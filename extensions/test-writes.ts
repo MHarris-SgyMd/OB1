@@ -200,7 +200,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     if (init?.signal?.aborted) throw Object.assign(new Error("the proxy aborted"), { name: "AbortError" });
     return Response.json({ job_id: JSON.parse(String(init?.body ?? "{}")).job_id, status: "executed", stub: true });
   }
-  if (!/openrouter\.ai|api\.openai\.com/.test(url)) throw new Error(`test-writes.ts: a writer reached ${url}; only the model provider and Readwise's book lookup are stubbed`);
+  if (!/openrouter\.ai|api\.openai\.com/.test(url)) throw new Error(`test-writes.ts: a writer reached ${url}; only the model provider, Readwise's book lookup and smart-ingest's execute are stubbed`);
   const body = JSON.parse(String(init?.body ?? "{}"));
   if (url.endsWith("/embeddings")) {
     if (embeddingsDown) return new Response("stub: embeddings down", { status: 500 });
@@ -797,7 +797,6 @@ try {
   const F = "integrations/rest-api/index.ts";
   console.log(`\n[${F}]`);
   process.env.CORS_ALLOWED_ORIGINS = "https://dash.test"; // read at module load, for the CORS arms at the block's end (SMD-2054 review pass 3, SMD-2079)
-  process.env.RATE_LIMIT_PER_MIN = "80"; // read at module load too; the block sends about thirty requests under KEY, and the 429 arm at its end sends the rest
   const h = await load(F);
   const captured = "a fresh thought captured through rest-api";
   const c = await send(h, "POST", "/capture", { content: captured });
@@ -945,21 +944,23 @@ try {
   // POST /ingestion-jobs/:id/execute proxies to smart-ingest with a bounded timeout. Dropping `req` from the proxy's
   // parameters left this handler passing it into the timeout's slot — a NaN timeout, so the abort fired at once and
   // every execute was a 504 (SMD-2079, found reading the change; nothing typechecks the file, SMD-2080). The stub
-  // answers after 25 ms and honours the signal, so a timeout that is not a number aborts it.
+  // answers after 25 ms and honours the signal, so a timeout that is not a number aborts it. The stub matches the URL
+  // by its path: on this fork the route builds it from SUPABASE_URL, which is the Postgres DSN, so a real fetch refuses
+  // the protocol and every deployment answers 502 (SMD-2110) — this arm holds the proxy's timeout and its headers, not the route.
   const exec = await send(h, "POST", "/ingestion-jobs/7/execute", undefined, KEY, D);
   assert(exec.status === 200 && exec.json?.status === "executed" && exec.json?.job_id === "7" && allow(exec) === D,
-    `POST /ingestion-jobs/:id/execute reaches the upstream and answers its reply with the CORS headers — the proxy's timeout is the number it was given, not the request (${exec.status} ${JSON.stringify(exec.json).slice(0, 80)}; ${allow(exec)})`);
+    `the ingest proxy's timeout is the number it was given, not the request — through the stub, POST /ingestion-jobs/:id/execute answers the upstream's reply with the CORS headers instead of an immediate 504 (${exec.status} ${JSON.stringify(exec.json).slice(0, 80)}; ${allow(exec)})`);
   // The 429 rebuilt its header set in the same change (it spread the CORS headers itself before): Retry-After and the
   // content type stay, the CORS headers arrive from the wrapper, and Retry-After is exposed, which no answer did — a
-  // browser could not read the wait off the 429 (review pass 1). RATE_LIMIT_PER_MIN was set before the module loaded;
-  // the bound outlasts a window that rolls over mid-loop.
+  // browser could not read the wait off the 429 (review pass 1). The cap is the default hundred a minute; the block
+  // has sent about thirty under KEY, this loop sends the rest, and its bound outlasts a window that rolls over mid-loop
+  // (a lower cap set before the module loaded would leave every earlier arm little headroom — review pass 2).
   let limited: Reply | null = null;
   for (let i = 0; i < 250 && !limited; i++) { const r = await send(h, "GET", "/health", undefined, KEY, D); if (r.status === 429) limited = r; }
   assert(limited !== null && allow(limited) === D && /^\d+$/.test(String(limited.headers.get("retry-after"))) && String(limited.headers.get("content-type")).startsWith("application/json") && limited.json?.error === "rate_limited"
     && /\bRetry-After\b/.test(String(limited.headers.get("access-control-expose-headers"))),
     `the 429 carries the request's CORS headers beside Retry-After and its JSON content type, and exposes Retry-After to the browser (${limited?.status} ${limited ? allow(limited) : "-"} / ${limited?.headers.get("retry-after")} / ${limited?.headers.get("content-type")} / ${limited?.headers.get("access-control-expose-headers")})`);
   delete process.env.CORS_ALLOWED_ORIGINS;
-  delete process.env.RATE_LIMIT_PER_MIN;
 }
 
 // ── recipes/repo-learning-coach ──────────────────────────────────────────────

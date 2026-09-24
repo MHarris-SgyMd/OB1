@@ -146,7 +146,7 @@ by updating the `MCP_ACCESS_KEY` secret.
 Every response carries the request's CORS headers — a page, a refusal, the
 preflight `204`, the `404`, the `429`, the `500` — set once on the way out of
 the main handler, not by each route (SMD-2079). Until that change forty-five
-of the gateway's sixty-two answers, every route's `200` among them, said
+of the gateway's sixty-two answers, every other route's `200` among them, said
 `Access-Control-Allow-Origin: null` under an allowlist, so a browser dashboard
 could read `POST /search` and not `GET /recent`, `/thoughts` or `/stats`; the
 allowlist below broke the clients it was set for. `Retry-After` is exposed,

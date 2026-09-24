@@ -148,7 +148,8 @@ function corsHeadersFor(req: Request): Record<string, string> {
  * the main handler returns — a page, a refusal, the preflight, the 404, the 500. Until this, json() built the headers
  * from the request only when handed `req`, and forty-five of the file's sixty-two answers were not: under an allowlist
  * they said `Access-Control-Allow-Origin: null`, so a browser client could read the auth refusals, the preflight, the
- * rate limit and POST /search, and no route's page. A header the handler set under the same name is replaced.
+ * rate limit and POST /search, and no route's page. A header the handler set under the same name is replaced —
+ * `Vary` among them, so it is the wrapper's: a route that needs another `Vary` token adds it here, not to its answer.
  */
 function withCors(req: Request, res: Response): Response {
   const headers = new Headers(res.headers);
