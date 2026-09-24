@@ -54,7 +54,7 @@
  *
  * Auth: x-brain-key header or Authorization: Bearer <key>.
  * Header-only by design — the key is never read from the URL query string,
- * which would leak it into CDN/proxy/Supabase access logs.
+ * which would leak it into CDN/proxy/server access logs.
  *
  * Dependencies:
  *   - Enhanced thoughts schema (schemas/enhanced-thoughts)
@@ -163,7 +163,7 @@ function json(data: unknown, status = 200): Response {
 /**
  * Simple in-memory per-key rate limiter. Window is 60 seconds; cap from
  * RATE_LIMIT_PER_MIN env var (default 100). State is process-local so it
- * resets on Edge Function cold start — good enough to block naive burn
+ * resets on restart — good enough to block naive burn
  * attacks against a leaked key, not a replacement for a durable limiter.
  */
 const RATE_LIMIT_PER_MIN = (() => {

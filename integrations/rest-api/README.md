@@ -27,7 +27,7 @@ All endpoints share the same authentication, sensitivity filtering, and enrichme
 | GET | `/thought/:id/connections` | Related thoughts |
 | GET | `/count` | Count thoughts with filters |
 | GET | `/stats` | Brain stats summary |
-| POST | `/ingest` | Proxy to smart-ingest — not available on this fork (SMD-2114) |
+| POST | `/ingest` | Proxy to smart-ingest — not available on this fork (SMD-2110) |
 | GET | `/ingestion-jobs` | List ingestion jobs |
 | GET | `/ingestion-jobs/:id` | Get job detail with items |
 | POST | `/ingestion-jobs/:id/execute` | Execute a dry-run job |
@@ -157,7 +157,8 @@ attempt a cross-origin write if it can obtain the key from another
 channel. Set `CORS_ALLOWED_ORIGINS` to your dashboard origin(s):
 
 ```bash
-CORS_ALLOWED_ORIGINS="https://brain.example.com,https://dashboard.example.com"
+CORS_ALLOWED_ORIGINS="https://brain.example.com,https://dashboard.example.com" \
+bun integrations/rest-api/index.ts
 ```
 
 ### Rate Limiting
@@ -168,7 +169,7 @@ CORS_ALLOWED_ORIGINS="https://brain.example.com,https://dashboard.example.com"
 
 State is kept in-memory per process, so the limit resets on restart. This is sufficient to block naive burn attacks against a
 leaked key; it is not a replacement for a durable token-bucket. If you
-expect high volume or need durability across cold starts, swap the
+expect high volume or need durability across restarts, swap the
 in-memory Map in `index.ts` for a Postgres-backed bucket.
 
 Keys are SHA-256-hashed before being used as bucket identifiers so raw
@@ -176,7 +177,7 @@ keys never touch log output.
 
 ## How It Connects to Other Components
 
-The REST API uses the same `_shared/` helpers as the Enhanced MCP Server (`integrations/enhanced-mcp`), ensuring consistent behavior for search, capture, and enrichment. The `/ingest` endpoints are written to proxy to Smart Ingest at `${SUPABASE_URL}/functions/v1/smart-ingest`, upstream's path on a project URL — with the shim's `postgres://` connection string that target is nonsense, so on this fork they fail until SMD-2114 gives the gateway a `SMART_INGEST_URL`.
+The REST API uses the same `_shared/` helpers as the Enhanced MCP Server (`integrations/enhanced-mcp`), ensuring consistent behavior for search, capture, and enrichment. The `/ingest` endpoints are written to proxy to Smart Ingest at `${SUPABASE_URL}/functions/v1/smart-ingest`, upstream's path on a project URL — with the shim's `postgres://` connection string that target is nonsense, so on this fork they fail until SMD-2110 gives the gateway a `SMART_INGEST_URL`.
 
 > **On this fork (FORK.md change 69, SMD-1228).** `:id` is the thought's UUID (`thoughts.id` here; an integer on upstream's enhanced schema — both are accepted). `POST /capture`, `PUT /thought/:id` and `PATCH /thought/:id/enrich` write a thought's content and vector through the database's own functions — the 3-argument `upsert_thought` (`db/migrations/035`) and `update_thought` (`033`) — rather than with a raw update of the row, so the content fingerprint follows the text, the model label follows the vector and the previous vector's chunk rows go; the enhanced-thoughts columns (`type`, `sensitivity_tier`, `importance`, `quality_score`, `source_type`) are written beside them by an update that carries neither. Two consequences: `/capture` reads the fork's return (`id`, `fingerprint`, `existed`) and no longer throws after the write, and a `PUT` whose embedding call failed leaves the row without a vector — not with the old vector under the new text — answers `embedding_updated: false` with a message saying so, and `PATCH /thought/:id/enrich?fill=embedding` refills it. The enhanced-thoughts columns are set for a fresh row; a re-capture of text already stored leaves them (the tier rule is escalation-only, and `PUT` is the way to change them). `extensions/test-writes.ts` drives the three routes against Postgres. The vectors these writers make are `openai/text-embedding-3-small`'s, 1536 wide, so the brain must be built at that model and width (`OB1_EMBEDDING_MODEL=openai/text-embedding-3-small`, `OB1_EMBEDDING_DIM=1536` — upstream's Supabase brain is); on this fork's default, `qwen3-embedding:4b` at 1024, the function refuses the vector and the whole capture or edit fails — loudly, where the raw write failed the same way or had its error ignored. Since FORK.md change 103 (SMD-1541) the audit row a capture, edit or enrich leaves (`thought_audit`, `db/migrations/008`; the trigger's body is `025`'s) names `MCP_ACCESS_KEY` — the one key this server holds — as the actor, with this server named as the row's `origin` (since migration `046`, SMD-1730; as `via` in the row's `actor_context` before it); before it named nobody. `DELETE /thought/:id` and the duplicate-resolve merge still delete raw, and the merge writes the survivor's `metadata` raw, so those audit rows name nobody (SMD-1793).
 
@@ -208,7 +209,7 @@ After completing setup, you should be able to:
 No embedding API key configured. The search endpoint needs `OPENROUTER_API_KEY` or `OPENAI_API_KEY` to generate query embeddings.
 
 **"/ingest" returns connection errors**
-Expected on this fork: the proxy target is built from `SUPABASE_URL`, which is a Postgres connection string here (SMD-2114). Call the smart-ingest server (`integrations/smart-ingest`) directly.
+Expected on this fork: the proxy target is built from `SUPABASE_URL`, which is a Postgres connection string here (SMD-2110). Call the smart-ingest server (`integrations/smart-ingest`) directly.
 
 **"/entities" returns empty or errors**
 The knowledge graph schema (`schemas/knowledge-graph`) must be applied first. Without it, entity endpoints will fail with table-not-found errors.
