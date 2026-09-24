@@ -260,6 +260,15 @@ jobs:
         working-directory: evals
         run: bun eval-write-path.ts --self-check
 
+      # The projection-replay spike's rules (SMD-1998): the snapshot key per
+      # projection, the replay rule branch by branch, the five scenarios on a
+      # hand-known corpus, the sample, the cost arithmetic, the verdict against
+      # the pre-registered bar and the report — probed with hand-known rows. No
+      # database, no model; the measurement itself reads the dogfood brain.
+      - name: Projection-replay rules
+        working-directory: evals
+        run: bun eval-projection-replay.ts --self-check
+
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
       - name: Cloudflare Workers build
