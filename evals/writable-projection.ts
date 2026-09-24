@@ -20,14 +20,16 @@
  *   recommend   — the GO option with the shorter contributor delta; fewer moved
  *                 objects on a tie; none when none is GO.
  *   comparable* — the differential's normalisation: what an event and a row
- *                 look like when the prototype's additions (content on a
- *                 capture, the key's move on an update) are set aside, so the
- *                 baseline's log and rows can be compared to an option's.
+ *                 look like when the prototype's three additions (the content
+ *                 and a backdating writer's created_at on a capture, the key's
+ *                 move on an update) are set aside, so the baseline's log and
+ *                 rows can be compared to an option's.
  *   compareRows — the replay rule: which columns of a rebuilt row differ from
- *                 the copy taken before the wipe, with the one tolerated
- *                 difference named (a key the raw writer left NULL and 003's
- *                 rule filled).
- *   EXPECTED    — the matrix the run recorded, held by `--check` in CI so a
+ *                 the copy taken before the wipe, with the one tolerated KIND
+ *                 of difference named (a key a raw writer left NULL and 003's
+ *                 rule filled — one kind, as many rows as raw inserts).
+ *   EXPECTED    — the matrix the run recorded (an outcome and the probes run
+ *                 and passed per measured cell), held by `--check` in CI so a
  *                 Postgres or prototype change that moves a cell is named.
  */
 
@@ -35,7 +37,14 @@ export type OptionId = "baseline" | "option2" | "option1-unchanged" | "option1";
 
 export type OptionInfo = { id: OptionId; label: string; movedObjects: number; description: string };
 
-/** movedObjects: relations, triggers and functions the option redefines or renames — the tie-break in `recommend`. */
+/**
+ * movedObjects: relations, triggers and functions the option redefines or
+ * renames — the tie-break in `recommend`, counted by hand from the prototype
+ * SQL (option 2: five functions, two triggers redefined, a table and a
+ * trigger added; option 1 adds a rename, a view and three INSTEAD OF
+ * triggers). No run reached the tie, so the count is unexercised and said so
+ * (third review pass).
+ */
 export const OPTIONS: readonly OptionInfo[] = [
   { id: "baseline", label: "053 as it stands", movedObjects: 0, description: "the schema at migration 053; the audit trigger derives the event from the row after the write" },
   { id: "option2", label: "option 2 — table stays, functions append then project", movedObjects: 9,
@@ -232,10 +241,11 @@ export type ReplayRow = {
 export type ReplayDiff = { id: string; column: string; before: string; after: string; tolerated: boolean };
 
 /**
- * Column by column. One difference is tolerated and named: a key the raw
- * writer left NULL (003's rule lives in the functions) that the projector
- * filled from the content — the replay applies the rule the writer skipped.
- * A row present on one side only is a difference on `presence`.
+ * Column by column. One KIND of difference is tolerated and named, on as many
+ * rows as raw inserts: a key the raw writer left NULL (003's rule lives in the
+ * functions) that the projector filled from the content — the replay applies
+ * the rule the writer skipped. A row present on one side only is a difference
+ * on `presence`.
  */
 export function compareRows(before: readonly ReplayRow[], after: readonly ReplayRow[]): ReplayDiff[] {
   const out: ReplayDiff[] = [];
@@ -297,14 +307,24 @@ export const EXPECTED: Readonly<Record<OptionId, Readonly<Partial<Record<Criteri
  * the outcome record cannot see a probe that is not there). A count that
  * differs is drift like a moved outcome. N/A cells carry none.
  */
-export const EXPECTED_PROBES: Readonly<Record<OptionId, Readonly<Partial<Record<CriterionId, number>>>>> = {
-  baseline: { C1: 6, C2: 5, C3: 12, C4: 7, C5: 6, C6: 4, C7: 4, C8: 3, C9: 4, C10: 36, C11: 2 },
-  option2: { C1: 6, C2: 5, C3: 12, C4: 7, C5: 6, C6: 4, C7: 4, C8: 3, C9: 4, C10: 39, C11: 4, C12: 5 },
-  "option1-unchanged": { C1: 6, C2: 5, C3: 12, C4: 7, C5: 6, C6: 4 },
-  option1: { C1: 6, C2: 5, C3: 12, C4: 7, C5: 6, C6: 4, C7: 4, C8: 3, C9: 4, C10: 37, C11: 4, C12: 5 },
+/** A measured cell's count: probes run and probes passed, as the report prints them (`PASS (5/5)`, `FAIL (4/6)`). */
+export type Count = readonly [passed: number, probes: number];
+
+export const EXPECTED_PROBES: Readonly<Record<OptionId, Readonly<Partial<Record<CriterionId, Count>>>>> = {
+  baseline: { C1: [5, 6], C2: [5, 5], C3: [12, 12], C4: [7, 7], C5: [6, 6], C6: [4, 4], C7: [4, 4], C8: [3, 3], C9: [4, 4], C10: [36, 36], C11: [2, 2] },
+  option2: { C1: [6, 6], C2: [5, 5], C3: [12, 12], C4: [7, 7], C5: [6, 6], C6: [4, 4], C7: [4, 4], C8: [3, 3], C9: [4, 4], C10: [40, 40], C11: [4, 4], C12: [5, 5] },
+  "option1-unchanged": { C1: [3, 6], C2: [1, 5], C3: [12, 12], C4: [7, 7], C5: [3, 6], C6: [0, 4] },
+  option1: { C1: [6, 6], C2: [5, 5], C3: [12, 12], C4: [7, 7], C5: [4, 6], C6: [0, 4], C7: [4, 4], C8: [3, 3], C9: [4, 4], C10: [38, 38], C11: [4, 4], C12: [5, 5] },
 };
 
-/** Every cell of a run that differs from the record — an outcome or a probe count — as "option/criterion: recorded X, observed Y". */
+/**
+ * Every cell of a run that differs from the record — an outcome, the probes
+ * run, or the probes passed — as "option/criterion: recorded X, observed Y".
+ * The passed count too (third review pass): a probe flipping inside a cell
+ * that already reads FAIL moves neither its outcome nor its total, and the
+ * mutant that regressed option 1's C5 from 4/6 to 3/6 was caught by another
+ * cell's total alone.
+ */
 export function driftFrom(expected: typeof EXPECTED, observations: readonly Observation[], probes: typeof EXPECTED_PROBES = EXPECTED_PROBES): string[] {
   const out: string[] = [];
   for (const option of Object.keys(expected) as OptionId[]) {
@@ -312,8 +332,11 @@ export function driftFrom(expected: typeof EXPECTED, observations: readonly Obse
       const o = observations.find((x) => x.option === option && x.criterion === criterion);
       const observed = o?.outcome ?? "N/A";
       if (observed !== recorded) out.push(`${option}/${criterion}: recorded ${recorded}, observed ${observed}`);
-      const n = probes[option]?.[criterion];
-      if (n !== undefined && o && o.probes !== n) out.push(`${option}/${criterion}: recorded ${n} probes, observed ${o.probes}`);
+      const c = probes[option]?.[criterion];
+      if (c && o) {
+        const passed = o.probes - o.failed.length;
+        if (o.probes !== c[1] || passed !== c[0]) out.push(`${option}/${criterion}: recorded ${c[0]}/${c[1]} probes, observed ${passed}/${o.probes}`);
+      }
     }
   }
   return out;
@@ -342,7 +365,8 @@ export function renderReport(r: Report): string {
   lines.push(`Writable projection — SMD-1999 (Spike 2 of SMD-1997), ${r.postgres}`);
   lines.push("");
   const cols = OPTIONS.map((o) => o.id);
-  lines.push(pad("criterion", 6) + cols.map((c) => pad(c, 19)).join(""));
+  // One column width for the label and the ids (third review pass: a 6-wide pad glued "criterion" to "baseline").
+  lines.push(pad("criterion", 11) + cols.map((c) => pad(c, 19)).join(""));
   for (const c of CRITERIA) {
     if (c.gating === "informative") continue;
     const cells = cols.map((opt) => {
@@ -350,7 +374,7 @@ export function renderReport(r: Report): string {
       const outcome = o?.outcome ?? "N/A";
       return pad(outcome === "N/A" ? "N/A" : `${outcome} (${o!.probes - o!.failed.length}/${o!.probes})`, 19);
     });
-    lines.push(pad(c.id, 6) + cells.join("") + `  ${c.title}`);
+    lines.push(pad(c.id, 11) + cells.join("") + `  ${c.title}`);
   }
   lines.push("");
   for (const v of r.verdicts) {

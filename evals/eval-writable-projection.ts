@@ -36,7 +36,7 @@ import { createAssert, resetSchema, substitute } from "../db/test-support.ts";
 import { median } from "./lib.ts";
 import {
   CRITERIA, CRITERION_IDS, EXPECTED, EXPECTED_PROBES, OPTIONS, comparableEvent, comparableRow, compareImages, compareRows, costLine, driftFrom, fmtUs, judge, recommend, renderReport, verdict,
-  type CriterionId, type EventImage, type Mismatch, type Observation, type OptionId, type Outcome, type Probe, type ReplayDiff, type ReplayRow, type Report, type RowImage, type Timing, type Verdict,
+  type Count, type CriterionId, type EventImage, type Mismatch, type Observation, type OptionId, type Outcome, type Probe, type ReplayDiff, type ReplayRow, type Report, type RowImage, type Timing, type Verdict,
 } from "./writable-projection.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -108,7 +108,7 @@ async function seed(sql: SQL): Promise<void> {
 export type Step = { step: string; ok: boolean; value?: unknown; error?: string; auditDelta: number };
 /** A row as read mid-script, before a later step deletes it (first review pass: C3 had read only returns and the log). */
 export type Image = (RowImage & { chunks: number }) | null;
-export type Trace = { steps: Step[]; ids: Record<string, string>; noopBumped: boolean | null; images: Record<string, Image> };
+export type Trace = { steps: Step[]; ids: Record<string, string>; noopBumped: boolean | null; images: Record<string, Image>; planted: string[] };
 
 const TEXTS = {
   A: "The first thought of the spike, captured by readwise.",
@@ -162,14 +162,18 @@ async function runScript(sql: SQL): Promise<Trace> {
   // When a capture step fails (053's ON CONFLICT against option 1's view), the
   // row is planted raw so the edits and deletes after it are still measured;
   // the failed step stands in C1/C2 and the plant is said in the trace.
+  const planted: string[] = [];
   const plant = async (label: string, text: string, withVector: boolean, chunkRows = 0): Promise<string> => {
+    const before = await audit();
     const rows = withVector
       ? await sql`INSERT INTO thoughts (content, metadata, embedding, embedding_model) VALUES (${text}, ${{ source: "planted" }}::jsonb, ${vec(1)}::vector, ${MODEL}) RETURNING id::text AS id`
       : await sql`INSERT INTO thoughts (content, metadata) VALUES (${text}, ${{ source: "planted" }}::jsonb) RETURNING id::text AS id`;
     const id = String((rows as Row[])[0]?.id ?? "");
     // What the failed capture would have left beside the row (the 4-argument form's windows), so the edits after it meet the same state.
     for (let i = 0; i < chunkRows && id; i++) await sql`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding) VALUES (${id}::uuid, ${i}, ${`window ${i + 1}`}, ${vec(31 + i)}::vector)`;
-    steps.push({ step: `${label} planted raw after its capture failed${chunkRows ? ` (${chunkRows} chunk rows)` : ""}`, ok: true, auditDelta: 0 });
+    // Measured, not assumed (third review pass): a raw insert is audited too, through the view under option 1.
+    steps.push({ step: `${label} planted raw after its capture failed${chunkRows ? ` (${chunkRows} chunk rows)` : ""}`, ok: true, auditDelta: (await audit()) - before });
+    planted.push(label);
     return id;
   };
 
@@ -260,7 +264,7 @@ async function runScript(sql: SQL): Promise<Trace> {
   // 018's stale-key case (second review pass): a raw content UPDATE around the functions leaves the key and the vector as they were.
   await step("s21 raw UPDATE thoughts SET content on F (the key left stale)", () => sql`UPDATE thoughts SET content = ${TEXTS.F2} WHERE id = ${ids.F}::uuid RETURNING id`);
   await snap("F after s21", ids.F);
-  return { steps, ids, noopBumped, images };
+  return { steps, ids, noopBumped, images, planted };
 }
 
 // ---------------------------------------------------------------------------
@@ -329,10 +333,12 @@ async function probeC1(c: Ctx): Promise<Probe[]> {
   out.push({ name: "s1 returns {id, fingerprint, existed: false, supersedes: null}", ok: !!v && typeof v.id === "string" && typeof v.fingerprint === "string" && v.existed === false && v.supersedes === null, error: v ? `got ${json(v)}` : s1?.error });
   // A is deleted at s12c; the row as it stood right after s1 is the trace's image.
   const a1 = t.images["A after s1"];
-  out.push({ name: "A is a row right after s1, with the content, 003's key, the vector and its label", ok: !!a1 && a1.content === TEXTS.A && typeof a1.content_fingerprint === "string" && a1.has_vector === true && a1.embedding_model === MODEL, error: json(a1) });
+  // A probe reading a planted row says so in its name (third review pass): the row is the eval's, not the capture's.
+  const on = (label: string) => (t.planted.includes(label) ? ` (on the planted row — the capture failed)` : "");
+  out.push({ name: `A is a row right after s1, with the content, 003's key, the vector and its label${on("A")}`, ok: !!a1 && a1.content === TEXTS.A && typeof a1.content_fingerprint === "string" && a1.has_vector === true && a1.embedding_model === MODEL, error: json(a1) });
   const captures = await eventsOf(sql, t.ids.A, "capture");
-  out.push({ name: "exactly one capture event for A", ok: captures.length === 1, error: `${captures.length} capture event(s)` });
-  out.push({ name: "the capture event carries the content", ok: captures.length === 1 && typeof captures[0].diff?.content === "string" && captures[0].diff?.content === TEXTS.A, error: captures[0] ? `diff keys ${Object.keys(captures[0].diff ?? {}).join(",")}` : "no capture event" });
+  out.push({ name: `exactly one capture event for A${on("A")}`, ok: captures.length === 1, error: `${captures.length} capture event(s)` });
+  out.push({ name: `the capture event carries the content${on("A")}`, ok: captures.length === 1 && typeof captures[0].diff?.content === "string" && captures[0].diff?.content === TEXTS.A, error: captures[0] ? `diff keys ${Object.keys(captures[0].diff ?? {}).join(",")}` : "no capture event" });
   out.push({ name: "the capture event names the actor from the key (op-key, operator, via mcp)", ok: captures[0]?.actor_name === "op-key" && captures[0]?.actor_kind === "operator" && captures[0]?.origin === "mcp", error: captures[0] ? json([captures[0].actor_name, captures[0].actor_kind, captures[0].origin]) : "no capture event" });
   return out;
 }
@@ -343,7 +349,7 @@ async function probeC2(c: Ctx): Promise<Probe[]> {
   const s4 = val(stepOf(t, "s4"));
   out.push({ name: "s4 returns {id, fingerprint}", ok: typeof s4?.id === "string" && typeof s4?.fingerprint === "string", error: json(s4 ?? null) });
   const rowB = cs.rows.find((r) => r.content === TEXTS.B);
-  out.push({ name: "B is a row with 003's key", ok: !!rowB && typeof rowB.content_fingerprint === "string", error: rowB ? "no fingerprint" : "no row" });
+  out.push({ name: `B is a row with 003's key${t.planted.includes("B") ? " (on the planted row — the capture failed)" : ""}`, ok: !!rowB && typeof rowB.content_fingerprint === "string", error: rowB ? "no fingerprint" : "no row" });
   const s5 = val(stepOf(t, "s5"));
   out.push({ name: "s5 returns chunks: 2", ok: Number(s5?.chunks) === 2, error: json(s5 ?? null) });
   return out;
@@ -619,6 +625,17 @@ async function probeC10(c: Ctx, withProjector: boolean): Promise<Probe[]> {
     out.push({ name: "the check: a pointer moved under an event that does not name supersedes is refused (OB002)", ok: unnamed !== null && /does not name/.test(unnamed), error: unnamed ?? "the write went through unrefused" });
     const landed = ((await sql`SELECT metadata ? 'forged' AS f, supersedes::text AS s FROM thoughts WHERE id = ${t.ids.B}::uuid`) as Row[])[0];
     out.push({ name: "and nothing of either landed", ok: landed?.f === false && landed?.s === null, error: json(landed ?? null) });
+    // The vector's presence (third review pass: the rule reached no probe): F's latest event is s21's raw content
+    // edit, which names no flip — dropping F's vector under it must be refused.
+    const evF = ((await sql`SELECT id::text AS id FROM thought_audit WHERE thought_id = ${t.ids.F}::uuid ORDER BY created_at DESC, seq DESC LIMIT 1`) as Row[])[0]?.id as string | undefined;
+    let dropped: string | null = null;
+    try {
+      await sql.begin(async (tx) => {
+        await tx`SELECT set_config('ob1.projecting', ${evF ?? ""}, true)`;
+        await tx.unsafe(`UPDATE ${c.rows} SET embedding = NULL WHERE id = '${t.ids.F}'::uuid`);
+      });
+    } catch (e) { dropped = msg(e); }
+    out.push({ name: "the check: a vector dropped under an event that names no presence flip is refused (OB002)", ok: dropped !== null && /vector's presence/.test(dropped), error: dropped ?? "the write went through unrefused" });
   }
   return out;
 }
@@ -672,9 +689,10 @@ async function probeC12(c: Ctx): Promise<{ probes: Probe[]; diffs: ReplayDiff[] 
   const eventsAfter = Number(((await sql`SELECT count(*)::int AS n FROM thought_audit`)[0] as { n: number }).n);
   probes.push({ name: "the replay appended nothing to the log", ok: eventsAfter === eventsBefore, error: `${eventsBefore} → ${eventsAfter}` });
   const after = await replayRows(sql, rows);
-  const diffs = compareRows(before, after);
+  // A replay the projector aborted rebuilt nothing: every row would read "absent", which is one fact, not one per row (third review pass).
+  const diffs = replayError === null ? compareRows(before, after) : [];
   const hard = diffs.filter((d) => !d.tolerated);
-  probes.push({ name: `the rebuilt rows equal the copy (${before.length} rows; content, key, metadata, provenance, stamps, vector, label)`, ok: hard.length === 0, error: hard.map((d) => `${d.id.slice(0, 8)}.${d.column}`).join(", ") });
+  probes.push({ name: `the rebuilt rows equal the copy (${before.length} rows; content, key, metadata, provenance, stamps, vector, label)`, ok: replayError === null && hard.length === 0, error: replayError !== null ? `not compared: the replay raised — ${replayError}` : hard.map((d) => `${d.id.slice(0, 8)}.${d.column}`).join(", ") });
   // The drop-the-content mutant.
   let refused: string | null = null;
   try {
@@ -731,7 +749,7 @@ async function runOption(url: string, option: OptionId, notes: string[]): Promis
       const failed: Probe[] = [{ name: "the scripted writes or the census could not run", ok: false, error: msg(e) }];
       return {
         option, observations: CRITERIA.filter((x) => x.gating !== "informative").map((x) => judge(x.id, option, failed)),
-        trace: { steps: [], ids: {}, noopBumped: null, images: {} }, census: { rows: [], events: [], claims: [], chunks: {} },
+        trace: { steps: [], ids: {}, noopBumped: null, images: {}, planted: [] }, census: { rows: [], events: [], claims: [], chunks: {} },
       };
     }
     const c: Ctx = { sql, option, trace, census: cs, rows, notes };
@@ -876,7 +894,7 @@ function selfCheck(): void {
   assert(v2.go === false && v2.reasons.join() === "C12 not measured", "an unmeasured contract criterion is not a PASS");
   const behaviourFail = allPass("option2").map((o) => (o.criterion === "C8" ? judge("C8", "option2", [P("no block", false, "timeout")]) : o));
   assert(verdict("option2", behaviourFail).go === false, "a behaviour that does not hold → NO-GO");
-  assert(verdict("option1", allPass("option1").map((o) => o.criterion === "C13" ? o : o)).go === true, "informative criteria never enter the verdict");
+  assert(verdict("option1", [...allPass("option1"), judge("C13", "option1", [P("cost", false, "slower")]), judge("C14", "option1", [P("delta", false, "one change")])]).go === true, "informative criteria never enter the verdict: C13 and C14 failing leave a GO");
 
   console.log("\n[4] recommend");
   const V = (option: OptionId, go: boolean): Verdict => ({ option, go, reasons: go ? [] : ["x"] });
@@ -935,15 +953,25 @@ function selfCheck(): void {
   assert(Object.values(EXPECTED).every((row) => Object.keys(row).every((k) => CRITERION_IDS.includes(k as CriterionId) && k !== "C13" && k !== "C14")), "cells only for gating criteria");
   assert(EXPECTED.option2.C6 === "PASS" && EXPECTED.option1.C6 === "FAIL" && EXPECTED["option1-unchanged"].C1 === "FAIL", "the record: option 2 keeps the community DDL, option 1 breaks it, 053's functions fail through the view");
   assert(EXPECTED.baseline.C1 === "FAIL" && EXPECTED.baseline.C12 === "N/A", "the record: 053's capture event carries no content, so the baseline fails C1's last clause and cannot be replayed");
-  const obsAll: Observation[] = (Object.keys(EXPECTED) as OptionId[]).flatMap((opt) => (Object.entries(EXPECTED[opt]) as [CriterionId, Outcome][]).map(([c, o]) => ({ criterion: c, option: opt, outcome: o, failed: [], probes: EXPECTED_PROBES[opt][c] ?? (o === "N/A" ? 0 : 1) })));
+  const obsAll: Observation[] = (Object.keys(EXPECTED) as OptionId[]).flatMap((opt) => (Object.entries(EXPECTED[opt]) as [CriterionId, Outcome][]).map(([c, o]) => {
+    const count = EXPECTED_PROBES[opt][c];
+    const probes = count ? count[1] : o === "N/A" ? 0 : 1;
+    const failedN = count ? count[1] - count[0] : o === "FAIL" ? 1 : 0;
+    return { criterion: c, option: opt, outcome: o, failed: Array.from({ length: failedN }, (_, i) => P(`f${i}`, false)), probes };
+  }));
+  assert(obsAll.every((o) => (o.outcome === "FAIL") === (o.failed.length > 0) && (o.outcome === "N/A") === (o.probes === 0)), "the recorded counts agree with the recorded outcomes: a FAIL has a failed probe, a PASS none, an N/A no probe");
   assert(driftFrom(EXPECTED, obsAll).length === 0, "a run equal to the record drifts nowhere");
   const moved = obsAll.map((o) => (o.option === "option2" && o.criterion === "C6" ? { ...o, outcome: "FAIL" as Outcome } : o));
   const drift = driftFrom(EXPECTED, moved);
   assert(drift.length === 1 && drift[0] === "option2/C6: recorded PASS, observed FAIL", "a moved cell is named with both values");
   assert(driftFrom(EXPECTED, obsAll.filter((o) => !(o.option === "option1" && o.criterion === "C12"))).join() === "option1/C12: recorded PASS, observed N/A", "a cell not measured reads N/A against the record");
-  assert(Object.values(EXPECTED_PROBES).every((row) => Object.entries(row).every(([k, n]) => n > 0 && EXPECTED[Object.keys(EXPECTED).find((o) => EXPECTED_PROBES[o as OptionId] === row) as OptionId][k as CriterionId] !== "N/A")), "a probe count is recorded only for a measured cell, and never zero");
+  assert((Object.keys(EXPECTED_PROBES) as OptionId[]).every((opt) => (Object.entries(EXPECTED_PROBES[opt]) as [CriterionId, Count][]).every(([k, c]) => c[1] > 0 && c[0] <= c[1] && EXPECTED[opt][k] !== "N/A")), "a count is recorded only for a measured cell, never zero, passed never above run");
   const shrunk = obsAll.map((o) => (o.option === "option2" && o.criterion === "C10" ? { ...o, probes: o.probes - 2 } : o));
-  assert(driftFrom(EXPECTED, shrunk).join() === `option2/C10: recorded ${EXPECTED_PROBES.option2.C10} probes, observed ${EXPECTED_PROBES.option2.C10! - 2}`, "a suite that shrank by two probes is drift, though every outcome stands");
+  const c10 = EXPECTED_PROBES.option2.C10!;
+  assert(driftFrom(EXPECTED, shrunk).join() === `option2/C10: recorded ${c10[0]}/${c10[1]} probes, observed ${c10[0] - 2}/${c10[1] - 2}`, "a suite that shrank by two probes is drift, though every outcome stands");
+  const flipped = obsAll.map((o) => (o.option === "option1" && o.criterion === "C5" ? { ...o, failed: [...o.failed, P("s21", false)] } : o));
+  const c5 = EXPECTED_PROBES.option1.C5!;
+  assert(driftFrom(EXPECTED, flipped).join() === `option1/C5: recorded ${c5[0]}/${c5[1]} probes, observed ${c5[0] - 1}/${c5[1]} probes`.replace(/ probes$/, ""), "a probe flipping inside a cell that already reads FAIL is drift (third review pass)");
 
   console.log("\n[9] the report");
   const rep: Report = {
@@ -953,7 +981,7 @@ function selfCheck(): void {
     recommendation: { option: "option2", why: "because" },
   };
   const text = renderReport(rep);
-  assert(text.includes("C1    ") && text.includes("baseline") && text.includes("option1-unchanged"), "the matrix has a row per gating criterion and a column per option");
+  assert(/^criterion\s+baseline\s+option2/m.test(text) && text.includes("\nC1         ") && text.includes("option1-unchanged"), "the matrix has a row per gating criterion and a column per option, the label and the ids one width apart");
   assert(text.includes("option2: GO") && text.includes("option1: NO-GO") && text.includes("C6 FAIL"), "each option's verdict with its reasons");
   assert(text.includes("C14 contributor delta: none") && text.includes("- C6 ADD COLUMN — views"), "the contributor delta per option, none said as none");
   assert(text.includes("capture: baseline 1.00 ms, option 2 1.20 ms (×1.20)"), "the cost lines");

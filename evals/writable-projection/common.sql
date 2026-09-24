@@ -10,37 +10,61 @@
 --   1. ONE DIFF RULE. ob1_thought_diff is what 046's audit trigger computed
 --      from OLD and NEW, lifted out so the write functions can compute the
 --      event BEFORE the row exists and the trigger can compute it AFTER and
---      compare. One addition over 046: an update records the fingerprint's
---      before/after when it moves — 018 sets the column NULL when another row
---      holds the key, a decision a replay cannot re-derive from the text.
+--      compare. Three additions over 046, and nothing else: a capture carries
+--      the content (SMD-1998: the log is otherwise not the payload store) and,
+--      when the writer set one, the row's created_at (a backdating ingester's
+--      own time — the event's clock is the write's); an update records the
+--      fingerprint's before/after when it moves — 018 sets the column NULL
+--      when another row holds the key, a decision a replay cannot re-derive.
 --   2. THE APPEND. ob1_append_thought_event is 046's trigger tail — who, the
 --      kind from the registry, the trust ceiling, the door, the claim — as a
 --      function that INSERTs the thought_audit row and returns its id. The
 --      trigger calls it for a raw write; the functions call it first.
 --   3. THE PROJECTOR. ob1_project_thought_event applies one event to the row
---      store: capture → INSERT, update → UPDATE by the diff's afters, delete →
+--      store: capture → INSERT (created_at from the event when it carries one,
+--      else the write's clock), update → UPDATE by the diff's afters, delete →
 --      DELETE. The live write passes its vector; a replay takes the vector
 --      from ob1_embedding_snapshot by (content_fingerprint, embedding_model) —
---      SMD-1998's key, made a table — or leaves it NULL for the re-embed pool
---      (015): the row is readable while its vector is still materialising.
---      A capture event without content (008's shape) is refused, not
---      projected as an empty thought.
+--      SMD-1998's key, made a table — or leaves what stands: the log is
+--      FAITHFUL, not corrective — a key the event does not move stays (018's
+--      stale key after a raw content edit stays stale), a vector the event
+--      does not flip stays unless the snapshot holds one for the new text. A
+--      row without a vector is readable while the re-embed pool (015) fills
+--      it. A capture event without content (008's shape) is refused, not
+--      projected as an empty thought. A replayed tombstone never refuses
+--      (ob1.cited_delete = 'detach' for the statement, restored after). The
+--      projector announces itself to the row's triggers through three
+--      settings, cleared after: ob1.projecting (the event id),
+--      ob1.projecting_thought (the event's row), ob1.projecting_replay.
+--      ob1_refresh_thought_vector is the fourth write: a vector arriving on a
+--      row that has one is a projection refresh with no event and no
+--      updated_at bump, announced as ob1.projecting = 'vector'.
 --   4. THE CHECK. thoughts_write_audit, under ob1.projecting = <event id>,
 --      recomputes the diff from the row it sees and RAISES (SQLSTATE OB002)
---      when it differs from the event's — every projected write, live or
---      replayed, is verified against its event by the trigger that used to
---      write it. Without the setting (a raw write) it appends, as 046 does.
---      Under ob1.projecting = 'vector' (a vector arriving on a row that has
---      one — a projection refresh, no event) it verifies that only the vector
---      moved.
+--      when the row is not the event's AFTER image or moved a column the
+--      event does not name — every projected write, live or replayed, is
+--      verified against its event by the trigger that used to write it. On a
+--      live write it also holds the vector's PRESENCE to the event (a flip
+--      named, or none); on a replay the snapshot may miss, so presence is not
+--      held there. THE FOREIGN-ROW RULE: a row OTHER than the event's that
+--      moves under its projection is a consequence the schema draws — a
+--      tombstone's ON DELETE SET NULL on a successor's pointer (025), 042's
+--      guard bumping a citing thought's stamp — accepted when it is exactly
+--      that: a bump (an empty diff) is nothing; the successor's nulled pointer
+--      is appended as its own update event live (as 046 does) and skipped on
+--      a replay (the log already holds it); anything else RAISES. Under
+--      ob1.projecting = 'vector' it verifies that only the vector moved.
+--      Without any setting (a raw write) it appends, as 046 does, reading and
+--      clearing ob1.event as 046 did.
 --   5. THE STAMP, CALLABLE. 050 stamps metadata.actor_kind / actor_name in a
 --      BEFORE trigger from the envelope; an event written before the row must
 --      carry the stamped metadata, so the two arms are functions the writers
 --      call, and the projector runs under 050's own pass-through
 --      (ob1.actor_amend = 'backfill') so the row takes the event's metadata
---      as given. 001's updated_at trigger likewise yields to the projector's
---      stamp (the event's created_at — now() on the live path, the original
---      time on a replay).
+--      as given. 001's updated_at trigger yields to the projector's stamp for
+--      the event's own row (ob1.projecting_thought) — the event's created_at,
+--      now() on the live path, the original time on a replay — and bumps a
+--      cascaded row as 001 bumps it.
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------

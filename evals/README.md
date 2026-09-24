@@ -4912,7 +4912,9 @@ expected outcome went on the ticket before the prototype ran (2026-09-24). An
 option is GO when C1–C6 and C10–C12 all PASS and C7–C9 each hold; NO-GO on
 any contract FAIL; C13 (cost) and C14 (the contributor delta) inform the
 recommendation and never the verdict; the recommendation is the GO option
-with the shorter delta, fewer moved objects on a tie.
+with the shorter delta, fewer moved objects on a tie. One clause was added
+when the runner was written and is said so: an unmeasured contract criterion
+is not a PASS — a verdict rests on what was measured.
 
 **How it was measured.** A throwaway Postgres (pgvector 0.8.6 / PG 16, width
 8, no provider) is reset to migration 053 four times, once per schema, and
@@ -4999,7 +5001,7 @@ stay. `option1-view.sql` renames the table to `thought_rows`, creates the
 view `thoughts` and its INSTEAD OF INSERT/UPDATE/DELETE triggers (the same
 append and projector); `option1-undo.sql` reverses it so test-support's
 reset can run again. `writable-projection.ts` holds every rule pure and
-`--self-check` (60 probes) runs in the portable-server job; `--check` runs
+`--self-check` (62 probes) runs in the portable-server job; `--check` runs
 the prototype in the data-layer job and holds it to the matrix recorded
 below (`EXPECTED`, an outcome and a probe count per measured cell), so a
 Postgres or prototype change that moves a cell — or a step that stops
@@ -5010,19 +5012,19 @@ running — is named.
 ```
 Writable projection — SMD-1999 (Spike 2 of SMD-1997), PostgreSQL 16.15 (Debian 16.15-1.pgdg12+2)
 
-criterionbaseline           option2            option1-unchanged  option1            
-C1    FAIL (5/6)         PASS (6/6)         FAIL (3/6)         PASS (6/6)           the vendored capture unchanged: 3-argument upsert_thought, the readwise payload, one capture event carrying the content
-C2    PASS (5/5)         PASS (5/5)         FAIL (1/5)         PASS (5/5)           the 2- and 4-argument forms unchanged
-C3    PASS (12/12)       PASS (12/12)       PASS (12/12)       PASS (12/12)         update_thought unchanged: content, metadata, provenance, DUPLICATE_CONTENT, STALE_READ, the re-embed shape
-C4    PASS (7/7)         PASS (7/7)         PASS (7/7)         PASS (7/7)           delete_thought unchanged: a delete event with the previous content; a cited delete refused and eventless
-C5    PASS (6/6)         PASS (6/6)         FAIL (3/6)         FAIL (4/6)           raw writers: INSERT INTO thoughts audited once; ingest-records' ON CONFLICT (id) … RETURNING xmax = 0
-C6    PASS (4/4)         PASS (4/4)         FAIL (0/4)         FAIL (0/4)           the community DDL verbatim: ADD COLUMN, CREATE INDEX, REFERENCES, a row trigger, a sidecar UPDATE
-C7    PASS (4/4)         PASS (4/4)         N/A                PASS (4/4)           SMD-1043: two captures of one text serialise on the fingerprint lock — one row, one id
-C8    PASS (3/3)         PASS (3/3)         N/A                PASS (3/3)           SMD-1323: an edit naming supersedes is not blocked by update_thought's row lock on its target
-C9    PASS (4/4)         PASS (4/4)         N/A                PASS (4/4)           SMD-1462: update_thought naming supersedes and delete_thought of the target serialise, no deadlock
-C10   PASS (36/36)       PASS (39/39)       N/A                PASS (37/37)         trigger interaction: one audit row and one extraction claim per logical write, the actor stamp, updated_at
-C11   PASS (2/2)         PASS (4/4)         N/A                PASS (4/4)           read-your-writes in the same session, and the drop-the-projector control
-C12   N/A                PASS (5/5)         N/A                PASS (5/5)           the log rebuilds the rows through the same projector; the content-less capture is refused
+criterion  baseline           option2            option1-unchanged  option1            
+C1         FAIL (5/6)         PASS (6/6)         FAIL (3/6)         PASS (6/6)           the vendored capture unchanged: 3-argument upsert_thought, the readwise payload, one capture event carrying the content
+C2         PASS (5/5)         PASS (5/5)         FAIL (1/5)         PASS (5/5)           the 2- and 4-argument forms unchanged
+C3         PASS (12/12)       PASS (12/12)       PASS (12/12)       PASS (12/12)         update_thought unchanged: content, metadata, provenance, DUPLICATE_CONTENT, STALE_READ, the re-embed shape
+C4         PASS (7/7)         PASS (7/7)         PASS (7/7)         PASS (7/7)           delete_thought unchanged: a delete event with the previous content; a cited delete refused and eventless
+C5         PASS (6/6)         PASS (6/6)         FAIL (3/6)         FAIL (4/6)           raw writers: INSERT INTO thoughts audited once; ingest-records' ON CONFLICT (id) … RETURNING xmax = 0
+C6         PASS (4/4)         PASS (4/4)         FAIL (0/4)         FAIL (0/4)           the community DDL verbatim: ADD COLUMN, CREATE INDEX, REFERENCES, a row trigger, a sidecar UPDATE
+C7         PASS (4/4)         PASS (4/4)         N/A                PASS (4/4)           SMD-1043: two captures of one text serialise on the fingerprint lock — one row, one id
+C8         PASS (3/3)         PASS (3/3)         N/A                PASS (3/3)           SMD-1323: an edit naming supersedes is not blocked by update_thought's row lock on its target
+C9         PASS (4/4)         PASS (4/4)         N/A                PASS (4/4)           SMD-1462: update_thought naming supersedes and delete_thought of the target serialise, no deadlock
+C10        PASS (36/36)       PASS (40/40)       N/A                PASS (38/38)         trigger interaction: one audit row and one extraction claim per logical write, the actor stamp, updated_at
+C11        PASS (2/2)         PASS (4/4)         N/A                PASS (4/4)           read-your-writes in the same session, and the drop-the-projector control
+C12        N/A                PASS (5/5)         N/A                PASS (5/5)           the log rebuilds the rows through the same projector; the content-less capture is refused
 
 option2: GO
   C14 contributor delta: none
@@ -5064,16 +5066,16 @@ option1: NO-GO
     - C6 schemas/entity-extraction: CREATE TRIGGER … AFTER INSERT OR UPDATE OF content, metadata ON public.thoughts FOR EACH ROW — "thoughts" is a view
 
 C13 cost (medians):
-  3-argument capture with a vector, 200 each: baseline 720 µs, option 2 666 µs (×0.92)
-  content edit with a vector, 200 each: baseline 704 µs, option 2 825 µs (×1.17)
+  3-argument capture with a vector, 200 each: baseline 676 µs, option 2 787 µs (×1.16)
+  content edit with a vector, 200 each: baseline 701 µs, option 2 1.00 ms (×1.43)
 
 Differential, baseline against option 2 (events and rows for the same scripted writes, the prototype's three additions set aside): identical
 
 C12 replay under option2: 0 difference(s) beyond the 4 tolerated
-  - (tolerated) 47f8c525 content_fingerprint: null → "103a9ba691fc63c733f213861430c75ade7fea9020959305e6374744…
-  - (tolerated) 67dfe3b1 content_fingerprint: null → "ed03218f17617156c47705e3be5b973298ccf9ab4c70e3f1c5c3955d…
-  - (tolerated) 7df31b76 content_fingerprint: null → "72d47147bf6dfa9099bc2e09806d1b4678b7b7660b07f50fe2e3447e…
-  - (tolerated) 8812a9d2 content_fingerprint: null → "5ede44fecbf41f73d39683f9f265a464e1b0954a6c124dbb67c2eaec…
+  - (tolerated) 1d09bd5d content_fingerprint: null → "5ede44fecbf41f73d39683f9f265a464e1b0954a6c124dbb67c2eaec…
+  - (tolerated) 28caeb35 content_fingerprint: null → "72d47147bf6dfa9099bc2e09806d1b4678b7b7660b07f50fe2e3447e…
+  - (tolerated) 93f2d194 content_fingerprint: null → "ed03218f17617156c47705e3be5b973298ccf9ab4c70e3f1c5c3955d…
+  - (tolerated) e92dd964 content_fingerprint: null → "103a9ba691fc63c733f213861430c75ade7fea9020959305e6374744…
 C12 replay under option1: every column of every row equal
 
 Notes:
@@ -5134,9 +5136,9 @@ the wipe cascades through the foreign keys, so the rows were rebuilt into a
 database with no chunks, claims or citations, and a replayed tombstone runs
 in detach mode (the delete happened; 042's guard would otherwise refuse a
 thought that was cited when it went). The cost is the round trip: medians
-between 0.5 and 1.9 ms in a laptop container, the ratio moving between ×0.7
-and ×1.8 across the fifteen runs the two review passes made (one edit run at
-×3 under load) — the noise exceeds the effect; C13 informs and gates
+between 0.5 and 1.9 ms in a laptop container, the ratio moving between ×0.65
+and ×1.8 across the fourteen timed runs the review passes made, plus one edit
+run at ×3 under load — the noise exceeds the effect; C13 informs and gates
 nothing.
 
 **Option 1 is NO-GO twice.** With 053's functions unchanged, every capture

@@ -202,7 +202,7 @@ jobs:
       # fourteen criteria, the judgement of probes, the pre-registered verdict
       # (GO only when every contract criterion PASSes and every behaviour
       # holds), the recommendation's tie-break, the differential's
-      # normalisation, the replay rule and its one tolerated difference, the
+      # normalisation, the replay rule and its one tolerated kind of difference, the
       # recorded matrix and the drift from it, the report — probed with
       # hand-known observations. No database; the prototype runs in the
       # data-layer job.

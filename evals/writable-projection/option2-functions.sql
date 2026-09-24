@@ -10,8 +10,11 @@
 --
 --   upsert_thought (2-, 3-argument): 005's payload guard, 025's provenance
 --   validation, 046's event validation, the actor setting, 003's fingerprint,
---   033's advisory lock and 035's row read FOR NO KEY UPDATE all stay in the
---   body, in the same order. What moves: the INSERT … ON CONFLICT becomes a
+--   033's advisory lock and (3-argument) 035's row read FOR NO KEY UPDATE all
+--   stay in the body, in the same order. DELTA, said in the record: the
+--   2-argument form takes that row read too — 046's was a pure INSERT … ON
+--   CONFLICT with no row lock — under the same advisory lock, so no caller
+--   can observe the difference. What moves: the INSERT … ON CONFLICT becomes a
 --   branch on the locked read — a fresh text appends a `capture` event (the
 --   stamped metadata, the content, the provenance) and projects it with the
 --   caller's vector; a re-capture appends an `update` event only when 046's
@@ -24,12 +27,16 @@
 --
 --   update_thought: the whole choreography before the UPDATE stays — the
 --   provenance shape, the actor, the event validation, the supersession lock,
---   the fingerprint lock, the row lock FOR NO KEY UPDATE, STALE_READ, the
---   cycle walk, 018's unchanged-content rule. What moves: the UPDATE becomes
---   the computed after-image (the stamp by 050's two arms), the diff, the
---   append, the projection with the caller's vector. A vector arriving on the
---   same text is a refresh, no event. DELTA: an edit whose patch changes
---   nothing writes nothing (053 bumps updated_at and records no audit row).
+--   the fingerprint lock, the row lock FOR NO KEY UPDATE, the STALE_READ
+--   pre-check, the cycle walk, 018's unchanged-content rule. What moves: the
+--   UPDATE becomes the computed after-image (the stamp by 050's two arms),
+--   the diff, the append, the projection with the caller's vector. A vector
+--   arriving on the same text is a refresh, no event. DELTAS, said in the
+--   record: an edit whose patch changes nothing writes nothing (053 bumps
+--   updated_at and records no audit row); and 046's if_unchanged_since
+--   predicate in the UPDATE's own WHERE, with its STALE_READ lost-race arm,
+--   is gone — unreachable under the row lock taken first, by 046's own
+--   argument, but a documented refusal path the body no longer has.
 --
 --   delete_thought: 042's body with one change — inside the sub-block, the
 --   `delete` event is appended and projected, so 042's citation guard (which
@@ -71,6 +78,9 @@ BEGIN
   -- ob1:capture-takes-fingerprint-lock (033): before the read, so a concurrent
   -- writer of this text has committed before the read runs.
   PERFORM pg_advisory_xact_lock(hashtextextended(v_fingerprint, 0));
+  -- New to the 2-argument form (046's was a pure INSERT … ON CONFLICT): the
+  -- row read the 3-argument form has had since 035, under the same advisory
+  -- lock — a named delta, unobservable to a caller.
   SELECT id, metadata INTO v_id, v_old_meta FROM thoughts WHERE content_fingerprint = v_fingerprint FOR NO KEY UPDATE;
   -- ob1:capture-sets-write-event (046): the declared event reaches the audit
   -- row — here by the append itself, not by a setting the trigger reads.
