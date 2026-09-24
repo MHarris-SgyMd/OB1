@@ -309,18 +309,20 @@ row only when the write says something (SMD-2090): `last_used_at` NULL,
 over five minutes old or in the future, or a presented scope that differs
 from the recorded one. A recently used key presenting its recorded scope
 takes no row lock, so it answers while another transaction holds its row,
-where 010's body waited on every lookup (the SQL store caps that wait at
-250 ms and calls the key busy, SMD-2072). `last_used_at` now means the last
+where 010's body waited on every lookup (the SQL store caps each wait at
+250 ms, and a key still waiting after the server's retries is busy,
+SMD-2072). `last_used_at` now means the last
 use to within five minutes. The write re-checks `revoked_at IS NULL`, and
 when it writes nothing the row is read again: a revocation that commits
 while the lookup waits answers REVOKED, where 010 answered ok and the server
 cached it for its TTL. A row deleted during the wait is registered again
 (the rotation branch, or first sight if its agent went too), and
 registration's `ON CONFLICT … DO UPDATE` no longer writes over a revoked
-row. Under a REPEATABLE READ or SERIALIZABLE default the waiting write fails
+row. Under a REPEATABLE READ or SERIALIZABLE default either write fails
 40001 instead, which the server retries. Same signature and grants, no data
-change; a role missing UPDATE on `ob1_agent_keys` now fails only a stale
-lookup rather than every one.
+change; a role missing UPDATE on `ob1_agent_keys` now fails only a lookup
+that writes (a stale key, a scope change, a registration) rather than every
+known-key lookup.
 
 ## What changed relative to the guide
 
@@ -1996,7 +1998,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1608 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 683 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+./with-postgres.sh bun test-live.ts         # 684 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

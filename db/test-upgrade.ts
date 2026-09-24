@@ -493,8 +493,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // indexes on 042's thought_facets and redefines 016's
   // record_thought_entities and 042's thought_facets_validate on their own
   // bodies, refusing by name without 016 or 042 ([20g]); 054 redefines 010's
-  // resolve_agent on its own body, refusing by name without 010's two columns
-  // ([20h]) — all recorded by
+  // resolve_agent on its own body, refusing by name without 010's table
+  // ([20h]) or its last_used_at, revoked_at and scope (test-schema [49]) — all recorded by
   // the baseline with their prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;

@@ -83,7 +83,8 @@ export const DEFAULT_CACHE_TTL_MS = 60000;
 export const RESOLVE_LOCK_TIMEOUT_MS = 250;
 
 /**
- * How a lookup that times out on a lock is retried before the key is `busy`:
+ * How a lookup that times out on a lock, or fails to serialize, is retried
+ * before the key is `busy`:
  * up to `attempts` lookups within `budgetMs` of the first, `pauseMs` apart
  * with no connection held. About two seconds waits out a migration's brief
  * lock (a CHECK added to a small table), which the uncapped wait used to, and
@@ -138,8 +139,9 @@ export type AgentOutcome =
   /** The database refused this digest. The request must be rejected. */
   | { status: "revoked"; agentId: string; revokedAt: string; reason: string | null }
   /**
-   * The lookup timed out on a lock (the registry there, but held) and this
-   * process has no revocation for the key. Refused with a retry: the registry
+   * The lookup timed out on a lock (the registry there, but held) or failed to
+   * serialize, through its retries, and this process has no revocation for
+   * the key. Refused with a retry: the registry
    * could still say revoked.
    */
   | { status: "busy" };
@@ -261,8 +263,8 @@ export class AgentResolver {
         this.warnOnce(key, "revoked", `agent registry: resolve_agent failed for key "${principal.name}" — its revocation stands until the registry answers: ${cause}`);
         outcome = revoked;
         ttl = failureTtl(this.ttlMs);
-      } else if (timedOut(e)) {
-        this.warnOnce(key, "busy", `agent registry: resolve_agent timed out for key "${principal.name}" on a lock, retried for ${this.busyRetry.budgetMs} ms — its requests are refused with a retry until the registry answers: ${cause}`);
+      } else if (retryable(e)) {
+        this.warnOnce(key, "busy", `agent registry: resolve_agent timed out on a lock or failed to serialize for key "${principal.name}", retried up to ${this.busyRetry.attempts} times within ${this.busyRetry.budgetMs} ms — its requests are refused with a retry until the registry answers: ${cause}`);
         outcome = { status: "busy" };
         ttl = Math.min(this.ttlMs, BUSY_TTL_MS);
       } else {
@@ -277,7 +279,8 @@ export class AgentResolver {
   }
 
   /**
-   * One lookup, retried while it times out on a lock (BUSY_RETRY) and this
+   * One lookup, retried while it times out on a lock or fails to serialize
+   * (BUSY_RETRY) and this
    * process has no revocation for the key — a revocation answers at once. Each
    * pause holds no connection. Throws the last error.
    */
@@ -288,7 +291,7 @@ export class AgentResolver {
       try {
         return await store.resolveAgent({ keyHash: principal.keyHash, label: principal.name, scope: principal.scope });
       } catch (e) {
-        const again = timedOut(e) && !this.revocations.has(principal.keyHash)
+        const again = retryable(e) && !this.revocations.has(principal.keyHash)
           && attempt < attempts && performance.now() - started + pauseMs < budgetMs;
         if (!again) throw e;
         await new Promise((r) => setTimeout(r, pauseMs));
@@ -326,17 +329,18 @@ export class AgentResolver {
 }
 
 /**
- * Whether a lookup gave up on a lock: 55P03 (lock_timeout, the SQL store's
+ * Whether a lookup failed in a way a fresh attempt can answer — it gave up on
+ * a lock, or lost a serialization race: 55P03 (lock_timeout, the SQL store's
  * cap), 57014 (statement_timeout — a role's, as on Workers; or a cancel),
  * 40P01 (a deadlock with a migration taking the two tables in the other
  * order) or 40001 (a serialization failure: under a REPEATABLE READ or
  * SERIALIZABLE default, resolve_agent's write of a row another transaction
- * changed while it waited — a revocation among them — fails where READ
- * COMMITTED would have re-read it, and a fresh attempt answers; SMD-2090).
- * The SQLSTATE rides on `errno`: Bun's SQL sets it, and the PostgREST store
- * copies PostgREST's code there.
+ * changed after its snapshot — a revocation among them, or a key another
+ * lookup registered — fails where READ COMMITTED would have re-read it;
+ * SMD-2090). The SQLSTATE rides on `errno`: Bun's SQL sets it, and the
+ * PostgREST store copies PostgREST's code there.
  */
-function timedOut(e: unknown): boolean {
+function retryable(e: unknown): boolean {
   const state = String((e as { errno?: unknown })?.errno ?? "");
   return state === "55P03" || state === "57014" || state === "40P01" || state === "40001";
 }

@@ -483,7 +483,7 @@ console.log("\n[15] Concurrent requests of a key share one lookup — on the SQL
   assert(apart === 5, `with sharing off (Workers), each request its own lookup (${apart})`);
 }
 
-console.log("\n[16] A lookup that times out on a lock is retried, then busy, and a revocation this process has read stands through any failure (SMD-2072)");
+console.log("\n[16] A lookup that times out on a lock, or fails to serialize, is retried, then busy, and a revocation this process has read stands through any failure (SMD-2072, SMD-2090)");
 {
   // The lookup's lock wait is capped (store-sql.ts), so a registry whose
   // tables are locked fails the lookup while every tool still answers: serving

@@ -35,12 +35,13 @@
 --     clock passed it), or when a scope was presented that differs from the
 --     one recorded. Otherwise nothing is written and no row lock is taken: a
 --     recently used key presenting its recorded scope answers while another
---     transaction holds its row. Five minutes is five times the server's default cache TTL, so a
---     server re-resolving a key once a minute writes its row one lookup in
---     five; OB1_AGENT_CACHE_TTL_MS=0 (a lookup per request) writes it once per
---     five minutes rather than on every request. last_used_at now means "the
---     last use, to within five minutes", which is what it is read for: which
---     keys are in use, which have gone quiet. A scope change is always written,
+--     transaction holds its row. Five minutes is five times the server's
+--     default cache TTL, so a server re-resolving a key once a minute writes
+--     its row one lookup in five; OB1_AGENT_CACHE_TTL_MS=0 (a lookup per
+--     request) writes it once per five minutes rather than on every request.
+--     last_used_at now means "the last use, to within five minutes", which is
+--     what it is read for: which keys are in use, which have gone quiet. A
+--     scope change is always written,
 --     since the column's job is to show a privilege change (010, 049) — so a
 --     key presented under two scopes at once (two processes on different
 --     MCP_ACCESS_KEYS during a rollout) writes on every lookup from either,
@@ -54,26 +55,38 @@
 --     lookup after the commit does. A row gone (deleted by hand while the
 --     lookup waited) is treated as a key never seen: the lookup falls through
 --     to 010's registration below — the rotation branch, or first sight if its
---     agent went too — which a later lookup would have done anyway. Under
---     REPEATABLE READ or SERIALIZABLE the waiting UPDATE fails 40001 instead,
---     as 010's did; the server retries that (agents.ts) and the retry reads
---     the revocation.
+--     agent went too — which a later lookup would have done anyway.
 --   * SO DOES REGISTRATION. 010's `INSERT … ON CONFLICT (key_hash) DO UPDATE`
 --     — reached by the loser of two first sights and, since this file, by a
 --     row deleted during the wait — wrote over whatever row won, revoked or
 --     not. Its DO UPDATE now carries `WHERE ob1_agent_keys.revoked_at IS
 --     NULL`, and when it writes nothing the row is read and REVOKED answered.
+--     The ON CONFLICT locks the row it refuses until the transaction ends, so
+--     that read finds the revoked version, never a row deleted in between.
+--   * UNDER REPEATABLE READ OR SERIALIZABLE both writes fail 40001 instead of
+--     re-reading — the waiting UPDATE, as 010's did, and the ON CONFLICT on a
+--     row committed after the snapshot. The server retries 40001 (agents.ts),
+--     and the retry, a fresh snapshot, reads the revocation.
 --
 --   The rest is 010's body: the rename branch, the rotation, first sight.
---   What stays: a lookup that overlaps an uncommitted revocation of a key it
---   does not need to write answers ok, having read the key before the
---   revocation committed — the same answer as a lookup a moment earlier, and
---   the one the server's TTL already allows for (a revocation "takes effect
---   within the server resolve cache TTL", 010's column comment). What this
---   file removes is the answer given AFTER the commit. And a role granted
---   SELECT and INSERT but not UPDATE on ob1_agent_keys, which failed every
---   known-key lookup under 010, now fails only a stale one: the documented
---   grants (db/config.mjs's server group) include UPDATE.
+--   What stays:
+--   * A lookup that overlaps an uncommitted revocation of a key it does not
+--     need to write answers ok, having read the key before the revocation
+--     committed — the same answer as a lookup a moment earlier, and the one
+--     the server's TTL already allows for (a revocation "takes effect within
+--     the server resolve cache TTL", 010's column comment). What this file
+--     removes is the answer given AFTER the commit.
+--   * A first sight that answers REVOKED from registration keeps the agent
+--     row it inserted for its label, with no key, and a later key under that
+--     label rotates onto it. It needs one digest presented under two names at
+--     once (auth.ts refuses that config); 010 left the same row and answered
+--     ok. Removing it would need DELETE, which the server role is not granted,
+--     or a subtransaction, whose rollback would release the refused row's lock.
+--   * A role granted SELECT and INSERT but not UPDATE on ob1_agent_keys failed
+--     every known-key lookup under 010; now it fails only a lookup that writes
+--     — a stale one, a scope change, or a registration (INSERT … ON CONFLICT DO
+--     UPDATE needs UPDATE too). The documented grants (db/config.mjs's server
+--     group) include it.
 --
 -- SAFETY
 --   Refuses up front, by name, when 010's table or the three columns the body
@@ -81,9 +94,9 @@
 --   (a ledger baselined over an older schema) — 049's guard. No table change,
 --   no data change; the function and two comments. Idempotent: CREATE OR
 --   REPLACE and COMMENT, so a re-run lands here, and so does --reapply, which
---   runs 010's body and then this file's. A redefined
---   function is a behaviour change at the schema, so under the version rules
---   it ships in a minor release (check-fork's checkFragments).
+--   runs 010's body and then this file's. A redefined function is a behaviour
+--   change at the schema, so under the version rules it ships in a minor
+--   release (check-fork's checkFragments).
 -- =============================================================================
 
 DO $g$
@@ -230,6 +243,8 @@ BEGIN
     WHERE ob1_agent_keys.revoked_at IS NULL;
 
   IF NOT FOUND THEN
+    -- The ON CONFLICT locked the row it refused, and holds it to the end of
+    -- the transaction: this reads that revoked row, never one deleted between.
     SELECT k.canonical_agent_id, k.revoked_at, k.revoked_reason, a.label
       INTO v_agent, v_revoked, v_reason, v_current
       FROM ob1_agent_keys k
