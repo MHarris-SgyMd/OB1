@@ -19,8 +19,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    # A release is a week old before a PR proposes it: a retagged or
-    # compromised release is usually found and pulled inside that window.
+    # A release is a week old before a version update proposes it (the
+    # default is three days): a retagged or compromised release is usually
+    # found and pulled inside that window. A security update does not wait.
     cooldown:
       default-days: 7
     groups:

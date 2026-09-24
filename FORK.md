@@ -510,15 +510,19 @@ unknown label). Every `uses:` is a full commit SHA with its tag in a trailing
 comment (`actions/checkout@<sha> # v7.0.1`), because the release job runs its
 actions with `packages: write` and a tag's owner can move it.
 `.github/dependabot.yml` opens a weekly PR that moves the pins, once a release
-is seven days old, grouping minor and patch releases and sending each major on
-its own. Read a major before it lands: actionlint looks an action's inputs up by
-tag, so it cannot check a SHA-pinned one's, and an input the new major dropped
-is ignored at run time with a warning. Dependabot's commits carry the house
-header, `[fork] Bump …`, through a prefix whose trailing space keeps it from
-writing `[fork]:`. Check 23 refuses a tag, a SHA with no tag comment, a docker
-image by tag, a `-latest` or expression-picked runner, and a `dependabot.yml`
-that cannot move the pins. It holds a pin's shape, not its truth: a comment
-naming another tag is zizmor's to find.
+is seven days old (a security update does not wait), grouping minor and patch
+releases and sending each major on its own. Read a major before it lands:
+actionlint looks an action's inputs up by tag, so it cannot check a SHA-pinned
+one's, and an input the new major dropped is ignored at run time with a
+warning. Dependabot's commits carry the house header, `[fork] Bump …`, through
+a prefix whose trailing space keeps it from writing `[fork]:`. Check 23 refuses
+a tag, a SHA with no tag comment, a `docker://` step image by tag, a `-latest`
+or expression-picked runner, and a `dependabot.yml` that cannot move the pins.
+It holds a pin's shape, not its truth: a comment naming another tag is what
+zizmor finds, and zizmor ran once for SMD-2093 and is not in CI. Two images the
+release job's actions start by input, QEMU's binfmt and the BuildKit builder
+that pushes to GHCR, are pinned by digest in `release.yml`, and nothing moves
+those but a hand edit; nor does anything move the `services:` images (pgvector).
 
 ## Detached from the fork network
 

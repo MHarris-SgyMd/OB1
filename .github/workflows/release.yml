@@ -118,11 +118,21 @@ jobs:
           # shellcheck disable=SC2086  # MODE_ARGS is two words on a tag, one on a rehearsal
           bun scripts/release-artifacts.ts facts $MODE_ARGS --owner "$GITHUB_REPOSITORY_OWNER" --out "$GITHUB_OUTPUT" | grep -v -e '^[a-z_]*_labels<<' -e '^org\.opencontainers' -e '^__OB1_EOF__$'
 
+      # The two images these actions start are pinned by digest as the actions
+      # are by SHA (SMD-2093): qemu's binfmt image runs --privileged on the
+      # runner, and the buildx builder is the BuildKit daemon that pushes to
+      # GHCR with this job's login. Their defaults are moving tags
+      # (tonistiigi/binfmt:latest, moby/buildkit:buildx-stable-1), and neither
+      # check 23 nor Dependabot reads an action's inputs, so these move by
+      # hand: `docker buildx imagetools inspect <image>:<new tag>`.
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         with:
           platforms: arm64
+          image: docker.io/tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
 
       - name: Log in to GHCR
         if: env.PUBLISH == 'true'
