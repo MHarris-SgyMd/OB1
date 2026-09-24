@@ -271,8 +271,8 @@ services:
     # so CI's "Full stack, no Supabase" job can put a listener on the runner
     # for preflight's reachability probe to find (SMD-1875). A hosts entry
     # only: nothing is published. podman writes both names itself and maps
-    # this one to the same address (measured, podman 6); podman before 4.1
-    # does not know the host-gateway keyword and refuses the container.
+    # this one to the same address (measured, podman 6); an older podman
+    # without the host-gateway keyword refuses the container.
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

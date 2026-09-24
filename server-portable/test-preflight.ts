@@ -1989,11 +1989,14 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   // is decided here first, by the same resolver, so the unresolved wording
   // is pinned wherever the name is unknown (first review pass: an
   // either-or regex let the ENOTFOUND mapping drift unnoticed).
+  // A box whose resolver knows the name may also have a host that drops
+  // port 1 (a wildcard search domain, a firewall), which is the timeout
+  // wording (second review pass); an unknown name is one wording, pinned.
   const ollamaResolves = await Bun.dns.lookup("ollama").then(() => true, () => false);
   const service = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://ollama:1/v1" });
-  const serviceWhy = ollamaResolves ? "the connection was refused" : "the name does not resolve";
-  assert(service.code === 1 && new RegExp(String.raw`✗\s+provider endpoint\s+nothing answers at http://ollama:1/v1 — ${serviceWhy} \(GET /models, 2\.5 s timeout\); the first capture would fail on it in milliseconds`).test(row(service.out, "provider endpoint")),
-         `the ollama service name with nothing behind it fails, "${serviceWhy}" (exit ${service.code}; the name ${ollamaResolves ? "resolves here" : "does not resolve here"})`);
+  const serviceWhy = ollamaResolves ? String.raw`(the connection was refused|no answer in 2\.5 s)` : String.raw`the name does not resolve \(GET /models, 2\.5 s timeout\); the first capture would fail on it in milliseconds`;
+  assert(service.code === 1 && new RegExp(String.raw`✗\s+provider endpoint\s+nothing answers at http://ollama:1/v1 — ${serviceWhy}`).test(row(service.out, "provider endpoint")),
+         `the ollama service name with nothing behind it fails (exit ${service.code}; the name ${ollamaResolves ? "resolves here, so refused or silent" : "does not resolve here, so that wording, pinned"})`);
   assert(/→ `ollama` is the local-models profile's service and exists only under it: start the stack with --profile local-models, or set OB1_LLM_BASE_URL to an Ollama on the host \(http:\/\/host\.containers\.internal:11434\/v1 under podman or http:\/\/host\.docker\.internal:11434\/v1 under Docker\) or to a hosted provider with a key\./.test(fix(service.out, "provider endpoint")),
          "…and the remedy names the profile first, then the host aliases and a hosted provider");
   const withKey = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://ollama:1/v1", OPENROUTER_API_KEY: "sk-or-1234" });
@@ -2006,7 +2009,7 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   const alias = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://host.docker.internal:1/v1" });
   assert(alias.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/host\.docker\.internal:1\/v1/.test(row(alias.out, "provider endpoint")),
          `the Docker host alias with nothing behind it fails (exit ${alias.code})`);
-  assert(/→ Nothing on the host answers at that port, or this runtime does not provide the name — podman writes both names, Docker Desktop host\.docker\.internal, and Docker on Linux neither without extra_hosts host-gateway, which deploy\/compose\.yaml sets for host\.docker\.internal\./.test(fix(alias.out, "provider endpoint")),
+  assert(/→ Nothing on the host answers at that port, or this runtime does not provide the name: podman writes both names; Docker Desktop only host\.docker\.internal; Docker on Linux neither unless extra_hosts host-gateway is set, and deploy\/compose\.yaml sets it for host\.docker\.internal\./.test(fix(alias.out, "provider endpoint")),
          "…with the runtimes and the extra_hosts line named");
   // A private address (a LAN box): the generic remedy, still with the three spellings.
   const lan = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://192.168.0.1:1/v1" });
@@ -2044,7 +2047,7 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   const timedOut = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://127.0.0.1:${hung.port}/v1` });
   const waited = performance.now() - t0;
   hung.stop(true);
-  assert(timedOut.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 — no answer in 2\.5 s \(GET \/models, 2\.5 s timeout\); the first capture would hang on it for the whole request timeout \(OB1_LLM_TIMEOUT\) and then fail/.test(row(timedOut.out, "provider endpoint")),
+  assert(timedOut.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 — no answer in 2\.5 s \(GET \/models, 2\.5 s timeout\); the first capture would wait on it, up to the whole request timeout \(OB1_LLM_TIMEOUT\), and then fail/.test(row(timedOut.out, "provider endpoint")),
          `an endpoint that accepts and never answers fails on the timeout, said in seconds, with the hang as the consequence (exit ${timedOut.code})`);
   assert(waited >= 2400 && waited < 10000, `…after about the timeout and not the run's whole patience (${Math.round(waited)} ms)`);
 

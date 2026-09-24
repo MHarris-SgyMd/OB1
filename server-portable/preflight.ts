@@ -342,14 +342,19 @@ const HOST_SPELLINGS = `an Ollama on the host is ${HOST_ALIASES}, and the stack'
  * what the first capture would have done there, which differs by kind: a
  * refusal or an unresolved name fails it in milliseconds; a silent endpoint
  * (a SYN dropped, a listener that never answers) holds it for the whole
- * request budget (first review pass). EAI_AGAIN is the resolver's "not now",
- * which for a name that should be on the compose network is the same finding.
+ * request budget (first review pass). Resolution is judged by the syscall,
+ * not one code: ENOTFOUND is the common case, and a resolver that answers
+ * ETIMEOUT or EAI_AGAIN inside the probe's window is the same finding with
+ * its code shown; a resolver stalled past the window reads as the timeout
+ * kind, which is why that kind says "up to" — measured on Linux, Bun's fetch
+ * reports a blackholed resolver as `getaddrinfo ETIMEOUT` at about 2.5 s
+ * (second review pass).
  */
 function probeFailure(e: unknown): { why: string; then: string } {
-  const err = e as Error & { code?: string | number };
+  const err = e as Error & { code?: string | number; syscall?: string };
   const fast = "the first capture would fail on it in milliseconds";
-  if (err.name === "TimeoutError") return { why: `no answer in ${LOCAL_PROBE_SECONDS}`, then: "the first capture would hang on it for the whole request timeout (OB1_LLM_TIMEOUT) and then fail" };
-  if (err.code === "ENOTFOUND" || err.code === "EAI_AGAIN") return { why: "the name does not resolve", then: fast };
+  if (err.name === "TimeoutError") return { why: `no answer in ${LOCAL_PROBE_SECONDS}`, then: "the first capture would wait on it, up to the whole request timeout (OB1_LLM_TIMEOUT), and then fail" };
+  if (err.syscall === "getaddrinfo" || err.code === "ENOTFOUND") return { why: `the name does not resolve${err.code && err.code !== "ENOTFOUND" ? ` (${err.code})` : ""}`, then: fast };
   if (err.code === "ConnectionRefused" || err.code === "ECONNREFUSED") return { why: "the connection was refused", then: fast };
   return { why: err.message, then: fast };
 }
@@ -363,7 +368,7 @@ function probeRemedy(base: string, knob: string): string {
     return `Inside a container ${host} is the container itself, not the host: ${HOST_SPELLINGS}. From a shell on the host, start the provider or fix the port.`;
   }
   if (host === "host.docker.internal" || host === "host.containers.internal") {
-    return `Nothing on the host answers at that port, or this runtime does not provide the name — podman writes both names, Docker Desktop host.docker.internal, and Docker on Linux neither without extra_hosts host-gateway, which deploy/compose.yaml sets for host.docker.internal. Start the provider on the host, or use the stack's own (${STACK_OWN}).`;
+    return `Nothing on the host answers at that port, or this runtime does not provide the name: podman writes both names; Docker Desktop only host.docker.internal; Docker on Linux neither unless extra_hosts host-gateway is set, and deploy/compose.yaml sets it for host.docker.internal. Start the provider on the host, or use the stack's own (${STACK_OWN}).`;
   }
   return `Start the provider at that address or fix the host and port in ${knob}; ${HOST_SPELLINGS}.`;
 }
