@@ -11,7 +11,7 @@ There are two approaches — pick the one that fits your setup:
 | Approach | Infrastructure | Difficulty | Auto-send? |
 | -------- | -------------- | ---------- | ---------- |
 | **Claude Code Scheduled Task** (below) | None — uses MCP tools you already have | Beginner | Draft only (one-tap send) |
-| **Supabase Edge Function** (planned) | Edge Function + pg_cron + email service | Intermediate | Full auto-send |
+| **Scheduled server** (planned) | A Bun process on cron + an email service | Intermediate | Full auto-send |
 
 ---
 
@@ -106,25 +106,24 @@ Solution: Verify your Gmail MCP connector is working. Try `gmail_create_draft` m
 
 ---
 
-## Approach B: Supabase Edge Function (Planned)
+## Approach B: Scheduled Server (Planned)
 
-A fully self-contained approach using a Supabase Edge Function, pg_cron trigger, and an email service (Resend or SendGrid) for true automated delivery without Claude running. This approach is not yet implemented — contributions welcome.
+A fully self-contained approach: one HTTP server under Bun, on the shape every server here has ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/)), fired by cron — or by `pg_cron` + `pg_net` where your Postgres has them — with an email service (Resend or SendGrid) for true automated delivery without Claude running. This approach is not yet implemented — contributions welcome.
 
 ### Prerequisites (planned)
 
-- Supabase CLI available ([Homebrew/Scoop/standalone binary or `npx supabase`](https://supabase.com/docs/guides/local-development/cli/getting-started); `npm i -g supabase` is not supported)
+- [Bun](https://bun.sh) 1.4+ and a checkout of this repository
 - OpenRouter API key (for generating the summary)
 - Email service: Resend or SendGrid (free tier)
 
-### Credential Tracker (for future Edge Function approach)
+### Credential Tracker (for the planned scheduled-server approach)
 
 ```text
 DAILY DIGEST -- CREDENTIAL TRACKER
 --------------------------------------
 
 FROM YOUR OPEN BRAIN SETUP
-  Supabase Project URL:  ____________
-  Supabase Secret key:   ____________
+  Postgres URL:          ____________
   OpenRouter API key:    ____________
 
 DELIVERY METHOD

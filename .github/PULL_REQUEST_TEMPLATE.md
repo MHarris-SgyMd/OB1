@@ -24,4 +24,5 @@
 - [ ] My `metadata.json` has all required fields
 - [ ] If my contribution depends on a skill or primitive, I declared it in metadata.json and linked it in the README
 - [ ] I tested this on my own Open Brain instance
+- [ ] If this ships a server, it runs under `bun <file>` and is reached by URL, and its tests import it (no stdio server, no `claude_desktop_config.json`)
 - [ ] No credentials, API keys, or secrets are included

@@ -10,7 +10,7 @@
   "requires": {
     "open_brain": true,
     "services": ["Telegram Bot API", "OpenRouter"],
-    "tools": ["Supabase CLI"]
+    "tools": ["Bun 1.4+"]
   },
   "tags": ["telegram", "capture", "bot", "messaging"],
   "connectors": ["telegram"],

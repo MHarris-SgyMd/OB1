@@ -572,7 +572,7 @@
       </div>
       <div class="pillar">
         <h3>Open protocol</h3>
-        <p>MCP (Model Context Protocol) connects any AI client to your database. Runs as a Supabase Edge Function. No local server, no middleware, no Zapier chains.</p>
+        <p>MCP (Model Context Protocol) connects any AI client to your database. Runs as one HTTP process under Bun, in a container. No stdio server, no middleware, no Zapier chains.</p>
       </div>
       <div class="pillar">
         <h3>Build your way</h3>
@@ -598,8 +598,8 @@
         <p>Free tier, no credit card required. Enable pgvector and run the core schema. Takes about five minutes.</p>
       </li>
       <li>
-        <strong>Deploy the MCP Edge Function</strong>
-        <p>One-command deploy to Supabase Edge Functions. Paste the URL into your AI client as a custom connector. No local server needed.</p>
+        <strong>Run the MCP Server</strong>
+        <p>One compose command brings up Postgres, the models and the server. Paste the URL into your AI client as a custom connector.</p>
       </li>
       <li>
         <strong>Connect your AI clients</strong>

@@ -77,7 +77,7 @@ The plugin reads non-secret config from `~/.hermes/ob1.json` and the access key 
 ```bash
 cat > ~/.hermes/ob1.json <<'EOF'
 {
-  "endpoint": "http://localhost:8000/functions/v1/agent-memory-api",
+  "endpoint": "http://127.0.0.1:8787/agent-memory-api",
   "workspace_id": "default",
   "project_id": null,
   "auto_recall": true,
@@ -93,7 +93,7 @@ EOF
 
 ```bash
 echo 'OPENBRAIN_KEY=<your-mcp-access-key>' >> ~/.hermes/.env
-echo 'OPENBRAIN_URL=http://localhost:8000/functions/v1/agent-memory-api' >> ~/.hermes/.env
+echo 'OPENBRAIN_URL=http://127.0.0.1:8787/agent-memory-api' >> ~/.hermes/.env
 ```
 
 **3. Tell Hermes to use the provider:**
@@ -173,7 +173,7 @@ The OB1 Agent Memory API uses `match_thoughts(threshold=0.7)` against `text-embe
 
 ### `HTTP 400 Invalid input` errors in Hermes logs
 
-Almost always means the OB1 Edge Function rejected a payload shape. The provider sends the v1 schema_version literals (`openbrain.agent_memory.recall.v1` / `openbrain.agent_memory.writeback.v1`) and a strict `runtime: {name, version}` shape — extra keys in `runtime` get rejected. If you're modifying the provider, run the test suite (`pytest plugin/tests/`) before installing.
+Almost always means the OB1 Agent Memory API rejected a payload shape. The provider sends the v1 schema_version literals (`openbrain.agent_memory.recall.v1` / `openbrain.agent_memory.writeback.v1`) and a strict `runtime: {name, version}` shape — extra keys in `runtime` get rejected. If you're modifying the provider, run the test suite (`pytest plugin/tests/`) before installing.
 
 ### Subagent runs are corrupting the parent agent's task_id
 

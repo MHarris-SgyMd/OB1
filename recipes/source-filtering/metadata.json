@@ -10,7 +10,7 @@
   "requires": {
     "open_brain": true,
     "services": ["OpenRouter"],
-    "tools": ["Deno 1.40+"]
+    "tools": ["Bun 1.4+"]
   },
   "tags": ["source", "filtering", "metadata", "backfill", "search"],
   "difficulty": "beginner",
