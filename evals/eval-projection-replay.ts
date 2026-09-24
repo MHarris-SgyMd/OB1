@@ -139,14 +139,18 @@ async function readBrain(sql: SQL): Promise<{ rows: (ThoughtRow & { content: str
 
   // The stale-graph comparison, the pool rows and the recorded pass's
   // finished_at against the move are decided in SQL at full precision; the
-  // pool pairs come out as `key=status,…` for parsePool.
+  // pool pairs come out as `key=status,…` for parsePool. The graph is the
+  // MODEL passes' rows: 053's structured pass writes `source:` keys with no
+  // model call, and its own SQL spells "an extracted pass" as NOT LIKE
+  // 'source:%' — a structured row re-ingested after an edit would otherwise
+  // mask a stale model extraction.
   const raw = (await sql`
     WITH moved AS (
       SELECT a.thought_id, max(a.created_at) AS at FROM thought_audit a
       WHERE a.action = 'update' AND a.diff ? 'content'
         AND content_fingerprint_of(a.diff->'content'->>'before') <> content_fingerprint_of(a.diff->'content'->>'after')
       GROUP BY 1),
-    ext AS (SELECT e.thought_id, max(e.extracted_at) AS at, count(*)::int AS n FROM thought_entities e GROUP BY 1),
+    ext AS (SELECT e.thought_id, max(e.extracted_at) AS at, count(*)::int AS n FROM thought_entities e WHERE e.extraction_key NOT LIKE 'source:%' GROUP BY 1),
     pool AS (SELECT w.thought_id, string_agg(w.work_type || '=' || w.status, ',' ORDER BY w.work_type) AS pairs FROM thought_work_claims w WHERE w.work_type LIKE 'extract:%' GROUP BY 1),
     own AS (SELECT w.thought_id, w.finished_at FROM thought_work_claims w WHERE w.work_type = ${recordedKey ?? ""})
     SELECT t.id::text AS id, t.content, length(t.content) AS chars, t.content_fingerprint AS stored_fp,
@@ -274,14 +278,17 @@ async function run(): Promise<void> {
         const was = stored.parents.get(r.id);
         const widthMismatch = was !== undefined && was.length !== e.embedding.length;
         const storedWindows = stored.windows.get(r.id) ?? [];
-        const windowCos = e.chunks.map((w, i) => (storedWindows[i] ? (storedWindows[i].length === w.embedding.length ? cosine(w.embedding, storedWindows[i]) : NaN) : null)).filter((c): c is number => c !== null);
+        const storedCount = storedWindows.filter((w) => w !== undefined).length;
+        // A different count means the recipe moved: nothing lines up by index, and the rows compared would be a coincidence.
+        const windowCountMismatch = storedCount !== e.chunks.length;
+        const windowCos = windowCountMismatch ? [] : e.chunks.map((w, i) => (storedWindows[i] ? (storedWindows[i].length === w.embedding.length ? cosine(w.embedding, storedWindows[i]) : NaN) : null)).filter((c): c is number => c !== null);
         samples.push({
           id: r.id, chars: r.chars, decision: decideEmbedding(r, target), windows: e.chunks.length, calls: 1 + e.chunks.length, ms,
           cosineToStored: was && !widthMismatch ? cosine(e.embedding, was) : null, widthMismatch,
-          windowCosineMin: windowCos.length ? Math.min(...windowCos) : null, windowsCompared: windowCos.length,
+          windowCosineMin: windowCos.length ? Math.min(...windowCos) : null, windowsCompared: windowCos.length, windowCountMismatch,
           fellBack: e.wholeContentFellBack,
         });
-        process.stderr.write(`  ${r.id} ${r.chars} chars ${(ms / 1000).toFixed(2)} s${e.chunks.length ? ` (${e.chunks.length} windows, ${windowCos.length} compared)` : ""}${widthMismatch ? " WIDTH MISMATCH" : ""}\n`);
+        process.stderr.write(`  ${r.id} ${r.chars} chars ${(ms / 1000).toFixed(2)} s${e.chunks.length ? ` (${e.chunks.length} windows, ${windowCos.length} compared)` : ""}${widthMismatch ? " WIDTH MISMATCH" : ""}${windowCountMismatch ? ` WINDOW COUNT ${e.chunks.length} vs ${storedCount} stored` : ""}\n`);
       } catch (e) {
         if (e instanceof ProviderError && e.kind === "egress") {
           console.error(`the egress gate refused the sample's text: ${e.message}\n  Declare the provider local (OB1_LLM_LOCAL=1) as the server does, or --no-provider for the counts alone.`);
@@ -390,8 +397,12 @@ async function fixtureCheck(): Promise<void> {
   await recordKey(FIXTURE_KEY);
   // Row 11: extracted, then a whitespace-only edit through a writer — content moved, the key did not, the graph is fresh.
   await mention(11); await moveContent(11, text("eleven graph, a whitespace-only edit", 450) + "  ", true);
-  // Row 12: extracted, moved, re-enqueued under the recorded key and still waiting.
+  // Row 12: extracted, moved, re-enqueued under the recorded key and still waiting — and a structured `source:` row
+  // (053's ingester, no model) written after the move, which is not the graph projection and must not read it fresh.
   await mention(12); await moveContent(12, text("twelve moved", 560), true);
+  entities++;
+  const [{ id: srcEntity }] = (await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', ${`Tool${entities}`}, ${`tool${entities}`}) RETURNING id::text AS id`) as { id: string }[];
+  await sql`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) VALUES (${fid(12)}::uuid, ${srcEntity}::uuid, 1.00, 'source:fixture')`;
   // Row 10: two chunk rows.
   await sql`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding) VALUES (${fid(10)}::uuid, 0, 'w0', ${vec}::vector), (${fid(10)}::uuid, 1, 'w1', ${vec}::vector)`;
 
@@ -434,12 +445,13 @@ async function fixtureCheck(): Promise<void> {
   assert(census.audit.capture === 12 && census.audit.update === 8, `the audit: 12 captures, 8 updates (${census.audit.update})`);
   assert(census.audit.contentUpdates === 7 && census.audit.keyUpdates === 5, `7 updates moved content, 5 of them the fingerprint (${census.audit.contentUpdates}/${census.audit.keyUpdates}) — the two whitespace edits moved no key`);
   assert(census.audit.liveWithContentEvent === 7, `the log holds content for the 7 edited rows (${census.audit.liveWithContentEvent})`);
-  assert(census.mentions === 6 && census.chunkedThoughts === 1 && census.chunkRows === 2, `six mentions (row 7 twice), one windowed thought (${census.mentions})`);
+  assert(census.mentions === 6 && census.chunkedThoughts === 1 && census.chunkRows === 2, `six model mentions (row 7 twice; row 12's source: row not among them), one windowed thought (${census.mentions})`);
   assert(st.thoughts === 3 && st.mentions === 3, `three thoughts extracted before their key moved (${st.thoughts}, ${st.mentions} mentions)`);
   assert(by.get(fid(7))!.contentMovedAfterExtraction === false, "a thought re-extracted after its move is fresh: the comparison is the latest extraction against the latest key move");
   assert(by.get(fid(11))!.contentMovedAfterExtraction === false, "a whitespace-only edit after extraction moves no key: fresh — the fingerprint condition, not the content one");
+  assert(by.get(fid(12))!.contentMovedAfterExtraction === true && by.get(fid(12))!.mentions === 1, "a structured source: row written after the move does not make a stale model extraction fresh, and is not counted as a mention");
   assert(by.get(fid(6))!.contentMovedAfterExtraction === false && by.get(fid(1))!.contentMovedAfterExtraction === false, "a thought with no graph rows is not stale");
-  assert(st.queued === 1 && st.failed === 1 && st.succeededBefore === 1 && st.succeededAfter === 0 && st.none === 0 && st.elsewhere === 1, `under the recorded key: queued ${st.queued}, failed ${st.failed}, succeeded before ${st.succeededBefore}, after ${st.succeededAfter}, none ${st.none}; pending elsewhere ${st.elsewhere}`);
+  assert(st.queued === 1 && st.failed === 1 && st.succeededBefore === 1 && st.succeededAfter === 0 && st.succeededUnplaced === 0 && st.none === 0 && st.elsewhere === 1, `under the recorded key: queued ${st.queued}, failed ${st.failed}, succeeded before ${st.succeededBefore}, after ${st.succeededAfter}, unplaced ${st.succeededUnplaced}, none ${st.none}; pending elsewhere ${st.elsewhere}`);
   const nine = by.get(fid(9))!;
   assert(nine.pool.recorded === "succeeded" && nine.pool.finished === "before" && nine.pool.elsewhere === true, `row 9: succeeded under the recorded key before the move, pending under the other key (${JSON.stringify(nine.pool)})`);
   assert(by.get(fid(12))!.pool.recorded === "pending" && by.get(fid(12))!.pool.elsewhere === false && by.get(fid(8))!.pool.recorded === "failed", "row 12 pending here and nowhere else; row 8 failed");
@@ -455,16 +467,16 @@ async function fixtureCheck(): Promise<void> {
 const row = (id: string, o: Partial<ThoughtRow> = {}): ThoughtRow => ({
   id, chars: 1000, storedFingerprint: `fp-${id}`, payloadFingerprint: `fp-${id}`, model: "m1", hasVector: true, chunkRows: 0, mentions: 3, contentMovedAfterExtraction: false, pool: { recorded: "none", elsewhere: false, finished: null }, ...o,
 });
-const sample = (id: string, o: Partial<Sample> = {}): Sample => ({ id, chars: 1000, decision: "reuse", windows: 0, calls: 1, ms: 1000, cosineToStored: 1, widthMismatch: false, windowCosineMin: null, windowsCompared: 0, fellBack: false, ...o });
+const sample = (id: string, o: Partial<Sample> = {}): Sample => ({ id, chars: 1000, decision: "reuse", windows: 0, calls: 1, ms: 1000, cosineToStored: 1, widthMismatch: false, windowCosineMin: null, windowsCompared: 0, windowCountMismatch: false, fellBack: false, ...o });
 
 function selfCheck(): void {
   const { assert, report } = createAssert();
 
   console.log("[1] The contract names every projection once, with a verdict from the list");
-  assert(PROJECTIONS.length === 5 && new Set(PROJECTIONS.map((p) => p.name)).size === 5, "five projections, five names");
+  assert(PROJECTIONS.length === 6 && new Set(PROJECTIONS.map((p) => p.name)).size === 6, "six projections, six names");
   assert(PROJECTIONS.every((p) => KEY_VERDICTS.includes(p.verdict) && p.derived.length > 0 && p.recorded.length > 0), "each carries a derived key, a recorded key and a verdict from KEY_VERDICTS");
   assert(PROJECTIONS.find((p) => p.name === "embedding")!.verdict === "recorded" && PROJECTIONS.find((p) => p.name === "metadata")!.verdict === "unkeyed" && PROJECTIONS.find((p) => p.name === "graph")!.verdict === "half recorded" && PROJECTIONS.find((p) => p.name === "chunks")!.verdict === "recipe not recorded", "the embedding's key is recorded, the graph's half, the chunks' recipe not, the capture-time metadata's not at all");
-  assert(/template/.test(PROJECTIONS[0].derived) && /nullable/.test(PROJECTIONS[3].recorded), "the embedding's entry says the template rides on the name by convention; the proposals' that the fingerprints are nullable");
+  assert(/template/.test(PROJECTIONS[0].derived) && /nullable/.test(PROJECTIONS[3].recorded) && PROJECTIONS.find((p) => p.name === "sources")!.verdict === "recorded" && /source:/.test(PROJECTIONS.find((p) => p.name === "sources")!.recorded), "the embedding's entry says the template rides on the name by convention; the proposals' that the fingerprints are nullable; 053's sources are recorded and their rows carry a source: key");
 
   console.log("[2] The replay rule, branch by branch, in order");
   assert(decideEmbedding(row("a"), "m1") === "reuse", "the key, a vector, the target's label: reuse");
@@ -533,7 +545,7 @@ function selfCheck(): void {
     row("ok", { pool: { recorded: "failed", elsewhere: false, finished: null } }),
   ];
   const sg = staleGraph(pooled);
-  assert(sg.thoughts === 7 && sg.queued === 2 && sg.failed === 1 && sg.succeededBefore === 2 && sg.succeededAfter === 1 && sg.none === 1 && sg.elsewhere === 1, `pending and claimed are queued; failed, succeeded-before (an unplaced succeeded row counts with it), succeeded-after and none apart; elsewhere over the unqueued only (${JSON.stringify(sg)})`);
+  assert(sg.thoughts === 7 && sg.queued === 2 && sg.failed === 1 && sg.succeededBefore === 1 && sg.succeededAfter === 1 && sg.succeededUnplaced === 1 && sg.none === 1 && sg.elsewhere === 1, `pending and claimed are queued; failed, succeeded-before, succeeded-after, succeeded-unplaced and none apart; elsewhere over the unqueued only (${JSON.stringify(sg)})`);
 
   console.log("[6] The sample is deterministic and spread by length");
   const many = Array.from({ length: 50 }, (_, i) => ({ id: `id-${String(i).padStart(2, "0")}`, chars: (i * 37) % 50 * 100 + 100 }));
@@ -561,7 +573,9 @@ function selfCheck(): void {
   assert(k.msPerKChar === 1000, "one second per thousand characters here");
   assert(k.modelBumpSecondsByRows === 1600 && k.modelBumpSecondsTrimmed === 1600 && k.modelBumpSecondsByChars === 1200 && k.editSeconds === 40, "the model bump priced by rows, trimmed and by characters; the edits by rows");
   assert(k.reusedCompared === 2 && k.minCosine === 0.9995 && k.medianCosine === 0.99975 && k.maxGap !== null && Math.abs(k.maxGap - 0.0005) < 1e-12 && k.fellBack === 1, "the cosine over reused rows that had a vector, the gap beside it; the fallbacks counted");
-  assert(k.windowsCompared === 2 && k.windowMinCosine === 0.998 && k.sampledWindowed === 1 && Math.abs(k.corpusWindowedShare - 0.0075) < 1e-12, "the window vectors' least cosine and count; the sample's windowed share beside the corpus's");
+  assert(k.windowsCompared === 2 && k.windowMinCosine === 0.998 && k.windowMaxGap !== null && Math.abs(k.windowMaxGap - 0.002) < 1e-12 && k.windowCountMismatches === 0 && k.sampledWindowed === 1 && Math.abs(k.corpusWindowedShare - 0.0075) < 1e-12, "the window vectors' least cosine, its gap and count; the sample's windowed share beside the corpus's");
+  const recut = costModel([sample("a", { windows: 3, windowCountMismatch: true })], { rows: 2, chars: 2000, windowed: 1 }, 1);
+  assert(recut.windowCountMismatches === 1 && recut.windowMinCosine === null, "a reused row cut to another number of windows is counted and compared to nothing");
   const five = [1, 2, 3, 4, 5].map((i) => sample(`s${i}`, { chars: i * 1000, ms: i === 5 ? 10000 : 1000 }));
   const k5 = costModel(five, { rows: 100, chars: 100_000, windowed: 0 }, 2);
   assert(k5.meanMsPerRow === 2800 && k5.meanMsPerRowTrimmed === 1000 && k5.trimmedRows === 3 && trimNote(k5) === "over the 3 rows between the extremes" && Math.abs(k5.longestShare - 10000 / 14000) < 1e-12, "at five rows the two extreme ranks are dropped and the longest row's leverage shows");
@@ -585,7 +599,9 @@ function selfCheck(): void {
   const v = verdict(ideal, goodCost);
   assert(v.go && !v.provisional && ["A:", "B (simulated)", "C:", "D (derived", "E:"].every((h) => v.reasons.some((r) => r.startsWith(h))), "the ideal corpus is GO with a line per scenario, B marked simulated and D derived");
   assert(v.reasons.some((r) => /^A: .*each row against its own text; the log as the payload is out of scope/.test(r)), "A's line says what it measured: the row against its own text, not the log");
-  assert(v.reasons.some((r) => /over 1 reused rows, min cosine 0\.9999 \(1−cos 1\.0e-4\)/.test(r)) && v.reasons.some((r) => /^window vectors: 3 compared against the stored chunk rows, min cosine 0\.9998/.test(r)), "the cosine lines name the reused rows covered, the gap, and the windows on their own line");
+  assert(v.reasons.some((r) => /over 1 reused rows, min cosine 0\.9999 \(1−cos 1\.0e-4\)/.test(r)) && v.reasons.some((r) => /^window vectors: 3 compared against the stored chunk rows, min cosine 0\.9998 \(1−cos 2\.0e-4\)/.test(r)), "the cosine lines name the reused rows covered, the gap, and the windows with their own gap on their own line");
+  const recutVerdict = verdict(ideal, costModel([sample("a", { cosineToStored: 1, windows: 3, windowCountMismatch: true })], { rows: 6, chars: 20700, windowed: 1 }, 2));
+  assert(!recutVerdict.go && recutVerdict.reasons.some((r) => /NO-GO: 1 reused row\(s\) cut to a different number of windows/.test(r)), "a reused row cut to another number of windows than its stored chunk rows: NO-GO — the recipe moved without the key moving");
   assert(verdict(ideal, null).go && verdict(ideal, null).provisional && verdict(ideal, null).reasons.some((r) => /provisional: no provider/.test(r)), "no provider: GO but provisional, said so");
   const poor = buildScenarios(corpus.map((r, i) => (i < 2 ? { ...r, storedFingerprint: "stale" } : r)), "m1", new Set(["c"]), "m2", () => false);
   const pv = verdict(poor, goodCost);
@@ -632,10 +648,10 @@ function selfCheck(): void {
   const text = renderReport(o);
   for (const p of PROJECTIONS) assert(text.includes(p.table) && text.includes(p.verdict), `the report names ${p.table} and its verdict`);
   assert(/A no-op rebuild\s+6\s+100\.0%\s+0\s+none/.test(text) && /B 2 edits\s+4\s+66\.7%\s+2\s+content 2/.test(text) && /C model bump → m2\s+0\s+0\.0%\s+6\s+model 6/.test(text), "the scenario rows carry reuse, share, recompute and reasons");
-  assert(/2 updates moved content, 1 of them the fingerprint; the log holds content for 1\/6 live thoughts/.test(text) && /1 thought\(s\) with 3 mention rows extracted before their fingerprint last moved — under the recorded key extract:x@p1: 0 queued for a re-read, 0 failed \(terminal until --retry-failed\), 0 succeeded before the move \(re-enqueued under another key\), 0 succeeded after it with the rows still older, 1 never asked; 0 of the unqueued pending under another key/.test(text), "the log's completeness and the stale graph, pool state under the recorded key with the succeeded rows placed, are stated");
+  assert(/2 updates moved content, 1 of them the fingerprint; the log holds content for 1\/6 live thoughts/.test(text) && /1 thought\(s\) with 3 mention rows extracted before their fingerprint last moved — under the recorded key extract:x@p1: 0 queued for a re-read, 0 failed \(terminal until --retry-failed\), 0 succeeded before the move \(re-enqueued under another key\), 0 succeeded after it with the rows still older, 0 succeeded with no stamp to place, 1 never asked; 0 of the unqueued pending under another key/.test(text) && /graph: 15 model mentions \(a source: pass's rows apart\)/.test(text), "the log's completeness and the stale graph, pool state under the recorded key with the succeeded rows placed or unplaced, are stated; the mentions are the model passes'");
   assert(/corpus: 6 thoughts, 20\.7 k chars/.test(text) && /NULL on 0/.test(text) && /target m1@8/.test(text) && /MB table and TOAST/.test(text), "characters at their unit, the NULL keys counted, the target with its width, the audit's size named for what it measures");
   assert(/per row: median 3\.00 s, mean 4\.00 s, mean untrimmed: under 5 rows 4\.00 s \(the longest row is 66\.7% of the sample's wall-clock\); 1\.000 s per 1k chars; 1 fell back/.test(text) && /worst \(C, 6 rows\): 24\.0 s by rows, 24\.0 s trimmed, 20\.7 s by characters/.test(text), "the cost lines carry the sample's numbers, the trim note, the longest row's share and the three extrapolations");
-  assert(/over the 2 reused rows: min cosine 0\.9995 \(1−cos 5\.0e-4\), median 0\.9998; 0 at another width; window vectors: 2 compared, min cosine 0\.9980/.test(text), "the reproducibility line names the reused rows, the gap, the width mismatches and the windows");
+  assert(/over the 2 reused rows: min cosine 0\.9995 \(1−cos 5\.0e-4\), median 0\.9998; 0 at another width; window vectors: 2 compared, min cosine 0\.9980 \(1−cos 2\.0e-3\), 0 row\(s\) cut to another count/.test(text), "the reproducibility line names the reused rows, the gap, the width mismatches, the windows with their gap and the recut rows");
   assert(/^  id\s+decision\s+chars/m.test(text) && /\brecompute:/.test(text) === false && /  c\s+reuse\s+8000\s+6\s+7\s+8\.00\s+—\s+—\s+—  head window$/m.test(text), "the per-row table carries the decision, the gap and the window column; a fallback is marked");
   assert(/--workers 2 by default, so under its own contention/.test(text) && /extract:x@p1\s+n\s+6\s+median\s+30\.0 s\/row\s+→ 6 thoughts ≈ 0\.1 h/.test(text), "the graph's own cost says what concurrency the log recorded it under");
   assert(/other passes' rows in the claim log, for scale[\s\S]*consolidate:x@p1\s+n\s+2/.test(text) && text.indexOf("the graph's own cost") < text.indexOf("other passes' rows"), "the judge's rows are shown apart from the graph's, after them");

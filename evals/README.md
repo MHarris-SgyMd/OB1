@@ -4542,23 +4542,26 @@ already records is unchanged, and recomputes only what changed.
 
 **Pre-registered, then measured.** The contract went on the ticket before the
 first run: the snapshot key per projection and what the row records of it
-(`projection-replay.ts`, `PROJECTIONS`); the replay rule — a row with no key
-recomputes (there is nothing to say what its vector is of), then the payload's
-fingerprint (`content_fingerprint_of(content)`, by the SQL rule's owner)
-against the row's, then a vector present or not, then the row's label against
-the target in `ob1_config`, reuse on a hit and recompute on a miss with a
-reason the key states; the ticket's five scenarios with the expectation each is
-held to; and the bar — a no-op rebuild reuses at least 99% with every miss
-stated by the key, N edits recompute exactly N beyond what the no-op already
-recomputed, a comprehension-only change recomputes none, a model bump is
-priced in wall-clock. One bar was added between the comment and the first run:
-a REUSED row whose fresh vector sits under cosine 0.99 to its stored one is a
-vector that is not a function of its key — the one defect the key cannot
-express — and fails the verdict; it is held over the parent vectors and over
-the window vectors against their stored chunk rows alike, at the column's
-width (a fresh vector at another width is a failure, not a prefix compared);
-a recomputed row's stored vector is of other text or another model and is not
-compared.
+(`projection-replay.ts`, `PROJECTIONS` — six rows as of migration 053, the
+sixth 053's own `thought_sources`, recorded by `canonical_hash`); the replay
+rule — a row with no key recomputes (there is nothing to say what its vector
+is of), then the payload's fingerprint (`content_fingerprint_of(content)`, by
+the SQL rule's owner) against the row's, then a vector present or not, then
+the row's label against the target in `ob1_config`, reuse on a hit and
+recompute on a miss with a reason the key states; the ticket's five scenarios
+with the expectation each is held to; and the bar — a no-op rebuild reuses at
+least 99% with every miss stated by the key, N edits recompute exactly N
+beyond what the no-op already recomputed, a comprehension-only change
+recomputes none, a model bump is priced in wall-clock. One bar was added
+between the comment and the first run: a REUSED row whose fresh vector sits
+under cosine 0.99 to its stored one is a vector that is not a function of its
+key — the one defect the key cannot express — and fails the verdict; it is
+held over the parent vectors and over the window vectors against their stored
+chunk rows alike, at the column's width (a fresh vector at another width is a
+failure, not a prefix compared), and a fresh cut to a different NUMBER of
+windows than the stored chunk rows is a failure too, since nothing lines up by
+index and 022 records no recipe to say why; a recomputed row's stored vector
+is of other text or another model and is not compared.
 
 **What the scenarios are, said plainly.** The no-op rebuild reads each row's
 payload from the `thoughts` row itself, so it is the row's key against its own
@@ -4572,7 +4575,11 @@ is derived from the contract (the vector's key carries no extraction or judge
 key), not observed; the verdict marks both. The recipe scenario counts the
 chunk rows a change replaces (every one, since no row records the recipe it
 was cut by — 022) and the thoughts the CURRENT recipe windows; it does not
-model the recipe a change would move to.
+model the recipe a change would move to. The graph the stale count reads is
+the MODEL passes' rows: 053's structured pass writes `source:` extraction keys
+with no model call, and a structured row re-ingested after an edit must not
+make a stale model extraction read fresh, so those rows are held apart, as
+053's own SQL holds them.
 
 **One snapshot, read only, through the real embedder.** The run reads a live
 brain through `DATABASE_URL` in one transaction — repeatable read, read only,
@@ -4594,25 +4601,28 @@ the judge's rows are shown apart, for scale.
 **Held.** `--self-check` (portable-server job; no database, no model): the
 contract's shape, the replay rule branch by branch and in order, the pool
 parser and its classification under the recorded key (a succeeded row placed
-before or after the move by the stamp the SQL compared), the five scenarios on
-a hand-known corpus, the stale-graph breakdown, the sample, the cost model (the
-trimmed mean and when it is not trimmed, the longest row's share, the
-reused-only cosine, the width mismatch, the window cosine), the verdict — GO on
-the ideal; NO-GO under the reuse bar, on N edits that recompute more or fewer
-or the wrong rows, on a model bump that reuses, on a comprehension-only change
-that touches a vector, on a reused row or a window vector that does not
-reproduce, on a cosine that is not a number, on a fresh vector at another
-width, on an empty brain; provisional with no provider or no reused row in the
-sample — the report's lines, the argument rules. `--fixture-check` (data-layer
-job, a throwaway Postgres; it DROPS the schema at `DATABASE_URL` and refuses a
-database holding thoughts unless `OB1_FIXTURE_RESET=1`): the schema reset and
-seeded through raw SQL with one row per branch — a NULL label, no vector, no
-fingerprint, a key left stale by a raw content update, another model's label,
-a whitespace-only edit that moved content and not the key, graph thoughts
-whose text moved after extraction with the pool under the recorded key queued,
-failed and succeeded before the move (the move re-enqueued under another key,
-as the live brain showed), a graph thought re-extracted after its move and one
-whose post-extraction edit was whitespace-only (both fresh), a windowed
+before or after the move by the stamp the SQL compared, or unplaced), the five
+scenarios on a hand-known corpus, the stale-graph breakdown, the sample, the
+cost model (the trimmed mean and when it is not trimmed, the longest row's
+share, the reused-only cosine, the width mismatch, the window cosine and its
+gap, the window-count mismatch), the verdict — GO on the ideal; NO-GO under
+the reuse bar, on N edits that recompute more or fewer or the wrong rows, on a
+model bump that reuses, on a comprehension-only change that touches a vector,
+on a reused row or a window vector that does not reproduce, on a cosine that
+is not a number, on a fresh vector at another width or a fresh cut to another
+number of windows, on an empty brain; provisional with no provider or no
+reused row in the sample — the report's lines, the argument rules.
+`--fixture-check` (data-layer job, a throwaway Postgres; it DROPS the schema
+at `DATABASE_URL` and refuses a database holding thoughts unless
+`OB1_FIXTURE_RESET=1`): the schema reset and seeded through raw SQL with one
+row per branch — a NULL label, no vector, no fingerprint, a key left stale by
+a raw content update, another model's label, a whitespace-only edit that moved
+content and not the key, graph thoughts whose text moved after extraction
+with the pool under the recorded key queued, failed and succeeded before the
+move (the move re-enqueued under another key, as the live brain showed), a
+graph thought re-extracted after its move and one whose post-extraction edit
+was whitespace-only (both fresh), a stale thought with a structured `source:`
+row written after its move (still stale, the row not a mention), a windowed
 thought — read back through the same queries the live measurement runs and
 held to the contract: every decision in its branch, 7/12 reused and NO-GO,
 two edits with one already a miss counted once, the audit's content and key
@@ -4623,7 +4633,7 @@ branches: every row there reuses.
 ```bash
 bun eval-projection-replay.ts --self-check                  # the rules, probed with hand-known rows; no database, no model (in CI, portable-server)
 ../db/with-postgres.sh bun eval-projection-replay.ts --fixture-check   # the SQL held to the contract on a seeded brain; DROPS the schema at DATABASE_URL (in CI, data-layer)
-DATABASE_URL=… bun eval-projection-replay.ts                # the report over the live brain, 21 rows through the provider
+DATABASE_URL=… bun eval-projection-replay.ts                # the report over the live brain, the default sample through the provider
 DATABASE_URL=… bun eval-projection-replay.ts --no-provider  # the counts alone
 DATABASE_URL=… bun eval-projection-replay.ts --sample 21 --edit 10 --json out.json
 ```
@@ -4633,14 +4643,14 @@ The dogfood brain publishes no port (SMD-1844), so the run below went through
 worktree mounted read-only, the URL built inside the container, host Ollama at
 `host.containers.internal` as the server dials it.
 
-### Results, 2026-09-24 (the dogfood brain as found, 427 thoughts; the program's output, verbatim)
+### Results, 2026-09-24 (the dogfood brain as found, 430 thoughts; the program's output, verbatim)
 
 ```
-Projection replay — SMD-1998 — 2026-09-24T01:52:34.044Z
+Projection replay — SMD-1998 — 2026-09-24T02:18:12.619Z
 
-corpus: 427 thoughts, 1.78 M chars; 427 with a vector (qwen3-embedding:4b 427); content_fingerprint = content_fingerprint_of(content) on 427/427, NULL on 0; 3 windowed (20 chunk rows); chunk_context false; target qwen3-embedding:4b@1024
-log: 428 capture / 1609 update / 1 delete rows (4.2 MB table and TOAST); 280 updates moved content, 280 of them the fingerprint; the log holds content for 213/427 live thoughts (a capture row carries metadata, not content — 008)
-graph: 6616 mentions, 5211 edges; 4 thought(s) with 45 mention rows extracted before their fingerprint last moved — under the recorded key extract:qwen2.5:7b@p2: 4 queued for a re-read, 0 failed (terminal until --retry-failed), 0 succeeded before the move (re-enqueued under another key), 0 succeeded after it with the rows still older, 0 never asked; 0 of the unqueued pending under another key, which refreshes nothing here; 24 proposals
+corpus: 430 thoughts, 1.79 M chars; 430 with a vector (qwen3-embedding:4b 430); content_fingerprint = content_fingerprint_of(content) on 430/430, NULL on 0; 3 windowed (20 chunk rows); chunk_context false; target qwen3-embedding:4b@1024
+log: 431 capture / 1613 update / 1 delete rows (4.2 MB table and TOAST); 280 updates moved content, 280 of them the fingerprint; the log holds content for 213/430 live thoughts (a capture row carries metadata, not content — 008)
+graph: 5878 model mentions (a source: pass's rows apart), 5211 edges; 14 thought(s) with 238 mention rows extracted before their fingerprint last moved — under the recorded key extract:qwen2.5:7b@p2: 8 queued for a re-read, 5 failed (terminal until --retry-failed), 1 succeeded before the move (re-enqueued under another key), 0 succeeded after it with the rows still older, 0 succeeded with no stamp to place, 0 never asked; 6 of the unqueued pending under another key, which refreshes nothing here; 24 proposals
 
 the snapshot key per projection (the contract):
   thoughts.embedding                        recorded             derived (content_fingerprint_of(content), embedding_model); the prompt template and the requested width ride on the model name by convention (embed.ts, EMBEDDING_PROMPTS) — code, not data, so a template change under one name invalidates every vector with the key unmoved, and the cosine bar below is the check for that; recorded: content_fingerprint (003/023), embedding_model (021)
@@ -4648,100 +4658,104 @@ the snapshot key per projection (the contract):
   thought_entities / ob1_entity_edges       half recorded        derived (content_fingerprint, extraction_key); recorded: extraction_key, extracted_at; no fingerprint — staleness after an edit is read from the audit and the claim pool
   supersession_proposals                    recorded             derived (older_fingerprint, newer_fingerprint, judge_key); recorded: all three when the caller passed them (nullable, 029); consolidate.ts does
   thoughts.metadata (type, topics, people)  unkeyed              derived (content_fingerprint, metadata model, prompt version); recorded: nothing
+  thought_sources (053)                     recorded             derived (canonical_hash of the source-faithful canonical, the adapter); recorded: canonical and canonical_hash side by side; the structured pass's rows carry a `source:` extraction key, no model
 
 scenario                         reuse      recompute  by reason
 ──────────────────────────────────────────────────────────────────────────────
-A no-op rebuild                    427  100.0%          0  none
-B 10 edits                         417   97.7%         10  content 10
-C model bump → another-model@1024     0    0.0%        427  model 427
-D comprehension-only (embedding)   427  100.0%          0  none
-D comprehension-only (graph)         —                427  thoughts re-read, 6616 mention rows replaced
-E window recipe                    427 parents         20  chunk rows under 3 thought(s); 3 the current recipe windows; head-window fallbacks unrecorded
+A no-op rebuild                    430  100.0%          0  none
+B 10 edits                         420   97.7%         10  content 10
+C model bump → another-model@1024     0    0.0%        430  model 430
+D comprehension-only (embedding)   430  100.0%          0  none
+D comprehension-only (graph)         —                430  thoughts re-read, 5878 mention rows replaced
+E window recipe                    430 parents         20  chunk rows under 3 thought(s); 3 the current recipe windows; head-window fallbacks unrecorded
 
-cost — 21 rows embedded through the real embedder (http://host.containers.internal:11434/v1 qwen3-embedding:4b@1024), 97.3 k chars, one at a time, nothing else running; 1 of them windowed (the corpus: 0.7%):
-  per row: median 0.55 s, mean 1.12 s, mean over the 19 rows between the extremes 0.65 s (the longest row is 46.9% of the sample's wall-clock); 0.242 s per 1k chars; 0 fell back to a head window
-  steady state (A): 0 calls. typical (B, 10 edits): 11.2 s. worst (C, 427 rows): 8.0 min by rows, 4.7 min trimmed, 7.2 min by characters
-  the cached value against a fresh one, over the 21 reused rows: min cosine 1.0000 (1−cos 2.2e-16), median 1.0000; 0 at another width; window vectors: 7 compared, min cosine 1.0000
+cost — 21 rows embedded through the real embedder (http://host.containers.internal:11434/v1 qwen3-embedding:4b@1024), 97.2 k chars, one at a time, nothing else running; 1 of them windowed (the corpus: 0.7%):
+  per row: median 0.62 s, mean 1.17 s, mean over the 19 rows between the extremes 0.68 s (the longest row is 46.9% of the sample's wall-clock); 0.252 s per 1k chars; 0 fell back to a head window
+  steady state (A): 0 calls. typical (B, 10 edits): 11.7 s. worst (C, 430 rows): 8.4 min by rows, 4.9 min trimmed, 7.5 min by characters
+  the cached value against a fresh one, over the 21 reused rows: min cosine 1.0000 (1−cos 1.1e-16), median 1.0000; 0 at another width; window vectors: 7 compared, min cosine 1.0000 (1−cos 1.1e-16), 0 row(s) cut to another count
   id                                    decision  chars  windows  calls     s   cosine   1−cos    windows-min
   5aee0f50-d9f8-489d-ba3e-997447b5cfb0  reuse       251        0      1   0.09  1.0000   1.1e-16  —
   091fb5c8-4700-4337-973c-2376649a06c6  reuse       746        0      1   0.19  1.0000   0        —
-  8fa2f4b2-9e71-40ea-a0d6-cef56cdf3cad  reuse      1586        0      1   0.26  1.0000   0        —
-  008b4199-c07c-43f6-92de-17e85b2cfae0  reuse      1838        0      1   0.34  1.0000   0        —
-  7ba37993-91ff-4f5c-857f-d8a2270ad3bb  reuse      2186        0      1   0.39  1.0000   0        —
-  06b82b2c-b753-4f60-96f1-003f9a87498a  reuse      2622        0      1   0.39  1.0000   1.1e-16  —
-  b10c6bab-83ff-4620-b327-11b7d1dc4bac  reuse      2755        0      1   0.46  1.0000   0        —
-  290d8470-4c46-4f62-96ea-14da0cf7dda3  reuse      2964        0      1   0.40  1.0000   0        —
-  98f22a49-dad7-456f-bdd6-7ecc7ebf9993  reuse      3129        0      1   0.47  1.0000   0        —
-  ed22f597-1192-4b42-8376-5d31c32b85e9  reuse      3401        0      1   0.54  1.0000   0        —
+  3f92be0e-8e5c-43fe-a5eb-8a1efba63c40  reuse      1558        0      1   0.26  1.0000   1.1e-16  —
+  bbcdfca7-653b-4875-8026-02e212f8aeb6  reuse      1826        0      1   0.27  1.0000   0        —
+  7ba37993-91ff-4f5c-857f-d8a2270ad3bb  reuse      2186        0      1   0.40  1.0000   0        —
+  5d1ebe2d-b4d4-4ea0-98bd-2f5ecb53814f  reuse      2606        0      1   0.40  1.0000   0        —
+  b10c6bab-83ff-4620-b327-11b7d1dc4bac  reuse      2755        0      1   0.47  1.0000   0        —
+  290d8470-4c46-4f62-96ea-14da0cf7dda3  reuse      2964        0      1   0.41  1.0000   0        —
+  3a7e389e-78c1-4801-87dc-363319f793a7  reuse      3141        0      1   0.47  1.0000   0        —
+  ffcb56f6-a199-40ce-b129-347a5310ac5c  reuse      3400        0      1   0.62  1.0000   0        —
   66beb4e0-6739-4a8a-9d88-3bac3e7d07ad  reuse      3609        0      1   0.63  1.0000   0        —
-  1f88795d-eb5d-4b56-b232-94b7f9f36cbb  reuse      3844        0      1   0.55  1.0000   0        —
-  37a8bf3c-0759-46e7-a55e-079863bbfe8d  reuse      4086        0      1   0.63  1.0000   0        —
-  7ebab11d-99cf-4fcc-9db2-97e9aa594c0f  reuse      4534        0      1   0.71  1.0000   0        —
-  8fa771a4-e5c1-417f-b851-1a9ff1838dcd  reuse      4958        0      1   0.81  1.0000   0        —
-  b6c27763-ea72-4c0c-a4ab-eed30b11e1e8  reuse      5259        0      1   0.86  1.0000   2.2e-16  —
-  3f31fad1-3cff-45d4-9b5e-677eb033a452  reuse      5605        0      1   0.94  1.0000   0        —
-  66e0127d-e56b-4a35-885e-96160cf3d517  reuse      6020        0      1   1.02  1.0000   0        —
-  299dbf4b-0494-41f7-b89c-53a63aa5715d  reuse      7068        0      1   1.05  1.0000   0        —
-  6d5c6c03-f6e0-4817-aaf9-d76df064b710  reuse      9514        0      1   1.79  1.0000   0        —
-  6941c030-e3cd-4218-ac7b-12f76662bd79  reuse     21345        7      8  11.05  1.0000   0        1.0000 over 7
+  14f9b68c-24e8-4436-910f-d204a4db8b02  reuse      3833        0      1   0.58  1.0000   0        —
+  be2fff59-9764-4359-9697-30bdb0c21b02  reuse      4063        0      1   0.71  1.0000   0        —
+  b8ee8d61-aed0-46d5-9022-640f3d598e9d  reuse      4488        0      1   0.79  1.0000   0        —
+  c22f60e0-b0d2-4e1f-9c21-42cdb429ae49  reuse      4954        0      1   0.78  1.0000   0        —
+  7644cd24-e104-447d-b501-b43eb658eb94  reuse      5257        0      1   0.98  1.0000   1.1e-16  —
+  f53fee38-fe35-49d9-82b3-71bf0106eb89  reuse      5593        0      1   0.98  1.0000   0        —
+  66e0127d-e56b-4a35-885e-96160cf3d517  reuse      6020        0      1   1.05  1.0000   0        —
+  299dbf4b-0494-41f7-b89c-53a63aa5715d  reuse      7068        0      1   1.07  1.0000   0        —
+  6d5c6c03-f6e0-4817-aaf9-d76df064b710  reuse      9514        0      1   1.84  1.0000   0        —
+  6941c030-e3cd-4218-ac7b-12f76662bd79  reuse     21345        7      8  11.48  1.0000   0        1.0000 over 7
 
 the graph's own cost, from the claim log (finished_at − claimed_at over succeeded rows, as the pass ran them — --workers 2 by default, so under its own contention), and a full re-read one row after another at that rate:
-  extract:qwen2.5:7b@p1        n  117  median   31.7 s/row  → 427 thoughts ≈ 3.8 h
-  extract:qwen2.5:7b@p2        n  396  median   36.7 s/row  → 427 thoughts ≈ 4.4 h
-  extract:qwen3.8:27b@p2       n   36  median   41.9 s/row  → 427 thoughts ≈ 5.0 h
+  extract:qwen2.5:7b@p1        n  117  median   31.7 s/row  → 430 thoughts ≈ 3.8 h
+  extract:qwen2.5:7b@p2        n  396  median   36.7 s/row  → 430 thoughts ≈ 4.4 h
+  extract:qwen3.8:27b@p2       n   36  median   41.9 s/row  → 430 thoughts ≈ 5.0 h
 
 other passes' rows in the claim log, for scale (a thought judged by the consolidation pass; a row re-embedded), not the graph's:
-  consolidate:qwen2.5:7b@p2    n  260  median   17.6 s/row  → 427 thoughts ≈ 2.1 h
+  consolidate:qwen2.5:7b@p2    n  260  median   17.6 s/row  → 430 thoughts ≈ 2.1 h
 
 verdict: GO
-  A: the no-op rebuild reuses 427/427 (each row against its own text; the log as the payload is out of scope, see the log line)
-  B (simulated): 10 edits recompute exactly 10 beyond the no-op's 0; 417 reused
-  C: a model bump recomputes 427/427, 8.0 min by rows (4.7 min over the 19 rows between the extremes) / 7.2 min by characters at the measured rate
-  D (derived, not observed): the vector's key carries no extraction or judge key, so a comprehension-only change recomputes no vector beyond the no-op's 0; the graph re-reads 427 thoughts (6616 mention rows replaced)
-  E: a window-recipe change replaces 20 chunk rows under 3 thoughts (3 the current recipe windows) and reuses 427 parents — less any head-window fallback, which the row does not record
-  the cached value reproduces: fresh against stored over 21 reused rows, min cosine 1.0000 (1−cos 2.2e-16), median 1.0000
-  window vectors: 7 compared against the stored chunk rows, min cosine 1.0000
+  A: the no-op rebuild reuses 430/430 (each row against its own text; the log as the payload is out of scope, see the log line)
+  B (simulated): 10 edits recompute exactly 10 beyond the no-op's 0; 420 reused
+  C: a model bump recomputes 430/430, 8.4 min by rows (4.9 min over the 19 rows between the extremes) / 7.5 min by characters at the measured rate
+  D (derived, not observed): the vector's key carries no extraction or judge key, so a comprehension-only change recomputes no vector beyond the no-op's 0; the graph re-reads 430 thoughts (5878 mention rows replaced)
+  E: a window-recipe change replaces 20 chunk rows under 3 thoughts (3 the current recipe windows) and reuses 430 parents — less any head-window fallback, which the row does not record
+  the cached value reproduces: fresh against stored over 21 reused rows, min cosine 1.0000 (1−cos 1.1e-16), median 1.0000
+  window vectors: 7 compared against the stored chunk rows, min cosine 1.0000 (1−cos 1.1e-16)
 ```
 
 **What it says.** GO on every pre-registered line. The key the schema records
-is sufficient for the rows it describes: every one of 427 rows reuses, and the
-fresh vector equals the cached one to within 2.2e-16 on all 21 sampled rows
-(parents) and on the 7 window vectors of the one windowed row in the sample —
-the cached value IS what a recompute would produce, so reusing it loses
-nothing. Ten edits recompute exactly ten; the worst case, a model bump,
-re-embeds the whole brain in minutes on this Mac: 8.0 by rows, 4.7 over the
-19 rows between the extremes, 7.2 by characters (mean 1.12 s a row, 0.65 s
-trimmed; 0.242 s per thousand characters; the corpus is 1.78 M characters).
+is sufficient for the rows it describes: every one of 430 rows reuses, and the
+fresh vector equals the cached one to within 1.1e-16 on all 21 sampled rows
+(parents) and to within 1.1e-16 on the 7 window vectors of the one windowed
+row in the sample — the cached value IS what a recompute would produce, so
+reusing it loses nothing. Ten edits recompute exactly ten; the worst case, a
+model bump, re-embeds the whole brain in minutes on this Mac: 8.4 by rows, 4.9
+over the 19 rows between the extremes, 7.5 by characters (mean 1.17 s a row,
+0.68 s trimmed; 0.252 s per thousand characters; the corpus is 1.79 M
+characters).
 
 **The premise inverts.** The ADR named re-embedding as the expensive
 projection. On this hardware at this corpus it is the CHEAP one and the
 best-keyed: the graph's re-read costs a median 37 s a thought under the 7B
 extractor (42 s under the 27B; 18 s a thought judged for the consolidation
-pass, shown apart), 4.4 hours one row after another for the corpus,
-thirty-three times the re-embed's 8.0 minutes — with the caveat that the claim
-log recorded those seconds under the pass's own two workers on the same Ollama
-while the embed sample ran alone, so the ratio is an order of magnitude, not a
+pass, shown apart), 4.4 hours one row after another for the corpus, thirty-one
+times the re-embed's 8.4 minutes — with the caveat that the claim log recorded
+those seconds under the pass's own two workers on the same Ollama while the
+embed sample ran alone, so the ratio is an order of magnitude, not a
 measurement to the digit. And the graph is the projection whose key is half
 recorded (the rows carry `extraction_key` and no fingerprint; 016 checks one at
 write time and keeps none), while the capture-time metadata (`type`, `topics`,
-`people`) is unkeyed altogether. As of the run four thoughts held 45 mention
-rows extracted from text whose fingerprint has since moved, all four queued for
-a re-read under the recorded key; an earlier run the same night found eleven,
-five of them failed on a retry and one succeeded under the recorded key BEFORE
-the move — its re-enqueue went under the key another pass had recorded in
-between, and no pass under this key will return to it — before a 27B pass
-caught the rest up (mentions 5,922 → 6,616). The row cannot say any of this;
-the audit and the claim table can. Snapshot discipline — a key on the row a
-replay can derive from the payload and the configuration — matters most where
-it is weakest, and the ADR's snapshot strategy should be written for the graph
-and the metadata first, with the embedding as the worked example that already
-holds.
+`people`) is unkeyed altogether. The stale graph moved under the night's runs
+as a 27B extraction pass worked through the brain: 11 thoughts with 205 mention
+rows extracted before their fingerprint last moved at one run, 4 with 45 at
+the next, 14 with 238 as of the block — eight queued for a re-read under the
+recorded key, five failed on a retry, one succeeded under the recorded key
+BEFORE the move (its re-enqueue went under the key another pass had recorded
+in between, and no pass under this key will return to it), six of the
+unqueued pending under another key. The row cannot say any of this; the audit
+and the claim table can. Snapshot discipline — a key on the row a replay can
+derive from the payload and the configuration — matters most where it is
+weakest, and the ADR's snapshot strategy should be written for the graph and
+the metadata first, with the embedding as the worked example that already
+holds; 053's `thought_sources`, recorded by `canonical_hash` beside the
+canonical, is the shape to copy.
 
 **What the log cannot yet replay.** A capture row in `thought_audit` carries
 `metadata` and not `content` (008's INSERT branch), so the log alone holds the
-text of 213 of 427 live thoughts — those with a content-moving update, whose
+text of 213 of 430 live thoughts — those with a content-moving update, whose
 `before` is the earlier text — and today the `thoughts` row is the payload
-store. Carrying the content in the capture event costs 1.78 M characters of
+store. Carrying the content in the capture event costs 1.79 M characters of
 text beside a 4.2 MB audit table (table and TOAST, no indexes). The chunk rows
 carry no recipe (022 has the parent's label vouch for them), so a
 window-recipe change replaces every chunk row (20, under 3 thoughts here)
@@ -4755,26 +4769,27 @@ data — so a template change under one name would invalidate every vector with
 the key unmoved; the cosine bar is the check for that, over the rows sampled.
 Each is an input to SMD-1997 and SMD-1999, recorded there.
 
-**Caveats.** One brain, one day, one Mac; the corpus is live (419 → 427
-between the night's runs, and a succeeded claim count went DOWN between runs —
-016's requeue resets a row to pending when its text moves) and the report
-reads it at run time; the numbers above are as of the run in the block. The
-sample is 21 rows of 427, spread by length rather than drawn from the corpus's
-own histogram, so the extremes weigh 1/21 here and 1/427 there: the one
-21,345-character row is 46.9% of the sample's wall-clock (the report prints
-the share), which is why the trimmed mean is printed beside the mean, and the
-sample's one windowed row is 4.8% of it against 0.7% of the corpus. Embedded
-sequentially with the model warm and nothing else running; a cold model adds
-its load time to the first row, a concurrent extraction pass on the same
-Ollama slows an embed by about a third (SMD-1951's measurement), and with
+**Caveats.** One brain, one day, one Mac; the corpus is live (419 → 430
+between the night's runs, the graph churning under a 27B pass — mention rows
+5,922 → 6,616 → 5,878 as `record_thought_entities` replaced them — and a
+succeeded claim count going DOWN between runs as 016's requeue reset rows) and
+the report reads it at run time; the numbers above are as of the run in the
+block. The sample is 21 rows of 430, spread by length rather than drawn from
+the corpus's own histogram, so the extremes weigh 1/21 here and 1/430 there:
+the one 21,345-character row is 46.9% of the sample's wall-clock (the report
+prints the share), which is why the trimmed mean is printed beside the mean,
+and the sample's one windowed row is 4.8% of it against 0.7% of the corpus.
+Embedded sequentially with the model warm and nothing else running; a cold
+model adds its load time to the first row, a concurrent extraction pass on the
+same Ollama slows an embed by about a third (SMD-1951's measurement), and with
 `chunk_context` on (it is off here) every window would add a chat generation
 the sample never paid. The graph's seconds per row are the claim log's
 medians; its means are pulled up by the 300-second timeouts SMD-1879 fixed and
 are not the number to read. The stale-graph comparison is the latest
-key-moving audit stamp against the latest `extracted_at`, both transaction-
-start `now()`: an edit transaction that began before an extraction and
-committed after it sorts before it and reads fresh — a window of one write's
-duration, as every MCP write is its own short transaction.
+key-moving audit stamp against the latest `extracted_at` of a model pass, both
+transaction-start `now()`: an edit transaction that began before an extraction
+and committed after it sorts before it and reads fresh — a window of one
+write's duration, as every MCP write is its own short transaction.
 
 Not built here: a projector, a schema change, a recipe on the chunk rows, a
 fingerprint on the graph rows, content in the capture event. The record is

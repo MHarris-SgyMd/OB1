@@ -29,7 +29,7 @@ import { median } from "./lib.ts";
 
 // ── The contract ─────────────────────────────────────────────────────────────
 
-export type ProjectionName = "embedding" | "chunks" | "graph" | "proposals" | "metadata";
+export type ProjectionName = "embedding" | "chunks" | "graph" | "proposals" | "metadata" | "sources";
 export type KeyVerdict = "recorded" | "recipe not recorded" | "half recorded" | "unkeyed";
 
 export type Projection = {
@@ -42,7 +42,7 @@ export type Projection = {
   verdict: KeyVerdict;
 };
 
-/** The snapshot key per projection, as the schema records it on 2026-09-24 (migrations to 052). */
+/** The snapshot key per projection, as the schema records it on 2026-09-24 (migrations to 053). */
 export const PROJECTIONS: readonly Projection[] = [
   {
     name: "embedding", table: "thoughts.embedding",
@@ -53,6 +53,7 @@ export const PROJECTIONS: readonly Projection[] = [
   { name: "graph", table: "thought_entities / ob1_entity_edges", derived: "(content_fingerprint, extraction_key)", recorded: "extraction_key, extracted_at; no fingerprint — staleness after an edit is read from the audit and the claim pool", verdict: "half recorded" },
   { name: "proposals", table: "supersession_proposals", derived: "(older_fingerprint, newer_fingerprint, judge_key)", recorded: "all three when the caller passed them (nullable, 029); consolidate.ts does", verdict: "recorded" },
   { name: "metadata", table: "thoughts.metadata (type, topics, people)", derived: "(content_fingerprint, metadata model, prompt version)", recorded: "nothing", verdict: "unkeyed" },
+  { name: "sources", table: "thought_sources (053)", derived: "(canonical_hash of the source-faithful canonical, the adapter)", recorded: "canonical and canonical_hash side by side; the structured pass's rows carry a `source:` extraction key, no model", verdict: "recorded" },
 ];
 
 export const KEY_VERDICTS: readonly KeyVerdict[] = ["recorded", "recipe not recorded", "half recorded", "unkeyed"];
@@ -60,7 +61,7 @@ export const KEY_VERDICTS: readonly KeyVerdict[] = ["recorded", "recipe not reco
 // ── The rows ─────────────────────────────────────────────────────────────────
 
 export type ClaimStatus = "pending" | "claimed" | "succeeded" | "failed";
-export const CLAIM_STATUSES: readonly ClaimStatus[] = ["pending", "claimed", "succeeded", "failed"];
+const CLAIM_STATUSES: readonly ClaimStatus[] = ["pending", "claimed", "succeeded", "failed"];
 
 /**
  * Where a thought stands in the extraction pool. `recorded` is its claim row
@@ -110,6 +111,7 @@ export type ThoughtRow = {
   model: string | null;
   hasVector: boolean;
   chunkRows: number;
+  /** Mention rows a MODEL pass wrote; 053's structured pass (`source:` keys, no model call) is not the graph projection this measures. */
   mentions: number;
   /**
    * An update event that moved the FINGERPRINT landed after the latest
@@ -153,7 +155,7 @@ export type Tally = {
 };
 
 export const recomputed = (t: Tally): number => MISSES.reduce((n, m) => n + t.recompute[m], 0);
-export const emptyTally = (): Tally => ({ total: 0, reuse: 0, recompute: { "no-fingerprint": 0, content: 0, "no-vector": 0, unlabelled: 0, model: 0 }, recomputed: [] });
+const emptyTally = (): Tally => ({ total: 0, reuse: 0, recompute: { "no-fingerprint": 0, content: 0, "no-vector": 0, unlabelled: 0, model: 0 }, recomputed: [] });
 
 export function tally(rows: readonly ThoughtRow[], target: string, payloadOf: (r: ThoughtRow) => string = (r) => r.payloadFingerprint): Tally {
   const t = emptyTally();
@@ -248,6 +250,8 @@ export type StaleGraph = {
   succeededBefore: number;
   /** Under the recorded key: succeeded AFTER the text moved and the graph rows still predate it — the pass says done and the rows say otherwise. */
   succeededAfter: number;
+  /** Under the recorded key: succeeded, and the row carries no finished_at to place it by. */
+  succeededUnplaced: number;
   /** No row under the recorded key. */
   none: number;
   /** Of those not queued under the recorded key, how many are pending under another `extract:` key — which refreshes nothing under this one. */
@@ -270,8 +274,9 @@ export function staleGraph(rows: readonly ThoughtRow[]): StaleGraph {
     mentions: stale.reduce((n, r) => n + r.mentions, 0),
     queued: queued.length,
     failed: stale.filter((r) => r.pool.recorded === "failed").length,
-    succeededBefore: stale.filter((r) => r.pool.recorded === "succeeded" && r.pool.finished !== "after").length,
+    succeededBefore: stale.filter((r) => r.pool.recorded === "succeeded" && r.pool.finished === "before").length,
     succeededAfter: stale.filter((r) => r.pool.recorded === "succeeded" && r.pool.finished === "after").length,
+    succeededUnplaced: stale.filter((r) => r.pool.recorded === "succeeded" && r.pool.finished === null).length,
     none: stale.filter((r) => r.pool.recorded === "none").length,
     elsewhere: stale.filter((r) => !queued.includes(r) && r.pool.elsewhere).length,
   };
@@ -332,6 +337,8 @@ export type Sample = {
   /** The fresh window vectors against the stored chunk rows by index, the least of them; NULL when there were none to compare. */
   windowCosineMin: number | null;
   windowsCompared: number;
+  /** The fresh cut has a different number of windows than the stored chunk rows — the recipe moved (022 records none), and index-by-index comparison says nothing. */
+  windowCountMismatch: boolean;
   fellBack: boolean;
 };
 
@@ -368,9 +375,12 @@ export type CostModel = {
   maxGap: number | null;
   /** Reused rows whose fresh vector came back at another width than the stored one. */
   widthMismatches: number;
-  /** The window vectors' least cosine over the reused rows that had chunk rows, and how many windows that covered. */
+  /** The window vectors' least cosine over the reused rows that had chunk rows, how many windows that covered, and the gap the print cannot show. */
   windowsCompared: number;
   windowMinCosine: number | null;
+  windowMaxGap: number | null;
+  /** Reused rows whose fresh cut had a different number of windows than the stored chunk rows. */
+  windowCountMismatches: number;
   fellBack: number;
 };
 
@@ -420,6 +430,8 @@ export function costModel(samples: readonly Sample[], corpus: { rows: number; ch
     widthMismatches: reused.filter((s) => s.widthMismatch).length,
     windowsCompared: windowed.reduce((n, s) => n + s.windowsCompared, 0),
     windowMinCosine: windowed.length ? Math.min(...windowed.map((s) => s.windowCosineMin as number)) : null,
+    windowMaxGap: windowed.length ? 1 - Math.min(...windowed.map((s) => s.windowCosineMin as number)) : null,
+    windowCountMismatches: reused.filter((s) => s.windowCountMismatch).length,
     fellBack: samples.filter((s) => s.fellBack).length,
   };
 }
@@ -497,10 +509,11 @@ export function verdict(s: Scenarios, cost: CostModel | null): Verdict {
     else if (!Number.isFinite(cost.minCosine)) reasons.push("NO-GO: a reused row's fresh vector has no cosine to its stored one (a zero or mismatched vector)");
     else if (cost.minCosine < REPRO_COSINE) reasons.push(`NO-GO: a reused row's fresh vector sits at cosine ${cost.minCosine.toFixed(4)} to its stored one (bar ${REPRO_COSINE}) — the vector is not a function of its key`);
     else reasons.push(`the cached value reproduces: fresh against stored over ${cost.reusedCompared} reused rows, min cosine ${cost.minCosine.toFixed(4)} (1−cos ${fmtGap(cost.maxGap)}), median ${cost.medianCosine!.toFixed(4)}`);
+    if (cost.windowCountMismatches > 0) reasons.push(`NO-GO: ${cost.windowCountMismatches} reused row(s) cut to a different number of windows than their stored chunk rows — the window recipe moved without the key moving (022 records none), and index-by-index says nothing`);
     if (cost.windowMinCosine === null) reasons.push(`window vectors: none compared${cost.windowsCompared || cost.sampledWindowed ? "" : " (no windowed thought in the sample)"} — the bar over the chunk rows was not applied`);
     else if (!Number.isFinite(cost.windowMinCosine)) reasons.push("NO-GO: a reused row's fresh window vector has no cosine to its stored chunk row (a zero or mismatched vector)");
     else if (cost.windowMinCosine < REPRO_COSINE) reasons.push(`NO-GO: a reused row's fresh window vector sits at cosine ${cost.windowMinCosine.toFixed(4)} to its stored chunk row (bar ${REPRO_COSINE}) — the window recipe moved without the key moving`);
-    else reasons.push(`window vectors: ${cost.windowsCompared} compared against the stored chunk rows, min cosine ${cost.windowMinCosine.toFixed(4)}`);
+    else reasons.push(`window vectors: ${cost.windowsCompared} compared against the stored chunk rows, min cosine ${cost.windowMinCosine.toFixed(4)} (1−cos ${fmtGap(cost.windowMaxGap)})`);
   } else {
     provisional = true;
     reasons.push("provisional: no provider ran, so the cost and the reproducibility of the cached value are not measured");
@@ -577,7 +590,7 @@ export function renderReport(o: Observation): string {
   L.push("");
   L.push(`corpus: ${c.thoughts} thoughts, ${fmtChars(c.chars)}; ${c.withVector} with a vector (${c.byModel.map((m) => `${m.model ?? "<unlabelled>"} ${m.n}`).join(", ") || "none"}); content_fingerprint = content_fingerprint_of(content) on ${c.fingerprintAgrees}/${c.thoughts}, NULL on ${c.fingerprintNull}; ${c.chunkedThoughts} windowed (${c.chunkRows} chunk rows); chunk_context ${c.config.chunk_context ?? "?"}; target ${o.scenarios.target}@${c.config.embedding_dim ?? "?"}`);
   L.push(`log: ${c.audit.capture} capture / ${c.audit.update} update / ${c.audit.delete} delete rows (${(c.audit.bytes / 1e6).toFixed(1)} MB table and TOAST); ${c.audit.contentUpdates} updates moved content, ${c.audit.keyUpdates} of them the fingerprint; the log holds content for ${c.audit.liveWithContentEvent}/${c.thoughts} live thoughts (a capture row carries metadata, not content — 008)`);
-  L.push(`graph: ${c.mentions} mentions, ${c.edges} edges; ${o.stale.thoughts} thought(s) with ${o.stale.mentions} mention rows extracted before their fingerprint last moved — under the recorded key ${c.config.entity_extraction_key || "(none)"}: ${o.stale.queued} queued for a re-read, ${o.stale.failed} failed (terminal until --retry-failed), ${o.stale.succeededBefore} succeeded before the move (re-enqueued under another key), ${o.stale.succeededAfter} succeeded after it with the rows still older, ${o.stale.none} never asked; ${o.stale.elsewhere} of the unqueued pending under another key, which refreshes nothing here; ${c.proposals} proposals`);
+  L.push(`graph: ${c.mentions} model mentions (a source: pass's rows apart), ${c.edges} edges; ${o.stale.thoughts} thought(s) with ${o.stale.mentions} mention rows extracted before their fingerprint last moved — under the recorded key ${c.config.entity_extraction_key || "(none)"}: ${o.stale.queued} queued for a re-read, ${o.stale.failed} failed (terminal until --retry-failed), ${o.stale.succeededBefore} succeeded before the move (re-enqueued under another key), ${o.stale.succeededAfter} succeeded after it with the rows still older, ${o.stale.succeededUnplaced} succeeded with no stamp to place, ${o.stale.none} never asked; ${o.stale.elsewhere} of the unqueued pending under another key, which refreshes nothing here; ${c.proposals} proposals`);
   L.push("");
   L.push("the snapshot key per projection (the contract):");
   const w = Math.max(...PROJECTIONS.map((p) => p.table.length));
@@ -599,9 +612,9 @@ export function renderReport(o: Observation): string {
     L.push(`cost — ${k.sampled} rows embedded through the real embedder (${o.provider}), ${fmtChars(k.sampledChars)}, one at a time, nothing else running; ${k.sampledWindowed} of them windowed (the corpus: ${pct(Math.round(k.corpusWindowedShare * c.thoughts), c.thoughts)}):`);
     L.push(`  per row: median ${(k.medianMsPerRow / 1000).toFixed(2)} s, mean ${(k.meanMsPerRow / 1000).toFixed(2)} s, mean ${trimNote(k)} ${(k.meanMsPerRowTrimmed / 1000).toFixed(2)} s (the longest row is ${pct(k.longestShare, 1)} of the sample's wall-clock); ${(k.msPerKChar / 1000).toFixed(3)} s per 1k chars; ${k.fellBack} fell back to a head window`);
     L.push(`  steady state (A): 0 calls. typical (B, ${s.edited.n} edits): ${fmtSeconds(k.editSeconds)}. worst (C, ${c.thoughts} rows): ${fmtSeconds(k.modelBumpSecondsByRows)} by rows, ${fmtSeconds(k.modelBumpSecondsTrimmed)} trimmed, ${fmtSeconds(k.modelBumpSecondsByChars)} by characters`);
-    L.push(`  the cached value against a fresh one, over the ${k.reusedCompared} reused rows: min cosine ${k.minCosine === null ? "—" : k.minCosine.toFixed(4)} (1−cos ${fmtGap(k.maxGap)}), median ${k.medianCosine === null ? "—" : k.medianCosine.toFixed(4)}; ${k.widthMismatches} at another width; window vectors: ${k.windowsCompared} compared${k.windowMinCosine === null ? "" : `, min cosine ${k.windowMinCosine.toFixed(4)}`}`);
+    L.push(`  the cached value against a fresh one, over the ${k.reusedCompared} reused rows: min cosine ${k.minCosine === null ? "—" : k.minCosine.toFixed(4)} (1−cos ${fmtGap(k.maxGap)}), median ${k.medianCosine === null ? "—" : k.medianCosine.toFixed(4)}; ${k.widthMismatches} at another width; window vectors: ${k.windowsCompared} compared${k.windowMinCosine === null ? "" : `, min cosine ${k.windowMinCosine.toFixed(4)} (1−cos ${fmtGap(k.windowMaxGap)})`}, ${k.windowCountMismatches} row(s) cut to another count`);
     L.push("  id                                    decision  chars  windows  calls     s   cosine   1−cos    windows-min");
-    for (const x of o.samples) L.push(`  ${x.id}  ${x.decision.replace("recompute:", "").padEnd(8)}  ${String(x.chars).padStart(5)}  ${String(x.windows).padStart(7)}  ${String(x.calls).padStart(5)}  ${(x.ms / 1000).toFixed(2).padStart(5)}  ${x.cosineToStored === null ? (x.widthMismatch ? " width" : "     —") : x.cosineToStored.toFixed(4)}   ${x.cosineToStored === null ? "—".padEnd(7) : fmtGap(1 - x.cosineToStored).padEnd(7)}  ${x.windowCosineMin === null ? "—" : `${x.windowCosineMin.toFixed(4)} over ${x.windowsCompared}`}${x.fellBack ? "  head window" : ""}`);
+    for (const x of o.samples) L.push(`  ${x.id}  ${x.decision.replace("recompute:", "").padEnd(8)}  ${String(x.chars).padStart(5)}  ${String(x.windows).padStart(7)}  ${String(x.calls).padStart(5)}  ${(x.ms / 1000).toFixed(2).padStart(5)}  ${x.cosineToStored === null ? (x.widthMismatch ? " width" : "     —") : x.cosineToStored.toFixed(4)}   ${x.cosineToStored === null ? "—".padEnd(7) : fmtGap(1 - x.cosineToStored).padEnd(7)}  ${x.windowCosineMin === null ? (x.windowCountMismatch ? "count differs" : "—") : `${x.windowCosineMin.toFixed(4)} over ${x.windowsCompared}${x.windowCountMismatch ? ", count differs" : ""}`}${x.fellBack ? "  head window" : ""}`);
   } else {
     L.push("cost — not measured this run (--no-provider): the scenarios above are counts; the seconds need the provider");
   }
