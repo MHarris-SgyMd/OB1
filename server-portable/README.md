@@ -89,6 +89,7 @@ compose file's `extra_hosts`. Until SMD-1875 the gate decided "local" from the
 hostname and connected to nothing, so a container pointed at an address with
 nothing behind it started `preflight OK` and failed its first capture in 7 ms.
 A hosted endpoint is not dialled without `--deep`.
+
 `preflight.ts --deep` exercises both against the live endpoint, checks the
 embedding width matches the schema, and checks the metadata model actually honours
 JSON mode — a provider that ignores `response_format` degrades every capture to

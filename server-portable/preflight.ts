@@ -337,13 +337,21 @@ const LOCAL_PROBE_SECONDS = `${LOCAL_PROBE_TIMEOUT_MS / 1000} s`;
 const HOST_ALIASES = "http://host.containers.internal:11434/v1 under podman or http://host.docker.internal:11434/v1 under Docker";
 const STACK_OWN = "http://ollama:11434/v1 with --profile local-models";
 const HOST_SPELLINGS = `an Ollama on the host is ${HOST_ALIASES}, and the stack's own is ${STACK_OWN}`;
-/** What went wrong at the connection, in words, from Bun's error for it. */
-function probeFailure(e: unknown): string {
+/**
+ * What went wrong at the connection, in words, from Bun's error for it — and
+ * what the first capture would have done there, which differs by kind: a
+ * refusal or an unresolved name fails it in milliseconds; a silent endpoint
+ * (a SYN dropped, a listener that never answers) holds it for the whole
+ * request budget (first review pass). EAI_AGAIN is the resolver's "not now",
+ * which for a name that should be on the compose network is the same finding.
+ */
+function probeFailure(e: unknown): { why: string; then: string } {
   const err = e as Error & { code?: string | number };
-  if (err.name === "TimeoutError") return `no answer in ${LOCAL_PROBE_SECONDS}`;
-  if (err.code === "ENOTFOUND") return "the name does not resolve";
-  if (err.code === "ConnectionRefused" || err.code === "ECONNREFUSED") return "the connection was refused";
-  return err.message;
+  const fast = "the first capture would fail on it in milliseconds";
+  if (err.name === "TimeoutError") return { why: `no answer in ${LOCAL_PROBE_SECONDS}`, then: "the first capture would hang on it for the whole request timeout (OB1_LLM_TIMEOUT) and then fail" };
+  if (err.code === "ENOTFOUND" || err.code === "EAI_AGAIN") return { why: "the name does not resolve", then: fast };
+  if (err.code === "ConnectionRefused" || err.code === "ECONNREFUSED") return { why: "the connection was refused", then: fast };
+  return { why: err.message, then: fast };
 }
 /** The remedy for the hostname's kind: which of the three spellings this one is, and what it needs. */
 function probeRemedy(base: string, knob: string): string {
@@ -355,18 +363,22 @@ function probeRemedy(base: string, knob: string): string {
     return `Inside a container ${host} is the container itself, not the host: ${HOST_SPELLINGS}. From a shell on the host, start the provider or fix the port.`;
   }
   if (host === "host.docker.internal" || host === "host.containers.internal") {
-    return `Nothing on the host answers at that port, or this runtime does not provide the name — podman provides host.containers.internal, Docker Desktop host.docker.internal, and Docker on Linux the latter only through extra_hosts host-gateway, which deploy/compose.yaml sets. Start the provider on the host, or use the stack's own (${STACK_OWN}).`;
+    return `Nothing on the host answers at that port, or this runtime does not provide the name — podman writes both names, Docker Desktop host.docker.internal, and Docker on Linux neither without extra_hosts host-gateway, which deploy/compose.yaml sets for host.docker.internal. Start the provider on the host, or use the stack's own (${STACK_OWN}).`;
   }
   return `Start the provider at that address or fix the host and port in ${knob}; ${HOST_SPELLINGS}.`;
 }
 async function probeLocal(row: string, at: ProviderEndpoint, knob: string): Promise<void> {
   const started = performance.now();
   try {
-    const r = await fetch(`${at.base}/models`, { method: "GET", signal: AbortSignal.timeout(LOCAL_PROBE_TIMEOUT_MS) });
+    // No redirects followed: a 3xx is an answer from THIS address, and
+    // following one would judge — and dial — wherever it points, off the box
+    // included, under a row that names the base (first review pass).
+    const r = await fetch(`${at.base}/models`, { method: "GET", redirect: "manual", signal: AbortSignal.timeout(LOCAL_PROBE_TIMEOUT_MS) });
     await r.body?.cancel();
     add(row, "ok", `${at.base} answers — HTTP ${r.status} to GET /models in ${Math.max(1, Math.round(performance.now() - started))} ms; what it serves is checked under --deep`);
   } catch (e) {
-    add(row, "fail", `nothing answers at ${at.base} — ${probeFailure(e)} (GET /models, ${LOCAL_PROBE_SECONDS} timeout); the first capture would fail on it in milliseconds`,
+    const { why, then } = probeFailure(e);
+    add(row, "fail", `nothing answers at ${at.base} — ${why} (GET /models, ${LOCAL_PROBE_SECONDS} timeout); ${then}`,
         probeRemedy(at.base, knob));
   }
 }

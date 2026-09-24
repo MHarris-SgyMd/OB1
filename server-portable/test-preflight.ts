@@ -1985,10 +1985,15 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   // The compose fallback with no profile — the ticket's case, and SMD-1843's
   // OpenRouter-key-alone case: `ollama` resolves only on the compose network
   // with the profile up. Port 1, so a box whose resolver knows the name still
-  // fails, refused; the remedy is the hostname's either way.
+  // fails, refused; the remedy is the hostname's either way. Which wording
+  // is decided here first, by the same resolver, so the unresolved wording
+  // is pinned wherever the name is unknown (first review pass: an
+  // either-or regex let the ENOTFOUND mapping drift unnoticed).
+  const ollamaResolves = await Bun.dns.lookup("ollama").then(() => true, () => false);
   const service = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://ollama:1/v1" });
-  assert(service.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/ollama:1\/v1 — (the name does not resolve|the connection was refused) \(GET \/models/.test(row(service.out, "provider endpoint")),
-         `the ollama service name with nothing behind it fails (exit ${service.code})`);
+  const serviceWhy = ollamaResolves ? "the connection was refused" : "the name does not resolve";
+  assert(service.code === 1 && new RegExp(String.raw`✗\s+provider endpoint\s+nothing answers at http://ollama:1/v1 — ${serviceWhy} \(GET /models, 2\.5 s timeout\); the first capture would fail on it in milliseconds`).test(row(service.out, "provider endpoint")),
+         `the ollama service name with nothing behind it fails, "${serviceWhy}" (exit ${service.code}; the name ${ollamaResolves ? "resolves here" : "does not resolve here"})`);
   assert(/→ `ollama` is the local-models profile's service and exists only under it: start the stack with --profile local-models, or set OB1_LLM_BASE_URL to an Ollama on the host \(http:\/\/host\.containers\.internal:11434\/v1 under podman or http:\/\/host\.docker\.internal:11434\/v1 under Docker\) or to a hosted provider with a key\./.test(fix(service.out, "provider endpoint")),
          "…and the remedy names the profile first, then the host aliases and a hosted provider");
   const withKey = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://ollama:1/v1", OPENROUTER_API_KEY: "sk-or-1234" });
@@ -2001,7 +2006,7 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   const alias = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://host.docker.internal:1/v1" });
   assert(alias.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/host\.docker\.internal:1\/v1/.test(row(alias.out, "provider endpoint")),
          `the Docker host alias with nothing behind it fails (exit ${alias.code})`);
-  assert(/→ Nothing on the host answers at that port, or this runtime does not provide the name — podman provides host\.containers\.internal, Docker Desktop host\.docker\.internal, and Docker on Linux the latter only through extra_hosts host-gateway, which deploy\/compose\.yaml sets\./.test(fix(alias.out, "provider endpoint")),
+  assert(/→ Nothing on the host answers at that port, or this runtime does not provide the name — podman writes both names, Docker Desktop host\.docker\.internal, and Docker on Linux neither without extra_hosts host-gateway, which deploy\/compose\.yaml sets for host\.docker\.internal\./.test(fix(alias.out, "provider endpoint")),
          "…with the runtimes and the extra_hosts line named");
   // A private address (a LAN box): the generic remedy, still with the three spellings.
   const lan = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://192.168.0.1:1/v1" });
@@ -2029,15 +2034,31 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   assert(/✓\s+provider endpoint\s+\S+ answers — HTTP 500/.test(erroring.out), "…and so is a 5xx");
   answering.stop(true);
 
-  // One that accepts the connection and never answers: the timeout, in words.
+  // One that accepts the connection and never answers: the timeout, in words,
+  // and a consequence that is not "milliseconds" — a capture would hang on it
+  // for its request budget (first review pass). The stub keeps Bun.serve's
+  // 10 s idleTimeout, and the upper bound below leans on it: a probe timeout
+  // over 10 s would surface as the stub's own idle close at ~12 s.
   const hung = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) });
   const t0 = performance.now();
   const timedOut = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://127.0.0.1:${hung.port}/v1` });
   const waited = performance.now() - t0;
   hung.stop(true);
-  assert(timedOut.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 — no answer in 2\.5 s \(GET \/models, 2\.5 s timeout\)/.test(row(timedOut.out, "provider endpoint")),
-         `an endpoint that accepts and never answers fails on the timeout, said in seconds (exit ${timedOut.code})`);
+  assert(timedOut.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 — no answer in 2\.5 s \(GET \/models, 2\.5 s timeout\); the first capture would hang on it for the whole request timeout \(OB1_LLM_TIMEOUT\) and then fail/.test(row(timedOut.out, "provider endpoint")),
+         `an endpoint that accepts and never answers fails on the timeout, said in seconds, with the hang as the consequence (exit ${timedOut.code})`);
   assert(waited >= 2400 && waited < 10000, `…after about the timeout and not the run's whole patience (${Math.round(waited)} ms)`);
+
+  // A redirect is an answer from THIS address and is not followed: the row
+  // says 3xx, the target is never dialled — so a redirector cannot make the
+  // row name one address and judge another, on or off the box (first review
+  // pass: `fetch` followed it, and a 302 to a dead port read as refused).
+  let targetHits = 0;
+  const target = Bun.serve({ port: 0, fetch: () => { targetHits++; return new Response("here", { status: 200 }); } });
+  const redirector = Bun.serve({ port: 0, fetch: () => new Response(null, { status: 302, headers: { Location: `http://127.0.0.1:${target.port}/elsewhere` } }) });
+  const redirected = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://127.0.0.1:${redirector.port}/v1` });
+  redirector.stop(true); target.stop(true);
+  assert(/✓\s+provider endpoint\s+http:\/\/127\.0\.0\.1:\d+\/v1 answers — HTTP 302 to GET \/models/.test(redirected.out) && targetHits === 0,
+         `a 302 passes as an answer from the base and its target is not dialled (${targetHits} hit(s) on the target)`);
 
   // A hosted endpoint is not dialled without --deep (unchanged): a name that
   // cannot resolve, with a key, prints no endpoint row and no resolver error.
