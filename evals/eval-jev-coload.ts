@@ -33,9 +33,11 @@
  *
  * The provider is OB1_LLM_BASE_URL (its /v1 stripped for /api/ps), the models
  * OB1_EMBEDDING_MODEL and OB1_METADATA_MODEL, the tier OB1_JEV_BASE_URL with
- * OB1_JEV_LOCAL=1. The texts are fixed and carry nothing from any brain. It
- * loads the two Ollama models if they are not loaded (a first call), so run it
- * where that is acceptable — on the dogfood Mac it shares Ollama with the brain.
+ * OB1_JEV_LOCAL=1. The texts are fixed and carry nothing from any brain. The
+ * warm-up loads either Ollama model that is not loaded — the one load the run
+ * can make, with the tier already up — so /api/ps and the runners are read
+ * before it too, and a warm-up that loaded or evicted anything says so. Run it
+ * where that is acceptable: on the dogfood Mac it shares Ollama with the brain.
  */
 
 import { loadEnv } from "./env.ts";
@@ -71,18 +73,25 @@ async function tierMemory(pid: string | undefined): Promise<string> {
   const rss = (await Bun.$`ps -o rss= -p ${pid}`.nothrow().quiet().text()).trim();
   return rss ? `${Math.round(Number(rss) / 1024)} MB rss (excludes compressed pages)` : "—";
 }
-/** Ollama's model runners, as pid@start-time, so an unload or a reload between two snapshots shows. */
+/** Ollama's model runners, as "pid start-time", so an unload or a reload between two snapshots shows. */
 async function runners(): Promise<string[]> {
   const out = await Bun.$`ps -A -o pid=,lstart=,command=`.nothrow().quiet().text();
   return out.split("\n").filter((l) => /llama-server|ollama runner/.test(l)).map((l) => l.trim().replace(/\s+\/.*$/, "").replace(/\s+/g, " ")).sort();
 }
-/** Ollama's own OLLAMA_* settings, from its process's environment — the eval's own shell says nothing about them. */
+/**
+ * Ollama's own OLLAMA_* settings, from `ollama serve`'s environment — the eval's
+ * own shell says nothing about them. `ps eww` shows another user's process
+ * without its environment (Linux's systemd `ollama` user, a root Ollama), so no
+ * variables past the command line reads as unreadable, not as the defaults.
+ * A value with a space in it is cut at the space.
+ */
 async function ollamaSettings(): Promise<string> {
-  const pid = (await Bun.$`pgrep -x ollama`.nothrow().quiet().text()).trim().split("\n")[0];
-  if (!pid) return "unknown (no ollama process on this box)";
-  const env = await Bun.$`ps eww -o command= -p ${pid}`.nothrow().quiet().text();
-  const vars = env.split(/\s+/).filter((w) => /^OLLAMA_[A-Z_]+=/.test(w));
-  return vars.length ? vars.join(" ") : "none set (Ollama's defaults)";
+  const pid = (await Bun.$`pgrep -xf ${"^\\S*ollama serve$"}`.nothrow().quiet().text()).trim().split("\n")[0];
+  if (!pid) return "unknown (no `ollama serve` process on this box)";
+  const words = (await Bun.$`ps eww -o command= -p ${pid}`.nothrow().quiet().text()).trim().split(/\s+/);
+  const vars = words.filter((w) => /^OLLAMA_[A-Z_]+=/.test(w));
+  if (vars.length) return vars.join(" ");
+  return words.slice(2).some((w) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) ? "none set (Ollama's defaults)" : "unreadable (its environment is not shown to this user)";
 }
 /** Free memory as the OS reports it: pages free + inactive (macOS vm_stat), else /proc/meminfo's MemAvailable. */
 async function freeMemory(): Promise<string> {
@@ -131,13 +140,20 @@ async function timed(label: string, once: () => Promise<void>, count: number, un
 
 const showPs = (models: Loaded[]) => models.map((m) => `${m.name} ${gb(m.size)} (VRAM ${gb(m.size_vram)})`).join("; ") || "none";
 
-// Warm all three so "alone" measures a loaded model, not a load.
+// Warm all three so "alone" measures a loaded model, not a load — read before
+// and after, since a load here is the one the run can cause.
+const cold = await ps();
+const runnersCold = await runners();
 await embedOnce();
 await chatOnce();
 await decideOnce();
 const before = await ps();
 const runnersBefore = await runners();
-console.log(`\nbefore: Ollama holds ${showPs(before)}`);
+const warmLoaded = before.filter((m) => !cold.some((c) => c.name === m.name)).map((m) => m.name);
+const warmEvicted = cold.filter((m) => !before.some((b) => b.name === m.name)).map((m) => m.name);
+const warmChanged = JSON.stringify(runnersCold) !== JSON.stringify(runnersBefore);
+console.log(`\nwarm-up: ${warmLoaded.length ? `loaded ${warmLoaded.join(", ")}` : "loaded nothing"}${warmEvicted.length ? `; EVICTED ${warmEvicted.join(", ")}` : ""}${warmChanged && !warmLoaded.length ? "; a runner stopped or started" : ""}`);
+console.log(`before: Ollama holds ${showPs(before)}`);
 console.log(`        Ollama's settings: ${await ollamaSettings()}; runners ${runnersBefore.join(", ") || "none seen"}`);
 console.log(`        tier ${await tierMemory(jevPid)}; free memory ${await freeMemory()}`);
 
@@ -160,4 +176,4 @@ console.log(evicted.length ? `EVICTED while the tier ran: ${evicted.join(", ")}`
   : reloaded ? "a runner stopped or started while the tier ran: a model was unloaded and reloaded (see the runners above)"
   : runnersBefore.length ? "no Ollama model was evicted or reloaded while the tier ran beside it (same runners, same start times)"
   : "no Ollama model was evicted (runners not visible from here: the name comparison alone)");
-console.log("not tested: no model load was requested and no memory pressure applied — Ollama evicts on a load, which the tier never makes");
+console.log(`not tested: ${warmLoaded.length ? "past the warm-up's load, " : ""}no model load was requested and no memory pressure applied — Ollama evicts on a load, which the tier never makes`);

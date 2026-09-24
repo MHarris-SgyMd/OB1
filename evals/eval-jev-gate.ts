@@ -43,7 +43,7 @@
 
 import { SQL } from "bun";
 import { loadEnv } from "./env.ts";
-import { INSUFFICIENT_EVIDENCE, jevDecideMany, resolveJevConfig, type JevDecision, type JevEnv } from "../server-portable/jev.ts";
+import { INSUFFICIENT_EVIDENCE, jevDecideMany, resolveJevConfig, type JevDecision, type JevEnv, type JevResult } from "../server-portable/jev.ts";
 
 loadEnv();
 const arg = (flag: string) => {
@@ -58,7 +58,7 @@ if (!url || !cfg || !Number.isInteger(perCohort) || perCohort < 1) {
   process.exit(2);
 }
 
-type Candidate = { cohort: "bad" | "positive" | "typed"; name: string; type: string; context: string };
+type Candidate = { cohort: "bad" | "positive" | "typed"; name: string; type: string; context: string; metadata: Record<string, unknown> };
 
 /** One window of the thought around the first place it names the entity, else its head. */
 function windowAround(text: string, name: string, span = 400): string {
@@ -73,24 +73,24 @@ async function candidates(): Promise<Candidate[]> {
     return await sql.begin("read only", async (tx) => {
       const rows = (await tx`
         WITH firsts AS (
-          SELECT DISTINCT ON (e.id) e.id, e.name, e.entity_type, t.content,
+          SELECT DISTINCT ON (e.id) e.id, e.name, e.entity_type, t.content, t.metadata,
                  count(*) OVER (PARTITION BY e.id) AS mentions
           FROM ob1_entities e
           JOIN thought_entities te ON te.entity_id = e.id
           JOIN thoughts t ON t.id = te.thought_id
           ORDER BY e.id, t.created_at
         )
-        SELECT name, entity_type, content, mentions,
+        SELECT name, entity_type, content, metadata, mentions,
                CASE WHEN name ~ '^[0-9.:]+$' THEN 'bad'
                     WHEN entity_type IN ('person', 'place') THEN 'typed'
                     WHEN entity_type IN ('tool', 'project', 'organization') AND mentions >= 5 AND name ~ '[A-Za-z]' THEN 'positive'
                END AS cohort
         FROM firsts
-      `) as { name: string; entity_type: string; content: string; mentions: number; cohort: Candidate["cohort"] | null }[];
+      `) as { name: string; entity_type: string; content: string; metadata: Record<string, unknown> | null; mentions: number | bigint; cohort: Candidate["cohort"] | null }[];
       const out: Candidate[] = [];
       for (const cohort of ["bad", "positive", "typed"] as const) {
         const pick = rows.filter((r) => r.cohort === cohort).sort((a, b) => Number(b.mentions) - Number(a.mentions) || a.name.localeCompare(b.name));
-        for (const r of pick.slice(0, perCohort)) out.push({ cohort, name: r.name, type: r.entity_type, context: windowAround(r.content, r.name) });
+        for (const r of pick.slice(0, perCohort)) out.push({ cohort, name: r.name, type: r.entity_type, context: windowAround(r.content, r.name), metadata: r.metadata ?? {} });
       }
       return out;
     });
@@ -127,16 +127,19 @@ const pct = (n: number, d: number) => (d ? `${((100 * n) / d).toFixed(1)}%` : "â
 const quantile = (xs: number[], q: number) => [...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.floor(q * xs.length))];
 
 const all = await candidates();
-const subject = { kind: "decision" as const, actor: "eval-jev-gate" };
+// Each window leaves under its own thought's metadata, so a source/type/topic
+// term the egress policy names applies to it (jevDecideMany: one subject a call).
+const subject = (c: Candidate) => ({ kind: "decision" as const, actor: "eval-jev-gate", metadata: c.metadata });
 const t0 = performance.now();
 // One decision per request so the per-decision latency is measured, not a batch's share.
 const valid: { p: number | null; abstained: boolean; ms: number }[] = [];
+const typed: JevResult[] = [];
 for (const c of all) {
   const t = performance.now();
-  const { results } = await jevDecideMany(cfg!, [validity(c)], subject);
+  const { results } = await jevDecideMany(cfg!, [validity(c)], subject(c));
   valid.push({ p: results[0].p_true ?? null, abstained: results[0].abstained, ms: performance.now() - t });
+  typed.push((await jevDecideMany(cfg!, [typing(c)], subject(c))).results[0]);
 }
-const typed = (await jevDecideMany(cfg!, all.map(typing), subject)).results;
 const wall = performance.now() - t0;
 
 const cohort = (k: Candidate["cohort"]) => all.map((c, i) => ({ c, v: valid[i], t: typed[i] })).filter((x) => x.c.cohort === k);
