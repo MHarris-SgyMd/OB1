@@ -463,19 +463,42 @@ try {
   assert(named.status === 401, `a named key (MCP_ACCESS_KEYS) is 401 here — this server knows its one MCP_ACCESS_KEY (${named.status})`);
 
   // The other nine tools, on the shim (SMD-1798): the reads by construction, the schema-backed ones degrading as they say.
-  // The three search tools answer, and answer nothing: each sends `exclude_restricted: true` (and any date bound) as
-  // a key of the `filter` it hands match_thoughts and search_thoughts_text, and both functions — this fork's 014 and
-  // the enhanced-thoughts sidecar's own — read that argument as `metadata @> filter`, which no thought's metadata
-  // satisfies. A defect of the tool, not the shim (the shim ran the calls; the rows came back empty), pinned here so
-  // SMD-1986's fix flips these three by name.
+  // The three search tools (SMD-1986). Each sent `exclude_restricted: true` (and any date bound) as a key of the
+  // `filter` it hands match_thoughts and search_thoughts_text, and both functions — this fork's 014 and the
+  // enhanced-thoughts sidecar's own — read that argument as `metadata @> filter`, which no thought's metadata
+  // satisfies: every search answered no matches, and this suite pinned it. Now the caller's metadata_filter goes
+  // alone and the tier and the dates are applied to the rows — the tier by the COLUMN (match_thoughts returns none,
+  // so semantic mode looks it up by id; the old client-side filter compared undefined). A restricted twin at the
+  // captured thought's own vector, whose text the query matches too, is the mutant that shows the filter at work.
+  const hidden = "a restricted thought captured through enhanced-mcp, which no search may show";
+  const [{ id: rid }] = await sql`INSERT INTO thoughts (content, content_fingerprint, embedding, embedding_model, sensitivity_tier, metadata)
+    VALUES (${hidden}, content_fingerprint_of(${hidden}), ${vec(unit(captured))}::vector, ${MODEL}, 'restricted', '{"source": "planted"}'::jsonb) RETURNING id`;
+  const ids = (r: { structured: any }) => ((r.structured?.results ?? []) as { id: string }[]).map((x) => x.id);
   const textMode = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text" });
-  assert(!textMode.isError && Array.isArray(textMode.structured?.results) && textMode.structured.results.length === 0 && textMode.structured?.pagination?.total === 0,
-    `brain_search_thoughts in text mode reaches search_thoughts_text and answers no matches — its exclude_restricted key is read as a containment (${textMode.toolText.slice(0, 80)})`);
+  assert(!textMode.isError && ids(textMode).includes(cid) && !ids(textMode).includes(rid),
+    `brain_search_thoughts in text mode finds the captured thought through search_thoughts_text and not the restricted twin (${textMode.toolText.slice(0, 80)})`);
+  assert(textMode.structured?.pagination?.total === 2 && textMode.structured?.pagination?.has_more === false,
+    `…its total is the function's count, the hidden row included, and has_more reads the page the cursor passed (${JSON.stringify(textMode.structured?.pagination)})`);
   const semantic = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5 });
-  assert(!semantic.isError && Array.isArray(semantic.structured?.results) && semantic.structured.results.length === 0,
-    `…and in semantic mode embeds the query through the stub, calls match_thoughts, and answers no matches for the same reason (${semantic.toolText.slice(0, 80)})`);
+  assert(!semantic.isError && ids(semantic).includes(cid) && !ids(semantic).includes(rid),
+    `…and in semantic mode embeds the query through the stub, calls match_thoughts, and drops the twin by its sensitivity_tier column — one match_thoughts does not return (${semantic.toolText.slice(0, 80)})`);
   const direct = await call(h, "search_thoughts_text", { query: "captured through enhanced" });
-  assert(!direct.isError && Array.isArray(direct.structured?.results) && direct.structured.results.length === 0, `search_thoughts_text likewise (${direct.toolText.slice(0, 60)})`);
+  assert(!direct.isError && ids(direct).includes(cid) && !ids(direct).includes(rid), `search_thoughts_text likewise (${direct.toolText.slice(0, 60)})`);
+  // The one containment that IS meant: a metadata_filter no thought satisfies answers nothing, in both modes.
+  const noneText = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", metadata_filter: { nothing_has_this: true } });
+  const noneSem = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, metadata_filter: { nothing_has_this: true } });
+  assert(!noneText.isError && ids(noneText).length === 0 && noneText.structured?.pagination?.total === 0 && !noneSem.isError && ids(noneSem).length === 0,
+    `a metadata_filter no thought satisfies answers nothing in both modes — the containment the argument is for (${noneText.toolText.slice(0, 40)} / ${noneSem.toolText.slice(0, 40)})`);
+  // The date bounds, applied to the rows in both modes: a window that closed before the capture hides it; one that opened before shows it.
+  const past = "2000-01-01T00:00:00Z";
+  const before = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, end_date: past });
+  const since = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, start_date: past });
+  const beforeText = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", end_date: past });
+  const sinceText = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", start_date: past });
+  assert(ids(before).length === 0 && ids(since).includes(cid) && ids(beforeText).length === 0 && ids(sinceText).includes(cid),
+    `a date bound is applied to the rows in both modes: an end_date in the past hides the capture, a start_date in the past shows it (${ids(before).length}/${ids(since).length}/${ids(beforeText).length}/${ids(sinceText).length})`);
+  assert(beforeText.structured?.pagination?.has_more === false && /^No matches found/.test(beforeText.toolText),
+    `…and a text page the bounds emptied, with none following, says so plainly (${beforeText.toolText})`);
   const listed = await call(h, "brain_list_thoughts", { limit: 1, type: "idea" });
   const pagination = listed.structured?.pagination;
   assert(!listed.isError && listed.structured?.results?.length === 1 && typeof pagination?.total === "number" && pagination.total >= 2 && pagination.has_more === true,
