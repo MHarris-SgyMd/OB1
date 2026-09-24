@@ -100,8 +100,10 @@
  *      group, a decimal, a date or a number before a unit word excluded, and a
  *      slugged path (or a relative link inside the record) naming the file as
  *      it is. A changes/smd-NNNN.md fragment (16) is held to the name and the
- *      cap here, and listed in the index by ticket until the release step
- *      numbers it (SMD-1917)
+ *      cap here, and is not in the index: the block renders from the numbered
+ *      files alone, so a PR that adds a fragment leaves FORK.md untouched and
+ *      the block moves when a numbered file does — at a release cut or a
+ *      retitle (SMD-1917, SMD-2084)
  *  16. every changes/smd-NNNN.md fragment is well-formed — one of Keep a
  *      Changelog's six types, a bump the migrations it lists allow (a `patch`
  *      that ships a migration fails), an SMD-#### ticket list; exactly one
@@ -122,7 +124,9 @@
  *      source); a migration inside a released range keeps the sha the release
  *      froze; and
  *      migration 044's schema_version equals db/version.mjs's FORK_VERSION
- *      (SMD-1804)
+ *      (SMD-1804); and server-portable/version.ts is exactly what
+ *      scripts/gen-version.ts renders from db/version.mjs, releases.json and
+ *      db/migrations/ (17e, SMD-2041)
  *  18. the type-checked directories — server-portable/, compat/supabase-sql/,
  *      db/, evals/ and scripts/ — share one type surface and CI checks each: every one
  *      pins @types/bun, typescript and @types/node in devDependencies at the
@@ -2568,6 +2572,10 @@ async function checkToolsManifest() {
   try {
     ({ renderToolsJson } = await import("./gen-tools.ts"));
   } catch (e) {
+    // Skipped only where the generator cannot load at all; under bun a failed
+    // import is the generator broken, and passing on it would hide a stale file
+    // (SMD-2041 review pass 1).
+    if (typeof Bun !== "undefined") return fail("scripts/gen-tools.ts", `does not import (${(e as Error).message.split("\n")[0]}) — the tools.json round-trip cannot run (SMD-1805)`);
     console.warn(`  (tools.json round-trip skipped — ${(e as Error).message.split("\n")[0]} — run under bun)`);
     return;
   }
@@ -2635,6 +2643,7 @@ const HOUSE_FORM = (k: string) => new RegExp(`^\\$\\{${k}(?::-([^$}]*))?\\}$`);
 /** Knobs the server declares that compose.yaml must NOT forward, with the reason its own comment gives. */
 const NOT_FORWARDED: Record<string, string> = {
   OB1_STORE: "the SQL store is the server's default (FORK.md change 97) and this stack is the deployment that proves it — forwarding it would let the default drift back to PostgREST with nothing in CI noticing",
+  OB1_GIT_SHA: "the commit the image was built from, baked by server-portable/Dockerfile from the build arg of the same name (compose's `build.args`) — a runtime forward would override the baked value with whatever deploy/.env names, a commit the image need not have been built from (SMD-2041)",
 };
 
 /** The names `type Env = { … }` declares in a server source, in order; null when the block is not there. */
@@ -3323,7 +3332,7 @@ function forkLayoutProblems({ entries, forkText, citations = [], ceilings = OVER
   const prose = span ? forkText.slice(0, span.s) + forkText.slice(span.e) : forkText;
   const bytes = Buffer.byteLength(prose, "utf8");
   if (bytes > forkCeiling) at("FORK.md", "fork-oversize", `is ${bytes} bytes outside the generated index; the front door stays under ${forkCeiling} — a change's record belongs in its file under ${CHANGES_DIR}/, not here`);
-  if (span && forkText.slice(span.s, span.e) !== "\n" + renderIndex(changes)) at("FORK.md", "index-stale", `the index between the markers is not what ${CHANGES_DIR}/ renders to — run \`bun scripts/fork-index.ts\``);
+  if (span && forkText.slice(span.s, span.e) !== "\n" + renderIndex(numbered)) at("FORK.md", "index-stale", `the index between the markers is not what ${CHANGES_DIR}/ renders to — run \`bun scripts/fork-index.ts\``);
   for (const c of citations) {
     if (c.n < 1 || (c.n >= FIRST_FILED && !byN.has(c.n)) || (c.name && c.n < FIRST_FILED)) at(c.where, "dangling", `cites change ${c.n}${c.name ? ` as ${CHANGES_DIR}/${c.name}` : ""}, which has no file under ${CHANGES_DIR}/ (1–${FIRST_FILED - 1} are FORK.md's table; the highest with a file is ${hi}) — a renumber left this behind, or the file is missing`);
     else if (c.name && byN.get(c.n)!.name !== c.name) at(c.where, "dangling", `cites ${CHANGES_DIR}/${c.name}, and change ${c.n}'s file is ${CHANGES_DIR}/${byN.get(c.n)!.name} — the file was renamed under the link`); // has(c.n) held by the branch above
@@ -3333,7 +3342,7 @@ function forkLayoutProblems({ entries, forkText, citations = [], ceilings = OVER
 
 const LAYOUT_ENTRIES = (...files: [string, string | null][]): ChangeEntry[] => files.map(([name, text]) => ({ name, text }));
 const CH = (n: number, title = "A thing — a consequence (SMD-1)", body = "Body.\n"): [string, string] => [`${String(n).padStart(3, "0")}-a-thing.md`, `# ${n}. ${title}\n\n${body}`];
-const FORK_FOR = (entries: ChangeEntry[], extra = "") => `# FORK\n\nintro\n\n${INDEX_START}\n${renderIndex(classifyChanges(entries))}${INDEX_END}\n\ntail\n${extra}`;
+const FORK_FOR = (entries: ChangeEntry[], extra = "") => `# FORK\n\nintro\n\n${INDEX_START}\n${renderIndex(classifyChanges(entries).numbered)}${INDEX_END}\n\ntail\n${extra}`;
 const LONG = "line\n".repeat(200);
 const LAYOUT_PROBES: [string, () => LayoutArgs, string[]][] = [
   // [label, args, expected kinds]
@@ -3363,7 +3372,9 @@ const LAYOUT_PROBES: [string, () => LayoutArgs, string[]][] = [
   ["a numbered file below 18", () => { const en = LAYOUT_ENTRIES(CH(18), ["005-below.md", "# 5. Below (SMD-1)\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["below-first"]],
   ["a dotfile the OS left", () => { const en = LAYOUT_ENTRIES(CH(18), [".DS_Store", "x"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, []],
   ["two fragments for one ticket", () => { const en = LAYOUT_ENTRIES(CH(18), ["smd-9.md", "---\n"], ["smd-09.md", "---\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["duplicate-fragment"]],
-  ["a stale index", () => { const en = LAYOUT_ENTRIES(CH(18), CH(19)); return { entries: en, forkText: FORK_FOR(en.slice(0, 1)), ceilings: {} }; }, ["index-stale"]],
+  ["a stale index (a numbered file added, FORK.md untouched)", () => { const en = LAYOUT_ENTRIES(CH(18), CH(19)); return { entries: en, forkText: FORK_FOR(en.slice(0, 1)), ceilings: {} }; }, ["index-stale"]],
+  // A PR adds a fragment and nothing else; FORK.md is as main left it (SMD-2084).
+  ["a fragment added, FORK.md untouched", () => { const en = LAYOUT_ENTRIES(CH(18), ["smd-9.md", "---\n"]); return { entries: en, forkText: FORK_FOR(en.slice(0, 1)), ceilings: {} }; }, []],
   ["a citation above the highest", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 19 }] }; }, ["dangling"]],
   ["a citation of change 0", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 0 }] }; }, ["dangling"]],
   ["a citation of a gapped number", () => { const en = LAYOUT_ENTRIES(CH(18), CH(20)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 19 }] }; }, ["gap", "dangling"]],
@@ -3708,6 +3719,32 @@ function checkSchemaVersion() {
   if (current.value !== FORK_VERSION) fail(`db/migrations/${current.name}`, `writes schema_version '${current.value}' but db/version.mjs's FORK_VERSION is '${FORK_VERSION}' — the brain would report a version the tooling does not (SMD-1804)`);
 }
 checkSchemaVersion();
+
+/**
+ * 17e: server-portable/version.ts is generated (SMD-2041) — the version, the
+ * release range and the tree's last migration the server reports, in a module
+ * the Workers build can bundle (db/version.mjs is node-only). It must be
+ * exactly what scripts/gen-version.ts renders, so a migration added or a cut
+ * made without regenerating it fails here rather than a brain reporting the
+ * previous tree. Bun-only, like the tools.json round-trip.
+ */
+async function checkVersionModule() {
+  let renderVersionTs: () => string;
+  try {
+    ({ renderVersionTs } = await import("./gen-version.ts"));
+  } catch (e) {
+    // As the tools.json round-trip: a skip only off bun.
+    if (typeof Bun !== "undefined") return fail("scripts/gen-version.ts", `does not import (${(e as Error).message.split("\n")[0]}) — check 17e cannot run (SMD-2041)`);
+    console.warn(`  (version.ts round-trip skipped — ${(e as Error).message.split("\n")[0]} — run under bun)`);
+    return;
+  }
+  const rel = "server-portable/version.ts";
+  const path = join(ROOT, rel);
+  if (!existsSync(path)) return fail(rel, "missing — run `bun scripts/gen-version.ts` (SMD-2041)");
+  if (readFileSync(path, "utf8") !== renderVersionTs())
+    fail(rel, "does not match what scripts/gen-version.ts renders from db/version.mjs, releases.json and db/migrations/ — the server would report a version, release range or last migration other than this tree's; run `bun scripts/gen-version.ts` to regenerate (SMD-2041)");
+}
+await checkVersionModule();
 
 /**
  * 18: one type surface across the type-checked directories, and a CI step

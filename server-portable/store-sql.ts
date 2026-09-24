@@ -23,6 +23,7 @@
  */
 
 import { SQL } from "bun";
+import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgress } from "./brain-info.ts";
 import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
   Actor,
@@ -209,6 +210,10 @@ export class SqlStore implements ThoughtStore {
   async countThoughts(): Promise<number> {
     const rows = await this.sql`SELECT count(*)::int AS c FROM thoughts`;
     return Number(rows[0].c);
+  }
+
+  async databaseFacts(opts?: ReadOptions, progress?: ReadProgress): Promise<DatabaseFacts> {
+    return readDatabaseFacts(this.sql, opts, progress);
   }
 
   async statsSummary(): Promise<ThoughtStats> {

@@ -72,7 +72,11 @@ the brain it serves. `db/version.mjs` is the one definition of the current versi
 migration belongs to. 044 wrote `0.0.0+upstream.9543c29`, the pre-first-release
 baseline; each cut appends the migration that writes its version as the last file
 of the range it freezes — 048 writes `1.0.0+upstream.9543c29`, the first release;
-051 writes `1.1.0+upstream.9543c29`, the second.
+051 writes `1.1.0+upstream.9543c29`, the second. The server reports its own at
+runtime — the MCP `initialize` reply, the `brain_info` tool and `GET /health` with a
+key — from `server-portable/version.ts`, generated from `db/version.mjs`,
+`releases.json` and `db/migrations/` by `scripts/gen-version.ts` and round-tripped
+by check-fork's 17e (SMD-2041).
 
 **A release is a tag naming three things**: the migration range it closes
 (the first cut, `001..048`; the second, `049..051`), the server commit, and the upstream pin. The committed
@@ -89,8 +93,10 @@ section and its cross-references. A PR ships a fragment, `changes/smd-NNNN.md`
 and a `## FORK` body), with no change number; the release step assigns the
 numbers once, at assembly, writing each fragment as the next
 `changes/NNN-<slug>.md` in merge order and regenerating the index below
-(SMD-1804, SMD-1917). Changes 1–103 keep their numbers — the code comments cite
-them — as the table and the files they are.
+(SMD-1804, SMD-1917). A fragment needs no edit to this file: the index lists
+numbered changes alone, so adding a fragment never moves it — a cut does, or a
+numbered record's retitle (SMD-2084). Changes 1–103 keep their numbers — the
+code comments cite them — as the table and the files they are.
 
 `CHANGELOG.md` (root, **Keep a Changelog 1.1.0**) is the short page beside this
 design record: `## [Unreleased]` first, one dated section per release with entries
@@ -283,7 +289,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 133 | [Shim everywhere](changes/133-shim-everywhere.md) | SMD-1798 |
 | 134 | [Entity extraction sent the whole thought in one unbounded call](changes/134-entity-extraction-sent-the-whole-thought-in-one.md) | SMD-1879 |
 
-Landed since the last release and numbered at the next one (SMD-1804): [SMD-1296](changes/smd-1296.md), [SMD-1668](changes/smd-1668.md), [SMD-1713](changes/smd-1713.md), [SMD-1799](changes/smd-1799.md), [SMD-1800](changes/smd-1800.md), [SMD-1801](changes/smd-1801.md), [SMD-1867](changes/smd-1867.md), [SMD-1875](changes/smd-1875.md), [SMD-1958](changes/smd-1958.md), [SMD-1960](changes/smd-1960.md), [SMD-1982](changes/smd-1982.md), [SMD-1986](changes/smd-1986.md), [SMD-2012](changes/smd-2012.md), [SMD-2059](changes/smd-2059.md).
+Changes landed since the last release, if any, are the [`changes/smd-*.md`](changes/) files, numbered at the next cut (SMD-1804).
 <!-- changes-index:end -->
 
 ### Files we own
@@ -411,7 +417,7 @@ db/test-support.ts               # change 100 (createAssert gains total()/skippe
 db/test-schema.ts, db/test-live.ts # change 100 (each holds db/README.md's quoted assertion total to the run's own; test-live only on a full run)
 scripts/check-fork-consistency.ts # change 100 (grant privileges per group [SMD-1471]; every migration documented once and the count checked; tools.json round-tripped against tools.ts [SMD-1805])
 changes/                         # SMD-1917 (new dir — one file per change from 18 on: NNN-<slug>.md once numbered, smd-NNNN.md until the release step numbers it; a fixed shape and a 150-line cap)
-scripts/fork-index.ts            # SMD-1917 (new file — renders FORK.md's index from changes/; check 15 round-trips it; the release step calls it)
+scripts/fork-index.ts            # SMD-1917 (new file — renders FORK.md's index from changes/; check 15 round-trips it; the release step calls it); SMD-2084 (the numbered files alone — a fragment moves nothing in FORK.md)
 db/config.mjs                    # change 100 (grantRows() — every ROLE_GRANTS row undeduped, for the per-group privilege check)
 db/README.md                     # change 100 (the applied-migration count stated as a digit so the check can read it)
 docs/01-getting-started.md       # fix 6

@@ -1,6 +1,7 @@
 import { createAssert } from "../db/test-support.ts";
 import { DEFAULT_EMBEDDING_DIM, queryLogEnabled, queryLogRetentionDays, QUERY_LOG, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { visibleToolNames, READ_TOOL_NAMES } from "./tools.ts";
+import { FORK_VERSION } from "../db/version.mjs";
 /**
  * test-server.ts
  *
@@ -221,6 +222,10 @@ console.log("\n[7] initialize");
   const result = b?.result as Record<string, unknown> | undefined;
   assert(result?.protocolVersion != null, "protocolVersion returned");
   assert(result?.capabilities != null, "capabilities returned");
+  // The generated version module's, which is db/version.mjs's (17e holds the
+  // two equal) — a literal here said 1.0.0 through the 1.1.0 cut (SMD-2041).
+  const info = result?.serverInfo as { version?: string } | undefined;
+  assert(info?.version === FORK_VERSION, `serverInfo.version is FORK_VERSION ${FORK_VERSION} (${info?.version})`);
 
   // @hono/mcp 0.1.x wanted both Accept tokens on a POST and the server patched
   // whichever was missing; 0.3.x takes either, or none, and the patch is gone
@@ -277,6 +282,20 @@ console.log("\n[10] Read tools are annotated read-only, capture is not");
     assert(byName[t]?.annotations?.readOnlyHint === true, `"${t}" is readOnlyHint: true`);
   }
   assert(byName["capture_thought"]?.annotations?.readOnlyHint === false, `"capture_thought" is readOnlyHint: false`);
+}
+
+console.log("\n[10b] brain_info answers with no database, and says why that half is missing (SMD-2041)");
+{
+  const r = await fetch(BASE, {
+    method: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "brain_info", arguments: {} } }),
+  });
+  const result = (await mcpBody(r))?.result as { isError?: boolean; content?: { text?: string }[] } | undefined;
+  const text = result?.content?.[0]?.text ?? "";
+  assert(result?.isError !== true && new RegExp(`^Version: +${FORK_VERSION.replace(/[.+]/g, "\\$&")} \\((?:release range \\d{3}–\\d{3}(?:; this tree adds \\d{3}(?:–\\d{3})?, unreleased)?|no release range recorded)\\)`, "m").test(text), `the Version row carries FORK_VERSION and its release range (${text.split("\n")[0]})`);
+  assert(/^Commit: +unknown$/m.test(text) && /^Store: +sql$/m.test(text), "…the commit (unknown here) and the store");
+  assert(/^Database: +unavailable — .*DATABASE_URL is not set/m.test(text), `…and the database row names the store's refusal (${text.split("\n").find((l) => l.startsWith("Database"))?.slice(0, 70)})`);
 }
 
 console.log("\n[11] OAuth discovery is a 404, not an auth challenge (upstream #340)");
@@ -389,12 +408,14 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
   // the preflight is probed. POST reaching the transport is [7].
 
   // /health is the probe target for platforms that can only GET and want 2xx:
-  // before authenticate(), so it needs no key and a key changes nothing. The
-  // match rule is the HEALTH_PATH comment in index.ts; these rows pin it.
+  // it needs no key, and without one it says `ok` and nothing else. The match
+  // rule is the HEALTH_PATH comment in index.ts; these rows pin it. A key
+  // presented changes the body (SMD-2041, below), never the status.
   for (const [label, path, init] of [
     ["GET /health", "/health", {}],
     ["GET /health with a key in the URL", `/health?key=${KEY}`, {}],
     ["HEAD /health", "/health", { method: "HEAD" }],
+    ["HEAD /health with the key", "/health", { method: "HEAD", headers: { "x-brain-key": KEY } }],
     ["GET /health/ (trailing slash)", "/health/", {}],
     ["GET /mcp/health (one-segment proxy prefix)", "/mcp/health", {}],
     ["GET /functions/v1/open-brain-mcp/health (the Supabase-shaped prefix)", "/functions/v1/open-brain-mcp/health", {}],
@@ -423,6 +444,291 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
   // JSON-RPC refusal a keyless POST gets anywhere.
   const postHealth = await fetch(`${BASE}/health`, { method: "POST", headers: AUTH, body: INIT, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
   assert(postHealth.status === 200 && (await mcpBody(postHealth))?.result != null, `POST /health with the key is the MCP endpoint (${postHealth.status})`);
+}
+
+console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's judgement, the rendering, why a read did not answer, the deadline keeping what was read, a failed savepoint or COMMIT (SMD-2041)");
+{
+  const { brainInfo, formatBytes, ledgerStatus, parseHnswOptions, readDatabaseFacts, renderBrainInfo, unreadReason } = await import("./brain-info.ts");
+  type Facts = Awaited<ReturnType<typeof readDatabaseFacts>>;
+  assert(ledgerStatus(52, 52) === "current" && ledgerStatus(51, 52) === "behind" && ledgerStatus(53, 52) === "ahead" && ledgerStatus(null, 52) === null,
+    "the ledger's highest against the tree's last: current, behind, ahead, unjudged");
+  const hn = [parseHnswOptions("m=24,ef_construction=100"), parseHnswOptions("ef_construction=200"), parseHnswOptions(null), parseHnswOptions("m=8")];
+  assert(JSON.stringify(hn) === JSON.stringify([{ m: 24, efConstruction: 100 }, { m: 16, efConstruction: 200 }, { m: 16, efConstruction: 64 }, { m: 8, efConstruction: 64 }]),
+    `HNSW reloptions are read per key, pgvector's defaults where unset (${JSON.stringify(hn)})`);
+  const sizes = [formatBytes(999), formatBytes(1000), formatBytes(45_200_000), formatBytes(10_779_671)];
+  assert(sizes.join("|") === "999 B|1.0 kB|45.2 MB|10.8 MB", `bytes in decimal units, one place (${sizes.join("|")})`);
+  const pgError = (msg: string, errno: string) => Object.assign(new Error(msg), { errno });
+  assert(unreadReason(pgError("x", "42501")) === "refused" && unreadReason(pgError("x", "57014")) === "timeout" && unreadReason(pgError("x", "55P03")) === "timeout" && unreadReason(new Error("x")) === "error",
+    "a failed read's reason is its SQLSTATE's: refused, timeout (statement or lock), anything else");
+
+  // A fake client answering by statement text, in one transaction with a
+  // savepoint per guarded read: ob1_entities refused, the ledger timed out,
+  // thought_chunks absent everywhere, thought_audit present only in a schema
+  // this role does not resolve. Each lands in `unread` by its own reason and
+  // the rest answer.
+  const statements: string[] = [];
+  const hang = new Set<string>();
+  let answerLedger = false;
+  const answer = (text: string): unknown[] => {
+    statements.push(text);
+    if (/FROM ob1_entities/.test(text)) throw pgError("permission denied for table ob1_entities", "42501");
+    if (/FROM schema_migrations/.test(text)) {
+      if (answerLedger) return [{ name: "051_schema_version.sql" }, { name: "052_thought_changes.sql" }];
+      throw pgError("canceling statement due to lock timeout", "55P03");
+    }
+    if (/set_config/.test(text)) return [{}];
+    if (/server_version/.test(text)) {
+      return [{
+        postgres: "16.15", vec_version: "0.8.6", vec_schema: "public",
+        resolved: { ob1_config: true, schema_migrations: true, thoughts: true, thought_audit: false, thought_chunks: false, ob1_entities: true },
+        anywhere: { ob1_config: "public", schema_migrations: "public", thoughts: "public", thought_audit: "vault", ob1_entities: "public" },
+        hnsw: [{ index: "thoughts_embedding_idx", table: "thoughts", opts: "m=24,ef_construction=100" }],
+      }];
+    }
+    if (/pg_database_size/.test(text)) return [{ n: 10_779_671 }];
+    if (/FROM ob1_config/.test(text)) return [{ key: "schema_version", value: "1.1.0+upstream.9543c29" }];
+    if (/count\(\*\)/.test(text)) return [{ n: 7 }];
+    throw new Error(`unexpected statement: ${text.slice(0, 60)}`);
+  };
+  const slow = new Set<string>();
+  const tag = (strings: TemplateStringsArray) => {
+    const text = strings.join("?");
+    for (const h of hang) if (text.includes(h)) return new Promise<unknown[]>(() => {});
+    for (const h of slow) if (text.includes(h)) return Bun.sleep(150).then(() => answer(text));
+    return Promise.resolve().then(() => answer(text));
+  };
+  // The savepoint's RELEASE and the transaction's COMMIT can be slowed or
+  // failed, to put a deadline or an error between a read and its end.
+  let releaseMs = 0;
+  let savepointMs = 0;
+  let failCommit = false;
+  const tx = Object.assign(tag, {
+    savepoint: async <T>(fn: (sp: typeof tag) => Promise<T>) => {
+      if (savepointMs) await Bun.sleep(savepointMs);
+      const r = await fn(tag);
+      if (releaseMs) await Bun.sleep(releaseMs);
+      return r;
+    },
+  });
+  const fake = Object.assign(tag, {
+    begin: async <T>(fn: (t: typeof tx) => Promise<T>) => { const r = await fn(tx); if (failCommit) throw pgError("terminating connection due to administrator command", "57P01"); return r; },
+  });
+  const facts = await readDatabaseFacts(fake);
+  assert(facts.ledger.present === true && facts.ledger.names === null && facts.unread.ledger?.reason === "timeout",
+    `a ledger whose read timed out is present and unread as a timeout, not a refusal (${JSON.stringify(facts.unread.ledger)})`);
+  assert(facts.unread["counts.ob1_entities"]?.reason === "refused" && facts.counts?.ob1_entities === null, "a refused count is unread as refused");
+  assert(facts.unread["counts.thought_audit"]?.reason === "invisible" && /schema vault/.test(facts.unread["counts.thought_audit"]?.message ?? "") && !statements.some((t) => /FROM thought_audit/.test(t)),
+    `a table present only where this role cannot resolve it is invisible, not absent, and is not queried (${facts.unread["counts.thought_audit"]?.message})`);
+  assert(facts.counts?.thought_chunks === null && !("counts.thought_chunks" in facts.unread), "a table absent everywhere is null with no entry");
+  assert(facts.counts?.thoughts === 7 && facts.hnsw[0]?.m === 24 && facts.schemaVersion === "1.1.0+upstream.9543c29" && facts.databaseBytes === 10_779_671,
+    "…and the reads that answered stand");
+  statements.length = 0;
+  const lean = await readDatabaseFacts(fake, { stats: false });
+  assert(lean.counts === null && lean.databaseBytes === null && !statements.some((t) => /count\(\*\)|pg_database_size/.test(t)) && lean.schemaVersion === "1.1.0+upstream.9543c29",
+    "stats: false reads no count and no size — preflight's read");
+
+  const server = { version: FORK_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } };
+  const planted = (highest: number | null, over: Partial<Facts> = {}): Facts => ({ ...facts, ledger: { present: true, names: highest === null ? [] : [`${highest}_x.sql`] }, highestMigration: highest, unread: {}, ...over });
+  const ahead = await brainInfo(server, async () => planted(53), 1000);
+  const aheadText = renderBrainInfo(ahead);
+  assert(ahead.ledgerStatus === "ahead" && /^Migrations: +053 applied — this server's tree ends at 052 \(the brain is ahead of it\)$/m.test(aheadText),
+    `a ledger past the tree is ahead, in the record and the table (${aheadText.split("\n").find((l) => l.startsWith("Migrations"))})`);
+  const behindText = renderBrainInfo(await brainInfo(server, async () => planted(51), 1000));
+  assert(/^Migrations: +051 applied — this server's tree ends at 052 \(the brain is behind it\)$/m.test(behindText), "…one short of it is behind");
+  const db = ahead.database as { ledger: Record<string, unknown> };
+  assert(JSON.stringify(db.ledger) === JSON.stringify({ present: true, readable: true }), `the record carries the ledger's standing, not its names (${JSON.stringify(db.ledger)})`);
+  const unreadText = renderBrainInfo(await brainInfo(server, async () => planted(52, { unread: { ob1_config: { reason: "refused", message: "permission denied for table ob1_config" } }, schemaVersion: null }), 1000));
+  assert(/^Schema version: +\? \(ob1_config not readable by this role\)$/m.test(unreadText) && /^Brain embedding: +\? \(ob1_config not readable by this role\)$/m.test(unreadText) && /^Not read: +ob1_config — not readable by this role: permission denied/m.test(unreadText),
+    "an ob1_config this role cannot read is `?`, not `none recorded`");
+  const readText = renderBrainInfo(await brainInfo(server, async () => facts, 1000));
+  assert(/^Rows: +7 thoughts · \? audit events · no table chunks · \? entities$/m.test(readText) && /^Migrations: +schema_migrations not read in time/m.test(readText) && /^Database size: +10\.8 MB$/m.test(readText),
+    `the table says which count was not read and which table is absent, and a timed-out ledger is not called a grant (${readText.split("\n").find((l) => l.startsWith("Migrations"))})`);
+
+  // The deadline keeps what was read (review pass 2: it threw every fact away).
+  // A count that never answers: the catalog, the config and the ledger stand,
+  // the hanging read and every one after it are `deadline`. Each call raced
+  // against a guard of its own, so a missing deadline fails here by name.
+  const guard = <T>(p: Promise<T>) => Promise.race([p, Bun.sleep(3000).then(() => null)]);
+  hang.add("FROM thoughts");
+  const t0 = performance.now();
+  const partial = await guard(brainInfo(server, (progress) => readDatabaseFacts(fake, {}, progress), 100));
+  const took = performance.now() - t0;
+  hang.clear();
+  const pd = partial && !("error" in partial.database) ? partial.database : null;
+  assert(pd !== null && took < 1000 && pd.postgres === "16.15" && pd.schemaVersion === "1.1.0+upstream.9543c29"
+      && pd.unread["counts.thoughts"]?.reason === "deadline" && pd.unread["counts.thoughts"]?.message === "not read before the deadline"
+      && pd.unread.databaseBytes?.reason === "deadline" && pd.unread.ledger?.reason === "timeout",
+    `at the deadline the facts read so far stand and the rest are named (${Math.round(took)} ms, ${JSON.stringify(pd?.unread)})`);
+  // A table absent everywhere was settled before any read, so the deadline
+  // never names it (review pass 3: it rendered '?' for 'no table').
+  assert(pd !== null && !("counts.thought_chunks" in pd.unread) && pd.unread["counts.thought_audit"]?.reason === "invisible",
+    "at the deadline an absent table is still absent, an invisible one still invisible");
+  // A deadline between a read's write and its savepoint's RELEASE: the fact is
+  // read, and not named `deadline` (review pass 3: the snapshot tore).
+  releaseMs = 150;
+  const torn = await guard(brainInfo(server, (progress) => readDatabaseFacts(fake, {}, progress), 60));
+  releaseMs = 0;
+  const td = torn && !("error" in torn.database) ? torn.database : null;
+  assert(td !== null && td.schemaVersion === "1.1.0+upstream.9543c29" && !("ob1_config" in td.unread),
+    `a fact written before its savepoint's release is read, not deadline (${JSON.stringify(td?.unread.ob1_config)})`);
+  // A failure after the catalog answered — here the COMMIT — keeps what was
+  // read (review pass 3: it threw every fact away).
+  failCommit = true;
+  const dropped = await guard(brainInfo(server, (progress) => readDatabaseFacts(fake, {}, progress), 1000));
+  failCommit = false;
+  assert(dropped !== null && !("error" in dropped.database) && dropped.database.postgres === "16.15" && dropped.database.schemaVersion === "1.1.0+upstream.9543c29"
+      && /terminating connection/.test(dropped.database.unread.transaction?.message ?? ""),
+    `a failure after every read answered keeps the facts, and is named rather than lost (review pass 4: ${JSON.stringify(dropped && !("error" in dropped.database) ? dropped.database.unread.transaction : null)})`);
+  // A savepoint that fails after its read wrote (its RELEASE): the value is
+  // taken back, so the ledger is not both read and unread (review pass 4:
+  // `current` beside "schema_migrations not read").
+  answerLedger = true;
+  const tx2Facts = await (async () => {
+    // The first savepoint is ob1_config's; fail the second, the ledger's.
+    // Fresh function objects: Object.assign onto `tag` would replace the
+    // shared fake's own savepoint and begin.
+    let n = 0;
+    const run = (strings: TemplateStringsArray) => tag(strings);
+    const counting = Object.assign((strings: TemplateStringsArray) => run(strings), {
+      savepoint: async <T>(fn: (sp: typeof run) => Promise<T>) => {
+        const r = await fn(run);
+        if (++n === 2) throw pgError("server closed the connection unexpectedly", "08006");
+        return r;
+      },
+    });
+    const client = Object.assign((strings: TemplateStringsArray) => run(strings), { begin: async <T>(fn: (t: typeof counting) => Promise<T>) => fn(counting) });
+    return readDatabaseFacts(client);
+  })();
+  answerLedger = false;
+  assert(tx2Facts.unread.ledger?.reason === "error" && tx2Facts.highestMigration === null && tx2Facts.ledger.names === null,
+    `a ledger read whose savepoint then failed is unread, its highest taken back (${tx2Facts.highestMigration}, ${JSON.stringify(tx2Facts.unread.ledger)})`);
+  // A deadline during a SAVEPOINT round trip starts no statement after it
+  // (review pass 4: the abandoned read ran one more count).
+  savepointMs = 120;
+  statements.length = 0;
+  await guard(brainInfo(server, (progress) => readDatabaseFacts(fake, {}, progress), 60));
+  await Bun.sleep(300);
+  savepointMs = 0;
+  assert(!statements.some((t) => /FROM ob1_config/.test(t)), "a deadline during the SAVEPOINT round trip: the read inside it never runs");
+
+  // Between cuts the version stays the last cut's; the tail says what this
+  // tree adds (review pass 4). A release image's tree ends at the range.
+  const between = await brainInfo(server, async () => planted(52), 1000);
+  const cut = await brainInfo({ ...server, latestMigration: 51 }, async () => planted(51), 1000);
+  assert(JSON.stringify(between.unreleased) === "[52,52]" && /^Version: .*\(release range 049–051; this tree adds 052, unreleased\)$/m.test(renderBrainInfo(between)) && cut.unreleased === null,
+    `the version names the unreleased tail between cuts, and none at a cut (${JSON.stringify(between.unreleased)}, ${JSON.stringify(cut.unreleased)})`);
+  // An abandoned read starts nothing more: a count that answers after the
+  // deadline is the last statement it runs — no size read follows it.
+  slow.add("FROM thoughts");
+  statements.length = 0;
+  await guard(brainInfo(server, (progress) => readDatabaseFacts(fake, {}, progress), 50));
+  await Bun.sleep(300);
+  slow.clear();
+  assert(statements.some((t) => /FROM thoughts/.test(t)) && !statements.some((t) => /FROM thought_chunks|pg_database_size/.test(t)),
+    "an abandoned read stops at the deadline: no read is started after it");
+  hang.add("server_version");
+  const none = await guard(brainInfo(server, (progress) => readDatabaseFacts(fake, {}, progress), 50));
+  hang.clear();
+  assert(none !== null && "error" in none.database && /no answer within 50 ms/.test(none.database.error) && none.ledgerStatus === null,
+    "a catalog that never answers is the database's error at the deadline, the server's facts still there");
+}
+
+console.log("\n[13b] GET /health with a key is what the brain is; without one it is `ok` (SMD-2041)");
+{
+  const get = async (path: string, headers: Record<string, string> = {}) => {
+    const r = await fetch(`${BASE}${path}`, { headers, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+    return { status: r.status, type: r.headers.get("content-type") ?? "", cors: corsOk(r), body: await r.text() };
+  };
+  // Nothing about the deployment reaches a probe that presents no key, or a
+  // key that is not one: the literal, at every health path.
+  for (const [label, path, headers] of [
+    ["no key", "/health", {}],
+    ["no key, behind a prefix", "/mcp/health", {}],
+    ["a wrong key in the header", "/health", { "x-brain-key": "wrong" }],
+    ["a wrong key in the URL", "/health?key=wrong", {}],
+  ] as [string, string, Record<string, string>][]) {
+    const r = await get(path, headers);
+    assert(r.status === 200 && r.body === "ok", `${label} → 200 \`ok\` (${r.status}, ${JSON.stringify(r.body.slice(0, 40))})`);
+  }
+  // The tree's last migration read here from the directory itself, not from
+  // the generated module the server reports it from — a stale version.ts is
+  // caught here as well as by check 17e.
+  const { readdirSync } = await import("node:fs");
+  const treeLast = Math.max(...readdirSync(new URL("../db/migrations/", import.meta.url)).filter((n) => /^\d{3}_.*\.sql$/.test(n)).map((n) => Number(n.slice(0, 3))));
+  for (const [label, path, headers] of [
+    ["the key in a header", "/health", { "x-brain-key": KEY }],
+    ["the key in the URL", `/health?key=${KEY}`, {}],
+    ["the key, behind the Supabase-shaped prefix", "/functions/v1/open-brain-mcp/health", { "x-brain-key": KEY }],
+  ] as [string, string, Record<string, string>][]) {
+    const r = await get(path, headers);
+    let info: Record<string, unknown> = {};
+    try { info = JSON.parse(r.body); } catch { /* asserted below */ }
+    assert(r.status === 200 && /application\/json/.test(r.type) && r.cors, `${label} → 200 JSON with CORS (${r.status}, ${r.type})`);
+    assert(info.version === FORK_VERSION, `…version is FORK_VERSION (${info.version})`);
+    assert(info.latestMigration === treeLast, `…latestMigration is db/migrations/'s last, ${treeLast} (${info.latestMigration})`);
+    assert(info.commit === "unknown" && info.store === "sql" && info.tier === null, `…commit unknown with no OB1_GIT_SHA, the sql store, no tier (${info.commit}, ${info.store}, ${info.tier})`);
+    // No database in this suite: the record still answers, and says why the
+    // database's half is missing — the store's own refusal, not a 500.
+    const database = info.database as { error?: string } | undefined;
+    assert(/DATABASE_URL is not set/.test(database?.error ?? "") && info.ledgerStatus === null, `…and the database's facts are an error naming DATABASE_URL, the ledger unjudged (${database?.error?.slice(0, 60)})`);
+  }
+}
+
+console.log("\n[13c] A keyed /health answers within its deadline from a database that accepts and never replies, and one that refuses at once says so (SMD-2041 review passes 1–2)");
+{
+  // Two child servers, since this suite's own env is frozen with no store.
+  // The first's database is a listener that takes the connection and says
+  // nothing: the driver waits out its connect timeout (30 s), and both the
+  // registry check and the read wait with it. Before review pass 1 the probe
+  // got no reply at all. Since pass 2 a registry with no answer by the
+  // deadline gets `ok` — it could still have said revoked. The second's
+  // database refuses at once: the registry reports it cannot reach it (not a
+  // refusal, agents.ts), and the record carries the database's error and the
+  // commit the build arg baked.
+  const { HEALTH_DEADLINE_MS } = await import("./index.ts");
+  const freePort = () => { const p = Bun.serve({ port: 0, fetch: () => new Response() }); const n = p.port!; p.stop(true); return n; };
+  const child = (port: number, databaseUrl: string) => Bun.spawn(["bun", "--no-env-file", "index.ts"], {
+    cwd: import.meta.dir,
+    env: { ...process.env, PORT: String(port), DATABASE_URL: databaseUrl, MCP_ACCESS_KEY: KEY, OB1_GIT_SHA: "c0ffee1" },
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  const up = async (port: number) => {
+    for (let i = 0; i < 100; i++) {
+      if (await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok, () => false)) return true;
+      await Bun.sleep(50);
+    }
+    return false;
+  };
+  const keyed = async (port: number, method: string) => {
+    const t0 = performance.now();
+    const r = await fetch(`http://127.0.0.1:${port}/health`, { method, headers: { "x-brain-key": KEY }, signal: AbortSignal.timeout(HEALTH_DEADLINE_MS + 5000) }).catch((e: Error) => e);
+    const took = performance.now() - t0;
+    return { took, status: r instanceof Response ? r.status : r.name, body: r instanceof Response ? await r.text() : "" };
+  };
+  const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
+  const silentPort = freePort();
+  const quiet = child(silentPort, `postgres://u:p@127.0.0.1:${silent.port}/db`);
+  const refusedPort = freePort();
+  const refusing = child(refusedPort, `postgres://u:p@127.0.0.1:${freePort()}/db`);
+  try {
+    assert(await up(silentPort) && await up(refusedPort), "both child servers answer a keyless probe");
+    const get = await keyed(silentPort, "GET");
+    assert(get.status === 200 && get.body === "ok" && get.took < HEALTH_DEADLINE_MS + 1500,
+      `keyed GET /health, the database silent → 200 \`ok\` in ${Math.round(get.took)} ms (deadline ${HEALTH_DEADLINE_MS} ms)`);
+    const head = await keyed(silentPort, "HEAD");
+    assert(head.status === 200 && head.body === "" && head.took < 500, `keyed HEAD /health reads nothing and answers at once (${Math.round(head.took)} ms)`);
+    const refused = await keyed(refusedPort, "GET");
+    let info: Record<string, any> = {};
+    try { info = JSON.parse(refused.body); } catch { /* asserted below */ }
+    assert(refused.status === 200 && refused.took < HEALTH_DEADLINE_MS && typeof info.database?.error === "string" && info.ledgerStatus === null,
+      `keyed GET /health, the database refusing → the record with the database's error in ${Math.round(refused.took)} ms (${info.database?.error})`);
+    assert(info.version === FORK_VERSION && info.commit === "c0ffee1", `…carrying the server's own facts — the commit OB1_GIT_SHA names (${info.commit})`);
+  } finally {
+    quiet.kill();
+    refusing.kill();
+    silent.stop(true);
+  }
 }
 
 console.log("\n[14] OB1_STORE unset selects the SQL store; PostgREST stays selectable and is said to be retired here (SMD-1797)");

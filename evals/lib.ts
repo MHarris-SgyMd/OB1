@@ -119,3 +119,15 @@ export function cosine(a: number[], b: number[]): number {
   }
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
+
+/**
+ * The median, the two middles averaged for an even count. Here beside cosine
+ * because the harnesses keep re-writing it (eval-graphrag.ts has one that takes
+ * the upper middle); a rate reported from a sample should use one definition.
+ */
+export function median(xs: readonly number[]): number {
+  if (!xs.length) return NaN;
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}

@@ -132,6 +132,10 @@ jobs:
           file: ${{ steps.facts.outputs.server_dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: false
+          # The commit brain_info and the keyed /health report (SMD-2041) — the
+          # same value on both server builds, so the rehearsal's cache serves
+          # the build below.
+          build-args: OB1_GIT_SHA=${{ github.sha }}
           provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -159,6 +163,7 @@ jobs:
           load: ${{ env.PUBLISH != 'true' }}
           tags: ${{ steps.facts.outputs.server_image }}
           labels: ${{ steps.facts.outputs.server_labels }}
+          build-args: OB1_GIT_SHA=${{ github.sha }}
           # No provenance attestation: it adds an `unknown/unknown` manifest
           # beside the two platforms in GHCR's tag list, and the digest the
           # overlay pins is the index's.

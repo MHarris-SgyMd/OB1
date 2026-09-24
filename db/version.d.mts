@@ -46,5 +46,8 @@ export function versionForMigration(n: number | string, releases?: Release[]): s
 /** The last released range's upper bound, or 0 when nothing is released. */
 export function highestReleasedMigration(releases?: Release[]): number;
 
+/** The highest `NNN_*.sql` number in a migrations directory (db/migrations/ by default), or null when it is absent or holds none. */
+export function latestMigration(dir?: string): number | null;
+
 /** The schema_version literal a migration template upserts into ob1_config, or null when it writes none. */
 export function schemaVersionValue(template: string): string | null;
