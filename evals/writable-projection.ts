@@ -142,19 +142,30 @@ export type EventImage = {
   trust: string | null;
   origin: string | null;
   stance: string | null;
+  /** 046's event columns and the context blob with its `claimed` key — compared since the second review pass, when the envelope first rode the scripted writes. */
+  cites: string[] | null;
+  valid_from: string | null;
+  valid_until: string | null;
+  actor_context: Record<string, unknown> | null;
   diff: Record<string, unknown> | null;
 };
 
+/** The keys the prototype adds to 046's capture diff (the third since the second review pass: a backdating writer's created_at). */
+export const CAPTURE_ADDITIONS: readonly string[] = ["content", "created_at"];
+/** The key the prototype adds to 046's update diff. */
+export const UPDATE_ADDITIONS: readonly string[] = ["content_fingerprint"];
+
 /**
- * The prototype adds two things to 046's event and nothing else: the content
- * on a capture, and the fingerprint's move on an update. Set aside, an
- * option's event must equal the baseline's for the same write.
+ * The prototype adds three things to 046's event and nothing else: the content
+ * and the row's created_at on a capture, and the fingerprint's move on an
+ * update. Set aside, an option's event must equal the baseline's for the
+ * same write.
  */
 export function comparableEvent(e: EventImage): EventImage {
   const diff = e.diff ? { ...e.diff } : null;
   if (diff) {
-    if (e.action === "capture") delete diff.content;
-    if (e.action === "update") delete diff.content_fingerprint;
+    if (e.action === "capture") for (const k of CAPTURE_ADDITIONS) delete diff[k];
+    if (e.action === "update") for (const k of UPDATE_ADDITIONS) delete diff[k];
   }
   return { ...e, diff };
 }
@@ -280,14 +291,29 @@ export const EXPECTED: Readonly<Record<OptionId, Readonly<Partial<Record<Criteri
   option1: { C1: "PASS", C2: "PASS", C3: "PASS", C4: "PASS", C5: "FAIL", C6: "FAIL", C7: "PASS", C8: "PASS", C9: "PASS", C10: "PASS", C11: "PASS", C12: "PASS" },
 };
 
-/** Every cell of a run that differs from the record, as "option/criterion: recorded X, observed Y". */
-export function driftFrom(expected: typeof EXPECTED, observations: readonly Observation[]): string[] {
+/**
+ * How many probes each measured cell ran (second review pass: a step that
+ * stopped running shrank a criterion by two probes and moved no cell, since
+ * the outcome record cannot see a probe that is not there). A count that
+ * differs is drift like a moved outcome. N/A cells carry none.
+ */
+export const EXPECTED_PROBES: Readonly<Record<OptionId, Readonly<Partial<Record<CriterionId, number>>>>> = {
+  baseline: { C1: 6, C2: 5, C3: 12, C4: 7, C5: 6, C6: 4, C7: 4, C8: 3, C9: 4, C10: 36, C11: 2 },
+  option2: { C1: 6, C2: 5, C3: 12, C4: 7, C5: 6, C6: 4, C7: 4, C8: 3, C9: 4, C10: 39, C11: 4, C12: 5 },
+  "option1-unchanged": { C1: 6, C2: 5, C3: 12, C4: 7, C5: 6, C6: 4 },
+  option1: { C1: 6, C2: 5, C3: 12, C4: 7, C5: 6, C6: 4, C7: 4, C8: 3, C9: 4, C10: 37, C11: 4, C12: 5 },
+};
+
+/** Every cell of a run that differs from the record — an outcome or a probe count — as "option/criterion: recorded X, observed Y". */
+export function driftFrom(expected: typeof EXPECTED, observations: readonly Observation[], probes: typeof EXPECTED_PROBES = EXPECTED_PROBES): string[] {
   const out: string[] = [];
   for (const option of Object.keys(expected) as OptionId[]) {
     for (const [criterion, recorded] of Object.entries(expected[option]) as [CriterionId, Outcome][]) {
       const o = observations.find((x) => x.option === option && x.criterion === criterion);
       const observed = o?.outcome ?? "N/A";
       if (observed !== recorded) out.push(`${option}/${criterion}: recorded ${recorded}, observed ${observed}`);
+      const n = probes[option]?.[criterion];
+      if (n !== undefined && o && o.probes !== n) out.push(`${option}/${criterion}: recorded ${n} probes, observed ${o.probes}`);
     }
   }
   return out;
@@ -339,7 +365,7 @@ export function renderReport(r: Report): string {
   lines.push("C13 cost (medians):");
   for (const t of r.timings) lines.push(`  ${costLine(t)}`);
   lines.push("");
-  lines.push(`Differential, baseline against option 2 (events and rows for the same scripted writes, the prototype's two additions set aside): ${r.differential.length === 0 ? "identical" : `${r.differential.length} mismatch(es)`}`);
+  lines.push(`Differential, baseline against option 2 (events and rows for the same scripted writes, the prototype's three additions set aside): ${r.differential.length === 0 ? "identical" : `${r.differential.length} mismatch(es)`}`);
   for (const m of r.differential) lines.push(`  - ${m.at}: baseline ${m.baseline} / option ${m.option}`);
   lines.push("");
   for (const [opt, diffs] of Object.entries(r.replay) as [OptionId, readonly ReplayDiff[]][]) {

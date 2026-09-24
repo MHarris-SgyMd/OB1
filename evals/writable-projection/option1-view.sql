@@ -36,7 +36,8 @@ BEGIN
   v_fp   := COALESCE(NEW.content_fingerprint, content_fingerprint_of(NEW.content));
   v_ev   := ob1_append_thought_event(NEW.id, 'capture', v_meta->>'source',
              ob1_thought_diff('capture', NULL, NEW.content, NULL, v_meta, false, NEW.embedding IS NOT NULL,
-                              NULL, NEW.supersedes, NULL, NEW.derived_from, NULL, v_fp),
+                              NULL, NEW.supersedes, NULL, NEW.derived_from, NULL, v_fp,
+                              NEW.created_at),  -- a backdating writer's own time rides the event (second review pass)
              NULL);
   PERFORM ob1_project_thought_event(v_ev, NEW.embedding, NEW.embedding_model);
   SELECT * INTO v_row FROM thought_rows WHERE id = NEW.id;
@@ -87,7 +88,10 @@ BEGIN
   END IF;
   v_ev := ob1_append_thought_event(NEW.id, 'update', v_meta->>'source', v_diff, NULL);
   IF v_ev IS NOT NULL THEN
-    PERFORM ob1_project_thought_event(v_ev, CASE WHEN NEW.embedding IS DISTINCT FROM OLD.embedding THEN NEW.embedding END, NEW.embedding_model);
+    -- The row's vector as the writer leaves it — kept when the writer did not
+    -- touch it, as the base table would keep it (second review pass: passing
+    -- NULL for "unchanged" had the projector drop a raw content edit's vector).
+    PERFORM ob1_project_thought_event(v_ev, NEW.embedding, NEW.embedding_model);
   END IF;
   SELECT * INTO v_row FROM thought_rows WHERE id = NEW.id;
   RETURN v_row;

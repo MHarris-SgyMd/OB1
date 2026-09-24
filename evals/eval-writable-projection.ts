@@ -35,7 +35,7 @@ import { fileURLToPath } from "node:url";
 import { createAssert, resetSchema, substitute } from "../db/test-support.ts";
 import { median } from "./lib.ts";
 import {
-  CRITERIA, CRITERION_IDS, EXPECTED, OPTIONS, comparableEvent, comparableRow, compareImages, compareRows, costLine, driftFrom, fmtUs, judge, recommend, renderReport, verdict,
+  CRITERIA, CRITERION_IDS, EXPECTED, EXPECTED_PROBES, OPTIONS, comparableEvent, comparableRow, compareImages, compareRows, costLine, driftFrom, fmtUs, judge, recommend, renderReport, verdict,
   type CriterionId, type EventImage, type Mismatch, type Observation, type OptionId, type Outcome, type Probe, type ReplayDiff, type ReplayRow, type Report, type RowImage, type Timing, type Verdict,
 } from "./writable-projection.ts";
 
@@ -119,9 +119,15 @@ const TEXTS = {
   E1: "A record the stable-tier ingester wrote.",
   E2: "A record the stable-tier ingester wrote, then rewrote.",
   F: "A thought captured with an actor and kept to the census, so its row's stamp is compared.",
+  F2: "A thought captured with an actor and kept to the census — its text moved by a raw UPDATE that left the key stale.",
   G: "A raw row written after a function call in the same transaction, under a hand-set event.",
+  G2: "A raw row written after an update_thought that changed nothing, under a hand-set event.",
+  G3: "A raw row written after an identical re-capture, under a hand-set event.",
   H: "A thought whose payload says metadata is null.",
+  I: "A thought captured with 046's event envelope: a stance, a citation, a valid window, a declared trust.",
 };
+/** A backdated record, as db/ingest-records.ts writes one (the record's own time, not the write's). */
+const E_CREATED = "2024-01-02T03:04:05Z";
 const E_ID = "00000000-0000-4000-8000-00000000e001";
 
 async function runScript(sql: SQL): Promise<Trace> {
@@ -207,7 +213,7 @@ async function runScript(sql: SQL): Promise<Trace> {
   const ingest = (text: string) => sql`
     WITH old AS (SELECT content_fingerprint AS fp FROM thoughts WHERE id = ${E_ID}::uuid)
     INSERT INTO thoughts (id, content, metadata, content_fingerprint, created_at, derived_from)
-    VALUES (${E_ID}::uuid, ${text}, ${{ source: "linear" }}::jsonb, content_fingerprint_of(${text}), now(), NULL::jsonb)
+    VALUES (${E_ID}::uuid, ${text}, ${{ source: "linear" }}::jsonb, content_fingerprint_of(${text}), COALESCE(${E_CREATED}::timestamptz, now()), NULL::jsonb)
     ON CONFLICT (id) DO UPDATE
       SET content = CASE WHEN thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint THEN EXCLUDED.content ELSE thoughts.content END,
           content_fingerprint = CASE WHEN thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint THEN EXCLUDED.content_fingerprint ELSE thoughts.content_fingerprint END,
@@ -219,6 +225,7 @@ async function runScript(sql: SQL): Promise<Trace> {
   // Kept to the census: a row captured with an actor, so the differential compares its stamp (first review pass).
   const s16 = r(await step("s16 capture F (3-arg, actor; kept for the census)", () => sql`SELECT upsert_thought(${TEXTS.F}, ${readwise("f", { metadata: { source: "kept" } })}::jsonb, ${vec(6)}::vector) AS r`));
   ids.F = String(s16?.id ?? "");
+  await snap("F after s16", ids.F);
   // 046's anti-inheritance rule: a hand-set event, a function call, then a raw write in one transaction — the raw event must not carry the stance.
   const s17 = await step("s17 a hand-set ob1.event, update_thought, then a raw INSERT in one transaction", () => sql.begin(async (tx) => {
     await tx`SELECT set_config('ob1.event', ${JSON.stringify({ stance: "stated" })}, true)`;
@@ -229,6 +236,30 @@ async function runScript(sql: SQL): Promise<Trace> {
   // A payload whose metadata is JSON null (first review pass): 046 stores jsonb null on the row, not SQL NULL.
   const s18 = r(await step("s18 capture H (2-arg, \"metadata\": null in the payload)", () => sql`SELECT upsert_thought(${TEXTS.H}, ${{ metadata: null }}::jsonb) AS r`));
   ids.H = String(s18?.id ?? "");
+  // The per-body clears (second review pass: s17's function call projected, so the projector's clear covered it): a
+  // function call that writes NOTHING — an edit whose patch changes nothing, an identical re-capture — then a raw insert.
+  const s17b = await step("s17b a hand-set ob1.event, an update_thought that changes nothing, then a raw INSERT", () => sql.begin(async (tx) => {
+    await tx`SELECT set_config('ob1.event', ${JSON.stringify({ stance: "stated" })}, true)`;
+    await tx`SELECT update_thought(${ids.B}::uuid, NULL::text, ${{}}::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, ${ACTOR}::jsonb, NULL::text, NULL::jsonb) AS r`;
+    return tx`INSERT INTO thoughts (content, metadata) VALUES (${TEXTS.G2}, ${{ source: "raw" }}::jsonb) RETURNING id`;
+  }));
+  ids.G2 = String(r(s17b)?.id ?? "");
+  const s17c = await step("s17c a hand-set ob1.event, an identical 2-arg re-capture, then a raw INSERT", () => sql.begin(async (tx) => {
+    await tx`SELECT set_config('ob1.event', ${JSON.stringify({ stance: "stated" })}, true)`;
+    // B's metadata already holds source: recipe, so the merge changes nothing and no event is written.
+    await tx`SELECT upsert_thought(${TEXTS.B}, ${{ metadata: { source: "recipe" } }}::jsonb) AS r`;
+    return tx`INSERT INTO thoughts (content, metadata) VALUES (${TEXTS.G3}, ${{ source: "raw" }}::jsonb) RETURNING id`;
+  }));
+  ids.G3 = String(r(s17c)?.id ?? "");
+  // 046's envelope through the new bodies (second review pass: no step had sent one): a capture declaring a stance, a
+  // citation, a valid window and a trust under the key's ceiling; an edit declaring an actor_kind the key does not support.
+  const s19 = r(await step("s19 capture I (3-arg, actor, event: stance, cites, valid window, trust)", () => sql`SELECT upsert_thought(${TEXTS.I}, ${readwise("i", { metadata: { source: "cited" }, event: { stance: "retrieved", cites: [ids.B], valid_from: "2026-01-01T00:00:00Z", valid_until: "2026-06-01T00:00:00Z", trust: "agent" } })}::jsonb, ${vec(19)}::vector) AS r`));
+  ids.I = String(s19?.id ?? "");
+  await step("s20 update I (10-arg) with an event claiming an actor_kind the key does not support", () =>
+    sql`SELECT update_thought(${ids.I}::uuid, NULL::text, ${{ note: 1 }}::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, ${ACTOR}::jsonb, NULL::text, NULL::jsonb, ${{ stance: "inferred", trust: "agent", actor_kind: "ingested" }}::jsonb) AS r`);
+  // 018's stale-key case (second review pass): a raw content UPDATE around the functions leaves the key and the vector as they were.
+  await step("s21 raw UPDATE thoughts SET content on F (the key left stale)", () => sql`UPDATE thoughts SET content = ${TEXTS.F2} WHERE id = ${ids.F}::uuid RETURNING id`);
+  await snap("F after s21", ids.F);
   return { steps, ids, noopBumped, images };
 }
 
@@ -240,7 +271,7 @@ type Census = { rows: RowImage[]; events: EventImage[]; claims: { thought_id: st
 
 async function census(sql: SQL): Promise<Census> {
   const rows = (await sql`SELECT content, content_fingerprint, jsonb_typeof(metadata) AS metadata_type, metadata, supersedes::text AS supersedes, derived_from, embedding IS NOT NULL AS has_vector, embedding_model FROM thoughts ORDER BY content`) as RowImage[];
-  const events = (await sql`SELECT action, source, actor_name, actor_kind, trust, origin, stance, diff FROM thought_audit ORDER BY created_at, seq`) as EventImage[];
+  const events = (await sql`SELECT action, source, actor_name, actor_kind, trust, origin, stance, cites::text[] AS cites, valid_from::text AS valid_from, valid_until::text AS valid_until, actor_context, diff FROM thought_audit ORDER BY created_at, seq`) as EventImage[];
   const claims = (await sql`SELECT thought_id::text AS thought_id, count(*)::int AS n FROM thought_work_claims WHERE work_type = ${KEY} GROUP BY thought_id`) as { thought_id: string; n: number }[];
   const chunkRows = (await sql`SELECT thought_id::text AS thought_id, count(*)::int AS n FROM thought_chunks GROUP BY thought_id`) as { thought_id: string; n: number }[];
   return { rows, events, claims, chunks: Object.fromEntries(chunkRows.map((c) => [c.thought_id, Number(c.n)])) };
@@ -266,8 +297,8 @@ const val = (s: Step | undefined) => (s?.value as Row[] | undefined)?.[0]?.r as 
 async function eventsOf(sql: SQL, id: string, action?: string): Promise<EventImage[]> {
   if (!id) return [];
   return (action
-    ? await sql`SELECT action, source, actor_name, actor_kind, trust, origin, stance, diff FROM thought_audit WHERE thought_id = ${id}::uuid AND action = ${action} ORDER BY created_at, seq`
-    : await sql`SELECT action, source, actor_name, actor_kind, trust, origin, stance, diff FROM thought_audit WHERE thought_id = ${id}::uuid ORDER BY created_at, seq`) as EventImage[];
+    ? await sql`SELECT action, source, actor_name, actor_kind, trust, origin, stance, cites::text[] AS cites, valid_from::text AS valid_from, valid_until::text AS valid_until, actor_context, diff FROM thought_audit WHERE thought_id = ${id}::uuid AND action = ${action} ORDER BY created_at, seq`
+    : await sql`SELECT action, source, actor_name, actor_kind, trust, origin, stance, cites::text[] AS cites, valid_from::text AS valid_from, valid_until::text AS valid_until, actor_context, diff FROM thought_audit WHERE thought_id = ${id}::uuid ORDER BY created_at, seq`) as EventImage[];
 }
 
 const okStep = (t: Trace, prefix: string, name?: string): Probe => {
@@ -361,6 +392,10 @@ async function probeC5(c: Ctx): Promise<Probe[]> {
   const a = (s15a?.value as Row[] | undefined)?.[0]; const b = (s15b?.value as Row[] | undefined)?.[0];
   out.push({ name: "ingest-records' first write: inserted = true", ok: !!s15a?.ok && a?.inserted === true, error: s15a?.ok ? json(a ?? null) : s15a?.error });
   out.push({ name: "ingest-records' rewrite: inserted = false, moved = true", ok: !!s15b?.ok && b?.inserted === false && b?.moved === true, error: s15b?.ok ? json(b ?? null) : s15b?.error });
+  // 018's stale-key case (second review pass): the raw content UPDATE moved the text and left the vector and its label.
+  const f16 = t.images["F after s16"]; const f21 = t.images["F after s21"];
+  out.push({ name: "s21's raw content UPDATE on F: the new text, the vector and its label kept", ok: !!f21 && f21.content === TEXTS.F2 && f21.has_vector === true && f21.embedding_model === MODEL, error: json(f21) });
+  if (f16 && f21) c.notes.push(`${c.option}: after the raw content UPDATE F's key ${f21.content_fingerprint === f16.content_fingerprint ? "stayed stale (018's case: 003's rule lives in the functions)" : "was refreshed by the writer's door"}`);
   return out;
 }
 
@@ -525,20 +560,24 @@ async function probeC10(c: Ctx, withProjector: boolean): Promise<Probe[]> {
     ...counted("s1", 1), ...counted("s2", 1), ...counted("s3", 0), ...counted("s4", 1), ...counted("s5", 1),
     ...counted("s6", 1), ...counted("s7", 1), ...counted("s8", 1), ...counted("s9", 0), ...counted("s10", 0), ...counted("s11", 0),
     ...counted("s12b", 0), ...counted("s12c", 2), ...counted("s13", 1), ...counted("s14", 1), ...counted("s15a", 1), ...counted("s15b", 1),
-    ...counted("s16", 1), ...counted("s17", 2), ...counted("s18", 1),
+    ...counted("s16", 1), ...counted("s17", 2), ...counted("s18", 1), ...counted("s17b", 1), ...counted("s17c", 1),
+    ...counted("s19", 1), ...counted("s20", 1), ...counted("s21", 1),
   ];
   if (notCounted.length) c.notes.push(`${c.option}: C10 counted no audit rows for ${notCounted.join(", ")} — the step itself failed (C5)`);
   // 016's trigger: a claim for every thought written (the functions', the raw insert's, the ingester's), none for a deleted one (the FK cascade).
   const claimed = new Set(cs.claims.map((k) => k.thought_id));
   // The live rows among them — under option 1 the ingester's statement fails (C5) and E was never written.
-  const liveText: Record<string, string[]> = { B: [TEXTS.B], D: [TEXTS.D], E: [TEXTS.E1, TEXTS.E2], F: [TEXTS.F], G: [TEXTS.G] };
+  const liveText: Record<string, string[]> = { B: [TEXTS.B], D: [TEXTS.D], E: [TEXTS.E1, TEXTS.E2], F: [TEXTS.F, TEXTS.F2], G: [TEXTS.G], G2: [TEXTS.G2], G3: [TEXTS.G3], I: [TEXTS.I] };
   const want = Object.keys(liveText).filter((l) => t.ids[l] && cs.rows.some((r) => liveText[l].includes(r.content)));
   out.push({ name: `an extraction claim for every live thought written (${want.join(", ")}) and none for the deleted (A, C)`, ok: want.every((l) => claimed.has(t.ids[l])) && !claimed.has(t.ids.A) && !claimed.has(t.ids.C), error: json([...claimed].map((id) => Object.entries(t.ids).find(([, v]) => v === id)?.[0] ?? id.slice(0, 8))) });
   const rowB = cs.rows.find((r) => r.content === TEXTS.B);
   out.push({ name: "the actor stamp on the row (050): B carries no stamp (no envelope)", ok: !!rowB && rowB.metadata?.actor_name === undefined, error: json(rowB?.metadata ?? null) });
   // The stamp on a ROW that survives to the census — the prototype's callable stamp against 050's trigger (first review pass: only events and deleted rows had been read).
-  const rowF = cs.rows.find((r) => r.content === TEXTS.F);
+  const rowF = t.images["F after s16"];
   out.push({ name: "F's row carries the stamp (actor_name op-key, actor_kind operator) — the row, not the event", ok: rowF?.metadata?.actor_name === "op-key" && rowF?.metadata?.actor_kind === "operator", error: json(rowF?.metadata ?? null) });
+  // 050's rule on a raw content edit with no envelope: the actor follows the content, and a writer with no key leaves no mark.
+  const rowF21 = cs.rows.find((r) => r.content === TEXTS.F2);
+  out.push({ name: "after s21's raw content UPDATE with no envelope, F's stamp is gone (050: the actor follows the content)", ok: !!rowF21 && rowF21.metadata?.actor_name === undefined && rowF21.metadata?.actor_kind === undefined, error: json(rowF21?.metadata ?? null) });
   const capA = await eventsOf(sql, t.ids.A, "capture");
   out.push({ name: "A's capture event metadata carries the stamp (actor_name op-key, actor_kind operator)", ok: (capA[0]?.diff?.metadata as Row | undefined)?.actor_name === "op-key" && (capA[0]?.diff?.metadata as Row | undefined)?.actor_kind === "operator", error: json(capA[0]?.diff?.metadata ?? null) });
   const bump = ((await sql`SELECT updated_at > created_at AS bumped FROM thoughts WHERE id = ${t.ids.B}::uuid`) as Row[])[0]?.bumped;
@@ -546,22 +585,40 @@ async function probeC10(c: Ctx, withProjector: boolean): Promise<Probe[]> {
   // 046's anti-inheritance rule (first review pass): s17 hand-set ob1.event, called update_thought, then INSERTed raw in one transaction.
   const capG = await eventsOf(sql, t.ids.G, "capture");
   out.push({ name: "a raw insert after a function call in one transaction inherits no hand-set stance (046's rule)", ok: capG.length === 1 && capG[0].stance === null, error: capG[0] ? `stance ${json(capG[0].stance)}` : "no capture event for G" });
+  // The per-body clears, each on a path where the function projected nothing (second review pass).
+  const capG2 = await eventsOf(sql, t.ids.G2, "capture");
+  out.push({ name: "…nor after an update_thought that changed nothing (the body's own clear)", ok: capG2.length === 1 && capG2[0].stance === null, error: capG2[0] ? `stance ${json(capG2[0].stance)}` : "no capture event for G2" });
+  const capG3 = await eventsOf(sql, t.ids.G3, "capture");
+  out.push({ name: "…nor after an identical re-capture (the 2-argument body's own clear)", ok: capG3.length === 1 && capG3[0].stance === null, error: capG3[0] ? `stance ${json(capG3[0].stance)}` : "no capture event for G3" });
+  // 046's envelope through the bodies (second review pass): the capture's declarations on its event, the edit's over-claim recorded, not copied.
+  const capI = await eventsOf(sql, t.ids.I, "capture");
+  out.push({ name: "I's capture event carries the declared stance, citation, valid window and trust (agent, under the key's ceiling)", ok: capI[0]?.stance === "retrieved" && json(capI[0]?.cites) === json([t.ids.B]) && capI[0]?.trust === "agent" && capI[0]?.actor_kind === "operator" && typeof capI[0]?.valid_from === "string" && typeof capI[0]?.valid_until === "string", error: json(capI[0] ? { stance: capI[0].stance, cites: capI[0].cites, trust: capI[0].trust, kind: capI[0].actor_kind, from: capI[0].valid_from, until: capI[0].valid_until } : null) });
+  const updI = await eventsOf(sql, t.ids.I, "update");
+  out.push({ name: "I's edit event keeps the key's kind (operator), takes the lower trust, and files the claimed actor_kind under actor_context.claimed", ok: updI[0]?.actor_kind === "operator" && updI[0]?.trust === "agent" && updI[0]?.stance === "inferred" && (updI[0]?.actor_context?.claimed as Row | undefined)?.actor_kind === "ingested", error: json(updI[0] ? { kind: updI[0].actor_kind, trust: updI[0].trust, stance: updI[0].stance, context: updI[0].actor_context } : null) });
   c.notes.push(`${c.option}: an identical re-capture (s3) ${t.noopBumped === null ? "could not be measured" : t.noopBumped ? "bumps updated_at with no audit row (053's ON CONFLICT DO UPDATE)" : "leaves updated_at as it was — no event, no write"}`);
   if (withProjector) {
     // The check itself (first review pass: the mechanism the report leans on had no probe): a row moved under an
     // event that does not name the change must be refused. The base relation by name — under option 1 an UPDATE
     // of the view is legitimately intercepted and given its own event.
-    const ev = ((await sql`SELECT id::text AS id FROM thought_audit WHERE thought_id = ${t.ids.B}::uuid ORDER BY created_at DESC, seq DESC LIMIT 1`) as Row[])[0]?.id as string | undefined;
-    let refused: string | null = null;
-    try {
-      await sql.begin(async (tx) => {
-        await tx`SELECT set_config('ob1.projecting', ${ev ?? ""}, true)`;
-        await tx.unsafe(`UPDATE ${c.rows} SET metadata = metadata || '{"forged": true}'::jsonb WHERE id = '${t.ids.B}'::uuid`);
-      });
-    } catch (e) { refused = msg(e); }
-    out.push({ name: "the check: a row moved under an event that does not name the change is refused (OB002)", ok: refused !== null && /does not name|diverges/.test(refused), error: refused ?? "the write went through unrefused" });
-    const forged = ((await sql`SELECT metadata ? 'forged' AS f FROM thoughts WHERE id = ${t.ids.B}::uuid`) as Row[])[0]?.f;
-    out.push({ name: "and nothing of it landed", ok: forged === false, error: String(forged) });
+    // Two arms, two forgeries (second review pass: one forgery had hit the divergence arm alone). B's latest metadata
+    // event names metadata and not supersedes: a metadata forgery DIVERGES from it, a supersedes forgery moves a column
+    // it DOES NOT NAME.
+    const ev = ((await sql`SELECT id::text AS id FROM thought_audit WHERE thought_id = ${t.ids.B}::uuid AND action = 'update' AND diff ? 'metadata' AND NOT diff ? 'supersedes' ORDER BY created_at DESC, seq DESC LIMIT 1`) as Row[])[0]?.id as string | undefined;
+    const forge = async (statement: string): Promise<string | null> => {
+      try {
+        await sql.begin(async (tx) => {
+          await tx`SELECT set_config('ob1.projecting', ${ev ?? ""}, true)`;
+          await tx.unsafe(statement);
+        });
+        return null;
+      } catch (e) { return msg(e); }
+    };
+    const diverged = await forge(`UPDATE ${c.rows} SET metadata = metadata || '{"forged": true}'::jsonb WHERE id = '${t.ids.B}'::uuid`);
+    out.push({ name: "the check: a metadata forged under an event whose metadata differs is refused as a divergence (OB002)", ok: diverged !== null && /diverges from its update event/.test(diverged), error: diverged ?? "the write went through unrefused" });
+    const unnamed = await forge(`UPDATE ${c.rows} SET supersedes = '${t.ids.F}'::uuid WHERE id = '${t.ids.B}'::uuid`);
+    out.push({ name: "the check: a pointer moved under an event that does not name supersedes is refused (OB002)", ok: unnamed !== null && /does not name/.test(unnamed), error: unnamed ?? "the write went through unrefused" });
+    const landed = ((await sql`SELECT metadata ? 'forged' AS f, supersedes::text AS s FROM thoughts WHERE id = ${t.ids.B}::uuid`) as Row[])[0];
+    out.push({ name: "and nothing of either landed", ok: landed?.f === false && landed?.s === null, error: json(landed ?? null) });
   }
   return out;
 }
@@ -663,9 +720,20 @@ async function runOption(url: string, option: OptionId, notes: string[]): Promis
     if (option === "option2") { await apply(sql, "common.sql", "thoughts"); await apply(sql, "option2-functions.sql", "thoughts"); }
     if (option === "option1-unchanged") { await apply(sql, "option1-view.sql", "thought_rows"); await apply(sql, "common.sql", "thought_rows"); }
     if (option === "option1") { await apply(sql, "option1-view.sql", "thought_rows"); await apply(sql, "common.sql", "thought_rows"); await apply(sql, "option2-functions.sql", "thought_rows"); }
-    await seed(sql);
-    const trace = await runScript(sql);
-    const cs = await census(sql);
+    // The stages before the probes (second review pass): a throw here is a FAIL on every gating criterion with the
+    // error named, not a dead run with no verdict.
+    let trace: Trace; let cs: Census;
+    try {
+      await seed(sql);
+      trace = await runScript(sql);
+      cs = await census(sql);
+    } catch (e) {
+      const failed: Probe[] = [{ name: "the scripted writes or the census could not run", ok: false, error: msg(e) }];
+      return {
+        option, observations: CRITERIA.filter((x) => x.gating !== "informative").map((x) => judge(x.id, option, failed)),
+        trace: { steps: [], ids: {}, noopBumped: null, images: {} }, census: { rows: [], events: [], claims: [], chunks: {} },
+      };
+    }
     const c: Ctx = { sql, option, trace, census: cs, rows, notes };
     const obs: Observation[] = [];
     const add = (id: CriterionId, probes: Probe[]) => obs.push(judge(id, option, probes));
@@ -759,7 +827,7 @@ async function teardown(url: string): Promise<void> {
   for (const fn of [
     "ob1_snapshot_embedding()", "ob1_project_thought_event(uuid, vector, text, boolean)", "ob1_refresh_thought_vector(uuid, vector, text)",
     "ob1_append_thought_event(uuid, text, text, jsonb, jsonb)", "ob1_actor_stamp(jsonb)", "ob1_actor_stamp_kept(jsonb, jsonb)",
-    "ob1_thought_diff(text, text, text, jsonb, jsonb, boolean, boolean, uuid, uuid, jsonb, jsonb, text, text)",
+    "ob1_thought_diff(text, text, text, jsonb, jsonb, boolean, boolean, uuid, uuid, jsonb, jsonb, text, text, timestamptz)",
     "ob1_thoughts_view_insert()", "ob1_thoughts_view_update()", "ob1_thoughts_view_delete()",
   ]) await sql.unsafe(`DROP FUNCTION IF EXISTS ${fn}`);
   await sql.end();
@@ -824,8 +892,11 @@ function selfCheck(): void {
   assert(recommend([V("baseline", true), V("option2", false), V("option1-unchanged", false), V("option1", false)], D0).option !== "baseline", "the baseline is never the recommendation");
 
   console.log("\n[5] the differential's normalisation");
-  const ev = (action: string, diff: Record<string, unknown>): EventImage => ({ action, source: "s", actor_name: null, actor_kind: null, trust: null, origin: null, stance: null, diff });
+  const ev = (action: string, diff: Record<string, unknown>): EventImage => ({ action, source: "s", actor_name: null, actor_kind: null, trust: null, origin: null, stance: null, cites: null, valid_from: null, valid_until: null, actor_context: null, diff });
   assert(JSON.stringify(comparableEvent(ev("capture", { content: "x", metadata: { a: 1 } })).diff) === JSON.stringify({ metadata: { a: 1 } }), "a capture's content is set aside");
+  assert(JSON.stringify(comparableEvent(ev("capture", { content: "x", created_at: "2024-01-02T03:04:05+00:00", metadata: { a: 1 } })).diff) === JSON.stringify({ metadata: { a: 1 } }), "a capture's created_at — the third addition — is set aside too");
+  assert(JSON.stringify(comparableEvent(ev("capture", { metadata: { a: 1 }, supersedes: "u" })).diff) === JSON.stringify({ metadata: { a: 1 }, supersedes: "u" }), "046's own capture keys stay");
+  assert(compareImages([ev("capture", { metadata: {} })], [{ ...ev("capture", { metadata: {} }), stance: "stated" }], "event", comparableEvent).length === 1 && compareImages([ev("update", {})], [{ ...ev("update", {}), actor_context: { claimed: { actor_kind: "agent" } } }], "event", comparableEvent).length === 1, "the envelope's columns — stance, cites, the window, the context's claim — are compared");
   assert(JSON.stringify(comparableEvent(ev("update", { content: { before: "a", after: "b" }, content_fingerprint: { before: "1", after: "2" } })).diff) === JSON.stringify({ content: { before: "a", after: "b" } }), "an update's key move is set aside");
   assert(JSON.stringify(comparableEvent(ev("delete", { previous_content: "x" })).diff) === JSON.stringify({ previous_content: "x" }), "a delete's diff is compared whole");
   assert(comparableEvent(ev("capture", { content: "x" })).diff !== undefined && ev("capture", { content: "x" }).diff?.content === "x", "the normalisation copies, it does not mutate");
@@ -864,12 +935,15 @@ function selfCheck(): void {
   assert(Object.values(EXPECTED).every((row) => Object.keys(row).every((k) => CRITERION_IDS.includes(k as CriterionId) && k !== "C13" && k !== "C14")), "cells only for gating criteria");
   assert(EXPECTED.option2.C6 === "PASS" && EXPECTED.option1.C6 === "FAIL" && EXPECTED["option1-unchanged"].C1 === "FAIL", "the record: option 2 keeps the community DDL, option 1 breaks it, 053's functions fail through the view");
   assert(EXPECTED.baseline.C1 === "FAIL" && EXPECTED.baseline.C12 === "N/A", "the record: 053's capture event carries no content, so the baseline fails C1's last clause and cannot be replayed");
-  const obsAll: Observation[] = (Object.keys(EXPECTED) as OptionId[]).flatMap((opt) => (Object.entries(EXPECTED[opt]) as [CriterionId, Outcome][]).map(([c, o]) => ({ criterion: c, option: opt, outcome: o, failed: [], probes: o === "N/A" ? 0 : 1 })));
+  const obsAll: Observation[] = (Object.keys(EXPECTED) as OptionId[]).flatMap((opt) => (Object.entries(EXPECTED[opt]) as [CriterionId, Outcome][]).map(([c, o]) => ({ criterion: c, option: opt, outcome: o, failed: [], probes: EXPECTED_PROBES[opt][c] ?? (o === "N/A" ? 0 : 1) })));
   assert(driftFrom(EXPECTED, obsAll).length === 0, "a run equal to the record drifts nowhere");
   const moved = obsAll.map((o) => (o.option === "option2" && o.criterion === "C6" ? { ...o, outcome: "FAIL" as Outcome } : o));
   const drift = driftFrom(EXPECTED, moved);
   assert(drift.length === 1 && drift[0] === "option2/C6: recorded PASS, observed FAIL", "a moved cell is named with both values");
   assert(driftFrom(EXPECTED, obsAll.filter((o) => !(o.option === "option1" && o.criterion === "C12"))).join() === "option1/C12: recorded PASS, observed N/A", "a cell not measured reads N/A against the record");
+  assert(Object.values(EXPECTED_PROBES).every((row) => Object.entries(row).every(([k, n]) => n > 0 && EXPECTED[Object.keys(EXPECTED).find((o) => EXPECTED_PROBES[o as OptionId] === row) as OptionId][k as CriterionId] !== "N/A")), "a probe count is recorded only for a measured cell, and never zero");
+  const shrunk = obsAll.map((o) => (o.option === "option2" && o.criterion === "C10" ? { ...o, probes: o.probes - 2 } : o));
+  assert(driftFrom(EXPECTED, shrunk).join() === `option2/C10: recorded ${EXPECTED_PROBES.option2.C10} probes, observed ${EXPECTED_PROBES.option2.C10! - 2}`, "a suite that shrank by two probes is drift, though every outcome stands");
 
   console.log("\n[9] the report");
   const rep: Report = {

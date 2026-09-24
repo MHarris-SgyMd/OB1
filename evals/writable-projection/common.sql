@@ -53,7 +53,13 @@ CREATE OR REPLACE FUNCTION ob1_thought_diff(
   p_old_has_vector  boolean, p_new_has_vector  boolean,
   p_old_supersedes  uuid,    p_new_supersedes  uuid,
   p_old_derived     jsonb,   p_new_derived     jsonb,
-  p_old_fingerprint text,    p_new_fingerprint text
+  p_old_fingerprint text,    p_new_fingerprint text,
+  -- Second review pass: the row's created_at on a capture — a raw writer
+  -- (db/ingest-records.ts) backdates it to the record's own time, and the
+  -- event's own created_at is the clock of the write, so a replay had no way
+  -- back to it. The third addition to 046's diff, beside the content and the
+  -- key's move.
+  p_created_at      timestamptz DEFAULT NULL
 )
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -66,6 +72,9 @@ BEGIN
     -- 046 recorded metadata only; the event carries the content (SMD-1998's
     -- hard input to this spike: the log is otherwise not the payload store).
     d := jsonb_build_object('content', p_new_content, 'metadata', p_new_metadata);
+    IF p_created_at IS NOT NULL THEN
+      d := d || jsonb_build_object('created_at', p_created_at);
+    END IF;
     IF p_new_derived IS NOT NULL THEN
       d := d || jsonb_build_object('derived_from', p_new_derived);
     END IF;
@@ -331,7 +340,9 @@ DECLARE
   v_vec        vector({{EMBEDDING_DIM}});
   v_model      text;
   v_target     text;
+  v_found      boolean := false;
   v_prev_amend text := current_setting('ob1.actor_amend', true);
+  v_prev_cited text := current_setting('ob1.cited_delete', true);
 BEGIN
   SELECT * INTO e FROM thought_audit WHERE id = p_event;
   IF NOT FOUND THEN
@@ -382,36 +393,50 @@ BEGIN
       v_vec, v_model,
       NULLIF(e.diff->'derived_from', 'null'::jsonb),
       (e.diff->>'supersedes')::uuid,
-      e.created_at, e.created_at);
+      -- The row's own created_at when the event carries one (a backdating
+      -- writer), else the write's clock; updated_at is the write's clock as
+      -- 001's default makes it.
+      COALESCE((e.diff->>'created_at')::timestamptz, e.created_at), e.created_at);
 
   ELSIF e.action = 'update' THEN
     IF e.diff ? 'content' THEN
       v_content := e.diff->'content'->>'after';
-      v_fp := CASE WHEN e.diff ? 'content_fingerprint' THEN e.diff->'content_fingerprint'->>'after'
-                   ELSE content_fingerprint_of(v_content) END;
       IF p_replay THEN
+        -- The vector by the new text's key, if the live write ever snapshotted one.
         SELECT s.embedding, s.embedding_model INTO v_vec, v_model
           FROM ob1_embedding_snapshot s
          WHERE s.content_fingerprint = content_fingerprint_of(v_content) AND s.embedding_model = v_target;
+        v_found := FOUND;
       ELSE
         -- The live edit's vector, or none: update_thought writes p_embedding beside a new text (018/021).
         v_vec   := p_embedding;
         v_model := CASE WHEN p_embedding IS NULL THEN NULL ELSE p_embedding_model END;
       END IF;
     END IF;
+    -- The log is faithful, not corrective (second review pass): a key the
+    -- event does not move stays as it was — a raw content UPDATE around the
+    -- functions leaves 018's stale key live, and the replay leaves it too —
+    -- and a vector the event does not flip stays unless the snapshot holds
+    -- one for the new text (a function's edit snapshotted it live; a raw
+    -- edit did not, and the stale vector stays, as live).
     UPDATE {{ROWS}} t SET
       content             = CASE WHEN e.diff ? 'content' THEN v_content ELSE t.content END,
       content_fingerprint = CASE WHEN e.diff ? 'content_fingerprint' THEN e.diff->'content_fingerprint'->>'after'
-                                 WHEN e.diff ? 'content' THEN v_fp
                                  ELSE t.content_fingerprint END,
       metadata            = CASE WHEN e.diff ? 'metadata' THEN NULLIF(e.diff->'metadata'->'after', 'null'::jsonb) ELSE t.metadata END,
       supersedes          = CASE WHEN e.diff ? 'supersedes' THEN (e.diff->'supersedes'->>'after')::uuid ELSE t.supersedes END,
       derived_from        = CASE WHEN e.diff ? 'derived_from' THEN NULLIF(e.diff->'derived_from'->'after', 'null'::jsonb) ELSE t.derived_from END,
-      embedding           = CASE WHEN e.diff ? 'content' THEN v_vec
+      embedding           = CASE WHEN e.diff ? 'content' AND NOT p_replay THEN v_vec
+                                 WHEN e.diff ? 'content' AND (e.diff->>'embedding_present') = 'false' THEN NULL
+                                 WHEN e.diff ? 'content' AND v_found THEN v_vec
+                                 WHEN e.diff ? 'content' THEN t.embedding
                                  WHEN p_embedding IS NOT NULL THEN p_embedding
                                  WHEN (e.diff->>'embedding_present') = 'false' THEN NULL
                                  ELSE t.embedding END,
-      embedding_model     = CASE WHEN e.diff ? 'content' THEN v_model
+      embedding_model     = CASE WHEN e.diff ? 'content' AND NOT p_replay THEN v_model
+                                 WHEN e.diff ? 'content' AND (e.diff->>'embedding_present') = 'false' THEN NULL
+                                 WHEN e.diff ? 'content' AND v_found THEN v_model
+                                 WHEN e.diff ? 'content' THEN t.embedding_model
                                  WHEN p_embedding IS NOT NULL THEN p_embedding_model
                                  WHEN (e.diff->>'embedding_present') = 'false' THEN NULL
                                  ELSE t.embedding_model END,
@@ -435,6 +460,7 @@ BEGIN
   PERFORM set_config('ob1.projecting_thought', '', true);
   PERFORM set_config('ob1.projecting_replay', '', true);
   PERFORM set_config('ob1.actor_amend', COALESCE(v_prev_amend, ''), true);
+  PERFORM set_config('ob1.cited_delete', COALESCE(v_prev_cited, ''), true);  -- restored as delete_thought restores its own (second review pass)
   RETURN e.thought_id;
 END;
 $$;
@@ -493,7 +519,8 @@ BEGIN
     OLD.embedding IS NOT NULL, NEW.embedding IS NOT NULL,
     OLD.supersedes, NEW.supersedes,
     OLD.derived_from, NEW.derived_from,
-    OLD.content_fingerprint, NEW.content_fingerprint);
+    OLD.content_fingerprint, NEW.content_fingerprint,
+    CASE WHEN TG_OP = 'INSERT' THEN NEW.created_at END);
 
   IF v_proj = 'vector' THEN
     -- ob1:projection-checked-against-its-event (1999): a refresh moves the
@@ -539,7 +566,18 @@ BEGIN
                                      'row', jsonb_build_object('thought_id', v_id, 'action', v_action, 'diff', v_diff))::text;
     END IF;
 
-    v_diff := v_diff - 'embedding_present';  -- the vector is a projection (SMD-1998), not the event's claim
+    -- The vector's PRESENCE: live, the projector writes what the event says
+    -- (a flip named, or none), so a vector dropped or conjured under an event
+    -- that names no flip is a divergence (second review pass — a view's raw
+    -- content UPDATE had dropped the vector with the strip hiding it). On a
+    -- replay the snapshot may miss, so presence is not held there.
+    IF COALESCE(current_setting('ob1.projecting_replay', true), '') <> 'on'
+       AND (e.diff->'embedding_present') IS DISTINCT FROM (v_diff->'embedding_present') THEN
+      RAISE EXCEPTION USING ERRCODE = 'OB002',
+        MESSAGE = 'thoughts_write_audit: the projection moved the vector''s presence in a way its event does not name',
+        DETAIL  = jsonb_build_object('event', e.diff->'embedding_present', 'row', v_diff->'embedding_present')::text;
+    END IF;
+    v_diff := v_diff - 'embedding_present';  -- the vector itself is a projection (SMD-1998), not the event's claim
     IF e.action <> v_action THEN
       RAISE EXCEPTION USING ERRCODE = 'OB002',
         MESSAGE = 'thoughts_write_audit: the projected row''s action is not the event''s',
@@ -553,6 +591,7 @@ BEGIN
     IF TG_OP = 'INSERT' THEN
       IF (e.diff->>'content') IS DISTINCT FROM NEW.content
          OR (e.diff->'metadata') IS DISTINCT FROM NEW.metadata
+         OR (e.diff ? 'created_at' AND (e.diff->>'created_at')::timestamptz IS DISTINCT FROM NEW.created_at)
          OR NULLIF(e.diff->'derived_from', 'null'::jsonb) IS DISTINCT FROM NEW.derived_from
          OR (e.diff->>'supersedes')::uuid IS DISTINCT FROM NEW.supersedes THEN
         RAISE EXCEPTION USING ERRCODE = 'OB002',
