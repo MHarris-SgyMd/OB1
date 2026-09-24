@@ -77,7 +77,8 @@ a refusal there is a `ProviderError` of kind `egress`. Deny is the default and
 at Ollama by address needs `OB1_LLM_LOCAL=1`, and preflight's `embeddings
 egress` row says so with the line.
 
-A local endpoint — loopback, a private address, the `ollama` service name, the two
+A local endpoint — local by its hostname, the credential rule's sense and not
+`OB1_LLM_LOCAL`'s: loopback, a private address, the `ollama` service name, the two
 host aliases — is dialled once on every start, with or without `--deep`: one
 `GET /models`, no body, no credential, 2.5 s, and any HTTP answer passes the
 `provider endpoint` row (a `chat endpoint` row for a chat base of its own). One
@@ -85,8 +86,8 @@ that answers nothing — refused, unresolved, or silent — fails it, with a rem
 for the name's kind: the service name needs `--profile local-models`; inside a
 container `127.0.0.1` is the container; `host.containers.internal` is podman's
 alias and `host.docker.internal` Docker's, which Linux Docker gets through the
-compose file's `extra_hosts`. Until SMD-1875 the gate decided "local" from the
-hostname and connected to nothing, so a container pointed at an address with
+compose file's `extra_hosts`. Until SMD-1875 preflight's credential rule called an
+endpoint local by its hostname and connected to nothing, so a container pointed at an address with
 nothing behind it started `preflight OK` and failed its first capture in 7 ms.
 A hosted endpoint is not dialled without `--deep`.
 

@@ -631,15 +631,17 @@ jobs:
           grep -F 'preflight OK' <<<"$LOG"
 
       # SMD-1875, the ticket's first Verify item on every PR: the compose
-      # fallback (the `ollama` service) with no profile is a name that resolves
-      # to nothing, and the container must refuse to start on it — where it
-      # used to say `preflight OK` and fail the first capture in 7 ms. The
+      # fallback (the `ollama` service) with no profile is a name that does not
+      # resolve, and the container must refuse to start on it — where it used
+      # to say `preflight OK` and fail the first capture on it (getaddrinfo
+      # ENOTFOUND ollama). The
       # built image, the running database, one environment line changed, and
       # preflight alone (the image's entrypoint is `sh -c "bun preflight.ts &&
       # exec bun index.ts"`, so the command is replaced through --entrypoint).
       # Exit 1, the `provider endpoint` row failed, the remedy naming the
-      # profile; and the same run with the reachable address passes, so the
-      # step proves the probe and not a broken container.
+      # profile; and the same run with the reachable address (the runner's
+      # listener from the first step, still up) passes, so the step proves
+      # the probe and not a broken container.
       - name: A local endpoint that answers nothing refuses to start
         working-directory: deploy
         run: |

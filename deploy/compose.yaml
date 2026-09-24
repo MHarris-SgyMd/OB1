@@ -211,9 +211,10 @@ services:
       # knob at all: preflight called that address local, wanted no credential,
       # dialled nothing without --deep and said OK; the first capture failed in
       # 7 ms with "Unable to connect", and the server logged nothing. Since
-      # SMD-1875 preflight dials a local endpoint once (GET /models, 2.5 s) and
-      # the container refuses to start on one that answers nothing, naming the
-      # profile, the host aliases or a key as the fix. An Ollama
+      # SMD-1875 preflight dials an endpoint whose name is local once (GET
+      # /models, 2.5 s) and the container refuses to start on one that answers
+      # nothing, naming by the name's kind the profile, the host aliases or
+      # the stack's own service as the fix. An Ollama
       # on the host is http://host.containers.internal:11434/v1 (podman; Docker
       # Desktop: host.docker.internal); OpenRouter is https://openrouter.ai/api/v1
       # with a key — deploy/.env.example, "Model provider". Check 14 holds this

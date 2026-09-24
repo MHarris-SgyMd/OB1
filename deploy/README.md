@@ -39,12 +39,12 @@ podman compose -f deploy/compose.yaml --profile local-models up --build
 The profile is the stack's own Ollama, where the server's model endpoint
 defaults; drop it when `deploy/.env` names another provider (an Ollama on the
 host, OpenRouter — `.env.example`, "Model provider"). Without either, the server
-container refuses to start: preflight dials a local endpoint once (`GET /models`,
-2.5 s) and its `provider endpoint` row fails on the `ollama` name with nothing
+container refuses to start: preflight dials an endpoint whose name is local once
+(`GET /models`, 2.5 s) and its `provider endpoint` row fails on the `ollama` name with nothing
 behind it, naming the profile, the two host aliases and a hosted provider as the
 ways out (SMD-1875). Before that row the name counted as local and was not
-dialled, so the stack came up `preflight OK` and the first capture failed in
-7 ms with the server log ending at `Started server`.
+dialled, so the stack came up `preflight OK` and the first capture failed on it
+(`getaddrinfo ENOTFOUND ollama`) with the server log ending at `Started server`.
 
 Three services, in order (five with the profile):
 

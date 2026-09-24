@@ -1985,7 +1985,7 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   // The compose fallback with no profile — the ticket's case, and SMD-1843's
   // OpenRouter-key-alone case: `ollama` resolves only on the compose network
   // with the profile up. Port 1, so a box whose resolver knows the name still
-  // fails, refused; the remedy is the hostname's either way. Which wording
+  // fails; the remedy is the hostname's either way. Which wording
   // is decided here first, by the same resolver, so the unresolved wording
   // is pinned wherever the name is unknown (first review pass: an
   // either-or regex let the ENOTFOUND mapping drift unnoticed).
@@ -1994,7 +1994,7 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   // wording (second review pass); an unknown name is one wording, pinned.
   const ollamaResolves = await Bun.dns.lookup("ollama").then(() => true, () => false);
   const service = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://ollama:1/v1" });
-  const serviceWhy = ollamaResolves ? String.raw`(the connection was refused|no answer in 2\.5 s)` : String.raw`the name does not resolve \(GET /models, 2\.5 s timeout\); the first capture would fail on it in milliseconds`;
+  const serviceWhy = ollamaResolves ? String.raw`(the connection was refused|no HTTP answer in 2\.5 s)` : String.raw`the name does not resolve \(GET /models, 2\.5 s timeout\); the first capture would fail on it in milliseconds`;
   assert(service.code === 1 && new RegExp(String.raw`✗\s+provider endpoint\s+nothing answers at http://ollama:1/v1 — ${serviceWhy}`).test(row(service.out, "provider endpoint")),
          `the ollama service name with nothing behind it fails (exit ${service.code}; the name ${ollamaResolves ? "resolves here, so refused or silent" : "does not resolve here, so that wording, pinned"})`);
   assert(/→ `ollama` is the local-models profile's service and exists only under it: start the stack with --profile local-models, or set OB1_LLM_BASE_URL to an Ollama on the host \(http:\/\/host\.containers\.internal:11434\/v1 under podman or http:\/\/host\.docker\.internal:11434\/v1 under Docker\) or to a hosted provider with a key\./.test(fix(service.out, "provider endpoint")),
@@ -2011,6 +2011,7 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
          `the Docker host alias with nothing behind it fails (exit ${alias.code})`);
   assert(/→ Nothing on the host answers at that port, or this runtime does not provide the name: podman writes both names; Docker Desktop only host\.docker\.internal; Docker on Linux neither unless extra_hosts host-gateway is set, and deploy\/compose\.yaml sets it for host\.docker\.internal\./.test(fix(alias.out, "provider endpoint")),
          "…with the runtimes and the extra_hosts line named");
+  assert(THREE(fix(alias.out, "provider endpoint")), "…and the three spellings, this remedy too (third review pass: the pass-2 rewrite had dropped podman's)");
   // A private address (a LAN box): the generic remedy, still with the three spellings.
   const lan = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://192.168.0.1:1/v1" });
   assert(/✗\s+provider endpoint/.test(lan.out) && /→ Start the provider at that address or fix the host and port in OB1_LLM_BASE_URL;/.test(fix(lan.out, "provider endpoint")) && THREE(fix(lan.out, "provider endpoint")),
@@ -2047,7 +2048,7 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   const timedOut = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://127.0.0.1:${hung.port}/v1` });
   const waited = performance.now() - t0;
   hung.stop(true);
-  assert(timedOut.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 — no answer in 2\.5 s \(GET \/models, 2\.5 s timeout\); the first capture would wait on it, up to the whole request timeout \(OB1_LLM_TIMEOUT\), and then fail/.test(row(timedOut.out, "provider endpoint")),
+  assert(timedOut.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 — no HTTP answer in 2\.5 s \(GET \/models, 2\.5 s timeout\); the first capture would wait on it, up to the whole request timeout \(OB1_LLM_TIMEOUT\), and then fail/.test(row(timedOut.out, "provider endpoint")),
          `an endpoint that accepts and never answers fails on the timeout, said in seconds, with the hang as the consequence (exit ${timedOut.code})`);
   assert(waited >= 2400 && waited < 10000, `…after about the timeout and not the run's whole patience (${Math.round(waited)} ms)`);
 
@@ -2076,7 +2077,7 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   assert(row(declared.out, "provider endpoint") === "", "…and OB1_LLM_LOCAL=1 on a hosted name does not make it dial either");
 
   // Two endpoints: the same base is one socket and one probe; a chat base of
-  // its own is its own row, so a down chat runtime fails by its own name.
+  // its own is its own row, so a down chat server fails by its own name.
   const chatSeen: string[] = [];
   const chatStub = Bun.serve({ port: 0, fetch: (req) => { chatSeen.push(new URL(req.url).pathname); return Response.json({ object: "list", data: [] }); } });
   const CHAT = `http://127.0.0.1:${chatStub.port}/v1`;
@@ -2090,7 +2091,7 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   chatStub.stop(true);
   const chatDown = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: LOCAL_STUB, OB1_CHAT_BASE_URL: "http://127.0.0.1:1/v1" });
   assert(chatDown.code === 1 && /✓\s+provider endpoint/.test(chatDown.out) && /✗\s+chat endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:1\/v1 — the connection was refused/.test(row(chatDown.out, "chat endpoint")),
-         `a down chat runtime beside a live embedder fails the chat endpoint row and not the provider's (exit ${chatDown.code})`);
+         `a down chat server beside a live embedder fails the chat endpoint row and not the provider's (exit ${chatDown.code})`);
   const hostedChat = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: LOCAL_STUB, OB1_CHAT_BASE_URL: "https://provider.invalid/v1", OB1_CHAT_API_KEY: "k-chat" });
   assert(row(hostedChat.out, "chat endpoint") === "" && /✓\s+provider endpoint/.test(hostedChat.out), "…and a hosted chat endpoint beside a local embedder is not dialled");
 
