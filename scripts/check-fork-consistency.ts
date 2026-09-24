@@ -1598,7 +1598,7 @@ const THOUGHT_WRITE_EXCEPTIONS = new Map([
   ["recipes/vercel-neon-telegram/src/lib/db.ts", OWN_DATABASE("its own Neon database, built by sql/001-create-thoughts.sql")],
   ["recipes/schema-aware-routing/index.ts", OWN_DATABASE("its own five-table project, built by its README's SQL (a `thoughts` with domain/status/source columns)")],
   // The fixtures: a row as an older write left it — fingerprint and label by hand — for the writer under test to move, and a restricted twin for the search tools to hide.
-  ["extensions/test-writes.ts", { why: "plants a thought as an older write left it, fingerprint and label supplied by hand, for the writer under test to move whole; and a restricted twin at a captured thought's vector, the row the three search tools must not show (SMD-1986)", lines: 2 }],
+  ["extensions/test-writes.ts", { why: "plants a thought as an older write left it, fingerprint and label supplied by hand, for the writer under test to move whole; and a restricted twin at a captured thought's vector (plantRestricted, once for both servers), the row no search may show — enhanced-mcp's three tools (SMD-1986), rest-api's POST /search (SMD-2054)", lines: 2 }],
 ]);
 
 function checkThoughtWritesAround() {
