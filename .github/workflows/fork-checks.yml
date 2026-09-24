@@ -513,11 +513,15 @@ jobs:
         working-directory: extensions
         run: bun install --frozen-lockfile
 
+      # TZ: the enhanced-mcp block holds that a zone-less date bound is read as
+      # UTC, never the process's zone — an arm that proves nothing on a UTC
+      # runner, so the suite runs west of UTC here (SMD-1986).
       - name: Vendored writers leave what update_thought leaves
         working-directory: extensions
         run: bun test-writes.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+          TZ: America/Chicago
 
       # Every tool of the five extension servers on the SQL shim, called through
       # tools/call against the extensions' own schema.sql files (applied after
