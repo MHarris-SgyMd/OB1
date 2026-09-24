@@ -407,14 +407,14 @@ section("[8] the client's batches and answers");
   let err: any;
   try { await jevDecide(expecting, { proposition: "p", context: "c" }, subj); } catch (e) { err = e; }
   assert(err?.kind === "body" && /OB1_JEV_MODEL expects semif/.test(err.message), "an answer from another model is refused even from a tier that did not check");
-  const bodies: [string, (b: any) => unknown][] = [
-    ["another contract", (b) => ({ contract: "other/9", model: MODEL_INFO, results: [], ms: 0 })],
-    ["too few results", (b) => ({ contract: JEV_CONTRACT, model: MODEL_INFO, results: [], ms: 0 })],
-    ["probabilities that do not sum to 1", (b) => ({ contract: JEV_CONTRACT, model: MODEL_INFO, ms: 0, results: [{ kind: "binary", probabilities: { true: 0.9, false: 0.9, [INSUFFICIENT_EVIDENCE]: 0 }, selected: "true", abstained: false, p_insufficient: 0, p_true: 0.5, logits: [], temperature: 1, tokens: 1, truncated: false }] })],
-    ["another decision's options", (b) => ({ contract: JEV_CONTRACT, model: MODEL_INFO, ms: 0, results: [{ kind: "binary", probabilities: { yes: 1, [INSUFFICIENT_EVIDENCE]: 0 }, selected: "yes", abstained: false, p_insufficient: 0, logits: [], temperature: 1, tokens: 1, truncated: false }] })],
+  const bodies: [string, () => unknown][] = [
+    ["another contract", () => ({ contract: "other/9", model: MODEL_INFO, results: [], ms: 0 })],
+    ["too few results", () => ({ contract: JEV_CONTRACT, model: MODEL_INFO, results: [], ms: 0 })],
+    ["probabilities that do not sum to 1", () => ({ contract: JEV_CONTRACT, model: MODEL_INFO, ms: 0, results: [{ kind: "binary", probabilities: { true: 0.9, false: 0.9, [INSUFFICIENT_EVIDENCE]: 0 }, selected: "true", abstained: false, p_insufficient: 0, p_true: 0.5, logits: [], temperature: 1, tokens: 1, truncated: false }] })],
+    ["another decision's options", () => ({ contract: JEV_CONTRACT, model: MODEL_INFO, ms: 0, results: [{ kind: "binary", probabilities: { yes: 1, [INSUFFICIENT_EVIDENCE]: 0 }, selected: "yes", abstained: false, p_insufficient: 0, logits: [], temperature: 1, tokens: 1, truncated: false }] })],
   ];
   for (const [what, make] of bodies) {
-    stub.answer = (b) => Response.json(make(b));
+    stub.answer = () => Response.json(make());
     err = undefined;
     try { await jevDecide(local, { proposition: "p", context: "c" }, subj); } catch (e) { err = e; }
     assert(err instanceof ProviderError && err.kind === "body", `an answer with ${what} is a body error (${err?.message?.slice(0, 70)})`);

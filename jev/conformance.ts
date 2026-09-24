@@ -33,7 +33,7 @@
 
 import { INSUFFICIENT_EVIDENCE } from "../server-portable/jev-contract.ts";
 import { ensureModel, type ModelPins } from "./fetch-model.ts";
-import { createEngine, loadVerdict, softmax, type Calibrator, type Encoder, type Runner } from "./verdict.ts";
+import { createEngine, LABEL_MARKER, loadVerdict, SEP_MARKER, softmax, type Calibrator, type Encoder, type Runner } from "./verdict.ts";
 
 const OPENJEV = "Heman10x-NGU/openJev-verdict-2.0";
 /** The receipt, its inputs and its totals, at the commit that holds them. */
@@ -102,7 +102,7 @@ export async function receiptArm(l: Loaded): Promise<ReceiptArm> {
   const disagreements: string[] = [];
   for (const row of l.rows) {
     // core/formatting.py's build_model_input over the raw descriptions — scripts/evaluate.py's call, uncut (these rows are all under 512 tokens).
-    const prompt = `${row.candidates.map((c) => `<<LABEL>>${c.description}`).join("")}<<SEP>>Question: ${row.question}\n\nContext:\n${row.text}`;
+    const prompt = `${row.candidates.map((c) => `${LABEL_MARKER}${c.description}`).join("")}${SEP_MARKER}Question: ${row.question}\n\nContext:\n${row.text}`;
     const ids = l.encoder.encode(prompt).ids;
     const logits = await l.run(BigInt64Array.from(ids, BigInt), new BigInt64Array(ids.length).fill(1n));
     const probs = softmax(Array.from(logits.subarray(0, row.candidates.length)).map((x) => x / l.report.temperature));
