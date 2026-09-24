@@ -86,7 +86,8 @@
  * the bounds as instants, the refusals as 400s, the emptied first page and
  * the page past the last hit; GET /recent, which read thoughts with no tier
  * predicate, hides the twin too; and the date helpers rest-api copied from enhanced-mcp
- * are held identical to the character (the text pins at the end).
+ * are held identical to the character (the text pins at the end); and every
+ * answer of /search carries the request's CORS headers under an allowlist.
  *
  * The files are imported as modules — each exports Bun's entry shape, and its
  * default export's `fetch` is the handler driven here (SMD-1799) — under the
@@ -780,6 +781,7 @@ try {
 {
   const F = "integrations/rest-api/index.ts";
   console.log(`\n[${F}]`);
+  process.env.CORS_ALLOWED_ORIGINS = "https://dash.test"; // read at module load, for the CORS arm at the block's end (review pass 3)
   const h = await load(F);
   const captured = "a fresh thought captured through rest-api";
   const c = await send(h, "POST", "/capture", { content: captured });
@@ -895,6 +897,19 @@ try {
   const recentOpen = await send(h, "GET", "/recent?limit=50&exclude_restricted=false");
   assert(recent.status === 200 && ids(recent).includes(cid) && !ids(recent).includes(rid) && ids(recentOpen).includes(rid) && ids(recentOpen).includes(cid),
     `GET /recent hides the restricted twin by default and shows it under exclude_restricted=false, as its siblings do — it filtered nothing before (${recent.status}: ${ids(recent).length} rows${ids(recent).includes(rid) ? ", the twin among them" : ""}; open: ${ids(recentOpen).length})`);
+  // Every answer of /search carries the request's CORS headers (review pass 3): the second pass passed `req` on the
+  // 400s and said the 200s did the same — they did not, so under an allowlist a browser could read the refusal and
+  // not the page. Direct calls, since send() drops the headers; the allowlist was set before the module loaded (above).
+  // The file's other routes still answer null under an allowlist — SMD-2079.
+  const withOrigin = (origin: string, body: Record<string, unknown>) =>
+    h(new Request("http://writer.test/search", { method: "POST", headers: { ...HEADERS, Origin: origin }, body: JSON.stringify(body) }));
+  const [okCors, refusedCors, strangerCors] = await Promise.all([
+    withOrigin("https://dash.test", { query: captured, min_similarity: 0.5 }), withOrigin("https://dash.test", { query: captured, end_date: "yesterday" }),
+    withOrigin("https://elsewhere.test", { query: captured, min_similarity: 0.5 })]);
+  const allow = (r: Response) => r.headers.get("access-control-allow-origin");
+  assert(okCors.status === 200 && allow(okCors) === "https://dash.test" && refusedCors.status === 400 && allow(refusedCors) === "https://dash.test" && strangerCors.status === 200 && allow(strangerCors) === "null",
+    `every answer of POST /search carries the request's CORS headers under an allowlist — the 200 and the 400 echo a listed origin, an unlisted one gets null (${allow(okCors)} / ${allow(refusedCors)} / ${allow(strangerCors)})`);
+  delete process.env.CORS_ALLOWED_ORIGINS;
 }
 
 // ── recipes/repo-learning-coach ──────────────────────────────────────────────

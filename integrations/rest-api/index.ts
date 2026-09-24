@@ -529,8 +529,9 @@ async function handleSearch(req: Request): Promise<Response> {
   const startDate = body.start_date ? String(body.start_date).trim() : null;
   const endDate = body.end_date ? String(body.end_date).trim() : null;
 
-  // A 400 carries the request's CORS headers like the 200 does (review pass 2): without `req`, json() answers
-  // `Access-Control-Allow-Origin: null` under an allowlist, and a browser client cannot read the refusal.
+  // Every answer of this route carries the request's CORS headers (review passes 2 and 3): without `req`, json()
+  // answers `Access-Control-Allow-Origin: null` under an allowlist, and a browser client can read neither a page nor
+  // a refusal. The file's other routes still answer that way — SMD-2079.
   if (query.length < 2) return json({ error: "query must be at least 2 characters" }, 400, req);
   const window = dateWindow(startDate, endDate);
   if ("error" in window) return json({ error: window.error }, 400, req);
@@ -557,7 +558,7 @@ async function handleSearch(req: Request): Promise<Response> {
       }));
 
     return json({ results, count: results.length, total: totalCount, page, per_page: limit,
-      total_pages: Math.ceil(totalCount / limit), mode: "text" });
+      total_pages: Math.ceil(totalCount / limit), mode: "text" }, 200, req);
   }
 
   // Semantic search (default): match_thoughts returns the top-N by similarity; the tier and the date bounds are
@@ -588,7 +589,7 @@ async function handleSearch(req: Request): Promise<Response> {
     };
   });
 
-  return json({ results, count: results.length, total: results.length, page: 1, per_page: limit, total_pages: 1, mode: "semantic" });
+  return json({ results, count: results.length, total: results.length, page: 1, per_page: limit, total_pages: 1, mode: "semantic" }, 200, req);
 }
 
 // ── Capture ─────────────────────────────────────────────────────────────────
