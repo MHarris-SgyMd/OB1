@@ -2,8 +2,8 @@
 
 [`FORK.md`](../FORK.md) is the front door: the pin, what the fork is for, the
 version scheme, changes 1–17 as a table, the standing sections, and a generated
-index of everything here. The record of every change from 18 on is one file in
-this directory, in one of two states:
+index of the numbered files here. The record of every change from 18 on is one
+file in this directory, in one of two states:
 
 - **`NNN-<slug>.md` — a numbered change.** The change number is the one code
   comments cite as "FORK.md change N" and `db/README.md`'s migration map cites as
@@ -13,8 +13,11 @@ this directory, in one of two states:
   It has no change number yet; the release step assigns one when it assembles a
   release, turning the fragment into `NNN-<slug>.md` in merge order. So a merge of
   `main` while a PR is in review renumbers nothing, and two PRs never collide on a
-  number. The index lists fragments by ticket under "landed since the last
-  release".
+  number. A fragment needs no FORK.md edit: the index lists numbered files
+  alone and says, in one fixed sentence, that the `smd-*.md` files here are
+  what has landed since the last release — so two PRs that each add a fragment
+  never conflict on FORK.md. The index is the release step's to move
+  (SMD-2084).
 
 Until SMD-1917 these were `### N.` sections of one 1.2 MB, 17,700-line FORK.md
 that no context window could hold whole, numbered by hand at PR time and
@@ -77,7 +80,9 @@ ten, and may only shrink: a listed
 file that fits under the cap fails until its entry is dropped, and a listed file
 that grows past its ceiling fails.
 [`102-…`](102-every-knob-the-server-reads-reaches.md) is the first record cut to
-the shape (470 lines to 119); [`smd-1917.md`](smd-1917.md) is the second.
+the shape (470 lines to 119);
+[`108-…`](108-fork-md-is-the-front-door-and-every-change.md), SMD-1917's own
+record, is the second.
 
 ## At a release
 
@@ -114,7 +119,8 @@ FORK.md`. Git does not follow a split of one file into eighty-five, so
 contiguous numbers, the `# N.` heading matching the name, the line cap and its
 ratchet, FORK.md under its byte ceiling and carrying no numbered section at any
 heading level, the index between FORK.md's markers equal to what
-`scripts/fork-index.ts` renders from this directory, and every "FORK.md change
+`scripts/fork-index.ts` renders from this directory's numbered files (a
+fragment changes nothing there), and every "FORK.md change
 N" / "FORK change N" / `changes/NNN` / "NNN change M" citation in a file git
 tracks or would track — and every "change N" in the record itself — naming a
 number with a file (or a row of the 1–17 table). Check 16 holds the fragment

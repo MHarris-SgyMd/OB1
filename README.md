@@ -141,11 +141,11 @@ Plain-text skill packs you can drop into Claude Code, Codex, or other AI clients
 
 ### [`/dashboards`](dashboards/) — Frontend Templates
 
-Host on Vercel or Netlify, pointed at your Supabase backend. Two community-built options — pick the framework you prefer.
+Host on Vercel or Netlify, pointed at your Open Brain server and signed into with one of its access keys. Two community-built options — pick the framework you prefer.
 
 | Dashboard | What It Does | Contributor |
 | --------- | ------------ | ----------- |
-| [Open Brain Dashboard](dashboards/open-brain-dashboard/) | SvelteKit dashboard with MCP proxy and Supabase auth | [@headcrest](https://github.com/headcrest) |
+| [Open Brain Dashboard](dashboards/open-brain-dashboard/) | SvelteKit dashboard with MCP proxy; sign in with one of the server's access keys | [@headcrest](https://github.com/headcrest) |
 | [Open Brain Dashboard (Next.js)](dashboards/open-brain-dashboard-next/) | Full-featured Next.js dashboard — 8 pages, dark theme, smart ingest, quality auditing | [@alanshurafa](https://github.com/alanshurafa) |
 
 ### [`/integrations`](integrations/) — New Connections

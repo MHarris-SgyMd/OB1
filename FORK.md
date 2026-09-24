@@ -93,8 +93,10 @@ section and its cross-references. A PR ships a fragment, `changes/smd-NNNN.md`
 and a `## FORK` body), with no change number; the release step assigns the
 numbers once, at assembly, writing each fragment as the next
 `changes/NNN-<slug>.md` in merge order and regenerating the index below
-(SMD-1804, SMD-1917). Changes 1–103 keep their numbers — the code comments cite
-them — as the table and the files they are.
+(SMD-1804, SMD-1917). A fragment needs no edit to this file: the index lists
+numbered changes alone, so adding a fragment never moves it — a cut does, or a
+numbered record's retitle (SMD-2084). Changes 1–103 keep their numbers — the
+code comments cite them — as the table and the files they are.
 
 `CHANGELOG.md` (root, **Keep a Changelog 1.1.0**) is the short page beside this
 design record: `## [Unreleased]` first, one dated section per release with entries
@@ -287,7 +289,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 133 | [Shim everywhere](changes/133-shim-everywhere.md) | SMD-1798 |
 | 134 | [Entity extraction sent the whole thought in one unbounded call](changes/134-entity-extraction-sent-the-whole-thought-in-one.md) | SMD-1879 |
 
-Landed since the last release and numbered at the next one (SMD-1804): [SMD-1296](changes/smd-1296.md), [SMD-1713](changes/smd-1713.md), [SMD-1799](changes/smd-1799.md), [SMD-1800](changes/smd-1800.md), [SMD-1867](changes/smd-1867.md), [SMD-1875](changes/smd-1875.md), [SMD-1958](changes/smd-1958.md), [SMD-1960](changes/smd-1960.md), [SMD-1982](changes/smd-1982.md), [SMD-1986](changes/smd-1986.md), [SMD-1994](changes/smd-1994.md), [SMD-1998](changes/smd-1998.md), [SMD-2012](changes/smd-2012.md), [SMD-2041](changes/smd-2041.md), [SMD-2059](changes/smd-2059.md), [SMD-2072](changes/smd-2072.md).
+Changes landed since the last release, if any, are the [`changes/smd-*.md`](changes/) files, numbered at the next cut (SMD-1804).
 <!-- changes-index:end -->
 
 ### Files we own
@@ -415,7 +417,7 @@ db/test-support.ts               # change 100 (createAssert gains total()/skippe
 db/test-schema.ts, db/test-live.ts # change 100 (each holds db/README.md's quoted assertion total to the run's own; test-live only on a full run)
 scripts/check-fork-consistency.ts # change 100 (grant privileges per group [SMD-1471]; every migration documented once and the count checked; tools.json round-tripped against tools.ts [SMD-1805])
 changes/                         # SMD-1917 (new dir — one file per change from 18 on: NNN-<slug>.md once numbered, smd-NNNN.md until the release step numbers it; a fixed shape and a 150-line cap)
-scripts/fork-index.ts            # SMD-1917 (new file — renders FORK.md's index from changes/; check 15 round-trips it; the release step calls it)
+scripts/fork-index.ts            # SMD-1917 (new file — renders FORK.md's index from changes/; check 15 round-trips it; the release step calls it); SMD-2084 (the numbered files alone — a fragment moves nothing in FORK.md)
 db/config.mjs                    # change 100 (grantRows() — every ROLE_GRANTS row undeduped, for the per-group privilege check)
 db/README.md                     # change 100 (the applied-migration count stated as a digit so the check can read it)
 docs/01-getting-started.md       # fix 6
@@ -805,9 +807,11 @@ Deliberate. Recorded so nobody assumes they were missed.
 - **`claude-issue-triage.yml`** feeds untrusted issue bodies to an agent holding
   `issues: write`; **`discord-announce.yml`** declares no `permissions:` block.
   Neither is reachable in a fork that has those workflows disabled.
-- **Three overlapping dashboards** (`open-brain-dashboard`, `-next`, `-pro`) with
-  different auth and env models. Nothing says which is canonical. Pick one before
-  depending on any.
+- **Three overlapping dashboards** (`open-brain-dashboard`, `-next`, `-pro`).
+  All three sign in with one of the server's access keys sealed in a cookie
+  (SMD-1801 brought the SvelteKit one to the shape the Next two had), but the
+  first speaks MCP to the server and the other two speak to the `open-brain-rest`
+  gateway, and nothing says which is canonical. Pick one before depending on any.
 - **`sensitivity-tiers` does not exist.** Both Next dashboards, the
   `weekly-digest` recipe and its code reference it as a primitive.
   [PR #110](https://github.com/NateBJones-Projects/OB1/pull/110) was closed
@@ -838,10 +842,11 @@ Deliberate. Recorded so nobody assumes they were missed.
   real Postgres, and CI checks every migrated file still parses and that the
   codemod round-trips byte-for-byte — but exercise the ones you actually run
   before trusting them.
-- **One file still needs a human.** The dashboard's type-only supabase-js
-  import (SMD-1801's); the six servers that used resource embedding and nested
-  `.or()` moved with SMD-1798. Run `bun scripts/migrate-to-sql-shim.ts` for
-  the current list and the reason.
+- **No file imports supabase-js at runtime any more.** The six servers that
+  used resource embedding and nested `.or()` moved with SMD-1798; the
+  dashboard's type-only import went with its Supabase sign-in (SMD-1801). Check
+  22 holds the tree there; `bun scripts/migrate-to-sql-shim.ts` lists what a
+  rebase brings back and why.
 - **`CLAUDE.md` and `AGENTS.md` disagree** — a duplicated worktrees block, then
   divergent content, and `AGENTS.md` mandates updating a private tracker.
   [PR #274](https://github.com/NateBJones-Projects/OB1/pull/274) proposed the

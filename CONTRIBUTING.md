@@ -279,18 +279,19 @@ The fork is versioned `MAJOR.MINOR.PATCH+upstream.<sha>` — the rules are in
 opposed to a vendored contribution, records itself as a **release fragment** rather
 than by editing a hand-numbered FORK.md section:
 
-- **Every PR that touches `db/migrations/`, `server-portable/` or `evals/` ships a
+- **Every PR that touches `db/migrations/`, `server-portable/`, `evals/` or `jev/` ships a
   fragment**, `changes/smd-NNNN.md` (see [`changes/README.md`](changes/README.md)
   for the shape). It carries the Keep a Changelog `type`, the `bump` the change
   deserves (a `patch` may not add a migration — a migration is at least a MINOR),
   the tickets and migrations it touches, a one-to-three-line changelog entry, and
   the record itself in the shape `changes/README.md` gives — at most 150 lines,
   citing tickets, migrations and existing change numbers, never a number of its
-  own, which the release step assigns. CI holds this: the `Repo consistency`
-  job's landing check (`scripts/check-landing.ts`) refuses a PR whose change in
-  those directories, test files (`test-*.ts`, `*.test.ts`) and Markdown aside,
-  comes with no fragment added or modified; the refusal names the files that
-  asked (SMD-1857). The one landing that passes without a fragment is a release
+  own, which the release step assigns. A fragment needs no edit to FORK.md's
+  index, which lists numbered changes alone (SMD-2084). CI holds this: the
+  `Repo consistency` job's landing check (`scripts/check-landing.ts`) refuses a
+  PR whose change in those directories, test files (`test-*.ts`, `*.test.ts`)
+  and Markdown aside, comes with no fragment added or modified; the refusal
+  names the files that asked (SMD-1857). The one landing that passes without a fragment is a release
   cut, which records itself in `releases.json` instead (SMD-1860).
 - The release step assembles the accumulated fragments into numbered change
   files (`changes/NNN-<slug>.md`), FORK.md's index and `CHANGELOG.md` in one

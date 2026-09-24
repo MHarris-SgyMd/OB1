@@ -100,8 +100,10 @@
  *      group, a decimal, a date or a number before a unit word excluded, and a
  *      slugged path (or a relative link inside the record) naming the file as
  *      it is. A changes/smd-NNNN.md fragment (16) is held to the name and the
- *      cap here, and listed in the index by ticket until the release step
- *      numbers it (SMD-1917)
+ *      cap here, and is not in the index: the block renders from the numbered
+ *      files alone, so a PR that adds a fragment leaves FORK.md untouched and
+ *      the block moves when a numbered file does — at a release cut or a
+ *      retitle (SMD-1917, SMD-2084)
  *  16. every changes/smd-NNNN.md fragment is well-formed — one of Keep a
  *      Changelog's six types, a bump the migrations it lists allow (a `patch`
  *      that ships a migration fails), an SMD-#### ticket list; exactly one
@@ -371,10 +373,18 @@ function checkDeps(meta: Metadata | undefined, { rel }: ContribDir) {
 /** Repo-relative path with `/` separators on every OS, so it can be a key. */
 const relOf = (file: string) => relative(ROOT, file).split(sep).join("/");
 
+/**
+ * Directories no check reads: the repo's own machinery, and the build output a
+ * dashboard leaves behind (`.vercel/output`, `.svelte-kit/output`, `.next` —
+ * gitignored, and a SvelteKit server bundle carries the shell spawn check 6
+ * flags; the README's `bun run build` before its smoke made that a routine
+ * false FAIL on a contributor's tree, SMD-1801's first review pass).
+ */
+const UNREAD_DIRS = new Set([".git", "node_modules", ".claude", ".vercel", ".svelte-kit", ".next", ".output", ".netlify"]);
 function walk(dir: string, out: string[] = [], match = /\.(sql|md)$/) {
   for (const name of readdirSync(dir)) {
     // .claude holds this repo's agent worktrees — whole copies of the tree.
-    if (name === ".git" || name === "node_modules" || name === ".claude") continue;
+    if (UNREAD_DIRS.has(name)) continue;
     const p = join(dir, name);
     const s = statSync(p);
     if (s.isDirectory()) walk(p, out, match);
@@ -1588,7 +1598,7 @@ const THOUGHT_WRITE_EXCEPTIONS = new Map([
   ["recipes/vercel-neon-telegram/src/lib/db.ts", OWN_DATABASE("its own Neon database, built by sql/001-create-thoughts.sql")],
   ["recipes/schema-aware-routing/index.ts", OWN_DATABASE("its own five-table project, built by its README's SQL (a `thoughts` with domain/status/source columns)")],
   // The fixtures: a row as an older write left it — fingerprint and label by hand — for the writer under test to move, and a restricted twin for the search tools to hide.
-  ["extensions/test-writes.ts", { why: "plants a thought as an older write left it, fingerprint and label supplied by hand, for the writer under test to move whole; and a restricted twin at a captured thought's vector, the row the three search tools must not show (SMD-1986)", lines: 2 }],
+  ["extensions/test-writes.ts", { why: "plants a thought as an older write left it, fingerprint and label supplied by hand, for the writer under test to move whole; and a restricted twin at a captured thought's vector (plantRestricted, once for both servers), the row no search may show — enhanced-mcp's three tools (SMD-1986), rest-api's POST /search (SMD-2054)", lines: 2 }],
 ]);
 
 function checkThoughtWritesAround() {
@@ -2089,7 +2099,7 @@ function documentedEnvKnobs(pattern: RegExp) {
 /** compose file under deploy/ → the services that publish one mapping each from it. */
 const PUBLISHES: Record<string, string[]> = {
   "compose.yaml": ["server"],
-  "compose.host-ports.yaml": ["postgres", "ollama"],
+  "compose.host-ports.yaml": ["postgres", "ollama", "jev"],
   // The three-brain pipeline (SMD-1806): each tier's server on its own loopback
   // port; the three Postgres services and the shared Ollama publish nothing.
   "compose.tiers.yaml": ["stable-server", "canary-server", "working-server"],
@@ -3322,7 +3332,7 @@ function forkLayoutProblems({ entries, forkText, citations = [], ceilings = OVER
   const prose = span ? forkText.slice(0, span.s) + forkText.slice(span.e) : forkText;
   const bytes = Buffer.byteLength(prose, "utf8");
   if (bytes > forkCeiling) at("FORK.md", "fork-oversize", `is ${bytes} bytes outside the generated index; the front door stays under ${forkCeiling} — a change's record belongs in its file under ${CHANGES_DIR}/, not here`);
-  if (span && forkText.slice(span.s, span.e) !== "\n" + renderIndex(changes)) at("FORK.md", "index-stale", `the index between the markers is not what ${CHANGES_DIR}/ renders to — run \`bun scripts/fork-index.ts\``);
+  if (span && forkText.slice(span.s, span.e) !== "\n" + renderIndex(numbered)) at("FORK.md", "index-stale", `the index between the markers is not what ${CHANGES_DIR}/ renders to — run \`bun scripts/fork-index.ts\``);
   for (const c of citations) {
     if (c.n < 1 || (c.n >= FIRST_FILED && !byN.has(c.n)) || (c.name && c.n < FIRST_FILED)) at(c.where, "dangling", `cites change ${c.n}${c.name ? ` as ${CHANGES_DIR}/${c.name}` : ""}, which has no file under ${CHANGES_DIR}/ (1–${FIRST_FILED - 1} are FORK.md's table; the highest with a file is ${hi}) — a renumber left this behind, or the file is missing`);
     else if (c.name && byN.get(c.n)!.name !== c.name) at(c.where, "dangling", `cites ${CHANGES_DIR}/${c.name}, and change ${c.n}'s file is ${CHANGES_DIR}/${byN.get(c.n)!.name} — the file was renamed under the link`); // has(c.n) held by the branch above
@@ -3332,7 +3342,7 @@ function forkLayoutProblems({ entries, forkText, citations = [], ceilings = OVER
 
 const LAYOUT_ENTRIES = (...files: [string, string | null][]): ChangeEntry[] => files.map(([name, text]) => ({ name, text }));
 const CH = (n: number, title = "A thing — a consequence (SMD-1)", body = "Body.\n"): [string, string] => [`${String(n).padStart(3, "0")}-a-thing.md`, `# ${n}. ${title}\n\n${body}`];
-const FORK_FOR = (entries: ChangeEntry[], extra = "") => `# FORK\n\nintro\n\n${INDEX_START}\n${renderIndex(classifyChanges(entries))}${INDEX_END}\n\ntail\n${extra}`;
+const FORK_FOR = (entries: ChangeEntry[], extra = "") => `# FORK\n\nintro\n\n${INDEX_START}\n${renderIndex(classifyChanges(entries).numbered)}${INDEX_END}\n\ntail\n${extra}`;
 const LONG = "line\n".repeat(200);
 const LAYOUT_PROBES: [string, () => LayoutArgs, string[]][] = [
   // [label, args, expected kinds]
@@ -3362,7 +3372,9 @@ const LAYOUT_PROBES: [string, () => LayoutArgs, string[]][] = [
   ["a numbered file below 18", () => { const en = LAYOUT_ENTRIES(CH(18), ["005-below.md", "# 5. Below (SMD-1)\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["below-first"]],
   ["a dotfile the OS left", () => { const en = LAYOUT_ENTRIES(CH(18), [".DS_Store", "x"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, []],
   ["two fragments for one ticket", () => { const en = LAYOUT_ENTRIES(CH(18), ["smd-9.md", "---\n"], ["smd-09.md", "---\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["duplicate-fragment"]],
-  ["a stale index", () => { const en = LAYOUT_ENTRIES(CH(18), CH(19)); return { entries: en, forkText: FORK_FOR(en.slice(0, 1)), ceilings: {} }; }, ["index-stale"]],
+  ["a stale index (a numbered file added, FORK.md untouched)", () => { const en = LAYOUT_ENTRIES(CH(18), CH(19)); return { entries: en, forkText: FORK_FOR(en.slice(0, 1)), ceilings: {} }; }, ["index-stale"]],
+  // A PR adds a fragment and nothing else; FORK.md is as main left it (SMD-2084).
+  ["a fragment added, FORK.md untouched", () => { const en = LAYOUT_ENTRIES(CH(18), ["smd-9.md", "---\n"]); return { entries: en, forkText: FORK_FOR(en.slice(0, 1)), ceilings: {} }; }, []],
   ["a citation above the highest", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 19 }] }; }, ["dangling"]],
   ["a citation of change 0", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 0 }] }; }, ["dangling"]],
   ["a citation of a gapped number", () => { const en = LAYOUT_ENTRIES(CH(18), CH(20)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 19 }] }; }, ["gap", "dangling"]],
@@ -3370,7 +3382,7 @@ const LAYOUT_PROBES: [string, () => LayoutArgs, string[]][] = [
   ["a path citation of a table change (no file can exist)", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.md:1", n: 5, name: "005-below.md" }] }; }, ["dangling"]],
 ];
 
-const SKIP_DIRS = new Set([".git", "node_modules", ".planning", ".cf-out", ".claude", "dist", "build", ".wrangler"]);
+const SKIP_DIRS = new Set([...UNREAD_DIRS, ".planning", ".cf-out", "dist", "build", ".wrangler"]);
 /**
  * Every text file a citation can live in: what git tracks plus what it would
  * track (untracked, not ignored) — so a change file not yet added is read, and a
@@ -3742,7 +3754,7 @@ await checkVersionModule();
  * `server-portable` is the reference: the others import its files, so its
  * pins are the ones a second copy would collide with.
  */
-const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals", "scripts"];
+const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals", "scripts", "jev"];
 const TYPE_PINS = ["@types/bun", "typescript", "@types/node"];
 const WORKFLOW = ".github/workflows/fork-checks.yml";
 const TSC_STEP = /^\s*bunx tsc --noEmit\s*$/;
@@ -4419,10 +4431,11 @@ checkDestructiveSql();
 // `// ob1-original-import:` record is a comment; a README's sample is prose,
 // SMD-1802's), is a hit, whatever statement holds it: an import, a type-only
 // import, a require, a dynamic import. Counted per-file exceptions, as check 7
-// counts them: the dashboard's type-only import (SMD-1801's); the one client
-// the codemod's KEEP list held on supabase-js — local-brain-no-mcp's, inside
-// that recipe's own Supabase stack — left with the recipe (SMD-1800). Every
-// other vendored client moved: the rest in change 74, the last six here.
+// counts them — none today: the dashboard's type-only import went when its
+// Supabase sign-in did (SMD-1801); the one client the codemod's KEEP list held
+// on supabase-js — local-brain-no-mcp's, inside that recipe's own Supabase
+// stack — left with the recipe (SMD-1800). Every other vendored client moved:
+// the rest in change 74, the last six here.
 const SUPABASE_JS_SPECIFIER = /(["'])(?:npm:|jsr:|https?:\/\/[^"'\s]*\/)?@supabase\/supabase-js(?:@[^"'/]*)?(?:\/[^"']*)?\1/g;
 /** Code, and HTML for the inline `<script type="module">` a dashboard's page may carry. */
 const CODE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|svelte|vue|html)$/;
@@ -4447,9 +4460,7 @@ const SUPABASE_JS_PROBES: [string, boolean, boolean?][] = [
   ['<!-- <script>import x from "@supabase/supabase-js";</script> -->\n<a href="https://npmjs.com/package/@supabase/supabase-js">docs</a>\n<script>const y = 1;</script>', false, true],
 ];
 /** file → rule → the reason and the exact hit count; a hit past the count fails, a count no hit reaches fails as stale. */
-const SUPABASE_JS_EXCEPTIONS = new Map<string, Record<string, CountedException>>([
-  ["dashboards/open-brain-dashboard/src/app.d.ts", { "supabase-js": { why: "the dashboard's type-only import: the one client left that reads the brain over PostgREST — SMD-1801 moves it onto the fork's REST API", lines: 1 } }],
-]);
+const SUPABASE_JS_EXCEPTIONS = new Map<string, Record<string, CountedException>>([]);
 /** A markup file's code is its `<script>` bodies: everything else, an HTML comment included, is blanked (newlines kept). */
 const MARKUP_FILE = /\.(html|svelte|vue)$/;
 function scriptBodiesOf(text: string): string {

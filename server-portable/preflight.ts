@@ -28,6 +28,7 @@ import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
+import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
@@ -139,7 +140,6 @@ const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/042_thou
 /** An id no row has: the probes below call a function with it and read the NOT_FOUND it answers, writing nothing. */
 const NOBODY = "00000000-0000-4000-8000-000000000000";
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
-const APPLY_032 = "Apply db/migrations/032_update_thought_provenance.sql.";
 const APPLY_042 = "Apply db/migrations/042_thought_citations.sql.";
 const APPLY_046 = "Apply db/migrations/046_thought_audit_event_shape.sql.";
 const APPLY_042_POSTGREST = `Apply the migrations through db/migrations/042_thought_citations.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
@@ -150,7 +150,6 @@ const APPLY_042_POSTGREST = `Apply the migrations through db/migrations/042_thou
  * (SMD-1193); the 014, 019 and 023 remedies read the ledger the same way.
  */
 const REAPPLY = `The ledger records that migration but the schema installed is older — adopted with --baseline, or a body put there or removed from outside the migrations (an earlier migration re-applied by hand, a vendored schema's CREATE OR REPLACE or DROP; SMD-1250): re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped; a plain run skips a recorded file.`;
-const APPLY_021_POSTGREST = `Apply the migrations through db/migrations/021_embedding_model_per_row.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 const APPLY_032_POSTGREST = `Apply the migrations through db/migrations/032_update_thought_provenance.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 /** PostgREST's wording for a function it cannot resolve — missing, or not at the argument shape sent. */
 const missing = (msg: string) => /could not find the function|does not exist/i.test(msg);
@@ -391,15 +390,37 @@ function probeRemedy(base: string, knob: string): string {
 }
 const TLS_REMEDY = "Serve it over http:// on the box, or trust its issuer for the server (NODE_EXTRA_CA_CERTS=<ca.pem>); NODE_TLS_REJECT_UNAUTHORIZED=0 disables the check for every call the server makes.";
 /**
+ * Whether NO_PROXY / no_proxy exempts this base, by the rule Bun 1.4's fetch
+ * applies (measured by SMD-2050's seventh review pass): `*` exempts every
+ * host; an entry exempts its own host and every subdomain of it, with or
+ * without a leading dot (`internal`, `.internal` and `b.internal` all exempt
+ * `a.b.internal`); an entry with a port exempts only that port. Not matched,
+ * as Bun does not: `*.internal`, CIDR ranges, `localhost` for 127.0.0.1.
+ */
+function noProxyExempts(base: string): boolean {
+  let url: URL;
+  try { url = new URL(base); } catch { return false; }
+  const host = url.hostname.toLowerCase();
+  const port = url.port || (url.protocol === "https:" ? "443" : "80");
+  const entries = [process.env.NO_PROXY, process.env.no_proxy].flatMap((v) => (v ?? "").split(",")).map((e) => e.trim().toLowerCase()).filter(Boolean);
+  return entries.some((entry) => {
+    if (entry === "*") return true;
+    const at = entry.lastIndexOf(":");
+    const [name, wantPort] = at > 0 && /^\d+$/.test(entry.slice(at + 1)) ? [entry.slice(0, at), entry.slice(at + 1)] : [entry, null];
+    const bare = name.replace(/^\./, "");
+    return (host === bare || host.endsWith(`.${bare}`)) && (wantPort === null || wantPort === port);
+  });
+}
+/**
  * The proxy variable Bun's fetch reads for this base — HTTP_PROXY/http_proxy
- * for http, HTTPS_PROXY/https_proxy for https — or null. Loopback and private
- * addresses go through it too unless NO_PROXY names them, and so does every
- * call the server makes, so a failure here is the route's before it is the
- * endpoint's; podman forwards the host's proxy variables into containers by
- * default (fifth review pass). Whether NO_PROXY exempts the host is Bun's
- * rule to apply, so the text says "unless" rather than deciding.
+ * for http, HTTPS_PROXY/https_proxy for https — or null, also when NO_PROXY
+ * exempts the base (noProxyExempts). Loopback and private addresses go
+ * through it too unless exempted, and so does every call the server makes, so
+ * a failure here is the route's before it is the endpoint's; podman forwards
+ * the host's proxy variables into containers by default (fifth review pass).
  */
 function proxyKnobFor(base: string): string | null {
+  if (noProxyExempts(base)) return null;
   const names = base.startsWith("https:") ? ["HTTPS_PROXY", "https_proxy"] : ["HTTP_PROXY", "http_proxy"];
   return names.find((n) => process.env[n]) ?? null;
 }
@@ -3120,6 +3141,90 @@ if (deep) {
     } catch (e) {
       add(row, "fail", `${model} at ${chatEndpoint.base}: ${(e as Error).message}`,
           `Network reachability to ${hostOf(chatEndpoint.base)}. ${consequence}`);
+    }
+  }
+}
+
+// ── Optional: the typed-decision tier (SMD-2050) ─────────────────────────────
+
+// Off unless OB1_JEV_BASE_URL is set. Set, the tier is dialled on every run,
+// not only under --deep: GET /info sends no text and costs no model call, and
+// a wrong or unreachable URL then fails here rather than at the first spike's
+// first decision. --deep also makes one decision, through the client and its
+// egress gate, and checks the answer's shape.
+const jevCfg = resolveJevConfig(env);
+if (!jevCfg) {
+  add("jev tier", "skip", "OB1_JEV_BASE_URL is unset — the typed-decision tier is off (nothing the server does needs it)");
+} else {
+  // SMD-1875's rules for a probed endpoint, followed here (the merge review):
+  // the base shown masked, since this row runs on every start; the name
+  // resolved before it is dialled; the failure in probeFailure's words.
+  const base = jevCfg.endpoint.base;
+  const at = maskUrl(base);
+  const masked = (message: string) => message.split(base).join(at);
+  const START = "Start it — compose --profile jev, reached as http://jev:8020, or bun jev/serve.ts on the host, reached as http://127.0.0.1:8020 from a checkout and from a container as http://host.containers.internal:8020 under podman machine or http://host.docker.internal:8020 under Docker Desktop (serve.ts binds loopback, which rootless podman and Docker on Linux do not reach: the profile is the route there) — fix OB1_JEV_BASE_URL, or unset it to turn the tier off.";
+  const host = hostnameOf(base);
+  // The stack's own service name resolves only while the service runs: the
+  // profile is down, or `compose restart server` ran — which does not start
+  // what the server depends on (fifth review pass: ~5 restarts a second).
+  const NOT_RUNNING = "The jev service is not running: bring the profile up — compose --profile jev up -d (compose restart server does not start it) — or unset OB1_JEV_BASE_URL to turn the tier off.";
+  // It resolves and answers nothing: it runs but does not listen yet — it
+  // listens only after the fetch and the load, ~20 s on a first start — or is
+  // restarting, or the port is not its 8020 (sixth review pass: the
+  // not-running remedy was given here too, and dropped "fix the URL").
+  const NOT_LISTENING = "The jev service is up but not listening: on a first start it fetches the weights (~20 s) before it listens — compose ps shows its health — or it is restarting (compose logs jev), or OB1_JEV_BASE_URL's port is not the service's 8020.";
+  const unresolved = await resolveFirst(host);
+  if (unresolved) {
+    add("jev tier", "fail", `nothing answers at ${at} — ${unresolved.why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)`, host === "jev" ? NOT_RUNNING : START);
+  } else try {
+    const info = await jevInfo(jevCfg, { timeoutMs: LOCAL_PROBE_TIMEOUT_MS });
+    const pins = `${info.model.name} (${info.model.source}@${info.model.revision.slice(0, 8)}, weights ${info.model.weights_sha256.slice(0, 12)}…)`;
+    if (jevCfg.model && info.model.name !== jevCfg.model) {
+      add("jev tier", "fail", `${at} serves ${pins}, and OB1_JEV_MODEL expects ${jevCfg.model}`,
+          `Point OB1_JEV_BASE_URL at the tier serving ${jevCfg.model}, or set OB1_JEV_MODEL=${info.model.name}.`);
+    } else {
+      add("jev tier", "ok", `${at} serves ${pins} — ${info.contract}, ${info.kinds.join(" and ")} decisions, up to ${info.max_options} options, ${info.max_tokens} tokens${jevCfg.model ? " (OB1_JEV_MODEL)" : ""}`);
+    }
+  } catch (e) {
+    // Four answers, worded as the provider rows word them (fifth review pass):
+    // something answered but not as the tier (a status, a redirect, a body
+    // outside the contract — often a base with Ollama's /v1 on it); it
+    // answered with a certificate this runtime does not trust (the tier
+    // serves plain http); nothing answered; and in each, a proxy variable
+    // that routes the call is named, since podman forwards the host's.
+    const err = e as Error & { kind?: string };
+    const failure = err.kind ? null : probeFailure(e); // the connection's own failure, when the client did not name one
+    // An exempt host is dialled direct: the proxy is then not the route, and
+    // not the fix (proxyKnobFor, by Bun's NO_PROXY rule).
+    const proxy = proxyKnobFor(base);
+    const route = proxy ? `; ${proxy} is set, so this call goes through that proxy unless NO_PROXY names ${host}` : "";
+    const viaProxy = proxy ? `Add ${host} to NO_PROXY (and no_proxy) for the server, or unset ${proxy} for it. Otherwise: ` : "";
+    if (err.kind === "http" || err.kind === "body") {
+      add("jev tier", "fail", `${at} answers, but not as the tier: ${masked(err.message)}${route}`,
+          `${viaProxy}Check OB1_JEV_BASE_URL is the tier's base with no path — its routes are /health, /info and /decide (not Ollama's /v1) — and that it names the jev service, not another.`);
+    } else if (failure?.kind === "tls") {
+      add("jev tier", "fail", `${at} answers, but ${failure.why}${route}`,
+          `${viaProxy}The tier serves plain http: use http:// in OB1_JEV_BASE_URL, or trust the issuer of whatever terminates TLS in front of it for the server (NODE_EXTRA_CA_CERTS=<ca.pem>).`);
+    } else {
+      const why = failure ? failure.why : `no HTTP answer in ${LOCAL_PROBE_SECONDS}`;
+      add("jev tier", "fail", `nothing answers at ${at} — ${why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)${route}`, viaProxy + (host === "jev" ? NOT_LISTENING : START));
+    }
+  }
+  egressRow("jev egress", jevCfg.endpoint, "OB1_JEV_LOCAL", "decision",
+            "every decision a spike asks for is refused before it is sent (a ProviderError of kind egress)");
+  if (!deep) {
+    add("jev decision", "skip", "not checked — pass --deep to make one decision");
+  } else if (!results.some((r) => r.name === "jev tier" && r.status === "ok")) {
+    add("jev decision", "skip", "not checked — the jev tier row failed");
+  } else {
+    try {
+      const t0 = performance.now();
+      const probe = await jevDecide(jevCfg, { proposition: "the note is about a preflight check", context: "preflight: checking that the decision tier answers" }, { kind: "decision", actor: "preflight" });
+      add("jev decision", "ok", `one binary decision in ${(performance.now() - t0).toFixed(0)} ms: p ${probe.p === null ? "null" : probe.p.toFixed(3)}, insufficient ${probe.pInsufficient.toFixed(3)}, temperature ${probe.result.temperature} — the answer is a distribution over the decision's options`);
+    } catch (e) {
+      const err = e as Error & { kind?: string };
+      add("jev decision", err.kind === "egress" ? "warn" : "fail", masked(err.message),
+          err.kind === "egress" ? "See the jev egress row." : "The tier answered /info but not /decide in the contract's shape — check its log.");
     }
   }
 }
