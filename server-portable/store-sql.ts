@@ -23,8 +23,8 @@
  */
 
 import { SQL } from "bun";
-import { readDatabaseFacts, setTimeoutCeilings, type DatabaseFacts, type ReadOptions, type ReadProgress } from "./brain-info.ts";
-import { RESOLVE_LOCK_TIMEOUT_MS, RESOLVE_STATEMENT_TIMEOUT_MS } from "./agents.ts";
+import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgress } from "./brain-info.ts";
+import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
   Actor,
@@ -370,18 +370,20 @@ export class SqlStore implements ThoughtStore {
   }
 
   async resolveAgent(opts: { keyHash: string; label: string; scope?: string }): Promise<AgentResolution> {
-    // Its own transaction, so its lock wait and run are capped: resolve_agent
-    // UPDATEs the key's row, and while a migration holds the registry's tables
-    // or a transaction holds that row, an uncapped call held a pool connection
-    // until the lock cleared — K cold keys, K connections (SMD-2072). A
-    // timeout raises, and agents.ts keeps the registry's last answer for the
-    // key, or serves it by name.
-    return this.sql.begin(async (tx) => {
-      await setTimeoutCeilings(tx, RESOLVE_STATEMENT_TIMEOUT_MS, RESOLVE_LOCK_TIMEOUT_MS);
-      const rows = await tx`
-        SELECT resolve_agent(${opts.keyHash}::text, ${opts.label}::text, ${opts.scope ?? null}::text) AS r`;
-      return normaliseAgentResolution(rows[0]?.r);
-    });
+    // Each lock wait capped (RESOLVE_LOCK_TIMEOUT_MS), so a lookup of a locked
+    // registry holds its connection for the cap, not for the lock; the timeout
+    // raises 55P03 and agents.ts answers the key as busy. One statement, no
+    // BEGIN, so a statement-mode pooler passes it: the materialised CTE sets
+    // the ceiling (a stricter setting kept) before resolve_agent — volatile, so
+    // evaluated per row of it — plans its reads, and lock_timeout is read as
+    // each wait begins. set_config's `true` ends it with the statement's
+    // implicit transaction; the pooled connection keeps its own.
+    const rows = await this.sql`
+      WITH cap AS MATERIALIZED (
+        SELECT set_config('lock_timeout', (CASE WHEN s.lt = 0 OR s.lt > ${RESOLVE_LOCK_TIMEOUT_MS}::int THEN ${RESOLVE_LOCK_TIMEOUT_MS}::int ELSE s.lt END)::text, true)
+          FROM (SELECT setting::int AS lt FROM pg_settings WHERE name = 'lock_timeout') s)
+      SELECT resolve_agent(${opts.keyHash}::text, ${opts.label}::text, ${opts.scope ?? null}::text) AS r FROM cap`;
+    return normaliseAgentResolution(rows[0]?.r);
   }
 
   async captureActorOf(id: string): Promise<{ actorName: string | null; agentId: string | null } | null> {

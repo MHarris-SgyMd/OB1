@@ -107,14 +107,16 @@ const CAPTURE_KEY = "hook-" + "c".repeat(59);
 const CAPTURE_KEY_2 = "hook-" + "d".repeat(59);
 // Two named write keys beside them (SMD-1726, [10c]): the server's actor is the
 // key's name, and migration 050 stamps who wrote a thought from it.
-// And more write keys than the pool has connections, none used before [14]'s
-// registry lock (SMD-2072): each is a cold key there.
+// And more write keys than the pool has connections (OB1_PG_POOL, below), none
+// used before [14]'s registry lock (SMD-2072): each is a cold key there.
 const COLD_KEYS = Array.from({ length: 12 }, (_, i) => `cold-${String(i + 1).padStart(2, "0")}`);
 const KEYS_AT_BOOT = `session-hook:capture:${hashKey(CAPTURE_KEY)},hook-two:capture:${hashKey(CAPTURE_KEY_2)},op-key:write:${hashKey("op-raw")},bot-key:write:${hashKey("bot-raw")},${COLD_KEYS.map((k) => `${k}:write:${hashKey(k + "-raw")}`).join(",")}`;
 process.env.MCP_ACCESS_KEYS = KEYS_AT_BOOT;
 // No registry cache: [13] takes resolve_agent away and brings it back, and a
 // principal's agent id must follow at once.
 process.env.OB1_AGENT_CACHE_TTL_MS = "0";
+// The pool at its default, pinned: [14]'s cold keys outnumber it by design.
+process.env.OB1_PG_POOL = "10";
 // The query log (034, SMD-1295) is read once at first request and frozen, as in
 // production (set at boot, not toggled per request). On for the whole suite so
 // [N] can exercise the real write+join path; the OFF guarantee — that the guard
@@ -1183,38 +1185,41 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   await call("thought_stats", {}, "bot-raw"); // registers bot-key in the registry, as any first request does
   await sql`SELECT revoke_agent_key(${hashKey("bot-raw")}, 'SMD-2041 e2e')`;
   assert(await health("bot-raw") === "ok", "a revoked write key → `ok`, not the record");
-  // The registry's tables locked: its lookup's lock wait is capped at 1 s
-  // (SMD-2072), so every key answers well inside the deadline. A key this
-  // process has had an answer for keeps it: the revoked one is still shown
-  // nothing, the good one the record (before the cap, both waited out the
-  // deadline and got `ok`; review pass 2 of SMD-2041: a revoked key read the
-  // whole record while the lock lasted).
+  // The registry's lookup under a lock (SMD-2072). Each lock wait is capped
+  // (agents.ts's RESOLVE_LOCK_TIMEOUT_MS, 250 ms), so every key answers at the
+  // cap rather than at /health's 2.5 s deadline or when the lock clears: a
+  // revocation this process has read stands, and any other key is busy —
+  // refused with a retry, since the registry could still say revoked.
   const lockWaits = async () => (await sql`
     SELECT count(*)::int AS n FROM pg_stat_activity
      WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE '%resolve_agent%'`)[0].n as number;
+  /** An MCP call's outcome under a guard of its own: an uncapped lookup waits for an unlock that comes after it. */
+  const guarded = (p: Promise<string>, ms = 4000) =>
+    Promise.race([p.then(() => "served", (e) => String((e as Error).message)), Bun.sleep(ms).then(() => `no answer in ${ms} ms`)]);
+  const BUSY = /"code":-32003.*Retry in a few seconds/;
   {
     const unlock = await holdLocks("ob1_agents, ob1_agent_keys");
     try {
       const t0 = performance.now();
       const revoked = await health("bot-raw");
       const r1 = performance.now() - t0;
-      const good = await health("op-raw") as Record<string, any>;
+      const good = await health("op-raw");
       const r2 = performance.now() - t0 - r1;
-      assert(revoked === "ok" && r1 < 2000, `with the registry locked, a key it had revoked is still shown nothing, at the lookup's cap and not the deadline (${Math.round(r1)} ms)`);
-      assert(typeof good === "object" && good.version === FORK_VERSION && r2 < 2000, `…and a key it had answered for is shown the record (${typeof good === "object" ? "the record" : JSON.stringify(good)}, ${Math.round(r2)} ms)`);
+      assert(revoked === "ok" && r1 < 1500, `with the registry locked, a key it had revoked is shown nothing, at the lookup's cap and not the deadline (${Math.round(r1)} ms)`);
+      assert(good === "ok" && r2 < 1500, `…and a key it had answered ok for is busy — \`ok\`, not the record (${typeof good === "object" ? "the record" : good}, ${Math.round(r2)} ms)`);
       // A burst of probes with one key shares its one lookup (SMD-2041 review
       // pass 3: ten probes emptied the pool while /health said ok), and each
       // lookup gives up at the cap: none is left waiting on the lock.
       const burst = await sampleWhile(Promise.all(Array.from({ length: 10 }, () => health("op-raw"))), "%resolve_agent%");
-      assert(burst.every((b) => typeof b === "object" && JSON.stringify(b) === JSON.stringify(burst[0])) && burst.maxWaiting === 1,
-        `ten probes of one key during a registry lock share its one lookup (at most ${burst.maxWaiting} waiting on the lock)`);
+      assert(burst.every((b) => b === "ok") && burst.maxWaiting === 1,
+        `ten probes of one key during a registry lock share its one lookup at a time (at most ${burst.maxWaiting} waiting on the lock)`);
       const after = await lockWaits();
       assert(after === 0, `…and no lookup is still waiting on the lock once they have answered (${after})`);
-      // The MCP route likewise: the revoked key is refused while the lock lasts.
-      // Guarded: an uncapped lookup waits for the unlock below, which never came.
-      const refusal = call("thought_stats", {}, "bot-raw").then(() => "served", (e) => String((e as Error).message));
-      const refused = await Promise.race([refusal, Bun.sleep(4000).then(() => "no answer in 4000 ms")]);
-      assert(/revoked/.test(refused), `…and the MCP route still refuses the revoked key (${refused.slice(0, 80)})`);
+      // The MCP route: the revoked key refused as revoked, the other asked to retry.
+      const refused = await guarded(call("thought_stats", {}, "bot-raw"));
+      const retry = await guarded(call("thought_stats", {}, "op-raw"));
+      assert(/has been revoked/.test(refused), `…and the MCP route still refuses the revoked key as revoked (${refused.slice(0, 90)})`);
+      assert(BUSY.test(retry), `…and asks the other to retry, with its own code (${retry.slice(0, 120)})`);
     } finally {
       await unlock();
     }
@@ -1222,40 +1227,52 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
 
   // More cold keys than the pool has connections, each capturing while
   // ob1_agent_keys is locked — ob1_agents stays open, since every write reads
-  // a writer's kind from it (046's audit trigger). Before the cap each lookup
-  // held its connection until the lock cleared: ten of them emptied the pool
-  // and every request stalled, the writes that needed no registry included.
-  // Now each lookup gives up at 1 s and the capture lands attributed by name.
-  // A guard of its own, so a stall fails the assertion rather than the suite.
+  // a writer's kind from it (046's audit trigger). One of them was revoked
+  // before this server ever presented it, straight through the registry. Each
+  // is asked to retry at the cap, none is served — so none writes, the revoked
+  // one included (review pass 1: served by name, it captured) — and none is
+  // left waiting on the lock or on the pool.
   {
+    const revokedCold = COLD_KEYS[COLD_KEYS.length - 1];
+    await sql`SELECT resolve_agent(${hashKey(revokedCold + "-raw")}, ${revokedCold}, 'write')`;
+    await sql`SELECT revoke_agent_key(${hashKey(revokedCold + "-raw")}, 'SMD-2072 e2e')`;
     const unlock = await holdLocks("ob1_agent_keys");
-    let all: Promise<number[]> = Promise.resolve([]);
+    let all: Promise<{ key: string; out: string; ms: number }[]> = Promise.resolve([]);
     try {
       const t0 = performance.now();
-      all = Promise.all(COLD_KEYS.map((k) => call("capture_thought", { content: `SMD-2072 capture by ${k} while the registry is locked` }, `${k}-raw`).then(() => performance.now() - t0)));
-      const took = await Promise.race([all, Bun.sleep(8000).then(() => null)]);
-      assert(took !== null && Math.max(...took) < 5000,
-        `${COLD_KEYS.length} cold keys, more than the pool's connections, each capture while the registry is locked (slowest ${took ? Math.round(Math.max(...took)) : "none answered in 8000"} ms)`);
+      all = Promise.all(COLD_KEYS.map((k) =>
+        guarded(call("capture_thought", { content: `SMD-2072 capture by ${k} while the registry is locked` }, `${k}-raw`), 8000)
+          .then((out) => ({ key: k, out, ms: performance.now() - t0 }))));
+      const outs = await all;
+      const slowest = Math.max(...outs.map((o) => o.ms));
+      const notBusy = outs.filter((o) => !BUSY.test(o.out));
+      assert(notBusy.length === 0 && slowest < 2500,
+        `${COLD_KEYS.length} cold keys, more than the pool's connections, each asked to retry while the registry is locked (slowest ${Math.round(slowest)} ms${notBusy.length ? `; not busy: ${notBusy.map((o) => `${o.key}: ${o.out.slice(0, 60)}`).join(" | ")}` : ""})`);
       const rows = await sql`
-        SELECT actor_name, canonical_agent_id::text AS agent FROM thought_audit
+        SELECT count(*)::int AS n FROM thought_audit
          WHERE action = 'capture' AND actor_name = ANY(${sql.array(COLD_KEYS, "TEXT")}::text[])`;
-      assert(rows.length === COLD_KEYS.length && rows.every((r: { agent: string | null }) => r.agent === null),
-        `…each attributed by its key's name alone (${rows.length} capture rows, ${rows.filter((r: { agent: string | null }) => r.agent !== null).length} with an agent id)`);
+      assert(rows[0].n === 0, `…so none captured, the key revoked before this server saw it included (${rows[0].n} capture rows)`);
       const after = await lockWaits();
       assert(after === 0, `…and no lookup is still waiting on the lock (${after})`);
     } finally {
       await unlock();
       await all.catch(() => {});
     }
-    // Once the lock clears the registry answers again: a cold key gets its id.
-    await call("thought_stats", {}, `${COLD_KEYS[0]}-raw`);
-    const [reg] = await sql`SELECT count(*)::int AS n FROM ob1_agent_keys WHERE key_hash = ${hashKey(COLD_KEYS[0] + "-raw")}`;
-    assert(reg.n === 1, "…and once the lock clears, a cold key is registered on its next request");
+    // Once the lock clears the registry answers again: the revoked key is
+    // refused as revoked, a cold key captures under its agent id.
+    const refused = await guarded(call("thought_stats", {}, `${revokedCold}-raw`));
+    assert(/has been revoked/.test(refused), `…and once the lock clears, the key revoked before this server saw it is refused as revoked (${refused.slice(0, 80)})`);
+    await call("capture_thought", { content: `SMD-2072 capture by ${COLD_KEYS[0]} once the registry answers` }, `${COLD_KEYS[0]}-raw`);
+    const [cap] = await sql`
+      SELECT a.canonical_agent_id::text AS agent, k.canonical_agent_id::text AS registered
+        FROM thought_audit a JOIN ob1_agent_keys k ON k.key_hash = ${hashKey(COLD_KEYS[0] + "-raw")}
+       WHERE a.action = 'capture' AND a.actor_name = ${COLD_KEYS[0]}`;
+    assert(cap?.agent != null && cap.agent === cap.registered, `…and a cold key captures under the agent id the registry gave it (${cap?.agent ?? "none"})`);
   }
 
   // A transaction holding the keys' rows, not the tables: a revoked key is
-  // refused at once, since its revocation is read before the UPDATE that
-  // waits; a good key's UPDATE waits out the cap and it keeps its last answer.
+  // refused at once, since resolve_agent reads its revocation before the
+  // UPDATE that waits; a good key's UPDATE waits out the cap and it is busy.
   {
     const locker = new SQL({ url: URL_, max: 1 });
     let release: () => void = () => {};
@@ -1270,12 +1287,12 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     await isLocked;
     try {
       const t0 = performance.now();
-      const revoked = await health("bot-raw");
+      const revoked = await guarded(call("thought_stats", {}, "bot-raw"));
       const r1 = performance.now() - t0;
-      const good = await health("op-raw") as Record<string, any>;
+      const good = await guarded(call("thought_stats", {}, "op-raw"));
       const r2 = performance.now() - t0 - r1;
-      assert(revoked === "ok" && r1 < 500, `with the keys' rows held, a revoked key is refused without waiting (${Math.round(r1)} ms)`);
-      assert(typeof good === "object" && r2 >= 900 && r2 < 2000, `…and a good key's lookup waits out the 1 s cap and it keeps its last answer (${Math.round(r2)} ms)`);
+      assert(/has been revoked/.test(revoked) && r1 < 500, `with the keys' rows held, a revoked key is refused as revoked without waiting (${Math.round(r1)} ms)`);
+      assert(BUSY.test(good) && r2 >= 200 && r2 < 1500, `…and a good key's lookup waits out the 250 ms cap and is asked to retry (${Math.round(r2)} ms)`);
     } finally {
       release();
       await tx;

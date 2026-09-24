@@ -349,12 +349,17 @@ that does not answer is named in `unread` with its reason (`refused`,
 are kept, and a database whose catalog has not answered by then is
 `database.error`. Concurrent probes share one read, and requests of one key share
 one agent-registry lookup (at /health and the MCP route alike), so a burst during
-a migration holds one connection for the read and one per distinct key, each
-for at most the lookup's 1 s lock wait (SMD-2072: its statement is capped at 2 s
-and its lock wait at 1 s, as ceilings; a lookup that times out is served as for
-an unreachable database, except that a key this process has had an answer for
-keeps it — its agent id, or its revocation). Without a key, with a wrong
-or capture-only key, or with a revoked one — or while the agent registry has
+a migration holds one connection for the read and one per distinct key. Each
+of the lookup's lock waits is capped at 250 ms (a ceiling; a lookup waits two
+or three times at most), so a lookup of a locked `ob1_agent_keys` gives up at
+about the cap — more keys than the pool holds queue for it, in rounds of
+about the cap — and the key is then **busy**: the MCP route refuses it with
+JSON-RPC error `-32003` ("retry in a few seconds"), since the registry could
+still say revoked, and a revocation this process has already read stands
+through any failure until the registry answers otherwise (SMD-2072). A lock on
+`ob1_agents` stalls every write regardless: 046's audit trigger reads a
+writer's kind there. Without a key, with a wrong
+or capture-only key, with a revoked one or a busy one — or while the agent registry has
 not answered by the deadline, since it could still say revoked — the body is
 the literal `ok`, so nothing about the deployment reaches an unauthenticated
 probe; a `HEAD`, keyed or not, is the bodiless `ok` and reads nothing. Point a

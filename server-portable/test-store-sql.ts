@@ -662,6 +662,53 @@ console.log("\n[14] listChanges: one page of the log from a cursor, the actions 
   await sql.close();
 }
 
+console.log("\n[15] resolveAgent caps each lock wait in its own statement — 55P03 at the cap, a stricter setting kept, nothing left on the connection (SMD-2072)");
+{
+  // One connection, so the statements after a lookup run where it ran.
+  const one = new SqlStore(URL_, { max: 1 });
+  const conn = (one as unknown as { sql: SQL }).sql;
+  const hash = "e".repeat(64);
+  const setting = async () => (await conn`SELECT current_setting('lock_timeout') AS lt`)[0].lt as string;
+  const ok = await one.resolveAgent({ keyHash: hash, label: "store-sql-2072", scope: "write" });
+  assert(ok.ok === true, `an unlocked registry answers (${JSON.stringify(ok).slice(0, 60)})`);
+  assert(await setting() === "0", "the lookup's ceiling ends with its statement: the connection's lock_timeout is its own (0) afterwards");
+
+  const locker = new SQL({ url: URL_, max: 1 });
+  let release: () => void = () => {};
+  const held = new Promise<void>((r) => { release = r; });
+  let locked: () => void = () => {};
+  const isLocked = new Promise<void>((r) => { locked = r; });
+  const tx = locker.begin(async (t) => {
+    await t`LOCK TABLE ob1_agent_keys IN ACCESS EXCLUSIVE MODE`;
+    locked();
+    await held;
+  });
+  await isLocked;
+  try {
+    const timed = async () => {
+      const t0 = performance.now();
+      let err: { errno?: string; message?: string } = {};
+      try { await one.resolveAgent({ keyHash: hash, label: "store-sql-2072", scope: "write" }); } catch (e) { err = e as typeof err; }
+      return { errno: err.errno, message: err.message, ms: performance.now() - t0 };
+    };
+    const capped = await timed();
+    assert(capped.errno === "55P03" && capped.ms >= 200 && capped.ms < 1000,
+      `with ob1_agent_keys locked, the lookup raises lock_timeout's 55P03 at the 250 ms cap (${capped.errno}, ${Math.round(capped.ms)} ms: ${capped.message})`);
+    assert(await setting() === "0", "…and the connection is healthy after it, its lock_timeout its own");
+    // A stricter setting already on the connection is kept, not raised.
+    await conn`SET lock_timeout = '80ms'`;
+    const stricter = await timed();
+    assert(stricter.errno === "55P03" && stricter.ms < 200, `a stricter lock_timeout (80 ms) is kept, not raised to the cap (${Math.round(stricter.ms)} ms)`);
+    assert(await setting() === "80ms", `…and is still the connection's afterwards (${await setting()})`);
+    await conn`RESET lock_timeout`;
+  } finally {
+    release();
+    await tx;
+    await locker.close();
+  }
+  await one.close();
+}
+
 await store.close();
 
 report();

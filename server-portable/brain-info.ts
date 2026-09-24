@@ -42,22 +42,6 @@ export type SqlClient = SqlTag & { begin<T>(fn: (tx: SqlTx) => Promise<T>): Prom
 export const READ_STATEMENT_TIMEOUT_MS = 5_000;
 export const READ_LOCK_TIMEOUT_MS = 1_000;
 
-/**
- * Cap the transaction's statement and lock timeouts, in ms. Ceilings, not
- * settings: 0 (no limit) or a looser value is lowered to the cap, a stricter
- * one kept; local to the transaction (set_config's `true`), so the pooled
- * connection keeps the role's own afterwards. pg_settings.setting is in ms for
- * both. The facts read's, and the agent registry's lookup (store-sql.ts,
- * SMD-2072).
- */
-export async function setTimeoutCeilings(tx: SqlTag, statementMs: number, lockMs: number): Promise<void> {
-  await tx`
-    SELECT set_config('statement_timeout', (CASE WHEN s.st = 0 OR s.st > ${statementMs}::int THEN ${statementMs}::int ELSE s.st END)::text, true),
-           set_config('lock_timeout', (CASE WHEN s.lt = 0 OR s.lt > ${lockMs}::int THEN ${lockMs}::int ELSE s.lt END)::text, true)
-      FROM (SELECT (SELECT setting::int FROM pg_settings WHERE name = 'statement_timeout') AS st,
-                   (SELECT setting::int FROM pg_settings WHERE name = 'lock_timeout') AS lt) s`;
-}
-
 /** The tables whose row counts the record carries. */
 export const COUNTED_TABLES = ["thoughts", "thought_audit", "thought_chunks", "ob1_entities"] as const;
 export type CountedTable = (typeof COUNTED_TABLES)[number];
@@ -180,7 +164,13 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
   const st = opts.statementTimeoutMs ?? READ_STATEMENT_TIMEOUT_MS;
   const lt = opts.lockTimeoutMs ?? READ_LOCK_TIMEOUT_MS;
   return client.begin(async (tx) => {
-    await setTimeoutCeilings(tx, st, lt);
+    // Ceilings, not settings: 0 (no limit) or a looser value is lowered to the
+    // read's, a stricter one kept. pg_settings.setting is in ms for both.
+    await tx`
+      SELECT set_config('statement_timeout', (CASE WHEN s.st = 0 OR s.st > ${st}::int THEN ${st}::int ELSE s.st END)::text, true),
+             set_config('lock_timeout', (CASE WHEN s.lt = 0 OR s.lt > ${lt}::int THEN ${lt}::int ELSE s.lt END)::text, true)
+        FROM (SELECT (SELECT setting::int FROM pg_settings WHERE name = 'statement_timeout') AS st,
+                     (SELECT setting::int FROM pg_settings WHERE name = 'lock_timeout') AS lt) s`;
 
     // The catalog in one statement: every relation here is readable by any
     // role, and to_regclass and pg_class take no lock a migration holds. A
