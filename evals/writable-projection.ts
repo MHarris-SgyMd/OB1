@@ -162,6 +162,8 @@ export function comparableEvent(e: EventImage): EventImage {
 export type RowImage = {
   content: string;
   content_fingerprint: string | null;
+  /** jsonb_typeof(metadata): a JSON null and an SQL NULL both read as null in JS, and 046 stores the former (first review pass). */
+  metadata_type: string | null;
   metadata: Record<string, unknown> | null;
   supersedes: string | null;
   derived_from: unknown;
@@ -169,7 +171,13 @@ export type RowImage = {
   embedding_model: string | null;
 };
 
-/** The row as a caller sees it, ids and stamps aside (the ids are random, the stamps the run's). */
+/**
+ * The row as a caller sees it: the eight columns of RowImage, which carry no
+ * id (random per run) and no stamp (the run's clock) — so the differential
+ * compares exactly these, and the two named updated_at deltas are outside it
+ * by construction (first review pass: the doc said "set aside" of fields the
+ * image never held).
+ */
 export function comparableRow(r: RowImage): RowImage {
   return { ...r };
 }

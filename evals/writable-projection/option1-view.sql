@@ -74,7 +74,16 @@ BEGIN
     OLD.derived_from, NEW.derived_from,
     OLD.content_fingerprint, v_fp);
   IF v_diff = '{}'::jsonb THEN
-    RETURN NEW;
+    -- No event — but a vector or its label may still have moved (053's
+    -- update_thought re-embedding the same text through the view): a
+    -- projection refresh, as option 2's functions make it. First review
+    -- pass: the row-image probe found the refresh dropped here, the label
+    -- left as it was.
+    IF NEW.embedding IS DISTINCT FROM OLD.embedding OR NEW.embedding_model IS DISTINCT FROM OLD.embedding_model THEN
+      PERFORM ob1_refresh_thought_vector(NEW.id, NEW.embedding, NEW.embedding_model);
+    END IF;
+    SELECT * INTO v_row FROM thought_rows WHERE id = NEW.id;
+    RETURN v_row;
   END IF;
   v_ev := ob1_append_thought_event(NEW.id, 'update', v_meta->>'source', v_diff, NULL);
   IF v_ev IS NOT NULL THEN

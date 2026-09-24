@@ -63,6 +63,10 @@ BEGIN
     PERFORM set_config('ob1.actor', p_payload->>'actor', true);
   END IF;
   v_event := validate_write_event(p_payload->'event');
+  -- 046's anti-inheritance rule, kept: the event rides the append now, and
+  -- the setting a raw write later in this transaction would read is cleared
+  -- here as 046 cleared it before its write (first review pass).
+  PERFORM set_config('ob1.event', '', true);
   v_fingerprint := content_fingerprint_of(p_content);
   -- ob1:capture-takes-fingerprint-lock (033): before the read, so a concurrent
   -- writer of this text has committed before the read runs.
@@ -135,6 +139,10 @@ BEGIN
     PERFORM set_config('ob1.actor', p_payload->>'actor', true);
   END IF;
   v_event := validate_write_event(p_payload->'event');
+  -- 046's anti-inheritance rule, kept: the event rides the append now, and
+  -- the setting a raw write later in this transaction would read is cleared
+  -- here as 046 cleared it before its write (first review pass).
+  PERFORM set_config('ob1.event', '', true);
   v_fingerprint := content_fingerprint_of(p_content);
 
   -- ob1:capture-takes-fingerprint-lock — a CONTRACT SENTINEL (033).
@@ -251,6 +259,7 @@ BEGIN
     PERFORM set_config('ob1.actor', p_actor::text, true);
   END IF;
   v_event := validate_write_event(p_event);
+  PERFORM set_config('ob1.event', '', true);  -- 046's anti-inheritance rule, kept (first review pass)
   -- ob1:supersession-review (032/036): the writers' lock order.
   IF v_supersedes IS NOT NULL THEN
     PERFORM pg_advisory_xact_lock(hashtext('ob1:supersession-review'));
@@ -392,6 +401,7 @@ BEGIN
     PERFORM set_config('ob1.actor', p_actor::text, true);
   END IF;
   PERFORM set_config('ob1.cited_delete', CASE WHEN COALESCE(p_detach, false) THEN 'detach' ELSE 'refuse' END, true);
+  PERFORM set_config('ob1.event', '', true);  -- a tombstone declares nothing (046); the setting is cleared as 046's statement trigger cleared it
   -- ob1:supersession-review (036): the writers' lock order, first.
   PERFORM pg_advisory_xact_lock(hashtext('ob1:supersession-review'));
   BEGIN

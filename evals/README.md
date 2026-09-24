@@ -4988,7 +4988,7 @@ stay. `option1-view.sql` renames the table to `thought_rows`, creates the
 view `thoughts` and its INSTEAD OF INSERT/UPDATE/DELETE triggers (the same
 append and projector); `option1-undo.sql` reverses it so test-support's
 reset can run again. `writable-projection.ts` holds every rule pure and
-`--self-check` (54 probes) runs in the portable-server job; `--check` runs
+`--self-check` (55 probes) runs in the portable-server job; `--check` runs
 the prototype in the data-layer job and holds it to the matrix recorded
 below (`EXPECTED`), so a Postgres or prototype change that moves a cell is
 named.
@@ -4999,16 +4999,16 @@ named.
 Writable projection — SMD-1999 (Spike 2 of SMD-1997), PostgreSQL 16.15 (Debian 16.15-1.pgdg12+2)
 
 criterionbaseline           option2            option1-unchanged  option1            
-C1    FAIL (4/5)         PASS (5/5)         FAIL (2/5)         PASS (5/5)           the vendored capture unchanged: 3-argument upsert_thought, the readwise payload, one capture event carrying the content
+C1    FAIL (5/6)         PASS (6/6)         FAIL (3/6)         PASS (6/6)           the vendored capture unchanged: 3-argument upsert_thought, the readwise payload, one capture event carrying the content
 C2    PASS (5/5)         PASS (5/5)         FAIL (1/5)         PASS (5/5)           the 2- and 4-argument forms unchanged
-C3    PASS (9/9)         PASS (9/9)         PASS (9/9)         PASS (9/9)           update_thought unchanged: content, metadata, provenance, DUPLICATE_CONTENT, STALE_READ, the re-embed shape
+C3    PASS (12/12)       PASS (12/12)       PASS (12/12)       PASS (12/12)         update_thought unchanged: content, metadata, provenance, DUPLICATE_CONTENT, STALE_READ, the re-embed shape
 C4    PASS (7/7)         PASS (7/7)         PASS (7/7)         PASS (7/7)           delete_thought unchanged: a delete event with the previous content; a cited delete refused and eventless
 C5    PASS (5/5)         PASS (5/5)         FAIL (3/5)         FAIL (3/5)           raw writers: INSERT INTO thoughts audited once; ingest-records' ON CONFLICT (id) … RETURNING xmax = 0
 C6    PASS (4/4)         PASS (4/4)         FAIL (0/4)         FAIL (0/4)           the community DDL verbatim: ADD COLUMN, CREATE INDEX, REFERENCES, a row trigger, a sidecar UPDATE
-C7    PASS (3/3)         PASS (3/3)         N/A                PASS (3/3)           SMD-1043: two captures of one text serialise on the fingerprint lock — one row, one id
-C8    PASS (2/2)         PASS (2/2)         N/A                PASS (2/2)           SMD-1323: an edit naming supersedes is not blocked by update_thought's row lock on its target
-C9    PASS (3/3)         PASS (3/3)         N/A                PASS (3/3)           SMD-1462: update_thought naming supersedes and delete_thought of the target serialise, no deadlock
-C10   PASS (21/21)       PASS (21/21)       N/A                PASS (19/19)         trigger interaction: one audit row and one extraction claim per logical write, the actor stamp, updated_at
+C7    PASS (4/4)         PASS (4/4)         N/A                PASS (4/4)           SMD-1043: two captures of one text serialise on the fingerprint lock — one row, one id
+C8    PASS (3/3)         PASS (3/3)         N/A                PASS (3/3)           SMD-1323: an edit naming supersedes is not blocked by update_thought's row lock on its target
+C9    PASS (4/4)         PASS (4/4)         N/A                PASS (4/4)           SMD-1462: update_thought naming supersedes and delete_thought of the target serialise, no deadlock
+C10   PASS (26/26)       PASS (28/28)       N/A                PASS (26/26)         trigger interaction: one audit row and one extraction claim per logical write, the actor stamp, updated_at
 C11   PASS (2/2)         PASS (4/4)         N/A                PASS (4/4)           read-your-writes in the same session, and the drop-the-projector control
 C12   N/A                PASS (5/5)         N/A                PASS (5/5)           the log rebuilds the rows through the same projector; the content-less capture is refused
 
@@ -5051,13 +5051,14 @@ option1: NO-GO
     - C6 schemas/entity-extraction: CREATE TRIGGER … AFTER INSERT OR UPDATE OF content, metadata ON public.thoughts FOR EACH ROW — "thoughts" is a view
 
 C13 cost (medians):
-  3-argument capture with a vector, 200 each: baseline 574 µs, option 2 570 µs (×0.99)
-  content edit with a vector, 200 each: baseline 568 µs, option 2 635 µs (×1.12)
+  3-argument capture with a vector, 200 each: baseline 548 µs, option 2 620 µs (×1.13)
+  content edit with a vector, 200 each: baseline 598 µs, option 2 662 µs (×1.11)
 
 Differential, baseline against option 2 (events and rows for the same scripted writes, the prototype's two additions set aside): identical
 
-C12 replay under option2: 0 difference(s) beyond the 1 tolerated
-  - (tolerated) 5627cccf content_fingerprint: null → "103a9ba691fc63c733f213861430c75ade7fea9020959305e6374744…
+C12 replay under option2: 0 difference(s) beyond the 2 tolerated
+  - (tolerated) a4b74d54 content_fingerprint: null → "103a9ba691fc63c733f213861430c75ade7fea9020959305e6374744…
+  - (tolerated) dc5daac0 content_fingerprint: null → "72d47147bf6dfa9099bc2e09806d1b4678b7b7660b07f50fe2e3447e…
 C12 replay under option1: every column of every row equal
 
 Notes:
@@ -5068,6 +5069,7 @@ Notes:
   - option2: an identical re-capture (s3) leaves updated_at as it was — no event, no write
   - option1-unchanged: the raw insert's key is filled (the view's trigger applied 003's rule)
   - option1: the raw insert's key is filled (the view's trigger applied 003's rule)
+  - option1: C10 counted no audit rows for s15a, s15b — the step itself failed (C5)
   - option1: an identical re-capture (s3) leaves updated_at as it was — no event, no write
   - option1-unchanged: s1 capture A (3-arg, readwise payload, actor) — there is no unique or exclusion constraint matching the ON CONFLICT specification
   - option1-unchanged: A planted raw after its capture failed
@@ -5076,9 +5078,11 @@ Notes:
   - option1-unchanged: s4 capture B (2-arg) — there is no unique or exclusion constraint matching the ON CONFLICT specification
   - option1-unchanged: B planted raw after its capture failed
   - option1-unchanged: s5 capture C (4-arg, two chunks) — there is no unique or exclusion constraint matching the ON CONFLICT specification
-  - option1-unchanged: C planted raw after its capture failed
+  - option1-unchanged: C planted raw after its capture failed (2 chunk rows)
   - option1-unchanged: s15a ingest-records' statement, first write — column "xmax" does not exist
   - option1-unchanged: s15b ingest-records' statement, rewrite — column "xmax" does not exist
+  - option1-unchanged: s16 capture F (3-arg, actor; kept for the census) — there is no unique or exclusion constraint matching the ON CONFLICT specification
+  - option1-unchanged: s18 capture H (2-arg, "metadata": null in the payload) — there is no unique or exclusion constraint matching the ON CONFLICT specification
   - option1: s15a ingest-records' statement, first write — column "xmax" does not exist
   - option1: s15b ingest-records' statement, rewrite — column "xmax" does not exist
   - option2 / option1: a vector arriving on a row that already has one is a projection refresh — no event, and updated_at is left as it was (053 bumps it through update_thought); the vector's own time is ob1_embedding_snapshot.taken_at
@@ -5089,18 +5093,26 @@ Recommendation: option2 — option 2 — table stays, functions append then proj
 ### What it says
 
 **Option 2 is GO, with an empty contributor delta.** Every scripted write
-returns what 046 returns; the log and the rows are identical to the
-baseline's for the same writes once the prototype's two additions are set
-aside; the three behaviours hold with the same locks in the same order; one
+returns what 046 returns; the log and the rows equal the baseline's for the
+same writes — the rows on their eight caller-visible columns (content, key,
+the metadata and its JSON type, provenance, the vector's presence and label;
+no id, no stamp), the events on every column outside the prototype's two
+additions (the content on a capture, the key's move on an update); the three
+behaviours hold with the same locks in the same order; one
 audit row and one claim per logical write; a capture is visible to a `SELECT`
 and to the keyword search in the same session with no delay, and the control
 shows the row exists only once the projector has run; the whole log replays
 into rows equal to their copy on every column — content, key, metadata,
 provenance, `created_at`, `updated_at`, the vector from the snapshot and its
-label — the one difference the raw row's key, NULL before (003's rule lives in
-the functions) and filled after. The cost is the round trip: captures the
-same, edits ×1.12 here and up to ×1.4 across the runs made during the review,
-the medians all under a millisecond on a laptop container.
+label — the one difference the raw rows' key, NULL before (003's rule lives in
+the functions) and filled after. Two things the replay did not meet, said:
+the wipe cascades through the foreign keys, so the rows were rebuilt into a
+database with no chunks, claims or citations, and a replayed tombstone runs
+in detach mode (the delete happened; 042's guard would otherwise refuse a
+thought that was cited when it went). The cost is the round trip: every
+median under a millisecond in a laptop container, the ratio moving between
+×0.85 and ×1.4 across the eight runs made during the review (one edit run at
+×3 under load); C13 informs and gates nothing.
 
 **Option 1 is NO-GO twice.** With 053's functions unchanged, every capture
 fails — `INSERT … ON CONFLICT` has no unique constraint to name on a view —
@@ -5112,8 +5124,9 @@ view and so does a raw insert (which gains 003's key on the way), but C6 fails
 whole: `ADD COLUMN` and `CREATE INDEX` are "not supported for views", a
 `REFERENCES` finds "not a table", a row trigger "is a view" — and
 ingest-records' `xmax` "does not exist" (a view has no system columns). Three
-community schema files run `ALTER TABLE thoughts ADD COLUMN`, two `CREATE
-INDEX ON thoughts`, five `REFERENCES public.thoughts(id)`, one row trigger:
+community schema files run `ALTER TABLE thoughts ADD COLUMN`, two run five
+`CREATE INDEX ON thoughts`, six `REFERENCES public.thoughts(id)` stand in
+four, one row trigger:
 the view breaks all of them, and no in-tree rewrite can reach them. Row
 locks do work through the simple view, so the functions' lock order was never
 the obstacle; the DDL surface is. Option 3 shares that surface.
@@ -5137,6 +5150,21 @@ a projection refresh whose stamp the log cannot replay, so it leaves
 `updated_at` alone where 053's re-embed bumps it (and reads today as a change
 to a caller's `if_unchanged_since`). Both were named in the plan; both are
 for SMD-1997 to accept or reverse.
+
+**Named deltas the differential cannot show** (the first review pass read the
+bodies against 046 line by line): `update_thought`'s `if_unchanged_since`
+predicate lived in the UPDATE's own WHERE with a `STALE_READ` lost-race arm —
+unreachable under the row lock taken first, by 046's own argument, but a
+documented refusal path that the option-2 body no longer has; the 2-argument
+`upsert_thought` takes a row lock FOR NO KEY UPDATE that 046's pure `INSERT …
+ON CONFLICT` did not, under the same advisory lock; a raw writer's explicit
+key is not in the capture event, so a replay rewrites a stale one from the
+content. And two defects the pass found in the prototype itself, fixed and
+now probed: the three functions had stopped clearing `ob1.event`, 046's rule
+against a raw write inheriting an earlier call's stance (s17 sets one by hand
+and checks the raw insert after a function call carries none); and option
+1's INSTEAD OF UPDATE dropped a same-text re-embed's vector and label as "no
+event" (the row image after s11 shows the label).
 
 **The migration path** the ticket asked for, from the prototype's parts: (1)
 the capture event carries content and the diff rule, the append and the

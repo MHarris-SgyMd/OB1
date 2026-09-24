@@ -346,6 +346,11 @@ BEGIN
   PERFORM set_config('ob1.projecting_thought', e.thought_id::text, true);
   PERFORM set_config('ob1.projecting_replay', CASE WHEN p_replay THEN 'on' ELSE '' END, true);
   PERFORM set_config('ob1.actor_amend', 'backfill', true);
+  -- 046's anti-inheritance rule, kept: the setting a raw write would read is
+  -- cleared before any row moves, so a cascaded row cannot inherit a stance,
+  -- cites or a window declared for another write (first review pass: the
+  -- functions had stopped setting it, since the event now rides the append).
+  PERFORM set_config('ob1.event', '', true);
 
   IF e.action = 'capture' THEN
     IF NOT (e.diff ? 'content') THEN
@@ -364,10 +369,16 @@ BEGIN
       v_vec   := p_embedding;
       v_model := CASE WHEN p_embedding IS NULL THEN NULL ELSE p_embedding_model END;
     END IF;
+    -- metadata as the event holds it: a payload's `"metadata": null` is
+    -- jsonb null on the row under 046 (COALESCE does not replace it, 050's
+    -- guard leaves it), and stays so here — a NULLIF would turn it into SQL
+    -- NULL and the check, applying the same NULLIF, would not see the
+    -- difference (first review pass). An update's after keeps the NULLIF:
+    -- a raw `SET metadata = NULL` is SQL NULL, and JSON encodes both the same.
     INSERT INTO {{ROWS}} (id, content, content_fingerprint, metadata, embedding, embedding_model, derived_from, supersedes, created_at, updated_at)
     VALUES (
       e.thought_id, v_content, v_fp,
-      NULLIF(e.diff->'metadata', 'null'::jsonb),
+      e.diff->'metadata',
       v_vec, v_model,
       NULLIF(e.diff->'derived_from', 'null'::jsonb),
       (e.diff->>'supersedes')::uuid,
@@ -408,6 +419,13 @@ BEGIN
     WHERE t.id = e.thought_id;
 
   ELSIF e.action = 'delete' THEN
+    -- On a replay a tombstone never refuses: the delete happened, and 042's
+    -- guard (which reads ob1.cited_delete, default refuse) would otherwise
+    -- abort the whole replay on a thought that was cited when it went. The
+    -- facets it detaches are a projection rebuilt apart (first review pass).
+    IF p_replay THEN
+      PERFORM set_config('ob1.cited_delete', 'detach', true);
+    END IF;
     DELETE FROM {{ROWS}} WHERE id = e.thought_id;
   ELSE
     RAISE EXCEPTION 'ob1_project_thought_event: unknown action %', e.action;
@@ -493,9 +511,10 @@ BEGIN
       RAISE EXCEPTION USING ERRCODE = 'OB002',
         MESSAGE = 'thoughts_write_audit: ob1.projecting names an event that is not in the log', DETAIL = v_proj;
     END IF;
-    v_diff := v_diff - 'embedding_present';  -- the vector is a projection (SMD-1998), not the event's claim
-
     IF e.thought_id <> v_id THEN
+      -- The foreign-row rule reads the WHOLE diff: a cascade that also moved
+      -- a vector is not a bump (first review pass — the vector was stripped
+      -- before this test).
       -- ANOTHER row moved under this event's projection: a consequence the
       -- schema itself draws. Found by the first smoke run — a tombstone's
       -- ON DELETE SET NULL (025) writes every successor's pointer, and 042's
@@ -520,6 +539,7 @@ BEGIN
                                      'row', jsonb_build_object('thought_id', v_id, 'action', v_action, 'diff', v_diff))::text;
     END IF;
 
+    v_diff := v_diff - 'embedding_present';  -- the vector is a projection (SMD-1998), not the event's claim
     IF e.action <> v_action THEN
       RAISE EXCEPTION USING ERRCODE = 'OB002',
         MESSAGE = 'thoughts_write_audit: the projected row''s action is not the event''s',
@@ -532,7 +552,7 @@ BEGIN
     -- is a subset — the state the event asserts is what must hold.
     IF TG_OP = 'INSERT' THEN
       IF (e.diff->>'content') IS DISTINCT FROM NEW.content
-         OR NULLIF(e.diff->'metadata', 'null'::jsonb) IS DISTINCT FROM NEW.metadata
+         OR (e.diff->'metadata') IS DISTINCT FROM NEW.metadata
          OR NULLIF(e.diff->'derived_from', 'null'::jsonb) IS DISTINCT FROM NEW.derived_from
          OR (e.diff->>'supersedes')::uuid IS DISTINCT FROM NEW.supersedes THEN
         RAISE EXCEPTION USING ERRCODE = 'OB002',
