@@ -34,6 +34,12 @@ COPY releases.json /releases.json
 # After every COPY, so a new commit rebuilds no earlier layer. Unset reads as
 # `unknown`.
 ARG OB1_GIT_SHA=unknown
+# A RUN that reads the arg, before the ENV: podman's builder keys an ENV
+# layer's cache without the arg's value, so a rebuild whose only change was
+# the commit kept the previous build's (measured, podman 6.0.2); a RUN's key
+# includes it, and every layer after a rebuilt one rebuilds. BuildKit keys
+# both by it.
+RUN printf 'server image built from commit %s\n' "$OB1_GIT_SHA"
 ENV OB1_GIT_SHA=$OB1_GIT_SHA
 
 # Secrets are injected at runtime, never baked in:
