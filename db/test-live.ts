@@ -38,7 +38,7 @@ import { SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffers
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 import { consolidateKey } from "../server-portable/consolidate.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
-import { INGEST_ACTOR, recordId, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
+import { corpusIngested, docOf, INGEST_ACTOR, recordId, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { promote, refresh, refreshToolsReady, replayAndDiff } from "./tier.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -4124,7 +4124,7 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   const ids = docs.map((d) => d.id);
 
   const first: string[] = [];
-  for (const d of docs) first.push(await upsertRecord(sql, d));
+  for (const d of docs) first.push((await upsertRecord(sql, d)).outcome);
   assert(first.every((r) => r === "inserted"), `first ingest inserts every record (${first.join(",")})`);
   assert((await count("fork")) === 1 && (await count("commit")) === 1 && (await count("memory")) === 2, "each row carries its metadata.source label (SMD-1806 rule 5)");
   const [forkRow] = await sql`SELECT metadata, embedding IS NULL AS bare FROM thoughts WHERE id = ${docs[0].id}::uuid`;
@@ -4140,22 +4140,37 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   const before = (await sql`SELECT updated_at FROM thoughts WHERE id = ${docs[2].id}::uuid`)[0].updated_at;
   await Bun.sleep(1100);
   const second: string[] = [];
-  for (const d of docs) second.push(await upsertRecord(sql, d));
+  for (const d of docs) second.push((await upsertRecord(sql, d)).outcome);
   assert(second.every((r) => r === "unchanged"), `a re-ingest of the same records is a no-op — every row 'unchanged', not 'updated' (${second.join(",")})`);
   const afterNoop = (await sql`SELECT updated_at FROM thoughts WHERE id = ${docs[2].id}::uuid`)[0].updated_at;
   assert(String(before) === String(afterNoop), "…and updated_at is untouched: no UPDATE ran (the 1.1s gap would surface one if it had)");
 
   // Editing one record updates exactly that row.
+  // A vector and a chunk row planted on the row about to be edited: the edit
+  // must clear both — they were the old text's — so reembed.ts pools the row
+  // (SMD-1958's second half; before, a rebuild over an embedded brain left a
+  // stale vector under new text that nothing re-embedded). And a key another
+  // writer put on the row (the sync's facets, the extractor's tags) survives
+  // the edit: metadata is merged, not replaced.
+  await sql`UPDATE thoughts SET embedding = ${unit(3)}::vector, embedding_model = 'planted', metadata = metadata || '{"topics": ["kept"]}'::jsonb WHERE id = ${docs[2].id}::uuid`;
+  await sql`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding) VALUES (${docs[2].id}::uuid, 0, 'a window', ${unit(3)}::vector)`;
   const edited: Doc = { ...docs[2], content: "Test note A: EDITED body." };
   const third: string[] = [];
-  for (const d of [edited, docs[3]]) third.push(await upsertRecord(sql, d));
+  for (const d of [edited, docs[3]]) third.push((await upsertRecord(sql, d)).outcome);
   assert(third[0] === "updated" && third[1] === "unchanged", `editing one record updates only it (${third.join(",")})`);
-  assert(/EDITED/.test((await sql`SELECT content FROM thoughts WHERE id = ${docs[2].id}::uuid`)[0].content), "the edited row carries the new content");
+  const [editedRow] = await sql`SELECT content, embedding IS NULL AS bare, embedding_model AS m, metadata, (SELECT count(*)::int FROM thought_chunks WHERE thought_id = ${docs[2].id}::uuid) AS chunks FROM thoughts WHERE id = ${docs[2].id}::uuid`;
+  assert(/EDITED/.test(editedRow.content), "the edited row carries the new content");
+  assert(editedRow.bare === true && editedRow.m === null && editedRow.chunks === 0, `…its vector, label and chunk rows are cleared for reembed.ts to pool (bare=${editedRow.bare} model=${editedRow.m} chunks=${editedRow.chunks})`);
+  assert(JSON.stringify(editedRow.metadata.topics) === '["kept"]' && editedRow.metadata.source === "memory", "…and metadata another writer put on the row survives: merged, not replaced (SMD-1958)");
+  // A record that stands but gains a key is 'patched': the merge writes the key, the text and its (absent) vector are untouched.
+  const patched = await upsertRecord(sql, { ...edited, meta: { file: "test-note-a" } });
+  assert(patched.outcome === "patched" && (await sql`SELECT metadata->>'file' AS f FROM thoughts WHERE id = ${docs[2].id}::uuid`)[0].f === "test-note-a", `a record whose text stands and whose metadata gained a key is 'patched' (${patched.outcome})`);
+  assert((await upsertRecord(sql, { ...edited, meta: { file: "test-note-a" } })).outcome === "unchanged", "…and the same record again is 'unchanged' — a key already held is not a patch");
 
   // A different record whose content is byte-identical to one already stored
   // collides on the partial-unique content_fingerprint index → skipped, not a crash.
   const twin = mk("fork", "1000", docs[1].content);
-  assert((await upsertRecord(sql, twin)) === "skipped", "a different record with identical content is skipped");
+  assert((await upsertRecord(sql, twin)).outcome === "skipped", "a different record with identical content is skipped");
   assert((await count("fork")) === 1, "…and no second row was written for it");
 
   // SMD-1726: the ingester names itself in each record's transaction, so
@@ -4164,13 +4179,42 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   // stripped the mark an operator's edit had placed (run-it, first review
   // pass), and a session-level setting died with the connection (second).
   const named = mk("memory", "test-note-c", "Test note C: written under the ingester's own name.");
-  assert((await upsertRecord(sql, named)) === "inserted", "a record under the ingester's envelope inserts");
+  assert((await upsertRecord(sql, named)).outcome === "inserted", "a record under the ingester's envelope inserts");
   const [namedRow] = await sql`SELECT metadata->>'actor_name' AS n, metadata->>'actor_kind' AS k FROM thoughts WHERE id = ${named.id}::uuid`;
   assert(namedRow.n === INGEST_ACTOR.name && namedRow.k === null, `…stamped with the ingester's name and no kind until the operator classifies the label (${namedRow.n}/${namedRow.k})`);
   const [namedAudit] = await sql`SELECT origin, actor_name FROM thought_audit WHERE thought_id = ${named.id}::uuid AND action = 'capture'`;
   assert(namedAudit?.origin === INGEST_ACTOR.via && namedAudit.actor_name === INGEST_ACTOR.name, "…and its audit row names the ingester as writer and door");
   assert((await sql`SELECT current_setting('ob1.actor', true) AS a`)[0].a === "" || (await sql`SELECT current_setting('ob1.actor', true) AS a`)[0].a === null, "…and the envelope does not outlive the record's transaction on the connection");
   ids.push(named.id);
+
+  // A record an adapter mapped (SMD-1867): the row, and in its transaction the
+  // canonical, the links and the structured mentions; the same record again
+  // writes nothing at any of the four; a record whose identity another thought
+  // holds is 'held' and its transaction rolled back — no second row.
+  const structured = docOf(corpusIngested({ id: "SMD-90001", title: "A synthetic ticket", text: "Names <issue id=\"a\" href=\"h\">SMD-90002</issue> twice: <issue id=\"b\" href=\"h\">SMD-90002</issue>.", labels: ["zqlabel"], createdAt: "2026-09-01T00:00:00.000Z" }));
+  ids.push(structured.id);
+  const s1 = await upsertRecord(sql, structured, "test-live@1");
+  assert(s1.outcome === "inserted" && s1.structure?.canonical === "inserted" && s1.structure.links.added === 1 && s1.structure.mentions === 1, `a structured record inserts its row, canonical, one link and one mention (${JSON.stringify(s1)})`);
+  const [srcRow] = await sql`SELECT system, identity, media_type, ingest_run, canonical FROM thought_sources WHERE thought_id = ${structured.id}::uuid`;
+  assert(srcRow?.system === "linear" && srcRow.identity === "SMD-90001" && srcRow.ingest_run === "test-live@1" && /<issue id=/.test(srcRow.canonical) && !/<issue/.test(structured.content), "the canonical keeps the markup the row's text lost");
+  const [linkRow] = await sql`SELECT payload FROM thought_facets WHERE thought_id = ${structured.id}::uuid AND kind = 'link'`;
+  assert(linkRow?.payload?.relation === "references" && linkRow.payload.target === "SMD-90002" && linkRow.payload.origin === "structured", `the link names its target by identity, origin structured (${JSON.stringify(linkRow?.payload)})`);
+  const [mentionRow] = await sql`SELECT m.extraction_key AS k, en.name FROM thought_entities m JOIN ob1_entities en ON en.id = m.entity_id WHERE m.thought_id = ${structured.id}::uuid`;
+  assert(mentionRow?.k === "source:linear" && mentionRow.name === "zqlabel", "the label is a mention under source:linear");
+  const s2 = await upsertRecord(sql, structured, "test-live@2");
+  assert(s2.outcome === "unchanged" && s2.structure?.canonical === "unchanged" && s2.structure.links.added === 0 && s2.structure.links.kept === 1 && s2.structure.links.closed === 0 && s2.structure.mentions === 0, `the same record again writes nothing at any of the four — the mention count is 0 written, not 1 re-inserted (${JSON.stringify(s2)})`);
+  // A shrinking array facet is a change the merge must write: containment would have called ["a"] contained in ["a","b"] and kept the stale list (first review pass).
+  await sql`UPDATE thoughts SET metadata = metadata || '{"labels": ["a", "b"]}'::jsonb WHERE id = ${structured.id}::uuid`;
+  const shrunk = await upsertRecord(sql, { ...structured, meta: { ...structured.meta, labels: ["a"] } }, "test-live@3");
+  assert(shrunk.outcome === "patched" && JSON.stringify((await sql`SELECT metadata->'labels' AS l FROM thoughts WHERE id = ${structured.id}::uuid`)[0].l) === '["a"]', `an array facet that shrank is patched to the new list, not kept by containment (${shrunk.outcome})`);
+  // Another thought already IS this source item — the board sync's row for the ticket: held, nothing written, no second row.
+  const syncRow = (await sql`INSERT INTO thoughts (id, content, metadata, content_fingerprint) VALUES (gen_random_uuid(), 'SMD-90003 — held by the sync', '{"source":"linear","issue":"SMD-90003"}'::jsonb, content_fingerprint_of('SMD-90003 — held by the sync')) RETURNING id`)[0].id as string;
+  ids.push(syncRow);
+  await sql`SELECT record_thought_source(${syncRow}::uuid, 'linear', 'SMD-90003', '{}', 'application/json', 'sync')`;
+  const heldDoc = docOf(corpusIngested({ id: "SMD-90003", title: "The same ticket, from the dump", text: "a different text", labels: [], createdAt: "2026-09-01T00:00:00.000Z" }));
+  const held = await upsertRecord(sql, heldDoc, "test-live@4");
+  assert(held.outcome === "held" && held.heldBy === syncRow, `an identity another thought holds is 'held', naming it (${JSON.stringify(held)})`);
+  assert((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${heldDoc.id}::uuid`)[0].c === 0, "…and the transaction rolled back: no second row for the ticket");
   // Tier identity, for preflight's `tier` check.
   await stampTier(sql, "stable");
   const cfg = Object.fromEntries((await sql`SELECT key, value FROM ob1_config WHERE key IN ('tier','last_ingest')`).map((r: { key: string; value: string }) => [r.key, r.value]));

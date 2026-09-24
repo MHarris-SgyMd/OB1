@@ -320,6 +320,15 @@ jobs:
         working-directory: db
         run: bun sync-linear.ts --self-check
 
+      # The ingestion contract's adapters and pipeline (SMD-1867): the Linear
+      # adapter (markup out of the text, structure into links and mentions),
+      # the Markdown adapter (the canonical round-trips byte for byte, the
+      # lossy cases enumerated, two inputs refused) and the ingester's pure
+      # rules (the corpus path, the allowlist). No network, no database.
+      - name: Ingestion adapters
+        working-directory: db
+        run: bun ingest-linear.ts --self-check && bun ingest-markdown.ts --self-check && bun ingest-records.ts --self-check
+
       # The embedding width is configurable and must hold at more than one value.
       - name: Schema builds at a non-default embedding width
         working-directory: db
