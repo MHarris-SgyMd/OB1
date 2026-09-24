@@ -65,6 +65,18 @@
  * on an edit) and tolerates only a copy of the origin, the one case the rule
  * allows; server-portable/test-audit.ts holds the trigger itself.
  *
+ * SMD-1986 drives enhanced-mcp's three search tools, which SMD-1798's block
+ * had pinned answering nothing: each sent `exclude_restricted` and the date
+ * bounds as keys of the `filter` that match_thoughts and search_thoughts_text
+ * read as a metadata containment. A restricted twin is planted at the captured
+ * thought's own vector, with text the query matches and a rank above the
+ * capture's, so every search that finds the capture must drop the twin — by
+ * the `sensitivity_tier` column, which match_thoughts does not return and the
+ * tool looks up by id — and the paging over a hidden first row, the date
+ * bounds as instants and the refusals by name are held around the same pair.
+ * CI runs this file under TZ=America/Chicago so the zone-less bound's arm
+ * distinguishes UTC from the process's zone.
+ *
  * The files are imported as modules — each exports Bun's entry shape, and its
  * default export's `fetch` is the handler driven here (SMD-1799) — under the
  * loader extensions/test-auth.ts uses for Deno's specifiers; every server

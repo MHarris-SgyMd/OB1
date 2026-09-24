@@ -18,6 +18,12 @@
 // — one built at module scope and connect()ed to a fresh transport each request
 // answered the first of two overlapping requests on the second's transport.
 // FORK.md change 78; extensions/test-auth.ts fires three overlapping requests.
+// ob1-fork (SMD-1986): the three search tools hand match_thoughts and
+// search_thoughts_text the caller's metadata_filter alone — the tier and date
+// keys they folded in were containment keys no metadata holds, and every search
+// answered nothing — and apply the restricted tier (by the column, looked up by
+// id where the function returns none) and the date bounds to the rows; the note
+// above tiersOf(). extensions/test-writes.ts drives it against a restricted twin.
 
 // Deno reads the SDK's types through the extensionless subpath: its exports map
 // names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
@@ -229,9 +235,12 @@ function withinDates(row: ThoughtRow, w: DateWindow): boolean {
  * found." over a page of hidden rows with hits behind it (review pass 1); and
  * a line's ordinal is the row's position in that page, `at`, not in the
  * filtered list, so the numbers stay honest across pages with hidden rows.
+ * The function's count rides on every row as `total_count`; an empty page
+ * carries none, so an offset past the last hit reads as a total of 0.
  */
-function textPage(shown: { row: ThoughtRow; at: number }[], pageLength: number, totalCount: number, offset: number, limit: number) {
-  const pagination = { total: totalCount, offset, limit, has_more: offset + pageLength < totalCount };
+function textPage(shown: { row: ThoughtRow; at: number }[], page: ThoughtRow[], offset: number, limit: number) {
+  const totalCount = page.length > 0 ? Number((page[0] as Record<string, unknown>).total_count ?? page.length) : 0;
+  const pagination = { total: totalCount, offset, limit, has_more: offset + page.length < totalCount };
   if (shown.length === 0) {
     return toolSuccess(pagination.has_more ? "No matches on this page; more follow." : "No matches found.", { results: [], pagination });
   }
@@ -324,10 +333,8 @@ function buildServer(): McpServer {
 
         if (mode === "text") {
           // p_filter is a metadata containment (the note above tiersOf): the
-          // caller's metadata_filter alone. The tier and the date bounds are
-          // applied to the page the function returns — it ranks and pages
-          // before they apply, so a page can hold fewer than `limit` rows and
-          // `total` counts what they hide (the README's known limitation).
+          // caller's metadata_filter alone; the tier and the date bounds are
+          // applied to the page, which textPage() renders.
           const { data, error } = await supabase.rpc("search_thoughts_text", {
             p_query: query,
             p_limit: limit,
@@ -340,29 +347,23 @@ function buildServer(): McpServer {
           }
 
           const page = (data ?? []) as ThoughtRow[];
-          const totalCount =
-            page.length > 0
-              ? Number(
-                  (page[0] as Record<string, unknown>).total_count ?? page.length,
-                )
-              : 0;
           const shown = page
             .map((row, at) => ({ row, at }))
             .filter(({ row }) => row.sensitivity_tier !== "restricted")
             .filter(({ row }) => withinDates(row, window));
-          return textPage(shown, page.length, totalCount, offset, limit);
+          return textPage(shown, page, offset, limit);
         }
 
         // Semantic search (default)
         //
         // `match_thoughts` returns the top-N by similarity, with the caller's
         // metadata_filter as its containment (the note above tiersOf); the
-        // tier and the date bounds are applied to the rows here. Over-fetch
-        // when a date bound is active so the post-filter has headroom — 3x the
-        // requested limit, capped at 500, the largest count any caller in the
-        // repo sends (041 clamps to it). On a brain with dense recent activity
-        // and an old, narrow window this can still miss matches ranked below
-        // the over-fetch; see the README's known limitations.
+        // tier and the date bounds are applied to the rows here. Over-fetch so
+        // the post-filter has headroom: `limit + 20`, or under a date bound 3×
+        // the limit, at least 50 and at most 500 — the largest count any
+        // caller in the repo sends, which 041 clamps to. Rows ranked below the
+        // over-fetch are not seen; the README's known limitations say when
+        // that matters.
         const dateFilterActive = !!(startDate || endDate);
         const fetchCount = dateFilterActive
           ? Math.min(Math.max(limit * 3, 50), 500)
@@ -996,11 +997,10 @@ function buildServer(): McpServer {
         }
 
         const page = (data ?? []) as ThoughtRow[];
-        const totalCount = page.length > 0 ? Number((page[0] as Record<string, unknown>).total_count ?? page.length) : 0;
         const shown = page
           .map((row, at) => ({ row, at }))
           .filter(({ row }) => row.sensitivity_tier !== "restricted");
-        return textPage(shown, page.length, totalCount, offset, limit);
+        return textPage(shown, page, offset, limit);
       } catch (error) {
         console.error("search_thoughts_text failed", error);
         return toolFailure(String(error));
