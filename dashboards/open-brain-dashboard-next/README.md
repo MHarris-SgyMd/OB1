@@ -39,8 +39,8 @@ Provides 9 pages for managing your thoughts:
 
 | Credential | Where to get it | Where it goes |
 |------------|----------------|---------------|
-| `NEXT_PUBLIC_API_URL` | Your Supabase project URL + `/functions/v1/open-brain-rest` | `.env` or hosting env vars |
-| `AGENT_MEMORY_API_URL` | Optional. Your Supabase project URL + `/functions/v1/agent-memory-api` | `.env` or hosting env vars |
+| `NEXT_PUBLIC_API_URL` | Where `open-brain-rest` is served — `http://127.0.0.1:8787` when run under Bun from a checkout ([its README](../../integrations/open-brain-rest/README.md#deploy)) | `.env` or hosting env vars |
+| `AGENT_MEMORY_API_URL` | Where `agent-memory-api` is served, run the same way — set it: the fallback derives it from `NEXT_PUBLIC_API_URL` only when that ends in `/open-brain-rest` | `.env` or hosting env vars |
 | `AGENT_MEMORY_WORKSPACE_ID` | Optional. Default workspace for Agent Memory governance views | `.env` or hosting env vars |
 | `AGENT_MEMORY_PROJECT_ID` | Optional. Default project filter for Agent Memory governance views | `.env` or hosting env vars |
 | `SESSION_SECRET` | Generate: `openssl rand -hex 32` | `.env` or hosting env vars |
@@ -55,7 +55,7 @@ Provides 9 pages for managing your thoughts:
 
 ```bash
 # From the OB1 repo
-cd dashboards/open-brain-dashboard
+cd dashboards/open-brain-dashboard-next
 ```
 
 Or copy the folder to your own project directory.
@@ -66,6 +66,11 @@ Or copy the folder to your own project directory.
 npm install
 ```
 
+Two lockfiles sit here: `package-lock.json` for npm, and `bun.lock`, which CI
+installs from with `bun install --frozen-lockfile`. After changing
+`package.json`, run `bun install` too and commit `bun.lock` beside the npm one,
+or the build job refuses the frozen install.
+
 ### Step 3: Configure environment
 
 ```bash
@@ -75,9 +80,9 @@ cp .env.example .env
 Edit `.env` and set your values:
 
 ```
-NEXT_PUBLIC_API_URL=https://YOUR-PROJECT-REF.supabase.co/functions/v1/open-brain-rest
-# Optional if your Agent Memory function follows the standard slug:
-# AGENT_MEMORY_API_URL=https://YOUR-PROJECT-REF.supabase.co/functions/v1/agent-memory-api
+NEXT_PUBLIC_API_URL=http://127.0.0.1:8787
+# Optional: where agent-memory-api is served
+# AGENT_MEMORY_API_URL=http://127.0.0.1:8788
 # AGENT_MEMORY_WORKSPACE_ID=ob1-staging
 SESSION_SECRET=your-32-char-secret-here
 # Optional on HTTPS hosts:
@@ -215,7 +220,7 @@ Agent Memory pages also call these endpoints on `agent-memory-api`:
 <!-- -->
 
 > [!IMPORTANT]
-> OB1's real `thoughts.id` values are UUID strings. The dashboard treats thought IDs as strings end to end so detail links, workflow updates, audit deletes, and duplicate resolution work against production Supabase rows.
+> OB1's real `thoughts.id` values are UUID strings. The dashboard treats thought IDs as strings end to end so detail links, workflow updates, audit deletes, and duplicate resolution work against production rows.
 
 ## Optional: Restricted Content
 
@@ -266,7 +271,7 @@ Do not enable `OB1_DEMO_AUTH_BYPASS` in shared previews or production. It exists
 
 ## Troubleshooting
 
-1. **"Could not reach API" on login** — Verify `NEXT_PUBLIC_API_URL` is correct and your REST API gateway (`open-brain-rest`) is deployed. Test with: `curl https://YOUR-REF.supabase.co/functions/v1/open-brain-rest/health -H "x-brain-key: YOUR_KEY"`.
+1. **"Could not reach API" on login** — Verify `NEXT_PUBLIC_API_URL` is correct and your REST API gateway (`open-brain-rest`) is running. Test with: `curl -sS "$NEXT_PUBLIC_API_URL/health" -H "x-brain-key: YOUR_KEY"`.
 
 2. **"SESSION_SECRET env var is required"** — The app requires a 32+ character secret for cookie encryption. Generate one with `openssl rand -hex 32`.
 
