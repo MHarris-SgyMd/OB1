@@ -101,7 +101,16 @@ A hosted endpoint is not dialled without `--deep`.
 embedding width matches the schema, and checks the metadata model actually honours
 JSON mode — a provider that ignores `response_format` degrades every capture to
 `uncategorized` without ever failing — and, when `OB1_JUDGE_MODEL` names a
-different model, checks that one too under its own `judge model` row. `chunk window` prints the length a capture
+different model, checks that one too under its own `judge model` row. The
+typed-decision tier (`jev.ts`, SMD-2050) is checked only when `OB1_JEV_BASE_URL`
+is set, and then on every run, not only under `--deep`: `jev tier` dials its
+`/info` (no text sent) and fails on an unreachable URL, an answer outside the
+`ob1-jev/1` contract, or a model other than `OB1_JEV_MODEL`; `jev egress` says
+what the gate does with its decisions (declared by `OB1_JEV_LOCAL`); `--deep`
+adds `jev decision`, one binary decision through the client and its gate. The
+server never decides — the Jev spikes do — so the rows exist for the operator
+who set the knob to learn at start, not at a spike's first call, that the tier
+is not there. `chunk window` prints the length a capture
 is windowed above, the window size, and where the numbers came from — `OB1_CHUNK_TOKENS`, the model's
 measured window (`db/config.mjs`, `KNOWN_MODEL_WINDOW`), or the default for a
 model the table does not know — and warns when an explicit limit is over the
@@ -349,9 +358,20 @@ that does not answer is named in `unread` with its reason (`refused`,
 are kept, and a database whose catalog has not answered by then is
 `database.error`. Concurrent probes share one read, and requests of one key share
 one agent-registry lookup (at /health and the MCP route alike), so a burst during
-a migration holds one connection for the read and one per distinct key — the
-registry's lock wait itself is unbounded (SMD-2072). Without a key, with a wrong
-or capture-only key, or with a revoked one — or while the agent registry has
+a migration holds one connection for the read and one per distinct key. On
+the SQL store each of the lookup's lock waits is capped at 250 ms (a ceiling;
+a table lock ends the lookup at its first wait), and a lookup that times out
+is retried for up to 2 s, 250 ms apart with no connection held — a brief
+migration lock is waited out, as before the cap — after which the key is
+**busy**: the MCP route refuses it with JSON-RPC error `-32003` ("retry in a
+few seconds"), since the registry could still say revoked. More cold keys
+than the pool holds queue for it, in rounds of about the cap. On Workers the
+cap is the PostgREST role's `statement_timeout`, where it has one. A
+revocation this process has already read stands through any failure until
+the registry answers that the key is not revoked (SMD-2072). A lock on
+`ob1_agents` stalls every write regardless: 046's audit trigger reads a
+writer's kind there. Without a key, with a wrong
+or capture-only key, with a revoked one or a busy one — or while the agent registry has
 not answered by the deadline, since it could still say revoked — the body is
 the literal `ok`, so nothing about the deployment reaches an unauthenticated
 probe; a `HEAD`, keyed or not, is the bodiless `ok` and reads nothing. Point a

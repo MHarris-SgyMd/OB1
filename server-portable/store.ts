@@ -1047,6 +1047,11 @@ export interface ThoughtStore {
    * On the store rather than in a helper because the two backends reach
    * Postgres differently and this has to work on both — a Workers deployment
    * speaking PostgREST needs the same identity a Bun deployment gets.
+   *
+   * A failure throws with the SQLSTATE on the error's `errno` (Bun's SQL sets
+   * it; the PostgREST store copies PostgREST's `code` there): agents.ts reads
+   * 55P03, 57014 and 40P01 as a registry busy on a lock, which refuses the
+   * key, and anything else as an outage, which serves it by name (SMD-2072).
    */
   resolveAgent(opts: { keyHash: string; label: string; scope?: string }): Promise<AgentResolution>;
 

@@ -198,9 +198,10 @@ want=""; wantLast=""
 if [ -z "${hv:-}" ]; then
   # The body is `ok` for every key that may not see the record: a server from
   # before SMD-2041 (or an Edge Function), a revoked key, a key without read
-  # scope, and an agent registry that has not answered within the health
-  # deadline — the MCP checks above pass in that case, since they wait.
-  bad "GET /health with the key → '$(printf '%s' "$hj" | head -c 60)' (expected the brain's record as JSON: a server from before SMD-2041, a revoked or read-less key, or an agent registry that did not answer within the deadline)"
+  # scope, an agent registry that has not answered within the health
+  # deadline, and one locked past the lookup's retries (busy, SMD-2072) — the
+  # MCP checks above then fail too, with JSON-RPC -32003.
+  bad "GET /health with the key → '$(printf '%s' "$hj" | head -c 60)' (expected the brain's record as JSON: a server from before SMD-2041, a revoked or read-less key, or an agent registry that did not answer within the deadline or was locked past the lookup's retries)"
 elif [ -n "${OB1_SMOKE_COMMIT:-}" ] && [ -n "$want" ] && [ "$hv" != "$want" ]; then
   bad "GET /health with the key → version $hv, but this checkout is $want (the image was not built from it)"
 elif [ -n "${OB1_SMOKE_COMMIT:-}" ] && [ -n "$wantLast" ] && [ "$hlast" != "$wantLast" ]; then
