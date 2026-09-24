@@ -273,8 +273,10 @@ services:
     # for preflight's reachability probe to find (SMD-1875). A hosts entry
     # only: nothing is published. podman writes both names itself and maps
     # this one to the same address (measured, podman 6); an older podman
-    # without the host-gateway keyword refuses the container.
-    extra_hosts:
+    # without the host-gateway keyword refuses the container. board-sync,
+    # which embeds through the same knobs, takes the same entry by anchor
+    # (fourth review pass).
+    extra_hosts: &host-alias
       - "host.docker.internal:host-gateway"
 
   # Keeps the brain in lockstep with the Linear board (SMD-1954). Optional —
@@ -320,6 +322,9 @@ services:
       OB1_LINEAR_INITIATIVE: ${OB1_LINEAR_INITIATIVE:-}
       OB1_BOARD_SYNC_INTERVAL: ${OB1_BOARD_SYNC_INTERVAL:-}
     command: ["bun", "db/sync-linear.ts", "--loop"]
+    # The server's host alias (SMD-1875): this worker dials OB1_LLM_BASE_URL
+    # too, and on Linux Docker Option B's name exists only through this entry.
+    extra_hosts: *host-alias
     # SIGTERM ends the loop after the issue in hand, not the pass — one embed
     # and one write, seconds — and the brain is the state, so a pass cut short
     # is finished by the next; this is the room for that one issue.
