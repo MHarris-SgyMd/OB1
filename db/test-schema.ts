@@ -6715,6 +6715,12 @@ console.log("\n[49] Migration 054: resolve_agent writes a key's row only when la
   const r5 = await row(K);
   await look(K, "touch-key", "write");
   assert((await row(K)).x !== r5.x && (await row(K)).used !== null, "a NULL last_used_at is written");
+  // A use recorded in the future — a clock stepped back, a skewed restore — would never go stale; it is written.
+  await db.query(`UPDATE ob1_agent_keys SET last_used_at = now() + interval '1 hour' WHERE key_hash = $1`, [K]);
+  const rF = await row(K);
+  await look(K, "touch-key", "write");
+  const futureNow = (await one<{ ok: boolean }>(`SELECT last_used_at <= now() AS ok FROM ob1_agent_keys WHERE key_hash = $1`, [K])).ok;
+  assert((await row(K)).x !== rF.x && futureNow, `a last_used_at an hour in the future is written back to now (${rF.used} → ${(await row(K)).used})`);
 
   // A scope change is written however fresh the use: the column shows a privilege change (010, 049).
   const r6 = await row(K);
@@ -6741,11 +6747,18 @@ console.log("\n[49] Migration 054: resolve_agent writes a key's row only when la
   await db.query(`ALTER TABLE ob1_agent_keys RENAME COLUMN last_used_at TO last_used_gone`);
   let noColumn = "";
   try { await reapply("054"); } catch (e) { noColumn = (e as Error).message; }
-  assert(/migration 054 needs 010 \(ob1_agent_keys\.last_used_at, revoked_at\); this schema lacks it/.test(noColumn), `054 on a registry without last_used_at refuses by name (${noColumn.slice(0, 90)})`);
+  assert(/migration 054 needs 010 \(ob1_agent_keys\.last_used_at, revoked_at, scope\); this schema lacks it/.test(noColumn), `054 on a registry without last_used_at refuses by name (${noColumn.slice(0, 90)})`);
   await db.query(`ALTER TABLE ob1_agent_keys RENAME COLUMN last_used_gone TO last_used_at`);
+  // …and without scope, which the body now reads beside it (review pass 1: the guard counted revoked_at, which 010's body already read).
+  await db.query(`ALTER TABLE ob1_agent_keys RENAME COLUMN scope TO scope_gone`);
+  let noScope = "";
+  try { await reapply("054"); } catch (e) { noScope = (e as Error).message; }
+  assert(/migration 054 needs 010 \(ob1_agent_keys\.last_used_at, revoked_at, scope\)/.test(noScope), `…and one without scope (${noScope.slice(0, 90)})`);
+  await db.query(`ALTER TABLE ob1_agent_keys RENAME COLUMN scope_gone TO scope`);
   await reapply("054");
   assert(/ob1:stale-only-touch/.test(String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'resolve_agent(text, text, text)'::regprocedure`)).s)), "…and applies again once the column is back, landing the same body");
   await db.query(`DELETE FROM ob1_agent_keys WHERE key_hash = $1`, [K]);
+  await db.query(`DELETE FROM ob1_agents WHERE label = 'touch-key-renamed'`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

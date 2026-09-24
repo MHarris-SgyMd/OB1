@@ -1948,12 +1948,15 @@ console.log("\n[20h] Migration 054 on a schema without 010 — refused up front,
   await sql`DELETE FROM schema_migrations WHERE name = ${the054}`;
   const plain = await migrate();
   const ok = plain.code === 1 &&
-    /054_resolve_agent_stale_touch\.sql\s+FAILED: migration 054 needs 010 \(ob1_agent_keys\.last_used_at, revoked_at\); this schema lacks it/.test(plain.out) &&
+    /054_resolve_agent_stale_touch\.sql\s+FAILED: migration 054 needs 010 \(ob1_agent_keys\.last_used_at, revoked_at, scope\); this schema lacks it/.test(plain.out) &&
     /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
   assert(ok, `a plain run fails at 054 naming 010 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the054}`)[0].c) === 0, "…054 records nothing");
-  await sql.close();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "010" });
+  // An apply that did not throw is not the function present ([20c]'s lesson): read 054's sentinel off the live body.
+  const [body] = await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure('resolve_agent(text, text, text)')`;
+  assert(/ob1:stale-only-touch/.test(String(body?.s ?? "")), "…and applied once 010's table is there: the live resolve_agent is 054's");
+  await sql.close();
 }
 
 console.log("\n[21] test-support's schema reset leaves nothing of the fork's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");

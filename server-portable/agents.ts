@@ -44,9 +44,11 @@
  * stalls every write anyway (046's audit trigger reads a writer's kind
  * there). A committed revocation is read before any write, so a row lock
  * does not delay it. Since migration 054 a key used in the last five minutes
- * writes nothing, so a held row delays its lookup not at all, and a
- * revocation that commits while a staler key's write waits is answered
- * REVOKED (SMD-2090).
+ * and presenting its recorded scope writes nothing, so a held key row does
+ * not delay its lookup, and a revocation that commits while a staler key's
+ * write waits is answered REVOKED — under READ COMMITTED; under a stricter
+ * isolation the write fails 40001, which is retried like a timeout
+ * (SMD-2090).
  *
  * The same reasoning covers a deployment that has not applied migration 010:
  * `resolve_agent` does not exist, resolution fails, and attribution falls back
@@ -325,14 +327,18 @@ export class AgentResolver {
 
 /**
  * Whether a lookup gave up on a lock: 55P03 (lock_timeout, the SQL store's
- * cap), 57014 (statement_timeout — a role's, as on Workers; or a cancel) or
+ * cap), 57014 (statement_timeout — a role's, as on Workers; or a cancel),
  * 40P01 (a deadlock with a migration taking the two tables in the other
- * order). The SQLSTATE rides on `errno`: Bun's SQL sets it, and the PostgREST
- * store copies PostgREST's code there.
+ * order) or 40001 (a serialization failure: under a REPEATABLE READ or
+ * SERIALIZABLE default, resolve_agent's write of a row another transaction
+ * changed while it waited — a revocation among them — fails where READ
+ * COMMITTED would have re-read it, and a fresh attempt answers; SMD-2090).
+ * The SQLSTATE rides on `errno`: Bun's SQL sets it, and the PostgREST store
+ * copies PostgREST's code there.
  */
 function timedOut(e: unknown): boolean {
   const state = String((e as { errno?: unknown })?.errno ?? "");
-  return state === "55P03" || state === "57014" || state === "40P01";
+  return state === "55P03" || state === "57014" || state === "40P01" || state === "40001";
 }
 
 /** Parse OB1_AGENT_CACHE_TTL_MS, falling back rather than failing on nonsense. */

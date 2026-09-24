@@ -514,7 +514,7 @@ console.log("\n[16] A lookup that times out on a lock is retried, then busy, and
   const timed = await r.resolve(store, p);
   assert(timed.status === "busy", `a key answered ok before is busy when its lookup times out on a lock (${JSON.stringify(timed)})`);
   const never = principal("desk", H("8"));
-  for (const [code, what] of [["55P03", "lock_timeout's 55P03"], ["57014", "statement_timeout's 57014 (a role's cap, as on Workers)"], ["40P01", "a deadlock's 40P01"]] as const) {
+  for (const [code, what] of [["55P03", "lock_timeout's 55P03"], ["57014", "statement_timeout's 57014 (a role's cap, as on Workers)"], ["40P01", "a deadlock's 40P01"], ["40001", "a serialization failure's 40001 (resolve_agent's write under a REPEATABLE READ default, a revocation committed during its wait — SMD-2090)"]] as const) {
     answer = failing(code, what);
     const o = await r.resolve(store, p);
     const n = await r.resolve(store, never);
@@ -603,6 +603,15 @@ console.log("\n[16] A lookup that times out on a lock is retried, then busy, and
     const k = await known.resolve(revokedThenLocked, principal("retry-revoked", H("1")));
     console.warn = realWarn;
     assert(outageTries === 1 && k.status === "revoked" && revokedTries === 2, `…and not retried on an outage (${outageTries}) or for a key whose revocation is read, which answers at once (${k.status}, ${revokedTries - 1} lookup)`);
+    // Under a REPEATABLE READ default, resolve_agent's write of a row whose
+    // revocation committed while it waited fails 40001; the retry reads the
+    // revocation (SMD-2090's run-it review measured the served-by-name answer
+    // this replaces).
+    let serialTries = 0;
+    let serialFirst = true;
+    const serialThenRevoked = fakeStore(async () => { if (serialFirst) { serialFirst = false; throw Object.assign(new Error("could not serialize access due to concurrent update"), { errno: "40001" }); } return revokedAnswer(); }, () => serialTries++);
+    const afterSerial = await retrying.resolve(serialThenRevoked, principal("retry-serial", H("0")));
+    assert(afterSerial.status === "revoked" && serialTries === 2, `…and a serialization failure is retried, so a revocation that committed during the wait is refused, not served by name (${afterSerial.status}, ${serialTries} lookups)`);
   }
 
   // Cached with a TTL: a kept revocation for the failure TTL, as a read one

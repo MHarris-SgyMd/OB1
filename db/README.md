@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1606 assertions: 1606 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1608 assertions: 1608 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-four (54) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -305,17 +305,22 @@ an `extract:*` pass replaces only extracted rows, and where both name one
 no ACL; the ingester and the board sync write through it (below).
 
 Migration 054 redefines 010's `resolve_agent` so that a lookup writes a key's
-row only when the write says something (SMD-2090): `last_used_at` NULL or
-over five minutes old, or a presented scope that differs from the recorded
-one. A recently used key takes no row lock, so it answers while another
-transaction holds its row, where 010's body waited on every lookup (the
-server caps that wait at 250 ms and calls the key busy, SMD-2072).
-`last_used_at` now means the last use to within five minutes. The write
-re-checks `revoked_at IS NULL`, and when it writes nothing the row is read
-again: a revocation that commits while the lookup waits answers REVOKED,
-where 010 answered ok and the server cached it for its TTL. A row deleted
-during the wait is registered again. Same signature and grants, no data
-change.
+row only when the write says something (SMD-2090): `last_used_at` NULL,
+over five minutes old or in the future, or a presented scope that differs
+from the recorded one. A recently used key presenting its recorded scope
+takes no row lock, so it answers while another transaction holds its row,
+where 010's body waited on every lookup (the SQL store caps that wait at
+250 ms and calls the key busy, SMD-2072). `last_used_at` now means the last
+use to within five minutes. The write re-checks `revoked_at IS NULL`, and
+when it writes nothing the row is read again: a revocation that commits
+while the lookup waits answers REVOKED, where 010 answered ok and the server
+cached it for its TTL. A row deleted during the wait is registered again
+(the rotation branch, or first sight if its agent went too), and
+registration's `ON CONFLICT … DO UPDATE` no longer writes over a revoked
+row. Under a REPEATABLE READ or SERIALIZABLE default the waiting write fails
+40001 instead, which the server retries. Same signature and grants, no data
+change; a role missing UPDATE on `ob1_agent_keys` now fails only a stale
+lookup rather than every one.
 
 ## What changed relative to the guide
 
@@ -1990,8 +1995,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1606 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 681 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1608 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 683 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
