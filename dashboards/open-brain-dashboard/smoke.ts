@@ -23,6 +23,7 @@
  */
 
 import { seal } from "./src/lib/server/session";
+import { listTools } from "./src/lib/server/mcp";
 
 const args = process.argv.slice(2);
 const flag = (n: string) => { const i = args.indexOf(`--${n}`); return i >= 0 ? args[i + 1] : undefined; };
@@ -39,6 +40,34 @@ let fail = 0;
 const ok = (msg: string) => { console.log(`  ✓  ${msg}`); pass++; };
 const bad = (msg: string) => { console.log(`  ✗  ${msg}`); fail++; };
 const assert = (cond: boolean, msg: string) => (cond ? ok(msg) : bad(msg));
+
+// Before the dashboard: the MCP client's own reading of an SSE frame, against a
+// stub that streams a notification first, the answer second and a decoy with
+// another id last — the answer is the frame whose id is the request's, not the
+// last line (second review pass: the first pass's fix had no test, and the
+// portable server's one-frame-per-request transport could never exercise it).
+{
+  const stub = Bun.serve({
+    port: 0,
+    fetch: async (req) => {
+      const { id } = (await req.json()) as { id: number };
+      const body = [
+        `data: ${JSON.stringify({ jsonrpc: "2.0", method: "notifications/message", params: { level: "info", data: "first" } })}`,
+        `data: ${JSON.stringify({ jsonrpc: "2.0", id, result: { tools: [{ name: "the_answer" }] } })}`,
+        `data: ${JSON.stringify({ jsonrpc: "2.0", id: id + 1, result: { tools: [{ name: "a_decoy" }] } })}`,
+        "",
+      ].join("\n\n");
+      return new Response(body, { headers: { "content-type": "text/event-stream" } });
+    },
+  });
+  try {
+    const tools = await listTools(`http://127.0.0.1:${stub.port}/`, "any-key");
+    assert(tools.join() === "the_answer", `an SSE frame is read by the request's id, not its last line (${tools.join()})`);
+  } catch (err) {
+    bad(`the stub frame could not be read: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  stub.stop(true);
+}
 
 // A free port, then release it for the preview server.
 const probe = Bun.serve({ port: 0, fetch: () => new Response("") });

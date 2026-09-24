@@ -25,8 +25,11 @@ export const actions: Actions = {
 			tools = await listTools(mcpUrl(env), key);
 		} catch (err) {
 			if (err instanceof McpUnauthorized) return fail(401, { error: 'The server refused that access key.' });
-			if (err instanceof McpUnreachable) return fail(502, { error: `${err.message}. Check MCP_URL.` });
-			return fail(500, { error: err instanceof Error ? err.message : 'Sign-in failed.' });
+			// This page answers strangers: the detail (a host name the resolver could
+			// not find, an upstream body) is the operator's, in the log, not the visitor's.
+			console.error('[signin] MCP unreachable:', err instanceof Error ? err.message : err);
+			if (err instanceof McpUnreachable) return fail(502, { error: 'Could not reach the MCP server. Check MCP_URL and the server log.' });
+			return fail(500, { error: 'Sign-in failed; the server log has the reason.' });
 		}
 
 		const token = await seal({ key, canCapture: tools.includes('capture_thought') }, sessionSecret(env));

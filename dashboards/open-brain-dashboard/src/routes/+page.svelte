@@ -23,6 +23,9 @@
 	let capturing = $state(false);
 	let selectedThought = $state<Thought | null>(null);
 	let latestResultKey = $state<string | null>(null);
+	// What the last call to the brain said when it failed — the proxy's words
+	// (a tool's refusal, an unreachable server), shown, not left in the console.
+	let errorMessage = $state('');
 	let searchInput: HTMLInputElement | null = null;
 
 	const typeButtonClass: Record<ThoughtType, string> = {
@@ -70,6 +73,7 @@
 		}
 
 		searching = true;
+		errorMessage = '';
 		try {
 			const fetchedThoughts = await getThoughts({
 				search: query,
@@ -102,6 +106,7 @@
 			extractFilters();
 		} catch (err) {
 			console.error('Failed to load thoughts:', err);
+			errorMessage = `Search failed: ${err instanceof Error ? err.message : 'unknown error'}`;
 		} finally {
 			searching = false;
 		}
@@ -115,6 +120,7 @@
 			allPeople = Object.keys(s.people);
 		} catch (err) {
 			console.error('Failed to load stats:', err);
+			errorMessage = `Could not load stats: ${err instanceof Error ? err.message : 'unknown error'}`;
 		}
 	}
 
@@ -214,6 +220,7 @@
 	async function handleCapture() {
 		if (!captureContent.trim()) return;
 		capturing = true;
+		errorMessage = '';
 		try {
 			await captureThought(captureContent);
 			captureContent = '';
@@ -222,6 +229,7 @@
 			if (hasSearched) await loadThoughts();
 		} catch (err) {
 			console.error('Failed to capture:', err);
+			errorMessage = `Capture failed: ${err instanceof Error ? err.message : 'unknown error'}`;
 		}
 		capturing = false;
 	}
@@ -250,6 +258,12 @@
 			<span class="text-sm text-text-muted" title="Sign in with a write-scoped key to capture">Read-only key</span>
 		{/if}
 	</div>
+
+	{#if errorMessage}
+		<div class="mb-6 rounded-xl border border-red-400/30 bg-red-400/10 px-4 py-3 text-sm text-red-300" role="alert">
+			{errorMessage}
+		</div>
+	{/if}
 
 	<!-- Capture Form -->
 	{#if showCapture && data.canCapture}

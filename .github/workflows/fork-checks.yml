@@ -699,7 +699,8 @@ jobs:
         run: |
           for d in open-brain-dashboard open-brain-dashboard-next open-brain-dashboard-pro; do
             echo "::group::$d"
-            ( cd "dashboards/$d" && bun install --frozen-lockfile && bun run build )
+            # The group closed on failure too, or the rest of the log nests under it.
+            if ! ( cd "dashboards/$d" && bun install --frozen-lockfile && bun run build ); then echo "::endgroup::"; exit 1; fi
             echo "::endgroup::"
           done
           ( cd dashboards/open-brain-dashboard && bun run check )

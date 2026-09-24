@@ -105,14 +105,25 @@ HOSTING
 
 ## Deploy to Production
 
-- **Vercel:** Import this folder, set `MCP_URL` and `SESSION_SECRET`.
-- **Netlify:** Deploy as a SvelteKit site, set the same two variables.
+- **Vercel** (the configured adapter, `svelte.config.js`): import this folder,
+  set `MCP_URL` and `SESSION_SECRET`. Another host needs its SvelteKit adapter.
+- A hosted dashboard needs a server it can reach: not `127.0.0.1:8000`, but a
+  TLS proxy or tunnel in front of it ([deploy/README.md](../../deploy/README.md),
+  "What is reachable from where"). A dashboard in a container on the same host
+  as the compose stack reaches it as `http://host.docker.internal:8000/`
+  (`host.containers.internal` on podman).
 
-The session cookie is marked `Secure` when the request arrived over HTTPS —
-every hosted deploy — and not on plain HTTP (`bun run preview` on `127.0.0.1`,
-which CI drives), on sign-in and on sign-out alike. The sealed token also
+The session cookie is marked `Secure` when the request's URL is HTTPS — Vercel
+and Netlify hand the app the browser's URL — and not on plain HTTP (`bun run
+preview` on `127.0.0.1`, which CI drives), on sign-in and on sign-out alike.
+Self-hosting behind a TLS-terminating proxy with `adapter-node`, set `ORIGIN`
+(or `PROTOCOL_HEADER=x-forwarded-proto`) so the scheme the app sees is the
+browser's, or the cookie goes out without `Secure`. The sealed token also
 carries its own expiry, a day, so a copied cookie value stops working then.
-Put TLS in front of any deploy others can reach.
+Put TLS in front of any deploy others can reach. `/signin` answers a wrong key
+with 401 and a right one with a redirect, unthrottled by the dashboard or the
+server: a key `keygen.ts` minted is 32 random bytes and cannot be guessed, so
+keep it that way — do not hand-write a short key into `MCP_ACCESS_KEYS`.
 
 ## Expected outcome
 
@@ -147,7 +158,7 @@ Solution: Set it to where your server answers MCP. The compose stack's default i
 Solution: The server answered, and the key is not one it knows. Check that the key's hash is a line in the server's `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` also works) and that the container was restarted after editing `deploy/.env`.
 
 **Issue: sign-in says `Could not reach the MCP server`**
-Solution: `MCP_URL` is wrong, or the server is not up. `curl -sS $MCP_URL/health` should print `ok`. From a container, `127.0.0.1` is the container, not your machine.
+Solution: `MCP_URL` is wrong, or the server is not up; the dashboard's own log has the resolver's or the server's words. `curl -sS $MCP_URL/health` should print `ok`. From a container, `127.0.0.1` is the container, not your machine — use `host.docker.internal` (see Deploy).
 
 **Issue: no capture button**
 Solution: You signed in with a read key. Mint a write key (`--scope write`) and sign in again.

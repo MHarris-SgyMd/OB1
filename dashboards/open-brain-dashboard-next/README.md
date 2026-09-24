@@ -66,6 +66,11 @@ Or copy the folder to your own project directory.
 npm install
 ```
 
+Two lockfiles sit here: `package-lock.json` for npm, and `bun.lock`, which CI
+installs from with `bun install --frozen-lockfile`. After changing
+`package.json`, run `bun install` too and commit `bun.lock` beside the npm one,
+or the build job refuses the frozen install.
+
 ### Step 3: Configure environment
 
 ```bash

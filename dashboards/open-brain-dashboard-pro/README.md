@@ -44,7 +44,7 @@ Copy `.env.example` to `.env.local` (gitignored) and fill it in.
 
 ```bash
 cd dashboards/open-brain-dashboard-pro
-npm install
+npm install   # CI installs from bun.lock with `bun install --frozen-lockfile`: after changing package.json, run `bun install` too and commit bun.lock
 
 # Local dev
 cp .env.example .env.local   # then edit and fill in values
