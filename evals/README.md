@@ -5260,7 +5260,8 @@ OB1_JEV_BASE_URL=http://127.0.0.1:8020 OB1_JEV_LOCAL=1 \
 It warms and uses the host's Ollama, so it slows a brain sharing it for the
 few seconds it runs, and longer if the warm-up has a model to load.
 
-**SMD-1937's gate, end to end** — `eval-jev-gate.ts`. Candidates from a brain's
+**SMD-1937's gate, end to end** — `eval-jev-gate.ts` as it stood at 2635eb7d
+(SMD-1937 has since rebuilt it on graded mentions: the next section). Candidates from a brain's
 own entity graph in one read-only transaction — `bad` (names `^[0-9.:]+$`,
 SMD-1935's rule: a strong label), `positive` (tools, projects, organizations in
 ≥ 5 thoughts: a weak label) and the `person`/`place` layer (no label) — each
@@ -5297,6 +5298,132 @@ open-domain hard tier is 37% (jev/README.md, "Conformance"); which framing, whic
 calibration and which model (SemIf, SMD-2052) is SMD-1937's measurement to make
 on this harness. What the run shows is the Verify bullet: the spike ran against
 the tier with no serving code of its own.
+
+## The entity gate on the cases a regex cannot judge (SMD-1937)
+
+SMD-1937 asked whether a typed-decision model after the extractor earns a place
+in the extraction path. The bar was a margin over the deterministic gate on
+the **ambiguous** cases, not the numeric ones SMD-1935's regex already catches.
+`eval-jev-gate.ts` measures that against the tier (Verdict v1.4, the only model
+it serves; SemIf is SMD-2052). It writes nothing to the brain and puts nothing
+in the path.
+
+**Pre-registered** in the commit before the grades (793b1158):
+- the baselines: B0 = `NUMERIC_NAME_RE`; B1 = SMD-1935's whole gate, which is B0,
+  the type vocabulary as a name, and an identifier's shape typed `person` or
+  `place`;
+- the sample;
+- the split: dev/test by md5 of the thought;
+- the arms;
+- the margin: the arm chosen on dev beats B1 by 10 points of balanced
+  accuracy on test, with the paired bootstrap's 95% interval above 0.
+
+**The graded set** is `fixtures/entity-gate-grades.json` (ids and numbers only):
+- 201 dogfood mentions whose name passes B0: every `person`, `place` and
+  `organization`, and 50 each of `tool`, `topic` and `project`;
+- two blind Claude graders worked from the name and a window of the thought,
+  without the extractor's type or any tier output;
+- they agree on validity for 91% (kappa 0.82) and on the type for 90%
+  (kappa 0.83);
+- 81 of 201 are valid. By type, 42 of the 50 topics, 37 of the 50 tools,
+  15 of the 50 projects, and 8 of the 11 places are invalid.
+- The invalid ones are mostly code identifiers named as entities (tables,
+  functions, environment variables, files, branches) and generic words or
+  roles (`operator`, `evals`, `full stack`).
+
+```sh
+podman run --rm --network open-brain_default --env-file deploy/.env \
+  -e OB1_JEV_BASE_URL=http://host.containers.internal:8020 -e OB1_JEV_LOCAL=1 \
+  -v "$PWD":/repo:ro -w /repo/evals oven/bun:1.4.0-alpine sh -c \
+  'export DATABASE_URL="postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/openbrain"; exec bun eval-jev-gate.ts --cache /tmp/jev-gate.json'
+```
+
+(`--cache` keeps the answers, probabilities and logits only, by what was
+asked, so a re-analysis makes no tier pass. `--dump-sample` writes the grading
+sample, the brain's text, so write it outside the tree.)
+
+On the test split (90 mentions, 52 invalid), with the threshold, temperature
+and Platt refit taken from dev:
+
+| arm | AUROC | ECE served | Brier / ECE, Platt | balanced accuracy | rejects invalid | keeps valid |
+| --- | --- | --- | --- | --- | --- | --- |
+| B1 (SMD-1935's gate) | — | — | — | 0.545 | 11.5% | 97.4% |
+| v1: SMD-2050's validity framing | 0.586 | 0.114 | 0.242 / 0.052 | 0.562 | 51.9% | 60.5% |
+| **v2**: validity in the prompt's words | **0.658** | 0.136 | 0.229 / 0.118 | **0.645** | 71.2% | 57.9% |
+| claim: "X is <the extractor's type>" | 0.559 | 0.156 | 0.244 / 0.035 | 0.503 | 5.8% | 94.7% |
+| pertype: six binaries, the max | 0.547 | 0.191 | 0.242 / 0.035 | 0.529 | 5.8% | 100.0% |
+| choice: types + number + generic | 0.516 | 0.366 | 0.245 / 0.050 | 0.515 | 34.6% | 68.4% |
+| the extractor's stored confidence | 0.487 | 0.577 | 0.246 / 0.030 | 0.500 | 0.0% | 100.0% |
+
+- **The margin is not met.** v2 was chosen on dev (0.637).
+  - On test, v2 − B1 = +10.1 points, 95% interval −0.7 to +21.0.
+  - Against either grader's labels alone it is +7.8 to +7.9, with the interval
+    below 0 (−3.2).
+  - B1 then v2, the order a deployment would use, adds +8.8 (−1.4 to +18.8).
+- **The signal is real but weak.** Across 1,000 permutations of v2's scores,
+  chance sits at AUROC 0.501, and 0.5% reach 0.658 (p = 0.005). On SMD-1982's
+  29 hand-graded mentions (another grader, the same definition), the tier arms'
+  AUROC is 0.55–0.68, and B1's balanced accuracy is 0.75, above v2's 0.575: that
+  set holds numbers and vocabulary words, which B1 catches.
+- **Calibration.**
+  - The served probabilities sit on the wrong side of the base rate. The binary
+    arms average 0.54–0.60 (range 0.29–0.72) and the choice 0.75, while 42% of
+    the test mentions are valid.
+  - A temperature alone cannot move them: the fit flattens every arm to a coin
+    (Brier 0.250).
+  - Platt's offset brings the ECE to 0.03–0.12. It brings the Brier score to
+    0.229–0.246, where the base-rate constant scores 0.244. Only v2 carries any
+    Brier skill (about 6%).
+- **Typing is worse than the extractor's.** On the 38 valid test mentions:
+
+  | typer | right type |
+  | --- | --- |
+  | the extractor | 71% |
+  | the choice | 55% |
+  | pertype (argmax) | 21% |
+
+  pertype − extractor = −50 points (−66 to −32). The per-type binaries call
+  nearly everything a tool.
+- **A stored confidence (SMD-1925).** The extractor's column carries no signal:
+  two values (0.90, 1.00), AUROC 0.487. v2's P after Platt trades precision for
+  recall, but barely:
+
+  | keep at | precision | recall |
+  | --- | --- | --- |
+  | 0.4 | 60.5% | 60.5% |
+  | 0.5 | 87.5% | 18.4% |
+
+  Everything is kept below 0.3, and nothing at 0.6 or above.
+- **Cost.** A thought holds 13 mentions at p50, 34 at p95 and 64 at most. With a
+  whole thought's list in one request, container to host:
+
+  | shape | p50 | p95 |
+  | --- | --- | --- |
+  | one binary a candidate | 0.87 s | 3.5 s |
+  | six binaries a candidate | 5.0 s | 17.6 s |
+
+  One binary is about a tenth of a 9-second extraction call. Six are as much
+  as the call itself.
+- **It cannot replace B0.** Of the 60 most-mentioned numeric names, v2 rejects
+  65% and pertype 5%; B0 rejects all of them.
+- **Post hoc, not in the verdict.** B1's shapes read for every type reject 40%
+  of the invalid mentions and 40% of the valid ones (a ticket id is a valid
+  project), balanced accuracy 0.505. No shape rule separates the code
+  identifiers either.
+- **Controls.**
+  - With the gate off, 90 of 90 test mentions are kept with the extractor's
+    type: today's graph exactly.
+  - `--self-check` (a fork-checks step) holds the rules and the arithmetic. It
+    includes a mutant for each refit: a clamped log loss let the temperature
+    walk to its bound on the extractor's column, which the first run showed.
+
+**What it settles.** Verdict v1.4 does not earn a place in the extraction path,
+as a validity gate or as a typer. Ship SMD-1935's deterministic gate, which
+does all that a shape rule can. The mass it cannot reach is code identifiers
+and generic words, and those need either another model (SemIf, SMD-2052, is
+the one untried lever on this harness) or the extractor not minting them in
+the first place. The extractor's own confidence column stays uninformative
+until something like this earns the place.
 
 ## Related
 

@@ -109,6 +109,16 @@ export const IDENTIFIER_SHAPES: readonly [string, RegExp][] = [
   ["a host:port", /^\S+:\d+$/],
 ];
 
+/**
+ * NOT pre-registered: B1's identifier shapes read for every type, not only
+ * person and place. Added after the first run showed the invalid mentions B1
+ * keeps are mostly code identifiers typed tool, topic or project. Reported as
+ * post hoc, for SMD-1935 to weigh; the verdict does not read it.
+ */
+export function anyTypeShapeRejects(name: string, type: string): string | null {
+  return b1Rejects(name, type) ?? IDENTIFIER_SHAPES.find(([, re]) => re.test(name.trim()))?.[0] ?? null;
+}
+
 /** B1: why the whole deterministic gate rejects a mention, or null to keep it with the extractor's type. */
 export function b1Rejects(name: string, type: string): string | null {
   if (b0Rejects(name)) return "a number";
@@ -187,9 +197,15 @@ export function auroc(pos: number[], neg: number[]): number {
   return pos.length && neg.length ? wins / (pos.length * neg.length) : NaN;
 }
 
-/** Mean log loss of p = sigmoid(a·s + b) against the labels. */
+/**
+ * Mean log loss of p = sigmoid(a·s + b) against the labels, exact at any
+ * score: softplus(z) − y·z. A clamped p made every confident row cost the same
+ * past |z| ≈ 21, so the loss went flat and the search walked to its bound on a
+ * score of logit(1.00) (measured on the extractor's column).
+ */
 function logLoss(rows: { s: number; y: 0 | 1 }[], a: number, b: number): number {
-  return rows.reduce((t, r) => { const p = clampP(sigmoid(a * r.s + b)); return t - (r.y ? Math.log(p) : Math.log(1 - p)); }, 0) / rows.length;
+  const softplus = (z: number) => Math.max(z, 0) + Math.log1p(Math.exp(-Math.abs(z)));
+  return rows.reduce((t, r) => { const z = a * r.s + b; return t + softplus(z) - r.y * z; }, 0) / rows.length;
 }
 
 /**
@@ -282,6 +298,20 @@ export function shuffled<T>(xs: T[], seed: number): T[] {
   const out = [...xs], next = rng(seed);
   for (let i = out.length - 1; i > 0; i--) { const j = Math.floor(next() * (i + 1)); [out[i], out[j]] = [out[j], out[i]]; }
   return out;
+}
+
+/**
+ * The permuted-score mutant as a test: the scores shuffled across the labels
+ * `n` times. The mean says where chance sits for this many rows; p is the share
+ * of shuffles (the observed order counted as one) whose AUROC reaches the
+ * observed, so one lucky shuffle cannot pass for a signal or hide one.
+ */
+export function permutationTest(scores: number[], labels: (0 | 1)[], n = 1000, seed = 7): { observed: number; mean: number; p: number; n: number } {
+  const of = (ss: number[]) => auroc(ss.filter((_, i) => labels[i] === 1), ss.filter((_, i) => labels[i] === 0));
+  const observed = of(scores);
+  let sum = 0, reach = 0;
+  for (let i = 0; i < n; i++) { const a = of(shuffled(scores, seed + i)); sum += a; if (a >= observed) reach++; }
+  return { observed, mean: sum / n, p: (reach + 1) / (n + 1), n };
 }
 
 /** The gate: keep a candidate when its score clears the threshold, with the extractor's type unless the arm names another. Off (threshold -Infinity) it is the identity. */
@@ -447,7 +477,7 @@ type Scoredrow = { c: Candidate; g: GradedMention; split: "dev" | "test"; arms: 
 /** ECE over the deciles, the calibration harness's bins. */
 const eceOf = (rows: Scored[]) => ece(reliability(rows, binOf(Infinity)));
 
-async function report(url: string, perCohort: number, costThoughts: number) {
+async function report(url: string, perCohort: number, costThoughts: number, cachePath: string | undefined) {
   const cfg = resolveJevConfig(process.env as JevEnv);
   if (!cfg) { console.error("the report needs OB1_JEV_BASE_URL (and OB1_JEV_LOCAL=1 for a tier on this box)"); process.exit(2); }
   const grades = readGateGrades();
@@ -469,9 +499,16 @@ async function report(url: string, perCohort: number, costThoughts: number) {
   // term the egress policy names applies to it; a refused row is counted and left out.
   const subject = (c: Candidate) => ({ kind: "decision" as const, actor: "eval-jev-gate", metadata: c.metadata });
   let refused = 0;
+  // A cache of answers by what was asked (the decisions themselves, the window
+  // included), so a re-analysis costs no tier pass and a changed framing or a
+  // changed thought is asked again. It holds probabilities and logits, no text.
+  const cached: Record<string, JevResult[]> = cachePath && existsSync(cachePath) ? JSON.parse(readFileSync(cachePath, "utf8")) : {};
   const decide = async (c: Candidate) => {
+    const ds = decisionsFor(c);
+    const key = new Bun.CryptoHasher("md5").update(JSON.stringify(ds)).digest("hex");
+    if (cached[key]) return cached[key];
     try {
-      return (await jevDecideMany(cfg, decisionsFor(c), subject(c))).results;
+      return (cached[key] = (await jevDecideMany(cfg, ds, subject(c))).results);
     } catch (e) {
       if (!(e instanceof ProviderError && e.kind === "egress")) throw e;
       refused++;
@@ -494,6 +531,7 @@ async function report(url: string, perCohort: number, costThoughts: number) {
   const numericRows: Record<ArmName, Reading>[] = [];
   for (const c of numeric) { const r = await decide(c); if (r) numericRows.push(readArms(r, c.type, c.stored)); }
   const wall = performance.now() - t0;
+  if (cachePath) await Bun.write(cachePath, JSON.stringify(cached));
 
   const dev = rows.filter((r) => r.split === "dev"), test = rows.filter((r) => r.split === "test");
   const y = (r: Scoredrow) => r.g.valid;
@@ -522,6 +560,7 @@ async function report(url: string, perCohort: number, costThoughts: number) {
     [
       ["B0 numeric", "—", "—", "—", "—", "—", "—", "—", fixed(baTest((r) => !b0Rejects(r.c.name)), 3), pct(test.filter((r) => !y(r) && b0Rejects(r.c.name)).length, test.filter((r) => !y(r)).length), pct(test.filter((r) => y(r) && !b0Rejects(r.c.name)).length, test.filter((r) => y(r)).length)],
       ["B1 shape", "—", "—", "—", "—", "—", "—", "—", fixed(baTest(keepB1), 3), pct(test.filter((r) => !y(r) && !keepB1(r)).length, test.filter((r) => !y(r)).length), pct(test.filter((r) => y(r) && keepB1(r)).length, test.filter((r) => y(r)).length)],
+      ["B1 shapes, any type (post hoc)", "—", "—", "—", "—", "—", "—", "—", fixed(baTest((r) => !anyTypeShapeRejects(r.c.name, r.c.type)), 3), pct(test.filter((r) => !y(r) && anyTypeShapeRejects(r.c.name, r.c.type)).length, test.filter((r) => !y(r)).length), pct(test.filter((r) => y(r) && !anyTypeShapeRejects(r.c.name, r.c.type)).length, test.filter((r) => y(r)).length)],
       ...ARMS.map((arm) => {
         const f = fitted[arm];
         const pos = test.filter((r) => y(r)).map((r) => r.arms[arm].s), neg = test.filter((r) => !y(r)).map((r) => r.arms[arm].s);
@@ -575,8 +614,8 @@ async function report(url: string, perCohort: number, costThoughts: number) {
   const off = gate(test.map((r) => r.c), () => 0, -Infinity);
   const identity = off.length === test.length && off.every((k, i) => k.cand === test[i].c && k.type === test[i].c.type);
   console.log(`\ndrop-the-mechanism: with the gate off, ${off.length} of ${test.length} test candidates kept, every type the extractor's — ${identity ? "today's graph exactly" : "NOT the identity"}.`);
-  const perm = shuffled(test.map((r) => r.arms[chosen].s), 7);
-  console.log(`mutant: ${chosen}'s scores permuted across the test mentions give AUROC ${fixed(auroc(perm.filter((_, i) => y(test[i])), perm.filter((_, i) => !y(test[i]))), 3)} (unpermuted ${fixed(auroc(test.filter((r) => y(r)).map((r) => r.arms[chosen].s), test.filter((r) => !y(r)).map((r) => r.arms[chosen].s)), 3)}).`);
+  const perm = permutationTest(test.map((r) => r.arms[chosen].s), test.map(y));
+  console.log(`mutant: ${chosen}'s scores permuted across the test mentions, ${perm.n} times: mean AUROC ${fixed(perm.mean, 3)}, and ${fixed(100 * perm.p, 1)}% of permutations reach the unpermuted ${fixed(perm.observed, 3)} (p = ${fixed(perm.p, 3)}).`);
 
   // The second grader's set: SMD-1982's hand grades, the same definition, another grader.
   if (secondRows.length) {
@@ -623,6 +662,7 @@ function selfCheck() {
   ok(b1("021", "person") === "a number" && b1("Person", "topic") === "a type-vocabulary word" && b1("places", "place") === "a type-vocabulary word", "B1 rejects a number and the type vocabulary, whatever the type");
   ok(["@hono/mcp", "hono/mcp", "michaelharris/**", "SMD-1497", "host.containers.internal", "openrouter.ai", "open-brain_default", "localhost:11434"].every((n) => b1(n, "person") !== null && b1(n, "place") !== null), "B1 rejects an identifier's shape typed person or place: a package, a path, a glob, a ticket id, a host, a domain, snake_case, a host:port");
   ok(["@hono/mcp", "SMD-1497", "openrouter.ai", "db/migrate.ts"].every((n) => b1(n, "tool") === null && b1(n, "project") === null), "B1 keeps the same shapes typed tool or project: it bars only person and place (SMD-1935)");
+  ok(anyTypeShapeRejects("ob1_entity_edges", "project") !== null && anyTypeShapeRejects("db/README.md", "topic") !== null && anyTypeShapeRejects("Bun", "tool") === null && anyTypeShapeRejects("021", "tool") === "a number", "the post-hoc rule reads B1's shapes for every type, and keeps B1's own reasons first");
   ok(["Nate B. Jones", "anita", "Michael Harris", "Mac mini M4 Pro", "main", "operator"].every((n) => b1(n, "person") === null && b1(n, "place") === null), "B1 keeps a name with spaces, a lower-case name and a generic word: the ambiguous cases are the gate's, not the regex's");
 
   // The arithmetic.
@@ -635,6 +675,11 @@ function selfCheck() {
   const t = fitPlatt(synth(0.4, 0), true), p = fitPlatt(synth(0.4, -1));
   ok(Math.abs(t.a - 0.4) < 0.05 && t.b === 0, `a temperature is recovered (1/T = ${t.a.toFixed(3)}, drawn at 0.4)`);
   ok(Math.abs(p.a - 0.4) < 0.05 && Math.abs(p.b + 1) < 0.15, `Platt's slope and offset are recovered (${p.a.toFixed(3)}, ${p.b.toFixed(3)}; drawn at 0.4, -1)`);
+  // The extractor's column: two stated values, 1.00 and 0.90 (logit ≈ 20.7 and 2.2), neither of which the label follows.
+  // The best temperature flattens it toward the base rate; a clamped loss is flat past |z| ≈ 21 and the fit walks the other way.
+  const column = Array.from({ length: 400 }, (_, i) => ({ s: logit(i % 10 ? 1 : 0.9), y: (draw() < 0.42 ? 1 : 0) as 0 | 1 }));
+  const w = fitPlatt(column, true);
+  ok(w.a < 0.1, `a temperature on a confident column the labels do not follow flattens it (1/T = ${w.a.toFixed(3)}), not sharpens it`);
   ok(kappa([1, 1, 0, 0], [1, 1, 0, 0]) === 1 && Math.abs(kappa([1, 0, 1, 0], [1, 1, 0, 0])) < 1e-12, "kappa: agreement 1, agreement at chance 0");
   const rows = Array.from({ length: 200 }, (_, i) => ({ a: i % 2 === 0, b: i % 4 === 0, y: (i % 2 === 0 ? 1 : 0) as 0 | 1 }));
   const bs = pairedBootstrap(rows, (rs) => [balancedAccuracy(rs.map((r) => ({ keep: r.a, y: r.y }))), balancedAccuracy(rs.map((r) => ({ keep: r.b, y: r.y })))]);
@@ -649,6 +694,8 @@ function selfCheck() {
   const permuted = shuffled(sep, 7);
   const permAuroc = auroc(permuted.filter((_, i) => lab[i]), permuted.filter((_, i) => !lab[i]));
   ok(auroc(sep.filter((_, i) => lab[i]), sep.filter((_, i) => !lab[i])) === 1 && permAuroc > 0.3 && permAuroc < 0.7, `the mutant: a perfect score permuted falls to chance (${permAuroc.toFixed(3)})`);
+  const strong = permutationTest(sep, lab.map((l) => (l ? 1 : 0)), 200), none = permutationTest(sep.map((i) => i % 7), lab.map((l) => (l ? 1 : 0)), 200);
+  ok(strong.observed === 1 && strong.p < 0.01 && Math.abs(strong.mean - 0.5) < 0.05 && none.p > 0.05, `the permutation test: a perfect score is far past every shuffle (p ${strong.p.toFixed(3)}, chance ${strong.mean.toFixed(3)}), a score unrelated to the label is not (p ${none.p.toFixed(3)})`);
 
   // The framings and the readings.
   const ds = decisionsFor({ name: "Bun", context: "ctx" });
@@ -690,7 +737,7 @@ if (import.meta.main) {
     const url = arg("--url") ?? process.env.DATABASE_URL;
     const perCohort = Number(arg("--per-cohort") ?? 60), costThoughts = Number(arg("--cost-thoughts") ?? 20);
     if (!url || !Number.isInteger(perCohort) || perCohort < 1 || !Number.isInteger(costThoughts) || costThoughts < 1) {
-      console.error("usage: bun eval-jev-gate.ts --url postgres://… [--per-cohort 60] [--cost-thoughts 20] | --dump-sample <file> | --self-check");
+      console.error("usage: bun eval-jev-gate.ts --url postgres://… [--per-cohort 60] [--cost-thoughts 20] [--cache <file>] | --dump-sample <file> | --self-check");
       process.exit(2);
     }
     const dump = arg("--dump-sample");
@@ -703,6 +750,6 @@ if (import.meta.main) {
       } finally {
         await sql.close();
       }
-    } else await report(url, perCohort, costThoughts);
+    } else await report(url, perCohort, costThoughts, arg("--cache"));
   }
 }
