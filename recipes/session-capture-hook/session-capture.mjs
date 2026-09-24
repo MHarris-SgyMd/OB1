@@ -180,7 +180,7 @@ function release(dir, { keepTemps = false } = {}) {
 function claim(home, mine) {
   const here = join(mine, basename(home));
   try { renameSync(home, here); } catch { return null; } // a sibling has it
-  try { return { home, here, payload: JSON.parse(readFileSync(here, "utf8")) }; } catch { moveTo(here, DEAD_DIR()); return null; }
+  try { return { home, here, payload: JSON.parse(readFileSync(here, "utf8")) }; } catch { moveTo(here, DEAD_DIR()); log(`dead ${basename(home)} — not a payload this run can read`); return null; }
 }
 const moveTo = (from, dir) => { try { renameSync(from, join(dir, basename(from))); return true; } catch { return false; } };
 /** Dead letters are kept for an operator to read (the README's troubleshooting), not forever: after thirty days they are removed (eighth review pass — an endpoint down for an afternoon filled dead/ and nothing pruned it). */
@@ -1079,7 +1079,7 @@ export async function postPending(cfg, own) {
     // the room another's newest needs (fifth and sixth review passes); the
     // older ones left under pending/ are dropped by the next run.
     const done = new Set(outcomes.map((o) => o.file));
-    const lists = [...clearedSessions].map((sid) => [sid, sessionPayloads(sid).filter((q) => q.pid === null && !done.has(q.path) && !bounced.has(q.path)).sort((x, y) => y.name.localeCompare(x.name))]);
+    const lists = [...clearedSessions].map((sid) => [sid, sessionPayloads(sid).filter((q) => q.pid === null && !done.has(q.path) && !bounced.has(`${sid}:${q.path}`)).sort((x, y) => y.name.localeCompare(x.name))]);
     const next = [];
     for (let k = 0; next.length < room && lists.some(([, l]) => l.length > k); k++) {
       for (const [sid, l] of lists) {
@@ -1091,7 +1091,7 @@ export async function postPending(cfg, own) {
         // ("a.b" and "a_b"): a payload of another session is not this run's
         // to judge (sixth review pass — it was dropped as obsolete beside a
         // session it did not belong to).
-        if (c.payload.session_id !== sid) { moveTo(c.here, PENDING_DIR()); bounced.add(p.path); continue; }
+        if (c.payload.session_id !== sid) { moveTo(c.here, PENDING_DIR()); bounced.add(`${sid}:${p.path}`); continue; } // by session: its own may still follow it up (tenth review pass)
         // The session's newest, across rounds: a later round must not name an older payload newest when the newest was taken before and failed (ninth review pass).
         if (!newestOf.has(sid) || basename(newestOf.get(sid)).localeCompare(p.name) < 0) newestOf.set(sid, p.path);
         next.push(c);
@@ -1133,7 +1133,11 @@ export async function postPending(cfg, own) {
       // follow-up posts the payload as soon as the wait would have (fourth
       // review pass). A payload that has landed, or that is outdated, steps
       // aside for no one.
-      const ahead = payload.captured_id || outdated(readState(payload.session_id)) ? [] : aheadOf(payload.session_id, basename(here));
+      // A payload that has landed steps aside too: its state write must follow
+      // an older sibling's, and two children finishing one session's owed
+      // bookkeepings at once wrote the state in no order (tenth review pass;
+      // the first pass had spared it the wait, which is gone).
+      const ahead = outdated(readState(payload.session_id)) ? [] : aheadOf(payload.session_id, basename(here));
       if (ahead.length) {
         const moved = moveTo(here, PENDING_DIR());
         // Between the look and that move the predecessor may have landed and
@@ -1143,7 +1147,7 @@ export async function postPending(cfg, own) {
         // got to it first, in which case that run posts it and this one says so.
         let why = `the session's earlier post is in flight (pid ${ahead[0].pid}); ${moved ? "kept under pending/ for the run that lands it" : "pending/ refused the move, so it stays in this run's hands until the run ends"}`;
         if (moved && !retaken && !aheadOf(payload.session_id, basename(here)).length) {
-          try { renameSync(home, here); queue.unshift({ home, here, payload, retaken: true }); continue; } catch { why = "the session's earlier post has cleared and its run has taken this payload up"; }
+          try { renameSync(home, here); queue.unshift({ home, here, payload, retaken: true }); continue; } catch { why = existsSync(mine) ? "the session's earlier post has cleared and its run has taken this payload up" : "this run's claim directory is gone, swept as stale, so the payload waits under pending/ for the next run"; }
         }
         log(`deferred session=${payload.session_id} — ${why}`);
         outcomes.push({ file, ok: false, deferred: true, error: `deferred: ${why}` });
@@ -1220,7 +1224,8 @@ export async function postPending(cfg, own) {
       }
       const { id } = posted;
       clearedSessions.add(payload.session_id);
-      landedHere.set(payload.session_id, { id, ms: momentOf(payload.prepared_at, 0) });
+      const nameMs = Number(basename(here).split("-")[0]);
+      landedHere.set(payload.session_id, { id, ms: momentOf(payload.prepared_at, nameMs <= Date.now() ? nameMs : 0) }); // the same rule as a file's (tenth review pass)
       const note = [posted.note, lastResort].filter(Boolean).join("; ");
       // Bookkeeping, apart from the post: the id goes onto the payload first, so a
       // fault here leaves a file the next run finishes without posting twice. A
