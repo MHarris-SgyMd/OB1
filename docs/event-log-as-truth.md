@@ -131,8 +131,9 @@ orders of 033, 032 and 036 hold with the same locks in the same order; one
 audit row and one claim per logical write; a capture is visible to a `SELECT`
 and to the keyword search in the same session; the whole log replays into
 rows equal to their copy on every column, the vector from the snapshot
-included, bar four raw rows' NULL keys, which the projector fills. **Option 1** — a view named `thoughts` over a renamed table with
-`INSTEAD OF` triggers — is NO-GO twice: 053's functions fail every capture
+included, bar four raw rows' NULL keys, which the projector fills.
+**Option 1** — a view named `thoughts` over a renamed table with `INSTEAD
+OF` triggers — is NO-GO twice: 053's functions fail every capture
 (`ON CONFLICT` has no constraint to name on a view), and with option 2's
 bodies behind it the community surface fails whole (`ADD COLUMN`, `CREATE
 INDEX`, `REFERENCES`, a row trigger, and `xmax`, which `db/ingest-records.ts`
@@ -167,8 +168,9 @@ without it every ingested record replays at the write's clock; and the key's
 before/after on an update — 018 sets `content_fingerprint` NULL for a text
 another row already holds, a decision a replay cannot re-derive from the
 content. The log grows by the corpus: 1.83 M characters of text beside a
-4.3 MB audit table (table and TOAST) on the dogfood brain at gate 1's census. 046 chose the partition key (`RANGE` on
-`created_at` by month) and did not apply it; SMD-1947 benches the log at a
+4.3 MB audit table (table and TOAST) on the dogfood brain at gate 1's
+census. 046 chose the partition key (`RANGE` on `created_at` by month) and
+did not apply it; SMD-1947 benches the log at a
 million rows.
 
 ### The three verbs, as a read
@@ -283,8 +285,9 @@ step 1, which carries no key move (that is one of the three additions): for
 those the projector derives the key from the content it lands under 018's
 own rule — NULL when another live row already holds it, since 003's partial
 unique index admits one holder — and counts them; this is SMD-2117's arm,
-the prototype keeps the row's key today. A replayed tombstone never refuses (042's guard runs in detach
-mode; the citations are a projection rebuilt apart). A projector that
+the prototype keeps the row's key today. A replayed tombstone never refuses
+(042's guard runs in detach mode; the citations are a projection rebuilt
+apart). A projector that
 corrected the log on the way would make the row disagree with its event and
 the check would refuse it; that is the point of the check.
 
@@ -309,8 +312,8 @@ the graph is where the discipline pays first (gate 1: thirty-two times the
 cost, an order of magnitude rather than a digit; half the key). `node_state`
 is the first fold to build because it is small, its want already measured
 (SMD-1994: 11 of 16 High-priority OB1 issues — 69% — Done or closed and ranked
-identically to live work; 136 of 330 — 41% — Done across the whole board) and it reads status
-from the scalar the log replaces
+identically to live work; 136 of 330 — 41% — Done across the whole board)
+and it reads status from the scalar the log replaces
 (`metadata.status_type` is the lossy overwrite; the transitions are in
 `thought_audit` since 046).
 
@@ -327,10 +330,10 @@ log in `(created_at, seq)` order to the last event at or before the time
 asked and the rows are the brain as it stood — the same code as the rebuild,
 `db/fold.ts --as-of` (SMD-2117; `db/test-replay.ts` is the query-log replay
 gate of SMD-1295, so the fold takes a name of its own), into a working tier
-or a named schema, never over the live rows. The bound is the pair and `created_at` comes first:
-`seq` alone is exact only for rows written after 050 (the rows before took
-theirs in heap order at the ALTER, which 046's backfill and VACUUM had
-reordered), as 050's own comment says. The **as-of
+or a named schema, never over the live rows. The bound is the pair and
+`created_at` comes first: `seq` alone is exact only for rows written after
+050 (the rows before took theirs in heap order at the ALTER, which 046's
+backfill and VACUUM had reordered), as 050's own comment says. The **as-of
 read over valid time** is a filter on the window, on the row or the facet,
 which SMD-2011 wires: a supersession closes the older thought's `valid_until`
 at the newer one's observed-at instead of flagging it, the default read is
@@ -374,8 +377,9 @@ leaving the log to fight it:
   text is unremovable until it does.
 - **Forgetting reaches the projections through the rebuild.** After the
   amendment, `rebuild_derived` (SMD-1732, not built) will walk the lineage
-  forward and re-derive or delete every descendant — chunks, entities, proposals, the
-  snapshot row for that fingerprint — and reports what it could not reproduce.
+  forward and re-derive or delete every descendant — chunks, entities,
+  proposals, the snapshot row for that fingerprint — and report what it
+  could not reproduce.
 - **Declined: cryptographic shredding** (a key per thought, forgetting by
   discarding the key). A single-operator brain on one Postgres with an
   amendment gate the trigger enforces does not need it, and a key store is a
