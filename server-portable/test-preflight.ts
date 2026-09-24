@@ -12,7 +12,8 @@
  */
 
 import { join, dirname } from "node:path";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
 import { DIRECT_CHECK_SKIP_OVER_POSTGREST } from "./store.ts";
@@ -38,7 +39,15 @@ const { assert, skip: skipRaw, report } = createAssert();
 const rx = (literal: string) => literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const skip = (l: string) => skipRaw(l, "no DATABASE_URL");
 
-const BASE_OK = { MCP_ACCESS_KEY: "x".repeat(64), OPENROUTER_API_KEY: "sk-stub" };
+/**
+ * A local endpoint that answers GET /models, for every case whose subject is
+ * not the endpoint: since SMD-1875 preflight dials a local endpoint by default,
+ * and the code's default (127.0.0.1:11434) reaches nothing in CI — and, on a
+ * box that runs Ollama, the real thing. Section [9] holds the probe itself.
+ */
+const localStub = Bun.serve({ port: 0, fetch: () => Response.json({ object: "list", data: [] }) });
+const LOCAL_STUB = `http://127.0.0.1:${localStub.port}/v1`;
+const BASE_OK = { MCP_ACCESS_KEY: "x".repeat(64), OPENROUTER_API_KEY: "sk-stub", OB1_LLM_BASE_URL: LOCAL_STUB };
 
 async function run(env: Record<string, string | undefined>, ...args: string[]) {
   const clean: Record<string, string> = {};
@@ -46,8 +55,16 @@ async function run(env: Record<string, string | undefined>, ...args: string[]) {
     if (v !== undefined) clean[k] = String(v);
   }
   for (const [k, v] of Object.entries(env)) if (v === undefined) delete clean[k];
+  // A developer's proxy would route every loopback probe below through it
+  // (Bun reads these four; fifth review pass): only a case that sets one has one.
+  for (const k of ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"]) if (!(k in env)) delete clean[k];
   return runScript(["bun", join(HERE, "preflight.ts"), ...args], { env: clean, cwd: HERE });
 }
+
+/** The report row named `name` — glyph, name, detail — or "" when none printed. Fix lines start with →, so they never match. */
+const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)) ?? "";
+/** The → fix line under the row named `name`, or "" when the row has none. */
+const fix = (out: string, name: string) => { const ls = out.split("\n"); const i = ls.findIndex((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)); return i >= 0 && /^\s*→ /.test(ls[i + 1] ?? "") ? ls[i + 1] : ""; };
 
 // db/migrate.ts, for the --grant step: the one executable spelling of the
 // capturing-role privileges. Spawned like preflight so its exit code and output
@@ -1774,15 +1791,13 @@ else {
 // [6], [7] and [8] need no database: the provider rows print from configuration
 // alone, and the --deep probes run whether or not the data layer came up. A
 // store that is configured and unreachable, and no credential anywhere.
-const DB_DOWN = { ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", MCP_ACCESS_KEY: "x".repeat(64) };
+const DB_DOWN = { ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", MCP_ACCESS_KEY: "x".repeat(64), OB1_LLM_BASE_URL: LOCAL_STUB };
 const NO_KEYS = { OPENROUTER_API_KEY: undefined, OB1_LLM_API_KEY: undefined, OB1_CHAT_BASE_URL: undefined, OB1_CHAT_API_KEY: undefined };
 
 console.log("\n[6] Two provider endpoints are reported and gated by name (SMD-1902)");
 {
-  const LOCAL = "http://127.0.0.1:11434/v1";
+  const LOCAL = LOCAL_STUB;
   const HOSTED = "https://openrouter.ai/api/v1";
-  /** The report row named `name` — glyph, name, detail — or "" when none printed. */
-  const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)) ?? "";
 
   // Neither chat knob: one provider row that says it serves both, and no chat rows at all.
   const one = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: LOCAL });
@@ -1797,7 +1812,7 @@ console.log("\n[6] Two provider endpoints are reported and gated by name (SMD-19
          "…the chat credential row names the knob and says the embeddings key is not sent there");
   assert(/→ Set OB1_CHAT_API_KEY, or point OB1_CHAT_BASE_URL at a local provider\./.test(hosted.out), "…with the fix naming both chat knobs");
   assert(/✓\s+chat provider\s+https:\/\/openrouter\.ai\/api\/v1 — chat \(OB1_CHAT_BASE_URL\)/.test(hosted.out), "…and the chat provider row names the base");
-  assert(/✓\s+model provider\s+http:\/\/127\.0\.0\.1:11434\/v1 — embeddings \(local/.test(hosted.out), "…while the provider row now says embeddings only");
+  assert(new RegExp(String.raw`✓\s+model provider\s+${rx(LOCAL)} — embeddings \(local`).test(hosted.out), "…while the provider row now says embeddings only");
   assert(/!\s+provider credential\s+a key is set but the endpoint is local/.test(hosted.out), "…and the embeddings credential still warns about its own key on a local endpoint");
 
   // With a key of its own it passes and the value never prints; a local chat
@@ -1833,6 +1848,7 @@ console.log("\n[7] The supersession judge's model is reported, and probed under 
   const stub = Bun.serve({
     port: 0,
     async fetch(req) {
+      if (req.method === "GET") return Response.json({ object: "list", data: [] }); // the reachability probe (SMD-1875)
       const body = (await req.json()) as { model: string };
       if (new URL(req.url).pathname.endsWith("/embeddings")) return Response.json({ data: [{ embedding: new Array(EMBEDDING_DIM).fill(0) }] });
       chatModels.push(body.model);
@@ -1879,9 +1895,8 @@ console.log("\n[7] The supersession judge's model is reported, and probed under 
 
 console.log("\n[8] The egress gate is reported: the mode, and per endpoint what leaves — declared local, the upgrade case, or refused (SMD-1903)");
 {
-  const LOCAL = "http://127.0.0.1:11434/v1";
+  const LOCAL = LOCAL_STUB;
   const HOSTED = "https://openrouter.ai/api/v1";
-  const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)) ?? "";
   /** Every gate knob unset, whatever the shell has. */
   const GATE = { OB1_EGRESS_POLICY: undefined, OB1_EGRESS_ALLOW: undefined, OB1_EGRESS_DENY: undefined, OB1_LLM_LOCAL: undefined, OB1_CHAT_LOCAL: undefined };
 
@@ -1893,12 +1908,12 @@ console.log("\n[8] The egress gate is reported: the mode, and per endpoint what 
          "a source: term is warned about — the label is the caller's since capture_thought takes it (ninth review pass)");
   assert(/✓\s+egress policy\s+deny \(the default\) — a thought's text reaches an endpoint not declared local only under an OB1_EGRESS_ALLOW term; no terms/.test(undeclared.out),
          "unset: the policy row says deny, the default, no terms");
-  assert(/!\s+embeddings egress\s+http:\/\/127\.0\.0\.1:11434\/v1 looks local but is not declared so — the gate treats it as remote, and under deny with no allow term every embeddings and chat call is refused: captures land without a vector/.test(undeclared.out),
+  assert(new RegExp(String.raw`!\s+embeddings egress\s+${rx(LOCAL)} looks local but is not declared so — the gate treats it as remote, and under deny with no allow term every embeddings and chat call is refused: captures land without a vector`).test(undeclared.out),
          "…a loopback endpoint nothing declared warns as the upgrade case, naming the consequence");
   assert(/→ Set OB1_LLM_LOCAL=1 if this endpoint is on this machine/.test(undeclared.out), "…with the one-line fix");
   assert(row(undeclared.out, "chat egress") === "", "…and one row when chat is the embeddings endpoint");
   const declared = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1" });
-  assert(/✓\s+embeddings egress\s+http:\/\/127\.0\.0\.1:11434\/v1 is declared local \(OB1_LLM_LOCAL\) — the embeddings and chat text stays on the box; the gate does not apply/.test(declared.out),
+  assert(new RegExp(String.raw`✓\s+embeddings egress\s+${rx(LOCAL)} is declared local \(OB1_LLM_LOCAL\) — the embeddings and chat text stays on the box; the gate does not apply`).test(declared.out),
          "declared: ok, naming the knob");
 
   // Hosted under deny with no terms: every call refused, said with the
@@ -1938,7 +1953,7 @@ console.log("\n[8] The egress gate is reported: the mode, and per endpoint what 
   assert(/looks local but is not declared so — the gate treats it as remote; the gate is off, so nothing is refused today/.test(undeclaredOff.out), "…and under off that nothing is refused today");
   // Either knob declares a shared endpoint; the row names the one that did.
   const chatKnob = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_CHAT_LOCAL: "1" });
-  assert(/✓\s+embeddings egress\s+http:\/\/127\.0\.0\.1:11434\/v1 is declared local \(OB1_CHAT_LOCAL\) — the embeddings and chat text stays on the box/.test(chatKnob.out),
+  assert(new RegExp(String.raw`✓\s+embeddings egress\s+${rx(LOCAL)} is declared local \(OB1_CHAT_LOCAL\) — the embeddings and chat text stays on the box`).test(chatKnob.out),
          "OB1_CHAT_LOCAL alone declares the one endpoint both calls use, and the row names that knob");
   const badMode = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_EGRESS_POLICY: "maybe" });
   assert(badMode.code === 1 && /✗\s+egress policy\s+OB1_EGRESS_POLICY: `maybe` is not one of deny, allow, off/.test(badMode.out),
@@ -1947,12 +1962,213 @@ console.log("\n[8] The egress gate is reported: the mode, and per endpoint what 
   // Two endpoints, two rows, each with its own knob; a same-base chat
   // endpoint inherits and names the knob that declared it.
   const split = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: HOSTED, OB1_CHAT_API_KEY: "k" });
-  assert(/✓\s+embeddings egress\s+http:\/\/127\.0\.0\.1:11434\/v1 is declared local \(OB1_LLM_LOCAL\) — the embeddings text stays/.test(split.out), "split: the embeddings row is its own");
+  assert(new RegExp(String.raw`✓\s+embeddings egress\s+${rx(LOCAL)} is declared local \(OB1_LLM_LOCAL\) — the embeddings text stays`).test(split.out), "split: the embeddings row is its own");
   assert(/!\s+chat egress\s+every chat call to openrouter\.ai is refused — deny with no OB1_EGRESS_ALLOW term — so captures land untagged/.test(split.out) && /→ Declare the endpoint local \(OB1_CHAT_LOCAL=1\)/.test(split.out),
          "…and the chat row names its own knob and consequence");
   const inherit = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_CHAT_API_KEY: "k" });
-  assert(/✓\s+chat egress\s+http:\/\/127\.0\.0\.1:11434\/v1 is declared local \(OB1_LLM_LOCAL\)/.test(inherit.out),
+  assert(new RegExp(String.raw`✓\s+chat egress\s+${rx(LOCAL)} is declared local \(OB1_LLM_LOCAL\)`).test(inherit.out),
          "a chat endpoint at the same base with its own key inherits the declaration and names the knob that made it");
 }
 
+console.log("\n[9] A local endpoint is dialled by default, and one that answers nothing fails before the server starts (SMD-1875)");
+{
+  const THREE = (s: string) => /host\.containers\.internal:11434\/v1/.test(s) && /host\.docker\.internal:11434\/v1/.test(s) && /--profile local-models/.test(s);
+
+  // The measured baseline: the code's default inside a container is the
+  // container's own loopback, which reaches nothing. Refused → fail, exit 1,
+  // and the remedy says what 127.0.0.1 is inside a container and names the
+  // three spellings.
+  const refused = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1" });
+  assert(refused.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:1\/v1 — the connection was refused \(GET \/models, 2\.5 s timeout\); the first capture would fail on it in milliseconds/.test(row(refused.out, "provider endpoint")),
+         `a loopback endpoint nothing listens on fails the provider endpoint row by name (exit ${refused.code})`);
+  assert(/→ Inside a container 127\.0\.0\.1 is the container itself, not the host: an Ollama on the host is/.test(fix(refused.out, "provider endpoint")) && THREE(fix(refused.out, "provider endpoint")),
+         "…with the remedy naming the three spellings — the two host aliases and the stack's own service under its profile");
+  assert(/✓\s+model provider\s+http:\/\/127\.0\.0\.1:1\/v1 — embeddings and chat \(local — no credential needed\)/.test(refused.out) && /✓\s+provider credential\s+not required for a local endpoint/.test(refused.out),
+         "…while the provider and credential rows still pass: local it is, reachable it is not");
+
+  // The compose fallback with no profile — the ticket's case, and SMD-1843's
+  // OpenRouter-key-alone case: `ollama` resolves only on the compose network
+  // with the profile up. Port 1, so a box whose resolver knows the name still
+  // fails; the remedy is the hostname's either way. Which wording
+  // is decided here first, by the same resolver, so the unresolved wording
+  // is pinned wherever the name is unknown (first review pass: an
+  // either-or regex let the ENOTFOUND mapping drift unnoticed).
+  // A box whose resolver knows the name may also have a host that drops
+  // port 1 (a wildcard search domain, a firewall), which is the timeout
+  // wording (second review pass); an unknown name is one wording, pinned.
+  const ollamaResolves = await Bun.dns.lookup("ollama").then(() => true, () => false);
+  const service = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://ollama:1/v1" });
+  // An unknown name is "does not resolve" — with its code, or "within 2.5 s"
+  // where the resolver stalls (a GitHub runner did, on PR #138's first run) —
+  // never the timeout kind: the name is judged before anything is dialled.
+  const serviceWhy = ollamaResolves ? String.raw`(the connection was refused|no HTTP answer in 2\.5 s)` : String.raw`the name does not resolve(?: \([A-Z_]+\)| within 2\.5 s — the resolver did not answer)? \(GET /models, 2\.5 s timeout\); the first capture would (?:fail on it in milliseconds|wait on the resolver)`;
+  assert(service.code === 1 && new RegExp(String.raw`✗\s+provider endpoint\s+nothing answers at http://ollama:1/v1 — ${serviceWhy}`).test(row(service.out, "provider endpoint")),
+         `the ollama service name with nothing behind it fails (exit ${service.code}; the name ${ollamaResolves ? "resolves here, so refused or silent" : "does not resolve here, so that wording, pinned"})`);
+  assert(/→ `ollama` is the local-models profile's service and exists only under it: start the stack with --profile local-models, or set OB1_LLM_BASE_URL to an Ollama on the host \(http:\/\/host\.containers\.internal:11434\/v1 under podman or http:\/\/host\.docker\.internal:11434\/v1 under Docker\) or to a hosted provider with a key\./.test(fix(service.out, "provider endpoint")),
+         "…and the remedy names the profile first, then the host aliases and a hosted provider");
+  const withKey = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://ollama:1/v1", OPENROUTER_API_KEY: "sk-or-1234" });
+  assert(withKey.code === 1 && /✗\s+provider endpoint/.test(withKey.out) && /!\s+provider credential\s+a key is set but the endpoint is local/.test(withKey.out),
+         "a key set beside the fallback address (the URL line left commented) fails on the endpoint, where it used to warn about the key and say OK");
+
+  // The host alias on a runtime that does not provide it, or with nothing on
+  // the host: the remedy says which runtime provides which name, and that
+  // Linux Docker gets host.docker.internal through compose's extra_hosts.
+  const alias = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://host.docker.internal:1/v1" });
+  assert(alias.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/host\.docker\.internal:1\/v1/.test(row(alias.out, "provider endpoint")),
+         `the Docker host alias with nothing behind it fails (exit ${alias.code})`);
+  assert(/→ Nothing on the host answers at that port, or this runtime does not provide the name: podman writes both names; Docker Desktop only host\.docker\.internal; Docker on Linux neither unless extra_hosts host-gateway is set, and deploy\/compose\.yaml sets it for host\.docker\.internal\./.test(fix(alias.out, "provider endpoint")),
+         "…with the runtimes and the extra_hosts line named");
+  assert(THREE(fix(alias.out, "provider endpoint")), "…and the three spellings, this remedy too (third review pass: the pass-2 rewrite had dropped podman's)");
+  // A private address (a LAN box): the generic remedy, still with the three spellings.
+  const lan = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://192.168.0.1:1/v1" });
+  assert(/✗\s+provider endpoint/.test(lan.out) && /→ Start the provider at that address or fix the host and port in OB1_LLM_BASE_URL;/.test(fix(lan.out, "provider endpoint")) && THREE(fix(lan.out, "provider endpoint")),
+         "a private-network address nothing answers on gets the generic remedy, with the three spellings");
+
+  // An endpoint that answers passes, whatever it answers: the probe is the
+  // connection, --deep is the API. The request is a bare GET of /models with
+  // no credential even when a key is set — a key is never sent to prove reachability.
+  const seen: { method: string; path: string; auth: string | null; length: string | null }[] = [];
+  let status = 200;
+  const answering = Bun.serve({ port: 0, fetch: (req) => { seen.push({ method: req.method, path: new URL(req.url).pathname, auth: req.headers.get("authorization"), length: req.headers.get("content-length") }); return new Response(status === 200 ? '{"object":"list","data":[]}' : "not here", { status }); } });
+  const ANSWERS = `http://127.0.0.1:${answering.port}/v1`;
+  const up = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: ANSWERS, OB1_LLM_API_KEY: "k-local" });
+  assert(new RegExp(String.raw`✓\s+provider endpoint\s+${rx(ANSWERS)} answers — HTTP 200 to GET /models in \d+ ms; what it serves is checked under --deep`).test(up.out),
+         "an endpoint that answers passes the row, naming the status and the path");
+  assert(seen.length === 1 && seen[0].method === "GET" && seen[0].path === "/v1/models" && seen[0].auth === null && (seen[0].length === null || seen[0].length === "0"),
+         `…with exactly one bare GET of /v1/models and no Authorization header, key or no key (${JSON.stringify(seen)})`);
+  assert(!/✗/.test(row(up.out, "provider endpoint")) && !/embedding provider\s+\S+ returns/.test(up.out), "…and no embedding request was made without --deep");
+  status = 404; seen.length = 0;
+  const notFound = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: ANSWERS });
+  assert(new RegExp(String.raw`✓\s+provider endpoint\s+${rx(ANSWERS)} answers — HTTP 404 to GET /models`).test(notFound.out), "a 4xx answer is an endpoint that answers — the API's behaviour is --deep's question");
+  status = 500;
+  const erroring = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: ANSWERS });
+  assert(/✓\s+provider endpoint\s+\S+ answers — HTTP 500/.test(erroring.out), "…and so is a 5xx");
+  answering.stop(true);
+
+  // One that accepts the connection and never answers: the timeout, in words,
+  // and a consequence that is not "milliseconds" — a capture would hang on it
+  // for its request budget (first review pass). The stub keeps Bun.serve's
+  // 10 s idleTimeout, and the upper bound below leans on it: a probe timeout
+  // over 10 s would surface as the stub's own idle close at ~12 s.
+  const hung = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) });
+  const t0 = performance.now();
+  const timedOut = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://127.0.0.1:${hung.port}/v1` });
+  const waited = performance.now() - t0;
+  hung.stop(true);
+  assert(timedOut.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 — no HTTP answer in 2\.5 s \(GET \/models, 2\.5 s timeout\); the first capture would wait on it, up to the whole request timeout \(OB1_LLM_TIMEOUT\), and then fail/.test(row(timedOut.out, "provider endpoint")),
+         `an endpoint that accepts and never answers fails on the timeout, said in seconds, with the hang as the consequence (exit ${timedOut.code})`);
+  assert(waited >= 2400 && waited < 10000, `…after about the timeout and not the run's whole patience (${Math.round(waited)} ms)`);
+
+  // A redirect is an answer from THIS address and is not followed: the row
+  // says 3xx, the target is never dialled — so a redirector cannot make the
+  // row name one address and judge another, on or off the box (first review
+  // pass: `fetch` followed it, and a 302 to a dead port read as refused).
+  let targetHits = 0;
+  const target = Bun.serve({ port: 0, fetch: () => { targetHits++; return new Response("here", { status: 200 }); } });
+  const redirector = Bun.serve({ port: 0, fetch: () => new Response(null, { status: 302, headers: { Location: `http://127.0.0.1:${target.port}/elsewhere` } }) });
+  const redirected = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://127.0.0.1:${redirector.port}/v1` });
+  redirector.stop(true); target.stop(true);
+  assert(/✓\s+provider endpoint\s+http:\/\/127\.0\.0\.1:\d+\/v1 answers — HTTP 302 to GET \/models/.test(redirected.out) && targetHits === 0,
+         `a 302 passes as an answer from the base and its target is not dialled (${targetHits} hit(s) on the target)`);
+
+  // A hosted endpoint is not dialled without --deep (unchanged): a name that
+  // cannot resolve, with a key, prints no endpoint row and no resolver error.
+  const hosted = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "https://provider.invalid/v1", OPENROUTER_API_KEY: "sk-or-1234" });
+  assert(row(hosted.out, "provider endpoint") === "" && !/ENOTFOUND|does not resolve/.test(hosted.out) && /✓\s+provider credential\s+set \(10 chars\)/.test(hosted.out),
+         "a hosted endpoint with a key is not dialled: no endpoint row, no resolver error");
+  // Declared local by the knob but hosted by its name: the probe follows the
+  // credential rule (the hostname), as the row's own text says — the
+  // declaration is the egress gate's, and a name that is not on this box is
+  // not dialled without a credential to show for it.
+  const declared = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "https://provider.invalid/v1", OPENROUTER_API_KEY: "sk-or-1234", OB1_LLM_LOCAL: "1" });
+  assert(row(declared.out, "provider endpoint") === "", "…and OB1_LLM_LOCAL=1 on a hosted name does not make it dial either");
+
+  // Two endpoints: the same base is one socket and one probe; a chat base of
+  // its own is its own row, so a down chat server fails by its own name.
+  const chatSeen: string[] = [];
+  const chatStub = Bun.serve({ port: 0, fetch: (req) => { chatSeen.push(new URL(req.url).pathname); return Response.json({ object: "list", data: [] }); } });
+  const CHAT = `http://127.0.0.1:${chatStub.port}/v1`;
+  const shared = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: CHAT, OB1_CHAT_API_KEY: "k-chat" });
+  assert(chatSeen.length === 1 && row(shared.out, "chat endpoint") === "" && /✓\s+provider endpoint/.test(shared.out),
+         `a chat endpoint at the embeddings base with its own key is one probe and one row (${chatSeen.length} request(s))`);
+  chatSeen.length = 0;
+  const own = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: LOCAL_STUB, OB1_CHAT_BASE_URL: CHAT });
+  assert(chatSeen.length === 1 && new RegExp(String.raw`✓\s+chat endpoint\s+${rx(CHAT)} answers — HTTP 200 to GET /models`).test(own.out) && /✓\s+provider endpoint/.test(own.out),
+         "a chat base of its own is probed under its own row");
+  chatStub.stop(true);
+  const chatDown = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: LOCAL_STUB, OB1_CHAT_BASE_URL: "http://127.0.0.1:1/v1" });
+  assert(chatDown.code === 1 && /✓\s+provider endpoint/.test(chatDown.out) && /✗\s+chat endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:1\/v1 — the connection was refused/.test(row(chatDown.out, "chat endpoint")),
+         `a down chat server beside a live embedder fails the chat endpoint row and not the provider's (exit ${chatDown.code})`);
+  assert(/fix the port in OB1_CHAT_BASE_URL\./.test(fix(chatDown.out, "chat endpoint")) && /fix the port in OB1_LLM_BASE_URL\./.test(fix(refused.out, "provider endpoint")),
+         "…and each row's remedy names its own knob (fifth review pass)");
+  const hostedChat = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: LOCAL_STUB, OB1_CHAT_BASE_URL: "https://provider.invalid/v1", OB1_CHAT_API_KEY: "k-chat" });
+  assert(row(hostedChat.out, "chat endpoint") === "" && /✓\s+provider endpoint/.test(hostedChat.out), "…and a hosted chat endpoint beside a local embedder is not dialled");
+
+  // A proxy in the environment: Bun routes loopback through it too, and so do
+  // the server's calls, so the row names the route before the endpoint and the
+  // remedy leads with NO_PROXY (fifth review pass: a dead corporate proxy read
+  // as "127.0.0.1 refused" with the container remedy).
+  const proxied = Bun.serve({ port: 0, fetch: () => Response.json({ object: "list", data: [] }) });
+  const PROXIED = `http://127.0.0.1:${proxied.port}/v1`;
+  const deadProxy = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: PROXIED, HTTP_PROXY: "http://127.0.0.1:1" });
+  assert(deadProxy.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 — the connection was refused \(GET \/models, 2\.5 s timeout\); HTTP_PROXY is set, so this call and every one the server makes go through that proxy unless NO_PROXY names 127\.0\.0\.1; the first capture/.test(row(deadProxy.out, "provider endpoint")),
+         `a live endpoint behind a dead HTTP_PROXY fails naming the proxy variable (exit ${deadProxy.code})`);
+  assert(/→ Add 127\.0\.0\.1 to NO_PROXY \(and no_proxy\) for the server, or unset HTTP_PROXY for it\. Otherwise: Inside a container/.test(fix(deadProxy.out, "provider endpoint")), "…with NO_PROXY first in the remedy, the hostname's remedy after");
+  const exempt = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: PROXIED, http_proxy: "http://127.0.0.1:1", NO_PROXY: "127.0.0.1" });
+  assert(/✓\s+provider endpoint\s+http:\/\/127\.0\.0\.1:\d+\/v1 answers — HTTP 200/.test(exempt.out) && !/proxy/.test(row(exempt.out, "provider endpoint")), "…and NO_PROXY naming the host passes with no proxy text on the row");
+  const httpsProxyOnly = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: PROXIED, HTTPS_PROXY: "http://127.0.0.1:1" });
+  assert(/✓\s+provider endpoint\s+http:\/\/127\.0\.0\.1:\d+\/v1 answers — HTTP 200/.test(httpsProxyOnly.out), "…and HTTPS_PROXY alone does not touch an http base");
+  proxied.stop(true);
+
+  // Userinfo in the base: fetch never sends it, and the rows must not print
+  // it on every start (fifth review pass).
+  const seenAuth: (string | null)[] = [];
+  const plain = Bun.serve({ port: 0, fetch: (req) => { seenAuth.push(req.headers.get("authorization")); return Response.json({ object: "list", data: [] }); } });
+  const withUser = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://user:s3cret-in-url@127.0.0.1:${plain.port}/v1` });
+  plain.stop(true);
+  assert(!/s3cret-in-url/.test(withUser.out) && /✓\s+provider endpoint\s+http:\/\/\*\*\*@127\.0\.0\.1:\d+\/v1 answers/.test(withUser.out) && /✓\s+model provider\s+http:\/\/\*\*\*@127\.0\.0\.1:\d+\/v1 — embeddings/.test(withUser.out),
+         "userinfo in the base URL is masked on the endpoint and provider rows and appears nowhere in the report");
+  assert(seenAuth.length === 1 && seenAuth[0] === null, `…and fetch sent no Authorization for it (${JSON.stringify(seenAuth)})`);
+
+  // A listener that accepts and closes with no HTTP — an https port dialled
+  // as http is the common shape — is its own wording, without Bun's advice
+  // about its verbose option (fifth review pass).
+  const closer = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { open(sock) { sock.end(); }, data() {} } });
+  const reset = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://127.0.0.1:${closer.port}/v1` });
+  closer.stop(true);
+  assert(reset.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 — the connection was accepted and closed with no HTTP answer, as an https endpoint dialled as http does \(GET \/models/.test(row(reset.out, "provider endpoint")) && !/verbose: true/.test(reset.out),
+         `a listener that closes on accept reads as accepted-and-closed, without Bun's advice (exit ${reset.code}; ${row(reset.out, "provider endpoint").slice(0, 160)})`);
+
+  // TLS: something answered and its certificate was refused. The lead says
+  // "answers, but", the remedy is trust, not addresses; under
+  // NODE_TLS_REJECT_UNAUTHORIZED=0 it passes as the server's calls would
+  // (fifth review pass). The certificate is minted here with openssl; a box
+  // without one skips the case rather than passing it.
+  const certDir = mkdtempSync(join(tmpdir(), "ob1-preflight-tls-"));
+  const minted = Bun.spawnSync(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(certDir, "k.pem"), "-out", join(certDir, "c.pem"), "-subj", "/CN=localhost", "-days", "1"], { stdout: "ignore", stderr: "ignore" });
+  if (minted.exitCode !== 0) {
+    skipRaw("a self-signed TLS endpoint reads as answering with an untrusted certificate", "no openssl to mint a certificate");
+    skipRaw("…and passes under NODE_TLS_REJECT_UNAUTHORIZED=0", "no openssl to mint a certificate");
+  } else {
+    const tlsStub = Bun.serve({ port: 0, tls: { key: Bun.file(join(certDir, "k.pem")), cert: Bun.file(join(certDir, "c.pem")) }, fetch: () => Response.json({ object: "list", data: [] }) });
+    const TLS = `https://127.0.0.1:${tlsStub.port}/v1`;
+    const untrusted = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: TLS, NODE_TLS_REJECT_UNAUTHORIZED: undefined });
+    assert(untrusted.code === 1 && new RegExp(String.raw`✗\s+provider endpoint\s+${rx(TLS)} answers, but its TLS certificate is not trusted \(DEPTH_ZERO_SELF_SIGNED_CERT\) \(GET /models, 2\.5 s timeout\); every capture would fail the same way`).test(row(untrusted.out, "provider endpoint")),
+           `a self-signed TLS endpoint reads as answering with an untrusted certificate (exit ${untrusted.code}; ${row(untrusted.out, "provider endpoint").slice(0, 160)})`);
+    assert(/→ Serve it over http:\/\/ on the box, or trust its issuer for the server \(NODE_EXTRA_CA_CERTS=<ca\.pem>\); NODE_TLS_REJECT_UNAUTHORIZED=0 disables the check for every call the server makes\./.test(fix(untrusted.out, "provider endpoint")) && !/Inside a container/.test(fix(untrusted.out, "provider endpoint")),
+           "…with a trust remedy and not an address one");
+    const trusted = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: TLS, NODE_TLS_REJECT_UNAUTHORIZED: "0" });
+    assert(new RegExp(String.raw`✓\s+provider endpoint\s+${rx(TLS)} answers — HTTP 200`).test(trusted.out), "…and passes under NODE_TLS_REJECT_UNAUTHORIZED=0");
+    tlsStub.stop(true);
+  }
+  rmSync(certDir, { recursive: true, force: true });
+
+  // The row is in the JSON report too, by name, so a pipeline gate reads it.
+  const asJson = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1" }, "--json");
+  const parsed = JSON.parse(asJson.out) as { ok: boolean; checks: { name: string; status: string; fix?: string }[] };
+  const jsonRow = parsed.checks.find((c) => c.name === "provider endpoint");
+  assert(parsed.ok === false && jsonRow?.status === "fail" && THREE(jsonRow?.fix ?? ""), "--json carries the row, its status and its remedy");
+}
+
+localStub.stop(true);
 report();

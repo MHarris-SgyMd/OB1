@@ -2124,6 +2124,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const provider = Bun.serve({
     port: 0,
     async fetch(req) {
+      // preflight's reachability probe (SMD-1875): a bare GET of /models.
+      if (req.method === "GET") return Response.json({ object: "list", data: [] });
       const body = (await req.json()) as { input?: string; model?: string };
       modelsSeen.add(String(body.model));
       const input = String(body.input ?? "");
