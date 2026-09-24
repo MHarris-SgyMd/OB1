@@ -4386,10 +4386,11 @@ checkDestructiveSql();
 // `// ob1-original-import:` record is a comment; a README's sample is prose,
 // SMD-1802's), is a hit, whatever statement holds it: an import, a type-only
 // import, a require, a dynamic import. Counted per-file exceptions, as check 7
-// counts them: the dashboard's type-only import (SMD-1801's); the one client
-// the codemod's KEEP list held on supabase-js — local-brain-no-mcp's, inside
-// that recipe's own Supabase stack — left with the recipe (SMD-1800). Every
-// other vendored client moved: the rest in change 74, the last six here.
+// counts them — none today: the dashboard's type-only import went when its
+// Supabase sign-in did (SMD-1801); the one client the codemod's KEEP list held
+// on supabase-js — local-brain-no-mcp's, inside that recipe's own Supabase
+// stack — left with the recipe (SMD-1800). Every other vendored client moved:
+// the rest in change 74, the last six here.
 const SUPABASE_JS_SPECIFIER = /(["'])(?:npm:|jsr:|https?:\/\/[^"'\s]*\/)?@supabase\/supabase-js(?:@[^"'/]*)?(?:\/[^"']*)?\1/g;
 /** Code, and HTML for the inline `<script type="module">` a dashboard's page may carry. */
 const CODE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|svelte|vue|html)$/;
@@ -4414,9 +4415,7 @@ const SUPABASE_JS_PROBES: [string, boolean, boolean?][] = [
   ['<!-- <script>import x from "@supabase/supabase-js";</script> -->\n<a href="https://npmjs.com/package/@supabase/supabase-js">docs</a>\n<script>const y = 1;</script>', false, true],
 ];
 /** file → rule → the reason and the exact hit count; a hit past the count fails, a count no hit reaches fails as stale. */
-const SUPABASE_JS_EXCEPTIONS = new Map<string, Record<string, CountedException>>([
-  ["dashboards/open-brain-dashboard/src/app.d.ts", { "supabase-js": { why: "the dashboard's type-only import: the one client left that reads the brain over PostgREST — SMD-1801 moves it onto the fork's REST API", lines: 1 } }],
-]);
+const SUPABASE_JS_EXCEPTIONS = new Map<string, Record<string, CountedException>>([]);
 /** A markup file's code is its `<script>` bodies: everything else, an HTML comment included, is blanked (newlines kept). */
 const MARKUP_FILE = /\.(html|svelte|vue)$/;
 function scriptBodiesOf(text: string): string {

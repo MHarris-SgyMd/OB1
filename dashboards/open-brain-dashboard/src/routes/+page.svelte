@@ -2,6 +2,10 @@
 	import { getStats, getThoughts, captureThought } from '$lib/api';
 	import { THOUGHT_TYPES, type Thought, type ThoughtType } from '$lib/types';
 	import { onMount } from 'svelte';
+	import type { PageProps } from './$types';
+
+	// From the layout: whether the signed-in key may capture (a read key's may not).
+	let { data }: PageProps = $props();
 
 	let thoughts = $state<Thought[]>([]);
 	let loading = $state(true);
@@ -235,16 +239,20 @@
 			<span class="text-2xl font-bold text-text">{stats.total}</span>
 			<span>thoughts captured</span>
 		</div>
-		<button
-			onclick={() => showCapture = !showCapture}
-			class="px-4 py-2 bg-primary hover:bg-primary-light text-white rounded-lg font-medium transition-colors"
-		>
-			{showCapture ? 'Close' : '+ Capture'}
-		</button>
+		{#if data.canCapture}
+			<button
+				onclick={() => showCapture = !showCapture}
+				class="px-4 py-2 bg-primary hover:bg-primary-light text-white rounded-lg font-medium transition-colors"
+			>
+				{showCapture ? 'Close' : '+ Capture'}
+			</button>
+		{:else}
+			<span class="text-sm text-text-muted" title="Sign in with a write-scoped key to capture">Read-only key</span>
+		{/if}
 	</div>
 
 	<!-- Capture Form -->
-	{#if showCapture}
+	{#if showCapture && data.canCapture}
 		<div class="mb-6 bg-bg-card border border-white/10 rounded-xl p-5">
 			<textarea
 				bind:value={captureContent}

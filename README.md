@@ -145,7 +145,7 @@ Host on Vercel or Netlify, pointed at your Supabase backend. Two community-built
 
 | Dashboard | What It Does | Contributor |
 | --------- | ------------ | ----------- |
-| [Open Brain Dashboard](dashboards/open-brain-dashboard/) | SvelteKit dashboard with MCP proxy and Supabase auth | [@headcrest](https://github.com/headcrest) |
+| [Open Brain Dashboard](dashboards/open-brain-dashboard/) | SvelteKit dashboard with MCP proxy; sign in with one of the server's access keys | [@headcrest](https://github.com/headcrest) |
 | [Open Brain Dashboard (Next.js)](dashboards/open-brain-dashboard-next/) | Full-featured Next.js dashboard — 8 pages, dark theme, smart ingest, quality auditing | [@alanshurafa](https://github.com/alanshurafa) |
 
 ### [`/integrations`](integrations/) — New Connections

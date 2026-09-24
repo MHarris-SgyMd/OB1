@@ -14,19 +14,33 @@
 
 ## What it does
 
-This dashboard connects directly to your Open Brain MCP endpoint and gives you an interface to:
+This dashboard talks to your Open Brain server over MCP — the same six tools
+every AI client uses — and gives you an interface to:
 
 - capture new thoughts from a web form,
 - search and filter existing thoughts by type, topic, and people,
 - inspect stats, action items, and recent capture activity in a clean, focused layout.
 
+You sign in with one of the server's own **access keys** (`server-portable/keygen.ts`
+mints them; `SETUP.md` explains scopes). The dashboard checks the key against the
+server, seals it into an httpOnly cookie, and forwards it on every call, so:
+
+- a **read** key gets a read-only dashboard — the capture button is not shown,
+  and a capture sent anyway is refused before the server is asked;
+- a **write** key can capture too;
+- revoking the key in the server's `MCP_ACCESS_KEYS` ends the session.
+
+No Supabase project, no user table, no key in the dashboard's environment. (On
+this fork — SMD-1801 — the Supabase email/password sign-in this dashboard used
+to require is gone; the two Next dashboards beside it work the same way, against
+the REST gateway.)
+
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- Supabase project URL + anon key for your Open Brain project
-- MCP function URL + access key for your Open Brain MCP function
-- Node.js 18+
-- A Supabase-authenticated user in your project (this dashboard uses email/password sign-in)
+- A running Open Brain server ([SETUP.md](../../SETUP.md) — the compose stack
+  publishes it on `http://127.0.0.1:8000/`), or any URL that speaks MCP
+- An access key for it — read-scoped is enough to browse and search
+- Bun 1.4+ (or Node.js 18+ with npm)
 
 ## Credential Tracker
 
@@ -37,10 +51,11 @@ OPEN BRAIN DASHBOARD -- CREDENTIAL TRACKER
 ------------------------------------------
 
 FROM OPEN BRAIN
-  Supabase URL:              ____________
-  Supabase anon key:         ____________
-  MCP Function URL:          ____________
-  MCP Access Key:            ____________
+  MCP URL:                   ____________   (MCP_URL, in .env.local)
+  Access key:                ____________   (typed at /signin, stored nowhere)
+
+THIS DASHBOARD
+  SESSION_SECRET:            ____________   (openssl rand -hex 32)
 
 HOSTING
   Deploy URL:                ____________
@@ -54,40 +69,48 @@ HOSTING
 
    ```bash
    cd dashboards/open-brain-dashboard
-   npm install
+   bun install --frozen-lockfile
    ```
 
-2. Create `.env.local` in the dashboard folder (or symlink from the repo root):
+2. Create `.env.local` in the dashboard folder:
 
    ```bash
    cp .env.example .env.local
    ```
 
-3. Fill in your 4 values. You can find them at:
+3. Fill in the two values:
 
    | Variable | Where to get it |
    |----------|----------------|
-   | `PUBLIC_SUPABASE_URL` | Supabase Dashboard → Settings → API → Project URL |
-   | `PUBLIC_SUPABASE_ANON_KEY` | Supabase Dashboard → Settings → API → `anon` `public` key |
-   | `MCP_URL` | Your deployed Edge Function URL (e.g. `https://<ref>.supabase.co/functions/v1/open-brain-mcp`) |
-   | `MCP_KEY` | The `MCP_ACCESS_KEY` you set during Open Brain setup. Also visible in Claude Desktop → Settings → Connectors → your connector URL after `?key=` |
+   | `MCP_URL` | Where your server answers MCP — `http://127.0.0.1:8000/` for the compose stack (`SERVER_PORT` in `deploy/.env` if you changed it), or your deployed URL |
+   | `SESSION_SECRET` | `openssl rand -hex 32` — 32+ characters; the dashboard refuses to serve without it |
 
-4. Create a sign-in user (if you don't have one). In Supabase Dashboard → Authentication → Add user → create with email + password + Auto Confirm.
+4. Mint an access key for the dashboard if you have none to spare:
 
-   > **Note:** If your existing user was created via OAuth, you won't have a password. Click "Send password recovery" from the user detail panel, or create a second user with email/password (e.g. `you+dashboard@gmail.com`).
+   ```bash
+   cd ../../server-portable && bun keygen.ts --name dashboard --scope read
+   ```
+
+   Add the printed `dashboard:read:<hash>` line to the server's `MCP_ACCESS_KEYS`
+   (`deploy/.env` for the compose stack, then `docker compose up -d`) and keep
+   the raw key for step 6. `--scope write` if you want to capture from the dashboard.
 
 5. Start the app:
 
    ```bash
-   npm run dev
+   bun run dev
    ```
 
-6. Open `http://localhost:5173` and sign in.
+6. Open `http://localhost:5173` and paste the key at `/signin`.
 
 ## Deploy to Production
 
-- **Vercel:** Import this folder, set the same 4 environment variables.
-- **Netlify:** Deploy as a SvelteKit site, set the same 4 environment variables.
+- **Vercel:** Import this folder, set `MCP_URL` and `SESSION_SECRET`.
+- **Netlify:** Deploy as a SvelteKit site, set the same two variables.
+
+The session cookie is marked `Secure` when the request arrived over HTTPS —
+every hosted deploy — and not on a plain-HTTP preview (`bun run preview` on
+`127.0.0.1`, which CI drives). Put TLS in front of any deploy others can reach.
 
 ## Expected outcome
 
@@ -97,27 +120,35 @@ After setup, you should be able to:
 - search thoughts and get results sorted by recency,
 - filter by type (Observation/Task/Idea/Reference/Person Note), topic, and people,
 - open a thought for full text review,
-- capture a new thought and immediately persist it through MCP.
+- capture a new thought and immediately persist it through MCP (write key).
 
-If a value is missing in env, the app will show startup errors about missing `PUBLIC_SUPABASE_URL` / `PUBLIC_SUPABASE_ANON_KEY` or missing MCP credentials.
+`smoke.ts` drives all of that against a running server, the way CI does:
+
+```bash
+MCP_URL=http://127.0.0.1:8000/ bun smoke.ts --key <write-key> --read-key <read-key>
+```
+
+It builds nothing — run `bun run build` first — and starts `vite preview` on a
+free port, signs in with a wrong key (refused, 401), with the write key (the
+stats JSON the first page loads comes back), and with the read key (browsing
+works, capture is refused with 403 before the server is asked).
 
 ## Troubleshooting
 
-**Issue: `Missing PUBLIC_SUPABASE_URL or PUBLIC_SUPABASE_ANON_KEY`**
-Solution: Ensure `.env.local` exists, both variables are set, and SvelteKit has been restarted after editing env.
+**Issue: `SESSION_SECRET must be set and at least 32 characters`**
+Solution: Ensure `.env.local` exists with a value from `openssl rand -hex 32`, and restart the dev server after editing env.
 
-**Issue: App keeps redirecting to sign-in**
-Solution: Confirm you have a valid Supabase user in the project and correct credentials; the app intentionally requires auth via `/signin`.
+**Issue: `MCP_URL is not set`**
+Solution: Set it to where your server answers MCP. The compose stack's default is `http://127.0.0.1:8000/`; `deploy/README.md` says what is reachable from where.
 
-**Issue: MCP calls fail with `Unauthorized` or 401**
-Solution: Verify `MCP_URL` points to the Supabase Edge Function for this project, and `MCP_KEY` matches the function key expected by `open-brain-mcp`.
+**Issue: sign-in says `The server refused that access key`**
+Solution: The server answered, and the key is not one it knows. Check that the key's hash is a line in the server's `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` also works) and that the container was restarted after editing `deploy/.env`.
+
+**Issue: sign-in says `Could not reach the MCP server`**
+Solution: `MCP_URL` is wrong, or the server is not up. `curl -sS $MCP_URL/health` should print `ok`. From a container, `127.0.0.1` is the container, not your machine.
+
+**Issue: no capture button**
+Solution: You signed in with a read key. Mint a write key (`--scope write`) and sign in again.
 
 **Issue: Search returns "No thoughts found" but stats show thoughts exist**
-Solution: Search uses semantic (vector) similarity, not keyword matching. Three things to check:
-
-1. **OpenRouter API key** — `search_thoughts` calls OpenRouter to generate a query embedding. If `OPENROUTER_API_KEY` is missing or invalid in your Supabase secrets, search silently returns nothing. Verify with: `supabase secrets list | grep OPENROUTER`
-2. **Embeddings exist** — Thoughts captured before embeddings were configured won't be searchable. Check in SQL Editor: `SELECT count(*) FROM thoughts WHERE embedding IS NULL`
-3. **Similarity threshold** — Short queries against long content may score below the default 0.5 threshold. Try a more specific search phrase, or pass a lower `threshold` value.
-
-**Issue: "Database error querying schema" on sign-in**
-Solution: Your user was likely created via OAuth and has no password set. Either send a password recovery email from the Supabase Dashboard user detail panel, or create a new email/password user.
+Solution: Search is semantic (vector similarity), so it needs the server's embedding provider. If the server's preflight reports the provider unreachable, or thoughts were captured before embeddings were configured, search finds nothing. The server's own log (`docker compose logs server`) names the provider and the failure.

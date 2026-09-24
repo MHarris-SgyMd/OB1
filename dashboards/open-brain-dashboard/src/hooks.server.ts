@@ -1,40 +1,14 @@
-import { env } from '$env/dynamic/public';
-import { createServerClient } from '@supabase/ssr';
+import { env } from '$env/dynamic/private';
 import type { Handle } from '@sveltejs/kit';
+import { SESSION_COOKIE, sessionSecret, unseal } from '$lib/server/session';
 
-const SUPABASE_URL = env.PUBLIC_SUPABASE_URL;
-const SUPABASE_ANON_KEY = env.PUBLIC_SUPABASE_ANON_KEY;
-
-if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-	throw new Error('Missing PUBLIC_SUPABASE_URL or PUBLIC_SUPABASE_ANON_KEY');
-}
-
+// Every request: the session cookie, if any, becomes locals.session. A cookie
+// that does not unseal (tampered, or SESSION_SECRET rotated) is dropped, so the
+// visitor lands on /signin rather than on an error.
 export const handle: Handle = async ({ event, resolve }) => {
-	event.locals.supabase = createServerClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-		cookies: {
-			getAll: () => event.cookies.getAll(),
-			setAll: (
-				cookiesToSet: Array<{
-					name: string;
-					value: string;
-					options: Parameters<typeof event.cookies.set>[2];
-				}>,
-			) => {
-				for (const cookie of cookiesToSet) {
-					event.cookies.set(cookie.name, cookie.value, cookie.options);
-				}
-			},
-		},
-	});
-
-	const {
-		data: { user },
-		error,
-	} = await event.locals.supabase.auth.getUser();
-
-	event.locals.user = error ? null : user;
-	event.locals.session = null;
-
-	const response = await resolve(event);
-	return response;
+	const secret = sessionSecret(env);
+	const token = event.cookies.get(SESSION_COOKIE);
+	event.locals.session = await unseal(token, secret);
+	if (token && !event.locals.session) event.cookies.delete(SESSION_COOKIE, { path: '/' });
+	return resolve(event);
 };

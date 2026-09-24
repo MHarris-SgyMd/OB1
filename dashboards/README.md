@@ -2,7 +2,7 @@
 
 https://github.com/user-attachments/assets/9454662f-2648-4928-8723-f7d52e94e9b8
 
-Frontend templates you can host on Vercel or Netlify, pointed at your Supabase backend. Instant UI for your brain.
+Frontend templates you can host on Vercel or Netlify, pointed at your Open Brain server (over MCP, or through the `open-brain-rest` gateway) and signed into with one of its access keys. Instant UI for your brain.
 
 *No community dashboards yet — be the first to contribute one.*
 
