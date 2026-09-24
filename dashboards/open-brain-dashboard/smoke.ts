@@ -30,8 +30,9 @@ const flag = (n: string) => { const i = args.indexOf(`--${n}`); return i >= 0 ? 
 const MCP_URL = process.env.MCP_URL;
 const WRITE_KEY = flag("key");
 const READ_KEY = flag("read-key");
+const CAPTURE_KEY = flag("capture-key");
 if (!MCP_URL || !WRITE_KEY) {
-  console.error("usage: MCP_URL=<server> bun smoke.ts --key <write-key> [--read-key <read-key>]");
+  console.error("usage: MCP_URL=<server> bun smoke.ts --key <write-key> [--read-key <read-key>] [--capture-key <capture-key>]");
   process.exit(2);
 }
 
@@ -239,6 +240,18 @@ if (READ_KEY) {
   assert(out.status === 303 && cookie === "", "…and signs out");
 } else {
   console.log("  ·  no --read-key: the read-key arm skipped");
+}
+
+// A capture-only key (SMD-1298): its tools/list is capture_thought alone, so the
+// page could not load its first read — refused at sign-in, not signed in to a
+// dead page (third review pass: it signed in as a "write key").
+if (CAPTURE_KEY) {
+  const r = await signIn(CAPTURE_KEY);
+  takeCookie(r);
+  assert(r.status === 403 && cookie === "", `a capture-only key is refused at /signin with 403 and no cookie (${r.status})`);
+  assert((await r.text()).includes("This key cannot read"), "…and the page says why");
+} else {
+  console.log("  ·  no --capture-key: the capture-key arm skipped");
 }
 
 stop();

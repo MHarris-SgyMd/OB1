@@ -111,7 +111,11 @@ HOSTING
   TLS proxy or tunnel in front of it ([deploy/README.md](../../deploy/README.md),
   "What is reachable from where"). A dashboard in a container on the same host
   as the compose stack reaches it as `http://host.docker.internal:8000/`
-  (`host.containers.internal` on podman).
+  (`host.containers.internal` on podman) where the VM forwards to the host's
+  loopback — Docker Desktop, podman machine; on a Linux host that name is the
+  bridge gateway, which a `127.0.0.1` publish does not answer, so put the
+  dashboard on the compose network and use `http://server:8000/`, or set
+  `SERVER_BIND`.
 
 The session cookie is marked `Secure` when the request's URL is HTTPS — Vercel
 and Netlify hand the app the browser's URL — and not on plain HTTP (`bun run
@@ -143,8 +147,12 @@ MCP_URL=http://127.0.0.1:8000/ bun smoke.ts --key <write-key> --read-key <read-k
 
 It builds nothing — run `bun run build` first — and starts `vite preview` on a
 free port, signs in with a wrong key (refused, 401), with the write key (the
-stats JSON the first page loads comes back), and with the read key (browsing
-works, capture is refused with 403 before the server is asked).
+stats JSON the first page loads comes back; the list and keyword-search tools
+answer), with the read key (browsing works, capture is refused with 403 before
+the server is asked) and, given `--capture-key`, with a capture-only key
+(refused at sign-in: it cannot read). The page's own search is `search_thoughts`,
+the semantic tool, which needs the server's embedding provider; the smoke
+drives the keyword tool so it runs where no provider does (CI).
 
 ## Troubleshooting
 

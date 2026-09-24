@@ -29,6 +29,17 @@ export class McpUnreachable extends Error {
 	}
 }
 
+/** The server refused the call itself — a method or tool it does not have, arguments it will not take: the caller's mistake, not an outage. */
+export class McpRefused extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = 'McpRefused';
+	}
+}
+
+/** JSON-RPC's method-not-found and invalid-params: what a server answers for a tool it has not, or has not for this key, when it answers as an error rather than an isError result. */
+const REFUSED_CODES = new Set([-32601, -32602]);
+
 /** MCP_URL, or a clear refusal — the value is the operator's, not the visitor's. */
 export function mcpUrl(env: Record<string, string | undefined>): string {
 	const url = env.MCP_URL;
@@ -79,7 +90,8 @@ export async function rpc(url: string, key: string, method: string, params: Reco
 	} catch (err) {
 		throw new McpUnreachable(`Could not reach the MCP server: ${err instanceof Error ? err.message : String(err)}`);
 	}
-	if (upstream.status === 401) throw new McpUnauthorized();
+	// The vendored servers' bare refusals: 401 for a key they do not know, 403 for one they will not admit.
+	if (upstream.status === 401 || upstream.status === 403) throw new McpUnauthorized();
 	if (!upstream.ok) {
 		const text = await upstream.text().catch(() => '');
 		throw new McpUnreachable(`MCP upstream HTTP ${upstream.status}${text ? `: ${text.slice(0, 200)}` : ''}`);
@@ -87,6 +99,7 @@ export async function rpc(url: string, key: string, method: string, params: Reco
 	const parsed = parseBody(await upstream.text(), id);
 	if (parsed.error) {
 		if (parsed.error.code === UNAUTHORIZED_CODE) throw new McpUnauthorized();
+		if (typeof parsed.error.code === 'number' && REFUSED_CODES.has(parsed.error.code)) throw new McpRefused(parsed.error.message || 'The server refused the call');
 		throw new Error(parsed.error.message || 'MCP error');
 	}
 	return parsed.result ?? null;

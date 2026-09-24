@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import type { RequestHandler } from './$types';
-import { callTool, mcpUrl, McpUnauthorized, McpUnreachable } from '$lib/server/mcp';
+import { callTool, mcpUrl, McpRefused, McpUnauthorized, McpUnreachable } from '$lib/server/mcp';
 import { cookieOptions, SESSION_COOKIE } from '$lib/server/session';
 
 // The browser's one door to the brain: a tool call, forwarded with the
@@ -40,6 +40,8 @@ export const POST: RequestHandler = async ({ request, locals, cookies, url }) =>
 			cookies.delete(SESSION_COOKIE, cookieOptions(url));
 			return json({ error: err.message }, { status: 401 });
 		}
+		// A server that answers a missing tool as a JSON-RPC error rather than an isError result: the same 422.
+		if (err instanceof McpRefused) return json({ error: err.message }, { status: 422 });
 		if (err instanceof McpUnreachable) return json({ error: err.message }, { status: 502 });
 		return json({ error: err instanceof Error ? err.message : 'Unknown proxy error' }, { status: 502 });
 	}

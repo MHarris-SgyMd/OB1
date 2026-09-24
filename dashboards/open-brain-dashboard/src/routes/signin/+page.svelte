@@ -10,7 +10,7 @@
 	<div class="bg-bg-card border border-white/10 rounded-2xl p-8">
 		<h1 class="text-2xl font-semibold mb-2">Sign in</h1>
 		<p class="text-sm text-text-muted mb-8">
-			Paste an access key for your Open Brain server. A read key browses and searches; a write key can capture too.
+			Paste an access key for your Open Brain server. A read key browses and searches; a write key can capture too. A capture-only key cannot read, so it is refused here.
 		</p>
 
 		<form
@@ -38,7 +38,7 @@
 			</div>
 
 			{#if form?.error}
-				<div class="text-sm text-red-400">{form.error}</div>
+				<div class="text-sm text-red-400" role="alert">{form.error}</div>
 			{/if}
 
 			<button

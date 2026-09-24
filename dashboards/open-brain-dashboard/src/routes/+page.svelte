@@ -113,6 +113,7 @@
 	}
 
 	async function loadStats() {
+		errorMessage = '';
 		try {
 			const s = await getStats();
 			stats = s;
