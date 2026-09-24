@@ -6,7 +6,7 @@ This is the core of Open Brain — the foundation everything else builds on. Onc
 
 > **Run servers for a living?** [`SETUP.md`](../SETUP.md) is the same stack as an operator's reference — which models, which vector width, what leaves the box, where to run it for real. This guide is the beginner's walk through it.
 
-About 30 minutes. Zero coding experience. Nothing to sign up for: the whole system runs on your own machine, in containers, and the models that read your thoughts run there too. Three tools to install, one folder to download, one file to fill in.
+About 30 minutes. Zero coding experience. Nothing to sign up for: the whole system runs on your own machine, in containers, and the models that read your thoughts run there too. Three tools to install (four on Windows), one folder to download, one file to fill in.
 
 - **[Podman](https://podman.io) or [Docker](https://www.docker.com/products/docker-desktop/)** — runs the containers (free)
 - **[Bun](https://bun.sh)** — makes your access key and runs the checks (free)
@@ -45,7 +45,7 @@ Public HTTPS URL:           ____________  (Step 6, only for Claude Desktop / cla
 
 ![Step 1](https://img.shields.io/badge/Step_1-Install_the_Tools-E53935?style=for-the-badge)
 
-Three installs. Each is a download-and-click, or one line in a terminal.
+Three installs — four on Windows. Each is a download-and-click, or one line in a terminal.
 
 > [!TIP]
 > **New to the terminal?** The "terminal" is the text-based command line on your computer. On Mac, open the app called **Terminal** (search for it in Spotlight). On Windows, use **Git Bash** (installed in 1.3 below) for every `bash` block — PowerShell is for the one `powershell` block. Everything in a `bash` block gets typed there, not in your browser.
@@ -194,9 +194,9 @@ From the `OB1` folder:
 podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
 
-(Docker: `docker compose …`. Hosted models: leave off `--profile local-models`.)
+(Docker: `docker compose …`. The profile adds the two model containers; with hosted models, leave `--profile local-models` off. `--build` builds the server image from your checkout, so a later `git pull` takes effect on the next start with it.)
 
-Five containers start in order: Postgres with pgvector, a one-shot job that applies the schema and exits, the models' runtime and a one-shot job that pulls the two models, then the MCP server. The first run downloads the images and about 7 GB of models (SETUP.md has the sizes), so give it a while; every later start is seconds.
+Five containers start in order (three with hosted models — no Ollama and no pull): Postgres with pgvector, a one-shot job that applies the schema and exits, the models' runtime and a one-shot job that pulls the two models, then the MCP server. The first run downloads the images and about 7 GB of models (SETUP.md has the sizes), so give it a while; every later start is seconds.
 
 The server checks its own configuration before it serves anything. Watch for two lines from `server`:
 

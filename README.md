@@ -173,7 +173,7 @@ Tables and sidecars that extend the base `thoughts` model without replacing it.
 1. Browse the category tables above or the folders in the repo
 2. Open the contribution's folder and read the README
 3. Every README has prerequisites, step-by-step instructions, expected outcomes, and troubleshooting
-4. Most contributions involve running SQL, deploying an edge function, or hosting frontend code — the README tells you exactly what to do
+4. Most contributions involve running SQL, running a server under Bun, or hosting frontend code — the README tells you exactly what to do
 
 ## Contributing
 

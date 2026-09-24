@@ -48,7 +48,7 @@ Every contribution lives in its own subfolder under the right category (e.g., `r
 
 - **`README.md`** — What it does, prerequisites, step-by-step setup, expected outcome, troubleshooting
 - **`metadata.json`** — Structured metadata (see template below)
-- **Your actual code** — SQL files, edge function code, frontend code, config files, whatever it takes
+- **Your actual code** — SQL files, server code, frontend code, config files, whatever it takes
 - **NO credentials, API keys, or secrets.** The automated review will reject them. Use environment variables and document what the user needs to set.
 
 ## README Standards

@@ -162,7 +162,7 @@ And remember — `server-portable/README.md` explains what a search does step by
 
 ### "What did I actually accomplish by setting this up?"
 
-Think about what you just did. You stood up a PostgreSQL database in the cloud. You wrote database migrations. You deployed serverless edge functions. You configured API secrets and environment variables. You didn't just connect to an MCP server — you built one from scratch and deployed it to production.
+Think about what you just did. You stood up a PostgreSQL database with vector search on your own machine. You applied its migrations. You ran an MCP server and put access keys in front of it. You configured environment variables. You didn't just connect to an MCP server — you built one from scratch and deployed it to production.
 
 A few years ago that's a junior backend engineer's first month. If you did it in a few hours with zero prior experience, the guide helped — but the guide doesn't click the buttons for you. That was you.
 

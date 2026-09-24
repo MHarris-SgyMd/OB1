@@ -51,7 +51,7 @@ body:
       label: Environment
       description: Any relevant details about your setup.
       placeholder: |
-        - Supabase plan: Free
+        - Container runtime: podman 5.x / Docker Desktop
         - OS: macOS 15
         - Node version: 22
     validations:

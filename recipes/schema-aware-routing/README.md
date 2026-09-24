@@ -203,7 +203,7 @@ async function getEmbedding(text: string): Promise<number[]> {
 
 ### Option B: OpenRouter (matches canonical OB1 setup)
 
-If you set up OpenRouter in `docs/01-getting-started.md` Step 4, you already have everything you need. Replace the `extractMetadata()` function in your `index.ts` with this:
+If you set up OpenRouter in `docs/01-getting-started.md` Step 3 (the hosted-models option), you already have everything you need. Replace the `extractMetadata()` function in your `index.ts` with this:
 
 ```typescript
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY; // or wherever you store secrets
