@@ -1900,10 +1900,12 @@ console.log("\n[20f] Migration 052 on a schema without 008, and on 008's table w
 console.log("\n[20g] Migration 053 on a schema without 016, and on 016's tables without 042's — refused up front, naming the missing migration and --reapply, and applied once both are there (SMD-1867)");
 {
   // 053's guard is 052's shape ([20f]): a brain baselined at a ledger through
-  // 053 whose schema stops before 016 would take the validator and fail at
-  // record_thought_entities's CREATE OR REPLACE with a bare "relation
-  // ob1_entities does not exist"; the file refuses at apply instead, naming 016
-  // — and, with 016's tables but not 042's thought_facets, naming 042. A guard
+  // 053 whose schema stops before 016 would fail at source_thought's SQL body
+  // — validated at CREATE — with a bare "column n.supersedes does not exist"
+  // (025's column; a plpgsql body is not checked against the catalog until it
+  // runs), and one through 041 at the link index with a bare "relation
+  // thought_facets does not exist"; the file refuses at apply instead, naming
+  // 016 — and, with 016's tables but not 042's thought_facets, naming 042. A guard
   // with no driver is prose ([20c]'s lesson), so both are driven (eighth
   // review pass: the guard had none).
   await dropSchema(URL_);
@@ -1924,8 +1926,8 @@ console.log("\n[20g] Migration 053 on a schema without 016, and on 016's tables 
   assert(half.code === 1 && /053_thought_sources_and_links\.sql\s+FAILED: migration 053 needs 042 \(thought_facets\); this schema lacks it/.test(half.out),
     `…and with 016's tables but not 042's it names 042 (exit ${half.code})${half.code === 1 ? "" : `:\n${half.out}`}`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "042" });
-  assert((await sql`SELECT to_regclass('thought_sources') IS NOT NULL AS t, to_regprocedure('record_source_links(uuid, text, jsonb)') IS NOT NULL AS f`)[0].t === true
-    && (await sql`SELECT to_regprocedure('record_source_links(uuid, text, jsonb)') IS NOT NULL AS f`)[0].f === true, "…and applied once both are there: the table and the writer are present");
+  const present = (await sql`SELECT to_regclass('thought_sources') IS NOT NULL AS t, to_regprocedure('record_source_links(uuid, text, jsonb)') IS NOT NULL AS f`)[0] as { t: boolean; f: boolean };
+  assert(present.t === true && present.f === true, "…and applied once both are there: the table and the writer are present");
   await sql.close();
 }
 
