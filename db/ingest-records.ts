@@ -60,8 +60,8 @@
  * SMD-1867): the row's metadata is MERGED, never replaced (the board sync's
  * facets and 050's actor marks survive a rebuild — SMD-1958); a record older
  * than the row's watermark (a dump the sync has moved past) is `stale` and
- * writes nothing; a record whose
- * text moved has its vector and chunks cleared so `reembed.ts` pools it; and a
+ * writes nothing; a record whose text moved has its vector and chunks
+ * cleared so `reembed.ts` pools it; and a
  * record that came through an adapter also writes its canonical
  * (thought_sources), its links (053's `link` facets, as a set) and its
  * structured mentions (record_thought_entities under `source:<system>`), all in
