@@ -435,6 +435,8 @@ async function processRow(row: Row): Promise<Outcome> {
   if (extraction.malformed) {
     malformed++;
     const where = extraction.parts ? ` (window ${extraction.parts.filter((p) => p.malformed).map((p) => p.index + 1).join(", ")} of ${extraction.windows})` : "";
+    // "No retry was made" is reachable only with EXTRACT_RETRY_RUNAWAY off and
+    // the stream abort on — a constant flipped — and stays for that truth.
     // A runaway aborted on the stream is named in the failed row's error, so
     // an operator sorting the failed rows — for SMD-2000's larger model, say —
     // can tell a loop the retry did not rescue from an answer that was never

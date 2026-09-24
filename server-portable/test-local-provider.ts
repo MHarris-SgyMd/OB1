@@ -714,10 +714,10 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   // Eighth review pass, probed: [DONE] alone is the same empty answer; one
   // event on two data: lines is one frame; the answer's last brace and a
   // second object's first in one frame is the answer, cut at the brace.
+  runs.length = 0;
   gMode = "doneonly";
-  let doneOnly = "";
-  try { await extractEntities(short, cfgG, undefined, { kind: "extraction" }); } catch (e) { doneOnly = (e as Error).message; }
-  assert(/was empty: no answer in 1 frame/.test(doneOnly), `[DONE] alone is the provider's empty answer too, in the same words (${doneOnly.slice(0, 90)})`);
+  const doneOnly = await extractEntities(short, cfgG, undefined, { kind: "extraction" }, { ...windowingFor(cfgG), retryRunaway: false });
+  assert(doneOnly.malformed && doneOnly.retried === undefined && runs.length === 1, "[DONE] alone is the provider's empty answer, malformed as the whole read has it — not thrown (tenth review pass)");
   runs.length = 0;
   gMode = "multiline";
   const multiline = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
@@ -735,10 +735,10 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   gMode = "loop4finish";
   const loop4 = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
   assert(loop4.retried === true && loop4.abortedMs !== undefined && runs.length === 2 && runs[1].body.stream === undefined, "a loop that went on, arriving complete in the finishing frame, is the runaway it is when the finish comes alone — retried, read whole");
+  runs.length = 0;
   gMode = "rolefinish";
-  let roleFinish = "";
-  try { await extractEntities(short, cfgG, undefined, { kind: "extraction" }); } catch (e) { roleFinish = (e as Error).message; }
-  assert(/was empty: no answer in 2 frame/.test(roleFinish), `a role frame and a finish with no content is the empty answer, whatever the frame count — the finish ends the read before [DONE] (${roleFinish.slice(0, 90)})`);
+  const roleFinish = await extractEntities(short, cfgG, undefined, { kind: "extraction" }, { ...windowingFor(cfgG), retryRunaway: false });
+  assert(roleFinish.malformed && roleFinish.retried === undefined && runs.length === 1, "a role frame and a finish with no content is the empty answer, malformed as the whole read has it — the same record by either transport");
   runs.length = 0;
   gMode = "crlfsplit";
   const crlfSplit = await extractEntities(short, cfgG, undefined, { kind: "extraction" });

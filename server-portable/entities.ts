@@ -265,15 +265,19 @@ export const RUNAWAY_REPEATS = 3;
  * parseExtraction folds, and the verdict does not depend on where the
  * provider split its frames (sixth and seventh passes); a later array's own
  * loop arms it anew (eighth pass). An "item" that began as the answer object
- * — `{"entities": [` — was the answer itself, put inside an array by an
- * unbalanced `[` in a preamble: the reading re-roots to the objects inside
- * and that object's close is the answer's (eighth and ninth passes); an item
- * whose own nested array holds objects keeps them as its own. `closed` needs
- * an item read or an array opened in the answer, so a valid empty answer
- * closes and a preamble's own `{…}` does not (ninth pass); nothing after the
- * close is read. `closedAt` is where in the text fed the answer closed, so a
- * reader can cut what a frame carried after it. Not resynced: preamble chatter
- * with an unbalanced bracket AND a stray quote — the budget bounds it.
+ * — its first key `"entities"` or `"relationships"` — was the answer itself,
+ * put inside an array by an unbalanced `[` in a preamble: the reading
+ * re-roots to the objects inside and that object's close is the answer's
+ * (eighth to tenth passes); an item whose own nested array holds objects
+ * keeps them as its own. `closed` needs the answer's own `"entities"` key read
+ * in it, so a valid empty answer closes and a preamble's own `{…}` — even one
+ * holding an array — does not (ninth and tenth passes); nothing after the
+ * close is read, so a stream that carries a complete answer and then another
+ * object is read to the first, where the whole read would fail both (named,
+ * accepted). `closedAt` is where in the text fed the answer closed, so a
+ * reader can cut what a frame carried after it. Not resynced: preamble
+ * chatter with an unbalanced bracket and a stray quote, or a quoted bracket
+ * (`"["`) — the budget bounds those, as it did before this ticket.
  */
 export class RunawayDetector {
   private readonly stack: ("{" | "[")[] = [];
@@ -289,8 +293,10 @@ export class RunawayDetector {
   closed = false;
   /** The stack depth of the answer's own container — 1, or the level of the object the reading re-rooted out of. */
   private answerLevel = 1;
-  /** An array opened directly inside the answer: a valid empty answer has two and no item. */
-  private answerArray = false;
+  /** The answer's own `"entities"` key, read directly inside its container: what makes its close the answer's. */
+  private sawEntities = false;
+  /** The string being read directly inside the answer's container — a key — while inString there. */
+  private key = "";
   /** Characters fed up to and including the brace that closed the answer; -1 while open. */
   closedAt = -1;
   private consumed = 0;
@@ -321,29 +327,32 @@ export class RunawayDetector {
       if (this.inString) {
         if (this.escaped) this.escaped = false;
         else if (c === "\\") this.escaped = true;
-        else if (c === '"') this.inString = false;
+        else if (c === '"') {
+          this.inString = false;
+          if (this.stack.length === this.answerLevel && this.key === "entities") this.sawEntities = true;
+        }
+        if (this.inString && this.stack.length === this.answerLevel) this.key += c;
         continue;
       }
-      if (c === '"') { this.inString = true; continue; }
+      if (c === '"') { this.inString = true; this.key = ""; continue; }
       if (c === "{" || c === "[") {
-        if (c === "[" && this.stack.length === this.answerLevel) this.answerArray = true;
         // An object opening directly inside an array is an item, at any depth.
         // One opening inside an array inside the current item, when that item
-        // began as the answer object — `{"entities": [` — says the item WAS the
-        // answer, put inside an array by an unbalanced `[` in a preamble: the
-        // reading re-roots to this object, and the answer's close is the
-        // outer's (eighth and ninth passes). Any other nested object is its
-        // item's own.
+        // began as the answer object — its first key "entities" or
+        // "relationships" — says the item WAS the answer, put inside an array
+        // by an unbalanced `[` in a preamble: the reading re-roots to this
+        // object, and the answer's close is the outer's (eighth to tenth
+        // passes). Any other nested object is its item's own.
         if (c === "{" && this.stack[this.stack.length - 1] === "[") {
           if (this.itemLevel < 0) { this.itemLevel = this.stack.length + 1; this.item = ""; start = i; }
-          else if (/^\{\s*"(entities|relationships)"\s*:\s*\[\s*$/.test(this.item + piece.slice(start, i))) { this.answerLevel = this.itemLevel; this.answerArray = true; this.itemLevel = this.stack.length + 1; this.item = ""; start = i; }
+          else if (this.stack.length === this.itemLevel + 1 && /^\{\s*"(entities|relationships)"\s*:/.test(this.item + piece.slice(start, i))) { this.answerLevel = this.itemLevel; this.sawEntities = true; this.itemLevel = this.stack.length + 1; this.item = ""; start = i; }
         }
         this.stack.push(c);
         continue;
       }
       if (c === "}" || c === "]") {
         this.stack.pop();
-        if (this.stack.length === this.answerLevel - 1 && (this.items > 0 || this.answerArray)) { this.closed = true; this.closedAt = offset + i + 1; }
+        if (this.stack.length === this.answerLevel - 1 && this.sawEntities) { this.closed = true; this.closedAt = offset + i + 1; }
         // The array that held the third copy has closed: the loop ended with it,
         // and the detector is armed again for a loop in a later array (eighth
         // review pass: the first fire was final, so a relation repeated three
@@ -685,7 +694,7 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, pa
   // read as before; anything else is the stream.
   let d: { choices?: [{ message?: { content?: string }; finish_reason?: string }] };
   if (stream && r.body) {
-    const got = await readStreamedAnswer(r.body, new RunawayDetector(), cfg.chat.base);
+    const got = await readStreamedAnswer(r.body, cfg.chat.base);
     if (got.kind === "sse") {
       // Aborted: a runaway by the detector's rule, whatever the budget — the
       // partial answer is not read (it could not parse), and the caller's
@@ -732,15 +741,18 @@ type StreamedBody = { kind: "sse"; content: string; finish: string | undefined; 
  * folds the copies (fifth to eighth passes). A stream that ends with content
  * but no end sign is a socket that closed mid-answer — thrown, so the worker
  * classifies it (transient) — unless what arrived is whole JSON, which is the
- * answer; one that ends with no content at all, whatever frames it carried
- * (a role event, the end marker), is the provider's empty answer, thrown as
- * that — the row's, not the connection's (seventh to ninth passes). An event that is the provider's error (`data:
+ * answer; one that ends with no content but an end sign is the provider's
+ * empty answer, returned as the whole read returns it — malformed — and one
+ * with neither content nor end sign is thrown as empty, the row's failure
+ * and not the connection's, as the whole read's r.json() on an empty body
+ * threw (seventh to tenth passes). An event that is the provider's error (`data:
  * {"error": …}`) throws with its message and HTTP-shaped code, the reader
  * cancelled on the way out. Assumed: the event that finishes the answer is
  * the last with content — the OpenAI shape, Ollama's too; a layer sending
  * content after its finish is read short (named, not handled).
  */
-async function readStreamedAnswer(body: ReadableStream<Uint8Array>, detector: RunawayDetector, base: string): Promise<StreamedBody> {
+async function readStreamedAnswer(body: ReadableStream<Uint8Array>, base: string): Promise<StreamedBody> {
+  const detector = new RunawayDetector();
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -797,13 +809,21 @@ async function readStreamedAnswer(body: ReadableStream<Uint8Array>, detector: Ru
     return take(data);
   };
   let verdict: StreamVerdict = null;
+  let heldCR = "";
   try {
     outer: for (;;) {
       const { done, value } = await reader.read();
-      // Line ends normalised on the buffer, a `\r` at its very end held back
-      // until the next read says whether a `\n` follows — split, it would make
-      // a blank line, and a blank line ends an event (ninth review pass).
-      buffer = (buffer + (done ? decoder.decode() : decoder.decode(value, { stream: true }))).replace(/\r\n/g, "\n").replace(done ? /\r/g : /\r(?!$)/g, "\n");
+      let chunk = heldCR + (done ? decoder.decode() : decoder.decode(value, { stream: true }));
+      heldCR = "";
+      if (kind !== "json") {
+        // Line ends normalised per chunk, a `\r` at its very end held back
+        // until the next read says whether a `\n` follows — split, it would
+        // make a blank line, and a blank line ends an event (ninth and tenth
+        // passes). A whole-JSON body needs none of this.
+        if (!done && chunk.endsWith("\r")) { heldCR = "\r"; chunk = chunk.slice(0, -1); }
+        chunk = chunk.replace(/\r\n?/g, "\n");
+      }
+      buffer += chunk;
       if (kind === undefined) {
         const head = buffer.trimStart();
         if (!head && !done) continue;
@@ -841,7 +861,7 @@ async function readStreamedAnswer(body: ReadableStream<Uint8Array>, detector: Ru
     verdict = line("");
   }
   if (verdict?.kind === "repeated") return { kind: "sse", content, finish, repeated: verdict.key };
-  if (!content) throw new Error(`Extraction stream from ${base} was empty: no answer in ${frames} frame(s)`);
+  if (!content && verdict === null) throw new Error(`Extraction stream from ${base} was empty: no answer in ${frames} frame(s)`);
   if (verdict === null && !isWholeJson(content)) {
     throw new Error(`Extraction stream from ${base} closed mid-answer: the socket closed after ${content.length} characters with no finish_reason — not an answer`);
   }
