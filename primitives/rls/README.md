@@ -15,7 +15,7 @@ RLS is the foundation that makes multi-user and shared-access extensions possibl
 
 ## Prerequisites
 
-- A Supabase project with at least one table created
+- A Postgres with at least one table created — the fork's stack, or a Supabase project
 - Basic understanding of SQL and PostgreSQL
 - Familiarity with Supabase authentication (users have UUIDs via `auth.uid()`)
 
@@ -248,10 +248,7 @@ CREATE POLICY "Users can delete their own recipes"
 
 ## Step-by-Step Guide for Enabling RLS on a Table
 
-1. **Navigate to the Supabase SQL Editor**:
-   - Go to your project dashboard
-   - Click "SQL Editor" in the left sidebar
-   - Click "New query"
+1. **Open a SQL session on your database** — `psql "$DATABASE_URL"`, or Supabase's SQL Editor if that is where it lives
 
 2. **Enable RLS on your table**:
 

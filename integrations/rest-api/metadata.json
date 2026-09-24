@@ -9,8 +9,8 @@
   "version": "1.0.0",
   "requires": {
     "open_brain": true,
-    "services": ["OpenRouter or OpenAI (embeddings + classification)", "Supabase"],
-    "tools": ["Supabase CLI", "Deno"]
+    "services": ["OpenRouter or OpenAI (embeddings + classification)"],
+    "tools": ["Bun 1.4+"]
   },
   "tags": ["rest", "api", "gateway", "crud", "search", "dashboard", "webhook"],
   "difficulty": "intermediate",

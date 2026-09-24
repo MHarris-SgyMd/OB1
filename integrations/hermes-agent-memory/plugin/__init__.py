@@ -740,7 +740,7 @@ class OB1MemoryProvider(MemoryProvider):
         return [
             {
                 "key": "endpoint",
-                "description": "OB1 Agent Memory API URL (e.g. http://localhost:8000/functions/v1/agent-memory-api)",
+                "description": "OB1 Agent Memory API URL (e.g. http://127.0.0.1:8787/agent-memory-api)",
                 "secret": False,
                 "required": True,
             },

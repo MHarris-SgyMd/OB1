@@ -203,7 +203,7 @@ async function getEmbedding(text: string): Promise<number[]> {
 
 ### Option B: OpenRouter (matches canonical OB1 setup)
 
-If you set up OpenRouter in `docs/01-getting-started.md` Step 4, you already have everything you need. Replace the `extractMetadata()` function in your `index.ts` with this:
+If you set up OpenRouter in `docs/01-getting-started.md` Step 3 (the hosted-models option), you already have everything you need. Replace the `extractMetadata()` function in your `index.ts` with this:
 
 ```typescript
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY; // or wherever you store secrets
@@ -239,7 +239,7 @@ Key differences from OpenAI direct:
 - **Model strings:** `openai/gpt-4o-mini` and `openai/text-embedding-3-small` (prefixed with the provider)
 - **Same everything else:** Same `Authorization: Bearer` header pattern, same JSON shapes, same `response_format: { type: "json_object" }` support
 
-This is the exact same provider/config pair the core OB1 MCP server (`supabase/functions/open-brain-mcp/index.ts`) uses, so if you have OB1 running, these snippets reuse your existing setup.
+This is the exact same provider/config pair the core OB1 MCP server (`server-portable/index.ts`, under `OB1_LLM_BASE_URL=https://openrouter.ai/api/v1`) uses, so if you have OB1 running, these snippets reuse your existing setup.
 
 ✅ **Done when:** Both functions make real API calls and return data instead of throwing errors.
 
