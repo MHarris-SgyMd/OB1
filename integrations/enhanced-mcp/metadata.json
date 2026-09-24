@@ -9,8 +9,8 @@
   "version": "1.0.0",
   "requires": {
     "open_brain": true,
-    "services": ["OpenRouter", "Supabase"],
-    "tools": ["Supabase CLI", "Deno"]
+    "services": ["OpenRouter"],
+    "tools": ["Bun 1.4+"]
   },
   "tags": ["mcp", "tools", "search", "capture", "enrichment", "ops"],
   "difficulty": "intermediate",

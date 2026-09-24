@@ -41,11 +41,11 @@ For the full tool and worker inventory, see `docs/05-tool-audit.md` in the repos
 
 ### 1. Check Out the Integration
 
-The workers run from a checkout of this repository: each imports the repository's SQL shim by relative path, and the access-key module from `../_shared/auth.ts` beside it (the core server's, held byte-identical by `extensions/test-auth.ts`). Nothing is copied anywhere; there is no Supabase Edge Function to deploy and no `deno.json` (SMD-1800).
+The workers run from a checkout of this repository: each imports the repository's SQL shim by relative path, and the access-key module from `../_shared/auth.ts` beside it (the core server's, held byte-identical by `extensions/test-auth.ts`). Nothing is copied anywhere and nothing is deployed but the two processes (SMD-1800; [Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps).
 
 ### 2. Run the Workers
 
-> **Runs under Bun, not as an Edge Function.** Both workers import the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and are Bun-native — `process.env` for their environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74 moved `consolidation-bio`; SMD-1798 moved `consolidation-metadata`, whose two-group `.or()` over the candidates the shim did not read until then; SMD-1799 gave both the shape), so `supabase functions deploy` cannot bundle them; from a checkout of this repository each serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
+> **Runs under Bun.** Both workers import the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and are Bun-native — `process.env` for their environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74 moved `consolidation-bio`; SMD-1798 moved `consolidation-metadata`, whose two-group `.or()` over the candidates the shim did not read until then; SMD-1799 gave both the shape) — one HTTP process each, as every server here is; from a checkout of this repository each serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
 >
 > ```bash
 > PORT=8787 SUPABASE_URL='postgres://user:password@host:5432/openbrain' MCP_ACCESS_KEYS='cron:write:<sha256-of-your-key>' OPENROUTER_API_KEY='…' bun integrations/consolidation-workers/bio/index.ts
@@ -62,7 +62,7 @@ export \
   OPENROUTER_API_KEY="your-openrouter-key"
 ```
 
-`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per caller — the hash, never the key; mint one as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. One `MCP_ACCESS_KEYS` list serves every server you run — set the whole list, comma-separated, in each worker's environment. Both workers write, so a real run needs a `write` key; a `read` key may only `dry_run=true`.
+`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per caller — the hash, never the key; mint one as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. One `MCP_ACCESS_KEYS` list serves every server you run — set the whole list, comma-separated, in each worker's environment. Both workers write, so a real run needs a `write` key; a `read` key may only `dry_run=true`.
 
 Optional multi-provider fallback:
 

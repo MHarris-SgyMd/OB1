@@ -23,7 +23,7 @@ This recipe depends on the canonical [Work Operating Model skill](../../skills/w
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
 - Existing core Open Brain connector with `search_thoughts` and `capture_thought`
 - AI client that supports reusable skills or prompt packs
-- Supabase CLI installed and linked to your project
+- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/))
 - Canonical [Work Operating Model skill](../../skills/work-operating-model/)
 
 ## Credential Tracker
@@ -33,15 +33,13 @@ WORK OPERATING MODEL ACTIVATION -- CREDENTIAL TRACKER
 ----------------------------------------------------
 
 FROM YOUR OPEN BRAIN SETUP
-  Project URL:           ____________
-  Secret key:            ____________
-  Project ref:           ____________
+  Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
   MCP Access Key:        ____________
   Core Open Brain tools available:  yes / no
 
 GENERATED DURING SETUP
   Default User ID:       ____________
-  Function URL:          ____________
+  MCP Server URL:        ____________
   MCP Connection URL:    ____________
   Current profile version: ____________
 
@@ -56,11 +54,7 @@ Follow the installation steps in the [Work Operating Model skill](../../skills/w
 
 ### 2. Run the schema
 
-Open your Supabase SQL Editor and run [`schema.sql`](./schema.sql):
-
-```text
-https://supabase.com/dashboard/project/YOUR_PROJECT_ID/sql/new
-```
+Run [`schema.sql`](./schema.sql) against your brain's database — `psql "$DATABASE_URL" -f recipes/work-operating-model-activation/schema.sql` (or paste it into Supabase's SQL Editor, if that is where your Postgres lives).
 
 This creates:
 
@@ -80,109 +74,31 @@ This recipe is single-user on purpose. Generate one UUID and reuse it for future
 uuidgen | tr '[:upper:]' '[:lower:]'
 ```
 
-Save it to your credential tracker, then set it in Supabase:
+Save it to your credential tracker; it goes on the run command in Step 4 as `DEFAULT_USER_ID`.
+
+### 4. Run the MCP server
+
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and the access-key module from `../_shared/auth.ts` (the copy in `recipes/_shared/`, the core server's), and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — one HTTP process, as every server here is. From a checkout of this repository ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks every step):
 
 ```bash
-supabase secrets set DEFAULT_USER_ID=your-generated-uuid
+(cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK
+PORT=8787 NODE_PATH=extensions/node_modules \
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+SUPABASE_SERVICE_ROLE_KEY=unused \
+MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
+DEFAULT_USER_ID='your-generated-uuid' \
+bun recipes/work-operating-model-activation/index.ts
 ```
 
-> **Runs under Bun, not as an Edge Function.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — so `supabase functions deploy` cannot bundle it; from a checkout of this repository it serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
->
-> ```bash
-> PORT=8787 NODE_PATH=extensions/node_modules SUPABASE_URL='postgres://user:password@host:5432/openbrain' SUPABASE_SERVICE_ROLE_KEY=unused MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' DEFAULT_USER_ID='your-generated-uuid' bun recipes/work-operating-model-activation/index.ts
-> ```
->
-> `SUPABASE_URL` carries the Postgres connection string (the shim's convention); this server refuses to start without `SUPABASE_SERVICE_ROLE_KEY`, so set it to any value — the shim ignores it — and the other variables are the secrets the steps below set, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI. The Supabase steps below apply to the file after `bun scripts/migrate-to-sql-shim.ts --revert recipes/work-operating-model-activation/index.ts`, which puts it back on supabase-js.
+`SUPABASE_URL` carries the Postgres connection string (the shim's convention); this server refuses to start without `SUPABASE_SERVICE_ROLE_KEY`, so set it to any value — the shim ignores it. `PORT` unset is 8000, which the core server holds — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI. Your **MCP Server URL** is `http://your-host:8787/mcp`; a hosted connector needs the HTTPS form ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
 
-### 4. Deploy the MCP server
-
-Follow the [Deploy an Edge Function](../../primitives/deploy-edge-function/) guide using these values:
-
-| Setting | Value |
-|---------|-------|
-| Function name | `work-operating-model-mcp` |
-| Download path | `recipes/work-operating-model-activation` |
-
-The guide's Step 2 also downloads `_shared/auth.ts`, which the server imports from `../_shared/auth.ts` (the copy in `recipes/_shared/` is the same file). This function uses:
-
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-- `MCP_ACCESS_KEYS` — `name:scope:sha256` entries, minted as the guide's Step 3 shows (the older single `MCP_ACCESS_KEY` still works). Give the session a `write` key: `start_operating_model_session`, `save_operating_model_layer` and `generate_operating_model_exports` are registered only for one; a `read` key gets `query_operating_model` alone.
-- `DEFAULT_USER_ID`
-
-### 5. Connect it to your AI client
-
-Use the [Remote MCP Connection](../../primitives/remote-mcp/) pattern.
-
-| Setting | Value |
-|---------|-------|
-| Connector name | `Work Operating Model` |
-| URL | Your function URL with the same MCP key pattern you use for your other OB1 servers |
-
-Keep your core Open Brain connector enabled too. This recipe stores structured data in its own tables, but the skill still uses the base `search_thoughts` and `capture_thought` tools for hints and summary memory writes.
-
-### 6. Start the interview
-
-With both connectors enabled and the skill installed, prompt your AI client:
-
-```text
-Use the Work Operating Model workflow to interview me and build my operating model.
-```
-
-The skill should:
-
-1. call `start_operating_model_session`
-2. run the five layers in order
-3. show a checkpoint summary after each layer
-4. wait for your confirmation before saving
-5. save the layer with `save_operating_model_layer`
-6. capture one summary thought through your core Open Brain connector
-7. run a contradiction pass
-8. call `generate_operating_model_exports`
-
-### 7. Review the exports
-
-At the end of a successful run, the MCP server stores and returns:
-
-- `operating-model.json`
-- `USER.md`
-- `SOUL.md`
-- `HEARTBEAT.md`
-- `schedule-recommendations.json`
-
-These are stored in `operating_model_exports`, so they still exist even if your client cannot write files locally.
-
-## Available MCP Tools
-
-1. `start_operating_model_session`
-   Create or resume the active interview run. Returns profile status, session status, completed layers, pending layer, session checkpoints, and latest approved checkpoints.
-
-2. `save_operating_model_layer`
-   Atomically upserts the approved layer checkpoint plus canonical entries for that layer, then advances the session to the next layer or review state.
-
-3. `query_operating_model`
-   Reads the latest operating model or a filtered slice by `layer`, `keyword`, `cadence`, `stakeholder`, `unresolved_only`, or `friction_priority`.
-
-4. `generate_operating_model_exports`
-   Renders and stores the final JSON/markdown artifacts after all five layers are approved.
-
-## Expected Outcome
-
-When this recipe is working correctly:
-
-- a first session creates version `1` of a structured operating model
-- pausing after layer 2 and restarting later resumes at the correct pending layer
-- each approved layer writes one checkpoint plus canonical entries into the recipe tables
-- the skill captures six summary thoughts in your core Open Brain:
-  - one per layer
-  - one final synthesis
-- `query_operating_model` can find things like `Monday planning block`, `finance email dependency`, or `handoff friction`
+- `MCP_ACCESS_KEYS` — `name:scope:sha256` entries, minted as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows (the older single `MCP_ACCESS_KEY` still works). Give the session a `write` key: `start_operating_model_session`, `save_operating_model_layer` and `generate_operating_model_exports` are registered only for one; a `read` key gets `query_operating_model` alone.
 - `generate_operating_model_exports` returns all five artifact blobs even if no local files are written
 
 ## Troubleshooting
 
 **Issue: `start_operating_model_session` says no environment variable is configured**
-Solution: Verify `DEFAULT_USER_ID` was set with `supabase secrets set DEFAULT_USER_ID=...` and redeploy the function if needed.
+Solution: Verify `DEFAULT_USER_ID` is in the server's environment (the `bun` command in Step 4) and restart it.
 
 **Issue: The skill can see the recipe connector but not `search_thoughts` or `capture_thought`**
 Solution: This recipe does not replace the core Open Brain server. Re-enable your base connector alongside this one.

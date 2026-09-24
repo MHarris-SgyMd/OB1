@@ -9,8 +9,10 @@ This is the single most common issue. The tell is right in the pattern: Claude C
 The fix: use the MCP Connection URL with the key embedded as a query parameter (`?key=your-access-key`), not as a custom header. Your URL should look like:
 
 ```text
-https://your-project-ref.supabase.co/functions/v1/open-brain-mcp?key=your-access-key
+https://your-host/?key=your-access-key
 ```
+
+— the HTTPS proxy or tunnel in front of your server ([setup guide](01-getting-started.md), Step 6); a client on the same machine takes `http://127.0.0.1:8000/?key=your-access-key`.
 
 When adding the connector in Claude Desktop (Settings → Connectors) or ChatGPT (Settings → Apps & Connectors), paste that full URL. Set authentication to "none" — the key is already in the URL.
 
@@ -32,31 +34,29 @@ ChatGPT is less intuitive than Claude at picking the right MCP tool on its own. 
 
 ### "ChatGPT says the Open Brain tool is not available"
 
-First check Supabase dashboard → Edge Functions → `open-brain-mcp` → Logs. If you see **zero requests** while ChatGPT is failing, stop debugging keys, URLs, and Edge Function code. ChatGPT never called your server; the problem is the tools exposed to that chat session.
+First check the server's log: `podman compose -f deploy/compose.yaml logs server`. If you see **zero requests** while ChatGPT is failing, stop debugging keys, URLs, and server code. ChatGPT never called your server; the problem is the tools exposed to that chat session.
 
 As of May 2026, OpenAI's ChatGPT developer-mode docs are in beta and the plan/model behavior is not perfectly stable. The important implementation detail: ChatGPT treats MCP tools without `readOnlyHint` as write actions. Open Brain now marks `search_thoughts`, `list_thoughts`, `thought_stats`, `search`, and `fetch` as read-only. It marks `capture_thought` as a bounded, non-destructive write action.
 
-After updating your deployed MCP server, redeploy it, then refresh or recreate the ChatGPT app so ChatGPT pulls the new tool metadata. Expected behavior:
+After updating your MCP server, rebuild and restart it, then refresh or recreate the ChatGPT app so ChatGPT pulls the new tool metadata. Expected behavior:
 
 - Full MCP-capable chats should expose the four core tools, plus ChatGPT compatibility aliases (`search` and `fetch`).
 - Restricted Pro/read-only sessions may expose only read tools and hide or block `capture_thought`.
 - If a Pro chat exposes none of the tools, switch that chat to a thinking model, start a fresh chat, and make sure the Open Brain app is selected in Developer Mode.
 
-### "I'm stuck and Claude is rewriting my edge function code to fix the connection"
+### "I'm stuck and Claude is rewriting my server code to fix the connection"
 
 Pause. The problems are almost never in the code. They're in the configuration: a secret that doesn't match, a URL that's missing the key, a step that got skipped. Letting an AI rewrite working code when the issue is a mismatched environment variable will make things harder to debug, not easier.
 
-Check your Supabase dashboard → Edge Functions → open-brain-mcp → Logs first. That'll tell you what's actually happening.
+Read the server's log first (`podman compose -f deploy/compose.yaml logs server`) — and the row preflight failed on, if it did. That'll tell you what's actually happening.
 
 ### "Search isn't working but I can capture recent thoughts"
 
-Good news — that means your database, edge functions, and MCP connection are all fine. The issue is isolated to the search function.
+Good news — that means your database, server, and MCP connection are all fine. The issue is isolated to search.
 
-Most likely culprits: the vector extension isn't enabled (run `create extension if not exists vector;` in the SQL editor), the embedding generation is failing silently, or the search function deployed with an error.
+Most likely culprits: the embedding call is failing (the model endpoint is unreachable, or the key for a hosted provider is wrong), or the thoughts were captured without a vector (the reply says so at the time) — `db/reembed.ts` finds and fills those, and preflight's `vector models` and `re-embed pass` rows warn when the corpus is off the model.
 
-Quickest diagnosis: Supabase dashboard → Edge Functions → click on the search function → check the Logs tab.
-
-And don't forget the Supabase AI assistant covered in the [setup guide](01-getting-started.md). Paste your edge function code and the error logs right into it — it's surprisingly good at diagnosing Supabase-specific issues since it has direct context on their APIs.
+Quickest diagnosis: the server's log, then `bun preflight.ts` in `server-portable/` with the stack's environment.
 
 ---
 
@@ -90,13 +90,13 @@ In Obsidian, your notes are documents. You write them, organize them, revise the
 
 The Open Brain isn't that. It's a memory layer for your AI. You put thoughts in, your AI pulls the right ones out when they're relevant. You don't need to organize them, file them, or maintain them — the vector search handles retrieval by meaning.
 
-If you need to fix a typo or delete something, Supabase's Table Editor works (dashboard → Table Editor → thoughts). But if you're finding yourself wanting to regularly browse and edit your content, that's Obsidian's workflow, not this one. They solve different problems.
+If you need to fix a typo or delete something, ask your AI — a write key has `update_thought` and `delete_thought` — or use any SQL client (`psql`). But if you're finding yourself wanting to regularly browse and edit your content, that's Obsidian's workflow, not this one. They solve different problems.
 
-That said — the system is yours to extend. The MCP server currently has a capture tool for writing new thoughts. If you want your AI to be able to revise what's stored, that's one more tool added to the server. You can describe what you want to the Supabase AI assistant and it can help you build it. You built the system, you can extend it.
+That said — the system is yours to extend. The MCP server is one file, `server-portable/index.ts`; a tool it lacks is one more `registerTool` block. You built the system, you can extend it.
 
 ### "I want the visual editing experience — headings, bullets, drag stuff around, everything visible at once"
 
-That's a fair ask, and you're right — that doesn't exist in the Open Brain right now. The Table Editor in Supabase is functional but it's a database view, not a writing environment.
+That's a fair ask, and you're right — that doesn't exist in the Open Brain right now. A SQL client is functional but it's a database view, not a writing environment.
 
 Here's how to think about it: the Open Brain is the backend. It's where the data lives, where the vectors live, where your AI connects. Obsidian is a frontend. There's nothing stopping you from having both — use the Open Brain as your storage and retrieval layer, and build (or eventually connect) a nicer interface on top of it.
 
@@ -146,15 +146,15 @@ The key thing to get right is metadata. Every source type should tag itself (`so
 
 Here's how to diagnose it yourself:
 
-First, check your row count. Supabase dashboard → Table Editor → thoughts. If you're under 20-30 entries, the system just doesn't have enough data points for semantic search to work well. It's not broken, it's sparse. The more you put in, the better retrieval gets.
+First, check your row count: ask your AI "How many thoughts do I have?" (the `thought_stats` tool), or `select count(*) from thoughts;`. If you're under 20-30 entries, the system just doesn't have enough data points for semantic search to work well. It's not broken, it's sparse. The more you put in, the better retrieval gets.
 
 Second, test search directly. Ask your AI to search for something you KNOW is in there — use words that are close to what you actually typed when you captured it. If that works but vaguer queries don't, the system is fine, it just needs more content for the semantic matching to have enough to work with.
 
-Third, check your edge function logs. Supabase dashboard → Edge Functions → open-brain-mcp → Logs. If search is erroring out silently, you'll see it there.
+Third, check the server's log (`podman compose -f deploy/compose.yaml logs server`). If search is erroring out silently, you'll see it there.
 
 Fourth, if search finds a thought when listing recent entries but NOT through semantic search, that's a useful clue. It means the data is there and retrievable, but the embedding or similarity matching isn't connecting your query to that entry. This usually improves as you add more content — semantic search gets sharper with more data points to compare against.
 
-And remember — the Supabase AI assistant in your dashboard can help you debug this stuff. Paste in what you're seeing and it'll walk you through it.
+And remember — `server-portable/README.md` explains what a search does step by step, and `evals/` is how the default models were chosen if you want to measure your own.
 
 ---
 
@@ -162,7 +162,7 @@ And remember — the Supabase AI assistant in your dashboard can help you debug 
 
 ### "What did I actually accomplish by setting this up?"
 
-Think about what you just did. You stood up a PostgreSQL database in the cloud. You wrote database migrations. You deployed serverless edge functions. You configured API secrets and environment variables. You didn't just connect to an MCP server — you built one from scratch and deployed it to production.
+Think about what you just did. You stood up a PostgreSQL database with vector search on your own machine. You applied its migrations. You ran an MCP server and put access keys in front of it. You configured environment variables. You didn't just connect to an MCP server — you built one from scratch and deployed it to production.
 
 A few years ago that's a junior backend engineer's first month. If you did it in a few hours with zero prior experience, the guide helped — but the guide doesn't click the buttons for you. That was you.
 
@@ -184,14 +184,14 @@ When you generate a new key on openrouter.ai/keys, the old key is revoked immedi
 
 **Places your OpenRouter key lives (update ALL of them):**
 
-1. **Supabase Edge Function secrets** — This is the most common one to miss. Your MCP server reads the key from here at runtime.
+1. **The server's environment** — This is the most common one to miss. Your MCP server reads the key from `deploy/.env` once, at start.
 
    ```bash
-   supabase secrets set OPENROUTER_API_KEY=sk-or-v1-your-new-key
-   supabase functions deploy open-brain-mcp --no-verify-jwt
+   # edit OPENROUTER_API_KEY in deploy/.env, then
+   podman compose -f deploy/compose.yaml up -d server
    ```
 
-   `secrets set` stores the new value, but Edge Functions read environment variables once at cold start and cache them. Already-running ("warm") instances keep using the old key until they recycle — which can take minutes and produce intermittent 401s in the meantime. Redeploying forces a fresh boot so the new key takes effect immediately. If you've deployed extension functions that also read `OPENROUTER_API_KEY`, redeploy each of them too (or run `supabase functions deploy` with no arg to redeploy all).
+   A running server keeps the key it started with, so the restart is what makes the new one take effect. Every extension, worker or gateway you run under `bun` with the key in its environment is restarted the same way. (If the stack runs the `local-models` profile, there is no OpenRouter key to rotate.)
 
 2. **Local `.env` files** — Any recipes or integrations you run locally (e.g., `recipes/chatgpt-conversation-import/.env`). Open each one and replace the old key value.
 
@@ -222,9 +222,9 @@ That said: check your usage tier in your provider's console, make sure your agen
 ## Quick Reference: Before You Ask for Help
 
 1. **Did you follow the guide step by step?** Most issues trace back to a skipped or modified step.
-2. **Check Edge Function logs.** Supabase dashboard → Edge Functions → your function → Logs. This tells you what's actually breaking.
-3. **Is your URL format correct?** Should be: `https://your-ref.supabase.co/functions/v1/open-brain-mcp?key=your-key`
-4. **Use the Supabase AI assistant.** Paste your error and it can help diagnose Supabase-specific issues.
+2. **Check the server's log.** `podman compose -f deploy/compose.yaml logs server` — and `deploy/smoke.sh`, which probes every surface. This tells you what's actually breaking.
+3. **Is your URL format correct?** `http://127.0.0.1:8000/?key=your-key` from this machine, `https://your-host/?key=your-key` through the proxy — a hosted connector needs the second.
+4. **Read the preflight row.** A server that refuses to start names the setting and the fix.
 5. **Don't let AI rewrite your server code** unless you understand what it's changing. Configuration problems need configuration fixes.
 
 ---

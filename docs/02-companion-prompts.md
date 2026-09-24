@@ -309,7 +309,7 @@ Format:
 
 **What you'll get:** Five starter patterns with explanations of why each one works.
 
-> **Why does formatting matter?** Your Open Brain's edge function uses an LLM to extract metadata from each capture — people, topics, action items, type. These templates are structured to give that LLM clear signals, which means better tagging, better search, better retrieval.
+> **Why does formatting matter?** Your Open Brain's MCP server uses an LLM to extract metadata from each capture — people, topics, action items, type. These templates are structured to give that LLM clear signals, which means better tagging, better search, better retrieval.
 
 **Output feeds into:** N/A — reference tool.
 

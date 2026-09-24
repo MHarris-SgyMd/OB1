@@ -87,7 +87,7 @@ compiled-wiki/ + compile-manifest.json
 - The merged graph/wiki stack on `main`
 - Node.js 18+
 - A valid `.env.local` or shell env for the underlying recipes
-- A deployed `entity-extraction-worker` Edge Function if you want the wrapper to trigger extraction automatically
+- A running `entity-extraction-worker` server (`integrations/entity-extraction-worker`) if you want the wrapper to trigger extraction automatically
 
 ### Required environment
 

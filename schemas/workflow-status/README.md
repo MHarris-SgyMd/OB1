@@ -55,13 +55,7 @@ WHERE type IN ('task', 'idea') AND status IS NULL;
 
 </details>
 
-Or via the Supabase CLI:
-
-```bash
-supabase db push
-```
-
-(if you have the migration file in `supabase/migrations/`)
+Or, if your Postgres is Supabase's, paste the file into its SQL Editor and Run
 
 ![Step 2](https://img.shields.io/badge/Step_2-Verify-1E88E5?style=for-the-badge)
 
@@ -95,7 +89,7 @@ After running the migration:
 
 ## MCP Integration
 
-Once the schema is applied, update your `open-brain-mcp` Edge Function to include the `progress_task` tool. This allows AI assistants to manage task status conversationally:
+Once the schema is applied, add the `progress_task` tool to your MCP server (`server-portable/index.ts`). This allows AI assistants to manage task status conversationally:
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|

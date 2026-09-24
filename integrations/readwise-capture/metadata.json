@@ -10,7 +10,7 @@
   "requires": {
     "open_brain": true,
     "services": ["Readwise"],
-    "tools": ["Supabase CLI"]
+    "tools": ["Bun 1.4+"]
   },
   "tags": ["readwise", "highlights", "capture", "reading", "webhook"],
   "connectors": ["readwise"],

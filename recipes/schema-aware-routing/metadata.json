@@ -10,7 +10,7 @@
   "requires": {
     "open_brain": true,
     "services": ["OpenAI-compatible API (LLM + embeddings) — OpenAI direct or OpenRouter (canonical OB1 setup)"],
-    "tools": ["Node.js 18+ or Deno"]
+    "tools": ["Bun 1.4+"]
   },
   "tags": [
     "ingestion",

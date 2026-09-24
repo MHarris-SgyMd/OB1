@@ -1,14 +1,16 @@
 # Remote MCP Connection
 
-A guide to connecting your Open Brain extensions to any AI client. Deploy once as a Supabase Edge Function, connect from anywhere.
+A guide to connecting your Open Brain extensions to any AI client. Run the server once behind an HTTPS URL ([Run a Remote MCP Server](../deploy-remote-mcp/)), connect from anywhere.
 
 **Jump to your client:**
 [Claude Desktop](#claude-desktop) | [ChatGPT](#chatgpt) | [Claude Code](#claude-code) | [Cursor](#cursor) | [Other Clients](#other-clients-windsurf-vs-code-zed) | [Troubleshooting](#troubleshooting)
 
 ## Prerequisites
 
-- Your **MCP Connection URL** (from the extension's credential tracker — looks like `https://YOUR_REF.supabase.co/functions/v1/extension-mcp?key=your-access-key`)
+- Your **MCP Connection URL** — the server's URL with the access key on it. Behind the TLS proxy it looks like `https://your-host/mcp?key=your-access-key`; for a client on the same machine as the server, `http://127.0.0.1:8787/mcp?key=your-access-key` (the port is the one the server's `PORT` names; the core server's is `http://127.0.0.1:8000/?key=…`)
 - The AI client you want to connect
+
+> A hosted client — Claude Desktop's connector, claude.ai, ChatGPT — dials your server from the vendor's side, so it needs the HTTPS form. Claude Code, Cursor and the other clients that run on your machine take the `127.0.0.1` form directly.
 
 ## Step-by-step Instructions
 
@@ -17,7 +19,7 @@ A guide to connecting your Open Brain extensions to any AI client. Deploy once a
 1. Open Claude Desktop → **Settings** → **Connectors**
 2. Click **Add custom connector**
 3. Name: the extension name (e.g., `Household Knowledge`, `Family Calendar`)
-4. Remote MCP server URL: paste your **MCP Connection URL**
+4. Remote MCP server URL: paste your **MCP Connection URL** (the HTTPS form)
 5. Click **Add**
 
 Start a new conversation and enable the connector via the "+" button at the bottom of the chat → Connectors.
@@ -43,23 +45,23 @@ Requires a paid ChatGPT plan (Plus, Pro, Business, Enterprise, or Edu). Works on
 1. In Settings → **Apps & Connectors**, click **Create**
 2. Name: the extension name
 3. Description: brief description of what it does (for your reference only)
-4. MCP endpoint URL: paste your **MCP Connection URL**
+4. MCP endpoint URL: paste your **MCP Connection URL** (the HTTPS form)
 5. Authentication: select **No Authentication** (your access key is embedded in the URL)
 6. Click **Create**
 
 **Using it:** Start a new conversation and make sure the connector is enabled in the tools/apps panel. ChatGPT sometimes needs explicit tool references: "Use the search_household_items tool to find my paint colors."
 
-If ChatGPT says a tool is unavailable and your server logs show zero requests, the request never reached your MCP server. Refresh or recreate the ChatGPT app so it pulls the latest tool metadata, start a fresh chat, select the app in Developer Mode, and try a thinking model. On restricted Pro sessions, exact `search`/`fetch` read tools are more likely to appear than write tools.
+If ChatGPT says a tool is unavailable and your server's output shows no request arriving, the request never reached your MCP server. Refresh or recreate the ChatGPT app so it pulls the latest tool metadata, start a fresh chat, select the app in Developer Mode, and try a thinking model. On restricted Pro sessions, exact `search`/`fetch` read tools are more likely to appear than write tools.
 
 ## Claude Code
 
 ```bash
 claude mcp add --transport http extension-name \
-  https://YOUR_PROJECT_REF.supabase.co/functions/v1/extension-mcp \
+  http://127.0.0.1:8787/mcp \
   --header "x-access-key: your-access-key"
 ```
 
-Replace `extension-name` with a short name (e.g., `household-knowledge`, `family-calendar`), the URL with your MCP Server URL (without the `?key=` part), and `your-access-key` with your MCP Access Key.
+Replace `extension-name` with a short name (e.g., `household-knowledge`, `family-calendar`), the URL with your MCP Server URL (without the `?key=` part — the HTTPS form when the server is on another machine), and `your-access-key` with your MCP Access Key. Add `--scope user` so every project sees it.
 
 ## Cursor
 
@@ -69,7 +71,7 @@ Cursor supports remote MCP servers natively. Add this to your `~/.cursor/mcp.jso
 {
   "mcpServers": {
     "extension-name": {
-      "url": "https://YOUR_PROJECT_REF.supabase.co/functions/v1/extension-mcp?key=your-access-key"
+      "url": "http://127.0.0.1:8787/mcp?key=your-access-key"
     }
   }
 }
@@ -95,18 +97,19 @@ Every MCP client handles remote servers slightly differently. Your extension acc
       "args": [
         "-y",
         "mcp-remote",
-        "https://YOUR_PROJECT_REF.supabase.co/functions/v1/extension-mcp?key=your-access-key"
+        "http://127.0.0.1:8787/mcp?key=your-access-key"
       ]
     }
   }
 }
 ```
 
-> Older examples pass the access key via `--header`. This breaks with `mcp-remote@latest` because it now attempts OAuth client registration before sending custom headers. Pass the key via the `?key=` query parameter instead.
+> Older examples pass the access key via `--header`. This breaks with `mcp-remote@latest` because it now attempts OAuth client registration before sending custom headers. Pass the key via the `?key=` query parameter instead. The bridge is a stdio process on your machine, but it is a bridge: the server it reaches is still the one HTTP process — the rule is that the *server* is never a stdio process.
 
 ## Troubleshooting
 
 **Claude Desktop tools don't appear**
+- The connector dials from Anthropic's side: the URL must be the HTTPS form, reachable from the internet — a `127.0.0.1` URL works only for a client on this machine
 - Make sure the connector is enabled for your conversation — click "+" → Connectors and check the toggle
 - Verify the MCP Connection URL is correct (it should end with `?key=your-access-key`)
 - Try removing and re-adding the connector in Settings → Connectors
@@ -115,18 +118,18 @@ Every MCP client handles remote servers slightly differently. Your extension acc
 - Confirm Developer Mode is enabled (Settings → Apps & Connectors → Advanced settings)
 - Check that the connector is active for your current conversation in the tools/apps panel
 - Be explicit: "Use the [tool_name] tool to [do thing]." ChatGPT often needs direct tool references the first few times.
-- If server logs show zero requests, refresh or recreate the ChatGPT app and try a thinking model; the tool may not be exposed to that chat session.
+- If the server's output shows no request, refresh or recreate the ChatGPT app and try a thinking model; the tool may not be exposed to that chat session.
 
 **Getting 401 errors**
-- The access key doesn't match what's stored in Supabase secrets
+- The access key doesn't match an entry in the server's `MCP_ACCESS_KEYS` — the URL carries the key, the environment its hash
 - Double-check that the `?key=` value in your URL matches your MCP Access Key exactly
-- If using the header approach (Claude Code): the extension servers and this fork's server (`server-portable/`) accept `x-brain-key`, `x-access-key` or `Authorization: Bearer <key>`; the original `open-brain-mcp` Edge Function from the Getting Started guide accepts `x-brain-key` or `?key=` only
-- A key that lists tools but not the ones that write is read-scoped — that is the scope to give a key that travels in a URL; mint a write-scoped one for a client that captures (Step 3 of [Deploy an Edge Function](../deploy-edge-function/))
+- If using the header approach (Claude Code): the extension servers and the core server (`server-portable/`) accept `x-brain-key`, `x-access-key` or `Authorization: Bearer <key>`
+- A key that lists tools but not the ones that write is read-scoped — that is the scope to give a key that travels in a URL; mint a write-scoped one for a client that captures (Step 3 of [Run a Remote MCP Server](../deploy-remote-mcp/))
 
 **Tools work but responses are slow**
-- First request on a cold Edge Function takes a few seconds to warm up
-- Subsequent calls are faster
-- Check your Supabase project region — pick the one closest to you
+- The first capture or search after the stack starts loads the local models into memory — seconds once, then fast
+- A hosted model provider adds a network round trip per embedding
+- Read the server's output for a slow query of its own
 
 ## Expected Outcome
 
@@ -141,4 +144,4 @@ After following the steps for your client, your Open Brain extension should appe
 - [Professional CRM](../../extensions/professional-crm/) (Extension 5)
 - [Job Hunt Pipeline](../../extensions/job-hunt/) (Extension 6)
 
-Every extension that deploys a remote MCP server uses this connection pattern.
+Every extension that runs a remote MCP server uses this connection pattern.
