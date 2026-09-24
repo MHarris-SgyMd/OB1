@@ -97,8 +97,11 @@ jobs:
         with:
           bun-version: "1.4.0"
           # The Bun this job publishes with is downloaded fresh, not restored
-          # from an Actions cache another run wrote (zizmor cache-poisoning;
-          # SMD-2093). A few seconds a release.
+          # from an Actions cache (zizmor cache-poisoning; SMD-2093). A few
+          # seconds a release. The job reads two caches still — qemu's binfmt
+          # image and the image builds' `type=gha` layers — which a tag's run
+          # restores only from its own tag's scope and main's, where no
+          # pull request writes.
           no-cache: true
 
       # Everything the rest of this job needs to know, checked first. On a tag:

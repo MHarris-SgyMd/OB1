@@ -211,12 +211,13 @@
  *      exceptions as 7's — the dashboard's type-only import (SMD-1801's)
  *      (SMD-1798)
  *  23. every workflow under .github/workflows/ names its runner image — no
- *      `-latest` label, no expression — and pins every `uses:` (a step's, or a
- *      job's reusable workflow) to a full commit SHA with its tag in a trailing
- *      `# vX.Y.Z` comment, a local `./` path, or a `docker://` image by sha256
- *      digest; .github/dependabot.yml keeps a `github-actions` update over `/`
- *      so the pins move by PR. The structure is read with Bun.YAML, the tag
- *      comment from the value's own line; the rules are workflowPinProblems
+ *      `-latest` label in any case or size, no expression — and pins every
+ *      `uses:` (a step's, or a job's reusable workflow) to a full commit SHA
+ *      with its tag in a trailing `# vX.Y.Z` comment, a local `./` path, or a
+ *      `docker://` image by sha256 digest; .github/dependabot.yml keeps a
+ *      `github-actions` update over `/` that can open a PR, so the pins move.
+ *      The structure is read with Bun.YAML, the tag comment from the value's
+ *      own line, block scalars skipped; the rules are workflowPinProblems
  *      and dependabotProblems, pure functions their probes run on in-memory
  *      text (SMD-2093); no exceptions
  *
@@ -4531,29 +4532,47 @@ checkSupabaseJsImports();
  * a date of its own (26 from 2026-10-19), so the switch would have landed on
  * whichever PR ran first after it, as an unrelated red. And every `uses:` named
  * a tag its owner can move, which the release job runs with `packages: write`.
- * So every job's `runs-on` names an image, never a `-latest` label or an
- * expression this check cannot read. Every `uses:` — a step's, or a job's
- * reusable workflow — is one of three things: a full 40-hex commit SHA with
- * the tag it was in a trailing `# vX.Y.Z` comment (Dependabot rewrites the
- * two together, and a reader needs the tag), a local `./` path, or a
- * `docker://` image by sha256 digest. And .github/dependabot.yml keeps a
- * `github-actions` entry over `/`, so the pins move by PR rather than rot. The
- * structure is read from the parsed document. The comment, which a YAML parser
- * drops, is read from the line the value sits on, so a SHA-pinned `uses:` the
- * line reader cannot find (flow style) is refused: its tag cannot be read. A
- * `uses:` line inside a `run:` body is text, not a step, and is not read. The
- * rules are workflowPinProblems and dependabotProblems, pure functions their
- * probes run on in-memory text; no exceptions.
+ * So every job's `runs-on` names an image: no `-latest` label in any case or
+ * size (`macos-latest-large` moves as `ubuntu-latest` does), and no
+ * expression this check cannot read; a runner group names no image and is
+ * held by its labels alone. Every `uses:` — a step's, or a job's reusable
+ * workflow — is one of three things: a full 40-hex commit SHA with the tag it
+ * was in a trailing `# vX.Y.Z` comment (or `# X.Y.Z`, for an action whose tags
+ * carry no `v`; Dependabot rewrites the two together, and a reader needs the
+ * tag), a local `./` path, or a `docker://` image by sha256 digest. And
+ * .github/dependabot.yml keeps a `github-actions` entry over `/` that can
+ * open a PR, so the pins move by PR rather than rot. The structure is read
+ * from the parsed document. The comment, which a YAML parser drops, is read
+ * from the value's line: the first unclaimed line carrying the value, block
+ * scalars (a `run: |` body) skipped, since a `uses:` line there is text, not
+ * a step. So a SHA-pinned `uses:` the line reader cannot find (flow style) is
+ * refused: its tag cannot be read. Check 23 holds a pin's shape, not its
+ * truth — a comment that names another tag, or a commit only a fork of the
+ * action holds, is zizmor's to find (run once for SMD-2093), and actionlint
+ * cannot check a SHA-pinned action's inputs, so a Dependabot major is read
+ * against the new action.yml by hand. The rules are workflowPinProblems and
+ * dependabotProblems, pure functions their probes run on in-memory text; no
+ * exceptions.
  */
 const WORKFLOWS_DIR = ".github/workflows";
 const DEPENDABOT = ".github/dependabot.yml";
 const FULL_SHA = /^[0-9a-f]{40}$/;
-/** The trailing comment a SHA pin carries: the tag, `# v7` or `# v7.0.1`, then anything. */
-const TAG_COMMENT = /^#\s*v\d+(?:\.\d+)*(?:\s|$)/;
-/** Every line that reads as `uses: <value> [# comment]`, a `- ` list item or not, the value quoted or not. */
+/** The trailing comment a SHA pin carries: the tag, `# v7`, `# v7.0.1` or `# 7.0.1`, then anything. */
+const TAG_COMMENT = /^#\s*v?\d+(?:\.\d+)*(?:\s|$)/;
+/** A runner label GitHub moves to a new image on its own date: `-latest`, alone or before a size, in any case. */
+const MOVING_LABEL = /-latest(?:-|$)/i;
+/** A key whose value is a block scalar (`run: |`, `script: >-`): the lines under it, indented past the key, are its text. */
+const BLOCK_SCALAR_KEY = /^\s*(?:-\s+)?[^\s#][^#]*?:\s+[|>][-+0-9]*\s*(?:#.*)?$/;
+/** Every line outside a block scalar that reads as `uses: <value> [# comment]`, a `- ` list item or not, the value quoted or not. */
 function usesLinesOf(text: string): { value: string; comment: string; line: number }[] {
   const out: { value: string; comment: string; line: number }[] = [];
+  let blockKeyColumn = -1; // inside a block scalar, the column of the key that opened it; -1 outside one
   text.split("\n").forEach((raw, i) => {
+    if (blockKeyColumn >= 0) {
+      if (raw.trim() === "" || raw.length - raw.trimStart().length > blockKeyColumn) return;
+      blockKeyColumn = -1;
+    }
+    if (BLOCK_SCALAR_KEY.test(raw)) { blockKeyColumn = raw.match(/^\s*(?:-\s+)?/)![0].length; return; }
     const m = raw.match(/^\s*(?:-\s+)?uses:\s*(["']?)([^"'\s#]+)\1\s*(#.*)?$/);
     if (m) out.push({ value: m[2], comment: (m[3] ?? "").trim(), line: i + 1 });
   });
@@ -4581,7 +4600,7 @@ function workflowPinProblems(file: string, text: string): [string, string][] {
     const at = value.lastIndexOf("@");
     const ref = at < 0 ? "" : value.slice(at + 1);
     if (!FULL_SHA.test(ref)) {
-      problems.push([where, `uses ${value}, ${ref ? `a tag or branch (${ref})` : "no ref at all"} its owner can move — pin the full 40-character commit SHA with the tag in a trailing comment, \`${at < 0 ? value : value.slice(0, at)}@<sha> # ${ref || "vX.Y.Z"}\`, and let Dependabot move it (SMD-2093)`]);
+      problems.push([where, `uses ${value}, ${ref ? `a tag or branch (${ref})` : "no ref at all"} its owner can move — pin the full 40-character commit SHA with the tag in a trailing comment, \`${at < 0 ? value : value.slice(0, at)}@<sha> # ${/^v?\d/.test(ref) ? ref : "vX.Y.Z"}\`, and let Dependabot move it (SMD-2093)`]);
       return;
     }
     if (i < 0) { problems.push([file, `job ${key} uses ${value} on no line check 23 can read (flow style?) — the tag comment beside a SHA cannot be read; write the step as \`uses: ${value} # vX.Y.Z\` (SMD-2093)`]); return; }
@@ -4592,11 +4611,13 @@ function workflowPinProblems(file: string, text: string): [string, string][] {
     const j = job as { "runs-on"?: unknown; uses?: unknown; steps?: unknown };
     if (j["runs-on"] !== undefined) {
       const runsOn = j["runs-on"];
-      const labels: unknown[] = typeof runsOn === "string" ? [runsOn] : Array.isArray(runsOn) ? runsOn : runsOn && typeof runsOn === "object" && "labels" in runsOn ? [(runsOn as { labels: unknown }).labels].flat() : [runsOn];
+      // A string, a list of labels, or `{ group, labels }` — a group alone names no image, only its labels do.
+      const group = runsOn && typeof runsOn === "object" && !Array.isArray(runsOn) ? (runsOn as { group?: unknown; labels?: unknown }) : null;
+      const labels: unknown[] = typeof runsOn === "string" ? [runsOn] : Array.isArray(runsOn) ? runsOn : group && "labels" in group ? [group.labels].flat() : group && "group" in group ? [] : [runsOn];
       for (const label of labels) {
         if (typeof label !== "string") problems.push([file, `job ${key}'s runs-on ${JSON.stringify(runsOn)} carries a label check 23 cannot read (SMD-2093)`]);
         else if (label.includes("${{")) problems.push([file, `job ${key} picks its runner by an expression (${label}) — check 23 cannot tell whether it resolves to a -latest image; name the image (SMD-2093)`]);
-        else if (/-latest$/.test(label)) problems.push([file, `job ${key} runs on ${label}, which GitHub moves to a new image on its own date — name the image (ubuntu-24.04), and move to the next one in a PR of its own (SMD-2093)`]);
+        else if (MOVING_LABEL.test(label)) problems.push([file, `job ${key} runs on ${label}, which GitHub moves to a new image on its own date — name the image (ubuntu-24.04), and move to the next one in a PR of its own (SMD-2093)`]);
       }
     }
     if (j.uses !== undefined) holdUses(key, j.uses);
@@ -4604,18 +4625,23 @@ function workflowPinProblems(file: string, text: string): [string, string][] {
   }
   return problems;
 }
-/** .github/dependabot.yml, as text or null when absent: it must keep a `github-actions` update over `/`. */
+/** .github/dependabot.yml, as text or null when absent: it must keep a `github-actions` update over `/` that can open a PR. */
 function dependabotProblems(text: string | null): [string, string][] {
   if (text === null) return [[DEPENDABOT, "missing — nothing moves the workflows' SHA pins, so they stay on the commit they were pinned at; add a `github-actions` update over `/` (SMD-2093)"]];
   let doc: unknown;
   try { doc = Bun.YAML.parse(text); } catch (e) { return [[DEPENDABOT, `does not parse: ${(e as Error).message} (SMD-2093)`]]; }
   const updates = doc && typeof doc === "object" ? (doc as { updates?: unknown }).updates : null;
-  const covers = (u: unknown) => {
+  type Update = { "package-ecosystem"?: unknown; directory?: unknown; directories?: unknown; "open-pull-requests-limit"?: unknown; ignore?: unknown };
+  const covers = (u: unknown): u is Update => {
     if (!u || typeof u !== "object") return false;
-    const e = u as { "package-ecosystem"?: unknown; directory?: unknown; directories?: unknown };
+    const e = u as Update;
     return e["package-ecosystem"] === "github-actions" && (e.directory === "/" || (Array.isArray(e.directories) && e.directories.includes("/")));
   };
-  if (!Array.isArray(updates) || !updates.some(covers)) return [[DEPENDABOT, "has no `github-actions` update over `/` — nothing moves the workflows' SHA pins, so they stay on the commit they were pinned at (SMD-2093)"]];
+  const entries = Array.isArray(updates) ? updates.filter(covers) : [];
+  if (!entries.length) return [[DEPENDABOT, "has no `github-actions` update over `/` — nothing moves the workflows' SHA pins, so they stay on the commit they were pinned at (SMD-2093)"]];
+  // An entry that can open no PR is no entry: a limit of 0, or an ignore of every dependency.
+  const opens = (e: Update) => e["open-pull-requests-limit"] !== 0 && !(Array.isArray(e.ignore) && e.ignore.some((r) => r && typeof r === "object" && (r as { "dependency-name"?: unknown })["dependency-name"] === "*"));
+  if (!entries.some(opens)) return [[DEPENDABOT, "has a `github-actions` update over `/` that can open no PR (`open-pull-requests-limit: 0`, or an ignore of `*`) — the pins stay where they are (SMD-2093)"]];
   return [];
 }
 const PIN_SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1";
@@ -4631,6 +4657,10 @@ const PIN_ACCEPTED: [string, string][] = [
   ["a runner label list with no -latest", PIN_PROBE("[self-hosted, linux]", PIN_STEP)],
   ["a `uses:` line inside a run body, which is text", PIN_PROBE("ubuntu-24.04", `${PIN_STEP}\n      - run: |\n          uses: actions/checkout@v4`)],
   ["two steps on one pin", PIN_PROBE("ubuntu-24.04", `${PIN_STEP}\n      ${PIN_STEP}`)],
+  ["a bare copy of the pin in an earlier run body, which lends the step nothing", PIN_PROBE("ubuntu-24.04", `- run: |\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+  ["a tag comment with no v, as an action whose tags carry none", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA} # 7.0.1`)],
+  ["a runner group alone, which names no image", PIN_PROBE("{ group: big-runners }", PIN_STEP)],
+  ["a runner group with a named image", PIN_PROBE("{ group: big-runners, labels: [ubuntu-24.04] }", PIN_STEP)],
 ];
 /** Workflows check 23 refuses with exactly one problem: [why, text, a phrase the problem carries]. */
 const PIN_MUTANTS: [string, string, string][] = [
@@ -4646,6 +4676,15 @@ const PIN_MUTANTS: [string, string, string][] = [
   ["a SHA pin in flow style", PIN_PROBE("ubuntu-24.04", `- { uses: "actions/checkout@${PIN_SHA}" }`), "on no line"],
   ["a docker image by tag", PIN_PROBE("ubuntu-24.04", "- uses: docker://alpine:3"), "by its sha256 digest"],
   ["a reusable workflow by tag", "name: probe\non: push\njobs:\n  b:\n    uses: org/repo/.github/workflows/x.yml@v1\n", "can move"],
+  ["a -latest label with a size", PIN_PROBE("macos-latest-large", PIN_STEP), "moves to a new image"],
+  ["a -latest label in another case", PIN_PROBE("Ubuntu-Latest", PIN_STEP), "moves to a new image"],
+  ["a runner group whose label is -latest", PIN_PROBE("{ group: big-runners, labels: [ubuntu-latest] }", PIN_STEP), "moves to a new image"],
+  ["a runner label that is not a string", PIN_PROBE("[ubuntu-24.04, 3]", PIN_STEP), "cannot read"],
+  // Each step claims its own line: without the claim the second step would read the first one's comment.
+  ["two steps on one pin, the second bare", PIN_PROBE("ubuntu-24.04", `${PIN_STEP}\n      - uses: actions/checkout@${PIN_SHA}`), "no `# vX.Y.Z` comment"],
+  // A run body is skipped: its commented copy of the pin lends the bare step below it nothing.
+  ["a bare step under a run body carrying the commented pin", PIN_PROBE("ubuntu-24.04", `- run: |\n          uses: actions/checkout@${PIN_SHA} # v7.0.1\n      - uses: actions/checkout@${PIN_SHA}`), "no `# vX.Y.Z` comment"],
+  ["no jobs at all", "name: probe\non: push\n", "no `jobs:` map"],
 ];
 function checkWorkflowPins() {
   if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
@@ -4661,11 +4700,16 @@ function checkWorkflowPins() {
     if (got.length !== 1 || !got[0][1].includes(says)) fail(SELF, `check 23 reports ${JSON.stringify(got)} for ${why}, not one problem saying "${says}" (its own probe)`);
   }
   const DEPENDABOT_OK = "version: 2\nupdates:\n  - package-ecosystem: github-actions\n    directory: /\n    schedule:\n      interval: weekly\n";
-  if (dependabotProblems(DEPENDABOT_OK).length) fail(SELF, "check 23 refuses a github-actions update over / (its own probe)");
+  for (const [why, text] of [
+    ["a github-actions update over /", DEPENDABOT_OK],
+    ["a github-actions update over a directories list naming /", DEPENDABOT_OK.replace("directory: /", "directories: [/]")],
+  ] as const) if (dependabotProblems(text).length) fail(SELF, `check 23 refuses ${why} (its own probe)`);
   for (const [why, text] of [
     ["no file", null],
     ["an npm update alone", DEPENDABOT_OK.replace("github-actions", "npm")],
     ["a github-actions update over another directory", DEPENDABOT_OK.replace("directory: /", "directory: /deploy")],
+    ["a github-actions update limited to no PRs", `${DEPENDABOT_OK}    open-pull-requests-limit: 0\n`],
+    ["a github-actions update that ignores every action", `${DEPENDABOT_OK}    ignore:\n      - dependency-name: "*"\n`],
   ] as const) if (dependabotProblems(text).length !== 1) fail(SELF, `check 23 accepts a dependabot.yml with ${why} (its own probe)`);
   const files = readdirSync(join(ROOT, WORKFLOWS_DIR)).filter((n) => /\.ya?ml$/.test(n)).sort();
   if (files.length === 0) fail(WORKFLOWS_DIR, "holds no workflow — the listing is broken, not the tree clean (check 23)");

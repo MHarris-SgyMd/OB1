@@ -34,9 +34,9 @@ defaults:
 # full commit SHA with the tag it was in a trailing comment; Dependabot
 # (.github/dependabot.yml) moves the pins by PR, and check-fork-consistency
 # check 23 refuses a tag or a -latest runner (SMD-2093). Every checkout sets
-# persist-credentials: false: no step talks to the remote after it (the full
-# history comes with fetch-depth: 0), so the token has no reason to stay in
-# the workspace.
+# persist-credentials: false: no step talks to the remote after it (a job that
+# reads history takes it at checkout, fetch-depth: 0), so the token has no
+# reason to stay in the workspace.
 
 concurrency:
   group: fork-checks-${{ github.ref }}

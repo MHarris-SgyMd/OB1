@@ -505,14 +505,20 @@ locally (`bun scripts/install-hooks.ts` for the commit hook), and both are
 **The runner image and every action are pinned (SMD-2093).** Every job runs on
 `ubuntu-24.04`, not `ubuntu-latest`, which GitHub moves to Ubuntu 26 from
 2026-10-19. Moving to the next image is a PR of its own, with the stack job's
-lines rerun. Every `uses:` is a full commit SHA with its tag in a trailing
+lines rerun and actionlint's pin moved too (1.7.7 refuses `ubuntu-26.04` as an
+unknown label). Every `uses:` is a full commit SHA with its tag in a trailing
 comment (`actions/checkout@<sha> # v7.0.1`), because the release job runs its
 actions with `packages: write` and a tag's owner can move it.
-`.github/dependabot.yml` opens a weekly PR that moves the pins, grouping minor
-and patch releases and sending each major on its own, to be read before it
-lands. Its commits carry the house header, `[fork] Bump …`, through a prefix
-whose trailing space keeps Dependabot from writing `[fork]:`. Check 23 refuses
-a tag, a `-latest` runner, and a SHA with no tag comment.
+`.github/dependabot.yml` opens a weekly PR that moves the pins, once a release
+is seven days old, grouping minor and patch releases and sending each major on
+its own. Read a major before it lands: actionlint looks an action's inputs up by
+tag, so it cannot check a SHA-pinned one's, and an input the new major dropped
+is ignored at run time with a warning. Dependabot's commits carry the house
+header, `[fork] Bump …`, through a prefix whose trailing space keeps it from
+writing `[fork]:`. Check 23 refuses a tag, a SHA with no tag comment, a docker
+image by tag, a `-latest` or expression-picked runner, and a `dependabot.yml`
+that cannot move the pins. It holds a pin's shape, not its truth: a comment
+naming another tag is zizmor's to find.
 
 ## Detached from the fork network
 
