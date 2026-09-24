@@ -89,14 +89,27 @@
  * are held identical to the character (the text pins at the end); and every
  * answer of /search carries the request's CORS headers under an allowlist.
  *
+ * SMD-2079 widens that last arm to the gateway: json() built the CORS headers
+ * from the request only when handed `req`, and forty-five of the file's
+ * sixty-two answers were not, so under an allowlist a browser could read
+ * /search and no other route's page. The headers are set once now, on the way
+ * out of the main handler, and an unlisted origin gets no allow-origin header
+ * (the literal `null` matched an opaque origin's own). The block drives a page
+ * from /recent and /thoughts, a 404, an unlisted origin, the preflight 204, the
+ * 401, the 429 (Retry-After exposed), the default `*` through a second instance
+ * of the module loaded with no allowlist, and the ingest proxy's timeout
+ * through the fetch stub.
+ *
  * The files are imported as modules — each exports Bun's entry shape, and its
  * default export's `fetch` is the handler driven here (SMD-1799) — under the
  * loader extensions/test-auth.ts uses for Deno's specifiers; every server
  * imports compat/supabase-sql itself since SMD-1798 (the loader resolved a
  * supabase-js import to it for the two that did not, until then). The model provider is
  * stubbed — a unit vector keyed off the text, so the vector a writer stored is
- * recognisable — and everything below the tool or route boundary is real;
- * test-auth.ts is where the servers start under bun for real.
+ * recognisable — as are Readwise's book lookup and smart-ingest's execute
+ * (SMD-2079, the ingest proxy's upstream), and everything below the tool or
+ * route boundary is real; test-auth.ts is where the servers start under bun
+ * for real.
  *
  * The database is the fork's migrations plus three vendored sidecars the
  * writers assume: schemas/enhanced-thoughts (the columns the APIs write
@@ -192,7 +205,15 @@ const BOOK = { id: 42, title: "Meditations", author: "Marcus Aurelius", category
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
   if (/readwise\.io\/api\/v2\/books\//.test(url)) return Response.json(BOOK);
-  if (!/openrouter\.ai|api\.openai\.com/.test(url)) throw new Error(`test-writes.ts: a writer reached ${url}; only the model provider and Readwise's book lookup are stubbed`);
+  // smart-ingest's execute, which rest-api proxies with a bounded timeout (the function is not on this fork): answered
+  // after a pause with the signal honoured, so a proxy whose timeout is not a number — a Request in the slot, the
+  // defect SMD-2079's first review pass holds — aborts here instead.
+  if (url.endsWith("/functions/v1/smart-ingest/execute")) {
+    await Bun.sleep(25);
+    if (init?.signal?.aborted) throw Object.assign(new Error("the proxy aborted"), { name: "AbortError" });
+    return Response.json({ job_id: JSON.parse(String(init?.body ?? "{}")).job_id, status: "executed", stub: true });
+  }
+  if (!/openrouter\.ai|api\.openai\.com/.test(url)) throw new Error(`test-writes.ts: a writer reached ${url}; only the model provider, Readwise's book lookup and smart-ingest's execute are stubbed`);
   const body = JSON.parse(String(init?.body ?? "{}"));
   if (url.endsWith("/embeddings")) {
     if (embeddingsDown) return new Response("stub: embeddings down", { status: 500 });
@@ -788,7 +809,7 @@ try {
 {
   const F = "integrations/rest-api/index.ts";
   console.log(`\n[${F}]`);
-  process.env.CORS_ALLOWED_ORIGINS = "https://dash.test"; // read at module load, for the CORS arm at the block's end (review pass 3)
+  process.env.CORS_ALLOWED_ORIGINS = "https://dash.test"; // read at module load, for the CORS arms at the block's end (SMD-2054 review pass 3, SMD-2079)
   const h = await load(F);
   const captured = "a fresh thought captured through rest-api";
   const c = await send(h, "POST", "/capture", { content: captured });
@@ -908,18 +929,56 @@ try {
   const recentOpen = await send(h, "GET", "/recent?limit=50&exclude_restricted=false");
   assert(recent.status === 200 && ids(recent).includes(cid) && !ids(recent).includes(rid) && ids(recentOpen).includes(rid) && ids(recentOpen).includes(cid),
     `GET /recent hides the restricted twin by default and shows it under exclude_restricted=false, as its siblings do — it filtered nothing before (${recent.status}: ${ids(recent).length} rows${ids(recent).includes(rid) ? ", the twin among them" : ""}; open: ${ids(recentOpen).length})`);
-  // Every answer of /search carries the request's CORS headers (review pass 3): the second pass passed `req` on the
-  // 400s and said the 200s did the same — they did not, so under an allowlist a browser could read the refusal and
-  // not the page. The allowlist was set before the module loaded (above); send() carries the Origin and returns the
-  // headers. The file's other routes still answer null under an allowlist — SMD-2079.
-  const [okCors, refusedCors, strangerCors] = await Promise.all([
-    send(h, "POST", "/search", { query: captured, min_similarity: 0.5 }, KEY, "https://dash.test"),
-    send(h, "POST", "/search", { query: captured, end_date: "yesterday" }, KEY, "https://dash.test"),
-    send(h, "POST", "/search", { query: captured, min_similarity: 0.5 }, KEY, "https://elsewhere.test")]);
+  // Every answer of the gateway carries the request's CORS headers (SMD-2079): json() built them only when handed `req`,
+  // and forty-five of the file's sixty-two answers were not, so under an allowlist a browser could read /search (SMD-2054)
+  // and no other route's page. Set once now, on the way out of the main handler; an unlisted origin gets NO allow-origin
+  // header, since the literal `null` is an opaque origin's own (review pass 1). The allowlist was set before the module
+  // loaded (above); send() carries the Origin and returns the headers.
+  const D = "https://dash.test";
+  const [okCors, refusedCors, strangerCors, recentCors, browseCors, lostCors, strangerRecent, preflight, unauthorized] = await Promise.all([
+    send(h, "POST", "/search", { query: captured, min_similarity: 0.5 }, KEY, D),
+    send(h, "POST", "/search", { query: captured, end_date: "yesterday" }, KEY, D),
+    send(h, "POST", "/search", { query: captured, min_similarity: 0.5 }, KEY, "https://elsewhere.test"),
+    send(h, "GET", "/recent?limit=1", undefined, KEY, D),
+    send(h, "GET", "/thoughts", undefined, KEY, D),
+    send(h, "GET", "/no-such-route", undefined, KEY, D),
+    send(h, "GET", "/recent?limit=1", undefined, KEY, "https://elsewhere.test"),
+    send(h, "OPTIONS", "/recent", undefined, KEY, D),
+    send(h, "GET", "/recent?limit=1", undefined, "not-the-key", D)]);
   const allow = (r: Reply) => r.headers.get("access-control-allow-origin");
-  assert(okCors.status === 200 && allow(okCors) === "https://dash.test" && refusedCors.status === 400 && allow(refusedCors) === "https://dash.test" && strangerCors.status === 200 && allow(strangerCors) === "null",
-    `every answer of POST /search carries the request's CORS headers under an allowlist — the 200 and the 400 echo a listed origin, an unlisted one gets null (${allow(okCors)} / ${allow(refusedCors)} / ${allow(strangerCors)})`);
+  assert(okCors.status === 200 && allow(okCors) === D && refusedCors.status === 400 && allow(refusedCors) === D && strangerCors.status === 200 && allow(strangerCors) === null,
+    `every answer of POST /search carries the request's CORS headers under an allowlist — the 200 and the 400 echo a listed origin, an unlisted one gets no allow-origin header (${allow(okCors)} / ${allow(refusedCors)} / ${allow(strangerCors)})`);
+  assert(recentCors.status === 200 && allow(recentCors) === D && browseCors.status === 200 && allow(browseCors) === D && lostCors.status === 404 && allow(lostCors) === D && strangerRecent.status === 200 && allow(strangerRecent) === null,
+    `…and so does every other answer of the gateway (SMD-2079): a page from GET /recent and from GET /thoughts and the 404 for an unknown route echo a listed origin, and GET /recent's page to an unlisted one carries no allow-origin header — main's file answered the literal null (${recentCors.status} ${allow(recentCors)} / ${browseCors.status} ${allow(browseCors)} / ${lostCors.status} ${allow(lostCors)} / ${strangerRecent.status} ${allow(strangerRecent)})`);
+  // The preflight and the 401 passed the request before and are the wrapper's now, so the wrapper-absent mutant fails
+  // this arm with the others (six of them, review pass 4).
+  assert(preflight.status === 204 && allow(preflight) === D && /x-brain-key/.test(String(preflight.headers.get("access-control-allow-headers"))) && unauthorized.status === 401 && allow(unauthorized) === D,
+    `the preflight 204 and the 401 keep theirs — they passed the request before, and are the wrapper's now like every answer (${preflight.status} ${allow(preflight)} / ${unauthorized.status} ${allow(unauthorized)})`);
+  // The ingest proxy's timeout: dropping `req` from proxyFetchJson's parameters left handleExecuteJob passing it into the
+  // timeout's slot — NaN, so every execute aborted at once with a 504 (SMD-2079; nothing typechecks the file, SMD-2080).
+  // The stub answers after 25 ms honouring the signal, so a timeout that is not a number aborts it. It matches the URL by
+  // its path: on this fork the route builds it from SUPABASE_URL, the Postgres DSN, and a real fetch refuses the protocol
+  // (SMD-2110) — this arm holds the proxy's timeout and its headers, not the route.
+  const exec = await send(h, "POST", "/ingestion-jobs/7/execute", undefined, KEY, D);
+  assert(exec.status === 200 && exec.json?.status === "executed" && exec.json?.job_id === "7" && allow(exec) === D,
+    `the ingest proxy's timeout is the number it was given, not the request — through the stub, POST /ingestion-jobs/:id/execute answers the upstream's reply with the CORS headers instead of an immediate 504 (${exec.status} ${JSON.stringify(exec.json).slice(0, 80)}; ${allow(exec)})`);
+  // The 429 rebuilt its header set (it spread the CORS headers itself before): Retry-After and the content type stay, the
+  // CORS headers arrive from the wrapper, and Retry-After is exposed, which no answer was (review pass 1). The cap is the
+  // default hundred a minute — the block has sent about thirty under KEY, this loop sends the rest, and its bound outlasts
+  // a window that rolls over mid-loop; a lower cap set before load would starve the earlier arms (review pass 2).
+  let limited: Reply | null = null;
+  for (let i = 0; i < 250 && !limited; i++) { const r = await send(h, "GET", "/health", undefined, KEY, D); if (r.status === 429) limited = r; }
+  assert(limited !== null && allow(limited) === D && /^\d+$/.test(String(limited.headers.get("retry-after"))) && String(limited.headers.get("content-type")).startsWith("application/json") && limited.json?.error === "rate_limited"
+    && /\bRetry-After\b/.test(String(limited.headers.get("access-control-expose-headers"))),
+    `the 429 carries the request's CORS headers beside Retry-After and its JSON content type, and exposes Retry-After to the browser (${limited?.status} ${limited ? allow(limited) : "-"} / ${limited?.headers.get("retry-after")} / ${limited?.headers.get("content-type")} / ${limited?.headers.get("access-control-expose-headers")})`);
   delete process.env.CORS_ALLOWED_ORIGINS;
+  // The default, no allowlist: `*` to any origin, the README's backward-compatibility promise, which nothing drove while
+  // the block ran under an allowlist (review pass 3). A second instance of the module, loaded with the variable unset;
+  // the query string keeps Bun's module cache from handing back the first.
+  const open = (await import(join(ROOT, F) + "?no-allowlist")) as { default?: { fetch?: Handler } };
+  const star = await send(open.default!.fetch!, "GET", "/health", undefined, KEY, "https://elsewhere.test");
+  assert(star.status === 200 && allow(star) === "*",
+    `with no allowlist the gateway answers Access-Control-Allow-Origin: * to any origin — the README's default (${star.status} ${allow(star)})`);
 }
 
 // ── recipes/repo-learning-coach ──────────────────────────────────────────────
