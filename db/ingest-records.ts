@@ -455,9 +455,14 @@ export type RecordResult = {
  * project, a state or a label without touching `updatedAt`, and the sync
  * re-renders the ticket from the census — so the brain's clock does: a row
  * written after the record's view was taken (`asOf`, the dump's build
- * instant) was rendered by a later view, and the record is "stale" too;
- * without an `asOf` the record writes, as before (first review pass,
- * independent read: the guard let a Monday dump undo Tuesday's rename).
+ * instant) is left as it is, and the record is "stale" too; without an
+ * `asOf` the record writes, as before (first review pass, independent read:
+ * the guard let a Monday dump undo Tuesday's rename). `updated_at` is the
+ * brain's LAST WRITE by anyone — the sync's re-render, but also a facet
+ * patch, a re-embed, a retag, a hand edit — so a rename the dump saw and such
+ * a write followed reads "stale" for a reason that is not a later view; the
+ * sync's next pass lands the rename from its census, so the cost is a delay
+ * and an overstated count, never a lost write (second review pass).
  */
 export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()): Promise<RecordResult> {
   const meta = { ...doc.meta, source: doc.source };

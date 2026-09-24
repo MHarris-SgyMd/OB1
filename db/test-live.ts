@@ -4449,6 +4449,12 @@ console.log("\n[22] one renderer, one merge rule: a corpus dump through ingest-r
   assert(afterRename.outcome === "unchanged", `a dump built after the rename is 'unchanged' (${afterRename.outcome})`);
   const noClock = await upsertRecord(sql, docOf(corpusIngested(await dump(moved, null))), "test-live@dumpE");
   assert(noClock.outcome === "updated" && (await sql`SELECT content FROM thoughts WHERE id = ${docA.id}::uuid`)[0].content === renderIssue(moved), `…and a dump with NO build instant writes at an equal clock, as documented — the second clock is what held the line above (${noClock.outcome})`);
+  // Blocked by the clock AND nothing to write: the same view again, after a
+  // later write left the row exactly as the view has it, is 'unchanged', not
+  // 'stale' — the word is for a record that had something to say (second
+  // review pass; the fragment claimed it and nothing held it).
+  const sameAgain = await upsertRecord(sql, docOf(corpusIngested(await dump(moved, viewOfMoved))), "test-live@dumpB-third");
+  assert(sameAgain.outcome === "unchanged", `a view the brain's clock would refuse, with nothing to write, is 'unchanged' — 'stale' is for a record with something to say (${sameAgain.outcome})`);
 
   // Order B: the sync first, then the dump.
   const issueB: LinearIssue = { ...issue, identifier: "SMD-90020", title: "Converges from the sync", description: "Plain.", updatedAt: "2026-09-22T03:00:00.000Z" };

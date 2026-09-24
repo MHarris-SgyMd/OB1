@@ -1588,7 +1588,8 @@ rebuild over an embedded brain left a stale vector under new text that nothing
 re-embedded). A record that carries the source's clock (the contract's
 `watermark` — a Linear record's `linear_updated_at`) is written only when the
 row's stored value is not newer, and at an equal value only when the row was
-not written after the record's view was taken (the dump's `fetchedAt`);
+not written — by anyone — after the record's view was taken (the dump's
+`fetchedAt`);
 otherwise it is `stale`, nothing is written, structure included, and the run
 says how many — the board sync had moved those tickets past the dump (SMD-1958,
 "Two writers of one identity" below).
@@ -1854,12 +1855,17 @@ back to Monday, and the next pass forward again. Where Linear's clock cannot
 settle it — a project, state or label **renamed** in Linear leaves `updatedAt`
 where it was, and this tool re-renders the ticket from the census — the
 brain's does: the dump carries its build instant (`fetchedAt`), and at an equal
-watermark a row written after it was rendered from a later view, so the record
-is `stale` too (the builder's clock and the brain's must agree to the order of
-that gap; a dump with no build instant writes at an equal clock). The dump
-holds the issues the builder kept — those with a description or comments, in
-the state it was asked for (`OB1_CORPUS_STATE`, `completed` by default) — and
-every other ticket is this tool's alone. A dump built before the `issue` field
+watermark a row written after it is left as it is and the record is `stale` too
+(the builder's clock and the brain's must agree to the order of that gap; a
+dump with no build instant writes at an equal clock). `updated_at` is the
+brain's last write by anyone — a facet patch, a re-embed, a retag, a hand edit
+as much as this tool's re-render — so a rename the dump did see can read
+`stale` behind such a write; this tool's next pass lands it from the census,
+so the cost is a delay and an overstated count, never a lost write. The dump
+holds the issues the builder kept — those whose description and comments make
+a non-empty text (`OB1_CORPUS_MIN_CHARS` can drop more), in the state it was
+asked for (`OB1_CORPUS_STATE`, `completed` by default) — and every other
+ticket is this tool's alone. A dump built before the `issue` field
 is refused by name with the rebuild command — one renderer, not two.
 
 **Structure on a brain from before 053.** A scheduled pass fetches only the
@@ -1891,7 +1897,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1552 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 659 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+./with-postgres.sh bun test-live.ts         # 660 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

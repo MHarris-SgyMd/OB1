@@ -97,8 +97,8 @@ Each document carries `id`, `title`, `text` (the description and, unless
 as Linear's API gave it, the same field selection `db/sync-linear.ts` fetches
 (`ISSUE_FIELDS`, owned by `db/ingest-linear.ts`), with `fetchedAt`, the instant
 the build began. The harnesses read `title` and `text` and never `issue`;
-`db/ingest-records.ts --linear` reads `issue` and `fetchedAt` and nothing else
-of the document, mapping the issue through the Linear adapter so the thought it
+`db/ingest-records.ts --linear` reads `id`, `issue` and `fetchedAt` and nothing
+else of the document, mapping the issue through the Linear adapter so the thought it
 writes is the one the board sync would write, and using the build instant to
 order a view Linear's own clock cannot (a rename) against the brain's last
 write (SMD-1958). A dump built before that date has no `issue` and the ingester

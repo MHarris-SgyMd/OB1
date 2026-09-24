@@ -77,8 +77,10 @@ export type Ingested = {
    * the same value that differ — Linear renames a project, a state or a label
    * without touching the issue's `updatedAt`, and the board sync re-renders
    * the ticket from the census — are ordered by the brain's own clock: a row
-   * written after `asOf` was rendered by a later view, and the older one is
-   * `stale`. A live writer (the sync) has no `asOf`; a dump has one.
+   * written after `asOf` — by anyone: the sync, a re-embed, a retag, a hand
+   * edit — is not written over, and the older view is `stale` (where the
+   * write was not a later view, the live writer's next pass repairs it). A
+   * live writer (the sync) has no `asOf`; a dump has one.
    */
   watermark?: { key: string; value: string; asOf?: string };
 };
