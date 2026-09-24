@@ -3,7 +3,7 @@
  *
  * Ported from ExoCortex open-brain-utils.ts with OB1 adaptations:
  * - OpenRouter is the primary provider (reversed from ExoCortex).
- * - All env reads use Deno.env.get().
+ * - All env reads use process.env.
  */
 
 import {
@@ -95,10 +95,10 @@ export function safeEmbedding(emb: number[] | null | undefined): number[] | unde
  * OB1 adaptation: OpenRouter is tried first (reversed from ExoCortex).
  */
 export async function embedText(text: string): Promise<number[]> {
-  const openRouterKey = Deno.env.get("OPENROUTER_API_KEY") ?? "";
-  const openAiKey = Deno.env.get("OPENAI_API_KEY") ?? "";
-  const openRouterModel = Deno.env.get("OPENROUTER_EMBEDDING_MODEL") ?? "openai/text-embedding-3-small";
-  const openAiModel = Deno.env.get("OPENAI_EMBEDDING_MODEL") ?? "text-embedding-3-small";
+  const openRouterKey = process.env.OPENROUTER_API_KEY ?? "";
+  const openAiKey = process.env.OPENAI_API_KEY ?? "";
+  const openRouterModel = process.env.OPENROUTER_EMBEDDING_MODEL ?? "openai/text-embedding-3-small";
+  const openAiModel = process.env.OPENAI_EMBEDDING_MODEL ?? "text-embedding-3-small";
 
   // Primary: OpenRouter
   if (openRouterKey) {
@@ -156,18 +156,18 @@ type MetadataProvider = "openrouter" | "openai" | "anthropic";
 /** Read env and return configured providers in OB1 priority order (openrouter first). */
 function getConfiguredMetadataProviders(): MetadataProvider[] {
   const providers: MetadataProvider[] = [];
-  if (Deno.env.get("OPENROUTER_API_KEY")) providers.push("openrouter");
-  if (Deno.env.get("OPENAI_API_KEY")) providers.push("openai");
-  if (Deno.env.get("ANTHROPIC_API_KEY")) providers.push("anthropic");
+  if (process.env.OPENROUTER_API_KEY) providers.push("openrouter");
+  if (process.env.OPENAI_API_KEY) providers.push("openai");
+  if (process.env.ANTHROPIC_API_KEY) providers.push("anthropic");
   return providers;
 }
 
 /** Fetch metadata from OpenRouter chat completions endpoint. */
 async function fetchOpenRouterMetadata(text: string): Promise<string> {
-  const apiKey = Deno.env.get("OPENROUTER_API_KEY") ?? "";
+  const apiKey = process.env.OPENROUTER_API_KEY ?? "";
   if (!apiKey) throw new Error("OPENROUTER_API_KEY is not configured");
 
-  const model = Deno.env.get("OPENROUTER_CLASSIFIER_MODEL") ?? CLASSIFIER_MODEL_OPENROUTER;
+  const model = process.env.OPENROUTER_CLASSIFIER_MODEL ?? CLASSIFIER_MODEL_OPENROUTER;
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -193,10 +193,10 @@ async function fetchOpenRouterMetadata(text: string): Promise<string> {
 
 /** Fetch metadata from OpenAI chat completions endpoint. */
 async function fetchOpenAIMetadata(text: string): Promise<string> {
-  const apiKey = Deno.env.get("OPENAI_API_KEY") ?? "";
+  const apiKey = process.env.OPENAI_API_KEY ?? "";
   if (!apiKey) throw new Error("OPENAI_API_KEY is not configured");
 
-  const model = Deno.env.get("OPENAI_CLASSIFIER_MODEL") ?? CLASSIFIER_MODEL_OPENAI;
+  const model = process.env.OPENAI_CLASSIFIER_MODEL ?? CLASSIFIER_MODEL_OPENAI;
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -223,10 +223,10 @@ async function fetchOpenAIMetadata(text: string): Promise<string> {
 
 /** Fetch metadata from Anthropic Messages API. */
 async function fetchAnthropicMetadata(text: string): Promise<string> {
-  const apiKey = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
+  const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
   if (!apiKey) throw new Error("ANTHROPIC_API_KEY is not configured");
 
-  const model = Deno.env.get("ANTHROPIC_CLASSIFIER_MODEL") ?? CLASSIFIER_MODEL_ANTHROPIC;
+  const model = process.env.ANTHROPIC_CLASSIFIER_MODEL ?? CLASSIFIER_MODEL_ANTHROPIC;
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -437,7 +437,7 @@ export function detectSensitivity(text: string): SensitivityResult {
 /**
  * Compute SHA-256 fingerprint of normalized content.
  * Algorithm: lowercase -> collapse whitespace -> trim -> SHA-256 hex.
- * Uses Web Crypto API (available in Deno and modern browsers).
+ * Uses Web Crypto API (available in Bun, Deno and modern browsers).
  */
 export async function computeContentFingerprint(content: string): Promise<string> {
   const normalized = content.trim().replace(/\s+/g, " ").toLowerCase();

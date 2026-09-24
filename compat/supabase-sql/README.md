@@ -30,7 +30,7 @@ bun scripts/migrate-to-sql-shim.ts --apply --all      # rewrite every eligible f
 bun scripts/migrate-to-sql-shim.ts --revert <file>    # undo, byte-for-byte
 ```
 
-The rewrite is one line — two, for a file that reads `Deno.env` or calls `Deno.serve` (step 3):
+The rewrite is one line; a file that still reaches `Deno.*` is refused at triage and ported by hand first (step 3):
 
 ```diff
 - import { createClient } from "@supabase/supabase-js";
@@ -49,23 +49,24 @@ than at the first query.
 ### 3. Run a migrated server under Bun
 
 A migrated server was written as a Supabase Edge Function — `Deno.env.get` for its
-environment, `Deno.serve` at the end — and the shim imports `bun`, so one import
-line left it running nowhere: not under Deno, which cannot resolve `bun`, and not
-under Bun, which has no `Deno` (SMD-1480, FORK.md change 74). The codemod
-therefore gives such a file a second line, first among its imports:
+environment, `Deno.serve` at the end — and the shim imports `bun`, so until
+SMD-1799 such a file also took `compat/deno-on-bun.ts`, a polyfill for those two
+members, as its first import (SMD-1480, FORK.md change 74). The servers are
+Bun-native now: `process.env` for the environment and, at the tail, the shape the
+core server has (`||`: an empty `PORT` is unset, not port 0) —
 
-```diff
-+ import "../../compat/deno-on-bun.ts";
+```ts
+export default {
+  port: Number(process.env.PORT || 8000),
+  fetch: app.fetch,
+};
 ```
 
-That module installs exactly the two Deno members these files use — `Deno.env.get`
-reading the process environment, `Deno.serve` as `Bun.serve` on `PORT` (8000 unset,
-Deno's default — a port podman's `gvproxy` also holds on macOS, so the examples
-say `PORT=8787`), printing Deno's `Listening on` line — and nothing else, so a file
-that starts using another `Deno.*` fails at the call rather than running on a
-guess at another runtime's semantics. Where the file's first import was Supabase's
-type-only `import "jsr:@supabase/functions-js/edge-runtime.d.ts"`, which Bun cannot
-resolve, that is the line replaced, the original recorded beside it for `--revert`.
+— which Bun serves when the file is the entry module (`PORT` 8000 unset, Deno's
+old default — a port podman's `gvproxy` also holds on macOS, so the examples say
+`PORT=8787`), and which a test imports as `default.fetch` without listening. A
+file that still reaches `Deno.*` fails at the call under Bun, is refused by the
+codemod's triage, and fails check 11 of `scripts/check-fork-consistency.ts`.
 Then, from a checkout:
 
 ```bash
@@ -94,7 +95,7 @@ every server but `work-operating-model-activation`, which refuses to start
 without it — set it to any value there. An extension's `schema.sql` carries
 Supabase RLS policies on `auth.uid()`; its README's Step 1 gives the two stub
 functions a plain Postgres needs before the file runs. Check 11 of `scripts/check-fork-consistency.ts` holds
-every shim-importing file in this state — the polyfill first, no other `Deno.*`, no
+every code file under the category directories and docs/ to no `Deno` (save the seven Edge Function files DENO_EXCEPTIONS counts, SMD-1800's), and every shim-importing file to no
 `jsr:`/`npm:`/URL specifier, through the files it imports — and
 `extensions/test-auth.ts` starts each one under `bun` and answers it over its port
 in CI. One file is kept on supabase-js by the codemod's `KEEP` list, with the
@@ -284,6 +285,5 @@ development — the test caught it.
 
 - `../../scripts/migrate-to-sql-shim.ts` — the codemod
 - `../../extensions/test-tools.ts` — every extension tool on the shim, driven against Postgres
-- `../deno-on-bun.ts` — Deno's two globals on Bun, for the servers on the shim
 - `../../server-portable/store-sql.ts` — the core server's own SQL layer
 - `../../db/` — the schema these queries run against

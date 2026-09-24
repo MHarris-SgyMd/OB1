@@ -38,7 +38,12 @@ import { SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffers
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 import { consolidateKey } from "../server-portable/consolidate.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
-import { INGEST_ACTOR, recordId, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
+import { corpusIngested, docOf, INGEST_ACTOR, recordId, recordStructure, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
+import { labelNames, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
+import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
+import type { LinearDoc } from "../evals/linear-corpus.ts";
+import { SqlStore } from "../server-portable/store-sql.ts";
+import { resolveEmbedConfig } from "../server-portable/embed.ts";
 import { promote, refresh, refreshToolsReady, replayAndDiff } from "./tier.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -4107,6 +4112,9 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
     `the section leaves the database's tables, views and functions as it found them (${left.tables.size}/${left.views.size}/${left.fns.size})`);
 }
 
+/** A corpus dump's record for an issue (SMD-1958): the shape the sync fetches, through the same adapter; `fetchedAt` is the dump's build instant, absent for a dump with no second clock. [19] and [22]. */
+const dumpOf = (issue: LinearIssue, fetchedAt?: string): LinearDoc => ({ id: issue.identifier, title: issue.title, text: issue.description ?? "", labels: labelNames(issue), createdAt: issue.createdAt, issue, ...(fetchedAt ? { fetchedAt } : {}) });
+
 console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled and idempotent, an edit moves one row, duplicate content is skipped (SMD-1806)");
 {
   const count = (s: string) => sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'source' = ${s}`.then((r) => r[0].c);
@@ -4124,7 +4132,7 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   const ids = docs.map((d) => d.id);
 
   const first: string[] = [];
-  for (const d of docs) first.push(await upsertRecord(sql, d));
+  for (const d of docs) first.push((await upsertRecord(sql, d)).outcome);
   assert(first.every((r) => r === "inserted"), `first ingest inserts every record (${first.join(",")})`);
   assert((await count("fork")) === 1 && (await count("commit")) === 1 && (await count("memory")) === 2, "each row carries its metadata.source label (SMD-1806 rule 5)");
   const [forkRow] = await sql`SELECT metadata, embedding IS NULL AS bare FROM thoughts WHERE id = ${docs[0].id}::uuid`;
@@ -4140,22 +4148,37 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   const before = (await sql`SELECT updated_at FROM thoughts WHERE id = ${docs[2].id}::uuid`)[0].updated_at;
   await Bun.sleep(1100);
   const second: string[] = [];
-  for (const d of docs) second.push(await upsertRecord(sql, d));
+  for (const d of docs) second.push((await upsertRecord(sql, d)).outcome);
   assert(second.every((r) => r === "unchanged"), `a re-ingest of the same records is a no-op — every row 'unchanged', not 'updated' (${second.join(",")})`);
   const afterNoop = (await sql`SELECT updated_at FROM thoughts WHERE id = ${docs[2].id}::uuid`)[0].updated_at;
   assert(String(before) === String(afterNoop), "…and updated_at is untouched: no UPDATE ran (the 1.1s gap would surface one if it had)");
 
   // Editing one record updates exactly that row.
+  // A vector and a chunk row planted on the row about to be edited: the edit
+  // must clear both — they were the old text's — so reembed.ts pools the row
+  // (SMD-1958's second half; before, a rebuild over an embedded brain left a
+  // stale vector under new text that nothing re-embedded). And a key another
+  // writer put on the row (the sync's facets, the extractor's tags) survives
+  // the edit: metadata is merged, not replaced.
+  await sql`UPDATE thoughts SET embedding = ${unit(3)}::vector, embedding_model = 'planted', metadata = metadata || '{"topics": ["kept"]}'::jsonb WHERE id = ${docs[2].id}::uuid`;
+  await sql`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding) VALUES (${docs[2].id}::uuid, 0, 'a window', ${unit(3)}::vector)`;
   const edited: Doc = { ...docs[2], content: "Test note A: EDITED body." };
   const third: string[] = [];
-  for (const d of [edited, docs[3]]) third.push(await upsertRecord(sql, d));
+  for (const d of [edited, docs[3]]) third.push((await upsertRecord(sql, d)).outcome);
   assert(third[0] === "updated" && third[1] === "unchanged", `editing one record updates only it (${third.join(",")})`);
-  assert(/EDITED/.test((await sql`SELECT content FROM thoughts WHERE id = ${docs[2].id}::uuid`)[0].content), "the edited row carries the new content");
+  const [editedRow] = await sql`SELECT content, embedding IS NULL AS bare, embedding_model AS m, metadata, (SELECT count(*)::int FROM thought_chunks WHERE thought_id = ${docs[2].id}::uuid) AS chunks FROM thoughts WHERE id = ${docs[2].id}::uuid`;
+  assert(/EDITED/.test(editedRow.content), "the edited row carries the new content");
+  assert(editedRow.bare === true && editedRow.m === null && editedRow.chunks === 0, `…its vector, label and chunk rows are cleared for reembed.ts to pool (bare=${editedRow.bare} model=${editedRow.m} chunks=${editedRow.chunks})`);
+  assert(JSON.stringify(editedRow.metadata.topics) === '["kept"]' && editedRow.metadata.source === "memory", "…and metadata another writer put on the row survives: merged, not replaced (SMD-1958)");
+  // A record that stands but gains a key is 'patched': the merge writes the key, the text and its (absent) vector are untouched.
+  const patched = await upsertRecord(sql, { ...edited, meta: { file: "test-note-a" } });
+  assert(patched.outcome === "patched" && (await sql`SELECT metadata->>'file' AS f FROM thoughts WHERE id = ${docs[2].id}::uuid`)[0].f === "test-note-a", `a record whose text stands and whose metadata gained a key is 'patched' (${patched.outcome})`);
+  assert((await upsertRecord(sql, { ...edited, meta: { file: "test-note-a" } })).outcome === "unchanged", "…and the same record again is 'unchanged' — a key already held is not a patch");
 
   // A different record whose content is byte-identical to one already stored
   // collides on the partial-unique content_fingerprint index → skipped, not a crash.
   const twin = mk("fork", "1000", docs[1].content);
-  assert((await upsertRecord(sql, twin)) === "skipped", "a different record with identical content is skipped");
+  assert((await upsertRecord(sql, twin)).outcome === "skipped", "a different record with identical content is skipped");
   assert((await count("fork")) === 1, "…and no second row was written for it");
 
   // SMD-1726: the ingester names itself in each record's transaction, so
@@ -4164,13 +4187,44 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   // stripped the mark an operator's edit had placed (run-it, first review
   // pass), and a session-level setting died with the connection (second).
   const named = mk("memory", "test-note-c", "Test note C: written under the ingester's own name.");
-  assert((await upsertRecord(sql, named)) === "inserted", "a record under the ingester's envelope inserts");
+  assert((await upsertRecord(sql, named)).outcome === "inserted", "a record under the ingester's envelope inserts");
   const [namedRow] = await sql`SELECT metadata->>'actor_name' AS n, metadata->>'actor_kind' AS k FROM thoughts WHERE id = ${named.id}::uuid`;
   assert(namedRow.n === INGEST_ACTOR.name && namedRow.k === null, `…stamped with the ingester's name and no kind until the operator classifies the label (${namedRow.n}/${namedRow.k})`);
   const [namedAudit] = await sql`SELECT origin, actor_name FROM thought_audit WHERE thought_id = ${named.id}::uuid AND action = 'capture'`;
   assert(namedAudit?.origin === INGEST_ACTOR.via && namedAudit.actor_name === INGEST_ACTOR.name, "…and its audit row names the ingester as writer and door");
   assert((await sql`SELECT current_setting('ob1.actor', true) AS a`)[0].a === "" || (await sql`SELECT current_setting('ob1.actor', true) AS a`)[0].a === null, "…and the envelope does not outlive the record's transaction on the connection");
   ids.push(named.id);
+
+  // A record an adapter mapped (SMD-1867): the row, and in its transaction the
+  // canonical, the links and the structured mentions; the same record again
+  // writes nothing at any of the four; a record whose identity another thought
+  // holds is 'held' before any write — no second row (the in-function
+  // IDENTITY_HELD, the backstop for the race between that look and the write,
+  // is test-schema [48]'s).
+  const structured = docOf(corpusIngested(dumpOf({ ...SAMPLE_ISSUE, identifier: "SMD-90001", title: "A synthetic ticket", description: "Names <issue id=\"a\" href=\"h\">SMD-90002</issue> twice: <issue id=\"b\" href=\"h\">SMD-90002</issue>.", project: null, labels: { nodes: [{ name: "zqlabel" }] }, createdAt: "2026-09-01T00:00:00.000Z" })));
+  ids.push(structured.id);
+  const s1 = await upsertRecord(sql, structured, "test-live@1");
+  assert(s1.outcome === "inserted" && s1.structure?.canonical === "inserted" && s1.structure.links.added === 1 && s1.structure.mentions === 1, `a structured record inserts its row, canonical, one link and one mention (${JSON.stringify(s1)})`);
+  const [srcRow] = await sql`SELECT system, identity, media_type, ingest_run, canonical FROM thought_sources WHERE thought_id = ${structured.id}::uuid`;
+  assert(srcRow?.system === "linear" && srcRow.identity === "SMD-90001" && srcRow.ingest_run === "test-live@1" && /<issue id=/.test(srcRow.canonical) && !/<issue/.test(structured.content), "the canonical keeps the markup the row's text lost");
+  const [linkRow] = await sql`SELECT payload FROM thought_facets WHERE thought_id = ${structured.id}::uuid AND kind = 'link'`;
+  assert(linkRow?.payload?.relation === "references" && linkRow.payload.target === "SMD-90002" && linkRow.payload.origin === "structured", `the link names its target by identity, origin structured (${JSON.stringify(linkRow?.payload)})`);
+  const [mentionRow] = await sql`SELECT m.extraction_key AS k, en.name FROM thought_entities m JOIN ob1_entities en ON en.id = m.entity_id WHERE m.thought_id = ${structured.id}::uuid`;
+  assert(mentionRow?.k === "source:linear" && mentionRow.name === "zqlabel", "the label is a mention under source:linear");
+  const s2 = await upsertRecord(sql, structured, "test-live@2");
+  assert(s2.outcome === "unchanged" && s2.structure?.canonical === "unchanged" && s2.structure.links.added === 0 && s2.structure.links.kept === 1 && s2.structure.links.closed === 0 && s2.structure.mentions === 0, `the same record again writes nothing at any of the four — the mention count is 0 written, not 1 re-inserted (${JSON.stringify(s2)})`);
+  // A shrinking array facet is a change the merge must write: containment would have called ["a"] contained in ["a","b"] and kept the stale list (first review pass).
+  await sql`UPDATE thoughts SET metadata = metadata || '{"labels": ["a", "b"]}'::jsonb WHERE id = ${structured.id}::uuid`;
+  const shrunk = await upsertRecord(sql, { ...structured, meta: { ...structured.meta, labels: ["a"] } }, "test-live@3");
+  assert(shrunk.outcome === "patched" && JSON.stringify((await sql`SELECT metadata->'labels' AS l FROM thoughts WHERE id = ${structured.id}::uuid`)[0].l) === '["a"]', `an array facet that shrank is patched to the new list, not kept by containment (${shrunk.outcome})`);
+  // Another thought already IS this source item — the board sync's row for the ticket: held, nothing written, no second row.
+  const syncRow = (await sql`INSERT INTO thoughts (id, content, metadata, content_fingerprint) VALUES (gen_random_uuid(), 'SMD-90003 — held by the sync', '{"source":"linear","issue":"SMD-90003"}'::jsonb, content_fingerprint_of('SMD-90003 — held by the sync')) RETURNING id`)[0].id as string;
+  ids.push(syncRow);
+  await sql`SELECT record_thought_source(${syncRow}::uuid, 'linear', 'SMD-90003', '{}', 'application/json', 'sync')`;
+  const heldDoc = docOf(corpusIngested(dumpOf({ ...SAMPLE_ISSUE, identifier: "SMD-90003", title: "The same ticket, from the dump", description: "a different text", labels: { nodes: [] } })));
+  const held = await upsertRecord(sql, heldDoc, "test-live@4");
+  assert(held.outcome === "held" && held.heldBy === syncRow, `an identity another thought holds is 'held', naming it (${JSON.stringify(held)})`);
+  assert((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${heldDoc.id}::uuid`)[0].c === 0, "…and no second row for the ticket: the identity is asked about before any write");
   // Tier identity, for preflight's `tier` check.
   await stampTier(sql, "stable");
   const cfg = Object.fromEntries((await sql`SELECT key, value FROM ob1_config WHERE key IN ('tier','last_ingest')`).map((r: { key: string; value: string }) => [r.key, r.value]));
@@ -4311,6 +4365,112 @@ console.log("\n[21] said_by on real pgvector: the mark 050 stamps is filtered th
   const botSet = new Set(botIds);
   assert(kw.length === 60 && kw.every((h) => botSet.has(h.id)), `the keyword arm under actor: bot-live returns exactly that key's rows (${kw.length})`);
   for (const id of [...opIds, ...botIds]) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
+}
+
+console.log("\n[22] one renderer, one merge rule: a corpus dump through ingest-records.ts and the board sync through sync-linear.ts converge on one row in both orders, and an older dump does not move a ticket back (SMD-1958)");
+{
+  // The sync's write decisions over the REAL store (server-portable/store-sql.ts
+  // — upsert_thought, update_thought, 050's stamp, 053's structure hook) with
+  // the two model calls faked and counted: what converges here is the text,
+  // the facets and the structure the two tools write, which the self-check's
+  // fakes cannot show. `syncIssue` is the sync's per-ticket unit; the census
+  // and the fetch it sits behind are Linear's side and are not needed to ask
+  // whether the second writer finds anything to write.
+  const store = new SqlStore(URL_!, { max: 1 });
+  const calls: string[] = [];
+  const writer: Writer = {
+    store,
+    cfg: resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_EGRESS_POLICY: "off" }),
+    embed: async () => { calls.push("embed"); return { embedding: JSON.parse(unit(7)) as number[], model: EMBEDDING_MODEL, chunks: [] }; },
+    tags: async () => { calls.push("tags"); return { type: "task", topics: ["zqtopic"] }; },
+    fingerprintOf: async (t) => (await sql`SELECT content_fingerprint_of(${t}) AS f`)[0].f as string,
+    holderOf: async (fp) => ((await sql`SELECT id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint FROM thoughts WHERE content_fingerprint = ${fp} LIMIT 1`)[0] as BrainRow | undefined) ?? null,
+    actor: { name: SYNC_ACTOR, via: "test-live" },
+    dryRun: false,
+    log: () => {},
+    structure: async (id, s) => { await sql.begin(async (tx) => { await recordStructure(tx, id, s, "test-live@sync", { take: true }); }); },
+  };
+  // A dump built NOW, by the brain's clock — `fetchedAt` is compared with the
+  // row's updated_at, and the container's clock is the one that stamps it.
+  const dbNow = async () => (await sql`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS t`)[0].t as string;
+  const rowsFor = async (identifier: string) => groupTicketRows(await readTicketRows(sql, { scanHeaders: true })).get(identifier) ?? [];
+  const sync = async (issue: LinearIssue) => { calls.length = 0; return syncIssue(writer, issue, await rowsFor(issue.identifier)); };
+  const ticketRows = async (identifier: string) => (await sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'issue' = ${identifier}`)[0].c as number;
+  const holderOf = async (identifier: string) => (await sql`SELECT thought_id::text AS t, canonical FROM thought_sources WHERE system = 'linear' AND identity = ${identifier}`)[0] as { t: string; canonical: string } | undefined;
+  const mentionsOf = async (id: string) => (await sql`SELECT en.name FROM thought_entities m JOIN ob1_entities en ON en.id = m.entity_id WHERE m.thought_id = ${id}::uuid AND m.extraction_key = 'source:linear' ORDER BY en.name`).map((r: { name: string }) => r.name).join(",");
+  const ids: string[] = [];
+
+  const issue: LinearIssue = { ...SAMPLE_ISSUE, identifier: "SMD-90010", title: "Converges from the dump", description: "Names <issue id=\"a\" href=\"h\">SMD-90011</issue>.", project: { id: "p", name: "zqproject" }, labels: { nodes: [{ name: "zqlabel" }] }, updatedAt: "2026-09-22T01:00:00.000Z" };
+
+  // Order A: the dump first, then the sync.
+  const docA = docOf(corpusIngested(dumpOf(issue, await dbNow())));
+  ids.push(docA.id);
+  const a1 = await upsertRecord(sql, docA, "test-live@dumpA");
+  assert(a1.outcome === "inserted" && a1.structure?.canonical === "inserted" && a1.structure.links.added === 1 && a1.structure.mentions === 2, `the dump inserts the ticket's row with its canonical, one link and two mentions (${JSON.stringify(a1)})`);
+  const beforeA = (await sql`SELECT updated_at::text AS u, content, metadata FROM thoughts WHERE id = ${docA.id}::uuid`)[0];
+  const sA = await sync(issue);
+  const afterA = (await sql`SELECT updated_at::text AS u, content, metadata FROM thoughts WHERE id = ${docA.id}::uuid`)[0];
+  assert(sA.outcome === "unchanged" && calls.length === 0, `the sync over the dump's row reads the ticket unchanged and makes no model call (${sA.outcome}; calls ${calls.join(",") || "none"})`);
+  assert(afterA.u === beforeA.u && afterA.content === beforeA.content && JSON.stringify(afterA.metadata) === JSON.stringify(beforeA.metadata), "…and wrote nothing: updated_at, content and metadata as the dump left them");
+  assert((await ticketRows("SMD-90010")) === 1 && (await holderOf("SMD-90010"))?.t === docA.id, "…one row for the ticket, the identity still the dump's row's");
+  assert(beforeA.content === renderIssue(issue), "the dump's text IS the sync's render — the one renderer, byte for byte");
+
+  // The ticket moves in Linear: the sync updates the row (a real edit — vector
+  // and tags); the dump rebuilt after the move is unchanged; the OLD dump is
+  // stale — the row is not moved back, and its structure stands.
+  const moved: LinearIssue = { ...issue, state: { name: "Done", type: "completed" }, labels: { nodes: [{ name: "zqlabel" }, { name: "zqother" }] }, updatedAt: "2026-09-22T02:00:00.000Z" };
+  const sM = await sync(moved);
+  assert(sM.outcome === "updated" && calls.join(",") === "embed,tags", `the ticket moved: the sync edits the row, embedding and tagging once (${sM.outcome}; ${calls.join(",")})`);
+  const rowM = (await sql`SELECT content, metadata, embedding IS NOT NULL AS vec FROM thoughts WHERE id = ${docA.id}::uuid`)[0];
+  assert(rowM.content === renderIssue(moved) && rowM.metadata.status === "Done" && rowM.metadata.type === "task" && rowM.vec === true, `…on the dump's row: the moved text, the facets, the tags and a vector (${rowM.metadata.status}/${rowM.metadata.type}/vec=${rowM.vec})`);
+  assert((await mentionsOf(docA.id)) === "zqlabel,zqother,zqproject", `…and the structure moved with it (${await mentionsOf(docA.id)})`);
+  const viewOfMoved = await dbNow(); // a dump built now would see `moved`
+  const fresh = await upsertRecord(sql, docOf(corpusIngested(dumpOf(moved, viewOfMoved))), "test-live@dumpB");
+  assert(fresh.outcome === "unchanged" && fresh.structure?.canonical === "unchanged" && fresh.structure.links.kept === 1 && fresh.structure.mentions === 0, `a dump rebuilt after the move finds nothing to write — row, canonical, links or mentions (${JSON.stringify(fresh)})`);
+  const stale = await upsertRecord(sql, docA, "test-live@dumpA-again");
+  const rowS = (await sql`SELECT content, metadata, embedding IS NOT NULL AS vec FROM thoughts WHERE id = ${docA.id}::uuid`)[0];
+  assert(stale.outcome === "stale" && stale.structure === undefined, `the OLD dump over the moved row is 'stale' and records no structure (${JSON.stringify(stale)})`);
+  assert(rowS.content === renderIssue(moved) && rowS.metadata.status === "Done" && rowS.vec === true && (await mentionsOf(docA.id)) === "zqlabel,zqother,zqproject" && /Done/.test((await holderOf("SMD-90010"))?.canonical ?? ""), "…and moved nothing back: text, status, vector, mentions and canonical are the sync's");
+  // The tooth: with the watermark clause removed from the guard, the old dump
+  // is 'updated' and the row reads Backlog again (drop-the-mechanism mutant).
+
+  // The source's clock cannot settle a RENAME: Linear renames a project, a
+  // state or a label without touching updatedAt, and the sync re-renders the
+  // ticket from the census. The brain's clock does — a dump built before the
+  // rename is stale, one built after it is unchanged, and one with no build
+  // instant (no second clock) writes, as the contract says (first review
+  // pass, independent read: the equal case let a Monday dump undo a rename).
+  const renamed: LinearIssue = { ...moved, project: { id: "p", name: "zqproject-renamed" } };
+  const sR = await sync(renamed);
+  assert(sR.outcome === "updated" && calls.join(",") === "embed,tags" && (await sql`SELECT content FROM thoughts WHERE id = ${docA.id}::uuid`)[0].content === renderIssue(renamed), `a renamed project (same updatedAt) re-renders the row through the sync (${sR.outcome})`);
+  const beforeRename = await upsertRecord(sql, docOf(corpusIngested(dumpOf(moved, viewOfMoved))), "test-live@dumpB-again");
+  assert(beforeRename.outcome === "stale" && (await sql`SELECT content FROM thoughts WHERE id = ${docA.id}::uuid`)[0].content === renderIssue(renamed), `the dump built before the rename, same updatedAt, is 'stale' by the brain's clock — the row keeps the new name (${beforeRename.outcome})`);
+  const afterRename = await upsertRecord(sql, docOf(corpusIngested(dumpOf(renamed, await dbNow()))), "test-live@dumpD");
+  assert(afterRename.outcome === "unchanged", `a dump built after the rename is 'unchanged' (${afterRename.outcome})`);
+  const noClock = await upsertRecord(sql, docOf(corpusIngested(dumpOf(moved))), "test-live@dumpE");
+  assert(noClock.outcome === "updated" && (await sql`SELECT content FROM thoughts WHERE id = ${docA.id}::uuid`)[0].content === renderIssue(moved), `…and a dump with NO build instant writes at an equal clock, as documented — the second clock is what held the line above (${noClock.outcome})`);
+  // Blocked by the clock AND nothing to write: the same view again, after a
+  // later write left the row exactly as the view has it, is 'unchanged', not
+  // 'stale' — the word is for a record that had something to say (second
+  // review pass; the fragment claimed it and nothing held it).
+  const sameAgain = await upsertRecord(sql, docOf(corpusIngested(dumpOf(moved, viewOfMoved))), "test-live@dumpB-third");
+  assert(sameAgain.outcome === "unchanged", `a view the brain's clock would refuse, with nothing to write, is 'unchanged' — 'stale' is for a record with something to say (${sameAgain.outcome})`);
+
+  // Order B: the sync first, then the dump.
+  const issueB: LinearIssue = { ...issue, identifier: "SMD-90020", title: "Converges from the sync", description: "Plain.", updatedAt: "2026-09-22T03:00:00.000Z" };
+  const sB = await sync(issueB);
+  assert(sB.outcome === "captured" && calls.join(",") === "embed,tags", `the sync captures a ticket the brain lacks (${sB.outcome}; ${calls.join(",")})`);
+  const syncRow = (await holderOf("SMD-90020"))?.t;
+  assert(typeof syncRow === "string" && syncRow !== recordId("linear", "SMD-90020"), "…on its own id, which holds the identity");
+  ids.push(syncRow!);
+  const held = await upsertRecord(sql, docOf(corpusIngested(dumpOf(issueB, await dbNow()))), "test-live@dumpC");
+  assert(held.outcome === "held" && held.heldBy === syncRow, `the dump for that ticket is 'held' by the sync's row (${JSON.stringify(held)})`);
+  assert((await ticketRows("SMD-90020")) === 1 && (await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${recordId("linear", "SMD-90020")}::uuid`)[0].c === 0, "…no second row, none on the dump's id");
+  const sB2 = await sync(issueB);
+  assert(sB2.outcome === "unchanged" && calls.length === 0, `and the sync again reads it unchanged (${sB2.outcome}; calls ${calls.join(",") || "none"})`);
+
+  await store.close();
+  for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
 }
 
 await sql.close();

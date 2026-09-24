@@ -91,6 +91,19 @@ auto-loads a `.env` from whatever directory you ran from, and that takes
 precedence over all of them; the scripts print which files they read, naming keys
 but never values.
 
+Each document carries `id`, `title`, `text` (the description and, unless
+`OB1_CORPUS_COMMENTS=off`, the comment thread), `description`, `comments`,
+`labels`, `createdAt`, `completedAt` — and, since 2026-09-24, `issue`: the issue
+as Linear's API gave it, the same field selection `db/sync-linear.ts` fetches
+(`ISSUE_FIELDS`, owned by `db/ingest-linear.ts`), with `fetchedAt`, the instant
+the build began. The harnesses read `title` and `text` and never `issue`;
+`db/ingest-records.ts --linear` reads `id`, `issue` and `fetchedAt` and nothing
+else of the document, mapping the issue through the Linear adapter so the thought it
+writes is the one the board sync would write, and using the build instant to
+order a view Linear's own clock cannot (a rename) against the brain's last
+write (SMD-1958). A dump built before that date has no `issue` and the ingester
+refuses it by name; the harnesses run on it as before.
+
 The script is committed; **its output is not, and must not be**. The corpus is
 internal engineering data from a healthcare company: it stays out of git and away
 from any hosted embedding provider, which is the whole argument for the local path

@@ -9,7 +9,7 @@ description: |
   when a PR is merged or a task is closed, or when the conversation is about
   to end and a decision or a shipped change has not been written down.
 author: Michael Harris
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Session Summary
@@ -82,11 +82,16 @@ search result marks a superseded hit.
 - **The hook and the skill coexist.** When both run, the session has two
   summaries: the agent's considered one and the hook's mechanical one, each
   naming the same sources. That is fine — they are different kinds of thought,
-  and the hook's `source` lets a reader weigh them apart. If you want one,
-  YOUR summary can `supersede` the hook's (your key can read and write); the
-  hook's capture-only key may supersede only what it wrote itself, so it
-  cannot replace yours. Pass the hook's id as `supersedes` only when you are
-  sure of it.
+  and the hook's `source` lets a reader weigh them apart. Do NOT `supersede`
+  the hook's thought while the session runs: the hook captures again at each
+  compaction and at the end (SMD-2012), and each capture supersedes the id the
+  hook itself last wrote — so a checkpoint you replaced mid-session is
+  superseded twice, and your summary and the hook's final one both stand as
+  current. If you want one, supersede the hook's summary from a LATER session,
+  once this one has ended and its final thought exists (your key can read and
+  write); the hook's capture-only key may supersede only what it wrote itself,
+  so it cannot replace yours. Pass the hook's id as `supersedes` only when you
+  are sure of it.
 - **A capture-scoped key cannot run this skill** — it has no search. The skill
   runs under the session's own key; the hook runs under its capture key.
 - **Other clients.** Cursor, Windsurf or a ChatGPT connector with the write
