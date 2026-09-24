@@ -289,7 +289,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 133 | [Shim everywhere](changes/133-shim-everywhere.md) | SMD-1798 |
 | 134 | [Entity extraction sent the whole thought in one unbounded call](changes/134-entity-extraction-sent-the-whole-thought-in-one.md) | SMD-1879 |
 
-Landed since the last release and numbered at the next one (SMD-1804): [SMD-1296](changes/smd-1296.md), [SMD-1713](changes/smd-1713.md), [SMD-1799](changes/smd-1799.md), [SMD-1867](changes/smd-1867.md), [SMD-1875](changes/smd-1875.md), [SMD-1958](changes/smd-1958.md), [SMD-1982](changes/smd-1982.md), [SMD-2012](changes/smd-2012.md).
+Landed since the last release and numbered at the next one (SMD-1804): [SMD-1296](changes/smd-1296.md), [SMD-1713](changes/smd-1713.md), [SMD-1799](changes/smd-1799.md), [SMD-1867](changes/smd-1867.md), [SMD-1875](changes/smd-1875.md), [SMD-1958](changes/smd-1958.md), [SMD-1960](changes/smd-1960.md), [SMD-1982](changes/smd-1982.md), [SMD-2012](changes/smd-2012.md).
 <!-- changes-index:end -->
 
 ### Files we own
