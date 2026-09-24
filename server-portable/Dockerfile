@@ -26,6 +26,22 @@ COPY server-portable/shims ./shims
 COPY db/config.mjs db/config.d.mts db/version.mjs db/version.d.mts /db/
 COPY releases.json /releases.json
 
+# The commit this image was built from, reported by brain_info and the keyed
+# /health body (SMD-2041). A build arg baked into the environment: compose
+# passes it from OB1_GIT_SHA, the release job the tag's commit, and neither
+# forwards one at runtime. It is an ENV, so a runtime variable of the same name
+# (`docker run -e`, a Kubernetes `env:` entry) does override it — set none.
+# After every COPY, so a new commit rebuilds no earlier layer. Unset reads as
+# `unknown`.
+ARG OB1_GIT_SHA=unknown
+# A RUN that reads the arg, before the ENV: podman's builder keys an ENV
+# layer's cache without the arg's value, so a rebuild whose only change was
+# the commit kept the previous build's (measured, podman 6.0.2); a RUN's key
+# includes it, and every layer after a rebuilt one rebuilds. BuildKit keys
+# both by it.
+RUN printf 'server image built from commit %s\n' "$OB1_GIT_SHA"
+ENV OB1_GIT_SHA=$OB1_GIT_SHA
+
 # Secrets are injected at runtime, never baked in:
 #   MCP_ACCESS_KEYS (or the legacy MCP_ACCESS_KEY), OPENROUTER_API_KEY or
 #                  OB1_LLM_API_KEY (and OB1_CHAT_API_KEY when OB1_CHAT_BASE_URL

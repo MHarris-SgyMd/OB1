@@ -143,6 +143,10 @@ services:
       # on the missing module.
       context: ..
       dockerfile: server-portable/Dockerfile
+      # The commit brain_info and the keyed /health report (SMD-2041), baked
+      # into the image: set OB1_GIT_SHA when building (deploy/README.md).
+      args:
+        OB1_GIT_SHA: ${OB1_GIT_SHA:-unknown}
     # Anchored: `board-sync` below inherits this block whole (`<<: *server-env`),
     # so the provider, embedding and egress knobs are forwarded once, here, and a
     # worker that embeds and tags exactly as a capture does reads exactly what

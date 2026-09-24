@@ -610,6 +610,8 @@ jobs:
                   self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
           HTTPServer(("0.0.0.0", 11434), H).serve_forever()
           PY
+          # OB1_GIT_SHA reaches the image as compose's build arg (SMD-2041),
+          # and the smoke step asserts the health body reports it.
           cat > .env <<EOF
           POSTGRES_PASSWORD=$(openssl rand -hex 24)
           MCP_ACCESS_KEYS=ci:write:$HASH
@@ -617,6 +619,7 @@ jobs:
           OB1_LLM_LOCAL=1
           OB1_QUERY_LOG=on
           SERVER_PORT=8010
+          OB1_GIT_SHA=$GITHUB_SHA
           EOF
           docker compose -f compose.yaml up -d --build --wait --wait-timeout 240
 
@@ -688,9 +691,13 @@ jobs:
           SERVER_BIND=0.0.0.0 docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 3) and .services.server.ports[0].host_ip == "0.0.0.0" and ([.services.postgres.ports[].host_ip, .services.ollama.ports[].host_ip] == ["127.0.0.1", "127.0.0.1"])'
 
+      # OB1_SMOKE_COMMIT: check 10 asserts the keyed /health body names the
+      # commit the build arg above baked in, beside the version it asserts.
       - name: Smoke-test it over MCP
         working-directory: deploy
         run: ./smoke.sh
+        env:
+          OB1_SMOKE_COMMIT: ${{ github.sha }}
 
       - name: Confirm no Supabase CLI anywhere in the stack
         working-directory: deploy

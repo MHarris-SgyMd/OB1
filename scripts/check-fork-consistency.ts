@@ -122,7 +122,9 @@
  *      source); a migration inside a released range keeps the sha the release
  *      froze; and
  *      migration 044's schema_version equals db/version.mjs's FORK_VERSION
- *      (SMD-1804)
+ *      (SMD-1804); and server-portable/version.ts is exactly what
+ *      scripts/gen-version.ts renders from db/version.mjs, releases.json and
+ *      db/migrations/ (17e, SMD-2041)
  *  18. the type-checked directories — server-portable/, compat/supabase-sql/,
  *      db/, evals/ and scripts/ — share one type surface and CI checks each: every one
  *      pins @types/bun, typescript and @types/node in devDependencies at the
@@ -2560,6 +2562,10 @@ async function checkToolsManifest() {
   try {
     ({ renderToolsJson } = await import("./gen-tools.ts"));
   } catch (e) {
+    // Skipped only where the generator cannot load at all; under bun a failed
+    // import is the generator broken, and passing on it would hide a stale file
+    // (SMD-2041 review pass 1).
+    if (typeof Bun !== "undefined") return fail("scripts/gen-tools.ts", `does not import (${(e as Error).message.split("\n")[0]}) — the tools.json round-trip cannot run (SMD-1805)`);
     console.warn(`  (tools.json round-trip skipped — ${(e as Error).message.split("\n")[0]} — run under bun)`);
     return;
   }
@@ -2627,6 +2633,7 @@ const HOUSE_FORM = (k: string) => new RegExp(`^\\$\\{${k}(?::-([^$}]*))?\\}$`);
 /** Knobs the server declares that compose.yaml must NOT forward, with the reason its own comment gives. */
 const NOT_FORWARDED: Record<string, string> = {
   OB1_STORE: "the SQL store is the server's default (FORK.md change 97) and this stack is the deployment that proves it — forwarding it would let the default drift back to PostgREST with nothing in CI noticing",
+  OB1_GIT_SHA: "the commit the image was built from, baked by server-portable/Dockerfile from the build arg of the same name (compose's `build.args`) — a runtime forward would override the baked value with whatever deploy/.env names, a commit the image need not have been built from (SMD-2041)",
 };
 
 /** The names `type Env = { … }` declares in a server source, in order; null when the block is not there. */
@@ -3700,6 +3707,32 @@ function checkSchemaVersion() {
   if (current.value !== FORK_VERSION) fail(`db/migrations/${current.name}`, `writes schema_version '${current.value}' but db/version.mjs's FORK_VERSION is '${FORK_VERSION}' — the brain would report a version the tooling does not (SMD-1804)`);
 }
 checkSchemaVersion();
+
+/**
+ * 17e: server-portable/version.ts is generated (SMD-2041) — the version, the
+ * release range and the tree's last migration the server reports, in a module
+ * the Workers build can bundle (db/version.mjs is node-only). It must be
+ * exactly what scripts/gen-version.ts renders, so a migration added or a cut
+ * made without regenerating it fails here rather than a brain reporting the
+ * previous tree. Bun-only, like the tools.json round-trip.
+ */
+async function checkVersionModule() {
+  let renderVersionTs: () => string;
+  try {
+    ({ renderVersionTs } = await import("./gen-version.ts"));
+  } catch (e) {
+    // As the tools.json round-trip: a skip only off bun.
+    if (typeof Bun !== "undefined") return fail("scripts/gen-version.ts", `does not import (${(e as Error).message.split("\n")[0]}) — check 17e cannot run (SMD-2041)`);
+    console.warn(`  (version.ts round-trip skipped — ${(e as Error).message.split("\n")[0]} — run under bun)`);
+    return;
+  }
+  const rel = "server-portable/version.ts";
+  const path = join(ROOT, rel);
+  if (!existsSync(path)) return fail(rel, "missing — run `bun scripts/gen-version.ts` (SMD-2041)");
+  if (readFileSync(path, "utf8") !== renderVersionTs())
+    fail(rel, "does not match what scripts/gen-version.ts renders from db/version.mjs, releases.json and db/migrations/ — the server would report a version, release range or last migration other than this tree's; run `bun scripts/gen-version.ts` to regenerate (SMD-2041)");
+}
+await checkVersionModule();
 
 /**
  * 18: one type surface across the type-checked directories, and a CI step

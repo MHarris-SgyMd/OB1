@@ -34,6 +34,10 @@
       "scope": "read"
     },
     {
+      "name": "brain_info",
+      "scope": "read"
+    },
+    {
       "name": "capture_thought",
       "scope": "capture"
     },
