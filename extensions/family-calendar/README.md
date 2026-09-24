@@ -58,10 +58,8 @@ You'll reference these values during setup. Copy this block into a text editor a
 FAMILY CALENDAR -- CREDENTIAL TRACKER
 --------------------------------------
 
-SUPABASE (from your Open Brain setup)
-  Project URL:           ____________
-  Secret key:            ____________
-  Project ref:           ____________
+DATABASE (from your Open Brain setup)
+  Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
 
 GENERATED DURING SETUP
   Default User ID:       ____________

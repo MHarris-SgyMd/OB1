@@ -100,7 +100,7 @@ Important details:
 - The server runs preflight before serving: a misconfiguration crashloops with the failing row named, rather than failing on the first capture.
 - The default embedding dimension is 1024 (local); 1536 with OpenRouter's `openai/text-embedding-3-small`. The models are changed as a pair, and `upsert_thought` refuses a vector of another width.
 - The `upsert_thought` function deduplicates by normalized content fingerprint and merges metadata on duplicate capture.
-- Users should save all credentials in the provided credential tracker spreadsheet before moving between services.
+- Users should save every value the guide says to (the password, the key and its hash line, the URLs) in a text file as they go; the key is not recoverable from its hash.
 
 ## ChatGPT-Specific Context
 

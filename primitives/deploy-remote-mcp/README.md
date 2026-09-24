@@ -27,7 +27,7 @@ Replace `extension-name` below with the extension's directory name.
 
 ## Step 1: Apply the Extension's Schema
 
-Run the extension's `schema.sql` against your Open Brain database, as the extension's README Step 1 says — `psql "$DATABASE_URL" -f extensions/extension-name/schema.sql`, with the two `auth.*` stub functions first when the schema's policies call `auth.uid()` (the README says when). The core server's tables are already there from the migrations; this adds the extension's.
+Run the extension's `schema.sql` against your Open Brain database, as the extension's README Step 1 says — `psql "$DATABASE_URL" -f extensions/extension-name/schema.sql`, with the two `auth.*` stub functions first when the schema's policies call `auth.uid()` (the README says when). The core server's tables are already there from the migrations; this adds the extension's. With the compose stack, the database reaches the host only when the stack came up with `-f deploy/compose.host-ports.yaml` (`deploy/README.md`, "What is reachable from where"), and `DATABASE_URL` is then `postgres://postgres:<POSTGRES_PASSWORD>@127.0.0.1:5432/openbrain` — the same URL Step 4's `SUPABASE_URL` takes.
 
 ## Step 2: Install the Pinned Packages
 
@@ -41,14 +41,14 @@ Once per checkout:
 
 ## Step 3: Mint an Access Key
 
-The extensions authenticate the way the core Open Brain server does: a key is **named**, has a **scope** (`read` or `write`), and only its **SHA-256 hash** is stored — the server never holds the key itself, and a key is revoked on its own by removing its line and restarting. A read-scoped key is never given the tools that write, so it does not even see them; that is the key to put in a connector URL.
+The extensions authenticate the way the core Open Brain server does: a key is **named**, has a **scope** (`read` or `write`; a `capture` key exists for the core server's session hook and is not admitted here), and only its **SHA-256 hash** is stored — the server never holds the key itself, and a key is revoked on its own by removing its line and restarting. A read-scoped key is never given the tools that write, so it does not even see them; that is the key to put in a connector URL.
 
 > **Already have keys from the core server?** An extension server reads its own `MCP_ACCESS_KEYS` from its own environment, so reuse a line or mint a new one per extension — your choice. Nothing is shared unless you pass the same value.
 
 Mint one from the checkout with Bun (it prints the key once, and the line to store):
 
 ```bash
-(cd server-portable && bun keygen.ts --name laptop --scope write)
+bun server-portable/keygen.ts --name laptop --scope write
 ```
 
 Or by hand — generate a key, then hash it:
@@ -117,7 +117,7 @@ git pull
 PORT=8787 … bun extensions/extension-name/index.ts
 ```
 
-The URL and access key stay the same — no need to reconfigure your AI clients. If the extension's `schema.sql` changed, the README's Step 1 says what to re-run; the SQL is idempotent (`IF NOT EXISTS`).
+The URL and access key stay the same — no need to reconfigure your AI clients. If the extension's `schema.sql` changed, the README's Step 1 says what to re-run. Most schemas use `IF NOT EXISTS` and re-run cleanly; family-calendar's and meal-planning's do not, and every `CREATE POLICY` refuses a second run — apply the changed statements by hand there.
 
 ---
 
@@ -130,7 +130,7 @@ The URL and access key stay the same — no need to reconfigure your AI clients.
 - Step 2 was skipped: `(cd extensions && bun install)`. For an integration or recipe server, add `NODE_PATH=extensions/node_modules` to the command, as its README shows.
 
 **401 on every request**
-- The URL or header must carry the **key**, the environment its **hash**. An entry that is not `name:read|write:<64 hex characters>` is ignored, and the vendored servers do not log it: check each entry is three fields, the scope lower-case, the digest 64 hex characters. `bun preflight.ts` in `server-portable/` with the same `MCP_ACCESS_KEYS` in its environment prints the parse problem.
+- The URL or header must carry the **key**, the environment its **hash**. An entry that is not `name:read|write|capture:<64 hex characters>` is ignored, and the vendored servers do not log it: check each entry is three fields, the scope lower-case, the digest 64 hex characters. `bun preflight.ts` in `server-portable/` with the same `MCP_ACCESS_KEYS` in its environment prints the parse problem.
 - A `read`-scoped key authenticates but is given no writing tool; a server whose only tools write (`delete-thought-mcp`, `update-thought-mcp`) shows a read key nothing to call.
 
 **`relation "…" does not exist`**

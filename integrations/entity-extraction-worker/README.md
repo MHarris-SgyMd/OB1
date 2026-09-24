@@ -180,7 +180,7 @@ After completing setup and running the worker, you should be able to:
 ## Troubleshooting
 
 **"No LLM API key configured"**
-Set at least one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY` as a Supabase secret.
+Set at least one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY` in the worker's environment.
 
 **Queue items stuck in "processing"**
 If the worker crashes mid-batch, items remain in "processing" status. Reset them:

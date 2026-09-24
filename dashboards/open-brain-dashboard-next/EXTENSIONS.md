@@ -47,13 +47,13 @@ export default async function Page() {
 ```
 
 `apiKey` is the OB1 access key the user logged in with — pass it as the
-`x-brain-key` header when calling Edge Functions.
+`x-brain-key` header when calling the gateway or a sidecar server.
 
 ## Backend routes
 
 Extensions that need their own REST endpoints have two clean options:
 
-- **Sidecar Edge Function.** Deploy a separate function (e.g.
+- **Sidecar server.** Run a separate server under Bun, on the gateway's shape (e.g.
   `my-extension-api`). Derive its URL on the dashboard side by string-
   replacing `open-brain-rest` in `NEXT_PUBLIC_API_URL` (`agent-memory-api`
   does this — see `lib/agent-memory.ts`).

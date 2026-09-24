@@ -23,7 +23,6 @@ All graph traversal runs in PostgreSQL — `traverse_graph` uses a recursive CTE
 ## Prerequisites
 
 - Working Open Brain setup ([Getting Started guide](../../docs/01-getting-started.md))
-- Supabase project configured
 - [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/))
 
 ## Credential Tracker
@@ -51,7 +50,7 @@ GENERATED DURING SETUP
 <details>
 <summary><strong>SQL: Create tables, indexes, RLS, and graph functions</strong> (click to expand)</summary>
 
-Run the contents of `schema.sql` in your Supabase SQL Editor (Dashboard → SQL Editor → New Query → paste → Run).
+Run `schema.sql` against your brain's database — `psql "$DATABASE_URL" -f recipes/ob-graph/schema.sql` (or paste it into Supabase's SQL Editor, if that is where your Postgres lives).
 
 The schema creates:
 
@@ -220,7 +219,7 @@ After setup, your AI can:
 
 ### "relation 'graph_nodes' does not exist"
 
-You haven't run the SQL from Step 1 yet. Copy `schema.sql` into your Supabase SQL Editor and run it.
+You haven't run the SQL from Step 1 yet. Run `schema.sql` against your database as Step 1 shows.
 
 ### "function traverse_graph does not exist"
 

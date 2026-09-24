@@ -23,8 +23,8 @@ backups, no resource limits.
 
 ```bash
 cp deploy/.env.example deploy/.env
-openssl rand -hex 24   # → POSTGRES_PASSWORD
-openssl rand -hex 32   # → MCP_ACCESS_KEY
+openssl rand -hex 24                                    # → POSTGRES_PASSWORD
+bun server-portable/keygen.ts --name laptop --scope write   # → a line for MCP_ACCESS_KEYS; keep the key
 ```
 
 `deploy/.env` is gitignored. This replaces `supabase secrets set`: the same values,
@@ -59,7 +59,7 @@ Three services, in order (five with the profile):
 ### 3. Verify
 
 ```bash
-./deploy/smoke.sh
+OB1_SMOKE_KEY=<your-raw-key> ./deploy/smoke.sh
 ```
 
 ### 4. Connect a client

@@ -161,7 +161,7 @@ For common issues (connection errors, 401s, deployment problems), see [Common Tr
 
 **"Permission denied" or foreign key errors on insert**
 - Verify `DEFAULT_USER_ID` is set in the server's environment (the `bun` command in Step 3)
-- The service role key bypasses RLS, so permission errors usually mean a missing env var
+- The server connects as one role and scopes rows itself, so a permission error usually means a missing env var or a role without grants on the tables
 - If you ran an older version of `schema.sql` that had `REFERENCES auth.users(id)`, drop and recreate the tables with the updated schema
 
 ## Next Steps

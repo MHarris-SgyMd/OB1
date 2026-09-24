@@ -90,7 +90,7 @@ bun pull-gmail.ts --list-labels
 
 **Default (Supabase direct insert)** — The script generates embeddings and extracts metadata via OpenRouter, then inserts directly into Supabase with content fingerprint dedup. Requires `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `OPENROUTER_API_KEY`. This matches the pattern used by the ChatGPT import and MCP server.
 
-**`--ingest-endpoint`** — POSTs to a custom Edge Function endpoint that handles embedding and metadata server-side. Requires `INGEST_URL` and `INGEST_KEY`. Use this if you have a custom ingest-thought function deployed.
+**`--ingest-endpoint`** — POSTs to a capture server that handles embedding and metadata server-side (the Slack capture's shape, `integrations/slack-capture`). Requires `INGEST_URL` and `INGEST_KEY`. Use this if you run one.
 
 ## How It Works
 

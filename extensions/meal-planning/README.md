@@ -64,10 +64,8 @@ You'll reference these values during setup. Copy this block into a text editor a
 MEAL PLANNING -- CREDENTIAL TRACKER
 --------------------------------------
 
-SUPABASE (from your Open Brain setup)
+DATABASE (from your Open Brain setup)
   Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
-  Secret key:            ____________
-  Project ref:           ____________
 
 GENERATED DURING SETUP
   Default User ID:             ____________

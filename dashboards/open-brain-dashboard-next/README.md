@@ -279,4 +279,4 @@ Do not enable `OB1_DEMO_AUTH_BYPASS` in shared previews or production. It exists
 
 4. **Search returns no results** — Ensure your thoughts have embeddings. Semantic search requires the `embedding` column to be populated. Run an embedding backfill if needed.
 
-5. **Ingest page shows "extracting" forever** — Check that the `smart-ingest` Edge Function is deployed. The ingest feature depends on a separate Edge Function for document extraction.
+5. **Ingest page shows "extracting" forever** — Check that the `smart-ingest` server (`integrations/smart-ingest`) is running. The ingest feature depends on that separate server for document extraction.

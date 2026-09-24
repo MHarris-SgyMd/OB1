@@ -89,7 +89,7 @@ After running the migration:
 
 ## MCP Integration
 
-Once the schema is applied, update your `open-brain-mcp` Edge Function to include the `progress_task` tool. This allows AI assistants to manage task status conversationally:
+Once the schema is applied, add the `progress_task` tool to your MCP server (`server-portable/index.ts`). This allows AI assistants to manage task status conversationally:
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|

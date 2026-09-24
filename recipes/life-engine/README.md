@@ -35,7 +35,7 @@ This guide contains everything Claude Code needs to set up your entire Life Engi
 **What Claude Code will do:**
 1. Install and configure the Telegram channel plugin
 2. Create the skill file with the full Life Engine prompt
-3. Run the database schema in your Supabase project
+3. Run the database schema against your Open Brain's database
 4. Set up permissions for unattended operation
 5. Pause for you to complete Telegram pairing (requires your phone)
 6. Run a test cycle to confirm everything works
@@ -109,7 +109,7 @@ Before starting, you'll need:
 | Google Calendar MCP connected to Claude Code | ☐ |
 | Telegram account + Bot created via [@BotFather](https://t.me/BotFather) | ☐ |
 | [Bun](https://bun.sh/) installed (`bun --version` to check) | ☐ |
-| Supabase project with Open Brain MCP deployed | ☐ |
+| A running Open Brain ([`SETUP.md`](../../SETUP.md)) with its MCP server reachable | ☐ |
 
 ### Credential Tracker
 
@@ -476,7 +476,7 @@ The Life Engine needs its own tables to track habits, moods, check-ins, and skil
 
 ### 4.1 Run the Schema
 
-Run the included [`schema.sql`](schema.sql) file in your Supabase SQL Editor. It contains the full schema with CHECK constraints, table comments, GRANT statements for `service_role`, performance indexes, and an auto-update trigger.
+Run the included [`schema.sql`](schema.sql) against your Open Brain's database — `psql "$DATABASE_URL" -f recipes/life-engine/schema.sql`, or Supabase's SQL Editor if that is where it lives. It contains the full schema with CHECK constraints, table comments, GRANT statements for `service_role`, performance indexes, and an auto-update trigger.
 
 ✅ **Checkpoint:** Run the verification query at the bottom of `schema.sql` — you should see 6 tables (`life_engine_habits`, `life_engine_habit_log`, `life_engine_checkins`, `life_engine_briefings`, `life_engine_evolution`, `life_engine_state`).
 

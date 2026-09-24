@@ -45,9 +45,8 @@ You'll reference these values during setup. Copy this block into a text editor a
 JOB HUNT PIPELINE -- CREDENTIAL TRACKER
 --------------------------------------
 
-SUPABASE (from your Open Brain setup)
-  Project ref:           ____________
-  Secret key:            ____________
+DATABASE (from your Open Brain setup)
+  Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
 
 MCP SERVER (new for this extension)
   Default User ID:       ____________

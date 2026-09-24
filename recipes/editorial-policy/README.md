@@ -10,7 +10,7 @@
 
 Most Open Brain forks fix prompt drift in scattered prompt strings — when the morning briefing inflates a one-line task into a philosophical paragraph, you tweak the briefing's prompt; when the weekly summary smooths over contradictions, you tweak that one. The fixes don't compound, and the same failures keep reappearing under new names.
 
-This recipe replaces that pattern with a single source of truth: a numbered editorial policy (R1.1, R3.5, R10.2, …) that every synthesis prompt cites at the top of its system message, plus a weekly Edge Function that audits compliance and posts critical findings to Slack.
+This recipe replaces that pattern with a single source of truth: a numbered editorial policy (R1.1, R3.5, R10.2, …) that every synthesis prompt cites at the top of its system message, plus a weekly auditor server that audits compliance and posts critical findings to Slack.
 
 When synthesis drifts, you fix the policy, bump its version, and the rule propagates to every prompt that cites it. Trait-fix discipline you don't have to remember — the auditor remembers for you.
 

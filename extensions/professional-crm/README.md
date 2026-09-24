@@ -45,10 +45,8 @@ You'll reference these values during setup. Copy this block into a text editor a
 PROFESSIONAL CRM -- CREDENTIAL TRACKER
 --------------------------------------
 
-SUPABASE (from your Open Brain setup)
-  Project ref:           ____________
+DATABASE (from your Open Brain setup)
   Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
-  Secret key:            ____________
 
 MCP SERVER (you'll create these)
   Default User ID:       ____________

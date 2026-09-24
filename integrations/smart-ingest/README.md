@@ -263,7 +263,7 @@ After completing setup, you should be able to:
 ## Troubleshooting
 
 **"No LLM API key configured"**
-You need at least one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY` set as a Supabase secret. OpenRouter is recommended as the primary provider.
+You need at least one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY` in the server's environment. OpenRouter is recommended as the primary provider.
 
 **"Input contains restricted content"**
 The function runs a pre-flight sensitivity check and blocks content matching restricted patterns (SSN, credit card, API keys, passwords). This is a safety feature — process sensitive content locally instead.

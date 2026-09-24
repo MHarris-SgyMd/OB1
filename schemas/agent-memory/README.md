@@ -84,4 +84,4 @@ Solution: Run the core Open Brain setup first.
 Solution: This is usually correct. `can_use_as_instruction` is only allowed for `user_confirmed` or `imported` memory.
 
 **Issue: API cannot read tables**
-Solution: Re-run the GRANT section at the bottom of `schema.sql` and redeploy the Edge Function so PostgREST reloads the schema cache.
+Solution: Re-run the GRANT section at the bottom of `schema.sql` and restart the Agent Memory API server.

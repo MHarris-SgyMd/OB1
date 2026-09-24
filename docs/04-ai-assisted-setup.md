@@ -18,7 +18,7 @@ official guide in the MHarris-SgyMd/OB1 repository.
 - Repository: https://github.com/MHarris-SgyMd/OB1
 - Raw file base: https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/
 - Entry point: docs/01-getting-started.md — the setup guide. It defines every step,
-  every code and SQL block, and a "Done when" checkpoint for each step.
+  every command and configuration line, and a "Done when" checkpoint for each step.
 - The guide is the source of truth for WHAT to do. This prompt only defines how we
   work together. Where the two disagree on a technical detail, the guide wins — it
   is newer than this prompt.
@@ -80,7 +80,7 @@ refer to each secret by name in our chat.
 
 5. Finish with proof. When the guide's steps are complete, run — or walk me
    through — the end-to-end test the guide describes: capture a test thought from
-   my connected AI, search for it, and show me it landed in the database. Then give
+   my connected AI, search for it, and show me the stats tool counting it. Then give
    me a closing summary: what is deployed, where every credential lives, and what
    the guide suggests I do next.
 </instructions>

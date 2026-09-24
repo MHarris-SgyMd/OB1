@@ -54,11 +54,7 @@ Follow the installation steps in the [Work Operating Model skill](../../skills/w
 
 ### 2. Run the schema
 
-Run [`schema.sql`](./schema.sql) against your brain's database — `psql "$DATABASE_URL" -f recipes/work-operating-model-activation/schema.sql`:
-
-```text
-https://supabase.com/dashboard/project/YOUR_PROJECT_ID/sql/new
-```
+Run [`schema.sql`](./schema.sql) against your brain's database — `psql "$DATABASE_URL" -f recipes/work-operating-model-activation/schema.sql` (or paste it into Supabase's SQL Editor, if that is where your Postgres lives).
 
 This creates:
 

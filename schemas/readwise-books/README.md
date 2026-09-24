@@ -11,7 +11,7 @@
 This schema extension creates a single new table, `readwise_books`, keyed by Readwise's `user_book_id`, plus two RPC functions:
 
 - **`get_book_highlights(p_book_id, p_limit)`** — Returns all highlights for a book from the `thoughts` table, ordered by in-source location so you can re-read them the way you originally encountered them.
-- **`increment_book_highlight_count(p_book_id, p_highlighted_at)`** — Bumps `num_highlights` and refreshes `last_highlight_at` on the book row. Called by the readwise-capture Edge Function on each new highlight insert to avoid running `COUNT(*)` against the `thoughts` table.
+- **`increment_book_highlight_count(p_book_id, p_highlighted_at)`** — Bumps `num_highlights` and refreshes `last_highlight_at` on the book row. Called by the readwise-capture server on each new highlight insert to avoid running `COUNT(*)` against the `thoughts` table.
 
 The table stays small (one row per book, typically a few hundred rows per user), so it's primarily a convenience cache for cover images, category, and source attribution that would otherwise need to be fetched from the Readwise API on every UI render.
 
@@ -67,4 +67,4 @@ Solution: Run the core Open Brain setup first — the `get_book_highlights` func
 Solution: The function filters on `source_type = 'readwise'` (a column added by the [enhanced-thoughts](../enhanced-thoughts/) schema). If you skipped that schema, your highlights will be in `thoughts` but without the top-level `source_type` column set. Either install `enhanced-thoughts` and run its backfill, or modify your import to set `source_type` explicitly.
 
 **Issue: `increment_book_highlight_count` runs but counts stay at 0**
-Solution: Confirm the book row exists in `readwise_books` before the first highlight arrives. The readwise-capture Edge Function handles this automatically via a write-through cache lookup; if you're calling the RPC manually, you'll need to `INSERT` the book row first.
+Solution: Confirm the book row exists in `readwise_books` before the first highlight arrives. The readwise-capture server handles this automatically via a write-through cache lookup; if you're calling the RPC manually, you'll need to `INSERT` the book row first.

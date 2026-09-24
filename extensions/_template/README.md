@@ -33,7 +33,6 @@ REPLACE all instances of:
   - "Extension Name" with your extension's name
   - "extension-name" with your extension's slug (lowercase, hyphenated)
   - "HEX_COLOR" with your chosen badge color
-  - "YOUR_PROJECT_ID" with the placeholder for the user's project ref
   - "table_name" / "table_name_2" with your actual table names
 
 DELETE this comment block before submitting your PR.

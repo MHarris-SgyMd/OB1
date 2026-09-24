@@ -24,7 +24,7 @@ Screenshots go in `docs/screenshots/` and should be referenced from this README 
 ## Prerequisites
 
 - A working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- The **REST API gateway** (`open-brain-rest` Edge Function from PR #201) deployed and reachable
+- The **REST API gateway** ([`integrations/open-brain-rest`](../../integrations/open-brain-rest/), one server under Bun) running and reachable
 - **Node.js 20+**
 - A host for the dashboard: Vercel or Netlify free tier works; self-hosting on a Node.js 20+ runtime is also fine
 
@@ -140,5 +140,5 @@ The app listens on port 3000 by default; use `PORT=4000 npm start` to override.
 2. **Login says "Could not reach API"** — verify `NEXT_PUBLIC_API_URL` is correct and the REST gateway is live. Test with `curl -H "x-brain-key: YOUR_KEY" $NEXT_PUBLIC_API_URL/health`.
 3. **Login says "Invalid API key or service unavailable"** — the REST gateway reached but rejected the key. Check that the key's SHA-256 hash is an entry in the `MCP_ACCESS_KEYS` secret on your `open-brain-rest` function (the request carries the key, the secret its hash; the older single `MCP_ACCESS_KEY` still works), and that the entry is `write`-scoped — the dashboard edits and deletes.
 4. **Search returns nothing** — semantic search needs embeddings. Verify `OPENROUTER_API_KEY` is set in the gateway's environment (it embeds through OpenRouter at 1536 dimensions; its README names the brain width it needs) and that the `embedding` column is populated.
-5. **Ingest page never finishes extracting** — confirm the `smart-ingest` Edge Function is deployed alongside the REST gateway.
+5. **Ingest page never finishes extracting** — confirm the `smart-ingest` server (`integrations/smart-ingest`) is running beside the REST gateway.
 6. **Connections panel empty on Detail page** — the panel requires `topics` or `people` in `metadata`. Thoughts enriched through classification have these; raw captures do not.

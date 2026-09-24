@@ -55,7 +55,7 @@ GENERATED DURING SETUP
 1. Go to [readwise.io/access_token](https://readwise.io/access_token) while signed in
 2. Copy the token — save it as the Access Token in the tracker above
 
-This is a long-lived personal token. It's used only for book-metadata lookups (one call per new book, not per highlight). If you rotate it later, update the `READWISE_ACCESS_TOKEN` Supabase secret.
+This is a long-lived personal token. It's used only for book-metadata lookups (one call per new book, not per highlight). If you rotate it later, restart the server with the new `READWISE_ACCESS_TOKEN` in its environment.
 
 ---
 

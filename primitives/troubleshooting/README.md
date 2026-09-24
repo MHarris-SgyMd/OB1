@@ -14,7 +14,7 @@ Solutions for issues that come up across any Open Brain extension. If your probl
 - Double-check that the `?key=` value in your Connection URL matches your MCP Access Key exactly
 - If using header-based auth (Claude Code): the extension servers and the core server (`server-portable/`) accept `x-brain-key`, `x-access-key` or `Authorization: Bearer <key>`, and try every form you send
 - Do not use `mcp-remote` with `--header` for Cursor — use Cursor's native `url` field instead (see [Remote MCP Connection](../remote-mcp/))
-- An entry in `MCP_ACCESS_KEYS` that is not `name:read|write:<64 hex characters>` is ignored silently — `bun preflight.ts` in `server-portable/` with the same value in its environment prints the parse problem
+- An entry in `MCP_ACCESS_KEYS` that is not `name:read|write|capture:<64 hex characters>` is ignored silently — `bun preflight.ts` in `server-portable/` with the same value in its environment prints the parse problem
 - A key's scope is what you expect: a read-scoped key does not see the tools that write, and a server whose only tools write shows it nothing
 - Try minting a new key: Step 3 of [Run a Remote MCP Server](../deploy-remote-mcp/), then restart the server with the new line and update your Connection URL
 

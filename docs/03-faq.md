@@ -54,7 +54,7 @@ Read the server's log first (`podman compose -f deploy/compose.yaml logs server`
 
 Good news — that means your database, server, and MCP connection are all fine. The issue is isolated to search.
 
-Most likely culprits: the embedding call is failing (the model endpoint is unreachable, or the key for a hosted provider is wrong), or the thoughts were captured without a vector — preflight's `vectors` row counts those, and `db/reembed.ts` fills them.
+Most likely culprits: the embedding call is failing (the model endpoint is unreachable, or the key for a hosted provider is wrong), or the thoughts were captured without a vector (the reply says so at the time) — `db/reembed.ts` finds and fills those, and preflight's `vector models` and `re-embed pass` rows warn when the corpus is off the model.
 
 Quickest diagnosis: the server's log, then `bun preflight.ts` in `server-portable/` with the stack's environment.
 
@@ -90,13 +90,13 @@ In Obsidian, your notes are documents. You write them, organize them, revise the
 
 The Open Brain isn't that. It's a memory layer for your AI. You put thoughts in, your AI pulls the right ones out when they're relevant. You don't need to organize them, file them, or maintain them — the vector search handles retrieval by meaning.
 
-If you need to fix a typo or delete something, Supabase's Table Editor works (dashboard → Table Editor → thoughts). But if you're finding yourself wanting to regularly browse and edit your content, that's Obsidian's workflow, not this one. They solve different problems.
+If you need to fix a typo or delete something, ask your AI — a write key has `update_thought` and `delete_thought` — or use any SQL client (`psql`), or the SvelteKit dashboard in `dashboards/`. But if you're finding yourself wanting to regularly browse and edit your content, that's Obsidian's workflow, not this one. They solve different problems.
 
-That said — the system is yours to extend. The MCP server currently has a capture tool for writing new thoughts. If you want your AI to be able to revise what's stored, that's one more tool added to the server. You can describe what you want to the Supabase AI assistant and it can help you build it. You built the system, you can extend it.
+That said — the system is yours to extend. The MCP server is one file, `server-portable/index.ts`; a tool it lacks is one more `registerTool` block. You built the system, you can extend it.
 
 ### "I want the visual editing experience — headings, bullets, drag stuff around, everything visible at once"
 
-That's a fair ask, and you're right — that doesn't exist in the Open Brain right now. The Table Editor in Supabase is functional but it's a database view, not a writing environment.
+That's a fair ask, and you're right — that doesn't exist in the Open Brain right now. A SQL client is functional but it's a database view, not a writing environment.
 
 Here's how to think about it: the Open Brain is the backend. It's where the data lives, where the vectors live, where your AI connects. Obsidian is a frontend. There's nothing stopping you from having both — use the Open Brain as your storage and retrieval layer, and build (or eventually connect) a nicer interface on top of it.
 

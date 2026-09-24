@@ -13,7 +13,7 @@ About 30 minutes. Zero coding experience. Nothing to sign up for: the whole syst
 - **[Git](https://git-scm.com)** — downloads the code (free)
 
 > [!NOTE]
-> **Prefer hosted models?** If your machine is short on memory or you'd rather not download a few hundred megabytes of models, an [OpenRouter](https://openrouter.ai) key (~$5 in credits, lasts months) replaces the local models. Step 3 has the four lines. Everything else is the same.
+> **Prefer hosted models?** If your machine is short on memory or disk, or you'd rather not download about 7 GB of models, an [OpenRouter](https://openrouter.ai) key (~$5 in credits, lasts months) replaces the local models. Step 3 has the four lines. Everything else is the same.
 
 ---
 
@@ -48,7 +48,7 @@ Public HTTPS URL:           ____________  (Step 6, only for Claude Desktop / cla
 Three installs. Each is a download-and-click, or one line in a terminal.
 
 > [!TIP]
-> **New to the terminal?** The "terminal" is the text-based command line on your computer. On Mac, open the app called **Terminal** (search for it in Spotlight). On Windows, open **PowerShell**. Everything in a `bash` block below gets typed there, not in your browser.
+> **New to the terminal?** The "terminal" is the text-based command line on your computer. On Mac, open the app called **Terminal** (search for it in Spotlight). On Windows, use **Git Bash** (installed in 1.3 below) for every `bash` block — PowerShell is for the one `powershell` block. Everything in a `bash` block gets typed there, not in your browser.
 
 <details>
 <summary>🟩 <strong>Step 1 — Mac / Linux</strong> (click to expand)</summary>
@@ -84,7 +84,7 @@ powershell -c "irm bun.sh/install.ps1 | iex"
 
 Close and reopen PowerShell, then check with `bun --version`.
 
-**1.3 Git.** Install [Git for Windows](https://git-scm.com/download/win) with its defaults. It brings **Git Bash**, which you'll use for the one `.sh` script in Step 5.
+**1.3 Git and Python.** Install [Git for Windows](https://git-scm.com/download/win) with its defaults. It brings **Git Bash**, the terminal every `bash` block below runs in (it has `openssl` and `curl`). The check script in Step 5 also needs `python3` on the PATH: install [Python](https://www.python.org/downloads/windows/) and tick "Add python.exe to PATH".
 
 </details>
 
@@ -109,7 +109,7 @@ Save the folder's path in your tracker — every later command runs from inside 
 > [!TIP]
 > Not sure where you are? Run `pwd` (Mac/Linux) or `Get-Location` (Windows). It should end in `OB1`.
 
-✅ **Done when:** `ls deploy/` lists `compose.yaml`, `.env.example` and `smoke.sh`.
+✅ **Done when:** `ls -a deploy/` lists `compose.yaml`, `.env.example` and `smoke.sh`.
 
 ---
 
@@ -133,14 +133,14 @@ Generate one and paste it after `POSTGRES_PASSWORD=`:
 openssl rand -hex 24
 ```
 
-(On Windows without `openssl`, `bun -e "console.log(crypto.randomBytes(24).toString('hex'))"` prints one.) Save it in your tracker.
+(Without `openssl`, `bun -e "console.log(require('node:crypto').randomBytes(24).toString('hex'))"` prints one.) Save it in your tracker.
 
 ![3.3](https://img.shields.io/badge/3.3-Mint_Your_Access_Key-555?style=for-the-badge&labelColor=FB8C00)
 
 Your MCP server is an HTTP URL, so every request carries a key it checks. Keys are **named** and **scoped** — `write` can capture, `read` can only search — and the server stores only the key's **hash**, so a leaked `.env` reveals no key. Mint one:
 
 ```bash
-cd server-portable && bun keygen.ts --name laptop --scope write && cd ..
+bun server-portable/keygen.ts --name laptop --scope write
 ```
 
 It prints two things once:
@@ -153,13 +153,16 @@ It prints two things once:
 
 ![3.4](https://img.shields.io/badge/3.4-Say_the_Models_Are_Local-555?style=for-the-badge&labelColor=FB8C00)
 
-The shipped defaults run the models on your machine: `qwen3-embedding:4b` turns each thought into a vector, `qwen2.5:7b` tags it. Nothing to install — the stack downloads them on first start. One line tells the server so; find it in `deploy/.env`, uncomment it:
+The shipped defaults run the models on your machine: `qwen3-embedding:4b` turns each thought into a vector, `qwen2.5:7b` tags it. Nothing to install — the stack downloads them on first start. One line tells the server so; add it to `deploy/.env` on a line of its own (the example carries it commented, with a note after it):
 
 ```text
 OB1_LLM_LOCAL=1
 ```
 
 Why it matters: by default the server refuses to send a thought's text to any endpoint it hasn't been told is local — a thought captured without this line lands with no vector and a reply saying why. The line is the declaration.
+
+> [!NOTE]
+> **On a Mac**, the containers run in a small VM with no GPU, so the 7 GB of models load slowly there. [`SETUP.md`](../SETUP.md), "On macOS, install Ollama natively instead", is faster and lighter: install Ollama on the Mac itself, set `OB1_LLM_BASE_URL=http://host.containers.internal:11434/v1` in `deploy/.env` (Option B in the example), keep `OB1_LLM_LOCAL=1`, and leave `--profile local-models` off the Step 4 command.
 
 <details>
 <summary>☁️ <strong>Prefer hosted models instead? (OpenRouter)</strong></summary>
@@ -192,7 +195,7 @@ podman compose -f deploy/compose.yaml --profile local-models up --build
 
 (Docker: `docker compose …`. Hosted models: leave off `--profile local-models`.)
 
-Five containers start in order: Postgres with pgvector, a one-shot job that applies the schema and exits, the models' runtime and a one-shot job that pulls the two models, then the MCP server. The first run downloads the images and about 2.5 GB of models, so give it a few minutes; every later start is seconds.
+Five containers start in order: Postgres with pgvector, a one-shot job that applies the schema and exits, the models' runtime and a one-shot job that pulls the two models, then the MCP server. The first run downloads the images and about 7 GB of models (SETUP.md has the sizes), so give it a while; every later start is seconds.
 
 The server checks its own configuration before it serves anything. Watch for two lines from `server`:
 
@@ -205,7 +208,7 @@ If instead it prints `preflight FAILED` and stops, read the row it names — it 
 
 Leave this terminal running and open a second one for the next steps. (To run it in the background instead, add `-d`; `podman compose -f deploy/compose.yaml logs -f server` shows the server's log.)
 
-✅ **Done when:** the log shows `preflight OK` and `Started server`, and stays quiet.
+✅ **Done when:** the log shows `preflight OK` and `Started server`, and the `ollama-pull` container has exited — `podman compose -f deploy/compose.yaml ps` shows it `Exited (0)`. The server does not wait for the pull, so a capture before that fails on a model that is not there yet.
 
 ---
 
@@ -219,9 +222,9 @@ In the second terminal, from the `OB1` folder, with your access key:
 OB1_SMOKE_KEY=your-access-key ./deploy/smoke.sh
 ```
 
-🟦 **Windows** — open **Git Bash** (installed with Git), `cd` to the folder, and run the same line.
+🟦 **Windows** — in **Git Bash**, `cd` to the folder and run the same line (the script needs `python3`, from Step 1.3).
 
-Every check should pass: the server answers, the key is enforced, a capture lands with a vector and a search finds it. Then look at what you built:
+Every check should pass: the server answers, the key is enforced, the database is reachable and the tool list is the full set. The script is read-only — it captures nothing — so the models get their first real test in Step 8. Then look at what you built:
 
 ```bash
 curl -H "x-brain-key: your-access-key" http://127.0.0.1:8000/health
@@ -384,7 +387,7 @@ Every MCP client handles remote servers slightly differently. The server accepts
 }
 ```
 
-**Option C: mcp-remote bridge (alternative).** `mcp-remote` also works but performs OAuth discovery on startup, which can cause timeouts. If you use it, set a generous startup timeout (30+ seconds) in clients that support it.
+**Option C: mcp-remote bridge (alternative).** `mcp-remote` also works but performs OAuth discovery on startup, which can cause timeouts. If you use it, set a generous startup timeout (30+ seconds) in clients that support it, and pass the key in the URL — newer `mcp-remote` versions attempt OAuth client registration before sending custom headers, so `--header` fails against the server's key check.
 
 ```json
 {
@@ -394,24 +397,19 @@ Every MCP client handles remote servers slightly differently. The server accepts
       "args": [
         "-y",
         "mcp-remote",
-        "http://127.0.0.1:8000/",
-        "--header",
-        "x-brain-key:${BRAIN_KEY}"
-      ],
-      "env": {
-        "BRAIN_KEY": "your-access-key"
-      }
+        "http://127.0.0.1:8000/?key=your-access-key"
+      ]
     }
   }
 }
 ```
 
 > [!NOTE]
-> No space after the colon in `x-brain-key:${BRAIN_KEY}`. Some clients have a bug where spaces inside args get mangled. The bridge is a process on your machine, but it is only a bridge: the server it reaches is still the one HTTP process from Step 4.
+> The bridge is a process on your machine, but it is only a bridge: the server it reaches is still the one HTTP process from Step 4.
 
 </details>
 
-✅ **Done when:** You can start a conversation in your AI client and it has access to Open Brain tools — ten for a write key (`search_thoughts`, `list_thoughts`, `thought_stats`, `capture_thought`, `update_thought`, `delete_thought` and more), seven for a read key. ChatGPT may also show `search` and `fetch` compatibility tools.
+✅ **Done when:** You can start a conversation in your AI client and it has access to Open Brain tools — twelve for a write key (`search_thoughts`, `list_thoughts`, `thought_stats`, `capture_thought`, `update_thought`, `delete_thought` and more), nine for a read key. Two of them, `search` and `fetch`, are ChatGPT-shaped compatibility tools every client sees.
 
 ---
 
@@ -461,7 +459,11 @@ Your AI should retrieve the thought you just saved.
 
 **❌ `preflight FAILED` and the server stops**
 
-Read the row it names. Each row is one setting — the database, the access keys, the model endpoint, the vector width — and the message says what to change in `deploy/.env`. `getaddrinfo ENOTFOUND ollama` means you left off `--profile local-models` without naming another provider.
+Read the row it names. Each row is one setting — the database, the access keys, the model endpoint, the vector width — and the message says what to change in `deploy/.env`. A `provider endpoint` row saying `ollama` does not resolve means you left off `--profile local-models` without naming another provider; its hint lists the ways out.
+
+**❌ Starting over**
+
+A retry after a half-finished attempt: `podman compose -f deploy/compose.yaml down -v` removes the containers and the database volume (every thought in it), and Step 4 builds a fresh brain. Keep `deploy/.env`.
 
 **❌ Port 8000 is already in use**
 
@@ -485,7 +487,7 @@ The key in your URL or header is not one whose hash is in `MCP_ACCESS_KEYS`. The
 
 **❌ The capture landed but says it has no vector**
 
-`OB1_LLM_LOCAL=1` is missing from `deploy/.env` (Step 3.4): the server refused to send the text to a model endpoint it wasn't told is local. Add the line, restart, and run `bun db/reembed.ts` from a checkout — or capture again — to fill the vector in.
+`OB1_LLM_LOCAL=1` is missing from `deploy/.env` (Step 3.4): the server refused to send the text to a model endpoint it wasn't told is local. Add the line, restart, and capture the thought again — a re-capture of the same text replaces its vector. (A whole brain of such rows is `db/reembed.ts`'s job, which needs the database published to the host: `db/README.md`, "Re-embedding", and `deploy/README.md`, "What is reachable from where".)
 
 **❌ Search returns no results**
 

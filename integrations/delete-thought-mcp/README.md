@@ -121,8 +121,8 @@ Solution: Confirm the `?key=` in your custom connector URL is the **key** whose 
 **Issue: `delete_thought error: permission denied for table thoughts`**
 Solution: Ensure your service role has DELETE permission on `public.thoughts`. The getting-started guide grants this in Step 2.5 — re-run `grant select, insert, update, delete on table public.thoughts to service_role;` in the SQL editor if it was missed.
 
-**Issue: Tool succeeds but the row is still visible in the Table Editor**
-Solution: The Table Editor caches results. Reload the page, or run `select id from thoughts where id = '<uuid>'` directly in the SQL Editor to confirm the row is gone.
+**Issue: Tool succeeds but the row still shows in your SQL client or dashboard**
+Solution: The view may be cached. Re-run `select id from thoughts where id = '<uuid>'` to confirm the row is gone.
 
 ## Attribution
 
