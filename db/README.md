@@ -1890,10 +1890,13 @@ it is what people search for and cite. Headings only; a bold `**Corrected**`
 paragraph is prose, and a `## ` line inside a fenced code block is code (an
 unclosed fence runs to the end, as CommonMark reads it). A renamed heading is
 a new part and the old row stays (neither writer removes) — and while the old
-row holds the text, the renamed part reads as held by it and is refused each
-pass until the old row goes; two sections whose text comes out identical are
-one part, and a near-twin (the fingerprint folds case and whitespace) is
-refused before any model call. A part's
+row holds the text, the renamed part reads as held by it and is refused on
+each pass that visits the ticket (a change in Linear, or `--full`); two
+sections whose text comes out identical are one part, and a near-twin (the
+fingerprint folds case and whitespace) is refused by this tool before any
+model call and read `skipped` by the ingester. A part this tool captured whose
+structure write then failed stands without its identity and is refused the
+same way until SMD-2075 adopts it. A part's
 `created_at` is the heading's date from the ingester and the capture's moment
 from this tool (a capture takes no date). Parts land only once the ticket's
 head row is settled — a ticket whose text another thought holds gets none, and

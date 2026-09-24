@@ -662,7 +662,11 @@ async function syncDerived(w: Writer, headId: string, parts: readonly Derived[])
     // could merge this part's facets onto that row wholesale; the ticket path
     // asks the same question first (second review pass, independent read: the
     // `existed` refusal below cost two model calls and a facet ping-pong on the
-    // holder every pass).
+    // holder every pass). One holder this refuses that it should adopt: this
+    // part's own row from a pass whose structure write failed after the
+    // capture below (two statements, not one transaction) — identity-less,
+    // refused on every later visit. Adopting an unclaimed holder, as the
+    // ticket path adopts a paste, is SMD-2075 (third review pass).
     const holder = fp !== null ? await w.holderOf(fp) : null;
     if (holder && holder.id !== row?.id) { w.log(`  ! ${label}: the section's text is held by ${holder.id}, which is not this section's row; not written (DUPLICATE_CONTENT)`); t.refused++; continue; }
     // New or moved text: the vector and the tags, gated as the ticket's own text
