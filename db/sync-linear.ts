@@ -107,7 +107,7 @@ import { extractMetadata, metadataRefused, tagsOverExisting } from "../server-po
 import type { Actor } from "../server-portable/store.ts";
 import { describeEnv, loadEnv } from "./env.ts";
 import { linearClient, strict, type Gql } from "./linear-api.ts";
-import { IDENTIFIER_PATTERN, issueFacets, labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, stripAutolinks, type LinearIssue } from "./ingest-linear.ts";
+import { IDENTIFIER_PATTERN, ISSUE_FIELDS, issueFacets, LABELS_BOUND, labelNames, linearAdapter, RELATIONS_BOUND, renderIssue, SAMPLE_ISSUE, stripAutolinks, type LinearIssue } from "./ingest-linear.ts";
 // From ingest-structure.ts, NOT ingest-records.ts: the ingester imports evals/
 // and scripts/, which the board-sync container does not mount (third review
 // pass; the self-check holds this file's import closure to db/ and
@@ -118,7 +118,7 @@ import { recordStructure, runName, type Structure } from "./ingest-structure.ts"
 // the markup strip moved to db/ingest-linear.ts (SMD-1867) so the sync and
 // the ingester render a ticket one way (SMD-1958); callers of this module see
 // the same names.
-export { IDENTIFIER_PATTERN, issueFacets, labelNames, renderIssue, stripAutolinks, type LinearIssue };
+export { IDENTIFIER_PATTERN, issueFacets, LABELS_BOUND, labelNames, RELATIONS_BOUND, renderIssue, stripAutolinks, type LinearIssue };
 
 export const DEFAULT_INITIATIVE = "Open Brain";
 export const DEFAULT_INTERVAL_S = 300;
@@ -382,13 +382,11 @@ export async function censusOf(gql: Gql, projectIds: string[]): Promise<Census> 
   return out;
 }
 
-// Labels bounded as the census bounds them (twelfth review pass): the two must
-// see the same set, or an issue with more labels than the bound would read
-// `namesMoved` on every pass and never be unchanged.
-export const LABELS_BOUND = 20;
-/** Relations an issue holds, and those held toward it, per request — the structure the adapter turns into `link` facets (SMD-1867); a ticket with more is rare and its links beyond the bound wait for the day the bound is raised. */
-export const RELATIONS_BOUND = 25;
-const ISSUE_FIELDS = `identifier title description url createdAt updatedAt archivedAt priorityLabel state { name type } project { id name } parent { identifier } labels(first: ${LABELS_BOUND}) { nodes { name } } relations(first: ${RELATIONS_BOUND}) { nodes { type relatedIssue { identifier } } } inverseRelations(first: ${RELATIONS_BOUND}) { nodes { type issue { identifier } } }`;
+// The selection and its bounds are the adapter's (db/ingest-linear.ts, SMD-1958):
+// the census above bounds labels as ISSUE_FIELDS does (twelfth review pass —
+// the two must see the same set, or an issue with more labels than the bound
+// would read `namesMoved` on every pass and never be unchanged), and the corpus
+// builder asks for the same fields, so the dump and this fetch feed one mapping.
 
 /**
  * The issues named, in full, fifty a request: one query with an alias per

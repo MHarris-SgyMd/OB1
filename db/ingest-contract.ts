@@ -62,6 +62,17 @@ export type Ingested = {
   facets: Record<string, unknown>;
   /** When the item came to be on the source side; the pipeline leaves created_at to now() when absent. */
   createdAt?: string;
+  /**
+   * The source's own clock for the item, as one of the facets: the key and the
+   * value this mapping carries (Linear: `linear_updated_at`). The pipeline
+   * does not write an item over a row whose stored value is NEWER — a dump
+   * built on Monday, re-ingested on Friday over a brain the sync kept current,
+   * would otherwise move every ticket that moved back to Monday's text, and
+   * the next sync pass forward again (SMD-1958). Values compare as strings, so
+   * the clock is an ISO-8601 instant in UTC or another form that sorts as it
+   * orders. Absent, the pipeline compares the text and the facets alone.
+   */
+  watermark?: { key: string; value: string };
 };
 
 /** A source adapter: a name and a pure map. It reads; the pipeline writes. */

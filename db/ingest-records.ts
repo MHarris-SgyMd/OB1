@@ -24,8 +24,10 @@
  * Sources, and what each needs:
  *   fork     — the fork's changes, one changes/*.md file each (SMD-1917). In the tree; no flag.
  *   commit   — git commit messages since the upstream pin. In the tree; no flag.
- *   linear   — a corpus dump built by evals/build-linear-corpus.ts. Needs --linear,
- *              through the Linear adapter (db/ingest-linear.ts, SMD-1867).
+ *   linear   — a corpus dump built by evals/build-linear-corpus.ts. Needs --linear.
+ *              Each record's `issue` goes through the Linear adapter
+ *              (db/ingest-linear.ts, SMD-1867) — the mapping the board sync
+ *              feeds its own fetch to, so the two write one text (SMD-1958).
  *   memory   — the *.md memory files (not MEMORY.md, the index). Needs --memory-dir
  *              or OB1_MEMORY_DIR — they live outside the repo, in the operator's
  *              ~/.claude, so there is no portable default and this tool reads,
@@ -56,7 +58,9 @@
  *
  * The write path is the ingestion contract's pipeline (db/ingest-contract.ts,
  * SMD-1867): the row's metadata is MERGED, never replaced (the board sync's
- * facets and 050's actor marks survive a rebuild — SMD-1958); a record whose
+ * facets and 050's actor marks survive a rebuild — SMD-1958); a record older
+ * than the row's watermark (a dump the sync has moved past) is `stale` and
+ * writes nothing; a record whose
  * text moved has its vector and chunks cleared so `reembed.ts` pools it; and a
  * record that came through an adapter also writes its canonical
  * (thought_sources), its links (053's `link` facets, as a set) and its
@@ -70,11 +74,11 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { PIPELINE_TIERS } from "./config.mjs";
-import { loadLinearCorpus, linearThoughtId, linearThoughtText, type LinearDoc } from "../evals/linear-corpus.ts";
+import { loadLinearCorpus, linearThoughtId, type LinearDoc } from "../evals/linear-corpus.ts";
 import { parseFragment, fragmentSection } from "../scripts/fragments.ts";
 import { headingOf, ticketsOf } from "../scripts/fork-index.ts";
-import { AdapterRefusal, allowlistFrom, normaliseLinks, normaliseMentions, scopeRefusal, stableJson, type Allowlist, type Ingested } from "./ingest-contract.ts";
-import { autolinkTargets, LINEAR_SYSTEM, stripAutolinks } from "./ingest-linear.ts";
+import { AdapterRefusal, allowlistFrom, scopeRefusal, type Allowlist, type Ingested } from "./ingest-contract.ts";
+import { LINEAR_SYSTEM, linearAdapter, renderIssue, SAMPLE_ISSUE, WATERMARK_KEY } from "./ingest-linear.ts";
 import { markdownAdapter, markdownFiles, MARKDOWN_SYSTEM } from "./ingest-markdown.ts";
 import { IdentityHeld, recordStructure, runName as structureRunName, type Structure, type StructureResult } from "./ingest-structure.ts";
 
@@ -104,6 +108,8 @@ export type Doc = {
   structure?: Structure;
   /** The allowlist's unit, for a gated source. */
   scope?: string;
+  /** The source's clock for the item (ingest-contract.ts): a stored row whose value under `key` is newer is not written over — the record is `stale`. */
+  watermark?: { key: string; value: string };
 };
 
 /**
@@ -232,39 +238,47 @@ export function docOf(ingested: Ingested): Doc {
     createdAt: ingested.createdAt,
     structure: { identity: ingested.identity, canonical: ingested.canonical, links: ingested.links, mentions: ingested.mentions },
     scope: ingested.scope,
+    ...(ingested.watermark ? { watermark: ingested.watermark } : {}),
   };
 }
 
 /** The scope a corpus dump's records carry: the dump is one deliberate export, cleared as one. */
 export const LINEAR_CORPUS_SCOPE = "linear:corpus";
-export const LINEAR_CORPUS_MEDIA_TYPE = "application/vnd.ob1.linear-corpus+json";
+/** What a dump built before the `issue` field is refused with — once per run, with the way out. */
+export const DUMP_WITHOUT_ISSUE = "the dump carries no `issue` object (built before 2026-09-24); rebuild it — bun evals/build-linear-corpus.ts — so the ingester and the board sync render one text (SMD-1958)";
 
 /**
- * One corpus record (evals/build-linear-corpus.ts) through the contract. The
- * text keeps the eval's shape — `title\n\ntext` (eval-real.ts uses the title as
- * the query and the text as the document) — with Linear's autolink markup
- * stripped (SMD-1865); the cross-references it named become `references`
- * links, the labels topic mentions, the record itself the canonical. The dump
- * carries no state, project or relations (SMD-1958 extends it), so those
- * links and facets arrive from the board sync alone until it does.
+ * One corpus record (evals/build-linear-corpus.ts) through the Linear adapter
+ * — the SAME mapping db/sync-linear.ts feeds its fetch to, over the same input
+ * (the dump's `issue` is the issue as the API gave it, the sync's field
+ * selection), so the ingester and the sync write one text, one facet set, one
+ * canonical, the same links and mentions for a ticket, and on a brain both
+ * touch the second writer finds nothing to write (SMD-1958). The eval's own
+ * text (`title` / `text`, the title outside the document) is the harnesses'
+ * and is not what is stored. The scope is the dump's, not the project's: the
+ * dump is one export, cleared as one. A dump without `issue` is refused, not
+ * rendered some other way — one renderer.
  */
 export function corpusIngested(d: LinearDoc): Ingested {
-  const raw = linearThoughtText(d);
-  return {
-    identity: { system: LINEAR_SYSTEM, key: d.id },
-    scope: LINEAR_CORPUS_SCOPE,
-    canonical: { form: stableJson(d), mediaType: LINEAR_CORPUS_MEDIA_TYPE },
-    text: stripAutolinks(raw),
-    links: normaliseLinks(autolinkTargets(raw).map((target) => ({ relation: "references" as const, target })), d.id).links,
-    mentions: normaliseMentions((d.labels ?? []).map((name) => ({ name, type: "topic" as const }))),
-    facets: { issue: d.id },
-    createdAt: d.createdAt,
-  };
+  if (!d.issue) throw new AdapterRefusal({ system: LINEAR_SYSTEM, key: d.id }, DUMP_WITHOUT_ISSUE);
+  if (d.issue.identifier !== d.id) throw new AdapterRefusal({ system: LINEAR_SYSTEM, key: d.id }, `the record's id and its issue's identifier (${d.issue.identifier}) disagree`);
+  return { ...linearAdapter.map(d.issue), scope: LINEAR_CORPUS_SCOPE };
 }
 
-/** A Linear corpus dump as Docs, on the shared linear id space, through the adapter. */
-export function linearDocs(path: string): Doc[] {
-  return loadLinearCorpus(path).docs.map((d: LinearDoc) => docOf(corpusIngested(d)));
+/** A Linear corpus dump as Docs, on the shared linear id space, through the adapter; the records the adapter refused are counted, with the first reason. */
+export function linearDocs(path: string): { docs: Doc[]; refused: number; reason: string | null } {
+  const docs: Doc[] = [];
+  let refused = 0;
+  let reason: string | null = null;
+  for (const d of loadLinearCorpus(path).docs) {
+    try { docs.push(docOf(corpusIngested(d))); }
+    catch (e) {
+      if (!(e instanceof AdapterRefusal)) throw e;
+      refused++;
+      reason ??= e.message;
+    }
+  }
+  return { docs, refused, reason };
 }
 
 /**
@@ -358,8 +372,8 @@ export function commitDocs(since: string, cwd: string = REPO_ROOT): Doc[] {
 // Write path — bare rows, idempotent by id, safe on a duplicate-content record.
 // ---------------------------------------------------------------------------
 
-/** inserted: a new row. updated: the text moved (vector and chunks cleared). patched: the text stood and metadata moved. unchanged: nothing to write. skipped: another record already holds this text. held: another thought already IS this source item (thought_sources), nothing written. */
-export type UpsertResult = "inserted" | "updated" | "patched" | "unchanged" | "skipped" | "held";
+/** inserted: a new row. updated: the text moved (vector and chunks cleared). patched: the text stood and metadata moved. unchanged: nothing to write. skipped: another record already holds this text. held: another thought already IS this source item (thought_sources), nothing written. stale: the row carries a newer watermark than the record — an older dump over a brain kept current — nothing written. */
+export type UpsertResult = "inserted" | "updated" | "patched" | "unchanged" | "skipped" | "held" | "stale";
 
 function isFingerprintCollision(e: unknown): boolean {
   // Bun's PostgresError carries the SQLSTATE in `errno` (`code` is the generic
@@ -422,14 +436,36 @@ export type RecordResult = {
  * A different record whose content is byte-identical to one already stored
  * collides on the partial-unique content_fingerprint index (23505), not on
  * id; that is "skipped" — the content already exists as another record.
+ *
+ * A record with a watermark (the source's clock, as a facet — Linear's
+ * `linear_updated_at`) is written only when the row's stored value is not
+ * newer; a row the board sync moved past the dump is left as it is, structure
+ * included, and the record is "stale" (SMD-1958: a Monday dump on Friday would
+ * otherwise put every moved ticket back to Monday, and the next sync pass
+ * forward again). The values compare as text, in the same clause that guards
+ * the write, so the read and the decision are one statement.
  */
 export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()): Promise<RecordResult> {
   const meta = { ...doc.meta, source: doc.source };
   for (const k of ACTOR_KEYS) delete (meta as Record<string, unknown>)[k];
   const created = doc.createdAt ?? null;
+  const wmKey = doc.watermark?.key ?? null;
+  const wmValue = doc.watermark?.value ?? null;
   try {
     return await sql.begin(async (tx) => {
       await tx`SELECT set_config('ob1.actor', ${JSON.stringify(INGEST_ACTOR)}, true)`;
+      // Another thought already IS this item — the board sync's row for a
+      // ticket, found by identity (thought_sources; on a brain the sync filled
+      // before 053, its metadata.issue claim). Asked BEFORE the write: with one
+      // renderer the sync's row holds the same text, so the insert would trip
+      // the fingerprint index first and read `skipped` — true, and the wrong
+      // word for a row that is this very ticket (run-it, test-live [22]).
+      // record_thought_source's IDENTITY_HELD stays the backstop for the race
+      // between this look and the write.
+      if (doc.structure) {
+        const [h] = (await tx`SELECT source_thought(${doc.structure.identity.system}, ${doc.structure.identity.key})::text AS t`) as { t: string | null }[];
+        if (h?.t && h.t !== doc.id) return { outcome: "held", heldBy: h.t };
+      }
       // `old` is read before the write so RETURNING can say whether the text
       // moved — an UPDATE's RETURNING sees only the new row. The two actor
       // keys are removed from EXCLUDED on both sides: 050's BEFORE INSERT
@@ -445,8 +481,9 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()):
               embedding = CASE WHEN thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint THEN NULL ELSE thoughts.embedding END,
               embedding_model = CASE WHEN thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint THEN NULL ELSE thoughts.embedding_model END,
               metadata = COALESCE(thoughts.metadata, '{}'::jsonb) || (EXCLUDED.metadata - 'actor_kind' - 'actor_name')
-          WHERE thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint
-             OR (COALESCE(thoughts.metadata, '{}'::jsonb) || (EXCLUDED.metadata - 'actor_kind' - 'actor_name')) IS DISTINCT FROM thoughts.metadata
+          WHERE (${wmValue}::text IS NULL OR thoughts.metadata->>(${wmKey}::text) IS NULL OR thoughts.metadata->>(${wmKey}::text) <= ${wmValue}::text)
+            AND (thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint
+              OR (COALESCE(thoughts.metadata, '{}'::jsonb) || (EXCLUDED.metadata - 'actor_kind' - 'actor_name')) IS DISTINCT FROM thoughts.metadata)
         RETURNING (xmax = 0) AS inserted, ((SELECT fp FROM old) IS DISTINCT FROM thoughts.content_fingerprint) AS moved`) as { inserted: boolean; moved: boolean }[];
       // The guard asks "would the merge change the row" — the merged value
       // against the stored one — not containment: `@>` holds when an array
@@ -454,6 +491,13 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()):
       // would have kept the stale list for good (first review pass).
       let outcome: UpsertResult = "unchanged";
       if (rows.length) outcome = rows[0].inserted ? "inserted" : rows[0].moved ? "updated" : "patched";
+      // No row written and a watermark to compare: was it the clock that said
+      // no? Then the structure is not recorded either — the record's links and
+      // mentions are the older state's, and would close what the sync wrote.
+      if (!rows.length && wmValue !== null) {
+        const [w] = (await tx`SELECT (metadata->>(${wmKey}::text)) > ${wmValue}::text AS newer FROM thoughts WHERE id = ${doc.id}::uuid`) as { newer: boolean | null }[];
+        if (w?.newer === true) return { outcome: "stale" };
+      }
       // The chunk rows were the old text's windows (022's rule: nothing vouches
       // for them now); reembed.ts writes the new ones with the vector.
       if (outcome === "updated") await tx`DELETE FROM thought_chunks WHERE thought_id = ${doc.id}::uuid`;
@@ -538,16 +582,26 @@ function selfCheck(): number {
   ]);
   ok(deduped.length === 2 && dropped === 1, "identical content across records is de-duped, first kept");
 
-  // The contract's pipeline (SMD-1867): a corpus record through the Linear
-  // adapter — the eval's text shape kept, the markup gone, the structure out.
-  const corpus = corpusIngested({ id: "SMD-10", title: "A title", text: "Body naming <issue id=\"a\" href=\"h\">SMD-11</issue> and <issue id=\"b\" href=\"h\">SMD-10</issue>.", labels: ["Bug", "infra"], createdAt: "2026-09-01T00:00:00.000Z" });
-  ok(corpus.text === "A title\n\nBody naming SMD-11 and SMD-10.", `the corpus text keeps title + blank + text with autolinks stripped (${JSON.stringify(corpus.text)})`);
+  // The contract's pipeline (SMD-1867) and the one renderer (SMD-1958): a
+  // corpus record is its `issue` through the Linear adapter — the text the
+  // board sync writes, byte for byte; the eval's own title/text are not stored.
+  const issue = { ...SAMPLE_ISSUE, identifier: "SMD-10", description: "Body naming <issue id=\"a\" href=\"h\">SMD-11</issue> and <issue id=\"b\" href=\"h\">SMD-10</issue>.", labels: { nodes: [{ name: "infra" }, { name: "Bug" }] } };
+  const record: LinearDoc = { id: "SMD-10", title: "A title", text: "the eval's document", labels: ["infra", "Bug"], createdAt: issue.createdAt, issue };
+  const corpus = corpusIngested(record);
+  ok(corpus.text === renderIssue(issue) && /^SMD-10 — /.test(corpus.text) && !/the eval's document/.test(corpus.text), `the text is the adapter's render of the issue — the sync's text — not the eval's title + text (${JSON.stringify(corpus.text.split("\n")[0])})`);
   ok(JSON.stringify(corpus.links) === '[{"relation":"references","target":"SMD-11"}]', "a cross-reference is a references link; the record's own identifier is not");
-  ok(corpus.mentions.map((m) => `${m.type}:${m.name}`).join(",") === "topic:Bug,topic:infra" && corpus.scope === LINEAR_CORPUS_SCOPE, "labels are topic mentions; the scope is the corpus");
-  ok(/<issue id=/.test(corpus.canonical.form), "the canonical keeps the record as dumped, markup included");
+  ok(corpus.mentions.map((m) => `${m.type}:${m.name}`).join(",") === `project:${issue.project!.name},topic:Bug,topic:infra` && corpus.scope === LINEAR_CORPUS_SCOPE, `project and labels are mentions as the sync's are; the scope is the corpus, not the project (${corpus.mentions.map((m) => m.name).join(",")})`);
+  ok(/<issue id=/.test(corpus.canonical.form) && corpus.canonical.form === linearAdapter.map(issue).canonical.form, "the canonical is the issue as the API gave it, markup included — the same bytes the sync stores, so a rebuild over a synced brain reads it unchanged");
+  ok(corpus.facets.status === "Backlog" && corpus.facets[WATERMARK_KEY] === issue.updatedAt && corpus.watermark?.value === issue.updatedAt, "the facets are the sync's, the watermark the issue's updatedAt");
   const doc = docOf(corpus);
-  ok(doc.id === linearThoughtId("SMD-10") && doc.source === "linear" && doc.meta.issue === "SMD-10" && doc.content === corpus.text && doc.structure?.identity.key === "SMD-10" && doc.scope === LINEAR_CORPUS_SCOPE, "docOf: the eval's id space, the source, the facets, the structure carried");
+  ok(doc.id === linearThoughtId("SMD-10") && doc.source === "linear" && doc.meta.issue === "SMD-10" && doc.content === corpus.text && doc.structure?.identity.key === "SMD-10" && doc.scope === LINEAR_CORPUS_SCOPE && doc.watermark?.key === WATERMARK_KEY, "docOf: the eval's id space, the source, the facets, the structure and the watermark carried");
   ok(docOf({ ...corpus, identity: { system: "markdown", key: "Note" } }).id === recordId("markdown", "Note"), "…and a markdown record lands on its own source-qualified id");
+  let refusal = "";
+  try { corpusIngested({ id: "SMD-10", title: "A title", text: "old dump" }); } catch (e) { refusal = e instanceof AdapterRefusal ? e.message : `wrong: ${(e as Error).name}`; }
+  ok(/built before 2026-09-24/.test(refusal) && /build-linear-corpus/.test(refusal), `a dump without \`issue\` is refused with the rebuild command, not rendered another way (${refusal.slice(0, 60)})`);
+  refusal = "";
+  try { corpusIngested({ ...record, id: "SMD-99" }); } catch (e) { refusal = e instanceof AdapterRefusal ? e.message : "wrong"; }
+  ok(/disagree/.test(refusal), "a record whose id and issue identifier disagree is refused");
 
   // The allowlist (SMD-1813): gated sources refuse by scope, one line per scope; the fork's own records pass.
   const gated = applyAllowlist([doc, { ...doc, id: "x" }, { id: "f", content: "c", source: "fork", meta: {} }], allowlistFrom(""));
@@ -645,7 +699,12 @@ async function main(): Promise<void> {
   if (wanted.has("linear")) {
     if (!linearPath) note("linear", "skipped — pass --linear <dump.json> (built by evals/build-linear-corpus.ts)");
     else if (!existsSync(linearPath)) { console.error(`--linear: no such file: ${linearPath}`); process.exit(2); }
-    else { const docs = linearDocs(linearPath); perSource.linear = docs.length; collected.push(...docs); }
+    else {
+      const { docs, refused, reason } = linearDocs(linearPath);
+      perSource.linear = docs.length;
+      collected.push(...docs);
+      if (refused) note("linear", `${refused} record(s) refused — ${reason}`);
+    }
   }
   if (wanted.has("memory")) {
     if (!memoryDir) note("memory", "skipped — pass --memory-dir <path> or set OB1_MEMORY_DIR (the *.md memory files)");
@@ -691,7 +750,7 @@ async function main(): Promise<void> {
 
   const sql = new SQL({ url, max: 1 });
   const run = runName();
-  const tally: Record<UpsertResult, number> = { inserted: 0, updated: 0, patched: 0, unchanged: 0, skipped: 0, held: 0 };
+  const tally: Record<UpsertResult, number> = { inserted: 0, updated: 0, patched: 0, unchanged: 0, skipped: 0, held: 0, stale: 0 };
   const structure = { canonical: { inserted: 0, updated: 0, unchanged: 0 } as Record<string, number>, links: { added: 0, closed: 0, kept: 0, dropped: 0 }, mentions: 0, records: 0 };
   const heldBy = new Map<string, number>();
   try {
@@ -712,8 +771,9 @@ async function main(): Promise<void> {
   }
 
   printCounts();
-  console.log(`  tier=${tier}  inserted ${tally.inserted}  updated ${tally.updated}  patched ${tally.patched}  unchanged ${tally.unchanged}  skipped ${tally.skipped}  held ${tally.held}${dropped ? `  (+${dropped} duplicate-content dropped)` : ""}`);
+  console.log(`  tier=${tier}  inserted ${tally.inserted}  updated ${tally.updated}  patched ${tally.patched}  unchanged ${tally.unchanged}  skipped ${tally.skipped}  held ${tally.held}  stale ${tally.stale}${dropped ? `  (+${dropped} duplicate-content dropped)` : ""}`);
   for (const [source, n] of heldBy) console.log(`  ${source}: ${n} record(s) HELD — another thought already is that source item (the board sync's row for a ticket, on a brain it keeps); nothing written for them. db/README.md, "Two writers of one identity".`);
+  if (tally.stale) console.log(`  ${tally.stale} record(s) STALE — the row carries a newer watermark than the record (the board sync moved the ticket past this dump); nothing written for them. Rebuild the dump, or let the sync keep the board.`);
   if (structure.records) {
     console.log(`  structure (${structure.records} record(s), run ${run}): canonical inserted ${structure.canonical.inserted ?? 0} updated ${structure.canonical.updated ?? 0} unchanged ${structure.canonical.unchanged ?? 0}; links added ${structure.links.added} closed ${structure.links.closed} kept ${structure.links.kept} dropped ${structure.links.dropped}; structured mentions ${structure.mentions}`);
   }
