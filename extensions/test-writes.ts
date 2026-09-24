@@ -866,6 +866,10 @@ try {
   assert(textMode.status === 200 && ids(textMode).includes(cid) && !ids(textMode).includes(rid) && textMode.json?.total === 2 && textMode.json?.count === 1 && textMode.json?.total_pages === 1,
     `…and in text mode, through search_thoughts_text with p_filter {}: the page filtered by the column the function returns, total its count with the hidden row, count the rows shown (${textMode.status}: ${JSON.stringify({ count: textMode.json?.count, total: textMode.json?.total, total_pages: textMode.json?.total_pages })})`);
   const [openSem, openText] = await Promise.all([sem({ exclude_restricted: false }), txt({ exclude_restricted: false })]);
+  // send()'s in-flight counter (the fix in c5b3a21d) is held by nothing while every arm passes — it fixes how a failure
+  // is REPORTED — so its teeth are this self-check (review pass 4, the mutant run): two requests were just in flight.
+  assert(console.error === CONSOLE.error && console.warn === CONSOLE.warn,
+    "send() restores the console after two requests in flight — the per-call save-and-restore it replaced left the second request's silence in place");
   const twin = ((openSem.json?.results ?? []) as Record<string, unknown>[]).find((x) => x.id === rid);
   assert(ids(openSem).includes(rid) && ids(openSem).includes(cid) && ids(openText).includes(rid) && ids(openText).includes(cid) && twin?.type === "planted-kind",
     `exclude_restricted: false shows the twin beside the capture in both modes, and the twin's type — a column its metadata does not carry — reaches the semantic result through the lookup (${ids(openSem).length}/${ids(openText).length}; ${twin?.type})`);
@@ -1111,16 +1115,16 @@ try {
 
 console.log("\n[the files say what this test assumes]");
 const spells = (rel: string, re: RegExp, what: string) => assert(re.test(readFileSync(join(ROOT, rel), "utf8")), `${rel} ${what}`);
-// The date helpers rest-api's /search copied from enhanced-mcp (SMD-2054) — ISO_BOUND, parseBound, dateWindow,
-// withinDates — are held identical to the character, comment lines and the row's type aside: the enhanced-mcp block
+// The date helpers rest-api's /search copied from enhanced-mcp (SMD-2054) — DateWindow, ISO_BOUND, parseBound,
+// dateWindow, withinDates — are held identical to the character, comment lines and the row's type aside: the enhanced-mcp block
 // above drives the date-only, zone-less and calendar arms through ITS copy, and a divergence in rest-api's would pass
 // every arm of the rest-api block (review pass 1). The two servers deploy alone and share only _shared/.
 {
-  const dateHelpers = (rel: string) => (readFileSync(join(ROOT, rel), "utf8").match(/^const ISO_BOUND[\s\S]*?^function withinDates[\s\S]*?^}$/m)?.[0] ?? "")
+  const dateHelpers = (rel: string) => (readFileSync(join(ROOT, rel), "utf8").match(/^type DateWindow[\s\S]*?^function withinDates[\s\S]*?^}$/m)?.[0] ?? "")
     .split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*\*)/.test(l)).join("\n").replace("row: ThoughtRow", "row: Record<string, unknown>");
   const [ours, theirs] = [dateHelpers("integrations/rest-api/index.ts"), dateHelpers("integrations/enhanced-mcp/index.ts")];
   assert(ours.length > 1000 && ours === theirs,
-    `integrations/rest-api/index.ts 's date helpers are integrations/enhanced-mcp/index.ts's to the character, comment lines and the row's type aside (${ours.length} vs ${theirs.length} chars)`);
+    `integrations/rest-api/index.ts 's date helpers, the window's type included, are integrations/enhanced-mcp/index.ts's to the character, comment lines and the row's type aside (${ours.length} vs ${theirs.length} chars)`);
 }
 // A paste-in snippet with free variables; a README's sample.
 spells("recipes/provenance-chains/mcp-tools.ts", /"upsert_thought",\s*\{\s*p_content: content,\s*p_payload: \{[^}]*embedding_model: EMBEDDING_MODEL/s, "captures content, vector and label in one 3-argument upsert_thought");
