@@ -9,7 +9,7 @@
   "requires": {
     "open_brain": true,
     "services": ["Discord API", "OpenRouter"],
-    "tools": ["Supabase CLI"]
+    "tools": ["Bun 1.4+"]
   },
   "tags": ["discord", "capture", "bot", "messaging"],
   "connectors": ["discord"],

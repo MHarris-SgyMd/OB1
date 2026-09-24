@@ -23,8 +23,8 @@ backups, no resource limits.
 
 ```bash
 cp deploy/.env.example deploy/.env
-openssl rand -hex 24   # → POSTGRES_PASSWORD
-openssl rand -hex 32   # → MCP_ACCESS_KEY
+openssl rand -hex 24                                    # → POSTGRES_PASSWORD
+bun server-portable/keygen.ts --name laptop --scope write   # → a line for MCP_ACCESS_KEYS; keep the key
 ```
 
 `deploy/.env` is gitignored. This replaces `supabase secrets set`: the same values,
@@ -52,14 +52,14 @@ Three services, in order (five with the profile):
 | --- | --- |
 | `postgres` | The Supabase-hosted database (`pgvector/pgvector:0.8.6-pg16`) |
 | `migrate` | Pasting SQL into the Supabase dashboard — the `ob1-migrate` image (`db/Dockerfile`) runs `db/migrate.ts`, then exits |
-| `server` | The Edge Function and `supabase functions deploy` |
+| `server` | Upstream's Edge Function and its deploy command |
 | `ollama` (profile) | OpenRouter — the model endpoint the server defaults to |
 | `ollama-pull` (profile) | Pulling both models by hand; runs once, then exits |
 
 ### 3. Verify
 
 ```bash
-./deploy/smoke.sh
+OB1_SMOKE_KEY=<your-raw-key> ./deploy/smoke.sh
 ```
 
 ### 4. Connect a client
@@ -77,7 +77,7 @@ this machine, such as Claude Code at user scope
 (`claude mcp add --transport http --scope user open-brain http://127.0.0.1:8000/
 --header "x-brain-key: <key>"`). A claude.ai or Claude Desktop custom connector
 connects from Anthropic's side, not from your machine, so it needs a TLS proxy
-or a tunnel in front; one on this host (caddy, cloudflared, `tailscale serve`)
+or a tunnel in front; one on this host (caddy, cloudflared, `tailscale funnel`)
 dials `127.0.0.1:8000` itself and the loopback default serves it — `SERVER_BIND`
 changes only when the proxy is on another machine, as the next section says.
 `127.0.0.1`, not `localhost`: the mapping binds the IPv4 loopback only, and a
@@ -146,6 +146,7 @@ the repo root, with whatever `-f` files the stack was started with:
 | `server` | `server:8000` | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
 | `postgres` | `postgres:5432` — the server and the migrator | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
 | `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
+| `jev` (`--profile jev`) | `jev:8020` — the server's preflight, and a spike run in a container | Nothing. The host-ports file publishes it on `127.0.0.1:${JEV_PORT:-8020}` for a spike run from a checkout (`OB1_JEV_BASE_URL=http://127.0.0.1:8020`) | Not intended; an unauthenticated model API, as Ollama's is |
 | `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` and the model provider, and Linear's API outward | Nothing | Nothing |
 
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes one
@@ -311,6 +312,41 @@ scheduled form is the one built here; a Linear webhook is exact and immediate
 but needs an inbound URL the stack has no origin for until SMD-1846, and the
 handler's shape (signature, replay window, loop guard) is SMD-1862's.
 
+## The typed-decision tier
+
+The Jev spikes — a reranker, a question router, extraction gates — each need a
+model that answers a bounded question ("is this true of this text?", "which of
+these options?") with a calibrated probability in one forward pass. Ollama
+cannot serve one (its API exposes no option logits), so the `jev` profile runs
+[`jev/serve.ts`](../jev/README.md) — Verdict v1.4 on onnxruntime's CPU
+provider — beside the stack (SMD-2050):
+
+```bash
+# deploy/.env: OB1_JEV_BASE_URL=http://jev:8020 and OB1_JEV_LOCAL=1
+podman compose -f deploy/compose.yaml --profile jev up -d
+podman compose -f deploy/compose.yaml --profile jev logs -f jev
+```
+
+The first start fetches the pinned weights (606 MB, about 20 s here) into the
+`jev-models` volume — on a link slower than ~1 MB/s that outlasts the
+healthcheck's ten-minute start period and the server, which waits for a
+healthy `jev`, does not start: pre-pull with
+`podman compose -f deploy/compose.yaml --profile jev run --rm jev --fetch-only`; every start verifies each file's sha256 and replaces one
+that does not match (a verify-only restart serves in about a second). About
+1 GB resident, outside Ollama's scheduler. With `OB1_JEV_BASE_URL` set the
+server's preflight dials the tier and fails the start when it does not answer,
+so set the knob with the profile, not before it; with the profile the server
+waits for `jev` to be healthy (`depends_on … required: false`), so the first
+start's fetch does not crashloop it. `compose restart server` does not start
+what the server depends on: with `jev` stopped the server's preflight fails
+and restarts it until `compose --profile jev up -d` brings the tier back
+(preflight's remedy says so). A full batch of 64 decisions is ~25 s in the
+container; `JEV_THREADS` (and `JEV_HUB`, a mirror for the weights) in
+`deploy/.env` reach the service. A spike run from a checkout
+adds `-f deploy/compose.host-ports.yaml` and reaches it at
+`http://127.0.0.1:8020`; without compose, `bun jev/serve.ts` on the host serves
+the same contract on the same port.
+
 ## What this does not cover
 
 - **TLS, backups, resource limits, log shipping.** Reference topology only. One
@@ -329,7 +365,7 @@ handler's shape (signature, replay window, loop guard) is SMD-1862's.
   prints the vector count and the setting in force just before 039. On a brain
   past a million rows build the two staging indexes `CONCURRENTLY` first, as
   the migration's header says, and let it adopt them.
-- **A Supabase Edge Function passing checks 2, 3 and 4.** On Supabase the API gateway
+- **Upstream's Edge Function on Supabase passing checks 2, 3 and 4.** There the API gateway
   answers the OAuth discovery path with 401 before the function sees it, so check
   2 fails there — and the failure is real: the claude.ai connector will not open
   against that deployment either (upstream

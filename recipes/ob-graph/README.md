@@ -23,8 +23,7 @@ All graph traversal runs in PostgreSQL — `traverse_graph` uses a recursive CTE
 ## Prerequisites
 
 - Working Open Brain setup ([Getting Started guide](../../docs/01-getting-started.md))
-- Supabase project configured
-- Supabase CLI installed and linked to your project
+- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/))
 
 ## Credential Tracker
 
@@ -32,10 +31,8 @@ All graph traversal runs in PostgreSQL — `traverse_graph` uses a recursive CTE
 OB-GRAPH -- CREDENTIAL TRACKER
 --------------------------------------
 
-SUPABASE (from your Open Brain setup)
-  Project URL:           ____________
-  Secret key:            ____________
-  Project ref:           ____________
+DATABASE (from your Open Brain setup)
+  Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
 
 GENERATED DURING SETUP
   Default User ID:       ____________
@@ -53,7 +50,7 @@ GENERATED DURING SETUP
 <details>
 <summary><strong>SQL: Create tables, indexes, RLS, and graph functions</strong> (click to expand)</summary>
 
-Run the contents of `schema.sql` in your Supabase SQL Editor (Dashboard → SQL Editor → New Query → paste → Run).
+Run `schema.sql` against your brain's database — `psql "$DATABASE_URL" -f recipes/ob-graph/schema.sql` (or paste it into Supabase's SQL Editor, if that is where your Postgres lives).
 
 The schema creates:
 
@@ -90,7 +87,7 @@ Done when: `graph_nodes` and `graph_edges` exist and `traverse_graph` and `find_
 
 ![Step 2](https://img.shields.io/badge/Step_2-Run_the_MCP_Server-2E86AB?style=for-the-badge)
 
-This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — so it is not a Supabase Edge Function and `supabase functions deploy` does not apply (FORK.md change 74; SMD-1798 moved this server, whose `graph_nodes!graph_edges_target_node_id_fkey(…)` embeds — the key named because two join the tables — the shim did not read until then). It imports the access-key module from `../_shared/auth.ts` (the copy in `recipes/_shared/`, the core server's). Mint an access key as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows, decide which Open Brain user this graph belongs to, and from a checkout of this repository:
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — one HTTP process, as every server here is ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks it; FORK.md change 74; SMD-1798 moved this server, whose `graph_nodes!graph_edges_target_node_id_fkey(…)` embeds — the key named because two join the tables — the shim did not read until then). It imports the access-key module from `../_shared/auth.ts` (the copy in `recipes/_shared/`, the core server's). Mint an access key as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows, decide which Open Brain user this graph belongs to, and from a checkout of this repository:
 
 ```bash
 (cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports
@@ -222,7 +219,7 @@ After setup, your AI can:
 
 ### "relation 'graph_nodes' does not exist"
 
-You haven't run the SQL from Step 1 yet. Copy `schema.sql` into your Supabase SQL Editor and run it.
+You haven't run the SQL from Step 1 yet. Run `schema.sql` against your database as Step 1 shows.
 
 ### "function traverse_graph does not exist"
 

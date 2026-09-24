@@ -68,13 +68,7 @@ SUPABASE (from your Open Brain setup)
 
 The migration is idempotent — safe to re-run. It uses `ADD COLUMN IF NOT EXISTS`, `CREATE OR REPLACE FUNCTION`, and `CREATE INDEX IF NOT EXISTS` throughout.
 
-Or via the Supabase CLI:
-
-```bash
-supabase db push
-```
-
-(if you have the migration file in `supabase/migrations/`).
+Or, if your Postgres is Supabase's, paste the file into its SQL Editor and Run.
 
 ![Step 2](https://img.shields.io/badge/Step_2-Verify-1E88E5?style=for-the-badge)
 

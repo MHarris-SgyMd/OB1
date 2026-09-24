@@ -38,9 +38,9 @@ Must validate against `/.github/metadata.schema.json`. Required fields:
   "requires": {
     "open_brain": true,
     "services": [],
-    "tools": ["Supabase CLI"]
+    "tools": ["Bun 1.4+"]
   },
-  "requires_primitives": ["deploy-edge-function", "remote-mcp"],
+  "requires_primitives": ["deploy-remote-mcp", "remote-mcp"],
   "learning_order": null,
   "tags": ["at-least-one-tag"],
   "difficulty": "beginner | intermediate | advanced",
@@ -49,16 +49,16 @@ Must validate against `/.github/metadata.schema.json`. Required fields:
 ```
 
 Rules:
-- `requires_primitives` always includes `deploy-edge-function` (its Step 3 mints the access key; the server itself runs under Bun, not as an Edge Function) and `remote-mcp`. Add others (e.g., `rls`, `shared-mcp`) only if the extension teaches those concepts.
+- `requires_primitives` always includes `deploy-remote-mcp` (the run line, and its Step 3 mints the access key) and `remote-mcp`. Add others (e.g., `rls`, `shared-mcp`) only if the extension teaches those concepts.
 - `learning_order` is only set for curated learning path extensions (1-6). Community extensions omit it.
-- `services` lists external APIs beyond Supabase/OpenRouter (e.g., `["Gmail API"]`).
+- `services` lists external APIs beyond the brain's own Postgres and model provider (e.g., `["Gmail API"]`); `tools` names the runtime, `Bun 1.4+`.
 - `tags` should include the extension's domain and difficulty-related terms.
 
 ---
 
 ## File 3: schema.sql
 
-PostgreSQL DDL that runs in the Supabase SQL Editor. Must follow these rules:
+PostgreSQL DDL that runs against the brain's database with `psql -f`. Must follow these rules:
 
 1. **Every table must have:**
    - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
@@ -112,7 +112,8 @@ import { z } from "zod";
 import { createClient } from "../../compat/supabase-sql/index.ts"; // Bun's Postgres client in supabase-js's shape
 // The core server's access keys: named, scoped, SHA-256-hashed entries in
 // MCP_ACCESS_KEYS, compared timing-safe, each revocable on its own. _shared/
-// auth.ts is server-portable/auth.ts, copied so Supabase bundles it. Never
+// auth.ts is server-portable/auth.ts, copied beside the extensions and held
+// identical by extensions/test-auth.ts. Never
 // compare a key with `!==` yourself (the fork's consistency check refuses it).
 import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
 
@@ -238,16 +239,15 @@ Must follow the template at `extensions/_template/README.md`. Key sections:
 
 ### The Bun Run (CRITICAL)
 
-The README's "Run the MCP Server" step is the run every extension README has (`extensions/household-knowledge/README.md` is the model): `PORT=8787 bun extensions/{extension-slug}/index.ts` with `SUPABASE_URL` (a `postgres://` connection string) and `MCP_ACCESS_KEYS` set, the key minted as the [Deploy an Edge Function](../../primitives/deploy-edge-function/) primitive's Step 3 shows. There is no function to deploy: the fork's servers are Bun-native (SMD-1799), and `extensions/test-auth.ts` starts every one under `bun` in CI. The path in the command must match the extension's actual directory name.
+The README's "Run the MCP Server" step is the run every extension README has (`extensions/household-knowledge/README.md` is the model): `PORT=8787 bun extensions/{extension-slug}/index.ts` with `SUPABASE_URL` (a `postgres://` connection string) and `MCP_ACCESS_KEYS` set, the key minted as the [Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) primitive's Step 3 shows, and behind HTTPS for a hosted client as its Step 5 shows. There is nothing else to deploy: the fork's servers are Bun-native (SMD-1799), and `extensions/test-auth.ts` starts every one under `bun` in CI. The path in the command must match the extension's actual directory name.
 
 ### SQL Setup
 
-Point users to the Supabase SQL Editor, not the CLI:
+Point users at their database, with the connection string the server will use:
 
 ```markdown
-Run the SQL in `schema.sql` in your Supabase SQL Editor
-(`https://supabase.com/dashboard/project/YOUR_PROJECT_ID/sql/new`).
-Copy, paste, click Run.
+Run `schema.sql` against your Open Brain database:
+`psql "$DATABASE_URL" -f extensions/{extension-slug}/schema.sql`.
 ```
 
 ### Test Prompts
@@ -261,7 +261,6 @@ Include 3-5 example prompts a user can try immediately after setup. These should
 | Thing | Pattern | Example |
 |-------|---------|---------|
 | Directory | `extensions/{kebab-case-name}/` | `extensions/household-knowledge/` |
-| Function name | `{kebab-case-name}-mcp` | `household-knowledge-mcp` |
 | MCP server name | `{kebab-case-name}` | `household-knowledge` |
 | Table names | `{snake_case}` | `household_items`, `household_vendors` |
 | Tool names | `{snake_case}` | `add_household_item`, `search_items` |

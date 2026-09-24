@@ -40,7 +40,7 @@ The Open Brain capture is prefixed with the memory type (e.g., `[feedback]`, `[u
 ## Troubleshooting
 
 **Issue: Open Brain capture fails but local memory saves fine**
-Solution: Check that your MCP server is running (`supabase functions list` should show `open-brain-mcp` as ACTIVE). The skill is designed to not block local saves if the capture fails.
+Solution: Check that your MCP server is running (`podman compose -f deploy/compose.yaml ps` shows `server` up; `deploy/smoke.sh` answers green). The skill is designed to not block local saves if the capture fails.
 
 **Issue: Duplicate thoughts in Open Brain**
 Solution: Open Brain uses embedding-based dedup. If you update an existing memory, the new capture may coexist with the old one. This is expected — semantic search will surface the most relevant version.

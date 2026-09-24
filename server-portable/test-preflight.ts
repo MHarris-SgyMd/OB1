@@ -2280,5 +2280,142 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   assert(parsed.ok === false && jsonRow?.status === "fail" && THREE(jsonRow?.fix ?? ""), "--json carries the row, its status and its remedy");
 }
 
+console.log("\n[10] The typed-decision tier is dialled when configured — every run, not only --deep (SMD-2050)");
+{
+  // A stub tier that speaks ob1-jev/1 and counts what reaches it, so "dialled
+  // without --deep" and "the refused decision sent nothing" are facts about
+  // the requests, not the report.
+  const { INSUFFICIENT_EVIDENCE, JEV_CONTRACT } = await import("./jev-contract.ts");
+  const MODEL = { name: "verdict-v1.4", source: "https://huggingface.co/o/r", revision: "8af2496eb63c7fa66d7d234e1f62629380030eb4", weights_sha256: "4ae01f82".padEnd(64, "0"), calibrator_sha256: "af2a8769".padEnd(64, "0"), rules: "openjev-engine@00b5ee96#d1c5fb07e514" };
+  const seen: string[] = [];
+  const stub = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const path = new URL(req.url).pathname;
+      seen.push(`${req.method} ${path}`);
+      if (path === "/info") return Response.json({ contract: JEV_CONTRACT, model: MODEL, kinds: ["binary", "choice"], max_options: 24, max_batch: 64, max_tokens: 512 });
+      const { decisions } = (await req.json()) as { decisions: { id?: string }[] };
+      return Response.json({ contract: JEV_CONTRACT, model: MODEL, ms: 1, results: decisions.map((d) => ({ ...(d.id ? { id: d.id } : {}), kind: "binary", probabilities: { true: 0.6, false: 0.2, [INSUFFICIENT_EVIDENCE]: 0.2 }, selected: "true", abstained: false, p_insufficient: 0.2, p_true: 0.75, logits: [1, 0, 0], temperature: 5.0069, tokens: 30, truncated: false })) });
+    },
+  });
+  const other = Bun.serve({ port: 0, fetch: () => Response.json({ models: [] }) }); // answers, but not the contract
+  // Answers every path with a redirect: something is there, and it is not the tier.
+  const redirector = Bun.serve({ port: 0, fetch: () => new Response(null, { status: 302, headers: { Location: "http://elsewhere.invalid/" } }) });
+  // Answers /info as the tier and fails /decide: the decision row's failure path.
+  const halfTier = Bun.serve({
+    port: 0,
+    fetch: (req) => (new URL(req.url).pathname === "/info"
+      ? Response.json({ contract: JEV_CONTRACT, model: MODEL, kinds: ["binary", "choice"], max_options: 24, max_batch: 64, max_tokens: 512 })
+      : Response.json({ error: "the model failed" }, { status: 500 })),
+  });
+  const TIER = `http://127.0.0.1:${stub.port}`;
+  const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)) ?? "";
+  const JEV = { OB1_JEV_BASE_URL: undefined, OB1_JEV_MODEL: undefined, OB1_JEV_LOCAL: undefined, OB1_EGRESS_POLICY: undefined, OB1_EGRESS_ALLOW: undefined, OB1_EGRESS_DENY: undefined };
+
+  const off = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV });
+  assert(/^\s*·\s+jev tier\s+OB1_JEV_BASE_URL is unset — the typed-decision tier is off/.test(row(off.out, "jev tier")) && row(off.out, "jev egress") === "",
+         "unset: one skip row, and no egress row for a tier that is not there");
+
+  seen.length = 0;
+  const up = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1" });
+  assert(/✓\s+jev tier\s+http:\/\/127\.0\.0\.1:\d+ serves verdict-v1\.4 \(https:\/\/huggingface\.co\/o\/r@8af2496e, weights 4ae01f820000…\) — ob1-jev\/1/.test(row(up.out, "jev tier")),
+         `set: the row names the model, its pinned revision and weights (${row(up.out, "jev tier").trim().slice(0, 90)})`);
+  assert(JSON.stringify(seen) === JSON.stringify(["GET /info"]), `…dialled without --deep, /info only — no decision, no text (${seen.join(", ")})`);
+  assert(/✓\s+jev egress\s+http:\/\/127\.0\.0\.1:\d+ is declared local \(OB1_JEV_LOCAL\) — the decision text stays on the box/.test(up.out), "…and the egress row names the knob that declared it");
+  assert(/·\s+jev decision\s+not checked — pass --deep/.test(up.out), "…and the decision probe waits for --deep");
+
+  seen.length = 0;
+  const deep = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1" }, "--deep");
+  assert(/✓\s+jev decision\s+one binary decision in \d+ ms: p 0\.750, insufficient 0\.200, temperature 5\.0069/.test(deep.out) && seen.includes("POST /decide"),
+         "--deep: one decision through the client, its answer read back");
+
+  const dead = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: "http://127.0.0.1:1", OB1_JEV_LOCAL: "1" }, "--deep");
+  assert(/✗\s+jev tier\s+nothing answers at http:\/\/127\.0\.0\.1:1 — the connection was refused \(GET \/info, 2\.5 s timeout\)/.test(dead.out) && /→ Start it — compose --profile jev/.test(dead.out),
+         "an unreachable tier fails its row with how to start it — at preflight, not at a spike's first call");
+  assert(/·\s+jev decision\s+not checked — the jev tier row failed/.test(dead.out), "…and --deep does not dial a tier that did not answer");
+
+  // SMD-1875's masking rule: userinfo never lands in the log, on the tier row or the egress row.
+  const withUser = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: "http://user:jevsecret@127.0.0.1:1", OB1_JEV_LOCAL: "1" });
+  assert(!/jevsecret/.test(withUser.out) && /✗\s+jev tier\s+nothing answers at http:\/\/\*\*\*@127\.0\.0\.1:1/.test(withUser.out), "a base with userinfo is shown masked, never in the clear");
+  const unknown = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: "http://jev-not-a-host.invalid:8020", OB1_JEV_LOCAL: "1" });
+  assert(/✗\s+jev tier\s+nothing answers at http:\/\/jev-not-a-host\.invalid:8020 — the name does not resolve/.test(unknown.out), "a name that does not resolve says so, resolved before it is dialled");
+  // Something answers, not as the tier; the base's userinfo stays masked in
+  // the client's own words too (the fifth review pass's mutant: dropping
+  // masked() passed every case before these).
+  const redirected = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `http://user:jevsecret@127.0.0.1:${redirector.port}`, OB1_JEV_LOCAL: "1" });
+  assert(!/jevsecret/.test(redirected.out) && /✗\s+jev tier\s+http:\/\/\*\*\*@127\.0\.0\.1:\d+ answers, but not as the tier: Info request to http:\/\/\*\*\*@.*302 redirecting to http:\/\/elsewhere\.invalid\//.test(redirected.out) && /→ Check OB1_JEV_BASE_URL is the tier's base with no path/.test(redirected.out),
+         "a redirect is an answer that is not the tier: named, its Location shown, userinfo masked, the base's path the remedy");
+  const halfway = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `http://user:jevsecret@127.0.0.1:${halfTier.port}`, OB1_JEV_LOCAL: "1" }, "--deep");
+  assert(!/jevsecret/.test(halfway.out) && /✗\s+jev decision\s+Decision request to http:\/\/\*\*\*@127\.0\.0\.1:\d+\/decide failed: 500/.test(halfway.out), "a /decide that fails is the decision row's, userinfo masked");
+  const pathed = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `${TIER}/v1`, OB1_JEV_LOCAL: "1" });
+  assert(/✗\s+jev tier\s+http:\/\/127\.0\.0\.1:\d+\/v1 answers, but not as the tier/.test(pathed.out), "a base with Ollama's /v1 on it answers, but not as the tier");
+  const proxied = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", HTTP_PROXY: "http://127.0.0.1:9", http_proxy: undefined, NO_PROXY: undefined, no_proxy: undefined });
+  assert(/✗\s+jev tier\s+.*HTTP_PROXY is set, so this call goes through that proxy unless NO_PROXY names 127\.0\.0\.1/.test(proxied.out) && /→ Add 127\.0\.0\.1 to NO_PROXY/.test(proxied.out), "a proxy variable in the way is named, with NO_PROXY as the fix");
+  const stopped = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: "http://jev:8020", OB1_JEV_LOCAL: "1" });
+  assert(/→ The jev service is not running: bring the profile up — compose --profile jev up -d \(compose restart server does not start it\)/.test(stopped.out), "the stack's own service unresolved: not running, and restart server does not start it");
+  // A proxy that answers — with an error status — is an answer not from the
+  // tier, and the row still names the proxy as the route.
+  const badProxy = Bun.serve({ port: 0, fetch: () => new Response("bad gateway", { status: 502 }) });
+  const viaBadProxy = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", HTTP_PROXY: `http://127.0.0.1:${badProxy.port}`, http_proxy: undefined, NO_PROXY: undefined, no_proxy: undefined });
+  badProxy.stop();
+  assert(/✗\s+jev tier\s+.* answers, but not as the tier: Info request .*502.*; HTTP_PROXY is set, so this call goes through that proxy/.test(viaBadProxy.out), "an error status through a proxy is not the tier's, and the proxy is named as the route");
+  // NO_PROXY exempts the host by Bun's rule — the host, `*`, host:port — and
+  // the call goes direct: a live tier behind a proxy that answers only 502
+  // passes, which it cannot through the proxy (seventh review pass: the
+  // earlier case could not tell a direct dial from a proxied one).
+  const exemptProxy = Bun.serve({ port: 0, fetch: () => new Response("bad gateway", { status: 502 }) });
+  for (const noProxy of ["127.0.0.1", "*", `127.0.0.1:${stub.port}`, "localhost,127.0.0.1"]) {
+    const exempted = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", HTTP_PROXY: `http://127.0.0.1:${exemptProxy.port}`, http_proxy: undefined, NO_PROXY: noProxy, no_proxy: undefined });
+    assert(/✓\s+jev tier\s+http:\/\/127\.0\.0\.1:\d+ serves verdict-v1\.4/.test(exempted.out) && !/HTTP_PROXY is set/.test(exempted.out), `NO_PROXY=${noProxy}: the tier is dialled direct past the proxy, and the row does not blame it`);
+  }
+  // …and where the exemption shows: a refused exempt host is not blamed on the
+  // proxy (the ✓ rows above carry no proxy wording to test). The suffix
+  // spelling (`.internal`) needs a resolvable subdomain and is not driven here.
+  for (const noProxy of ["127.0.0.1", "*", "127.0.0.1:1"]) {
+    const refused = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: "http://127.0.0.1:1", OB1_JEV_LOCAL: "1", HTTP_PROXY: `http://127.0.0.1:${exemptProxy.port}`, http_proxy: undefined, NO_PROXY: noProxy, no_proxy: undefined });
+    assert(/✗\s+jev tier\s+nothing answers at http:\/\/127\.0\.0\.1:1 — the connection was refused/.test(refused.out) && !/HTTP_PROXY is set/.test(refused.out) && !/Add 127\.0\.0\.1 to NO_PROXY/.test(refused.out),
+           `NO_PROXY=${noProxy}: a refused exempt host is not blamed on the proxy`);
+  }
+  // A port that is not the tier's does not exempt it: the call goes through the proxy, which answers 502.
+  const wrongPort = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", HTTP_PROXY: `http://127.0.0.1:${exemptProxy.port}`, http_proxy: undefined, NO_PROXY: "127.0.0.1:1", no_proxy: undefined });
+  exemptProxy.stop();
+  assert(/✗\s+jev tier\s+.*502.*HTTP_PROXY is set/.test(wrongPort.out), "NO_PROXY=host:another-port does not exempt it, and the proxy is named");
+  // An /info that names the contract and lacks its fields answers, but not as the tier.
+  const partial = Bun.serve({ port: 0, fetch: () => Response.json({ contract: JEV_CONTRACT }) });
+  const partialRun = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `http://127.0.0.1:${partial.port}`, OB1_JEV_LOCAL: "1" });
+  partial.stop();
+  assert(/✗\s+jev tier\s+http:\/\/127\.0\.0\.1:\d+ answers, but not as the tier: .*lacks model, kinds, max_options/.test(partialRun.out), "an /info with the contract's name and not its fields is not the tier, not a crash");
+  // A certificate the runtime does not trust: something answers; the tier serves plain http.
+  const jevCerts = mkdtempSync(join(tmpdir(), "ob1-preflight-jev-tls-"));
+  const jevMinted = Bun.spawnSync(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(jevCerts, "k.pem"), "-out", join(jevCerts, "c.pem"), "-subj", "/CN=localhost", "-days", "1"], { stdout: "ignore", stderr: "ignore" });
+  if (jevMinted.exitCode !== 0) {
+    skipRaw("an https tier with an untrusted certificate answers, and the fix is http://", "no openssl to mint a certificate");
+  } else {
+    const tlsTier = Bun.serve({ port: 0, tls: { key: Bun.file(join(jevCerts, "k.pem")), cert: Bun.file(join(jevCerts, "c.pem")) }, fetch: () => Response.json({}) });
+    const tls = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `https://127.0.0.1:${tlsTier.port}`, OB1_JEV_LOCAL: "1", NODE_TLS_REJECT_UNAUTHORIZED: undefined });
+    tlsTier.stop(true);
+    assert(/✗\s+jev tier\s+https:\/\/127\.0\.0\.1:\d+ answers, but its TLS certificate is not trusted/.test(tls.out) && /→ The tier serves plain http: use http:\/\/ in OB1_JEV_BASE_URL/.test(tls.out),
+           "an https tier with an untrusted certificate answers, and the fix is http://");
+  }
+  rmSync(jevCerts, { recursive: true, force: true });
+  redirector.stop();
+  halfTier.stop();
+  const wrongModel = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "semif" });
+  assert(/✗\s+jev tier\s+.* serves verdict-v1\.4 .*, and OB1_JEV_MODEL expects semif/.test(wrongModel.out) && /→ Point OB1_JEV_BASE_URL at the tier serving semif, or set OB1_JEV_MODEL=verdict-v1\.4\./.test(wrongModel.out),
+         "a tier serving another model than OB1_JEV_MODEL fails, naming both");
+
+  const notJev = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `http://127.0.0.1:${other.port}`, OB1_JEV_LOCAL: "1" });
+  assert(/✗\s+jev tier\s+.*speaks undefined, not ob1-jev\/1/.test(notJev.out), "a URL that answers but is not the tier (an Ollama, say) fails as not the contract");
+
+  seen.length = 0;
+  const undeclared = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER }, "--deep");
+  assert(/!\s+jev egress\s+http:\/\/127\.0\.0\.1:\d+ looks local but is not declared so/.test(undeclared.out) && /→ Set OB1_JEV_LOCAL=1 if this endpoint is on this machine/.test(undeclared.out),
+         "undeclared: the egress row warns with OB1_JEV_LOCAL as the fix");
+  assert(/!\s+jev decision\s+Decision request to .* refused by the egress gate/.test(undeclared.out) && !seen.includes("POST /decide"),
+         `…and the --deep decision is refused by the gate before it is sent (${seen.join(", ")})`);
+  stub.stop();
+  other.stop();
+}
+
 localStub.stop(true);
 report();

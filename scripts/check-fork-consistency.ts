@@ -843,13 +843,12 @@ const COLUMN_COMMENT_NON_PROBES = [
   "COMMENT ON COLUMN thought_work_claims.ttl_expires_at IS 'x';",
   "-- COMMENT ON COLUMN thoughts.derived_from IS what 025 runs",
 ];
-// Files that create a brain from the getting-started shape, not sidecars that
-// add to one. Exactly this many lines, for exactly these functions.
-const GUIDE = "the guide migrations 001-003 were extracted from, creating the brain; SETUP.md sends this fork's readers past it";
+// Files that create a brain from upstream's getting-started shape, not sidecars
+// that add to one. Exactly this many lines, for exactly these functions. (The
+// guide itself carries no SQL since SMD-1802: it brings up the compose stack.)
 const NEON = "creates the recipe's own Neon database from the guide's shape; never run against a migrated brain";
 const one = (why: string): CountedException => ({ why, lines: 1 });
 const CORE_FUNCTION_EXCEPTIONS = new Map<string, Record<string, CountedException>>([
-  ["docs/01-getting-started.md", { update_updated_at: one(GUIDE), match_thoughts: one(GUIDE), upsert_thought: one(GUIDE) }],
   ["recipes/content-fingerprint-dedup/README.md", {
     upsert_thought: one("the recipe migration 003 was extracted from, kept as its record; the note above its Step 2 says a migrated brain must not paste it"),
   }],
@@ -1601,15 +1600,14 @@ const THOUGHT_WRITE_NON_PROBES = [
 ];
 const OWN_DATABASE = (what: string): CountedException => ({ why: `${what} — the fork's functions are not in it, so the capture is a raw row with no fingerprint, no label and no audit actor; the README says so`, lines: 1 });
 const THOUGHT_WRITE_EXCEPTIONS = new Map([
-  // The guides that show upstream's upsert_thought body: the INSERT is the function's own (check 7 excepts the same lines).
-  ["docs/01-getting-started.md", { why: "the INSERT inside upstream's upsert_thought definition, the function itself, shown as the guide's; SETUP.md sends this fork's readers past it", lines: 1 }],
+  // The guide that shows upstream's upsert_thought body: the INSERT is the function's own (check 7 excepts the same lines).
   ["recipes/content-fingerprint-dedup/README.md", { why: "the INSERT inside the upsert_thought definition migration 003 was extracted from, kept as its record", lines: 1 }],
   // Two deployments whose database is their own, built from the guide's shape.
   ["integrations/kubernetes-deployment/index.ts", OWN_DATABASE("its own Postgres in the cluster, built by k8s/init.sql")],
   ["recipes/vercel-neon-telegram/src/lib/db.ts", OWN_DATABASE("its own Neon database, built by sql/001-create-thoughts.sql")],
   ["recipes/schema-aware-routing/index.ts", OWN_DATABASE("its own five-table project, built by its README's SQL (a `thoughts` with domain/status/source columns)")],
   // The fixtures: a row as an older write left it — fingerprint and label by hand — for the writer under test to move, and a restricted twin for the search tools to hide.
-  ["extensions/test-writes.ts", { why: "plants a thought as an older write left it, fingerprint and label supplied by hand, for the writer under test to move whole; and a restricted twin at a captured thought's vector, the row the three search tools must not show (SMD-1986)", lines: 2 }],
+  ["extensions/test-writes.ts", { why: "plants a thought as an older write left it, fingerprint and label supplied by hand, for the writer under test to move whole; and a restricted twin at a captured thought's vector (plantRestricted, once for both servers), the row no search may show — enhanced-mcp's three tools (SMD-1986), rest-api's POST /search (SMD-2054)", lines: 2 }],
 ]);
 
 function checkThoughtWritesAround() {
@@ -2110,7 +2108,7 @@ function documentedEnvKnobs(pattern: RegExp) {
 /** compose file under deploy/ → the services that publish one mapping each from it. */
 const PUBLISHES: Record<string, string[]> = {
   "compose.yaml": ["server"],
-  "compose.host-ports.yaml": ["postgres", "ollama"],
+  "compose.host-ports.yaml": ["postgres", "ollama", "jev"],
   // The three-brain pipeline (SMD-1806): each tier's server on its own loopback
   // port; the three Postgres services and the shared Ollama publish nothing.
   "compose.tiers.yaml": ["stable-server", "canary-server", "working-server"],
@@ -3765,7 +3763,7 @@ await checkVersionModule();
  * `server-portable` is the reference: the others import its files, so its
  * pins are the ones a second copy would collide with.
  */
-const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals", "scripts"];
+const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals", "scripts", "jev"];
 const TYPE_PINS = ["@types/bun", "typescript", "@types/node"];
 const WORKFLOW = ".github/workflows/fork-checks.yml";
 const TSC_STEP = /^\s*bunx tsc --noEmit\s*$/;

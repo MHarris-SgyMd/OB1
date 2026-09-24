@@ -1,14 +1,17 @@
 # Setting up Open Brain without Supabase
 
-The upstream guide (`docs/01-getting-started.md`) builds Open Brain on
-supabase.com: a hosted Postgres, an Edge Function, SQL pasted into a dashboard,
-and `supabase secrets set`. This fork runs the same thing on infrastructure you
-control, with no Supabase account and no Supabase CLI.
+Upstream's guide builds Open Brain on supabase.com: a hosted Postgres, an Edge
+Function, SQL pasted into a dashboard, and `supabase secrets set`. This fork runs
+the same thing on infrastructure you control, with no Supabase account and no
+Supabase CLI.
 
-Same six MCP tools, same `thoughts` schema, same clients. Different plumbing.
+Same MCP tools, same `thoughts` schema, same clients. Different plumbing.
 
-**Read this instead of `docs/01-getting-started.md`.** That guide still describes
-the Supabase path, which is upstream's — this fork carries no Edge Function build (`FORK.md`, "Deploying").
+This file is the operator's reference: the two decisions, what leaves the box,
+where to run it for real. [`docs/01-getting-started.md`](docs/01-getting-started.md)
+walks the same stack at a beginner's pace, one verified step at a time, and
+connects each AI client; this fork carries no Edge Function build (`FORK.md`,
+"Deploying").
 
 ## Two decisions to make first
 
@@ -380,7 +383,7 @@ a leak is worth. See [issue #216](https://github.com/NateBJones-Projects/OB1/iss
 - podman or docker, with compose
 - **Either** an [OpenRouter](https://openrouter.ai) API key with a few dollars of
   credit, **or** nothing at all if you use the `local-models` profile — in which
-  case budget a few hundred MB for the model downloads instead
+  case budget about 7 GB for the model downloads instead
 - [Bun](https://bun.sh) 1.4+ to mint keys and run the tests
 
 No Supabase account. No Supabase CLI. No Deno.
@@ -472,12 +475,12 @@ are not published at all (`deploy/README.md`, "What is reachable from where").
 A claude.ai or Claude Desktop custom connector (Settings → Connectors → Add
 custom connector) connects from Anthropic's side, not from your machine, so it
 needs a TLS proxy or a tunnel in front. One on this host (caddy, cloudflared,
-`tailscale serve`) dials `127.0.0.1:8000` itself, and the loopback default
-serves it. Only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in
+`tailscale funnel` — `tailscale serve` reaches your tailnet alone) dials
+`127.0.0.1:8000` itself, and the loopback default serves it. Only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in
 `deploy/.env` — it opens the server, and only the server, to the network, with
 the key in clear on every request until the proxy.
 
-A write key sees ten tools; a read key sees seven. `capture_thought`,
+A write key sees twelve tools; a read key sees nine. `capture_thought`,
 `update_thought` and `delete_thought` are never registered for a read key, so
 they do not appear in `tools/list` at all rather than failing when called.
 Opening the connector URL in a browser shows `Method Not Allowed`: the endpoint
@@ -489,7 +492,7 @@ new thought's id, which is what the other two take.
 `migrate` exits 0 having applied every migration under `db/migrations/`. `server`
 logs `preflight OK` and `Started server`. `smoke.sh` reports every check passed
 (`deploy/README.md` has the count, and the liveness-probe target for a platform
-that can only GET). A client shows ten tools for a write key, seven for a read
+that can only GET). A client shows twelve tools for a write key, nine for a read
 key.
 
 ## Where to run it for real

@@ -8,7 +8,7 @@ The [Provenance Chains schema](../../schemas/provenance-chains/) adds four colum
 
 1. **`backfill.mjs`** — One-time script to mark existing derived artifacts (weekly digests, wikis, lint reports, etc.) as `derivation_layer='derived'` and, where the saved artifact exposes thought IDs, populate `derived_from`.
 2. **`eval.mjs`** — Nightly (or on-demand) grader that scores each derived thought on existence / relevance / sufficiency using an LLM, and writes the scores into the thought's metadata so dashboards can surface low-quality chains. Three grader backends: `openrouter` (hosted, default), `stdin` (manual), and `queue` (emit prompts → another worker grades → apply back).
-3. **`mcp-tools.ts`** — Three MCP tool handler snippets to drop into your `open-brain-mcp` Edge Function: two read tools (`trace_provenance`, `find_derivatives`) that wrap the SQL helpers and handle redaction of restricted ancestors, cycle tolerance, and node caps; plus one write tool (`capture_derived_thought`) that captures a synthesized artifact *with* its provenance so the graph gets populated at capture time — not just by the one-time `backfill.mjs`. The write tool is deliberately separate from the canonical `capture_thought`, so the everyday capture path is untouched.
+3. **`mcp-tools.ts`** — Three MCP tool handler snippets to drop into your Open Brain MCP server (`server-portable/index.ts`): two read tools (`trace_provenance`, `find_derivatives`) that wrap the SQL helpers and handle redaction of restricted ancestors, cycle tolerance, and node caps; plus one write tool (`capture_derived_thought`) that captures a synthesized artifact *with* its provenance so the graph gets populated at capture time — not just by the one-time `backfill.mjs`. The write tool is deliberately separate from the canonical `capture_thought`, so the everyday capture path is untouched.
 
 Together, the schema + this recipe turn a flat thoughts table into a directed provenance graph that any Claude/GPT client can query through MCP.
 
@@ -18,7 +18,7 @@ Together, the schema + this recipe turn a flat thoughts table into a directed pr
 - [Provenance Chains schema](../../schemas/provenance-chains/) applied (adds the columns and helper SQL functions this recipe depends on)
 - Node.js 18+
 - Optional: an [OpenRouter](https://openrouter.ai) API key for the `openrouter` grader in `eval.mjs`. You can use `--grader stdin` or `--grader queue` instead if you prefer not to pay per-call grading costs.
-- Deno-style Supabase Edge Function runtime if you install the MCP tool handlers
+- A checkout of this repository, if you install the MCP tool handlers — they go into `server-portable/index.ts`
 
 ## Credential Tracker
 
@@ -104,13 +104,9 @@ Legacy names (still accepted with a deprecation warning):
 
 ![Step 6](https://img.shields.io/badge/Step_6-Install_MCP_Tools-1E88E5?style=for-the-badge)
 
-1. Open your `open-brain-mcp` server (in this repo, [`server-portable/index.ts`](../../server-portable/index.ts); in a deployed Supabase copy, usually `supabase/functions/open-brain-mcp/index.ts`) and paste the three `server.registerTool(...)` blocks from [`mcp-tools.ts`](./mcp-tools.ts) alongside your other tool registrations. The `capture_derived_thought` block reuses the canonical `getEmbedding` and `extractMetadata` helpers already defined in `index.ts` — paste it after those are in scope.
+1. Open your Open Brain MCP server, [`server-portable/index.ts`](../../server-portable/index.ts), and paste the three `server.registerTool(...)` blocks from [`mcp-tools.ts`](./mcp-tools.ts) alongside your other tool registrations. The `capture_derived_thought` block reuses the canonical `getEmbedding` and `extractMetadata` helpers already defined in `index.ts` — paste it after those are in scope.
 
-   Deploy the function:
-
-   ```bash
-   supabase functions deploy open-brain-mcp
-   ```
+   Rebuild and restart the server — `podman compose -f deploy/compose.yaml up --build server` for the reference stack.
 
    In Claude Desktop, open your Open Brain connector — you should now see `trace_provenance`, `find_derivatives`, and `capture_derived_thought` in the tool list.
 

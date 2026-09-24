@@ -10,7 +10,7 @@
   "requires": {
     "open_brain": true,
     "services": ["OpenRouter (optional, for eval grader)"],
-    "tools": ["Node.js 18+", "Supabase Edge Functions (for MCP tool handlers)"]
+    "tools": ["Node.js 18+", "a checkout of this repository (for the MCP tool handlers)"]
   },
   "requires_skills": [],
   "tags": ["provenance", "backfill", "evaluation", "mcp-tools"],

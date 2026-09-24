@@ -94,7 +94,7 @@ Restart Claude Code, have a conversation with at least 3 user messages, then end
 cat logs/ambient-capture.log
 
 # Verify thoughts were created
-curl "https://<project-ref>.supabase.co/functions/v1/open-brain-rest/thoughts?source_type=claude_code_ambient&limit=5" \
+curl "$SUPABASE_URL/functions/v1/open-brain-rest/thoughts?source_type=claude_code_ambient&limit=5" \   # the same base the hook posts to (upstream's path — the fork note above); export SUPABASE_URL in this shell first
   -H "x-brain-key: your-access-key"
 ```
 

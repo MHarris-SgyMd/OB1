@@ -17,6 +17,10 @@
 // A capture's, an edit's and an enrich's row; the raw deletes (DELETE /thought/:id,
 // the duplicate-resolve merge's) and the merge's raw metadata write on the
 // survivor still leave rows naming nobody — SMD-1793.
+// ob1-fork (SMD-2054): POST /search drops the restricted tier by the
+// sensitivity_tier COLUMN and reads its date bounds as instants, in both
+// modes, and GET /recent takes the tier filter its siblings had — the note
+// above columnsOf() says what leaked, what answered nothing, and why.
 /**
  * rest-api — REST API gateway for Open Brain.
  *
@@ -418,6 +422,98 @@ export default {
   fetch: handler,
 };
 
+// ── Search filters ──────────────────────────────────────────────────────────
+
+// ob1-fork (SMD-2054): POST /search hands the database no filter of its own.
+// Both functions it calls read that argument as a metadata containment —
+// `t.metadata @> filter` in this fork's match_thoughts (db/migrations/014,
+// 041's body) and `t.metadata @> coalesce(p_filter, '{}')` in the
+// enhanced-thoughts sidecar's search_thoughts_text — so the
+// `exclude_restricted: true` text mode folded into p_filter matched no thought
+// and every text-mode search answered an empty page with total 0. Semantic
+// mode sent `{}` and filtered the rows on `r.sensitivity_tier !== "restricted"`,
+// a column match_thoughts does not return (it returns id, content, metadata,
+// similarity, created_at and score): undefined !== "restricted" is always
+// true, and restricted thoughts' full content came back under the default
+// exclude_restricted. The tier is read from the COLUMN — columnsOf below, for
+// the ids match_thoughts returned — and the date bounds are instants applied
+// to the rows in both modes (text mode read none). The date helpers are
+// enhanced-mcp's (SMD-1986): the two servers deploy alone and share only
+// _shared/, so the text is copied, and extensions/test-writes.ts holds the two
+// copies identical to the character (comments and the row's type aside) and
+// drives this route against a restricted twin planted at a captured thought's
+// vector.
+
+type ThoughtColumns = { sensitivity_tier: string; type: unknown; source_type: unknown };
+/**
+ * The enhanced-thoughts columns of each id, one query: `sensitivity_tier`, on
+ * which semantic mode drops a restricted row, and `type` and `source_type`,
+ * which the semantic projection names — match_thoughts returns none of the
+ * three (review pass 1: `row.source_type` was undefined on every semantic
+ * result, so the key was missing from the JSON while text mode carried it,
+ * and `row.type` was a dead fallback behind metadata.type). The text function
+ * returns all three and needs no lookup.
+ */
+async function columnsOf(ids: string[]): Promise<Map<string, ThoughtColumns>> {
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase.from("thoughts").select("id, sensitivity_tier, type, source_type").in("id", ids);
+  if (error) throw new Error(`thoughts column lookup failed: ${error.message}`);
+  const rows = (data ?? []) as Record<string, unknown>[];
+  return new Map(rows.map((r): [string, ThoughtColumns] => [String(r.id), {
+    sensitivity_tier: String(r.sensitivity_tier ?? "standard"), type: r.type ?? null, source_type: r.source_type ?? null,
+  }]));
+}
+
+/**
+ * The caller's date window as instants. A bound is an ISO 8601 date or
+ * date-time, held to that shape before it is parsed (`Date.parse` alone would
+ * take "Dec 25, 2025"), and read as UTC unless it carries an offset: a
+ * date-only value is that day's midnight UTC, a zone-less date-time is UTC
+ * too — never the process's zone. Semantic mode compared the strings before:
+ * a bound written with a UTC offset sorted against the shim's `Z` rendering
+ * by its digits (later digits for an earlier instant), and a bound that did
+ * not parse hid every row or was ignored, neither with a word. GET /thoughts
+ * and GET /count hand the same string to Postgres, which reads a bare date in
+ * the session's time zone and takes shapes this refuses
+ * (`yesterday`, an hour-only offset); for a bound both accept, they agree on
+ * the instant on a database running in UTC, the container images' default. A
+ * bound off the shape, or a window closed before it opens, is a 400 naming the
+ * field rather than a comparison.
+ */
+type DateWindow = { start: number | null; end: number | null };
+// An offset carries its minutes (`+02:00`, `+0200`): Bun's Date.parse makes `+02` an Invalid Date.
+const ISO_BOUND = /^(?<y>\d{4})-(?<mo>\d{2})-(?<d>\d{2})(?:[T ](?<h>\d{2}):(?<mi>\d{2})(?::(?<s>\d{2})(?:\.\d{1,9})?)?(?<zone>Z|[+-]\d{2}:?\d{2})?)?$/i;
+function parseBound(name: string, value: string | null): number | null | { error: string } {
+  if (!value) return null;
+  const m = ISO_BOUND.exec(value);
+  if (!m) return { error: `${name} is not an ISO 8601 date or date-time: ${value}` };
+  // The fields in range, as Postgres holds them: Bun's Date.parse rolls `2026-02-30` over to March 2, where
+  // Postgres refuses the string — a rolled bound is a silently different day. `24:00`, ISO's end of day, stays.
+  const g = m.groups!;
+  const [y, mo, d, h, mi, s] = [g.y, g.mo, g.d, g.h ?? "0", g.mi ?? "0", g.s ?? "0"].map(Number);
+  const daysIn = new Date(Date.UTC(y, mo, 0)).getUTCDate(); // day 0 of the next month
+  const inRange = mo >= 1 && mo <= 12 && d >= 1 && d <= daysIn && mi <= 59 && s <= 60 && (h <= 23 || (h === 24 && mi === 0 && s === 0));
+  if (!inRange) return { error: `${name} is not a real date: ${value}` };
+  const utc = g.zone || value.length === 10 ? value : `${value}Z`;
+  const t = Date.parse(utc.replace(" ", "T"));
+  return Number.isNaN(t) ? { error: `${name} is not a real date: ${value}` } : t;
+}
+function dateWindow(startDate: string | null, endDate: string | null): DateWindow | { error: string } {
+  const start = parseBound("start_date", startDate);
+  if (typeof start === "object" && start !== null) return start;
+  const end = parseBound("end_date", endDate);
+  if (typeof end === "object" && end !== null) return end;
+  if (start !== null && end !== null && start > end) return { error: `start_date ${startDate} is after end_date ${endDate}` };
+  return { start, end };
+}
+
+/** Is the row's `created_at` inside the window? A row whose timestamp does not parse is outside any bound. */
+function withinDates(row: Record<string, unknown>, w: DateWindow): boolean {
+  if (w.start === null && w.end === null) return true;
+  const t = Date.parse(String(row.created_at));
+  return (w.start === null || t >= w.start) && (w.end === null || t <= w.end);
+}
+
 // ── Search ──────────────────────────────────────────────────────────────────
 
 async function handleSearch(req: Request): Promise<Response> {
@@ -432,28 +528,41 @@ async function handleSearch(req: Request): Promise<Response> {
   const startDate = body.start_date ? String(body.start_date).trim() : null;
   const endDate = body.end_date ? String(body.end_date).trim() : null;
 
-  if (query.length < 2) return json({ error: "query must be at least 2 characters" }, 400);
+  // Every answer of this route carries the request's CORS headers (review passes 2 and 3): without `req`, json()
+  // answers `Access-Control-Allow-Origin: null` under an allowlist, and a browser client can read neither a page nor
+  // a refusal. The file's other routes still answer that way — SMD-2079.
+  if (query.length < 2) return json({ error: "query must be at least 2 characters" }, 400, req);
+  const window = dateWindow(startDate, endDate);
+  if ("error" in window) return json({ error: window.error }, 400, req);
 
   if (mode === "text") {
-    const filter: Record<string, unknown> = {};
-    if (excludeRestricted) filter.exclude_restricted = true;
+    // p_filter is a metadata containment (the note above columnsOf): none here. The function ranks and pages BEFORE
+    // the tier and date filters apply to its page, so `total` and `total_pages` are the function's, hidden rows
+    // counted, and `count` is the rows shown — a page the filters emptied is `count: 0` with the pages after it
+    // still numbered; the README says so, and SMD-2055 moves the filters into the function.
     const { data, error } = await supabase.rpc("search_thoughts_text", {
-      p_query: query, p_limit: limit, p_filter: filter, p_offset: offset,
+      p_query: query, p_limit: limit, p_filter: {}, p_offset: offset,
     });
     if (error) throw new Error(`search failed: ${error.message}`);
 
-    const rows = data ?? [];
-    const totalCount = rows.length > 0 ? Number((rows[0] as Record<string, unknown>).total_count) : 0;
-    const results = rows.map((row: Record<string, unknown>) => ({
-      id: row.id, content: row.content, type: row.type, source_type: row.source_type,
-      importance: row.importance, metadata: row.metadata, created_at: row.created_at, rank: row.rank,
-    }));
+    const rows = (data ?? []) as Record<string, unknown>[];
+    // total_count rides on every row the function returns (hit_count, non-null); a page past the last hit has none.
+    const totalCount = rows.length > 0 ? Number(rows[0].total_count) : 0;
+    const results = rows
+      .filter((row) => !excludeRestricted || row.sensitivity_tier !== "restricted")
+      .filter((row) => withinDates(row, window))
+      .map((row) => ({
+        id: row.id, content: row.content, type: row.type, source_type: row.source_type,
+        importance: row.importance, metadata: row.metadata, created_at: row.created_at, rank: row.rank,
+      }));
 
     return json({ results, count: results.length, total: totalCount, page, per_page: limit,
-      total_pages: Math.ceil(totalCount / limit), mode: "text" });
+      total_pages: Math.ceil(totalCount / limit), mode: "text" }, 200, req);
   }
 
-  // Semantic search (default)
+  // Semantic search (default): match_thoughts returns the top-N by similarity; the tier and the date bounds are
+  // applied to the rows here, so over-fetch for headroom (rows ranked below the over-fetch are not seen — the
+  // README says when that matters).
   const dateFilterActive = !!(startDate || endDate);
   const fetchCount = (excludeRestricted || dateFilterActive) ? Math.min(limit + (dateFilterActive ? 50 : 20), 200) : limit;
   const { data, error } = await supabase.rpc("match_thoughts", {
@@ -461,18 +570,25 @@ async function handleSearch(req: Request): Promise<Response> {
   });
   if (error) throw new Error(`search failed: ${error.message}`);
 
-  let semanticRows = data ?? [];
-  if (excludeRestricted) semanticRows = semanticRows.filter((r: Record<string, unknown>) => r.sensitivity_tier !== "restricted");
-  if (startDate) semanticRows = semanticRows.filter((r: Record<string, unknown>) => String(r.created_at) >= startDate);
-  if (endDate) semanticRows = semanticRows.filter((r: Record<string, unknown>) => String(r.created_at) <= endDate);
-  semanticRows = semanticRows.slice(0, limit);
+  const allRows = (data ?? []) as Record<string, unknown>[];
+  // The columns by id, one lookup: the tier, on which the filter drops a row — an id the lookup did not return
+  // (deleted between the two calls) is treated as restricted, so the filter fails closed; nothing drives that
+  // branch, since the lookup reads the table the match just read — and the two the projection names.
+  const columns = await columnsOf(allRows.map((r) => String(r.id)));
+  const semanticRows = allRows
+    .filter((r) => !excludeRestricted || (columns.get(String(r.id))?.sensitivity_tier ?? "restricted") !== "restricted")
+    .filter((r) => withinDates(r, window))
+    .slice(0, limit);
 
-  const results = semanticRows.map((row: Record<string, unknown>) => ({
-    id: row.id, content: row.content, type: (row.metadata as Record<string, unknown>)?.type ?? row.type,
-    similarity: row.similarity, source_type: row.source_type, created_at: row.created_at,
-  }));
+  const results = semanticRows.map((row) => {
+    const own = columns.get(String(row.id));
+    return {
+      id: row.id, content: row.content, type: (row.metadata as Record<string, unknown>)?.type ?? own?.type ?? null,
+      similarity: row.similarity, source_type: own?.source_type ?? null, created_at: row.created_at,
+    };
+  });
 
-  return json({ results, count: results.length, total: results.length, page: 1, per_page: limit, total_pages: 1, mode: "semantic" });
+  return json({ results, count: results.length, total: results.length, page: 1, per_page: limit, total_pages: 1, mode: "semantic" }, 200, req);
 }
 
 // ── Capture ─────────────────────────────────────────────────────────────────
@@ -561,6 +677,13 @@ async function handleRecent(url: URL): Promise<Response> {
   const source = url.searchParams.get("source")?.trim() || null;
   const type = url.searchParams.get("type")?.trim() || null;
   const topic = url.searchParams.get("topic")?.trim() || null;
+  // ob1-fork (SMD-2054, review pass 1): the one route reading thoughts directly with no tier predicate —
+  // `GET /recent?limit=100` answered every restricted thought's full content, newest first (GET /duplicates calls
+  // find_near_duplicates, defined nowhere on this fork, so it fails rather than answers). exclude_restricted,
+  // default true, as its siblings (/thoughts, /count, /thought/:id) take it; the predicate is theirs, `<>` on the
+  // column, which also hides a row whose tier is NULL — an explicit write, the column defaults to standard — where
+  // the sidecar's functions use IS DISTINCT FROM (review pass 2; the siblings' shape kept, closed either way).
+  const excludeRestricted = url.searchParams.get("exclude_restricted") !== "false";
 
   let query = supabase.from("thoughts")
     .select("id, content, type, source_type, importance, metadata, created_at, updated_at")
@@ -570,10 +693,11 @@ async function handleRecent(url: URL): Promise<Response> {
   if (source) query = query.eq("source_type", source);
   if (type) query = query.eq("type", type);
   if (topic) query = query.contains("metadata", { topics: [topic] });
+  if (excludeRestricted) query = query.neq("sensitivity_tier", "restricted");
 
   const { data, error } = await query;
   if (error) throw new Error(`recent query failed: ${error.message}`);
-  return json({ results: data ?? [], count: (data ?? []).length, offset, limit, filters: { source, type, topic } });
+  return json({ results: data ?? [], count: (data ?? []).length, offset, limit, filters: { source, type, topic, exclude_restricted: excludeRestricted } });
 }
 
 // ── Get / Update / Delete Thought ───────────────────────────────────────────

@@ -10,7 +10,7 @@
   "requires": {
     "open_brain": true,
     "services": ["Slack"],
-    "tools": ["Supabase CLI"]
+    "tools": ["Bun 1.4+"]
   },
   "tags": ["slack", "capture", "integration", "messaging"],
   "connectors": ["slack"],

@@ -10,7 +10,7 @@
   "requires": {
     "open_brain": true,
     "services": ["Any OpenAI-compatible LLM gateway (OpenRouter, Ollama, etc.)"],
-    "tools": ["Supabase CLI or Supabase Studio"]
+    "tools": ["psql, or any SQL client"]
   },
   "tags": [
     "classification",

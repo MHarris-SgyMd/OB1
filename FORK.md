@@ -7,7 +7,7 @@ rebase.
 
 **What this fork is for:** running Open Brain without Supabase. Upstream assumes a
 supabase.com project — hosted Postgres, an Edge Function, SQL pasted into a
-dashboard, `supabase secrets set`. This fork runs the same six MCP tools and the
+dashboard, `supabase secrets set`. This fork runs the same MCP tools and the
 same schema on infrastructure you control.
 
 There is **no Supabase project to migrate from** here; this was built as a
@@ -111,15 +111,18 @@ upstream leftover no workflow ran, is removed so there is one release mechanism.
 
 [`SETUP.md`](SETUP.md) is the path: Postgres with pgvector, the migrations, the
 server as a Bun process or the container `server-portable/Dockerfile` builds
-(`deploy/compose.yaml` is the working reference), or Cloudflare Workers. There is
+(`deploy/compose.yaml` is the working reference), or Cloudflare Workers;
+`docs/01-getting-started.md` is the same stack at a beginner's pace. There is
 no Supabase Edge Function build in this fork to deploy — `server/` left with
 SMD-1800 — and the vendored MCP servers, APIs and workers under the category
-directories run the same way, `bun <file>` (their READMEs say so; SMD-1802
-brings the remaining deploy instructions to it). To deploy upstream's Edge
-Function, use upstream's checkout and guide; this fork's schema is a superset of
-the guide's, so that function runs against a brain built here — at its model's
-width (`openai/text-embedding-3-small`, 1536; `SETUP.md`'s local default is
-1024, and `upsert_thought` refuses another width).
+directories run the same way, `bun <file>`, behind the same TLS proxy
+(`primitives/deploy-remote-mcp/`; every README's deploy section says so since
+SMD-1802, and the repo rule in `CLAUDE.md` reads "remote over HTTP, never
+stdio" with no host named). To deploy upstream's Edge Function, use upstream's
+checkout and guide; this fork's schema is a superset of the guide's, so that
+function runs against a brain built here — at its model's width
+(`openai/text-embedding-3-small`, 1536; `SETUP.md`'s local default is 1024, and
+`upsert_thought` refuses another width).
 
 ### Required migration
 
