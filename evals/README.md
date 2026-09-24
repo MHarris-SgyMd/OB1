@@ -4905,8 +4905,8 @@ from Ollama's own process), both models resident (`qwen2.5:7b` 9.9 GB,
 `qwen3-embedding:4b` 9.3 GB), the tier as a host process (`bun jev/serve.ts`,
 4 threads). Alone, 30 embeddings, 10 chat completions and 30 decisions in
 turn; together, the three loops to one shared deadline as long as the alone
-phase took (about 2.5 s), so they overlap throughout — chat's 15 samples there
-make its p95 near its maximum:
+phase took (about 2.5 s), so they overlap throughout — with chat's 15 samples
+there, its p95 is its maximum:
 
 | call | alone: calls, p50 / p95 | beside the other two: calls, p50 / p95 | p50 ratio |
 | --- | --- | --- | --- |
@@ -4917,7 +4917,7 @@ make its p95 near its maximum:
 The warm-up loaded nothing, and no Ollama model was evicted or reloaded: both
 of its runners (`llama-server`) kept their pids and start times across the run.
 The tier is its own process, outside the scheduler `OLLAMA_MAX_LOADED_MODELS`
-governs; its footprint was 943–953 MB over two runs (macOS `footprint`, which counts the
+governs; its footprint was 942–953 MB over two runs (macOS `footprint`, which counts the
 compressed pages `ps`'s resident set leaves out: an earlier run's `ps` read
 536–622 MB), with 12.2 → 12.1 GB free. The cost is contention, not memory. What
 this does not test, and the run says so: past a warm-up load, no model load was
@@ -4939,7 +4939,8 @@ SMD-1935's rule: a strong label), `positive` (tools, projects, organizations in
 ≥ 5 thoughts: a weak label) and the `person`/`place` layer (no label) — each
 with a window of the first thought naming it, sent through the client and
 nothing else, under its own thought's metadata (so an egress policy's
-source/type/topic terms apply row by row); at most `--per-cohort` (60) of each,
+source/type/topic terms apply row by row, a refused row counted and left out);
+at most `--per-cohort` (60) of each,
 the most mentioned. The
 dogfood brain's Postgres is not published, so the run is a one-off container
 on the stack's network, the tier on the host (reached through the podman
@@ -4964,8 +4965,8 @@ On the dogfood brain (2,420 entities):
 negative: P(named entity) does not separate a migration number from a tool on
 this graph (AUROC 0.509; medians 0.555 and 0.568), and the choice kept the
 extractor's type for 37% of positives and for none of the 29 persons and
-places left once the 11 numeric-named ones fall to `bad` — `Nate B. Jones`
-typed as a project. It is one framing on Verdict v1.4, whose
+places left once the 11 numeric-named ones fall to `bad` — a person's full
+name typed as a project. It is one framing on Verdict v1.4, whose
 open-domain hard tier is 37% (jev/README.md, "Conformance"); which framing, which
 calibration and which model (SemIf, SMD-2052) is SMD-1937's measurement to make
 on this harness. What the run shows is the Verify bullet: the spike ran against

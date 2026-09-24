@@ -86,7 +86,7 @@ async function runners(): Promise<string[]> {
  * A value with a space in it is cut at the space.
  */
 async function ollamaSettings(): Promise<string> {
-  const pid = (await Bun.$`pgrep -xf ${"^\\S*ollama serve$"}`.nothrow().quiet().text()).trim().split("\n")[0];
+  const pid = (await Bun.$`pgrep -xf ${"^([^[:space:]]*/)?ollama serve$"}`.nothrow().quiet().text()).trim().split("\n")[0];
   if (!pid) return "unknown (no `ollama serve` process on this box)";
   const words = (await Bun.$`ps eww -o command= -p ${pid}`.nothrow().quiet().text()).trim().split(/\s+/);
   const vars = words.filter((w) => /^OLLAMA_[A-Z_]+=/.test(w));

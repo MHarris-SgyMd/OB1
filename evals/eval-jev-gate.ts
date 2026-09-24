@@ -43,6 +43,7 @@
 
 import { SQL } from "bun";
 import { loadEnv } from "./env.ts";
+import { ProviderError } from "../server-portable/embed.ts";
 import { INSUFFICIENT_EVIDENCE, jevDecideMany, resolveJevConfig, type JevDecision, type JevEnv, type JevResult } from "../server-portable/jev.ts";
 
 loadEnv();
@@ -86,7 +87,7 @@ async function candidates(): Promise<Candidate[]> {
                     WHEN entity_type IN ('tool', 'project', 'organization') AND mentions >= 5 AND name ~ '[A-Za-z]' THEN 'positive'
                END AS cohort
         FROM firsts
-      `) as { name: string; entity_type: string; content: string; metadata: Record<string, unknown> | null; mentions: number | bigint; cohort: Candidate["cohort"] | null }[];
+      `) as { name: string; entity_type: string; content: string; metadata: Record<string, unknown> | null; mentions: number | string; cohort: Candidate["cohort"] | null }[];
       const out: Candidate[] = [];
       for (const cohort of ["bad", "positive", "typed"] as const) {
         const pick = rows.filter((r) => r.cohort === cohort).sort((a, b) => Number(b.mentions) - Number(a.mentions) || a.name.localeCompare(b.name));
@@ -128,28 +129,35 @@ const quantile = (xs: number[], q: number) => [...xs].sort((a, b) => a - b)[Math
 
 const all = await candidates();
 // Each window leaves under its own thought's metadata, so a source/type/topic
-// term the egress policy names applies to it (jevDecideMany: one subject a call).
+// term the egress policy names applies to it (jevDecideMany: one subject a call);
+// a row the policy refuses is counted and left out, not the end of the run.
 const subject = (c: Candidate) => ({ kind: "decision" as const, actor: "eval-jev-gate", metadata: c.metadata });
 const t0 = performance.now();
 // One decision per request so the per-decision latency is measured, not a batch's share.
-const valid: { p: number | null; abstained: boolean; ms: number }[] = [];
-const typed: JevResult[] = [];
+const answered: { c: Candidate; v: { p: number | null; abstained: boolean; ms: number }; t: JevResult }[] = [];
+let refused = 0;
 for (const c of all) {
-  const t = performance.now();
-  const { results } = await jevDecideMany(cfg!, [validity(c)], subject(c));
-  valid.push({ p: results[0].p_true ?? null, abstained: results[0].abstained, ms: performance.now() - t });
-  typed.push((await jevDecideMany(cfg!, [typing(c)], subject(c))).results[0]);
+  try {
+    const t = performance.now();
+    const { results } = await jevDecideMany(cfg!, [validity(c)], subject(c));
+    const v = { p: results[0].p_true ?? null, abstained: results[0].abstained, ms: performance.now() - t };
+    answered.push({ c, v, t: (await jevDecideMany(cfg!, [typing(c)], subject(c))).results[0] });
+  } catch (e) {
+    if (!(e instanceof ProviderError && e.kind === "egress")) throw e;
+    refused++;
+  }
 }
 const wall = performance.now() - t0;
+const valid = answered.map((x) => x.v);
 
-const cohort = (k: Candidate["cohort"]) => all.map((c, i) => ({ c, v: valid[i], t: typed[i] })).filter((x) => x.c.cohort === k);
+const cohort = (k: Candidate["cohort"]) => answered.filter((x) => x.c.cohort === k);
 const bad = cohort("bad"), positive = cohort("positive"), typedLayer = cohort("typed");
 const baselineRejects = (c: Candidate) => /^[0-9.:]+$/.test(c.name);
 const rejects = (v: { p: number | null; abstained: boolean }) => v.abstained || (v.p ?? 0) < 0.5;
 /** The choice arm rejects as the binary arm does: a number, a generic word, or an abstention. */
 const CHOICE_REJECTS = ["number", "generic", INSUFFICIENT_EVIDENCE];
 
-console.log(`\n${all.length} candidates from the brain (${bad.length} bad, ${positive.length} positive, ${typedLayer.length} person/place); tier ${cfg!.endpoint.base}; ${(wall / 1000).toFixed(1)} s\n`);
+console.log(`\n${all.length} candidates from the brain${refused ? `, ${refused} refused by the egress policy and left out` : ""} (${bad.length} bad, ${positive.length} positive, ${typedLayer.length} person/place); tier ${cfg!.endpoint.base}; ${(wall / 1000).toFixed(1)} s\n`);
 console.log("| arm | rejects bad (recall) | rejects positive (false rejections, weak label) |");
 console.log("| --- | --- | --- |");
 console.log(`| baseline ^[0-9.:]+$ | ${pct(bad.filter((x) => baselineRejects(x.c)).length, bad.length)} | ${pct(positive.filter((x) => baselineRejects(x.c)).length, positive.length)} |`);
