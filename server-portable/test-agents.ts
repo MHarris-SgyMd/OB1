@@ -483,6 +483,60 @@ console.log("\n[15] Concurrent requests of a key share one lookup — on the SQL
   assert(apart === 5, `with sharing off (Workers), each request its own lookup (${apart})`);
 }
 
+console.log("\n[16] A lookup that times out keeps the registry's last answer for the key — a lock must not lift a revocation (SMD-2072)");
+{
+  // The lookup's lock wait is capped (store-sql.ts), so a registry whose tables
+  // are locked fails the lookup while every tool still answers: the one case
+  // where serving by name would let a revoked key through.
+  const warnings: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...a: unknown[]) => { warnings.push(a.map(String).join(" ")); };
+  let answer: () => Promise<AgentResolution> = async () => ({ ok: true, agentId: "agent-9" } as AgentResolution);
+  const store = fakeStore(() => answer(), () => {});
+  // Bun's SQL carries the SQLSTATE as `errno`: 55P03 is lock_timeout's.
+  const lockTimeout = async (): Promise<AgentResolution> => { throw Object.assign(new Error("canceling statement due to lock timeout"), { errno: "55P03" }); };
+  // TTL 0: the last answer is kept apart from the cache, whatever its TTL.
+  const r = new AgentResolver(0, () => 0);
+  const p = principal("laptop", H("9"));
+  await r.resolve(store, p);
+  answer = lockTimeout;
+  const kept = await r.resolve(store, p);
+  assert(kept.status === "ok" && kept.agentId === "agent-9" && kept.unresolved === undefined, `a key the registry answered for keeps its agent id while the lookup times out (${JSON.stringify(kept)})`);
+  // By digest: a rename presents the same digest under a new name.
+  const renamed = await r.resolve(store, principal("laptop-renamed", H("9")));
+  assert(renamed.status === "ok" && renamed.agentId === "agent-9", "…by digest, so a renamed key keeps it too");
+  answer = async () => ({ ok: false, error: "REVOKED", agentId: "agent-9", revokedAt: "2026-09-24T00:00:00Z", reason: "leaked" });
+  await r.resolve(store, p);
+  answer = lockTimeout;
+  const still = await r.resolve(store, p);
+  const again = await r.resolve(store, p);
+  assert(still.status === "revoked" && again.status === "revoked", "a key the registry revoked stays refused while the lookup times out, lookup after lookup");
+  const fresh = await r.resolve(store, principal("desk", H("8")));
+  assert(fresh.status === "ok" && fresh.agentId === undefined && fresh.unresolved === "unreachable", "a key it never answered for is served by name, as for an unreachable database");
+  // Any other failure is served by name whatever came before: the registry
+  // the answer came from may be gone ([11b]: resolve_agent dropped).
+  const kinds: [string, Error][] = [
+    ["no connection", new Error("connection refused")],
+    ["no resolve_agent", Object.assign(new Error("function resolve_agent(text, text, text) does not exist"), { errno: "42883" })],
+  ];
+  for (const [what, err] of kinds) {
+    answer = async () => { throw err; };
+    const gone = await r.resolve(store, p);
+    assert(gone.status === "ok" && gone.agentId === undefined && gone.unresolved === "unreachable", `…and on ${what}, even a revoked key's last answer gives way to serving by name, as before the cap`);
+  }
+  const statement = Object.assign(new Error("canceling statement due to statement timeout"), { errno: "57014" });
+  answer = async () => { throw statement; };
+  const capped = await r.resolve(store, p);
+  assert(capped.status === "revoked", "…while statement_timeout's 57014 keeps it, as lock_timeout's 55P03 does");
+  answer = async () => ({ ok: true, agentId: "agent-9" } as AgentResolution);
+  const lifted = await r.resolve(store, p);
+  assert(lifted.status === "ok" && lifted.agentId === "agent-9", "…and once the registry answers again, its answer replaces the last one (a revocation lifted)");
+  console.warn = realWarn;
+  const laptop = warnings.filter((w) => /key "laptop"/.test(w));
+  assert(laptop.length === 2 && /its last answer \(agent agent-9\) stands/.test(laptop[0]) && /its last answer \(revoked\) stands/.test(laptop[1]) && laptop.every((w) => /lock timeout/.test(w)),
+    `warned once per failure run, naming the answer kept and the cause (${laptop.length}: ${laptop.map((w) => w.slice(0, 90)).join(" | ")})`);
+}
+
 await sql.close();
 server.stop();
 provider.stop();

@@ -23,7 +23,8 @@
  */
 
 import { SQL } from "bun";
-import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgress } from "./brain-info.ts";
+import { readDatabaseFacts, setTimeoutCeilings, type DatabaseFacts, type ReadOptions, type ReadProgress } from "./brain-info.ts";
+import { RESOLVE_LOCK_TIMEOUT_MS, RESOLVE_STATEMENT_TIMEOUT_MS } from "./agents.ts";
 import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
   Actor,
@@ -369,9 +370,18 @@ export class SqlStore implements ThoughtStore {
   }
 
   async resolveAgent(opts: { keyHash: string; label: string; scope?: string }): Promise<AgentResolution> {
-    const rows = await this.sql`
-      SELECT resolve_agent(${opts.keyHash}::text, ${opts.label}::text, ${opts.scope ?? null}::text) AS r`;
-    return normaliseAgentResolution(rows[0]?.r);
+    // Its own transaction, so its lock wait and run are capped: resolve_agent
+    // UPDATEs the key's row, and while a migration holds the registry's tables
+    // or a transaction holds that row, an uncapped call held a pool connection
+    // until the lock cleared — K cold keys, K connections (SMD-2072). A
+    // timeout raises, and agents.ts keeps the registry's last answer for the
+    // key, or serves it by name.
+    return this.sql.begin(async (tx) => {
+      await setTimeoutCeilings(tx, RESOLVE_STATEMENT_TIMEOUT_MS, RESOLVE_LOCK_TIMEOUT_MS);
+      const rows = await tx`
+        SELECT resolve_agent(${opts.keyHash}::text, ${opts.label}::text, ${opts.scope ?? null}::text) AS r`;
+      return normaliseAgentResolution(rows[0]?.r);
+    });
   }
 
   async captureActorOf(id: string): Promise<{ actorName: string | null; agentId: string | null } | null> {

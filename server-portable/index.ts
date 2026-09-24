@@ -2282,7 +2282,10 @@ app.get("*", async (c, next) => {
   // what an unknown key gets (review pass 2: a revoked key read the whole
   // record while the registry's tables were locked); one that answers that it
   // cannot reach the database (agents.ts: not a refusal) lets the record
-  // through with the database's error.
+  // through with the database's error. Locked tables answer before the
+  // deadline since SMD-2072 (the lookup's lock wait is capped at 1 s): a key
+  // this process has had an answer for keeps it — a revoked key stays refused
+  // — and one it has not is served as for an unreachable database.
   const info = readBrainInfo("health");
   let timer: ReturnType<typeof setTimeout> | undefined;
   const identity = await Promise.race([

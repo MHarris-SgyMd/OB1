@@ -349,8 +349,11 @@ that does not answer is named in `unread` with its reason (`refused`,
 are kept, and a database whose catalog has not answered by then is
 `database.error`. Concurrent probes share one read, and requests of one key share
 one agent-registry lookup (at /health and the MCP route alike), so a burst during
-a migration holds one connection for the read and one per distinct key — the
-registry's lock wait itself is unbounded (SMD-2072). Without a key, with a wrong
+a migration holds one connection for the read and one per distinct key, each
+for at most the lookup's 1 s lock wait (SMD-2072: its statement is capped at 2 s
+and its lock wait at 1 s, as ceilings; a lookup that times out is served as for
+an unreachable database, except that a key this process has had an answer for
+keeps it — its agent id, or its revocation). Without a key, with a wrong
 or capture-only key, or with a revoked one — or while the agent registry has
 not answered by the deadline, since it could still say revoked — the body is
 the literal `ok`, so nothing about the deployment reaches an unauthenticated

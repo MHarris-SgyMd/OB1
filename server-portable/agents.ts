@@ -28,6 +28,18 @@
  * for what is really an outage. A definitive REVOKED, by contrast, is an answer,
  * and it is enforced.
  *
+ * The argument has one gap, and it is closed separately: the registry's tables
+ * locked while the thoughts are not (a migration of ob1_agent_keys, a
+ * transaction holding a key's row). The lookup's lock wait is capped
+ * (RESOLVE_LOCK_TIMEOUT_MS, SMD-2072), so the lookup times out there while
+ * every tool still answers. On a timeout — the registry there but busy — a key
+ * this process has had an answer for keeps that answer: its agent id, or its
+ * revocation, which a lock must not lift. A key it has never had one for is
+ * served by name, as for an unreachable database. Any other failure (no
+ * connection, no resolve_agent) is served by name whatever came before: the
+ * registry an old answer came from may be gone. Row locks never reach a
+ * revoked key: its revocation is read before the UPDATE that waits.
+ *
  * The same reasoning covers a deployment that has not applied migration 010:
  * `resolve_agent` does not exist, resolution fails, and attribution falls back
  * to the key's name in thought_audit.actor_name — precisely where it was before
@@ -46,6 +58,17 @@ import type { AgentResolution, ThoughtStore } from "./store.ts";
  * kill switch usefully fast. Set to 0 to resolve on every request.
  */
 export const DEFAULT_CACHE_TTL_MS = 60000;
+
+/**
+ * The caps on one lookup (SMD-2072), set as ceilings in the transaction the
+ * SQL store opens for it (store-sql.ts). resolve_agent reads a key's row and
+ * UPDATEs it; the lock wait is the one wait it can have, and a second is
+ * generous for a single-row write. Within /health's 2.5 s deadline (index.ts),
+ * so a locked registry answers the probe before the deadline does. Workers'
+ * PostgREST store runs under the role PostgREST connects as and sets neither.
+ */
+export const RESOLVE_LOCK_TIMEOUT_MS = 1_000;
+export const RESOLVE_STATEMENT_TIMEOUT_MS = 2_000;
 
 /**
  * A failed lookup is cached too, and far more briefly.
@@ -133,11 +156,9 @@ export class AgentResolver {
     const hit = this.cache.get(key);
     if (hit && hit.expires > this.now()) return hit.outcome;
     // One lookup in flight per key: concurrent requests of a key the cache has
-    // not got share it. resolve_agent waits on a lock the registry's tables may
-    // be under, with no timeout of its own, so without this every request of a
-    // cold key held one pool connection while they were locked — ten emptied
-    // the pool, through the MCP route or /health alike (SMD-2041 review
-    // passes 3–4). The lock wait itself is SMD-2072's.
+    // not got share it, so a burst of one key while the registry's tables are
+    // locked holds one pool connection for the lock wait, not one each
+    // (SMD-2041), and the wait is capped (SMD-2072).
     if (!this.shareLookups) return this.lookup(store, principal, key);
     const shared = this.inflight.get(key);
     if (shared) return shared;
@@ -164,9 +185,13 @@ export class AgentResolver {
 
       if (r.ok) {
         outcome = { status: "ok", agentId: r.agentId };
+        this.lastAnswer.set(principal.keyHash, outcome);
+        this.warned.delete(key);
         ttl = this.ttlMs;
       } else if (r.error === "REVOKED") {
         outcome = { status: "revoked", agentId: r.agentId, revokedAt: r.revokedAt, reason: r.reason };
+        this.lastAnswer.set(principal.keyHash, outcome);
+        this.warned.delete(key);
         // Not cached for the full TTL: a revocation lifted by hand should take
         // effect about as fast as one applied.
         ttl = failureTtl(this.ttlMs);
@@ -182,18 +207,34 @@ export class AgentResolver {
         ttl = failureTtl(this.ttlMs);
       }
     } catch (e) {
-      // Unreachable, unmigrated, or misconfigured. See the header. Said once
-      // per key while the failure lasts, so a brain whose CHECK refuses a
-      // scope (049, SMD-1298) is not silent about the unattributed writes.
-      this.warnOnce(key, `agent registry: resolve_agent failed for key "${principal.name}" — writes are attributed by name only until it answers: ${String((e as Error)?.message ?? e).split("\n")[0].slice(0, 200)}`);
-      outcome = { status: "ok", agentId: undefined, unresolved: "unreachable" };
+      // Unreachable, unmigrated, misconfigured, or locked past the cap. See the
+      // header. Said once per key while the failure lasts, so a brain whose
+      // CHECK refuses a scope (049, SMD-1298) is not silent about the
+      // unattributed writes.
+      const cause = String((e as Error)?.message ?? e).split("\n")[0].slice(0, 200);
+      const last = timedOut(e) ? this.lastAnswer.get(principal.keyHash) : undefined;
+      if (last) {
+        this.warnOnce(key, `agent registry: resolve_agent failed for key "${principal.name}" — its last answer (${last.status === "revoked" ? "revoked" : `agent ${last.agentId}`}) stands until it answers: ${cause}`);
+        outcome = last;
+      } else {
+        this.warnOnce(key, `agent registry: resolve_agent failed for key "${principal.name}" — writes are attributed by name only until it answers: ${cause}`);
+        outcome = { status: "ok", agentId: undefined, unresolved: "unreachable" };
+      }
       ttl = failureTtl(this.ttlMs);
     }
-    if (outcome.agentId !== undefined) this.warned.delete(key);
 
     if (ttl > 0) this.cache.set(key, { outcome, expires: this.now() + ttl });
     return outcome;
   }
+
+  /**
+   * The registry's last answer for each digest — an agent id or a revocation —
+   * kept apart from the cache and whatever its TTL (0 included): it is read
+   * only when a lookup times out (the header). By digest, not digest and name: a
+   * rename keeps the agent and the revocation. The key space is the configured
+   * key set, as for the cache.
+   */
+  private readonly lastAnswer = new Map<string, AgentOutcome>();
 
   /** Keys whose resolve threw and were warned about; cleared when one answers again. */
   private readonly warned = new Set<string>();
@@ -207,8 +248,19 @@ export class AgentResolver {
   /** Drop everything cached. For tests, and for a deployment that wants a signal. */
   clear(): void {
     this.cache.clear();
+    this.lastAnswer.clear();
     this.warned.clear();
   }
+}
+
+/**
+ * Whether a lookup failed on the SQL store's caps: 55P03 (lock_timeout) or
+ * 57014 (statement_timeout), the SQLSTATE Bun's SQL carries as `errno`. The
+ * PostgREST store rethrows a message alone, and sets no caps.
+ */
+function timedOut(e: unknown): boolean {
+  const state = String((e as { errno?: unknown })?.errno ?? "");
+  return state === "55P03" || state === "57014";
 }
 
 /** Parse OB1_AGENT_CACHE_TTL_MS, falling back rather than failing on nonsense. */
