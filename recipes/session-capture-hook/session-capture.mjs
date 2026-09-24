@@ -894,13 +894,48 @@ export async function awaitPredecessors(sessionId, name, { boundMs = POST_TIMEOU
   const ahead = () => sessionPayloads(sessionId).filter((p) => p.pid !== null && p.pid !== process.pid && p.name.localeCompare(name) < 0 && isAlive(p.pid));
   const first = ahead();
   if (!first.length) return { waitedMs: 0, timedOut: false };
+  if (boundMs <= 0) return { waitedMs: 0, timedOut: true }; // the run's budget is spent: said in the note, not waited for
   log(`waiting session=${sessionId} for an earlier payload of the session in flight (pid ${first[0].pid}), at most ${Math.ceil(boundMs / 1000)} s`);
   const t0 = Date.now();
   while (ahead().length) {
     if (Date.now() - t0 >= boundMs) return { waitedMs: Date.now() - t0, timedOut: true };
-    await sleep(50);
+    await sleep(WAIT_POLL_MS);
   }
   return { waitedMs: Date.now() - t0, timedOut: false };
+}
+/** Between looks at the claims while waiting: nothing interactive waits on this child, and each look walks every claim directory (first review pass: 50 ms was 1,800 walks over a long wait). */
+const WAIT_POLL_MS = 250;
+
+/**
+ * A landed payload of the session whose bookkeeping is still owed — its post
+ * answered, its `captured_id` written, its state write failed, the file back
+ * under pending/ — is a thought the state does not name (first review pass).
+ * The newest such payload older than `name`, by name.
+ */
+export function landedBefore(sessionId, name) {
+  let best;
+  for (const p of sessionPayloads(sessionId)) {
+    if (p.name.localeCompare(name) >= 0 || (best && p.name.localeCompare(best.name) < 0)) continue;
+    let j;
+    try { j = JSON.parse(readFileSync(p.path, "utf8")); } catch { continue; }
+    if (j?.captured_id) best = { name: p.name, id: j.captured_id, at: j.prepared_at };
+  }
+  return best;
+}
+/**
+ * The thought a payload supersedes: the session's newest landed one by the
+ * time its payload was prepared — what the state records, or a landed payload
+ * whose bookkeeping is owed. Newest by time, not by source: a run that
+ * finished an older payload's bookkeeping named it over the state's newer
+ * thought, and two summaries stood (first review pass). What this run itself
+ * landed is one or the other: its state write moved the state, or failed and
+ * left the payload owed under pending/ — the per-run map SMD-1298's sixth
+ * pass added for it was the third spelling of the same fact.
+ */
+function pointerFor(sessionId, name, state) {
+  const cands = [state?.thought_id && { id: state.thought_id, at: state.summary_at ?? state.captured_at }, landedBefore(sessionId, name)].filter(Boolean);
+  cands.sort((a, b) => (Date.parse(b.at ?? "") || 0) - (Date.parse(a.at ?? "") || 0));
+  return cands[0]?.id;
 }
 
 /**
@@ -919,7 +954,7 @@ export async function awaitPredecessors(sessionId, name, { boundMs = POST_TIMEOU
  * leaves its claims for the next run's sweep (third review pass). The run's
  * own payload is always among the five.
  */
-export async function postPending(cfg, own) {
+export async function postPending(cfg, own, { waitBudgetMs = POST_TIMEOUT_MS } = {}) {
   ensureDirs();
   sweepInflight();
   const mine = join(INFLIGHT_DIR(), String(process.pid));
@@ -938,25 +973,29 @@ export async function postPending(cfg, own) {
   }
   const newestOf = new Map(); // session → the newest payload's home in this run
   for (const { home, payload } of claimed) newestOf.set(payload.session_id, home);
-  const landed = new Map(); // session → the id this run landed for it
   const outcomes = [];
   pruneDead();
-  let waitBudgetMs = POST_TIMEOUT_MS; // the run's, shared: five payloads each waiting a whole timeout would outlive the claim sweep
+  // The wait budget is the run's, shared (the seam is the suite's): five
+  // payloads each waiting a whole timeout would outlive the claim sweep.
   try {
     for (const { home, here, payload } of claimed) {
       const file = home;
       // An earlier payload of the session that another child is still posting
       // lands first (SMD-2035): the state read below is what it wrote, and the
-      // pointer comes from there. A payload that has landed points at nothing.
-      const wait = payload.captured_id ? { waitedMs: 0, timedOut: false } : await awaitPredecessors(payload.session_id, basename(here), { boundMs: waitBudgetMs });
-      waitBudgetMs -= wait.waitedMs;
+      // pointer comes from there. A payload that has landed points at nothing,
+      // and one this run holds a newer sibling of is obsolete whatever the state
+      // says — neither waits (first review pass: an obsolete payload spent the
+      // budget and the newest one, which needed it, posted past a live predecessor).
+      const newestHere = newestOf.get(payload.session_id) === home;
+      const predecessorWait = payload.captured_id || !newestHere ? { waitedMs: 0, timedOut: false } : await awaitPredecessors(payload.session_id, basename(here), { boundMs: waitBudgetMs });
+      waitBudgetMs = Math.max(0, waitBudgetMs - predecessorWait.waitedMs);
       const state = readState(payload.session_id);
       const stateIsNewer = recordedAfter(state, payload.prepared_at);
       // A payload that already LANDED is never obsolete: its id must reach the
       // state, and the newer payload behind it must supersede it (sixth review
       // pass: judged obsolete beside a newer one, the id was lost and two
       // summaries stood).
-      const obsolete = !payload.captured_id && (newestOf.get(payload.session_id) !== home || stateIsNewer);
+      const obsolete = !payload.captured_id && (!newestHere || stateIsNewer);
       if (obsolete) {
         moveTo(here, DEAD_DIR());
         log(`obsolete session=${payload.session_id} — a later capture of the session has a summary; this one is not posted`);
@@ -964,12 +1003,12 @@ export async function postPending(cfg, own) {
         continue;
       }
       // The pointer is decided when the payload POSTS, not when it was prepared:
-      // what this run landed for the session, else what the state records NOW,
-      // else what prepare saw. The state only moves forward, so a pointer from
+      // the session's newest landed thought — what the state records NOW, or a
+      // landed payload whose bookkeeping is owed — else what prepare saw. The state only moves forward, so a pointer from
       // prepare time is stale the moment the state names another id — a payload
       // prepared before its predecessor landed pointed past it, and two
       // summaries stood (seventh and eighth review passes).
-      if (!payload.captured_id) payload.supersedes = landed.get(payload.session_id) ?? state?.thought_id ?? payload.supersedes;
+      if (!payload.captured_id) payload.supersedes = pointerFor(payload.session_id, basename(here), state) ?? payload.supersedes;
       // A pointer the server has kept failing on — its registry away for good,
       // its audit table unreadable — must not take the summary down with it:
       // on the last attempt it is dropped and the summary lands (seventh review
@@ -1016,8 +1055,10 @@ export async function postPending(cfg, own) {
         continue;
       }
       const { id } = posted;
-      const note = [posted.note, lastResort, wait.waitedMs ? `waited ${(wait.waitedMs / 1000).toFixed(1)} s for the session's earlier post${wait.timedOut ? ", which had not landed when the wait ran out" : ""}` : ""].filter(Boolean).join("; ");
-      landed.set(payload.session_id, id);
+      const waitNote = !predecessorWait.waitedMs && !predecessorWait.timedOut ? ""
+        : !predecessorWait.waitedMs ? "did not wait for the session's earlier post: the run's wait budget was spent"
+        : `waited ${(predecessorWait.waitedMs / 1000).toFixed(1)} s for the session's earlier post${predecessorWait.timedOut ? ", which had not landed when the wait ran out" : ""}`;
+      const note = [posted.note, lastResort, waitNote].filter(Boolean).join("; ");
       // The state is read AGAIN after the post: a sibling run may have landed a
       // newer summary of the session meanwhile, and a judgement made before the
       // post would move the state back to this older one (eighth review pass).
