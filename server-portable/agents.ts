@@ -124,7 +124,26 @@ export class AgentResolver {
     const key = cacheKey(principal.keyHash, principal.name);
     const hit = this.cache.get(key);
     if (hit && hit.expires > this.now()) return hit.outcome;
+    // One lookup in flight per key: concurrent requests of a key the cache has
+    // not got share it. resolve_agent waits on a lock the registry's tables may
+    // be under, with no timeout of its own, so without this every request of a
+    // cold key held one pool connection while they were locked — ten emptied
+    // the pool, through the MCP route or /health alike (SMD-2041 review
+    // passes 3–4). The lock wait itself is SMD-2072's.
+    const shared = this.inflight.get(key);
+    if (shared) return shared;
+    const lookup = this.lookup(store, principal, key);
+    this.inflight.set(key, lookup);
+    try {
+      return await lookup;
+    } finally {
+      if (this.inflight.get(key) === lookup) this.inflight.delete(key);
+    }
+  }
 
+  private readonly inflight = new Map<string, Promise<AgentOutcome>>();
+
+  private async lookup(store: Promise<ThoughtStore>, principal: Principal, key: string): Promise<AgentOutcome> {
     let outcome: AgentOutcome;
     let ttl: number;
     try {

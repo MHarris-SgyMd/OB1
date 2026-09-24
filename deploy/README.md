@@ -220,18 +220,22 @@ curl -s -H "x-brain-key: $KEY" http://127.0.0.1:8010/health | jq '{version, comm
 ```
 
 **The commit is a build argument.** `server-portable/Dockerfile` bakes
-`OB1_GIT_SHA` into the image, and compose passes the variable of the same name
-from your shell or `deploy/.env` to every server build (the three tier servers
-too). Compose never forwards it at runtime, so the stack reports the commit its
-image was built from; a runtime variable of that name set some other way
-(`docker run -e`, a Kubernetes `env:` entry) overrides the baked one, so set
-none. Unset at build, the image reports `unknown`. Rebuild with it:
+`OB1_GIT_SHA` into the image, and compose passes the variable of the same name to
+every server build (the three tier servers too). Set it from the shell, on the
+command that builds — not in `deploy/.env`, where a value written once is baked
+into every later build — with `--dirty`, so an image built from uncommitted
+changes says so. Compose never forwards it at runtime; a runtime variable of that
+name set some other way (`docker run -e`, a Kubernetes `env:` entry) overrides the
+baked one, so set none. Unset at build, the image reports `unknown`; a Worker
+always does (wrangler has no build arg). Rebuild with it:
 
 ```bash
-OB1_GIT_SHA=$(git rev-parse --short HEAD) docker compose up -d --build server
+OB1_GIT_SHA=$(git describe --always --dirty --abbrev=8) docker compose up -d --build server
 ```
 
-The release images carry the tag's commit (`.github/workflows/release.yml`).
+The release images carry the tagged commit — the cut's merge commit, in full
+(`.github/workflows/release.yml`) — which is not `releases.json`'s `server` field
+(the cut's first commit; the server tree is the same).
 
 ## Why the server runs preflight before serving
 

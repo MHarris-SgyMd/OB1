@@ -1006,7 +1006,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
 
   // The tool renders the same read.
   const text = await call("brain_info");
-  assert(new RegExp(`^Migrations: +${String(treeLast).padStart(3, "0")} applied — this server's tree ends at ${String(treeLast).padStart(3, "0")} \\(current\\)$`, "m").test(text),
+  assert(new RegExp(`^Migrations: +${String(treeLast).padStart(3, "0")} applied — this server's tree ends at ${String(treeLast).padStart(3, "0")} \\(current: the ledger's highest is the tree's last\\)$`, "m").test(text),
     `the tool's Migrations row says the brain is current (${text.split("\n").find((l) => l.startsWith("Migrations"))})`);
   assert(new RegExp(`^Rows: +${truth.thoughts} thoughts · ${truth.audit} audit`, "m").test(text) && /^Postgres: +\S.* · pgvector \d/m.test(text), "…and its Rows and Postgres rows carry the same counts and versions");
 
@@ -1102,6 +1102,26 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     } finally {
       await lost.close();
     }
+
+    // Another tool's schema_migrations earlier on the role's path shadows the
+    // fork's (review pass 4): what resolves is not the ledger — no sha256 —
+    // so the fork's is invisible, not "read" and failing with 42703.
+    await sql.unsafe(`CREATE SCHEMA e2e_shadow`);
+    await sql.unsafe(`CREATE TABLE e2e_shadow.schema_migrations (version text PRIMARY KEY)`);
+    await sql.unsafe(`GRANT USAGE ON SCHEMA e2e_shadow TO brain_reader`);
+    await sql.unsafe(`GRANT SELECT ON e2e_shadow.schema_migrations TO brain_reader`);
+    await sql.unsafe(`ALTER ROLE brain_reader SET search_path = e2e_shadow, public`);
+    const shadowed = new SQL({ url: roleUrl, max: 1 });
+    try {
+      const f = await readDatabaseFacts(shadowed);
+      assert(f.unread.ledger?.reason === "invisible" && /schema public/.test(f.unread.ledger?.message ?? "") && f.highestMigration === null && f.schemaVersion === FORK_VERSION,
+        `a foreign schema_migrations ahead on the path is not the ledger; the fork's is invisible behind it (${JSON.stringify(f.unread.ledger)})`);
+    } finally {
+      await shadowed.close();
+      await sql.unsafe(`DROP TABLE e2e_shadow.schema_migrations`);
+      await sql.unsafe(`REVOKE USAGE ON SCHEMA e2e_shadow FROM brain_reader`);
+      await sql.unsafe(`DROP SCHEMA e2e_shadow`);
+    }
   } finally {
     await sql.unsafe(`REVOKE ALL ON thoughts, thought_audit, ob1_config FROM brain_reader`);
     await sql.unsafe(`REVOKE USAGE ON SCHEMA public FROM brain_reader`);
@@ -1144,7 +1164,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
       const probe = await health("e2e-key") as Record<string, any>;
       const probeTook = performance.now() - p0;
       const toolText = await tool;
-      assert(probe.database?.unread?.["counts.thought_audit"]?.reason === "timeout" && probeTook < 1800 && /^Rows: +\? thoughts · \? audit · \? chunks/m.test(toolText),
+      assert(probe.database?.unread?.["counts.thought_audit"]?.reason === "timeout" && probeTook < 1800 && /^Rows: +\? thoughts · \? audit events · \? chunks/m.test(toolText),
         `a probe during the tool's read answers from its own, at the health ceilings (${Math.round(probeTook)} ms)`);
     } finally {
       await unlock();

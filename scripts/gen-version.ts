@@ -8,8 +8,8 @@
  * version is written, but it is node-only (node:crypto, node:fs) and the
  * Cloudflare Workers build bundles the server, so the server cannot import it.
  * Neither can it read releases.json or db/migrations/ at runtime: a Worker has
- * no filesystem, and the container image carries neither directory's files
- * (server-portable/Dockerfile). So the three facts the server needs are
+ * no filesystem, and the container image carries releases.json but not
+ * db/migrations/ (server-portable/Dockerfile). So the three facts the server needs are
  * generated into a module with no imports at all — the version, the release
  * range it names, and the highest migration this tree carries — and
  * check-fork-consistency.ts's 17e round-trips it (regenerate in memory,

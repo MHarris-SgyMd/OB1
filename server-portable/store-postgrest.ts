@@ -189,7 +189,9 @@ export class PostgrestStore implements ThoughtStore {
     // Every fact is a catalog read (pg_extension, pg_class, schema_migrations,
     // pg_database_size) and PostgREST exposes none of them; the record names
     // this rather than reporting a partial database as a whole one.
-    throw new Error("the PostgREST store has no catalog reads — the database's versions, ledger, counts and indexes need the SQL store's direct connection");
+    // Said as what it is, not an outage (review pass 4): a Worker is PostgREST
+    // only, and a container or Bun deployment on the SQL store reports these.
+    throw new Error("not read on this deployment — the PostgREST store (Cloudflare Workers) exposes no catalog reads; a container or Bun deployment on the SQL store reports the database's versions, ledger, counts and indexes");
   }
 
   async statsSummary(): Promise<ThoughtStats> {

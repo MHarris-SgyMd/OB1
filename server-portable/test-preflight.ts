@@ -1740,6 +1740,10 @@ else {
     const bare = await run(SQL_ENV);
     assert(new RegExp(`✓\\s+vector extension\\s+the vector type resolves \\(pgvector ${rx(String(extversion))} in schema public\\)`).test(bare.out),
            `the vector row names the installed pgvector, the catalog's ${extversion} (${row(bare.out, "vector extension")})`);
+    // In a checkout the generated version module is held to db/migrations/
+    // (review pass 4: a stale one made a freshly migrated brain read "ahead").
+    assert(new RegExp(`✓\\s+version module\\s+server-portable/version\\.ts matches db/migrations/ \\(${last}\\)`).test(bare.out),
+           `the version module row holds version.ts to the tree it sits in (${row(bare.out, "version module")})`);
 
     const adopt = await migrate(["--url", LIVE, "--baseline"]);
     assert(adopt.code === 0, `migrate.ts --baseline records every file (${adopt.out.trim().split("\n").slice(-1)[0]})`);

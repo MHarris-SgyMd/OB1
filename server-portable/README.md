@@ -286,23 +286,34 @@ An agent or an operator can ask a running brain what it is (SMD-2041). The
 key does not) answers a short table:
 
 ```
-Version:         1.1.0+upstream.9543c29 (release range 049–051)
+Version:         1.1.0+upstream.9543c29 (release range 049–051; this tree adds 052, unreleased)
 Commit:          8ba58db5…
 Store:           sql · tier stable
 Embedding:       qwen3-embedding:4b @ 1024
 Postgres:        16.15 (Debian 16.15-1.pgdg12+2) · pgvector 0.8.6 (schema public)
 Schema version:  1.1.0+upstream.9543c29
-Migrations:      052 applied — this server's tree ends at 052 (current)
+Migrations:      052 applied — this server's tree ends at 052 (current: the ledger's highest is the tree's last)
 Brain embedding: qwen3-embedding:4b @ 1024
-Rows:            373 thoughts · 1,204 audit · 90 chunks · 512 entities
+Rows:            373 thoughts · 1,204 audit events · 90 chunks · 512 entities
 Database size:   45.2 MB
 HNSW:            thought_chunks_embedding_idx on thought_chunks (m 16, ef_construction 64); …
 ```
 
+What the judgements mean. `ledgerStatus` compares one number: the ledger's
+highest migration against the last file of the tree this server was built from.
+`current` says they are equal — not that every file below it was applied as
+written: a skipped, renumbered or edited migration is what `migrate.ts --dry-run`
+lists, file by file (SMD-2069 compares the two lists). Between release cuts the
+version stays the last cut's; `unreleased` names the migrations this tree adds
+past its range. The audit count is the event log's size — every capture, edit and
+delete, deleted thoughts' included — not a count of thoughts. `Database size` is
+the whole database's. The server's embedding and the brain's are printed side by
+side without a verdict (preflight's embedding rows judge them; SMD-2071).
+
 **`GET /health` with a read or write key** (the `x-brain-key` header, a bearer
 token or `?key=`) answers the same record as JSON — `version`, `releaseRange`,
-`latestMigration`, `commit`, `store`, `tier`, `embedding`, `ledgerStatus`
-(`current` | `behind` | `ahead` | `null`) and `database`, which carries the
+`unreleased`, `latestMigration`, `commit`, `store`, `tier`, `embedding`,
+`ledgerStatus` (`current` | `behind` | `ahead` | `null`) and `database`, which carries the
 database's facts (the ledger as `{ present, readable }`, not its names) or
 `{ "error": … }` when it cannot answer. It answers within 2.5 s
 (`HEALTH_DEADLINE_MS`) whatever the database does — an unreachable address,
@@ -312,9 +323,10 @@ waits at 300 ms (never above a stricter setting the role already has), a read
 that does not answer is named in `unread` with its reason (`refused`,
 `timeout`, `deadline`, `invisible`, `error`), the facts read by the deadline
 are kept, and a database whose catalog has not answered by then is
-`database.error`. Concurrent probes share one read, and one registry check per
-key, so a burst of probes during a migration holds a connection or two, not the
-pool. Without a key, with a wrong
+`database.error`. Concurrent probes share one read, and requests of one key share
+one agent-registry lookup (at /health and the MCP route alike), so a burst during
+a migration holds one connection for the read and one per distinct key — the
+registry's lock wait itself is unbounded (SMD-2072). Without a key, with a wrong
 or capture-only key, or with a revoked one — or while the agent registry has
 not answered by the deadline, since it could still say revoked — the body is
 the literal `ok`, so nothing about the deployment reaches an unauthenticated
@@ -324,9 +336,12 @@ reads the keyed body.
 
 Where each fact comes from: the version, its release range and the tree's last
 migration are generated into `version.ts` by `scripts/gen-version.ts` (the Workers
-build cannot import the node-only `db/version.mjs`; check-fork's 17e round-trips
-the file, so rerun the script after adding a migration). The commit is the image's
-`OB1_GIT_SHA` build arg (`deploy/README.md`), `unknown` when unset. The database's
+build cannot import the node-only `db/version.mjs`, and neither a Worker nor the
+image carries `db/migrations/`; check-fork's 17e round-trips the file, and in a
+checkout preflight's `version module` row compares it with `db/migrations/`, so
+rerun the script after adding a migration). The commit is the image's
+`OB1_GIT_SHA` build arg (`deploy/README.md`), `unknown` when unset — and always
+on Workers, which has no build arg. The database's
 half is `brain-info.ts`'s `readDatabaseFacts`, the same read preflight's
 `vector extension`, `migration ledger` and `schema version` rows make, so the gate
 and the tool cannot disagree (preflight skips the counts and size, which it does
@@ -335,8 +350,9 @@ a role without `SELECT` on, say, `ob1_entities` or `schema_migrations` gets that
 field as unread, named on a `Not read:` line, and the rest still answers; a table
 that exists where the role cannot resolve it (off its search path, or no USAGE on
 its schema) is `invisible`, never "no table". The tool's statements are capped at
-5 s and its whole read at 15 s. Over the PostgREST store
-(Workers) the database's half is an error — PostgREST exposes no catalog reads.
+5 s and its whole read at 15 s. Over the PostgREST store (Workers) the
+database's half is not read — PostgREST exposes no catalog reads — and the table
+says so; see Caveats.
 
 ## Expected outcome
 
@@ -388,6 +404,10 @@ directly testable — but the Deno build still needs them.
 
 ## Caveats
 
+- **`brain_info` on Workers reports the server, not the database.** The
+  PostgREST store has no catalog reads: the version, commit (`unknown`, no build
+  arg), store and embedding answer; the database's versions, ledger, counts and
+  indexes do not. A container or Bun deployment on the SQL store reports them.
 - **Workers cannot pool Postgres connections.** `wrangler.toml` pins
   `OB1_STORE=postgrest` there; the SQL store, selected by hand or by a lost
   binding, fails loudly via the shim. Whether Hyperdrive and a Workers-capable

@@ -29,6 +29,7 @@ import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
+import { existsSync, readdirSync } from "node:fs";
 import { LATEST_MIGRATION } from "./version.ts";
 import { tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
@@ -500,6 +501,25 @@ if (store === "sql") {
   else add("SUPABASE_URL", "ok", maskUrl(env.SUPABASE_URL));
   if (!env.SUPABASE_SERVICE_ROLE_KEY) unset("SUPABASE_SERVICE_ROLE_KEY");
   else add("SUPABASE_SERVICE_ROLE_KEY", "ok", `set (${env.SUPABASE_SERVICE_ROLE_KEY.length} chars)`);
+}
+
+// The generated version module against the tree it sits in (SMD-2041 review
+// pass 4). In a checkout db/migrations/ is beside the server, and a migration
+// added without `bun scripts/gen-version.ts` leaves version.ts naming the
+// previous tree: the brain the migrator just brought up would read as "ahead"
+// of this server. The image carries no db/migrations/, so there is nothing to
+// compare there and no row; check 17e holds the committed file in CI.
+{
+  const migrationsDir = new URL("../db/migrations/", import.meta.url);
+  if (existsSync(migrationsDir)) {
+    const nums = readdirSync(migrationsDir).filter((n) => /^\d{3}_.*\.sql$/.test(n)).map((n) => Number(n.slice(0, 3)));
+    const treeLast = nums.length ? Math.max(...nums) : null;
+    if (treeLast !== null && treeLast !== LATEST_MIGRATION)
+      add("version module", "warn",
+          `server-portable/version.ts says the tree ends at ${pad3(LATEST_MIGRATION)}, but db/migrations/ ends at ${pad3(treeLast)} — brain_info and the ledger rows would judge this brain against the wrong tree`,
+          "Regenerate it: bun scripts/gen-version.ts");
+    else if (treeLast !== null) add("version module", "ok", `server-portable/version.ts matches db/migrations/ (${pad3(treeLast)})`);
+  }
 }
 
 const configFailed = results.some((r) => r.status === "fail");
@@ -2758,9 +2778,16 @@ if (configFailed) {
               // The range check needs the ledger's highest; a ledger held by a
               // migration, or off this role's path, is not "unknown and fine"
               // (review pass 3: a locked ledger turned this row's warning into ✓).
+              // The remedy is the ledger row's, by why it is unread: a lock
+              // passes, a ledger off the role's path does not (review pass 4:
+              // "run it again" was given for both).
               add("schema version", "warn",
                 `could not verify against the ledger: ${brain}, but ${whyUnread} — the release-range check needs its highest migration`,
-                "Run preflight again once the ledger can be read; the migration ledger row says why it could not.");
+                ledgerUnread.reason === "invisible"
+                  ? "Fix the ledger's visibility as the migration ledger row says (the role's search_path, or USAGE on the ledger's schema), then run preflight again."
+                  : ledgerUnread.reason === "timeout"
+                    ? "A migration or a long transaction holds the ledger; run preflight again once it has finished."
+                    : "See the migration ledger row for why the ledger could not be read.");
             } else {
               add("schema version", "ok", `${brain} · highest migration ${highest}${cmp > 0 ? ` (server ${FORK_VERSION} is newer)` : ""}`);
             }

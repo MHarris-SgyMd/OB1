@@ -185,7 +185,11 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
              (SELECT n.nspname::text FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'vector') AS vec_schema,
              jsonb_build_object(
                'ob1_config', to_regclass('ob1_config') IS NOT NULL,
-               'schema_migrations', to_regclass('schema_migrations') IS NOT NULL,
+               -- The fork's ledger resolves only if the table the path
+               -- reaches carries migrate.ts's sha256 column: another tool's
+               -- schema_migrations on the path is not it (review pass 4).
+               'schema_migrations', EXISTS (SELECT 1 FROM pg_attribute a
+                                             WHERE a.attrelid = to_regclass('schema_migrations') AND a.attname = 'sha256' AND NOT a.attisdropped),
                'thoughts', to_regclass('thoughts') IS NOT NULL,
                'thought_audit', to_regclass('thought_audit') IS NOT NULL,
                'thought_chunks', to_regclass('thought_chunks') IS NOT NULL,
@@ -228,7 +232,9 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
     // The guarded reads, in order. Each names the table it needs; a table that
     // does not resolve is not queried — absent, or `invisible` when pg_class
     // has it where this role cannot reach.
-    type Guarded = { field: string; table?: KnownTable; read: (sp: SqlTag) => Promise<void> };
+    // `clear` takes a value back when the savepoint fails after the read wrote
+    // it (its RELEASE, say), so a fact is never both read and unread (review pass 4).
+    type Guarded = { field: string; table?: KnownTable; read: (sp: SqlTag) => Promise<void>; clear: () => void };
     const guarded: Guarded[] = [
       {
         field: "ob1_config",
@@ -240,6 +246,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
           facts.schemaVersion = config.schema_version ?? null;
           facts.embedding = { model: config.embedding_model ?? null, dim: dim === null || Number.isNaN(dim) ? null : dim };
         },
+        clear: () => { facts.schemaVersion = null; facts.embedding = { model: null, dim: null }; },
       },
       {
         field: "ledger",
@@ -250,11 +257,12 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
           facts.ledger.names = names;
           facts.highestMigration = numbers.length ? Math.max(...numbers) : null;
         },
+        clear: () => { facts.ledger.names = null; facts.highestMigration = null; },
       },
       ...(stats
         ? [
-            ...COUNTED_TABLES.map((t): Guarded => ({ field: `counts.${t}`, table: t, read: async (sp) => { facts.counts![t] = Number((await COUNT_SQL[t](sp))[0].n); } })),
-            { field: "databaseBytes", read: async (sp: SqlTag) => { facts.databaseBytes = Number((await sp`SELECT pg_database_size(current_database())::float8 AS n`)[0].n); } },
+            ...COUNTED_TABLES.map((t): Guarded => ({ field: `counts.${t}`, table: t, read: async (sp) => { facts.counts![t] = Number((await COUNT_SQL[t](sp))[0].n); }, clear: () => { facts.counts![t] = null; } })),
+            { field: "databaseBytes", read: async (sp: SqlTag) => { facts.databaseBytes = Number((await sp`SELECT pg_database_size(current_database())::float8 AS n`)[0].n); }, clear: () => { facts.databaseBytes = null; } },
           ]
         : []),
     ];
@@ -279,13 +287,16 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
         // it, before the savepoint's RELEASE round trip: a deadline between
         // the two would otherwise name a written fact `deadline` (review pass 3).
         await tx.savepoint(async (sp) => {
+          // A deadline during the SAVEPOINT round trip: start no statement
+          // (review pass 4: the abandoned read ran one more count).
+          if (progress.abandoned) return;
           await g.read(sp);
           progress.pending.delete(g.field);
         });
       } catch (e) {
         progress.pending.delete(g.field);
+        g.clear();
         facts.unread[g.field] = { reason: unreadReason(e), message: message(e) };
-        if (g.field === "ledger") facts.ledger.names = null;
       }
     }
     return facts;
@@ -308,7 +319,7 @@ function markPending(progress: ReadProgress, unread: Unread): void {
  * The rest are named with `unread`'s reason. Null when the catalog statement
  * has not answered: nothing is known about the database.
  */
-export function snapshotFacts(progress: ReadProgress, unread: Unread = { reason: "deadline", message: "" }): DatabaseFacts | null {
+export function snapshotFacts(progress: ReadProgress, unread: Unread = { reason: "deadline", message: "not read before the deadline" }): DatabaseFacts | null {
   progress.abandoned = true;
   markPending(progress, unread);
   return progress.facts ? structuredClone(progress.facts) : null;
@@ -341,6 +352,13 @@ export type DatabaseSummary = Omit<DatabaseFacts, "ledger"> & { ledger: { presen
 export type LedgerStatus = "current" | "behind" | "ahead" | null;
 
 export interface BrainInfo extends ServerFacts {
+  /**
+   * The migrations this server's tree carries past its release's range —
+   * [first, last] — or null when the tree ends at the range (a release image)
+   * or no range is recorded. Between cuts every build of main reports the last
+   * cut's version; this says what it adds (review pass 4).
+   */
+  unreleased: readonly [number, number] | null;
   /** The database's facts, or why none could be had. */
   database: DatabaseSummary | { error: string };
   /**
@@ -386,13 +404,20 @@ export async function brainInfo(
     // (review pass 3: it threw every fact away).
     failure = message(e);
     facts = snapshotFacts(progress, { reason: "error", message: failure });
+    // Every read answered and the transaction then failed (its COMMIT, the
+    // connection dropping): nothing was pending to carry the error, so it is
+    // named on its own rather than lost (review pass 4).
+    if (facts && !Object.values(facts.unread).some((u) => u.message === failure)) facts.unread.transaction = { reason: unreadReason(e), message: failure };
   } finally {
     clearTimeout(timer);
   }
-  if (!facts) return { ...server, database: { error: failure }, ledgerStatus: null };
+  const unreleased = server.releaseRange && server.latestMigration > server.releaseRange[1]
+    ? [server.releaseRange[1] + 1, server.latestMigration] as const
+    : null;
+  if (!facts) return { ...server, unreleased, database: { error: failure }, ledgerStatus: null };
   const { ledger, ...rest } = facts;
   const database: DatabaseSummary = { ...rest, ledger: { present: ledger.present, readable: ledger.present && ledger.names !== null } };
-  return { ...server, database, ledgerStatus: ledgerStatus(facts.highestMigration, server.latestMigration) };
+  return { ...server, unreleased, database, ledgerStatus: ledgerStatus(facts.highestMigration, server.latestMigration) };
 }
 
 /** A migration number as the ledger and the files spell it — 052. */
@@ -421,7 +446,8 @@ const unreadWords = (u: Unread): string =>
 /** The record as the tool's short table: one fact per line, a label and a value. */
 export function renderBrainInfo(info: BrainInfo): string {
   const row = (label: string, value: string) => `${`${label}:`.padEnd(16)} ${value}`;
-  const release = info.releaseRange ? `release range ${pad3(info.releaseRange[0])}–${pad3(info.releaseRange[1])}` : "no release range recorded";
+  const tail = info.unreleased ? `; this tree adds ${info.unreleased[0] === info.unreleased[1] ? pad3(info.unreleased[0]) : `${pad3(info.unreleased[0])}–${pad3(info.unreleased[1])}`}, unreleased` : "";
+  const release = info.releaseRange ? `release range ${pad3(info.releaseRange[0])}–${pad3(info.releaseRange[1])}${tail}` : "no release range recorded";
   const lines = [
     row("Version", `${info.version} (${release})`),
     row("Commit", info.commit),
@@ -447,7 +473,9 @@ export function renderBrainInfo(info: BrainInfo): string {
       ? `schema_migrations ${ledgerUnread ? unreadWords(ledgerUnread) : "not read"} — ${tree}`
       : db.highestMigration === null
         ? `the ledger records none — ${tree}`
-        : `${pad3(db.highestMigration)} applied — ${tree}${info.ledgerStatus === "current" ? " (current)" : info.ledgerStatus === "behind" ? " (the brain is behind it)" : " (the brain is ahead of it)"}`;
+        // `current` judges the highest number alone — a hole, a renamed or an
+        // edited migration is migrate.ts --dry-run's to find (SMD-2069).
+        : `${pad3(db.highestMigration)} applied — ${tree}${info.ledgerStatus === "current" ? " (current: the ledger's highest is the tree's last)" : info.ledgerStatus === "behind" ? " (the brain is behind it)" : " (the brain is ahead of it)"}`;
   // ob1_config unread is not ob1_config recording nothing (review pass 1).
   const configUnread = db.unread.ob1_config;
   const notConfig = configUnread ? `? (ob1_config ${unreadWords(configUnread)})` : null;
@@ -462,12 +490,13 @@ export function renderBrainInfo(info: BrainInfo): string {
   );
   if (counts) {
     lines.push(
-      row("Rows", `${num("thoughts")} thoughts · ${num("thought_audit")} audit · ${num("thought_chunks")} chunks · ${num("ob1_entities")} entities`),
+      row("Rows", `${num("thoughts")} thoughts · ${num("thought_audit")} audit events · ${num("thought_chunks")} chunks · ${num("ob1_entities")} entities`),
       row("Database size", db.databaseBytes === null ? "?" : formatBytes(db.databaseBytes)),
     );
   }
   lines.push(row("HNSW", db.hnsw.length === 0 ? "none" : db.hnsw.map((h) => `${h.index} on ${h.table} (m ${h.m}, ef_construction ${h.efConstruction})`).join("; ")));
   const unread = Object.entries(db.unread);
-  if (unread.length) lines.push(row("Not read", unread.map(([k, u]) => `${k} — ${unreadWords(u)}${u.message ? `: ${u.message}` : ""}`).join("; ")));
+  // A deadline's message is its words; every other reason adds the database's.
+  if (unread.length) lines.push(row("Not read", unread.map(([k, u]) => `${k} — ${unreadWords(u)}${u.reason === "deadline" ? "" : `: ${u.message}`}`).join("; ")));
   return lines.join("\n");
 }

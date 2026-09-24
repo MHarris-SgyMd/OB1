@@ -292,7 +292,7 @@ console.log("\n[10b] brain_info answers with no database, and says why that half
   });
   const result = (await mcpBody(r))?.result as { isError?: boolean; content?: { text?: string }[] } | undefined;
   const text = result?.content?.[0]?.text ?? "";
-  assert(result?.isError !== true && new RegExp(`^Version: +${FORK_VERSION.replace(/[.+]/g, "\\$&")} \\((?:release range \\d{3}–\\d{3}|no release range recorded)\\)`, "m").test(text), `the Version row carries FORK_VERSION and its release range (${text.split("\n")[0]})`);
+  assert(result?.isError !== true && new RegExp(`^Version: +${FORK_VERSION.replace(/[.+]/g, "\\$&")} \\((?:release range \\d{3}–\\d{3}(?:; this tree adds \\d{3}(?:–\\d{3})?, unreleased)?|no release range recorded)\\)`, "m").test(text), `the Version row carries FORK_VERSION and its release range (${text.split("\n")[0]})`);
   assert(/^Commit: +unknown$/m.test(text) && /^Store: +sql$/m.test(text), "…the commit (unknown here) and the store");
   assert(/^Database: +unavailable — .*DATABASE_URL is not set/m.test(text), `…and the database row names the store's refusal (${text.split("\n").find((l) => l.startsWith("Database"))?.slice(0, 70)})`);
 }
@@ -467,10 +467,14 @@ console.log("\n[10c] brain-info.ts's rules, without a database: the ledger's jud
   // the rest answer.
   const statements: string[] = [];
   const hang = new Set<string>();
+  let answerLedger = false;
   const answer = (text: string): unknown[] => {
     statements.push(text);
     if (/FROM ob1_entities/.test(text)) throw pgError("permission denied for table ob1_entities", "42501");
-    if (/FROM schema_migrations/.test(text)) throw pgError("canceling statement due to lock timeout", "55P03");
+    if (/FROM schema_migrations/.test(text)) {
+      if (answerLedger) return [{ name: "051_schema_version.sql" }, { name: "052_thought_changes.sql" }];
+      throw pgError("canceling statement due to lock timeout", "55P03");
+    }
     if (/set_config/.test(text)) return [{}];
     if (/server_version/.test(text)) {
       return [{
@@ -495,9 +499,15 @@ console.log("\n[10c] brain-info.ts's rules, without a database: the ledger's jud
   // The savepoint's RELEASE and the transaction's COMMIT can be slowed or
   // failed, to put a deadline or an error between a read and its end.
   let releaseMs = 0;
+  let savepointMs = 0;
   let failCommit = false;
   const tx = Object.assign(tag, {
-    savepoint: async <T>(fn: (sp: typeof tag) => Promise<T>) => { const r = await fn(tag); if (releaseMs) await Bun.sleep(releaseMs); return r; },
+    savepoint: async <T>(fn: (sp: typeof tag) => Promise<T>) => {
+      if (savepointMs) await Bun.sleep(savepointMs);
+      const r = await fn(tag);
+      if (releaseMs) await Bun.sleep(releaseMs);
+      return r;
+    },
   });
   const fake = Object.assign(tag, {
     begin: async <T>(fn: (t: typeof tx) => Promise<T>) => { const r = await fn(tx); if (failCommit) throw pgError("terminating connection due to administrator command", "57P01"); return r; },
@@ -530,7 +540,7 @@ console.log("\n[10c] brain-info.ts's rules, without a database: the ledger's jud
   assert(/^Schema version: +\? \(ob1_config not readable by this role\)$/m.test(unreadText) && /^Brain embedding: +\? \(ob1_config not readable by this role\)$/m.test(unreadText) && /^Not read: +ob1_config — not readable by this role: permission denied/m.test(unreadText),
     "an ob1_config this role cannot read is `?`, not `none recorded`");
   const readText = renderBrainInfo(await brainInfo(server, async () => facts, 1000));
-  assert(/^Rows: +7 thoughts · \? audit · no table chunks · \? entities$/m.test(readText) && /^Migrations: +schema_migrations not read in time/m.test(readText) && /^Database size: +10\.8 MB$/m.test(readText),
+  assert(/^Rows: +7 thoughts · \? audit events · no table chunks · \? entities$/m.test(readText) && /^Migrations: +schema_migrations not read in time/m.test(readText) && /^Database size: +10\.8 MB$/m.test(readText),
     `the table says which count was not read and which table is absent, and a timed-out ledger is not called a grant (${readText.split("\n").find((l) => l.startsWith("Migrations"))})`);
 
   // The deadline keeps what was read (review pass 2: it threw every fact away).
@@ -545,7 +555,8 @@ console.log("\n[10c] brain-info.ts's rules, without a database: the ledger's jud
   hang.clear();
   const pd = partial && !("error" in partial.database) ? partial.database : null;
   assert(pd !== null && took < 1000 && pd.postgres === "16.15" && pd.schemaVersion === "1.1.0+upstream.9543c29"
-      && pd.unread["counts.thoughts"]?.reason === "deadline" && pd.unread.databaseBytes?.reason === "deadline" && pd.unread.ledger?.reason === "timeout",
+      && pd.unread["counts.thoughts"]?.reason === "deadline" && pd.unread["counts.thoughts"]?.message === "not read before the deadline"
+      && pd.unread.databaseBytes?.reason === "deadline" && pd.unread.ledger?.reason === "timeout",
     `at the deadline the facts read so far stand and the rest are named (${Math.round(took)} ms, ${JSON.stringify(pd?.unread)})`);
   // A table absent everywhere was settled before any read, so the deadline
   // never names it (review pass 3: it rendered '?' for 'no table').
@@ -564,8 +575,47 @@ console.log("\n[10c] brain-info.ts's rules, without a database: the ledger's jud
   failCommit = true;
   const dropped = await guard(brainInfo(server, (progress) => readDatabaseFacts(fake, {}, progress), 1000));
   failCommit = false;
-  assert(dropped !== null && !("error" in dropped.database) && dropped.database.postgres === "16.15" && dropped.database.schemaVersion === "1.1.0+upstream.9543c29",
-    "a failure after the catalog answered keeps the facts read");
+  assert(dropped !== null && !("error" in dropped.database) && dropped.database.postgres === "16.15" && dropped.database.schemaVersion === "1.1.0+upstream.9543c29"
+      && /terminating connection/.test(dropped.database.unread.transaction?.message ?? ""),
+    `a failure after every read answered keeps the facts, and is named rather than lost (review pass 4: ${JSON.stringify(dropped && !("error" in dropped.database) ? dropped.database.unread.transaction : null)})`);
+  // A savepoint that fails after its read wrote (its RELEASE): the value is
+  // taken back, so the ledger is not both read and unread (review pass 4:
+  // `current` beside "schema_migrations not read").
+  answerLedger = true;
+  const tx2Facts = await (async () => {
+    // The first savepoint is ob1_config's; fail the second, the ledger's.
+    // Fresh function objects: Object.assign onto `tag` would replace the
+    // shared fake's own savepoint and begin.
+    let n = 0;
+    const run = (strings: TemplateStringsArray) => tag(strings);
+    const counting = Object.assign((strings: TemplateStringsArray) => run(strings), {
+      savepoint: async <T>(fn: (sp: typeof run) => Promise<T>) => {
+        const r = await fn(run);
+        if (++n === 2) throw pgError("server closed the connection unexpectedly", "08006");
+        return r;
+      },
+    });
+    const client = Object.assign((strings: TemplateStringsArray) => run(strings), { begin: async <T>(fn: (t: typeof counting) => Promise<T>) => fn(counting) });
+    return readDatabaseFacts(client);
+  })();
+  answerLedger = false;
+  assert(tx2Facts.unread.ledger?.reason === "error" && tx2Facts.highestMigration === null && tx2Facts.ledger.names === null,
+    `a ledger read whose savepoint then failed is unread, its highest taken back (${tx2Facts.highestMigration}, ${JSON.stringify(tx2Facts.unread.ledger)})`);
+  // A deadline during a SAVEPOINT round trip starts no statement after it
+  // (review pass 4: the abandoned read ran one more count).
+  savepointMs = 120;
+  statements.length = 0;
+  await guard(brainInfo(server, (progress) => readDatabaseFacts(fake, {}, progress), 60));
+  await Bun.sleep(300);
+  savepointMs = 0;
+  assert(!statements.some((t) => /FROM ob1_config/.test(t)), "a deadline during the SAVEPOINT round trip: the read inside it never runs");
+
+  // Between cuts the version stays the last cut's; the tail says what this
+  // tree adds (review pass 4). A release image's tree ends at the range.
+  const between = await brainInfo(server, async () => planted(52), 1000);
+  const cut = await brainInfo({ ...server, latestMigration: 51 }, async () => planted(51), 1000);
+  assert(JSON.stringify(between.unreleased) === "[52,52]" && /^Version: .*\(release range 049–051; this tree adds 052, unreleased\)$/m.test(renderBrainInfo(between)) && cut.unreleased === null,
+    `the version names the unreleased tail between cuts, and none at a cut (${JSON.stringify(between.unreleased)}, ${JSON.stringify(cut.unreleased)})`);
   // An abandoned read starts nothing more: a count that answers after the
   // deadline is the last statement it runs — no size read follows it.
   slow.add("FROM thoughts");

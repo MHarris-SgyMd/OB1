@@ -234,20 +234,19 @@ const SURFACES: Record<Surface, { deadlineMs: number; opts: ReadOptions }> = {
 // taking a pool connection (review pass 2: forty probes against a locked table
 // held the pool, and tool calls queued behind them). Keyed by surface, so a
 // probe never inherits the tool's deadline and ceilings (review pass 3: keyed
-// by deadline, the one hidden coupling was a number), and held until the READ
-// ends, not the answer: a probe after the deadline gets the abandoned read's
-// answer instead of opening a second transaction beside it.
+// by deadline, the one hidden coupling was a number). Held until the answer,
+// not the read's end: an abandoned read finishes its last statement within its
+// ceiling (800 ms for health) beside the next caller's, but a read hung on a
+// half-open connection cannot pin every later answer to a stale one (review
+// pass 4 took back pass 3's hold-to-the-read's-end for that).
 const inflight = new Map<Surface, Promise<BrainInfo>>();
 function readBrainInfo(surface: Surface): Promise<BrainInfo> {
   const shared = inflight.get(surface);
   if (shared) return shared;
   const { deadlineMs, opts } = SURFACES[surface];
-  let read: Promise<unknown> = Promise.resolve();
-  const answer = brainInfo(serverFacts(), (progress) => (read = (async () => (await db()).databaseFacts(opts, progress))()), deadlineMs);
+  const answer = brainInfo(serverFacts(), async (progress) => (await db()).databaseFacts(opts, progress), deadlineMs)
+    .finally(() => { if (inflight.get(surface) === answer) inflight.delete(surface); });
   inflight.set(surface, answer);
-  void answer.then(() => read).catch(() => {}).finally(() => {
-    if (inflight.get(surface) === answer) inflight.delete(surface);
-  });
   return answer;
 }
 
@@ -1509,7 +1508,8 @@ function buildServer(principal: Principal): McpServer {
       description:
         "Say what this Open Brain is: the server's version and the release it belongs to, the commit it was built from, the store and tier, " +
         "the Postgres and pgvector versions, the schema version and highest migration applied (and whether that is this server's last), " +
-        "row counts, database size and vector-index parameters. Use it to check which version you are talking to, or whether a migration has been applied.",
+        "row counts, database size and vector-index parameters. Use it to check which version you are talking to, or whether the brain has reached this server's last migration " +
+        "(it compares the highest number applied; a skipped or edited migration is what `migrate.ts --dry-run` lists).",
       annotations: {
         readOnlyHint: true,
       },
@@ -2230,23 +2230,6 @@ app.options("*", (c) => {
 // be registered ABOVE this line or it never fires. FORK.md change 42.
 app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 
-// One registry check in flight per key for the health route: the race below
-// answers at its deadline but cannot cancel the resolve, which waits on a lock
-// the registry's tables may be under with no timeout of its own — so without
-// this every probe of a cold key left one pool connection waiting, and ten
-// probes emptied the pool while /health still said `ok` (review pass 3). A
-// burst of probes with one key now holds one connection.
-const resolving = new Map<string, ReturnType<AgentResolver["resolve"]>>();
-function resolveOnce(principal: Principal): ReturnType<AgentResolver["resolve"]> {
-  const key = `${principal.keyHash}:${principal.name}`;
-  const shared = resolving.get(key);
-  if (shared) return shared;
-  const p = agents().resolve(db(), principal);
-  resolving.set(key, p);
-  void p.catch(() => {}).finally(() => { if (resolving.get(key) === p) resolving.delete(key); });
-  return p;
-}
-
 // Liveness for platform probes (Kubernetes httpGet, load-balancer target checks,
 // uptime monitors), which can only GET and expect 2xx — the MCP endpoint answers
 // GET with 405 (below). Without a key, like /.well-known/*: it says the process
@@ -2298,7 +2281,7 @@ app.get("*", async (c, next) => {
   const info = readBrainInfo("health");
   let timer: ReturnType<typeof setTimeout> | undefined;
   const identity = await Promise.race([
-    resolveOnce(principal),
+    agents().resolve(db(), principal), // one lookup in flight per key (agents.ts)
     new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), HEALTH_DEADLINE_MS); }),
   ]);
   clearTimeout(timer);
