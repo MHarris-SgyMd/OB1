@@ -16,7 +16,11 @@
  * title before " — " (the house shape is "Thing — consequence") and the ticket
  * its title ends with. A changes/smd-NNNN.md file is SMD-1804's release
  * fragment — a change that has landed and takes its number at the next release —
- * and is listed after the numbered ones, by ticket.
+ * and is not listed: the block is the numbered table and one fixed sentence
+ * pointing at the fragments, so a PR that adds a fragment leaves FORK.md alone
+ * and two such PRs never conflict on it. The block moves when a numbered file
+ * does — at a release cut, when scripts/assemble-release.ts numbers the
+ * fragments and re-renders it, or at a numbered record's retitle (SMD-2084).
  */
 import { readFileSync, writeFileSync, readdirSync, existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -153,8 +157,19 @@ export function readChanges(root: string): ClassifiedChanges {
   return classifyChanges(readChangeEntries(root));
 }
 
-/** The index block, markers excluded. One definition for the writer and the check. */
-export function renderIndex({ numbered, fragments }: { numbered: NumberedChange[]; fragments: FragmentChange[] }): string {
+/**
+ * What the block says of the fragments, whatever changes/ holds: the directory
+ * lists them, not the index, so adding one moves nothing between the markers
+ * (SMD-2084).
+ */
+export const FRAGMENTS_LINE = `Changes landed since the last release, if any, are the [\`${CHANGES_DIR}/smd-*.md\`](${CHANGES_DIR}/) files, numbered at the next cut (SMD-1804).`;
+
+/**
+ * The index block, markers excluded. One definition for the writer and the
+ * check. It takes the numbered files alone — a fragment's presence or absence
+ * renders the same block (SMD-2084).
+ */
+export function renderIndex(numbered: NumberedChange[]): string {
   const hi = numbered.length ? numbered[numbered.length - 1].n : FIRST_FILED - 1;
   const lines = [
     numbered.length
@@ -171,13 +186,7 @@ export function renderIndex({ numbered, fragments }: { numbered: NumberedChange[
     const title = c.heading?.title ?? c.name;
     lines.push(`| ${c.n} | [${cell(headOf(title))}](${CHANGES_DIR}/${c.name}) | ${ticketOf(title) || "—"} |`); // 18–41 predate the ticket tail
   }
-  if (fragments.length) {
-    lines.push("");
-    lines.push(
-      "Landed since the last release and numbered at the next one (SMD-1804): " +
-        fragments.map((f) => `[${f.ticket}](${CHANGES_DIR}/${f.name})`).join(", ") + ".",
-    );
-  }
+  lines.push("", FRAGMENTS_LINE);
   return lines.join("\n") + "\n";
 }
 
@@ -209,6 +218,6 @@ const isMain = (() => { try { return Boolean(process.argv[1]) && realpathSync(fi
 if (isMain) {
   const fork = join(ROOT, "FORK.md");
   const changes = readChanges(ROOT);
-  writeFileSync(fork, spliceIndex(readFileSync(fork, "utf8"), renderIndex(changes)));
-  console.log(`wrote the index into FORK.md (${changes.numbered.length} numbered changes, ${changes.fragments.length} fragments)`);
+  writeFileSync(fork, spliceIndex(readFileSync(fork, "utf8"), renderIndex(changes.numbered)));
+  console.log(`wrote the index into FORK.md (${changes.numbered.length} numbered changes; ${changes.fragments.length} fragments pending, not listed — the release step numbers them)`);
 }
