@@ -53,6 +53,21 @@ export type LinearIssue = {
 /** The identifier grammar Linear uses (a team key of one letter or more, a dash, a number) — one spelling, shared with the sync's header grammar. */
 export const IDENTIFIER_PATTERN = "[A-Z][A-Z0-9]*-[0-9]+";
 
+/** Labels per issue, per request — the census (db/sync-linear.ts) bounds them the same, or an issue with more would read as moved every pass. */
+export const LABELS_BOUND = 20;
+/** Relations an issue holds, and those held toward it, per request; a ticket with more is rare and its links beyond the bound wait for the day the bound is raised. */
+export const RELATIONS_BOUND = 25;
+/**
+ * The GraphQL selection that yields a `LinearIssue` — what the adapter maps,
+ * so the adapter names it, and every fetcher (the sync's full fetch, the
+ * corpus builder) asks for the same shape and the two write one text
+ * (SMD-1958). The self-check holds it to the type: every key of a LinearIssue
+ * is selected.
+ */
+export const ISSUE_FIELDS = `identifier title description url createdAt updatedAt archivedAt priorityLabel state { name type } project { id name } parent { identifier } labels(first: ${LABELS_BOUND}) { nodes { name } } relations(first: ${RELATIONS_BOUND}) { nodes { type relatedIssue { identifier } } } inverseRelations(first: ${RELATIONS_BOUND}) { nodes { type issue { identifier } } }`;
+/** The facet that is the issue's clock — the sync's watermark, and the pipeline's rule against an older record (ingest-contract.ts `watermark`). */
+export const WATERMARK_KEY = "linear_updated_at";
+
 /**
  * Linear's autolink markup, `<issue id="…" href="…">SMD-1234</issue>`, to the
  * identifier it wraps — ~80 bytes of URL boilerplate per cross-reference that
@@ -171,6 +186,7 @@ export const linearAdapter: Adapter<LinearIssue> = {
       mentions: issueMentions(issue),
       facets: issueFacets(issue),
       createdAt: issue.createdAt,
+      watermark: { key: WATERMARK_KEY, value: issue.updatedAt },
     };
   },
 };
@@ -202,6 +218,19 @@ export function selfCheck(): number {
   ok(JSON.stringify(out.links) === JSON.stringify([{ relation: "references", target: "SMD-1730" }]), `two autolinks to one issue are one references link, a bare identifier in prose is none (${JSON.stringify(out.links)})`);
   ok(JSON.stringify(out.mentions) === JSON.stringify([{ name: issue.project!.name, type: "project" }, { name: "infrastructure", type: "topic" }]), `the project and the labels are mentions (${JSON.stringify(out.mentions)})`);
   ok(out.facets.source === "linear" && out.facets.issue === "SMD-1936" && out.createdAt === issue.createdAt, "facets and createdAt carried");
+  ok(out.watermark?.key === WATERMARK_KEY && out.watermark.value === issue.updatedAt && out.facets[WATERMARK_KEY] === issue.updatedAt, "the watermark is the issue's updatedAt, under the facet key the sync's plan reads (SMD-1958)");
+  // The selection the fetchers share names every key of the type — a key added
+  // to LinearIssue and not to ISSUE_FIELDS would arrive undefined from every
+  // fetcher and render as its absence (SMD-1958).
+  let topLevel = ISSUE_FIELDS.replace(/\([^)]*\)/g, "");
+  while (/\{/.test(topLevel)) { // innermost braces out first, however deep the selection nests
+    const next = topLevel.replace(/\{[^{}]*\}/g, "");
+    if (next === topLevel) { ok(false, "ISSUE_FIELDS has unbalanced braces"); break; } // a failure, not a hang (second review pass)
+    topLevel = next;
+  }
+  const selected = new Set(topLevel.split(/\s+/).filter((t) => /^\w+$/.test(t)));
+  const keys = Object.keys({ ...SAMPLE_ISSUE, relations: undefined, inverseRelations: undefined });
+  ok(keys.every((k) => selected.has(k)) && selected.has("relations") && selected.has("inverseRelations"), `ISSUE_FIELDS selects every key of a LinearIssue (${keys.filter((k) => !selected.has(k)).join(",") || "none missing"})`);
 
   const rich: LinearIssue = {
     ...issue, identifier: "SMD-1867", description: "x <issue id=\"a\" href=\"h\">SMD-1865</issue> <issue id=\"s\" href=\"h\">SMD-1867</issue>",
