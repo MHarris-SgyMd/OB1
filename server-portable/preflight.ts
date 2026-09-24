@@ -322,9 +322,9 @@ if (chatIsOwn) {
  * A local endpoint is dialled once, by default: one GET of `/models` with no
  * body and no credential, under a short timeout, and only the connection is
  * judged — any HTTP status is an endpoint that answers; what it serves is
- * --deep's question. Until this row preflight's credential rule (isLocalEndpoint,
- * above) called an endpoint local by its hostname
- * and connected to nothing without --deep, so an address that reached nothing
+ * --deep's question. Until this row preflight's credential rule
+ * (isLocalEndpoint, above) called an endpoint local by its hostname and
+ * connected to nothing without --deep, so an address that reached nothing
  * — the container's own loopback (the code's default, inside a container), the
  * `ollama` service name with no profile, `host.docker.internal` where the
  * runtime does not provide it, a typo in the port — was `preflight OK`, and the
@@ -369,9 +369,13 @@ function probeFailure(e: unknown): { kind: "silent" | "unresolved" | "refused" |
   if (/CERT|SSL|TLS/i.test(code) || /certificate/i.test(err.message)) return { kind: "tls", why: `its TLS certificate is not trusted (${code || err.message})`, then: "every capture would fail the same way" };
   return { kind: "other", why: err.message.replace(/\.?\s*For more information.*$/s, ""), then: fast };
 }
+/** The hostname of a base URL, lower-cased as the URL parser leaves it; "" for a value that is not a URL (which isLocalEndpoint already calls not local). */
+function hostnameOf(base: string): string {
+  try { return new URL(base).hostname.toLowerCase(); } catch { return ""; }
+}
 /** The remedy for the hostname's kind: which of the three spellings this one is, and what it needs. */
 function probeRemedy(base: string, knob: string): string {
-  const host = (() => { try { return new URL(base).hostname.toLowerCase(); } catch { return ""; } })();
+  const host = hostnameOf(base);
   if (LOCAL_PROVIDER_SERVICES.includes(host)) {
     return `\`${host}\` is the local-models profile's service and exists only under it: start the stack with --profile local-models, or set ${knob} to an Ollama on the host (${HOST_ALIASES}) or to a hosted provider with a key.`;
   }
@@ -413,7 +417,7 @@ async function probeLocal(row: string, at: ProviderEndpoint, knob: string): Prom
   } catch (e) {
     const { kind, why, then } = probeFailure(e);
     const proxy = proxyKnobFor(at.base);
-    const host = (() => { try { return new URL(at.base).hostname; } catch { return at.base; } })();
+    const host = hostnameOf(at.base);
     const lead = kind === "tls" ? `${shown} answers, but ${why}` : `nothing answers at ${shown} — ${why}`;
     const route = proxy ? `; ${proxy} is set, so this call and every one the server makes go through that proxy unless NO_PROXY names ${host}` : "";
     add(row, "fail", `${lead} (GET /models, ${LOCAL_PROBE_SECONDS} timeout)${route}; ${then}`,

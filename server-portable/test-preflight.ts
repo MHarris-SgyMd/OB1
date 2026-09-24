@@ -61,6 +61,11 @@ async function run(env: Record<string, string | undefined>, ...args: string[]) {
   return runScript(["bun", join(HERE, "preflight.ts"), ...args], { env: clean, cwd: HERE });
 }
 
+/** The report row named `name` — glyph, name, detail — or "" when none printed. Fix lines start with →, so they never match. */
+const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)) ?? "";
+/** The → fix line under the row named `name`, or "" when the row has none. */
+const fix = (out: string, name: string) => { const ls = out.split("\n"); const i = ls.findIndex((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)); return i >= 0 && /^\s*→ /.test(ls[i + 1] ?? "") ? ls[i + 1] : ""; };
+
 // db/migrate.ts, for the --grant step: the one executable spelling of the
 // capturing-role privileges. Spawned like preflight so its exit code and output
 // are asserted the same way.
@@ -1793,8 +1798,6 @@ console.log("\n[6] Two provider endpoints are reported and gated by name (SMD-19
 {
   const LOCAL = LOCAL_STUB;
   const HOSTED = "https://openrouter.ai/api/v1";
-  /** The report row named `name` — glyph, name, detail — or "" when none printed. */
-  const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)) ?? "";
 
   // Neither chat knob: one provider row that says it serves both, and no chat rows at all.
   const one = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: LOCAL });
@@ -1894,7 +1897,6 @@ console.log("\n[8] The egress gate is reported: the mode, and per endpoint what 
 {
   const LOCAL = LOCAL_STUB;
   const HOSTED = "https://openrouter.ai/api/v1";
-  const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)) ?? "";
   /** Every gate knob unset, whatever the shell has. */
   const GATE = { OB1_EGRESS_POLICY: undefined, OB1_EGRESS_ALLOW: undefined, OB1_EGRESS_DENY: undefined, OB1_LLM_LOCAL: undefined, OB1_CHAT_LOCAL: undefined };
 
@@ -1970,8 +1972,6 @@ console.log("\n[8] The egress gate is reported: the mode, and per endpoint what 
 
 console.log("\n[9] A local endpoint is dialled by default, and one that answers nothing fails before the server starts (SMD-1875)");
 {
-  const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)) ?? "";
-  const fix = (out: string, name: string) => { const ls = out.split("\n"); const i = ls.findIndex((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)); return i >= 0 && /^\s*→ /.test(ls[i + 1] ?? "") ? ls[i + 1] : ""; };
   const THREE = (s: string) => /host\.containers\.internal:11434\/v1/.test(s) && /host\.docker\.internal:11434\/v1/.test(s) && /--profile local-models/.test(s);
 
   // The measured baseline: the code's default inside a container is the
