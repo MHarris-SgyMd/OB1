@@ -10,8 +10,9 @@
 --   key. That write takes the key's row lock, so any transaction holding the
 --   row made the lookup wait: an open revoke_agent_key, an operator's SELECT …
 --   FOR UPDATE, another replica's lookup of the same key. The SQL store caps
---   each wait at 250 ms (SMD-2072) and a key whose lookup times out is `busy`,
---   refused with a retry. The cap bounds the cost; the wait itself was for a
+--   each wait at 250 ms (SMD-2072), and a key whose lookup still times out
+--   after the server's retries is `busy`, refused with a retry. The cap bounds
+--   the cost; the wait itself was for a
 --   write that, most of the time, changed nothing anyone reads.
 --
 --   And the write re-checked only key_hash. A lookup that overlapped a
@@ -49,13 +50,15 @@
 --   * THE WRITE RE-CHECKS THE REVOCATION. `WHERE key_hash = … AND revoked_at IS
 --     NULL`: under READ COMMITTED an UPDATE that waited on a row re-evaluates
 --     its WHERE against the version that committed, so a revocation that
---     landed during the wait leaves nothing to write. When nothing was written
---     the row is read again — each statement of a VOLATILE function under READ
---     COMMITTED takes a fresh snapshot: revoked answers REVOKED, exactly as a
---     lookup after the commit does. A row gone (deleted by hand while the
---     lookup waited) is treated as a key never seen: the lookup falls through
---     to 010's registration below — the rotation branch, or first sight if its
---     agent went too — which a later lookup would have done anyway.
+--     landed during the wait (or between the read and the write) leaves
+--     nothing to write. When nothing was written the row is read again — each
+--     statement of a VOLATILE function under READ COMMITTED takes a fresh
+--     snapshot: revoked answers REVOKED, exactly as a lookup after the commit
+--     does. A row gone (deleted by hand while the lookup waited) is treated as
+--     a key never seen: the lookup falls through to 010's registration below —
+--     the rotation branch, or first sight if its agent went too — which a later
+--     lookup would have done anyway. A row present and not revoked (revoked
+--     and cleared, or registered again by another lookup) answers ok.
 --   * SO DOES REGISTRATION. 010's `INSERT … ON CONFLICT (key_hash) DO UPDATE`
 --     — reached by the loser of two first sights and, since this file, by a
 --     row deleted during the wait — wrote over whatever row won, revoked or
@@ -75,13 +78,15 @@
 --     committed — the same answer as a lookup a moment earlier, and the one
 --     the server's TTL already allows for (a revocation "takes effect within
 --     the server resolve cache TTL", 010's column comment). What this file
---     removes is the answer given AFTER the commit.
+--     removes is the answer given after a commit its write waited on.
 --   * A first sight that answers REVOKED from registration keeps the agent
 --     row it inserted for its label, with no key, and a later key under that
 --     label rotates onto it. It needs one digest presented under two names at
---     once (auth.ts refuses that config); 010 left the same row and answered
---     ok. Removing it would need DELETE, which the server role is not granted,
---     or a subtransaction, whose rollback would release the refused row's lock.
+--     once (auth.ts refuses that config) or a key row inserted revoked by
+--     hand; 010 left the same row and answered ok. Removing it would need
+--     DELETE on ob1_agents, which db/config.mjs's server grants do not include
+--     (a least-privilege role would then fail the refusal), or a
+--     subtransaction, whose rollback would release the refused row's lock.
 --   * A role granted SELECT and INSERT but not UPDATE on ob1_agent_keys failed
 --     every known-key lookup under 010; now it fails only a lookup that writes
 --     — a stale one, a scope change, or a registration (INSERT … ON CONFLICT DO
@@ -181,7 +186,8 @@ BEGIN
          AND revoked_at IS NULL;
 
       IF NOT FOUND THEN
-        -- The row changed while the UPDATE waited. Under READ COMMITTED each
+        -- The row changed between the read and the write (or while the write
+        -- waited on it). Under READ COMMITTED each
         -- statement of a VOLATILE function takes a fresh snapshot, so this
         -- reads what committed.
         SELECT k.canonical_agent_id, k.revoked_at, k.revoked_reason, a.label
@@ -263,7 +269,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION resolve_agent(text, text, text) IS
-  'Resolve a key digest + key name to a stable canonical_agent_id, registering on first sight. Distinguishes a rename (hash known, label new) from a rotation (label known, hash new); both preserve the id. Returns {ok:false, error:REVOKED} with the agent id still attached, so a refused key stays identified. A known key''s row is written only when last_used_at is NULL, over five minutes old or in the future, or the presented scope changed, so a recently used key presenting its recorded scope takes no row lock; a revocation that commits while that write waits, or before a registration writes over a row another transaction inserted, answers REVOKED (migration 054, SMD-2090).';
+  'Resolve a key digest + key name to a stable canonical_agent_id, registering on first sight. Distinguishes a rename (hash known, label new) from a rotation (label known, hash new); both preserve the id. Returns {ok:false, error:REVOKED} with the agent id still attached, so a refused key stays identified. A known key''s row is written only when last_used_at is NULL, over five minutes old or in the future, or the presented scope changed, so a recently used key presenting its recorded scope takes no row lock; a revocation that commits while that write waits, or before a registration writes over a row another transaction inserted, answers REVOKED under READ COMMITTED (40001 under a stricter isolation, which a retry answers) (migration 054, SMD-2090).';
 
 COMMENT ON COLUMN ob1_agent_keys.last_used_at IS
   'The key''s last use, to within five minutes: resolve_agent writes it when it is NULL, older than that or in the future, or when the presented scope changed, and not otherwise, so a lookup of a recently used key takes no row lock (migration 054, SMD-2090). resolve_agent sets it on every row it inserts, so NULL means a row written or cleared outside it (by hand, or by a restore).';

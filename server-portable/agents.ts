@@ -19,7 +19,8 @@
  *
  *
  * On failure, this returns `{ agentId: undefined }` rather than throwing —
- * except on a lock (`busy`) or for a revocation already read, which are
+ * except on a lock timeout or a serialization failure that outlasts its
+ * retries (`busy`) or for a revocation already read, which are
  * refusals; the paragraph after next says why.
  *
  * That is deliberate and worth defending, because "the identity lookup failed,
@@ -264,7 +265,7 @@ export class AgentResolver {
         outcome = revoked;
         ttl = failureTtl(this.ttlMs);
       } else if (retryable(e)) {
-        this.warnOnce(key, "busy", `agent registry: resolve_agent timed out on a lock or failed to serialize for key "${principal.name}", retried up to ${this.busyRetry.attempts} times within ${this.busyRetry.budgetMs} ms — its requests are refused with a retry until the registry answers: ${cause}`);
+        this.warnOnce(key, "busy", `agent registry: resolve_agent timed out on a lock or failed to serialize for key "${principal.name}", tried up to ${this.busyRetry.attempts} times within ${this.busyRetry.budgetMs} ms — its requests are refused with a retry until the registry answers: ${cause}`);
         outcome = { status: "busy" };
         ttl = Math.min(this.ttlMs, BUSY_TTL_MS);
       } else {

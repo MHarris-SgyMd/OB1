@@ -4731,6 +4731,36 @@ console.log("\n[24] resolve_agent under a held key row: a recently used key answ
       await sql`DELETE FROM ob1_agent_keys WHERE key_hash = ${unseen}`;
     }
   }
+  // Its other half: the row another transaction is inserting is NOT revoked —
+  // the loser of two first sights, or a rotation meeting one. The lookup's
+  // INSERT waits, the ON CONFLICT writes over the unrevoked row, and the
+  // lookup answers ok, a rotation onto the label's agent (review pass 3: an
+  // inverted re-check, or DO NOTHING, refused every such key as revoked and
+  // no suite saw it).
+  {
+    const loser = "b9".repeat(32);
+    const inserter = await hold((tx) => tx`
+      INSERT INTO ob1_agent_keys (key_hash, canonical_agent_id, scope, last_used_at)
+      VALUES (${loser}, ${agentOf.fresh}::uuid, 'write', now())`);
+    let pending: Promise<{ r?: R; code: string }> | undefined;
+    let waited = false;
+    try {
+      pending = looker.begin(async (tx: SQL) => {
+        await tx`SELECT set_config('lock_timeout', '5000ms', true)`;
+        return tx`SELECT resolve_agent(${loser}, ${labelOf("fresh")}, 'write') AS r`;
+      }).then((rows) => ({ r: (rows as { r: R }[])[0].r, code: "" }), (e) => ({ code: String((e as { errno?: string }).errno ?? (e as Error).message) }));
+      waited = await lookerWaits();
+    } finally {
+      await inserter.commit();
+    }
+    try {
+      const won = await pending!;
+      assert(waited && won.r?.ok === true && won.r.rotated === true && won.r.agent_id === agentOf.fresh,
+        `…and one meeting an unrevoked row another transaction inserted answers ok, a rotation onto the label's agent (waited: ${waited}; ${won.code || JSON.stringify(won.r)})`);
+    } finally {
+      await sql`DELETE FROM ob1_agent_keys WHERE key_hash = ${loser}`;
+    }
+  }
   // Under REPEATABLE READ — a database or role whose default isolation is not
   // READ COMMITTED — the waiting UPDATE cannot re-read the committed row:
   // Postgres fails it 40001, the SQLSTATE agents.ts retries, and a fresh
