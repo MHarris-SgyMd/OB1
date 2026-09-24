@@ -492,8 +492,16 @@ console.log("\n[10c] brain-info.ts's rules, without a database: the ledger's jud
     for (const h of slow) if (text.includes(h)) return Bun.sleep(150).then(() => answer(text));
     return Promise.resolve().then(() => answer(text));
   };
-  const tx = Object.assign(tag, { savepoint: <T>(fn: (sp: typeof tag) => Promise<T>) => fn(tag) });
-  const fake = Object.assign(tag, { begin: <T>(fn: (t: typeof tx) => Promise<T>) => fn(tx) });
+  // The savepoint's RELEASE and the transaction's COMMIT can be slowed or
+  // failed, to put a deadline or an error between a read and its end.
+  let releaseMs = 0;
+  let failCommit = false;
+  const tx = Object.assign(tag, {
+    savepoint: async <T>(fn: (sp: typeof tag) => Promise<T>) => { const r = await fn(tag); if (releaseMs) await Bun.sleep(releaseMs); return r; },
+  });
+  const fake = Object.assign(tag, {
+    begin: async <T>(fn: (t: typeof tx) => Promise<T>) => { const r = await fn(tx); if (failCommit) throw pgError("terminating connection due to administrator command", "57P01"); return r; },
+  });
   const facts = await readDatabaseFacts(fake);
   assert(facts.ledger.present === true && facts.ledger.names === null && facts.unread.ledger?.reason === "timeout",
     `a ledger whose read timed out is present and unread as a timeout, not a refusal (${JSON.stringify(facts.unread.ledger)})`);
@@ -539,6 +547,25 @@ console.log("\n[10c] brain-info.ts's rules, without a database: the ledger's jud
   assert(pd !== null && took < 1000 && pd.postgres === "16.15" && pd.schemaVersion === "1.1.0+upstream.9543c29"
       && pd.unread["counts.thoughts"]?.reason === "deadline" && pd.unread.databaseBytes?.reason === "deadline" && pd.unread.ledger?.reason === "timeout",
     `at the deadline the facts read so far stand and the rest are named (${Math.round(took)} ms, ${JSON.stringify(pd?.unread)})`);
+  // A table absent everywhere was settled before any read, so the deadline
+  // never names it (review pass 3: it rendered '?' for 'no table').
+  assert(pd !== null && !("counts.thought_chunks" in pd.unread) && pd.unread["counts.thought_audit"]?.reason === "invisible",
+    "at the deadline an absent table is still absent, an invisible one still invisible");
+  // A deadline between a read's write and its savepoint's RELEASE: the fact is
+  // read, and not named `deadline` (review pass 3: the snapshot tore).
+  releaseMs = 150;
+  const torn = await guard(brainInfo(server, (progress) => readDatabaseFacts(fake, {}, progress), 60));
+  releaseMs = 0;
+  const td = torn && !("error" in torn.database) ? torn.database : null;
+  assert(td !== null && td.schemaVersion === "1.1.0+upstream.9543c29" && !("ob1_config" in td.unread),
+    `a fact written before its savepoint's release is read, not deadline (${JSON.stringify(td?.unread.ob1_config)})`);
+  // A failure after the catalog answered — here the COMMIT — keeps what was
+  // read (review pass 3: it threw every fact away).
+  failCommit = true;
+  const dropped = await guard(brainInfo(server, (progress) => readDatabaseFacts(fake, {}, progress), 1000));
+  failCommit = false;
+  assert(dropped !== null && !("error" in dropped.database) && dropped.database.postgres === "16.15" && dropped.database.schemaVersion === "1.1.0+upstream.9543c29",
+    "a failure after the catalog answered keeps the facts read");
   // An abandoned read starts nothing more: a count that answers after the
   // deadline is the last statement it runs — no size read follows it.
   slow.add("FROM thoughts");

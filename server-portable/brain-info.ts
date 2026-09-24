@@ -195,6 +195,12 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
                   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                  WHERE c.relkind IN ('r', 'p')
                    AND c.relname IN ('ob1_config', 'schema_migrations', 'thoughts', 'thought_audit', 'thought_chunks', 'ob1_entities')
+                   -- Another tool's schema_migrations (Supabase's auth and
+                   -- supabase_migrations, Rails, dbmate) is not this ledger:
+                   -- only one carrying migrate.ts's sha256 column counts
+                   -- (review pass 3).
+                   AND (c.relname <> 'schema_migrations' OR EXISTS (
+                         SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attname = 'sha256' AND NOT a.attisdropped))
                  GROUP BY c.relname) x) AS anywhere,
              (SELECT COALESCE(jsonb_agg(jsonb_build_object('index', c.relname, 'table', t.relname, 'opts', array_to_string(c.reloptions, ',')) ORDER BY t.relname, c.relname), '[]'::jsonb)
                 FROM pg_index i
@@ -252,47 +258,59 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
           ]
         : []),
     ];
-    for (const g of guarded) progress.pending.add(g.field);
-
+    // A table that does not resolve is settled here, before any read: absent
+    // everywhere (null, no entry) or `invisible` — so only a read that will run
+    // is pending, and a deadline never names an absent table (review pass 3).
+    const toRun: Guarded[] = [];
     for (const g of guarded) {
-      if (progress.abandoned) break; // snapshotFacts names what is still pending
       if (g.table && !resolved[g.table]) {
         if (g.table in anywhere) facts.unread[g.field] = { reason: "invisible", message: `${g.table} exists (schema ${anywhere[g.table]}) but does not resolve for this role — not on its search_path, or no USAGE on that schema` };
         if (g.field === "ledger") facts.ledger.names = g.table in anywhere ? null : [];
-        progress.pending.delete(g.field);
-        continue;
+      } else {
+        toRun.push(g);
+        progress.pending.add(g.field);
       }
+    }
+
+    for (const g of toRun) {
+      if (progress.abandoned) break; // snapshotFacts named what is still pending
       try {
-        await tx.savepoint(g.read);
+        // The field leaves `pending` in the same synchronous step that writes
+        // it, before the savepoint's RELEASE round trip: a deadline between
+        // the two would otherwise name a written fact `deadline` (review pass 3).
+        await tx.savepoint(async (sp) => {
+          await g.read(sp);
+          progress.pending.delete(g.field);
+        });
       } catch (e) {
+        progress.pending.delete(g.field);
         facts.unread[g.field] = { reason: unreadReason(e), message: message(e) };
         if (g.field === "ledger") facts.ledger.names = null;
       }
-      progress.pending.delete(g.field);
     }
-    if (progress.abandoned) markAbandoned(progress);
     return facts;
   });
 }
 
-/** Every read the progress still has pending, named as the deadline's. */
-function markAbandoned(progress: ReadProgress): void {
+/** Every read the progress still has pending, named with the reason it was not reached. */
+function markPending(progress: ReadProgress, unread: Unread): void {
   if (!progress.facts) return;
   for (const field of progress.pending) {
-    progress.facts.unread[field] = { reason: "deadline", message: "not read before the deadline" };
+    progress.facts.unread[field] = unread;
     if (field === "ledger") progress.facts.ledger.names = null;
   }
   progress.pending.clear();
 }
 
 /**
- * The facts a read has reached, as its caller's deadline finds them — a copy,
- * since the read may still be finishing its last statement. Null when the
- * catalog statement has not answered: nothing is known about the database.
+ * The facts a read has reached, as its caller finds them at a deadline or a
+ * failure — a copy, since the read may still be finishing its last statement.
+ * The rest are named with `unread`'s reason. Null when the catalog statement
+ * has not answered: nothing is known about the database.
  */
-export function snapshotFacts(progress: ReadProgress): DatabaseFacts | null {
+export function snapshotFacts(progress: ReadProgress, unread: Unread = { reason: "deadline", message: "" }): DatabaseFacts | null {
   progress.abandoned = true;
-  markAbandoned(progress);
+  markPending(progress, unread);
   return progress.facts ? structuredClone(progress.facts) : null;
 }
 
@@ -363,8 +381,11 @@ export async function brainInfo(
       if (!facts) failure = `the database gave no answer within ${deadlineMs} ms`;
     }
   } catch (e) {
-    facts = null;
+    // A failure after the catalog answered (the connection dropped mid-read, a
+    // COMMIT refused) keeps what was read, the rest named with the error
+    // (review pass 3: it threw every fact away).
     failure = message(e);
+    facts = snapshotFacts(progress, { reason: "error", message: failure });
   } finally {
     clearTimeout(timer);
   }
@@ -447,6 +468,6 @@ export function renderBrainInfo(info: BrainInfo): string {
   }
   lines.push(row("HNSW", db.hnsw.length === 0 ? "none" : db.hnsw.map((h) => `${h.index} on ${h.table} (m ${h.m}, ef_construction ${h.efConstruction})`).join("; ")));
   const unread = Object.entries(db.unread);
-  if (unread.length) lines.push(row("Not read", unread.map(([k, u]) => `${k} — ${unreadWords(u)}: ${u.message}`).join("; ")));
+  if (unread.length) lines.push(row("Not read", unread.map(([k, u]) => `${k} — ${unreadWords(u)}${u.message ? `: ${u.message}` : ""}`).join("; ")));
   return lines.join("\n");
 }

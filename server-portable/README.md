@@ -312,7 +312,9 @@ waits at 300 ms (never above a stricter setting the role already has), a read
 that does not answer is named in `unread` with its reason (`refused`,
 `timeout`, `deadline`, `invisible`, `error`), the facts read by the deadline
 are kept, and a database whose catalog has not answered by then is
-`database.error`. Concurrent probes share one read. Without a key, with a wrong
+`database.error`. Concurrent probes share one read, and one registry check per
+key, so a burst of probes during a migration holds a connection or two, not the
+pool. Without a key, with a wrong
 or capture-only key, or with a revoked one — or while the agent registry has
 not answered by the deadline, since it could still say revoked — the body is
 the literal `ok`, so nothing about the deployment reaches an unauthenticated

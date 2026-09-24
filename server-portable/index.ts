@@ -224,20 +224,31 @@ function serverFacts(): ServerFacts {
 // 2); the tool, kept alive by its stream (SMD-1864), waits longer for a large
 // brain's counts, at brain-info.ts's default ceilings.
 export const HEALTH_DEADLINE_MS = 2_500;
-const HEALTH_READ = { statementTimeoutMs: 800, lockTimeoutMs: 300 };
 export const BRAIN_INFO_TOOL_DEADLINE_MS = 15_000;
-// One read in flight per surface: concurrent probes share it rather than each
+type Surface = "health" | "tool";
+const SURFACES: Record<Surface, { deadlineMs: number; opts: ReadOptions }> = {
+  health: { deadlineMs: HEALTH_DEADLINE_MS, opts: { statementTimeoutMs: 800, lockTimeoutMs: 300 } },
+  tool: { deadlineMs: BRAIN_INFO_TOOL_DEADLINE_MS, opts: {} },
+};
+// One read in flight per surface: concurrent callers share it rather than each
 // taking a pool connection (review pass 2: forty probes against a locked table
-// held the pool, and tool calls queued behind them).
-const inflight = new Map<number, Promise<BrainInfo>>();
-function readBrainInfo(deadlineMs: number, opts: ReadOptions = {}): Promise<BrainInfo> {
-  let p = inflight.get(deadlineMs);
-  if (!p) {
-    p = brainInfo(serverFacts(), async (progress) => (await db()).databaseFacts(opts, progress), deadlineMs)
-      .finally(() => inflight.delete(deadlineMs));
-    inflight.set(deadlineMs, p);
-  }
-  return p;
+// held the pool, and tool calls queued behind them). Keyed by surface, so a
+// probe never inherits the tool's deadline and ceilings (review pass 3: keyed
+// by deadline, the one hidden coupling was a number), and held until the READ
+// ends, not the answer: a probe after the deadline gets the abandoned read's
+// answer instead of opening a second transaction beside it.
+const inflight = new Map<Surface, Promise<BrainInfo>>();
+function readBrainInfo(surface: Surface): Promise<BrainInfo> {
+  const shared = inflight.get(surface);
+  if (shared) return shared;
+  const { deadlineMs, opts } = SURFACES[surface];
+  let read: Promise<unknown> = Promise.resolve();
+  const answer = brainInfo(serverFacts(), (progress) => (read = (async () => (await db()).databaseFacts(opts, progress))()), deadlineMs);
+  inflight.set(surface, answer);
+  void answer.then(() => read).catch(() => {}).finally(() => {
+    if (inflight.get(surface) === answer) inflight.delete(surface);
+  });
+  return answer;
 }
 
 // Built on first use, for the same reason as the store: reading env() at module
@@ -1506,7 +1517,7 @@ function buildServer(principal: Principal): McpServer {
     },
     async () => {
       try {
-        return { content: [{ type: "text" as const, text: renderBrainInfo(await readBrainInfo(BRAIN_INFO_TOOL_DEADLINE_MS)) }] };
+        return { content: [{ type: "text" as const, text: renderBrainInfo(await readBrainInfo("tool")) }] };
       } catch (err: unknown) {
         return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
       }
@@ -2219,6 +2230,23 @@ app.options("*", (c) => {
 // be registered ABOVE this line or it never fires. FORK.md change 42.
 app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 
+// One registry check in flight per key for the health route: the race below
+// answers at its deadline but cannot cancel the resolve, which waits on a lock
+// the registry's tables may be under with no timeout of its own — so without
+// this every probe of a cold key left one pool connection waiting, and ten
+// probes emptied the pool while /health still said `ok` (review pass 3). A
+// burst of probes with one key now holds one connection.
+const resolving = new Map<string, ReturnType<AgentResolver["resolve"]>>();
+function resolveOnce(principal: Principal): ReturnType<AgentResolver["resolve"]> {
+  const key = `${principal.keyHash}:${principal.name}`;
+  const shared = resolving.get(key);
+  if (shared) return shared;
+  const p = agents().resolve(db(), principal);
+  resolving.set(key, p);
+  void p.catch(() => {}).finally(() => { if (resolving.get(key) === p) resolving.delete(key); });
+  return p;
+}
+
 // Liveness for platform probes (Kubernetes httpGet, load-balancer target checks,
 // uptime monitors), which can only GET and expect 2xx — the MCP endpoint answers
 // GET with 405 (below). Without a key, like /.well-known/*: it says the process
@@ -2267,10 +2295,10 @@ app.get("*", async (c, next) => {
   // record while the registry's tables were locked); one that answers that it
   // cannot reach the database (agents.ts: not a refusal) lets the record
   // through with the database's error.
-  const info = readBrainInfo(HEALTH_DEADLINE_MS, HEALTH_READ);
+  const info = readBrainInfo("health");
   let timer: ReturnType<typeof setTimeout> | undefined;
   const identity = await Promise.race([
-    agents().resolve(db(), principal),
+    resolveOnce(principal),
     new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), HEALTH_DEADLINE_MS); }),
   ]);
   clearTimeout(timer);

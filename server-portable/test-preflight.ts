@@ -1818,6 +1818,10 @@ else {
       }
       assert(/!\s+migration ledger\s+could not verify: schema_migrations could not be read \(canceling statement due to lock timeout\)/.test(busy.out) && !/not readable by this role/.test(row(busy.out, "migration ledger") ?? ""),
              `a locked ledger is could-not-verify, not a missing grant (${row(busy.out, "migration ledger")})`);
+      // …and the version row, whose range check needs the ledger's highest,
+      // says it could not verify rather than ✓ "unknown" (review pass 3).
+      assert(/!\s+schema version\s+could not verify against the ledger: .* schema_migrations could not be read: canceling statement due to lock timeout/.test(busy.out),
+             `a locked ledger leaves the version row unverified, not ✓ (${row(busy.out, "schema version")})`);
     }
 
     // Back to the harness's unrecorded schema for the sections below.

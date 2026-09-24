@@ -2754,6 +2754,13 @@ if (configFailed) {
               add("schema version", "warn",
                 `the brain reports ${brain} but its ledger reaches migration ${highest}, past that release's range (…${pad3(releasedHi)}) — migrations applied beyond the version it names`,
                 "Cut a release that closes the new range, or roll the extra migrations back; releases.json maps versions to ranges.");
+            } else if (highestApplied === null && ledgerUnread && ledgerUnread.reason !== "refused") {
+              // The range check needs the ledger's highest; a ledger held by a
+              // migration, or off this role's path, is not "unknown and fine"
+              // (review pass 3: a locked ledger turned this row's warning into ✓).
+              add("schema version", "warn",
+                `could not verify against the ledger: ${brain}, but ${whyUnread} — the release-range check needs its highest migration`,
+                "Run preflight again once the ledger can be read; the migration ledger row says why it could not.");
             } else {
               add("schema version", "ok", `${brain} · highest migration ${highest}${cmp > 0 ? ` (server ${FORK_VERSION} is newer)` : ""}`);
             }

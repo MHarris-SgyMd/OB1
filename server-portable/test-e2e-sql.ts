@@ -964,9 +964,16 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
 
   // resetSchema applies the files with no ledger: the record says so rather
   // than inventing a number, and does not judge the brain against the tree.
+  // Another tool's schema_migrations (Supabase's supabase_migrations, Rails,
+  // dbmate) is not the fork's ledger: no sha256 column, so the brain still has
+  // none — not one it cannot resolve (review pass 3).
+  await sql.unsafe(`CREATE SCHEMA e2e_other_tool`);
+  await sql.unsafe(`CREATE TABLE e2e_other_tool.schema_migrations (version text PRIMARY KEY)`);
   const bare = await health("e2e-key") as Record<string, any>;
+  await sql.unsafe(`DROP TABLE e2e_other_tool.schema_migrations`);
+  await sql.unsafe(`DROP SCHEMA e2e_other_tool`);
   assert(bare.database?.ledger?.present === false && bare.database?.highestMigration === null && bare.ledgerStatus === null,
-    `a brain with no schema_migrations reports no ledger and no judgement (${JSON.stringify(bare.database?.ledger)}, ${bare.ledgerStatus})`);
+    `a brain with no schema_migrations of its own — another tool's in another schema — reports no ledger and no judgement (${JSON.stringify(bare.database?.ledger)}, ${bare.ledgerStatus})`);
 
   // Adopted the way an operator adopts a hand-built schema: the ledger now
   // records every file, so its highest is the tree's last — a fresh brain is current.
@@ -1030,6 +1037,20 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     return async () => { release(); await tx; await locker.close(); };
   };
   const roleUrl = URL_.replace(/\/\/[^@]*@/, "//brain_reader:reader@");
+  /** Await `work`, sampling pg_stat_activity for backends waiting on a lock in a query LIKE `pattern`; the most seen at once rides on the result. */
+  const sampleWhile = async <T extends object>(work: Promise<T>, pattern: string): Promise<T & { maxWaiting: number }> => {
+    let done = false;
+    let maxWaiting = 0;
+    const settled = work.finally(() => { done = true; });
+    while (!done) {
+      const [{ n }] = await sql`
+        SELECT count(*)::int AS n FROM pg_stat_activity
+         WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE ${pattern}`;
+      maxWaiting = Math.max(maxWaiting, n);
+      await Bun.sleep(25);
+    }
+    return Object.assign(await settled, { maxWaiting });
+  };
   await sql.unsafe(`DROP ROLE IF EXISTS brain_reader`);
   await sql.unsafe(`CREATE ROLE brain_reader LOGIN PASSWORD 'reader'`);
   await sql.unsafe(`GRANT USAGE ON SCHEMA public TO brain_reader`);
@@ -1103,17 +1124,28 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     try {
       const t0 = performance.now();
       const probes = Array.from({ length: 10 }, () => health("e2e-key") as Promise<Record<string, any>>);
-      await Bun.sleep(150);
-      const [{ n: waiting }] = await sql`
-        SELECT count(*)::int AS n FROM pg_stat_activity
-         WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE '%count(*)::float8 AS n FROM thought%'`;
-      const bodies = await Promise.all(probes);
+      // Sampled until the probes answer, not once at a guessed moment (review
+      // pass 3: a slow runner could sample before the read reached the lock).
+      const bodies = await sampleWhile(Promise.all(probes), "%count(*)::float8 AS n FROM thought%");
+      const waiting = bodies.maxWaiting;
       const took = performance.now() - t0;
       const d = bodies[0].database ?? {};
       const locked = ["thoughts", "thought_audit", "thought_chunks"].every((t) => d.unread?.[`counts.${t}`]?.reason === "timeout");
       assert(locked && d.counts?.ob1_entities === truth.entities && d.highestMigration === treeLast - 1 && d.pgvector?.version === truth.vec && took < 2500,
         `three locked tables are three timed-out counts and the rest answer, in ${Math.round(took)} ms (${JSON.stringify(d.unread)})`);
-      assert(waiting === 1 && bodies.every((b) => JSON.stringify(b) === JSON.stringify(bodies[0])), `ten concurrent probes share one read: ${waiting} backend(s) waiting on the lock, one body`);
+      assert(waiting === 1 && bodies.every((b) => JSON.stringify(b) === JSON.stringify(bodies[0])), `ten concurrent probes share one read: at most ${waiting} backend(s) waiting on the lock, one body`);
+
+      // A probe while the tool's read is in flight has a read of its own, at
+      // the health ceilings (review pass 3: keyed by deadline alone, a shared
+      // entry would hand it the tool's 15 s deadline and 1 s lock waits).
+      const tool = call("brain_info");
+      await Bun.sleep(100);
+      const p0 = performance.now();
+      const probe = await health("e2e-key") as Record<string, any>;
+      const probeTook = performance.now() - p0;
+      const toolText = await tool;
+      assert(probe.database?.unread?.["counts.thought_audit"]?.reason === "timeout" && probeTook < 1800 && /^Rows: +\? thoughts · \? audit · \? chunks/m.test(toolText),
+        `a probe during the tool's read answers from its own, at the health ceilings (${Math.round(probeTook)} ms)`);
     } finally {
       await unlock();
     }
@@ -1138,6 +1170,16 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
       const good = await health("op-raw");
       const took = performance.now() - t0;
       assert(revoked === "ok" && good === "ok" && took < 6000, `with the registry unanswering, every key gets \`ok\` at the deadline (${Math.round(took)} ms for two)`);
+      // …and a burst of probes with one key holds one registry connection, not
+      // one each (review pass 3: ten probes emptied the pool while /health said ok).
+      // The two probes above each left one resolve waiting (one per key); ten
+      // more of op-raw's share its one, so the count does not move.
+      const [{ n: before }] = await sql`
+        SELECT count(*)::int AS n FROM pg_stat_activity
+         WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE '%resolve_agent%'`;
+      const burst = await sampleWhile(Promise.all(Array.from({ length: 10 }, () => health("op-raw"))), "%resolve_agent%");
+      assert(burst.every((b) => b === "ok") && before === 2 && burst.maxWaiting === before,
+        `ten probes of one key during a registry lock share its one waiting resolve (${before} waiting before, at most ${burst.maxWaiting} during)`);
     } finally {
       await unlock();
     }
