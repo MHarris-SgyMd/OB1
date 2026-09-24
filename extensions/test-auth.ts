@@ -36,12 +36,10 @@
  * `export default { port, fetch }` (SMD-1799), and its `fetch` is the handler
  * driven here — console.error/warn silenced for the length of a request, since
  * a refused port is the proof and not noise — and, for the recipes and
- * integrations, under a loader that reads their Deno specifiers on Bun: a
- * `jsr:` type-only import is dropped, `npm:pkg@version` becomes `pkg`, the
- * Deno postgres driver becomes a stub that never connects, and a bare package
- * name resolves from this directory's install, since theirs is a deno.json.
- * Nothing stands in for `Deno`: a server that still reached it would throw at
- * import or answer 500, a counted failure either way.
+ * integrations, under a loader that resolves their bare package names from
+ * this directory's install, since they have none of their own. Nothing stands
+ * in for `Deno`: a server that still reached it would throw at import or
+ * answer 500, a counted failure either way.
  * No database: nothing here reaches a handler that queries with a key that
  * would let it, or the client refuses at once (a port nothing listens on) —
  * the SQL shim and supabase-js both connect lazily, so a stub URL is never
@@ -60,8 +58,7 @@
  * Run: bun install && bun test-auth.ts   (in extensions/)
  */
 
-import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "./_shared/auth.ts";
@@ -88,30 +85,26 @@ async function importServer(file: string): Promise<Handler> {
   return mod.default.fetch as Handler;
 }
 
-// ── Deno's specifiers, on Bun ────────────────────────────────────────────────
-// Dead for the 22 servers on the shim since SMD-1799 (check 11 refuses a `jsr:`/`npm:`/URL specifier in them); the
-// `postgres` stub still stands in for kubernetes-deployment, a Deno deployment until SMD-1800.
+// ── The vendored servers' packages, from this directory's install ────────────
+// A recipe or integration imports hono, zod, @hono/mcp and the SDK by bare name
+// and has no install of its own beside it (kubernetes-deployment's package.json
+// is the image's, SMD-1800; run from a checkout, Bun fetches the four on demand —
+// SMD-1991), so this loader resolves those names from extensions/node_modules,
+// the pinned versions. Until SMD-1800 it also read Deno's specifiers — a `jsr:`
+// type-only import dropped, `npm:pkg@version` unprefixed, the deno.land postgres
+// driver stubbed for kubernetes-deployment; none is left in the tree (check 11
+// refuses them in every shim importer).
 
-/** The packages this directory installs; the recipes' and integrations' deno.json pin the same names. */
+/** The packages this directory installs. */
 const PACKAGES = /^(hono|zod|@hono\/mcp|@modelcontextprotocol\/sdk)(\/|$)/;
-const PG_STUB = join(tmpdir(), `ob1-test-auth-deno-postgres-stub-${process.pid}.ts`);
-await Bun.write(PG_STUB,
-  "export class Pool { constructor(..._: unknown[]) {} connect(): never { throw new Error('the test never queries'); } }\n");
 /** Only this checkout's recipes/ and integrations/ — not a checkout that happens to sit under a directory so named. */
 const VENDORED = new RegExp("^" + ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/(recipes|integrations)/.*\\.ts$");
 Bun.plugin({
-  name: "deno-specifiers-on-bun",
+  name: "vendored-packages-from-extensions",
   setup(build) {
     build.onLoad({ filter: VENDORED }, async (args) => {
-      let src = await Bun.file(args.path).text();
-      src = src.replace(/^import\s+"jsr:[^"]+";\s*$/gm, "");
-      src = src.replace(/(from\s+|import\s+)(["'])([^"']+)\2/g, (whole, lead, q, spec) => {
-        let s = spec as string;
-        if (s.startsWith("npm:")) s = s.slice(4).replace(/^(@?[^@/]+(?:\/[^@/]+)?)@[^/]*/, "$1");
-        if (s === "postgres") return `${lead}${q}${PG_STUB}${q}`;
-        if (PACKAGES.test(s)) return `${lead}${q}${Bun.resolveSync(s, HERE)}${q}`;
-        return whole;
-      });
+      const src = (await Bun.file(args.path).text()).replace(/(from\s+|import\s+)(["'])([^"']+)\2/g, (whole, lead, q, spec) =>
+        PACKAGES.test(spec as string) ? `${lead}${q}${Bun.resolveSync(spec as string, HERE)}${q}` : whole);
       return { contents: src, loader: "ts" };
     });
   },
@@ -253,11 +246,9 @@ try {
   // A server that listens or connects at import, or reaches a `Deno` nothing installs, is a
   // counted failure with a tally, not a stack trace in place of one; nothing below could run.
   assert(false, `a server threw at import — as a module nothing should listen, connect or reach \`Deno\`: ${e instanceof Error ? e.message : String(e)}`);
-  unlinkSync(PG_STUB);
   report();
 }
 assert(!("Deno" in globalThis), "no import installed a `Deno` global — every server is Bun-native (SMD-1799)");
-unlinkSync(PG_STUB); // every import that wanted it has it
 
 // ── One request ──────────────────────────────────────────────────────────────
 
@@ -937,6 +928,13 @@ for (const t of TEXT_ONLY) {
     // `npm:hono`, a `jsr:` or URL import would deploy on latest while the test ran the pin) — is this exact npm pin.
     const drift = Object.entries(imports).filter(([name, spec]) => name in pkg && spec !== `npm:${name}@${pkg[name]}`);
     assert(drift.length === 0, `${file} pins what package.json installs${drift.length ? ` (${drift.map(([n, s]) => `${n}: ${s}`).join(", ")})` : ""}`);
+  }
+  // kubernetes-deployment's package.json — the one vendored server with an install of its own, the image's
+  // (SMD-1800) — pins the MCP stack to what this directory installs, so the container runs what the test ran.
+  {
+    const deps = JSON.parse(readFileSync(join(ROOT, "integrations/kubernetes-deployment/package.json"), "utf8")).dependencies as Record<string, string>;
+    const drift = Object.entries(pkg).filter(([name, version]) => deps[name] !== version);
+    assert(drift.length === 0 && Object.keys(deps).length === Object.keys(pkg).length, `integrations/kubernetes-deployment/package.json pins exactly what extensions/package.json installs${drift.length ? ` (${drift.map(([n, v]) => `${n}: ${deps[n] ?? "absent"} vs ${v}`).join(", ")})` : ""}`);
   }
   // server/package.json mirrors server/deno.json on the MCP stack (change 84's
   // review: a nested zod 4.5.4 had arrived in its lock unheld). supabase-js is

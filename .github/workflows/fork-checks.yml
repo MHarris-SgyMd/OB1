@@ -158,19 +158,12 @@ jobs:
       # `// @ts-types` pragma naming the extensionless subpath, and test-auth.ts
       # holds it there (change 84). A file that loses the pragma fails here
       # with `implicitly has an 'any' type` at every handler.
+      # Every vendored MCP server, API and worker runs under Bun — the 22 on the
+      # SQL shim since SMD-1798, kubernetes-deployment on Bun's own Postgres
+      # client since SMD-1800 — and the Portable-server job imports and starts
+      # each, so none is checked here any more.
       - name: deno check server/index.ts
         working-directory: server
-        run: deno check --node-modules-dir=none index.ts
-
-      # Every vendored MCP server, API and worker imports the SQL shim (which
-      # imports `bun`) since SMD-1798 and runs under Bun — the Portable-server
-      # job starts each, the data-layer job drives their tools — so none
-      # resolves under Deno any more; the five steps that checked the last six
-      # of them went with the move. kubernetes-deployment is the one vendored
-      # file still deployed on Deno (its image, SMD-1800's; its own database,
-      # SMD-1524) — Bun-shaped since SMD-1799, `deno serve` serving the export.
-      - name: deno check integrations/kubernetes-deployment
-        working-directory: integrations/kubernetes-deployment
         run: deno check --node-modules-dir=none index.ts
 
   portable-server:
@@ -671,6 +664,13 @@ jobs:
       - name: Smoke-test it over MCP
         working-directory: deploy
         run: ./smoke.sh
+
+      # The other container this repository ships (SMD-1800): kubernetes-deployment's
+      # image, Bun's base with its pinned install, built from integrations/ so the
+      # shared auth module is in the context. Built, not run — its database is its
+      # own (k8s/init.sql) and extensions/test-auth.ts starts the server itself.
+      - name: The Kubernetes image builds
+        run: docker build -f integrations/kubernetes-deployment/Dockerfile -t ob1-k8s-mcp:ci integrations
 
       - name: Confirm no Supabase CLI anywhere in the stack
         working-directory: deploy
