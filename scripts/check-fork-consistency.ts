@@ -52,7 +52,8 @@
  *      `anon`, no `auth.uid()`, `auth.role()` or `auth.users`, no
  *      `supabase_`-prefixed name, no RLS or policy — comments excepted by a
  *      literal-aware strip, string literals included (SMD-1796; widened from
- *      schemas/ and db/ to the whole tree by SMD-1810); the rules are
+ *      schemas/ and db/ to db/ and the seven category directories by
+ *      SMD-1810); the rules are
  *      db/config.mjs's SUPABASE_SQL_RULES, which test-schema [10], [40] and
  *      [49] apply from inside the suite; no exceptions
  *  13. every port a compose file under deploy/ publishes names its host address

@@ -110,7 +110,7 @@ Run `schema.sql` against your Open Brain database — `psql "$DATABASE_URL" -f e
 
 ```sql
 -- Paste your schema.sql content here
--- Keep each logical group (tables, functions, policies) in its own sub-step
+-- Keep each logical group (tables, indexes, functions, triggers) in its own sub-step
 ```
 
 </details>
@@ -120,9 +120,10 @@ Run `schema.sql` against your Open Brain database — `psql "$DATABASE_URL" -f e
 New query → paste and Run:
 
 <!--
-IMPORTANT: Every extension MUST include this GRANT step.
-Replace table_name and table_name_2 with your actual table names.
-Add one line per table your extension creates.
+IMPORTANT: Every extension MUST say how a role other than the tables' owner is granted them.
+An extension in this tree lists its tables in ROLE_GRANTS.extensions (db/config.mjs) and lets
+`bun db/migrate.ts --grant <role>` issue them (the callout below); these hand lines are for a
+contribution that cannot. Replace table_name and table_name_2 with your actual table names.
 -->
 
 <details>

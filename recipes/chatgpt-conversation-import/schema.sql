@@ -24,7 +24,7 @@
 
 CREATE TABLE IF NOT EXISTS chatgpt_conversations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID,                          -- NULL allowed; set USER_ID env var for multi-tenant (this fork: a plain uuid — the note under Row Level Security)
+    user_id UUID,                          -- NULL allowed; the importer fills it from USER_ID when set (this fork: a plain uuid — the note under Row Level Security)
 
     -- ChatGPT identifiers
     chatgpt_id TEXT UNIQUE,                 -- Original ChatGPT conversation ID

@@ -66,7 +66,7 @@ The schema creates:
 </details>
 
 > [!NOTE]
-> The schema needs nothing first — no Supabase role, no `auth.*` stub. Upstream's file granted both tables to `service_role`, revoked the three functions from `anon` and `authenticated`, and enabled row-level security on `auth.uid()`; this fork removed all of it (SMD-1810). The server connects as one role and scopes rows by `user_id` itself, and a role other than the tables' owner is granted them by `bun db/migrate.ts --grant <role>` (`db/README.md`, "Grants for a capturing role", the **recipes** group).
+> The schema needs nothing first — no Supabase role, no `auth.*` stub. Upstream's file granted both tables to `service_role`, revoked the three functions from `anon` and `authenticated`, and enabled row-level security on `auth.uid()`; this fork removed all of it (SMD-1810). The server connects as one role and scopes rows by `DEFAULT_USER_ID` itself, and a role other than the tables' owner is granted them by `bun db/migrate.ts --grant <role>` (`db/README.md`, "Grants for a capturing role", the **recipes** group).
 
 Done when: `graph_nodes` and `graph_edges` exist and `traverse_graph` and `find_shortest_path` are functions in your database (`\dt graph_*` and `\df traverse_graph` in psql; the Supabase Table Editor and Database → Functions, there).
 

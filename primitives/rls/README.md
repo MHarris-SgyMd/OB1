@@ -331,7 +331,7 @@ CREATE POLICY "Users can delete their own recipes"
 
 ## Extensions That Used This
 
-Upstream's [Household Knowledge](../../extensions/household-knowledge/) and [Home Maintenance](../../extensions/home-maintenance/) (Pattern 1 on two tables each), [Meal Planning](../../extensions/meal-planning/) (shared household access to recipes, meal plans and shopping lists), [Professional CRM](../../extensions/professional-crm/) (contacts, interactions, opportunities) and [Job Hunt Pipeline](../../extensions/job-hunt/) (five tables) carried Pattern 1 — meal planning Pattern 2 as well — in their `schema.sql`. On this fork each file carries a note where the policies stood (SMD-1810), and the three READMEs point here as background.
+Upstream's [Household Knowledge](../../extensions/household-knowledge/) and [Home Maintenance](../../extensions/home-maintenance/) (Pattern 1 on two tables each), [Meal Planning](../../extensions/meal-planning/) (shared household access to recipes, meal plans and shopping lists), [Professional CRM](../../extensions/professional-crm/) (contacts, interactions, opportunities) and [Job Hunt Pipeline](../../extensions/job-hunt/) (five tables) carried Pattern 1 — meal planning Pattern 2 as well — in their `schema.sql`. On this fork each file carries a note where the policies stood (SMD-1810), and the three that list it in `requires_primitives` (Meal Planning, Professional CRM, Job Hunt) point here as background.
 
 ## Further Reading
 

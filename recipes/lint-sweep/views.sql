@@ -1,7 +1,7 @@
 -- lint-sweep views.sql
 --
 -- OPTIONAL: SQL views that let you run the Tier 1 checks directly in
--- Supabase Studio or psql without installing the Node.js script. Apply
+-- psql (or any SQL client) without installing the Node.js script. Apply
 -- once; they become queryable read-only views over `public.thoughts`
 -- (and optionally `public.entities` / `public.thought_entities`).
 --
