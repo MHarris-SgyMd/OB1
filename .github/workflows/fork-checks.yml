@@ -124,7 +124,7 @@ jobs:
         working-directory: scripts
         run: bunx tsc --noEmit
 
-      # The session-end capture hook (SMD-1298): both transcript parsers, the
+      # The session capture hook (SMD-1298, SMD-2012): both transcript parsers, the
       # summary's shape, every secret pattern's probe, the refusal, the detached
       # hand-off and the MCP post — against synthetic transcripts and a fake
       # endpoint on localhost. Bun only, no database, so it runs here.
@@ -250,6 +250,15 @@ jobs:
       - name: Calibration ledger arithmetic
         working-directory: evals
         run: bun eval-calibration.ts --self-check
+
+      # The write-path eval's rules (SMD-1713): the corpus's shape, the stub
+      # provider's three answers, the reader's policy, the parsers, the
+      # scorer's partitions, the pairing and the floor comparison — probed
+      # with hand-known answers, the ticket's mutant among them. No database,
+      # no model; the run itself is the data-layer job's gate.
+      - name: Write-path rules
+        working-directory: evals
+        run: bun eval-write-path.ts --self-check
 
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
@@ -448,6 +457,27 @@ jobs:
       - name: Local model provider, no OpenRouter
         working-directory: server-portable
         run: bun test-local-provider.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # The write-path gate (SMD-1713): twenty fictional sessions through the
+      # real server with the provider scripted, four deliverables written by a
+      # fixed reader, one process per arm; fails when the default arm's
+      # salient-survival, error-catch or citation-coverage rate falls below
+      # the floor evals/baselines.json records, and proves the floor has teeth
+      # with a reader that ignores every label. Keyless, as the replay gate
+      # is; here rather than its own job because the write path needs the
+      # server and this database, and a step in a required job gates a merge
+      # without a new name in the ruleset (SMD-1856). No install for evals/
+      # or db/: the eval, the workers it spawns (db/extract-entities.ts,
+      # db/consolidate.ts) and the db/ modules they share import only bun,
+      # node and ../server-portable, whose packages the first step installed;
+      # a package added to db/ or evals/ and imported on this path would fail
+      # here first. The evals' own packages (LanceDB, Arrow) belong to the
+      # store comparison.
+      - name: Write-path gate
+        working-directory: evals
+        run: bun eval-write-path.ts --gate
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
