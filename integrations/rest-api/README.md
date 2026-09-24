@@ -152,9 +152,9 @@ could read `POST /search` and not `GET /recent`, `/thoughts` or `/stats`; the
 allowlist below broke the clients it was set for. `Retry-After` is exposed,
 so a browser can read the `429`'s wait; the preflight `204` carries no
 `Content-Type`. This is the one gateway on the fork that reads the
-allowlist: its siblings (`open-brain-rest`, `enhanced-mcp`,
-`agent-memory-api`, `server-portable`) answer `*` to every origin
-(SMD-2113).
+allowlist: the other vendored servers (`open-brain-rest`, `enhanced-mcp`,
+`agent-memory-api` and `server-portable` among them) answer `*` to every
+origin (SMD-2113).
 
 **Warning:** `*` combined with write methods (`POST`, `PUT`, `PATCH`,
 `DELETE`) is unsafe for production. Any webpage a victim visits can

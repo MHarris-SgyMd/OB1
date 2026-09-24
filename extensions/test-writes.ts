@@ -950,8 +950,10 @@ try {
     `every answer of POST /search carries the request's CORS headers under an allowlist — the 200 and the 400 echo a listed origin, an unlisted one gets no allow-origin header (${allow(okCors)} / ${allow(refusedCors)} / ${allow(strangerCors)})`);
   assert(recentCors.status === 200 && allow(recentCors) === D && browseCors.status === 200 && allow(browseCors) === D && lostCors.status === 404 && allow(lostCors) === D && strangerRecent.status === 200 && allow(strangerRecent) === null,
     `…and so does every other answer of the gateway (SMD-2079): a page from GET /recent and from GET /thoughts and the 404 for an unknown route echo a listed origin, and GET /recent's page to an unlisted one carries no allow-origin header — main's file answered the literal null (${recentCors.status} ${allow(recentCors)} / ${browseCors.status} ${allow(browseCors)} / ${lostCors.status} ${allow(lostCors)} / ${strangerRecent.status} ${allow(strangerRecent)})`);
+  // The preflight and the 401 passed the request before and are the wrapper's now, so the wrapper-absent mutant fails
+  // this arm with the others (six of them, review pass 4).
   assert(preflight.status === 204 && allow(preflight) === D && /x-brain-key/.test(String(preflight.headers.get("access-control-allow-headers"))) && unauthorized.status === 401 && allow(unauthorized) === D,
-    `the preflight 204 and the 401 keep theirs — they passed the request before, and are the wrapper's now like every answer (the wrapper-absent mutant fails this arm too) (${preflight.status} ${allow(preflight)} / ${unauthorized.status} ${allow(unauthorized)})`);
+    `the preflight 204 and the 401 keep theirs — they passed the request before, and are the wrapper's now like every answer (${preflight.status} ${allow(preflight)} / ${unauthorized.status} ${allow(unauthorized)})`);
   // The ingest proxy's timeout: dropping `req` from proxyFetchJson's parameters left handleExecuteJob passing it into the
   // timeout's slot — NaN, so every execute aborted at once with a 504 (SMD-2079; nothing typechecks the file, SMD-2080).
   // The stub answers after 25 ms honouring the signal, so a timeout that is not a number aborts it. It matches the URL by
