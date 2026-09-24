@@ -286,6 +286,7 @@ jobs:
           bun-version: "1.4.0"
 
       - name: Install
+        id: install
         working-directory: db
         run: bun install --frozen-lockfile
 
@@ -293,12 +294,14 @@ jobs:
       # container: the migrations are applied and asserted against a real planner.
       # The embedding width is configurable and must hold at more than one value,
       # so the suite runs twice — the default width and 768 — side by side
-      # (SMD-2092): each run is one single-threaded PGlite in memory, sharing no
-      # file, port or database, and the runner has four cores. Run in series they
-      # were the critical path of every run. Each run writes its own log, both
-      # streams (a failed assertion goes to stderr); both are waited on, both logs
-      # printed — a passing one folded, a failing one open — and the step fails
-      # when either run does. The two summary lines close the step.
+      # (SMD-2092): each run is one single-threaded process whose PGlite databases
+      # live in memory, sharing no file, port or database with the other, and the
+      # runner has four cores. Run in series they were the critical path of most
+      # runs. Each run writes its own log, both streams (a failed assertion goes
+      # to stderr); both are waited on, both logs printed — a passing one folded,
+      # a failing one open — and the step fails when either run does. The two
+      # summary lines close the step; they read the report line db/test-support.ts
+      # prints (`N assertions: …`).
       - name: Apply migrations and assert the schema, at the default width and at 768
         working-directory: db
         run: |
@@ -324,7 +327,7 @@ jobs:
               echo "::error title=Schema migrations::test-schema.ts at the $width width failed (exit $rc) — its log follows"
               cat "$log"
             fi
-            summary=$(grep -E '^[0-9]+ assertions: ' "$log" | tail -n 1 || true)
+            summary=$(grep -aE '^[0-9]+ assertions: ' "$log" | tail -n 1 || true)
             summaries+="  $width width: ${summary:-no summary line — the run stopped before its report} (exit $rc)"$'\n'
           done
           printf '\ntest-schema.ts\n%s' "$summaries"
@@ -333,8 +336,10 @@ jobs:
       # The board sync's pure rules and write decisions — the rendering the
       # hand captures are recognised by, the plan from a census, which call
       # each state of the brain gets — against a recording store. No network,
-      # no database, no provider (SMD-1954).
+      # no database, no provider (SMD-1954). This and the next step run when the
+      # schema step has failed too, so one broken width does not hide them.
       - name: Board sync rules
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         working-directory: db
         run: bun sync-linear.ts --self-check
 
@@ -344,6 +349,7 @@ jobs:
       # lossy cases enumerated, two inputs refused) and the ingester's pure
       # rules (the corpus path, the allowlist). No network, no database.
       - name: Ingestion adapters
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         working-directory: db
         run: bun ingest-linear.ts --self-check && bun ingest-markdown.ts --self-check && bun ingest-records.ts --self-check
 

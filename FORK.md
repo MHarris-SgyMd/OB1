@@ -534,8 +534,9 @@ Dependabot one included (SMD-2111).
 step runs the suite at the default width and at 768 in the background, each to
 its own log, and waits on both. A passing run's log is folded under its width;
 a failing one is printed open under an error annotation naming the width. The
-step closes with each run's `N assertions: …` line. Read those two lines first:
-"no summary line" means the run died before its report, and its log says where.
+step closes with each run's `N assertions: …` line; go to the end of the step
+for those two lines first. "No summary line" means the run died before its
+report, and its log says where. The self-checks after it run either way.
 
 ## Detached from the fork network
 
