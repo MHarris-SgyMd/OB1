@@ -36,6 +36,9 @@
     "projection-replay": "bun eval-projection-replay.ts",
     "projection-replay:self-check": "bun eval-projection-replay.ts --self-check",
     "projection-replay:fixture-check": "../db/with-postgres.sh bun eval-projection-replay.ts --fixture-check",
+    "writable-projection": "../db/with-postgres.sh bun eval-writable-projection.ts --prototype",
+    "writable-projection:self-check": "bun eval-writable-projection.ts --self-check",
+    "writable-projection:check": "../db/with-postgres.sh bun eval-writable-projection.ts --check",
     "jev-coload": "bun eval-jev-coload.ts",
     "jev-gate": "bun eval-jev-gate.ts"
   },
