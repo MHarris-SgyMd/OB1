@@ -244,37 +244,50 @@ export const RUNAWAY_REPEATS = 3;
 
 /**
  * Reads a streamed extraction answer as it arrives and says when it has become
- * a runaway: the RUNAWAY_REPEATS-th copy of one item. An item is a complete
- * `{…}` one level inside the answer's top-level object — the objects of its
- * two arrays — found by brace depth outside strings, so braces and quotes
- * inside a name are text. Items are keyed as parseExtraction keys them, the
- * type and relation UNVALIDATED: a repeated item the rules would reject
- * (`"type": "table"`, tails 7, 20 and 21) is a loop all the same, and a copy
- * differing only in confidence, aliases, case or whitespace is a copy. Text
- * that is not an item is skipped; the budget bounds an answer this cannot read.
+ * a runaway: the RUNAWAY_REPEATS-th copy of one item. An item is an object
+ * directly inside an array — the answer's two arrays, at whatever depth they
+ * sit (sixth review pass: an unbalanced brace in a preamble put the real
+ * object one level down and hid every item from a rule by absolute depth) —
+ * found by a container stack kept outside strings, so braces and quotes inside
+ * a name are text, and outside every container nothing is a string (a stray
+ * quote in a preamble; fifth pass). Items are keyed as parseExtraction keys
+ * them, entities and relations in their own key spaces (`e:`, `r:`), the type
+ * and relation UNVALIDATED: a repeated item the rules would reject (`"type":
+ * "table"`, tails 7, 20 and 21) is a loop all the same, and a copy differing
+ * only in confidence, aliases, case or whitespace is a copy. Text that is not
+ * an item is skipped; the budget bounds an answer this cannot read. `closed`
+ * says the outermost container has closed — the answer is complete; `fired`
+ * says which item reached the count and on which item, so the reader can tell
+ * "a third copy, then more" from "a third copy, then the end" (sixth pass).
  */
 export class RunawayDetector {
-  private depth = 0;
+  private readonly stack: ("{" | "[")[] = [];
   private inString = false;
   private escaped = false;
+  /** The stack depth at which the current item was opened; -1 outside an item. */
+  private itemLevel = -1;
   private item = "";
   private readonly counts = new Map<string, number>();
   /** Items read so far, the one that fired included. */
   items = 0;
+  /** True once the outermost container has closed: the answer is complete. */
+  closed = false;
+  /** The item that reached RUNAWAY_REPEATS and the item count when it did; null while none has. */
+  fired: { key: string; atItem: number } | null = null;
 
-  /** Feed the next piece of the answer. The repeated item's key when the answer became a runaway on this piece; null while it has not. */
+  /** Feed the next piece of the answer. The repeated item's key when the answer became a runaway on THIS piece — the first time only; null otherwise. */
   feed(piece: string): string | null {
-    let fired: string | null = null;
+    let firedNow: string | null = null;
     // Where the current item's text begins in THIS piece — one slice per item
     // per piece rather than a concatenation per character (fifth review pass).
-    let start = this.depth >= 2 ? 0 : -1;
+    let start = this.itemLevel >= 0 ? 0 : -1;
     for (let i = 0; i < piece.length; i++) {
       const c = piece[i];
-      if (this.depth === 0) {
-        // Outside the answer's object nothing is a string: a stray quote in a
+      if (this.stack.length === 0) {
+        // Outside every container nothing is a string: a stray quote in a
         // preamble ("Here is the "answer:") must not silence the reading of
         // everything after it (fifth review pass).
-        if (c === "{") this.depth = 1;
+        if (c === "{" || c === "[") { this.stack.push(c); this.closed = false; }
         continue;
       }
       if (this.inString) {
@@ -284,38 +297,41 @@ export class RunawayDetector {
         continue;
       }
       if (c === '"') { this.inString = true; continue; }
-      if (c === "{") {
-        this.depth++;
-        if (this.depth === 2) { this.item = ""; start = i; }
+      if (c === "{" || c === "[") {
+        // An object opening directly inside an array is an item, at any depth.
+        if (c === "{" && this.itemLevel < 0 && this.stack[this.stack.length - 1] === "[") { this.itemLevel = this.stack.length + 1; this.item = ""; start = i; }
+        this.stack.push(c);
         continue;
       }
-      if (c === "}") {
-        this.depth--;
-        if (this.depth !== 1) continue;
+      if (c === "}" || c === "]") {
+        this.stack.pop();
+        if (this.stack.length === 0) this.closed = true;
+        if (this.itemLevel < 0 || this.stack.length !== this.itemLevel - 1) continue;
         const key = itemKey(this.item + piece.slice(start, i + 1));
         this.item = "";
         start = -1;
+        this.itemLevel = -1;
         if (key === null) continue;
         this.items++;
         const n = (this.counts.get(key) ?? 0) + 1;
         this.counts.set(key, n);
-        if (n >= RUNAWAY_REPEATS && fired === null) fired = key;
+        if (n >= RUNAWAY_REPEATS && this.fired === null) { this.fired = { key, atItem: this.items }; firedNow = key; }
       }
     }
     if (start >= 0) this.item += piece.slice(start);
-    return fired;
+    return firedNow;
   }
 }
 
-/** parseExtraction's key for one item of a streamed answer, the type or relation unvalidated; null for text that is not an item. */
+/** parseExtraction's key for one item of a streamed answer, in the item's kind's key space (`e:` / `r:`, sixth review pass — one map held both and an entity typed `uses` counted with a relation), the type or relation unvalidated; null for text that is not an item. */
 function itemKey(text: string): string | null {
   let o: unknown;
   try { o = JSON.parse(text); } catch { return null; }
   if (!isRecord(o)) return null;
   // An item carrying `from` or `to` is a relation or nothing — never read as an
   // entity by its `name`, which parseExtraction would not do (third review pass).
-  if (o.from !== undefined || o.to !== undefined) return typeof o.from === "string" && typeof o.to === "string" ? relationKey(lowered(o.relation) as Relation, cleanName(o.from), cleanName(o.to)) : null;
-  if (typeof o.name === "string") return entityKey(lowered(o.type) as EntityType, cleanName(o.name));
+  if (o.from !== undefined || o.to !== undefined) return typeof o.from === "string" && typeof o.to === "string" ? `r:${relationKey(lowered(o.relation) as Relation, cleanName(o.from), cleanName(o.to))}` : null;
+  if (typeof o.name === "string") return `e:${entityKey(lowered(o.type) as EntityType, cleanName(o.name))}`;
   return null;
 }
 
@@ -425,7 +441,7 @@ const MALFORMED = (): Extraction => ({ ...EMPTY(), malformed: true });
  * entities resolved.
  */
 export function parseExtraction(raw: string): Extraction {
-  const text = raw.trim().replace(/^```(?:json)?\s*\n?/, "").replace(/\n?\s*```$/, "");
+  const text = stripFences(raw);
   if (!text) return MALFORMED();
   let parsed: unknown;
   try {
@@ -486,6 +502,16 @@ export function parseExtraction(raw: string): Extraction {
     }
   }
   return out;
+}
+
+/** An answer without the markdown fence a chat model may wrap it in — parseExtraction's first step, shared with the stream reader's "is this whole JSON" question. */
+function stripFences(raw: string): string {
+  return raw.trim().replace(/^```(?:json)?\s*\n?/, "").replace(/\n?\s*```$/, "");
+}
+
+/** Whether `text`, fences stripped, parses as JSON at all — a stream that ended with no end sign but a whole answer is an answer, not a closed socket (sixth review pass). */
+function isWholeJson(text: string): boolean {
+  try { JSON.parse(stripFences(text)); return true; } catch { return false; }
 }
 
 /** parseExtraction's own identity for an entity within one answer, applied across windows by mergeExtractions. */
@@ -609,17 +635,25 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, pa
     (err as Error & { status?: number }).status = r.status;
     throw err;
   }
-  // Streamed when asked AND answered so (SMD-1960): a provider that ignores
-  // `stream` — the suites' stubs answer JSON — is read whole, as one not asked.
-  if (stream && r.body && /^text\/event-stream/i.test(r.headers.get("content-type") ?? "")) {
+  // Streamed when asked (SMD-1960), and the body read as what it IS rather
+  // than what its content-type says (sixth review pass: an SSE body under
+  // application/json fell to r.json()): a body opening with `{` is the whole
+  // answer a provider that ignores `stream` sends — the suites' stubs — and is
+  // read as before; anything else is the stream.
+  let d: { choices?: [{ message?: { content?: string }; finish_reason?: string }] };
+  if (stream && r.body) {
     const got = await readStreamedAnswer(r.body, new RunawayDetector(), cfg.chat.base);
-    // Aborted: a runaway by the detector's rule, whatever the budget — the
-    // partial answer is not read (it could not parse), and the caller's
-    // deadline, on the fetch's signal, bounds the read as it does the whole.
-    if (got.repeated !== null) return { ...MALFORMED(), runaway: true, abortedMs: Date.now() - t0 };
-    return { ...parseExtraction(got.content), runaway: budget && got.finish === "length" };
+    if (got.kind === "sse") {
+      // Aborted: a runaway by the detector's rule, whatever the budget — the
+      // partial answer is not read (it could not parse), and the caller's
+      // deadline, on the fetch's signal, bounds the read as it does the whole.
+      if (got.repeated !== null) return { ...MALFORMED(), runaway: true, abortedMs: Date.now() - t0 };
+      return { ...parseExtraction(got.content), runaway: budget && got.finish === "length" };
+    }
+    d = JSON.parse(got.text);
+  } else {
+    d = (await r.json()) as typeof d;
   }
-  const d = (await r.json()) as { choices?: [{ message?: { content?: string }; finish_reason?: string }] };
   const answer = d?.choices?.[0]?.message?.content;
   // A cut answer is a runaway only when the call was budgeted: without a
   // budget the provider's own limit is what `length` names.
@@ -629,40 +663,43 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, pa
 }
 
 /**
- * A chat completion's `text/event-stream` body reassembled: the `data:` frames'
- * `choices[0].delta.content` concatenated, the last `finish_reason` kept, and
- * comments and frames that are not JSON passed over, and `[DONE]` OR a
- * frame carrying `finish_reason` the end: the reader is cancelled there and
- * the answer returned, so a gateway that keeps the connection open after
- * either (keepalive comments) does not hold the call to its deadline (fourth
- * and fifth review passes). Every piece of content goes through the detector
- * as it lands; when it fires while the answer is still coming the reader is
- * cancelled — the connection closes and Ollama stops generating — and what
- * arrived is returned with the repeated item's key. A frame that finishes the
- * answer is never an abort: the answer is complete, and parseExtraction folds
- * the copies it holds (fifth review pass — a whole answer in one frame with a
- * third copy in it was thrown away as a runaway). Frames split across reads
- * are buffered to their newline. A stream that ends with neither a
- * `finish_reason` nor `[DONE]` is a socket that closed mid-answer — the
- * provider died, the connection dropped — and THROWS, as the whole read's
- * r.json() on a truncated body did, so the worker classifies it (transient)
- * rather than recording the thought's answer as malformed (first review pass).
- * A frame that is the provider's error (`data: {"error": …}` — a runner that
- * died or a refusal after the 200) throws with the provider's message, not the
- * socket sentence, so the failed row names the cause (second review pass).
+ * A chat completion's body, read as it arrives. Sniffed, not trusted to its
+ * content-type (sixth review pass): a body opening with `{` is a whole JSON
+ * answer — a provider that ignores `stream` — returned as text to be read as
+ * one; anything else is `text/event-stream`, reassembled: the `data:` frames'
+ * `choices[0].delta.content` concatenated, the last `finish_reason` kept,
+ * comments and frames that are not JSON passed over. The read ENDS — the
+ * reader cancelled, so a gateway holding the connection open does not hold
+ * the call to its deadline — at `[DONE]`, at a frame carrying `finish_reason`,
+ * or when the detector says the answer's outermost container has closed
+ * (Ollama sends its finish in a frame of its own, after the content; sixth
+ * review pass). Every piece of content goes through the detector; a third
+ * copy of one item makes the abort PENDING, and the next item after it — the
+ * answer going on — is the abort: the reader is cancelled (the connection
+ * closes, Ollama stops generating) and the repeated item's key returned. An
+ * answer that closes or finishes after its third copy is complete, not a
+ * runaway: parseExtraction folds the copies (fifth and sixth passes). A stream
+ * that ends with none of the three end signs is a socket that closed
+ * mid-answer — thrown, so the worker classifies it (transient) — unless what
+ * arrived is whole JSON, which is the answer (sixth review pass: a provider
+ * omitting the terminal marker stalled the pass one row at a time). A frame
+ * that is the provider's error (`data: {"error": …}`) throws with its message
+ * and HTTP-shaped code, the reader cancelled on the way out.
  */
-async function readStreamedAnswer(body: ReadableStream<Uint8Array>, detector: RunawayDetector, base: string): Promise<{ content: string; finish: string | undefined; repeated: string | null }> {
+type StreamVerdict = { end: true } | { repeated: string } | null;
+type StreamedBody = { kind: "sse"; content: string; finish: string | undefined; repeated: string | null } | { kind: "json"; text: string };
+async function readStreamedAnswer(body: ReadableStream<Uint8Array>, detector: RunawayDetector, base: string): Promise<StreamedBody> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let content = "";
   let finish: string | undefined;
-  let ended = false;
-  /** The frame's verdict: a repeated item's key, `"[DONE]"` for the end (the marker, or a frame carrying finish_reason), null to go on. */
-  const take = (line: string): string | null => {
+  let kind: "sse" | "json" | undefined;
+  /** The frame's verdict: the end, a repeated item's key to abort on, or null to go on. */
+  const take = (line: string): StreamVerdict => {
     if (!line.startsWith("data:")) return null;
     const data = line.slice(5).trim();
-    if (data === "[DONE]") { ended = true; return "[DONE]"; }
+    if (data === "[DONE]") return { end: true };
     if (!data) return null;
     let frame: { choices?: [{ delta?: { content?: unknown }; finish_reason?: unknown }]; error?: unknown };
     try { frame = JSON.parse(data); } catch { return null; }
@@ -686,13 +723,26 @@ async function readStreamedAnswer(body: ReadableStream<Uint8Array>, detector: Ru
     const choice = frame?.choices?.[0];
     const piece = typeof choice?.delta?.content === "string" ? choice.delta.content : "";
     content += piece;
-    if (typeof choice?.finish_reason === "string") { finish = choice.finish_reason; ended = true; return "[DONE]"; }
-    return piece ? detector.feed(piece) : null;
+    if (typeof choice?.finish_reason === "string") { finish = choice.finish_reason; return { end: true }; }
+    if (!piece) return null;
+    detector.feed(piece);
+    if (detector.closed) return { end: true };
+    const fired = detector.fired;
+    return fired !== null && detector.items > fired.atItem ? { repeated: fired.key } : null;
   };
   try {
     for (;;) {
       const { done, value } = await reader.read();
       buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      if (kind === undefined) {
+        const head = buffer.trimStart();
+        if (!head && !done) continue;
+        kind = head.startsWith("{") ? "json" : "sse";
+      }
+      if (kind === "json") {
+        if (done) return { kind, text: buffer };
+        continue;
+      }
       // One slice per read, however many frames it carried (first review pass).
       let from = 0;
       let nl: number;
@@ -702,7 +752,7 @@ async function readStreamedAnswer(body: ReadableStream<Uint8Array>, detector: Ru
         const verdict = take(line);
         if (verdict !== null) {
           await reader.cancel().catch(() => {});
-          return { content, finish, repeated: verdict === "[DONE]" ? null : verdict };
+          return { kind: "sse", content, finish, repeated: "repeated" in verdict ? verdict.repeated : null };
         }
       }
       buffer = buffer.slice(from);
@@ -716,13 +766,13 @@ async function readStreamedAnswer(body: ReadableStream<Uint8Array>, detector: Ru
     await reader.cancel().catch(() => {});
     throw e;
   }
-  // A last frame without its newline.
+  // A last frame without its newline; then the end, with or without an end sign.
   const verdict = buffer ? take(buffer) : null;
-  const repeated = verdict === "[DONE]" ? null : verdict;
-  if (repeated === null && !ended) {
+  if (verdict !== null && "repeated" in verdict) return { kind: "sse", content, finish, repeated: verdict.repeated };
+  if (verdict === null && !isWholeJson(content)) {
     throw new Error(`Extraction stream from ${base} closed mid-answer: the socket closed after ${content.length} characters with no finish_reason — not an answer`);
   }
-  return { content, finish, repeated };
+  return { kind: "sse", content, finish, repeated: null };
 }
 
 /**

@@ -522,7 +522,11 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   // request, how many frames it got out before the client hung up.
   type Run = { sent: number; total: number; cancelled: boolean; body: { stream?: boolean; frequency_penalty?: number } };
   const runs: Run[] = [];
-  let gMode: "loop" | "good" | "json" | "slow" | "cut" | "error" | "nodone" | "oneframe" = "loop";
+  let gMode: "loop" | "good" | "json" | "slow" | "cut" | "error" | "nodone" | "oneframe" | "sepfinish" | "cleanclose" | "mislabelled" = "loop";
+  // A converging answer whose LAST item is a third copy: the object closes
+  // after it, so the abort that was pending never fires. (Anita first: a
+  // fourth item after the third copy would be the answer going on — an abort.)
+  const THRICE = JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9 }, { name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }], relationships: [] });
   const GOOD = JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9, aliases: ["A. {Nita}"] }, { name: "Open Brain", type: "project", confidence: 0.8 }], relationships: [{ from: "Anita", to: "Open Brain", relation: "works_on", confidence: 0.7 }] });
   const frame = (content: string, finish: string | null = null) => `data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: finish }] })}\n\n`;
   const providerG = Bun.serve({
@@ -552,6 +556,14 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
         // One frame holding a complete answer with an item three times over,
         // finishing in the same frame: complete, so parsed — never an abort.
         frames = [frame(JSON.stringify({ entities: [{ name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }], relationships: [] }), "stop"), "data: [DONE]\n\n"];
+      } else if (gMode === "sepfinish") {
+        // Ollama's own shape: content frames, then the finish in a frame of its
+        // own — with a third copy inside a CONVERGING answer (sixth pass).
+        frames = [...(THRICE.match(/[\s\S]{1,6}/g) ?? []).map((p) => frame(p)), frame("", "stop"), "data: [DONE]\n\n"];
+      } else if (gMode === "cleanclose") {
+        // The whole answer, then the stream closes with no finish_reason and
+        // no [DONE]: an answer, not a closed socket (sixth pass).
+        frames = (GOOD.match(/[\s\S]{1,8}/g) ?? []).map((p) => frame(p));
       } else if (gMode === "cut") {
         // Half the answer, then the stream ends: no finish_reason, no [DONE].
         frames = Array.from({ length: 10 }, (_, i) => frame(GOOD.slice(i * 8, i * 8 + 8)));
@@ -579,7 +591,9 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
         },
         cancel() { run.cancelled = true; },
       });
-      return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+      // "mislabelled": the same frames under application/json — read as what
+      // the body is, not what the header says (sixth pass).
+      return new Response(stream, { headers: { "content-type": gMode === "mislabelled" ? "application/json" : "text/event-stream" } });
     },
   });
   const cfgG = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${providerG.port}/v1`, OB1_METADATA_MODEL: "stub-chat" });
@@ -638,6 +652,24 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   gMode = "oneframe";
   const whole3 = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
   assert(!whole3.malformed && whole3.entities.length === 1 && whole3.entities[0].name === "Loop" && whole3.retried === undefined && whole3.abortedMs === undefined && runs.length === 1, `a complete answer arriving in one finishing frame with an item three times over is parsed — the copies folded to one — not aborted and not retried (${JSON.stringify(whole3).slice(0, 100)})`);
+
+  // Sixth review pass, probed: the finish in its own frame after a converging
+  // answer holding a third copy; a clean close with no end sign; SSE under the
+  // wrong content-type.
+  runs.length = 0;
+  gMode = "sepfinish";
+  const converging = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!converging.malformed && converging.entities.length === 2 && converging.retried === undefined && converging.abortedMs === undefined && runs.length === 1, `a converging answer holding an item three times, its finish in a frame of its own, is complete — folded to two entities, not aborted, not retried (${JSON.stringify(converging).slice(0, 100)})`);
+  assert(converging.entities[1]?.name === "Loop" && converging.entities.length === 2, "…the three copies one entity beside Anita");
+  runs.length = 0;
+  gMode = "cleanclose";
+  const wholeClose = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!wholeClose.malformed && wholeClose.entities.length === 2 && wholeClose.retried === undefined && runs.length === 1, "a whole answer whose stream then closes with no finish_reason and no [DONE] is the answer, not a closed socket");
+  runs.length = 0;
+  gMode = "mislabelled";
+  const mislabelled = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!mislabelled.malformed && mislabelled.entities.length === 2 && runs.length === 1 && runs[0].body.stream === true, "an event stream served as application/json is read as the stream it is");
+  gMode = "loop";
 
   // The provider's own error frame mid-stream is the provider's error, with its
   // message — not the socket sentence, not a malformed answer (second review pass).

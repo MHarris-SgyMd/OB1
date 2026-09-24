@@ -433,14 +433,14 @@ console.log("\n[8c] A streamed answer is a runaway at the third copy of one item
   assert(counted.items === 4, `…and every item was read (${counted.items})`);
   assert(fires(answer([ent("Loop"), ent("Loop")])) === null, "two copies of one item are not a runaway — a converging answer holds a duplicate, which parseExtraction folds");
   const third = fires(answer([ent("Anita", "person"), ent("Loop"), ent("Loop"), ent("Loop"), ent("Loop")]), 1);
-  assert(third?.key === "tool loop" && third.items === 4, `the third copy fires, on the item that made it three, keyed as parseExtraction keys an entity (${JSON.stringify(third)})`);
+  assert(third?.key === "e:tool loop" && third.items === 4, `the third copy fires, on the item that made it three, keyed as parseExtraction keys an entity (${JSON.stringify(third)})`);
   const edge = fires(answer([], [rel("a", "b"), rel("a", "b"), rel("a", "b")]), 3);
-  assert(edge?.key === "uses a b" && edge.items === 3, `…and a relation by (relation, from, to) (${JSON.stringify(edge)})`);
+  assert(edge?.key === "r:uses a b" && edge.items === 3, `…and a relation by (relation, from, to) (${JSON.stringify(edge)})`);
   const alternating = fires(answer([], [rel("a", "b"), rel("b", "a"), rel("a", "b"), rel("b", "a"), rel("a", "b"), rel("b", "a")]), 3);
   assert(alternating?.items === 5, `two items alternating fire at the fifth — the first's third copy (tails 7, 13 and 26 of the probe) (${JSON.stringify(alternating)})`);
   const copies = fires(answer([item({ name: "Loop", type: "tool", confidence: 0.6 }), item({ name: "  LOOP ", type: "Tool", confidence: 1.0, aliases: ["x"] }), item({ name: "loop", type: "tool", confidence: 0.9 })]));
-  assert(copies?.key === "tool loop", "copies that differ in confidence, aliases, case or whitespace are copies");
-  assert(fires(answer([item({ name: "thoughts", type: "table", confidence: 1 }), item({ name: "thoughts", type: "table", confidence: 1 }), item({ name: "thoughts", type: "table", confidence: 1 })]))?.key === "table thoughts", "an item the rules would reject (type `table`) repeated is a loop all the same — tails 7, 20 and 21 looped on rejected types");
+  assert(copies?.key === "e:tool loop", "copies that differ in confidence, aliases, case or whitespace are copies");
+  assert(fires(answer([item({ name: "thoughts", type: "table", confidence: 1 }), item({ name: "thoughts", type: "table", confidence: 1 }), item({ name: "thoughts", type: "table", confidence: 1 })]))?.key === "e:table thoughts", "an item the rules would reject (type `table`) repeated is a loop all the same — tails 7, 20 and 21 looped on rejected types");
   const enumeration = fires(answer(Array.from({ length: 40 }, (_, i) => ent(`SMD-${1000 + i}`, "topic")), Array.from({ length: 40 }, (_, i) => rel("Open Brain", `SMD-${1000 + i}`))), 5);
   assert(enumeration === null, "forty distinct ids, each an entity and a `uses` edge, are an enumeration, not a loop — it runs to the budget, as the ticket requires");
   const skipped = fires(`{"entities": [{"name": }, {"name": "x", "type": "tool", "confidence": 1}, {"name": "x", "type": "tool", "confidence": 1}, {"name": "x", "type": "tool", "confidence": 1}]}`);
@@ -448,12 +448,23 @@ console.log("\n[8c] A streamed answer is a runaway at the third copy of one item
   assert(fires(`{"entities": [{"name": "n", "type": "tool", "confidence": 1, "meta": {"a": {"b": 1}}}, {"name": "n", "type": "tool", "confidence": 1}, {"name": "n", "type": "tool", "confidence": 1}]}`)?.items === 3, "an object nested inside an item is the item's, not an item");
   assert(fires(answer([], [item({ from: "a", to: null, relation: "uses", name: "a" }), item({ from: "a", to: null, relation: "uses", name: "a" }), item({ from: "a", to: null, relation: "uses", name: "a" })])) === null, "an item with `from` but no string `to` is a relation parseExtraction rejects, not an entity by its `name` — skipped, as the parser skips it (third review pass)");
   const preamble = fires(`Here is the "answer you asked for:\n${answer([ent("Loop"), ent("Loop"), ent("Loop")])}`, 3);
-  assert(preamble?.key === "tool loop" && preamble.items === 3, `a stray quote in a preamble before the JSON does not silence the reading — outside the object nothing is a string (fifth review pass) (${JSON.stringify(preamble)})`);
+  assert(preamble?.key === "e:tool loop" && preamble.items === 3, `a stray quote in a preamble before the JSON does not silence the reading — outside the object nothing is a string (fifth review pass) (${JSON.stringify(preamble)})`);
   const across = new RunawayDetector();
   const spread = answer([ent("Loop"), ent("Loop"), ent("Loop")]);
   let firedAt: string | null = null;
   for (let i = 0; i < spread.length; i += 11) { const k = across.feed(spread.slice(i, i + 11)); if (k !== null && firedAt === null) firedAt = k; }
-  assert(firedAt === "tool loop" && across.items === 3, "an item split across pieces is read whole — the scanner keeps the part that arrived and slices the rest");
+  assert(firedAt === "e:tool loop" && across.items === 3, "an item split across pieces is read whole — the scanner keeps the part that arrived and slices the rest");
+  // Sixth review pass: an item is an object directly inside an array, at any
+  // depth; the two kinds have their own key spaces; the detector says when the
+  // answer has closed and on which item it fired.
+  assert(fires(`Answer {\n${answer([ent("Loop"), ent("Loop"), ent("Loop")])}`, 3)?.key === "e:tool loop", "an UNBALANCED brace in a preamble puts the object one level down — the items are still objects inside an array, and are read");
+  assert(fires(`[${ent("Loop")}, ${ent("Loop")}, ${ent("Loop")}]`)?.items === 3, "a bare array of items is read too (the parser rejects it; the budget would have bounded it)");
+  assert(fires(answer([item({ name: "a b", type: "uses", confidence: 1 })], [rel("a", "b"), rel("a", "b")])) === null, "an entity typed `uses` named `a b` and two copies of the relation uses a→b are two key spaces, not three copies of one");
+  const closing = new RunawayDetector();
+  closing.feed(answer([ent("Loop"), ent("Loop"), ent("Loop")]).slice(0, -1));
+  assert(closing.fired?.key === "e:tool loop" && closing.fired.atItem === 3 && !closing.closed, "the detector names the item that fired and on which item, and the answer is not closed before its last brace");
+  closing.feed("}");
+  assert(closing.closed, "…and is closed after it");
 
   // The shipped windowing streams and aborts, and the sentence says so; with
   // reasoning on nothing is streamed — no budget, so no retry to send an
