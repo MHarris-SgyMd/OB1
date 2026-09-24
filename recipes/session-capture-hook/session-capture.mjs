@@ -133,8 +133,8 @@ const isAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) 
 /**
  * How long a claim may go without progress before it is judged abandoned:
  * longer than one payload takes — postCapture's six requests at most (one
- * and five refusal retries) at POST_TIMEOUT_MS, 540 s, and a wait as long
- * again (SMD-2035), 630 s against these 900 — and the claim directory's mtime
+ * and five refusal retries) at POST_TIMEOUT_MS, 540 s against these 900 — and
+ * the claim directory's mtime
  * moves at every payload a run turns to, so a long run is judged by its last
  * step, not its first (second review pass: five payloads of six requests
  * each could outlast the age from the run's start, and a live run swept
@@ -218,8 +218,16 @@ function statePath(sessionId) {
 export function readState(sessionId) {
   try { return JSON.parse(readFileSync(statePath(sessionId), "utf8")); } catch { return null; }
 }
-/** Every file in the state directory: pretty JSON, a trailing newline, owner-only. One home for the mode (seventh review pass: it was spelled four times). */
-const writeJson = (p, obj) => writeFileSync(p, JSON.stringify(obj, null, 2) + "\n", { mode: 0o600 });
+/**
+ * Every file in the state directory: pretty JSON, a trailing newline,
+ * owner-only. One home for the mode (seventh review pass: it was spelled four
+ * times). Written beside and renamed into place: a sibling run reads a landed
+ * payload's `captured_id` and the state (SMD-2035), and a truncating write
+ * would show it an empty file for a moment (fifth review pass). The `.tmp`
+ * name ends in no `.json`, so no reader of the directories takes it for a
+ * payload.
+ */
+const writeJson = (p, obj) => { writeFileSync(`${p}.tmp`, JSON.stringify(obj, null, 2) + "\n", { mode: 0o600 }); renameSync(`${p}.tmp`, p); };
 function writeState(sessionId, state) {
   ensureDirs();
   writeJson(statePath(sessionId), state);
@@ -655,8 +663,8 @@ export class CaptureError extends Error {
 export const REFUSAL_RE = /^\s*Refused\b/;
 export const SDK_ERROR_RE = /^\s*MCP error -3260[12]\b/;
 
-/** One request's ceiling, named (SMD-2035). */
-export const POST_TIMEOUT_MS = 90_000;
+/** One request's ceiling. */
+const POST_TIMEOUT_MS = 90_000;
 
 let rpcId = 1;
 export async function rpc(cfg, method, params, timeoutMs = POST_TIMEOUT_MS) {
@@ -926,7 +934,10 @@ function landedPayloads(sessionId) {
   for (const p of sessionPayloads(sessionId)) {
     let j;
     try { j = JSON.parse(readFileSync(p.path, "utf8")); } catch { continue; }
-    if (j?.captured_id) out.push({ name: p.name, id: j.captured_id, ms: momentOf(j.prepared_at, p.ms) });
+    // The name's millisecond was written by the same clock as prepared_at: a
+    // future one decides nothing either, and the payload ranks last — a clock
+    // that ran ahead never puts it over the state (fifth review pass).
+    if (j?.captured_id) out.push({ name: p.name, id: j.captured_id, ms: momentOf(j.prepared_at, p.ms <= Date.now() ? p.ms : 0) });
   }
   return out;
 }
@@ -999,41 +1010,50 @@ export async function postPending(cfg, own) {
   const outcomes = [];
   pruneDead();
   const clearedSessions = new Set();
-  // After the run, once: payloads left under pending/ of every session whose
-  // claim this run cleared — landed, or dropped as obsolete beside a newer one
-  // — are claimed and posted now, with the pointer the state carries, rather
-  // than by whichever hook run comes next: an end deferred behind the
-  // checkpoint this run has just landed (second review pass), or behind an
-  // older payload it has just dropped for that end (fourth review pass).
-  const followUps = () => {
+  // After the run: payloads left under pending/ of every session whose claim
+  // this run cleared — landed, dropped as obsolete beside a newer one, or
+  // failed on and returned — are claimed and posted now, with the pointer the
+  // state carries, rather than by whichever hook run comes next: an end
+  // deferred behind the checkpoint this run has just landed (second review
+  // pass), behind an older payload it has just dropped for that end (fourth),
+  // or behind one whose post failed (fifth). Round after round while a round
+  // yields something — an end deferred behind a checkpoint the first round
+  // was posting (fifth review pass) — up to five payloads in all.
+  const FOLLOW_UP_MAX = 5;
+  const followUps = (room) => {
     // Not what this run has itself returned to pending/ — a failed post, a
     // deferral — which would be retried at once and counted twice (third
-    // review pass); at most five, the run's own bound.
+    // review pass). A session's NEWEST first under the cap: the older ones
+    // are obsolete beside it, and left under pending/ they are dropped by the
+    // next run, where a stale one claimed instead would have posted (fifth
+    // review pass).
     const done = new Set(outcomes.map((o) => o.file));
     const next = [];
     for (const sid of clearedSessions) {
-      for (const p of sessionPayloads(sid).filter((q) => q.pid === null && !done.has(q.path)).sort((x, y) => x.name.localeCompare(y.name))) {
-        if (next.length >= 5) break;
+      const mine_ = [];
+      for (const p of sessionPayloads(sid).filter((q) => q.pid === null && !done.has(q.path)).sort((x, y) => y.name.localeCompare(x.name))) {
+        if (next.length + mine_.length >= room) break;
         const here = join(mine, p.name);
         try { renameSync(p.path, here); } catch { continue; }
         let payload;
         try { payload = JSON.parse(readFileSync(here, "utf8")); } catch { moveTo(here, DEAD_DIR()); continue; }
-        next.push({ home: p.path, here, payload });
-        newestOf.set(sid, p.path);
+        mine_.push({ home: p.path, here, payload });
       }
+      if (mine_.length) { newestOf.set(sid, mine_[0].home); next.push(...mine_.reverse()); }
     }
     if (next.length) log(`following up: ${next.length} payload(s) of ${[...new Set(next.map((n) => n.payload.session_id))].join(", ")} waited under pending/ behind a claim this run cleared`);
     return next;
   };
   const queue = [...claimed];
-  let followed = false;
+  let followedUp = 0;
   try {
     for (;;) {
       if (!queue.length) {
-        if (followed) break;
-        followed = true;
-        queue.push(...followUps());
-        if (!queue.length) break;
+        if (followedUp >= FOLLOW_UP_MAX) break;
+        const more = followUps(FOLLOW_UP_MAX - followedUp);
+        if (!more.length) break;
+        followedUp += more.length;
+        queue.push(...more);
       }
       const { home, here, payload, retaken } = queue.shift();
       const file = home;
@@ -1058,16 +1078,16 @@ export async function postPending(cfg, own) {
       // aside for no one.
       const ahead = payload.captured_id || outdated(readState(payload.session_id)) ? [] : aheadOf(payload.session_id, basename(here));
       if (ahead.length) {
-        moveTo(here, PENDING_DIR());
+        const moved = moveTo(here, PENDING_DIR());
         // Between the look and that move the predecessor may have landed and
         // run its follow-up over a pending/ that did not yet hold this payload
         // (third review pass). One more look: if the claim has cleared, the
         // payload is taken back and posted now — once — unless the landing run
-        // got to it first, in which case that run posts it.
-        if (!retaken && !aheadOf(payload.session_id, basename(here)).length) {
-          try { renameSync(home, here); queue.unshift({ home, here, payload, retaken: true }); continue; } catch { /* the landing run has it */ }
+        // got to it first, in which case that run posts it and this one says so.
+        let why = `the session's earlier post is in flight (pid ${ahead[0].pid}); ${moved ? "kept under pending/ for the run that lands it" : "pending/ refused the move, so it stays in this run's hands until the run ends"}`;
+        if (moved && !retaken && !aheadOf(payload.session_id, basename(here)).length) {
+          try { renameSync(home, here); queue.unshift({ home, here, payload, retaken: true }); continue; } catch { why = "the session's earlier post has landed and that run has taken this payload up"; }
         }
-        const why = `the session's earlier post is in flight (pid ${ahead[0].pid}); kept under pending/ for the run that lands it`;
         log(`deferred session=${payload.session_id} — ${why}`);
         outcomes.push({ file, ok: false, deferred: true, error: `deferred: ${why}` });
         continue;
@@ -1135,6 +1155,7 @@ export async function postPending(cfg, own) {
         // outage to wait out (twelfth review pass).
         const dead = e.kind === "refused" || /JSON-RPC -32(?:001|60[12])\b/.test(payload.last_error) || (Number.isFinite(waited) && waited > PENDING_MAX_AGE_MS);
         try { writeJson(here, payload); } catch { /* the claim is gone from under us; nothing to update */ }
+        clearedSessions.add(payload.session_id); // the claim clears: an end that stepped aside for this payload must not wait for an unrelated run (fifth review pass)
         moveTo(here, dead ? DEAD_DIR() : PENDING_DIR());
         log(`${dead ? "dead" : "pending"} session=${payload.session_id} attempt=${payload.attempts}${dead && waited > PENDING_MAX_AGE_MS ? ` waited=${Math.round(waited / 86_400_000)}d` : ""} error="${payload.last_error}"`);
         outcomes.push({ file, ok: false, error: payload.last_error, dead });
@@ -1152,9 +1173,9 @@ export async function postPending(cfg, own) {
       // landed payload whose session already records a NEWER summary is finished
       // without moving the state back to it (third review pass). The ORDER is
       // load-bearing: the state is written, then the claim is removed — a run
-      // that stepped aside for this claim (aheadOf) reads the state the moment
-      // the claim clears, and a claim cleared before the state was written
-      // would leave it pointerless (SMD-2035, second review pass).
+      // taking back the payload it stepped aside with reads the state the
+      // moment the claim clears, and a claim cleared before the state was
+      // written would leave it pointerless (SMD-2035, second review pass).
       try {
         if (!payload.captured_id) writeJson(here, { ...payload, captured_id: id, captured_note: note });
         // summary_at never runs ahead of the clock that will read it back.
