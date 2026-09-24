@@ -530,6 +530,13 @@ anything move the `services:` images (pgvector). The rehearsal still runs with
 the release's write token on a PR that touches what it builds from, a
 Dependabot one included (SMD-2111).
 
+**"Schema migrations" runs `test-schema.ts` twice at once (SMD-2092).** One
+step runs the suite at the default width and at 768 in the background, each to
+its own log, and waits on both. A passing run's log is folded under its width;
+a failing one is printed open under an error annotation naming the width. The
+step closes with each run's `N assertions: …` line. Read those two lines first:
+"no summary line" means the run died before its report, and its log says where.
+
 ## Detached from the fork network
 
 This repository was forked from `NateBJones-Projects/OB1` and then detached, for
