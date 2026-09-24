@@ -19,10 +19,10 @@
 // survivor still leave rows naming nobody — SMD-1793.
 // ob1-fork (SMD-2054): POST /search drops the restricted tier by the
 // sensitivity_tier COLUMN and applies the date bounds as instants, in both
-// modes — the note above tiersOf(). Semantic mode compared a column
+// modes — the note above columnsOf(). Semantic mode compared a column
 // match_thoughts never returns and leaked restricted rows; text mode sent
 // `exclude_restricted: true` as a metadata containment and answered nothing.
-// GET /recent, the one content route with no tier filter at all, takes
+// GET /recent, the one route reading thoughts with no tier predicate, takes
 // exclude_restricted (default true) as its siblings do (review pass 1).
 /**
  * rest-api — REST API gateway for Open Brain.
@@ -529,12 +529,14 @@ async function handleSearch(req: Request): Promise<Response> {
   const startDate = body.start_date ? String(body.start_date).trim() : null;
   const endDate = body.end_date ? String(body.end_date).trim() : null;
 
-  if (query.length < 2) return json({ error: "query must be at least 2 characters" }, 400);
+  // A 400 carries the request's CORS headers like the 200 does (review pass 2): without `req`, json() answers
+  // `Access-Control-Allow-Origin: null` under an allowlist, and a browser client cannot read the refusal.
+  if (query.length < 2) return json({ error: "query must be at least 2 characters" }, 400, req);
   const window = dateWindow(startDate, endDate);
-  if ("error" in window) return json({ error: window.error }, 400);
+  if ("error" in window) return json({ error: window.error }, 400, req);
 
   if (mode === "text") {
-    // p_filter is a metadata containment (the note above tiersOf): none here. The function ranks and pages BEFORE
+    // p_filter is a metadata containment (the note above columnsOf): none here. The function ranks and pages BEFORE
     // the tier and date filters apply to its page, so `total` and `total_pages` are the function's, hidden rows
     // counted, and `count` is the rows shown — a page the filters emptied is `count: 0` with the pages after it
     // still numbered; the README says so, and SMD-2055 moves the filters into the function.
@@ -675,9 +677,12 @@ async function handleRecent(url: URL): Promise<Response> {
   const source = url.searchParams.get("source")?.trim() || null;
   const type = url.searchParams.get("type")?.trim() || null;
   const topic = url.searchParams.get("topic")?.trim() || null;
-  // ob1-fork (SMD-2054, review pass 1): the one content route with no tier filter — `GET /recent?limit=100`
-  // answered every restricted thought's full content, newest first. exclude_restricted, default true, as its
-  // siblings (/thoughts, /count, /thought/:id) take it; the predicate is the column's.
+  // ob1-fork (SMD-2054, review pass 1): the one route reading thoughts directly with no tier predicate —
+  // `GET /recent?limit=100` answered every restricted thought's full content, newest first (GET /duplicates calls
+  // find_near_duplicates, defined nowhere on this fork, so it fails rather than answers). exclude_restricted,
+  // default true, as its siblings (/thoughts, /count, /thought/:id) take it; the predicate is theirs, `<>` on the
+  // column, which also hides a row whose tier is NULL — an explicit write, the column defaults to standard — where
+  // the sidecar's functions use IS DISTINCT FROM (review pass 2; the siblings' shape kept, closed either way).
   const excludeRestricted = url.searchParams.get("exclude_restricted") !== "false";
 
   let query = supabase.from("thoughts")

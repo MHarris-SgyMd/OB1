@@ -84,8 +84,8 @@
  * inside p_filter and answered an empty page, reading no date bound at all. A
  * restricted twin at that block's capture holds both modes, the open switch,
  * the bounds as instants, the refusals as 400s, the emptied first page and
- * the page past the last hit; GET /recent, which filtered no tier at all,
- * hides the twin too; and the date helpers rest-api copied from enhanced-mcp
+ * the page past the last hit; GET /recent, which read thoughts with no tier
+ * predicate, hides the twin too; and the date helpers rest-api copied from enhanced-mcp
  * are held identical to the character (the text pins at the end).
  *
  * The files are imported as modules — each exports Bun's entry shape, and its
@@ -843,6 +843,9 @@ try {
   // as every tier but restricted is). Semantic mode embeds the query through the stub, so the twin's similarity is 1.
   const hidden = "a restricted thought captured through rest-api, which no search may show";
   const rid = await plantRestricted(hidden, captured);
+  // The twin's metadata carries no `type` (a capture's does, and agrees with its column), so its column, set here,
+  // reaches a semantic result only through the column lookup — the arm with teeth for `type` (review pass 2).
+  await sql`UPDATE thoughts SET type = 'planted-kind' WHERE id = ${rid}`;
   const ids = (r: Reply) => ((r.json?.results ?? []) as { id: string }[]).map((x) => x.id);
   const sem = (body: Record<string, unknown>) => send(h, "POST", "/search", { query: captured, min_similarity: 0.5, ...body });
   const txt = (body: Record<string, unknown>) => send(h, "POST", "/search", { query: "captured through rest-api", mode: "text", ...body });
@@ -850,17 +853,20 @@ try {
   assert(semantic.status === 200 && ids(semantic).includes(cid) && !ids(semantic).includes(rid),
     `POST /search in semantic mode finds the capture and not the restricted twin — the tier read by the column, looked up by id after the match (${semantic.status}: ${ids(semantic).length} rows${ids(semantic).includes(rid) ? ", the twin among them" : ""})`);
   // match_thoughts returns no `type` and no `source_type` either (review pass 1): the projection named both from the
-  // row, so `source_type` was missing from every semantic result. Both come from the same lookup as the tier.
+  // row, so `source_type` was missing from every semantic result. Both come from the same lookup as the tier; a
+  // capture's `type` is its metadata's first, which agrees with the column, so the teeth for `type` are the twin's
+  // (below, under exclude_restricted: false).
   const [own] = await sql`SELECT type, source_type FROM thoughts WHERE id = ${cid}`;
   const hit = ((semantic.json?.results ?? []) as Record<string, unknown>[]).find((x) => x.id === cid);
   assert(hit !== undefined && "source_type" in hit && hit.source_type === own.source_type && hit.type === own.type,
-    `…and a semantic result carries the row's source_type and type, read by the same lookup — match_thoughts returns neither (${JSON.stringify({ type: hit?.type, source_type: hit?.source_type })} vs ${JSON.stringify(own)})`);
+    `…and a semantic result carries the row's source_type, read by the same lookup — match_thoughts returns it no more than the tier (${JSON.stringify({ type: hit?.type, source_type: hit?.source_type })} vs ${JSON.stringify(own)})`);
   const textMode = await txt({});
   assert(textMode.status === 200 && ids(textMode).includes(cid) && !ids(textMode).includes(rid) && textMode.json?.total === 2 && textMode.json?.count === 1 && textMode.json?.total_pages === 1,
     `…and in text mode, through search_thoughts_text with p_filter {}: the page filtered by the column the function returns, total its count with the hidden row, count the rows shown (${textMode.status}: ${JSON.stringify({ count: textMode.json?.count, total: textMode.json?.total, total_pages: textMode.json?.total_pages })})`);
   const [openSem, openText] = await Promise.all([sem({ exclude_restricted: false }), txt({ exclude_restricted: false })]);
-  assert(ids(openSem).includes(rid) && ids(openSem).includes(cid) && ids(openText).includes(rid) && ids(openText).includes(cid),
-    `exclude_restricted: false shows the twin beside the capture in both modes (${ids(openSem).length}/${ids(openText).length})`);
+  const twin = ((openSem.json?.results ?? []) as Record<string, unknown>[]).find((x) => x.id === rid);
+  assert(ids(openSem).includes(rid) && ids(openSem).includes(cid) && ids(openText).includes(rid) && ids(openText).includes(cid) && twin?.type === "planted-kind",
+    `exclude_restricted: false shows the twin beside the capture in both modes, and the twin's type — a column its metadata does not carry — reaches the semantic result through the lookup (${ids(openSem).length}/${ids(openText).length}; ${twin?.type})`);
   // The date bounds, as instants, in both modes: text mode read none; semantic mode compared the strings.
   const past = "2000-01-01T00:00:00Z";
   const [beforeSem, sinceSem, beforeText, sinceText] = await Promise.all([sem({ end_date: past }), sem({ start_date: past }), txt({ end_date: past }), txt({ start_date: past })]);
@@ -882,8 +888,9 @@ try {
     `a text page the tier filter emptied answers count 0 with total 2 and total_pages 2 — another page follows — and page 2 holds the capture, count 1 (${JSON.stringify({ count: onePage.json?.count, total: onePage.json?.total, total_pages: onePage.json?.total_pages })}; page 2: ${ids(secondPage).length})`);
   assert(pastEnd.status === 200 && pastEnd.json?.count === 0 && pastEnd.json?.total === 0 && pastEnd.json?.total_pages === 0,
     `…and page 3, past the last hit, answers total 0 — the count rides on the rows, and there are none (${JSON.stringify({ count: pastEnd.json?.count, total: pastEnd.json?.total, total_pages: pastEnd.json?.total_pages })})`);
-  // GET /recent (review pass 1): the one content route with no tier filter at all — it answered every restricted
-  // thought's full content, newest first. Its siblings' exclude_restricted, default true.
+  // GET /recent (review pass 1): the one route reading thoughts directly with no tier predicate — it answered every
+  // restricted thought's full content, newest first (GET /duplicates calls find_near_duplicates, defined nowhere on
+  // this fork, so it fails rather than answers). Its siblings' exclude_restricted, default true.
   const recent = await send(h, "GET", "/recent?limit=50");
   const recentOpen = await send(h, "GET", "/recent?limit=50&exclude_restricted=false");
   assert(recent.status === 200 && ids(recent).includes(cid) && !ids(recent).includes(rid) && ids(recentOpen).includes(rid) && ids(recentOpen).includes(cid),
