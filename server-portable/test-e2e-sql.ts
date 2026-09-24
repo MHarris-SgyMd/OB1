@@ -1297,9 +1297,13 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   }
 
   // A transaction holding the keys' rows, not the tables: a revoked key is
-  // refused at once, since resolve_agent reads its revocation before the
-  // UPDATE that waits; a good key's UPDATE waits out the cap and it is busy.
+  // refused at once, since resolve_agent reads its revocation before any
+  // write; a key used in the last five minutes writes nothing and is served
+  // (migration 054, SMD-2090); a key last used longer ago writes its row, so
+  // its lookup waits out the cap on each retry and it is busy.
   {
+    await sql`UPDATE ob1_agent_keys SET last_used_at = now() WHERE key_hash = ${hashKey("op-raw")}`;
+    await sql`UPDATE ob1_agent_keys SET last_used_at = now() - interval '1 hour' WHERE key_hash = ${hashKey(COLD_KEYS[0] + "-raw")}`;
     const locker = new SQL({ url: URL_, max: 1 });
     let release: () => void = () => {};
     const held = new Promise<void>((r) => { release = r; });
@@ -1315,10 +1319,13 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
       const t0 = performance.now();
       const revoked = await guarded(call("thought_stats", {}, "bot-raw"));
       const r1 = performance.now() - t0;
-      const good = await guarded(call("thought_stats", {}, "op-raw"));
+      const recent = await guarded(call("thought_stats", {}, "op-raw"));
       const r2 = performance.now() - t0 - r1;
+      const stale = await guarded(call("thought_stats", {}, `${COLD_KEYS[0]}-raw`));
+      const r3 = performance.now() - t0 - r1 - r2;
       assert(/has been revoked/.test(revoked) && r1 < 500, `with the keys' rows held, a revoked key is refused as revoked without waiting (${Math.round(r1)} ms)`);
-      assert(BUSY.test(good) && r2 >= 1000 && r2 < 3000, `…and a good key's lookup waits out the cap on each retry and is asked to retry (${Math.round(r2)} ms)`);
+      assert(recent === "served" && r2 < 500, `…a key used in the last five minutes is served without waiting, its row not written (${recent.slice(0, 60)}, ${Math.round(r2)} ms)`);
+      assert(BUSY.test(stale) && r3 >= 1000 && r3 < 3000, `…and a key last used an hour ago waits out the cap on each retry and is asked to retry (${Math.round(r3)} ms)`);
     } finally {
       release();
       await tx;

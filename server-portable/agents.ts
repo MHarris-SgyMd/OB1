@@ -42,9 +42,11 @@
  * read stands through any failure, and any reply that is not an answer, until
  * the registry answers that the key is not revoked. A lock on ob1_agents
  * stalls every write anyway (046's audit trigger reads a writer's kind
- * there). A committed revocation is read before the UPDATE that waits, so a
- * row lock does not delay it; one still uncommitted is not seen yet
- * (SMD-2090).
+ * there). A committed revocation is read before any write, so a row lock
+ * does not delay it. Since migration 054 a key used in the last five minutes
+ * writes nothing, so a held row delays its lookup not at all, and a
+ * revocation that commits while a staler key's write waits is answered
+ * REVOKED (SMD-2090).
  *
  * The same reasoning covers a deployment that has not applied migration 010:
  * `resolve_agent` does not exist, resolution fails, and attribution falls back

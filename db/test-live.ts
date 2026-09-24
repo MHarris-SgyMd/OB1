@@ -4541,6 +4541,125 @@ console.log("\n[23] a ticket's dated sections are thoughts of their own — deri
   for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
 }
 
+// ── 24. Migration 054 — resolve_agent under a held key row ──────────────────
+//
+// db/test-schema.ts [49] holds the sequential half: which lookups write the
+// row. This is the concurrent half, which PGlite's single session cannot run.
+// Each lookup runs on its own connection under a lock_timeout, as the server's
+// store runs it (250 ms, SMD-2072); a case that must wait for a commit sets it
+// to 5 s, which also bounds a lock that never released. The holder is a second
+// connection with a transaction held open.
+
+console.log("\n[24] resolve_agent under a held key row: a recently used key answers without waiting, a stale one waits, and a revocation or a delete that commits during the wait is what the lookup answers (migration 054, SMD-2090)");
+{
+  type R = { ok: boolean; error?: string; agent_id?: string; created?: boolean; rotated?: boolean };
+  const keys = { fresh: "b1".repeat(32), stale: "b2".repeat(32), race: "b3".repeat(32), gone: "b4".repeat(32), early: "b5".repeat(32) };
+  const labelOf = (k: keyof typeof keys) => `live-2090-${k}`;
+  const agentOf: Record<string, string> = {};
+  for (const k of Object.keys(keys) as (keyof typeof keys)[]) {
+    agentOf[k] = ((await sql`SELECT resolve_agent(${keys[k]}, ${labelOf(k)}, 'write') AS r`)[0].r as R).agent_id!;
+  }
+  await sql`UPDATE ob1_agent_keys SET last_used_at = now() - interval '1 hour' WHERE key_hash IN (${keys.stale}, ${keys.race}, ${keys.gone})`;
+
+  const looker = new SQL({ url: URL_, max: 1 });
+  const lookerPid = Number((await looker`SELECT pg_backend_pid() AS pid`)[0].pid);
+  /** One lookup, its answer or its SQLSTATE, and how long it took. */
+  const lookup = async (k: keyof typeof keys, scope = "write", capMs = 250) => {
+    const t0 = performance.now();
+    try {
+      const [row] = await looker.begin(async (tx: SQL) => {
+        await tx`SELECT set_config('lock_timeout', ${`${capMs}ms`}, true)`;
+        return tx`SELECT resolve_agent(${keys[k]}, ${labelOf(k)}, ${scope}) AS r`;
+      });
+      return { r: row.r as R, code: "", ms: performance.now() - t0 };
+    } catch (e) {
+      return { r: undefined, code: String((e as { errno?: string }).errno ?? (e as Error).message), ms: performance.now() - t0 };
+    }
+  };
+  /** A transaction on a connection of its own, held open after `work` until released. */
+  const hold = async (work: (tx: SQL) => Promise<unknown>) => {
+    const conn = new SQL({ url: URL_, max: 1 });
+    let release: () => void = () => {};
+    const released = new Promise<void>((r) => { release = r; });
+    let ready: () => void = () => {};
+    const isReady = new Promise<void>((r) => { ready = r; });
+    const done = conn.begin(async (tx: SQL) => { await work(tx); ready(); await released; })
+      .finally(() => conn.close());
+    await isReady;
+    return { commit: async () => { release(); await done; } };
+  };
+  /** Until the looker's backend waits on a lock, for at most 3 s. */
+  const lookerWaits = async () => {
+    for (let i = 0; i < 150; i++) {
+      const [w] = await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = ${lookerPid} AND wait_event_type = 'Lock'`;
+      if (w.n > 0) return true;
+      await Bun.sleep(20);
+    }
+    return false;
+  };
+
+  // The rows held, as an operator's SELECT … FOR UPDATE holds them.
+  {
+    const held = await hold((tx) => tx`SELECT 1 FROM ob1_agent_keys WHERE key_hash IN (${keys.fresh}, ${keys.stale}) FOR UPDATE`);
+    try {
+      const fresh = await lookup("fresh");
+      assert(fresh.r?.ok === true && fresh.r.agent_id === agentOf.fresh && fresh.ms < 50, `with its row held, a key used moments ago answers ok without waiting (${fresh.code || "ok"}, ${Math.round(fresh.ms)} ms)`);
+      const stale = await lookup("stale");
+      assert(stale.code === "55P03" && stale.ms >= 240, `…a key last used an hour ago writes its row, so it waits and meets the cap (${stale.code || JSON.stringify(stale.r)}, ${Math.round(stale.ms)} ms)`);
+      const scope = await lookup("fresh", "read");
+      assert(scope.code === "55P03", `…and so does a fresh key presenting another scope, since a scope change is written (${scope.code || JSON.stringify(scope.r)})`);
+    } finally {
+      await held.commit();
+    }
+  }
+
+  // A revocation not yet committed, of a key the lookup must write: the
+  // lookup reads the key as active, its UPDATE waits on the revoker, and once
+  // the revoker commits the lookup answers REVOKED (010's body answered ok,
+  // and the server cached it for its TTL).
+  {
+    const revoker = await hold((tx) => tx`SELECT revoke_agent_key(${keys.race}, 'SMD-2090 live')`);
+    const pending = lookup("race", "write", 5000);
+    const waited = await lookerWaits();
+    await revoker.commit();
+    const race = await pending;
+    assert(waited && race.r?.ok === false && race.r.error === "REVOKED" && race.r.agent_id === agentOf.race,
+      `a lookup waiting on an uncommitted revocation answers REVOKED once it commits, the agent id attached (waited: ${waited}; ${race.code || JSON.stringify(race.r)})`);
+  }
+  // The same, of a key the lookup need not write: it answers from what was
+  // committed when it read — ok, at once, as a lookup a moment earlier would —
+  // and the next lookup, after the commit, is refused.
+  {
+    const revoker = await hold((tx) => tx`SELECT revoke_agent_key(${keys.early}, 'SMD-2090 live')`);
+    let early;
+    try {
+      early = await lookup("early");
+    } finally {
+      await revoker.commit();
+    }
+    const after = await lookup("early");
+    assert(early.r?.ok === true && early.ms < 50 && after.r?.error === "REVOKED",
+      `a fresh key read before its revocation commits answers ok without waiting, and the lookup after the commit is REVOKED (${Math.round(early.ms)} ms; then ${after.r?.error ?? after.code})`);
+  }
+  // A key row deleted by hand while the lookup waited: the key is one never
+  // seen, registered again under its agent — the rotation branch, since the
+  // agent's label is still there.
+  {
+    const deleter = await hold((tx) => tx`DELETE FROM ob1_agent_keys WHERE key_hash = ${keys.gone}`);
+    const pending = lookup("gone", "write", 5000);
+    const waited = await lookerWaits();
+    await deleter.commit();
+    const gone = await pending;
+    const [back] = await sql`SELECT canonical_agent_id::text AS a FROM ob1_agent_keys WHERE key_hash = ${keys.gone}`;
+    assert(waited && gone.r?.ok === true && gone.r.rotated === true && gone.r.agent_id === agentOf.gone && back?.a === agentOf.gone,
+      `a lookup whose row was deleted while it waited registers the key again under its agent (waited: ${waited}; ${gone.code || JSON.stringify(gone.r)})`);
+  }
+
+  await looker.close();
+  await sql`DELETE FROM ob1_agent_keys WHERE key_hash IN (${keys.fresh}, ${keys.stale}, ${keys.race}, ${keys.gone}, ${keys.early})`;
+  await sql`DELETE FROM ob1_agents WHERE label LIKE 'live-2090-%'`;
+}
+
 await sql.close();
 
 // db/README.md's Testing block quotes this suite's assertion total. The count

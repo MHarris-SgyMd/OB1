@@ -463,9 +463,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // cut's last migration, SMD-1804/SMD-1860), 049 (the three-value CHECK on
   // ob1_agent_keys.scope, SMD-1298), 050 (the writer's mark on the row,
   // SMD-1726), 051 (the second release's schema_version, 1.1.0), 052
-  // (thought_changes, the read over the audit log, SMD-1296) and 053
+  // (thought_changes, the read over the audit log, SMD-1296), 053
   // (thought_sources, the link facet kind and the structured-wins rule,
-  // SMD-1867) stay recorded and are never tried. 030 is the right one to make pending because its
+  // SMD-1867) and 054 (resolve_agent's stale-only write, SMD-2090) stay recorded and are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
   // embedding_model column — are
   // exactly what a through-020 schema lacks, so it fails by name rather than
@@ -492,11 +492,13 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // name without either ([20f]); 053 adds a table on 001's thoughts, two
   // indexes on 042's thought_facets and redefines 016's
   // record_thought_entities and 042's thought_facets_validate on their own
-  // bodies, refusing by name without 016 or 042 ([20g]) — all recorded by
+  // bodies, refusing by name without 016 or 042 ([20g]); 054 redefines 010's
+  // resolve_agent on its own body, refusing by name without 010's two columns
+  // ([20h]) — all recorded by
   // the baseline with their prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 24, `030 is among the last twenty-four migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 25, `030 is among the last twenty-five migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -1929,6 +1931,29 @@ console.log("\n[20g] Migration 053 on a schema without 016, and on 016's tables 
   const present = (await sql`SELECT to_regclass('thought_sources') IS NOT NULL AS t, to_regprocedure('record_source_links(uuid, text, jsonb)') IS NOT NULL AS f`)[0] as { t: boolean; f: boolean };
   assert(present.t === true && present.f === true, "…and applied once both are there: the table and the writer are present");
   await sql.close();
+}
+
+console.log("\n[20h] Migration 054 on a schema without 010 — refused up front, naming 010 and --reapply (SMD-2090)");
+{
+  // 054's guard is 049's ([20d]): a plpgsql body is not checked against the
+  // catalog at CREATE, so without it 054 would apply over a pre-010 schema and
+  // fail bare at its COMMENT ON COLUMN. Same drive: a ledger baselined over a
+  // schema that stops before 010, 054 alone made pending.
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "010" });
+  const baselined = await migrate("--baseline");
+  assert(baselined.code === 0, `--baseline records every migration over the pre-010 schema (exit ${baselined.code})`);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the054 = MIGRATIONS.find((f) => f.startsWith("054_"))!;
+  await sql`DELETE FROM schema_migrations WHERE name = ${the054}`;
+  const plain = await migrate();
+  const ok = plain.code === 1 &&
+    /054_resolve_agent_stale_touch\.sql\s+FAILED: migration 054 needs 010 \(ob1_agent_keys\.last_used_at, revoked_at\); this schema lacks it/.test(plain.out) &&
+    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+  assert(ok, `a plain run fails at 054 naming 010 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the054}`)[0].c) === 0, "…054 records nothing");
+  await sql.close();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "010" });
 }
 
 console.log("\n[21] test-support's schema reset leaves nothing of the fork's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");
