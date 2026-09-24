@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1552 assertions: 1552 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1577 assertions: 1577 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-three (53) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -993,6 +993,8 @@ bun graph-centrality.ts --url postgres://…                     # the whole gra
 bun graph-centrality.ts --url … "Open Brain"                   # one subject's neighbourhood and the thoughts that tie it together
 bun graph-centrality.ts --url … "Open Brain" --no-edges        # the control: co-occurrence alone
 bun graph-centrality.ts --url … --types project,tool --json    # a typed subgraph, as data
+bun graph-centrality.ts --url … "Open Brain" --status open     # as the live tickets build it: no Done or Canceled evidence
+bun graph-centrality.ts --url … --decay-done                   # a settled ticket weighs 0.25 in every count
 ```
 
 The subject resolves by 016's own rule, one rung at a time — exact
@@ -1019,9 +1021,35 @@ noisy (SMD-1935 — names that are only digits, dots, colons and spaces are out
 of scope by default, `--keep-numeric` admits them, `--types` narrows further,
 and the scope IS the graph: an entity outside it is in no list and no count,
 the subject the one exception, so `--types tool "Open Brain"` is the tools
-around a project); hubs and clusters inflate each other; no ticket status is
-stored, so open/closed is the caller's filter; and only extracted thoughts are
-in the graph, which the coverage line counts. Exit 0 when ranked, 1 when no
+around a project); hubs and clusters inflate each other; ticket status is read
+from synced metadata and by default not acted on (below); and only extracted
+thoughts are in the graph, which the coverage line counts.
+
+**Lifecycle** (SMD-1994). board-sync (SMD-1954) stamps every synced ticket's
+`metadata` with Linear's `status`, `status_type` (triage / backlog / unstarted /
+started / completed / canceled) and `linear_updated_at`, so a thought's
+lifecycle is on its row and the script reads it. One rule carries the filter
+and the decay: every thought has a **weight**, and every count of thoughts —
+mentions, support, co_mentions, the per-relation counts — is a sum of weights.
+`--status open|active|done` keeps the named lifecycles at 1 and weighs the
+other known ones 0 (`open` = not completed or canceled; `active` = unstarted or
+started; `done` = completed or canceled); `--decay-done` weighs a completed or
+canceled thought `DONE_WEIGHT` = 0.25, pre-registered in the file, one value,
+exact in binary, refused beside a filter (they are two answers to one
+question). A thought with no lifecycle — a hand capture, or a `status_type`
+the file does not know — weighs 1 under every flag: it passes every filter,
+and the output counts how many did rather than calling it open. Degree counts
+neighbours, not evidence, so a filter removes an edge with no live evidence
+and decay leaves it; a thought is listed when it weighs more than 0 and ranks
+by its weight times its score, with its status beside it. The default,
+`--status all` without decay, is every weight 1 — today's counts by
+construction, so a Done ticket still counts as a live one until a flag says
+otherwise, and the lifecycle caveat says so with the run's numbers: how many
+thoughts carry a status, how many are settled, the latest `linear_updated_at`
+(the status is as fresh as the last sync pass), and under a filter how many
+thoughts weighed in. `lifecycleSql` is the one place the status comes from;
+when SMD-2074 folds `thought_audit`'s transitions into a node-state
+projection, that CTE reads it and nothing downstream changes. Exit 0 when ranked, 1 when no
 entity resolves (a near-miss whose only guesses the numeric rule hid is still
 no entity: exit 1, and the line counts the hidden guesses), 3 when the subject
 IS an entity — by id, name, alias or merged-in name — that the numeric rule
@@ -1943,7 +1971,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1552 assertions, PGlite, no container
+bun test-schema.ts                          # 1577 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 675 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
@@ -2466,7 +2494,15 @@ asserts 749 properties (at migration 032), including:
   around the first, the neighbourhood's
   order with edges on differing from the order without at every position,
   two runs byte-identical, the caveats in the rendered text with the run's
-  numbers, and the flags refused as documented
+  numbers, and the flags refused as documented; the thoughts carry the
+  lifecycles board-sync stamps (Done, In Progress, Backlog, Todo, Canceled,
+  none, an unknown `status_type`), every count above read at weight 1 so the
+  default is the drop-the-filter control, then the same graph under `--status
+  open` / `active` / `done` and `--decay-done` — the settled thoughts' evidence
+  gone or at a quarter, the neighbourhood's order moving at two positions,
+  degree unchanged under decay, the unstamped thoughts listed under every
+  filter and counted, the caveat carrying the freshness and the counts, and
+  decay beside a filter refused (SMD-1994)
 
 One thing this suite deliberately does NOT assert: that a context survives a
 capture, an edit and a payload that omits it. Writing chunk rows through the
