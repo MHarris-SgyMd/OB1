@@ -23,7 +23,7 @@
  * working tree and run again.
  *
  *   bun scripts/assemble-release.ts              # DRY RUN: print the plan, touch nothing
- *   bun scripts/assemble-release.ts --write      # write changes/NNN-*.md, FORK.md's index, CHANGELOG.md, releases.json
+ *   bun scripts/assemble-release.ts --write      # write changes/NNN-*.md, FORK.md's index, CHANGELOG.md, releases.json, server-portable/version.ts
  *   bun scripts/assemble-release.ts --self-check  # exercise the pure functions
  *
  * The pieces this computes — the next version, the change numbering, the section
@@ -36,7 +36,8 @@
  * a new `NNN_schema_version.sql` upserting it, the highest migration on disk, so
  * the range this cut freezes ends on the migration that names the release and a
  * brain that applies the range reports the version (check 17d holds the two
- * equal; db/README.md's map and the suites' migration counts move with it); then
+ * equal; db/README.md's map and the suites' migration counts move with it, and
+ * `bun scripts/gen-version.ts` regenerates server-portable/version.ts — 17e); then
  * --write, which refuses a tree whose FORK_VERSION or highest migration does not
  * say the version it is about to record. The PR lands the two; the maintainer
  * tags the merge commit `v<core>` and pushes the tag, and
@@ -52,6 +53,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FORK_VERSION, REPO_URL, UPSTREAM_PIN, migrationSha, readReleases, highestReleasedMigration, schemaVersionValue, type Release } from "../db/version.mjs";
 import { parseFragment, fragmentSection, fragmentProblems, type FragmentFrontMatter } from "./fragments.ts";
+import { renderVersionTs } from "./gen-version.ts";
 import { CHANGES_DIR as CHANGES_REL, FIRST_FILED, changeFileName, classifyChanges, pad3, readChangeEntries, renderIndex, spliceIndex, type FragmentChange } from "./fork-index.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -343,9 +345,12 @@ function write(plan: Plan) {
   writeFileSync(join(ROOT, "FORK.md"), plan.forkAfter);
   writeFileSync(join(ROOT, "CHANGELOG.md"), plan.changelogAfter);
   writeFileSync(join(ROOT, "releases.json"), JSON.stringify([...plan.releases, plan.entry], null, 2) + "\n");
+  // The server's generated version module names the range the entry just
+  // written records (SMD-2041); rendered after it, since it reads releases.json.
+  writeFileSync(join(ROOT, "server-portable", "version.ts"), renderVersionTs());
   for (const f of plan.fragments) unlinkSync(join(CHANGES_ABS, f.name));
 
-  console.log(`Wrote ${plan.fragments.length} change file(s), FORK.md's index, CHANGELOG.md and releases.json for ${plan.version}${plan.range ? ` (migrations ${pad3(plan.range[0])}..${pad3(plan.range[1])} frozen)` : ""}.`);
+  console.log(`Wrote ${plan.fragments.length} change file(s), FORK.md's index, CHANGELOG.md, releases.json and server-portable/version.ts for ${plan.version}${plan.range ? ` (migrations ${pad3(plan.range[0])}..${pad3(plan.range[1])} frozen)` : ""}.`);
   console.log(`Next: commit this as the cut's second commit, run check-fork-consistency, and open the PR. Once it has merged, tag the merge commit — git tag -a v${plan.version.split("+")[0]} <merge sha> -m '${plan.version}' && git push origin v${plan.version.split("+")[0]} — and .github/workflows/release.yml publishes the images and the release from it (scripts/release-artifacts.ts refuses a tag that does not name this cut).`);
 }
 

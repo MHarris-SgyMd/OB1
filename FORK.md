@@ -72,7 +72,11 @@ the brain it serves. `db/version.mjs` is the one definition of the current versi
 migration belongs to. 044 wrote `0.0.0+upstream.9543c29`, the pre-first-release
 baseline; each cut appends the migration that writes its version as the last file
 of the range it freezes — 048 writes `1.0.0+upstream.9543c29`, the first release;
-051 writes `1.1.0+upstream.9543c29`, the second.
+051 writes `1.1.0+upstream.9543c29`, the second. The server reports its own at
+runtime — the MCP `initialize` reply, the `brain_info` tool and `GET /health` with a
+key — from `server-portable/version.ts`, generated from `db/version.mjs`,
+`releases.json` and `db/migrations/` by `scripts/gen-version.ts` and round-tripped
+by check-fork's 17e (SMD-2041).
 
 **A release is a tag naming three things**: the migration range it closes
 (the first cut, `001..048`; the second, `049..051`), the server commit, and the upstream pin. The committed
@@ -283,7 +287,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 133 | [Shim everywhere](changes/133-shim-everywhere.md) | SMD-1798 |
 | 134 | [Entity extraction sent the whole thought in one unbounded call](changes/134-entity-extraction-sent-the-whole-thought-in-one.md) | SMD-1879 |
 
-Landed since the last release and numbered at the next one (SMD-1804): [SMD-1296](changes/smd-1296.md), [SMD-1713](changes/smd-1713.md), [SMD-1799](changes/smd-1799.md), [SMD-1800](changes/smd-1800.md), [SMD-1867](changes/smd-1867.md), [SMD-1875](changes/smd-1875.md), [SMD-1958](changes/smd-1958.md), [SMD-1960](changes/smd-1960.md), [SMD-1982](changes/smd-1982.md), [SMD-1986](changes/smd-1986.md), [SMD-1994](changes/smd-1994.md), [SMD-1998](changes/smd-1998.md), [SMD-2012](changes/smd-2012.md), [SMD-2059](changes/smd-2059.md).
+Landed since the last release and numbered at the next one (SMD-1804): [SMD-1296](changes/smd-1296.md), [SMD-1713](changes/smd-1713.md), [SMD-1799](changes/smd-1799.md), [SMD-1800](changes/smd-1800.md), [SMD-1867](changes/smd-1867.md), [SMD-1875](changes/smd-1875.md), [SMD-1958](changes/smd-1958.md), [SMD-1960](changes/smd-1960.md), [SMD-1982](changes/smd-1982.md), [SMD-1986](changes/smd-1986.md), [SMD-1994](changes/smd-1994.md), [SMD-1998](changes/smd-1998.md), [SMD-2012](changes/smd-2012.md), [SMD-2041](changes/smd-2041.md), [SMD-2059](changes/smd-2059.md).
 <!-- changes-index:end -->
 
 ### Files we own
