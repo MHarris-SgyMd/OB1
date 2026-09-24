@@ -280,30 +280,33 @@ export const RUNAWAY_REPEATS = 3;
  * becomes one unkeyed item), an unbalanced bracket and a stray quote, or a
  * quoted bracket (`"["`).
  */
+/** An item that reached RUNAWAY_REPEATS: its key, the item count then, and the stack depth of the array holding it. */
+type Fire = { key: string; atItem: number; arrayLevel: number };
+
 export class RunawayDetector {
+  // The text: the containers open, and whether the character in hand is inside a string.
   private readonly stack: ("{" | "[")[] = [];
   private inString = false;
   private escaped = false;
-  /** The stack depth at which the current item was opened; -1 outside an item. */
+  // The item in hand: the stack depth it opened at (-1 outside one) and its text from earlier pieces.
   private itemLevel = -1;
   private item = "";
+  // The root object's keys: the string being read directly inside it, and the one just closed there, pending the `:` that makes it a key rather than a value.
+  private key = "";
+  private pendingKey: string | null = null;
+  private sawEntities = false;
+  private consumed = 0;
   private readonly counts = new Map<string, number>();
   /** Items read so far, the one that fired included. */
   items = 0;
-  /** True once the answer's container has closed with an item read or an array opened in it: the answer is complete. Final — nothing after it is read (eighth and ninth passes). */
+  /** True once the root object has closed with its own `"entities"` key read in it: the answer is complete. Final — nothing after it is read. */
   closed = false;
-  /** The answer's own `"entities"` key — a string directly inside the root object, followed by `:` — what makes its close the answer's. */
-  private sawEntities = false;
-  /** The string being read directly inside the root object, and the one just closed there, pending the `:` that makes it a key rather than a value (eleventh pass). */
-  private key = "";
-  private pendingKey: string | null = null;
   /** Characters fed up to and including the brace that closed the answer; -1 while open. */
   closedAt = -1;
-  private consumed = 0;
-  /** The first item that reached RUNAWAY_REPEATS — or, once `runaway`, the one whose loop went on: its key, the item count then, and the stack depth of the array holding it. Kept; null while none has. */
-  fired: { key: string; atItem: number; arrayLevel: number } | null = null;
+  /** The first item that reached RUNAWAY_REPEATS — or, once `runaway`, the one whose loop went on. Kept; null while none has. */
+  fired: Fire | null = null;
   /** The fire still in force — cleared when its array closes, set anew by a later array's own third copy. */
-  private armed: { key: string; atItem: number; arrayLevel: number } | null = null;
+  private armed: Fire | null = null;
   /** True once an item followed the third copy inside the same array: the abort. */
   runaway = false;
 
@@ -349,10 +352,8 @@ export class RunawayDetector {
       if (c === "}" || c === "]") {
         this.stack.pop();
         if (this.stack.length === 0 && this.sawEntities) { this.closed = true; this.closedAt = offset + i + 1; }
-        // The array that held the third copy has closed: the loop ended with it,
-        // and the detector is armed again for a loop in a later array (eighth
-        // review pass: the first fire was final, so a relation repeated three
-        // times after a folded entity triplet was never seen).
+        // The array that held the third copy has closed: the loop ended with
+        // it, and a later array's own third copy arms the detector anew.
         if (this.armed !== null && !this.runaway && this.stack.length < this.armed.arrayLevel) this.armed = null;
         if (this.itemLevel < 0 || this.stack.length !== this.itemLevel - 1) continue;
         const key = itemKey(this.item + piece.slice(start, i + 1));
