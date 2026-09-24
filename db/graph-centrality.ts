@@ -45,9 +45,14 @@
  * sum of weights. A thought whose status the filter keeps weighs 1; one it
  * drops weighs 0; under `--decay-done` a completed or canceled thought weighs
  * `DONE_WEIGHT` (0.25, pre-registered here, one weight, exact in binary so the
- * sums are too). A thought with no status — a hand capture, a status_type
- * this file does not know — weighs 1 whatever the flags say: it passes every
- * filter, and the output counts how many did rather than calling it open. So
+ * sums are too). A row's lifecycle is its TICKET's: a row carrying a ticket
+ * (`issue`) or derived from one (`ticket` — SMD-2059's dated sections) takes
+ * the status of the ticket's current head, the `issue` row nothing supersedes,
+ * so a Done ticket's observations and its superseded earlier rows are settled
+ * with it; a row with no ticket takes the status keys on its own row, if any.
+ * A thought with no status — a hand capture, a status_type this file does not
+ * know — weighs 1 whatever the flags say: it passes every filter, and the
+ * output counts how many did rather than calling it open. So
  * mentions, support, co_mentions and the per-relation counts are weighted
  * sums (whole numbers unless decay is on); degree counts NEIGHBOURS, not
  * evidence, so a filter removes an edge with no live evidence and decay leaves
@@ -59,11 +64,11 @@
  *   active  = unstarted, started                    (on the board and moving)
  *   done    = completed, canceled
  *
- * `lifecycleSql` is the one place the status comes from. Today it is
+ * `LIFECYCLE_CTE` is the one place the status comes from. Today it is
  * `thoughts.metadata`, a scalar the sync overwrites each pass; the status
  * transitions themselves are on `thought_audit` (046), and when SMD-2074 folds
  * them into a node-state projection, that CTE reads the projection and nothing
- * downstream changes — the weights, the counts and the callers see the same
+ * downstream changes — `weightsSql`, the counts and the callers see the same
  * three columns.
  *
  * The subject resolves by 016's own rule, one rung at a time: an exact
@@ -178,7 +183,7 @@ export type Coverage = {
   done: number;
   /** Thoughts weighing more than 0 under the run's flags — with `--status all`, every thought. */
   weighed: number;
-  /** The latest linear_updated_at any thought carries: how fresh the statuses can be. Null when none is stamped. */
+  /** The latest linear_updated_at among the thoughts with a lifecycle: the statuses are no older than this. Null when none is stamped. */
   last_sync: string | null;
 };
 
@@ -215,8 +220,26 @@ function scopeSql(alias: string, scope: Scope, params: unknown[]): { where: stri
  * transitions `thought_audit` (046) already holds, this reads that instead;
  * `weightsSql` and every count below see the same three columns either way.
  */
-export const LIFECYCLE_CTE = `lifecycle AS (SELECT t.id AS thought_id, t.metadata->>'status' AS status, t.metadata->>'status_type' AS status_type,
-                                         t.metadata->>'linear_updated_at' AS synced_at FROM thoughts t)`;
+// A row's lifecycle is its TICKET's. board-sync stamps the status on the
+// ticket's head row alone (the `issue` row nothing supersedes); a superseded
+// earlier row keeps the status it froze at, and a row derived from the ticket
+// — SMD-2059's dated sections, carrying `ticket` and no status — has none of
+// its own. So `heads` picks one row per issue (un-superseded first, then the
+// newest sync, then the id) and every row carrying `issue` or `ticket` reads
+// that head's three keys, falling back to its own; a row with no ticket reads
+// its own (first review pass).
+export const LIFECYCLE_CTE = `heads AS (
+            SELECT p.metadata->>'issue' AS issue, p.metadata->>'status' AS status, p.metadata->>'status_type' AS status_type, p.metadata->>'linear_updated_at' AS synced_at,
+                   row_number() OVER (PARTITION BY p.metadata->>'issue'
+                                      ORDER BY (NOT EXISTS (SELECT 1 FROM thoughts s WHERE s.supersedes = p.id)) DESC, p.metadata->>'linear_updated_at' DESC NULLS LAST, p.id) AS rn
+              FROM thoughts p WHERE p.metadata->>'issue' IS NOT NULL),
+          lifecycle AS (
+            SELECT t.id AS thought_id,
+                   coalesce(h.status, t.metadata->>'status') AS status,
+                   coalesce(h.status_type, t.metadata->>'status_type') AS status_type,
+                   coalesce(h.synced_at, t.metadata->>'linear_updated_at') AS synced_at
+              FROM thoughts t
+              LEFT JOIN heads h ON h.rn = 1 AND h.issue = coalesce(t.metadata->>'ticket', t.metadata->>'issue'))`;
 
 /**
  * The per-thought weight, as the header defines it, with `lifecycle` before
@@ -227,14 +250,19 @@ export const LIFECYCLE_CTE = `lifecycle AS (SELECT t.id AS thought_id, t.metadat
  * wherever its own slots end.
  */
 export function weightsSql(opts: Pick<Options, "status" | "decayDone">, params: unknown[]): string {
+  // The rule parseArgs applies, applied here too for a caller that builds its
+  // own Options: decay and a filter are two answers to one question.
+  if (opts.decayDone && opts.status !== "all") throw new Error(`weightsSql: --decay-done with --status ${opts.status}; pass one or the other`);
   params.push(pgArray(opts.decayDone ? LIFECYCLE_FILTERS.open : LIFECYCLE_FILTERS[opts.status]));
   const kept = params.length;
   params.push(pgArray(LIFECYCLE_TYPES));
   const known = params.length;
   // The literal is a float8 written as SQL text — DONE_WEIGHT is a constant of
-  // this file, not input — so the type of `w` is float8 in every branch.
+  // this file, not input — so the type of `w` is float8 in every branch. The
+  // status name is shown only beside a status_type this file knows, so the
+  // column and the "carry a lifecycle" count agree (first review pass).
   return `${LIFECYCLE_CTE},
-          weights AS (SELECT thought_id, status, status_type,
+          weights AS (SELECT thought_id, CASE WHEN status_type = ANY($${known}::text[]) THEN status END AS status, status_type,
                              (CASE WHEN status_type = ANY($${kept}::text[]) THEN 1.0
                                    WHEN status_type = ANY($${known}::text[]) THEN ${opts.decayDone ? DONE_WEIGHT : 0}
                                    ELSE 1.0 END)::float8 AS w
@@ -270,6 +298,8 @@ export async function coverage(run: Runner, opts: Options): Promise<Coverage> {
   const patternSlot = sc.patternSlot ?? params.push(NUMERIC_NAME_RE);
   const weights = weightsSql(opts, params);
   const knownSlot = params.length;
+  params.push(pgArray(LIFECYCLE_FILTERS.done));
+  const doneSlot = params.length;
   const [r] = await run(
     `WITH ${weights}
      SELECT (SELECT count(*) FROM thoughts)::int AS thoughts,
@@ -281,9 +311,9 @@ export async function coverage(run: Runner, opts: Options): Promise<Coverage> {
             (SELECT value FROM ob1_config WHERE key = 'entity_extraction_key') AS extraction_key,
             (SELECT count(*) FROM lifecycle WHERE status_type = ANY($${knownSlot}::text[]))::int AS with_lifecycle,
             (SELECT count(*) FROM lifecycle WHERE status_type IS NOT NULL AND NOT status_type = ANY($${knownSlot}::text[]))::int AS unknown_status,
-            (SELECT count(*) FROM lifecycle WHERE status_type IN ('completed', 'canceled'))::int AS done,
+            (SELECT count(*) FROM lifecycle WHERE status_type = ANY($${doneSlot}::text[]))::int AS done,
             (SELECT count(*) FROM weights WHERE w > 0)::int AS weighed,
-            (SELECT max(synced_at) FROM lifecycle) AS last_sync`,
+            (SELECT max(synced_at) FROM lifecycle WHERE status_type = ANY($${knownSlot}::text[])) AS last_sync`,
     params);
   return r as Coverage;
 }
@@ -370,9 +400,11 @@ export function rankedSubjects(res: Resolution): string[] {
  * tables: by mentions (then degree and support with edges on), and with edges
  * on by degree (then support and mentions) — the hubs. Each entity's counts are
  * computed once and ranked twice; a row comes back if it is in either top list.
- * An entity no weighed thought mentions is not in the run: under a filter the
+ * Under a filter, an entity no kept thought mentions is not in the run: the
  * graph is the graph the kept thoughts build (an edge's thoughts mention both
- * its ends, so no mentions means no degree either).
+ * its ends, so no mentions means no degree either). Under `all` — decay too —
+ * every in-scope entity is listed as before, an orphan at 0 included (first
+ * review pass: the default lists exactly what it listed).
  */
 export async function topEntities(run: Runner, opts: Options): Promise<{ byMentions: EntityRow[]; byDegree: EntityRow[] }> {
   const params: unknown[] = [];
@@ -398,8 +430,8 @@ export async function topEntities(run: Runner, opts: Options): Promise<{ byMenti
                    JOIN scope o ON o.id = x.other_id JOIN scope me ON me.id = x.entity_id)` : ""},
           stats AS (
             SELECT s.id, s.entity_type, s.name, s.normalized_name, coalesce(m.mentions, 0)::float8 AS mentions${edgeCols}
-              FROM scope s LEFT JOIN mentions m ON m.entity_id = s.id ${edgeJoin}
-             WHERE coalesce(m.mentions, 0) > 0),
+              FROM scope s LEFT JOIN mentions m ON m.entity_id = s.id ${edgeJoin}${opts.status === "all" ? "" : `
+             WHERE coalesce(m.mentions, 0) > 0`}),
           ranked AS (
             SELECT *, row_number() OVER (ORDER BY mentions DESC${opts.edges ? ", degree DESC, support DESC" : ""}, ${ENTITY_TIEBREAK})::int AS rm
                    ${opts.edges ? `, row_number() OVER (ORDER BY degree DESC, support DESC, mentions DESC, ${ENTITY_TIEBREAK})::int AS rd` : ", NULL::int AS rd"}
@@ -611,17 +643,17 @@ export async function report(run: Runner, subject: string | null, opts: Options)
 // ── Rendering ────────────────────────────────────────────────────────────────
 
 type Col = { key: string; head: string; right?: boolean; width?: number };
+/** A weighted count as text — whole numbers plain, else two places — the rule FMT applies in SQL, so "3.50" reads the same in a cell, a subject line and a relation list. */
+const count = (n: number): string => (Number.isInteger(n) ? String(n) : n.toFixed(2));
 /** One cap for the entity-name column in every table, so the same name renders the same in the whole-graph and neighbourhood reports (the edges-on/off control diffs them). */
 const NAME_WIDTH = 60;
 
 function table(rows: Record<string, unknown>[], cols: Col[]): string {
   // Names and excerpts are model output: control characters out, whitespace
   // to one space, as db/consolidate.ts renders the same columns (sixth review pass).
-  // A weighted count is whole unless decay is on; then two places, as the SQL
-  // renders the per-relation counts.
   const cell = (r: Record<string, unknown>, k: string) =>
     r[k] === null || r[k] === undefined ? ""
-    : typeof r[k] === "number" ? (Number.isInteger(r[k]) ? String(r[k]) : (r[k] as number).toFixed(2))
+    : typeof r[k] === "number" ? count(r[k])
     : cleanForDisplay(String(r[k])).replace(/\s+/g, " ");
   const widths = cols.map((c) => Math.min(c.width ?? 80, Math.max(c.head.length, ...rows.map((r) => cell(r, c.key).length))));
   const line = (vals: string[]) => vals.map((v, i) => (cols[i].right ? v.padStart(widths[i]) : v.padEnd(widths[i]))).join("  ").trimEnd();
@@ -674,7 +706,7 @@ export function render(r: Report): string {
       const several = res.subjects.length > r.subject_ids.length ? " — several names match; ranked around the first, pass the name shown to be exact" : "";
       const label = { id: "by id", exact: "exact match on the normalised name", alias: `by alias or merged-in name${several}`, fuzzy: `by trigram similarity — GUESSES, ranked around the first; pass the name shown to be exact` }[res.how];
       out.push(`Subject (${label}):`);
-      for (const s of res.subjects) out.push(`  ${r.subject_ids.includes(s.id) ? "▸" : " "} ${s.entity_type} ${JSON.stringify(s.name)} — ${s.mentions} mention${s.mentions === 1 ? "" : "s"}${res.how === "fuzzy" ? ` (similarity ${s.score.toFixed(2)})` : ""}  ${s.id}`);
+      for (const s of res.subjects) out.push(`  ${r.subject_ids.includes(s.id) ? "▸" : " "} ${s.entity_type} ${JSON.stringify(s.name)} — ${count(s.mentions)} mention${s.mentions === 1 ? "" : "s"}${res.how === "fuzzy" ? ` (similarity ${s.score.toFixed(2)})` : ""}  ${s.id}`);
     }
     out.push("");
     if (r.neighbours && r.neighbours.length) {
@@ -761,7 +793,7 @@ export function parseArgs(argv: readonly string[]): Parsed | { error: string } {
     } else if (a === "--status") {
       const v = value();
       if (typeof v !== "string") return v;
-      if (!(v in LIFECYCLE_FILTERS)) return { error: `--status takes one of ${Object.keys(LIFECYCLE_FILTERS).join(", ")}; not ${JSON.stringify(v)}` };
+      if (!Object.hasOwn(LIFECYCLE_FILTERS, v)) return { error: `--status takes one of ${Object.keys(LIFECYCLE_FILTERS).join(", ")}; not ${JSON.stringify(v)}` };
       opts.status = v as LifecycleFilter;
     } else if (a === "--decay-done") opts.decayDone = true;
     else if (a === "--keep-numeric") opts.excludeNumeric = false;

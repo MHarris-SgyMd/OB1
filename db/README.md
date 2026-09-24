@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1577 assertions: 1577 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1589 assertions: 1589 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-three (53) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -1036,7 +1036,11 @@ other known ones 0 (`open` = not completed or canceled; `active` = unstarted or
 started; `done` = completed or canceled); `--decay-done` weighs a completed or
 canceled thought `DONE_WEIGHT` = 0.25, pre-registered in the file, one value,
 exact in binary, refused beside a filter (they are two answers to one
-question). A thought with no lifecycle — a hand capture, or a `status_type`
+question). A row's lifecycle is its ticket's: a row carrying a ticket
+(`issue`) or derived from one (`ticket` — SMD-2059's dated sections) takes
+the status of the ticket's current head, the `issue` row nothing supersedes,
+so a Done ticket's observations and its superseded earlier rows are settled
+with it. A thought with no lifecycle — a hand capture, or a `status_type`
 the file does not know — weighs 1 under every flag: it passes every filter,
 and the output counts how many did rather than calling it open. Degree counts
 neighbours, not evidence, so a filter removes an edge with no live evidence
@@ -1047,7 +1051,7 @@ construction, so a Done ticket still counts as a live one until a flag says
 otherwise, and the lifecycle caveat says so with the run's numbers: how many
 thoughts carry a status, how many are settled, the latest `linear_updated_at`
 (the status is as fresh as the last sync pass), and under a filter how many
-thoughts weighed in. `lifecycleSql` is the one place the status comes from;
+thoughts weighed in. `LIFECYCLE_CTE` is the one place the status comes from;
 when SMD-2074 folds `thought_audit`'s transitions into a node-state
 projection, that CTE reads it and nothing downstream changes. Exit 0 when ranked, 1 when no
 entity resolves (a near-miss whose only guesses the numeric rule hid is still
@@ -1971,7 +1975,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1577 assertions, PGlite, no container
+bun test-schema.ts                          # 1589 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 675 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
