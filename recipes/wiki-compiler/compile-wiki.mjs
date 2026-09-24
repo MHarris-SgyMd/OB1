@@ -216,7 +216,7 @@ async function triggerEntityExtraction(args, env) {
   url.searchParams.set("limit", String(args.extractLimit));
   if (args.dryRun) url.searchParams.set("dry_run", "true");
 
-  console.log(`[wiki-compiler] triggering entity extraction worker: ${url.toString()}`);
+  console.log(`[wiki-compiler] triggering entity extraction worker: ${url.toString().replace(/\/\/[^/@]*@/, "//…@")}`); // userinfo, if any, redacted
   const response = await fetch(url, {
     method: "POST",
     headers: { "x-brain-key": accessKey },

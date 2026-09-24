@@ -99,14 +99,20 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 /**
  * An HTTP target read from its own variable, or null when unset: never derived from SUPABASE_URL, which on this fork is the
  * Postgres connection string — a URL built on it carries the database credentials into fetch() and fails there
- * (SMD-2110). Any scheme but http(s) is refused at boot; the message names the scheme, not the value.
+ * (SMD-2110). Parsed at boot and refused unless it is a bare http(s) address — scheme, host, port, an optional path
+ * prefix; no query, fragment or credentials, since a path is appended to it — and the message names the variable and
+ * the scheme, never the value (a connection string's userinfo is the password; Bun's own "Invalid URL" error quotes the
+ * value whole, so it is caught and not rethrown). Trailing slashes are dropped. The same text as in the sibling server
+ * that reads a knob this way; extensions/test-writes.ts holds the two copies identical.
  */
 function httpTargetFrom(name: string): string | null {
-  const value = process.env[name]?.trim().replace(/\/+$/, "");
+  const value = process.env[name]?.trim();
   if (!value) return null;
-  const scheme = value.match(/^([a-z][a-z0-9+.-]*):/i)?.[1] ?? "";
-  if (!/^https?$/i.test(scheme)) throw new Error(`${name} must be an http(s) URL — it is ${scheme ? `a ${scheme}:// URL` : "not a URL"}`);
-  return value;
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error(`${name} must be an http(s) URL — it is not a URL`); }
+  if (!/^https?:$/.test(url.protocol)) throw new Error(`${name} must be an http(s) URL — it is a ${url.protocol}// URL`);
+  if (url.search || url.hash || url.username || url.password) throw new Error(`${name} must be a bare http(s) address — scheme, host, port and an optional path; no query, fragment or credentials`);
+  return url.origin + url.pathname.replace(/\/+$/, "");
 }
 /** The smart-ingest server's address (integrations/smart-ingest), the proxy routes' upstream; unset, they answer 503. */
 const SMART_INGEST_URL = httpTargetFrom("SMART_INGEST_URL");

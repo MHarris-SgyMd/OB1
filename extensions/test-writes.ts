@@ -1030,8 +1030,8 @@ try {
   assert(star.status === 200 && allow(star) === "*",
     `with no allowlist the gateway answers Access-Control-Allow-Origin: * to any origin — the README's default (${star.status} ${allow(star)})`);
   assert(unconfigured.status === 503 && unconfigured.json?.error === "smart_ingest_not_configured" && unconfigured.json?.variable === "SMART_INGEST_URL" && allow(unconfigured) === "*"
-    && unconfiguredIngest.status === 503 && unconfiguredIngest.json?.variable === "SMART_INGEST_URL" && !reached.some((u) => u.includes("/functions/v1/")),
-    `with SMART_INGEST_URL unset, POST /ingestion-jobs/:id/execute and POST /ingest answer 503 naming the variable, CORS headers on — main's file fetched the DSN's path and answered 502 upstream_unreachable; nothing fetched a /functions/v1/ path (${unconfigured.status} ${JSON.stringify(unconfigured.json).slice(0, 80)}; ${unconfiguredIngest.status} ${unconfiguredIngest.json?.variable})`);
+    && unconfiguredIngest.status === 503 && unconfiguredIngest.json?.variable === "SMART_INGEST_URL",
+    `with SMART_INGEST_URL unset, POST /ingestion-jobs/:id/execute and POST /ingest answer 503 naming the variable, CORS headers on — main's file fetched the DSN's path and answered 502 upstream_unreachable (${unconfigured.status} ${JSON.stringify(unconfigured.json).slice(0, 80)}; ${unconfiguredIngest.status} ${unconfiguredIngest.json?.variable})`);
   // The DSN in the knob — the URL main's file built, handed over as configuration — is refused at boot: the module does not
   // load, and the message names the variable and the scheme and none of the value, whose userinfo is the database password.
   process.env.SMART_INGEST_URL = URL_;
@@ -1039,6 +1039,12 @@ try {
   process.env.SMART_INGEST_URL = INGEST;
   assert(refused !== null && /^SMART_INGEST_URL must be an http\(s\) URL — it is a postgres(ql)?:\/\/ URL$/.test(refused) && !refused.includes(new URL(URL_).host),
     `a postgres:// SMART_INGEST_URL is refused when the module loads, the message naming the variable and the scheme and not the value (${refused === null ? "loaded" : refused})`);
+  // So is an address with a query: /execute is appended to it, and `?tenant=a/execute` is no path (review pass 1).
+  process.env.SMART_INGEST_URL = `${INGEST}/si?tenant=a`;
+  const refusedQuery = await import(join(ROOT, F) + "?query-in-the-knob").then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
+  process.env.SMART_INGEST_URL = INGEST;
+  assert(refusedQuery !== null && /^SMART_INGEST_URL must be a bare http\(s\) address/.test(refusedQuery),
+    `…and one with a query string, which a path is appended to, is refused as not bare (${refusedQuery === null ? "loaded" : refusedQuery})`);
 }
 
 // ── integrations/smart-ingest (SMD-2110) ─────────────────────────────────────
@@ -1058,11 +1064,16 @@ try {
   const mark = reached.length;
   const ingested = await send(h, "POST", "/", { text, dry_run: false, skip_classification: true, source_label: "test-writes" });
   const calls = reached.slice(mark);
-  const items = await sql`SELECT action, reason, status, error_message FROM ingestion_items WHERE job_id = ${Number(ingested.json?.job_id) || 0}`;
+  const items = await sql`SELECT action, reason, status, error_message, result_thought_id, metadata->>'result_thought_uuid' AS result_thought_uuid FROM ingestion_items WHERE job_id = ${Number(ingested.json?.job_id) || 0}`;
   assert(ingested.status === 200 && ingested.json?.status === "complete" && ingested.json?.added_count === 1 && Number(ingested.json?.job_id) > 0,
     `POST / extracts one thought through the stubbed model, records the job and writes the thought (${ingested.status} ${JSON.stringify(ingested.json).slice(0, 160)}; items ${JSON.stringify(items).slice(0, 300)})`);
-  const [{ n }] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE content = ${text} AND content_fingerprint IS NOT NULL`;
-  assert(n === 1, `…the row through upsert_thought, its fingerprint beside the content (${n}; the vector is SMD-2128's)`);
+  const rows = await sql`SELECT id FROM thoughts WHERE content = ${text} AND content_fingerprint IS NOT NULL`;
+  assert(rows.length === 1, `…the row through upsert_thought, its fingerprint beside the content (${rows.length}; the vector is SMD-2128's)`);
+  // The item's row says so too: one statement set status and result_thought_id together before, and the fork's UUID in the
+  // bigint column failed it whole, unread — the item stayed `ready` under a job marked complete (review pass 1). The
+  // status lands, and the UUID rides in the item's metadata until SMD-2128 widens the column.
+  assert(items.length === 1 && items[0].status === "executed" && items[0].result_thought_id === null && items[0].result_thought_uuid === rows[0]?.id,
+    `…and the item's row is executed with the thought's UUID in its metadata — the bigint result column left null, not failed whole (${JSON.stringify(items).slice(0, 200)})`);
   assert(calls.filter((u) => u.startsWith(`${WORKER}/`)).join() === `${WORKER}/?limit=1` && workerKeys.at(-1) === KEY,
     `…and POSTs once to the extraction worker at ENTITY_EXTRACTION_WORKER_URL with the count as ?limit= and the server's key — the knob's address, not a path on the DSN (${calls.filter((u) => !/openrouter/.test(u)).join(" ") || "no call"}; key ${workerKeys.at(-1) === KEY ? "sent" : String(workerKeys.at(-1))})`);
   // Without the knob: the write lands and triggers nothing — no call to the worker, and no URL on the DSN either — and the
@@ -1349,9 +1360,18 @@ for (const [ticket, files] of [["SMD-1228", [...DRIVEN, ...TEXT_ONLY]], ["SMD-15
 }
 // SMD-2110: an HTTP target comes from its own variable, never from SUPABASE_URL — the connection string on this fork. Every
 // URL the stub was handed, by every writer this suite drove, and the two files' text: no URL built on that variable.
-assert(reached.length > 0 && !reached.some((u) => /^postgres(ql)?:/.test(u)),
-  `no writer handed fetch() a postgres:// URL, suite long (${reached.length} calls; ${reached.filter((u) => /^postgres(ql)?:/.test(u)).slice(0, 3).map((u) => u.replace(/\/\/[^/@]*@/, "//…@")).join(" ")})`); // userinfo redacted: it is the password
-for (const f of ["integrations/rest-api/index.ts", "integrations/smart-ingest/index.ts"]) spells(f, /^(?![\s\S]*\$\{SUPABASE_URL\}\/)/, " builds no URL on SUPABASE_URL");
+assert(reached.length > 0 && !reached.some((u) => /^postgres(ql)?:/.test(u) || u.includes("/functions/v1/")),
+  `no writer handed fetch() a postgres:// URL or a /functions/v1/ path, suite long (${reached.length} calls; ${reached.filter((u) => /^postgres(ql)?:/.test(u) || u.includes("/functions/v1/")).slice(0, 3).map((u) => u.replace(/\/\/[^/@]*@/, "//…@")).join(" ")})`); // userinfo redacted: it is the password
+// The literal forms — a template `${SUPABASE_URL}/…` or a concatenation `SUPABASE_URL + "/…"` — in the two files' text; an
+// alias or a `new URL(path, SUPABASE_URL)` would pass this and fail the arm above at run time.
+for (const f of ["integrations/rest-api/index.ts", "integrations/smart-ingest/index.ts"]) spells(f, /^(?![\s\S]*(?:\$\{SUPABASE_URL\}\/|SUPABASE_URL\s*\+\s*["'`]\/))/, " writes no `${SUPABASE_URL}/…` template and no `SUPABASE_URL + \"/…\"` concatenation");
+// The two servers each carry httpTargetFrom (they deploy alone and share only their own _shared/): held identical to the
+// character, comment lines aside, as the date helpers are above.
+{
+  const helper = (rel: string) => (readFileSync(join(ROOT, rel), "utf8").match(/^function httpTargetFrom[\s\S]*?^}$/m)?.[0] ?? "").split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+  const [ours, theirs] = [helper("integrations/rest-api/index.ts"), helper("integrations/smart-ingest/index.ts")];
+  assert(ours.length > 300 && ours === theirs, `integrations/rest-api/index.ts's httpTargetFrom is integrations/smart-ingest/index.ts's to the character (${ours.length} vs ${theirs.length} chars)`);
+}
 
 } catch (e) {
   // A throw is a failure with a tally, not a stack trace in place of one.

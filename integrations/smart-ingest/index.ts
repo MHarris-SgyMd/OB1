@@ -71,14 +71,20 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 /**
  * An HTTP target read from its own variable, or null when unset: never derived from SUPABASE_URL, which on this fork is the
  * Postgres connection string — a URL built on it carries the database credentials into fetch() and fails there
- * (SMD-2110). Any scheme but http(s) is refused at boot; the message names the scheme, not the value.
+ * (SMD-2110). Parsed at boot and refused unless it is a bare http(s) address — scheme, host, port, an optional path
+ * prefix; no query, fragment or credentials, since a path is appended to it — and the message names the variable and
+ * the scheme, never the value (a connection string's userinfo is the password; Bun's own "Invalid URL" error quotes the
+ * value whole, so it is caught and not rethrown). Trailing slashes are dropped. The same text as in the sibling server
+ * that reads a knob this way; extensions/test-writes.ts holds the two copies identical.
  */
 function httpTargetFrom(name: string): string | null {
-  const value = process.env[name]?.trim().replace(/\/+$/, "");
+  const value = process.env[name]?.trim();
   if (!value) return null;
-  const scheme = value.match(/^([a-z][a-z0-9+.-]*):/i)?.[1] ?? "";
-  if (!/^https?$/i.test(scheme)) throw new Error(`${name} must be an http(s) URL — it is ${scheme ? `a ${scheme}:// URL` : "not a URL"}`);
-  return value;
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error(`${name} must be an http(s) URL — it is not a URL`); }
+  if (!/^https?:$/.test(url.protocol)) throw new Error(`${name} must be an http(s) URL — it is a ${url.protocol}// URL`);
+  if (url.search || url.hash || url.username || url.password) throw new Error(`${name} must be a bare http(s) address — scheme, host, port and an optional path; no query, fragment or credentials`);
+  return url.origin + url.pathname.replace(/\/+$/, "");
 }
 /** The entity-extraction worker's address (integrations/entity-extraction-worker), POSTed to after a write; unset, no trigger. */
 const ENTITY_EXTRACTION_WORKER_URL = httpTargetFrom("ENTITY_EXTRACTION_WORKER_URL");
@@ -196,8 +202,8 @@ interface IngestionJob {
 }
 
 type UpsertThoughtResult = {
-  thought_id?: number;
-  id?: number;
+  thought_id?: number | string; // upstream's integer, or this fork's UUID (SMD-2110)
+  id?: number | string;
 };
 
 // ── Auth ────────────────────────────────────────────────────────────────────
@@ -711,6 +717,24 @@ async function reconcileThought(
 
 // ── Execution ───────────────────────────────────────────────────────────────
 
+/**
+ * The item's row after a successful add, append or revision: `executed`, with the thought's id — in `result_thought_id`
+ * when it is upstream's integer, in `metadata.result_thought_uuid` when it is this fork's UUID, since the column is
+ * bigint until SMD-2128. One statement set the status and the id together before and failed whole on the UUID, its
+ * error unread, so the item stayed `ready` under a job marked complete (SMD-2110, review pass 1); the error is logged now.
+ */
+async function recordItemResult(itemDbId: number, resultThoughtId: number | string | null): Promise<void> {
+  if (!itemDbId) return;
+  const patch: Record<string, unknown> = { status: "executed" };
+  if (typeof resultThoughtId === "number") patch.result_thought_id = resultThoughtId;
+  if (typeof resultThoughtId === "string") {
+    const { data: row } = await supabase.from("ingestion_items").select("metadata").eq("id", itemDbId).maybeSingle();
+    patch.metadata = { ...((row?.metadata as Record<string, unknown> | null) ?? {}), result_thought_uuid: resultThoughtId };
+  }
+  const { error } = await supabase.from("ingestion_items").update(patch).eq("id", itemDbId);
+  if (error) console.warn(`ingestion_items #${itemDbId}: the result update failed — ${error.message}`);
+}
+
 async function executeItem(
   item: IngestionItem,
   embedding: number[],
@@ -994,9 +1018,7 @@ async function handleExecuteJob(req: Request): Promise<Response> {
         fakeItem, embedding, sourceLabel, sourceType, jobSourceMetadata, skipClassification,
       );
 
-      await supabase.from("ingestion_items")
-        .update({ status: "executed", result_thought_id: resultThoughtId })
-        .eq("id", item.id);
+      await recordItemResult(item.id, resultThoughtId);
       if (item.action === "add") addedCount++;
       else if (item.action === "append_evidence") appendedCount++;
       else if (item.action === "create_revision") revisedCount++;
@@ -1284,11 +1306,7 @@ const handler = async (req: Request) => {
         item, embeddings[i], sourceLabel, sourceType, sourceMetadata, skipClassification,
       );
       item.status = "executed";
-      if (itemDbId) {
-        await supabase.from("ingestion_items")
-          .update({ status: "executed", result_thought_id: resultThoughtId })
-          .eq("id", itemDbId);
-      }
+      await recordItemResult(itemDbId, resultThoughtId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       item.status = "failed"; item.error_message = msg;
