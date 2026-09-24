@@ -1,14 +1,17 @@
 # Setting up Open Brain without Supabase
 
-The upstream guide (`docs/01-getting-started.md`) builds Open Brain on
-supabase.com: a hosted Postgres, an Edge Function, SQL pasted into a dashboard,
-and `supabase secrets set`. This fork runs the same thing on infrastructure you
-control, with no Supabase account and no Supabase CLI.
+Upstream's guide builds Open Brain on supabase.com: a hosted Postgres, an Edge
+Function, SQL pasted into a dashboard, and `supabase secrets set`. This fork runs
+the same thing on infrastructure you control, with no Supabase account and no
+Supabase CLI.
 
 Same six MCP tools, same `thoughts` schema, same clients. Different plumbing.
 
-**Read this instead of `docs/01-getting-started.md`.** That guide still describes
-the Supabase path, which is upstream's — this fork carries no Edge Function build (`FORK.md`, "Deploying").
+This file is the operator's reference: the two decisions, what leaves the box,
+where to run it for real. [`docs/01-getting-started.md`](docs/01-getting-started.md)
+walks the same stack at a beginner's pace, one verified step at a time, and
+connects each AI client; this fork carries no Edge Function build (`FORK.md`,
+"Deploying").
 
 ## Two decisions to make first
 

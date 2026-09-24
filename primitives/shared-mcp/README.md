@@ -242,7 +242,7 @@ The shared server's keys are its own environment, separate from the extension se
 
 ```bash
 # Mint a separate, named key for the shared server — read-scoped unless this
-# member should add or check off items (Step 3 of the Deploy an Edge Function
+# member should add or check off items (Step 3 of the Run a Remote MCP Server
 # primitive shows the by-hand form). The HASH goes in MCP_HOUSEHOLD_ACCESS_KEYS;
 # the key goes in the other person's connector URL. From a checkout, in a
 # subshell so the cwd stays here:
