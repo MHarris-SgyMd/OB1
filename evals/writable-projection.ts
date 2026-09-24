@@ -6,7 +6,9 @@
  * everything here is arithmetic over what it observed, probed by
  * `--self-check` with no database.
  *
- *   OPTIONS     — the schemas measured: 053 as it stands (the baseline),
+ *   OPTIONS     — the schemas measured: the shipped schema as it stands (the
+ *                 baseline — 053 when measured, 054 since SMD-2115 put the
+ *                 content in the capture event, which C1 reads),
  *                 option 2 (table stays, functions append then project), option
  *                 1 with the functions unchanged, option 1 with option 2's
  *                 bodies pointed at the base table.
@@ -46,7 +48,7 @@ export type OptionInfo = { id: OptionId; label: string; movedObjects: number; de
  * (third review pass).
  */
 export const OPTIONS: readonly OptionInfo[] = [
-  { id: "baseline", label: "053 as it stands", movedObjects: 0, description: "the schema at migration 053; the audit trigger derives the event from the row after the write" },
+  { id: "baseline", label: "the shipped schema as it stands", movedObjects: 0, description: "the shipped migrations (054: the audit trigger derives the event from the row after the write, the capture event carrying the content since SMD-2115)" },
   { id: "option2", label: "option 2 — table stays, functions append then project", movedObjects: 9,
     description: "upsert_thought (2), update_thought, delete_thought append the event and call one projector; the audit trigger checks a projected write and appends a raw one; 001's updated_at trigger yields to the projector; the snapshot table and its trigger" },
   { id: "option1-unchanged", label: "option 1 — a view named thoughts, 053's functions unchanged", movedObjects: 6,
@@ -295,7 +297,10 @@ export function costLine(t: Timing): string {
  * change to the finding. Informative criteria (C13, C14) carry no cell.
  */
 export const EXPECTED: Readonly<Record<OptionId, Readonly<Partial<Record<CriterionId, Outcome>>>>> = {
-  baseline: { C1: "FAIL", C2: "PASS", C3: "PASS", C4: "PASS", C5: "PASS", C6: "PASS", C7: "PASS", C8: "PASS", C9: "PASS", C10: "PASS", C11: "PASS", C12: "N/A" },
+  // C1 was FAIL at 053 (the capture event carried no content — SMD-1998's
+  // finding, measured from the other side); 054 (SMD-2115) put the content in
+  // the event and the baseline passes it since.
+  baseline: { C1: "PASS", C2: "PASS", C3: "PASS", C4: "PASS", C5: "PASS", C6: "PASS", C7: "PASS", C8: "PASS", C9: "PASS", C10: "PASS", C11: "PASS", C12: "N/A" },
   option2: { C1: "PASS", C2: "PASS", C3: "PASS", C4: "PASS", C5: "PASS", C6: "PASS", C7: "PASS", C8: "PASS", C9: "PASS", C10: "PASS", C11: "PASS", C12: "PASS" },
   "option1-unchanged": { C1: "FAIL", C2: "FAIL", C3: "PASS", C4: "PASS", C5: "FAIL", C6: "FAIL", C7: "N/A", C8: "N/A", C9: "N/A", C10: "N/A", C11: "N/A", C12: "N/A" },
   option1: { C1: "PASS", C2: "PASS", C3: "PASS", C4: "PASS", C5: "FAIL", C6: "FAIL", C7: "PASS", C8: "PASS", C9: "PASS", C10: "PASS", C11: "PASS", C12: "PASS" },
@@ -311,7 +316,7 @@ export const EXPECTED: Readonly<Record<OptionId, Readonly<Partial<Record<Criteri
 export type Count = readonly [passed: number, probes: number];
 
 export const EXPECTED_PROBES: Readonly<Record<OptionId, Readonly<Partial<Record<CriterionId, Count>>>>> = {
-  baseline: { C1: [5, 6], C2: [5, 5], C3: [12, 12], C4: [7, 7], C5: [6, 6], C6: [4, 4], C7: [4, 4], C8: [3, 3], C9: [4, 4], C10: [36, 36], C11: [2, 2] },
+  baseline: { C1: [6, 6], C2: [5, 5], C3: [12, 12], C4: [7, 7], C5: [6, 6], C6: [4, 4], C7: [4, 4], C8: [3, 3], C9: [4, 4], C10: [36, 36], C11: [2, 2] },
   option2: { C1: [6, 6], C2: [5, 5], C3: [12, 12], C4: [7, 7], C5: [6, 6], C6: [4, 4], C7: [4, 4], C8: [3, 3], C9: [4, 4], C10: [40, 40], C11: [4, 4], C12: [5, 5] },
   "option1-unchanged": { C1: [3, 6], C2: [1, 5], C3: [12, 12], C4: [7, 7], C5: [3, 6], C6: [0, 4] },
   option1: { C1: [6, 6], C2: [5, 5], C3: [12, 12], C4: [7, 7], C5: [4, 6], C6: [0, 4], C7: [4, 4], C8: [3, 3], C9: [4, 4], C10: [38, 38], C11: [4, 4], C12: [5, 5] },

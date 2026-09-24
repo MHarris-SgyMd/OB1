@@ -142,6 +142,9 @@ const NOBODY = "00000000-0000-4000-8000-000000000000";
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
 const APPLY_042 = "Apply db/migrations/042_thought_citations.sql.";
 const APPLY_046 = "Apply db/migrations/046_thought_audit_event_shape.sql.";
+const APPLY_054 = "Apply db/migrations/054_capture_event_payload.sql.";
+/** The most capture rows without content the `audit events` census derives one by one; above it the line says "at least" and the pass is the remedy (SMD-2115). */
+const PAYLOAD_CENSUS_BOUND = 2000;
 const APPLY_042_POSTGREST = `Apply the migrations through db/migrations/042_thought_citations.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 /**
  * Where the ledger already records the migration a check finds absent — a
@@ -1465,9 +1468,16 @@ if (configFailed) {
          * trigger that INSERTs into them, so without them every write through
          * this server fails. An older body over the columns is a WARN: writes
          * go through and every row records an unknown kind and no event — the
-         * backfill fills the kind later, the event is lost. Then the census:
-         * keys nobody has classified and rows waiting on one, with the remedy
-         * — a WARN, since NULL is the honest value until the operator says.
+         * backfill fills the kind later, the event is lost. 054's payload
+         * (SMD-2115): the trigger body that carries a capture's content and an
+         * update's key move (its sentinel) — an older body over 054's schema is
+         * a WARN of the same kind: the log cannot rebuild what those rows
+         * describe, the payload backfill fills the captures later, the key
+         * moves are lost. Then the census: keys nobody has classified and rows
+         * waiting on one, and capture rows still without content, with the
+         * remedy — a WARN, since NULL is the honest value until the operator
+         * says; a capture row nothing derives for (its thought gone without a
+         * tombstone) is named in the ok line, not a warning to carry forever.
          */
         try {
           const EVENT_COLUMNS = ["actor_kind", "trust", "origin", "stance", "cites", "valid_from", "valid_until", "backfilled_at"];
@@ -1511,6 +1521,16 @@ if (configFailed) {
             add("audit events", "warn",
                 "the refusal trigger's body is from before 046 (008 re-applied by hand): every UPDATE of thought_audit is refused, the backfill's included, so rows written before a key was classified can never gain their kind",
                 ledgerRemedy("046", APPLY_046));
+          } else if (!/ob1:capture-event-carries-content/.test(trigSrc)) {
+            // 054's sentinel (SMD-2115): the body that carries a capture's
+            // content and an update's key move. 046 re-applied by hand over
+            // 054 puts 046's body back — writes go through, the kind and the
+            // event are recorded, and the log cannot rebuild what these rows
+            // describe: the payload backfill fills the captures later, the
+            // key moves are lost for good.
+            add("audit events", "warn",
+                "046's event shape is present but the audit trigger's body is from before 054 (046 re-applied by hand): a capture records no content and an update no key move, so the log alone cannot rebuild those thoughts — backfill_thought_payloads fills the captures later, the key moves are lost",
+                ledgerRemedy("054", APPLY_054));
           } else {
             // The census names what waits, not only how many: the names the
             // waiting rows carry that no classified key answers to (the
@@ -1563,14 +1583,40 @@ if (configFailed) {
                                                     FROM thought_audit a
                                                    WHERE a.canonical_agent_id = g.canonical_agent_id AND a.actor_name IS NOT NULL
                                                   OFFSET 0) d
-                                    WHERE ob1_registry_kind(NULL, d.actor_name) IS NOT NULL))
+                                    WHERE ob1_registry_kind(NULL, d.actor_name) IS NOT NULL)),
+              -- 054's payload (SMD-2115): the capture rows still without
+              -- content, read through 054's partial index on exactly them —
+              -- empty on a brain whose pass has run — bounded, and each one
+              -- derived as the backfill derives it, so the line can say how
+              -- many the pass would fill and how many nothing derives for
+              -- (a thought gone without a tombstone: named, not a warning
+              -- carried on every start). Above the bound the derivation is
+              -- skipped and the count says "at least".
+              payload AS (
+                SELECT a.thought_id, a.created_at, a.seq
+                  FROM thought_audit a
+                 WHERE a.action = 'capture' AND NOT (a.diff ? 'content')
+                 LIMIT ${PAYLOAD_CENSUS_BOUND + 1}),
+              derivable AS (
+                SELECT count(*)::int AS n
+                  FROM payload p CROSS JOIN LATERAL ob1_capture_payload(p.thought_id, p.created_at, p.seq) d
+                 WHERE d.content IS NOT NULL AND (SELECT count(*) FROM payload) <= ${PAYLOAD_CENSUS_BOUND})
               SELECT (SELECT count(*)::int FROM unclassified) AS unclassified,
                      (SELECT string_agg(label, ', ' ORDER BY label) FROM unclassified) AS labels,
                      COALESCE(sum(n), 0)::int AS awaiting,
                      COALESCE(sum(n) FILTER (WHERE fillable), 0)::int AS fillable,
-                     (SELECT string_agg(nm, ', ' ORDER BY nm) FROM (SELECT DISTINCT name AS nm FROM resolved WHERE NOT fillable LIMIT 8) s) AS unnamed
+                     (SELECT string_agg(nm, ', ' ORDER BY nm) FROM (SELECT DISTINCT name AS nm FROM resolved WHERE NOT fillable LIMIT 8) s) AS unnamed,
+                     (SELECT count(*)::int FROM payload) AS payload,
+                     (SELECT n FROM derivable) AS recoverable
                 FROM resolved`;
             const unclassified = Number(census.unclassified), awaiting = Number(census.awaiting), fillable = Number(census.fillable);
+            const payload = Number(census.payload), recoverable = Number(census.recoverable);
+            const overBound = payload > PAYLOAD_CENSUS_BOUND;
+            // What the payload census says beside the kind census, and its remedy.
+            const payloadClause = overBound
+              ? `at least ${PAYLOAD_CENSUS_BOUND.toLocaleString("en-US")} capture event(s) carry no content (written before migration 054, or under a re-applied 046)`
+              : `${payload} capture event(s) carry no content (written before migration 054, or under a re-applied 046)${payload > recoverable ? `, ${payload - recoverable} of them with nothing to derive from — the thought gone without a tombstone` : ""}`;
+            const PAYLOAD_REMEDY = "As the owner (the pass amends thought_audit), SELECT backfill_thought_payloads(); fills them from the first content-moving update, the tombstone or the live row, and reports any row nothing derives for (db/README.md).";
             if (unclassified > 0 || awaiting > 0) {
               const needsKinds = unclassified > 0 || Boolean(census.unnamed);
               add("audit events", "warn",
@@ -1583,9 +1629,16 @@ if (configFailed) {
                   (needsKinds
                     ? "For each name: SELECT set_agent_kind('<label>', '<operator | agent | ingested>'); then, as the owner (the pass amends thought_audit and locks ob1_agents), SELECT backfill_thought_audit_events(); fills the rows already written (db/README.md)."
                     : "As the owner (the pass amends thought_audit and locks ob1_agents), SELECT backfill_thought_audit_events(); fills them — every key they name is classified (db/README.md).")
-                  + (/(^|, )agent [0-9a-f-]{36}/.test(String(census.unnamed ?? "")) ? " A name shaped `agent <uuid>` is an id the registry has no row for: set_agent_kind cannot reach those rows, and they stay unknown." : ""));
+                  + (/(^|, )agent [0-9a-f-]{36}/.test(String(census.unnamed ?? "")) ? " A name shaped `agent <uuid>` is an id the registry has no row for: set_agent_kind cannot reach those rows, and they stay unknown." : "")
+                  + (payload > 0 && (overBound || recoverable > 0) ? ` Then ${PAYLOAD_REMEDY}` : ""));
+            } else if (payload > 0 && (overBound || recoverable > 0)) {
+              // Every key classified, and captures the log cannot rebuild yet
+              // (SMD-2115): the pass is the remedy, and it says what it filled.
+              add("audit events", "warn",
+                  `046's event shape present and every key classified, but ${payloadClause}${overBound ? "" : ` — ${recoverable} of them the payload backfill fills`}; the log alone cannot rebuild those thoughts until it runs`,
+                  PAYLOAD_REMEDY);
             } else {
-              add("audit events", "ok", "046's event shape present — the columns, the trigger that derives the kind from the key, the one lawful amendment — and every key classified");
+              add("audit events", "ok", `046's event shape present — the columns, the trigger that derives the kind from the key, the one lawful amendment — and every key classified; 054's payload in every capture event${payload > 0 ? ` but ${payload} with nothing to derive it from (the thought gone without a tombstone; the fold names them)` : ""}`);
             }
           }
         } catch (e) {

@@ -2385,9 +2385,18 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(Number(workers) === 2, `both workers took rows (${workers} distinct worker ids)`);
 
   // The audit log: nothing for a vector replaced by a vector, one row for a
-  // vector where there was none — 008's trigger diffs presence, not value.
+  // vector where there was none — 008's trigger diffs presence, not value —
+  // and, since 054 (SMD-2115), one for the legacy twin update_thought keyed
+  // as it passed (the first of the pair it reached takes 003's key, the other
+  // stays NULL under 018): the key's move is the third thing the event
+  // carries, and before 054 that fill left no trace.
   const [{ auditAfter }] = await sql`SELECT count(*)::int AS "auditAfter" FROM thought_audit`;
-  assert(Number(auditAfter) - Number(auditBefore) === 1, `the pass wrote one audit row, not thirty-seven (${Number(auditAfter) - Number(auditBefore)})`);
+  assert(Number(auditAfter) - Number(auditBefore) === 2, `the pass wrote two audit rows, not thirty-seven — the vector where there was none, and the key the first legacy twin gained (${Number(auditAfter) - Number(auditBefore)})`);
+  const keyRows = await sql`
+    SELECT a.actor_name, a.author_session_id, a.diff FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id
+    WHERE t.content IN (${twins[0]}, ${twins[1]}) AND a.action = 'update'`;
+  assert(keyRows.length === 1 && keyRows[0].actor_name === "reembed" && keyRows[0].author_session_id === REEMBED_JOB && Object.keys(keyRows[0].diff).join(",") === "content_fingerprint" && keyRows[0].diff.content_fingerprint.before === null && typeof keyRows[0].diff.content_fingerprint.after === "string",
+    `…one of them the twin that took the key: the move alone — before NULL, after 003's key — attributed to the pass (${JSON.stringify(keyRows.map((r: { diff: unknown }) => r.diff))})`);
   const [auditRow] = await sql`
     SELECT a.actor_name, a.author_session_id, a.diff FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id
     WHERE t.content = ${bare} AND a.action = 'update'`;

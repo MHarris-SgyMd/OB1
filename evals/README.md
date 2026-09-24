@@ -5160,7 +5160,11 @@ the obstacle; the DDL surface is. Option 3 shares that surface.
 
 **053 as it stands** passes everything but C1's last clause — the capture
 event carries no content — and cannot be replayed at all (C12 N/A): SMD-1998's
-finding, measured again from the other side.
+finding, measured again from the other side. (Since migration 054 — SMD-2115,
+step 1 of the decision — the shipped capture event carries the content, the
+baseline passes C1, and the recorded matrix in `evals/writable-projection.ts`
+says so; the prototype SQL calls the shipped diff rule, append and stamp arms
+rather than defining them. The block below is the run at 053, as it was.)
 
 **Two consequences the run found that the design must own.** A projected
 write CASCADES: a tombstone's `ON DELETE SET NULL` (025) writes every

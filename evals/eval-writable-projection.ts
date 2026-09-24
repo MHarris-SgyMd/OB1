@@ -3,11 +3,13 @@
  * (SMD-1997): can `thoughts` stay writable to its existing callers while every
  * write lands as an event first and a projector writes the row?
  *
- * The run resets a throwaway Postgres to migration 053 and measures the same
+ * The run resets a throwaway Postgres to the shipped migrations (053 when this
+ * was measured; 054 since SMD-2115 shipped the diff rule, the append and the
+ * stamp arms, which the prototype SQL now calls rather than defines) and measures the same
  * scripted writes — the vendored capture as readwise sends it, the 2- and
  * 4-argument forms, the server's and the integrations' update_thought calls,
  * delete_thought plain and refused, a raw INSERT, ingest-records' statement —
- * against four schemas: 053 as it stands; option 2 (the table stays, the
+ * against four schemas: the shipped schema as it stands; option 2 (the table stays, the
  * three write functions append the event and call one projector, the audit
  * trigger checks a projected write and appends a raw one); option 1 with 053's
  * functions unchanged (the table renamed, a view named `thoughts` with
@@ -816,7 +818,7 @@ async function prototype(): Promise<{ report: Report; observations: Observation[
   try {
     for (const o of OPTIONS) runs.push(await runOption(url, o.id, notes));
   } finally {
-    // The shared data-layer database is left at 053 whether or not the run completed (first review pass).
+    // The shared data-layer database is left at the shipped schema whether or not the run completed (first review pass).
     await teardown(url);
   }
   const observations = runs.flatMap((r) => r.observations);
@@ -850,16 +852,17 @@ async function prototype(): Promise<{ report: Report; observations: Observation[
  * The data-layer job runs its suites back to back on one database, and
  * test-support's reset knows the migrations' objects, not the prototype's:
  * its functions, its snapshot table and its trigger would outlive this run.
- * Dropped here, then a plain reset, so the next suite starts from 053.
+ * Dropped here, then a plain reset, so the next suite starts from the shipped schema.
  */
 async function teardown(url: string): Promise<void> {
   const sql = new SQL({ url, max: 1 });
   await undoPrototype(sql);
   await sql`DROP TRIGGER IF EXISTS thoughts_snapshot_embedding ON thoughts`;
   for (const fn of [
+    // (ob1_thought_diff, ob1_append_thought_event, ob1_actor_stamp and
+    // ob1_actor_stamp_kept were the prototype's until 054 shipped them —
+    // SMD-2115; test-support's reset owns them now.)
     "ob1_snapshot_embedding()", "ob1_project_thought_event(uuid, vector, text, boolean)", "ob1_refresh_thought_vector(uuid, vector, text)",
-    "ob1_append_thought_event(uuid, text, text, jsonb, jsonb)", "ob1_actor_stamp(jsonb)", "ob1_actor_stamp_kept(jsonb, jsonb)",
-    "ob1_thought_diff(text, text, text, jsonb, jsonb, boolean, boolean, uuid, uuid, jsonb, jsonb, text, text, timestamptz)",
     "ob1_thoughts_view_insert()", "ob1_thoughts_view_update()", "ob1_thoughts_view_delete()",
   ]) await sql.unsafe(`DROP FUNCTION IF EXISTS ${fn}`);
   await sql.end();
@@ -966,7 +969,7 @@ function selfCheck(): void {
   assert(Object.keys(EXPECTED).join() === "baseline,option2,option1-unchanged,option1", "a row per option");
   assert(Object.values(EXPECTED).every((row) => Object.keys(row).every((k) => CRITERION_IDS.includes(k as CriterionId) && k !== "C13" && k !== "C14")), "cells only for gating criteria");
   assert(EXPECTED.option2.C6 === "PASS" && EXPECTED.option1.C6 === "FAIL" && EXPECTED["option1-unchanged"].C1 === "FAIL", "the record: option 2 keeps the community DDL, option 1 breaks it, 053's functions fail through the view");
-  assert(EXPECTED.baseline.C1 === "FAIL" && EXPECTED.baseline.C12 === "N/A", "the record: 053's capture event carries no content, so the baseline fails C1's last clause and cannot be replayed");
+  assert(EXPECTED.baseline.C1 === "PASS" && EXPECTED.baseline.C12 === "N/A", "the record: the shipped capture event carries the content since 054 (SMD-2115; at 053 the baseline failed C1's last clause), and the baseline still cannot be replayed — no projector");
   const obsAll: Observation[] = (Object.keys(EXPECTED) as OptionId[]).flatMap((opt) => (Object.entries(EXPECTED[opt]) as [CriterionId, Outcome][]).map(([c, o]) => {
     const count = EXPECTED_PROBES[opt][c];
     const probes = count ? count[1] : o === "N/A" ? 0 : 1;
