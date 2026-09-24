@@ -305,15 +305,20 @@ token or `?key=`) answers the same record as JSON — `version`, `releaseRange`,
 (`current` | `behind` | `ahead` | `null`) and `database`, which carries the
 database's facts (the ledger as `{ present, readable }`, not its names) or
 `{ "error": … }` when it cannot answer. It answers within 2.5 s
-(`HEALTH_DEADLINE_MS`) whatever the database does — an unreachable address, a
-table locked by a migration — still a 200, since the process is serving: each
-read runs under a 2 s statement timeout and a 1 s lock timeout, a read that
-runs out is named in `unread`, and a database with no answer by the deadline is
-`database.error`. Without a key, with a wrong or capture-only key, or with a
-revoked one, the body stays the literal `ok`, so nothing about the deployment
-reaches an unauthenticated probe; a `HEAD`, keyed or not, is the bodiless `ok`
-and reads nothing. Point a platform's liveness probe at the keyless form.
-`deploy/smoke.sh`'s check 10 reads the keyed body.
+(`HEALTH_DEADLINE_MS`) whatever the database does — an unreachable address,
+tables locked by a migration — still a 200, since the process is serving: the
+read is one transaction whose statements are capped at 800 ms and whose lock
+waits at 300 ms (never above a stricter setting the role already has), a read
+that does not answer is named in `unread` with its reason (`refused`,
+`timeout`, `deadline`, `invisible`, `error`), the facts read by the deadline
+are kept, and a database whose catalog has not answered by then is
+`database.error`. Concurrent probes share one read. Without a key, with a wrong
+or capture-only key, or with a revoked one — or while the agent registry has
+not answered by the deadline, since it could still say revoked — the body is
+the literal `ok`, so nothing about the deployment reaches an unauthenticated
+probe; a `HEAD`, keyed or not, is the bodiless `ok` and reads nothing. Point a
+platform's liveness probe at the keyless form. `deploy/smoke.sh`'s check 10
+reads the keyed body.
 
 Where each fact comes from: the version, its release range and the tree's last
 migration are generated into `version.ts` by `scripts/gen-version.ts` (the Workers
@@ -322,9 +327,13 @@ the file, so rerun the script after adding a migration). The commit is the image
 `OB1_GIT_SHA` build arg (`deploy/README.md`), `unknown` when unset. The database's
 half is `brain-info.ts`'s `readDatabaseFacts`, the same read preflight's
 `vector extension`, `migration ledger` and `schema version` rows make, so the gate
-and the tool cannot disagree. Each read is its own statement: a role without
-`SELECT` on, say, `ob1_entities` or `schema_migrations` gets that field as unread,
-named on a `Not read:` line, and the rest still answers. Over the PostgREST store
+and the tool cannot disagree (preflight skips the counts and size, which it does
+not use). Each read that a role or a lock can refuse has a savepoint of its own:
+a role without `SELECT` on, say, `ob1_entities` or `schema_migrations` gets that
+field as unread, named on a `Not read:` line, and the rest still answers; a table
+that exists where the role cannot resolve it (off its search path, or no USAGE on
+its schema) is `invisible`, never "no table". The tool's statements are capped at
+5 s and its whole read at 15 s. Over the PostgREST store
 (Workers) the database's half is an error — PostgREST exposes no catalog reads.
 
 ## Expected outcome

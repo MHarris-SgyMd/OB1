@@ -222,8 +222,10 @@ curl -s -H "x-brain-key: $KEY" http://127.0.0.1:8010/health | jq '{version, comm
 **The commit is a build argument.** `server-portable/Dockerfile` bakes
 `OB1_GIT_SHA` into the image, and compose passes the variable of the same name
 from your shell or `deploy/.env` to every server build (the three tier servers
-too). It is never forwarded at runtime, so a running container cannot claim a
-commit it was not built from; unset, the image reports `unknown`. Rebuild with it:
+too). Compose never forwards it at runtime, so the stack reports the commit its
+image was built from; a runtime variable of that name set some other way
+(`docker run -e`, a Kubernetes `env:` entry) overrides the baked one, so set
+none. Unset at build, the image reports `unknown`. Rebuild with it:
 
 ```bash
 OB1_GIT_SHA=$(git rev-parse --short HEAD) docker compose up -d --build server

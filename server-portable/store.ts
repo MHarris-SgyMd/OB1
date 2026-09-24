@@ -28,7 +28,7 @@
  */
 
 import type { EgressRecord } from "./egress.ts";
-import type { DatabaseFacts } from "./brain-info.ts";
+import type { DatabaseFacts, ReadOptions, ReadProgress } from "./brain-info.ts";
 
 export type ThoughtMatch = {
   id: string;
@@ -936,7 +936,7 @@ export interface ThoughtStore {
    * make; the PostgREST store has no catalog reads and refuses, so the record
    * carries the server's own facts and says why the database's are missing.
    */
-  databaseFacts(): Promise<DatabaseFacts>;
+  databaseFacts(opts?: ReadOptions, progress?: ReadProgress): Promise<DatabaseFacts>;
 
   /**
    * One page of metadata for aggregation, newest first. The PostgREST

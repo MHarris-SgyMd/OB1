@@ -1777,10 +1777,47 @@ else {
              `a role without SELECT on the ledger is told it is unreadable, not absent (${row(asReader.out, "migration ledger")})`);
       assert(/schema version\s+could not verify: permission denied for table ob1_config/.test(asReader.out),
              `…and the version row names the refused ob1_config read (${row(asReader.out, "schema version")})`);
+
+      // The same role with public off its search path (review pass 2): the
+      // ledger exists and does not resolve for it. Never "no schema_migrations
+      // table" and never the --baseline remedy, which on a partly migrated
+      // brain would record pending migrations as applied.
+      await claims.unsafe("ALTER ROLE pf_reader SET search_path = nowhere");
+      const lost = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+      assert(/!\s+migration ledger\s+schema_migrations exists \(schema public\) but does not resolve for this role/.test(lost.out)
+               && !/no schema_migrations table/.test(lost.out) && !/Adopt it with: cd db && bun migrate\.ts --url \$DATABASE_URL --baseline/.test(lost.out),
+             `a ledger off the role's search path warns that it does not resolve, and recommends no --baseline (${row(lost.out, "migration ledger")})`);
     } finally {
       await claims.unsafe("REVOKE ALL ON thoughts FROM pf_reader");
       await claims.unsafe("REVOKE USAGE ON SCHEMA public FROM pf_reader");
       await claims.unsafe("DROP ROLE pf_reader");
+    }
+
+    // A ledger held by a migration while preflight runs (review pass 2): its
+    // read times out, and the row says it could not verify — not that the
+    // role lacks a grant.
+    {
+      const locker = new SQL({ url: LIVE!, max: 1 });
+      let release: () => void = () => {};
+      const held = new Promise<void>((r) => { release = r; });
+      let locked: () => void = () => {};
+      const isLocked = new Promise<void>((r) => { locked = r; });
+      const tx = locker.begin(async (t) => {
+        await t`LOCK TABLE schema_migrations IN ACCESS EXCLUSIVE MODE`;
+        locked();
+        await held;
+      });
+      await isLocked;
+      let busy: { code: number; out: string } = { code: -1, out: "" };
+      try {
+        busy = await run(SQL_ENV);
+      } finally {
+        release();
+        await tx;
+        await locker.close();
+      }
+      assert(/!\s+migration ledger\s+could not verify: schema_migrations could not be read \(canceling statement due to lock timeout\)/.test(busy.out) && !/not readable by this role/.test(row(busy.out, "migration ledger") ?? ""),
+             `a locked ledger is could-not-verify, not a missing grant (${row(busy.out, "migration ledger")})`);
     }
 
     // Back to the harness's unrecorded schema for the sections below.

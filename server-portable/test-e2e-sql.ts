@@ -1010,25 +1010,78 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   const behind = await health("e2e-key") as Record<string, any>;
   assert(behind.ledgerStatus === "behind" && behind.database?.highestMigration === treeLast - 1, `a ledger missing ${last} is behind this server's tree (${behind.ledgerStatus}, ${behind.database?.highestMigration})`);
 
-  // Review pass 1, against the live catalog. A role that may read the corpus
-  // and not the ledger, the chunks or the entities: the ledger is present and
-  // unread (information_schema hid it from such a role, so the record said
-  // there was none), each refused count is named, the rest answer.
+  // Review passes 1–2, against the live catalog. A role that may read the
+  // corpus and not the ledger, the chunks or the entities: the ledger is
+  // present and unread as a refusal, each refused count is named, the rest
+  // answer — and the read's timeouts stay inside its transaction.
+  const { readDatabaseFacts } = await import("./brain-info.ts");
+  const holdLocks = async (tables: string) => {
+    const locker = new SQL({ url: URL_, max: 1 });
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => { release = r; });
+    let locked: () => void = () => {};
+    const isLocked = new Promise<void>((r) => { locked = r; });
+    const tx = locker.begin(async (t) => {
+      await t.unsafe(`LOCK TABLE ${tables} IN ACCESS EXCLUSIVE MODE`);
+      locked();
+      await held;
+    });
+    await isLocked;
+    return async () => { release(); await tx; await locker.close(); };
+  };
+  const roleUrl = URL_.replace(/\/\/[^@]*@/, "//brain_reader:reader@");
   await sql.unsafe(`DROP ROLE IF EXISTS brain_reader`);
   await sql.unsafe(`CREATE ROLE brain_reader LOGIN PASSWORD 'reader'`);
   await sql.unsafe(`GRANT USAGE ON SCHEMA public TO brain_reader`);
   await sql.unsafe(`GRANT SELECT ON thoughts, thought_audit, ob1_config TO brain_reader`);
-  const reader = new SQL({ url: URL_.replace(/\/\/[^@]*@/, "//brain_reader:reader@"), max: 1 });
   try {
-    const { readDatabaseFacts } = await import("./brain-info.ts");
-    const f = await readDatabaseFacts(reader);
-    assert(f.ledger.present === true && f.ledger.names === null && /permission denied/.test(f.unread.ledger ?? ""),
-      `a role without SELECT on schema_migrations sees it present and unread (${JSON.stringify(f.ledger)}, ${f.unread.ledger})`);
-    assert(f.counts.thoughts === truth.thoughts && f.counts.thought_chunks === null && /permission denied/.test(f.unread["counts.thought_chunks"] ?? "") && /permission denied/.test(f.unread["counts.ob1_entities"] ?? ""),
-      `…the counts it may read answer, the refused ones are named (${JSON.stringify(f.counts)})`);
-    assert(f.schemaVersion === FORK_VERSION && f.pgvector?.version === truth.vec, "…and the config and catalog reads stand");
+    const reader = new SQL({ url: roleUrl, max: 1 });
+    try {
+      const f = await readDatabaseFacts(reader);
+      assert(f.ledger.present === true && f.ledger.names === null && f.unread.ledger?.reason === "refused",
+        `a role without SELECT on schema_migrations sees it present and unread as a refusal (${JSON.stringify(f.ledger)}, ${JSON.stringify(f.unread.ledger)})`);
+      assert(f.counts?.thoughts === truth.thoughts && f.counts?.thought_chunks === null && f.unread["counts.thought_chunks"]?.reason === "refused" && f.unread["counts.ob1_entities"]?.reason === "refused",
+        `…the counts it may read answer, the refused ones are named (${JSON.stringify(f.counts)})`);
+      assert(f.schemaVersion === FORK_VERSION && f.pgvector?.version === truth.vec, "…and the config and catalog reads stand");
+      // set_config(…, true): the ceilings end with the read's transaction; the
+      // one pooled connection it used keeps the role's own (no limit here).
+      const [after] = await reader`SELECT current_setting('statement_timeout') AS st, current_setting('lock_timeout') AS lt`;
+      assert(after.st === "0" && after.lt === "0", `the read's timeouts do not outlive its transaction (statement_timeout ${after.st}, lock_timeout ${after.lt})`);
+    } finally {
+      await reader.close();
+    }
+
+    // A role already stricter keeps its own: lock_timeout 100 ms on the role,
+    // under the read's 1 s ceiling, and a held lock on thoughts is given up at
+    // the role's 100 ms, not the read's 1 s.
+    await sql.unsafe(`ALTER ROLE brain_reader SET lock_timeout = '100ms'`);
+    const strict = new SQL({ url: roleUrl, max: 1 });
+    const unlock = await holdLocks("thoughts");
+    try {
+      const t0 = performance.now();
+      const f = await readDatabaseFacts(strict);
+      const took = performance.now() - t0;
+      assert(f.unread["counts.thoughts"]?.reason === "timeout" && took < 600, `a stricter role lock_timeout is kept, not raised to the read's (${Math.round(took)} ms, ${f.unread["counts.thoughts"]?.message})`);
+    } finally {
+      await unlock();
+      await strict.close();
+      await sql.unsafe(`ALTER ROLE brain_reader RESET lock_timeout`);
+    }
+
+    // A role whose search path does not reach public: every table exists and
+    // none resolves. The ledger is present and invisible — never "no table",
+    // the shape preflight answers with --baseline — and nothing is queried.
+    await sql.unsafe(`ALTER ROLE brain_reader SET search_path = nowhere`);
+    const lost = new SQL({ url: roleUrl, max: 1 });
+    try {
+      const f = await readDatabaseFacts(lost);
+      assert(f.ledger.present === true && f.ledger.names === null && f.unread.ledger?.reason === "invisible" && /schema public/.test(f.unread.ledger?.message ?? ""),
+        `a ledger off this role's search path is present and invisible, not absent (${f.unread.ledger?.message})`);
+      assert(f.unread["counts.thoughts"]?.reason === "invisible" && f.unread.ob1_config?.reason === "invisible", "…and so is every table it asks after");
+    } finally {
+      await lost.close();
+    }
   } finally {
-    await reader.close();
     await sql.unsafe(`REVOKE ALL ON thoughts, thought_audit, ob1_config FROM brain_reader`);
     await sql.unsafe(`REVOKE USAGE ON SCHEMA public FROM brain_reader`);
     await sql.unsafe(`DROP ROLE brain_reader`);
@@ -1040,28 +1093,31 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   assert(tuned?.m === 24 && tuned?.efConstruction === 100, `an index built WITH (m = 24, ef_construction = 100) reports 24/100 (${JSON.stringify(tuned)})`);
   await sql.unsafe(`DROP INDEX e2e_hnsw_tuned`);
 
-  // A migration holding ACCESS EXCLUSIVE on thought_audit: the count waits its
-  // lock_timeout and is named unread; the probe answers, well inside its
-  // deadline (before review pass 1 it waited on the lock and got no reply).
-  const locker = new SQL({ url: URL_, max: 1 });
-  let release: () => void = () => {};
-  const held = new Promise<void>((r) => { release = r; });
-  let locked: () => void = () => {};
-  const isLocked = new Promise<void>((r) => { locked = r; });
-  const tx = locker.begin(async (t) => {
-    await t`LOCK TABLE thought_audit IN ACCESS EXCLUSIVE MODE`;
-    locked();
-    await held;
-  });
-  await isLocked;
-  const t0 = performance.now();
-  const underLock = await health("e2e-key") as Record<string, any>;
-  const took = performance.now() - t0;
-  release();
-  await tx;
-  await locker.close();
-  assert(underLock.database?.counts?.thought_audit === null && /lock timeout/.test(underLock.database?.unread?.["counts.thought_audit"] ?? "") && underLock.database?.counts?.thoughts === truth.thoughts && took < 2500,
-    `a locked thought_audit is an unread count and the rest answer, in ${Math.round(took)} ms (${underLock.database?.unread?.["counts.thought_audit"]})`);
+  // A migration holding three tables at once (review pass 2: the per-read
+  // budgets then added past the deadline and the whole database half was
+  // lost). Each locked count is a timeout; everything else answers, inside the
+  // deadline. Ten concurrent probes share one read — one backend waits on the
+  // lock, not ten.
+  {
+    const unlock = await holdLocks("thoughts, thought_audit, thought_chunks");
+    try {
+      const t0 = performance.now();
+      const probes = Array.from({ length: 10 }, () => health("e2e-key") as Promise<Record<string, any>>);
+      await Bun.sleep(150);
+      const [{ n: waiting }] = await sql`
+        SELECT count(*)::int AS n FROM pg_stat_activity
+         WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE '%count(*)::float8 AS n FROM thought%'`;
+      const bodies = await Promise.all(probes);
+      const took = performance.now() - t0;
+      const d = bodies[0].database ?? {};
+      const locked = ["thoughts", "thought_audit", "thought_chunks"].every((t) => d.unread?.[`counts.${t}`]?.reason === "timeout");
+      assert(locked && d.counts?.ob1_entities === truth.entities && d.highestMigration === treeLast - 1 && d.pgvector?.version === truth.vec && took < 2500,
+        `three locked tables are three timed-out counts and the rest answer, in ${Math.round(took)} ms (${JSON.stringify(d.unread)})`);
+      assert(waiting === 1 && bodies.every((b) => JSON.stringify(b) === JSON.stringify(bodies[0])), `ten concurrent probes share one read: ${waiting} backend(s) waiting on the lock, one body`);
+    } finally {
+      await unlock();
+    }
+  }
 
   await sql`DELETE FROM schema_migrations`;
 
@@ -1071,6 +1127,21 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   await call("thought_stats", {}, "bot-raw"); // registers bot-key in the registry, as any first request does
   await sql`SELECT revoke_agent_key(${hashKey("bot-raw")}, 'SMD-2041 e2e')`;
   assert(await health("bot-raw") === "ok", "a revoked write key → `ok`, not the record");
+  // A registry that cannot answer by the deadline (its tables locked) could
+  // still say revoked: the revoked key, and a good one, get `ok` (review pass
+  // 2: the revoked key read the whole record).
+  {
+    const unlock = await holdLocks("ob1_agents, ob1_agent_keys");
+    try {
+      const t0 = performance.now();
+      const revoked = await health("bot-raw");
+      const good = await health("op-raw");
+      const took = performance.now() - t0;
+      assert(revoked === "ok" && good === "ok" && took < 6000, `with the registry unanswering, every key gets \`ok\` at the deadline (${Math.round(took)} ms for two)`);
+    } finally {
+      await unlock();
+    }
+  }
   await sql.close();
 }
 

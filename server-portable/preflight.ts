@@ -855,7 +855,9 @@ if (configFailed) {
         // this row, `migration ledger` and `schema version` below report what
         // the tool reports. After the probe above, which carries a refused
         // connection by this check's name.
-        const facts = await readDatabaseFacts(sql);
+        // No counts or size: preflight reads neither, and on a large brain
+        // they are its startup's cost (review pass 2).
+        const facts = await readDatabaseFacts(sql, { stats: false });
         if (vec.resolves) {
           add("vector extension", "ok", `the vector type resolves${facts.pgvector ? ` (pgvector ${facts.pgvector.version} in schema ${facts.pgvector.schema})` : ""}`);
         } else if (!vec.schema) {
@@ -915,6 +917,15 @@ if (configFailed) {
         const ledgerPresent = facts.ledger.present;
         const ledgerRead = ledgerPresent && facts.ledger.names !== null;
         const ledger = new Set((facts.ledger.names ?? []).map((n) => n.slice(0, 3)));
+        // Why an unread ledger is unread, in a remedy's words: a refusal is the
+        // role's grants; a timeout or a ledger off this role's path is not
+        // (review pass 2: every unread ledger was called a missing grant).
+        const ledgerUnread = facts.unread.ledger;
+        const whyUnread = !ledgerUnread || ledgerUnread.reason === "refused"
+          ? "this role cannot read schema_migrations"
+          : ledgerUnread.reason === "invisible"
+            ? "schema_migrations does not resolve for this role"
+            : `schema_migrations could not be read: ${ledgerUnread.message}`;
         /**
          * The remedy for a migration a check finds absent: recorded in the
          * ledger, the migrator's re-run (a plain run skips a recorded file);
@@ -928,7 +939,7 @@ if (configFailed) {
             ? REAPPLY
             : ledgerRead || !ledgerPresent
               ? apply
-              : `${apply} — or, if the ledger already records ${migration} (this role cannot read schema_migrations): ${REAPPLY.charAt(0).toLowerCase()}${REAPPLY.slice(1)}`;
+              : `${apply} — or, if the ledger already records ${migration} (${whyUnread}): ${REAPPLY.charAt(0).toLowerCase()}${REAPPLY.slice(1)}`;
         // By signature, not arity: a vendored bootstrap's upsert_thought(text,
         // vector, jsonb) is a third 3-argument form, and reading whichever the
         // catalog returned first judged a healthy brain by the wrong body
@@ -1234,7 +1245,7 @@ if (configFailed) {
                     ? `The ledger says 023 but backfill_content_fingerprints is absent (adopted with --baseline): ${byHand}`
                     : ledgerRead || !ledgerPresent
                       ? "Apply db/migrations/023_content_fingerprint_backfill.sql."
-                      : `Apply db/migrations/023_content_fingerprint_backfill.sql — or, if the ledger already records 023 (this role cannot read schema_migrations), ${byHand}`);
+                      : `Apply db/migrations/023_content_fingerprint_backfill.sql — or, if the ledger already records 023 (${whyUnread}), ${byHand}`);
             } else if (pending) {
               // Which rows these are cannot be read here: a batched upgrade
               // still running, or a load around upsert_thought since 023.
@@ -2694,7 +2705,14 @@ if (configFailed) {
         if (!ledgerPresent)
           add("migration ledger", "warn", "no schema_migrations table — the schema was applied by hand",
               "Adopt it with: cd db && bun migrate.ts --url $DATABASE_URL --baseline");
-        else if (!ledgerRead) add("migration ledger", "ok", `schema_migrations present, not readable by this role (${facts.unread.ledger}) — this server's tree ends at ${tree}`);
+        else if (!ledgerRead && (!ledgerUnread || ledgerUnread.reason === "refused"))
+          add("migration ledger", "ok", `schema_migrations present, not readable by this role (${ledgerUnread?.message ?? "no SELECT"}) — this server's tree ends at ${tree}`);
+        else if (!ledgerRead && ledgerUnread?.reason === "invisible")
+          add("migration ledger", "warn", `${ledgerUnread.message} — the ledger cannot be judged against this server's tree (${tree})`,
+              "Put the ledger's schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it; --baseline would record the ledger a second time.");
+        else if (!ledgerRead)
+          add("migration ledger", "warn", `could not verify: schema_migrations could not be read (${ledgerUnread!.message}) — this server's tree ends at ${tree}`,
+              "A migration or a long transaction may hold the ledger; run preflight again once it has finished.");
         else if (hi === null) add("migration ledger", "ok", `schema_migrations present, recording none — this server's tree ends at ${tree}`);
         else if (status === "behind")
           add("migration ledger", "warn", `the ledger reaches ${pad3(hi)} but this server's tree ends at ${tree} — the brain is behind the server it serves, and a tool that needs a later migration fails`,
@@ -2717,7 +2735,7 @@ if (configFailed) {
           const highest = highestApplied === null ? "unknown" : pad3(highestApplied);
           // ob1_config's schema_version, from `facts` (SMD-2041); a read it
           // could not make is this row's to report, as the read here once raised.
-          if (facts.unread.ob1_config) throw new Error(facts.unread.ob1_config);
+          if ("ob1_config" in facts.unread) throw new Error(facts.unread.ob1_config.message);
           const brain = facts.schemaVersion;
           if (!brain) {
             add("schema version", "warn",
@@ -2734,7 +2752,7 @@ if (configFailed) {
                 "Deploy the server for the brain's release (its tag names the server commit), or roll the brain back to a server that matches.");
             } else if (highestApplied !== null && releasedHi > 0 && highestApplied > releasedHi) {
               add("schema version", "warn",
-                `the brain reports ${brain} but its ledger reaches migration ${highest}, past that release's range (…${String(releasedHi).padStart(3, "0")}) — migrations applied beyond the version it names`,
+                `the brain reports ${brain} but its ledger reaches migration ${highest}, past that release's range (…${pad3(releasedHi)}) — migrations applied beyond the version it names`,
                 "Cut a release that closes the new range, or roll the extra migrations back; releases.json maps versions to ranges.");
             } else {
               add("schema version", "ok", `${brain} · highest migration ${highest}${cmp > 0 ? ` (server ${FORK_VERSION} is newer)` : ""}`);

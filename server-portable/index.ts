@@ -13,7 +13,7 @@ import { queryLogEnabled, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { authenticateRequest, canCapture, canRead, canWrite, SCOPES, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "./version.ts";
-import { brainInfo, renderBrainInfo, type BrainInfo, type ServerFacts } from "./brain-info.ts";
+import { brainInfo, renderBrainInfo, type BrainInfo, type ReadOptions, type ServerFacts } from "./brain-info.ts";
 
 /**
  * Runtime-portable env access.
@@ -219,11 +219,26 @@ function serverFacts(): ServerFacts {
 }
 // Bounded (review pass 1: a keyed probe at an unreachable database waited out
 // the driver's 30-second connect and got no reply). The health body answers
-// within a probe's usual timeout; the tool, kept alive by its stream
-// (SMD-1864), waits longer for a large brain's counts.
+// within a probe's usual timeout — its statements capped to fit, so a few
+// locked tables cost their lock waits and not the whole record (review pass
+// 2); the tool, kept alive by its stream (SMD-1864), waits longer for a large
+// brain's counts, at brain-info.ts's default ceilings.
 export const HEALTH_DEADLINE_MS = 2_500;
+const HEALTH_READ = { statementTimeoutMs: 800, lockTimeoutMs: 300 };
 export const BRAIN_INFO_TOOL_DEADLINE_MS = 15_000;
-const readBrainInfo = (deadlineMs: number): Promise<BrainInfo> => brainInfo(serverFacts(), async () => (await db()).databaseFacts(), deadlineMs);
+// One read in flight per surface: concurrent probes share it rather than each
+// taking a pool connection (review pass 2: forty probes against a locked table
+// held the pool, and tool calls queued behind them).
+const inflight = new Map<number, Promise<BrainInfo>>();
+function readBrainInfo(deadlineMs: number, opts: ReadOptions = {}): Promise<BrainInfo> {
+  let p = inflight.get(deadlineMs);
+  if (!p) {
+    p = brainInfo(serverFacts(), async (progress) => (await db()).databaseFacts(opts, progress), deadlineMs)
+      .finally(() => inflight.delete(deadlineMs));
+    inflight.set(deadlineMs, p);
+  }
+  return p;
+}
 
 // Built on first use, for the same reason as the store: reading env() at module
 // scope runs before initEnv() has seeded it.
@@ -2246,18 +2261,20 @@ app.get("*", async (c, next) => {
   if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
   // The registry check and the read start together, under one deadline, so the
   // answer comes within HEALTH_DEADLINE_MS whatever the database does. A
-  // revoked key reads nothing here either, as at the MCP route; a registry
-  // that has not answered by the deadline is treated as the MCP route treats
-  // one that cannot answer (agents.ts) — not a refusal — and the body then
-  // carries the server's own facts and the database's error.
-  const info = readBrainInfo(HEALTH_DEADLINE_MS);
+  // revoked key reads nothing here, as at the MCP route. A registry that has
+  // not answered by the deadline could still say `revoked`, so the key gets
+  // what an unknown key gets (review pass 2: a revoked key read the whole
+  // record while the registry's tables were locked); one that answers that it
+  // cannot reach the database (agents.ts: not a refusal) lets the record
+  // through with the database's error.
+  const info = readBrainInfo(HEALTH_DEADLINE_MS, HEALTH_READ);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const identity = await Promise.race([
     agents().resolve(db(), principal),
     new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), HEALTH_DEADLINE_MS); }),
   ]);
   clearTimeout(timer);
-  if (identity?.status === "revoked") return c.text("ok", 200, corsHeaders);
+  if (!identity || identity.status === "revoked") return c.text("ok", 200, corsHeaders);
   return c.json(await info, 200, corsHeaders);
 });
 

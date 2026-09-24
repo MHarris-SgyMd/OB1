@@ -11,27 +11,45 @@
 // rows read the same `readDatabaseFacts`, so the gate and the tool cannot
 // disagree about what the database holds.
 //
+// The read's shape (review pass 2, which found pass 1's per-read transactions
+// adding their budgets past one deadline and losing every fact at it): ONE
+// transaction on one connection; the catalog facts in one statement; each read
+// that a role or a lock can refuse in a savepoint of its own; the timeouts set
+// once, never raised above what the role already has; and the facts written
+// into a progress record as they arrive, so a caller's deadline keeps what was
+// read and names the rest.
+//
 // No imports: the Workers build bundles this (index.ts imports it), and the SQL
 // client is taken structurally rather than from "bun".
 
 /** A tagged-template SQL client — Bun's `SQL`, structurally. */
 export type SqlTag = (strings: TemplateStringsArray, ...values: unknown[]) => Promise<any[]>;
 
-/** A client that can also open a transaction — Bun's `SQL`, or the pool the SQL store holds. */
-export type SqlClient = SqlTag & { begin<T>(fn: (tx: SqlTag) => Promise<T>): Promise<T> };
+/** A transaction: statements, and a savepoint that rolls back alone when its body raises. */
+export type SqlTx = SqlTag & { savepoint<T>(fn: (sp: SqlTag) => Promise<T>): Promise<T> };
+
+/** A client that can open a transaction — Bun's `SQL`, or the pool the SQL store holds. */
+export type SqlClient = SqlTag & { begin<T>(fn: (tx: SqlTx) => Promise<T>): Promise<T> };
 
 /**
- * How long one read may run, and wait for a lock, before it is recorded as
- * unread (review pass 1: a migration holding ACCESS EXCLUSIVE on thought_audit
- * left count(*) waiting, and a keyed /health probe got no reply at all). Local
- * to each read's own transaction, so the pool's connections keep their defaults.
+ * How long one statement may run, and wait for a lock, before it is recorded
+ * as unread (review pass 1: a migration holding ACCESS EXCLUSIVE on
+ * thought_audit left count(*) waiting, and a keyed /health probe got no reply).
+ * Local to the read's transaction (set_config's `true`), and a ceiling: a role
+ * or database already stricter keeps its own. The defaults are preflight's
+ * and the tool's; the health body passes tighter ones, so its reads fit its
+ * deadline (index.ts).
  */
-export const READ_STATEMENT_TIMEOUT_MS = 2_000;
+export const READ_STATEMENT_TIMEOUT_MS = 5_000;
 export const READ_LOCK_TIMEOUT_MS = 1_000;
 
 /** The tables whose row counts the record carries. */
 export const COUNTED_TABLES = ["thoughts", "thought_audit", "thought_chunks", "ob1_entities"] as const;
 export type CountedTable = (typeof COUNTED_TABLES)[number];
+
+/** The tables the read asks after: the counted ones, the config and the ledger. */
+const KNOWN_TABLES = ["ob1_config", "schema_migrations", ...COUNTED_TABLES] as const;
+type KnownTable = (typeof KNOWN_TABLES)[number];
 
 export interface HnswIndex {
   index: string;
@@ -42,14 +60,26 @@ export interface HnswIndex {
 }
 
 /**
+ * Why a fact is missing. `refused`: the role may not read it (42501).
+ * `timeout`: a statement or lock timeout fired (57014, 55P03). `deadline`: the
+ * caller's deadline came first and the read never ran. `invisible`: the table
+ * exists but does not resolve for this role — not on its search_path, or no
+ * USAGE on its schema. `error`: anything else.
+ */
+export type UnreadReason = "refused" | "timeout" | "deadline" | "invisible" | "error";
+export interface Unread {
+  reason: UnreadReason;
+  message: string;
+}
+
+/**
  * What the database says about itself. A field is null for one of two reasons,
  * told apart by `unread`: the thing is absent (no pgvector, no schema_version
- * recorded, no such table — no entry), or the read failed (a role without
- * SELECT, say — an entry naming the field and the error). Each read is its own
- * statement, so one refused read leaves the others standing.
+ * recorded, no such table anywhere — no entry), or the read did not answer (an
+ * entry naming the field, the reason and the message).
  */
 export interface DatabaseFacts {
-  /** `server_version`, e.g. "16.4 (Debian 16.4-1.pgdg120+2)" — the one read that is not guarded. */
+  /** `server_version`, e.g. "16.4 (Debian 16.4-1.pgdg120+2)". */
   postgres: string;
   /** The installed pgvector and the schema it lives in; null when not installed. */
   pgvector: { version: string; schema: string } | null;
@@ -58,24 +88,53 @@ export interface DatabaseFacts {
   /** The embedding contract the brain records (006); null fields when unrecorded. */
   embedding: { model: string | null; dim: number | null };
   /**
-   * The migration ledger. `present` is whether schema_migrations is visible to
-   * this role at all; `names` every recorded name, or null when it is present
-   * and this role cannot read it (preflight's remedies say so apart from a
-   * ledger that does not record a migration).
+   * The migration ledger. `present` is whether a schema_migrations exists —
+   * resolved for this role or not (pg_class, not the search path) — and
+   * `names` every recorded name, or null when it could not be read (`unread`
+   * says why: a refusal, a timeout, or a ledger this role does not resolve).
    */
   ledger: { present: boolean; names: string[] | null };
-  /** The highest three-digit prefix the ledger records; null when it records none or cannot be read. */
+  /** The highest three-digit prefix the ledger records; null when it records none or was not read. */
   highestMigration: number | null;
-  counts: Record<CountedTable, number | null>;
-  /** pg_database_size(current_database()), in bytes. */
+  /** Row counts; null when the read was asked for none (`stats: false`). */
+  counts: Record<CountedTable, number | null> | null;
+  /** pg_database_size(current_database()), in bytes; null when not read. */
   databaseBytes: number | null;
   /** Every HNSW index on a table on this connection's search_path. */
-  hnsw: HnswIndex[] | null;
-  /** Field → why its read failed. Empty when every read answered. */
-  unread: Record<string, string>;
+  hnsw: HnswIndex[];
+  /** Field → why its read did not answer. Empty when every read answered. */
+  unread: Record<string, Unread>;
 }
 
-const message = (e: unknown) => (e instanceof Error ? e.message : String(e)).split("\n")[0];
+export interface ReadOptions {
+  /** Read the row counts and the database's size too — brain_info does; preflight, which uses neither, does not. Default true. */
+  stats?: boolean;
+  /** Ceilings on each statement's run and lock wait, in ms; READ_STATEMENT_TIMEOUT_MS and READ_LOCK_TIMEOUT_MS when unset. */
+  statementTimeoutMs?: number;
+  lockTimeoutMs?: number;
+}
+
+/**
+ * A read in flight, observable by its caller: the catalog facts once they are
+ * in, every guarded read still `pending`, and `abandoned` set by a caller whose
+ * deadline has come — the read then starts nothing more, and `snapshotFacts`
+ * names what it did not reach as `deadline`.
+ */
+export interface ReadProgress {
+  facts: DatabaseFacts | null;
+  pending: Set<string>;
+  abandoned: boolean;
+}
+
+export const newProgress = (): ReadProgress => ({ facts: null, pending: new Set(), abandoned: false });
+
+const message = (e: unknown) => (e instanceof Error ? e.message : String(e)).split("\n")[0] || "no message";
+
+/** A failed read's reason, from the SQLSTATE Bun's PostgresError carries in `errno`. */
+export function unreadReason(e: unknown): UnreadReason {
+  const state = String((e as { errno?: unknown })?.errno ?? "");
+  return state === "42501" ? "refused" : state === "57014" || state === "55P03" ? "timeout" : "error";
+}
 
 /** pgvector's HNSW `reloptions` (`m=24,ef_construction=100`) — its defaults where unset. */
 export function parseHnswOptions(opts: string | null | undefined): { m: number; efConstruction: number } {
@@ -96,108 +155,145 @@ const COUNT_SQL: Record<CountedTable, (sql: SqlTag) => Promise<{ n: number }[]>>
 
 /**
  * Read the database's facts over a direct connection — the SQL store's pool, or
- * preflight's own client. Raises only when the first statement does (the
- * connection itself failed); every later read runs in its own transaction under
- * READ_STATEMENT_TIMEOUT_MS and READ_LOCK_TIMEOUT_MS, and one that fails or
- * runs out of time is recorded in `unread` while the rest go on.
+ * preflight's own client — in one transaction. Raises only when the transaction
+ * or its catalog statement fails (the connection itself); every guarded read
+ * that does not answer is recorded in `unread` while the rest go on. Pass a
+ * `progress` to observe the read, and to abandon it at a deadline.
  */
-export async function readDatabaseFacts(client: SqlClient): Promise<DatabaseFacts> {
-  const unread: Record<string, string> = {};
-  const attempt = async <T>(field: string, read: (sql: SqlTag) => Promise<T>, absent: T): Promise<T> => {
-    try {
-      return await client.begin(async (sql) => {
-        await sql`SELECT set_config('statement_timeout', ${String(READ_STATEMENT_TIMEOUT_MS)}, true),
-                         set_config('lock_timeout', ${String(READ_LOCK_TIMEOUT_MS)}, true)`;
-        return read(sql);
-      });
-    } catch (e) {
-      unread[field] = message(e);
-      return absent;
+export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {}, progress: ReadProgress = newProgress()): Promise<DatabaseFacts> {
+  const stats = opts.stats ?? true;
+  const st = opts.statementTimeoutMs ?? READ_STATEMENT_TIMEOUT_MS;
+  const lt = opts.lockTimeoutMs ?? READ_LOCK_TIMEOUT_MS;
+  return client.begin(async (tx) => {
+    // Ceilings, not settings: 0 (no limit) or a looser value is lowered to the
+    // read's, a stricter one kept. pg_settings.setting is in ms for both.
+    await tx`
+      SELECT set_config('statement_timeout', (CASE WHEN s.st = 0 OR s.st > ${st}::int THEN ${st}::int ELSE s.st END)::text, true),
+             set_config('lock_timeout', (CASE WHEN s.lt = 0 OR s.lt > ${lt}::int THEN ${lt}::int ELSE s.lt END)::text, true)
+        FROM (SELECT (SELECT setting::int FROM pg_settings WHERE name = 'statement_timeout') AS st,
+                     (SELECT setting::int FROM pg_settings WHERE name = 'lock_timeout') AS lt) s`;
+
+    // The catalog in one statement: every relation here is readable by any
+    // role, and to_regclass and pg_class take no lock a migration holds. A
+    // table is resolved (to_regclass: this role's search path and USAGE) or
+    // merely present somewhere (pg_class) — the two apart, so a table this
+    // role cannot see is never called absent (review pass 2: preflight then
+    // recommends --baseline, which marks pending migrations applied).
+    const [cat] = await tx`
+      SELECT current_setting('server_version') AS postgres,
+             (SELECT e.extversion::text FROM pg_extension e WHERE e.extname = 'vector') AS vec_version,
+             (SELECT n.nspname::text FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'vector') AS vec_schema,
+             jsonb_build_object(
+               'ob1_config', to_regclass('ob1_config') IS NOT NULL,
+               'schema_migrations', to_regclass('schema_migrations') IS NOT NULL,
+               'thoughts', to_regclass('thoughts') IS NOT NULL,
+               'thought_audit', to_regclass('thought_audit') IS NOT NULL,
+               'thought_chunks', to_regclass('thought_chunks') IS NOT NULL,
+               'ob1_entities', to_regclass('ob1_entities') IS NOT NULL) AS resolved,
+             (SELECT COALESCE(jsonb_object_agg(relname, schemas), '{}'::jsonb) FROM (
+                SELECT c.relname::text AS relname, string_agg(n.nspname::text, ', ' ORDER BY n.nspname) AS schemas
+                  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE c.relkind IN ('r', 'p')
+                   AND c.relname IN ('ob1_config', 'schema_migrations', 'thoughts', 'thought_audit', 'thought_chunks', 'ob1_entities')
+                 GROUP BY c.relname) x) AS anywhere,
+             (SELECT COALESCE(jsonb_agg(jsonb_build_object('index', c.relname, 'table', t.relname, 'opts', array_to_string(c.reloptions, ',')) ORDER BY t.relname, c.relname), '[]'::jsonb)
+                FROM pg_index i
+                JOIN pg_class c ON c.oid = i.indexrelid
+                JOIN pg_class t ON t.oid = i.indrelid
+                JOIN pg_am a ON a.oid = c.relam
+               WHERE a.amname = 'hnsw' AND pg_table_is_visible(t.oid)) AS hnsw`;
+    const resolved = cat.resolved as Record<KnownTable, boolean>;
+    const anywhere = cat.anywhere as Record<string, string>;
+
+    const facts: DatabaseFacts = {
+      postgres: String(cat.postgres),
+      pgvector: cat.vec_version == null ? null : { version: String(cat.vec_version), schema: String(cat.vec_schema) },
+      schemaVersion: null,
+      embedding: { model: null, dim: null },
+      ledger: { present: resolved.schema_migrations || "schema_migrations" in anywhere, names: [] },
+      highestMigration: null,
+      counts: stats ? Object.fromEntries(COUNTED_TABLES.map((t) => [t, null])) as Record<CountedTable, number | null> : null,
+      databaseBytes: null,
+      hnsw: (cat.hnsw as { index: string; table: string; opts: string | null }[]).map((h) => ({ index: h.index, table: h.table, ...parseHnswOptions(h.opts) })),
+      unread: {},
+    };
+    progress.facts = facts;
+
+    // The guarded reads, in order. Each names the table it needs; a table that
+    // does not resolve is not queried — absent, or `invisible` when pg_class
+    // has it where this role cannot reach.
+    type Guarded = { field: string; table?: KnownTable; read: (sp: SqlTag) => Promise<void> };
+    const guarded: Guarded[] = [
+      {
+        field: "ob1_config",
+        table: "ob1_config",
+        read: async (sp) => {
+          const rows = await sp`SELECT key, value FROM ob1_config WHERE key IN ('schema_version', 'embedding_model', 'embedding_dim')`;
+          const config = Object.fromEntries(rows.map((r: { key: string; value: string }) => [r.key, r.value])) as Record<string, string>;
+          const dim = config.embedding_dim === undefined ? null : Number(config.embedding_dim);
+          facts.schemaVersion = config.schema_version ?? null;
+          facts.embedding = { model: config.embedding_model ?? null, dim: dim === null || Number.isNaN(dim) ? null : dim };
+        },
+      },
+      {
+        field: "ledger",
+        table: "schema_migrations",
+        read: async (sp) => {
+          const names = (await sp`SELECT name FROM schema_migrations`).map((r: { name: string }) => String(r.name));
+          const numbers = names.map((n) => Number(n.slice(0, 3))).filter((n) => !Number.isNaN(n));
+          facts.ledger.names = names;
+          facts.highestMigration = numbers.length ? Math.max(...numbers) : null;
+        },
+      },
+      ...(stats
+        ? [
+            ...COUNTED_TABLES.map((t): Guarded => ({ field: `counts.${t}`, table: t, read: async (sp) => { facts.counts![t] = Number((await COUNT_SQL[t](sp))[0].n); } })),
+            { field: "databaseBytes", read: async (sp: SqlTag) => { facts.databaseBytes = Number((await sp`SELECT pg_database_size(current_database())::float8 AS n`)[0].n); } },
+          ]
+        : []),
+    ];
+    for (const g of guarded) progress.pending.add(g.field);
+
+    for (const g of guarded) {
+      if (progress.abandoned) break; // snapshotFacts names what is still pending
+      if (g.table && !resolved[g.table]) {
+        if (g.table in anywhere) facts.unread[g.field] = { reason: "invisible", message: `${g.table} exists (schema ${anywhere[g.table]}) but does not resolve for this role — not on its search_path, or no USAGE on that schema` };
+        if (g.field === "ledger") facts.ledger.names = g.table in anywhere ? null : [];
+        progress.pending.delete(g.field);
+        continue;
+      }
+      try {
+        await tx.savepoint(g.read);
+      } catch (e) {
+        facts.unread[g.field] = { reason: unreadReason(e), message: message(e) };
+        if (g.field === "ledger") facts.ledger.names = null;
+      }
+      progress.pending.delete(g.field);
     }
-  };
+    if (progress.abandoned) markAbandoned(progress);
+    return facts;
+  });
+}
 
-  // Not guarded: a connection that fails fails here, and the caller names it.
-  const [{ v: postgres }] = await client`SELECT current_setting('server_version') AS v`;
-
-  const databaseBytes = await attempt("databaseBytes", async (sql) => {
-    const [{ n }] = await sql`SELECT pg_database_size(current_database())::float8 AS n`;
-    return Number(n);
-  }, null);
-
-  const pgvector = await attempt("pgvector", async (sql) => {
-    const rows = await sql`
-      SELECT e.extversion::text AS version, n.nspname::text AS schema
-        FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
-       WHERE e.extname = 'vector'`;
-    return rows.length ? { version: String(rows[0].version), schema: String(rows[0].schema) } : null;
-  }, null);
-
-  // Which tables resolve on this connection's search path. to_regclass needs no
-  // privilege on the table, so a role that may not read one still sees it —
-  // the ledger included (review pass 1: information_schema.tables lists only
-  // the tables a role holds some privilege on, so the documented server role
-  // was told its brain had no ledger, and it matched a schema_migrations in
-  // any schema). If this read itself fails, every table is tried, and each
-  // read records its own error rather than passing for absent.
-  const everything = { config: true, schema_migrations: true, thoughts: true, thought_audit: true, thought_chunks: true, ob1_entities: true };
-  const has: Record<string, boolean> = await attempt("tables", async (sql) => (await sql`
-    SELECT to_regclass('ob1_config') IS NOT NULL AS config,
-           to_regclass('schema_migrations') IS NOT NULL AS schema_migrations,
-           to_regclass('thoughts') IS NOT NULL AS thoughts,
-           to_regclass('thought_audit') IS NOT NULL AS thought_audit,
-           to_regclass('thought_chunks') IS NOT NULL AS thought_chunks,
-           to_regclass('ob1_entities') IS NOT NULL AS ob1_entities`)[0], everything);
-
-  const config = has.config
-    ? await attempt("ob1_config", async (sql) => {
-        const rows = await sql`SELECT key, value FROM ob1_config WHERE key IN ('schema_version', 'embedding_model', 'embedding_dim')`;
-        return Object.fromEntries(rows.map((r: { key: string; value: string }) => [r.key, r.value])) as Record<string, string>;
-      }, {} as Record<string, string>)
-    : {};
-  const dim = config.embedding_dim === undefined ? null : Number(config.embedding_dim);
-
-  // The ledger: present on the path, then readable — a role without SELECT on
-  // it is `names: null`, not an empty ledger.
-  let names: string[] | null = [];
-  if (has.schema_migrations) {
-    names = await attempt("ledger", async (sql) => {
-      const rows = await sql`SELECT name FROM schema_migrations`;
-      return rows.map((r: { name: string }) => String(r.name));
-    }, null);
+/** Every read the progress still has pending, named as the deadline's. */
+function markAbandoned(progress: ReadProgress): void {
+  if (!progress.facts) return;
+  for (const field of progress.pending) {
+    progress.facts.unread[field] = { reason: "deadline", message: "not read before the deadline" };
+    if (field === "ledger") progress.facts.ledger.names = null;
   }
-  const numbers = (names ?? []).map((n) => Number(n.slice(0, 3))).filter((n) => !Number.isNaN(n));
+  progress.pending.clear();
+}
 
-  const counts = {} as Record<CountedTable, number | null>;
-  for (const t of COUNTED_TABLES) {
-    counts[t] = has[t]
-      ? await attempt(`counts.${t}`, async (sql) => Number((await COUNT_SQL[t](sql))[0].n), null)
-      : null;
-  }
-
-  const hnsw = await attempt("hnsw", async (sql) => {
-    const rows = await sql`
-      SELECT c.relname::text AS index, t.relname::text AS "table", array_to_string(c.reloptions, ',') AS opts
-        FROM pg_index i
-        JOIN pg_class c ON c.oid = i.indexrelid
-        JOIN pg_class t ON t.oid = i.indrelid
-        JOIN pg_am a ON a.oid = c.relam
-       WHERE a.amname = 'hnsw' AND pg_table_is_visible(t.oid)
-       ORDER BY t.relname, c.relname`;
-    return rows.map((r: { index: string; table: string; opts: string | null }) => ({ index: r.index, table: r.table, ...parseHnswOptions(r.opts) }));
-  }, null);
-
-  return {
-    postgres: String(postgres),
-    pgvector,
-    schemaVersion: config.schema_version ?? null,
-    embedding: { model: config.embedding_model ?? null, dim: dim === null || Number.isNaN(dim) ? null : dim },
-    ledger: { present: has.schema_migrations, names },
-    highestMigration: numbers.length ? Math.max(...numbers) : null,
-    counts,
-    databaseBytes,
-    hnsw,
-    unread,
-  };
+/**
+ * The facts a read has reached, as its caller's deadline finds them — a copy,
+ * since the read may still be finishing its last statement. Null when the
+ * catalog statement has not answered: nothing is known about the database.
+ */
+export function snapshotFacts(progress: ReadProgress): DatabaseFacts | null {
+  progress.abandoned = true;
+  markAbandoned(progress);
+  return progress.facts ? structuredClone(progress.facts) : null;
 }
 
 /** What the server process knows about itself — no database needed. */
@@ -227,7 +323,7 @@ export type DatabaseSummary = Omit<DatabaseFacts, "ledger"> & { ledger: { presen
 export type LedgerStatus = "current" | "behind" | "ahead" | null;
 
 export interface BrainInfo extends ServerFacts {
-  /** The database's facts, or why they could not be had. */
+  /** The database's facts, or why none could be had. */
   database: DatabaseSummary | { error: string };
   /**
    * The ledger's highest migration against the server's tree: `current` when
@@ -244,26 +340,38 @@ export function ledgerStatus(highest: number | null, latest: number): LedgerStat
 
 /**
  * The one read under the tool and the health body. Never raises, and answers
- * within `deadlineMs` whatever the database does: a database that cannot
- * answer in time, or at all, is `database.error` (review pass 1: an
- * unreachable address waited out the driver's 30-second connect, and the
- * runtime closed the probe's socket first).
+ * by `deadlineMs` whatever the database does: the facts read by then, each
+ * read not yet answered named `deadline`; a database whose catalog has not
+ * answered by then — unreachable, say — is `database.error`.
  */
-export async function brainInfo(server: ServerFacts, readDatabase: () => Promise<DatabaseFacts>, deadlineMs: number): Promise<BrainInfo> {
-  let database: BrainInfo["database"];
+export async function brainInfo(
+  server: ServerFacts,
+  readDatabase: (progress: ReadProgress) => Promise<DatabaseFacts>,
+  deadlineMs: number,
+): Promise<BrainInfo> {
+  const progress = newProgress();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let facts: DatabaseFacts | null;
+  let failure = "";
   try {
-    const late = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`the database gave no answer within ${deadlineMs} ms`)), deadlineMs);
-    });
-    const { ledger, ...rest } = await Promise.race([readDatabase(), late]);
-    database = { ...rest, ledger: { present: ledger.present, readable: ledger.present && ledger.names !== null } };
+    facts = await Promise.race([
+      readDatabase(progress),
+      new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), deadlineMs); }),
+    ]);
+    if (facts === null) {
+      facts = snapshotFacts(progress);
+      if (!facts) failure = `the database gave no answer within ${deadlineMs} ms`;
+    }
   } catch (e) {
-    database = { error: message(e) };
+    facts = null;
+    failure = message(e);
   } finally {
     clearTimeout(timer);
   }
-  return { ...server, database, ledgerStatus: ledgerStatus("error" in database ? null : database.highestMigration, server.latestMigration) };
+  if (!facts) return { ...server, database: { error: failure }, ledgerStatus: null };
+  const { ledger, ...rest } = facts;
+  const database: DatabaseSummary = { ...rest, ledger: { present: ledger.present, readable: ledger.present && ledger.names !== null } };
+  return { ...server, database, ledgerStatus: ledgerStatus(facts.highestMigration, server.latestMigration) };
 }
 
 /** A migration number as the ledger and the files spell it — 052. */
@@ -281,6 +389,14 @@ export function formatBytes(n: number): string {
   return u === 0 ? `${v} B` : `${v.toFixed(1)} ${units[u]}`;
 }
 
+/** An unread fact as the table says it. */
+const unreadWords = (u: Unread): string =>
+  u.reason === "refused" ? "not readable by this role"
+    : u.reason === "timeout" ? "not read in time"
+    : u.reason === "deadline" ? "not read before the deadline"
+    : u.reason === "invisible" ? "not resolved for this role"
+    : "not read";
+
 /** The record as the tool's short table: one fact per line, a label and a value. */
 export function renderBrainInfo(info: BrainInfo): string {
   const row = (label: string, value: string) => `${`${label}:`.padEnd(16)} ${value}`;
@@ -296,36 +412,41 @@ export function renderBrainInfo(info: BrainInfo): string {
     lines.push(row("Database", `unavailable — ${db.error}`));
     return lines.join("\n");
   }
-  // A count is null when its table is absent (no entry in unread) or its read failed.
+  const counts = db.counts;
+  // A count is null when its table is absent (no entry in unread) or its read did not answer.
   const num = (t: CountedTable) => {
-    const n = db.counts[t];
-    return n === null ? (db.unread[`counts.${t}`] ? "?" : "no table") : n.toLocaleString("en-US");
+    const n = counts?.[t] ?? null;
+    return n !== null ? n.toLocaleString("en-US") : `counts.${t}` in db.unread ? "?" : "no table";
   };
   const tree = `this server's tree ends at ${pad3(info.latestMigration)}`;
+  const ledgerUnread = db.unread.ledger;
   const ledger = !db.ledger.present
     ? `no schema_migrations table — ${tree}`
     : !db.ledger.readable
-      ? `schema_migrations not readable by this role — ${tree}`
+      ? `schema_migrations ${ledgerUnread ? unreadWords(ledgerUnread) : "not read"} — ${tree}`
       : db.highestMigration === null
         ? `the ledger records none — ${tree}`
         : `${pad3(db.highestMigration)} applied — ${tree}${info.ledgerStatus === "current" ? " (current)" : info.ledgerStatus === "behind" ? " (the brain is behind it)" : " (the brain is ahead of it)"}`;
   // ob1_config unread is not ob1_config recording nothing (review pass 1).
-  const configUnread = db.unread.ob1_config !== undefined;
-  const recorded = configUnread
-    ? "? (ob1_config not read)"
-    : db.embedding.model === null && db.embedding.dim === null
-      ? "none recorded"
-      : `${db.embedding.model ?? "?"} @ ${db.embedding.dim ?? "?"}`;
+  const configUnread = db.unread.ob1_config;
+  const notConfig = configUnread ? `? (ob1_config ${unreadWords(configUnread)})` : null;
+  const recorded = notConfig ?? (db.embedding.model === null && db.embedding.dim === null
+    ? "none recorded"
+    : `${db.embedding.model ?? "?"} @ ${db.embedding.dim ?? "?"}`);
   lines.push(
     row("Postgres", `${db.postgres} · pgvector ${db.pgvector ? `${db.pgvector.version} (schema ${db.pgvector.schema})` : "not installed"}`),
-    row("Schema version", configUnread ? "? (ob1_config not read)" : db.schemaVersion ?? "none recorded (migration 044 writes it)"),
+    row("Schema version", notConfig ?? db.schemaVersion ?? "none recorded (migration 044 writes it)"),
     row("Migrations", ledger),
     row("Brain embedding", recorded),
-    row("Rows", `${num("thoughts")} thoughts · ${num("thought_audit")} audit · ${num("thought_chunks")} chunks · ${num("ob1_entities")} entities`),
-    row("Database size", db.databaseBytes === null ? "?" : formatBytes(db.databaseBytes)),
-    row("HNSW", db.hnsw === null ? "?" : db.hnsw.length === 0 ? "none" : db.hnsw.map((h) => `${h.index} on ${h.table} (m ${h.m}, ef_construction ${h.efConstruction})`).join("; ")),
   );
+  if (counts) {
+    lines.push(
+      row("Rows", `${num("thoughts")} thoughts · ${num("thought_audit")} audit · ${num("thought_chunks")} chunks · ${num("ob1_entities")} entities`),
+      row("Database size", db.databaseBytes === null ? "?" : formatBytes(db.databaseBytes)),
+    );
+  }
+  lines.push(row("HNSW", db.hnsw.length === 0 ? "none" : db.hnsw.map((h) => `${h.index} on ${h.table} (m ${h.m}, ef_construction ${h.efConstruction})`).join("; ")));
   const unread = Object.entries(db.unread);
-  if (unread.length) lines.push(row("Not read", unread.map(([k, v]) => `${k} — ${v}`).join("; ")));
+  if (unread.length) lines.push(row("Not read", unread.map(([k, u]) => `${k} — ${unreadWords(u)}: ${u.message}`).join("; ")));
   return lines.join("\n");
 }
