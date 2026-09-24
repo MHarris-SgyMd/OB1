@@ -37,7 +37,7 @@ Below 0.85, the thought is treated as entirely new (`add`).
 ## Cost & Limits
 
 Smart Ingest talks to paid LLM APIs and writes to your primary thoughts table,
-so the Edge Function ships with hard ceilings that you should tune before
+so the server ships with hard ceilings that you should tune before
 production use. All ceilings are environment-controlled; `0` disables a cap.
 
 | Env var | Default | What it caps |
@@ -88,11 +88,11 @@ without human review.
 - **Smart ingest tables** applied — install `schemas/smart-ingest-tables` to create the `ingestion_jobs` and `ingestion_items` tables plus the `append_thought_evidence` RPC
 - At least one LLM API key for extraction: OpenRouter (recommended), OpenAI, or Anthropic
 - An embedding API key: OpenRouter or OpenAI (required for semantic deduplication)
-- Supabase CLI installed for deployment
+- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/))
 
 ### Required RPCs
 
-This Edge Function depends on these database functions:
+This server depends on these database functions:
 
 | RPC | Source | Purpose |
 |-----|--------|---------|
@@ -127,38 +127,26 @@ EMBEDDING (at least one required)
 
 ## Steps
 
-> **Runs under Bun, not as an Edge Function.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — so `supabase functions deploy` cannot bundle it; from a checkout of this repository it serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
->
-> ```bash
-> PORT=8787 SUPABASE_URL='postgres://user:password@host:5432/openbrain' MCP_ACCESS_KEY='your-key' OPENROUTER_API_KEY='…' bun integrations/smart-ingest/index.ts
-> ```
->
-> `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset), and the other variables are the secrets the steps below set, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI. The Supabase steps below apply to the file after `bun scripts/migrate-to-sql-shim.ts --revert integrations/smart-ingest/index.ts`, which puts it back on supabase-js.
+### 1. Run the server
 
-### 1. Deploy the Edge Function
-
-Copy the `integrations/smart-ingest/` folder into your Supabase project's `supabase/functions/` directory, then deploy:
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and the access-key module from `../_shared/auth.ts` beside it (the same file every server on this fork shares), and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — one HTTP process, as every server here is. From a checkout of this repository ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps):
 
 ```bash
-supabase functions deploy smart-ingest --no-verify-jwt
+PORT=8787 \
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+MCP_ACCESS_KEY='your-access-key' \
+OPENROUTER_API_KEY='your-openrouter-key' \
+bun integrations/smart-ingest/index.ts
 ```
 
-### 2. Set Environment Variables
+`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the core server holds — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI. A caller on another machine reaches it through the same TLS proxy as the core server ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
 
-Add your secrets to the deployed function:
+### 2. Set the environment
 
-```bash
-supabase secrets set \
-  MCP_ACCESS_KEY="your-access-key" \
-  OPENROUTER_API_KEY="your-openrouter-key"
-```
-
-Optional multi-provider fallback:
+`MCP_ACCESS_KEY` is the one key this server holds, compared by digest, sent as `x-brain-key`. Optional multi-provider fallback, in the same environment:
 
 ```bash
-supabase secrets set \
-  OPENAI_API_KEY="your-openai-key" \
-  ANTHROPIC_API_KEY="your-anthropic-key"
+OPENAI_API_KEY="your-openai-key" ANTHROPIC_API_KEY="your-anthropic-key"
 ```
 
 ### 3. Test with a Dry Run
@@ -166,7 +154,7 @@ supabase secrets set \
 Send a test document with `dry_run: true` to preview what would be extracted without writing anything:
 
 ```bash
-curl -X POST "https://<your-project-ref>.supabase.co/functions/v1/smart-ingest" \
+curl -X POST "http://127.0.0.1:8787/" \
   -H "Content-Type: application/json" \
   -H "x-brain-key: your-access-key" \
   -d '{
@@ -194,7 +182,7 @@ You should get a response showing extracted thoughts and their reconciliation ac
 Once you're satisfied with the dry-run results, commit them to the database:
 
 ```bash
-curl -X POST "https://<your-project-ref>.supabase.co/functions/v1/smart-ingest/execute" \
+curl -X POST "http://127.0.0.1:8787/execute" \
   -H "Content-Type: application/json" \
   -H "x-brain-key: your-access-key" \
   -d '{ "job_id": 1 }'
@@ -252,7 +240,7 @@ Execute a previously dry-run job.
 
 **Today's user-facing surfaces:**
 
-- **Browser (dashboard):** The Next.js dashboard at `dashboards/open-brain-dashboard-next` includes an "Add to Brain" page that POSTs to this Edge Function and auto-decides between single-thought capture and multi-thought extraction. Install the dashboard separately if you want a non-CLI capture surface.
+- **Browser (dashboard):** The Next.js dashboard at `dashboards/open-brain-dashboard-next` includes an "Add to Brain" page that POSTs to this server and auto-decides between single-thought capture and multi-thought extraction. Install the dashboard separately if you want a non-CLI capture surface.
 - **CLI / scripts / webhooks:** The HTTP API documented above. Suitable for batch imports, custom capture pipelines, or terminal workflows.
 - **CLI agents:** Claude Code, Codex, Cursor, and similar tools can call the HTTP endpoint directly through their shell.
 

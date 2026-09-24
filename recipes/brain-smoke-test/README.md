@@ -6,9 +6,11 @@
 
 Runs ~30 independent checks across seven categories against your deployed Open Brain and prints a pass/skip/fail dashboard. Optional features (REST API, ob-graph, enhanced-thoughts, smart-ingest) are detected automatically and skipped with a clear reason rather than failing the run, so the same script works on stock core installs and fully-loaded instances.
 
+> **On this fork.** This harness was written against upstream's Supabase deployment: it dials the PostgREST gateway with a service-role key and probes RLS with an anon key, so its DB Schema, Access Key Enforcement and Row-Level Security categories have nothing to talk to here, where the brain is a plain Postgres and the server the one published port. The MCP Server, REST API and Auth categories apply to any URL. The fork's own smoke is `deploy/smoke.sh` (`deploy/README.md`).
+
 ## Why Use This
 
-Open Brain is a lot of moving parts -- a database, an Edge Function, a secret access key, RLS policies, and optionally more tables and endpoints from recipes and integrations. When something is wrong it is usually one specific thing: a missing `GRANT`, a mismatched access key, a forgotten column, a function that failed to deploy. This harness catches those misconfigurations before you waste an hour wondering why Claude Desktop sees no tools or why semantic search returns nothing.
+Open Brain is a lot of moving parts -- a database, an MCP server, a secret access key, RLS policies, and optionally more tables and endpoints from recipes and integrations. When something is wrong it is usually one specific thing: a missing `GRANT`, a mismatched access key, a forgotten column, a function that failed to deploy. This harness catches those misconfigurations before you waste an hour wondering why Claude Desktop sees no tools or why semantic search returns nothing.
 
 Run it:
 
@@ -19,7 +21,7 @@ Run it:
 
 ## Categories Checked
 
-1. **MCP Server** -- The `open-brain-mcp` Edge Function responds, exposes the four canonical tools (`search_thoughts`, `list_thoughts`, `thought_stats`, `capture_thought`), and completes a JSON-RPC `initialize` handshake.
+1. **MCP Server** -- The MCP server responds, exposes the four canonical tools (`search_thoughts`, `list_thoughts`, `thought_stats`, `capture_thought`), and completes a JSON-RPC `initialize` handshake.
 2. **REST API** -- If you have installed the optional `rest-api` integration or set `REST_API_BASE`, the gateway answers `/health`, `/thoughts`, `/search`, and `/stats`. The `NEXT_PUBLIC_API_URL` env var (the base URL the dashboard is pointed at) is also probed and only passes on a 2xx response. Skipped otherwise.
 3. **DB Schema** -- The canonical `public.thoughts` table exists with `id, content, embedding, metadata, created_at, updated_at`, the dedup fingerprint column is present, and `match_thoughts` + `upsert_thought` RPCs are callable. Optional tables (`graph_nodes`, `graph_edges`, `ingestion_jobs`) and the `search_thoughts_text` RPC are detected and skipped when absent.
 4. **Auth** -- `MCP_ACCESS_KEY` is enforced: requests with no key, with a wrong key, with the header (`x-brain-key`), and with the query string (`?key=`) all produce the expected outcome.
@@ -47,7 +49,7 @@ FROM YOUR OPEN BRAIN SETUP
   MCP access key:             ____________  (from Step 5 of the getting-started guide)
 
 OPTIONAL (unlocks extra checks, safe to leave blank on stock installs)
-  REST API base URL:          ____________  (e.g. https://<ref>.supabase.co/functions/v1/open-brain-rest)
+  REST API base URL:          ____________  (e.g. http://127.0.0.1:8787 — the open-brain-rest gateway)
   Dashboard REST base URL:    ____________  (the NEXT_PUBLIC_API_URL the dashboard uses;
                                               same shape as REST API base URL)
   Anon/publishable key:       ____________  (enables a real anon-key RLS probe in the
@@ -70,10 +72,10 @@ No build step. Just drop the file in and run it.
    MCP_ACCESS_KEY=your-access-key-from-step-5
 
    # Optional -- unlocks the REST API category. Leave unset on stock installs.
-   # REST_API_BASE=https://YOUR_PROJECT_REF.supabase.co/functions/v1/open-brain-rest
+   # REST_API_BASE=http://127.0.0.1:8787
 
    # Optional -- same base URL the dashboard uses (NEXT_PUBLIC_API_URL).
-   # NEXT_PUBLIC_API_URL=https://YOUR_PROJECT_REF.supabase.co/functions/v1/open-brain-rest
+   # NEXT_PUBLIC_API_URL=http://127.0.0.1:8787
 
    # Optional -- enables a real RLS probe that reads public.thoughts with
    # the anon key and fails if rows come back.
@@ -239,10 +241,10 @@ Each `fn` gets an `AbortSignal` that fires at 10 seconds by default. Return a sh
 Solution: Create `.env.local` in the current directory with `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `MCP_ACCESS_KEY`, or export them into your shell. The script refuses to start without all three.
 
 **Issue: `Auth: ✗ MCP accepts correct access key` fails with HTTP 401**
-Solution: The `MCP_ACCESS_KEY` in `.env.local` does not match what Supabase has stored. Re-run `supabase secrets set MCP_ACCESS_KEY=<your-key>` and confirm the key in your credential tracker is identical.
+Solution: The `MCP_ACCESS_KEY` in `.env.local` is not a key whose hash is in the server's `MCP_ACCESS_KEYS`. Confirm the key in your credential tracker is identical (the URL carries the key, the server's environment its hash).
 
 **Issue: `DB Schema: ✗ thoughts has canonical columns` fails with HTTP 400**
 Solution: Your `public.thoughts` table is missing one of the canonical columns (most commonly `embedding`). Re-run the SQL in [Step 2.2 of the getting-started guide](../../docs/01-getting-started.md). Additive migrations are safe -- the script only reads, it does not drop anything.
 
 **Issue: `MCP search_thoughts finds test row` fails even though capture succeeded**
-Solution: Embedding generation is asynchronous in some setups and may not land before search runs. The check already retries once with a 1.5 s delay; if it still fails, check the Edge Function logs in the Supabase dashboard for OpenRouter errors (missing or rate-limited key).
+Solution: Embedding generation is asynchronous in some setups and may not land before search runs. The check already retries once with a 1.5 s delay; if it still fails, read the server's log (`podman compose -f deploy/compose.yaml logs server`) for provider errors (missing or rate-limited key).

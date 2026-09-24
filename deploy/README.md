@@ -52,7 +52,7 @@ Three services, in order (five with the profile):
 | --- | --- |
 | `postgres` | The Supabase-hosted database (`pgvector/pgvector:0.8.6-pg16`) |
 | `migrate` | Pasting SQL into the Supabase dashboard — the `ob1-migrate` image (`db/Dockerfile`) runs `db/migrate.ts`, then exits |
-| `server` | The Edge Function and `supabase functions deploy` |
+| `server` | Upstream's Edge Function and its deploy command |
 | `ollama` (profile) | OpenRouter — the model endpoint the server defaults to |
 | `ollama-pull` (profile) | Pulling both models by hand; runs once, then exits |
 
@@ -329,7 +329,7 @@ handler's shape (signature, replay window, loop guard) is SMD-1862's.
   prints the vector count and the setting in force just before 039. On a brain
   past a million rows build the two staging indexes `CONCURRENTLY` first, as
   the migration's header says, and let it adopt them.
-- **A Supabase Edge Function passing checks 2, 3 and 4.** On Supabase the API gateway
+- **Upstream's Edge Function on Supabase passing checks 2, 3 and 4.** There the API gateway
   answers the OAuth discovery path with 401 before the function sees it, so check
   2 fails there — and the failure is real: the claude.ai connector will not open
   against that deployment either (upstream

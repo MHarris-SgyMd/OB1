@@ -9,11 +9,11 @@
   "version": "1.0.0",
   "requires": {
     "open_brain": true,
-    "services": ["Supabase"],
-    "tools": ["Supabase CLI", "AI client with MCP support and reusable skills/prompts"]
+    "services": [],
+    "tools": ["Bun 1.4+", "AI client with MCP support and reusable skills/prompts"]
   },
   "requires_skills": ["work-operating-model"],
-  "requires_primitives": ["deploy-edge-function", "remote-mcp"],
+  "requires_primitives": ["deploy-remote-mcp", "remote-mcp"],
   "tags": ["byoc", "portable-context", "operating-model", "mcp", "prompts"],
   "difficulty": "intermediate",
   "estimated_time": "1 hour",

@@ -29,12 +29,13 @@ Three failure modes the policy + auditor pair catches that scattered prompt-tuni
 - **`editorial-policy.md`** — the full 40-rule constitution. Copy to your `docs/editorial-policy.md`. Adapt the operator-specific rules (R1.1, R9.2, R9.3) to your name and timezone; keep everything else.
 - **`schema.sql`** — adds one helper RPC (`get_recent_audit_reports`) and one partial index on the `thoughts` table. No new tables.
 - **`auditor/index.ts`** — the auditor server (`bun recipes/editorial-policy/auditor/index.ts`) that runs weekly, scans recent thoughts, returns structured JSON findings, stores them as `type=audit_report` thoughts, and posts to Slack on critical findings only. On this fork the report is stored through the database's `upsert_thought` (FORK.md change 71, SMD-1524), so the row carries its content fingerprint and 008's audit row names the key that ran the audit — the raw insert it replaced left the fingerprint NULL and the actor unnamed; the report carries no vector, so it has no model label and is not a search target.
-- **`schedule.sql`** — pg_cron entry to fire the auditor weekly.
+- **`schedule.sql`** — a pg_cron entry to fire the auditor weekly, for a Postgres that has `pg_cron` and `pg_net`; an ordinary cron line does the same (Step 6).
 
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- Supabase Edge Functions enabled with `pg_cron` and `pg_net` extensions
+- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the auditor runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps)
+- A scheduler: cron on the machine that runs the auditor, or `pg_cron` + `pg_net` in your Postgres
 - OpenRouter API key (the auditor uses `gpt-4o-mini` by default — swap to `claude-haiku-4-5` if you want stricter compliance reasoning)
 - Slack workspace with a bot token (only required if you want critical findings posted automatically; otherwise the auditor still stores reports silently)
 
@@ -47,9 +48,7 @@ EDITORIAL POLICY + AUDITOR -- CREDENTIAL TRACKER
 --------------------------------------
 
 FROM YOUR OPEN BRAIN SETUP
-  Project URL:               ____________
-  Project ref (xxx.supabase.co):  ____________
-  Service role key:          ____________
+  Postgres URL:              ____________  (SUPABASE_URL — the shim's name for it)
   OpenRouter API key:        ____________
   Slack bot token:           ____________
   Slack capture channel ID:  ____________
@@ -107,55 +106,56 @@ Without this step, the auditor has nothing to enforce — the rules need to be l
 
 ### Step 3: Add the schema
 
-Run the contents of `schema.sql` in your Supabase SQL Editor. This adds the `get_recent_audit_reports` RPC and a partial index on `audit_report` rows.
+Run `schema.sql` against your brain's database — `psql "$DATABASE_URL" -f recipes/editorial-policy/schema.sql`. This adds the `get_recent_audit_reports` RPC and a partial index on `audit_report` rows.
 
-### Step 4: Set the auditor secrets
+### Step 4: Set the auditor's environment
 
-In the Supabase dashboard: **Settings → Edge Functions → Secrets**. Set:
+These go on the `bun` command in Step 5:
 
 ```
-AUDITOR_ACCESS_KEYS = cron:write:<sha256-of-your-key>
-SLACK_DIGEST_CHANNEL = <optional; defaults to SLACK_CAPTURE_CHANNEL>
-POLICY_VERSION = 1.3   # or whatever your editorial-policy.md says
+AUDITOR_ACCESS_KEYS=cron:write:<sha256-of-your-key>
+SLACK_DIGEST_CHANNEL=<optional; defaults to SLACK_CAPTURE_CHANNEL>
+POLICY_VERSION=1.3   # or whatever your editorial-policy.md says
 ```
 
-`AUDITOR_ACCESS_KEYS` holds `name:scope:sha256` entries — the hash of a key you generate, never the key; mint one as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows. Give the schedule a `write` key: the audit stores a report. The older single `AUDITOR_ACCESS_KEY` still works, compared by digest.
+`AUDITOR_ACCESS_KEYS` holds `name:scope:sha256` entries — the hash of a key you generate, never the key; mint one as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows. Give the schedule a `write` key: the audit stores a report. The older single `AUDITOR_ACCESS_KEY` still works, compared by digest.
 
-### Step 5: Deploy the function
+### Step 5: Run the auditor
 
-> **Runs under Bun, not as an Edge Function.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — so `supabase functions deploy` cannot bundle it; from a checkout of this repository it serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
->
-> ```bash
-> PORT=8787 SUPABASE_URL='postgres://user:password@host:5432/openbrain' AUDITOR_ACCESS_KEYS='schedule:write:<sha256-of-your-key>' OPENROUTER_API_KEY='…' bun recipes/editorial-policy/auditor/index.ts
-> ```
->
-> `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset), and the other variables are the secrets the steps below set, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI, and `extensions/test-writes.ts` drives its report against Postgres. The Supabase steps below apply to the file after `bun scripts/migrate-to-sql-shim.ts --revert recipes/editorial-policy/auditor/index.ts`, which puts it back on supabase-js.
+The auditor runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and the access-key module from `../_shared/auth.ts` beside it, and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — one HTTP process, as every server here is. From a checkout of this repository:
 
 ```bash
-# From your OB1 working directory:
-mkdir -p supabase/functions/auditor supabase/functions/_shared
-cp <recipe>/auditor/index.ts  supabase/functions/auditor/index.ts
-cp <recipe>/_shared/auth.ts   supabase/functions/_shared/auth.ts   # the access-key module index.ts imports as ../_shared/auth.ts
-supabase functions deploy auditor
+PORT=8787 \
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+AUDITOR_ACCESS_KEYS='cron:write:<sha256-of-your-key>' \
+OPENROUTER_API_KEY='…' \
+POLICY_VERSION='1.3' \
+bun recipes/editorial-policy/auditor/index.ts
 ```
+
+`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the core server holds — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI, and `extensions/test-writes.ts` drives its report against Postgres. Nothing else calls it, so it needs no public URL: the scheduler in Step 6 runs on the same machine and dials `127.0.0.1`.
 
 ### Step 6: Schedule the weekly run
 
-Open `schedule.sql`, replace `<YOUR-PROJECT-REF>` and `<YOUR-AUDITOR-KEY>` with your actual values, then run it in the SQL Editor. This adds a pg_cron job that fires every Sunday at 09:00 UTC.
+A cron line on the machine that runs the auditor — Sunday 09:00 UTC, the auditor before the weekly summary so it has the full week to inspect:
+
+```cron
+0 9 * * 0  curl -sS -X POST "http://127.0.0.1:8787/?key=<YOUR-AUDITOR-KEY>" -H "Content-Type: application/json" -d '{"days":30,"post_to_slack":true,"dry_run":false,"prior_audit_count":4}'
+```
+
+The URL carries the key, the environment its hash. If your Postgres has `pg_cron` and `pg_net`, `schedule.sql` does the same from inside the database: replace `<YOUR-AUDITOR-URL>` with a URL the database can reach and `<YOUR-AUDITOR-KEY>` with the key, then run it with `psql`.
 
 ### Step 7: Smoke test
 
-From the SQL Editor, fire a one-off dry run (no Slack post, no audit_report stored):
+Fire a one-off dry run (no Slack post, no audit_report stored):
 
-```sql
-SELECT net.http_post(
-  url := 'https://<YOUR-PROJECT-REF>.supabase.co/functions/v1/auditor?key=<YOUR-AUDITOR-KEY>',
-  headers := jsonb_build_object('Content-Type', 'application/json'),
-  body := jsonb_build_object('days', 30, 'post_to_slack', false, 'dry_run', true)
-);
+```bash
+curl -sS -X POST "http://127.0.0.1:8787/?key=<YOUR-AUDITOR-KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"days": 30, "post_to_slack": false, "dry_run": true}'
 ```
 
-Then check the response in `pg_net`'s response table — you should see structured JSON with `findings: []` (or actual findings if your brain has a few weeks of captures already).
+You should see structured JSON with `findings: []` (or actual findings if your brain has a few weeks of captures already).
 
 ## Expected Outcome
 
@@ -176,7 +176,7 @@ A typical critical finding looks like:
 
 **Issue: Auditor returns 401 Unauthorized**
 
-Solution: the `AUDITOR_ACCESS_KEYS` secret isn't set, or the `?key=…` in your `schedule.sql` is not the key whose hash it holds (the URL carries the key, the secret its hash). Check **Settings → Edge Functions → Secrets** and the cron URL. A 403 means the key's entry is `read`-scoped: a scheduled run stores a report, so it needs `write`; only a `dry_run` is allowed on `read`.
+Solution: `AUDITOR_ACCESS_KEYS` isn't in the auditor's environment, or the `?key=…` in your cron line is not the key whose hash it holds (the URL carries the key, the environment its hash). Check the `bun` command and the cron URL. A 403 means the key's entry is `read`-scoped: a scheduled run stores a report, so it needs `write`; only a `dry_run` is allowed on `read`.
 
 **Issue: Auditor runs but finds nothing useful**
 
@@ -203,4 +203,4 @@ Solution: add a `list_audit_reports` tool to your MCP server that calls `get_rec
 
 ## Why a Recipe, Not a Skill or Extension
 
-This is a *recipe* because it combines three things — a policy doc, an SQL helper, and an Edge Function — that only deliver value together. The policy without the auditor is documentation that drifts. The auditor without the policy is a function with nothing to check. Ship them together or skip them both.
+This is a *recipe* because it combines three things — a policy doc, an SQL helper, and a server — that only deliver value together. The policy without the auditor is documentation that drifts. The auditor without the policy is a function with nothing to check. Ship them together or skip them both.

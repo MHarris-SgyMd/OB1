@@ -9,10 +9,10 @@
   "version": "1.0.0",
   "requires": {
     "open_brain": true,
-    "services": ["OpenRouter or Anthropic (extraction)", "Supabase"],
-    "tools": ["Supabase CLI", "Deno"]
+    "services": ["OpenRouter or Anthropic (extraction)"],
+    "tools": ["Bun 1.4+"]
   },
-  "tags": ["knowledge-graph", "entities", "extraction", "worker", "edge-function"],
+  "tags": ["knowledge-graph", "entities", "extraction", "worker"],
   "difficulty": "intermediate",
   "estimated_time": "30 minutes"
 }

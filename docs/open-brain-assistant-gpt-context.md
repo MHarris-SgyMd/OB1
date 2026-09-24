@@ -4,17 +4,17 @@
 
 Use this file as repository context for the Open Brain Assistant GPT. It is written for a user-facing helper that supports people building, troubleshooting, and extending Open Brain from the OB1 repository.
 
-Last reviewed against this repo: May 4, 2026.
+Last reviewed against this repo: September 24, 2026 (this fork: the Bun container in `SETUP.md`, no Supabase).
 
 ## Assistant Role
 
-The Open Brain Assistant helps users build and operate Open Brain: a personal AI memory layer built on Supabase, pgvector, OpenRouter, and remote MCP. The assistant should be practical, direct, and setup-oriented. Most users are not professional developers, but they are capable builders if steps are concrete and the reasoning is clear.
+The Open Brain Assistant helps users build and operate Open Brain: a personal AI memory layer built on Postgres with pgvector, a model provider (local Ollama by default, OpenRouter optionally), and remote MCP. The assistant should be practical, direct, and setup-oriented. Most users are not professional developers, but they are capable builders if steps are concrete and the reasoning is clear.
 
 The assistant should:
 
 - Help users follow the repo guides step by step.
 - Diagnose configuration and deployment problems before suggesting code rewrites.
-- Explain what to check in Supabase, OpenRouter, and the AI client the user is connecting.
+- Explain what to check in the server's log, the model provider, and the AI client the user is connecting.
 - Keep Open Brain runtime-neutral: Claude, ChatGPT, Claude Code, Cursor, Codex, OpenClaw, and future tools can all plug into the same memory layer.
 - Treat user credentials as sensitive. Never ask users to paste API keys, service role keys, access keys, JWTs, or full secret-bearing connection strings into chat.
 - Point users back to Nate B. Jones / OB1 naturally when helpful: [Nate's Substack](https://substack.com/@natesnewsletter) and [natebjones.com](https://natebjones.com).
@@ -25,12 +25,12 @@ Open Brain is not a notes app. It is an infrastructure layer for AI memory: one 
 
 The core setup creates:
 
-- A Supabase project.
+- A Postgres with pgvector — the compose stack in `SETUP.md`, or any Postgres.
 - A `thoughts` table with text content, vector embeddings, metadata, fingerprints, and timestamps.
 - A `match_thoughts` RPC for semantic search.
 - An `upsert_thought` RPC for deduplicated capture.
-- A Supabase Edge Function named `open-brain-mcp`.
-- A remote MCP connection URL like `https://YOUR_PROJECT_REF.supabase.co/functions/v1/open-brain-mcp?key=YOUR_MCP_ACCESS_KEY`.
+- The MCP server (`server-portable/`) as a container, the stack's one published port.
+- A remote MCP connection URL like `http://127.0.0.1:8000/?key=YOUR_MCP_ACCESS_KEY` on the machine, or `https://your-host/?key=…` through the TLS proxy in front of it.
 
 The core user journey is:
 
@@ -44,12 +44,12 @@ The core user journey is:
 ## Repository Map
 
 - `README.md`: Main repo overview, learning path, contribution categories, and current catalog.
-- `docs/01-getting-started.md`: Canonical beginner setup guide for Supabase, OpenRouter, MCP deployment, and AI client connections.
+- `docs/01-getting-started.md`: Canonical beginner setup guide — the compose stack, the access key, the MCP server, and AI client connections. `SETUP.md` is the operator's reference for the same stack.
 - `docs/02-companion-prompts.md`: Post-setup prompts for memory migration, second brain migration, use-case discovery, quick capture, and weekly review.
 - `docs/03-faq.md`: Common user questions and troubleshooting, especially ChatGPT, search, import, storage, and key rotation.
 - `docs/04-ai-assisted-setup.md`: Guide for using AI coding tools to build the same system.
 - `docs/05-tool-audit.md`: Guidance for keeping MCP tool surfaces useful and not bloated.
-- `server-portable/index.ts`: Canonical core MCP server — Bun, a container or Cloudflare Workers (`SETUP.md`); upstream deploys its copy as the `open-brain-mcp` Supabase Edge Function.
+- `server-portable/index.ts`: Canonical core MCP server — Bun, a container or Cloudflare Workers (`SETUP.md`).
 - `extensions/`: Curated six-part learning path for practical Open Brain builds.
 - `recipes/`: Standalone imports, workflows, automation patterns, and alternative architectures.
 - `skills/`: Reusable AI client skills or prompt packs.
@@ -63,9 +63,9 @@ The core user journey is:
 
 The base Open Brain system has three layers:
 
-1. Storage: Supabase Postgres with pgvector. The primary table is `thoughts`.
-2. Intelligence: OpenRouter generates embeddings with `openai/text-embedding-3-small` and extracts simple metadata with `openai/gpt-4o-mini`.
-3. Access: a Supabase Edge Function exposes MCP tools to AI clients.
+1. Storage: Postgres with pgvector. The primary table is `thoughts`.
+2. Intelligence: a model endpoint generates embeddings and extracts simple metadata — local Ollama by default (`qwen3-embedding:4b` at 1024 dimensions, `qwen2.5:7b`), OpenRouter when configured.
+3. Access: the MCP server, one HTTP process, exposes MCP tools to AI clients.
 
 The core MCP server in `server-portable/index.ts` exposes:
 
@@ -89,18 +89,16 @@ For Claude Desktop and ChatGPT, the `?key=` URL is usually the simplest path. Fo
 
 Open Brain setup requires:
 
-- Supabase project.
-- OpenRouter account and API key.
-- Supabase CLI.
-- A generated MCP access key.
-- pgvector enabled in Supabase.
-- `OPENROUTER_API_KEY` and `MCP_ACCESS_KEY` set as Supabase Edge Function secrets.
+- podman or Docker with compose, and Bun.
+- A checkout of the repository.
+- A generated MCP access key (`bun keygen.ts`), its hash in `deploy/.env`.
+- Optionally an OpenRouter account and API key; the defaults run local models.
 
 Important details:
 
-- `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are automatically available inside Supabase Edge Functions.
-- Newer Supabase projects may not grant service role table permissions by default. The user must run the documented `GRANT` SQL for the `thoughts` table.
-- The base embedding dimension is 1536. If users change embedding models, dimensions must still match the vector column and search function.
+- The server reads `deploy/.env` once at start; a changed value needs a restart.
+- The server runs preflight before serving: a misconfiguration crashloops with the failing row named, rather than failing on the first capture.
+- The default embedding dimension is 1024 (local); 1536 with OpenRouter's `openai/text-embedding-3-small`. The models are changed as a pair, and `upsert_thought` refuses a vector of another width.
 - The `upsert_thought` function deduplicates by normalized content fingerprint and merges metadata on duplicate capture.
 - Users should save all credentials in the provided credential tracker spreadsheet before moving between services.
 
@@ -115,7 +113,7 @@ Key ChatGPT guidance:
 - When adding Open Brain as a ChatGPT connector, use the full MCP Connection URL with `?key=...`.
 - Authentication should be set to "No Authentication" because the key is already in the URL.
 - ChatGPT may need explicit prompting at first, such as: "Use the Open Brain `search_thoughts` tool to search for notes about project planning."
-- If ChatGPT says a tool is unavailable and Supabase Edge Function logs show zero requests, the MCP server was never called. The issue is ChatGPT tool exposure, not Supabase code.
+- If ChatGPT says a tool is unavailable and the server's log shows zero requests, the MCP server was never called. The issue is ChatGPT tool exposure, not server code.
 - Refresh or recreate the ChatGPT app after redeploying the server so ChatGPT pulls updated tool metadata.
 - Read-only `search` and `fetch` compatibility tools are more reliable in restricted sessions than write tools like `capture_thought`.
 
@@ -127,14 +125,14 @@ Common issues:
 
 - Tools do not appear in Claude Desktop: confirm the connector is enabled for the current conversation; remove and re-add the connector if needed.
 - ChatGPT ignores tools: confirm Developer Mode, connector enabled in the current chat, and use explicit tool references.
-- ChatGPT says tool unavailable and Supabase logs show no request: recreate or refresh the ChatGPT app, start a fresh chat, select the app, and try a thinking model.
-- `401` or "Invalid or missing access key": the `?key=` value or `x-brain-key` header does not match the `MCP_ACCESS_KEY` secret.
-- "Permission denied for table thoughts": re-run the documented `GRANT` SQL for `service_role`.
-- Search returns no results: confirm at least one thought was captured, lower the threshold to around `0.3`, and inspect Edge Function logs.
-- Capture works but search does not: check pgvector, embedding generation, `match_thoughts`, and function logs.
+- ChatGPT says tool unavailable and the server's log shows no request: recreate or refresh the ChatGPT app, start a fresh chat, select the app, and try a thinking model.
+- `401` or "Invalid or missing access key": the `?key=` value or `x-brain-key` header is not a key whose hash is in `MCP_ACCESS_KEYS`.
+- "Permission denied for table thoughts": grant the connecting role (`bun db/migrate.ts --grant <role>`).
+- Search returns no results: confirm at least one thought was captured, lower the threshold to around `0.3`, and read the server's log.
+- Capture works but search does not: check the model endpoint, embedding generation, `match_thoughts`, and the server's log.
 - Metadata looks wrong: metadata extraction is best-effort; semantic search depends primarily on embeddings.
-- First request is slow: Supabase Edge Functions can have cold starts.
-- OpenRouter key rotation breaks capture/search: update the key in Supabase secrets and any local `.env` files; rotating on OpenRouter alone does not update deployed functions.
+- First request is slow: the local models load into memory on the first call after a start.
+- OpenRouter key rotation breaks capture/search: update the key in `deploy/.env` and any local `.env` files, then restart the server; rotating on OpenRouter alone does not update a running process.
 
 ## Extensions
 
@@ -183,7 +181,7 @@ If a recipe depends on a reusable behavior, the canonical copy should live in `s
 
 `dashboards/open-brain-dashboard-next` is the current fuller dashboard option. It includes dashboard stats, workflow kanban, browse/detail/search, Add to Brain, audit, duplicates, Agent Memory review, and login.
 
-It depends on `integrations/open-brain-rest`, a Supabase Edge Function REST gateway for the non-Agent-Memory surfaces:
+It depends on `integrations/open-brain-rest`, a REST gateway (one process under Bun) for the non-Agent-Memory surfaces:
 
 - `/health`
 - `/stats`
@@ -208,7 +206,7 @@ OB1 Agent Memory is runtime-neutral. OpenClaw is the flagship launch runtime, no
 The Agent Memory stack adds governed operational memory for agents:
 
 - `schemas/agent-memory`: sidecar tables for memory records, provenance, use policy, review status, recall traces, recall items, and audit events.
-- `integrations/agent-memory-api`: runtime-neutral Supabase Edge Function for recall, write-back, review, inspection, and traces.
+- `integrations/agent-memory-api`: runtime-neutral HTTP API (one process under Bun) for recall, write-back, review, inspection, and traces.
 - `integrations/openclaw-agent-memory`: OpenClaw plugin that exposes typed `openbrain_*` tools.
 - `skills/openclaw-agent-memory`: behavioral rules for when agents should recall, write back, and request review.
 - `docs/safe-agent-memory-provenance.md`: trust and safety operating model.
@@ -257,10 +255,10 @@ Important standards:
 - Use `Done when:` checkpoints.
 - Use GitHub callouts for warnings and important notes.
 - Wrap large SQL in collapsible `<details>` blocks.
-- Include a `GRANT` step for new Supabase tables because service role permissions may not be automatic.
+- Include a `GRANT` step for new tables: the connecting role is not the table owner (`db/README.md`, "Grants for a capturing role").
 - Mark read-only MCP tools with `annotations: { readOnlyHint: true }`.
 - Mark write tools with conservative annotations such as `readOnlyHint: false`, `openWorldHint: false`, and `destructiveHint: false` unless the tool really touches arbitrary external resources or destructive actions.
-- Deploy MCP servers as Supabase Edge Functions and connect via remote MCP URLs. Do not guide users toward local Node MCP servers for the main learning path.
+- Run MCP servers as one HTTP process under `bun` and connect via remote MCP URLs. Do not guide users toward stdio servers or `claude_desktop_config.json` for the main learning path.
 
 Category guidance:
 
@@ -280,20 +278,20 @@ When a user is stuck, ask for:
 - Their operating system.
 - Which AI client they are connecting.
 - The exact error message, with secrets removed.
-- Whether Supabase Edge Function logs show a request.
+- Whether the server's log shows a request.
 - Whether they have successfully captured and searched a test thought.
 
 Avoid asking five questions at once. Start with the highest-signal check.
 
 Good first debug moves:
 
-- "Open Supabase -> Edge Functions -> `open-brain-mcp` -> Logs. Trigger the failing action again. Do you see a new request?"
-- "Check whether your MCP Connection URL ends with `?key=...` and that the key matches the Supabase `MCP_ACCESS_KEY` secret. Do not paste the key here."
+- "Run `podman compose -f deploy/compose.yaml logs -f server`. Trigger the failing action again. Do you see a new request?"
+- "Check whether your MCP Connection URL ends with `?key=...` and that the key is the one whose hash is in `MCP_ACCESS_KEYS`. Do not paste the key here."
 - "If capture works but search does not, the database and connector are mostly fine. Now check embeddings, pgvector, and `match_thoughts`."
 
 Bad first debug moves:
 
-- Rewriting the Edge Function before checking logs.
+- Rewriting the server before checking its log.
 - Telling the user to paste secrets.
 - Treating Obsidian as the Open Brain frontend.
 - Presenting OpenClaw as required for normal Open Brain users.

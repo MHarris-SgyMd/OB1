@@ -2,8 +2,7 @@
 
 A runtime-neutral build of the Open Brain MCP server. Same tools, same wire
 behaviour as upstream's Edge Function build (`server/index.ts`, in this fork
-until SMD-1800), with no dependency on Deno or on Supabase Edge Functions as a
-host.
+until SMD-1800), with no dependency on Deno or on Supabase's function host.
 
 This exists so the runtime decision in the Supabase migration can be made last,
 and changed later. One file targets four runtimes.
@@ -11,8 +10,8 @@ and changed later. One file targets four runtimes.
 ## Prerequisites
 
 - [Bun](https://bun.sh) 1.4+ (used for tests and the container image)
-- A Postgres with pgvector and the core Open Brain schema — see
-  [the getting-started guide](../docs/01-getting-started.md)
+- A Postgres with pgvector and the core Open Brain schema — `db/migrations/`
+  applies it; [`SETUP.md`](../SETUP.md) brings up the whole stack
 - For the Cloudflare target: a Cloudflare account and `wrangler` (a dev dependency here)
 
 ## What differs from upstream's Edge Function build
@@ -476,6 +475,6 @@ stored in the same write").
 
 ## Related
 
-- `../server/` — the original Deno / Supabase Edge Function build, still deployable
+- `../deploy/` — the compose stack this server is the published port of
 - `../FORK.md` — what this fork changes and why
 - `../integrations/kubernetes-deployment/` — a raw-SQL port that drops PostgREST too

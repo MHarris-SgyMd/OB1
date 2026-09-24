@@ -26,27 +26,25 @@ A database and MCP server for storing and retrieving household facts — paint c
 - Simple MCP tool creation
 - JSONB patterns for flexible metadata storage
 - Text search with ILIKE patterns
-- Building a Supabase-backed MCP server
+- Building a Postgres-backed MCP server
 
 ## Prerequisites
 
 - Working Open Brain setup
-- [Bun](https://bun.sh) 1.4+ and a Postgres carrying the Open Brain schema ([`SETUP.md`](../../SETUP.md)) — this server runs under Bun, not as a Supabase Edge Function (FORK.md change 74)
+- [Bun](https://bun.sh) 1.4+ and a Postgres carrying the Open Brain schema ([`SETUP.md`](../../SETUP.md)) — this server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/); FORK.md change 74)
 
 ## Credential Tracker
 
 You'll reference these values during setup. Copy this block into a text editor and fill it in as you go.
 
-> **Already have your Supabase credentials from the [Setup Guide](../../docs/01-getting-started.md)?** You just need the same Project URL and Secret key.
+> **Already have your brain's connection string from the [Setup Guide](../../docs/01-getting-started.md)?** That is the one value this server needs from it.
 
 ```text
 HOUSEHOLD KNOWLEDGE -- CREDENTIAL TRACKER
 --------------------------------------
 
-SUPABASE (from your Open Brain setup)
+DATABASE (from your Open Brain setup)
   Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
-  Secret key:            ____________
-  Project ref:           ____________
 
 GENERATED DURING SETUP
   Default User ID:       ____________
@@ -87,7 +85,7 @@ Pass it to the server as `DEFAULT_USER_ID` when you start it in Step 3.
 
 ### 3. Run the MCP Server
 
-This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — so it is not a Supabase Edge Function and `supabase functions deploy` does not apply (FORK.md change 74). From a checkout of this repository:
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — one HTTP process, as every server here is ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks it; FORK.md change 74). From a checkout of this repository:
 
 ```bash
 (cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports
@@ -97,7 +95,7 @@ DEFAULT_USER_ID='your-generated-uuid-here' \
 PORT=8787 bun extensions/household-knowledge/index.ts
 ```
 
-`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). Bun prints its start line, `Started development server: http://localhost:8787` (`Started server:` under `NODE_ENV=production`; `PORT` unset, it listens on 8000 — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI. Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request; five extension servers beside the core server are sixty of Postgres's default hundred before any load, so set it lower where several share one database.
+`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). Bun prints its start line, `Started development server: http://localhost:8787` (`Started server:` under `NODE_ENV=production`; `PORT` unset, it listens on 8000 — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI. Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request; five extension servers beside the core server are sixty of Postgres's default hundred before any load, so set it lower where several share one database.
 
 > **Every tool of this server runs on the fork.** `extensions/test-tools.ts` drives all five against a real Postgres carrying this `schema.sql` in CI — `details` into `JSONB`, the four-column search, each filter on its own (FORK.md change 77, SMD-1588; change 74's review had found none of the five failing, and the suite holds it).
 
@@ -162,7 +160,7 @@ For common issues (connection errors, 401s, deployment problems), see [Common Tr
 **Extension-specific issues:**
 
 **"Permission denied" or foreign key errors on insert**
-- Verify `DEFAULT_USER_ID` is set: `supabase secrets list` should show it
+- Verify `DEFAULT_USER_ID` is set in the server's environment (the `bun` command in Step 3)
 - The service role key bypasses RLS, so permission errors usually mean a missing env var
 - If you ran an older version of `schema.sql` that had `REFERENCES auth.users(id)`, drop and recreate the tables with the updated schema
 

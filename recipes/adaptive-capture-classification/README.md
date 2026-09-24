@@ -37,20 +37,16 @@ Intermediate
 
 ### Step 1: Run the schema migration
 
-Run `schema.sql` against your Supabase project. This creates four tables alongside your
+Run `schema.sql` against your brain's database. This creates four tables alongside your
 existing OB1 schema — nothing existing is modified.
 
-**Supabase Studio:** open the SQL editor, paste the contents of `schema.sql`, and run it.
-
-**Supabase CLI:**
-
 ```bash
-supabase migration new adaptive_capture_classification
-# paste the contents of schema.sql into the generated migration file
-supabase db push
+psql "$DATABASE_URL" -f recipes/adaptive-capture-classification/schema.sql
 ```
 
-✅ **Done when:** the four tables appear in your Supabase Studio table list:
+(Or paste it into the SQL client you use — Supabase's SQL Editor, if your Postgres is Supabase's.)
+
+✅ **Done when:** `\dt` in psql lists the four tables:
 `correction_learnings`, `classification_outcomes`, `capture_thresholds`, `ab_comparisons`.
 
 ---

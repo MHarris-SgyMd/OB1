@@ -8,12 +8,12 @@ Adds Slack as a quick-capture interface for your Open Brain. Type a thought in a
 
 ## Prerequisites
 
-- A working Open Brain setup (follow the [Getting Started guide](../../docs/01-getting-started.md) through Step 4 — you need the Supabase database, OpenRouter API key, and Supabase CLI installed)
+- A working Open Brain setup (the [Getting Started guide](../../docs/01-getting-started.md)), an OpenRouter API key — the sample embeds through OpenRouter at 1536; see the width note above — and [Bun](https://bun.sh) 1.4+ with a checkout of this repository
 - A Slack workspace (free tier works)
 
 ## Cost
 
-Slack is free. The Edge Function uses the same OpenRouter credits from your main Open Brain setup — embeddings cost ~$0.02 per million tokens, metadata extraction ~$0.15 per million input tokens. For 20 thoughts/day, expect roughly $0.10–0.30/month in API costs.
+Slack is free. The server uses the same OpenRouter credits from your main Open Brain setup — embeddings cost ~$0.02 per million tokens, metadata extraction ~$0.15 per million input tokens. For 20 thoughts/day, expect roughly $0.10–0.30/month in API costs.
 
 ---
 
@@ -35,7 +35,7 @@ GENERATED DURING SETUP
   Channel name:          ____________
   Channel ID (Step 1):   C____________
   Bot OAuth Token:       xoxb-____________
-  Edge Function URL:     https://____________.supabase.co/functions/v1/ingest-thought
+  Capture URL:           https://____________  (the HTTPS proxy or tunnel in front of the server)
 
 --------------------------------------
 ```
@@ -75,51 +75,36 @@ This is the bridge between Slack and your database.
 
 In Slack, open your capture channel and type: `/invite @Open Brain`
 
-> Don't set up Event Subscriptions yet — you need the Edge Function URL first (Step 3).
+> Don't set up Event Subscriptions yet — you need the Capture URL first (Step 3).
 
 ---
 
-## Step 3: Deploy the Edge Function
+## Step 3: Run the Capture Server
 
-This is the brains of the operation. One function receives messages from Slack, generates an embedding, extracts metadata, stores everything in Supabase, and replies with a confirmation.
+This is the brains of the operation. One HTTP server receives messages from Slack, generates an embedding, extracts metadata, stores everything in your brain's Postgres, and replies with a confirmation. It runs under [Bun](https://bun.sh) from a checkout of this repository — one HTTP process, as every server here is ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps for an MCP server).
 
 > **New to the terminal?** The "terminal" is the text-based command line on your computer. On Mac, open the app called **Terminal** (search for it in Spotlight). On Windows, open **PowerShell**. Everything below gets typed there, not in your browser.
 
-### Verify Supabase CLI
-
-Make sure you completed Step 7 of the main guide (Supabase CLI installation). Verify it's working:
+### Verify Bun
 
 ```bash
-supabase --version
+bun --version
 ```
 
-If that command fails, go back to the [Getting Started guide](../../docs/01-getting-started.md) Step 7 and install the CLI first.
+If that fails, install it from [bun.sh](https://bun.sh) first.
 
-### Log In and Link (if not already done)
+### Save the Server File
 
-```bash
-supabase login
-supabase link --project-ref YOUR_PROJECT_REF
-```
-
-Replace `YOUR_PROJECT_REF` with the project ref from your Supabase dashboard URL: `supabase.com/dashboard/project/THIS_PART`.
-
-### Create the Function
-
-```bash
-supabase functions new ingest-thought
-```
-
-Open `supabase/functions/ingest-thought/index.ts` and replace its entire contents with:
+Create `integrations/slack-capture/index.ts` in your checkout of this repository — it imports the SQL shim by relative path, so it lives in the tree — with the contents below:
 
 ```typescript
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "../../compat/supabase-sql/index.ts"; // Bun's Postgres client in supabase-js's shape
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
-const SLACK_BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN")!;
-const SLACK_CAPTURE_CHANNEL = Deno.env.get("SLACK_CAPTURE_CHANNEL")!;
+const SUPABASE_URL = process.env.SUPABASE_URL!;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? ""; // ignored by the shim; the credentials are in the URL
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY!;
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN!;
+const SLACK_CAPTURE_CHANNEL = process.env.SLACK_CAPTURE_CHANNEL!;
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 // The label written beside every vector (021): the model as OB1_EMBEDDING_MODEL spells it.
@@ -168,7 +153,7 @@ async function replyInSlack(channel: string, threadTs: string, text: string): Pr
   });
 }
 
-Deno.serve(async (req: Request): Promise<Response> => {
+async function handler(req: Request): Promise<Response> {
   try {
     const body = await req.json();
     if (body.type === "url_verification") {
@@ -234,45 +219,46 @@ Deno.serve(async (req: Request): Promise<Response> => {
     console.error("Function error:", err);
     return new Response("error", { status: 500 });
   }
-});
+}
+
+// Bun serves the default export on PORT (8000 unset).
+export default { port: Number(process.env.PORT || 8000), fetch: handler };
 ```
 
-### Set Your Secrets
+### Run It
+
+The values go in the server's environment, on the `bun` command:
 
 ```bash
-supabase secrets set OPENROUTER_API_KEY=your-openrouter-key-here
-supabase secrets set SLACK_BOT_TOKEN=xoxb-your-slack-bot-token-here
-supabase secrets set SLACK_CAPTURE_CHANNEL=C0your-channel-id-here
+PORT=8789 \
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+OPENROUTER_API_KEY='your-openrouter-key-here' \
+SLACK_BOT_TOKEN='xoxb-your-slack-bot-token-here' \
+SLACK_CAPTURE_CHANNEL='C0your-channel-id-here' \
+bun integrations/slack-capture/index.ts
 ```
 
 Replace the values with:
-- Your OpenRouter API key from the main guide (Step 4)
+- Your brain's Postgres connection string (`SUPABASE_URL` is the SQL shim's name for it; `SUPABASE_SERVICE_ROLE_KEY` may be left unset)
+- Your OpenRouter API key
 - Your Slack Bot OAuth Token from Step 2 above
 - Your Slack Channel ID from Step 1 above
 
-> SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are automatically available inside Edge Functions — you don't need to set them.
+> **If you ever rotate your OpenRouter key:** restart the server with the new value — it reads its environment once, at start. See the [FAQ on key rotation](../../docs/03-faq.md#api-key-rotation) for the full checklist.
 
-<!-- -->
+### Put It Behind HTTPS
 
-> **If you ever rotate your OpenRouter key:** you must re-run `supabase secrets set OPENROUTER_API_KEY=...` with the new key. This Edge Function reads the key from Supabase secrets at runtime — updating it on openrouter.ai alone won't propagate here. See the [FAQ on key rotation](../../docs/03-faq.md#api-key-rotation) for the full checklist.
-
-### Deploy
-
-```bash
-supabase functions deploy ingest-thought --no-verify-jwt
-```
-
-> Copy the Edge Function URL immediately after deployment! It looks like: `https://YOUR_PROJECT_REF.supabase.co/functions/v1/ingest-thought`
+Slack calls this server from its side, so it needs an HTTPS URL that reaches port 8789 — the same TLS proxy or tunnel that fronts the core server ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)). That URL is your **Capture URL**.
 
 Save this URL — you'll need it in Step 4.
 
 ---
 
-## Step 4: Connect Slack to the Edge Function
+## Step 4: Connect Slack to the Capture Server
 
 1. Go to api.slack.com/apps → select your Open Brain app
 2. Left sidebar → **Event Subscriptions** → toggle **Enable Events ON**
-3. Paste your Edge Function URL in the **Request URL** field
+3. Paste your Capture URL in the **Request URL** field
 4. Wait for the green checkmark — Verified
 5. Under **Subscribe to bot events**, add both: `message.channels` and `message.groups`
 6. Click **Save Changes** (reinstall if prompted)
@@ -297,7 +283,7 @@ People: Sarah
 Action items: Check in with Sarah about consulting plans
 ```
 
-Then open Supabase dashboard → Table Editor → thoughts. You should see one row with your message, an embedding, and metadata.
+Then query the table — `select content, metadata from thoughts order by created_at desc limit 1;`. You should see one row with your message, an embedding, and metadata.
 
 ---
 
@@ -307,7 +293,7 @@ Every message you post in your Slack capture channel automatically gets:
 - Embedded with a 1536-dimensional vector for semantic search
 - Classified by type (observation, task, idea, reference, person_note)
 - Tagged with topics, people, action items, and dates (where applicable)
-- Stored in your Supabase `thoughts` table
+- Stored in your `thoughts` table
 - Confirmed with a threaded reply showing the extracted metadata
 
 You can now search for these thoughts using any MCP-connected AI (Claude Desktop, ChatGPT, Claude Code, etc.) via the Open Brain MCP server from the main guide.
@@ -318,27 +304,19 @@ You can now search for these thoughts using any MCP-connected AI (Claude Desktop
 
 ### Slack says "Request URL not verified"
 
-Your Edge Function isn't deployed or isn't reachable. Run the deploy command again and check the output for errors.
-
-```bash
-supabase functions deploy ingest-thought --no-verify-jwt
-```
+The server isn't running, or the HTTPS URL doesn't reach its port. Check the terminal the `bun` command runs in, and the proxy or tunnel in front of it.
 
 ### Messages aren't triggering the function
 
-Check Event Subscriptions — make sure both `message.channels` and `message.groups` are listed (public channels use the first, private channels use the second — you need both). Verify the app is invited to the channel. Confirm the channel ID in your secrets matches the actual channel.
+Check Event Subscriptions — make sure both `message.channels` and `message.groups` are listed (public channels use the first, private channels use the second — you need both). Verify the app is invited to the channel. Confirm the channel ID in the server's environment matches the actual channel.
 
 ### Slack creates duplicate database entries
 
-Slack retries webhook delivery if it doesn't get a response within 3 seconds. The Edge Function includes built-in deduplication — it checks for existing rows with the same `slack_ts` before processing. If you're still seeing duplicates, make sure you're on the latest version of the code (see Step 3) and have redeployed.
+Slack retries webhook delivery if it doesn't get a response within 3 seconds. The server includes built-in deduplication — it checks for existing rows with the same `slack_ts` before processing. If you're still seeing duplicates, make sure you're on the latest version of the code (see Step 3) and have restarted it.
 
-### Function runs but nothing in the database
+### The server answers but nothing lands in the database
 
-Check Edge Function logs: Supabase dashboard → Edge Functions → ingest-thought → Logs. Most likely the OpenRouter key is wrong or has no credits.
-
-```bash
-supabase secrets list
-```
+Read the server's output. Most likely the OpenRouter key is wrong or has no credits — or the brain is not at the 1536 width the sample embeds at (the note at the top).
 
 ### No confirmation reply in Slack
 

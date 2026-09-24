@@ -10,7 +10,7 @@
   "requires": {
     "open_brain": true,
     "services": ["Gmail API"],
-    "tools": ["Deno"]
+    "tools": ["Bun 1.4+"]
   },
   "tags": ["email", "gmail", "import", "history"],
   "connectors": ["gmail"],

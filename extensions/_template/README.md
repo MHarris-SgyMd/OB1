@@ -70,7 +70,7 @@ Lead with the human pain point. What real-life scenario makes this extension wor
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- Supabase CLI installed and linked to your project
+- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/))
 - List any earlier extensions that must be completed first
 - List any required primitives with links
 
@@ -78,16 +78,14 @@ Lead with the human pain point. What real-life scenario makes this extension wor
 
 Copy this block into a text editor and fill it in as you go.
 
-> **Already have your Supabase credentials from the [Setup Guide](../../docs/01-getting-started.md)?** You just need the same Project URL, Secret key, and Project ref.
+> **Already have your brain's connection string from the [Setup Guide](../../docs/01-getting-started.md)?** That is the one value this server needs from it.
 
 ```text
 EXTENSION NAME -- CREDENTIAL TRACKER
 --------------------------------------
 
-SUPABASE (from your Open Brain setup)
-  Project URL:           ____________
-  Secret key:            ____________
-  Project ref:           ____________
+DATABASE (from your Open Brain setup)
+  Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
 
 GENERATED DURING SETUP
   MCP Access Key:        ____________  (same key for all extensions)
@@ -106,7 +104,7 @@ GENERATED DURING SETUP
 
 ![1.1](https://img.shields.io/badge/1.1-Create_the_Tables-555?style=for-the-badge&labelColor=HEX_COLOR)
 
-In your Supabase SQL Editor (`https://supabase.com/dashboard/project/YOUR_PROJECT_ID/sql/new`), paste and Run:
+Run `schema.sql` against your Open Brain database — `psql "$DATABASE_URL" -f extensions/extension-name/schema.sql`, or paste it into the SQL client you use. If its policies call `auth.uid()`, create the two stub functions first, as [Household Knowledge](../household-knowledge/README.md) Step 1 shows:
 
 <details>
 <summary>📋 <strong>SQL: Extension tables</strong> (click to expand)</summary>
@@ -129,27 +127,27 @@ Add one line per table your extension creates.
 -->
 
 <details>
-<summary>📋 <strong>SQL: Grant service_role access</strong> (click to expand)</summary>
+<summary>📋 <strong>SQL: Grant the server's role access</strong> (click to expand)</summary>
 
 ```sql
-grant select, insert, update, delete on table public.table_name to service_role;
-grant select, insert, update, delete on table public.table_name_2 to service_role;
+grant select, insert, update, delete on table public.table_name to your_role;
+grant select, insert, update, delete on table public.table_name_2 to your_role;
 ```
 
 </details>
 
 > [!IMPORTANT]
-> This step is required. Supabase does not grant full table permissions to `service_role` by default on new projects. Without this, your MCP server will return "permission denied" errors.
+> This step is required unless the server connects as the table owner. Nothing grants the connecting role anything by default (`db/README.md`, "Grants for a capturing role"). Without this, your MCP server will return "permission denied" errors.
 
 ![1.3](https://img.shields.io/badge/1.3-Verify-555?style=for-the-badge&labelColor=HEX_COLOR)
 
-✅ **Done when:** Table Editor shows your new tables with the expected columns.
+✅ **Done when:** `\d table_name` in psql shows your new tables with the expected columns.
 
 ---
 
 ![Step 2](https://img.shields.io/badge/Step_2-Run_the_MCP_Server-HEX_COLOR?style=for-the-badge)
 
-Run the server under [Bun](https://bun.sh) from a checkout of this repository — there is no Supabase function to deploy; the fork's servers are Bun-native (SMD-1799; `compat/supabase-sql/README.md` §3):
+Run the server under [Bun](https://bun.sh) from a checkout of this repository — one HTTP process, as every server here is (SMD-1799; [Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks it, `compat/supabase-sql/README.md` §3 has the shim):
 
 ```bash
 (cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK
@@ -158,7 +156,7 @@ MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
 PORT=8787 bun extensions/extension-name/index.ts
 ```
 
-`SUPABASE_URL` is a `postgres://` connection string (the SQL shim keeps the variable names; `SUPABASE_SERVICE_ROLE_KEY` may be left unset). Mint the access key as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS`. Your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=<your-key>` (behind TLS on any host that is not your own).
+`SUPABASE_URL` is a `postgres://` connection string (the SQL shim keeps the variable names; `SUPABASE_SERVICE_ROLE_KEY` may be left unset). Mint the access key as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS`. Your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=<your-key>` (behind TLS on any host that is not your own).
 
 ✅ **Done when:** Bun prints its start line (`Started development server: http://localhost:8787`, or `Started server:` under `NODE_ENV=production`) and the process stays up.
 
@@ -191,7 +189,7 @@ Try these prompts in your AI client:
 > [!CAUTION]
 > If any prompt returns an error, read the server's terminal output (a failed tool call logs its cause there) before troubleshooting further.
 
-✅ **Done when:** All test prompts return expected results and you can see data in your Supabase Table Editor.
+✅ **Done when:** All test prompts return expected results and `select * from table_name` shows the rows.
 
 ---
 
@@ -224,7 +222,7 @@ For common issues (connection errors, 401s, deployment problems), see [Common Tr
 - You skipped Step 1.2. Go back and run the `GRANT` SQL.
 
 **"relation 'table_name' does not exist"**
-- The schema SQL wasn't run successfully — re-run it in the Supabase SQL Editor.
+- The schema SQL wasn't run successfully — re-run it against the database `SUPABASE_URL` names.
 
 ## Next Steps
 

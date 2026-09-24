@@ -453,7 +453,7 @@ Your Open Brain is already deployed as a remote MCP server from the Getting Star
 If not already connected:
 
 ```bash
-claude mcp add open-brain --transport http --url "https://YOUR_PROJECT_REF.supabase.co/functions/v1/open-brain-mcp?key=YOUR_ACCESS_KEY"
+claude mcp add --transport http open-brain http://127.0.0.1:8000/ --header "x-brain-key: YOUR_ACCESS_KEY"
 ```
 
 ### 3.2 Verify Open Brain Access
@@ -832,7 +832,7 @@ After setup, you'll have:
 |---------|-------|----------------|
 | Supabase Project URL | `https://xxx.supabase.co` | Open Brain MCP, Life Engine tables |
 | Supabase Service Key | `eyJ...` | Database access |
-| OB1 MCP URL | `https://xxx.supabase.co/functions/v1/open-brain-mcp?key=xxx` | Knowledge search |
+| OB1 MCP URL | `http://127.0.0.1:8000/?key=xxx` (or the HTTPS proxy in front of it) | Knowledge search |
 | Telegram Bot Token | `123456:ABC...` | Telegram channel plugin |
 | Google Calendar | (OAuth via Claude Code) | Calendar events |
 

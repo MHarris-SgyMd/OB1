@@ -55,13 +55,7 @@ WHERE type IN ('task', 'idea') AND status IS NULL;
 
 </details>
 
-Or via the Supabase CLI:
-
-```bash
-supabase db push
-```
-
-(if you have the migration file in `supabase/migrations/`)
+Or, if your Postgres is Supabase's, paste the file into its SQL Editor and Run
 
 ![Step 2](https://img.shields.io/badge/Step_2-Verify-1E88E5?style=for-the-badge)
 
