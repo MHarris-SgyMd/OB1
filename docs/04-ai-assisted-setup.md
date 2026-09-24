@@ -12,17 +12,17 @@ Copy everything in this block and paste it into your AI coding tool:
 
 ```text
 Walk me through building my own Open Brain — a personal AI memory system — using the
-official guide in the NateBJones-Projects/OB1 repository.
+official guide in the MHarris-SgyMd/OB1 repository.
 
 <context>
-- Repository: https://github.com/NateBJones-Projects/OB1
-- Raw file base: https://raw.githubusercontent.com/NateBJones-Projects/OB1/main/
+- Repository: https://github.com/MHarris-SgyMd/OB1
+- Raw file base: https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/
 - Entry point: docs/01-getting-started.md — the setup guide. It defines every step,
   every code and SQL block, and a "Done when" checkpoint for each step.
 - The guide is the source of truth for WHAT to do. This prompt only defines how we
   work together. Where the two disagree on a technical detail, the guide wins — it
   is newer than this prompt.
-- The guide's server code and SQL are known-good. When something fails, the cause is
+- The guide's commands and configuration are known-good. When something fails, the cause is
   nearly always configuration: a mismatched secret, a missing value, a skipped step.
   Read the error output and the guide's troubleshooting section first, and fix the
   configuration.
@@ -31,10 +31,10 @@ official guide in the NateBJones-Projects/OB1 repository.
 <approach>
 Work through the guide with me one step at a time, in order. You handle everything
 that can be done in a terminal or editor; I handle everything that needs a browser,
-an account, or a payment. Use plain words and short sentences, and assume I have
+an account, an installer or a payment. Use plain words and short sentences, and assume I have
 never used a terminal before unless I tell you otherwise.
 
-Every command, SQL block, and code file you give me comes from the guide or from
+Every command and configuration line you give me comes from the guide or from
 files the guide links to, fetched this session. If a fetch fails or a file is
 missing, show me the URL that failed and pause that step until we resolve it.
 
@@ -68,11 +68,11 @@ refer to each secret by name in our chat.
 
 4. Execute one step at a time. For each step in the guide:
    - Tell me what this step builds and why, in a sentence or two.
-   - Do the parts you can do; walk me through the parts only I can do (browser
-     signups, dashboard clicks, payments), telling me exactly what to click and
-     what to copy.
+   - Do the parts you can do; walk me through the parts only I can do (installing
+     Docker or podman, AI-app settings, an optional signup), telling me exactly
+     what to click and what to copy.
    - Keep a running list of every non-secret value the guide says to record
-     (project identifiers, URLs) and show it whenever I ask. For secrets, record
+     (URLs, the key's hash line) and show it whenever I ask. For secrets, record
      where each one lives.
    - Verify the step against its "Done when" checkpoint before moving on. If
      verification fails, read the actual error output or logs, check the guide's
@@ -98,7 +98,7 @@ from the first unfinished step.
 
 - **An interview first.** Your AI asks about your OS, your AI apps, and any previous attempts before it touches anything. Answer honestly — "I've never opened a terminal" is a useful answer that changes how it talks to you.
 - **One step at a time, verified.** The guide has a "✅ Done when" checkpoint for every step. Your AI checks each one before moving on, so problems surface at the step that caused them.
-- **You still do the human parts.** Creating accounts, clicking through the Supabase dashboard, adding OpenRouter credits, and pasting the connector into your AI app's settings are yours. Your AI tells you exactly what to click.
+- **You still do the human parts.** Installing Docker or podman, pasting the connector into your AI app's settings, and — if you choose hosted models — creating the OpenRouter account are yours. Your AI tells you exactly what to click.
 - **Secrets stay out of the chat.** The prompt instructs your AI to have you paste keys directly where they're used — a terminal command or a dashboard field — and to refer to them by name in conversation.
 - **It's resumable.** Interrupted halfway? Paste the same prompt into a new session. It re-checks the guide's checkpoints to find where you left off.
 
@@ -109,12 +109,12 @@ Any AI tool that can fetch files and (ideally) run terminal commands: Claude Cod
 ## Tips
 
 - **Let it read before it builds.** The prompt's first move is fetching the full guide. If your AI starts generating setup code without having read the guide this session, point it back to step 1 of the prompt.
-- **Use Supabase's built-in AI too.** The Supabase dashboard has its own AI assistant (chat icon, bottom-right). It knows Supabase's docs inside out. Your coding AI handles the big picture; the Supabase AI handles Supabase-specific questions.
+- **The server tells you what is wrong.** It runs preflight before it serves and names the failing setting; `deploy/smoke.sh` probes every surface. Have your AI read those before it changes anything.
 - **Read the [FAQ](03-faq.md) when stuck.** It covers the most common issues, including the auth error patterns that trip up Claude Desktop and ChatGPT connections.
 
 ## For Contributors: Why the Prompt Has No Steps In It
 
-The prompt deliberately names zero setup steps, zero SQL, and zero connection mechanics. It pins three things only: the repository, the entry-point guide, and the rules of the working session. Everything procedural is fetched from `docs/01-getting-started.md` at runtime.
+The prompt deliberately names zero setup steps, zero configuration lines, and zero connection mechanics. It pins three things only: the repository, the entry-point guide, and the rules of the working session. Everything procedural is fetched from `docs/01-getting-started.md` at runtime.
 
 This is what keeps it from rotting. When the setup flow changes — a new auth mechanism, a different connection method, a reordered step — update the guide and the prompt inherits the change automatically. If you're tempted to add a step, a URL format, or a tool name to the prompt itself, add it to the guide instead.
 
