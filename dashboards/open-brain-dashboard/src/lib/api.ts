@@ -35,6 +35,9 @@ async function callMcpTool(name: string, args: Record<string, unknown> = {}): Pr
 	
 	if (!response.ok) {
 		const body = (await response.json().catch(() => ({}))) as { error?: string };
+		// The session ended under us — the key revoked, the cookie expired or dropped
+		// by the proxy: the sign-in page, not a console line.
+		if (response.status === 401 && typeof location !== 'undefined') location.assign('/signin');
 		throw new Error(body.error || `HTTP ${response.status}`);
 	}
 

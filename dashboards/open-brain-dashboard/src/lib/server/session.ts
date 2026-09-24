@@ -24,7 +24,22 @@ export type DashboardSession = {
 	canCapture: boolean;
 };
 
+/** What is sealed: the session and when it stops being one — the cookie's Max-Age is the browser's to honour, this is the server's. */
+type Sealed = DashboardSession & { exp: number };
+
 const MIN_SECRET = 32;
+
+/**
+ * The one set of attributes for the session cookie, for the `set` at sign-in
+ * and every `delete`: SvelteKit's defaults mark a cookie Secure off
+ * `localhost`, and a browser refuses a Secure Set-Cookie from a plain-HTTP
+ * origin — so a delete with the defaults never landed on http://<lan-host>,
+ * and sign-out left the visitor signed in (first review pass). Secure follows
+ * the request's scheme, on the set and the deletes alike.
+ */
+export function cookieOptions(url: URL) {
+	return { path: '/', httpOnly: true, sameSite: 'lax' as const, secure: url.protocol === 'https:' };
+}
 
 /** SESSION_SECRET, refused short: a 16-byte secret guessed by dictionary would hand over every visitor's key. */
 export function sessionSecret(env: Record<string, string | undefined>): string {
@@ -54,10 +69,11 @@ function fromBase64Url(text: string): Uint8Array<ArrayBuffer> {
 	return out;
 }
 
-/** iv(12) + ciphertext, base64url. */
-export async function seal(session: DashboardSession, secret: string): Promise<string> {
+/** iv(12) + ciphertext, base64url; the payload carries its expiry, `now` (ms) for a test to place it. */
+export async function seal(session: DashboardSession, secret: string, now = Date.now()): Promise<string> {
 	const iv = crypto.getRandomValues(new Uint8Array(12));
-	const plain = new TextEncoder().encode(JSON.stringify(session));
+	const sealed: Sealed = { key: session.key, canCapture: session.canCapture, exp: now + SESSION_MAX_AGE * 1000 };
+	const plain = new TextEncoder().encode(JSON.stringify(sealed));
 	const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await keyFor(secret), plain));
 	const out = new Uint8Array(iv.length + cipher.length);
 	out.set(iv, 0);
@@ -65,8 +81,8 @@ export async function seal(session: DashboardSession, secret: string): Promise<s
 	return toBase64Url(out);
 }
 
-/** The session a cookie holds, or null for anything that does not decrypt to one — a tampered, truncated or re-keyed cookie is no session, not an error. */
-export async function unseal(token: string | undefined, secret: string): Promise<DashboardSession | null> {
+/** The session a cookie holds, or null for anything that does not decrypt to one — a tampered, truncated, re-keyed or expired cookie is no session, not an error. */
+export async function unseal(token: string | undefined, secret: string, now = Date.now()): Promise<DashboardSession | null> {
 	if (!token) return null;
 	try {
 		const bytes = fromBase64Url(token);
@@ -79,10 +95,11 @@ export async function unseal(token: string | undefined, secret: string): Promise
 		const parsed: unknown = JSON.parse(new TextDecoder().decode(plain));
 		if (
 			typeof parsed === 'object' && parsed !== null &&
-			typeof (parsed as DashboardSession).key === 'string' && (parsed as DashboardSession).key.length > 0 &&
-			typeof (parsed as DashboardSession).canCapture === 'boolean'
+			typeof (parsed as Sealed).key === 'string' && (parsed as Sealed).key.length > 0 &&
+			typeof (parsed as Sealed).canCapture === 'boolean' &&
+			typeof (parsed as Sealed).exp === 'number' && (parsed as Sealed).exp > now
 		) {
-			return { key: (parsed as DashboardSession).key, canCapture: (parsed as DashboardSession).canCapture };
+			return { key: (parsed as Sealed).key, canCapture: (parsed as Sealed).canCapture };
 		}
 		return null;
 	} catch {

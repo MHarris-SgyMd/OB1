@@ -22,6 +22,8 @@
  * nothing is captured (the one capture attempted is the refused one).
  */
 
+import { seal } from "./src/lib/server/session";
+
 const args = process.argv.slice(2);
 const flag = (n: string) => { const i = args.indexOf(`--${n}`); return i >= 0 ? args[i + 1] : undefined; };
 const MCP_URL = process.env.MCP_URL;
@@ -43,9 +45,11 @@ const probe = Bun.serve({ port: 0, fetch: () => new Response("") });
 const port = probe.port!;
 probe.stop(true);
 
+// The preview's secret is this run's, so the smoke can seal tokens the server must and must not take.
+const SECRET = "smoke-".padEnd(48, "s");
 const preview = Bun.spawn(["bun", "run", "preview", "--", "--port", String(port), "--strictPort", "--host", "127.0.0.1"], {
   cwd: import.meta.dir,
-  env: { ...process.env, MCP_URL, SESSION_SECRET: "smoke-".padEnd(48, "s") },
+  env: { ...process.env, MCP_URL, SESSION_SECRET: SECRET },
   stdout: "pipe",
   stderr: "pipe",
 });
@@ -72,17 +76,23 @@ if (!up) {
 }
 console.log(`▸ dashboard ${base} → MCP ${MCP_URL}`);
 
-// One cookie: the session, or nothing.
+// One cookie: the session, or nothing; and the last Set-Cookie line for it, attributes included.
 let cookie = "";
+let lastSetCookie = "";
 const takeCookie = (r: Response) => {
   const set = r.headers.getSetCookie?.() ?? [];
   for (const c of set) {
     const [pair] = c.split(";");
     const [name, value] = pair.split("=");
-    if (name === "ob1_dashboard_session") cookie = value ? `${name}=${value}` : "";
+    if (name === "ob1_dashboard_session") {
+      cookie = value ? `${name}=${value}` : "";
+      lastSetCookie = c;
+    }
   }
 };
 const headers = (extra: Record<string, string> = {}) => (cookie ? { cookie, ...extra } : extra);
+/** The preview is plain HTTP on 127.0.0.1: the cookie must carry HttpOnly and SameSite=Lax and NOT Secure, or a browser would drop it — and a delete marked Secure would never land (first review pass). */
+const attributesHold = (line: string) => /HttpOnly/i.test(line) && /SameSite=Lax/i.test(line) && !/;\s*Secure/i.test(line);
 
 // As a browser submits the form: HTML wanted (without `accept: text/html`,
 // SvelteKit answers the action as JSON for a fetch, HTTP 200 whatever happened),
@@ -112,6 +122,32 @@ const tool = async (name: string, toolArgs: Record<string, unknown> = {}) => {
   assert(api.status === 401, `signed out, /api/mcp answers 401 (${api.status})`);
 }
 
+// Cookies the server must not take as a session — only a token it sealed itself, and not past its expiry
+// (first review pass: the smoke had presented no cookie it was not given, so a proxy that trusted plain JSON,
+// or a stale token, or the wrong secret passed it).
+{
+  const present = async (value: string, what: string, alsoHome = false) => {
+    cookie = `ob1_dashboard_session=${value}`;
+    const r = await tool("thought_stats");
+    assert(r.status === 401, `${what} is no session: /api/mcp answers 401 (${r.status})`);
+    if (alsoHome) {
+      const home = await fetch(`${base}/`, { redirect: "manual", headers: headers() });
+      takeCookie(home);
+      assert(home.status === 302 && /Max-Age=0/i.test(lastSetCookie) && attributesHold(lastSetCookie), `…/ redirects to /signin and drops the cookie with a Set-Cookie a plain-HTTP browser accepts (${home.status}; ${lastSetCookie.replace(/=[^;]*/, "=…")})`);
+    }
+    cookie = "";
+  };
+  await present("garbage", "garbage", true);
+  const plain = Buffer.from(JSON.stringify({ key: WRITE_KEY, canCapture: true, exp: Date.now() + 86_400_000 })).toString("base64url");
+  await present(plain, "plain JSON with the write key");
+  await present(await seal({ key: WRITE_KEY, canCapture: true }, "other-".padEnd(48, "o")), "a token sealed under another secret");
+  await present(await seal({ key: WRITE_KEY, canCapture: true }, SECRET, Date.now() - 2 * 86_400_000), "a token sealed under this secret two days ago");
+  cookie = `ob1_dashboard_session=${await seal({ key: WRITE_KEY, canCapture: true }, SECRET)}`;
+  const fresh = await tool("thought_stats");
+  assert(fresh.status === 200 && fresh.text.startsWith("Total thoughts:"), `…while a token sealed under this secret now is the session the server reads (${fresh.status})`);
+  cookie = "";
+}
+
 // A wrong key.
 {
   const r = await signIn("not-a-key");
@@ -128,6 +164,7 @@ const tool = async (name: string, toolArgs: Record<string, unknown> = {}) => {
   takeCookie(r);
   assert(r.status === 303 && (r.headers.get("location") ?? "") === "/", `the write key signs in: 303 to / (${r.status} → ${r.headers.get("location")})`);
   assert(cookie !== "", "…and a session cookie is set");
+  assert(attributesHold(lastSetCookie) && /Max-Age=86400/.test(lastSetCookie), `…HttpOnly, SameSite=Lax, a day's Max-Age, and not Secure on plain HTTP (${lastSetCookie.replace(/=[^;]*/, "=…")})`);
   const home = await fetch(`${base}/`, { headers: headers() });
   const html = await home.text();
   assert(home.status === 200 && html.includes("Signed in with a write key"), `/ renders for the write key and names its scope (${home.status})`);
@@ -140,9 +177,12 @@ const tool = async (name: string, toolArgs: Record<string, unknown> = {}) => {
   assert(kw.status === 200 && !kw.isError && /^No thoughts contain/.test(kw.text), `search_thoughts_keyword reaches the database (${kw.status}: ${kw.text.split("\n")[0]})`);
   const unnamed = await fetch(`${base}/api/mcp`, { method: "POST", headers: headers({ "content-type": "application/json" }), body: "{}" });
   assert(unnamed.status === 400, `a call with no tool name is 400 (${unnamed.status})`);
+  const unknown = await tool("no_such_tool");
+  assert(unknown.status === 422 && /not found/i.test(unknown.error), `a tool the server does not have is 422 with the server's words, not a 200 the page reads as data (${unknown.status}: ${unknown.error})`);
   const out = await fetch(`${base}/signout`, { method: "POST", redirect: "manual", headers: headers({ origin: base }) });
   takeCookie(out);
   assert(out.status === 303 && cookie === "", `sign-out is a POST that clears the cookie (${out.status})`);
+  assert(/Max-Age=0/i.test(lastSetCookie) && attributesHold(lastSetCookie), `…with a Set-Cookie a plain-HTTP browser accepts — not Secure (${lastSetCookie.replace(/=[^;]*/, "=…")})`);
   const after = await tool("thought_stats");
   assert(after.status === 401, `…and /api/mcp is 401 again (${after.status})`);
 }
@@ -160,6 +200,11 @@ if (READ_KEY) {
   assert(stats.status === 200 && stats.text.startsWith("Total thoughts:"), `the read key reads stats (${stats.status})`);
   const cap = await tool("capture_thought", { content: "the dashboard smoke must never store this" });
   assert(cap.status === 403 && /read-scoped/.test(cap.error), `the read key is refused capture by the proxy with 403, before the server is asked (${cap.status}: ${cap.error})`);
+  // A write tool the proxy does not gate itself: the SERVER refuses it under the read key — the tool is not
+  // registered for it — which proves the key forwarded is this visitor's, not one from the dashboard's env
+  // (a proxy forwarding a write key from env answered "No thought with id …" here; first review pass).
+  const upd = await tool("update_thought", { id: "00000000-0000-0000-0000-000000000000", content: "never" });
+  assert(upd.status === 422 && /Tool update_thought not found/.test(upd.error), `the read key's own scope reaches the server: update_thought is not a tool it has (${upd.status}: ${upd.error})`);
   const out = await fetch(`${base}/signout`, { method: "POST", redirect: "manual", headers: headers({ origin: base }) });
   takeCookie(out);
   assert(out.status === 303 && cookie === "", "…and signs out");

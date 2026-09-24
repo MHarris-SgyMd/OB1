@@ -2,14 +2,17 @@ import { json } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import type { RequestHandler } from './$types';
 import { callTool, mcpUrl, McpUnauthorized, McpUnreachable } from '$lib/server/mcp';
-import { SESSION_COOKIE } from '$lib/server/session';
+import { cookieOptions, SESSION_COOKIE } from '$lib/server/session';
 
 // The browser's one door to the brain: a tool call, forwarded with the
 // visitor's own key (from the sealed cookie, never from this server's env), so
 // what the dashboard may do is what that key may do. A read key is refused
 // capture here, before the server is asked — the server would refuse too (the
-// tool is not registered for it), but the visitor should be told why.
-export const POST: RequestHandler = async ({ request, locals, cookies }) => {
+// tool is not registered for it), but the visitor should be told why. A tool
+// result the server marks isError — a tool this key was not given, an id that
+// does not exist — is 422 with the tool's text, not a 200 the page would read
+// as data (first review pass: an unknown tool rendered as "Total thoughts: 0").
+export const POST: RequestHandler = async ({ request, locals, cookies, url }) => {
 	const session = locals.session;
 	if (!session) return json({ error: 'Unauthorized' }, { status: 401 });
 
@@ -28,11 +31,13 @@ export const POST: RequestHandler = async ({ request, locals, cookies }) => {
 	}
 
 	try {
-		return json({ result: await callTool(mcpUrl(env), session.key, name, args) });
+		const result = await callTool(mcpUrl(env), session.key, name, args);
+		if (result?.isError) return json({ error: result.content?.[0]?.text || 'The tool refused the call' }, { status: 422 });
+		return json({ result });
 	} catch (err) {
 		if (err instanceof McpUnauthorized) {
 			// Revoked since sign-in: the cookie is no longer a session.
-			cookies.delete(SESSION_COOKIE, { path: '/' });
+			cookies.delete(SESSION_COOKIE, cookieOptions(url));
 			return json({ error: err.message }, { status: 401 });
 		}
 		if (err instanceof McpUnreachable) return json({ error: err.message }, { status: 502 });

@@ -790,9 +790,11 @@ const ALLOW_HEADERS = /"Access-Control-Allow-Headers":\s*\n?\s*"([^"]+)"/;
  * on every non-initialize POST, so that client was the one it could never see. A
  * server with no list at all is not a browser's to reach and is not held.
  */
+const HELD_ALLOW_LISTS: string[] = [];
 const holdsBrowserHeaders = (file: string, text: string) => {
   const list = text.match(ALLOW_HEADERS);
   if (!list) return;
+  HELD_ALLOW_LISTS.push(file);
   const names = list[1].split(",").map((h) => h.trim().toLowerCase());
   for (const h of ["mcp-protocol-version", "last-event-id"]) {
     assert(names.includes(h), `${file}: Access-Control-Allow-Headers names ${h} — a browser client's preflight is refused without it (SMD-1668)`);
@@ -873,6 +875,10 @@ for (const s of SERVERS) {
   assert(!ACCEPT_PATCH.test(text), `${file}: the Accept patch is gone (change 84)`);
   holdsBrowserHeaders(file, text);
 }
+// The rule reached the four lists the tree publishes — a list respelled (a template literal, hono's cors())
+// would drop out of the regex's reach silently otherwise (first review pass).
+assert(HELD_ALLOW_LISTS.length === 4,
+  `the allow-list rule read four lists — delete-thought, update-thought, kubernetes-deployment, enhanced-mcp (${HELD_ALLOW_LISTS.length}: ${HELD_ALLOW_LISTS.join(", ")})`);
 
 // The files this test cannot import — a Next.js route, a README's code block, a
 // Node stub — say the same thing in their text. (The cost recipe's per-session

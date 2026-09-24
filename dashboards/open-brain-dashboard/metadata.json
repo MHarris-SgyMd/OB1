@@ -11,7 +11,7 @@
     "open_brain": true,
     "services": [],
     "tools": [
-      "Bun 1.4+ or Node.js 18+"
+      "Bun 1.4+ or Node.js 20.19+"
     ]
   },
   "tags": [

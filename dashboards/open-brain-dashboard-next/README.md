@@ -40,7 +40,7 @@ Provides 9 pages for managing your thoughts:
 | Credential | Where to get it | Where it goes |
 |------------|----------------|---------------|
 | `NEXT_PUBLIC_API_URL` | Where `open-brain-rest` is served — `http://127.0.0.1:8787` when run under Bun from a checkout ([its README](../../integrations/open-brain-rest/README.md#deploy)) | `.env` or hosting env vars |
-| `AGENT_MEMORY_API_URL` | Optional. Where `agent-memory-api` is served, run the same way | `.env` or hosting env vars |
+| `AGENT_MEMORY_API_URL` | Where `agent-memory-api` is served, run the same way — set it: the fallback derives it from `NEXT_PUBLIC_API_URL` only when that ends in `/open-brain-rest` | `.env` or hosting env vars |
 | `AGENT_MEMORY_WORKSPACE_ID` | Optional. Default workspace for Agent Memory governance views | `.env` or hosting env vars |
 | `AGENT_MEMORY_PROJECT_ID` | Optional. Default project filter for Agent Memory governance views | `.env` or hosting env vars |
 | `SESSION_SECRET` | Generate: `openssl rand -hex 32` | `.env` or hosting env vars |

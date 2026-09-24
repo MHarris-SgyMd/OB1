@@ -14,7 +14,7 @@
 
 ## What it does
 
-This dashboard talks to your Open Brain server over MCP — the same six tools
+This dashboard talks to your Open Brain server over MCP — the same tools
 every AI client uses — and gives you an interface to:
 
 - capture new thoughts from a web form,
@@ -40,7 +40,7 @@ the REST gateway.)
 - A running Open Brain server ([SETUP.md](../../SETUP.md) — the compose stack
   publishes it on `http://127.0.0.1:8000/`), or any URL that speaks MCP
 - An access key for it — read-scoped is enough to browse and search
-- Bun 1.4+ (or Node.js 18+ with npm)
+- Bun 1.4+ (or Node.js 20.19+ / 22.12+ with npm — Vite 7's floor)
 
 ## Credential Tracker
 
@@ -109,8 +109,10 @@ HOSTING
 - **Netlify:** Deploy as a SvelteKit site, set the same two variables.
 
 The session cookie is marked `Secure` when the request arrived over HTTPS —
-every hosted deploy — and not on a plain-HTTP preview (`bun run preview` on
-`127.0.0.1`, which CI drives). Put TLS in front of any deploy others can reach.
+every hosted deploy — and not on plain HTTP (`bun run preview` on `127.0.0.1`,
+which CI drives), on sign-in and on sign-out alike. The sealed token also
+carries its own expiry, a day, so a copied cookie value stops working then.
+Put TLS in front of any deploy others can reach.
 
 ## Expected outcome
 

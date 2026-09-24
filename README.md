@@ -141,7 +141,7 @@ Plain-text skill packs you can drop into Claude Code, Codex, or other AI clients
 
 ### [`/dashboards`](dashboards/) — Frontend Templates
 
-Host on Vercel or Netlify, pointed at your Supabase backend. Two community-built options — pick the framework you prefer.
+Host on Vercel or Netlify, pointed at your Open Brain server and signed into with one of its access keys. Two community-built options — pick the framework you prefer.
 
 | Dashboard | What It Does | Contributor |
 | --------- | ------------ | ----------- |

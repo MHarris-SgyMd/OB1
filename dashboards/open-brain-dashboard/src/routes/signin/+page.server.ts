@@ -2,7 +2,7 @@ import { fail, redirect } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import type { Actions, PageServerLoad } from './$types';
 import { listTools, mcpUrl, McpUnauthorized, McpUnreachable } from '$lib/server/mcp';
-import { seal, SESSION_COOKIE, SESSION_MAX_AGE, sessionSecret } from '$lib/server/session';
+import { cookieOptions, seal, SESSION_COOKIE, SESSION_MAX_AGE, sessionSecret } from '$lib/server/session';
 
 export const load: PageServerLoad = async ({ locals }) => {
 	if (locals.session) {
@@ -30,14 +30,8 @@ export const actions: Actions = {
 		}
 
 		const token = await seal({ key, canCapture: tools.includes('capture_thought') }, sessionSecret(env));
-		cookies.set(SESSION_COOKIE, token, {
-			path: '/',
-			httpOnly: true,
-			sameSite: 'lax',
-			// Secure on HTTPS; a plain-HTTP preview on 127.0.0.1 (CI's) would otherwise never send it back.
-			secure: url.protocol === 'https:',
-			maxAge: SESSION_MAX_AGE,
-		});
+		// The one attribute set (session.ts): Secure follows the scheme, here and on every delete.
+		cookies.set(SESSION_COOKIE, token, { ...cookieOptions(url), maxAge: SESSION_MAX_AGE });
 		throw redirect(303, '/');
 	},
 };

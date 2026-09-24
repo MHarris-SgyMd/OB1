@@ -369,10 +369,18 @@ function checkDeps(meta: Metadata | undefined, { rel }: ContribDir) {
 /** Repo-relative path with `/` separators on every OS, so it can be a key. */
 const relOf = (file: string) => relative(ROOT, file).split(sep).join("/");
 
+/**
+ * Directories no check reads: the repo's own machinery, and the build output a
+ * dashboard leaves behind (`.vercel/output`, `.svelte-kit/output`, `.next` —
+ * gitignored, and a SvelteKit server bundle carries the shell spawn check 6
+ * flags; the README's `bun run build` before its smoke made that a routine
+ * false FAIL on a contributor's tree, SMD-1801's first review pass).
+ */
+const UNREAD_DIRS = new Set([".git", "node_modules", ".claude", ".vercel", ".svelte-kit", ".next", ".output", ".netlify"]);
 function walk(dir: string, out: string[] = [], match = /\.(sql|md)$/) {
   for (const name of readdirSync(dir)) {
     // .claude holds this repo's agent worktrees — whole copies of the tree.
-    if (name === ".git" || name === "node_modules" || name === ".claude") continue;
+    if (UNREAD_DIRS.has(name)) continue;
     const p = join(dir, name);
     const s = statSync(p);
     if (s.isDirectory()) walk(p, out, match);
@@ -3363,7 +3371,7 @@ const LAYOUT_PROBES: [string, () => LayoutArgs, string[]][] = [
   ["a path citation of a table change (no file can exist)", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.md:1", n: 5, name: "005-below.md" }] }; }, ["dangling"]],
 ];
 
-const SKIP_DIRS = new Set([".git", "node_modules", ".planning", ".cf-out", ".claude", "dist", "build", ".wrangler"]);
+const SKIP_DIRS = new Set([...UNREAD_DIRS, ".planning", ".cf-out", "dist", "build", ".wrangler"]);
 /**
  * Every text file a citation can live in: what git tracks plus what it would
  * track (untracked, not ignored) — so a change file not yet added is read, and a

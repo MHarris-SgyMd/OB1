@@ -36,28 +36,35 @@ export function mcpUrl(env: Record<string, string | undefined>): string {
 	return url;
 }
 
-/** Raw JSON, or the last `data:` line of an SSE frame — the two shapes the transport answers with. */
-function parseBody(body: string): JsonRpcResponse {
+/**
+ * Raw JSON, or an SSE frame — the two shapes the transport answers with. In a
+ * frame, the `data:` line whose `id` is the request's; a server that streams a
+ * notification after the response would otherwise be read by its last line
+ * (first review pass). The last parseable line when none carries the id.
+ */
+function parseBody(body: string, id: number): JsonRpcResponse {
 	const trimmed = body.trim();
 	if (!trimmed) return {};
 	if (trimmed.startsWith('{')) return JSON.parse(trimmed) as JsonRpcResponse;
-	const dataLines = trimmed
-		.split('\n')
-		.map((line) => line.trim())
-		.filter((line) => line.startsWith('data:'))
-		.map((line) => line.slice(5).trim())
-		.filter((line) => line && line !== '[DONE]');
-	for (let i = dataLines.length - 1; i >= 0; i--) {
+	const frames: (JsonRpcResponse & { id?: unknown })[] = [];
+	for (const line of trimmed.split('\n')) {
+		const t = line.trim();
+		if (!t.startsWith('data:')) continue;
+		const data = t.slice(5).trim();
+		if (!data || data === '[DONE]') continue;
 		try {
-			return JSON.parse(dataLines[i]) as JsonRpcResponse;
+			frames.push(JSON.parse(data) as JsonRpcResponse & { id?: unknown });
 		} catch {
 			continue;
 		}
 	}
-	throw new McpUnreachable('Unable to parse the MCP response');
+	const answer = frames.find((f) => f.id === id) ?? frames.at(-1);
+	if (!answer) throw new McpUnreachable('Unable to parse the MCP response');
+	return answer;
 }
 
 export async function rpc(url: string, key: string, method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+	const id = Date.now();
 	let upstream: Response;
 	try {
 		upstream = await fetch(url, {
@@ -67,7 +74,7 @@ export async function rpc(url: string, key: string, method: string, params: Reco
 				Accept: 'application/json, text/event-stream',
 				'x-brain-key': key,
 			},
-			body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method, params }),
+			body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
 		});
 	} catch (err) {
 		throw new McpUnreachable(`Could not reach the MCP server: ${err instanceof Error ? err.message : String(err)}`);
@@ -77,7 +84,7 @@ export async function rpc(url: string, key: string, method: string, params: Reco
 		const text = await upstream.text().catch(() => '');
 		throw new McpUnreachable(`MCP upstream HTTP ${upstream.status}${text ? `: ${text.slice(0, 200)}` : ''}`);
 	}
-	const parsed = parseBody(await upstream.text());
+	const parsed = parseBody(await upstream.text(), id);
 	if (parsed.error) {
 		if (parsed.error.code === UNAUTHORIZED_CODE) throw new McpUnauthorized();
 		throw new Error(parsed.error.message || 'MCP error');
