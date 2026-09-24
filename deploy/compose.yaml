@@ -444,7 +444,10 @@ services:
       interval: 10s
       timeout: 3s
       retries: 3
-      # The first start downloads the weights before it listens.
+      # The first start downloads the weights before it listens: 606 MB in
+      # ~20 s here, and past these ten minutes below ~1 MB/s — then jev is
+      # unhealthy and the server, which waits for it, does not start.
+      # Pre-pull on a slow link: compose --profile jev run --rm jev --fetch-only.
       start_period: 600s
     # A fetch that fails or a file that hashes wrong exits 1 with the file
     # named; three tries cover a network that was not up yet, then the service

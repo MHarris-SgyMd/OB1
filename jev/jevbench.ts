@@ -33,6 +33,7 @@
  *   bun jevbench.ts <model dir>
  */
 
+import { INSUFFICIENT_EVIDENCE } from "../server-portable/jev-contract.ts";
 import { ensureModel, type ModelPins } from "./fetch-model.ts";
 import { INSUFFICIENT_LABEL, LABEL_MARKER, loadVerdict, SEP_MARKER, truncate, type Encoder, type Runner } from "./verdict.ts";
 
@@ -93,7 +94,6 @@ export function pyDumps(v: unknown): string {
 }
 
 export type Framing = "bare" | "it-is";
-export const ABSTAIN = "__insufficient_evidence__";
 
 /** The prompt the adapter's query becomes in the author's engine, and the option ids in slot order. */
 export function jevbenchPrompt(t: Task, framing: Framing): { prompt: string; ids: string[] } {
@@ -103,16 +103,16 @@ export function jevbenchPrompt(t: Task, framing: Framing): { prompt: string; ids
   const asked = `Question: ${q.instructions}\n\nContext:\n${state}`;
   if (q.type === "choice") {
     const opts = Object.entries(q.criteria as Record<string, string>).map(([k, v]) => ({ id: k, desc: v || k }));
-    return { prompt: withLabels(opts.map((o) => (framing === "it-is" ? `It is ${o.desc}` : o.desc)), asked), ids: [...opts.map((o) => o.id), ABSTAIN] };
+    return { prompt: withLabels(opts.map((o) => (framing === "it-is" ? `It is ${o.desc}` : o.desc)), asked), ids: [...opts.map((o) => o.id), INSUFFICIENT_EVIDENCE] };
   }
   if (q.type === "score") {
     const levels = q.criteria as string[];
     // Level(value=float(i)) and f"{description} (Value: {value})": Python writes the float as 0.0.
-    return { prompt: withLabels(levels.map((d, i) => `${String(d)} (Value: ${i}.0)`), asked), ids: [...levels.map((_, i) => String(i)), ABSTAIN] };
+    return { prompt: withLabels(levels.map((d, i) => `${String(d)} (Value: ${i}.0)`), asked), ids: [...levels.map((_, i) => String(i)), INSUFFICIENT_EVIDENCE] };
   }
   const c = (q.criteria ?? {}) as Record<string, string>;
   const prop = q.instructions + (c.true || c.false ? ` (true: ${c.true || "yes"}; false: ${c.false || "no"})` : "");
-  return { prompt: withLabels([`true: ${prop}`, `false: not ${prop}`], `Context:\n${state}\n\nEvaluate proposition: ${prop}`), ids: ["true", "false", ABSTAIN] };
+  return { prompt: withLabels([`true: ${prop}`, `false: not ${prop}`], `Context:\n${state}\n\nEvaluate proposition: ${prop}`), ids: ["true", "false", INSUFFICIENT_EVIDENCE] };
 }
 
 export type Arm = { framing: Framing; maxTokens: number };
@@ -126,7 +126,7 @@ export async function runArm(tasks: Task[], encoder: Encoder, run: Runner, arm: 
     const cut = truncate(encoder.encode(prompt).ids, arm.maxTokens);
     const logits = await run(BigInt64Array.from(cut.ids, BigInt), new BigInt64Array(cut.ids.length).fill(1n));
     let top = -1;
-    for (let i = 0; i < ids.length; i++) if (ids[i] !== ABSTAIN && (top < 0 || logits[i] > logits[top])) top = i;
+    for (let i = 0; i < ids.length; i++) if (ids[i] !== INSUFFICIENT_EVIDENCE && (top < 0 || logits[i] > logits[top])) top = i;
     const want = t.question.type === "noul" ? (t.expected === "yes" ? "true" : "false") : String(t.expected);
     out.push({ id: t.id, tier: t.tier, correct: ids[top] === want, truncated: cut.truncated });
   }

@@ -247,8 +247,8 @@ FSL-1.1-MIT.
 
 ## Tests
 
-`bun test-jev.ts` — 101 assertions with no model; with `JEV_TEST_MODEL_DIR`
+`bun test-jev.ts` — 104 assertions with no model; with `JEV_TEST_MODEL_DIR`
 naming the pinned files, [9] adds the model's presets and its refusals on the
 real tokenizer, [10] the receipt run and [11] both JevBench rows and the
-served-prompt equivalence (114, about 100 s). CI runs it in the
+served-prompt equivalence (117, about 100 s). CI runs it in the
 portable-server job, with `bunx tsc --noEmit` here (check 18 lists `jev`).

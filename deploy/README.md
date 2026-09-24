@@ -298,7 +298,10 @@ podman compose -f deploy/compose.yaml --profile jev logs -f jev
 ```
 
 The first start fetches the pinned weights (606 MB, about 20 s here) into the
-`jev-models` volume; every start verifies each file's sha256 and replaces one
+`jev-models` volume — on a link slower than ~1 MB/s that outlasts the
+healthcheck's ten-minute start period and the server, which waits for a
+healthy `jev`, does not start: pre-pull with
+`podman compose -f deploy/compose.yaml --profile jev run --rm jev --fetch-only`; every start verifies each file's sha256 and replaces one
 that does not match (a verify-only restart serves in about a second). About
 1 GB resident, outside Ollama's scheduler. With `OB1_JEV_BASE_URL` set the
 server's preflight dials the tier and fails the start when it does not answer,

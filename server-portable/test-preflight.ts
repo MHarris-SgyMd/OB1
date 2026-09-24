@@ -2176,7 +2176,7 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
   // without --deep" and "the refused decision sent nothing" are facts about
   // the requests, not the report.
   const { INSUFFICIENT_EVIDENCE, JEV_CONTRACT } = await import("./jev-contract.ts");
-  const MODEL = { name: "verdict-v1.4", source: "https://huggingface.co/o/r", revision: "8af2496eb63c7fa66d7d234e1f62629380030eb4", weights_sha256: "4ae01f82".padEnd(64, "0"), calibrator_sha256: "af2a8769".padEnd(64, "0") };
+  const MODEL = { name: "verdict-v1.4", source: "https://huggingface.co/o/r", revision: "8af2496eb63c7fa66d7d234e1f62629380030eb4", weights_sha256: "4ae01f82".padEnd(64, "0"), calibrator_sha256: "af2a8769".padEnd(64, "0"), rules: "openjev-engine@00b5ee96#d1c5fb07e514" };
   const seen: string[] = [];
   const stub = Bun.serve({
     port: 0,
@@ -2249,9 +2249,32 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
   const viaBadProxy = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", HTTP_PROXY: `http://127.0.0.1:${badProxy.port}`, http_proxy: undefined, NO_PROXY: undefined, no_proxy: undefined });
   badProxy.stop();
   assert(/✗\s+jev tier\s+.* answers, but not as the tier: Info request .*502.*; HTTP_PROXY is set, so this call goes through that proxy/.test(viaBadProxy.out), "an error status through a proxy is not the tier's, and the proxy is named as the route");
-  // NO_PROXY naming the host exempts it: the proxy is then neither the route nor the fix.
-  const exempted = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: "http://127.0.0.1:1", OB1_JEV_LOCAL: "1", HTTP_PROXY: "http://127.0.0.1:9", http_proxy: undefined, NO_PROXY: "127.0.0.1", no_proxy: undefined });
-  assert(/✗\s+jev tier\s+nothing answers at http:\/\/127\.0\.0\.1:1 — the connection was refused/.test(exempted.out) && !/HTTP_PROXY is set/.test(exempted.out), "a host NO_PROXY names is dialled direct, and the row does not blame the proxy");
+  // NO_PROXY exempts the host by Bun's rule — the host, `*`, host:port — and
+  // the call goes direct: a live tier behind a proxy that answers only 502
+  // passes, which it cannot through the proxy (seventh review pass: the
+  // earlier case could not tell a direct dial from a proxied one).
+  const exemptProxy = Bun.serve({ port: 0, fetch: () => new Response("bad gateway", { status: 502 }) });
+  for (const noProxy of ["127.0.0.1", "*", `127.0.0.1:${stub.port}`, "localhost,127.0.0.1"]) {
+    const exempted = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", HTTP_PROXY: `http://127.0.0.1:${exemptProxy.port}`, http_proxy: undefined, NO_PROXY: noProxy, no_proxy: undefined });
+    assert(/✓\s+jev tier\s+http:\/\/127\.0\.0\.1:\d+ serves verdict-v1\.4/.test(exempted.out) && !/HTTP_PROXY is set/.test(exempted.out), `NO_PROXY=${noProxy}: the tier is dialled direct past the proxy, and the row does not blame it`);
+  }
+  // …and where the exemption shows: a refused exempt host is not blamed on the
+  // proxy (the ✓ rows above carry no proxy wording to test). The suffix
+  // spelling (`.internal`) needs a resolvable subdomain and is not driven here.
+  for (const noProxy of ["127.0.0.1", "*", "127.0.0.1:1"]) {
+    const refused = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: "http://127.0.0.1:1", OB1_JEV_LOCAL: "1", HTTP_PROXY: `http://127.0.0.1:${exemptProxy.port}`, http_proxy: undefined, NO_PROXY: noProxy, no_proxy: undefined });
+    assert(/✗\s+jev tier\s+nothing answers at http:\/\/127\.0\.0\.1:1 — the connection was refused/.test(refused.out) && !/HTTP_PROXY is set/.test(refused.out) && !/Add 127\.0\.0\.1 to NO_PROXY/.test(refused.out),
+           `NO_PROXY=${noProxy}: a refused exempt host is not blamed on the proxy`);
+  }
+  // A port that is not the tier's does not exempt it: the call goes through the proxy, which answers 502.
+  const wrongPort = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", HTTP_PROXY: `http://127.0.0.1:${exemptProxy.port}`, http_proxy: undefined, NO_PROXY: "127.0.0.1:1", no_proxy: undefined });
+  exemptProxy.stop();
+  assert(/✗\s+jev tier\s+.*502.*HTTP_PROXY is set/.test(wrongPort.out), "NO_PROXY=host:another-port does not exempt it, and the proxy is named");
+  // An /info that names the contract and lacks its fields answers, but not as the tier.
+  const partial = Bun.serve({ port: 0, fetch: () => Response.json({ contract: JEV_CONTRACT }) });
+  const partialRun = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `http://127.0.0.1:${partial.port}`, OB1_JEV_LOCAL: "1" });
+  partial.stop();
+  assert(/✗\s+jev tier\s+http:\/\/127\.0\.0\.1:\d+ answers, but not as the tier: .*lacks model, kinds, max_options/.test(partialRun.out), "an /info with the contract's name and not its fields is not the tier, not a crash");
   // A certificate the runtime does not trust: something answers; the tier serves plain http.
   const jevCerts = mkdtempSync(join(tmpdir(), "ob1-preflight-jev-tls-"));
   const jevMinted = Bun.spawnSync(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(jevCerts, "k.pem"), "-out", join(jevCerts, "c.pem"), "-subj", "/CN=localhost", "-days", "1"], { stdout: "ignore", stderr: "ignore" });

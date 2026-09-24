@@ -18,7 +18,7 @@
  * OB1_JEV_MODEL and OB1_JEV_LOCAL — where to reach it, what to expect, and
  * that it is on this box):
  *
- *   JEV_HOST       127.0.0.1 — the compose service sets 0.0.0.0 inside its network
+ *   JEV_HOST       127.0.0.1 — the image (jev/Dockerfile) sets 0.0.0.0 inside the compose network
  *   JEV_PORT       8020
  *   JEV_MODEL_DIR  ~/.cache/ob1-jev/<revision> — the compose service mounts a volume
  *   JEV_THREADS    4 — onnxruntime's intra-op threads
@@ -33,9 +33,6 @@ import { homedir } from "node:os";
 import { JEV_CONTRACT, JEV_MAX_BODY_BYTES, jevRequestProblem, type JevRequest, type JevResponse } from "../server-portable/jev-contract.ts";
 import { DEFAULT_HUB, ensureModel, openParts } from "./fetch-model.ts";
 import { CallerGone, createVerdictEngine, DecisionRefused, VERDICT, type Engine } from "./verdict.ts";
-
-/** The contract's body cap, which the client splits its batches under (first review pass: this was 2 MB, under what a valid batch could be). */
-export const MAX_BODY_BYTES = JEV_MAX_BODY_BYTES;
 
 /**
  * The body as text, or null past `max` bytes — counted as they arrive, so a
@@ -86,9 +83,10 @@ export function createHandler(engine: Engine): (req: Request) => Promise<Respons
     if (path === "/info") return json(200, engine.info);
 
     const declared = Number(req.headers.get("content-length") ?? "0");
-    if (declared > MAX_BODY_BYTES) return json(413, { error: `the body is ${declared} bytes; at most ${MAX_BODY_BYTES}` });
-    const raw = await readCapped(req, MAX_BODY_BYTES);
-    if (raw === null) return json(413, { error: `the body is over ${MAX_BODY_BYTES} bytes` });
+    // The contract's cap, which the client packs its requests under.
+    if (declared > JEV_MAX_BODY_BYTES) return json(413, { error: `the body is ${declared} bytes; at most ${JEV_MAX_BODY_BYTES}` });
+    const raw = await readCapped(req, JEV_MAX_BODY_BYTES);
+    if (raw === null) return json(413, { error: `the body is over ${JEV_MAX_BODY_BYTES} bytes` });
     let body: unknown;
     try {
       body = JSON.parse(raw);
@@ -169,8 +167,10 @@ if (import.meta.main) {
   server = Bun.serve({
     hostname: host,
     port,
-    // A queued request waits for the ones ahead of it; Bun's 10 s default
-    // would close a connection that is only waiting its turn.
+    // Bun 1.4 keeps a connection open while its handler is pending — a
+    // request waiting its turn answered 200 at 13 s under the default
+    // (measured, seventh review pass); this bounds a connection idle with
+    // nothing in flight, generously.
     idleTimeout: 120,
     fetch: createHandler(engine),
   });

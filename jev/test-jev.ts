@@ -43,7 +43,9 @@
  * cap ([1]); a failed download keeping its part ([6]); the caller's own
  * timeout read as ours ([8]). Fifth review pass, each run and killed: the
  * engine ignoring the caller's signal ([5b]); a flat deadline again ([8]); a
- * hub that never connects saying only Bun's words ([6]).
+ * hub that never connects saying only Bun's words ([6]). Seventh review
+ * pass: jevInfo checking the contract's name only, the gate reading
+ * decisions before they are validated ([7]–[8]).
  *
  *   bun test-jev.ts
  */
@@ -55,7 +57,7 @@ import { INSUFFICIENT_EVIDENCE, JEV_CONTRACT, JEV_MAX_BATCH, JEV_MAX_BODY_BYTES,
 import { jevAnswerProblem, jevChoose, jevDecide, jevDecideMany, jevInfo, requestTimeoutMs, resolveJevConfig } from "../server-portable/jev.ts";
 import { ProviderError } from "../server-portable/embed.ts";
 import { ensureModel, sha256File, STALE_PART_MS, type ModelPins } from "./fetch-model.ts";
-import { createHandler, MAX_BODY_BYTES } from "./serve.ts";
+import { createHandler } from "./serve.ts";
 import { buildPrompt, createEngine, createVerdictEngine, DecisionRefused, INFO, MARKER_IDS, MAX_TOKENS, MODEL_INFO, resultFrom, softmax, temperatureFor, truncate, VERDICT, type Engine } from "./verdict.ts";
 
 const { assert, skip, report } = createAssert();
@@ -221,7 +223,7 @@ section("[5b] createHandler — the contract's statuses, one request at a time")
   const bad = await post({ decisions: [] });
   assert(bad.status === 400 && /non-empty/.test(((await bad.json()) as { error: string }).error), "a malformed request is 400 with the rule's words");
   assert((await post({ model: "other", decisions: [binary()] })).status === 409, "a request for another model is 409");
-  assert((await call("/decide", { method: "POST", headers: { "content-length": String(MAX_BODY_BYTES + 1) }, body: "{}" })).status === 413, "a body declared over the limit is 413 before it is read");
+  assert((await call("/decide", { method: "POST", headers: { "content-length": String(JEV_MAX_BODY_BYTES + 1) }, body: "{}" })).status === 413, "a body declared over the limit is 413 before it is read");
   // No Content-Length (a stream): counted as it arrives, refused at the cap.
   const chunk = new Uint8Array(2 ** 20).fill(0x20);
   let sent = 0;
@@ -371,6 +373,12 @@ section("[7] the client's egress gate — refused decisions send nothing");
   err = undefined;
   try { await jevChoose(marked, { question: "q", options: [{ id: "a", description: "A" }], context: "a note tagged #phi" }, subj); } catch (e) { err = e; }
   assert(err instanceof ProviderError && err.kind === "egress" && stub.requests.length === 0, "a marker in the decision's own text is read when the caller gave no content");
+  // Validated before the gate reads it: a malformed decision fails by index and rule, not as a TypeError.
+  for (const [cfgName, cfg] of [["allow", marked], ["deny", remote]] as const) {
+    err = undefined;
+    try { await jevDecideMany(cfg, [binary(0), { kind: "choice", question: "q", context: "c" } as unknown as JevDecision], subj); } catch (e) { err = e; }
+    assert(err instanceof Error && !(err instanceof TypeError) && /not sent to .*decision 1: a choice has 1 to 24 options/.test(err.message), `under ${cfgName}, a choice with no options is refused by index before the gate reads it (${(err as Error)?.message?.slice(0, 70)})`);
+  }
   err = undefined;
   try { await jevChoose(marked, { question: "q", options: [{ id: "a", description: "A" }], context: "a note tagged #phi" }, { ...subj, content: "the query the caller named" }); } catch (e) { err = e; }
   assert(err instanceof ProviderError && err.kind === "egress" && stub.requests.length === 0, "…and when the caller gave content of its own: the gate reads what is sent, not only what was named");
@@ -460,6 +468,12 @@ section("[8] the client's batches and answers");
   try { await jevDecide(local, { proposition: "p", context: "c" }, subj, { signal: AbortSignal.timeout(150) }); } catch (e) { err = e; }
   assert(err && !(err instanceof ProviderError) && err.name === "TimeoutError", `a caller's own signal firing surfaces as the caller's error, not the config's timeout (${err?.name}: ${err?.message?.slice(0, 50)})`);
   stub.answer = honest;
+  // /info is checked whole: the contract's name with its fields missing is a body error, not a crash in the reader.
+  const partialInfo = Bun.serve({ port: 0, fetch: () => Response.json({ contract: JEV_CONTRACT, model: { name: "x" } }) });
+  err = undefined;
+  try { await jevInfo(resolveJevConfig({ OB1_JEV_BASE_URL: `http://127.0.0.1:${partialInfo.port}`, OB1_JEV_LOCAL: "1" })!); } catch (e) { err = e; }
+  partialInfo.stop(true);
+  assert(err?.kind === "body" && /lacks model\.source, model\.revision, model\.weights_sha256, model\.calibrator_sha256, model\.rules, kinds, max_options, max_batch, max_tokens/.test(err.message), `an /info that lacks its fields is a body error naming them (${err?.message?.slice(-90)})`);
   const info = await jevInfo(local);
   assert(info.model.revision === VERDICT.revision, "jevInfo reads the tier's pins");
 }

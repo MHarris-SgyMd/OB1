@@ -390,15 +390,37 @@ function probeRemedy(base: string, knob: string): string {
 }
 const TLS_REMEDY = "Serve it over http:// on the box, or trust its issuer for the server (NODE_EXTRA_CA_CERTS=<ca.pem>); NODE_TLS_REJECT_UNAUTHORIZED=0 disables the check for every call the server makes.";
 /**
+ * Whether NO_PROXY / no_proxy exempts this base, by the rule Bun 1.4's fetch
+ * applies (measured by SMD-2050's seventh review pass): `*` exempts every
+ * host; an entry exempts its own host and every subdomain of it, with or
+ * without a leading dot (`internal`, `.internal` and `b.internal` all exempt
+ * `a.b.internal`); an entry with a port exempts only that port. Not matched,
+ * as Bun does not: `*.internal`, CIDR ranges, `localhost` for 127.0.0.1.
+ */
+function noProxyExempts(base: string): boolean {
+  let url: URL;
+  try { url = new URL(base); } catch { return false; }
+  const host = url.hostname.toLowerCase();
+  const port = url.port || (url.protocol === "https:" ? "443" : "80");
+  const entries = [process.env.NO_PROXY, process.env.no_proxy].flatMap((v) => (v ?? "").split(",")).map((e) => e.trim().toLowerCase()).filter(Boolean);
+  return entries.some((entry) => {
+    if (entry === "*") return true;
+    const at = entry.lastIndexOf(":");
+    const [name, wantPort] = at > 0 && /^\d+$/.test(entry.slice(at + 1)) ? [entry.slice(0, at), entry.slice(at + 1)] : [entry, null];
+    const bare = name.replace(/^\./, "");
+    return (host === bare || host.endsWith(`.${bare}`)) && (wantPort === null || wantPort === port);
+  });
+}
+/**
  * The proxy variable Bun's fetch reads for this base — HTTP_PROXY/http_proxy
- * for http, HTTPS_PROXY/https_proxy for https — or null. Loopback and private
- * addresses go through it too unless NO_PROXY names them, and so does every
- * call the server makes, so a failure here is the route's before it is the
- * endpoint's; podman forwards the host's proxy variables into containers by
- * default (fifth review pass). Whether NO_PROXY exempts the host is Bun's
- * rule to apply, so the text says "unless" rather than deciding.
+ * for http, HTTPS_PROXY/https_proxy for https — or null, also when NO_PROXY
+ * exempts the base (noProxyExempts). Loopback and private addresses go
+ * through it too unless exempted, and so does every call the server makes, so
+ * a failure here is the route's before it is the endpoint's; podman forwards
+ * the host's proxy variables into containers by default (fifth review pass).
  */
 function proxyKnobFor(base: string): string | null {
+  if (noProxyExempts(base)) return null;
   const names = base.startsWith("https:") ? ["HTTPS_PROXY", "https_proxy"] : ["HTTP_PROXY", "http_proxy"];
   return names.find((n) => process.env[n]) ?? null;
 }
@@ -3102,10 +3124,9 @@ if (!jevCfg) {
     // serves plain http); nothing answered; and in each, a proxy variable
     // that routes the call is named, since podman forwards the host's.
     const err = e as Error & { kind?: string };
-    // A NO_PROXY entry naming the host exactly exempts it (Bun 1.4, measured
-    // by the sixth review pass); then the proxy is not the route, and not the fix.
-    const exempt = [process.env.NO_PROXY, process.env.no_proxy].some((v) => (v ?? "").split(",").map((x) => x.trim().toLowerCase()).includes(host));
-    const proxy = exempt ? null : proxyKnobFor(base);
+    // An exempt host is dialled direct: the proxy is then not the route, and
+    // not the fix (proxyKnobFor, by Bun's NO_PROXY rule).
+    const proxy = proxyKnobFor(base);
     const route = proxy ? `; ${proxy} is set, so this call goes through that proxy unless NO_PROXY names ${host}` : "";
     const viaProxy = proxy ? `Add ${host} to NO_PROXY (and no_proxy) for the server, or unset ${proxy} for it. Otherwise: ` : "";
     if (err.kind === "http" || err.kind === "body") {

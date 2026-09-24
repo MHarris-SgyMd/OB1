@@ -21,8 +21,10 @@
  * answer is checked before it is believed.
  *
  * Provenance: every answer carries the model's name, source revision, weights
- * sha256 and calibrator sha256 (JevModelInfo). A caller that stores a
- * probability — a mention's confidence, a route — stores that beside it. The
+ * sha256, calibrator sha256 and `rules` — the prompt and calibration rules, since
+ * the same weights under another engine answer differently (JevModelInfo). A
+ * caller that stores a probability — a mention's confidence, a route — stores
+ * all five beside it. The
  * lineage table that would hold it for every derived row is SMD-1731's; this
  * tier supplies what such a row would record and builds nothing to hold it.
  *
@@ -219,6 +221,17 @@ const utf8 = new TextEncoder();
 export async function jevInfo(cfg: JevConfig, opts: CallOpts = {}): Promise<JevInfo> {
   const info = await exchange<JevInfo>(cfg, "GET", "/info", undefined, opts);
   if (info?.contract !== JEV_CONTRACT) throw new ProviderError(`${cfg.endpoint.base}/info speaks ${JSON.stringify(info?.contract)}, not ${JEV_CONTRACT}`, "body");
+  // The whole shape, not the contract's name alone: a partial second
+  // implementation (SemIf's adapter, SMD-2052) would otherwise read as a crash
+  // in whatever reads the fields (seventh review pass).
+  const m = info.model as Partial<JevModelInfo> | undefined;
+  const text = (v: unknown) => typeof v === "string" && v.length > 0;
+  const missing = [
+    ...(!m ? ["model"] : (["name", "source", "revision", "weights_sha256", "calibrator_sha256", "rules"] as const).filter((k) => !text(m[k])).map((k) => `model.${k}`)),
+    ...(!Array.isArray(info.kinds) || !info.kinds.length ? ["kinds"] : []),
+    ...(["max_options", "max_batch", "max_tokens"] as const).filter((k) => !Number.isInteger(info[k])),
+  ];
+  if (missing.length) throw new ProviderError(`${cfg.endpoint.base}/info names ${JEV_CONTRACT} but lacks ${missing.join(", ")}`, "body");
   return info;
 }
 
@@ -234,19 +247,24 @@ export async function jevInfo(cfg: JevConfig, opts: CallOpts = {}): Promise<JevI
  * and the requests before it are already answered: the error says how many.
  */
 export async function jevDecideMany(cfg: JevConfig, decisions: JevDecision[], subject: EgressSubject, opts: CallOpts = {}): Promise<{ results: JevResult[]; model: JevModelInfo; ms: number }> {
-  const gate = gateDecisions(subject, decisions, cfg);
-  if (!gate.allowed) throw refuseEgress("Decision", cfg.endpoint.base, gate);
-  // Every request built and checked before the first is sent: a bad decision
-  // at index 70 must not leave the first 64 decided and the caller holding
-  // half an answer.
-  const envelope = { ...(cfg.model ? { model: cfg.model } : {}) };
+  // Validated first, then gated: the gate reads each decision's fields, and a
+  // malformed one must fail by its index and rule, not as a TypeError inside
+  // the gate (seventh review pass).
   if (!decisions.length) throw new Error(`not sent to ${cfg.endpoint.base}: \`decisions\` is a non-empty array`);
-  const requests: { model?: string; decisions: JevDecision[] }[] = [];
-  const overhead = utf8.encode(JSON.stringify({ ...envelope, decisions: [] })).length;
-  let batch: JevDecision[] = [], bytes = overhead;
+  const envelope = { ...(cfg.model ? { model: cfg.model } : {}) };
   for (const [i, d] of decisions.entries()) {
     const problem = jevRequestProblem({ ...envelope, decisions: [d] });
     if (problem) throw new Error(`not sent to ${cfg.endpoint.base}: ${problem.replace(/^decision 0/, `decision ${i}`)}`);
+  }
+  const gate = gateDecisions(subject, decisions, cfg);
+  if (!gate.allowed) throw refuseEgress("Decision", cfg.endpoint.base, gate);
+  // Every decision checked (above) and every request built before the first is
+  // sent: a bad decision at index 70 must not leave the first 64 decided and
+  // the caller holding half an answer.
+  const requests: { model?: string; decisions: JevDecision[] }[] = [];
+  const overhead = utf8.encode(JSON.stringify({ ...envelope, decisions: [] })).length;
+  let batch: JevDecision[] = [], bytes = overhead;
+  for (const d of decisions) {
     const size = utf8.encode(JSON.stringify(d)).length + 1; // and its comma
     if (batch.length && (batch.length === JEV_MAX_BATCH || bytes + size > JEV_MAX_BODY_BYTES)) {
       requests.push({ ...envelope, decisions: batch });
