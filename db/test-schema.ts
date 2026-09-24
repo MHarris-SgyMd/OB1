@@ -70,8 +70,8 @@ import { fileURLToPath } from "node:url";
 import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, createAssert, FUNCTION_COMMENT_SQL, ISO_RE, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
 import {
-  DEFAULT_OPTIONS, FUZZY_FLOOR, coverage as graphCoverage, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
-  resolveSubject, subjectThoughts, topEntities, topThoughts, type Options as GraphOptions, type Runner,
+  DEFAULT_OPTIONS, DONE_WEIGHT, FUZZY_FLOOR, coverage as graphCoverage, lifecycleCaveat, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
+  resolveSubject, subjectThoughts, topEntities, topThoughts, weightsSql, type Options as GraphOptions, type Runner,
 } from "./graph-centrality.ts";
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { ENTITY_TYPES, NUMERIC_NAME_RE, RELATIONS } from "../server-portable/entities.ts";
@@ -5494,15 +5494,18 @@ console.log("\n[43] Migration 046: the event shape at the write boundary — who
   await db.exec(`DELETE FROM ob1_agents`);
 }
 
-// ── 44. db/graph-centrality.ts — the counts, the ladder, the control ─────────
+// ── 44. db/graph-centrality.ts — the counts, the ladder, the control, the lifecycle ──
 //
 // The script's exported SQL builders run here under PGlite through a Runner, so
 // the text the CLI sends is the text asserted. A small graph whose every count
 // is known by construction: the subject, three neighbours that separate under
 // each ranking, one numeric-noise entity (SMD-1935) that must count nowhere,
-// and a merged entity for the merged_from rung.
+// and a merged entity for the merged_from rung. The thoughts carry the
+// lifecycle board-sync stamps (SMD-1994): every count in the first half is read
+// with every weight 1, so the default run IS the drop-the-filter control, and
+// the lifecycle block reads the same graph under each filter and under decay.
 
-console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defined; the resolution ladder; numeric names out of every count; edges on vs off is the drop-the-graph control (SMD-1938)");
+console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defined; the resolution ladder; numeric names out of every count; edges on vs off is the drop-the-graph control (SMD-1938); a thought's lifecycle is a weight — the filter, the decay, and the unstamped passing every filter (SMD-1994)");
 {
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`);
@@ -5547,6 +5550,23 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   const ANITA = await idOf("anita", "person");
   const NUM = await idOf("021", "person");
   await db.query(`SELECT merge_entities($1::uuid, $2::uuid)`, [PG, await idOf("pg")]);
+  // The lifecycles, as board-sync stamps them (the three keys, source linear):
+  // t1 Done, t2 In Progress, t3 Backlog, t4 Todo, t5 Canceled; t6 none; t8 a
+  // status_type this tool does not know. Stamped BEFORE the counts below, which
+  // read every thought at weight 1 — the default — and so pin that the
+  // lifecycle read is additive.
+  const SYNCED = "2026-09-24T10:00:00.000Z";
+  const LATEST = "2026-09-24T11:00:00.000Z";
+  const stamp = (id: string, status: string, status_type: string, at = SYNCED) =>
+    db.query(`UPDATE thoughts SET metadata = metadata || $2::jsonb WHERE id = $1`, [id, JSON.stringify({ source: "linear", status, status_type, linear_updated_at: at })]);
+  await stamp(t1, "Done", "completed", LATEST);
+  await stamp(t2, "In Progress", "started");
+  await stamp(t3, "Backlog", "backlog");
+  await stamp(t4, "Todo", "unstarted");
+  await stamp(t5, "Canceled", "canceled");
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"status_type": "weird"}'::jsonb WHERE id = $1`, [t8]);
+  // t6 carries a `status` key with no status_type — a hand note's own word, not a lifecycle (first review pass).
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"status": "draft"}'::jsonb WHERE id = $1`, [t6]);
   const names = (rows: { name: string }[]) => rows.map((r) => r.name);
   const on: GraphOptions = { ...DEFAULT_OPTIONS, limit: 10 };
   const off: GraphOptions = { ...on, edges: false };
@@ -5678,7 +5698,7 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   const r2 = await graphReport(run, "Open Brain", on);
   assert(JSON.stringify(r1) === JSON.stringify(r2), "two runs over the same rows are byte-identical");
   const text = render(r1);
-  for (const needle of ["SMD-1925", "5 of 6 edge rows carry confidence 1.00", "SMD-1935", "1 entity of the ranked types named only by digits, dots, colons and spaces is out of scope", "admits it;", "no ticket status", "No recency term", "Coverage: 7 of 7 thoughts", "db/extract-entities.ts has not run", "--status tells the two apart", "can sum past support"])
+  for (const needle of ["SMD-1925", "5 of 6 edge rows carry confidence 1.00", "SMD-1935", "1 entity of the ranked types named only by digits, dots, colons and spaces is out of scope", "admits it;", "Ticket status is read from synced metadata (board-sync, SMD-1954)", "No recency term", "Coverage: 7 of 7 thoughts", "db/extract-entities.ts has not run", "--status tells the two apart", "can sum past support"])
     assert(text.includes(needle), `the rendered report says: ${needle}`);
   assert(text.includes("depends_on×3") && text.includes("exact match on the normalised name"), "…and shows the relation counts and how the subject resolved");
   assert(text.includes(r1.thoughts[0].created_at!) && text.split("\n").filter((l) => l.includes(r1.thoughts[0].id)).every((l) => !l.includes("…")),
@@ -5696,14 +5716,149 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   const whole = await graphReport(run, null, off);
   assert(whole.resolution === null && whole.by_mentions?.length === 4 && whole.by_degree?.length === 0 && render(whole).includes("the whole graph"), "no subject: the whole graph, and no hub list with edges off");
 
+  // ── The lifecycle (SMD-1994). One rule, a per-thought weight, carries the
+  // filter (0 or 1) and the decay (DONE_WEIGHT for a completed or canceled
+  // thought); a thought with no lifecycle, or one this tool does not know,
+  // weighs 1 under every flag. Every count above was read at weight 1, so the
+  // default run is the control; here the same graph under each filter.
+  const open: GraphOptions = { ...on, status: "open" };
+  const active: GraphOptions = { ...on, status: "active" };
+  const doneOnly: GraphOptions = { ...on, status: "done" };
+  const decay: GraphOptions = { ...on, decayDone: true };
+  assert(cov.with_lifecycle === 5 && cov.done === 2 && cov.unknown_status === 1 && cov.weighed === 7 && cov.last_sync === LATEST,
+    `coverage: five thoughts carry a lifecycle, two of them settled, one an unknown status_type; every thought weighs in by default; the latest linear_updated_at is the freshness (${cov.with_lifecycle}/${cov.done}/${cov.unknown_status}/${cov.weighed}, ${cov.last_sync})`);
+  assert((await graphCoverage(run, open)).weighed === 5 && (await graphCoverage(run, active)).weighed === 4 && (await graphCoverage(run, doneOnly)).weighed === 4 && (await graphCoverage(run, decay)).weighed === 7,
+    "weighed: open drops t1 and t5; active drops t3 too; done keeps t1, t5 and the two without a lifecycle; decay drops none");
+  assert(r1.thoughts[0].id === t1 && r1.thoughts[0].status === "Done" && r1.thoughts[0].status_type === "completed" && r1.thoughts[0].weight === 1 && r1.thoughts.find((t) => t.id === t5)!.status === "Canceled",
+    "the JSON carries each thought's status, status_type and weight — t1 Done at weight 1 by default");
+  assert(text.includes(`latest linear_updated_at ${LATEST}: 5 of 7 thoughts carry a lifecycle, 2 of them completed or canceled, and 1 carries a status_type this tool does not know (weighed 1). Every thought weighs 1: a Done ticket counts as a live one`)
+      && text.includes("5 of 5 listed thoughts carry a lifecycle.") && text.includes("lifecycle all;") && !text.includes("holds no ticket status") && /status {7}thought/.test(text) && !text.includes("  weight  "),
+    "the default report: the lifecycle line has the source, the freshness and the counts, says every thought weighs 1, the thought table has a status column and no weight column, and the old claim that the graph holds no status is gone");
+  assert(lifecycleCaveat({ ...cov, with_lifecycle: 0, done: 0, unknown_status: 0, last_sync: null }, on).includes("none is stamped here: 0 of 7 thoughts carry a lifecycle"), "a brain board-sync has not reached says so instead of a freshness");
+  assert(lifecycleCaveat({ ...cov, last_sync: null }, on).includes("no linear_updated_at is stamped beside them: 5 of 7"), "…and statuses with their watermarks cleared say that, not nothing (second review pass)");
+
+  // --status open: t1 and t5 weigh 0, so the graph is the one t2, t3, t4, t6
+  // and t8 build. Open Brain 3 mentions (t2–t4), degree 2 still (t2, t3 reach
+  // PostgreSQL, t4 Anita), support 3; Bun's four are all live and lead.
+  const openTop = await topEntities(run, open);
+  const obOpen = openTop.byMentions.find((e) => e.id === OB)!;
+  const pgOpen = openTop.byMentions.find((e) => e.id === PG)!;
+  assert(names(openTop.byMentions).join(",") === "Bun,Open Brain,PostgreSQL,Anita" && obOpen.mentions === 3 && obOpen.degree === 2 && obOpen.support === 3 && pgOpen.mentions === 3 && pgOpen.support === 2,
+    `--status open by mentions: Bun's four live thoughts lead; Open Brain 3/2/3 — the Done t1 and Canceled t5 evidence nothing; PostgreSQL 3 mentions (t2, t3 and the unstamped t8), support 2 (${names(openTop.byMentions).join(",")}; ${obOpen.mentions}/${obOpen.degree}/${obOpen.support})`);
+  const nOpen = await neighbourhood(run, [OB], open);
+  assert(names(nOpen).join(",") === "PostgreSQL,Bun,Anita" && nOpen[0].co_mentions === 2 && nOpen[0].support === 2 && nOpen[0].relations === "depends_on×2" && nOpen[2].co_mentions === 1 && nOpen[2].support === 1 && nOpen[2].mentions === 1,
+    `--status open around the subject: PostgreSQL 2+2, Bun 3+0, Anita 1+1 — Anita drops below Bun once t1 is settled, the relation counts follow (${names(nOpen).join(",")}; ${JSON.stringify(nOpen[0])})`);
+  const stOpen = await subjectThoughts(run, [OB], nOpen.map((n) => n.id), open);
+  assert(stOpen.length === 3 && stOpen.every((t) => t.id !== t1 && t.id !== t5 && t.weight === 1) && stOpen.map((t) => t.status_type).sort().join() === "backlog,started,unstarted",
+    `--status open lists the three live thoughts about the subject, each at weight 1 (${stOpen.map((t) => t.status).join(", ")})`);
+  const ttOpen = await topThoughts(run, open);
+  assert(ttOpen.length === 5 && ttOpen.every((t) => t.id !== t1 && t.id !== t5) && ttOpen.find((t) => t.id === t6)!.status === null && ttOpen.find((t) => t.id === t8)!.status_type === "weird",
+    "…and the whole graph's thoughts: t1 and t5 gone; t6 with no lifecycle (its own `status: draft` is not shown as one) and t8 with an unknown one listed — a thought without a lifecycle passes every filter");
+  assert((await resolveSubject(run, "Open Brain", open)).subjects[0].mentions === 3, "the subject line's mention count is the run's — 3 under open, not 5");
+  const rOpen = render(await graphReport(run, null, open));
+  assert(rOpen.includes("lifecycle open;") && rOpen.includes("3 of 5 listed thoughts carry a lifecycle.") && rOpen.includes("--status open: 5 of 7 thoughts weigh in this run (triage, backlog, unstarted, started, plus every thought without a lifecycle"),
+    "the open report: the header names the filter, the thought table says how many listed carry a lifecycle, the caveat says what weighed in and that the unstamped pass");
+  assert(names(await neighbourhood(run, [ANITA], active)).join() === "Open Brain,Bun" && render(await graphReport(run, "Anita", { ...on, types: ["place"], status: "open" })).includes("shares a --status open thought"),
+    "around Anita under active: t4 alone — Open Brain 1+1, Bun 1+0; and a subject with no neighbour under a filter is told which filter emptied it");
+
+  // --status active: t2 and t4 alone; three neighbours tie at 2 and mentions decide.
+  const nActive = await neighbourhood(run, [OB], active);
+  assert(names(nActive).join(",") === "Bun,PostgreSQL,Anita" && nActive.every((n) => n.co_mentions! + n.support! === 2) && nActive.map((n) => n.mentions).join() === "3,2,1",
+    `--status active: a three-way tie at 2 breaks on mentions — Bun 3 (t2, t4, t6), PostgreSQL 2, Anita 1 (${names(nActive).join(",")})`);
+  // --status done: t1 alone evidences the neighbourhood; Bun, co-mentioned in
+  // live thoughts only, is no candidate — yet keeps the mention the unstamped t6 gives it.
+  const nDone = await neighbourhood(run, [OB], doneOnly);
+  assert(names(nDone).join(",") === "PostgreSQL,Anita" && nDone.every((n) => n.co_mentions === 1 && n.support === 1),
+    `--status done around the subject: PostgreSQL and Anita at 1+1 from t1; Bun is nobody's neighbour (${names(nDone).join(",")})`);
+  const doneTop = await topEntities(run, doneOnly);
+  assert(doneTop.byMentions.find((e) => e.id === BUN)!.mentions === 1 && doneTop.byMentions.find((e) => e.id === OB)!.support === 1 && (await topThoughts(run, doneOnly)).map((t) => t.id).sort().join() === [t1, t5, t6, t8].sort().join(),
+    "--status done in the whole graph: Bun keeps t6's mention (no lifecycle, so it passes), Open Brain's support is t1 alone, and the thoughts are t1, t5 and the two unstamped");
+
+  // --decay-done: t1 and t5 weigh DONE_WEIGHT. Evidence is weighted; degree
+  // — neighbours — is not. Sums of quarters are exact, so the equalities are.
+  const nDecay = await neighbourhood(run, [OB], decay);
+  assert(names(nDecay).join(",") === "PostgreSQL,Bun,Anita" && nDecay[0].co_mentions === 2.25 && nDecay[0].support === 2.25 && nDecay[0].relations === "depends_on×2.25" && nDecay[2].co_mentions === 1.25 && nDecay[2].support === 1.25 && nDecay[1].co_mentions === 3,
+    `--decay-done around the subject: PostgreSQL 2.25+2.25, Bun 3+0, Anita 1.25+1.25 — the settled t1 counts a quarter and Anita drops below Bun (${names(nDecay).join(",")}; ${JSON.stringify(nDecay[0])})`);
+  const decayTop = await topEntities(run, decay);
+  const obDecay = decayTop.byMentions.find((e) => e.id === OB)!;
+  assert(obDecay.mentions === 3.5 && obDecay.degree === 2 && obDecay.support === 3.25 && names(decayTop.byMentions)[0] === "Bun" && DONE_WEIGHT === 0.25,
+    `…Open Brain 3.5 mentions and 3.25 support with its degree unchanged at 2 — decay weighs evidence, not neighbours — and Bun's four live thoughts lead (${obDecay.mentions}/${obDecay.degree}/${obDecay.support})`);
+  const stDecay = await subjectThoughts(run, [OB], nDecay.map((n) => n.id), decay);
+  assert(st[0].id === t1 && stDecay[3].id === t1 && stDecay[3].weight === 0.25 && stDecay[3].entities === 2 && stDecay[3].edges === 2 && stDecay[4].id === t5,
+    `…and t1, first by default with the most neighbours and edges, ranks fourth at a quarter of its score, t5 last (${stDecay.map((t) => t.weight).join(",")})`);
+  const rDecay = render(await graphReport(run, "Open Brain", decay));
+  assert(rDecay.includes("lifecycle all (done ×0.25)") && /2\.25 {5}2\.25/.test(rDecay) && rDecay.includes("depends_on×2.25") && /weight  status/.test(rDecay) && rDecay.includes("3.50 mentions") && rDecay.includes("--decay-done: a completed or canceled thought weighs 0.25 in every count (pre-registered, one weight)"),
+    "the decayed report: the header says the weight, the quarter counts render to two places in the table, the relation list and the subject line alike (3.50, not 3.5), the weight column appears, and the caveat pre-registers the one weight");
+  let threwW = "";
+  try { weightsSql({ status: "open", decayDone: true }, []); } catch (e) { threwW = (e as Error).message; }
+  assert(/pass one or the other/.test(threwW), "weightsSql refuses decay beside a filter as parseArgs does — a caller building its own Options gets the rule, not decay semantics silently (first review pass)");
+
+  // A row's lifecycle is its TICKET's (first review pass). t1 is the head of
+  // SMD-1936 (Done). tSec is a dated section derived from it (`ticket`, no
+  // status, its own newer watermark); tPrev is the ticket's earlier row, In
+  // Progress when t1 superseded it; tOrphan is derived from a ticket no row holds;
+  // tDone is a Done ticket whose edge is Open Brain's only path to Redis.
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"issue": "SMD-1936"}'::jsonb WHERE id = $1`, [t1]);
+  const tSec = await thought("SMD-1936 — the ticket · Update 2026-09-20\n\nOpen Brain moved onto PostgreSQL 17.");
+  await record(tSec, [E("Open Brain", "project"), E("PostgreSQL", "tool")]);
+  await db.query(`UPDATE thoughts SET metadata = metadata || $2::jsonb WHERE id = $1`, [tSec, JSON.stringify({ source: "linear", ticket: "SMD-1936", type: "observation", linear_updated_at: "2026-09-24T12:00:00.000Z" })]);
+  const tPrev = await thought("SMD-1936 — the ticket's earlier text, about Open Brain.");
+  await record(tPrev, [E("Open Brain", "project")]);
+  await db.query(`UPDATE thoughts SET metadata = metadata || $2::jsonb WHERE id = $1`, [tPrev, JSON.stringify({ source: "linear", issue: "SMD-1936", status: "In Progress", status_type: "started", linear_updated_at: "2026-09-25T00:00:00.000Z" })]);
+  // tPrev's watermark is NEWER than the head's: only the supersession puts t1 first (second review pass).
+  await db.query(`UPDATE thoughts SET supersedes = $2 WHERE id = $1`, [t1, tPrev]);
+  const tOrphan = await thought("SMD-9999 — a ticket no row holds · Update 2026-09-21\n\nOpen Brain, noted.");
+  await record(tOrphan, [E("Open Brain", "project")]);
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"source": "linear", "ticket": "SMD-9999", "type": "observation", "linear_updated_at": "2026-09-26T00:00:00.000Z"}'::jsonb WHERE id = $1`, [tOrphan]);
+  // …and carries the newest watermark of all with no lifecycle: the freshness must not read it (second review pass).
+  const tDone = await thought("Open Brain uses Redis, said a settled ticket.");
+  await record(tDone, [E("Open Brain", "project"), E("Redis", "tool")], [R("Open Brain", "Redis", "uses")]);
+  await stamp(tDone, "Done", "completed");
+  const covH = await graphCoverage(run, on);
+  assert(covH.thoughts === 11 && covH.with_lifecycle === 8 && covH.done === 5 && covH.last_sync === LATEST && (await graphCoverage(run, open)).weighed === 6,
+    `the derived row and the superseded row take the head's lifecycle: 8 of 11 carry one, 5 settled (t1, t5, tSec, tPrev, tDone); the head is the un-superseded row though tPrev's watermark is newer; neither the derived row's own newer watermark nor the lifecycle-less tOrphan's newest is the freshness, the head's is; open weighs t2, t3, t4, t6, t8 and the orphan-ticket tOrphan (${covH.with_lifecycle}/${covH.done}/${covH.last_sync}/${(await graphCoverage(run, open)).weighed})`);
+  const ttH = await topThoughts(run, on);
+  assert(ttH.find((t) => t.id === tSec)!.status === "Done" && ttH.find((t) => t.id === tSec)!.status_type === "completed" && ttH.find((t) => t.id === tPrev)!.status === "Done" && ttH.find((t) => t.id === tOrphan)!.status === null,
+    "listed by default, the section row and the superseded row show the head's status, Done — not none and not the In Progress tPrev froze at — and the row derived from an unknown ticket shows none");
+  const ttOpenH = await topThoughts(run, open);
+  assert(ttOpenH.every((t) => t.id !== tSec && t.id !== tPrev && t.id !== tDone) && ttOpenH.some((t) => t.id === tOrphan),
+    "--status open lists neither the Done ticket's section nor its earlier row nor the Done tDone, and lists the row whose ticket no row holds (its own lifecycle: none)");
+  const obAll = (await topEntities(run, on)).byMentions.find((e) => e.id === OB)!;
+  const obOpenH = (await topEntities(run, open)).byMentions.find((e) => e.id === OB)!;
+  const obDecayH = (await topEntities(run, decay)).byMentions.find((e) => e.id === OB)!;
+  assert(obAll.degree === 3 && obOpenH.degree === 2 && obDecayH.degree === 3 && obOpenH.mentions === 4,
+    `Open Brain's degree: 3 by default (PostgreSQL, Anita, Redis), 2 under open — Redis is reached by the Done tDone alone, so the filter removes the edge — and 3 under decay, which weighs evidence and leaves neighbours; open mentions 4 (t2, t3, t4, tOrphan) (${obAll.degree}/${obOpenH.degree}/${obDecayH.degree}, ${obOpenH.mentions})`);
+  const nOpenH = await neighbourhood(run, [OB], open);
+  const nAllH = await neighbourhood(run, [OB], on);
+  assert(names(nOpenH).join(",") === "PostgreSQL,Bun,Anita" && nOpenH[0].co_mentions === 2 && nAllH.find((n) => n.name === "PostgreSQL")!.co_mentions === 4 && nAllH.some((n) => n.name === "Redis"),
+    `under open the section row adds nothing to PostgreSQL (co 2, not 3) and Redis is no neighbour; by default the section counts (co 4) and Redis is one (${names(nOpenH).join(",")}; ${nAllH.find((n) => n.name === "PostgreSQL")!.co_mentions})`);
+  assert((await topThoughts(run, doneOnly)).map((t) => t.id).sort().join() === [t1, t5, t6, t8, tSec, tDone, tPrev, tOrphan].sort().join(),
+    "--status done lists the section row and the earlier row with their Done head, the Done tDone, and — passing every filter — the two without a lifecycle and the row whose ticket no row holds");
+  await db.query(`UPDATE thoughts SET supersedes = NULL, metadata = metadata - 'issue' WHERE id = $1`, [t1]);
+  for (const id of [tSec, tDone, tPrev, tOrphan]) await drop(id);
+  assert((await graphCoverage(run, on)).thoughts === 7 && (await graphCoverage(run, on)).entities === 4, "the ticket rows are gone again");
+
+  // The default lists every in-scope entity, an orphan at 0 included — the
+  // filter alone drops what no kept thought mentions (first review pass).
+  const tZed = await thought("Zed alone.");
+  await record(tZed, [E("Zed", "tool")]);
+  await db.query(`DELETE FROM thoughts WHERE id = $1`, [tZed]);
+  assert((await graphCoverage(run, on)).entities === 5 && (await topEntities(run, on)).byMentions.some((e) => e.name === "Zed" && e.mentions === 0) && !(await topEntities(run, open)).byMentions.some((e) => e.name === "Zed"),
+    "an entity whose thought was deleted and not yet pruned is in scope, listed at 0 by default as before, and absent under a filter");
+  await db.exec(`SELECT prune_orphan_entities()`);
+  assert((await graphCoverage(run, on)).entities === 4, "…and pruned away");
+
   // The flags, and the helpers the SQL rests on.
-  const p = parseArgs(["--url", "postgres://x", "Open Brain", "--limit", "5", "--types", "tool,project", "--no-edges", "--keep-numeric", "--json"]);
-  assert(!("error" in p) && p.subject === "Open Brain" && p.opts.limit === 5 && p.opts.types.join() === "tool,project" && !p.opts.edges && !p.opts.excludeNumeric && p.json && p.url === "postgres://x", "every flag lands");
+  const p = parseArgs(["--url", "postgres://x", "Open Brain", "--limit", "5", "--types", "tool,project", "--no-edges", "--keep-numeric", "--json", "--status", "open"]);
+  assert(!("error" in p) && p.subject === "Open Brain" && p.opts.limit === 5 && p.opts.types.join() === "tool,project" && !p.opts.edges && !p.opts.excludeNumeric && p.json && p.url === "postgres://x" && p.opts.status === "open" && !p.opts.decayDone, "every flag lands");
+  const pd = parseArgs(["--decay-done"]);
+  assert(!("error" in pd) && pd.opts.decayDone && pd.opts.status === "all" && !("error" in parseArgs(["--decay-done", "--status", "all"])), "--decay-done lands, alone or with --status all");
   const bare = parseArgs([]);
   assert(!("error" in bare) && bare.subject === null, "no argument is the whole graph");
   for (const [argv, why] of [[["--limit", "0"], "limit"], [["--limit"], "needs a value"], [["--types", "vegetable"], "vegetable"], [["a", "b"], "one subject"], [["--bogus"], "unknown flag"], [["--types", ""], "none given"],
                              [["--limit", "5", "--limit", "50"], "given twice"], [["--json", "x", "--json"], "given twice"], [[""], "subject is empty"], [["  "], "subject is empty"],
-                             [["--limit", "0x10"], "decimal"], [["--limit", "1e2"], "decimal"], [["--limit", " 7"], "decimal"], [["--limit", "7.0"], "decimal"]] as [string[], string][])
+                             [["--limit", "0x10"], "decimal"], [["--limit", "1e2"], "decimal"], [["--limit", " 7"], "decimal"], [["--limit", "7.0"], "decimal"],
+                             [["--status", "closed"], "one of all, open, active, done"], [["--status"], "needs a value"], [["--status", "Open"], "one of"], [["--status", "toString"], "one of"], [["--status", "__proto__"], "one of"], [["--decay-done", "--status", "open"], "pass one or the other"], [["--status", "done", "--decay-done"], "already decides them"]] as [string[], string][])
     assert("error" in parseArgs(argv) && (parseArgs(argv) as { error: string }).error.includes(why), `refused: ${argv.join(" ")} (${why})`);
   assert(pgArray(["a", "b"]) === "{a,b}" && pgArray([]) === "{}", "pgArray builds the literal");
   let threw = "";
