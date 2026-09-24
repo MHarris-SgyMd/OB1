@@ -153,6 +153,48 @@ workload wants is that workload's to measure — every result carries the raw
 logits so a spike can refit — and the served arm is held at these numbers by
 [10], so a change to either moves them on purpose.
 
+### The framing on open-domain tasks (JevBench)
+
+The engine's README says the `It is` framing lifts open-domain accuracy.
+JevBench ran these same weights through both engines as two rows — "openJev
+Verdict" (engine `33950bf`: bare labels, 1,024 tokens) and "openJev Verdict
+1.4" (`00b5ee96`, PR #3: `It is` labels, 512 tokens, the calibrator) — and
+publishes each row's right/wrong on its 231 public tasks. `jevbench.ts` fetches
+the tasks and both rows pinned (JevBench `2fa63fa3`, sha256 each) and runs the
+benchmark adapter's prompt rules (`jevbench/adapters/verdict_local.py`) here:
+
+```bash
+bun jevbench.ts ~/.cache/ob1-jev/8af2496eb63c7fa66d7d234e1f62629380030eb4   # ~70 s
+```
+
+| 231 public tasks | easy (48) | standard (72) | hard (111) | all |
+| --- | --- | --- | --- | --- |
+| earlier engine — bare, 1,024 tokens | 85.4% | 62.5% | 37.8% | 55.4% |
+| v1.4 engine — `It is`, 512 tokens (**served**) | 87.5% | 69.4% | 36.9% | 57.6% |
+| bare, 512 tokens | 85.4% | 62.5% | 35.1% | 54.1% |
+
+Both published rows reproduce **task by task, 231 of 231** — the earlier one
+though JevBench ran it through PyTorch — and `buildPrompt` writes the v1.4
+row's prompt byte for byte for all 213 choice and binary tasks (the contract
+has no score kind), so the v1.4 row measures the served path itself. The
+engine README's easy and standard figures (85.4 → 87.5, 62.5 → 69.4) are these;
+its "hard 36.9 → 36.9" is not — the earlier row it describes scores 37.8%.
+
+Paired on the same items, with the token budget held at the served 512:
+
+| | bare | `It is` | only bare right | only `It is` right | McNemar exact p |
+| --- | --- | --- | --- | --- | --- |
+| JevBench public, open domain (231) | 54.1% | 57.6% | 3 | 11 | 0.057 |
+| … standard tier (72) | 62.5% | 69.4% | 0 | 5 | 0.063 |
+| banking receipt, the model's own domain (1,000) | 95.5% | 93.1% | 25 | 1 | < 0.0001 |
+
+**The framing's effect depends on the domain.** On the fine-tuning domain it
+is a clear loss — all 25 on in-scope rows, abstention untouched; on
+open-domain tasks it is a gain of 3.5 points that stops just short of p 0.05
+on 231 items. The tier keeps `It is` (the author's current engine, and
+JevBench's direction), and neither set is the fork's own workload: which
+framing a spike's decisions want is that spike's first measurement.
+
 ## Licences
 
 Verdict v1.4 weights and the openJev reference code: Apache-2.0.
@@ -164,6 +206,7 @@ FSL-1.1-MIT.
 ## Tests
 
 `bun test-jev.ts` — 75 assertions with no model; with `JEV_TEST_MODEL_DIR`
-naming the pinned files, [9] adds the model's presets and [10] the conformance
-run above (83, about a minute). CI runs it in the
+naming the pinned files, [9] adds the model's presets, [10] the receipt run
+and [11] both JevBench rows and the served-prompt equivalence (86, about three
+minutes). CI runs it in the
 portable-server job, with `bunx tsc --noEmit` here (check 18 lists `jev`).

@@ -19,7 +19,9 @@
  * (`bun serve.ts --fetch-only` puts them in ~/.cache/ob1-jev/<revision>) and
  * skips otherwise; [10], likewise, reproduces the model's published receipt
  * row by row (conformance.ts) and holds the served prompt at its measured
- * numbers. No model is needed for [1]–[8].
+ * numbers; [11] reproduces JevBench's two published Verdict rows task by task
+ * on its 231 public tasks (jevbench.ts) and holds buildPrompt to the v1.4
+ * row's prompt. No model is needed for [1]–[8].
  *
  * Mutants, each run and each killed (2026-09-23): drop the gate from
  * jevDecideMany and [7] fails (the stub sees the decision); derive no marker
@@ -358,6 +360,35 @@ if (!dir) {
   const s = await servedArm(l);
   assert(Math.abs(s.accuracy - 0.931) < 0.0015 && s.differsFromReceipt === 28, `the served arm stands at its recorded accuracy, 93.1%, 28 answers from the receipt's (${(s.accuracy * 100).toFixed(1)}%, ${s.differsFromReceipt}) — jev/README.md, "Conformance"`);
   assert(Math.abs(s.ece - 0.2123) < 0.002, `…and its recorded ECE, 0.212 under the bundle's per-K calibrator (${s.ece.toFixed(4)})`);
+}
+
+// ── [11] JevBench's two published Verdict rows, task by task ────────────────
+section("[11] JevBench — both published Verdict rows on the 231 public tasks (JEV_TEST_MODEL_DIR)");
+if (!dir) {
+  skip("the earlier and the v1.4 engine rows reproduce task by task, and the served prompt is the v1.4 row's", "JEV_TEST_MODEL_DIR is unset");
+} else {
+  const { agreement, jevbenchPrompt, loadJevbench, pyDumps, runArm } = await import("./jevbench.ts");
+  const j = await loadJevbench(dir);
+  // The served path is the v1.4 row's prompt, byte for byte, for every task
+  // the contract can carry (choice and noul — it has no score kind), so the
+  // published row measures what the tier serves, not a lookalike.
+  let same = 0, carried = 0;
+  for (const t of j.tasks) {
+    const q = t.question;
+    if (q.type === "score") continue;
+    carried++;
+    const state = typeof t.state === "string" ? t.state : pyDumps(t.state);
+    const c = (q.criteria ?? {}) as Record<string, string>;
+    const d: JevDecision = q.type === "choice"
+      ? { kind: "choice", question: q.instructions, context: state, options: Object.entries(c).map(([id, v]) => ({ id, description: v || id })) }
+      : { kind: "binary", context: state, proposition: q.instructions + (c.true || c.false ? ` (true: ${c.true || "yes"}; false: ${c.false || "no"})` : "") };
+    if (buildPrompt(d).prompt === jevbenchPrompt(t, "it-is").prompt) same++;
+  }
+  assert(carried === 213 && same === carried, `buildPrompt writes the v1.4 row's prompt for every choice and binary task (${same}/${carried})`);
+  const earlier = agreement(await runArm(j.tasks, j.encoder, j.run, { framing: "bare", maxTokens: 1024 }), j.earlier);
+  assert(earlier.agree === 231, `the earlier engine (bare labels, 1,024 tokens) scores every task as JevBench's "openJev Verdict" row (${earlier.agree}/231${earlier.differ.length ? `: ${earlier.differ.slice(0, 3).join(", ")}` : ""})`);
+  const v14 = agreement(await runArm(j.tasks, j.encoder, j.run, { framing: "it-is", maxTokens: 512 }), j.v14);
+  assert(v14.agree === 231, `the v1.4 engine — the served prompt — scores every task as its "openJev Verdict 1.4" row (${v14.agree}/231${v14.differ.length ? `: ${v14.differ.slice(0, 3).join(", ")}` : ""})`);
 }
 
 report();
