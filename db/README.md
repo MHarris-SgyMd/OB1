@@ -1718,10 +1718,17 @@ bun tier.ts --promote --from <canary-url> --to <stable-url>
 (thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
 migration might touch, so a migration meets *all* the real data), resets the target
 and restores into it, then runs `migrate.ts` forward with the merged tree. It is
-destructive to `--to` and refuses a non-loopback target unless
-`OB1_ALLOW_REMOTE_DB=1`. It needs a `pg_dump`/`pg_restore` whose major version is at
-least the source server's — the pgvector image the tiers run carries matching client
-tools; a host needs `postgresql-client >=` the server. A branch that changes the
+destructive to `--to`: it refuses a `--to` that is the `--from` database (compared by
+the server's `system_identifier` and the database name, so two names for one host are
+still one), and a non-loopback target unless `OB1_ALLOW_REMOTE_DB=1`. It needs Bun
+and a `pg_dump`/`pg_restore` whose major version is at least the source server's, and
+no image the stack runs has both — the pgvector image has the client and no Bun,
+`oven/bun` the reverse. **`deploy/tier.sh` is the runnable form** (SMD-2036): it
+builds `db/tier.Dockerfile` (`oven/bun:1.4.0-alpine` + `postgresql16-client`, the
+stack server's major) and runs this checkout's `tier.ts` in it on the stack's
+network, so a refresh migrates forward with the tree it was run from —
+`deploy/README.md` has the commands. A host with Bun and `postgresql-client >=` the
+server can still run `bun tier.ts` directly. A branch that changes the
 embedding model or width cannot inherit stable's vectors: `migrate.ts` refuses the
 mismatch on the refreshed copy, so that branch's working tier is rebuilt from the
 records instead (`ingest-records.ts` then `reembed.ts`, the claim path) — a real
@@ -1978,7 +1985,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1590 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 675 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+./with-postgres.sh bun test-live.ts         # 676 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

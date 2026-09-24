@@ -734,6 +734,36 @@ jobs:
         env:
           OB1_SMOKE_COMMIT: ${{ github.sha }}
 
+      # SMD-2036. db/tier.ts --refresh runs under Bun and shells to pg_dump /
+      # pg_restore, which no image in the stack carries together, so the
+      # snapshot half of the tier pipeline ran nowhere in CI (db-live's runner
+      # has a pg14 client, which refuses a pg16 server; test-live [20] drives the
+      # replay engine and the guards). deploy/tier.sh builds db/tier.Dockerfile
+      # and runs this checkout's tier.ts on the stack's network: the stack's
+      # brain refreshed into a second database on its server, read back (the
+      # migration ledger, the rows, the smoke step's logged search, the tier
+      # stamp), and a --diff over that log that finds nothing moved. Then the
+      # guard the wrapper runs under, since from its container every database
+      # is remote: the brain under its service name and its container name is
+      # one database, and the refresh is refused.
+      - name: The tier refresh runs from deploy/tier.sh
+        working-directory: deploy
+        run: |
+          docker compose -f compose.yaml exec -T postgres createdb -U postgres ob1_tier_ci
+          ./tier.sh --refresh --from postgres --to postgres/ob1_tier_ci --tier working
+          q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d "$1" -tAc "$2"; }
+          COUNTS="SELECT (SELECT count(*) FROM schema_migrations) || '/' || (SELECT count(*) FROM thoughts) || '/' || (SELECT count(*) FROM query_log)"
+          STABLE="$(q openbrain "$COUNTS")"; COPY="$(q ob1_tier_ci "$COUNTS")"
+          echo "migrations/thoughts/query_log: stable $STABLE, refreshed $COPY"
+          [ "$STABLE" = "$COPY" ] && [ "${STABLE##*/}" -gt 0 ]
+          [ "$(q ob1_tier_ci "SELECT value FROM ob1_config WHERE key = 'tier'")" = working ]
+          ./tier.sh --diff --since 1970-01-01T00:00:00Z --from postgres --to postgres/ob1_tier_ci | tee /tmp/tier-diff.out
+          grep -F 'what moved: nothing' /tmp/tier-diff.out
+          if ./tier.sh --refresh --from postgres --to open-brain-postgres-1 --tier working 2> /tmp/tier-same.err; then
+            echo "tier.sh refreshed the brain into itself" >&2; exit 1
+          fi
+          grep -F 'name the same database' /tmp/tier-same.err || { cat /tmp/tier-same.err >&2; exit 1; }
+
       - name: Confirm no Supabase CLI anywhere in the stack
         working-directory: deploy
         run: |

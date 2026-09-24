@@ -312,6 +312,49 @@ scheduled form is the one built here; a Linear webhook is exact and immediate
 but needs an inbound URL the stack has no origin for until SMD-1846, and the
 handler's shape (signature, replay window, loop guard) is SMD-1862's.
 
+## Refreshing a tier
+
+`db/tier.ts` builds the canary and working tiers from stable (`db/README.md`,
+"The canary and working tiers"). Its `--refresh` runs under Bun and shells to
+`pg_dump` / `pg_restore` at the source server's major, and no image here
+carries both. `tier.sh` is the runnable form. It builds `db/tier.Dockerfile`
+(`oven/bun:1.4.0-alpine` plus `postgresql16-client`, the major of the postgres
+service) as `open-brain-tier:latest`, and runs this checkout's `tier.ts`
+in it, mounted read-only, on the stack's network:
+
+```bash
+# stable (this stack's postgres) into a canary on its own server beside it
+deploy/tier.sh --refresh --from postgres --to open-brain-canary-postgres --tier canary
+deploy/tier.sh --diff    --from postgres --to open-brain-canary-postgres
+# the three-tier stack's own network and services
+deploy/tier.sh --refresh --from stable-postgres --to canary-postgres --network open-brain-tiers_default
+```
+
+`--from` and `--to` name a database on the network as `HOST[:PORT][/DB]`
+(port 5432 and database `openbrain` by default). The wrapper builds the URL as
+the services here do, with `POSTGRES_PASSWORD` from the environment or from
+`deploy/.env`. A full `postgres://` URL is used as given. The URLs reach the
+container as variables, not arguments. `--env-file` (default `deploy/.env`) is
+passed to the container, because `migrate.ts` reads the `OB1_EMBEDDING_*`
+knobs from it on a refresh. `--network` defaults to `open-brain_default`, and
+`--runtime` is `docker` or `podman` (docker when it is on the PATH). Anything
+else goes to `tier.ts` as given.
+
+From a container every database is remote, so the wrapper sets
+`OB1_ALLOW_REMOTE_DB=1`. What guards `--to` in place of the loopback check is
+`tier.ts` refusing a `--to` that is the `--from` database. It compares the
+server's `system_identifier` and the database name, so `postgres` and
+`open-brain-postgres-1` are recognised as one database. The container publishes
+nothing. The client's major has to be at least the source server's, and
+`refreshToolsReady` refuses the refresh otherwise, so a Postgres bump in the
+compose files means bumping the package in `db/tier.Dockerfile` with it.
+The deploy-stack CI job runs a refresh, a `--diff` and the refusal through
+this script on every PR.
+
+A refresh does not carry the per-database HNSW settings over (SMD-2037), and a
+server already running on the refreshed database keeps its old pool until it
+is recreated. The canary-beside-the-dogfood standup is SMD-2038.
+
 ## The typed-decision tier
 
 The Jev spikes — a reranker, a question router, extraction gates — each need a

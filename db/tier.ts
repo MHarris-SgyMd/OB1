@@ -31,11 +31,12 @@
  * --refresh uses pg_dump | pg_restore for a faithful whole-database snapshot
  * (thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
  * migration might touch), then runs migrate.ts against the target. It needs a
- * pg_dump / pg_restore whose major version is at least the source server's (the
- * pgvector image the tiers run carries matching client tools; a host that runs
- * this needs postgresql-client >= the server). It is destructive to --to and
- * refuses a non-loopback target unless OB1_ALLOW_REMOTE_DB=1, the same guard
- * test-support's dropSchema uses.
+ * pg_dump / pg_restore whose major version is at least the source server's, AND
+ * Bun: no image the stack runs has both, so deploy/tier.sh runs this file in one
+ * that does (db/tier.Dockerfile, SMD-2036); a host that runs it directly needs
+ * postgresql-client >= the server. It is destructive to --to, refuses a --to
+ * that is the --from database, and refuses a non-loopback target unless
+ * OB1_ALLOW_REMOTE_DB=1, the same guard test-support's dropSchema uses.
  *
  * The replay is the LIVE half of the replay gate (SMD-1295, whose db/test-replay.ts
  * is the offline, model-free, fixture-vector half in CI). For each search row
@@ -245,6 +246,24 @@ async function toolMajor(tool: string): Promise<number | null> {
   }
 }
 
+/**
+ * Which database a connection reached, as the server knows it: the cluster's
+ * system_identifier (fixed at initdb) and the database name. Two URLs that
+ * spell one database differently — a compose service name and its container
+ * name, localhost and 127.0.0.1 — agree here where their strings do not. A
+ * role that may not read pg_control_system falls back to the address the
+ * server answered on.
+ */
+async function databaseIdentity(sql: SQL): Promise<string> {
+  try {
+    const [{ id, db }] = await sql<{ id: string; db: string }[]>`SELECT system_identifier::text AS id, current_database() AS db FROM pg_control_system()`;
+    return `${id}/${db}`;
+  } catch {
+    const [{ addr, port, db }] = await sql<{ addr: string | null; port: number | null; db: string }[]>`SELECT host(inet_server_addr()) AS addr, inet_server_port() AS port, current_database() AS db`;
+    return `${addr ?? "socket"}:${port ?? ""}/${db}`;
+  }
+}
+
 /** Whether pg_dump AND pg_restore exist and are new enough to read `serverMaj` — refresh needs both. */
 export async function refreshToolsReady(serverMaj: number): Promise<{ ready: boolean; why?: string }> {
   const dump = await toolMajor("pg_dump");
@@ -280,10 +299,22 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     throw new Error(`--to is not loopback and OB1_ALLOW_REMOTE_DB is not 1. Refusing to reset a remote database. (--refresh drops the target's schema.)`);
   }
   const src = new SQL({ url: fromUrl, max: 1 });
-  const serverMaj = await serverMajor(src);
-  await src.close();
+  const target = new SQL({ url: toUrl, max: 1 });
+  let serverMaj: number;
+  try {
+    serverMaj = await serverMajor(src);
+    // The reset below drops --to's schema, so --to must not be the source. The
+    // loopback guard does not cover it — deploy/tier.sh sets OB1_ALLOW_REMOTE_DB,
+    // since from its container every database is remote — and a typo'd --to is
+    // most often stable itself, under the name of the service beside it.
+    const [a, b] = [await databaseIdentity(src), await databaseIdentity(target)];
+    if (a === b) throw new Error(`--from and --to name the same database (${b.split("/").pop()} on one server). Refusing: --refresh drops the target's schema.`);
+  } finally {
+    await src.close();
+    await target.close();
+  }
   const ready = await refreshToolsReady(serverMaj);
-  if (!ready.ready) throw new Error(`--refresh needs pg_dump / pg_restore: ${ready.why}. The pgvector image carries matching client tools; on a host install postgresql-client >= ${serverMaj}.`);
+  if (!ready.ready) throw new Error(`--refresh needs pg_dump / pg_restore: ${ready.why}. deploy/tier.sh runs this in an image with both (db/tier.Dockerfile, postgresql16-client); on a host install postgresql-client >= ${serverMaj}.`);
 
   const dir = await mkdtemp(join(tmpdir(), "ob1-tier-"));
   const dumpFile = join(dir, "stable.dump");

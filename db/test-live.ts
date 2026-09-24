@@ -4360,6 +4360,17 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
   catch { refusedRemote = true; }
   finally { if (savedAllow !== undefined) process.env.OB1_ALLOW_REMOTE_DB = savedAllow; }
   assert(refusedRemote, "refresh refuses a non-loopback target unless OB1_ALLOW_REMOTE_DB=1 (it drops the target's schema)");
+  // And a --to that is the --from database under another spelling (SMD-2036):
+  // deploy/tier.sh sets OB1_ALLOW_REMOTE_DB, so this is the guard it runs
+  // under. The second URL differs as a string (a parameter only), so string
+  // equality would let it through; the server's identity does not. It refuses
+  // before the client tools are looked for, so no pg_dump is needed here.
+  const respelled = new URL(URL_!);
+  respelled.searchParams.set("application_name", "tier-same-db-guard");
+  let refusedSame: string | null = null;
+  try { await refresh(URL_!, respelled.toString(), "canary"); }
+  catch (e) { refusedSame = (e as Error).message; }
+  assert(/name the same database/.test(refusedSame ?? ""), `refresh refuses a --to that is the --from database spelled another way (got: ${refusedSame ?? "no refusal"})`);
 
   for (const c of corpus) await sql`DELETE FROM thoughts WHERE id = ${c.id}::uuid`;
   await sql`DELETE FROM query_log`;
