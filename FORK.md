@@ -289,7 +289,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 133 | [Shim everywhere](changes/133-shim-everywhere.md) | SMD-1798 |
 | 134 | [Entity extraction sent the whole thought in one unbounded call](changes/134-entity-extraction-sent-the-whole-thought-in-one.md) | SMD-1879 |
 
-Changes landed since the last release are the `changes/smd-*.md` files, numbered at the next cut (SMD-1804).
+Changes landed since the last release, if any, are the [`changes/smd-*.md`](changes/) files, numbered at the next cut (SMD-1804).
 <!-- changes-index:end -->
 
 ### Files we own

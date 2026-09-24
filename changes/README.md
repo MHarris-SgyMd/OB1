@@ -2,7 +2,7 @@
 
 [`FORK.md`](../FORK.md) is the front door: the pin, what the fork is for, the
 version scheme, changes 1–17 as a table, the standing sections, and a generated
-index of everything here. The record of every change from 18 on is one file in
+index of the numbered files here. The record of every change from 18 on is one file in
 this directory, in one of two states:
 
 - **`NNN-<slug>.md` — a numbered change.** The change number is the one code

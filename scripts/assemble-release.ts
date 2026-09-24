@@ -242,7 +242,7 @@ function buildPlan() {
     ...numbered.map((f) => ({ name: f.file.name, text: f.file.text })),
   ]);
   const forkPath = join(ROOT, "FORK.md");
-  const forkAfter = spliceIndex(readFileSync(forkPath, "utf8"), renderIndex(after));
+  const forkAfter = spliceIndex(readFileSync(forkPath, "utf8"), renderIndex(after.numbered));
 
   const migNums = [...migrationFiles().keys()];
   const lo = highestReleasedMigration(releases) + 1;

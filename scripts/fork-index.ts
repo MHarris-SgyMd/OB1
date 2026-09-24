@@ -162,14 +162,14 @@ export function readChanges(root: string): ClassifiedChanges {
  * lists them, not the index, so adding one moves nothing between the markers
  * (SMD-2084).
  */
-export const FRAGMENTS_LINE = `Changes landed since the last release are the \`${CHANGES_DIR}/smd-*.md\` files, numbered at the next cut (SMD-1804).`;
+export const FRAGMENTS_LINE = `Changes landed since the last release, if any, are the [\`${CHANGES_DIR}/smd-*.md\`](${CHANGES_DIR}/) files, numbered at the next cut (SMD-1804).`;
 
 /**
  * The index block, markers excluded. One definition for the writer and the
- * check. It reads the numbered files alone — a fragment's presence or absence
+ * check. It takes the numbered files alone — a fragment's presence or absence
  * renders the same block (SMD-2084).
  */
-export function renderIndex({ numbered }: { numbered: NumberedChange[] }): string {
+export function renderIndex(numbered: NumberedChange[]): string {
   const hi = numbered.length ? numbered[numbered.length - 1].n : FIRST_FILED - 1;
   const lines = [
     numbered.length
@@ -218,6 +218,6 @@ const isMain = (() => { try { return Boolean(process.argv[1]) && realpathSync(fi
 if (isMain) {
   const fork = join(ROOT, "FORK.md");
   const changes = readChanges(ROOT);
-  writeFileSync(fork, spliceIndex(readFileSync(fork, "utf8"), renderIndex(changes)));
-  console.log(`wrote the index into FORK.md (${changes.numbered.length} numbered changes; fragments are not listed — the release step numbers them)`);
+  writeFileSync(fork, spliceIndex(readFileSync(fork, "utf8"), renderIndex(changes.numbered)));
+  console.log(`wrote the index into FORK.md (${changes.numbered.length} numbered changes; ${changes.fragments.length} fragments pending, not listed — the release step numbers them)`);
 }
