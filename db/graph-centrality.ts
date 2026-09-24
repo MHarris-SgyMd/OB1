@@ -47,9 +47,13 @@
  * `DONE_WEIGHT` (0.25, pre-registered here, one weight, exact in binary so the
  * sums are too). A row's lifecycle is its TICKET's: a row carrying a ticket
  * (`issue`) or derived from one (`ticket` — SMD-2059's dated sections) takes
- * the status of the ticket's current head, the `issue` row nothing supersedes,
- * so a Done ticket's observations and its superseded earlier rows are settled
- * with it; a row with no ticket takes the status keys on its own row, if any.
+ * the status of the ticket's head — of the rows carrying that `issue`, one
+ * nothing supersedes before one superseded, the newest sync before an older,
+ * then the id — so a Done ticket's observations and its superseded earlier
+ * rows are settled with it; a row with no ticket claim takes the status keys
+ * on its own row, if any. A twin the sync chained under a head without an
+ * `issue` of its own (a hand paste adopted after the fact) is such a row: it
+ * keeps its own lifecycle, which is none.
  * A thought with no status — a hand capture, a status_type this file does not
  * know — weighs 1 whatever the flags say: it passes every filter, and the
  * output counts how many did rather than calling it open. So
@@ -175,7 +179,7 @@ export type Resolution = {
 export type NeighbourRow = { id: string; entity_type: string; name: string; mentions: number; co_mentions: number; support?: number; relations?: string | null };
 export type Coverage = {
   thoughts: number; extracted: number; entities: number; numeric_names: number; edges: number; unit_edges: number; extraction_key: string | null;
-  /** Thoughts whose status_type is one LIFECYCLE_TYPES names. */
+  /** Thoughts whose lifecycle — their own keys, or their ticket head's — names a status_type LIFECYCLE_TYPES has. */
   with_lifecycle: number;
   /** Thoughts carrying a status_type this file does not know — weighed 1, counted here rather than passed off as open. */
   unknown_status: number;
@@ -232,7 +236,7 @@ export const LIFECYCLE_CTE = `heads AS (
             SELECT p.metadata->>'issue' AS issue, p.metadata->>'status' AS status, p.metadata->>'status_type' AS status_type, p.metadata->>'linear_updated_at' AS synced_at,
                    row_number() OVER (PARTITION BY p.metadata->>'issue'
                                       ORDER BY (NOT EXISTS (SELECT 1 FROM thoughts s WHERE s.supersedes = p.id)) DESC, p.metadata->>'linear_updated_at' DESC NULLS LAST, p.id) AS rn
-              FROM thoughts p WHERE p.metadata->>'issue' IS NOT NULL),
+              FROM thoughts p WHERE p.metadata ? 'issue'),
           lifecycle AS (
             SELECT t.id AS thought_id,
                    coalesce(h.status, t.metadata->>'status') AS status,
@@ -261,8 +265,13 @@ export function weightsSql(opts: Pick<Options, "status" | "decayDone">, params: 
   // this file, not input — so the type of `w` is float8 in every branch. The
   // status name is shown only beside a status_type this file knows, so the
   // column and the "carry a lifecycle" count agree (first review pass).
+  // MATERIALIZED: a query that reads `weights` once, inside a correlated
+  // subquery — the rungs' mention count — would otherwise have the planner
+  // inline heads and lifecycle into it and scan `thoughts` once per candidate
+  // row; materialised, the weights are computed once per statement whatever
+  // the reference count (second review pass).
   return `${LIFECYCLE_CTE},
-          weights AS (SELECT thought_id, CASE WHEN status_type = ANY($${known}::text[]) THEN status END AS status, status_type,
+          weights AS MATERIALIZED (SELECT thought_id, CASE WHEN status_type = ANY($${known}::text[]) THEN status END AS status, status_type,
                              (CASE WHEN status_type = ANY($${kept}::text[]) THEN 1.0
                                    WHEN status_type = ANY($${known}::text[]) THEN ${opts.decayDone ? DONE_WEIGHT : 0}
                                    ELSE 1.0 END)::float8 AS w
@@ -334,8 +343,9 @@ export async function resolveSubject(run: Runner, subject: string, scopeIn: Opti
   // unscoped probe, and the fuzzy rung still had none (sixth review pass).
   // The type scope does not apply here: it says what to rank around the
   // subject. The mention count is MENTIONS_CTE's, correlated — an index probe
-  // per CANDIDATE row, since the ORDER BY reads it: one for an exact or alias
-  // match, one per entity above the similarity floor on the fuzzy rung.
+  // into thought_entities per CANDIDATE row against the weights materialised
+  // once, since the ORDER BY reads it: one for an exact or alias match, one
+  // per entity above the similarity floor on the fuzzy rung.
   /** A rung's rows: those in the rule (the subject, if any) and how many the rule kept out. */
   type RungResult = { hit: SubjectRow[]; out: number };
   const rung = async (how: string, score: string, params: unknown[], limit = ""): Promise<RungResult> => {
@@ -602,7 +612,7 @@ export function caveats(c: Coverage, opts: Options): string[] {
  * filter's weighed count, or the decay's weight.
  */
 export function lifecycleCaveat(c: Coverage, opts: Options): string {
-  const source = `Ticket status is read from synced metadata (board-sync, SMD-1954), as fresh as its last pass${c.last_sync ? ` — latest linear_updated_at ${c.last_sync}` : c.with_lifecycle ? "" : " — none is stamped here"}: ${c.with_lifecycle} of ${c.thoughts} thoughts carry a lifecycle, ${c.done} of them completed or canceled${c.unknown_status ? `, and ${c.unknown_status} carr${c.unknown_status === 1 ? "ies" : "y"} a status_type this tool does not know (weighed 1)` : ""}.`;
+  const source = `Ticket status is read from synced metadata (board-sync, SMD-1954), as fresh as its last pass${c.last_sync ? ` — latest linear_updated_at ${c.last_sync}` : c.with_lifecycle ? " — no linear_updated_at is stamped beside them" : " — none is stamped here"}: ${c.with_lifecycle} of ${c.thoughts} thoughts carry a lifecycle, ${c.done} of them completed or canceled${c.unknown_status ? `, and ${c.unknown_status} carr${c.unknown_status === 1 ? "ies" : "y"} a status_type this tool does not know (weighed 1)` : ""}.`;
   const rule = opts.status !== "all"
     ? ` --status ${opts.status}: ${c.weighed} of ${c.thoughts} thoughts weigh in this run (${LIFECYCLE_FILTERS[opts.status].join(", ")}, plus every thought without a lifecycle — it passes every filter).`
     : opts.decayDone

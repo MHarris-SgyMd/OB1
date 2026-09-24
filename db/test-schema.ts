@@ -5735,6 +5735,7 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
       && text.includes("5 of 5 listed thoughts carry a lifecycle.") && text.includes("lifecycle all;") && !text.includes("holds no ticket status") && /status {7}thought/.test(text) && !text.includes("  weight  "),
     "the default report: the lifecycle line has the source, the freshness and the counts, says every thought weighs 1, the thought table has a status column and no weight column, and the old claim that the graph holds no status is gone");
   assert(lifecycleCaveat({ ...cov, with_lifecycle: 0, done: 0, unknown_status: 0, last_sync: null }, on).includes("none is stamped here: 0 of 7 thoughts carry a lifecycle"), "a brain board-sync has not reached says so instead of a freshness");
+  assert(lifecycleCaveat({ ...cov, last_sync: null }, on).includes("no linear_updated_at is stamped beside them: 5 of 7"), "…and statuses with their watermarks cleared say that, not nothing (second review pass)");
 
   // --status open: t1 and t5 weigh 0, so the graph is the one t2, t3, t4, t6
   // and t8 build. Open Brain 3 mentions (t2–t4), degree 2 still (t2, t3 reach
@@ -5803,17 +5804,19 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   await db.query(`UPDATE thoughts SET metadata = metadata || $2::jsonb WHERE id = $1`, [tSec, JSON.stringify({ source: "linear", ticket: "SMD-1936", type: "observation", linear_updated_at: "2026-09-24T12:00:00.000Z" })]);
   const tPrev = await thought("SMD-1936 — the ticket's earlier text, about Open Brain.");
   await record(tPrev, [E("Open Brain", "project")]);
-  await db.query(`UPDATE thoughts SET metadata = metadata || $2::jsonb WHERE id = $1`, [tPrev, JSON.stringify({ source: "linear", issue: "SMD-1936", status: "In Progress", status_type: "started", linear_updated_at: "2026-09-23T00:00:00.000Z" })]);
+  await db.query(`UPDATE thoughts SET metadata = metadata || $2::jsonb WHERE id = $1`, [tPrev, JSON.stringify({ source: "linear", issue: "SMD-1936", status: "In Progress", status_type: "started", linear_updated_at: "2026-09-25T00:00:00.000Z" })]);
+  // tPrev's watermark is NEWER than the head's: only the supersession puts t1 first (second review pass).
   await db.query(`UPDATE thoughts SET supersedes = $2 WHERE id = $1`, [t1, tPrev]);
   const tOrphan = await thought("SMD-9999 — a ticket no row holds · Update 2026-09-21\n\nOpen Brain, noted.");
   await record(tOrphan, [E("Open Brain", "project")]);
-  await db.query(`UPDATE thoughts SET metadata = metadata || '{"source": "linear", "ticket": "SMD-9999", "type": "observation"}'::jsonb WHERE id = $1`, [tOrphan]);
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"source": "linear", "ticket": "SMD-9999", "type": "observation", "linear_updated_at": "2026-09-26T00:00:00.000Z"}'::jsonb WHERE id = $1`, [tOrphan]);
+  // …and carries the newest watermark of all with no lifecycle: the freshness must not read it (second review pass).
   const tDone = await thought("Open Brain uses Redis, said a settled ticket.");
   await record(tDone, [E("Open Brain", "project"), E("Redis", "tool")], [R("Open Brain", "Redis", "uses")]);
   await stamp(tDone, "Done", "completed");
   const covH = await graphCoverage(run, on);
   assert(covH.thoughts === 11 && covH.with_lifecycle === 8 && covH.done === 5 && covH.last_sync === LATEST && (await graphCoverage(run, open)).weighed === 6,
-    `the derived row and the superseded row take the head's lifecycle: 8 of 11 carry one, 5 settled (t1, t5, tSec, tPrev, tDone); the derived row's own newer watermark is not the freshness, its head's is; open weighs t2, t3, t4, t6, t8 and the orphan-ticket tOrphan (${covH.with_lifecycle}/${covH.done}/${covH.last_sync}/${(await graphCoverage(run, open)).weighed})`);
+    `the derived row and the superseded row take the head's lifecycle: 8 of 11 carry one, 5 settled (t1, t5, tSec, tPrev, tDone); the head is the un-superseded row though tPrev's watermark is newer; neither the derived row's own newer watermark nor the lifecycle-less tOrphan's newest is the freshness, the head's is; open weighs t2, t3, t4, t6, t8 and the orphan-ticket tOrphan (${covH.with_lifecycle}/${covH.done}/${covH.last_sync}/${(await graphCoverage(run, open)).weighed})`);
   const ttH = await topThoughts(run, on);
   assert(ttH.find((t) => t.id === tSec)!.status === "Done" && ttH.find((t) => t.id === tSec)!.status_type === "completed" && ttH.find((t) => t.id === tPrev)!.status === "Done" && ttH.find((t) => t.id === tOrphan)!.status === null,
     "listed by default, the section row and the superseded row show the head's status, Done — not none and not the In Progress tPrev froze at — and the row derived from an unknown ticket shows none");

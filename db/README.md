@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1589 assertions: 1589 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1590 assertions: 1590 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-three (53) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -1038,9 +1038,11 @@ canceled thought `DONE_WEIGHT` = 0.25, pre-registered in the file, one value,
 exact in binary, refused beside a filter (they are two answers to one
 question). A row's lifecycle is its ticket's: a row carrying a ticket
 (`issue`) or derived from one (`ticket` — SMD-2059's dated sections) takes
-the status of the ticket's current head, the `issue` row nothing supersedes,
+the status of the ticket's head — of the rows carrying that `issue`, one
+nothing supersedes before one superseded, the newest sync before an older —
 so a Done ticket's observations and its superseded earlier rows are settled
-with it. A thought with no lifecycle — a hand capture, or a `status_type`
+with it; a twin the sync chained under a head without an `issue` of its own
+keeps its own lifecycle, which is none. A thought with no lifecycle — a hand capture, or a `status_type`
 the file does not know — weighs 1 under every flag: it passes every filter,
 and the output counts how many did rather than calling it open. Degree counts
 neighbours, not evidence, so a filter removes an edge with no live evidence
@@ -1975,7 +1977,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1589 assertions, PGlite, no container
+bun test-schema.ts                          # 1590 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 675 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
