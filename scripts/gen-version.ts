@@ -48,7 +48,7 @@ export function renderVersionTs(): string {
     "/** db/version.mjs's FORK_VERSION — the version this server reports. */",
     `export const FORK_VERSION = ${JSON.stringify(FORK_VERSION)};`,
     "",
-    "/** The migration range releases.json records for FORK_VERSION, or null when it records none (a docs-only cut, or a version not yet cut). */",
+    "/** The migration range releases.json records for FORK_VERSION, or null when it records none (a version bumped and not yet cut). */",
     `export const RELEASE_RANGE: readonly [number, number] | null = ${range};`,
     "",
     "/** The highest migration file in the tree this server was built from — what a brain migrated for it has applied. */",

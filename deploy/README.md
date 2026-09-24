@@ -216,7 +216,7 @@ commit and the highest migration from it, and asserts the version is the
 checkout's:
 
 ```bash
-curl -s -H "x-brain-key: $KEY" http://127.0.0.1:8010/health | jq '{version, commit, ledger, highest: .database.highestMigration}'
+curl -s -H "x-brain-key: $KEY" http://127.0.0.1:8010/health | jq '{version, commit, ledgerStatus, highest: .database.highestMigration}'
 ```
 
 **The commit is a build argument.** `server-portable/Dockerfile` bakes

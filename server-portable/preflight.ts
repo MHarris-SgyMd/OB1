@@ -28,7 +28,7 @@ import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
-import { pad3, readDatabaseFacts } from "./brain-info.ts";
+import { ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
@@ -2690,15 +2690,16 @@ if (configFailed) {
         // brain a newer tree migrated. Both warn: each still serves.
         const tree = pad3(LATEST_MIGRATION);
         const hi = facts.highestMigration;
+        const status = ledgerStatus(hi, LATEST_MIGRATION); // brain_info's rule, one definition
         if (!ledgerPresent)
           add("migration ledger", "warn", "no schema_migrations table — the schema was applied by hand",
               "Adopt it with: cd db && bun migrate.ts --url $DATABASE_URL --baseline");
         else if (!ledgerRead) add("migration ledger", "ok", `schema_migrations present, not readable by this role (${facts.unread.ledger}) — this server's tree ends at ${tree}`);
         else if (hi === null) add("migration ledger", "ok", `schema_migrations present, recording none — this server's tree ends at ${tree}`);
-        else if (hi < LATEST_MIGRATION)
+        else if (status === "behind")
           add("migration ledger", "warn", `the ledger reaches ${pad3(hi)} but this server's tree ends at ${tree} — the brain is behind the server it serves, and a tool that needs a later migration fails`,
               "Apply the pending migrations: cd db && bun migrate.ts --url $DATABASE_URL (--dry-run lists them).");
-        else if (hi > LATEST_MIGRATION)
+        else if (status === "ahead")
           add("migration ledger", "warn", `the ledger reaches ${pad3(hi)}, past this server's tree (${tree}) — a newer tree migrated this brain`,
               "Deploy the server built from the tree that migrated it, or confirm this older one is intended.");
         else add("migration ledger", "ok", `schema_migrations present, highest ${pad3(hi)} — this server's tree ends there too`);

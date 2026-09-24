@@ -2457,6 +2457,10 @@ async function checkToolsManifest() {
   try {
     ({ renderToolsJson } = await import("./gen-tools.ts"));
   } catch (e) {
+    // Skipped only where the generator cannot load at all; under bun a failed
+    // import is the generator broken, and passing on it would hide a stale file
+    // (SMD-2041 review pass 1).
+    if (typeof Bun !== "undefined") return fail("scripts/gen-tools.ts", `does not import (${(e as Error).message.split("\n")[0]}) — the tools.json round-trip cannot run (SMD-1805)`);
     console.warn(`  (tools.json round-trip skipped — ${(e as Error).message.split("\n")[0]} — run under bun)`);
     return;
   }
@@ -3612,6 +3616,8 @@ async function checkVersionModule() {
   try {
     ({ renderVersionTs } = await import("./gen-version.ts"));
   } catch (e) {
+    // As the tools.json round-trip: a skip only off bun.
+    if (typeof Bun !== "undefined") return fail("scripts/gen-version.ts", `does not import (${(e as Error).message.split("\n")[0]}) — check 17e cannot run (SMD-2041)`);
     console.warn(`  (version.ts round-trip skipped — ${(e as Error).message.split("\n")[0]} — run under bun)`);
     return;
   }
@@ -3619,7 +3625,7 @@ async function checkVersionModule() {
   const path = join(ROOT, rel);
   if (!existsSync(path)) return fail(rel, "missing — run `bun scripts/gen-version.ts` (SMD-2041)");
   if (readFileSync(path, "utf8") !== renderVersionTs())
-    fail(rel, "does not match db/version.mjs, releases.json and db/migrations/ — the server would report the tree before this one; run `bun scripts/gen-version.ts` to regenerate (SMD-2041)");
+    fail(rel, "does not match what scripts/gen-version.ts renders from db/version.mjs, releases.json and db/migrations/ — the server would report a version, release range or last migration other than this tree's; run `bun scripts/gen-version.ts` to regenerate (SMD-2041)");
 }
 await checkVersionModule();
 

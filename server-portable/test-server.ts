@@ -292,7 +292,7 @@ console.log("\n[10b] brain_info answers with no database, and says why that half
   });
   const result = (await mcpBody(r))?.result as { isError?: boolean; content?: { text?: string }[] } | undefined;
   const text = result?.content?.[0]?.text ?? "";
-  assert(result?.isError !== true && new RegExp(`^Version: +${FORK_VERSION.replace(/[.+]/g, "\\$&")} \\(release range \\d{3}–\\d{3}\\)`, "m").test(text), `the Version row carries FORK_VERSION and its release range (${text.split("\n")[0]})`);
+  assert(result?.isError !== true && new RegExp(`^Version: +${FORK_VERSION.replace(/[.+]/g, "\\$&")} \\((?:release range \\d{3}–\\d{3}|no release range recorded)\\)`, "m").test(text), `the Version row carries FORK_VERSION and its release range (${text.split("\n")[0]})`);
   assert(/^Commit: +unknown$/m.test(text) && /^Store: +sql$/m.test(text), "…the commit (unknown here) and the store");
   assert(/^Database: +unavailable — .*DATABASE_URL is not set/m.test(text), `…and the database row names the store's refusal (${text.split("\n").find((l) => l.startsWith("Database"))?.slice(0, 70)})`);
 }
@@ -445,6 +445,69 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
   assert(postHealth.status === 200 && (await mcpBody(postHealth))?.result != null, `POST /health with the key is the MCP endpoint (${postHealth.status})`);
 }
 
+console.log("\n[10c] brain-info.ts's rules, without a database: the ledger's judgement, the rendering, a refused and an absent read, the deadline (SMD-2041 review pass 1)");
+{
+  const { brainInfo, formatBytes, ledgerStatus, parseHnswOptions, readDatabaseFacts, renderBrainInfo } = await import("./brain-info.ts");
+  type Facts = Awaited<ReturnType<typeof readDatabaseFacts>>;
+  assert(ledgerStatus(52, 52) === "current" && ledgerStatus(51, 52) === "behind" && ledgerStatus(53, 52) === "ahead" && ledgerStatus(null, 52) === null,
+    "the ledger's highest against the tree's last: current, behind, ahead, unjudged");
+  const hn = [parseHnswOptions("m=24,ef_construction=100"), parseHnswOptions("ef_construction=200"), parseHnswOptions(null), parseHnswOptions("m=8")];
+  assert(JSON.stringify(hn) === JSON.stringify([{ m: 24, efConstruction: 100 }, { m: 16, efConstruction: 200 }, { m: 16, efConstruction: 64 }, { m: 8, efConstruction: 64 }]),
+    `HNSW reloptions are read per key, pgvector's defaults where unset (${JSON.stringify(hn)})`);
+  const sizes = [formatBytes(999), formatBytes(1000), formatBytes(45_200_000), formatBytes(10_779_671)];
+  assert(sizes.join("|") === "999 B|1.0 kB|45.2 MB|10.8 MB", `bytes in decimal units, one place (${sizes.join("|")})`);
+
+  // A fake client that answers by statement text: every table on the path,
+  // ob1_entities and the ledger refused, thought_chunks absent. Each read is
+  // its own transaction, so a refusal lands in `unread` and the rest answer.
+  const refused = /FROM ob1_entities|FROM schema_migrations/;
+  const answer = (text: string): unknown[] => {
+    if (refused.test(text)) throw new Error("permission denied for table");
+    if (/set_config/.test(text)) return [{}];
+    if (/server_version/.test(text)) return [{ v: "16.15" }];
+    if (/pg_database_size/.test(text)) return [{ n: 10_779_671 }];
+    if (/pg_extension/.test(text)) return [{ version: "0.8.6", schema: "public" }];
+    if (/to_regclass/.test(text)) return [{ config: true, schema_migrations: true, thoughts: true, thought_audit: true, thought_chunks: false, ob1_entities: true }];
+    if (/FROM ob1_config/.test(text)) return [{ key: "schema_version", value: "1.1.0+upstream.9543c29" }];
+    if (/count\(\*\)/.test(text)) return [{ n: 7 }];
+    if (/pg_am/.test(text)) return [{ index: "thoughts_embedding_idx", table: "thoughts", opts: "m=24,ef_construction=100" }];
+    throw new Error(`unexpected statement: ${text.slice(0, 60)}`);
+  };
+  const tag = (strings: TemplateStringsArray) => Promise.resolve().then(() => answer(strings.join("?")));
+  const fake = Object.assign(tag, { begin: <T>(fn: (tx: typeof tag) => Promise<T>) => fn(tag) });
+  const facts = await readDatabaseFacts(fake);
+  assert(facts.ledger.present === true && facts.ledger.names === null && /permission denied/.test(facts.unread.ledger ?? ""),
+    `a ledger on the path this role cannot read is present and unread, not absent (${JSON.stringify(facts.ledger)})`);
+  assert(facts.counts.ob1_entities === null && /permission denied/.test(facts.unread["counts.ob1_entities"] ?? "") && facts.counts.thought_chunks === null && !("counts.thought_chunks" in facts.unread),
+    `a refused count is unread, an absent table's count is null with no entry (${JSON.stringify(facts.unread)})`);
+  assert(facts.counts.thoughts === 7 && facts.hnsw?.[0]?.m === 24 && facts.schemaVersion === "1.1.0+upstream.9543c29", "…and the reads that answered stand");
+
+  const server = { version: FORK_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } };
+  const planted = (highest: number | null, over: Partial<Facts> = {}): Facts => ({ ...facts, ledger: { present: true, names: highest === null ? [] : [`${highest}_x.sql`] }, highestMigration: highest, unread: {}, ...over });
+  const ahead = await brainInfo(server, async () => planted(53), 1000);
+  const aheadText = renderBrainInfo(ahead);
+  assert(ahead.ledgerStatus === "ahead" && /^Migrations: +053 applied — this server's tree ends at 052 \(the brain is ahead of it\)$/m.test(aheadText),
+    `a ledger past the tree is ahead, in the record and the table (${aheadText.split("\n").find((l) => l.startsWith("Migrations"))})`);
+  const behindText = renderBrainInfo(await brainInfo(server, async () => planted(51), 1000));
+  assert(/^Migrations: +051 applied — this server's tree ends at 052 \(the brain is behind it\)$/m.test(behindText), "…one short of it is behind");
+  const db = ahead.database as { ledger: Record<string, unknown> };
+  assert(JSON.stringify(db.ledger) === JSON.stringify({ present: true, readable: true }), `the record carries the ledger's standing, not its names (${JSON.stringify(db.ledger)})`);
+  const unreadText = renderBrainInfo(await brainInfo(server, async () => planted(52, { unread: { ob1_config: "permission denied for table ob1_config" }, schemaVersion: null }), 1000));
+  assert(/^Schema version: +\? \(ob1_config not read\)$/m.test(unreadText) && /^Brain embedding: +\? \(ob1_config not read\)$/m.test(unreadText) && /^Not read: +ob1_config — permission denied/m.test(unreadText),
+    "an ob1_config this role cannot read is `?`, not `none recorded`");
+  const refusedText = renderBrainInfo(await brainInfo(server, async () => facts, 1000));
+  assert(/^Rows: +7 thoughts · 7 audit · no table chunks · \? entities$/m.test(refusedText) && /^Migrations: +schema_migrations not readable by this role/m.test(refusedText) && /^Database size: +10\.8 MB$/m.test(refusedText),
+    `the table says which count was refused and which table is absent (${refusedText.split("\n").find((l) => l.startsWith("Rows"))})`);
+
+  const t0 = performance.now();
+  // Raced against a guard of its own, so a missing deadline fails here by name
+  // rather than leaving the suite waiting forever.
+  const late = await Promise.race([brainInfo(server, () => new Promise<never>(() => {}), 50), Bun.sleep(3000).then(() => null)]);
+  const took = performance.now() - t0;
+  assert(late !== null && "error" in late.database && /no answer within 50 ms/.test(late.database.error) && took < 1000 && late.ledgerStatus === null,
+    `a read that never answers is the database's error at the deadline, the server's facts still there (${Math.round(took)} ms)`);
+}
+
 console.log("\n[13b] GET /health with a key is what the brain is; without one it is `ok` (SMD-2041)");
 {
   const get = async (path: string, headers: Record<string, string> = {}) => {
@@ -482,7 +545,52 @@ console.log("\n[13b] GET /health with a key is what the brain is; without one it
     // No database in this suite: the record still answers, and says why the
     // database's half is missing — the store's own refusal, not a 500.
     const database = info.database as { error?: string } | undefined;
-    assert(/DATABASE_URL is not set/.test(database?.error ?? "") && info.ledger === null, `…and the database's facts are an error naming DATABASE_URL, the ledger unjudged (${database?.error?.slice(0, 60)})`);
+    assert(/DATABASE_URL is not set/.test(database?.error ?? "") && info.ledgerStatus === null, `…and the database's facts are an error naming DATABASE_URL, the ledger unjudged (${database?.error?.slice(0, 60)})`);
+  }
+}
+
+console.log("\n[13c] A keyed /health answers within its deadline from a database that accepts and never replies (SMD-2041 review pass 1)");
+{
+  // A listener that takes the connection and says nothing: the driver waits
+  // out its connect timeout (30 s), and both the registry check and the read
+  // wait with it. Before the deadline the probe got no reply at all — the
+  // runtime closed the socket at its idle sweep. A child server, since this
+  // suite's own env is frozen with no store.
+  const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
+  const { HEALTH_DEADLINE_MS } = await import("./index.ts");
+  const probePort = Bun.serve({ port: 0, fetch: () => new Response() });
+  const port = probePort.port;
+  probePort.stop(true);
+  const child = Bun.spawn(["bun", "--no-env-file", "index.ts"], {
+    cwd: import.meta.dir,
+    // The build arg as the image bakes it: the record reports it.
+    env: { ...process.env, PORT: String(port), DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, MCP_ACCESS_KEY: KEY, OB1_GIT_SHA: "c0ffee1" },
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  try {
+    let up = false;
+    for (let i = 0; i < 100 && !up; i++) {
+      up = await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok, () => false);
+      if (!up) await Bun.sleep(50);
+    }
+    assert(up, "the child server answers a keyless probe");
+    for (const method of ["GET", "HEAD"]) {
+      const t0 = performance.now();
+      const r = await fetch(`http://127.0.0.1:${port}/health`, { method, headers: { "x-brain-key": KEY }, signal: AbortSignal.timeout(HEALTH_DEADLINE_MS + 5000) }).catch((e: Error) => e);
+      const took = performance.now() - t0;
+      const ok = r instanceof Response && r.status === 200;
+      const body = ok ? await r.text() : "";
+      const info = method === "GET" && ok ? JSON.parse(body) : null;
+      // A HEAD reads nothing — it answers at once; a GET at the deadline.
+      const bound = method === "HEAD" ? 500 : HEALTH_DEADLINE_MS + 1500;
+      assert(ok && took < bound && (method === "HEAD" ? body === "" : new RegExp(`no answer within ${HEALTH_DEADLINE_MS} ms`).test(info?.database?.error ?? "")),
+        `keyed ${method} /health → 200 in ${Math.round(took)} ms (bound ${bound} ms)${info ? `, database.error: ${info.database?.error}` : ""}${r instanceof Error ? ` — ${r.name}` : ""}`);
+      if (info) assert(info.version === FORK_VERSION && info.commit === "c0ffee1" && info.ledgerStatus === null, `…carrying the server's own facts — the commit OB1_GIT_SHA names (${info.commit}) — the ledger unjudged`);
+    }
+  } finally {
+    child.kill();
+    silent.stop(true);
   }
 }
 

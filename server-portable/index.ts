@@ -217,7 +217,13 @@ function serverFacts(): ServerFacts {
     embedding: { model: cfg.embeddingModel, dim: cfg.embeddingDim },
   };
 }
-const readBrainInfo = (): Promise<BrainInfo> => brainInfo(serverFacts(), async () => (await db()).databaseFacts());
+// Bounded (review pass 1: a keyed probe at an unreachable database waited out
+// the driver's 30-second connect and got no reply). The health body answers
+// within a probe's usual timeout; the tool, kept alive by its stream
+// (SMD-1864), waits longer for a large brain's counts.
+export const HEALTH_DEADLINE_MS = 2_500;
+export const BRAIN_INFO_TOOL_DEADLINE_MS = 15_000;
+const readBrainInfo = (deadlineMs: number): Promise<BrainInfo> => brainInfo(serverFacts(), async () => (await db()).databaseFacts(), deadlineMs);
 
 // Built on first use, for the same reason as the store: reading env() at module
 // scope runs before initEnv() has seeded it.
@@ -1485,7 +1491,7 @@ function buildServer(principal: Principal): McpServer {
     },
     async () => {
       try {
-        return { content: [{ type: "text" as const, text: renderBrainInfo(await readBrainInfo()) }] };
+        return { content: [{ type: "text" as const, text: renderBrainInfo(await readBrainInfo(BRAIN_INFO_TOOL_DEADLINE_MS)) }] };
       } catch (err: unknown) {
         return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
       }
@@ -2235,9 +2241,24 @@ app.get("*", async (c, next) => {
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
   }, { admit: SCOPES });
   if (!principal || !canRead(principal)) return c.text("ok", 200, corsHeaders);
-  // A revoked key reads nothing here either, as at the MCP route.
-  if ((await agents().resolve(db(), principal)).status === "revoked") return c.text("ok", 200, corsHeaders);
-  return c.json(await readBrainInfo(), 200, corsHeaders);
+  // A HEAD has no body to carry the record: liveness, as without a key, and no
+  // read for nothing (review pass 1: it paid the whole read, and the deadline).
+  if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
+  // The registry check and the read start together, under one deadline, so the
+  // answer comes within HEALTH_DEADLINE_MS whatever the database does. A
+  // revoked key reads nothing here either, as at the MCP route; a registry
+  // that has not answered by the deadline is treated as the MCP route treats
+  // one that cannot answer (agents.ts) — not a refusal — and the body then
+  // carries the server's own facts and the database's error.
+  const info = readBrainInfo(HEALTH_DEADLINE_MS);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const identity = await Promise.race([
+    agents().resolve(db(), principal),
+    new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), HEALTH_DEADLINE_MS); }),
+  ]);
+  clearTimeout(timer);
+  if (identity?.status === "revoked") return c.text("ok", 200, corsHeaders);
+  return c.json(await info, 200, corsHeaders);
 });
 
 // ── A tool call outlives the runtime's idle timeout (SMD-1864) ───────────────

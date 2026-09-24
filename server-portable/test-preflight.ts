@@ -1761,6 +1761,28 @@ else {
     const ahead = await run(SQL_ENV);
     assert(new RegExp(`!\\s+migration ledger\\s+the ledger reaches 999, past this server's tree \\(${last}\\) — a newer tree migrated this brain`).test(ahead.out),
            `a ledger past the tree's last file warns the other way (${row(ahead.out, "migration ledger")})`);
+
+    // A role that may read the corpus and neither the ledger nor ob1_config
+    // (review pass 1): the ledger row says the table is there and unreadable —
+    // information_schema hid it from such a role, and the row told it to adopt
+    // a hand-applied schema with --baseline — and the version row says it
+    // could not read ob1_config rather than that 044 never ran.
+    await claims.unsafe("DROP ROLE IF EXISTS pf_reader");
+    await claims.unsafe("CREATE ROLE pf_reader LOGIN PASSWORD 'reader'");
+    await claims.unsafe("GRANT USAGE ON SCHEMA public TO pf_reader");
+    await claims.unsafe("GRANT SELECT ON thoughts TO pf_reader");
+    try {
+      const asReader = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+      assert(/migration ledger\s+schema_migrations present, not readable by this role \(permission denied for table schema_migrations\)/.test(asReader.out) && !/no schema_migrations table/.test(asReader.out),
+             `a role without SELECT on the ledger is told it is unreadable, not absent (${row(asReader.out, "migration ledger")})`);
+      assert(/schema version\s+could not verify: permission denied for table ob1_config/.test(asReader.out),
+             `…and the version row names the refused ob1_config read (${row(asReader.out, "schema version")})`);
+    } finally {
+      await claims.unsafe("REVOKE ALL ON thoughts FROM pf_reader");
+      await claims.unsafe("REVOKE USAGE ON SCHEMA public FROM pf_reader");
+      await claims.unsafe("DROP ROLE pf_reader");
+    }
+
     // Back to the harness's unrecorded schema for the sections below.
     await claims.unsafe("DROP TABLE schema_migrations");
   }

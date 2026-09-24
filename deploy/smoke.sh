@@ -184,8 +184,10 @@ facts=$(printf '%s' "$hj" | python3 -c '
 import sys, json
 d = json.load(sys.stdin); db = d.get("database") or {}
 hi = ("error: " + db["error"][:80]) if "error" in db else ("%03d" % db["highestMigration"] if db.get("highestMigration") is not None else "none")
-print("\t".join([d.get("version", ""), d.get("commit", ""), hi, d.get("ledger") or "not judged"]))' 2>/dev/null)
-IFS=$'\t' read -r hv hc hm hl <<<"$facts"
+print("\x1f".join([d.get("version", ""), d.get("commit", ""), hi, d.get("ledgerStatus") or "not judged"]))' 2>/dev/null)
+# \x1f, not a tab: read collapses runs of an IFS whitespace character, so an
+# empty field would shift the ones after it (review pass 1).
+IFS=$'\x1f' read -r hv hc hm hl <<<"$facts"
 vfile="$HERE/../server-portable/version.ts"
 want=""
 [ -r "$vfile" ] && want=$(sed -nE 's/^export const FORK_VERSION = "([^"]+)";$/\1/p' "$vfile")

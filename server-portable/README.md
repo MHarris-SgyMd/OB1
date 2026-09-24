@@ -301,12 +301,19 @@ HNSW:            thought_chunks_embedding_idx on thought_chunks (m 16, ef_constr
 
 **`GET /health` with a read or write key** (the `x-brain-key` header, a bearer
 token or `?key=`) answers the same record as JSON — `version`, `releaseRange`,
-`latestMigration`, `commit`, `store`, `tier`, `embedding`, `ledger`
+`latestMigration`, `commit`, `store`, `tier`, `embedding`, `ledgerStatus`
 (`current` | `behind` | `ahead` | `null`) and `database`, which carries the
-database's facts or `{ "error": … }` when it cannot answer (still a 200: the
-process is serving). Without a key, with a wrong or capture-only key, or with a
+database's facts (the ledger as `{ present, readable }`, not its names) or
+`{ "error": … }` when it cannot answer. It answers within 2.5 s
+(`HEALTH_DEADLINE_MS`) whatever the database does — an unreachable address, a
+table locked by a migration — still a 200, since the process is serving: each
+read runs under a 2 s statement timeout and a 1 s lock timeout, a read that
+runs out is named in `unread`, and a database with no answer by the deadline is
+`database.error`. Without a key, with a wrong or capture-only key, or with a
 revoked one, the body stays the literal `ok`, so nothing about the deployment
-reaches an unauthenticated probe. `deploy/smoke.sh`'s check 10 reads it.
+reaches an unauthenticated probe; a `HEAD`, keyed or not, is the bodiless `ok`
+and reads nothing. Point a platform's liveness probe at the keyless form.
+`deploy/smoke.sh`'s check 10 reads the keyed body.
 
 Where each fact comes from: the version, its release range and the tree's last
 migration are generated into `version.ts` by `scripts/gen-version.ts` (the Workers

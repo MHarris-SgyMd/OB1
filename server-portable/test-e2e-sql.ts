@@ -965,8 +965,8 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   // resetSchema applies the files with no ledger: the record says so rather
   // than inventing a number, and does not judge the brain against the tree.
   const bare = await health("e2e-key") as Record<string, any>;
-  assert(bare.database?.ledger?.present === false && bare.database?.highestMigration === null && bare.ledger === null,
-    `a brain with no schema_migrations reports no ledger and no judgement (${JSON.stringify(bare.database?.ledger)}, ${bare.ledger})`);
+  assert(bare.database?.ledger?.present === false && bare.database?.highestMigration === null && bare.ledgerStatus === null,
+    `a brain with no schema_migrations reports no ledger and no judgement (${JSON.stringify(bare.database?.ledger)}, ${bare.ledgerStatus})`);
 
   // Adopted the way an operator adopts a hand-built schema: the ledger now
   // records every file, so its highest is the tree's last — a fresh brain is current.
@@ -982,8 +982,8 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
            (SELECT count(*)::int FROM thought_chunks) AS chunks,
            (SELECT count(*)::int FROM ob1_entities) AS entities,
            (SELECT value FROM ob1_config WHERE key = 'schema_version') AS schema_version`;
-  assert(db.highestMigration === treeLast && info.latestMigration === treeLast && info.ledger === "current",
-    `the ledger's highest is the tree's last file, ${treeLast}, and the brain is current (${db.highestMigration}, ${info.latestMigration}, ${info.ledger})`);
+  assert(db.highestMigration === treeLast && info.latestMigration === treeLast && info.ledgerStatus === "current",
+    `the ledger's highest is the tree's last file, ${treeLast}, and the brain is current (${db.highestMigration}, ${info.latestMigration}, ${info.ledgerStatus})`);
   assert(db.postgres === truth.pg && db.pgvector?.version === truth.vec && db.pgvector?.schema === "public",
     `Postgres and pgvector versions are the catalog's (${db.postgres}, ${db.pgvector?.version} in ${db.pgvector?.schema})`);
   assert(db.schemaVersion === truth.schema_version && db.schemaVersion === FORK_VERSION, `the schema version is ob1_config's, which is FORK_VERSION (${db.schemaVersion})`);
@@ -1008,7 +1008,61 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   const [{ name: lastName }] = await sql`SELECT name FROM schema_migrations WHERE name LIKE ${last + "%"}`;
   await sql`DELETE FROM schema_migrations WHERE name = ${lastName}`;
   const behind = await health("e2e-key") as Record<string, any>;
-  assert(behind.ledger === "behind" && behind.database?.highestMigration === treeLast - 1, `a ledger missing ${last} is behind this server's tree (${behind.ledger}, ${behind.database?.highestMigration})`);
+  assert(behind.ledgerStatus === "behind" && behind.database?.highestMigration === treeLast - 1, `a ledger missing ${last} is behind this server's tree (${behind.ledgerStatus}, ${behind.database?.highestMigration})`);
+
+  // Review pass 1, against the live catalog. A role that may read the corpus
+  // and not the ledger, the chunks or the entities: the ledger is present and
+  // unread (information_schema hid it from such a role, so the record said
+  // there was none), each refused count is named, the rest answer.
+  await sql.unsafe(`DROP ROLE IF EXISTS brain_reader`);
+  await sql.unsafe(`CREATE ROLE brain_reader LOGIN PASSWORD 'reader'`);
+  await sql.unsafe(`GRANT USAGE ON SCHEMA public TO brain_reader`);
+  await sql.unsafe(`GRANT SELECT ON thoughts, thought_audit, ob1_config TO brain_reader`);
+  const reader = new SQL({ url: URL_.replace(/\/\/[^@]*@/, "//brain_reader:reader@"), max: 1 });
+  try {
+    const { readDatabaseFacts } = await import("./brain-info.ts");
+    const f = await readDatabaseFacts(reader);
+    assert(f.ledger.present === true && f.ledger.names === null && /permission denied/.test(f.unread.ledger ?? ""),
+      `a role without SELECT on schema_migrations sees it present and unread (${JSON.stringify(f.ledger)}, ${f.unread.ledger})`);
+    assert(f.counts.thoughts === truth.thoughts && f.counts.thought_chunks === null && /permission denied/.test(f.unread["counts.thought_chunks"] ?? "") && /permission denied/.test(f.unread["counts.ob1_entities"] ?? ""),
+      `…the counts it may read answer, the refused ones are named (${JSON.stringify(f.counts)})`);
+    assert(f.schemaVersion === FORK_VERSION && f.pgvector?.version === truth.vec, "…and the config and catalog reads stand");
+  } finally {
+    await reader.close();
+    await sql.unsafe(`REVOKE ALL ON thoughts, thought_audit, ob1_config FROM brain_reader`);
+    await sql.unsafe(`REVOKE USAGE ON SCHEMA public FROM brain_reader`);
+    await sql.unsafe(`DROP ROLE brain_reader`);
+  }
+
+  // An index built WITH its own parameters is read as built, not as pgvector's defaults.
+  await sql.unsafe(`CREATE INDEX e2e_hnsw_tuned ON thought_chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 24, ef_construction = 100)`);
+  const tuned = ((await health("e2e-key") as Record<string, any>).database?.hnsw ?? []).find((h: { index: string }) => h.index === "e2e_hnsw_tuned");
+  assert(tuned?.m === 24 && tuned?.efConstruction === 100, `an index built WITH (m = 24, ef_construction = 100) reports 24/100 (${JSON.stringify(tuned)})`);
+  await sql.unsafe(`DROP INDEX e2e_hnsw_tuned`);
+
+  // A migration holding ACCESS EXCLUSIVE on thought_audit: the count waits its
+  // lock_timeout and is named unread; the probe answers, well inside its
+  // deadline (before review pass 1 it waited on the lock and got no reply).
+  const locker = new SQL({ url: URL_, max: 1 });
+  let release: () => void = () => {};
+  const held = new Promise<void>((r) => { release = r; });
+  let locked: () => void = () => {};
+  const isLocked = new Promise<void>((r) => { locked = r; });
+  const tx = locker.begin(async (t) => {
+    await t`LOCK TABLE thought_audit IN ACCESS EXCLUSIVE MODE`;
+    locked();
+    await held;
+  });
+  await isLocked;
+  const t0 = performance.now();
+  const underLock = await health("e2e-key") as Record<string, any>;
+  const took = performance.now() - t0;
+  release();
+  await tx;
+  await locker.close();
+  assert(underLock.database?.counts?.thought_audit === null && /lock timeout/.test(underLock.database?.unread?.["counts.thought_audit"] ?? "") && underLock.database?.counts?.thoughts === truth.thoughts && took < 2500,
+    `a locked thought_audit is an unread count and the rest answer, in ${Math.round(took)} ms (${underLock.database?.unread?.["counts.thought_audit"]})`);
+
   await sql`DELETE FROM schema_migrations`;
 
   // Keyless stays the literal against a live database too, and a key revoked in
