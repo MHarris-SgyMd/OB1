@@ -5222,4 +5222,5 @@ The record is `changes/smd-1999.md`.
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform
+- `../docs/event-log-as-truth.md` — the decision the two gate sections above (SMD-1998, SMD-1999) opened: the event log as the source of truth, the `thoughts` row its projection (SMD-1997)
 - `../db/config.mjs` — `KNOWN_MODEL_DIMS`, so a model/width mismatch is caught
