@@ -2,8 +2,8 @@
 
 [`FORK.md`](../FORK.md) is the front door: the pin, what the fork is for, the
 version scheme, changes 1–17 as a table, the standing sections, and a generated
-index of the numbered files here. The record of every change from 18 on is one file in
-this directory, in one of two states:
+index of the numbered files here. The record of every change from 18 on is one
+file in this directory, in one of two states:
 
 - **`NNN-<slug>.md` — a numbered change.** The change number is the one code
   comments cite as "FORK.md change N" and `db/README.md`'s migration map cites as
@@ -80,7 +80,9 @@ ten, and may only shrink: a listed
 file that fits under the cap fails until its entry is dropped, and a listed file
 that grows past its ceiling fails.
 [`102-…`](102-every-knob-the-server-reads-reaches.md) is the first record cut to
-the shape (470 lines to 119); [`smd-1917.md`](smd-1917.md) is the second.
+the shape (470 lines to 119);
+[`108-…`](108-fork-md-is-the-front-door-and-every-change.md), SMD-1917's own
+record, is the second.
 
 ## At a release
 

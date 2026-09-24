@@ -102,8 +102,8 @@
  *      it is. A changes/smd-NNNN.md fragment (16) is held to the name and the
  *      cap here, and is not in the index: the block renders from the numbered
  *      files alone, so a PR that adds a fragment leaves FORK.md untouched and
- *      the block moves only when the release step numbers the fragments
- *      (SMD-1917, SMD-2084)
+ *      the block moves when a numbered file does — at a release cut or a
+ *      retitle (SMD-1917, SMD-2084)
  *  16. every changes/smd-NNNN.md fragment is well-formed — one of Keep a
  *      Changelog's six types, a bump the migrations it lists allow (a `patch`
  *      that ships a migration fails), an SMD-#### ticket list; exactly one

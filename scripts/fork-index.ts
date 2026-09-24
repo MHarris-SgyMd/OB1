@@ -18,9 +18,9 @@
  * fragment — a change that has landed and takes its number at the next release —
  * and is not listed: the block is the numbered table and one fixed sentence
  * pointing at the fragments, so a PR that adds a fragment leaves FORK.md alone
- * and two such PRs never conflict on it. The block moves only at a release cut,
- * when scripts/assemble-release.ts numbers the fragments and re-renders it
- * (SMD-2084).
+ * and two such PRs never conflict on it. The block moves when a numbered file
+ * does — at a release cut, when scripts/assemble-release.ts numbers the
+ * fragments and re-renders it, or at a numbered record's retitle (SMD-2084).
  */
 import { readFileSync, writeFileSync, readdirSync, existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
