@@ -188,6 +188,15 @@ services:
       # (SMD-1901). The server never judges; preflight, which runs in this
       # container, reports it beside the metadata model and probes it with --deep.
       OB1_JUDGE_MODEL: ${OB1_JUDGE_MODEL:-}
+      # The typed-decision tier (SMD-2050; the jev service below). The server
+      # never decides; preflight, which runs in this container, dials the tier
+      # when OB1_JEV_BASE_URL is set and fails the start when it does not
+      # answer — so no fallback here: a default would fail every stack that
+      # does not run the profile. With it, deploy/.env names
+      # OB1_JEV_BASE_URL=http://jev:8020 and OB1_JEV_LOCAL=1.
+      OB1_JEV_BASE_URL: ${OB1_JEV_BASE_URL:-}
+      OB1_JEV_MODEL: ${OB1_JEV_MODEL:-}
+      OB1_JEV_LOCAL: ${OB1_JEV_LOCAL:-}
       OB1_LLM_TIMEOUT: ${OB1_LLM_TIMEOUT:-}
       # What may leave the box (SMD-1903): whether a thought's text may reach
       # an endpoint not declared local — deny (the default), allow or off —
@@ -364,6 +373,45 @@ services:
         [ -z "$$OB1_JUDGE_MODEL" ] || ollama pull "$$OB1_JUDGE_MODEL"
     restart: "no"
 
+  # The typed-decision tier (SMD-2050). Optional — `--profile jev`; a brain
+  # that runs none of the Jev spikes never builds it.
+  #
+  # A Jev-class model answers a bounded question — "is this true of this
+  # text?", "which of these options?" — with a calibrated probability in one
+  # forward pass, no generation. Ollama cannot serve that (its API exposes no
+  # option logits), so this is its own process: jev/serve.ts, Verdict v1.4 on
+  # onnxruntime-node's CPU provider, behind the contract in
+  # server-portable/jev-contract.ts that server-portable/jev.ts calls. Outside
+  # Ollama's scheduler, so OLLAMA_MAX_LOADED_MODELS neither counts nor evicts
+  # it; about 1 GB resident (jev/README.md has the measured footprint).
+  #
+  # No weights in the image: on first start the service fetches the pinned
+  # files (606 MB) into the jev-models volume and verifies every file's sha256
+  # on every start; a file that does not match is refused, never loaded.
+  jev:
+    build:
+      context: ..
+      dockerfile: jev/Dockerfile
+    profiles: ["jev"]
+    volumes:
+      - jev-models:/models
+    # No `ports:`. An unauthenticated API, like Ollama's: the server's
+    # preflight and a spike in a container reach it as `jev:8020` on the
+    # compose network; compose.host-ports.yaml publishes it on loopback for a
+    # spike run from a checkout.
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r = await fetch('http://127.0.0.1:8020/health'); process.exit(r.ok ? 0 : 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      # The first start downloads the weights before it listens.
+      start_period: 600s
+    # A fetch that fails or a file that hashes wrong exits 1 with the file
+    # named; three tries cover a network that was not up yet, then the service
+    # stops and `ps` says so rather than looping (the board-sync rule above).
+    restart: on-failure:3
+
 volumes:
   pgdata:
   ollama:
+  jev-models:

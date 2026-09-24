@@ -81,7 +81,16 @@ egress` row says so with the line.
 embedding width matches the schema, and checks the metadata model actually honours
 JSON mode — a provider that ignores `response_format` degrades every capture to
 `uncategorized` without ever failing — and, when `OB1_JUDGE_MODEL` names a
-different model, checks that one too under its own `judge model` row. `chunk window` prints the length a capture
+different model, checks that one too under its own `judge model` row. The
+typed-decision tier (`jev.ts`, SMD-2050) is checked only when `OB1_JEV_BASE_URL`
+is set, and then on every run, not only under `--deep`: `jev tier` dials its
+`/info` (no text sent) and fails on an unreachable URL, an answer outside the
+`ob1-jev/1` contract, or a model other than `OB1_JEV_MODEL`; `jev egress` says
+what the gate does with its decisions (declared by `OB1_JEV_LOCAL`); `--deep`
+adds `jev decision`, one binary decision through the client and its gate. The
+server never decides — the Jev spikes do — so the rows exist for the operator
+who set the knob to learn at start, not at a spike's first call, that the tier
+is not there. `chunk window` prints the length a capture
 is windowed above, the window size, and where the numbers came from — `OB1_CHUNK_TOKENS`, the model's
 measured window (`db/config.mjs`, `KNOWN_MODEL_WINDOW`), or the default for a
 model the table does not know — and warns when an explicit limit is over the

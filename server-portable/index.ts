@@ -102,6 +102,15 @@ type Env = {
   OB1_METADATA_MODEL?: string;
   /** The supersession judge's model (db/consolidate.ts), when it is not OB1_METADATA_MODEL; the server never judges, but embed.ts reads one Env (SMD-1901). */
   OB1_JUDGE_MODEL?: string;
+  /**
+   * The typed-decision tier (jev.ts, SMD-2050): where it is served, the model
+   * the caller expects, and 1/on when that endpoint is on this box (declared,
+   * as OB1_LLM_LOCAL is). The server never decides; preflight, which runs in
+   * this container, checks the tier when OB1_JEV_BASE_URL is set.
+   */
+  OB1_JEV_BASE_URL?: string;
+  OB1_JEV_MODEL?: string;
+  OB1_JEV_LOCAL?: string;
   /** Sampling temperature for extraction. Defaults to 0 — metadata.ts's extractMetadata says why; embed.ts's resolveEmbedConfig owns the default. */
   OB1_METADATA_TEMPERATURE?: string;
   /**

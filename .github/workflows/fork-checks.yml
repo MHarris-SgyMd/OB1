@@ -89,7 +89,7 @@ jobs:
       # check-fork-consistency below run on whichever tree is checked out. A PR
       # into another branch is not a landing yet; it is asked when it reaches
       # main.
-      - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/ or evals/
+      - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/, evals/ or jev/
         if: github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.base_ref == 'main')
         env:
           EVENT: ${{ github.event_name }}
@@ -236,6 +236,26 @@ jobs:
       - name: Typecheck the evals
         working-directory: evals
         run: bunx tsc --noEmit
+
+      # The typed-decision tier (SMD-2050): its serving process under jev/ and
+      # the client in server-portable/jev.ts, which the suite imports — so it
+      # runs in THIS job, after server-portable's install. No model: [1]–[8]
+      # hold the contract, the Verdict port, the handler, the verified fetch
+      # and the client's gate against stubs; [9], the model itself, skips
+      # unless JEV_TEST_MODEL_DIR names the pinned files (606 MB, not fetched
+      # in CI). onnxruntime-node's postinstall stays untrusted: it fetches only
+      # CUDA binaries, and the typecheck needs none.
+      - name: Install the decision tier's pinned packages
+        working-directory: jev
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck the decision tier
+        working-directory: jev
+        run: bunx tsc --noEmit
+
+      - name: Decision tier — contract, service and client
+        working-directory: jev
+        run: bun test-jev.ts
 
       # The thought-kind labels (SMD-1951): the fixture's shape rules, probed
       # with mutants, and the committed fixture held to them. Ids and closed

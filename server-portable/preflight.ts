@@ -28,6 +28,7 @@ import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
+import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
 
@@ -2911,6 +2912,51 @@ if (deep) {
     } catch (e) {
       add(row, "fail", `${model} at ${chatEndpoint.base}: ${(e as Error).message}`,
           `Network reachability to ${hostOf(chatEndpoint.base)}. ${consequence}`);
+    }
+  }
+}
+
+// ── Optional: the typed-decision tier (SMD-2050) ─────────────────────────────
+
+// Off unless OB1_JEV_BASE_URL is set. Set, the tier is dialled on every run,
+// not only under --deep: GET /info sends no text and costs no model call, and
+// a wrong or unreachable URL then fails here rather than at the first spike's
+// first decision. --deep also makes one decision, through the client and its
+// egress gate, and checks the answer's shape.
+const jevCfg = resolveJevConfig(env);
+if (!jevCfg) {
+  add("jev tier", "skip", "OB1_JEV_BASE_URL is unset — the typed-decision tier is off (nothing the server does needs it)");
+} else {
+  const at = jevCfg.endpoint.base;
+  const START = "Start it (bun jev/serve.ts on the host, reached from a container as http://host.containers.internal:8020; or compose --profile jev, reached as http://jev:8020), fix OB1_JEV_BASE_URL, or unset it to turn the tier off.";
+  try {
+    const info = await jevInfo(jevCfg, { timeoutMs: 2500 });
+    const pins = `${info.model.name} (${info.model.source}@${info.model.revision.slice(0, 8)}, weights ${info.model.weights_sha256.slice(0, 12)}…)`;
+    if (jevCfg.model && info.model.name !== jevCfg.model) {
+      add("jev tier", "fail", `${at} serves ${pins}, and OB1_JEV_MODEL expects ${jevCfg.model}`,
+          `Point OB1_JEV_BASE_URL at the tier serving ${jevCfg.model}, or set OB1_JEV_MODEL=${info.model.name}.`);
+    } else {
+      add("jev tier", "ok", `${at} serves ${pins} — ${info.contract}, ${info.kinds.join(" and ")} decisions, up to ${info.max_options} options, ${info.max_tokens} tokens${jevCfg.model ? " (OB1_JEV_MODEL)" : ""}`);
+    }
+  } catch (e) {
+    const err = e as Error & { code?: string; kind?: string };
+    add("jev tier", "fail", `${at}: ${err.kind === "timeout" ? "no answer within 2.5 s" : err.message}`, START);
+  }
+  egressRow("jev egress", jevCfg.endpoint, "OB1_JEV_LOCAL", "decision",
+            "every decision a spike asks for is refused before it is sent (a ProviderError of kind egress)");
+  if (!deep) {
+    add("jev decision", "skip", "not checked — pass --deep to make one decision");
+  } else if (!results.some((r) => r.name === "jev tier" && r.status === "ok")) {
+    add("jev decision", "skip", "not checked — the jev tier row failed");
+  } else {
+    try {
+      const t0 = performance.now();
+      const probe = await jevDecide(jevCfg, { proposition: "the note is about a preflight check", context: "preflight: checking that the decision tier answers" }, { kind: "decision", actor: "preflight" });
+      add("jev decision", "ok", `one binary decision in ${(performance.now() - t0).toFixed(0)} ms: p ${probe.p === null ? "null" : probe.p.toFixed(3)}, insufficient ${probe.pInsufficient.toFixed(3)}, temperature ${probe.result.temperature} — the answer is a distribution over the decision's options`);
+    } catch (e) {
+      const err = e as Error & { kind?: string };
+      add("jev decision", err.kind === "egress" ? "warn" : "fail", err.message,
+          err.kind === "egress" ? "See the jev egress row." : "The tier answered /info but not /decide in the contract's shape — check its log.");
     }
   }
 }

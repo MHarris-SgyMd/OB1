@@ -2100,7 +2100,7 @@ function documentedEnvKnobs(pattern: RegExp) {
 /** compose file under deploy/ → the services that publish one mapping each from it. */
 const PUBLISHES: Record<string, string[]> = {
   "compose.yaml": ["server"],
-  "compose.host-ports.yaml": ["postgres", "ollama"],
+  "compose.host-ports.yaml": ["postgres", "ollama", "jev"],
   // The three-brain pipeline (SMD-1806): each tier's server on its own loopback
   // port; the three Postgres services and the shared Ollama publish nothing.
   "compose.tiers.yaml": ["stable-server", "canary-server", "working-server"],
@@ -3722,7 +3722,7 @@ checkSchemaVersion();
  * `server-portable` is the reference: the others import its files, so its
  * pins are the ones a second copy would collide with.
  */
-const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals", "scripts"];
+const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals", "scripts", "jev"];
 const TYPE_PINS = ["@types/bun", "typescript", "@types/node"];
 const WORKFLOW = ".github/workflows/fork-checks.yml";
 const TSC_STEP = /^\s*bunx tsc --noEmit\s*$/;
