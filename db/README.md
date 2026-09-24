@@ -1887,9 +1887,13 @@ passes, patched, edited or captured as the ticket's own text is, each with its
 own vector and tags — and the report's `sections` line counts them; the
 ingester writes the same parts from the dump. The ticket's text is unchanged:
 it is what people search for and cite. Headings only; a bold `**Corrected**`
-paragraph is prose, and a `## ` line inside a fenced code block is code. A
-renamed heading is a new part and the old row stays (neither writer removes);
-two sections whose text comes out identical are one part. A part's
+paragraph is prose, and a `## ` line inside a fenced code block is code (an
+unclosed fence runs to the end, as CommonMark reads it). A renamed heading is
+a new part and the old row stays (neither writer removes) — and while the old
+row holds the text, the renamed part reads as held by it and is refused each
+pass until the old row goes; two sections whose text comes out identical are
+one part, and a near-twin (the fingerprint folds case and whitespace) is
+refused before any model call. A part's
 `created_at` is the heading's date from the ingester and the capture's moment
 from this tool (a capture takes no date). Parts land only once the ticket's
 head row is settled — a ticket whose text another thought holds gets none, and

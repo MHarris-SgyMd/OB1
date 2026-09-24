@@ -656,6 +656,15 @@ async function syncDerived(w: Writer, headId: string, parts: readonly Derived[])
       t[patch ? "patched" : "unchanged"]++;
       continue;
     }
+    // The text held by another thought — a near-twin section (016's fingerprint
+    // folds case and whitespace; the adapter's same-text rule is exact), a
+    // paste — is refused HERE, before a model call is paid and before a capture
+    // could merge this part's facets onto that row wholesale; the ticket path
+    // asks the same question first (second review pass, independent read: the
+    // `existed` refusal below cost two model calls and a facet ping-pong on the
+    // holder every pass).
+    const holder = fp !== null ? await w.holderOf(fp) : null;
+    if (holder && holder.id !== row?.id) { w.log(`  ! ${label}: the section's text is held by ${holder.id}, which is not this section's row; not written (DUPLICATE_CONTENT)`); t.refused++; continue; }
     // New or moved text: the vector and the tags, gated as the ticket's own text
     // is — an edit judged with the row's own metadata under the facets, as the
     // ticket's edit is (first review pass, independent read).
@@ -678,14 +687,13 @@ async function syncDerived(w: Writer, headId: string, parts: readonly Derived[])
     }
     // The facets over the tags, as at a ticket's capture: `type: observation` is the adapter's word, not the model's guess.
     const captured = await w.store.captureThought({ content, payload: { metadata: { ...tags, ...facets } }, chunks: embedded?.chunks ?? [], actor, embedding: embedded?.embedding ?? null, embeddingModel: embedded?.model, derivedFrom: [headId] });
-    // The text was there after all, on a row this identity does not hold
-    // (holderOfIdentity said none): another part's, or a paste. A thought
-    // holds ONE identity (thought_sources' key is the thought), so taking it
-    // would re-key that row — and two same-text parts would re-key one row
-    // between their identities every pass (first review pass, independent
-    // read). Refused and said, as the ticket path refuses an outside holder;
-    // the facets merged onto the row by the capture stand.
-    if (captured.existed === true) { w.log(`  ! ${label}: ${captured.id} already holds the section's text under another identity or none; not taken (DUPLICATE_CONTENT)`); t.refused++; continue; }
+    // The text landed on another row in the window since the look above (a
+    // race): a thought holds ONE identity (thought_sources' key is the
+    // thought), so taking it would re-key that row — and two same-text parts
+    // would re-key one row between their identities every pass (first review
+    // pass, independent read). Refused and said, as the ticket path refuses an
+    // outside holder; the facets the capture merged onto the row stand.
+    if (captured.existed === true) { w.log(`  ! ${label}: ${captured.id} took the section's text in the last instant under another identity or none; not taken`); t.refused++; continue; }
     await w.structure(captured.id, structure);
     w.log(`  + ${label}: captured${embedded ? "" : " WITHOUT a vector (egress refused)"}`);
     t.captured++;
@@ -1492,7 +1500,15 @@ function selfCheck(): Promise<number> {
       const existed: Writer = { ...parts, store: { ...recorder.store, captureThought: async (o) => (o.derivedFrom ? { id: "other", existed: true, supersedes: null } : recorder.store.captureThought(o)) } };
       seen.length = 0;
       r = await syncIssue(existed, sectioned, []);
-      ok(r.derived?.refused === 1 && r.derived.captured === 0 && seen.join(" ") === "new:SMD-1936", `a section's text held by a row this identity does not hold is refused, not taken — the identity is not re-keyed onto that row (${JSON.stringify(r.derived)}; ${seen.join(" ")})`);
+      ok(r.derived?.refused === 1 && r.derived.captured === 0 && seen.join(" ") === "new:SMD-1936", `a section's text taken by another row in the last instant is refused, not taken — the identity is not re-keyed onto that row (${JSON.stringify(r.derived)}; ${seen.join(" ")})`);
+      // …and a holder known BEFORE the write is refused before any model call
+      // is paid (second review pass, independent read: a near-twin section —
+      // 016's fingerprint folds case and whitespace — cost two model calls and
+      // a facet merge onto the holder every pass).
+      const heldText: Writer = { ...parts, holderOf: async (fp) => (fp === fakeFingerprint(part.text) ? row("twin", part.text, { source: "linear", ticket: "SMD-1936" }, null, null) : null) };
+      calls.length = 0; seen.length = 0;
+      r = await syncIssue(heldText, sectioned, []);
+      ok(r.derived?.refused === 1 && calls.join("; ") === 'embed; tags; capture "Backlog" vec=yes type=task' && seen.join(" ") === "new:SMD-1936", `a section whose text another thought holds is refused before the vector and the tags are paid for; the ticket's own capture is the only model work (${calls.join("; ")}; ${seen.join(" ")})`);
       const held: Writer = { ...parts, holderOfIdentity: async () => row("d1", part.text, { ...part.facets, source: "linear" }, null, null) };
       calls.length = 0; seen.length = 0;
       r = await syncIssue(held, sectioned, [headRow]);

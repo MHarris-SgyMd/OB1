@@ -213,7 +213,9 @@ export function sectionSlug(heading: string): string {
  * description are told apart by a counter in order of appearance (so deleting
  * the first renames the second — a renamed heading is a new part, the old
  * row stays). A heading whose date does not exist is not a dated heading.
- * Lines are split on LF or CRLF; a CRLF description's raw is re-joined with LF.
+ * An unclosed fence runs to the end of the description, as CommonMark reads
+ * it: every heading after it is code. Lines are split on LF or CRLF; a CRLF
+ * description's raw is re-joined with LF.
  */
 export function issueSections(issue: LinearIssue): IssueSection[] {
   const lines = (issue.description ?? "").split(/\r?\n/);
