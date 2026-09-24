@@ -11,7 +11,8 @@ are here so the decision is auditable and re-runnable when better models appear.
 - The models you want to compare, pulled
 - `OB1_LLM_LOCAL=1` in the environment for the harnesses that dial through the
   server's own resolver (`eval-consolidate`, `eval-entities`, `eval-graphrag`,
-  `eval-extract-windows`; the chunking end-to-end sets it for its child itself): the egress gate
+  `eval-extract-windows`; the chunking end-to-end and the write-path eval set it for their
+  children themselves): the egress gate
   (SMD-1903) refuses a thought's text to an endpoint not declared local, and a
   loopback address is not a declaration. `lib.ts`'s own embedding dialler
   (`OB1_EVAL_BASE`) is outside the gate: it embeds eval corpora, not the brain
@@ -4332,6 +4333,199 @@ running for mentions — the prompt that asks for a reason below 1 first, on the
 windowed prompt SMD-1879 merged the same day (PR #113) — and item 2 (stop
 recording a confidence) is not the answer for mentions. For edges the
 confidence carries no signal either way. The record is `changes/smd-1982.md`.
+
+
+## What survives into a deliverable, and which planted errors are caught — the write-path eval (SMD-1713)
+
+`eval-write-path.ts`. Every number above is layer one of the four the
+literature asks for (retrieval), or, since SMD-1719, layer two (use: did a
+later write cite what came back). This is layer three, the number the
+verification loop rests on: of the facts a session captured, how many reached
+a later deliverable as a plain statement; of the errors planted along the way,
+how many the deliverable did not state as fact, and which memory mechanism
+each catch rests on. GBrain's shape — sessions, planted salient units, a rate
+before and after — copied small enough to run in CI in seconds.
+
+**The reduced first form, said so.** The ticket's "deliverable that carries
+citations" needs SMD-1715's `capture_deliverable`, which is not built, and
+migration 042's `record_citation` has no MCP caller (SMD-1733 owns the
+argument). On this fork today a deliverable is what SMD-1719 already scores as
+a citation: a `capture_thought` whose `derived_from` names the returned ids it
+used. That is the form that ran; when 1715 lands the arm swaps the tool and the
+scorer does not change.
+
+**The corpus is code, not a fixture.** Twenty fictional sessions over twelve
+fictional subjects, thirty-six captures by two keys — the operator's and an
+agent's — with the planted items typed: 27 salient facts (one subject has
+seven, so the reader's k=5 cuts and survival is not trivially 1), three stale
+decisions each reversed by a later one, three numbers the operator later
+mistyped, three unsourced inferences by the agent against the operator's word,
+and the cases where a mechanism should HURT — an agent's true fact on a
+subject the operator also spoke on, two true facts of one subject with
+different numbers. It lives in `write-path-corpus.ts`, not under `fixtures/`:
+check-fork-consistency check 9 reads every committed fixture as an allowlist
+(a string is an id, or free text under four keys) and its own probes pin the
+"fictional content" case, so an exception would have to tell fiction from an
+export by file name. The rule stays whole; the corpus is source, typechecked
+with the evals; only numbers go to `baselines.json`.
+
+**Keyless, through the real server.** The provider is scripted as
+`test-chunking.ts` scripts it: a `Bun.serve` answers `/embeddings` (1 on the
+axis of each fictional subject the text names, a hashed weight on one of
+sixteen noise axes so the texts of one subject rank in a fixed order, the
+query itself the bare axis — 28 dimensions; a corpus rule holds every pair of
+one subject at least 1e-6 apart in cosine to the query, a margin, since equal
+weights were measured to move the k cut run to run and one bucket apart was
+not) and
+`/chat/completions` for the three prompts the write path sends, told apart by
+their delimiters: the capture's metadata, the extractor's entities (the
+subject named), and the consolidation judge's verdict by one blunt rule — two
+texts under one subject whose digit runs differ conflict, the newer current,
+0.9; anything else agrees. The real `server-portable/index.ts` boots
+in-process against a throwaway Postgres with two write keys; each session's
+rows are then dated one calendar day apart (029's candidate rule wants a day
+between a pair; the text is not touched, so 050's mark stays). One process per
+arm, because the server snapshots its environment and pools connections.
+
+**The arms, paired.** `default` has every mechanism on; each other arm
+switches one off at the memory side, never at the reader: `-supersedes` (the
+newer decision never names the older, so the read has nothing to label),
+`-judge` (no `extract-entities.ts`, no `consolidate.ts`, so no proposal),
+`-actor` (the keys never classified by `set_agent_kind`, so no `By:` kind).
+The reader is one fixed policy — SMD-1735's thesis is that presentation is
+memory's only lever on use, so the policy is what memory's labels let a reader
+do: a hit marked `⚠ Superseded` is left out; where the operator's word stands
+on a subject, an agent's is left out; a hit in a pending conflict proposal is
+written as *contested* (a proposal is a question for a reviewer, never applied
+unreviewed — 029's rule); every other hit is a plain line. A `blind` reader
+that ignores every label runs once more so the gate can show its floor has
+teeth. Partitions decided up front: an item is *retrieved* when its subject's
+search returned it within k; retrieved items are *plain*, *contested* or
+*dropped*; survival counts plain over every salient item, catch counts
+not-plain over every retrieved error, and errors never retrieved are counted
+beside the rate, not inside it — luck is not a mechanism.
+
+```bash
+bun eval-write-path.ts --self-check              # the rules, probed with hand-known answers; no database (in CI, portable-server)
+../db/with-postgres.sh bun eval-write-path.ts    # every arm and the blind reader, the report
+../db/with-postgres.sh bun eval-write-path.ts --gate      # …and hold baselines.json's write_path floor (in CI, data-layer)
+../db/with-postgres.sh bun eval-write-path.ts --record    # re-record the section after a change that moves a rate
+```
+
+### Results, 2026-09-23 (the committed corpus; deterministic — three gate runs identical; the program's output, verbatim)
+
+```
+arm            reader   survival            catch               coverage            contested  unseen-err  returned  chars
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+default        labels    63.0% (17/27)      100.0% (9/9)        100.0% (26/26)              6           0        34   2266
+-supersedes    labels    63.0% (17/27)       66.7% (6/9)        100.0% (29/29)              6           0        34   2436
+-judge         labels    85.2% (23/27)       66.7% (6/9)        100.0% (26/26)              0           0        34   2014
+-actor         labels    70.4% (19/27)       77.8% (7/9)        100.0% (31/31)              6           0        34   2664
+default        blind     92.6% (25/27)        0.0% (0/9)        100.0% (34/34)              0           0        34   2554
+
+catch by error class (default arm): stale 100.0% (3/3) · wrong_number 100.0% (3/3) · inference 100.0% (3/3)
+
+paired against the default arm — items the mechanism got right that its absence did not (helped) and the reverse (hurt), over the items both arms counted; McNemar exact, two-sided: facts (stated) and errors (not stated) each with its own p, and the mixed p over both, where opposite effects cancel
+mechanism    facts +/−  p       errors +/−  p       mixed p   helped items              hurt items                    unpaired
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+supersedes   0/0        1.000   3/0         0.250   0.250     hs1,tm1,ln2                                             
+judge        0/6        0.031   3/0         0.250   0.508     qs2,sf2,md2               qs1,zp1,pw1,sf1,md1,zp2       
+actor        0/2        0.500   2/0         0.500   1.000     gr2,ln4                   hs3,md3                       
+
+errors the default arm caught, and the mechanism each rests on (none named = caught by more than one of the arms run, or never retrieved)
+  hs1   stale         supersedes
+  tm1   stale         supersedes
+  ln2   stale         supersedes
+  gr2   inference     actor
+  qs2   wrong_number  judge
+  pw2   inference     more than one
+  sf2   wrong_number  judge
+  ln4   inference     actor
+  md2   wrong_number  judge
+```
+
+The paired table carries a McNemar p per population — facts (stated) and
+errors (not stated) — and the mixed p over both, where two effects in
+opposite directions cancel: the judge's 0/6 on facts (p 0.031) and 3/0 on
+errors (p 0.250) read as "no effect" at 0.508 together. Read the two. No
+planted error went unseen.
+
+**What it says.**
+
+- **Ten salient facts did not survive, and eight of those are the mechanisms'
+  price, not retrieval's.** Two are the k cut on the seven-item subject (the
+  blind reader shows it: 25/27). Six are contested by the judge — the three
+  true twins of the operator's slips, the two true facts with different
+  numbers, and the operator's fact whose agent inference carried a number —
+  and two are the agent's true facts dropped where the operator spoke.
+- **The judge helped 3 and hurt 6, and the hurt is by design of the read, not
+  of the rule.** A pending proposal contests BOTH sides until a reviewer
+  decides, so the true side loses its plain statement for as long as the
+  queue is unreviewed. That is 029's rule (never apply unreviewed) meeting the
+  read: today the read returns a question where a belief-state read
+  (SMD-1735) would return the reviewed value plain. Three of the six are the
+  stub rule's false positives on two true facts with different numbers — a
+  real judge's rate on that is `eval-consolidate.ts`'s question, not this
+  one's; what this arm measures is the plumbing from verdict to deliverable.
+- **The supersedes pointer is the one mechanism with no hurt** (3/0): a writer
+  who names what a decision replaces costs the read nothing. It is also the
+  only one that depends on the writer saying so.
+- **The actor mark is symmetric here** (2/2): it drops an agent's word where
+  the operator spoke, true or not. Telling "the agent inferred" from "the
+  agent reported" is a stance, and no tool argument carries one yet
+  (SMD-1733; trust, SMD-1724).
+- **Labels are what the catch costs.** The blind reader states 25 of 27 facts
+  and catches none of the nine errors; the labelled reader catches all nine
+  for eight facts.
+- **Coverage is 1.0 by construction of the reader,** which always cites what
+  it used; what the number holds is the store's side — `derived_from` comes
+  back as given (035's re-capture path and the capture-key trim would show
+  here) — and it is billed as that, not as a measure of the writer. A
+  citation finer than the thought needs SMD-1715/1733.
+- **One coupling between arms, stated and measured.** 029 keeps a superseded
+  thought out of the judge's pool and its candidates, so the `-supersedes`
+  arm also hands the judge the three stale decisions to pair: five more pairs
+  judged than the default arm (114 chat calls against 109), none a proposal,
+  because a corpus rule holds that no item on a subject with a decision
+  carries a digit for the judge's rule to read. The arm measures the pointer
+  alone by that rule, not by accident.
+
+**The gate.** `--gate` runs the default arm and the blind reader in the
+data-layer job, keyless as the replay gate is (a step there rather than its
+own job: the write path needs the server and that database, and a step in a
+required job gates a merge with no new name in the ruleset, SMD-1856). It
+runs the corpus's shape rules, checks the record was made on this corpus at
+this k, then fails when the default arm's survival, catch or coverage falls
+below the recorded counts or is measured over a different population
+(coverage's is the line count, so any change to what the reader keeps moves
+it, and the message says so — the ratio is compared as well, so a lost
+citation cannot hide behind a changed count), when more planted errors went
+unretrieved than recorded (an error the reader never sees is outside the
+catch rate, and a retrieval change that hid one would otherwise leave the
+rate at 1), or when any item the record had right is wrong now, by id — a
+fact lost for a fact gained keeps every count. An item now right that the
+record had wrong is a note to re-record, not a failure. The four modes are
+one at a time (`--gate --record` once rewrote the record from two arms and
+then held it). It proves the floor has teeth with the blind reader (0%, below
+the recorded catch and this run's). The arm's process gets the parent's
+shell with every `OB1_*` variable removed and reads no `.env` file — a rule,
+not a list, so a dogfood shell's chunk knob or worker key cannot reach the
+server under test. `--self-check` runs in
+the portable-server job: the corpus's shape rules probed with broken copies,
+the stub's answers against the REAL prompts (both name their own delimiters
+in their rules before the wrapped text — the first draft read the rule as
+the text and extracted nothing), the reader, the parsers, the scorer's
+partitions, the pairing, the comparator, and the ticket's mutant — one
+planted fact dropped from its deliverable fails the survival floor. Live
+mutants on the gate, restored by copy: the reader dropping the first hit of
+every subject fails survival (9/27); the deliverable captured without
+`derived_from` fails coverage (0/26); the reader ignoring the superseded mark
+fails catch (6/9); the run-it reviews' further mutants, each on the right rate.
+
+Not built here: `capture_deliverable` / `verify_deliverable` (SMD-1715), a
+`cites` or `stance` argument (SMD-1733), a real judge's catch rate, proposal
+issues 06 and 09 (they may be filed now that this number exists). The record is
+`changes/smd-1713.md`.
 
 
 ## Related
