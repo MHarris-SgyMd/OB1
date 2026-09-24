@@ -478,7 +478,7 @@ console.log("\n[8c] A streamed answer is a runaway at the third copy of one item
   const laterLoop = answer([ent("Loop"), ent("Loop"), ent("Loop")], [rel("a", "b"), rel("a", "b"), rel("a", "b"), rel("a", "b")]);
   assert([1, 5, laterLoop.length].every((step) => verdictAt(laterLoop, step).startsWith("runaway/")), `a folded entity triplet ends its array, then the relations loop: the detector is armed again for the later array (${verdictAt(laterLoop, 5)})`);
   const bracketPreamble = `Here is the JSON [as requested:\n${answer([ent("Loop"), ent("Loop"), ent("Loop"), ent("Anita", "person")])}`;
-  assert([1, 3, bracketPreamble.length].every((step) => verdictAt(bracketPreamble, step).startsWith("runaway/")), `an unbalanced [ in a preamble made the answer object an "item"; the reading re-roots to the objects inside it (${verdictAt(bracketPreamble, 3)})`);
+  assert([1, 3].every((step) => verdictAt(bracketPreamble, step) === "quiet/open/0"), "an unbalanced [ in a preamble makes the answer one unkeyed item — not read, named in the docblock; the budget bounds it (eleventh pass: no re-rooting)");
   const twice = new RunawayDetector();
   const one = answer([ent("Loop")]);
   twice.feed(`${one}\n{"entities": [`);
@@ -495,9 +495,11 @@ console.log("\n[8c] A streamed answer is a runaway at the third copy of one item
   const firstEmpty = `{"entities": [], "relationships": []}`;
   twoObjects.feed(`${firstEmpty} ${answer([ent("Loop")])}`);
   assert(twoObjects.closed && twoObjects.closedAt === firstEmpty.length && twoObjects.items === 0, "a complete answer followed by a second object is read to the first — named in the docblock; the whole read would fail both");
-  const emptyFirst = `[{"entities": [], "relationships": [${rel("a", "b")}, ${rel("a", "b")}, ${rel("a", "b")}, ${rel("a", "b")}]}`;
-  assert([1, 4, emptyFirst.length].every((step) => verdictAt(emptyFirst, step) === "runaway/closed/4"), `under an unbalanced [ an answer whose first array is empty is re-rooted all the same — the item began with the answer's key (${verdictAt(emptyFirst, 4)})`);
-  assert([1, 3].every((step) => verdictAt(`[${answer([ent("Anita", "person")])}`, step) === "quiet/closed/1"), "a re-rooted answer closes at ITS brace, though the preamble's bracket never does");
+  // Eleventh review pass.
+  const valued = `{"x": "entities"} ${answer([ent("Loop")])}`;
+  assert([1, 3, valued.length].every((step) => verdictAt(valued, step) === "quiet/closed/1"), `a string VALUE "entities" in a preamble object is not the answer's key — the key is the string a colon follows (${verdictAt(valued, 3)})`);
+  const keyedItem = answer([item({ entities: [{ a: 1 }], name: "Loop", type: "tool", confidence: 1 }), ent("Loop"), ent("Loop"), ent("Loop"), ent("Loop")]);
+  assert([1, 7, keyedItem.length].every((step) => verdictAt(keyedItem, step) === "runaway/closed/5"), `an item whose first key is "entities" and holds an object is an item like any other — five items, a loop, the answer closed at its own brace (${verdictAt(keyedItem, 7)})`);
   const nestedArrays = answer([item({ name: "Loop", type: "tool", confidence: 1, aliases: [{ x: 1 }] }), item({ name: "Loop", type: "tool", confidence: 1, aliases: [{ x: 1 }] }), item({ name: "Loop", type: "tool", confidence: 1, aliases: [{ x: 1 }] }), item({ name: "Loop", type: "tool", confidence: 1, aliases: [{ x: 1 }] })]);
   assert([1, 5].every((step) => verdictAt(nestedArrays, step) === "runaway/closed/4"), `an item whose own nested array holds objects keeps them as its own — four such items are four items and a loop (${verdictAt(nestedArrays, 5)})`);
 

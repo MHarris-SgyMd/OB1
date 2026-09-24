@@ -264,20 +264,21 @@ export const RUNAWAY_REPEATS = 3;
  * that ends with its array, whatever follows in the other array, is an answer
  * parseExtraction folds, and the verdict does not depend on where the
  * provider split its frames (sixth and seventh passes); a later array's own
- * loop arms it anew (eighth pass). An "item" that began as the answer object
- * — its first key `"entities"` or `"relationships"` — was the answer itself,
- * put inside an array by an unbalanced `[` in a preamble: the reading
- * re-roots to the objects inside and that object's close is the answer's
- * (eighth to tenth passes); an item whose own nested array holds objects
- * keeps them as its own. `closed` needs the answer's own `"entities"` key read
- * in it, so a valid empty answer closes and a preamble's own `{…}` — even one
- * holding an array — does not (ninth and tenth passes); nothing after the
- * close is read, so a stream that carries a complete answer and then another
- * object is read to the first, where the whole read would fail both (named,
- * accepted). `closedAt` is where in the text fed the answer closed, so a
- * reader can cut what a frame carried after it. Not resynced: preamble
- * chatter with an unbalanced bracket and a stray quote, or a quoted bracket
- * (`"["`) — the budget bounds those, as it did before this ticket.
+ * loop arms it anew (eighth pass). An item's own nested objects, in arrays
+ * or not, are the item's — never items, never the answer (eleventh pass:
+ * three passes of "re-rooting" out of an item that looked like the answer
+ * helped only answers a preamble had already made malformed, and each
+ * widening misread a valid one). `closed` needs the answer's own `"entities"`
+ * KEY — a string directly inside the root object followed by `:` — so a
+ * valid empty answer closes and a preamble's own `{…}` does not, whatever it
+ * holds or says (ninth to eleventh passes); nothing after the close is read,
+ * so a stream that carries a complete answer and then another object is read
+ * to the first, where the whole read would fail both (named, accepted).
+ * `closedAt` is where in the text fed the answer closed, so a reader can cut
+ * what a frame carried after it. Not handled, the budget bounding them as it
+ * did before this ticket: preamble chatter with an unbalanced `[` (the answer
+ * becomes one unkeyed item), an unbalanced bracket and a stray quote, or a
+ * quoted bracket (`"["`).
  */
 export class RunawayDetector {
   private readonly stack: ("{" | "[")[] = [];
@@ -291,12 +292,11 @@ export class RunawayDetector {
   items = 0;
   /** True once the answer's container has closed with an item read or an array opened in it: the answer is complete. Final — nothing after it is read (eighth and ninth passes). */
   closed = false;
-  /** The stack depth of the answer's own container — 1, or the level of the object the reading re-rooted out of. */
-  private answerLevel = 1;
-  /** The answer's own `"entities"` key, read directly inside its container: what makes its close the answer's. */
+  /** The answer's own `"entities"` key — a string directly inside the root object, followed by `:` — what makes its close the answer's. */
   private sawEntities = false;
-  /** The string being read directly inside the answer's container — a key — while inString there. */
+  /** The string being read directly inside the root object, and the one just closed there, pending the `:` that makes it a key rather than a value (eleventh pass). */
   private key = "";
+  private pendingKey: string | null = null;
   /** Characters fed up to and including the brace that closed the answer; -1 while open. */
   closedAt = -1;
   private consumed = 0;
@@ -329,30 +329,26 @@ export class RunawayDetector {
         else if (c === "\\") this.escaped = true;
         else if (c === '"') {
           this.inString = false;
-          if (this.stack.length === this.answerLevel && this.key === "entities") this.sawEntities = true;
+          if (this.stack.length === 1) this.pendingKey = this.key;
         }
-        if (this.inString && this.stack.length === this.answerLevel) this.key += c;
+        if (this.inString && this.stack.length === 1) this.key += c;
         continue;
+      }
+      if (this.pendingKey !== null && this.stack.length === 1 && !/\s/.test(c)) {
+        if (c === ":" && this.pendingKey === "entities") this.sawEntities = true;
+        this.pendingKey = null;
       }
       if (c === '"') { this.inString = true; this.key = ""; continue; }
       if (c === "{" || c === "[") {
-        // An object opening directly inside an array is an item, at any depth.
-        // One opening inside an array inside the current item, when that item
-        // began as the answer object — its first key "entities" or
-        // "relationships" — says the item WAS the answer, put inside an array
-        // by an unbalanced `[` in a preamble: the reading re-roots to this
-        // object, and the answer's close is the outer's (eighth to tenth
-        // passes). Any other nested object is its item's own.
-        if (c === "{" && this.stack[this.stack.length - 1] === "[") {
-          if (this.itemLevel < 0) { this.itemLevel = this.stack.length + 1; this.item = ""; start = i; }
-          else if (this.stack.length === this.itemLevel + 1 && /^\{\s*"(entities|relationships)"\s*:/.test(this.item + piece.slice(start, i))) { this.answerLevel = this.itemLevel; this.sawEntities = true; this.itemLevel = this.stack.length + 1; this.item = ""; start = i; }
-        }
+        // An object opening directly inside an array, outside any item, is an
+        // item, at any depth; inside an item it is the item's own.
+        if (c === "{" && this.itemLevel < 0 && this.stack[this.stack.length - 1] === "[") { this.itemLevel = this.stack.length + 1; this.item = ""; start = i; }
         this.stack.push(c);
         continue;
       }
       if (c === "}" || c === "]") {
         this.stack.pop();
-        if (this.stack.length === this.answerLevel - 1 && this.sawEntities) { this.closed = true; this.closedAt = offset + i + 1; }
+        if (this.stack.length === 0 && this.sawEntities) { this.closed = true; this.closedAt = offset + i + 1; }
         // The array that held the third copy has closed: the loop ended with it,
         // and the detector is armed again for a loop in a later array (eighth
         // review pass: the first fire was final, so a relation repeated three
@@ -438,7 +434,9 @@ export function describeExtractWindow(cfg: EmbedConfig): string {
     ? "; no answer budget and no runaway retry — reasoning is on (OB1_METADATA_REASONING), and a budget would cap the thinking, so a call that does not converge ends at the context or the caller's deadline"
     : w.retryRunaway
       ? `${abort}${w.streamAbort ? ", and a call aborted so or run to its answer budget" : "; a call that runs to its answer budget"} is made once more with a ${RUNAWAY_PENALTY} frequency penalty${w.streamAbort ? ", read whole" : ""}`
-      : abort;
+      // Reachable with EXTRACT_RETRY_RUNAWAY flipped and the abort on: the
+      // consequence named, as the worker's failed-row note names it.
+      : abort ? `${abort}, and is the thought's answer, malformed — no retry` : "";
   if (cfg.extractChunkTokensFrom === "OB1_EXTRACT_CHUNK_TOKENS") return `${rule}, from OB1_EXTRACT_CHUNK_TOKENS (${ctx})${retry}`;
   if (cfg.extractChunkTokensFrom === "window") {
     // `capped` is the resolver's own answer (second review pass: inferring it
