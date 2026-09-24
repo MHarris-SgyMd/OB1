@@ -32,6 +32,7 @@ import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { destructiveSqlIn } from "../db/config.mjs";
 import { createAssert, resetSchema, substitute } from "../db/test-support.ts";
 import { median } from "./lib.ts";
 import {
@@ -44,12 +45,13 @@ const SQL_DIR = join(HERE, "writable-projection");
 const args = process.argv.slice(2);
 const has = (f: string) => args.includes(f);
 
-export const DIM = 8;
-export const MODEL = "proto-model";
-export const OTHER_MODEL = "other-model";
-export const KEY = "extract:proto@p1";
-export const ACTOR = { name: "op-key", via: "mcp" };
-export const TIMING_N = 200;
+// The run's constants — this CLI's own, imported by nothing (boyscout: exports with no consumer un-exported).
+const DIM = 8;
+const MODEL = "proto-model";
+const OTHER_MODEL = "other-model";
+const KEY = "extract:proto@p1";
+const ACTOR = { name: "op-key", via: "mcp" };
+const TIMING_N = 200;
 
 export function argumentProblem(argv: readonly string[]): string | null {
   const known = new Set(["--self-check", "--prototype", "--check", "--json"]);
@@ -105,10 +107,10 @@ async function seed(sql: SQL): Promise<void> {
 // The scripted writes: the same statements against every schema.
 // ---------------------------------------------------------------------------
 
-export type Step = { step: string; ok: boolean; value?: unknown; error?: string; auditDelta: number };
+type Step = { step: string; ok: boolean; value?: unknown; error?: string; auditDelta: number };
 /** A row as read mid-script, before a later step deletes it (first review pass: C3 had read only returns and the log). */
-export type Image = (RowImage & { chunks: number }) | null;
-export type Trace = { steps: Step[]; ids: Record<string, string>; noopBumped: boolean | null; images: Record<string, Image>; planted: string[] };
+type Image = (RowImage & { chunks: number }) | null;
+type Trace = { steps: Step[]; ids: Record<string, string>; noopBumped: boolean | null; images: Record<string, Image>; planted: string[] };
 
 const TEXTS = {
   A: "The first thought of the spike, captured by readwise.",
@@ -128,6 +130,7 @@ const TEXTS = {
 };
 /** A backdated record, as db/ingest-records.ts writes one (the record's own time, not the write's). */
 const E_CREATED = "2024-01-02T03:04:05Z";
+/** The ingester's record id, fixed: its statement lands on `ON CONFLICT (id)`, so the first write and the rewrite must name the same one. */
 const E_ID = "00000000-0000-4000-8000-00000000e001";
 
 async function runScript(sql: SQL): Promise<Trace> {
@@ -275,7 +278,7 @@ type Census = { rows: RowImage[]; events: EventImage[]; claims: { thought_id: st
 
 async function census(sql: SQL): Promise<Census> {
   const rows = (await sql`SELECT content, content_fingerprint, jsonb_typeof(metadata) AS metadata_type, metadata, supersedes::text AS supersedes, derived_from, embedding IS NOT NULL AS has_vector, embedding_model FROM thoughts ORDER BY content`) as RowImage[];
-  const events = (await sql`SELECT action, source, actor_name, actor_kind, trust, origin, stance, cites::text[] AS cites, valid_from::text AS valid_from, valid_until::text AS valid_until, actor_context, diff FROM thought_audit ORDER BY created_at, seq`) as EventImage[];
+  const events = await readEvents(sql);
   const claims = (await sql`SELECT thought_id::text AS thought_id, count(*)::int AS n FROM thought_work_claims WHERE work_type = ${KEY} GROUP BY thought_id`) as { thought_id: string; n: number }[];
   const chunkRows = (await sql`SELECT thought_id::text AS thought_id, count(*)::int AS n FROM thought_chunks GROUP BY thought_id`) as { thought_id: string; n: number }[];
   return { rows, events, claims, chunks: Object.fromEntries(chunkRows.map((c) => [c.thought_id, Number(c.n)])) };
@@ -298,12 +301,23 @@ type Ctx = { sql: SQL; option: OptionId; trace: Trace; census: Census; rows: "th
 const stepOf = (t: Trace, token: string) => t.steps.find((s) => s.step.split(" ")[0] === token);
 const val = (s: Step | undefined) => (s?.value as Row[] | undefined)?.[0]?.r as Row | undefined;
 
-async function eventsOf(sql: SQL, id: string, action?: string): Promise<EventImage[]> {
-  if (!id) return [];
-  return (action
-    ? await sql`SELECT action, source, actor_name, actor_kind, trust, origin, stance, cites::text[] AS cites, valid_from::text AS valid_from, valid_until::text AS valid_until, actor_context, diff FROM thought_audit WHERE thought_id = ${id}::uuid AND action = ${action} ORDER BY created_at, seq`
-    : await sql`SELECT action, source, actor_name, actor_kind, trust, origin, stance, cites::text[] AS cites, valid_from::text AS valid_from, valid_until::text AS valid_until, actor_context, diff FROM thought_audit WHERE thought_id = ${id}::uuid ORDER BY created_at, seq`) as EventImage[];
+/**
+ * The audit rows as the differential and the probes read them — one column
+ * list (boyscout: the census and both arms of the per-thought read had spelled
+ * it three times). `id` narrows to one thought and `action` to one kind;
+ * neither given means every row, in log order.
+ */
+async function readEvents(sql: SQL, id?: string, action?: string): Promise<EventImage[]> {
+  return (await sql`
+    SELECT action, source, actor_name, actor_kind, trust, origin, stance,
+           cites::text[] AS cites, valid_from::text AS valid_from, valid_until::text AS valid_until, actor_context, diff
+      FROM thought_audit
+     WHERE (${id ?? null}::uuid IS NULL OR thought_id = ${id ?? null}::uuid)
+       AND (${action ?? null}::text IS NULL OR action = ${action ?? null}::text)
+     ORDER BY created_at, seq`) as EventImage[];
 }
+/** A thought's events; an empty id (a capture that failed and was not planted) has none. */
+const eventsOf = (sql: SQL, id: string, action?: string): Promise<EventImage[]> => (id ? readEvents(sql, id, action) : Promise.resolve([]));
 
 const okStep = (t: Trace, prefix: string, name?: string): Probe => {
   const s = stepOf(t, prefix);
@@ -993,8 +1007,9 @@ function selfCheck(): void {
   assert(argumentProblem(["--self-check"]) === null && argumentProblem(["--prototype"]) === null && argumentProblem(["--check"]) === null && argumentProblem(["--prototype", "--json"]) === null, "the three modes, --json with --prototype");
   assert(argumentProblem([]) !== null && argumentProblem(["--self-check", "--check"]) !== null && argumentProblem(["--check", "--json"]) !== null && argumentProblem(["--bogus"]) !== null, "no mode, two modes, --json elsewhere and an unknown flag are refused");
   assert(protoSql("common.sql", "thought_rows").includes("ON thought_rows") && !protoSql("common.sql", "thought_rows").includes("{{") && protoSql("option2-functions.sql", "thoughts").includes(`vector(${DIM})`), "the prototype SQL substitutes the width and the rows relation, leaving no placeholder");
-  const statements = ["common.sql", "option1-view.sql", "option1-undo.sql", "option2-functions.sql"].map((f) => readFileSync(join(SQL_DIR, f), "utf8")).join("\n").split("\n").filter((l) => !/^\s*--/.test(l)).join("\n");
-  assert(!/DROP\s+TABLE|TRUNCATE\s|DELETE\s+FROM\s+\w+\s*;/i.test(statements), "no prototype file destroys rows, comments aside (check 21 reads them as statements)");
+  // The rule's owner, not a copy of it (boyscout): check 21 reads every .sql through destructiveSqlIn, this file included.
+  const destructive = ["common.sql", "option1-view.sql", "option1-undo.sql", "option2-functions.sql"].flatMap((f) => destructiveSqlIn(readFileSync(join(SQL_DIR, f), "utf8")).map((h) => `${f}:${h.line} ${h.rule}`));
+  assert(destructive.length === 0, `no prototype file destroys rows by check 21's own rule${destructive.length ? ` — ${destructive.join("; ")}` : ""}`);
 
   report();
 }

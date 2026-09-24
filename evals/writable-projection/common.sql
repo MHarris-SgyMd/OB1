@@ -563,11 +563,9 @@ BEGIN
         MESSAGE = 'thoughts_write_audit: ob1.projecting names an event that is not in the log', DETAIL = v_proj;
     END IF;
     IF e.thought_id <> v_id THEN
-      -- The foreign-row rule reads the WHOLE diff: a cascade that also moved
-      -- a vector is not a bump (first review pass — the vector was stripped
-      -- before this test).
       -- ANOTHER row moved under this event's projection: a consequence the
-      -- schema itself draws. Found by the first smoke run — a tombstone's
+      -- schema itself draws, judged on the WHOLE diff (a cascade that also
+      -- moved a vector is not a bump). Found by the first smoke run — a tombstone's
       -- ON DELETE SET NULL (025) writes every successor's pointer, and 042's
       -- citation guard bumps a citing thought's updated_at on a detach.
       IF v_diff = '{}'::jsonb THEN
