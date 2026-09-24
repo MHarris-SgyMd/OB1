@@ -77,9 +77,9 @@ OPTIONAL (TIER 3 ONLY)
    <!-- -->
 
    > [!WARNING]
-   > The service role key bypasses Row Level Security. Keep `.env.local` out of version control and restrict its file permissions.
+   > The connection string carries a role that reads every thought. Keep `.env.local` out of version control and restrict its file permissions.
 
-3. (Optional) Apply the SQL views if you want to run Tier 1 checks directly in Supabase Studio without the Node script:
+3. (Optional) Apply the SQL views if you want to run Tier 1 checks directly in psql without the Node script:
 
    Run [`views.sql`](./views.sql) against your brain's database as the role that owns `thoughts` — `psql "$DATABASE_URL" -f recipes/lint-sweep/views.sql` — and grant any other role the views with `bun db/migrate.ts --grant <role>` (the **recipes** group). This creates read-only views (`lint_orphans_by_tag`, `lint_exact_duplicates`, `lint_high_importance_isolated`, etc.) you can query any time.
 

@@ -168,7 +168,7 @@ CREATE INDEX IF NOT EXISTS idx_omx_session_artifact
 -- five tables here, with a policy `auth.uid() = user_id` FOR ALL on each
 -- (DROP POLICY IF EXISTS first), and GRANTed each TO service_role. Those are
 -- Supabase's: auth.uid() is GoTrue's, so on plain Postgres the first policy
--- stopped the file (`function auth.uid() does not exist`), the GRANTs would
+-- stopped the file (`schema "auth" does not exist`), the GRANTs would
 -- have (`role "service_role" does not exist`), and with a stub auth.uid()
 -- returning NULL the policies denied every row to any role but the tables'
 -- owner. Removed. The recipe's server connects as one role and passes user_id

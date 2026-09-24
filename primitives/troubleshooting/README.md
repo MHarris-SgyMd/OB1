@@ -42,7 +42,7 @@ Solutions for issues that come up across any Open Brain extension. If your probl
 **The server starts but tool calls error**
 - Read the server's output: a failed tool call logs its cause there
 - `relation "…" does not exist`: the extension's `schema.sql` did not run against the database `SUPABASE_URL` names
-- `function auth.uid() does not exist`: a `schema.sql` from before SMD-1810, or one of your own with Supabase's policies — the files in this tree call no `auth.*` function; take the current file
+- `schema "auth" does not exist`, or `function auth.uid() does not exist` once an `auth` schema was created by hand: a `schema.sql` from before SMD-1810, or one of your own with Supabase's policies — the files in this tree call no `auth.*` function; take the current file
 - Vector width: a server that embeds through OpenRouter at 1536 dimensions refuses on a brain built at this fork's local default (1024); the README says which width it needs
 
 ## Database Issues

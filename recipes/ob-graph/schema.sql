@@ -68,7 +68,7 @@ CREATE INDEX IF NOT EXISTS idx_graph_edges_type
 -- This fork (SMD-1810): upstream's file ENABLEd ROW LEVEL SECURITY on both
 -- tables here, with a policy `auth.uid() = user_id` FOR ALL on each.
 -- auth.uid() is GoTrue's, which exists only on Supabase: on plain Postgres
--- the first policy stopped the file (`function auth.uid() does not exist`),
+-- the first policy stopped the file (`schema "auth" does not exist`),
 -- and with a stub returning NULL to get past it the policy denied every row
 -- to any role but the tables' owner. Removed. The server connects as one role
 -- and scopes rows by DEFAULT_USER_ID itself.
@@ -363,7 +363,8 @@ $$ LANGUAGE plpgsql;
 -- PUBLIC, anon, authenticated` and a GRANT EXECUTE TO service_role — so
 -- PostgREST would refuse an anonymous RPC call at the entry point rather than
 -- inside reconstruct_bfs_path. Those are Supabase's roles: on plain Postgres
--- the first GRANT stopped the file (`role "service_role" does not exist`).
+-- the first GRANT would have stopped the file (`role "service_role" does not
+-- exist`) had the policies above not stopped it first.
 -- Removed, the REVOKEs with them: none of the three functions is SECURITY
 -- DEFINER, this fork has no PostgREST to expose them as RPCs, and the server
 -- calls them as the role it connects with, so EXECUTE stays PUBLIC's, as it

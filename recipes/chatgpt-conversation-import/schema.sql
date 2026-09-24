@@ -78,7 +78,7 @@ COMMENT ON TABLE chatgpt_conversations IS 'ChatGPT conversation summaries with p
 -- table here, with a policy `auth.uid() = user_id` FOR ALL, and GRANTed it TO
 -- service_role; the column above referenced auth.users(id) with DEFAULT
 -- auth.uid(). Those are Supabase's: on plain Postgres the REFERENCES stopped
--- the file (`relation "auth.users" does not exist`) and the GRANT would have
+-- the file (`schema "auth" does not exist`) and the GRANT would have
 -- (`role "service_role" does not exist`), and a stub auth.uid() returning
 -- NULL left the policy denying every row to any role but the table's owner.
 -- Removed; user_id stays a plain nullable uuid the importer fills (USER_ID).

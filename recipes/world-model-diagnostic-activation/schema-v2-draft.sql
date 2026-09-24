@@ -80,7 +80,7 @@ execute function public.world_model_set_updated_at();
 -- each (created inside a DO block when absent) and grants on both to
 -- service_role; the two user_id columns above referenced auth.users(id) on
 -- delete cascade. Those are Supabase's: on plain Postgres the first
--- REFERENCES stopped the file (`relation "auth.users" does not exist`), as
+-- REFERENCES stopped the file (`schema "auth" does not exist`), as
 -- the grants would have (`role "service_role" does not exist`), and with a
 -- stub auth.uid() returning NULL the policies denied every row to any role
 -- but the tables' owner. Removed; user_id stays a NOT NULL uuid the recipe

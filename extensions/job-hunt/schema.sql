@@ -117,7 +117,7 @@ CREATE INDEX IF NOT EXISTS idx_job_contacts_user_company
 -- This fork (SMD-1810): upstream's file ENABLEd ROW LEVEL SECURITY on the
 -- five tables here, with a policy `auth.uid() = user_id` FOR ALL on each.
 -- auth.uid() is GoTrue's, which exists only on Supabase: on plain Postgres
--- the first policy stopped the file (`function auth.uid() does not exist`),
+-- the first policy stopped the file (`schema "auth" does not exist`),
 -- and with a stub returning NULL to get past it the policy denied every row
 -- to any role but the tables' owner. Removed. The server connects as one role
 -- and scopes rows by DEFAULT_USER_ID itself.

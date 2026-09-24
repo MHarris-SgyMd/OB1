@@ -140,10 +140,10 @@ create table pending_confirmations (
 );
 
 -- Grant the role your server connects as (skip when that role owns the tables)
-grant select, insert, update, delete on table public.people to <your_role>;
-grant select, insert, update, delete on table public.interactions to <your_role>;
-grant select, insert, update, delete on table public.action_items to <your_role>;
-grant select, insert, update, delete on table public.pending_confirmations to <your_role>;
+grant select, insert, update, delete on table public.people to your_role;
+grant select, insert, update, delete on table public.interactions to your_role;
+grant select, insert, update, delete on table public.action_items to your_role;
+grant select, insert, update, delete on table public.pending_confirmations to your_role;
 -- `thoughts` itself is `bun db/migrate.ts --grant <role>`'s (db/README.md, "Grants for a capturing role")
 ```
 

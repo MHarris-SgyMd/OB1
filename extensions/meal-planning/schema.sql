@@ -55,7 +55,7 @@ CREATE INDEX idx_shopping_lists_user_week ON shopping_lists(user_id, week_start)
 -- and a SELECT (on shopping_lists also an UPDATE) policy for a
 -- `household_member` role read from auth.jwt() — the shared server's scope.
 -- auth.uid() is GoTrue's, which exists only on Supabase: on plain Postgres
--- the first policy stopped the file (`function auth.uid() does not exist`),
+-- the first policy stopped the file (`schema "auth" does not exist`),
 -- and with a stub returning NULL to get past it the policy denied every row
 -- to any role but the tables' owner. Removed. The server connects as one role
 -- and scopes rows by DEFAULT_USER_ID itself.

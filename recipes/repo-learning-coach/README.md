@@ -37,7 +37,7 @@ LOCAL APP
 
 ![Step 1](https://img.shields.io/badge/Step_1-Create_the_Learning_Tables-1E88E5?style=for-the-badge)
 
-Open your Supabase SQL Editor and run the contents of [schema.sql](./schema.sql).
+Run [schema.sql](./schema.sql) against your brain's database — `psql "$DATABASE_URL" -f recipes/repo-learning-coach/schema.sql` (or Supabase's SQL Editor, if that is where it lives).
 
 <details>
 <summary>📋 <strong>SQL: Repo Learning Coach tables</strong> (copy from <code>schema.sql</code>)</summary>
