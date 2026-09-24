@@ -701,8 +701,8 @@ async function writeDossierThought(sb, env, entity, wiki, sourceCounts, provenan
   };
 
   // Compute embedding so the dossier is retrievable via match_thoughts. The
-  // MCP capture flow in server/index.ts does the same (embed first, then
-  // upsert + patch embedding). Embedding failure is FATAL here: a thought-mode
+  // MCP capture flow in server-portable/index.ts does the same (embed first,
+  // then one write with the vector). Embedding failure is FATAL here: a thought-mode
   // dossier without an embedding is unreachable via match_thoughts / MCP
   // search, which is the entire point of this output mode. Writing the row
   // anyway would silently produce an unsearchable dossier while reporting

@@ -479,8 +479,8 @@ else {
 
   /**
    * Two more bodies a vendored file replaced on a real brain (SMD-1250, fourth
-   * review pass): the edge-function-cost-optimization recipe's
-   * thought_stats_summary over 024's — a warning, thought_stats raising on a
+   * review pass): the edge-function-cost-optimization recipe's (retired by
+   * SMD-1800) thought_stats_summary over 024's — a warning, thought_stats raising on a
    * null topic — and upstream's thought-work-claims release_thought over
    * 015's — a failure, every worker release refused by 015's CHECK. Stand-ins
    * with the same shape and none of the clause each recogniser reads; and a
