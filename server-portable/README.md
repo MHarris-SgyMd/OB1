@@ -316,8 +316,11 @@ token or `?key=`) answers the same record as JSON — `version`, `releaseRange`,
 `ledgerStatus` (`current` | `behind` | `ahead` | `null`) and `database`, which carries the
 database's facts (the ledger as `{ present, readable }`, not its names) or
 `{ "error": … }` when it cannot answer. It answers within 2.5 s
-(`HEALTH_DEADLINE_MS`) whatever the database does — an unreachable address,
-tables locked by a migration — still a 200, since the process is serving: the
+(`HEALTH_DEADLINE_MS`) whatever the database does — still a 200, since the
+process is serving. A database that refuses at once is `database.error`; one
+that never answers (a dropped route) leaves the agent registry unanswered too,
+and the body is then the literal `ok`, as for a key the server cannot vouch for
+(below); tables locked by a migration cost their lock waits. The
 read is one transaction whose statements are capped at 800 ms and whose lock
 waits at 300 ms (never above a stricter setting the role already has), a read
 that does not answer is named in `unread` with its reason (`refused`,

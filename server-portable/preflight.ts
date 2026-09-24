@@ -2729,7 +2729,9 @@ if (configFailed) {
           add("migration ledger", "ok", `schema_migrations present, not readable by this role (${ledgerUnread?.message ?? "no SELECT"}) — this server's tree ends at ${tree}`);
         else if (!ledgerRead && ledgerUnread?.reason === "invisible")
           add("migration ledger", "warn", `${ledgerUnread.message} — the ledger cannot be judged against this server's tree (${tree})`,
-              "Put the ledger's schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it; --baseline would record the ledger a second time.");
+              ledgerUnread.message.includes("reaches")
+                ? "Put the ledger's schema ahead of the other schema_migrations on the server role's search_path (ALTER ROLE … SET search_path); --baseline would record the ledger a second time."
+                : "Put the ledger's schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it; --baseline would record the ledger a second time.");
         else if (!ledgerRead)
           add("migration ledger", "warn", `could not verify: schema_migrations could not be read (${ledgerUnread!.message}) — this server's tree ends at ${tree}`,
               "A migration or a long transaction may hold the ledger; run preflight again once it has finished.");

@@ -183,6 +183,10 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
       SELECT current_setting('server_version') AS postgres,
              (SELECT e.extversion::text FROM pg_extension e WHERE e.extname = 'vector') AS vec_version,
              (SELECT n.nspname::text FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'vector') AS vec_schema,
+             -- Schema-qualified: regclass's text drops the schema of a table the
+             -- path reaches, and the schema is the point of the message.
+             (SELECT n.nspname || '.' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+               WHERE c.oid = to_regclass('schema_migrations')) AS ledger_resolves_to,
              jsonb_build_object(
                'ob1_config', to_regclass('ob1_config') IS NOT NULL,
                -- The fork's ledger resolves only if the table the path
@@ -272,7 +276,17 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
     const toRun: Guarded[] = [];
     for (const g of guarded) {
       if (g.table && !resolved[g.table]) {
-        if (g.table in anywhere) facts.unread[g.field] = { reason: "invisible", message: `${g.table} exists (schema ${anywhere[g.table]}) but does not resolve for this role — not on its search_path, or no USAGE on that schema` };
+        // A ledger the path does reach, but through another tool's table of the
+        // same name, is shadowed — a path-order fix, not a grant (review pass 5).
+        const shadow = g.table === "schema_migrations" && cat.ledger_resolves_to != null ? String(cat.ledger_resolves_to) : null;
+        if (g.table in anywhere) {
+          facts.unread[g.field] = {
+            reason: "invisible",
+            message: shadow
+              ? `${g.table} exists (schema ${anywhere[g.table]}) but this role's search_path reaches ${shadow} first, which is not the ledger (no sha256 column)`
+              : `${g.table} exists (schema ${anywhere[g.table]}) but does not resolve for this role — not on its search_path, or no USAGE on that schema`,
+          };
+        }
         if (g.field === "ledger") facts.ledger.names = g.table in anywhere ? null : [];
       } else {
         toRun.push(g);

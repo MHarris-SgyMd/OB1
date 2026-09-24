@@ -241,11 +241,14 @@ const SURFACES: Record<Surface, { deadlineMs: number; opts: ReadOptions }> = {
 // pass 4 took back pass 3's hold-to-the-read's-end for that).
 const inflight = new Map<Surface, Promise<BrainInfo>>();
 function readBrainInfo(surface: Surface): Promise<BrainInfo> {
+  const { deadlineMs, opts } = SURFACES[surface];
+  const read = () => brainInfo(serverFacts(), async (progress) => (await db()).databaseFacts(opts, progress), deadlineMs);
+  // Not shared on Workers (the PostgREST store): its read is a refusal with no
+  // I/O to share, and a promise from one request is not another's to await.
+  if (storeKind(env()) !== "sql") return read();
   const shared = inflight.get(surface);
   if (shared) return shared;
-  const { deadlineMs, opts } = SURFACES[surface];
-  const answer = brainInfo(serverFacts(), async (progress) => (await db()).databaseFacts(opts, progress), deadlineMs)
-    .finally(() => { if (inflight.get(surface) === answer) inflight.delete(surface); });
+  const answer = read().finally(() => { if (inflight.get(surface) === answer) inflight.delete(surface); });
   inflight.set(surface, answer);
   return answer;
 }
@@ -254,7 +257,9 @@ function readBrainInfo(surface: Surface): Promise<BrainInfo> {
 // scope runs before initEnv() has seeded it.
 let _agents: AgentResolver | null = null;
 function agents(): AgentResolver {
-  if (!_agents) _agents = new AgentResolver(cacheTtlFromEnv(env().OB1_AGENT_CACHE_TTL_MS));
+  // Lookups are shared across requests only on the SQL store: on Workers (the
+  // PostgREST store) a fetch belongs to the request that started it.
+  if (!_agents) _agents = new AgentResolver(cacheTtlFromEnv(env().OB1_AGENT_CACHE_TTL_MS), Date.now, storeKind(env()) === "sql");
   return _agents;
 }
 
@@ -2237,8 +2242,10 @@ app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 // revoked one all get the literal `ok`, so nothing about the deployment reaches
 // an unauthenticated probe. With a read or a write key it answers what the
 // brain is, as JSON — brain_info's record (SMD-2041), for deploy/smoke.sh and an
-// operator's curl; a database that cannot answer is the record's
-// `database.error`, still a 200, since the process is serving. Readiness — is the database reachable —
+// operator's curl — still a 200, since the process is serving: a database that
+// refuses at once is the record's `database.error`; one that never answers
+// leaves the registry check unanswered too, and the body is then `ok` (below).
+// Readiness — is the database reachable —
 // is preflight's job at the entrypoint. HEAD is routed here as GET by Hono, so a
 // HEAD probe gets a bodiless 200. Matched as the last path segment under any
 // prefix a proxy leaves on the request (`/mcp/health`,
@@ -2271,8 +2278,9 @@ app.get("*", async (c, next) => {
   // read for nothing (review pass 1: it paid the whole read, and the deadline).
   if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
   // The registry check and the read start together, under one deadline, so the
-  // answer comes within HEALTH_DEADLINE_MS whatever the database does. A
-  // revoked key reads nothing here, as at the MCP route. A registry that has
+  // answer comes within HEALTH_DEADLINE_MS whatever the database does — the
+  // read runs for a revoked key too (serialising the two would not fit the
+  // deadline), but a revoked key is shown nothing, as at the MCP route. A registry that has
   // not answered by the deadline could still say `revoked`, so the key gets
   // what an unknown key gets (review pass 2: a revoked key read the whole
   // record while the registry's tables were locked); one that answers that it

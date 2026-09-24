@@ -1114,7 +1114,8 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     const shadowed = new SQL({ url: roleUrl, max: 1 });
     try {
       const f = await readDatabaseFacts(shadowed);
-      assert(f.unread.ledger?.reason === "invisible" && /schema public/.test(f.unread.ledger?.message ?? "") && f.highestMigration === null && f.schemaVersion === FORK_VERSION,
+      assert(f.unread.ledger?.reason === "invisible" && /schema public/.test(f.unread.ledger?.message ?? "") && /reaches e2e_shadow\.schema_migrations first/.test(f.unread.ledger?.message ?? "")
+          && f.highestMigration === null && f.schemaVersion === FORK_VERSION,
         `a foreign schema_migrations ahead on the path is not the ledger; the fork's is invisible behind it (${JSON.stringify(f.unread.ledger)})`);
     } finally {
       await shadowed.close();
@@ -1174,7 +1175,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   await sql`DELETE FROM schema_migrations`;
 
   // Keyless stays the literal against a live database too, and a key revoked in
-  // the registry reads nothing here, as at the MCP route.
+  // the registry is shown nothing here, as at the MCP route.
   assert(await health(null) === "ok", "no key → `ok`, with a live database behind it");
   await call("thought_stats", {}, "bot-raw"); // registers bot-key in the registry, as any first request does
   await sql`SELECT revoke_agent_key(${hashKey("bot-raw")}, 'SMD-2041 e2e')`;

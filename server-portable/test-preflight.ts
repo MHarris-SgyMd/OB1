@@ -1758,7 +1758,10 @@ else {
     const behind = await run(SQL_ENV);
     assert(behind.code === 0 && new RegExp(`!\\s+migration ledger\\s+the ledger reaches ${prev} but this server's tree ends at ${last} — the brain is behind`).test(behind.out)
              && /bun migrate\.ts --url \$DATABASE_URL \(--dry-run lists them\)/.test(behind.out)
-             && new RegExp(`schema version\\s+\\S+ · highest migration ${prev}\\b`).test(behind.out),
+             // As in the current case: past the release range the version row
+             // warns in its own words, and a merge of main moves the range's
+             // top under this test (review pass 5: 052 behind 053 is past 051).
+             && new RegExp(`schema version\\s+(?:\\S+ · highest migration|.* ledger reaches migration) ${prev}\\b`).test(behind.out),
            `a ledger short of the tree's last file warns, with the migrate remedy, and the version row agrees (${row(behind.out, "migration ledger")})`);
 
     await claims.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('${last}_x.sql', 'baseline'), ('999_from_a_newer_tree.sql', 'baseline')`);

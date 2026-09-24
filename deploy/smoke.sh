@@ -174,11 +174,12 @@ esac
 #     brain_info tool's record as JSON — check 4's keyless probe still gets
 #     `ok`. Printed: the version, the commit the image was built from, the
 #     ledger's highest migration and how it stands against the server's tree.
-#     Asserted: the version and the tree's last migration are this checkout's
-#     (server-portable/version.ts — the version alone does not move between
-#     cuts, so a stale image of main would pass on it), and, when
-#     OB1_SMOKE_COMMIT is set (CI sets the commit it built), the commit. No
-#     -L: curl forwards a custom
+#     With OB1_SMOKE_COMMIT set — CI sets the commit it built this image from —
+#     asserted: the commit, and the version and the tree's last migration are
+#     this checkout's (server-portable/version.ts; the version alone does not
+#     move between cuts). Without it they are printed beside the checkout's,
+#     not asserted: smoke.sh is pointed at pinned deployments from any checkout
+#     (review pass 5). No -L: curl forwards a custom
 #     header to whatever host a redirect names, and this one carries the key.
 #     A Supabase Edge Function fails here too: upstream has no such body.
 hj=$(curl -s --max-time 20 -H "x-brain-key: $KEY" "$BASE/health")
@@ -200,14 +201,18 @@ if [ -z "${hv:-}" ]; then
   # scope, and an agent registry that has not answered within the health
   # deadline — the MCP checks above pass in that case, since they wait.
   bad "GET /health with the key → '$(printf '%s' "$hj" | head -c 60)' (expected the brain's record as JSON: a server from before SMD-2041, a revoked or read-less key, or an agent registry that did not answer within the deadline)"
-elif [ -n "$want" ] && [ "$hv" != "$want" ]; then
-  bad "GET /health with the key → version $hv, but this checkout is $want (a stale image, or the wrong deployment)"
-elif [ -n "$wantLast" ] && [ "$hlast" != "$wantLast" ]; then
-  bad "GET /health with the key → the server's tree ends at migration $hlast, but this checkout's ends at $wantLast (an image built from another commit)"
+elif [ -n "${OB1_SMOKE_COMMIT:-}" ] && [ -n "$want" ] && [ "$hv" != "$want" ]; then
+  bad "GET /health with the key → version $hv, but this checkout is $want (the image was not built from it)"
+elif [ -n "${OB1_SMOKE_COMMIT:-}" ] && [ -n "$wantLast" ] && [ "$hlast" != "$wantLast" ]; then
+  bad "GET /health with the key → the server's tree ends at migration $hlast, but this checkout's ends at $wantLast (the image was not built from it)"
 elif [ -n "${OB1_SMOKE_COMMIT:-}" ] && [ "$hc" != "$OB1_SMOKE_COMMIT" ]; then
   bad "GET /health with the key → commit $hc, expected $OB1_SMOKE_COMMIT (the build arg did not reach the image)"
 else
-  ok "GET /health with the key → version $hv${want:+ (matching the checkout)}, commit $hc, highest migration $hm (ledger: $hl)"
+  checkout=""
+  if [ -z "${OB1_SMOKE_COMMIT:-}" ] && [ -n "$want" ]; then
+    { [ "$hv" = "$want" ] && [ "$hlast" = "$wantLast" ]; } && checkout=" (the checkout's)" || checkout=" (this checkout: $want, tree to $wantLast)"
+  fi
+  ok "GET /health with the key → version $hv, tree to $hlast$checkout, commit $hc, highest migration $hm (ledger: $hl)"
 fi
 
 echo

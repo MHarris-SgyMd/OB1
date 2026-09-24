@@ -109,7 +109,15 @@ export class AgentResolver {
 
   constructor(
     private readonly ttlMs: number = DEFAULT_CACHE_TTL_MS,
-    private readonly now: () => number = Date.now
+    private readonly now: () => number = Date.now,
+    /**
+     * Whether concurrent requests of one key share a lookup. Off on Cloudflare
+     * Workers (the PostgREST store): the runtime ties a fetch to the request
+     * that started it, so a second request awaiting the first's lookup can
+     * hang or see it cancelled when the first client goes (SMD-2041 review
+     * pass 5). The SQL store's pool is shared by every request, as the lookup is.
+     */
+    private readonly shareLookups: boolean = true,
   ) {}
 
   /**
@@ -130,6 +138,7 @@ export class AgentResolver {
     // cold key held one pool connection while they were locked — ten emptied
     // the pool, through the MCP route or /health alike (SMD-2041 review
     // passes 3–4). The lock wait itself is SMD-2072's.
+    if (!this.shareLookups) return this.lookup(store, principal, key);
     const shared = this.inflight.get(key);
     if (shared) return shared;
     const lookup = this.lookup(store, principal, key);
