@@ -178,9 +178,9 @@ esac
 #     asserted: the commit, and the version and the tree's last migration are
 #     this checkout's (server-portable/version.ts; the version alone does not
 #     move between cuts). Without it they are printed beside the checkout's,
-#     not asserted: smoke.sh is pointed at pinned deployments from any checkout
-#     (review pass 5). No -L: curl forwards a custom
-#     header to whatever host a redirect names, and this one carries the key.
+#     not asserted: smoke.sh is pointed at pinned deployments from any
+#     checkout. No -L: curl forwards a custom header to whatever host a
+#     redirect names, and this one carries the key.
 #     A Supabase Edge Function fails here too: upstream has no such body.
 hj=$(curl -s --max-time 20 -H "x-brain-key: $KEY" "$BASE/health")
 facts=$(printf '%s' "$hj" | python3 -c '

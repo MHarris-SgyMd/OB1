@@ -20,19 +20,19 @@
  * Rerun it after adding a migration or cutting a release; 17e names this
  * command when the file is stale.
  */
-import { readdirSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { FORK_VERSION, readReleases } from "../db/version.mjs";
+import { FORK_VERSION, latestMigration as treeLast, readReleases } from "../db/version.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = join(ROOT, "server-portable", "version.ts");
 
-/** The highest `NNN_*.sql` number in db/migrations/ — the tree's last migration. */
-export function latestMigration(dir = join(ROOT, "db", "migrations")): number {
-  const nums = readdirSync(dir).filter((n) => /^\d{3}_.*\.sql$/.test(n)).map((n) => Number(n.slice(0, 3)));
-  if (nums.length === 0) throw new Error(`${dir} holds no NNN_*.sql migration`);
-  return Math.max(...nums);
+/** The tree's last migration (db/version.mjs's rule); a tree with none is not one to generate for. */
+export function latestMigration(): number {
+  const n = treeLast();
+  if (n === null) throw new Error(`${join(ROOT, "db", "migrations")} holds no NNN_*.sql migration`);
+  return n;
 }
 
 /** The exact contents server-portable/version.ts must have — one definition for the writer here and 17e. */

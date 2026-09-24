@@ -11,13 +11,12 @@
 // rows read the same `readDatabaseFacts`, so the gate and the tool cannot
 // disagree about what the database holds.
 //
-// The read's shape (review pass 2, which found pass 1's per-read transactions
-// adding their budgets past one deadline and losing every fact at it): ONE
-// transaction on one connection; the catalog facts in one statement; each read
-// that a role or a lock can refuse in a savepoint of its own; the timeouts set
-// once, never raised above what the role already has; and the facts written
-// into a progress record as they arrive, so a caller's deadline keeps what was
-// read and names the rest.
+// The read's shape: ONE transaction on one connection; the catalog facts in one
+// statement; each read that a role or a lock can refuse in a savepoint of its
+// own; the timeouts set once, never raised above what the role already has; and
+// the facts written into a progress record as they arrive, so a caller's
+// deadline keeps what was read and names the rest. (A transaction per read,
+// each with its own budget, added past one deadline and lost every fact at it.)
 //
 // No imports: the Workers build bundles this (index.ts imports it), and the SQL
 // client is taken structurally rather than from "bun".

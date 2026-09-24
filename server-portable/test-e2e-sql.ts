@@ -1017,7 +1017,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   const behind = await health("e2e-key") as Record<string, any>;
   assert(behind.ledgerStatus === "behind" && behind.database?.highestMigration === treeLast - 1, `a ledger missing ${last} is behind this server's tree (${behind.ledgerStatus}, ${behind.database?.highestMigration})`);
 
-  // Review passes 1–2, against the live catalog. A role that may read the
+  // Against the live catalog. A role that may read the
   // corpus and not the ledger, the chunks or the entities: the ledger is
   // present and unread as a refusal, each refused count is named, the rest
   // answer — and the read's timeouts stay inside its transaction.

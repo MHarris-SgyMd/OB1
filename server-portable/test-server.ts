@@ -445,7 +445,7 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
   assert(postHealth.status === 200 && (await mcpBody(postHealth))?.result != null, `POST /health with the key is the MCP endpoint (${postHealth.status})`);
 }
 
-console.log("\n[10c] brain-info.ts's rules, without a database: the ledger's judgement, the rendering, why a read did not answer, the deadline keeping what was read (SMD-2041 review passes 1–2)");
+console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's judgement, the rendering, why a read did not answer, the deadline keeping what was read, a failed savepoint or COMMIT (SMD-2041)");
 {
   const { brainInfo, formatBytes, ledgerStatus, parseHnswOptions, readDatabaseFacts, renderBrainInfo, unreadReason } = await import("./brain-info.ts");
   type Facts = Awaited<ReturnType<typeof readDatabaseFacts>>;

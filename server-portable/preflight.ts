@@ -29,7 +29,6 @@ import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
-import { existsSync, readdirSync } from "node:fs";
 import { LATEST_MIGRATION } from "./version.ts";
 import { tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
@@ -510,10 +509,9 @@ if (store === "sql") {
 // of this server. The image carries no db/migrations/, so there is nothing to
 // compare there and no row; check 17e holds the committed file in CI.
 {
-  const migrationsDir = new URL("../db/migrations/", import.meta.url);
-  if (existsSync(migrationsDir)) {
-    const nums = readdirSync(migrationsDir).filter((n) => /^\d{3}_.*\.sql$/.test(n)).map((n) => Number(n.slice(0, 3)));
-    const treeLast = nums.length ? Math.max(...nums) : null;
+  const { latestMigration } = await import("../db/version.mjs");
+  const treeLast = latestMigration();
+  {
     if (treeLast !== null && treeLast !== LATEST_MIGRATION)
       add("version module", "warn",
           `server-portable/version.ts says the tree ends at ${pad3(LATEST_MIGRATION)}, but db/migrations/ ends at ${pad3(treeLast)} — brain_info and the ledger rows would judge this brain against the wrong tree`,
@@ -941,7 +939,7 @@ if (configFailed) {
         // role's grants; a timeout or a ledger off this role's path is not
         // (review pass 2: every unread ledger was called a missing grant).
         const ledgerUnread = facts.unread.ledger;
-        const whyUnread = !ledgerUnread || ledgerUnread.reason === "refused"
+        const whyUnread = ledgerUnread === undefined || ledgerUnread.reason === "refused"
           ? "this role cannot read schema_migrations"
           : ledgerUnread.reason === "invisible"
             ? "schema_migrations does not resolve for this role"
@@ -2725,16 +2723,21 @@ if (configFailed) {
         if (!ledgerPresent)
           add("migration ledger", "warn", "no schema_migrations table — the schema was applied by hand",
               "Adopt it with: cd db && bun migrate.ts --url $DATABASE_URL --baseline");
-        else if (!ledgerRead && (!ledgerUnread || ledgerUnread.reason === "refused"))
-          add("migration ledger", "ok", `schema_migrations present, not readable by this role (${ledgerUnread?.message ?? "no SELECT"}) — this server's tree ends at ${tree}`);
-        else if (!ledgerRead && ledgerUnread?.reason === "invisible")
-          add("migration ledger", "warn", `${ledgerUnread.message} — the ledger cannot be judged against this server's tree (${tree})`,
-              ledgerUnread.message.includes("reaches")
-                ? "Put the ledger's schema ahead of the other schema_migrations on the server role's search_path (ALTER ROLE … SET search_path); --baseline would record the ledger a second time."
-                : "Put the ledger's schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it; --baseline would record the ledger a second time.");
-        else if (!ledgerRead)
-          add("migration ledger", "warn", `could not verify: schema_migrations could not be read (${ledgerUnread!.message}) — this server's tree ends at ${tree}`,
-              "A migration or a long transaction may hold the ledger; run preflight again once it has finished.");
+        else if (!ledgerRead) {
+          // A present ledger with no names always has its reason recorded:
+          // every path in readDatabaseFacts that leaves them null writes it.
+          const u = ledgerUnread!;
+          if (u.reason === "refused")
+            add("migration ledger", "ok", `schema_migrations present, not readable by this role (${u.message}) — this server's tree ends at ${tree}`);
+          else if (u.reason === "invisible")
+            add("migration ledger", "warn", `${u.message} — the ledger cannot be judged against this server's tree (${tree})`,
+                u.message.includes("reaches")
+                  ? "Put the ledger's schema ahead of the other schema_migrations on the server role's search_path (ALTER ROLE … SET search_path); --baseline would record the ledger a second time."
+                  : "Put the ledger's schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it; --baseline would record the ledger a second time.");
+          else
+            add("migration ledger", "warn", `could not verify: schema_migrations could not be read (${u.message}) — this server's tree ends at ${tree}`,
+                "A migration or a long transaction may hold the ledger; run preflight again once it has finished.");
+        }
         else if (hi === null) add("migration ledger", "ok", `schema_migrations present, recording none — this server's tree ends at ${tree}`);
         else if (status === "behind")
           add("migration ledger", "warn", `the ledger reaches ${pad3(hi)} but this server's tree ends at ${tree} — the brain is behind the server it serves, and a tool that needs a later migration fails`,

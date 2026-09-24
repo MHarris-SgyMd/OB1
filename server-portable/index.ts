@@ -230,15 +230,12 @@ const SURFACES: Record<Surface, { deadlineMs: number; opts: ReadOptions }> = {
   health: { deadlineMs: HEALTH_DEADLINE_MS, opts: { statementTimeoutMs: 800, lockTimeoutMs: 300 } },
   tool: { deadlineMs: BRAIN_INFO_TOOL_DEADLINE_MS, opts: {} },
 };
-// One read in flight per surface: concurrent callers share it rather than each
-// taking a pool connection (review pass 2: forty probes against a locked table
-// held the pool, and tool calls queued behind them). Keyed by surface, so a
-// probe never inherits the tool's deadline and ceilings (review pass 3: keyed
-// by deadline, the one hidden coupling was a number). Held until the answer,
-// not the read's end: an abandoned read finishes its last statement within its
-// ceiling (800 ms for health) beside the next caller's, but a read hung on a
-// half-open connection cannot pin every later answer to a stale one (review
-// pass 4 took back pass 3's hold-to-the-read's-end for that).
+// One read in flight per surface, so concurrent callers share one pool
+// connection rather than taking one each (forty probes against a locked table
+// once held the pool). Keyed by surface, so a probe never gets the tool's
+// deadline and ceilings. Released when the answer settles: an abandoned read
+// finishes its last statement within its ceiling (800 ms for health) beside the
+// next caller's, and a read hung on a half-open connection pins nothing.
 const inflight = new Map<Surface, Promise<BrainInfo>>();
 function readBrainInfo(surface: Surface): Promise<BrainInfo> {
   const { deadlineMs, opts } = SURFACES[surface];
