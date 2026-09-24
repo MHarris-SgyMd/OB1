@@ -53,16 +53,15 @@
  * rows are settled with it; a row with no ticket claim takes the status keys
  * on its own row, if any. A twin the sync chained under a head without an
  * `issue` of its own (a hand paste adopted after the fact) is such a row: it
- * keeps its own lifecycle, which is none.
- * A thought with no status — a hand capture, a status_type this file does not
- * know — weighs 1 whatever the flags say: it passes every filter, and the
- * output counts how many did rather than calling it open. So
- * mentions, support, co_mentions and the per-relation counts are weighted
- * sums (whole numbers unless decay is on); degree counts NEIGHBOURS, not
- * evidence, so a filter removes an edge with no live evidence and decay leaves
- * it. A thought is listed when it weighs more than 0 and ranks by its weight
- * times its score. Default `--status all` without decay is every weight 1 —
- * today's counts, by construction.
+ * keeps its own lifecycle, which is none. A thought with no status — a hand
+ * capture, a status_type this file does not know — weighs 1 whatever the flags
+ * say: it passes every filter, and the output counts how many did rather than
+ * calling it open. So mentions, support, co_mentions and the per-relation
+ * counts are weighted sums (whole numbers unless decay is on); degree counts
+ * NEIGHBOURS, not evidence, so a filter removes an edge with no live evidence
+ * and decay leaves it. A thought is listed when it weighs more than 0 and
+ * ranks by its weight times its score. Default `--status all` without decay is
+ * every weight 1 — today's counts, by construction.
  *
  *   open    = triage, backlog, unstarted, started   (not completed or canceled)
  *   active  = unstarted, started                    (on the board and moving)
@@ -333,7 +332,7 @@ export async function coverage(run: Runner, opts: Options): Promise<Coverage> {
  * scope does not apply here — it says what to rank around the subject — and
  * the numeric rule does, so "021" is not a subject unless numerics are kept.
  */
-export async function resolveSubject(run: Runner, subject: string, scopeIn: Options): Promise<Resolution> {
+export async function resolveSubject(run: Runner, subject: string, opts: Options): Promise<Resolution> {
   // Every rung runs ONCE, without the numeric rule, and marks each row in or
   // out of it; rows in the rule sort first, so a LIMIT keeps them. The ladder
   // reads the partition: rows in → the subject; only rows out → "the match
@@ -351,13 +350,13 @@ export async function resolveSubject(run: Runner, subject: string, scopeIn: Opti
   const rung = async (how: string, score: string, params: unknown[], limit = ""): Promise<RungResult> => {
     params.push(NUMERIC_NAME_RE);
     const pattern = params.length;
-    const weights = weightsSql(scopeIn, params);
+    const weights = weightsSql(opts, params);
     const rows = await run(
       `WITH ${weights}
        SELECT s.id, s.entity_type, s.name, s.normalized_name,
               (SELECT coalesce(sum(w.w), 0) FROM thought_entities te JOIN weights w ON w.thought_id = te.thought_id WHERE te.entity_id = s.id)::float8 AS mentions,
               ${score} AS score,
-              (${scopeIn.excludeNumeric ? "true" : "false"} AND s.normalized_name ~ $${pattern}) AS excluded
+              (${opts.excludeNumeric ? "true" : "false"} AND s.normalized_name ~ $${pattern}) AS excluded
          FROM ob1_entities s
         WHERE ${how}
         ORDER BY excluded, score DESC, mentions DESC, ${ENTITY_TIEBREAK}${limit}`,
