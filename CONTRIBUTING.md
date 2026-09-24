@@ -279,7 +279,7 @@ The fork is versioned `MAJOR.MINOR.PATCH+upstream.<sha>` — the rules are in
 opposed to a vendored contribution, records itself as a **release fragment** rather
 than by editing a hand-numbered FORK.md section:
 
-- **Every PR that touches `db/migrations/`, `server-portable/` or `evals/` ships a
+- **Every PR that touches `db/migrations/`, `server-portable/`, `evals/` or `jev/` ships a
   fragment**, `changes/smd-NNNN.md` (see [`changes/README.md`](changes/README.md)
   for the shape). It carries the Keep a Changelog `type`, the `bump` the change
   deserves (a `patch` may not add a migration — a migration is at least a MINOR),

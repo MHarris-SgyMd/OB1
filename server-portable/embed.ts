@@ -267,12 +267,15 @@ export type ProviderEndpoint = {
    * where preflight's credential rule calls it local.
    */
   local: boolean;
-  /** The knob that declared it, when `local`: what a row or a banner names (second review pass). */
-  declaredBy?: "OB1_LLM_LOCAL" | "OB1_CHAT_LOCAL";
+  /** The knob that declared it, when `local`: what a row or a banner names (second review pass); OB1_JEV_LOCAL for the decision tier (jev.ts, SMD-2050). */
+  declaredBy?: LocalKnob;
 };
 
+/** The knobs that declare an endpoint local. */
+export type LocalKnob = "OB1_LLM_LOCAL" | "OB1_CHAT_LOCAL" | "OB1_JEV_LOCAL";
+
 /** An endpoint from its parts, with the one header rule every call shares. */
-export function providerEndpoint(base: string, key: string | undefined, local = false, declaredBy?: "OB1_LLM_LOCAL" | "OB1_CHAT_LOCAL"): ProviderEndpoint {
+export function providerEndpoint(base: string, key: string | undefined, local = false, declaredBy?: LocalKnob): ProviderEndpoint {
   return {
     base: base.replace(/\/+$/, ""),
     key,
