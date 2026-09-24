@@ -9,10 +9,10 @@
   "version": "1.0.0",
   "requires": {
     "open_brain": true,
-    "services": ["OpenRouter or Anthropic or OpenAI (LLM)", "Supabase"],
-    "tools": ["Supabase CLI", "Deno"]
+    "services": ["OpenRouter or Anthropic or OpenAI (LLM)"],
+    "tools": ["Bun 1.4+"]
   },
-  "tags": ["consolidation", "bio", "metadata", "worker", "edge-function", "enrichment"],
+  "tags": ["consolidation", "bio", "metadata", "worker", "enrichment"],
   "difficulty": "intermediate",
   "estimated_time": "30 minutes"
 }

@@ -235,7 +235,7 @@ Ask yourself three questions for each tool:
 
 ### Implementation
 
-Each scoped server is its own Supabase Edge Function with its own MCP tool definitions. They share the same database — scoping is about which tools are exposed, not which data is accessible.
+Each scoped server is its own process under `bun` — its own port, its own MCP tool definitions. They share the same database — scoping is about which tools are exposed, not which data is accessible.
 
 In Claude Desktop: Settings → Connectors. Add each server as a separate connector. Connect only the ones relevant to your current task. The admin server stays disconnected until you need it.
 
@@ -397,7 +397,7 @@ You are an MCP architecture consultant. Your job is to help the user split their
 5. Ask: "Does this split match how you actually work? Any tools I've put in the wrong bucket?"
 
 6. After the user confirms or adjusts, provide implementation guidance:
-   - Which tools to put in each Edge Function
+   - Which tools to put in each server
    - How to name the servers for clarity in the Claude Desktop connector list
    - Reminder to test each server independently after splitting
 </instructions>

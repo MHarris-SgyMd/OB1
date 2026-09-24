@@ -16,16 +16,16 @@
 
 ## What It Does
 
-Runs a Supabase Edge Function as a Telegram bot webhook. Every text message sent to the configured chat becomes a `thoughts` row with an embedding (`openai/text-embedding-3-small`) and LLM-extracted metadata (people, topics, action items, dates, type). The bot replies in-thread with a confirmation so you know capture succeeded. The first capture goes through the database's 3-argument `upsert_thought`, so the row carries its content fingerprint and its vector's model label (FORK.md change 71; the raw insert it replaced left both NULL; no audit actor either way — the bot holds a shared secret, not an access key). Optional `UPDATE_ON_EDIT` support re-embeds edited messages in place — through the database's `update_thought`, so the content fingerprint, the model label and the chunk rows follow the edit (FORK.md change 69). Both paths make 1536-wide `openai/text-embedding-3-small` vectors, so the brain must be at that model and width (upstream's Supabase brain is; this fork's default is 1024).
+Runs one HTTP server under Bun as a Telegram bot webhook. Every text message sent to the configured chat becomes a `thoughts` row with an embedding (`openai/text-embedding-3-small`) and LLM-extracted metadata (people, topics, action items, dates, type). The bot replies in-thread with a confirmation so you know capture succeeded. The first capture goes through the database's 3-argument `upsert_thought`, so the row carries its content fingerprint and its vector's model label (FORK.md change 71; the raw insert it replaced left both NULL; no audit actor either way — the bot holds a shared secret, not an access key). Optional `UPDATE_ON_EDIT` support re-embeds edited messages in place — through the database's `update_thought`, so the content fingerprint, the model label and the chunk rows follow the edit (FORK.md change 69). Both paths make 1536-wide `openai/text-embedding-3-small` vectors, so the brain must be at that model and width (upstream's Supabase brain is; this fork's default is 1024).
 
 ---
 
 ## Prerequisites
 
-- A working Open Brain setup (Supabase project with the `thoughts` table and pgvector)
+- A working Open Brain setup (the [Getting Started guide](../../docs/01-getting-started.md)'s stack, or any Postgres carrying the schema)
 - A Telegram account (the bot is free)
 - An [OpenRouter](https://openrouter.ai) API key
-- Supabase CLI installed and logged in
+- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps)
 - Shell access with `curl` and `openssl`
 
 **Cost**: Telegram is free. OpenRouter embedding + classification is the same as slack-capture, roughly **$0.10–0.30/month** for 20 captures per day.
@@ -42,8 +42,7 @@ Fill these in as you go, you'll need all of them in Step 4:
 | `TELEGRAM_CAPTURE_CHAT_ID` | `getUpdates` (Step 2) | |
 | `TELEGRAM_WEBHOOK_SECRET` | Invent one in Step 4 | |
 | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) | |
-| `SUPABASE_URL` | Auto-injected by Supabase | (skip) |
-| `SUPABASE_SERVICE_ROLE_KEY` | Auto-injected by Supabase | (skip) |
+| `SUPABASE_URL` | Your brain's Postgres connection string (the SQL shim's name for it) | |
 
 ---
 
@@ -104,27 +103,21 @@ You need the numeric ID of the chat where captures will live. Pick one option be
 
 ---
 
-### Step 3 — Drop the function into your Supabase project
+### Step 3 — Save the server file
 
-From the root of your Supabase project:
-
-```bash
-mkdir -p supabase/functions/telegram-capture
-```
-
-Create `supabase/functions/telegram-capture/index.ts` with the contents below:
+From a checkout of this repository, create `integrations/telegram-capture/index.ts` with the contents below — it imports the SQL shim by relative path, so it lives in the tree:
 
 ```typescript
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "../../compat/supabase-sql/index.ts"; // Bun's Postgres client in supabase-js's shape
 import { createHash, timingSafeEqual } from "node:crypto";
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
-const TELEGRAM_BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN")!;
-const TELEGRAM_CAPTURE_CHAT_ID = Deno.env.get("TELEGRAM_CAPTURE_CHAT_ID")!;
-const TELEGRAM_WEBHOOK_SECRET = Deno.env.get("TELEGRAM_WEBHOOK_SECRET");
-const UPDATE_ON_EDIT = Deno.env.get("UPDATE_ON_EDIT") === "true";
+const SUPABASE_URL = process.env.SUPABASE_URL!;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? ""; // ignored by the shim; the credentials are in the URL
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY!;
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN!;
+const TELEGRAM_CAPTURE_CHAT_ID = process.env.TELEGRAM_CAPTURE_CHAT_ID!;
+const TELEGRAM_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET;
+const UPDATE_ON_EDIT = process.env.UPDATE_ON_EDIT === "true";
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 // The label written beside every vector (021): the model as OB1_EMBEDDING_MODEL spells it.
@@ -133,8 +126,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // Whether the secret Telegram echoes is the configured one, compared timing-safe:
 // both sides hashed, so the digests are one length, then compared byte for byte
-// with the time taken independent of where they differ. node:crypto resolves on
-// Supabase's Deno runtime; the Web Crypto timing-safe compare Deno 1 had is gone in Deno 2.
+// with the time taken independent of where they differ.
 function secretMatches(presented: string | null, expected: string): boolean {
   if (!presented) return false;
   const digest = (s: string) => createHash("sha256").update(s, "utf8").digest();
@@ -208,7 +200,7 @@ function buildConfirmation(metadata: Record<string, unknown>, prefix: string): s
   return line;
 }
 
-Deno.serve(async (req: Request): Promise<Response> => {
+async function handler(req: Request): Promise<Response> {
   try {
     // Verify the secret token Telegram echoes in this header. Prevents random
     // internet traffic from hitting the endpoint if anyone discovers the URL.
@@ -319,10 +311,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
     console.error("Function error:", err);
     return new Response("error", { status: 500 });
   }
-});
+}
+
+// Bun serves the default export on PORT (8000 unset).
+export default { port: Number(process.env.PORT || 8000), fetch: handler };
 ```
 
-✅ **Done when:** The file exists at `supabase/functions/telegram-capture/index.ts` and saves without TypeScript errors in your editor.
+✅ **Done when:** The file exists at `integrations/telegram-capture/index.ts` and saves without TypeScript errors in your editor.
 
 ---
 
@@ -336,58 +331,62 @@ Run this to produce a random 64-character hex string:
 openssl rand -hex 32
 ```
 
-Copy the output into your credential tracker under `TELEGRAM_WEBHOOK_SECRET`. You will paste this exact value twice: once into Supabase here in Step 4b, and once into the `setWebhook` call in Step 6. They must match byte-for-byte.
+Copy the output into your credential tracker under `TELEGRAM_WEBHOOK_SECRET`. You will paste this exact value twice: once into the server's environment in Step 5, and once into the `setWebhook` call in Step 6. They must match byte-for-byte.
 
 > [!WARNING]
-> **Do not use `$(openssl rand -hex 32)` inline inside the `supabase secrets set` command.** The shell will generate a value, pass it to Supabase, and throw it away — you'll never know what it was, and you'll have no way to tell Telegram what value to match. Always generate first, save the output, then paste it as a literal string.
+> **Do not use `$(openssl rand -hex 32)` inline in the run command.** The shell will generate a value, pass it to the server, and throw it away — you'll never know what it was, and you'll have no way to tell Telegram what value to match. Always generate first, save the output, then paste it as a literal string.
 
-**4b. Push all four secrets to Supabase**
+**4b. Collect the four values**
 
-Replace each placeholder with your real value (no angle brackets):
+They go in the server's environment in Step 5 — no angle brackets, real values:
 
 ```bash
-supabase secrets set \
-  TELEGRAM_BOT_TOKEN="123456789:ABCdefGhIJKlmnoPQRstUVwxYZ" \
-  TELEGRAM_CAPTURE_CHAT_ID="987654321" \
-  TELEGRAM_WEBHOOK_SECRET="paste_the_hex_string_from_4a_here" \
-  OPENROUTER_API_KEY="sk-or-v1-your-openrouter-key"
+TELEGRAM_BOT_TOKEN="123456789:ABCdefGhIJKlmnoPQRstUVwxYZ"
+TELEGRAM_CAPTURE_CHAT_ID="987654321"
+TELEGRAM_WEBHOOK_SECRET="paste_the_hex_string_from_4a_here"
+OPENROUTER_API_KEY="sk-or-v1-your-openrouter-key"
 ```
 
-`SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are injected automatically by the Supabase runtime, so you don't set those yourself.
+plus `SUPABASE_URL`, your brain's Postgres connection string (`SUPABASE_SERVICE_ROLE_KEY` may be left unset; the shim ignores it).
 
 > [!TIP]
-> `TELEGRAM_WEBHOOK_SECRET` isn't something Telegram gives you — it's a value *you* invent and share between Supabase and Telegram. Telegram echoes it back in the `X-Telegram-Bot-Api-Secret-Token` header on every call, and the function rejects anything that doesn't match. That's how the function knows the request came from Telegram.
+> `TELEGRAM_WEBHOOK_SECRET` isn't something Telegram gives you — it's a value *you* invent and share between the server and Telegram. Telegram echoes it back in the `X-Telegram-Bot-Api-Secret-Token` header on every call, and the function rejects anything that doesn't match. That's how the function knows the request came from Telegram.
 
 **4c. (Optional) Enable edit handling**
 
-```bash
-supabase secrets set UPDATE_ON_EDIT=true
-```
+Add `UPDATE_ON_EDIT=true` to the run command in Step 5.
 
 When set, editing a captured Telegram message re-runs embedding and metadata extraction and rewrites the thought through `update_thought` rather than creating a duplicate.
 
-✅ **Done when:** `supabase secrets list` shows all four required keys *and* you still have the hex value from 4a saved somewhere you can copy from.
+✅ **Done when:** Your tracker holds all four values *and* you still have the hex value from 4a saved somewhere you can copy from.
 
 ---
 
-### Step 5 — Deploy the edge function
+### Step 5 — Run the server
+
+From the checkout, with the values from Step 4 in the environment:
 
 ```bash
-supabase functions deploy telegram-capture --no-verify-jwt
+PORT=8789 \
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+TELEGRAM_BOT_TOKEN='123456789:ABCdefGhIJKlmnoPQRstUVwxYZ' \
+TELEGRAM_CAPTURE_CHAT_ID='987654321' \
+TELEGRAM_WEBHOOK_SECRET='paste_the_hex_string_from_4a_here' \
+OPENROUTER_API_KEY='sk-or-v1-your-openrouter-key' \
+bun integrations/telegram-capture/index.ts
 ```
 
-> [!IMPORTANT]
-> `--no-verify-jwt` is required. Telegram won't send a Supabase JWT with its webhook calls. Authentication is handled inside the function by the secret-token check from Step 4, so you're not actually dropping auth, just moving it.
+Bun prints its start line. Telegram calls this server from its side, so it needs an HTTPS URL that reaches port 8789 — the same TLS proxy or tunnel that fronts the core server ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)). Authentication is handled inside the server by the secret-token check from Step 4, so the URL carries no key.
 
-Your function URL will look like:
+Your capture URL will look like:
 
 ```
-https://YOUR_PROJECT_REF.supabase.co/functions/v1/telegram-capture
+https://YOUR_HOST/
 ```
 
-(where `YOUR_PROJECT_REF` is the subdomain of your actual Supabase project). Keep the full URL handy for Step 6.
+(where `YOUR_HOST` is the proxy's or tunnel's hostname). Keep the full URL handy for Step 6.
 
-✅ **Done when:** `supabase functions deploy` prints a success URL.
+✅ **Done when:** The server is up and `curl -X POST https://YOUR_HOST/` answers `401` (the secret check, working).
 
 ---
 
@@ -414,13 +413,13 @@ If you get `{"ok":false,"error_code":404,"description":"Not Found"}`, the token 
 Run this **on one line** (don't reformat with backslashes — those can break depending on your shell):
 
 ```bash
-curl -X POST "https://api.telegram.org/botYOUR_BOT_TOKEN/setWebhook" -H "Content-Type: application/json" -d '{"url":"https://YOUR_PROJECT_REF.supabase.co/functions/v1/telegram-capture","secret_token":"YOUR_WEBHOOK_SECRET","allowed_updates":["message","edited_message"]}'
+curl -X POST "https://api.telegram.org/botYOUR_BOT_TOKEN/setWebhook" -H "Content-Type: application/json" -d '{"url":"https://YOUR_HOST/","secret_token":"YOUR_WEBHOOK_SECRET","allowed_updates":["message","edited_message"]}'
 ```
 
 > [!IMPORTANT]
 > **Three things to replace, everything else stays:**
 > - `YOUR_BOT_TOKEN` → your real bot token from BotFather (the whole `123456789:ABC...` string)
-> - `YOUR_PROJECT_REF` → the subdomain of your Supabase function URL. If your function lives at `https://abcdefg.supabase.co/functions/v1/telegram-capture`, then `abcdefg` is your project ref.
+> - `YOUR_HOST` → the hostname of your capture URL from Step 5 (the proxy or tunnel in front of the server)
 > - `YOUR_WEBHOOK_SECRET` → the hex value you generated in Step 4a and stored as `TELEGRAM_WEBHOOK_SECRET`. Must match exactly.
 >
 > The field names (`url`, `secret_token`, `allowed_updates`) are what Telegram's API looks for — leave those as written. Only change the *values* between the quotes.
@@ -439,7 +438,7 @@ curl "https://api.telegram.org/botYOUR_BOT_TOKEN/getWebhookInfo"
 
 Check the JSON response:
 
-- `url` should show your full Supabase function URL
+- `url` should show your full capture URL
 - `pending_update_count` should be `0`
 - `last_error_message` field should be absent (if it's present, the webhook has been failing — read the message)
 
@@ -449,8 +448,8 @@ Check the JSON response:
 |---|---|
 | `{"ok":false,"error_code":404,"description":"Not Found"}` | Bot token in the URL is wrong, truncated, or still has `<YOUR_TOKEN>`-style placeholder. |
 | `curl: (3) URL rejected: Malformed input to a URL function` | URL contains angle brackets (`<...>`), a newline from a multi-line paste, or smart quotes (`"` vs `"`). |
-| `{"ok":false,"error_code":400,"description":"Bad Request: bad webhook: ..."}` | `url` value in the JSON body is malformed or unreachable. Check your project ref. |
-| `last_error_message: "Wrong response from the webhook: 401 Unauthorized"` | `secret_token` you sent here doesn't match `TELEGRAM_WEBHOOK_SECRET` on Supabase. |
+| `{"ok":false,"error_code":400,"description":"Bad Request: bad webhook: ..."}` | `url` value in the JSON body is malformed or unreachable. Check the host, and that the tunnel or proxy is up. |
+| `last_error_message: "Wrong response from the webhook: 401 Unauthorized"` | `secret_token` you sent here doesn't match `TELEGRAM_WEBHOOK_SECRET` in the server's environment. |
 
 ✅ **Done when:** `getWebhookInfo` returns your URL with `pending_update_count: 0` and no `last_error_message`.
 
@@ -472,7 +471,7 @@ People: Sam
 Action items: follow up with Sam about pricing draft
 ```
 
-Then confirm in Supabase:
+Then confirm in the database:
 
 ```sql
 select id, content, metadata->>'type' as type, metadata->'topics' as topics
@@ -495,10 +494,10 @@ Text messages sent to your configured chat are embedded, classified, and stored 
 ## Troubleshooting
 
 **Webhook returns 401 "unauthorized"**
-The `secret_token` you passed to `setWebhook` doesn't match the `TELEGRAM_WEBHOOK_SECRET` environment variable. Re-run `setWebhook` with the correct value, or reset the secret via `supabase secrets set` and redeploy.
+The `secret_token` you passed to `setWebhook` doesn't match the `TELEGRAM_WEBHOOK_SECRET` environment variable. Re-run `setWebhook` with the correct value, or restart the server with the matching value.
 
 **No capture, no error, messages are just ignored**
-Run `curl "https://api.telegram.org/botYOUR_BOT_TOKEN/getWebhookInfo"` (replace with your actual token, no angle brackets). If `pending_update_count` is climbing or `last_error_message` is populated, the function is erroring. Check logs with `supabase functions logs telegram-capture`. If the function is invoked but returns `200` without inserting, confirm `String(message.chat.id) === TELEGRAM_CAPTURE_CHAT_ID`. A common mistake is storing `1234567890` when the real group ID is `-1001234567890` (the minus sign and `100` prefix matter).
+Run `curl "https://api.telegram.org/botYOUR_BOT_TOKEN/getWebhookInfo"` (replace with your actual token, no angle brackets). If `pending_update_count` is climbing or `last_error_message` is populated, the function is erroring. Read the server's output. If the function is invoked but returns `200` without inserting, confirm `String(message.chat.id) === TELEGRAM_CAPTURE_CHAT_ID`. A common mistake is storing `1234567890` when the real group ID is `-1001234567890` (the minus sign and `100` prefix matter).
 
 **Bot can't see messages in a group**
 Non-admin bots only see messages that @-mention them. Either promote the bot to admin, or disable Privacy Mode via BotFather → `/mybots` → your bot → `Bot Settings` → `Group Privacy` → `Turn off`. After toggling, remove and re-add the bot for the change to take effect.
@@ -507,20 +506,20 @@ Non-admin bots only see messages that @-mention them. Either promote the bot to 
 Look at `metadata->>'telegram_message_id'` on the duplicates. If they're the same, the dedup query isn't matching, verify that `thoughts.metadata` is JSONB and that the `contains` filter works against it. If the IDs are different, something upstream is replaying messages, which is not Telegram's usual behavior.
 
 **OpenRouter returns 401 or 429**
-Grep `supabase functions logs telegram-capture` for those status codes. Regenerate the key or wait out the window. The function returns `500` to Telegram on OpenRouter failures, and Telegram will retry for up to 24 hours.
+Look in the server's output for those status codes. Regenerate the key or wait out the window. The function returns `500` to Telegram on OpenRouter failures, and Telegram will retry for up to 24 hours.
 
 ---
 
 ## Tool Surface Area
 
-This integration **does not register any new MCP tools**. It is a capture-only ingestion path: an inbound webhook that writes to the existing `thoughts` table via a Supabase Edge Function.
+This integration **does not register any new MCP tools**. It is a capture-only ingestion path: an inbound webhook that writes to the existing `thoughts` table through one HTTP server under Bun.
 
 | Component | Type | What it does |
 |---|---|---|
-| `telegram-capture` Edge Function | Supabase webhook (not an MCP server) | Receives `message` and `edited_message` updates from Telegram, embeds the text via OpenRouter, extracts metadata, and inserts/updates a row in `thoughts`. |
+| `telegram-capture` server | Webhook receiver (not an MCP server) | Receives `message` and `edited_message` updates from Telegram, embeds the text via OpenRouter, extracts metadata, and inserts/updates a row in `thoughts`. |
 | `thoughts` table | Existing Open Brain primitive | No schema changes. Rows written here are consumed by whatever MCP tools (search, retrieval, summarization) you've already installed. |
 
-**External services called:** `api.telegram.org` (webhook callback + send confirmation) and `openrouter.ai/api/v1` (embedding + classification). Both are outbound HTTPS; neither requires opening inbound ports beyond the Supabase function URL itself.
+**External services called:** `api.telegram.org` (webhook callback + send confirmation) and `openrouter.ai/api/v1` (embedding + classification). Both are outbound HTTPS; neither requires opening inbound ports beyond the capture URL itself.
 
 **Auditing:** Because this integration adds no MCP tools, there's no MCP tool surface to audit for it directly. If you're installing this alongside MCP servers that read from the `thoughts` table (such as thought-search tools), audit those servers per the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md).
 

@@ -12,7 +12,7 @@
     "services": [],
     "tools": ["Bun 1.4+"]
   },
-  "requires_primitives": ["deploy-edge-function", "remote-mcp"],
+  "requires_primitives": ["deploy-remote-mcp", "remote-mcp"],
   "learning_order": 2,
   "tags": ["home", "maintenance", "scheduling", "tracking"],
   "difficulty": "beginner",

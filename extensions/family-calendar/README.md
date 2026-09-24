@@ -46,22 +46,20 @@ A multi-person family scheduling system. Track activities, important dates, and 
 
 - Working Open Brain setup
 - Extensions 1-2 recommended but not required
-- Supabase CLI installed and linked to your project
+- [Bun](https://bun.sh) 1.4+ and a Postgres carrying the Open Brain schema ([`SETUP.md`](../../SETUP.md)) — this server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/); FORK.md change 74)
 
 ## Credential Tracker
 
 You'll reference these values during setup. Copy this block into a text editor and fill it in as you go.
 
-> **Already have your Supabase credentials from the [Setup Guide](../../docs/01-getting-started.md)?** You just need the same Project URL and Secret key.
+> **Your brain's connection string** is the one value this server needs from your setup — with the compose stack, [Run a Remote MCP Server, Step 1](../../primitives/deploy-remote-mcp/README.md#step-1-apply-the-extensions-schema) says how the database reaches the host and what the URL looks like.
 
 ```text
 FAMILY CALENDAR -- CREDENTIAL TRACKER
 --------------------------------------
 
-SUPABASE (from your Open Brain setup)
-  Project URL:           ____________
-  Secret key:            ____________
-  Project ref:           ____________
+DATABASE (from your Open Brain setup)
+  Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
 
 GENERATED DURING SETUP
   Default User ID:       ____________
@@ -79,13 +77,11 @@ GENERATED DURING SETUP
 Run the SQL in `schema.sql` against your Open Brain database — a plain Postgres, or Supabase's (the schema has no row-level security, so it needs nothing Supabase-specific):
 
 ```bash
-# Option A: Using Supabase SQL Editor (recommended)
-# 1. Open https://supabase.com/dashboard/project/YOUR_PROJECT_ID/sql/new
-# 2. Paste the contents of schema.sql
-# 3. Click "Run"
+# Option A: psql, against the database the server will use
+psql "$DATABASE_URL" -f extensions/family-calendar/schema.sql
 
-# Option B: Using psql (if available)
-psql $DATABASE_URL -f extensions/family-calendar/schema.sql
+# Option B: if your Postgres is Supabase's, paste the contents of schema.sql into
+# its SQL Editor (https://supabase.com/dashboard/project/YOUR_PROJECT_ID/sql/new) and Run
 ```
 
 ### 2. Generate Your User ID
@@ -109,7 +105,7 @@ export DEFAULT_USER_ID=your-generated-uuid-here   # or on the command line in St
 
 ### 3. Run the MCP Server
 
-This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — so it is not a Supabase Edge Function and `supabase functions deploy` does not apply (FORK.md change 74; SMD-1798 moved this server, the week's schedule being the one query whose grouped `.or()` the shim did not read until then). From a checkout of this repository:
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — one HTTP process, as every server here is ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks it; FORK.md change 74; SMD-1798 moved this server, the week's schedule being the one query whose grouped `.or()` the shim did not read until then). From a checkout of this repository:
 
 ```bash
 (cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports
@@ -119,7 +115,7 @@ DEFAULT_USER_ID='your-generated-uuid-here' \
 PORT=8787 bun extensions/family-calendar/index.ts
 ```
 
-`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). Bun prints its start line, `Started development server: http://localhost:8787` (`Started server:` under `NODE_ENV=production`; `PORT` unset, it listens on 8000 — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI. Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request.
+`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). Bun prints its start line, `Started development server: http://localhost:8787` (`Started server:` under `NODE_ENV=production`; `PORT` unset, it listens on 8000 — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI. Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request.
 
 > **Every tool of this server runs on the fork.** `extensions/test-tools.ts` drives all six against a real Postgres carrying this `schema.sql` in CI — the week's schedule through the grouped `.or()`, the family member embedded on every activity and important date, the upcoming-dates window (SMD-1798).
 
