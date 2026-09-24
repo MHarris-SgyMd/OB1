@@ -610,7 +610,7 @@ reaching `main` goes through a PR, which is two commands:
 
 ```bash
 gh pr create --fill --base main --head siggymd/rebase-$(date +%Y%m%d)
-gh pr merge --merge --auto        # lands itself once the twelve checks pass
+gh pr merge --merge --auto        # lands itself once the ten checks pass
 ```
 
 History keeps both lines, which is what happened when the fork's work first landed

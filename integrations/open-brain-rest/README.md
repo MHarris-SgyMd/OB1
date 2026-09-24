@@ -55,7 +55,7 @@ The function expects `thoughts.id` to be a UUID. The dashboard now treats though
 > **Runs under Bun, not as an Edge Function.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — so `supabase functions deploy` cannot bundle it; from a checkout of this repository it serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
 >
 > ```bash
-> PORT=8787 NODE_PATH=extensions/node_modules SUPABASE_URL='postgres://user:password@host:5432/openbrain' MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' OPENROUTER_API_KEY='…' bun integrations/open-brain-rest/index.ts
+> PORT=8787 NODE_PATH=extensions/node_modules SUPABASE_URL='postgres://user:password@host:5432/openbrain' MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' OPENROUTER_API_KEY='…' bun --no-install integrations/open-brain-rest/index.ts
 > ```
 >
 > `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset), and the other variables are the secrets the steps below set, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI, and `extensions/test-writes.ts` drives its writes against Postgres. The Supabase steps below apply to the file after `bun scripts/migrate-to-sql-shim.ts --revert integrations/open-brain-rest/index.ts`, which puts it back on supabase-js.

@@ -41,8 +41,8 @@ the fork's own stack, no Supabase.)
 - The required environment variables `BRAIN_URL` and `BRAIN_KEY` are not set
   on the dev host -- this skill cannot function without them; ask the user to
   follow this skill's README first (the brain must be built at the gateway's
-  embedding width and carry the two schemas the README names, or capture,
-  search and browse answer 500).
+  embedding width and carry the schema the README names, or capture, search
+  and browse answer 500).
 
 ## Required Environment
 
@@ -96,9 +96,9 @@ curl -sS -X POST "$BRAIN_URL/search" \
 `mode` defaults to `semantic` (by meaning); `"mode":"text"` matches words.
 `threshold` defaults to 0.35. Lower it to 0.2-0.3 for broader recall; raise to
 0.5+ for precision. Cap `limit` at 100. The reply is
-`{"results":[…],"count":N,"total":M,"page":1,"per_page":10,"total_pages":…}`;
+`{"results":[…],"count":N,"total":M,"page":1,"per_page":10,"total_pages":…,"mode":"semantic"}`;
 each result carries `id`, `content`, `type`, `metadata`, `created_at` and, in
-semantic mode, `similarity`.
+semantic mode, `similarity` (`rank` in text mode).
 
 ### Browse recent
 
@@ -132,13 +132,14 @@ reply is `{"data":[…],"total":N,"page":1,"per_page":20}`, newest first.
 - HTTP 403 `Forbidden: this key is read-scoped and this route writes`: the
   key can search and browse but not capture. Tell the user to mint a
   write-scoped key.
-- HTTP 500 on capture or semantic search: the gateway could not reach
-  OpenRouter (`OPENROUTER_API_KEY` unset or wrong), or the brain was built at
-  another embedding width than the gateway's model (1536) and refused the
-  vector. Tell the user to check the gateway's log; `"mode":"text"` search
-  works without a provider.
-- HTTP 500 on browse (`/thoughts`): the brain lacks the columns the two
-  schemas in the README add. Tell the user to apply them.
+- HTTP 500: the gateway logs nothing for these, so the body is the
+  diagnosis — read its `error`. `OPENROUTER_API_KEY is not configured` or
+  `OpenRouter embeddings failed: 401 …`: the gateway's key is unset or wrong
+  (`"mode":"text"` search works without it). `expected 1024 dimensions, not
+  1536` (or another pair): the brain was built at a width other than the
+  gateway's model's. `column "type" does not exist`: the enhanced-thoughts
+  schema the README names is not applied (browse, text search and stats all
+  fail this way). Tell the user which, in the body's own words.
 - Connection refused or a network timeout: the gateway is down or the host is
   unreachable. Tell the user to check the process and ping the brain host from
   this dev host.

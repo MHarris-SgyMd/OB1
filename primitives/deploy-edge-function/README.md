@@ -176,7 +176,7 @@ The URL and access key stay the same — no need to reconfigure your AI clients.
 
 **Import errors or "not in import map"**
 - Run `ls supabase/functions/FUNCTION_NAME/` — you should see `index.ts` (this fork ships no `deno.json` import map since SMD-1800; the servers resolve their packages from `extensions/package.json` under Bun, and SMD-1802 retires this guide)
-- `Module not found "../_shared/auth.ts"`: Step 2's third download is missing — `ls supabase/functions/_shared/` should show `auth.ts`
+- `Module not found "../_shared/auth.ts"`: Step 2's second download is missing — `ls supabase/functions/_shared/` should show `auth.ts`
 
 **Deploy succeeds but function returns errors**
 - Check Edge Function logs: Supabase Dashboard → Edge Functions → your function → Logs

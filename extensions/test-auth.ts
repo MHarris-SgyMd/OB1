@@ -96,8 +96,9 @@ async function importServer(file: string): Promise<Handler> {
 // driver stubbed for kubernetes-deployment; none is left in the tree (check 11
 // refuses them in every shim importer).
 
-/** The packages this directory installs. */
-const PACKAGES = /^(hono|zod|@hono\/mcp|@modelcontextprotocol\/sdk)(\/|$)/;
+/** The MCP stack — the packages this directory installs, one list; the loader's regex and the pin guard's count both read it. */
+const STACK = ["hono", "zod", "@hono/mcp", "@modelcontextprotocol/sdk"];
+const PACKAGES = new RegExp(`^(${STACK.join("|")})(/|$)`); // no name holds a regex metacharacter
 /** Only this checkout's recipes/ and integrations/ — not a checkout that happens to sit under a directory so named. */
 const VENDORED = new RegExp("^" + ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/(recipes|integrations)/.*\\.ts$");
 Bun.plugin({
@@ -892,7 +893,7 @@ for (const t of TEXT_ONLY) {
   // The stack is PACKAGES' four names: a test-only devDependency added here (a fixture library, say) is not
   // demanded of the image or the core server.
   const stack = Object.entries(pkg).filter(([name]) => PACKAGES.test(name));
-  assert(stack.length === 4, `extensions/package.json installs the four packages of the MCP stack (${stack.length})`);
+  assert(stack.map(([n]) => n).sort().join() === [...STACK].sort().join(), `extensions/package.json installs the ${STACK.length} packages of the MCP stack (${stack.map(([n]) => n).join(", ") || "none"})`);
   const hold = (file: string, deps: Record<string, string>, exact: boolean) => {
     const drift = stack.filter(([name, version]) => deps[name] !== version);
     const extra = exact ? Object.keys(deps).filter((name) => !PACKAGES.test(name)) : [];
