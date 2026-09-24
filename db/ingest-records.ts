@@ -8,7 +8,7 @@
  * its cost is one re-ingest. This is that ingest. It reads the sources below,
  * turns each record into one thought row with a deterministic id and a
  * `metadata.source` label (SMD-1806 rule 5 — an agent-written capture is one
- * source among four, so SMD-1724's trust question has an answer here from day
+ * source among several, so SMD-1724's trust question has an answer here from day
  * one), and upserts them so a second run over unchanged records is a no-op and a
  * run over an edited record updates exactly the rows that moved.
  *
@@ -91,7 +91,6 @@ export type Source = (typeof SOURCES)[number];
 /** The pipeline tiers, from the one source db/config.mjs owns (SMD-1953) — migration 045's CHECK and preflight/initEnv validate against the same list. */
 export const TIERS = PIPELINE_TIERS;
 export type Tier = (typeof TIERS)[number];
-
 
 /** One record as a thought row: its id, its content, its source label and the metadata that goes under it. */
 export type Doc = {
