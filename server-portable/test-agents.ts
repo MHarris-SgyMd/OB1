@@ -483,7 +483,7 @@ console.log("\n[15] Concurrent requests of a key share one lookup — on the SQL
   assert(apart === 5, `with sharing off (Workers), each request its own lookup (${apart})`);
 }
 
-console.log("\n[16] A lookup that times out on a lock is busy, and a revocation this process has read stands through any failure (SMD-2072)");
+console.log("\n[16] A lookup that times out on a lock is retried, then busy, and a revocation this process has read stands through any failure (SMD-2072)");
 {
   // The lookup's lock wait is capped (store-sql.ts), so a registry whose
   // tables are locked fails the lookup while every tool still answers: serving
@@ -496,11 +496,14 @@ console.log("\n[16] A lookup that times out on a lock is busy, and a revocation 
   const lockTimeout = failing("55P03", "canceling statement due to lock timeout");
   const refusedConn = failing(undefined, "connection refused");
   const noFunction = failing("42883", "function resolve_agent(text, text, text) does not exist");
-  let answer: () => Promise<AgentResolution> = async () => ({ ok: true, agentId: "agent-9" } as AgentResolution);
-  let calls = 0;
-  const store = fakeStore(() => answer(), () => calls++);
-  // TTL 0: every request looks up, so each step below is a lookup.
-  const r = new AgentResolver(0, () => 0);
+  const okAnswer = async () => ({ ok: true, agentId: "agent-9" } as AgentResolution);
+  const revokedAnswer = async () => ({ ok: false, error: "REVOKED", agentId: "agent-9", revokedAt: "2026-09-24T00:00:00Z", reason: "leaked" } as AgentResolution);
+  let answer: () => Promise<AgentResolution> = okAnswer;
+  const store = fakeStore(() => answer(), () => {});
+  // TTL 0, so each step below is a lookup; no retries, so each is one (the
+  // retry has its own case below).
+  const once = { attempts: 1, budgetMs: 0, pauseMs: 0 };
+  const r = new AgentResolver(0, () => 0, true, once);
   const p = principal("laptop", H("9"));
 
   // A key the registry answered for is busy when it times out: that answer
@@ -510,56 +513,105 @@ console.log("\n[16] A lookup that times out on a lock is busy, and a revocation 
   answer = lockTimeout;
   const timed = await r.resolve(store, p);
   assert(timed.status === "busy", `a key answered ok before is busy when its lookup times out on a lock (${JSON.stringify(timed)})`);
-  const fresh = await r.resolve(store, principal("desk", H("8")));
-  assert(fresh.status === "busy", "…and so is a key this process never had an answer for — not served by name");
-  for (const [code, what] of [["57014", "statement_timeout's 57014 (a role's cap, as on Workers)"], ["40P01", "a deadlock's 40P01"]] as const) {
+  const never = principal("desk", H("8"));
+  for (const [code, what] of [["55P03", "lock_timeout's 55P03"], ["57014", "statement_timeout's 57014 (a role's cap, as on Workers)"], ["40P01", "a deadlock's 40P01"]] as const) {
     answer = failing(code, what);
     const o = await r.resolve(store, p);
-    assert(o.status === "busy", `…as is ${what}`);
+    const n = await r.resolve(store, never);
+    assert(o.status === "busy" && n.status === "busy", `…on ${what}, the answered key and one never answered for alike — not served by name (${o.status}, ${n.status})`);
   }
   // Any other failure is an outage, served by name as before: the tools fail
   // with it.
   answer = refusedConn;
   const down = await r.resolve(store, p);
   assert(down.status === "ok" && down.agentId === undefined && down.unresolved === "unreachable", "a lost connection is served by name, as before the cap");
+  // busy → ok → busy: the registry's answer resets the warning, so a second
+  // lock is said again.
+  answer = lockTimeout;
+  await r.resolve(store, p);
+  answer = okAnswer;
+  await r.resolve(store, p);
+  answer = lockTimeout;
+  await r.resolve(store, p);
 
   // A revocation this process has read stands through any failure — a lock,
-  // an outage, the function gone — until the registry answers otherwise.
-  answer = async () => ({ ok: false, error: "REVOKED", agentId: "agent-9", revokedAt: "2026-09-24T00:00:00Z", reason: "leaked" } as AgentResolution);
+  // an outage, the function gone — and any reply that is not an answer, until
+  // the registry answers otherwise.
+  answer = revokedAnswer;
   await r.resolve(store, p);
   const stands: string[] = [];
-  for (const [f, what] of [[lockTimeout, "a lock"], [refusedConn, "a lost connection"], [noFunction, "resolve_agent gone"], [lockTimeout, "a lock again"]] as const) {
+  const malformed = async () => ({ ok: false, error: "UNRESOLVED", detail: "MALFORMED_RESPONSE" } as AgentResolution);
+  for (const [f, what] of [[lockTimeout, "a lock"], [refusedConn, "a lost connection"], [noFunction, "resolve_agent gone"], [malformed, "a malformed reply"], [lockTimeout, "a lock again"]] as const) {
     answer = f;
     const o = await r.resolve(store, p);
     if (o.status !== "revoked") stands.push(`${what}: ${o.status}`);
   }
-  assert(stands.length === 0, `a revoked key stays refused through a lock, a lost connection and a missing resolve_agent (${stands.join(", ") || "every step revoked"})`);
+  assert(stands.length === 0, `a revoked key stays refused through a lock, a lost connection, a missing resolve_agent and a malformed reply (${stands.join(", ") || "every step revoked"})`);
   // By digest: a rename presents the same digest under a new name.
   const renamed = await r.resolve(store, principal("laptop-renamed", H("9")));
   assert(renamed.status === "revoked", "…by digest, so a renamed key stays refused too");
+  // A fresh REVOKED answer resets the warning like any answer.
+  answer = revokedAnswer;
+  await r.resolve(store, p);
+  answer = lockTimeout;
+  await r.resolve(store, p);
   // The registry's answer that the key is not revoked clears it.
-  answer = async () => ({ ok: true, agentId: "agent-9" } as AgentResolution);
+  answer = okAnswer;
   const lifted = await r.resolve(store, p);
   answer = lockTimeout;
   const afterLift = await r.resolve(store, p);
   assert(lifted.status === "ok" && lifted.agentId === "agent-9" && afterLift.status === "busy", `once the registry says the key is not revoked, a later timeout is busy, not revoked (${lifted.status}, ${afterLift.status})`);
   console.warn = realWarn;
 
-  // One warning per key and outcome: a change of outcome is said, a repeat is
-  // not. laptop went busy → unreachable, answered revoked, revoked (kept)
-  // through three failures, answered ok, busy again.
+  // One warning per key and outcome, said again when the outcome changes and
+  // after the registry answers: laptop went busy, unreachable, busy — then
+  // answered, busy again — revoked kept through five failures, answered
+  // revoked, revoked kept again, answered ok, busy.
   const laptop = warnings.filter((w) => /key "laptop"/.test(w));
   const kinds = laptop.map((w) => /timed out/.test(w) ? "busy" : /revocation stands/.test(w) ? "revoked" : /attributed by name/.test(w) ? "unreachable" : "?");
-  assert(JSON.stringify(kinds) === JSON.stringify(["busy", "unreachable", "revoked", "busy"]),
-    `warned once per key and outcome, again when the outcome changes (${kinds.join(" → ")})`);
+  assert(JSON.stringify(kinds) === JSON.stringify(["busy", "unreachable", "busy", "busy", "revoked", "revoked", "busy"]),
+    `warned once per key and outcome, again when it changes or the registry has answered (${kinds.join(" → ")})`);
+
+  // The retry: a lookup that times out is tried again, pausing between, and a
+  // lock that clears inside the budget is waited out — served, not busy.
+  {
+    let calls = 0;
+    let fails = 2;
+    const clearing = fakeStore(async () => { if (fails-- > 0) throw Object.assign(new Error("lock timeout"), { errno: "55P03" }); return { ok: true, agentId: "agent-5" } as AgentResolution; }, () => calls++);
+    const retrying = new AgentResolver(0, () => 0, true, { attempts: 5, budgetMs: 2000, pauseMs: 40 });
+    const t0 = performance.now();
+    const served = await retrying.resolve(clearing, principal("retry", H("5")));
+    const took = performance.now() - t0;
+    assert(served.status === "ok" && served.agentId === "agent-5" && calls === 3 && took >= 70,
+      `a lock that clears within the retry budget is waited out: served on the third lookup, after two pauses (${served.status}, ${calls} lookups, ${Math.round(took)} ms)`);
+    console.warn = () => {};
+    let tries = 0;
+    const held = fakeStore(lockTimeout, () => tries++);
+    const exhausted = await retrying.resolve(held, principal("retry-held", H("4")));
+    assert(exhausted.status === "busy" && tries === 5, `…and one that does not is busy after its attempts (${exhausted.status}, ${tries} lookups)`);
+    let slowTries = 0;
+    const slow = fakeStore(async () => { await Bun.sleep(300); throw Object.assign(new Error("statement timeout"), { errno: "57014" }); }, () => slowTries++);
+    const budgeted = await new AgentResolver(0, () => 0, true, { attempts: 5, budgetMs: 500, pauseMs: 40 }).resolve(slow, principal("retry-slow", H("3")));
+    assert(budgeted.status === "busy" && slowTries === 2, `…within the budget in real time: 300 ms lookups against 500 ms are tried twice (${slowTries})`);
+    let outageTries = 0;
+    await retrying.resolve(fakeStore(refusedConn, () => outageTries++), principal("retry-down", H("2")));
+    let revokedTries = 0;
+    const known = new AgentResolver(0, () => 0, true, { attempts: 5, budgetMs: 2000, pauseMs: 40 });
+    let first = true;
+    const revokedThenLocked = fakeStore(async () => { if (first) { first = false; return revokedAnswer(); } throw Object.assign(new Error("lock timeout"), { errno: "55P03" }); }, () => revokedTries++);
+    await known.resolve(revokedThenLocked, principal("retry-revoked", H("1")));
+    const k = await known.resolve(revokedThenLocked, principal("retry-revoked", H("1")));
+    console.warn = realWarn;
+    assert(outageTries === 1 && k.status === "revoked" && revokedTries === 2, `…and not retried on an outage (${outageTries}) or for a key whose revocation is read, which answers at once (${k.status}, ${revokedTries - 1} lookup)`);
+  }
 
   // Cached with a TTL: a kept revocation for the failure TTL, as a read one
-  // is; `busy` not at all — its answer is "retry", and the retry asks.
+  // is; `busy` for a second, so a key's retries do not each spend the budget.
   let n = 0;
   let now = 0;
   answer = async () => ({ ok: false, error: "REVOKED", agentId: "agent-7", revokedAt: "2026-09-24T00:00:00Z", reason: null } as AgentResolution);
   const counted = fakeStore(() => answer(), () => n++);
-  const ttl = new AgentResolver(60000, () => now);
+  const ttl = new AgentResolver(60000, () => now, true, once);
   const q = principal("tablet", H("7"));
   await ttl.resolve(counted, q);
   now += 20000; // past the revocation's 10 s failure TTL
@@ -573,9 +625,13 @@ console.log("\n[16] A lookup that times out on a lock is busy, and a revocation 
   const cold = principal("phone", H("6"));
   await ttl.resolve(counted, cold);
   const b2 = n;
-  const again = await ttl.resolve(counted, cold);
+  now += 500;
+  const within = await ttl.resolve(counted, cold);
+  const b3 = n;
+  now += 1000;
+  await ttl.resolve(counted, cold);
   console.warn = realWarn;
-  assert(again.status === "busy" && n === b2 + 1, `…and busy is not cached: the next request asks again (${n - b2} lookup)`);
+  assert(within.status === "busy" && b3 === b2 && n === b3 + 1, `…and busy for a second: none inside it, one after (${b3 - b2}, ${n - b3})`);
 }
 
 await sql.close();

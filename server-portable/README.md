@@ -349,14 +349,17 @@ that does not answer is named in `unread` with its reason (`refused`,
 are kept, and a database whose catalog has not answered by then is
 `database.error`. Concurrent probes share one read, and requests of one key share
 one agent-registry lookup (at /health and the MCP route alike), so a burst during
-a migration holds one connection for the read and one per distinct key. Each
-of the lookup's lock waits is capped at 250 ms (a ceiling; a lookup waits two
-or three times at most), so a lookup of a locked `ob1_agent_keys` gives up at
-about the cap — more keys than the pool holds queue for it, in rounds of
-about the cap — and the key is then **busy**: the MCP route refuses it with
-JSON-RPC error `-32003` ("retry in a few seconds"), since the registry could
-still say revoked, and a revocation this process has already read stands
-through any failure until the registry answers otherwise (SMD-2072). A lock on
+a migration holds one connection for the read and one per distinct key. On
+the SQL store each of the lookup's lock waits is capped at 250 ms (a ceiling;
+a table lock ends the lookup at its first wait), and a lookup that times out
+is retried for up to 2 s, 250 ms apart with no connection held — a brief
+migration lock is waited out, as before the cap — after which the key is
+**busy**: the MCP route refuses it with JSON-RPC error `-32003` ("retry in a
+few seconds"), since the registry could still say revoked. More cold keys
+than the pool holds queue for it, in rounds of about the cap. On Workers the
+cap is the PostgREST role's `statement_timeout`, where it has one. A
+revocation this process has already read stands through any failure until
+the registry answers that the key is not revoked (SMD-2072). A lock on
 `ob1_agents` stalls every write regardless: 046's audit trigger reads a
 writer's kind there. Without a key, with a wrong
 or capture-only key, with a revoked one or a busy one — or while the agent registry has

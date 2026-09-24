@@ -18,7 +18,9 @@
  * from a second source of truth.
  *
  *
- * On failure, this returns `{ agentId: undefined }` rather than throwing.
+ * On failure, this returns `{ agentId: undefined }` rather than throwing —
+ * except on a lock (`busy`) or for a revocation already read, which are
+ * refusals; the paragraph after next says why.
  *
  * That is deliberate and worth defending, because "the identity lookup failed,
  * so deny" is the reflex. Consider what a caller could actually gain: with the
@@ -28,17 +30,21 @@
  * for what is really an outage. A definitive REVOKED, by contrast, is an answer,
  * and it is enforced.
  *
- * The argument fails in one case: ob1_agent_keys locked while the thoughts
- * are not (a migration of that table, a transaction holding a key's row). The
- * lookup's lock wait is capped (RESOLVE_LOCK_TIMEOUT_MS), so it times out
- * there while every tool still answers, and serving by name would serve a key
- * the registry has revoked. So a timeout is not an outage: the key is `busy`,
- * refused with a retry — what waiting out the lock gave it, without the
- * connection held. And a revocation this process has read stands through any
- * failure until the registry answers otherwise, so no lock or outage lifts
- * it. A lock on ob1_agents stalls every write anyway (046's audit trigger
- * reads a writer's kind there); a row lock never reaches a revoked key, whose
- * revocation resolve_agent reads before the UPDATE that waits.
+ * The argument fails when ob1_agent_keys is locked while the thoughts are
+ * not (a migration of that table, a transaction holding a key's row). The
+ * lookup's lock waits are capped on the SQL store (RESOLVE_LOCK_TIMEOUT_MS),
+ * so it times out there while every tool still answers, and serving by name
+ * would serve a key the registry may have revoked. So a timeout is not an
+ * outage: the lookup is retried for a short while (BUSY_RETRY, pausing with
+ * no connection held), which waits out a brief lock as the uncapped wait did,
+ * and past that the key is `busy` — not served, as it was not while the
+ * uncapped wait lasted, and told to retry. And a revocation this process has
+ * read stands through any failure, and any reply that is not an answer, until
+ * the registry answers that the key is not revoked. A lock on ob1_agents
+ * stalls every write anyway (046's audit trigger reads a writer's kind
+ * there). A committed revocation is read before the UPDATE that waits, so a
+ * row lock does not delay it; one still uncommitted is not seen yet
+ * (SMD-2090).
  *
  * The same reasoning covers a deployment that has not applied migration 010:
  * `resolve_agent` does not exist, resolution fails, and attribution falls back
@@ -62,14 +68,34 @@ export const DEFAULT_CACHE_TTL_MS = 60000;
 /**
  * The cap on each lock wait of one lookup, in ms: a ceiling the SQL store sets
  * in the lookup's own statement (store-sql.ts), a stricter role setting kept.
- * resolve_agent's waits are its reads and writes of one key's rows, which no
- * other lookup holds for more than a moment; a wait past this is a migration
- * or a transaction holding them. A lookup waits at most two or three times
- * (a rename, a first sight), each capped. Short, since every lookup holds a
- * pool connection while it waits. Workers' PostgREST store sets none; its
- * role's statement_timeout, where set, is the cap there.
+ * resolve_agent's waits are on the registry's relation locks and one key's
+ * rows, which no other lookup holds for more than a moment; a wait past this
+ * is a migration, a transaction holding them, or 046's backfill holding
+ * ob1_agents FOR SHARE against a rename. Each wait is capped; a table lock
+ * ends the lookup at its first. Short, since a lookup holds a pool connection
+ * while it waits. Workers' PostgREST store sets none; its role's
+ * statement_timeout, where set, is the cap there.
  */
 export const RESOLVE_LOCK_TIMEOUT_MS = 250;
+
+/**
+ * How a lookup that times out on a lock is retried before the key is `busy`:
+ * up to `attempts` lookups within `budgetMs` of the first, `pauseMs` apart
+ * with no connection held. About two seconds waits out a migration's brief
+ * lock (a CHECK added to a small table), which the uncapped wait used to, and
+ * stays inside /health's 2.5 s deadline. Measured in real time, whatever clock
+ * the cache reads; a lookup slower than the budget (Workers, whose cap is a
+ * role's statement_timeout) is not retried at all.
+ */
+export const BUSY_RETRY = { attempts: 5, budgetMs: 2_000, pauseMs: 250 };
+export type BusyRetry = typeof BUSY_RETRY;
+
+/**
+ * How long a `busy` answer is reused, bounded by the TTL like every non-success
+ * answer (0 stays 0): long enough that a key's retries do not each spend the
+ * retry budget again, on Workers above all, where lookups are not shared.
+ */
+const BUSY_TTL_MS = 1000;
 
 /**
  * A failed lookup is cached too, and far more briefly.
@@ -148,6 +174,7 @@ export class AgentResolver {
      * pass 5). The SQL store's pool is shared by every request, as the lookup is.
      */
     private readonly shareLookups: boolean = true,
+    private readonly busyRetry: BusyRetry = BUSY_RETRY,
   ) {}
 
   /**
@@ -163,8 +190,9 @@ export class AgentResolver {
     const hit = this.cache.get(key);
     if (hit && hit.expires > this.now()) return hit.outcome;
     // One lookup in flight per key: concurrent requests of a key the cache has
-    // not got share it, so a burst of one key while the registry is locked
-    // holds one pool connection for the capped wait, not one each.
+    // not got share it, retries included, so a burst of one key while the
+    // registry is locked holds one pool connection for each capped wait, not
+    // one each.
     if (!this.shareLookups) return this.lookup(store, principal, key);
     const shared = this.inflight.get(key);
     if (shared) return shared;
@@ -183,11 +211,7 @@ export class AgentResolver {
     let outcome: AgentOutcome;
     let ttl: number;
     try {
-      const r: AgentResolution = await (await store).resolveAgent({
-        keyHash: principal.keyHash,
-        label: principal.name,
-        scope: principal.scope,
-      });
+      const r = await this.resolveRetrying(await store, principal);
 
       if (r.ok) {
         outcome = { status: "ok", agentId: r.agentId };
@@ -208,8 +232,17 @@ export class AgentResolver {
         // an agent id rather than locking everyone out over a shape mismatch —
         // and say so once per key: a retry will not change this answer, and
         // the tool's `Refused:` sends the operator to this log (eighth review pass).
-        this.warnOnce(key, "refused", `agent registry: resolve_agent refused key "${principal.name}" (${String((r as { detail?: unknown }).detail ?? r.error)}) — writes are attributed by name only; the label or digest the schema rejects will not pass on retry`);
-        outcome = { status: "ok", agentId: undefined, unresolved: "refused" };
+        // Not an answer that the key is not revoked, so a revocation read
+        // before stands.
+        const detail = String((r as { detail?: unknown }).detail ?? r.error);
+        const revoked = this.revocations.get(principal.keyHash);
+        if (revoked) {
+          this.warnOnce(key, "revoked", `agent registry: resolve_agent refused key "${principal.name}" (${detail}) — its revocation stands until the registry answers`);
+          outcome = revoked;
+        } else {
+          this.warnOnce(key, "refused", `agent registry: resolve_agent refused key "${principal.name}" (${detail}) — writes are attributed by name only; the label or digest the schema rejects will not pass on retry`);
+          outcome = { status: "ok", agentId: undefined, unresolved: "refused" };
+        }
         ttl = failureTtl(this.ttlMs);
       }
     } catch (e) {
@@ -225,11 +258,9 @@ export class AgentResolver {
         outcome = revoked;
         ttl = failureTtl(this.ttlMs);
       } else if (timedOut(e)) {
-        this.warnOnce(key, "busy", `agent registry: resolve_agent timed out for key "${principal.name}" on a lock — its requests are refused with a retry until the registry answers: ${cause}`);
+        this.warnOnce(key, "busy", `agent registry: resolve_agent timed out for key "${principal.name}" on a lock, retried for ${this.busyRetry.budgetMs} ms — its requests are refused with a retry until the registry answers: ${cause}`);
         outcome = { status: "busy" };
-        // Not cached: the answer is "retry", and a retry should find out. The
-        // in-flight share above holds a key to one lookup at a time.
-        ttl = 0;
+        ttl = Math.min(this.ttlMs, BUSY_TTL_MS);
       } else {
         this.warnOnce(key, "unreachable", `agent registry: resolve_agent failed for key "${principal.name}" — writes are attributed by name only until it answers: ${cause}`);
         outcome = { status: "ok", agentId: undefined, unresolved: "unreachable" };
@@ -239,6 +270,26 @@ export class AgentResolver {
 
     if (ttl > 0) this.cache.set(key, { outcome, expires: this.now() + ttl });
     return outcome;
+  }
+
+  /**
+   * One lookup, retried while it times out on a lock (BUSY_RETRY) and this
+   * process has no revocation for the key — a revocation answers at once. Each
+   * pause holds no connection. Throws the last error.
+   */
+  private async resolveRetrying(store: ThoughtStore, principal: Principal): Promise<AgentResolution> {
+    const started = performance.now();
+    const { attempts, budgetMs, pauseMs } = this.busyRetry;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await store.resolveAgent({ keyHash: principal.keyHash, label: principal.name, scope: principal.scope });
+      } catch (e) {
+        const again = timedOut(e) && !this.revocations.has(principal.keyHash)
+          && attempt < attempts && performance.now() - started + pauseMs < budgetMs;
+        if (!again) throw e;
+        await new Promise((r) => setTimeout(r, pauseMs));
+      }
+    }
   }
 
   /**

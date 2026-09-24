@@ -669,9 +669,11 @@ console.log("\n[15] resolveAgent caps each lock wait in its own statement — 55
   const conn = (one as unknown as { sql: SQL }).sql;
   const hash = "e".repeat(64);
   const setting = async () => (await conn`SELECT current_setting('lock_timeout') AS lt`)[0].lt as string;
+  // The connection's own, whatever the database or role sets it to.
+  const own = await setting();
   const ok = await one.resolveAgent({ keyHash: hash, label: "store-sql-2072", scope: "write" });
   assert(ok.ok === true, `an unlocked registry answers (${JSON.stringify(ok).slice(0, 60)})`);
-  assert(await setting() === "0", "the lookup's ceiling ends with its statement: the connection's lock_timeout is its own (0) afterwards");
+  assert(await setting() === own, `the lookup's ceiling ends with its statement: the connection's lock_timeout is its own (${own}) afterwards`);
 
   const locker = new SQL({ url: URL_, max: 1 });
   let release: () => void = () => {};
@@ -694,14 +696,14 @@ console.log("\n[15] resolveAgent caps each lock wait in its own statement — 55
     const capped = await timed();
     assert(capped.errno === "55P03" && capped.ms >= 200 && capped.ms < 1000,
       `with ob1_agent_keys locked, the lookup raises lock_timeout's 55P03 at the 250 ms cap (${capped.errno}, ${Math.round(capped.ms)} ms: ${capped.message})`);
-    assert(await setting() === "0", "…and the connection is healthy after it, its lock_timeout its own");
+    assert(await setting() === own, "…and the connection is healthy after it, its lock_timeout its own");
     // A stricter setting already on the connection is kept, not raised.
     await conn`SET lock_timeout = '80ms'`;
     const stricter = await timed();
     assert(stricter.errno === "55P03" && stricter.ms < 200, `a stricter lock_timeout (80 ms) is kept, not raised to the cap (${Math.round(stricter.ms)} ms)`);
     assert(await setting() === "80ms", `…and is still the connection's afterwards (${await setting()})`);
-    await conn`RESET lock_timeout`;
   } finally {
+    await conn`RESET lock_timeout`;
     release();
     await tx;
     await locker.close();

@@ -2297,7 +2297,7 @@ app.get("*", async (c, next) => {
   // record while the registry's tables were locked); one that answers that it
   // cannot reach the database (agents.ts: not a refusal) lets the record
   // through with the database's error. A registry whose lock outlasts the
-  // lookup's cap answers `busy` for the same reason (agents.ts), and so is
+  // lookup's retries answers `busy` for the same reason (agents.ts), and so is
   // `ok` here too.
   const info = readBrainInfo("health");
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -2515,7 +2515,8 @@ app.on(MCP_METHODS, "*", async (c) => {
    *
    * Cached, so the steady state adds no query; see agents.ts for what happens
    * when the registry cannot answer, which is deliberately NOT a refusal —
-   * except when it is locked, which is a refusal for now (`busy`).
+   * except when it is locked (`busy`, a refusal for now), or for a key whose
+   * revocation this process has already read.
    */
   const identity = await agents().resolve(db(), principal);
   if (identity.status === "revoked" || identity.status === "busy") {
@@ -2526,7 +2527,7 @@ app.on(MCP_METHODS, "*", async (c) => {
       : unauthorizedResponse(extractJsonRpcId(bodyText), BUSY_MESSAGE, JSON_RPC_BUSY_CODE);
   }
   principal.agentId = identity.agentId;
-  if (identity.status === "ok") principal.agentUnresolved = identity.unresolved;
+  principal.agentUnresolved = identity.unresolved;
 
   // The label, read through Hono's request, which caches the body for the
   // transport's own read of it — the same text, the same rejection: a body
