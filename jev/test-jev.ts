@@ -17,7 +17,9 @@
  * answer that is not the contract's is refused by kind. [9] runs the real
  * model when JEV_TEST_MODEL_DIR names a directory holding the pinned files
  * (`bun serve.ts --fetch-only` puts them in ~/.cache/ob1-jev/<revision>) and
- * skips otherwise; no model is needed for [1]–[8].
+ * skips otherwise; [10], likewise, reproduces the model's published receipt
+ * row by row (conformance.ts) and holds the served prompt at its measured
+ * numbers. No model is needed for [1]–[8].
  *
  * Mutants, each run and each killed (2026-09-23): drop the gate from
  * jevDecideMany and [7] fails (the stub sees the decision); derive no marker
@@ -27,7 +29,8 @@
  * without keeping the closing id and [3] and [5] fail; drop the handler's
  * queue and [5b]'s concurrency case fails; accept any model in the answer and
  * [8] fails; keep a download that hashes wrong and [6] fails; drop the noul
- * label's "not" and [2] fails.
+ * label's "not" and [2] fails; a tokenizer that loses [CLS] — every hash still
+ * passes — and all six of [10]'s assertions fail (982 of 1,000 rows agree).
  *
  *   bun test-jev.ts
  */
@@ -332,6 +335,29 @@ if (!dir) {
   ]);
   assert(arrival.selected === "card_arrival" && arrival.logits[0] > 5, `a card-arrival note selects card_arrival (logit ${arrival.logits[0].toFixed(2)})`);
   assert(solar.abstained, `an out-of-scope note abstains (p_insufficient ${solar.p_insufficient.toFixed(3)})`);
+}
+
+// ── [10] Conformance to the model's published evaluation ────────────────────
+section("[10] conformance — the published receipt, row by row (JEV_TEST_MODEL_DIR)");
+if (!dir) {
+  skip("the runtime reproduces reports/v2/predictions_v2.jsonl on all 1,000 rows", "JEV_TEST_MODEL_DIR is unset");
+} else {
+  const { loadConformance, receiptArm, servedArm } = await import("./conformance.ts");
+  const l = await loadConformance(dir);
+  const pub = l.report.calibrated;
+  const a = await receiptArm(l);
+  assert(a.agree === l.rows.length && l.rows.length === 1000, `the predicted option agrees with the receipt on every row (${a.agree}/${l.rows.length}; ${a.disagreements.slice(0, 2).join("; ")})`);
+  assert(a.maxConfidenceDelta < 1e-4, `…and the confidence to float noise (max |Δ| ${a.maxConfidenceDelta.toExponential(2)})`);
+  const near = (x: number, y: number) => Math.abs(x - y) < 1e-4;
+  assert(near(a.accuracy, pub.accuracy) && near(a.abstentionRecall, pub.abstention.recall) && near(a.abstentionPrecision, pub.abstention.precision),
+         `accuracy and abstention are the report's (${a.accuracy} / ${a.abstentionRecall} / ${a.abstentionPrecision.toFixed(4)})`);
+  assert(near(a.ece, pub.ece_equal_width) && near(a.brier, pub.brier_score), `ECE and Brier are the report's (${a.ece.toFixed(4)} / ${a.brier.toFixed(4)})`);
+  // The served arm is a different prompt and calibration by design (verdict.ts
+  // follows the v1.4 engine); held at its measured numbers so a change to
+  // buildPrompt or the calibrator moves them on purpose, with the record.
+  const s = await servedArm(l);
+  assert(Math.abs(s.accuracy - 0.931) < 0.0015 && s.differsFromReceipt === 28, `the served arm stands at its recorded accuracy, 93.1%, 28 answers from the receipt's (${(s.accuracy * 100).toFixed(1)}%, ${s.differsFromReceipt}) — jev/README.md, "Conformance"`);
+  assert(Math.abs(s.ece - 0.2123) < 0.002, `…and its recorded ECE, 0.212 under the bundle's per-K calibrator (${s.ece.toFixed(4)})`);
 }
 
 report();

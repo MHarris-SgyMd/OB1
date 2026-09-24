@@ -19,8 +19,11 @@ process, so Ollama's scheduler (`OLLAMA_MAX_LOADED_MODELS`) neither counts nor
 evicts it.
 
 The ticket named **openJev-verdict-2.0**, the line's newer model. It is not
-servable today: its Hugging Face repository answers 401 and its GitHub weights
-are a Git LFS pointer with no object behind it (both checked 2026-09-23).
+servable today: its Hugging Face repository answers 401, and its GitHub weights
+(`artifacts/verdict2-base/model.pt`) are a Git LFS pointer —
+`oid sha256:2201b07c…40f7`, `size 598509338` — for which GitHub's LFS batch API
+answers `404 Object does not exist on the server`, in the repository and in
+every one of its 41 forks (checked 2026-09-23).
 Verdict v1.4 is the same author's public checkpoint, the one on the JevBench
 leaderboard. When verdict-2.0 is published, it goes behind the same contract.
 **SemIf** (semantic-if over Qwen3.5-4B) is Python-only (transformers, MLX or
@@ -104,6 +107,52 @@ own presets resolve sharply (+6 logits against negatives) — framing and
 calibration on each workload are each spike's first measurement, and the
 reason every result carries its logits.
 
+## Conformance
+
+The sha256 pins say the bytes are the ones published; they do not say this
+runtime reads them as their author did. `conformance.ts` checks that against
+the author's own per-row receipt for this bundle: `reports/v2/predictions_v2.jsonl`,
+1,000 rows of `data/real_banking_test.jsonl` (800 in scope, 200 that should
+abstain), written by `scripts/evaluate.py` from `artifacts/v2/model.safetensors`
+— the checkpoint whose sha256 the bundle manifest names beside our
+`model.onnx` — with the totals in `evaluation_report_v2.json`. The three files
+are fetched pinned (commit `bff28567`, sha256 each), not vendored.
+
+```bash
+bun conformance.ts ~/.cache/ob1-jev/8af2496eb63c7fa66d7d234e1f62629380030eb4   # ~60 s
+```
+
+| 1,000 rows, K=5 | accuracy | abstention recall | abstention precision | ECE | Brier |
+| --- | --- | --- | --- | --- | --- |
+| published (T=1.4265) | 95.00% | 97.50% | 89.45% | 0.0335 | 0.0785 |
+| **receipt arm** — this runtime, the evaluator's prompt and temperature | 95.00% | 97.50% | 89.45% | 0.0335 | 0.0785 |
+| **served arm** — the contract's prompt, the bundle's calibrator | 93.10% | 96.50% | 83.91% | 0.2123 | 0.1660 |
+
+**The runtime conforms.** The receipt arm agrees with the receipt's predicted
+option on all 1,000 rows, the confidence within 6.4e-6, and every total is the
+report's. A tokenizer that drops `[CLS]` — a bug every hash still passes —
+moves 18 rows and fails all six of [10]'s assertions (measured as a mutant).
+
+**The served prompt is not the evaluated one, and it costs on this set.** Taken
+apart one choice at a time (same rows, same weights):
+
+| Prompt | accuracy | abstention precision | ECE at T=1.4265 | ECE at the bundle's per-K T |
+| --- | --- | --- | --- | --- |
+| raw labels, abstention where the row puts it (the evaluator's) | 95.0% | 89.4% | 0.034 | 0.213 |
+| raw labels, abstention last | 95.5% | 90.7% | 0.033 | 0.219 |
+| `It is` labels, abstention where the row puts it | 93.5% | 84.3% | 0.033 | 0.212 |
+| `It is` labels, abstention last (**served**) | 93.1% | 83.9% | 0.033 | 0.212 |
+
+Abstention last is free. The `It is` framing — the v1.4 engine's own rule,
+which its README says lifts JevBench's open-domain accuracy 2–7 points — costs
+about 2 points of accuracy and 5 of abstention precision on this in-domain set.
+The bundle's `calibrator.json` (fitted "open domain", T=3.06 at five options)
+leaves every answer where it was and makes the confidences six times worse
+calibrated here (under-confident). Which framing and which temperature a
+workload wants is that workload's to measure — every result carries the raw
+logits so a spike can refit — and the served arm is held at these numbers by
+[10], so a change to either moves them on purpose.
+
 ## Licences
 
 Verdict v1.4 weights and the openJev reference code: Apache-2.0.
@@ -114,6 +163,7 @@ FSL-1.1-MIT.
 
 ## Tests
 
-`bun test-jev.ts` — 75 assertions with no model; [9] adds the model itself
-when `JEV_TEST_MODEL_DIR` names the pinned files (77). CI runs it in the
+`bun test-jev.ts` — 75 assertions with no model; with `JEV_TEST_MODEL_DIR`
+naming the pinned files, [9] adds the model's presets and [10] the conformance
+run above (83, about a minute). CI runs it in the
 portable-server job, with `bunx tsc --noEmit` here (check 18 lists `jev`).

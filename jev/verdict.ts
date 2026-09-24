@@ -198,10 +198,21 @@ export function createEngine(encoder: Encoder, run: Runner, cal: Calibrator): En
 
 /**
  * The real engine: the pinned files in `dir` (fetch-model.ts put them there
- * and verified them), onnxruntime-node on the CPU. Imported here, not at the
- * top, so the rules above load without the native module.
+ * and verified them), onnxruntime-node on the CPU.
  */
 export async function createVerdictEngine(dir: string, opts: { threads: number }): Promise<Engine> {
+  const { encoder, run, cal } = await loadVerdict(dir, opts);
+  return createEngine(encoder, run, cal);
+}
+
+/**
+ * The loaded parts — tokenizer, runner, calibrator — for a caller that must
+ * write the prompt itself: the conformance run reproduces the model's own
+ * evaluation, whose prompts are not the contract's (test-jev.ts [10]).
+ * Imported here, not at the top, so the rules above load without the native
+ * module.
+ */
+export async function loadVerdict(dir: string, opts: { threads: number }): Promise<{ encoder: Encoder; run: Runner; cal: Calibrator }> {
   const [{ Tokenizer }, ort] = await Promise.all([import("@huggingface/tokenizers"), import("onnxruntime-node")]);
   const read = (f: VerdictFile) => Bun.file(`${dir}/${f}`).json();
   const tokenizer = new Tokenizer(await read("tokenizer.json"), await read("tokenizer_config.json"));
@@ -220,5 +231,5 @@ export async function createVerdictEngine(dir: string, opts: { threads: number }
     const out = await session.run({ input_ids: new ort.Tensor("int64", inputIds, dims), attention_mask: new ort.Tensor("int64", mask, dims) });
     return out.logits.data as Float32Array;
   };
-  return createEngine({ encode: (t) => tokenizer.encode(t) }, run, cal);
+  return { encoder: { encode: (t) => tokenizer.encode(t) }, run, cal };
 }

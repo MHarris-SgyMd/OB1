@@ -39,8 +39,18 @@ async function matchesPin(path: string, pin: { bytes: number; sha256: string }):
   return (await sizeOf(path)) === pin.bytes && (await sha256File(path)) === pin.sha256;
 }
 
-/** What is fetched: a repository at a revision, and each file's size and sha256. VERDICT is one. */
-export type ModelPins = { repo: string; revision: string; files: Readonly<Record<string, { bytes: number; sha256: string }>> };
+/**
+ * What is fetched: a repository at a revision, and each file's size and
+ * sha256. VERDICT is one; conformance.ts's receipt is another, on GitHub,
+ * whose raw URLs are not the hub's `resolve/` shape — hence `url`.
+ */
+export type ModelPins = {
+  repo: string;
+  revision: string;
+  files: Readonly<Record<string, { bytes: number; sha256: string }>>;
+  /** Where a file is fetched from; default the hub's `<repo>/resolve/<revision>/<name>`. */
+  url?: (name: string) => string;
+};
 
 export type EnsureResult = { fetched: string[]; verified: string[]; ms: number };
 
@@ -55,7 +65,7 @@ export async function ensureModel(
   dir: string,
   opts: { pins?: ModelPins; hub?: string; fetch?: boolean; fetchImpl?: typeof fetch; log?: (line: string) => void } = {},
 ): Promise<EnsureResult> {
-  const pins = opts.pins ?? VERDICT;
+  const pins: ModelPins = opts.pins ?? VERDICT;
   const hub = (opts.hub ?? DEFAULT_HUB).replace(/\/+$/, "");
   const doFetch = opts.fetchImpl ?? fetch;
   const log = opts.log ?? (() => {});
@@ -76,7 +86,7 @@ export async function ensureModel(
       log(`${name}: present but not the pinned bytes (${pin.sha256.slice(0, 12)}…) — replacing it`);
       await rm(path);
     }
-    const url = `${hub}/${pins.repo}/resolve/${pins.revision}/${name}`;
+    const url = pins.url ? pins.url(name) : `${hub}/${pins.repo}/resolve/${pins.revision}/${name}`;
     log(`${name}: fetching ${(pin.bytes / 2 ** 20).toFixed(1)} MB from ${url}`);
     const r = await doFetch(url, { redirect: "follow" });
     if (!r.ok || !r.body) throw new Error(`fetching ${name} from ${url} answered ${r.status}`);
