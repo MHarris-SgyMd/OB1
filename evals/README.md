@@ -5218,6 +5218,85 @@ reading the event, the raw in-tree writers (`review_supersession_proposal`,
 the backfills, the guard's bump — trigger-audited as today), the chunk rows.
 The record is `changes/smd-1999.md`.
 
+## The typed-decision tier beside Ollama, and the entity gate run against it (SMD-2050)
+
+SMD-2050 stood up a typed-decision tier (`jev/`, `server-portable/jev.ts`) for
+seven spikes that each assumed one. Its Verify asked two things only a running
+box answers: what the tier costs beside the embedder and the metadata model,
+and whether a consumer spike runs against it with no serving code of its own.
+
+**Beside Ollama** — `eval-jev-coload.ts`. On the dogfood Mac (M5 Pro, 64 GB),
+host Ollama with `OLLAMA_MAX_LOADED_MODELS=2`, `OLLAMA_NUM_PARALLEL=3` (read
+from Ollama's own process), both models resident (`qwen2.5:7b` 9.9 GB,
+`qwen3-embedding:4b` 9.3 GB), the tier as a host process (`bun jev/serve.ts`,
+4 threads). Alone, 30 embeddings, 10 chat completions and 30 decisions in
+turn; together, the three loops to one shared deadline as long as the alone
+phase took (about 2.5 s), so they overlap throughout — with chat's 15 samples
+there, its p95 is its maximum:
+
+| call | alone: calls, p50 / p95 | beside the other two: calls, p50 / p95 | p50 ratio |
+| --- | --- | --- | --- |
+| embedding | 30, 24 / 27 ms | 65, 39 / 43 ms | 1.6× |
+| chat, 16 tokens | 10, 118 / 121 ms | 15, 176 / 188 ms | 1.5× |
+| decision | 30, 21 / 23 ms | 92, 28 / 31 ms | 1.3× |
+
+The warm-up loaded nothing, and no Ollama model was evicted or reloaded: both
+of its runners (`llama-server`) kept their pids and start times across the run.
+The tier is its own process, outside the scheduler `OLLAMA_MAX_LOADED_MODELS`
+governs; its footprint was 944 → 953 MB with 12.2 → 12.1 GB free in the table's
+run, 942–953 MB over two (macOS `footprint`, which counts the compressed pages
+`ps`'s resident set leaves out: an earlier run's `ps` read 536–622 MB). The
+cost is contention, not memory. What
+this does not test, and the run says so: past a warm-up load, no model load was
+requested and no memory pressure applied — Ollama evicts on a load, which the
+tier never makes — so it shows the tier causes no eviction by being there, not
+what a box short of memory would do.
+
+```sh
+OB1_JEV_BASE_URL=http://127.0.0.1:8020 OB1_JEV_LOCAL=1 \
+  bun eval-jev-coload.ts --n 30 --jev-pid <tier pid>
+```
+
+It warms and uses the host's Ollama, so it slows a brain sharing it for the
+few seconds it runs, and longer if the warm-up has a model to load.
+
+**SMD-1937's gate, end to end** — `eval-jev-gate.ts`. Candidates from a brain's
+own entity graph in one read-only transaction — `bad` (names `^[0-9.:]+$`,
+SMD-1935's rule: a strong label), `positive` (tools, projects, organizations in
+≥ 5 thoughts: a weak label) and the `person`/`place` layer (no label) — each
+with a window of the first thought naming it, sent through the client and
+nothing else, under its own thought's metadata (so an egress policy's
+source/type/topic terms apply row by row, a refused row counted and left out);
+at most `--per-cohort` (60) of each, the most mentioned. The dogfood brain's
+Postgres is not published, so the run is a one-off container
+on the stack's network, the tier on the host (reached through the podman
+machine's `host.containers.internal`):
+
+```sh
+podman run --rm --network open-brain_default --env-file deploy/.env \
+  -e OB1_JEV_BASE_URL=http://host.containers.internal:8020 -e OB1_JEV_LOCAL=1 \
+  -v "$PWD":/repo:ro -w /repo/evals oven/bun:1.4.0-alpine sh -c \
+  'export DATABASE_URL="postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/openbrain"; exec bun eval-jev-gate.ts'
+```
+
+On the dogfood brain (2,420 entities):
+
+| arm | rejects `bad` | rejects `positive` (weak) |
+| --- | --- | --- |
+| baseline `^[0-9.:]+$` | 100.0% | 0.0% |
+| tier, binary validity (p < 0.5 or abstained) | 18.3% | 18.3% |
+| tier, choice → number, generic or abstained | 15.0% | 3.3% |
+
+149 candidates in 23 s, 75 ms p50 a decision container-to-host. The number is
+negative: P(named entity) does not separate a migration number from a tool on
+this graph (AUROC 0.509; medians 0.555 and 0.568), and the choice kept the
+extractor's type for 37% of positives and for none of the 29 persons and
+places left once the 11 numeric-named ones fall to `bad` — a person's full
+name typed as a project. It is one framing on Verdict v1.4, whose
+open-domain hard tier is 37% (jev/README.md, "Conformance"); which framing, which
+calibration and which model (SemIf, SMD-2052) is SMD-1937's measurement to make
+on this harness. What the run shows is the Verify bullet: the spike ran against
+the tier with no serving code of its own.
 
 ## Related
 
