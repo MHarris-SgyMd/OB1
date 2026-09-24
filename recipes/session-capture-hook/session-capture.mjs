@@ -58,7 +58,7 @@
  * State and log: ${XDG_STATE_HOME:-~/.local/state}/open-brain/session-capture/
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, rmdirSync, openSync, closeSync, appendFileSync, statSync, realpathSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, rmdirSync, openSync, closeSync, appendFileSync, statSync, realpathSync, utimesSync } from "node:fs";
 import { join, basename, relative, isAbsolute, dirname } from "node:path";
 import { homedir } from "node:os";
 import { createHash, randomBytes } from "node:crypto";
@@ -130,7 +130,14 @@ function ensureDirs() {
   for (const d of [STATE_DIR, PENDING_DIR(), DEAD_DIR(), INFLIGHT_DIR()]) mkdirSync(d, { recursive: true, mode: 0o700 });
 }
 const isAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e?.code === "EPERM"; } };
-/** Longer than any run can hold a claim: five posts at the request timeout, one wait as long (SMD-2035), and then some. */
+/**
+ * How long a claim may go without progress before it is judged abandoned:
+ * longer than one payload takes — its requests at the timeout, and a wait as
+ * long (SMD-2035) — and the claim directory's mtime moves at every payload a
+ * run turns to, so a long run is judged by its last step, not its first
+ * (second review pass: five payloads of six requests each could outlast the
+ * age from the run's start, and a live run swept mid-flight posts twice).
+ */
 const CLAIM_MAX_AGE_MS = 15 * 60_000;
 /**
  * Payloads claimed by a child that is gone (killed, crashed) go back to
@@ -173,12 +180,13 @@ function pruneDead() {
  * `<ms>-<seq>-<rand>-<session>.json`, so the session is everything after the
  * third hyphen, compared whole — a suffix match let session `abc` claim
  * `run-abc`'s payloads (eleventh review pass). `pid` is the child whose claim
- * holds it, null under pending/ (SMD-2035).
+ * holds it, null under pending/ (SMD-2035); a poll that only asks what other
+ * children hold leaves pending/ unread.
  */
-function sessionPayloads(sessionId) {
+function sessionPayloads(sessionId, { pending = true } = {}) {
   const tail = basename(statePath(sessionId));
   const out = [];
-  const dirs = [{ dir: PENDING_DIR(), pid: null }];
+  const dirs = pending ? [{ dir: PENDING_DIR(), pid: null }] : [];
   try { for (const pid of readdirSync(INFLIGHT_DIR())) dirs.push({ dir: join(INFLIGHT_DIR(), pid), pid: Number(pid) }); } catch { /* no inflight dir yet */ }
   for (const { dir, pid } of dirs) {
     let names = [];
@@ -891,10 +899,10 @@ function recordedAfter(state, preparedAt) {
  * wait — that is where the pointer comes from.
  */
 export async function awaitPredecessors(sessionId, name, { boundMs = POST_TIMEOUT_MS } = {}) {
-  const ahead = () => sessionPayloads(sessionId).filter((p) => p.pid !== null && p.pid !== process.pid && p.name.localeCompare(name) < 0 && isAlive(p.pid));
+  const ahead = () => sessionPayloads(sessionId, { pending: false }).filter((p) => p.pid !== process.pid && p.name.localeCompare(name) < 0 && isAlive(p.pid));
   const first = ahead();
   if (!first.length) return { waitedMs: 0, timedOut: false };
-  if (boundMs <= 0) return { waitedMs: 0, timedOut: true }; // the run's budget is spent: said in the note, not waited for
+  if (!(boundMs > 0)) return { waitedMs: 0, timedOut: true }; // the run's budget is spent — or the bound is no number at all, which must not wait for ever (second review pass)
   log(`waiting session=${sessionId} for an earlier payload of the session in flight (pid ${first[0].pid}), at most ${Math.ceil(boundMs / 1000)} s`);
   const t0 = Date.now();
   while (ahead().length) {
@@ -907,34 +915,45 @@ export async function awaitPredecessors(sessionId, name, { boundMs = POST_TIMEOU
 const WAIT_POLL_MS = 250;
 
 /**
- * A landed payload of the session whose bookkeeping is still owed — its post
- * answered, its `captured_id` written, its state write failed, the file back
- * under pending/ — is a thought the state does not name (first review pass).
- * The newest such payload older than `name`, by name.
+ * The session's landed payloads whose bookkeeping is still owed — the post
+ * answered, `captured_id` written, the state write failed, the file back under
+ * pending/ or still in its child's hands — are thoughts the state does not
+ * name (first review pass). Each with its moment: the time it was prepared,
+ * or the millisecond in its name when a hand-made file has none.
  */
-export function landedBefore(sessionId, name) {
-  let best;
+function landedPayloads(sessionId) {
+  const out = [];
   for (const p of sessionPayloads(sessionId)) {
-    if (p.name.localeCompare(name) >= 0 || (best && p.name.localeCompare(best.name) < 0)) continue;
     let j;
     try { j = JSON.parse(readFileSync(p.path, "utf8")); } catch { continue; }
-    if (j?.captured_id) best = { name: p.name, id: j.captured_id, at: j.prepared_at };
+    if (j?.captured_id) out.push({ name: p.name, id: j.captured_id, ms: momentOf(j.prepared_at, p.ms) });
   }
-  return best;
+  return out;
 }
+/** The newest of them older than `name`, by name — whatever order the directories were read in. */
+export function landedBefore(sessionId, name) {
+  return landedPayloads(sessionId).filter((p) => p.name.localeCompare(name) < 0).sort((a, b) => b.name.localeCompare(a.name))[0];
+}
+/** Whether one newer than `name` has landed: a payload older than it is then obsolete whatever the state says (second review pass). */
+export function landedAfter(sessionId, name) {
+  return landedPayloads(sessionId).some((p) => p.name.localeCompare(name) > 0);
+}
+/** A recorded moment for ranking: the time when it is one and not in the future — a clock that was wrong decides nothing, recordedAfter's rule — else the fallback. */
+const momentOf = (iso, fallbackMs) => { const t = Date.parse(iso ?? ""); return Number.isFinite(t) && t <= Date.now() ? t : fallbackMs; };
 /**
  * The thought a payload supersedes: the session's newest landed one by the
- * time its payload was prepared — what the state records, or a landed payload
- * whose bookkeeping is owed. Newest by time, not by source: a run that
- * finished an older payload's bookkeeping named it over the state's newer
- * thought, and two summaries stood (first review pass). What this run itself
- * landed is one or the other: its state write moved the state, or failed and
- * left the payload owed under pending/ — the per-run map SMD-1298's sixth
- * pass added for it was the third spelling of the same fact.
+ * time its payload was prepared — what the state records (`summary_at`, the
+ * prepare time; `captured_at`, the post time, only for a state from before
+ * it), or a landed payload whose bookkeeping is owed. Newest by time, not by
+ * source: a run that finished an older payload's bookkeeping named it over
+ * the state's newer thought, and two summaries stood (first review pass).
+ * What this run itself landed is one or the other: its state write moved the
+ * state, or failed and left the payload owed under pending/ — the per-run map
+ * SMD-1298's sixth pass added for it was the third spelling of the same fact.
  */
-function pointerFor(sessionId, name, state) {
-  const cands = [state?.thought_id && { id: state.thought_id, at: state.summary_at ?? state.captured_at }, landedBefore(sessionId, name)].filter(Boolean);
-  cands.sort((a, b) => (Date.parse(b.at ?? "") || 0) - (Date.parse(a.at ?? "") || 0));
+export function pointerFor(sessionId, name, state) {
+  const cands = [state?.thought_id && { id: state.thought_id, ms: momentOf(state.summary_at ?? state.captured_at, 0) }, landedBefore(sessionId, name)].filter(Boolean);
+  cands.sort((a, b) => b.ms - a.ms);
   return cands[0]?.id;
 }
 
@@ -975,27 +994,73 @@ export async function postPending(cfg, own, { waitBudgetMs = POST_TIMEOUT_MS } =
   for (const { home, payload } of claimed) newestOf.set(payload.session_id, home);
   const outcomes = [];
   pruneDead();
+  const landedSessions = new Set();
+  // After the run's landings, once: payloads of those sessions left under
+  // pending/ — an end deferred behind the checkpoint this run has just landed
+  // — are claimed and posted now, with the pointer the landing wrote, rather
+  // than by whichever hook run comes next (second review pass).
+  const followUps = () => {
+    const next = [];
+    for (const sid of landedSessions) {
+      for (const p of sessionPayloads(sid).filter((q) => q.pid === null).sort((x, y) => x.name.localeCompare(y.name))) {
+        const here = join(mine, p.name);
+        try { renameSync(p.path, here); } catch { continue; }
+        let payload;
+        try { payload = JSON.parse(readFileSync(here, "utf8")); } catch { moveTo(here, DEAD_DIR()); continue; }
+        next.push({ home: p.path, here, payload });
+        newestOf.set(sid, p.path);
+      }
+    }
+    if (next.length) log(`following up: ${next.length} payload(s) of ${[...new Set(next.map((n) => n.payload.session_id))].join(", ")} waited under pending/ behind this run's landing`);
+    return next;
+  };
+  const queue = [...claimed];
+  let followed = false;
   // The wait budget is the run's, shared (the seam is the suite's): five
   // payloads each waiting a whole timeout would outlive the claim sweep.
   try {
-    for (const { home, here, payload } of claimed) {
+    for (;;) {
+      if (!queue.length) {
+        if (followed) break;
+        followed = true;
+        queue.push(...followUps());
+        if (!queue.length) break;
+      }
+      const { home, here, payload } = queue.shift();
       const file = home;
+      try { const now = new Date(); utimesSync(mine, now, now); } catch { /* the claim is judged by its age; a touch that fails leaves it judged from the last one */ }
       // An earlier payload of the session that another child is still posting
       // lands first (SMD-2035): the state read below is what it wrote, and the
       // pointer comes from there. A payload that has landed points at nothing,
-      // and one this run holds a newer sibling of is obsolete whatever the state
-      // says — neither waits (first review pass: an obsolete payload spent the
+      // one this run holds a newer sibling of is obsolete whatever the state
+      // says, and one the state already outdates is obsolete too — none of them
+      // waits (first and second review passes: an obsolete payload spent the
       // budget and the newest one, which needed it, posted past a live predecessor).
       const newestHere = newestOf.get(payload.session_id) === home;
-      const predecessorWait = payload.captured_id || !newestHere ? { waitedMs: 0, timedOut: false } : await awaitPredecessors(payload.session_id, basename(here), { boundMs: waitBudgetMs });
-      waitBudgetMs = Math.max(0, waitBudgetMs - predecessorWait.waitedMs);
+      const couldPost = !payload.captured_id && newestHere && !recordedAfter(readState(payload.session_id), payload.prepared_at);
+      const predecessorWait = couldPost ? await awaitPredecessors(payload.session_id, basename(here), { boundMs: waitBudgetMs }) : { waitedMs: 0, timedOut: false };
+      waitBudgetMs -= predecessorWait.waitedMs;
+      // The wait ran out, or the run had none left: the payload is not posted
+      // past its predecessor — that is the two-thoughts race this closes, back
+      // on the slow-server path that causes it (second review pass). It goes
+      // back to pending/, and the run that lands the predecessor follows up
+      // with it; failing that, the next hook run does.
+      if (predecessorWait.timedOut) {
+        moveTo(here, PENDING_DIR());
+        const why = predecessorWait.waitedMs ? `still in flight after ${(predecessorWait.waitedMs / 1000).toFixed(1)} s of waiting` : "in flight and the run's wait budget is spent";
+        log(`deferred session=${payload.session_id} — the session's earlier post is ${why}; kept under pending/ for the run that lands it`);
+        outcomes.push({ file, ok: false, deferred: true, waitedMs: predecessorWait.waitedMs, error: `deferred: the session's earlier post is ${why}` });
+        continue;
+      }
       const state = readState(payload.session_id);
       const stateIsNewer = recordedAfter(state, payload.prepared_at);
       // A payload that already LANDED is never obsolete: its id must reach the
       // state, and the newer payload behind it must supersede it (sixth review
       // pass: judged obsolete beside a newer one, the id was lost and two
-      // summaries stood).
-      const obsolete = !payload.captured_id && (!newestHere || stateIsNewer);
+      // summaries stood). One whose session has a NEWER landed payload owed its
+      // bookkeeping is obsolete though the state is silent (second review pass:
+      // an old checkpoint posted as "continuing" after the end had landed).
+      const obsolete = !payload.captured_id && (!newestHere || stateIsNewer || landedAfter(payload.session_id, basename(here)));
       if (obsolete) {
         moveTo(here, DEAD_DIR());
         log(`obsolete session=${payload.session_id} — a later capture of the session has a summary; this one is not posted`);
@@ -1055,10 +1120,8 @@ export async function postPending(cfg, own, { waitBudgetMs = POST_TIMEOUT_MS } =
         continue;
       }
       const { id } = posted;
-      const waitNote = !predecessorWait.waitedMs && !predecessorWait.timedOut ? ""
-        : !predecessorWait.waitedMs ? "did not wait for the session's earlier post: the run's wait budget was spent"
-        : `waited ${(predecessorWait.waitedMs / 1000).toFixed(1)} s for the session's earlier post${predecessorWait.timedOut ? ", which had not landed when the wait ran out" : ""}`;
-      const note = [posted.note, lastResort, waitNote].filter(Boolean).join("; ");
+      landedSessions.add(payload.session_id);
+      const note = [posted.note, lastResort, predecessorWait.waitedMs ? `waited ${(predecessorWait.waitedMs / 1000).toFixed(1)} s for the session's earlier post` : ""].filter(Boolean).join("; ");
       // The state is read AGAIN after the post: a sibling run may have landed a
       // newer summary of the session meanwhile, and a judgement made before the
       // post would move the state back to this older one (eighth review pass).
@@ -1066,7 +1129,11 @@ export async function postPending(cfg, own, { waitBudgetMs = POST_TIMEOUT_MS } =
       // Bookkeeping, apart from the post: the id goes onto the payload first, so a
       // fault here leaves a file the next run finishes without posting twice. A
       // landed payload whose session already records a NEWER summary is finished
-      // without moving the state back to it (third review pass).
+      // without moving the state back to it (third review pass). The ORDER is
+      // load-bearing: the state is written, then the claim is removed — a run
+      // waiting on this claim (awaitPredecessors) reads the state the moment
+      // the claim clears, and a claim cleared before the state was written
+      // would leave it pointerless (SMD-2035, second review pass).
       try {
         if (!payload.captured_id) writeJson(here, { ...payload, captured_id: id, captured_note: note });
         // summary_at never runs ahead of the clock that will read it back.
@@ -1284,8 +1351,8 @@ export async function main(argv) {
     // Each outcome is already a timestamped line in the log, where this
     // process's stdout also lands when the hook spawned it; say it again only
     // to a terminal (first review pass: every line twice in the log).
-    if (process.stdout.isTTY) for (const o of outcomes) console.log(o.ok ? `captured ${o.id}${o.note ? ` (${o.note})` : ""}` : `not captured: ${o.error}${o.dead ? " (given up)" : " (kept for retry)"}`);
-    return outcomes.some((o) => !o.ok && !o.obsolete) ? 1 : 0;
+    if (process.stdout.isTTY) for (const o of outcomes) console.log(o.ok ? `captured ${o.id}${o.note ? ` (${o.note})` : ""}` : o.deferred ? o.error : `not captured: ${o.error}${o.dead ? " (given up)" : " (kept for retry)"}`);
+    return outcomes.some((o) => !o.ok && !o.obsolete && !o.deferred) ? 1 : 0;
   }
 
   // The hook itself: JSON on stdin. A terminal is not a hook — say so instead
@@ -1324,8 +1391,8 @@ export async function main(argv) {
     // payloads before it (third review pass: `[o]` read the first outcome).
     const o = (await postPending(cfg, prepared.payloadPath)).find((x) => x.file === prepared.payloadPath);
     if (!o) { console.error("session-capture: another run took this payload (to post it, or as obsolete beside a newer one)"); return 0; } // two runs at once (fourth review pass)
-    console.error(`session-capture: ${o.ok ? `captured ${o.id}` : o.obsolete ? `skip: ${o.error}` : `not captured: ${o.error}`}`);
-    return o.ok || o.obsolete ? 0 : 1;
+    console.error(`session-capture: ${o.ok ? `captured ${o.id}` : o.obsolete ? `skip: ${o.error}` : o.deferred ? o.error : `not captured: ${o.error}`}`);
+    return o.ok || o.obsolete || o.deferred ? 0 : 1;
   }
   const pid = detachPost(prepared.payloadPath);
   log(`${prepared.message} → posting in pid ${pid}`);
