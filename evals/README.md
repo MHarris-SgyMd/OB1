@@ -4656,14 +4656,14 @@ The dogfood brain publishes no port (SMD-1844), so the run below went through
 worktree mounted read-only, the URL built inside the container, host Ollama at
 `host.containers.internal` as the server dials it.
 
-### Results, 2026-09-24 (the dogfood brain as found, 430 thoughts; the program's output, verbatim)
+### Results, 2026-09-24 (the dogfood brain as found, 440 thoughts; the program's output, verbatim)
 
 ```
-Projection replay — SMD-1998 — 2026-09-24T02:18:12.619Z
+Projection replay — SMD-1998 — 2026-09-24T03:07:27.469Z
 
-corpus: 430 thoughts, 1.79 M chars; 430 with a vector (qwen3-embedding:4b 430); content_fingerprint = content_fingerprint_of(content) on 430/430, NULL on 0; 3 windowed (20 chunk rows); chunk_context false; target qwen3-embedding:4b@1024
-log: 431 capture / 1613 update / 1 delete rows (4.2 MB table and TOAST); 280 updates moved content, 280 of them the fingerprint; the log holds content for 213/430 live thoughts (a capture row carries metadata, not content — 008)
-graph: 5878 model mentions (a source: pass's rows apart), 5211 edges; 14 thought(s) with 238 mention rows extracted before their fingerprint last moved — under the recorded key extract:qwen2.5:7b@p2: 8 queued for a re-read, 5 failed (terminal until --retry-failed), 1 succeeded before the move (re-enqueued under another key), 0 succeeded after it with the rows still older, 0 succeeded with no stamp to place, 0 never asked; 6 of the unqueued pending under another key, which refreshes nothing here; 24 proposals
+corpus: 440 thoughts, 1.83 M chars; 440 with a vector (qwen3-embedding:4b 440); content_fingerprint = content_fingerprint_of(content) on 440/440, NULL on 0; 3 windowed (20 chunk rows); chunk_context false; target qwen3-embedding:4b@1024
+log: 441 capture / 1659 update / 1 delete rows (4.3 MB table and TOAST); 288 updates moved content, 288 of them the fingerprint; the log holds content for 217/440 live thoughts (a capture row carries metadata, not content — 008)
+graph: 5878 model mentions (a source: pass's rows apart), 5211 edges; 17 thought(s) with 275 mention rows extracted before their fingerprint last moved — under the recorded key extract:qwen2.5:7b@p2: 11 queued for a re-read, 5 failed (terminal until --retry-failed), 1 succeeded before the move (re-enqueued under another key), 0 succeeded after it with the rows still older, 0 succeeded with no stamp to place, 0 never asked; 6 of the unqueued pending under another key, which refreshes nothing here; 24 proposals
 
 the snapshot key per projection (the contract):
   thoughts.embedding                        recorded             derived (content_fingerprint_of(content), embedding_model); the prompt template and the requested width ride on the model name by convention (embed.ts, EMBEDDING_PROMPTS) — code, not data, so a template change under one name invalidates every vector with the key unmoved, and the cosine bar below is the check for that; recorded: content_fingerprint (003/023), embedding_model (021)
@@ -4675,74 +4675,74 @@ the snapshot key per projection (the contract):
 
 scenario                         reuse      recompute  by reason
 ──────────────────────────────────────────────────────────────────────────────
-A no-op rebuild                    430  100.0%          0  none
-B 10 edits                         420   97.7%         10  content 10
-C model bump → another-model@1024     0    0.0%        430  model 430
-D comprehension-only (embedding)   430  100.0%          0  none
-D comprehension-only (graph)         —                430  thoughts re-read, 5878 mention rows replaced
-E window recipe                    430 parents         20  chunk rows under 3 thought(s); 3 the current recipe windows; head-window fallbacks unrecorded
+A no-op rebuild                    440  100.0%          0  none
+B 10 edits                         430   97.7%         10  content 10
+C model bump → another-model@1024     0    0.0%        440  model 440
+D comprehension-only (embedding)   440  100.0%          0  none
+D comprehension-only (graph)         —                440  thoughts re-read, 5878 mention rows replaced
+E window recipe                    440 parents         20  chunk rows under 3 thought(s); 3 the current recipe windows; head-window fallbacks unrecorded
 
-cost — 21 rows embedded through the real embedder (http://host.containers.internal:11434/v1 qwen3-embedding:4b@1024), 97.2 k chars, one at a time, nothing else running; 1 of them windowed (the corpus: 0.7%):
-  per row: median 0.62 s, mean 1.17 s, mean over the 19 rows between the extremes 0.68 s (the longest row is 46.9% of the sample's wall-clock); 0.252 s per 1k chars; 0 fell back to a head window
-  steady state (A): 0 calls. typical (B, 10 edits): 11.7 s. worst (C, 430 rows): 8.4 min by rows, 4.9 min trimmed, 7.5 min by characters
-  the cached value against a fresh one, over the 21 reused rows: min cosine 1.0000 (1−cos 1.1e-16), median 1.0000; 0 at another width; window vectors: 7 compared, min cosine 1.0000 (1−cos 1.1e-16), 0 row(s) cut to another count
-  id                                    decision  chars  windows  calls     s   cosine   1−cos    windows-min
-  5aee0f50-d9f8-489d-ba3e-997447b5cfb0  reuse       251        0      1   0.09  1.0000   1.1e-16  —
-  091fb5c8-4700-4337-973c-2376649a06c6  reuse       746        0      1   0.19  1.0000   0        —
-  3f92be0e-8e5c-43fe-a5eb-8a1efba63c40  reuse      1558        0      1   0.26  1.0000   1.1e-16  —
-  bbcdfca7-653b-4875-8026-02e212f8aeb6  reuse      1826        0      1   0.27  1.0000   0        —
-  7ba37993-91ff-4f5c-857f-d8a2270ad3bb  reuse      2186        0      1   0.40  1.0000   0        —
-  5d1ebe2d-b4d4-4ea0-98bd-2f5ecb53814f  reuse      2606        0      1   0.40  1.0000   0        —
-  b10c6bab-83ff-4620-b327-11b7d1dc4bac  reuse      2755        0      1   0.47  1.0000   0        —
-  290d8470-4c46-4f62-96ea-14da0cf7dda3  reuse      2964        0      1   0.41  1.0000   0        —
-  3a7e389e-78c1-4801-87dc-363319f793a7  reuse      3141        0      1   0.47  1.0000   0        —
-  ffcb56f6-a199-40ce-b129-347a5310ac5c  reuse      3400        0      1   0.62  1.0000   0        —
-  66beb4e0-6739-4a8a-9d88-3bac3e7d07ad  reuse      3609        0      1   0.63  1.0000   0        —
-  14f9b68c-24e8-4436-910f-d204a4db8b02  reuse      3833        0      1   0.58  1.0000   0        —
-  be2fff59-9764-4359-9697-30bdb0c21b02  reuse      4063        0      1   0.71  1.0000   0        —
-  b8ee8d61-aed0-46d5-9022-640f3d598e9d  reuse      4488        0      1   0.79  1.0000   0        —
-  c22f60e0-b0d2-4e1f-9c21-42cdb429ae49  reuse      4954        0      1   0.78  1.0000   0        —
-  7644cd24-e104-447d-b501-b43eb658eb94  reuse      5257        0      1   0.98  1.0000   1.1e-16  —
-  f53fee38-fe35-49d9-82b3-71bf0106eb89  reuse      5593        0      1   0.98  1.0000   0        —
-  66e0127d-e56b-4a35-885e-96160cf3d517  reuse      6020        0      1   1.05  1.0000   0        —
-  299dbf4b-0494-41f7-b89c-53a63aa5715d  reuse      7068        0      1   1.07  1.0000   0        —
-  6d5c6c03-f6e0-4817-aaf9-d76df064b710  reuse      9514        0      1   1.84  1.0000   0        —
-  6941c030-e3cd-4218-ac7b-12f76662bd79  reuse     21345        7      8  11.48  1.0000   0        1.0000 over 7
+cost — 21 rows embedded through the real embedder (http://host.containers.internal:11434/v1 qwen3-embedding:4b@1024), 97.1 k chars, one at a time, nothing else running; 1 of them windowed (the corpus: 0.7%):
+  per row: median 0.62 s, mean 1.15 s, mean over the 19 rows between the extremes 0.68 s (the longest row is 46.4% of the sample's wall-clock); 0.249 s per 1k chars; 0 fell back to a head window
+  steady state (A): 0 calls. typical (B, 10 edits): 11.5 s. worst (C, 440 rows): 8.4 min by rows, 5.0 min trimmed, 7.6 min by characters
+  the cached value against a fresh one, over the 21 reused rows: min cosine 1.0000 (1−cos 2.2e-16), median 1.0000; 0 at another width; window vectors: 7 compared, min cosine 1.0000 (1−cos 1.1e-16), 0 row(s) cut to another count
+  id                                    decision  chars  windows  calls     s   cosine   1−cos    windows-min cos
+  5aee0f50-d9f8-489d-ba3e-997447b5cfb0  reuse       251        0      1   0.10  1.0000   1.1e-16  —
+  ebb8e653-2f8f-412d-92a4-4378ce1ad9f9  reuse       884        0      1   0.13  1.0000   0        —
+  8fa2f4b2-9e71-40ea-a0d6-cef56cdf3cad  reuse      1586        0      1   0.25  1.0000   0        —
+  e5f6f496-5e07-405c-af78-0e35c8308045  reuse      1839        0      1   0.26  1.0000   1.1e-16  —
+  0ad51b11-a8c2-4d4b-9bcc-dcfbc6371849  reuse      2205        0      1   0.39  1.0000   0        —
+  589bc3fb-167a-41ab-9e4b-a4531e6565b3  reuse      2586        0      1   0.46  1.0000   2.2e-16  —
+  cdcfcef0-c987-4b3a-924a-e9562f7e7ba4  reuse      2702        0      1   0.41  1.0000   2.2e-16  —
+  8fa7275d-85ce-4dfb-af71-e660df069288  reuse      2950        0      1   0.47  1.0000   0        —
+  3a0ce9bd-5d08-4acb-8ea5-22d7254561a1  reuse      3122        0      1   0.55  1.0000   0        —
+  89ec5c37-6e8e-4f71-ac3c-ca8cff033e6a  reuse      3374        0      1   0.54  1.0000   0        —
+  097dcd4f-5983-44b2-8f9b-2a8c91c91e74  reuse      3605        0      1   0.62  1.0000   0        —
+  a06b1f45-91f4-4f9f-b41a-6167383b950c  reuse      3801        0      1   0.62  1.0000   0        —
+  df2eac7d-a838-427e-ba9f-36e2d629bc30  reuse      4010        0      1   0.71  1.0000   0        —
+  991e6675-ef9c-4b80-a4d7-e3fff48dabca  reuse      4449        0      1   0.75  1.0000   0        —
+  aa343075-7089-4abe-8371-ba46c18f67fe  reuse      4947        0      1   0.85  1.0000   2.2e-16  —
+  761c79c7-18d0-4866-9fc8-d634cee3aeb4  reuse      5240        0      1   0.88  1.0000   0        —
+  1fc0fd6b-95d4-4730-a315-50ad58178260  reuse      5531        0      1   0.94  1.0000   2.2e-16  —
+  82fddbd3-513b-4a9f-8b12-97f5d2393e8e  reuse      6002        0      1   1.03  1.0000   0        —
+  20c43c7d-1930-450e-ac55-73287cb21a7e  reuse      7137        0      1   1.23  1.0000   0        —
+  6d5c6c03-f6e0-4817-aaf9-d76df064b710  reuse      9514        0      1   1.76  1.0000   0        —
+  6941c030-e3cd-4218-ac7b-12f76662bd79  reuse     21345        7      8  11.20  1.0000   0        1.0000 over 7
 
 the graph's own cost, from the claim log (finished_at − claimed_at over succeeded rows, as the pass ran them — --workers 2 by default, so under its own contention), and a full re-read one row after another at that rate:
-  extract:qwen2.5:7b@p1        n  117  median   31.7 s/row  → 430 thoughts ≈ 3.8 h
-  extract:qwen2.5:7b@p2        n  396  median   36.7 s/row  → 430 thoughts ≈ 4.4 h
-  extract:qwen3.8:27b@p2       n   36  median   41.9 s/row  → 430 thoughts ≈ 5.0 h
+  extract:qwen2.5:7b@p1        n  117  median   31.7 s/row  → 440 thoughts ≈ 3.9 h
+  extract:qwen2.5:7b@p2        n  393  median   36.9 s/row  → 440 thoughts ≈ 4.5 h
+  extract:qwen3.8:27b@p2       n   36  median   41.9 s/row  → 440 thoughts ≈ 5.1 h
 
 other passes' rows in the claim log, for scale (a thought judged by the consolidation pass; a row re-embedded), not the graph's:
-  consolidate:qwen2.5:7b@p2    n  260  median   17.6 s/row  → 430 thoughts ≈ 2.1 h
+  consolidate:qwen2.5:7b@p2    n  260  median   17.6 s/row  → 440 thoughts ≈ 2.2 h
 
 verdict: GO
-  A: the no-op rebuild reuses 430/430 (each row against its own text; the log as the payload is out of scope, see the log line)
-  B (simulated): 10 edits recompute exactly 10 beyond the no-op's 0; 420 reused
-  C: a model bump recomputes 430/430, 8.4 min by rows (4.9 min over the 19 rows between the extremes) / 7.5 min by characters at the measured rate
-  D (derived, not observed): the vector's key carries no extraction or judge key, so a comprehension-only change recomputes no vector beyond the no-op's 0; the graph re-reads 430 thoughts (5878 mention rows replaced)
-  E: a window-recipe change replaces 20 chunk rows under 3 thoughts (3 the current recipe windows) and reuses 430 parents — less any head-window fallback, which the row does not record
-  the cached value reproduces: fresh against stored over 21 reused rows, min cosine 1.0000 (1−cos 1.1e-16), median 1.0000
+  A: the no-op rebuild reuses 440/440 (each row against its own text; the log as the payload is out of scope, see the log line)
+  B (simulated): 10 edits recompute exactly 10 beyond the no-op's 0; 430 reused
+  C: a model bump recomputes 440/440, 8.4 min by rows (5.0 min over the 19 rows between the extremes) / 7.6 min by characters at the measured rate
+  D (derived, not observed): the vector's key carries no extraction or judge key, so a comprehension-only change recomputes no vector beyond the no-op's 0; the graph re-reads 440 thoughts (5878 mention rows replaced)
+  E: a window-recipe change replaces 20 chunk rows under 3 thoughts (3 the current recipe windows) and reuses 440 parents — less any head-window fallback, which the row does not record
+  the cached value reproduces: fresh against stored over 21 reused rows, min cosine 1.0000 (1−cos 2.2e-16), median 1.0000
   window vectors: 7 compared against the stored chunk rows, min cosine 1.0000 (1−cos 1.1e-16)
 ```
 
 **What it says.** GO on every pre-registered line. The key the schema records
-is sufficient for the rows it describes: every one of 430 rows reuses, and the
-fresh vector equals the cached one to within 1.1e-16 on all 21 sampled rows
+is sufficient for the rows it describes: every one of 440 rows reuses, and the
+fresh vector equals the cached one to within 2.2e-16 on all 21 sampled rows
 (parents) and to within 1.1e-16 on the 7 window vectors of the one windowed
 row in the sample — the cached value IS what a recompute would produce, so
 reusing it loses nothing. Ten edits recompute exactly ten; the worst case, a
-model bump, re-embeds the whole brain in minutes on this Mac: 8.4 by rows, 4.9
-over the 19 rows between the extremes, 7.5 by characters (mean 1.17 s a row,
-0.68 s trimmed; 0.252 s per thousand characters; the corpus is 1.79 M
+model bump, re-embeds the whole brain in minutes on this Mac: 8.4 by rows, 5.0
+over the 19 rows between the extremes, 7.6 by characters (mean 1.15 s a row,
+0.68 s trimmed; 0.249 s per thousand characters; the corpus is 1.83 M
 characters).
 
 **The premise inverts.** The ADR named re-embedding as the expensive
 projection. On this hardware at this corpus it is the CHEAP one and the
 best-keyed: the graph's re-read costs a median 37 s a thought under the 7B
 extractor (42 s under the 27B; 18 s a thought judged for the consolidation
-pass, shown apart), 4.4 hours one row after another for the corpus, thirty-one
+pass, shown apart), 4.5 hours one row after another for the corpus, thirty-two
 times the re-embed's 8.4 minutes — with the caveat that the claim log recorded
 those seconds under the pass's own two workers on the same Ollama while the
 embed sample ran alone, so the ratio is an order of magnitude, not a
@@ -4752,7 +4752,7 @@ write time and keeps none), while the capture-time metadata (`type`, `topics`,
 `people`) is unkeyed altogether. The stale graph moved under the night's runs
 as a 27B extraction pass worked through the brain: 11 thoughts with 205 mention
 rows extracted before their fingerprint last moved at one run, 4 with 45 at
-the next, 14 with 238 as of the block — eight queued for a re-read under the
+the next, 17 with 275 as of the block — eleven queued for a re-read under the
 recorded key, five failed on a retry, one succeeded under the recorded key
 BEFORE the move (its re-enqueue went under the key another pass had recorded
 in between, and no pass under this key will return to it), six of the
@@ -4766,10 +4766,10 @@ canonical, is the shape to copy.
 
 **What the log cannot yet replay.** A capture row in `thought_audit` carries
 `metadata` and not `content` (008's INSERT branch), so the log alone holds the
-text of 213 of 430 live thoughts — those with a content-moving update, whose
+text of 217 of 440 live thoughts — those with a content-moving update, whose
 `before` is the earlier text — and today the `thoughts` row is the payload
-store. Carrying the content in the capture event costs 1.79 M characters of
-text beside a 4.2 MB audit table (table and TOAST, no indexes). The chunk rows
+store. Carrying the content in the capture event costs 1.83 M characters of
+text beside a 4.3 MB audit table (table and TOAST, no indexes). The chunk rows
 carry no recipe (022 has the parent's label vouch for them), so a
 window-recipe change replaces every chunk row (20, under 3 thoughts here)
 rather than the ones the recipe moved; and a long thought whose whole-content
@@ -4782,14 +4782,16 @@ data — so a template change under one name would invalidate every vector with
 the key unmoved; the cosine bar is the check for that, over the rows sampled.
 Each is an input to SMD-1997 and SMD-1999, recorded there.
 
-**Caveats.** One brain, one day, one Mac; the corpus is live (419 → 430
-between the night's runs, the graph churning under a 27B pass — mention rows
-5,922 → 6,616 → 5,878 as `record_thought_entities` replaced them — and a
-succeeded claim count going DOWN between runs as 016's requeue reset rows) and
+**Caveats.** One brain, one day, one Mac; the corpus is live (419 → 440
+between the night's runs; the graph grew under a 27B pass and 053's ingester —
+5,922 mention rows, then 6,616, of which 738 are the ingester's `source:linear`
+rows, held apart since pass 3 and load-bearing on this brain, leaving 5,878
+model rows — and a succeeded claim count going DOWN between runs as 016's
+requeue reset rows) and
 the report reads it at run time; the numbers above are as of the run in the
-block. The sample is 21 rows of 430, spread by length rather than drawn from
-the corpus's own histogram, so the extremes weigh 1/21 here and 1/430 there:
-the one 21,345-character row is 46.9% of the sample's wall-clock (the report
+block. The sample is 21 rows of 440, spread by length rather than drawn from
+the corpus's own histogram, so the extremes weigh 1/21 here and 1/440 there:
+the one 21,345-character row is 46.4% of the sample's wall-clock (the report
 prints the share), which is why the trimmed mean is printed beside the mean,
 and the sample's one windowed row is 4.8% of it against 0.7% of the corpus.
 Embedded sequentially with the model warm and nothing else running; a cold

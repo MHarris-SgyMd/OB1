@@ -67,7 +67,7 @@ import { createEmbedder, ProviderError, resolveEmbedConfig, type EmbedEnv } from
 import { loadEnv } from "./env.ts";
 import { cosine, median } from "./lib.ts";
 import {
-  BUMPED_MODEL, KEY_VERDICTS, MIN_REUSE, MIN_TRIM_ROWS, MISSES, PROJECTIONS, REPRO_COSINE, buildScenarios, bumpedName, comprehensionOnlyRebuild, costModel, decideEmbedding, describeMisses, editedRebuild, fmtChars, fmtGap, fmtSeconds, graphCost, isGraphPass, modelBumpRebuild, noOpRebuild, parsePool, poolState, recipeChangeRebuild, recomputed, renderReport, staleGraph, stratifiedSample, tally, trimNote, verdict,
+  BUMPED_MODEL, KEY_VERDICTS, MIN_REUSE, MIN_TRIM_ROWS, MISSES, PROJECTIONS, REPRO_COSINE, buildScenarios, bumpedName, compareWindows, comprehensionOnlyRebuild, costModel, decideEmbedding, describeMisses, editedRebuild, fmtChars, fmtGap, fmtSeconds, graphCost, isGraphPass, modelBumpRebuild, noOpRebuild, parsePool, poolState, recipeChangeRebuild, recomputed, renderReport, staleGraph, stratifiedSample, tally, trimNote, verdict,
   type Census, type ClaimStat, type CostModel, type Decision, type Observation, type Sample, type Scenarios, type ThoughtRow,
 } from "./projection-replay.ts";
 
@@ -278,17 +278,14 @@ async function run(): Promise<void> {
         const was = stored.parents.get(r.id);
         const widthMismatch = was !== undefined && was.length !== e.embedding.length;
         const storedWindows = stored.windows.get(r.id) ?? [];
-        const storedCount = storedWindows.filter((w) => w !== undefined).length;
-        // A different count means the recipe moved: nothing lines up by index, and the rows compared would be a coincidence.
-        const windowCountMismatch = storedCount !== e.chunks.length;
-        const windowCos = windowCountMismatch ? [] : e.chunks.map((w, i) => (storedWindows[i] ? (storedWindows[i].length === w.embedding.length ? cosine(w.embedding, storedWindows[i]) : NaN) : null)).filter((c): c is number => c !== null);
+        const { cosines: windowCos, countMismatch: windowCountMismatch } = compareWindows(e.chunks.map((w) => w.embedding), storedWindows);
         samples.push({
           id: r.id, chars: r.chars, decision: decideEmbedding(r, target), windows: e.chunks.length, calls: 1 + e.chunks.length, ms,
           cosineToStored: was && !widthMismatch ? cosine(e.embedding, was) : null, widthMismatch,
           windowCosineMin: windowCos.length ? Math.min(...windowCos) : null, windowsCompared: windowCos.length, windowCountMismatch,
           fellBack: e.wholeContentFellBack,
         });
-        process.stderr.write(`  ${r.id} ${r.chars} chars ${(ms / 1000).toFixed(2)} s${e.chunks.length ? ` (${e.chunks.length} windows, ${windowCos.length} compared)` : ""}${widthMismatch ? " WIDTH MISMATCH" : ""}${windowCountMismatch ? ` WINDOW COUNT ${e.chunks.length} vs ${storedCount} stored` : ""}\n`);
+        process.stderr.write(`  ${r.id} ${r.chars} chars ${(ms / 1000).toFixed(2)} s${e.chunks.length ? ` (${e.chunks.length} windows, ${windowCos.length} compared)` : ""}${widthMismatch ? " WIDTH MISMATCH" : ""}${windowCountMismatch ? ` WINDOW COUNT ${e.chunks.length} vs ${storedWindows.filter((w) => w !== undefined).length} stored` : ""}\n`);
       } catch (e) {
         if (e instanceof ProviderError && e.kind === "egress") {
           console.error(`the egress gate refused the sample's text: ${e.message}\n  Declare the provider local (OB1_LLM_LOCAL=1) as the server does, or --no-provider for the counts alone.`);
@@ -573,6 +570,17 @@ function selfCheck(): void {
   assert(k.windowsCompared === 2 && k.windowMinCosine === 0.998 && k.windowMaxGap !== null && Math.abs(k.windowMaxGap - 0.002) < 1e-12 && k.windowCountMismatches === 0 && k.sampledWindowed === 1 && Math.abs(k.corpusWindowedShare - 0.0075) < 1e-12, "the window vectors' least cosine, its gap and count; the sample's windowed share beside the corpus's");
   const recut = costModel([sample("a", { windows: 3, windowCountMismatch: true })], { rows: 2, chars: 2000, windowed: 1 }, 1);
   assert(recut.windowCountMismatches === 1 && recut.windowMinCosine === null, "a reused row cut to another number of windows is counted and compared to nothing");
+  const same = compareWindows([[1, 0], [0, 1]], [[1, 0], [0, 1]]);
+  assert(!same.countMismatch && same.cosines.length === 2 && same.cosines.every((c) => Math.abs(c - 1) < 1e-12), "compareWindows: equal counts compare by index");
+  const fewer = compareWindows([[1, 0], [0, 1]], [[1, 0], [0, 1], [1, 1]]);
+  assert(fewer.countMismatch && fewer.cosines.length === 0, "compareWindows: a fresh cut to fewer windows than the stored rows is a count mismatch, and nothing is compared");
+  const more = compareWindows([[1, 0], [0, 1], [1, 1]], [[1, 0], [0, 1]]);
+  assert(more.countMismatch && more.cosines.length === 0, "compareWindows: …and to more");
+  const sparse = compareWindows([[1, 0], [0, 1]], [[1, 0], undefined, [0, 1]]);
+  assert(!sparse.countMismatch && sparse.cosines.length === 1, "compareWindows: a stored index with no row is not compared and does not count");
+  const widthed = compareWindows([[1, 0, 0]], [[1, 0]]);
+  assert(!widthed.countMismatch && widthed.cosines.length === 1 && Number.isNaN(widthed.cosines[0]), "compareWindows: a stored row at another width has no cosine (NaN), for the verdict to refuse");
+  assert(!compareWindows([], []).countMismatch && compareWindows([], []).cosines.length === 0, "compareWindows: no windows on either side is nothing to compare, not a mismatch");
   const five = [1, 2, 3, 4, 5].map((i) => sample(`s${i}`, { chars: i * 1000, ms: i === 5 ? 10000 : 1000 }));
   const k5 = costModel(five, { rows: 100, chars: 100_000, windowed: 0 }, 2);
   assert(k5.meanMsPerRow === 2800 && k5.meanMsPerRowTrimmed === 1000 && k5.trimmedRows === 3 && trimNote(k5) === "over the 3 rows between the extremes" && Math.abs(k5.longestShare - 10000 / 14000) < 1e-12, "at five rows the two extreme ranks are dropped and the longest row's leverage shows");
@@ -649,7 +657,7 @@ function selfCheck(): void {
   assert(/corpus: 6 thoughts, 20\.7 k chars/.test(text) && /NULL on 0/.test(text) && /target m1@8/.test(text) && /MB table and TOAST/.test(text), "characters at their unit, the NULL keys counted, the target with its width, the audit's size named for what it measures");
   assert(/per row: median 3\.00 s, mean 4\.00 s, mean untrimmed: under 5 rows 4\.00 s \(the longest row is 66\.7% of the sample's wall-clock\); 1\.000 s per 1k chars; 1 fell back/.test(text) && /worst \(C, 6 rows\): 24\.0 s by rows, 24\.0 s trimmed, 20\.7 s by characters/.test(text), "the cost lines carry the sample's numbers, the trim note, the longest row's share and the three extrapolations");
   assert(/over the 2 reused rows: min cosine 0\.9995 \(1−cos 5\.0e-4\), median 0\.9998; 0 at another width; window vectors: 2 compared, min cosine 0\.9980 \(1−cos 2\.0e-3\), 0 row\(s\) cut to another count/.test(text), "the reproducibility line names the reused rows, the gap, the width mismatches, the windows with their gap and the recut rows");
-  assert(/^  id\s+decision\s+chars/m.test(text) && /\brecompute:/.test(text) === false && /  c\s+reuse\s+8000\s+6\s+7\s+8\.00\s+—\s+—\s+—  head window$/m.test(text), "the per-row table carries the decision, the gap and the window column; a fallback is marked");
+  assert(/^  id\s+decision\s+chars.*windows-min cos$/m.test(text) && /\brecompute:/.test(text) === false && /  c\s+reuse\s+8000\s+6\s+7\s+8\.00\s+—\s+—\s+—  head window$/m.test(text), "the per-row table carries the decision, the gap and the window cosine column, named as a cosine; a fallback is marked");
   assert(/--workers 2 by default, so under its own contention/.test(text) && /extract:x@p1\s+n\s+6\s+median\s+30\.0 s\/row\s+→ 6 thoughts ≈ 0\.1 h/.test(text), "the graph's own cost says what concurrency the log recorded it under");
   assert(/other passes' rows in the claim log, for scale[\s\S]*consolidate:x@p1\s+n\s+2/.test(text) && text.indexOf("the graph's own cost") < text.indexOf("other passes' rows"), "the judge's rows are shown apart from the graph's, after them");
   assert(/^verdict: GO$/m.test(text), "the verdict line");

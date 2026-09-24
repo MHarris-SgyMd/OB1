@@ -25,7 +25,7 @@
  * branch so the SQL that derives these rows' fields is held too.
  */
 
-import { median } from "./lib.ts";
+import { cosine, median } from "./lib.ts";
 
 // ── The contract ─────────────────────────────────────────────────────────────
 
@@ -342,6 +342,23 @@ export type Sample = {
   fellBack: boolean;
 };
 
+/**
+ * The fresh window vectors against the stored chunk rows, by index. When the
+ * counts differ the recipe moved (022 records none to say how), nothing lines
+ * up by index, and comparing the rows that happen to share one would be a
+ * coincidence — so nothing is compared and the mismatch is the finding. A
+ * stored row at another width than its fresh window has no cosine (NaN),
+ * which the verdict reads as a NO-GO.
+ */
+export function compareWindows(fresh: readonly (readonly number[])[], stored: readonly (readonly number[] | undefined)[]): { cosines: number[]; countMismatch: boolean } {
+  const storedCount = stored.filter((w) => w !== undefined).length;
+  const countMismatch = storedCount !== fresh.length;
+  const cosines = countMismatch
+    ? []
+    : fresh.map((v, i) => { const s = stored[i]; return s ? (s.length === v.length ? cosine(v as number[], s as number[]) : NaN) : null; }).filter((c): c is number => c !== null);
+  return { cosines, countMismatch };
+}
+
 /** Fewer sampled rows than this and the two extreme ranks are most of the sample: nothing is trimmed, and the report says so. */
 export const MIN_TRIM_ROWS = 5;
 
@@ -613,7 +630,7 @@ export function renderReport(o: Observation): string {
     L.push(`  per row: median ${(k.medianMsPerRow / 1000).toFixed(2)} s, mean ${(k.meanMsPerRow / 1000).toFixed(2)} s, mean ${trimNote(k)} ${(k.meanMsPerRowTrimmed / 1000).toFixed(2)} s (the longest row is ${pct(k.longestShare, 1)} of the sample's wall-clock); ${(k.msPerKChar / 1000).toFixed(3)} s per 1k chars; ${k.fellBack} fell back to a head window`);
     L.push(`  steady state (A): 0 calls. typical (B, ${s.edited.n} edits): ${fmtSeconds(k.editSeconds)}. worst (C, ${c.thoughts} rows): ${fmtSeconds(k.modelBumpSecondsByRows)} by rows, ${fmtSeconds(k.modelBumpSecondsTrimmed)} trimmed, ${fmtSeconds(k.modelBumpSecondsByChars)} by characters`);
     L.push(`  the cached value against a fresh one, over the ${k.reusedCompared} reused rows: min cosine ${k.minCosine === null ? "—" : k.minCosine.toFixed(4)} (1−cos ${fmtGap(k.maxGap)}), median ${k.medianCosine === null ? "—" : k.medianCosine.toFixed(4)}; ${k.widthMismatches} at another width; window vectors: ${k.windowsCompared} compared${k.windowMinCosine === null ? "" : `, min cosine ${k.windowMinCosine.toFixed(4)} (1−cos ${fmtGap(k.windowMaxGap)})`}, ${k.windowCountMismatches} row(s) cut to another count`);
-    L.push("  id                                    decision  chars  windows  calls     s   cosine   1−cos    windows-min");
+    L.push("  id                                    decision  chars  windows  calls     s   cosine   1−cos    windows-min cos");
     for (const x of o.samples) L.push(`  ${x.id}  ${x.decision.replace("recompute:", "").padEnd(8)}  ${String(x.chars).padStart(5)}  ${String(x.windows).padStart(7)}  ${String(x.calls).padStart(5)}  ${(x.ms / 1000).toFixed(2).padStart(5)}  ${x.cosineToStored === null ? (x.widthMismatch ? " width" : "     —") : x.cosineToStored.toFixed(4)}   ${x.cosineToStored === null ? "—".padEnd(7) : fmtGap(1 - x.cosineToStored).padEnd(7)}  ${x.windowCosineMin === null ? (x.windowCountMismatch ? "count differs" : "—") : `${x.windowCosineMin.toFixed(4)} over ${x.windowsCompared}${x.windowCountMismatch ? ", count differs" : ""}`}${x.fellBack ? "  head window" : ""}`);
   } else {
     L.push("cost — not measured this run (--no-provider): the scenarios above are counts; the seconds need the provider");
