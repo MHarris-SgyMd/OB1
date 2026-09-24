@@ -373,10 +373,18 @@ function checkDeps(meta: Metadata | undefined, { rel }: ContribDir) {
 /** Repo-relative path with `/` separators on every OS, so it can be a key. */
 const relOf = (file: string) => relative(ROOT, file).split(sep).join("/");
 
+/**
+ * Directories no check reads: the repo's own machinery, and the build output a
+ * dashboard leaves behind (`.vercel/output`, `.svelte-kit/output`, `.next` —
+ * gitignored, and a SvelteKit server bundle carries the shell spawn check 6
+ * flags; the README's `bun run build` before its smoke made that a routine
+ * false FAIL on a contributor's tree, SMD-1801's first review pass).
+ */
+const UNREAD_DIRS = new Set([".git", "node_modules", ".claude", ".vercel", ".svelte-kit", ".next", ".output", ".netlify"]);
 function walk(dir: string, out: string[] = [], match = /\.(sql|md)$/) {
   for (const name of readdirSync(dir)) {
     // .claude holds this repo's agent worktrees — whole copies of the tree.
-    if (name === ".git" || name === "node_modules" || name === ".claude") continue;
+    if (UNREAD_DIRS.has(name)) continue;
     const p = join(dir, name);
     const s = statSync(p);
     if (s.isDirectory()) walk(p, out, match);
@@ -1590,7 +1598,7 @@ const THOUGHT_WRITE_EXCEPTIONS = new Map([
   ["recipes/vercel-neon-telegram/src/lib/db.ts", OWN_DATABASE("its own Neon database, built by sql/001-create-thoughts.sql")],
   ["recipes/schema-aware-routing/index.ts", OWN_DATABASE("its own five-table project, built by its README's SQL (a `thoughts` with domain/status/source columns)")],
   // The fixtures: a row as an older write left it — fingerprint and label by hand — for the writer under test to move, and a restricted twin for the search tools to hide.
-  ["extensions/test-writes.ts", { why: "plants a thought as an older write left it, fingerprint and label supplied by hand, for the writer under test to move whole; and a restricted twin at a captured thought's vector, the row the three search tools must not show (SMD-1986)", lines: 2 }],
+  ["extensions/test-writes.ts", { why: "plants a thought as an older write left it, fingerprint and label supplied by hand, for the writer under test to move whole; and a restricted twin at a captured thought's vector (plantRestricted, once for both servers), the row no search may show — enhanced-mcp's three tools (SMD-1986), rest-api's POST /search (SMD-2054)", lines: 2 }],
 ]);
 
 function checkThoughtWritesAround() {
@@ -3374,7 +3382,7 @@ const LAYOUT_PROBES: [string, () => LayoutArgs, string[]][] = [
   ["a path citation of a table change (no file can exist)", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.md:1", n: 5, name: "005-below.md" }] }; }, ["dangling"]],
 ];
 
-const SKIP_DIRS = new Set([".git", "node_modules", ".planning", ".cf-out", ".claude", "dist", "build", ".wrangler"]);
+const SKIP_DIRS = new Set([...UNREAD_DIRS, ".planning", ".cf-out", "dist", "build", ".wrangler"]);
 /**
  * Every text file a citation can live in: what git tracks plus what it would
  * track (untracked, not ignored) — so a change file not yet added is read, and a
@@ -4423,10 +4431,11 @@ checkDestructiveSql();
 // `// ob1-original-import:` record is a comment; a README's sample is prose,
 // SMD-1802's), is a hit, whatever statement holds it: an import, a type-only
 // import, a require, a dynamic import. Counted per-file exceptions, as check 7
-// counts them: the dashboard's type-only import (SMD-1801's); the one client
-// the codemod's KEEP list held on supabase-js — local-brain-no-mcp's, inside
-// that recipe's own Supabase stack — left with the recipe (SMD-1800). Every
-// other vendored client moved: the rest in change 74, the last six here.
+// counts them — none today: the dashboard's type-only import went when its
+// Supabase sign-in did (SMD-1801); the one client the codemod's KEEP list held
+// on supabase-js — local-brain-no-mcp's, inside that recipe's own Supabase
+// stack — left with the recipe (SMD-1800). Every other vendored client moved:
+// the rest in change 74, the last six here.
 const SUPABASE_JS_SPECIFIER = /(["'])(?:npm:|jsr:|https?:\/\/[^"'\s]*\/)?@supabase\/supabase-js(?:@[^"'/]*)?(?:\/[^"']*)?\1/g;
 /** Code, and HTML for the inline `<script type="module">` a dashboard's page may carry. */
 const CODE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|svelte|vue|html)$/;
@@ -4451,9 +4460,7 @@ const SUPABASE_JS_PROBES: [string, boolean, boolean?][] = [
   ['<!-- <script>import x from "@supabase/supabase-js";</script> -->\n<a href="https://npmjs.com/package/@supabase/supabase-js">docs</a>\n<script>const y = 1;</script>', false, true],
 ];
 /** file → rule → the reason and the exact hit count; a hit past the count fails, a count no hit reaches fails as stale. */
-const SUPABASE_JS_EXCEPTIONS = new Map<string, Record<string, CountedException>>([
-  ["dashboards/open-brain-dashboard/src/app.d.ts", { "supabase-js": { why: "the dashboard's type-only import: the one client left that reads the brain over PostgREST — SMD-1801 moves it onto the fork's REST API", lines: 1 } }],
-]);
+const SUPABASE_JS_EXCEPTIONS = new Map<string, Record<string, CountedException>>([]);
 /** A markup file's code is its `<script>` bodies: everything else, an HTML comment included, is blanked (newlines kept). */
 const MARKUP_FILE = /\.(html|svelte|vue)$/;
 function scriptBodiesOf(text: string): string {
