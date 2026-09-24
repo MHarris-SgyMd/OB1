@@ -80,7 +80,7 @@ jobs:
 
       # What a landing must carry (SMD-1857): a PR — or, in a merge queue, each
       # PR of the group, one first-parent merge commit each — whose change
-      # touches db/migrations/, server-portable/ or evals/ beyond tests and docs
+      # touches db/migrations/, server-portable/, evals/ or jev/ beyond tests and docs
       # ships a changes/smd-NNNN.md fragment. Read from the range the event
       # gives, so it holds on a merge group's result as on a PR's head. GitHub
       # refuses a merge queue on this user-owned repository (SMD-1984), so today

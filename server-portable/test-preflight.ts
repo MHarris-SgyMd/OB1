@@ -2211,10 +2211,15 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
          "--deep: one decision through the client, its answer read back");
 
   const dead = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: "http://127.0.0.1:1", OB1_JEV_LOCAL: "1" }, "--deep");
-  assert(/✗\s+jev tier\s+http:\/\/127\.0\.0\.1:1: /.test(dead.out) && /→ Start it \(bun jev\/serve\.ts on the host/.test(dead.out),
+  assert(/✗\s+jev tier\s+nothing answers at http:\/\/127\.0\.0\.1:1 — the connection was refused \(GET \/info, 2\.5 s timeout\)/.test(dead.out) && /→ Start it — compose --profile jev/.test(dead.out),
          "an unreachable tier fails its row with how to start it — at preflight, not at a spike's first call");
   assert(/·\s+jev decision\s+not checked — the jev tier row failed/.test(dead.out), "…and --deep does not dial a tier that did not answer");
 
+  // SMD-1875's masking rule: userinfo never lands in the log, on the tier row or the egress row.
+  const withUser = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: "http://user:jevsecret@127.0.0.1:1", OB1_JEV_LOCAL: "1" });
+  assert(!/jevsecret/.test(withUser.out) && /✗\s+jev tier\s+nothing answers at http:\/\/\*\*\*@127\.0\.0\.1:1/.test(withUser.out), "a base with userinfo is shown masked, never in the clear");
+  const unknown = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: "http://jev-not-a-host.invalid:8020", OB1_JEV_LOCAL: "1" });
+  assert(/✗\s+jev tier\s+nothing answers at http:\/\/jev-not-a-host\.invalid:8020 — the name does not resolve/.test(unknown.out), "a name that does not resolve says so, resolved before it is dialled");
   const wrongModel = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "semif" });
   assert(/✗\s+jev tier\s+.* serves verdict-v1\.4 .*, and OB1_JEV_MODEL expects semif/.test(wrongModel.out) && /→ Point OB1_JEV_BASE_URL at the tier serving semif, or set OB1_JEV_MODEL=verdict-v1\.4\./.test(wrongModel.out),
          "a tier serving another model than OB1_JEV_MODEL fails, naming both");

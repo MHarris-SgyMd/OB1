@@ -84,8 +84,9 @@ bun serve.ts --no-fetch       # refuse to start unless the files are already the
 
 On the host, `serve.ts` binds 127.0.0.1: a container reaches it as
 `host.containers.internal` under podman machine on macOS (gvproxy forwards to
-the host's loopback — measured for Ollama), not under rootless podman on
-Linux, where the profile below is the route.
+the host's loopback — measured for Ollama) and `host.docker.internal` under
+Docker Desktop, not under rootless podman or Docker on Linux, where the
+profile below is the route.
 
 Or `podman compose -f deploy/compose.yaml --profile jev up -d` —
 `deploy/README.md`, "The typed-decision tier". Knobs of its own: `JEV_HOST`
