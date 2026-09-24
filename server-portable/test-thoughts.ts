@@ -465,6 +465,16 @@ console.log("\n[8c] A streamed answer is a runaway at the third copy of one item
   assert(closing.fired?.key === "e:tool loop" && closing.fired.atItem === 3 && !closing.closed, "the detector names the item that fired and on which item, and the answer is not closed before its last brace");
   closing.feed("}");
   assert(closing.closed, "…and is closed after it");
+  // Seventh review pass: the verdict must not depend on where the frames
+  // split. A loop that ends with its array and goes on in the OTHER array is
+  // an answer (the parser folds the copies); one that goes on inside its own
+  // array is the runaway — at every piece size.
+  const verdictAt = (text: string, step: number) => { const d = new RunawayDetector(); for (let i = 0; i < text.length; i += step) d.feed(text.slice(i, i + step)); return `${d.runaway ? "runaway" : "quiet"}/${d.closed ? "closed" : "open"}/${d.items}`; };
+  const endsWithArray = answer([ent("Anita", "person"), ent("Loop"), ent("Loop"), ent("Loop")], [rel("Anita", "Loop")]);
+  assert([1, 3, 7, endsWithArray.length].every((step) => verdictAt(endsWithArray, step) === "quiet/closed/5"), `a third copy that ends its array, then a relation in the other array, is complete at every split (${[1, 3, 7].map((s) => verdictAt(endsWithArray, s)).join(" ")})`);
+  const goesOn = answer([ent("Loop"), ent("Loop"), ent("Loop"), ent("Anita", "person")], [rel("Anita", "Loop")]);
+  assert([1, 3, 7, goesOn.length].every((step) => verdictAt(goesOn, step).startsWith("runaway/")), `a third copy followed by another item in its own array is the runaway at every split (${[1, 3, 7].map((s) => verdictAt(goesOn, s)).join(" ")})`);
+  assert(verdictAt(`Here is the JSON (entities [3 items]):\n${answer([ent("Loop")])}`, 7) === "quiet/closed/1", "a preamble's own `[3 items]` closing is not the answer closing — closed needs an item read");
 
   // The shipped windowing streams and aborts, and the sentence says so; with
   // reasoning on nothing is streamed — no budget, so no retry to send an

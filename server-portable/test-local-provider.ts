@@ -522,11 +522,13 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   // request, how many frames it got out before the client hung up.
   type Run = { sent: number; total: number; cancelled: boolean; body: { stream?: boolean; frequency_penalty?: number } };
   const runs: Run[] = [];
-  let gMode: "loop" | "good" | "json" | "slow" | "cut" | "error" | "nodone" | "oneframe" | "sepfinish" | "cleanclose" | "mislabelled" = "loop";
+  let gMode: "loop" | "good" | "json" | "slow" | "cut" | "error" | "nodone" | "oneframe" | "sepfinish" | "cleanclose" | "mislabelled" | "emptyfinish" | "empty" | "cr" = "loop";
   // A converging answer whose LAST item is a third copy: the object closes
   // after it, so the abort that was pending never fires. (Anita first: a
   // fourth item after the third copy would be the answer going on — an abort.)
-  const THRICE = JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9 }, { name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }], relationships: [] });
+  // …and a relation in the other array after it (seventh pass: an item there
+  // is not the loop going on, whatever frame it lands in).
+  const THRICE = JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9 }, { name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }], relationships: [{ from: "Anita", to: "Loop", relation: "uses", confidence: 0.8 }] });
   const GOOD = JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9, aliases: ["A. {Nita}"] }, { name: "Open Brain", type: "project", confidence: 0.8 }], relationships: [{ from: "Anita", to: "Open Brain", relation: "works_on", confidence: 0.7 }] });
   const frame = (content: string, finish: string | null = null) => `data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: finish }] })}\n\n`;
   const providerG = Bun.serve({
@@ -560,6 +562,14 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
         // Ollama's own shape: content frames, then the finish in a frame of its
         // own — with a third copy inside a CONVERGING answer (sixth pass).
         frames = [...(THRICE.match(/[\s\S]{1,6}/g) ?? []).map((p) => frame(p)), frame("", "stop"), "data: [DONE]\n\n"];
+      } else if (gMode === "emptyfinish") {
+        // Every frame carries finish_reason "" where the OpenAI shape has null.
+        frames = [...(GOOD.match(/[\s\S]{1,7}/g) ?? []).map((p) => frame(p).replace('"finish_reason":null', '"finish_reason":""')), frame("", "stop"), "data: [DONE]\n\n"];
+      } else if (gMode === "empty") {
+        frames = [];
+      } else if (gMode === "cr") {
+        // Lone \r line ends, as the SSE grammar allows.
+        frames = [...(GOOD.match(/[\s\S]{1,7}/g) ?? []).map((p) => frame(p)), frame("", "stop"), "data: [DONE]\n\n"].map((f) => f.replace(/\n/g, "\r"));
       } else if (gMode === "cleanclose") {
         // The whole answer, then the stream closes with no finish_reason and
         // no [DONE]: an answer, not a closed socket (sixth pass).
@@ -659,8 +669,20 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   runs.length = 0;
   gMode = "sepfinish";
   const converging = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
-  assert(!converging.malformed && converging.entities.length === 2 && converging.retried === undefined && converging.abortedMs === undefined && runs.length === 1, `a converging answer holding an item three times, its finish in a frame of its own, is complete — folded to two entities, not aborted, not retried (${JSON.stringify(converging).slice(0, 100)})`);
+  assert(!converging.malformed && converging.entities.length === 2 && converging.relations.length === 1 && converging.retried === undefined && converging.abortedMs === undefined && runs.length === 1, `a converging answer holding an item three times, then a relation, its finish in a frame of its own, is complete — folded to two entities and one edge, not aborted, not retried (${JSON.stringify(converging).slice(0, 100)})`);
   assert(converging.entities[1]?.name === "Loop" && converging.entities.length === 2, "…the three copies one entity beside Anita");
+  runs.length = 0;
+  gMode = "emptyfinish";
+  const emptyFinish = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!emptyFinish.malformed && emptyFinish.entities.length === 2 && runs.length === 1, "a finish_reason of \"\" on every frame is not the end — only a non-empty one is");
+  runs.length = 0;
+  gMode = "cr";
+  const cr = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!cr.malformed && cr.entities.length === 2 && runs.length === 1, "a stream whose lines end in a lone \\r is framed all the same");
+  gMode = "empty";
+  let empty = "";
+  try { await extractEntities(short, cfgG, undefined, { kind: "extraction" }); } catch (e) { empty = (e as Error).message; }
+  assert(/was empty: no frame/.test(empty) && !/socket/.test(empty), `a 200 with no body at all is the provider's empty answer, this row's failure, not a closed socket (${empty.slice(0, 90)})`);
   runs.length = 0;
   gMode = "cleanclose";
   const wholeClose = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
