@@ -203,14 +203,14 @@ jobs:
       # servers, HTTP APIs, workers and webhook receiver (change 67) — through a
       # _shared/auth.ts beside it, a byte copy. Their test runs in THIS job
       # because main's ruleset requires it: a separate job would not gate a
-      # merge. Pinned to the servers' deno.json files — the test fails if one
-      # drifts — so they run on the libraries they deploy with.
+      # merge. One MCP stack across the tree's three installs — the test fails
+      # if server-portable's or the Kubernetes image's pins drift from these.
       - name: Install the vendored servers' pinned test dependencies
         working-directory: extensions
         run: bun install --frozen-lockfile
 
       # Imported as modules — each server's default export's `fetch`, the shape
-      # `bun <file>` serves (SMD-1799) — under a loader for Deno's specifiers: a
+      # `bun <file>` serves (SMD-1799) — their packages from this install: a
       # wrong or revoked key is refused, a read-scoped key never sees a tool that
       # writes, is told so by a route that writes and may only dry-run a worker,
       # every copy is byte for byte auth.ts. Then every server on the SQL shim is

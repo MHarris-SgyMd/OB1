@@ -12,26 +12,12 @@ Every extension produces exactly 5 files in `extensions/{extension-slug}/`:
 | `metadata.json` | Machine-readable metadata (follows schema below) |
 | `schema.sql` | PostgreSQL tables, indexes, RLS policies |
 | `index.ts` | The MCP server — Bun-native, `bun index.ts` serves it (SMD-1799) |
-| `deno.json` | Import map for `deno check`, the type gate SMD-1800 retires; Bun resolves the same packages from `extensions/node_modules` |
 
 ---
 
-## File 1: deno.json
+## File 1: the packages (no file of its own)
 
-This file is **identical for every extension** unless the extension needs additional dependencies. Start with this exact content:
-
-```json
-{
-  "imports": {
-    "@hono/mcp": "npm:@hono/mcp@0.3.2",
-    "@modelcontextprotocol/sdk": "npm:@modelcontextprotocol/sdk@1.30.0",
-    "hono": "npm:hono@4.13.8",
-    "zod": "npm:zod@4.6.5"
-  }
-}
-```
-
-Only add entries if the extension imports something not listed here. No `@supabase/supabase-js`: the server imports the repository's SQL shim by relative path (File 4), and `extensions/package.json` pins the same four packages for Bun.
+An extension ships no import map or package.json: `bun extensions/<slug>/index.ts` resolves `hono`, `zod`, `@hono/mcp` and `@modelcontextprotocol/sdk` from `extensions/node_modules`, which `extensions/package.json` pins — one MCP stack across the tree, held by `extensions/test-auth.ts` (until SMD-1800 each extension carried a `deno.json` mirroring those pins for `deno check`). Import exactly those four by bare name; if the extension needs another package, add it to `extensions/package.json` (and to test-auth's `PACKAGES`) rather than beside the extension. No `@supabase/supabase-js`: the server imports the repository's SQL shim by relative path (File 4).
 
 ---
 
@@ -119,9 +105,6 @@ PostgreSQL DDL that runs in the Supabase SQL Editor. Must follow these rules:
 The MCP server, in this fork's Bun-native shape (SMD-1799; the Edge Function shape it replaced is FORK.md's history). Must follow this exact structure:
 
 ```typescript
-// Deno reads the SDK's types through the extensionless subpath: its exports map
-// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
-// @ts-types="@modelcontextprotocol/sdk/server/mcp"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
@@ -290,7 +273,7 @@ Include 3-5 example prompts a user can try immediately after setup. These should
 
 Before submitting, verify:
 
-- [ ] `deno.json` contains the standard imports for `deno check` (no supabase-js; add extras only if needed)
+- [ ] `index.ts` imports only `hono`, `zod`, `@hono/mcp`, `@modelcontextprotocol/sdk` (from `extensions/package.json`), the SQL shim and `../_shared/auth.ts` — no supabase-js, no `deno.json`
 - [ ] `metadata.json` validates against `/.github/metadata.schema.json`
 - [ ] `schema.sql` uses `IF NOT EXISTS`, includes RLS, includes indexes
 - [ ] `schema.sql` does NOT modify the `thoughts` table

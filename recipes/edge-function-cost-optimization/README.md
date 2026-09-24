@@ -112,9 +112,6 @@ Each extension's tools live in their own module, exporting a `register(server, p
 The minimal pattern (full version in [`examples/after/index.ts`](./examples/after/index.ts)):
 
 ```ts
-// Deno reads the SDK's types through the extensionless subpath: its exports map
-// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
-// @ts-types="@modelcontextprotocol/sdk/server/mcp"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { buildServer } from "./server.ts";
 

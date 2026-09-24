@@ -28,8 +28,9 @@
  * module and nowhere else, every `_shared/auth.ts` is byte-for-byte
  * server-portable/auth.ts (a Supabase function is bundled from
  * supabase/functions/, so the module is copied beside the servers rather than
- * imported across the tree), and each deno.json still pins what package.json
- * installs — and the pinned `@hono/mcp` lets go of each request once it has
+ * imported across the tree), and the MCP stack is one set of versions across
+ * the tree's three installs (this directory's, server-portable's, the Kubernetes
+ * image's) — and the pinned `@hono/mcp` lets go of each request once it has
  * answered it (SMD-1607, change 83: 0.1.1 kept every one until close()).
  *
  * The files are imported as modules: each exports Bun's entry shape,
@@ -58,7 +59,7 @@
  * Run: bun install && bun test-auth.ts   (in extensions/)
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "./_shared/auth.ts";
@@ -152,7 +153,7 @@ const vendored = (file: string, kind: Kind, reads: string[], writes: string[], o
 // lists its routes as "METHOD /path" and needs `readProbe`, a worker `dryRun`
 // and `unconfigured`. Then, as needed: RPC_READS and LOG_TABLES for what its
 // reads may call; PACKAGES and extensions/package.json for a new npm package
-// (the pin guard then holds its deno.json to it); a TEXT_ONLY entry for a file
+// (the pin guard then holds the other two installs to it); a TEXT_ONLY entry for a file
 // that cannot run; COPIES and package.json's sync-auth for a new _shared/. A
 // REST server's routes must be mounted `app.<verb>("…", …)` at column 0, or
 // the classifier cannot see them.
@@ -778,16 +779,6 @@ const OLD_SPELLINGS = /c\.req\.query\("key"\)|c\.req\.header\("x-access-key"\)|[
  */
 const builtPerRequest = (text: string) =>
   !/^(?:export )?(?:const|let|var) [^\n]*(?:\bMcpServer\b|\bStreamableHTTPTransport\b|= buildServer\(|= new Map[<(])/m.test(text);
-// Every SDK subpath import is preceded by its `@ts-types` pragma: without it,
-// `deno check` reads the module — and every tool handler's arguments — as
-// `any` at SDK 1.29 and later (change 84 has the mechanism).
-const sdkTyped = (text: string) => {
-  const imports = [...text.matchAll(/^(.*)\n(?:\s*)import (?:type )?[^\n]* from "@modelcontextprotocol\/sdk\/([\w/]+)\.js";/gm)];
-  // Every SDK specifier in the file is one the line above matched — a multi-line, single-quoted or
-  // semicolon-less import would otherwise slip past as long as one other import carried its pragma.
-  const named = (text.match(/from ['"]@modelcontextprotocol\/sdk\/[^'"]+['"]/g) ?? []).length;
-  return imports.length > 0 && imports.length === named && imports.every((m) => m[1].trim() === `// @ts-types="@modelcontextprotocol/sdk/${m[2]}"`);
-};
 /** The Accept patch by its mechanism — every one re-wrapped the request over `c.req.raw` — not by the header it set, which an outgoing fetch may set too. */
 const ACCEPT_PATCH = /Object\.defineProperty\(\s*c\.req,\s*['"]raw['"]/;
 
@@ -817,7 +808,6 @@ for (const s of SERVERS) {
     assert(builtPerRequest(text), "…the McpServer is built inside a function, per request: no module-level declaration names McpServer, holds what buildServer() returns, or is a `new Map` (a server that outlives the request is connect()ed to a fresh transport each time and answers on the wrong one — SMD-1497, change 78)");
     assert(!ACCEPT_PATCH.test(text),
       "…and no Accept patch: the transport at @hono/mcp 0.3.x takes a missing Accept as */* and either token as enough, so the re-wrap of every request for Claude Desktop connectors is gone (change 84)");
-    assert(sdkTyped(text), "…and each SDK import carries its @ts-types pragma, so `deno check` types the tool handlers rather than reading the module as any (change 84) — or an SDK import is in a spelling this guard does not read");
   } else if (s.kind === "rest") {
     const mounted = [...text.matchAll(/^app\.(get|post|put|patch|delete)\("([^"]+)",\s*(requireWrite,\s*)?/gm)]
       .map((m) => ({ route: `${m[1].toUpperCase()} ${m[2]}`, gated: Boolean(m[3]), at: m.index! }));
@@ -862,8 +852,7 @@ for (const s of SERVERS) {
   const text = readFileSync(join(ROOT, file), "utf8");
   assert(builtPerRequest(text) && text.includes("await buildServer().connect(transport)"),
     `${file}: the McpServer is built per request by buildServer() and connected to that request's transport (SMD-1497, change 78)`);
-  assert(sdkTyped(text) && !ACCEPT_PATCH.test(text),
-    `${file}: each SDK import carries its @ts-types pragma (or one is in a spelling this guard does not read), and the Accept patch is gone (change 84)`);
+  assert(!ACCEPT_PATCH.test(text), `${file}: the Accept patch is gone (change 84)`);
 }
 
 // The files this test cannot import — a sample whose tool modules are not in
@@ -876,12 +865,10 @@ const TEXT_ONLY: { file: string; must: RegExp[]; mustNot: RegExp[] }[] = [
   // The sweep closes the transport of each session it drops (SMD-1607), which tells the server too.
   { file: "recipes/edge-function-cost-optimization/examples/after/index.ts",
     must: [/from "\.\.\/_shared\/auth\.ts"/, /authenticateRequest\(c\.req\.raw,/, /const server = buildServer\(principal\);[^\n]*\n\s*await server\.connect\(transport\);\n\s*session = \{ server, transport,/, /session\.scope !== principal\.scope/,
-      /sessions\.delete\(id\);\n(?:\s*\/\/[^\n]*\n)*\s*s\.transport\.close\(\)\.catch\(/,
-      /\/\/ @ts-types="@modelcontextprotocol\/sdk\/server\/mcp"\nimport type \{ McpServer \} from "@modelcontextprotocol\/sdk\/server\/mcp\.js";/],
+      /sessions\.delete\(id\);\n(?:\s*\/\/[^\n]*\n)*\s*s\.transport\.close\(\)\.catch\(/],
     mustNot: [/[!=]== ?MCP_ACCESS_KEY\b/, /c\.req\.header\("x-access-key"\)/, /serverFor\(/, /Map<[^>\n]*McpServer/, ACCEPT_PATCH] },
   { file: "recipes/edge-function-cost-optimization/examples/after/server.ts",
-    must: [/from "\.\.\/_shared\/auth\.ts"/, /export function buildServer\(principal: Principal\): McpServer/, /register\w+\(server, principal\)/,
-      /\/\/ @ts-types="@modelcontextprotocol\/sdk\/server\/mcp"\nimport \{ McpServer \} from "@modelcontextprotocol\/sdk\/server\/mcp\.js";/],
+    must: [/from "\.\.\/_shared\/auth\.ts"/, /export function buildServer\(principal: Principal\): McpServer/, /register\w+\(server, principal\)/],
     // No module-level declaration naming McpServer: a cache under any name, in any container, is a server shared across sessions.
     mustNot: [/export const server\b/, /new Map</, /serverFor/, /^(?:export )?(?:const|let|var) [^\n]*\bMcpServer\b/m] },
   { file: "recipes/vercel-neon-telegram/src/app/api/telegram/route.ts",
@@ -903,39 +890,24 @@ for (const t of TEXT_ONLY) {
   for (const re of t.mustNot) assert(!re.test(text), `${t.file} no longer says ${re}`);
 }
 
-// Each deno.json pins what package.json installs, so this test exercises the
-// libraries the functions deploy with: every import of an extension exactly;
-// for a recipe or integration, every npm pin of a package installed here.
+// One MCP stack across the tree's three installs (the recurring defect this fork
+// guards against is a value defined twice): what this directory installs is what
+// the vendored servers run under here and what `bun <file>` resolves for the
+// extensions; server-portable/package.json is the core server's and the
+// container's; integrations/kubernetes-deployment/package.json is that image's
+// (SMD-1800 — until then each server carried a deno.json import map, held here to
+// this file, and server/deno.json anchored the set). Every pin equal, or this
+// names the package and the two versions.
 {
   const pkg = JSON.parse(readFileSync(join(HERE, "package.json"), "utf8")).devDependencies as Record<string, string>;
-  const dirs = readdirSync(HERE, { withFileTypes: true }).filter((d) => d.isDirectory() && !d.name.startsWith("_") && d.name !== "node_modules").map((d) => d.name);
-  for (const dir of dirs) {
-    if (!existsSync(join(HERE, dir, "deno.json"))) { assert(false, `${dir}/deno.json exists — every extension pins its imports`); continue; }
-    const imports = JSON.parse(readFileSync(join(HERE, dir, "deno.json"), "utf8")).imports as Record<string, string>;
-    const drift = Object.entries(imports).filter(([name, spec]) => spec !== `npm:${name}@${pkg[name]}`);
-    assert(drift.length === 0, `extensions/${dir}/deno.json pins what package.json installs${drift.length ? ` (${drift.map(([n, s]) => `${n}: ${s}`).join(", ")})` : ""}`);
-  }
-  const seen = new Set<string>();
-  for (const s of SERVERS.filter((s) => !s.file.startsWith("extensions/"))) {
-    let dir = dirname(s.file);
-    while (dir.includes("/") && !existsSync(join(ROOT, dir, "deno.json"))) dir = dirname(dir);
-    const file = join(dir, "deno.json");
-    if (!existsSync(join(ROOT, file)) || seen.has(file)) continue;
-    seen.add(file);
-    // A deno.json with no import map at all (consolidation-workers', once supabase-js left it) pins nothing.
-    const imports = (JSON.parse(readFileSync(join(ROOT, file), "utf8")).imports ?? {}) as Record<string, string>;
-    // Every import of a package installed here — scoped or not, and whatever its spelling (an unversioned
-    // `npm:hono`, a `jsr:` or URL import would deploy on latest while the test ran the pin) — is this exact npm pin.
-    const drift = Object.entries(imports).filter(([name, spec]) => name in pkg && spec !== `npm:${name}@${pkg[name]}`);
-    assert(drift.length === 0, `${file} pins what package.json installs${drift.length ? ` (${drift.map(([n, s]) => `${n}: ${s}`).join(", ")})` : ""}`);
-  }
-  // kubernetes-deployment's package.json — the one vendored server with an install of its own, the image's
-  // (SMD-1800) — pins the MCP stack to what this directory installs, so the container runs what the test ran.
-  {
-    const deps = JSON.parse(readFileSync(join(ROOT, "integrations/kubernetes-deployment/package.json"), "utf8")).dependencies as Record<string, string>;
+  const hold = (file: string, deps: Record<string, string>, exact: boolean) => {
     const drift = Object.entries(pkg).filter(([name, version]) => deps[name] !== version);
-    assert(drift.length === 0 && Object.keys(deps).length === Object.keys(pkg).length, `integrations/kubernetes-deployment/package.json pins exactly what extensions/package.json installs${drift.length ? ` (${drift.map(([n, v]) => `${n}: ${deps[n] ?? "absent"} vs ${v}`).join(", ")})` : ""}`);
-  }
+    const extra = exact ? Object.keys(deps).filter((name) => !(name in pkg)) : [];
+    assert(drift.length === 0 && extra.length === 0, `${file} pins ${exact ? "exactly " : ""}what extensions/package.json installs${drift.length || extra.length ? ` (${[...drift.map(([n, v]) => `${n}: ${deps[n] ?? "absent"} vs ${v}`), ...extra.map((n) => `${n}: not installed here`)].join(", ")})` : ""}`);
+  };
+  // The core server installs supabase-js beside the stack for its Workers store (SMD-1847), so its set is a superset.
+  hold("server-portable/package.json", JSON.parse(readFileSync(join(ROOT, "server-portable/package.json"), "utf8")).dependencies as Record<string, string>, false);
+  hold("integrations/kubernetes-deployment/package.json", JSON.parse(readFileSync(join(ROOT, "integrations/kubernetes-deployment/package.json"), "utf8")).dependencies as Record<string, string>, true);
 }
 
 // ── The pinned transport, across a session ──────────────────────────────────

@@ -16,9 +16,6 @@
 // first, and every session but the last minted hung (ob1-fork, SMD-1497,
 // FORK.md change 78). A build is tens of microseconds, once per session.
 
-// Deno reads the SDK's types through the extensionless subpath: its exports map
-// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
-// @ts-types="@modelcontextprotocol/sdk/server/mcp"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { type Principal } from "../_shared/auth.ts";
 import { register as registerOpenBrain } from "./tools/open-brain.ts";

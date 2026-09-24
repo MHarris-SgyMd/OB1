@@ -210,7 +210,6 @@ consolidation-workers/
     index.ts         # Biographical profile synthesis worker
   metadata-norm/
     index.ts         # Metadata quality improvement worker
-  deno.json          # Deno configuration
   metadata.json      # OB1 contribution metadata
   README.md          # This file
 ```

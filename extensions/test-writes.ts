@@ -186,26 +186,21 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   return Response.json({ choices: [{ message: { content: JSON.stringify(STUB_METADATA) } }] });
 }) as typeof fetch;
 
-// ── The servers' handlers; Deno's specifiers, on Bun ─────────────────────────
+// ── The servers' handlers; their packages from this directory's install ──────
 
 type Handler = (req: Request) => Response | Promise<Response>;
 const PACKAGES = /^(hono|zod|@hono\/mcp|@modelcontextprotocol\/sdk)(\/|$)/;
 const VENDORED = new RegExp("^" + ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/(recipes|integrations)/.*\\.ts$");
-// Until SMD-1798 this loader also resolved a quoted supabase-js specifier to the shim, for the two servers still on
-// it; every vendored server imports the shim itself now, and a file that imports supabase-js at runtime is check
-// 22's failure, not something a test loader papers over.
+// A recipe or integration imports the four by bare name and has no install of its own beside it, so they resolve
+// from extensions/node_modules here (test-auth.ts has the same loader). Until SMD-1798 this loader also resolved a
+// quoted supabase-js specifier to the shim; until SMD-1800 it read Deno's specifiers (a `jsr:` line, an `npm:`
+// prefix) — neither is in the tree now, and check 11 and 22 refuse them.
 Bun.plugin({
-  name: "deno-specifiers-on-bun",
+  name: "vendored-packages-from-extensions",
   setup(build) {
     build.onLoad({ filter: VENDORED }, async (args) => {
-      let src = await Bun.file(args.path).text();
-      src = src.replace(/^import\s+"jsr:[^"]+";\s*$/gm, "");
-      src = src.replace(/(from\s+|import\s+)(["'])([^"']+)\2/g, (whole, lead, q, spec) => {
-        let s = spec as string;
-        if (s.startsWith("npm:")) s = s.slice(4).replace(/^(@?[^@/]+(?:\/[^@/]+)?)@[^/]*/, "$1");
-        if (PACKAGES.test(s)) return `${lead}${q}${Bun.resolveSync(s, HERE)}${q}`;
-        return whole;
-      });
+      const src = (await Bun.file(args.path).text()).replace(/(from\s+|import\s+)(["'])([^"']+)\2/g, (whole, lead, q, spec) =>
+        PACKAGES.test(spec as string) ? `${lead}${q}${Bun.resolveSync(spec as string, HERE)}${q}` : whole);
       return { contents: src, loader: "ts" };
     });
   },

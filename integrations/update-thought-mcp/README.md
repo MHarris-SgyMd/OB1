@@ -73,8 +73,6 @@ supabase functions new update-thought-mcp
 ```bash
 curl -o supabase/functions/update-thought-mcp/index.ts \
   https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/integrations/update-thought-mcp/index.ts
-curl -o supabase/functions/update-thought-mcp/deno.json \
-  https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/integrations/update-thought-mcp/deno.json
 mkdir -p supabase/functions/_shared
 curl -o supabase/functions/_shared/auth.ts \
   https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/integrations/_shared/auth.ts
