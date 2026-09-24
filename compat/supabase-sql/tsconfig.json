@@ -4,5 +4,5 @@
     "strict": true, "skipLibCheck": true, "noEmit": true,
     "allowImportingTsExtensions": true, "types": ["bun"]
   },
-  "include": ["*.ts", "../deno-on-bun.ts"]
+  "include": ["*.ts"]
 }

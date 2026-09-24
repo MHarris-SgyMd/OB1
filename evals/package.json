@@ -29,7 +29,10 @@
     "thought-kinds": "bun eval-thought-kinds.ts",
     "thought-kinds:self-check": "bun eval-thought-kinds.ts --self-check",
     "calibration": "bun eval-calibration.ts",
-    "calibration:self-check": "bun eval-calibration.ts --self-check"
+    "calibration:self-check": "bun eval-calibration.ts --self-check",
+    "write-path": "../db/with-postgres.sh bun eval-write-path.ts",
+    "write-path:gate": "../db/with-postgres.sh bun eval-write-path.ts --gate",
+    "write-path:self-check": "bun eval-write-path.ts --self-check"
   },
   "devDependencies": {
     "@types/bun": "1.4.0",

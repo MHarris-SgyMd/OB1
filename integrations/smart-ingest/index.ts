@@ -29,7 +29,6 @@
  *   - Enhanced thoughts columns (schemas/enhanced-thoughts)
  */
 
-import "../../compat/deno-on-bun.ts";
 import { createClient } from "../../compat/supabase-sql/index.ts";
 import {
   embedText,
@@ -50,12 +49,12 @@ import {
 
 // ── Environment ─────────────────────────────────────────────────────────────
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
-const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY") ?? "";
-const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
-const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY") ?? "";
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") ?? "";
+const SUPABASE_URL = process.env.SUPABASE_URL ?? "";
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
+const MCP_ACCESS_KEY = process.env.MCP_ACCESS_KEY ?? "";
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ?? "";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -76,14 +75,14 @@ const ENTITY_EXTRACTION_BATCH_MAX = 50;
 // Hard ceiling on input size and LLM call count so a single large paste
 // cannot mint unbounded OpenRouter/OpenAI/Anthropic spend if x-brain-key
 // is leaked or an agent misfires. All envs parseable at boot; 0 = unlimited.
-const MAX_INPUT_CHARS = Number(Deno.env.get("SMART_INGEST_MAX_INPUT_CHARS") ?? 100_000);
-const MAX_CHUNKS_PER_REQUEST = Number(Deno.env.get("SMART_INGEST_MAX_CHUNKS") ?? 10);
-const MAX_LLM_CALLS_PER_REQUEST = Number(Deno.env.get("SMART_INGEST_MAX_CALLS") ?? 10_000);
+const MAX_INPUT_CHARS = Number(process.env.SMART_INGEST_MAX_INPUT_CHARS ?? 100_000);
+const MAX_CHUNKS_PER_REQUEST = Number(process.env.SMART_INGEST_MAX_CHUNKS ?? 10);
+const MAX_LLM_CALLS_PER_REQUEST = Number(process.env.SMART_INGEST_MAX_CALLS ?? 10_000);
 
 // ── Edge Function wall-clock budget (Wave 2.5 HIGH / BLOCKER-2 assist) ─────
 // Supabase Edge Functions cap at ~150s. Leave a 10s safety margin so we can
 // record partial-completion state before the platform kills us.
-const EDGE_FUNCTION_BUDGET_MS = Number(Deno.env.get("SMART_INGEST_BUDGET_MS") ?? 140_000);
+const EDGE_FUNCTION_BUDGET_MS = Number(process.env.SMART_INGEST_BUDGET_MS ?? 140_000);
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -1012,7 +1011,7 @@ function tally(items: IngestionItem[]) {
 
 // ── Main Handler ────────────────────────────────────────────────────────────
 
-Deno.serve(async (req) => {
+const handler = async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: CORS_HEADERS });
   }
@@ -1283,4 +1282,9 @@ Deno.serve(async (req) => {
     status: "complete", job_id: jobId, extracted_count: items.length, ...counts,
     message: `Ingestion complete. Added ${counts.added_count}, skipped ${counts.skipped_count}.`,
   }, 200);
-});
+};
+
+export default {
+  port: Number(process.env.PORT || 8000),
+  fetch: handler,
+};

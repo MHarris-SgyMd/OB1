@@ -23,8 +23,8 @@
  * claim needs the tools driven, not the process started: this suite is where
  * a shim gap fails a named assertion instead of a user's first call.
  *
- * Each server is imported as deployed under the stand-in for Deno's two
- * globals test-auth.ts and test-writes.ts use, and every tool it registers is
+ * Each server is imported as a module — its default export's `fetch` is the
+ * handler `bun <file>` serves (SMD-1799) — and every tool it registers is
  * called through `tools/call` with the arguments its schema describes — each
  * optional filter on its own, each error path the tool documents — and what
  * comes back is read: the row a write stored, the rows a read chose, the
@@ -89,17 +89,9 @@ for (const role of ["authenticated", "service_role", "anon"]) {
 }
 for (const rel of SCHEMAS) await sql.unsafe(schemaText(rel));
 
-// ── Deno's two globals, and the environment the READMEs document ────────────
+// ── The servers' handlers, and the environment the READMEs document ─────────
 
 type Handler = (req: Request) => Response | Promise<Response>;
-const served: Handler[] = [];
-(globalThis as unknown as { Deno: unknown }).Deno = {
-  env: { get: (name: string) => process.env[name] },
-  serve: (a: Handler | object, b?: Handler) => {
-    served.push(typeof a === "function" ? a : b!);
-    return { finished: Promise.resolve() };
-  },
-};
 
 const KEY = "one-write-key-for-every-tool";
 const USER = "11111111-1111-4111-8111-111111111111";
@@ -112,11 +104,12 @@ for (const name of ["MCP_ACCESS_KEYS", "MCP_HOUSEHOLD_ACCESS_KEYS", "SUPABASE_SE
 /** Each server's handler by file, for the drift guard at the end. */
 const handlers = new Map<string, Handler>();
 async function load(rel: string): Promise<Handler> {
-  const before = served.length;
-  await import(join(ROOT, rel));
-  assert(served.length === before + 1, `${rel} imports as deployed and hands Deno.serve one handler`);
-  handlers.set(rel, served[before]);
-  return served[before];
+  // The handler Bun would serve: the module's default export's `fetch` (SMD-1799); nothing stands in for `Deno`.
+  const mod = (await import(join(ROOT, rel))) as { default?: { fetch?: unknown } };
+  assert(typeof mod.default?.fetch === "function", `${rel} imports as a module and exports default { fetch }`);
+  const h = mod.default!.fetch as Handler;
+  handlers.set(rel, h);
+  return h;
 }
 
 // ── One request ──────────────────────────────────────────────────────────────

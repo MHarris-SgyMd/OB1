@@ -75,6 +75,8 @@ import {
 } from "./graph-centrality.ts";
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { ENTITY_TYPES, NUMERIC_NAME_RE, RELATIONS } from "../server-portable/entities.ts";
+import { linearAdapter, SAMPLE_ISSUE } from "./ingest-linear.ts";
+import { LINK_RELATIONS } from "./ingest-contract.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS = join(HERE, "migrations");
@@ -4994,6 +4996,8 @@ console.log("\n[41] Migration 042: a cited source is refused as a value and deta
   await reapply("042");
   const again = await q<{ tgname: string }>(`SELECT tgname FROM pg_trigger WHERE NOT tgisinternal AND tgname IN ('thoughts_guard_citation_sources', 'thought_facets_validate')`);
   assert(again.length === 2 && (await functionsNamed("delete_thought")) === 1 && before > 0 && (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_facets`)).c === before, `042 re-applied twice leaves two triggers, one delete_thought and every facet row (${before})`);
+  // 042's file put 042's validator back; the shipped one is 053's (the `link` kind) — restored for the sections after.
+  await restoreShipped("thought_facets_validate");
   // A reset of the whole table: every citing thought goes with its source, so nothing survives and the statement is clean.
   await db.exec(`DELETE FROM thoughts`);
   assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_facets`)).c === 0, "DELETE FROM thoughts with citations among the rows is clean — nothing survives to rest on nothing — and the facets cascade");
@@ -6279,6 +6283,233 @@ console.log("\n[47] Migration 052: thought_changes — one page of the log, olde
   const fn = await one<{ v: string; r: number }>(`SELECT provolatile AS v, prorows AS r FROM pg_proc WHERE proname = 'thought_changes'`);
   assert(fn.v === "s" && Number(fn.r) === 50, "the function is STABLE with ROWS 50");
   await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[48] Migration 053: the source beside the thought — the canonical round-trips and is written once, links are a set the validator shapes and an index holds, an identity resolves, and a structured pass and an extracted pass coexist with the structured row standing (SMD-1867)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const refused = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return ""; } catch (e) { return (e as Error).message; } };
+  const put = async (content: string, metadata: Record<string, unknown> = {}, supersedes: string | null = null) =>
+    (await one<{ id: string }>(`INSERT INTO thoughts (id, content, metadata, content_fingerprint, supersedes) VALUES (gen_random_uuid(), $1, $2::jsonb, content_fingerprint_of($1), $3::uuid) RETURNING id`, [content, JSON.stringify(metadata), supersedes])).id;
+  type J = Record<string, unknown>;
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  const links = async (id: string, active = true) => q<{ p: J; open: boolean }>(`SELECT payload AS p, valid_until IS NULL AS open FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'link' ${active ? "AND valid_until IS NULL" : ""} ORDER BY payload->>'relation', payload->>'target', created_at`, [id]);
+  const mentions = async (id: string) => q<{ name: string; type: string; key: string; c: string }>(`SELECT en.name, en.entity_type AS type, m.extraction_key AS key, m.confidence::text AS c FROM thought_entities m JOIN ob1_entities en ON en.id = m.entity_id WHERE m.thought_id = $1::uuid ORDER BY en.entity_type, en.name`, [id]);
+  const edgesOf = async (id: string) => q<{ key: string; relation: string; c: string }>(`SELECT extraction_key AS key, relation, confidence::text AS c FROM ob1_entity_edges WHERE thought_id = $1::uuid ORDER BY relation`, [id]);
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_entities`);
+
+  // The shape: the table and its identity rule, the two indexes, and the
+  // functions 053 defines — the two it redefines carry sentinels so a test
+  // can tell 053's body from 016's / 042's.
+  const cols = (await q<{ column_name: string }>(`SELECT column_name FROM information_schema.columns WHERE table_name = 'thought_sources' ORDER BY ordinal_position`)).map((c) => c.column_name);
+  assert(cols.join(",") === "thought_id,system,identity,canonical,media_type,canonical_hash,ingest_run,ingested_at", `thought_sources has the eight columns (${cols.join(",")})`);
+  const uniq = (await q<{ d: string }>(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conrelid = 'thought_sources'::regclass AND contype = 'u'`)).map((x) => x.d);
+  assert(uniq.length === 1 && /UNIQUE \(system, identity\)/.test(uniq[0]), `an identity names one thought: UNIQUE (system, identity) (${uniq.join("; ")})`);
+  const idx = (await q<{ n: string }>(`SELECT indexname AS n FROM pg_indexes WHERE tablename = 'thought_facets' AND indexname LIKE 'thought_facets_link%' ORDER BY 1`)).map((x) => x.n);
+  assert(idx.join(",") === "thought_facets_link_active_uniq,thought_facets_link_target_idx", `the active-link unique index and the target probe exist (${idx.join(",")})`);
+  const rteSrc = await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)");
+  assert(lastDefinerOf("record_thought_entities").startsWith("053") && /ob1:structured-wins/.test(rteSrc), "053 is the last definer of record_thought_entities and its body carries the structured-wins sentinel");
+  const validatorSrc = await src("thought_facets_validate()");
+  assert(lastDefinerOf("thought_facets_validate").startsWith("053") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel");
+  assert(/CASE WHEN v_structured THEN extraction_key = p_extraction_key ELSE extraction_key NOT LIKE 'source:%' END/.test(rteSrc) && (rteSrc.match(/WHERE (?:thought_entities|ob1_entity_edges)\.extraction_key NOT LIKE 'source:%'/g) ?? []).length === 2,
+    "the rule is spelled on the key prefix: a source: pass replaces its own rows, an extraction the rest, and both conflict clauses yield to source:");
+  assert(/link \(migration 053\)/.test(validatorSrc) && LINK_RELATIONS.every((r) => validatorSrc.includes(`'${r}'`)) && LINK_RELATIONS.length === 6, `the validator's hint names the new kind, and every relation the contract names it admits (${LINK_RELATIONS.join(", ")})`);
+  const tc = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_sources"])).c ?? "";
+  assert(/SMD-1867/.test(tc) && /byte for byte/.test(tc) && /derived/.test(tc), "the table's comment states the round-trip rule: the canonical is the truth, the text and links derived");
+
+  // The Linear adapter's output, end to end: N autolinks → zero markup in the
+  // text, a references link per distinct target, the canonical intact.
+  const out = linearAdapter.map(SAMPLE_ISSUE);
+  const t1 = await put(out.text, out.facets);
+  const t2 = await put("SMD-1730 — the event shape\nProject: x · Status: Done\nhttps://linear.app/x", { source: "linear", issue: "SMD-1730" });
+  const recordSource = async (id: string, form: string, run: string) => (await one<{ r: J }>(`SELECT record_thought_source($1::uuid, $2, $3, $4, $5, $6) AS r`, [id, out.identity.system, out.identity.key, form, out.canonical.mediaType, run])).r;
+  const r1 = await recordSource(t1, out.canonical.form, "test@1");
+  assert(r1.ok === true && r1.outcome === "inserted", `the canonical is recorded (${JSON.stringify(r1)})`);
+  const stored = await one<{ c: string; h: string; hh: string; run: string }>(`SELECT canonical AS c, canonical_hash AS h, encode(sha256(convert_to(canonical, 'UTF8')), 'hex') AS hh, ingest_run AS run FROM thought_sources WHERE thought_id = $1::uuid`, [t1]);
+  assert(stored.c === out.canonical.form && /<issue id=/.test(stored.c) && !/<issue/.test((await one<{ c: string }>(`SELECT content FROM thoughts WHERE id = $1::uuid`, [t1])).c), "the stored canonical IS the adapter's, markup included, while the row's text has none — the round trip is the canonical's");
+  assert(stored.h === stored.hh && stored.h.length === 64 && stored.run === "test@1", "the hash is the canonical's sha256, written beside it; the run is recorded");
+  const r2 = await recordSource(t1, out.canonical.form, "test@2");
+  assert(r2.outcome === "unchanged" && (await one<{ run: string }>(`SELECT ingest_run AS run FROM thought_sources WHERE thought_id = $1::uuid`, [t1])).run === "test@1", "the same canonical again writes nothing — not even the run");
+  const r3 = await recordSource(t1, out.canonical.form + " ", "test@3");
+  assert(r3.outcome === "updated" && (await one<{ run: string }>(`SELECT ingest_run AS run FROM thought_sources WHERE thought_id = $1::uuid`, [t1])).run === "test@3", "a canonical that moved by one byte is updated, with its run");
+  await recordSource(t1, out.canonical.form, "test@4");
+  const held = (await one<{ r: J }>(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-1936', 'x', 'text/plain') AS r`, [t2])).r;
+  assert(held.ok === false && held.error === "IDENTITY_HELD" && held.held_by === t1, `an identity another thought holds is refused and the holder named, not re-pointed (${JSON.stringify(held)})`);
+  assert(((await one<{ r: J }>(`SELECT record_thought_source(gen_random_uuid(), 'linear', 'SMD-0', 'x', 'text/plain') AS r`)).r).error === "NOT_FOUND", "a thought that is not there is NOT_FOUND");
+  assert(/thought_sources_system_check/.test(await refused(`SELECT record_thought_source($1::uuid, 'Linear', 'SMD-1730', 'x', 'text/plain')`, [t2])), "a system that is not one lower-case word is refused by the table's CHECK");
+
+  // Resolution: the table first; the board sync's claim for linear, at the
+  // head of a twin chain; nothing for an identity nobody holds.
+  const sourceThought = async (system: string, key: string) => (await one<{ id: string | null }>(`SELECT source_thought($1, $2) AS id`, [system, key])).id;
+  assert((await sourceThought("linear", "SMD-1936")) === t1, "source_thought resolves through thought_sources");
+  assert((await sourceThought("linear", "SMD-1730")) === t2, "…and, for linear, through the sync's metadata.issue claim when no source row exists (SMD-1954's brain)");
+  const t2b = await put("SMD-1730 — the event shape (newer)\nProject: x · Status: Done\nhttps://linear.app/x", { source: "linear", issue: "SMD-1730" }, t2);
+  assert((await sourceThought("linear", "SMD-1730")) === t2b, "…the head of a twin chain — the row nothing supersedes — not the older twin");
+  assert((await sourceThought("linear", "SMD-9999")) === null && (await sourceThought("markdown", "SMD-1730")) === null, "an identity nobody holds resolves to nothing; the claim is linear's alone");
+
+  // Links as a set: the adapter's one references link; the same set again is
+  // a no-op; a wider set adds; a narrower set closes (history kept, active
+  // gone); malformed, unknown and self-referencing items are dropped and counted.
+  const recordLinks = async (id: string, system: string, ls: unknown) => (await one<{ r: J }>(`SELECT record_source_links($1::uuid, $2, $3::jsonb) AS r`, [id, system, JSON.stringify(ls)])).r;
+  const l1 = await recordLinks(t1, "linear", out.links);
+  assert(JSON.stringify(out.links) === '[{"relation":"references","target":"SMD-1730"}]' && l1.added === 1 && l1.closed === 0 && l1.kept === 0 && l1.dropped === 0, `the adapter's links land: two autolinks to one issue are one references link (${JSON.stringify(l1)})`);
+  const first = await links(t1);
+  assert(first.length === 1 && first[0].p.origin === "structured" && first[0].p.system === "linear" && first[0].p.target === "SMD-1730", `the validator writes origin = structured (${JSON.stringify(first[0]?.p)})`);
+  const l2 = await recordLinks(t1, "linear", out.links);
+  assert(l2.added === 0 && l2.closed === 0 && l2.kept === 1 && (await links(t1, false)).length === 1, "the same set again writes nothing — one row, still");
+  const l3 = await recordLinks(t1, "linear", [...out.links, { relation: "blocks", target: "SMD-1730" }, { relation: "child_of", target: "SMD-949" }]);
+  assert(l3.added === 2 && l3.kept === 1 && l3.closed === 0 && (await links(t1)).length === 3, "a wider set adds what is new and keeps what stood");
+  const l4 = await recordLinks(t1, "linear", [{ relation: "child_of", target: "SMD-949" }]);
+  const after4 = await links(t1, false);
+  assert(l4.closed === 2 && l4.kept === 1 && l4.added === 0 && after4.filter((r) => r.open).length === 1 && after4.filter((r) => !r.open).length === 2, `a narrower set closes the rest — valid_until set, rows kept as history (${after4.filter((r) => !r.open).length} closed)`);
+  const l5 = await recordLinks(t1, "linear", [{ relation: "child_of", target: "SMD-949" }, { relation: "references", target: "SMD-1730" }]);
+  assert(l5.added === 1 && (await links(t1, false)).length === 4 && (await links(t1)).length === 2, "a link stated again after closing is a new active row beside the closed one");
+  const l6 = await recordLinks(t1, "linear", [{ relation: "child_of", target: "SMD-949" }, { relation: "references", target: "SMD-1730" }, { relation: "references", target: "SMD-1936" }, { relation: "loves", target: "SMD-1" }, { relation: "blocks", target: "" }, "junk", { relation: "REFERENCES", target: " SMD-1730 " }]);
+  assert(l6.dropped === 5 && l6.kept === 2 && l6.added === 0, `a self-reference, an unknown relation, an empty target, a non-object and a duplicate after normalisation (REFERENCES / padded target) are dropped and counted; the two real links kept (${JSON.stringify(l6)})`);
+  const other = await recordLinks(t1, "markdown", [{ relation: "references", target: "Note" }]);
+  assert(other.added === 1 && (await links(t1)).length === 3 && (await recordLinks(t1, "linear", [{ relation: "child_of", target: "SMD-949" }, { relation: "references", target: "SMD-1730" }])).closed === 0, "another system's links on the same thought are its own set: a linear pass neither closes nor counts them");
+  assert(((await one<{ r: J }>(`SELECT record_source_links(gen_random_uuid(), 'linear', '[]'::jsonb) AS r`)).r).error === "NOT_FOUND", "links on a thought that is not there: NOT_FOUND");
+  assert(/must be a JSON array/.test(await refused(`SELECT record_source_links($1::uuid, 'linear', '{}'::jsonb)`, [t1])) && /one lower-case word/.test(await refused(`SELECT record_source_links($1::uuid, 'Linear', '[]'::jsonb)`, [t1])), "a non-array or a malformed system is an error, not a silent no-op");
+
+  // The validator's own refusals, on a raw write; the unique index behind the
+  // set; citations untouched beside links.
+  const raw = (payload: unknown) => refused(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'link', $2::jsonb)`, [t1, JSON.stringify(payload)]);
+  assert(/relation must be references, child_of/.test(await raw({ relation: "loves", system: "linear", target: "SMD-1" })), "a relation outside the six is refused");
+  assert(/one lower-case word/.test(await raw({ relation: "blocks", system: "Linear", target: "SMD-1" })), "a system that is not one word is refused");
+  assert(/target by identity/.test(await raw({ relation: "blocks", system: "linear", target: "" })) && /target by identity/.test(await raw({ relation: "blocks", system: "linear", target: 7 })), "an empty or non-string target is refused");
+  assert(/does not link to itself/.test(await raw({ relation: "references", system: "linear", target: "SMD-1936" })), "a link to the thought's own identity is refused by the validator too");
+  assert(/thought_facets_link_active_uniq/.test(await raw({ relation: "child_of", system: "linear", target: "SMD-949" })), "a second active row for one (thought, system, relation, target) is refused by the index — idempotency is the schema's");
+  assert(/not a registered facet kind/.test(await refused(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'tag', '{}'::jsonb)`, [t1])), "an unregistered kind is still refused");
+  const cit = (await one<{ r: J }>(`SELECT record_citation($1::uuid, $2::uuid, 'rests on it', 'stated') AS r`, [t1, t2])).r;
+  assert(cit.ok === true, `a citation beside links still records (${JSON.stringify(cit)})`);
+  assert(/needs a non-empty text/.test(await refused(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', $2::jsonb)`, [t1, JSON.stringify({ text: " ", stance: "stated", source_id: t2 })])), "…and 042's own refusals stand in the extended validator's citation branch");
+
+  // The resolution rule. A structured pass writes the project and the label
+  // as mentions with no model call; an extraction that names the same label
+  // does not displace it and its other rows land; the structured pass re-run
+  // replaces only its own rows; an extraction re-run replaces only its own.
+  const rte = async (id: string, key: string, ents: unknown, rels: unknown = []) => (await one<{ r: J }>(`SELECT record_thought_entities($1::uuid, $2, $3::jsonb, $4::jsonb, NULL, NULL) AS r`, [id, key, JSON.stringify(ents), JSON.stringify(rels)])).r;
+  const structured = out.mentions.map((m) => ({ name: m.name, type: m.type, confidence: 1 }));
+  const s1 = await rte(t1, "source:linear", structured);
+  assert(s1.ok === true && s1.mentions === 2 && s1.new_entities === 2, `the structured pass writes the project and the label as mentions (${JSON.stringify(s1)})`);
+  let m = await mentions(t1);
+  assert(m.length === 2 && m.every((x) => x.key === "source:linear" && x.c === "1.00"), `…under source:linear at confidence 1 (${JSON.stringify(m)})`);
+  // The same structured set again writes no row: the mentions' extracted_at
+  // and the entities' last_seen_at stand where the first pass put them (third
+  // review pass, independent read — the pass deleted and re-inserted its own
+  // rows every call, and a sync pass over an unchanged ticket stamped the
+  // project entity every five minutes).
+  const stamps = async () => q<{ x: string; s: string }>(`SELECT m.extracted_at::text AS x, en.last_seen_at::text AS s FROM thought_entities m JOIN ob1_entities en ON en.id = m.entity_id WHERE m.thought_id = $1::uuid ORDER BY en.name`, [t1]);
+  const stampsBefore = await stamps();
+  await db.query(`SELECT pg_sleep(0.02)`);
+  const s1b = await rte(t1, "source:linear", structured);
+  assert(s1b.ok === true && s1b.mentions === 0 && s1b.new_entities === 0 && s1b.entities === 2 && JSON.stringify(await stamps()) === JSON.stringify(stampsBefore), `the same structured set again writes nothing: 0 mentions written, extracted_at and last_seen_at unmoved, the two entities still counted (${JSON.stringify(s1b)})`);
+  // …nor an entity ROW: the upsert's WHERE holds the tuple where it was (xmin unmoved), so a no-op sync pass leaves no dead tuple per entity (fourth review pass, independent read).
+  const xmins = async () => q<{ x: string }>(`SELECT en.xmin::text AS x FROM ob1_entities en JOIN thought_entities m ON m.entity_id = en.id WHERE m.thought_id = $1::uuid ORDER BY en.name`, [t1]);
+  const xBefore = await xmins();
+  await rte(t1, "source:linear", structured);
+  assert(JSON.stringify(await xmins()) === JSON.stringify(xBefore), "…and no entity row is rewritten (xmin unmoved) by a structured pass that brings no new alias");
+  await rte(t1, "source:linear", structured.map((x) => (x.type === "topic" ? { ...x, aliases: ["infra"] } : x)));
+  assert(JSON.stringify(await xmins()) !== JSON.stringify(xBefore) && (await one<{ a: string[] }>(`SELECT aliases AS a FROM ob1_entities WHERE name = 'infrastructure'`)).a.includes("infra"), "…while a structured pass that brings a new alias writes it");
+  const s1c = await rte(t1, "source:linear", [...structured, { name: "Extra Topic", type: "topic", confidence: 1 }]);
+  assert(s1c.mentions === 1 && (await mentions(t1)).length === 3, `a wider structured set writes only what is new (${JSON.stringify(s1c)})`);
+  const extraSeen = (await one<{ s: string }>(`SELECT last_seen_at::text AS s FROM ob1_entities WHERE name = 'Extra Topic'`)).s;
+  const projectSeen = (await one<{ s: string }>(`SELECT last_seen_at::text AS s FROM ob1_entities WHERE name = $1`, [SAMPLE_ISSUE.project!.name])).s;
+  assert(extraSeen > projectSeen, "…and a mention written is a sighting (the new topic's last_seen_at is later than the untouched project's)");
+  await rte(t1, "source:linear", structured);
+  assert((await mentions(t1)).length === 2, "…a narrower set removes the row it no longer names");
+  const e1 = await rte(t1, "extract:m@p1", [{ name: "infrastructure", type: "topic", confidence: 0.6 }, { name: "Bob", type: "person", confidence: 0.9 }], [{ from: "Bob", to: "infrastructure", relation: "works_on", confidence: 0.8 }]);
+  m = await mentions(t1);
+  assert(e1.ok === true && e1.mentions === 1 && e1.edges === 1 && m.length === 3, `the extraction lands its own rows — Bob and one edge — and reports one mention, not two (${JSON.stringify(e1)})`);
+  assert(m.find((x) => x.name === "infrastructure")?.key === "source:linear" && m.find((x) => x.name === "infrastructure")?.c === "1.00", "…and the label it also named stays the structured row: source:linear, confidence 1 — structured wins");
+  assert(m.find((x) => x.name === "Bob")?.key === "extract:m@p1", "…while Bob is the extraction's");
+  const s2 = await rte(t1, "source:linear", structured.filter((x) => x.type === "project"));
+  m = await mentions(t1);
+  assert(s2.ok === true && m.length === 2 && !m.some((x) => x.name === "infrastructure") && m.some((x) => x.name === "Bob"), `a structured pass that no longer names the label removes ITS row and leaves the extraction's (${m.map((x) => x.name).join(",")})`);
+  assert((await edgesOf(t1)).length === 1, "…and the extraction's edge stands (the label entity is kept by it)");
+  const e2 = await rte(t1, "extract:m@p1", [{ name: "Alice", type: "person", confidence: 0.7 }]);
+  m = await mentions(t1);
+  assert(e2.ok === true && m.map((x) => x.name).sort().join(",") === ["Alice", SAMPLE_ISSUE.project!.name].sort().join(",") && !m.some((x) => x.name === "Bob"), `an extraction re-run replaces only the extracted rows — Bob gone, Alice in, the project untouched (${m.map((x) => x.name).join(",")})`);
+  assert((await edgesOf(t1)).length === 0, "…its old edge gone with it");
+
+  // The takeover and the standing, on the edge layer as on the mentions: an
+  // extraction first, then the structured pass naming the same pair.
+  const e3 = await rte(t2, "extract:m@p1", [{ name: "Open Brain", type: "project", confidence: 0.5 }, { name: "Carol", type: "person", confidence: 0.5 }], [{ from: "Carol", to: "Open Brain", relation: "member_of", confidence: 0.5 }]);
+  assert(e3.ok === true && e3.edges === 1, "an extraction on a fresh thought lands a mention pair and an edge");
+  const s3 = await rte(t2, "source:test", [{ name: "Open Brain", type: "project", confidence: 1 }, { name: "Carol", type: "person", confidence: 1 }], [{ from: "Carol", to: "Open Brain", relation: "member_of", confidence: 1 }]);
+  let edges = await edgesOf(t2);
+  m = await mentions(t2);
+  assert(s3.ok === true && s3.mentions === 2 && s3.edges === 1 && m.every((x) => x.key === "source:test" && x.c === "1.00") && edges.length === 1 && edges[0].key === "source:test" && edges[0].c === "1.00", `a structured pass onto extracted rows takes them over — mentions and the edge (${JSON.stringify(m)} ${JSON.stringify(edges)})`);
+  const e4 = await rte(t2, "extract:m@p2", [{ name: "Open Brain", type: "project", confidence: 0.4 }, { name: "Carol", type: "person", confidence: 0.4 }, { name: "Dave", type: "person", confidence: 0.4 }], [{ from: "Carol", to: "Open Brain", relation: "member_of", confidence: 0.4 }, { from: "Dave", to: "Open Brain", relation: "works_on", confidence: 0.4 }]);
+  m = await mentions(t2);
+  edges = await edgesOf(t2);
+  assert(e4.ok === true && e4.mentions === 1 && e4.edges === 1 && m.filter((x) => x.key === "source:test").length === 2 && m.find((x) => x.name === "Dave")?.key === "extract:m@p2", `an extraction onto structured rows leaves them and lands its own (${JSON.stringify(m)})`);
+  assert(edges.length === 2 && edges.find((x) => x.relation === "member_of")?.key === "source:test" && edges.find((x) => x.relation === "works_on")?.key === "extract:m@p2", `…the shared edge stays structured, the new one is the extraction's (${JSON.stringify(edges)})`);
+  const cleared = await rte(t2, "source:test", []);
+  m = await mentions(t2);
+  edges = await edgesOf(t2);
+  assert(cleared.ok === true && m.length === 1 && m[0].name === "Dave" && edges.length === 1 && edges[0].relation === "works_on", `a structured pass stating nothing removes its own rows only — the extraction's Dave and its works_on edge stand (${m.map((x) => x.name).join(",")}; ${edges.map((x) => x.relation).join(",")})`);
+  // The entity the structured rows alone held is pruned; the ones an extracted row still names are not.
+  assert(!(await q(`SELECT 1 FROM ob1_entities WHERE name = 'Carol'`)).length && (await q(`SELECT 1 FROM ob1_entities WHERE name = 'Open Brain'`)).length === 1, "Carol, referenced by nothing now, is pruned; Open Brain, the extraction's edge end, stays");
+
+  // Re-applying 053 lands the same shape and the rows stand.
+  await reapply("053");
+  assert((await links(t1)).length === 3 && (await q(`SELECT 1 FROM thought_sources WHERE thought_id = $1::uuid`, [t1])).length === 1 && lastDefinerOf("record_thought_entities").startsWith("053"), "re-applying 053 keeps every row and every definition");
+
+  // The takeover (first review pass): the board sync's head row for a ticket
+  // moves when an older paste becomes the chain's head, so the identity must
+  // be able to follow — p_take moves it and names the row it left; without
+  // p_take the refusal stands. The structure goes with it (second review
+  // pass): the old holder's active linear links are closed and its
+  // source:linear mentions removed — its markdown links and its extracted
+  // mention stand — so the ticket's edges are read once, on the new head. A
+  // self-link the moved identity now makes on the new holder is refused.
+  const beforeTake = { links: (await links(t1)).length, mentions: (await mentions(t1)).map((m) => `${m.key}:${m.name}`).sort() };
+  assert(beforeTake.links === 3 && beforeTake.mentions.length === 2 && beforeTake.mentions.some((m) => m.startsWith("source:linear:")), `before the takeover the old head carries three active links and a source:linear mention beside the extracted one (${JSON.stringify(beforeTake)})`);
+  const took = (await one<{ r: J }>(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-1936', 'the same issue, newer head', 'text/plain', 'test@take', true) AS r`, [t2b])).r;
+  assert(took.ok === true && took.outcome === "inserted" && took.taken_from === t1, `p_take moves the identity to the new head and names the row it left (${JSON.stringify(took)})`);
+  assert((await sourceThought("linear", "SMD-1936")) === t2b && (await q(`SELECT 1 FROM thought_sources WHERE thought_id = $1::uuid`, [t1])).length === 0, "…so the identity resolves to the new holder and the old holder has no source row");
+  const afterTake = await links(t1, false);
+  assert(afterTake.filter((r) => r.open).length === 1 && afterTake.filter((r) => r.open)[0].p.system === "markdown" && afterTake.filter((r) => !r.open && r.p.system === "linear").length === 4, `…its active linear links are closed (history kept), its markdown link stands (${afterTake.filter((r) => r.open).length} open, ${afterTake.filter((r) => !r.open).length} closed)`);
+  const afterMentions = (await mentions(t1)).map((m) => `${m.key}:${m.name}`);
+  assert(afterMentions.length === 1 && afterMentions[0] === "extract:m@p1:Alice", `…its source:linear mention is gone and the extracted one stands (${afterMentions.join(",")})`);
+  assert(((await one<{ r: J }>(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-1936', 'x', 'text/plain', 'test@nt') AS r`, [t1])).r).error === "IDENTITY_HELD", "…and without p_take the old holder is refused in its turn");
+  assert(/does not link to itself/.test(await refused(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'link', '{"relation":"references","system":"linear","target":"SMD-1936"}'::jsonb)`, [t2b])), "the moved identity guards the new holder against a self-link");
+  const plain = (await one<{ r: J }>(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-1936', 'the same issue, newer head', 'text/plain', 'test@again', true) AS r`, [t2b])).r;
+  assert(plain.outcome === "unchanged" && plain.taken_from === null, "p_take with nothing to take is the plain write: unchanged, taken from nobody");
+  // A NULL p_take is not a take (fourth review pass: `NOT NULL` is NULL and the guard fell through).
+  const nullTake = (await one<{ r: J }>(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-1936', 'x', 'text/plain', NULL, NULL::boolean) AS r`, [t1])).r;
+  assert(nullTake.ok === false && nullTake.error === "IDENTITY_HELD" && nullTake.held_by === t2b, `a NULL p_take is refused as IDENTITY_HELD, not read as a take (${JSON.stringify(nullTake)})`);
+  // Closing a link is not re-judged: an identity re-pointed onto a link's
+  // target since (the same thought, another identity) would otherwise make
+  // the row impossible to close and every structure write on the thought fail
+  // (fourth review pass, independent read).
+  const tA = await put("A note", {});
+  await db.query(`SELECT record_thought_source($1::uuid, 'markdown', 'a', 'A', 'text/markdown', 'r')`, [tA]);
+  await recordLinks(tA, "markdown", [{ relation: "references", target: "b" }]);
+  await db.query(`SELECT record_thought_source($1::uuid, 'markdown', 'b', 'A', 'text/markdown', 'r')`, [tA]);
+  const closing = await recordLinks(tA, "markdown", []);
+  assert(closing.ok === true && closing.closed === 1 && (await links(tA)).length === 0, `a link to what is now the thought's own identity can still be closed (${JSON.stringify(closing)})`);
+  const anew = await recordLinks(tA, "markdown", [{ relation: "references", target: "b" }]);
+  assert(anew.ok === true && anew.dropped === 1 && anew.added === 0, `…while stating it anew is dropped as a self-reference (${JSON.stringify(anew)})`);
+  // The shortcut is exactly a close (sixth review pass — the mutant that
+  // admitted any payload-unchanged UPDATE passed the suite): a re-open of the
+  // closed self-link, a move of the row to another thought whose identity is
+  // its target, and a kind change beside a close are all judged.
+  const closedLink = (await one<{ id: string }>(`SELECT id FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'link' AND valid_until IS NOT NULL`, [tA])).id;
+  assert(/does not link to itself/.test(await refused(`UPDATE thought_facets SET valid_until = NULL WHERE id = $1::uuid`, [closedLink])), "re-opening the closed link, now a self-link, is judged and refused");
+  const tB = await put("B note", {});
+  await db.query(`SELECT record_thought_source($1::uuid, 'markdown', 'c', 'B', 'text/markdown', 'r')`, [tB]);
+  const tC = await put("C note", {});
+  const onC = (await one<{ r: J }>(`SELECT record_source_links($1::uuid, 'markdown', '[{"relation":"references","target":"c"}]'::jsonb) AS r`, [tC])).r;
+  const cLink = (await one<{ id: string }>(`SELECT id FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'link'`, [tC])).id;
+  assert(onC.added === 1 && /does not link to itself/.test(await refused(`UPDATE thought_facets SET thought_id = $1::uuid WHERE id = $2::uuid`, [tB, cLink])), "moving a link row onto the thought whose identity it names is judged and refused");
+  assert(/needs a non-empty text|not a registered facet kind|stance/.test(await refused(`UPDATE thought_facets SET kind = 'citation', valid_until = now() WHERE id = $1::uuid`, [cLink])), "a kind change beside a close is judged as the new kind, and a link payload is no citation");
+  assert(((await one<{ r: J }>(`SELECT record_source_links($1::uuid, 'markdown', '[]'::jsonb) AS r`, [tC])).r).closed === 1, "…and the legitimate close still takes the shortcut");
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_entities`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

@@ -35,7 +35,6 @@
 // change 67; extensions/test-auth.ts exercises it.
 // Deploy this worker with _shared/auth.ts beside the function (supabase/functions/_shared/),
 // as the README says — next to the helpers this directory's _shared/ already held.
-import "../../../compat/deno-on-bun.ts";
 import { createClient } from "../../../compat/supabase-sql/index.ts";
 import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 import {
@@ -55,14 +54,14 @@ import { fetchWithTimeout, isTransientError, resolveLlmFetchTimeoutMs } from "..
 
 // --- Environment ---
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") ?? "";
-const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY") ?? "";
-const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
+const SUPABASE_URL = process.env.SUPABASE_URL ?? "";
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ?? "";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "";
 
 // OB1: OpenRouter-first model selection for classification
-const CONSOLIDATION_MODEL = Deno.env.get("OPENROUTER_CLASSIFIER_MODEL") ?? CLASSIFIER_MODEL_OPENROUTER;
+const CONSOLIDATION_MODEL = process.env.OPENROUTER_CLASSIFIER_MODEL ?? CLASSIFIER_MODEL_OPENROUTER;
 
 /**
  * Per-invocation LLM call cap. Defaults to 100; set to 0 to disable. This
@@ -70,7 +69,7 @@ const CONSOLIDATION_MODEL = Deno.env.get("OPENROUTER_CLASSIFIER_MODEL") ?? CLASS
  * clamps concurrency (candidates per run), not actual LLM completions.
  */
 function resolveMaxCalls(): number {
-  const raw = Deno.env.get("CONSOLIDATION_MAX_CALLS");
+  const raw = process.env.CONSOLIDATION_MAX_CALLS;
   if (raw === undefined || raw === "") return 100;
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed < 0) return 100;
@@ -326,7 +325,7 @@ function isMaterialChange(
 
 // --- Main handler ---
 
-Deno.serve(async (req) => {
+const handler = async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: getCorsHeaders() });
   }
@@ -336,8 +335,8 @@ Deno.serve(async (req) => {
   // form — x-brain-key, x-access-key, ?key=, a bearer token — is tried. Fail
   // closed with neither configured, as before.
   const keys = {
-    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
-    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+    MCP_ACCESS_KEYS: process.env.MCP_ACCESS_KEYS,
+    MCP_ACCESS_KEY: process.env.MCP_ACCESS_KEY,
   };
   if (!keys.MCP_ACCESS_KEYS && !keys.MCP_ACCESS_KEY) {
     console.warn("MCP_ACCESS_KEYS not set — rejecting all requests.");
@@ -524,4 +523,9 @@ Deno.serve(async (req) => {
 
   summary.llm_calls = llmCallCount;
   return json(summary);
-});
+};
+
+export default {
+  port: Number(process.env.PORT || 8000),
+  fetch: handler,
+};

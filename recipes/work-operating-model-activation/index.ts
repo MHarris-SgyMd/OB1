@@ -13,7 +13,6 @@
 // the request, connect()ed to a fresh transport each time, answered the first
 // of two overlapping requests on the second's transport. FORK.md change 78;
 // extensions/test-auth.ts fires three overlapping requests.
-import "../../compat/deno-on-bun.ts"; // ob1-original-types: jsr:@supabase/functions-js/edge-runtime.d.ts
 
 import { StreamableHTTPTransport } from "@hono/mcp";
 // Deno reads the SDK's types through the extensionless subpath: its exports map
@@ -25,15 +24,15 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 // `?? ""` so the name is a string inside buildServer() too: the throw below
 // narrows a `string | undefined` only at module scope, not in a hoisted function.
-const DEFAULT_USER_ID = Deno.env.get("DEFAULT_USER_ID") ?? "";
+const DEFAULT_USER_ID = process.env.DEFAULT_USER_ID ?? "";
 
 // The access keys themselves are read per request, where they are used (app.all
 // below); starting with none configured is still refused here.
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !DEFAULT_USER_ID || !(Deno.env.get("MCP_ACCESS_KEYS") || Deno.env.get("MCP_ACCESS_KEY"))) {
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !DEFAULT_USER_ID || !(process.env.MCP_ACCESS_KEYS || process.env.MCP_ACCESS_KEY)) {
   throw new Error(
     "Missing one or more required environment variables: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, MCP_ACCESS_KEYS (or the older MCP_ACCESS_KEY), DEFAULT_USER_ID"
   );
@@ -873,8 +872,8 @@ app.all("*", async (c) => {
   // MCP_ACCESS_KEY still works, compared by digest. A read-scoped key is never
   // given the tools that write, so it cannot see them, let alone call them.
   const principal = authenticateRequest(c.req.raw, {
-    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
-    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+    MCP_ACCESS_KEYS: process.env.MCP_ACCESS_KEYS,
+    MCP_ACCESS_KEY: process.env.MCP_ACCESS_KEY,
   });
   if (!principal) {
     return c.json({ error: "Unauthorized" }, 401);
@@ -891,4 +890,7 @@ app.all("*", async (c) => {
   return transport.handleRequest(c);
 });
 
-Deno.serve(app.fetch);
+export default {
+  port: Number(process.env.PORT || 8000),
+  fetch: app.fetch,
+};

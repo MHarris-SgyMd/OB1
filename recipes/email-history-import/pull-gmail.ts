@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-net --allow-read --allow-write --allow-env
+#!/usr/bin/env bun
 
 /**
  * Open Brain — Gmail Pull Script
@@ -13,7 +13,7 @@
  *   --ingest-endpoint:    Custom endpoint (requires INGEST_URL, INGEST_KEY)
  *
  * Usage:
- *   deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts [options]
+ *   bun pull-gmail.ts [options]
  *
  * Options:
  *   --window=24h|7d|30d|90d|1y|all  Time window to fetch (default: 24h)
@@ -35,13 +35,13 @@ const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
 const SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"];
 
 // Supabase direct insert (default mode)
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "";
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") || "";
+const SUPABASE_URL = process.env.SUPABASE_URL || "";
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
 
 // Edge Function endpoint (--ingest-endpoint mode)
-const INGEST_URL = Deno.env.get("INGEST_URL") || "";
-const INGEST_KEY = Deno.env.get("INGEST_KEY") || "";
+const INGEST_URL = process.env.INGEST_URL || "";
+const INGEST_KEY = process.env.INGEST_KEY || "";
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 
@@ -54,7 +54,7 @@ interface SyncLog {
 
 async function loadSyncLog(): Promise<SyncLog> {
   try {
-    const text = await Deno.readTextFile(SYNC_LOG_PATH);
+    const text = await Bun.file(SYNC_LOG_PATH).text();
     return JSON.parse(text);
   } catch {
     return { ingested_ids: {}, last_sync: "" };
@@ -62,7 +62,7 @@ async function loadSyncLog(): Promise<SyncLog> {
 }
 
 async function saveSyncLog(log: SyncLog): Promise<void> {
-  await Deno.writeTextFile(SYNC_LOG_PATH, JSON.stringify(log, null, 2));
+  await Bun.write(SYNC_LOG_PATH, JSON.stringify(log, null, 2));
 }
 
 // ─── Content Fingerprint ────────────────────────────────────────────────────
@@ -96,7 +96,7 @@ function parseArgs(): CliArgs {
     ingestEndpoint: false,
   };
 
-  for (const arg of Deno.args) {
+  for (const arg of Bun.argv.slice(2)) {
     if (arg.startsWith("--window=")) {
       args.window = arg.split("=")[1];
     } else if (arg.startsWith("--labels=")) {
@@ -134,7 +134,7 @@ interface TokenData {
 
 async function loadCredentials(): Promise<OAuthCredentials> {
   try {
-    const text = await Deno.readTextFile(CREDENTIALS_PATH);
+    const text = await Bun.file(CREDENTIALS_PATH).text();
     return JSON.parse(text);
   } catch {
     console.error(`\nNo credentials.json found at: ${CREDENTIALS_PATH}`);
@@ -143,13 +143,13 @@ async function loadCredentials(): Promise<OAuthCredentials> {
     console.error("  2. Create an OAuth 2.0 Client ID (type: Desktop app)");
     console.error("  3. Download the JSON and save it as credentials.json");
     console.error("  4. Enable the Gmail API at https://console.cloud.google.com/apis/library/gmail.googleapis.com");
-    Deno.exit(1);
+    process.exit(1);
   }
 }
 
 async function loadToken(): Promise<TokenData | null> {
   try {
-    const text = await Deno.readTextFile(TOKEN_PATH);
+    const text = await Bun.file(TOKEN_PATH).text();
     return JSON.parse(text);
   } catch {
     return null;
@@ -157,7 +157,7 @@ async function loadToken(): Promise<TokenData | null> {
 }
 
 async function saveToken(token: TokenData): Promise<void> {
-  await Deno.writeTextFile(TOKEN_PATH, JSON.stringify(token, null, 2));
+  await Bun.write(TOKEN_PATH, JSON.stringify(token, null, 2));
 }
 
 async function refreshAccessToken(
@@ -216,19 +216,19 @@ async function authorize(creds: OAuthCredentials): Promise<string> {
   console.log("\nWaiting for authorization...");
 
   const code = await new Promise<string>((resolve) => {
-    const server = Deno.serve({ port: 3847, onListen: () => {} }, (req) => {
+    const server = Bun.serve({ port: 3847, fetch: (req) => {
       const url = new URL(req.url);
       const authCode = url.searchParams.get("code");
       if (authCode) {
         resolve(authCode);
-        setTimeout(() => server.shutdown(), 100);
+        setTimeout(() => server.stop(), 100);
         return new Response(
           "<html><body><h2>Authorization complete!</h2><p>You can close this tab and return to your terminal.</p></body></html>",
           { headers: { "Content-Type": "text/html" } },
         );
       }
       return new Response("Waiting for auth...", { status: 400 });
-    });
+    } });
   });
 
   const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
@@ -308,7 +308,7 @@ function windowToQuery(window: string): string {
       return "";
     default:
       console.error(`Unknown window: ${window}. Use 24h, 7d, 30d, 90d, 1y, or all.`);
-      Deno.exit(1);
+      process.exit(1);
   }
 
   const y = after.getFullYear();
@@ -829,17 +829,17 @@ async function main() {
       if (!INGEST_URL || !INGEST_KEY) {
         console.error("\nINGEST_URL and INGEST_KEY are required with --ingest-endpoint.");
         console.error("Example: export INGEST_URL=https://YOUR_REF.supabase.co/functions/v1/ingest-thought");
-        Deno.exit(1);
+        process.exit(1);
       }
     } else {
       if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
         console.error("\nSUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for live mode.");
         console.error("Example: export SUPABASE_URL=https://YOUR_REF.supabase.co");
-        Deno.exit(1);
+        process.exit(1);
       }
       if (!OPENROUTER_API_KEY) {
         console.error("\nOPENROUTER_API_KEY is required for embedding + metadata extraction.");
-        Deno.exit(1);
+        process.exit(1);
       }
     }
   }
@@ -946,5 +946,5 @@ async function main() {
 
 main().catch((err) => {
   console.error("Fatal error:", err);
-  Deno.exit(1);
+  process.exit(1);
 });

@@ -156,8 +156,6 @@ spec:
                   key: chat-api-key
             - name: CHAT_MODEL
               value: "openai/gpt-4o-mini"
-            - name: PORT
-              value: "8000"
           readinessProbe:
             tcpSocket:
               port: 8000

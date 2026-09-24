@@ -19,16 +19,15 @@
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key is refused by the routes
 // that write. FORK.md change 67; extensions/test-auth.ts exercises it.
-import "../../compat/deno-on-bun.ts"; // ob1-original-types: jsr:@supabase/functions-js/edge-runtime.d.ts
 
 import { Hono, type MiddlewareHandler } from "hono";
 import { createClient } from "../../compat/supabase-sql/index.ts";
 import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
 import { z } from "zod";
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") || "";
+const SUPABASE_URL = process.env.SUPABASE_URL!;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 // The label written beside every vector this API produces (021): the model
 // name as OB1_EMBEDDING_MODEL spells it.
@@ -494,8 +493,8 @@ app.options("*", (c) => c.text("ok", 200, corsHeaders));
 // form — x-brain-key, x-access-key, ?key=, a bearer token — is tried.
 app.use("*", async (c, next) => {
   const principal = authenticateRequest(c.req.raw, {
-    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
-    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+    MCP_ACCESS_KEYS: process.env.MCP_ACCESS_KEYS,
+    MCP_ACCESS_KEY: process.env.MCP_ACCESS_KEY,
   });
   if (!principal) return c.json({ error: "Invalid or missing access key" }, 401, corsHeaders);
   c.set("principal", principal);
@@ -707,7 +706,7 @@ app.post("/ingest", requireWrite, async (c) => {
   return c.json({ job_id: 0, status: "complete", extracted_count: 1, thought_id: result.thought_id }, 200, corsHeaders);
 });
 
-Deno.serve((req) => {
+const handler = (req: Request) => {
   const url = new URL(req.url);
   if (url.pathname === "/open-brain-rest") {
     url.pathname = "/";
@@ -715,4 +714,9 @@ Deno.serve((req) => {
     url.pathname = url.pathname.slice("/open-brain-rest".length);
   }
   return app.fetch(new Request(url, req));
-});
+};
+
+export default {
+  port: Number(process.env.PORT || 8000),
+  fetch: handler,
+};

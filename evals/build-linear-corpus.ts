@@ -17,6 +17,11 @@
  *   decision, the pushback and the "we did X instead" live in the thread, not
  *   the description.
  *
+ * Since 2026-09-24 each document also carries `issue` — the issue as the API
+ * gave it, the shape db/sync-linear.ts fetches — so db/ingest-records.ts maps
+ * the dump through the Linear adapter and writes the thought the board sync
+ * would (SMD-1958). The harnesses read `title` and `text`, as before.
+ *
  * Both mattered beyond the leaderboard. Nothing in the old corpus reached the
  * 1200-token chunking threshold, so `thought_chunks` — and anything measured
  * against it — had no real documents to work on. That was an artifact of the
@@ -49,6 +54,7 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_TOKENS, estimateTokens } from "../server-portable/chunk.ts";
 import { describeEnv, envFiles, loadEnv } from "./env.ts";
 import { linearClient, strict } from "../db/linear-api.ts";
+import { ISSUE_FIELDS, type LinearIssue } from "../db/ingest-linear.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -124,13 +130,14 @@ if (outPath.startsWith(REPO_ROOT + "/")) {
 // ── Fetch ────────────────────────────────────────────────────────────────────
 
 type Comment = { body: string; createdAt: string };
-type Node = {
-  identifier: string;
-  title: string;
-  description: string | null;
-  createdAt: string;
+/**
+ * One issue as fetched: the adapter's selection (ISSUE_FIELDS — what
+ * db/sync-linear.ts fetches, so the dump's `issue` and the sync's feed one
+ * mapping and write one text, SMD-1958) plus the two fields the corpus alone
+ * wants, split off before the issue is written.
+ */
+type Node = LinearIssue & {
   completedAt: string | null;
-  labels: { nodes: { name: string }[] };
   comments: { nodes: Comment[]; pageInfo: { hasNextPage: boolean } };
 };
 
@@ -143,12 +150,8 @@ query Corpus($after: String, $team: String!, $state: String!) {
   ) {
     pageInfo { hasNextPage endCursor }
     nodes {
-      identifier
-      title
-      description
-      createdAt
+      ${ISSUE_FIELDS}
       completedAt
-      labels { nodes { name } }
       comments(first: 100) {
         pageInfo { hasNextPage }
         nodes { body createdAt }
@@ -173,6 +176,12 @@ async function page(after: string | null): Promise<{ nodes: Node[]; next: string
 
 console.log(`▸ config: ${describeEnv(ENV_SOURCES)}`);
 console.log(`▸ team ${TEAM}, state "${STATE}", comments ${WITH_COMMENTS ? "included" : "excluded"}`);
+
+// When this view of Linear was taken — the instant the first page was asked
+// for, so anything written to a brain after it counts as a later view (the
+// ingester's second clock, SMD-1958). Read against the brain's `updated_at`, so
+// the builder's clock and the brain's must agree to the order of the gap.
+const FETCHED_AT = new Date().toISOString();
 
 const nodes: Node[] = [];
 let after: string | null = null;
@@ -226,6 +235,20 @@ function compose(n: Node): string {
 
 const truncatedThreads = nodes.filter((n) => n.comments.pageInfo.hasNextPage).map((n) => n.identifier);
 
+/**
+ * The issue as the API gave it and as db/sync-linear.ts fetches it — the
+ * adapter's fields, nothing of the corpus's own — so db/ingest-records.ts maps
+ * the dump through the same adapter the sync uses and the two write one text,
+ * one facet set and one canonical for a ticket (SMD-1958). The corpus's
+ * `completedAt` and `comments` are split off: a key the sync's fetch does not
+ * carry would make the dump's canonical differ from the sync's for an
+ * unchanged issue.
+ */
+function issueOf(n: Node): LinearIssue {
+  const { completedAt: _completedAt, comments: _comments, ...issue } = n;
+  return issue;
+}
+
 const items = nodes
   .map((n) => ({
     id: n.identifier,
@@ -241,6 +264,9 @@ const items = nodes
     // created_at is set from it, so age means what it means in the tracker.
     createdAt: n.createdAt,
     completedAt: n.completedAt,
+    // The issue whole, and when this view of it was taken, for the ingester (SMD-1958); the harnesses read the fields above.
+    issue: issueOf(n),
+    fetchedAt: FETCHED_AT,
   }))
   .filter((it) => it.text.length > 0 && it.text.length >= MIN_CHARS)
   .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
