@@ -46,7 +46,7 @@ BRAIN SMOKE TEST -- CREDENTIAL TRACKER
 FROM YOUR OPEN BRAIN SETUP
   Project URL:                ____________  (e.g. https://abcd1234.supabase.co)
   Service role key:           ____________  (Supabase "Secret key")
-  MCP access key:             ____________  (from Step 5 of the getting-started guide)
+  MCP access key:             ____________  (from Step 3 of the getting-started guide)
 
 OPTIONAL (unlocks extra checks, safe to leave blank on stock installs)
   REST API base URL:          ____________  (e.g. http://127.0.0.1:8787 — the open-brain-rest gateway)
@@ -120,7 +120,7 @@ The seven category names are `MCP Server`, `REST API`, `DB Schema`, `Auth`, `Cor
 
 ## Security Note -- `?key=` Access-Key Logging
 
-One Auth category check (`MCP accepts correct access key (?key=)`) verifies the URL-query-string auth path that OB1 supports for clients that cannot send custom headers (documented in [docs/01-getting-started.md](../../docs/01-getting-started.md) Step 5). **This check puts `MCP_ACCESS_KEY` into the URL**, which means the key ends up in:
+One Auth category check (`MCP accepts correct access key (?key=)`) verifies the URL-query-string auth path that OB1 supports for clients that cannot send custom headers (documented in [docs/01-getting-started.md](../../docs/01-getting-started.md) Step 6). **This check puts `MCP_ACCESS_KEY` into the URL**, which means the key ends up in:
 
 - Supabase's function-invocation logs (visible in the Studio UI to anyone with dashboard access)
 - any corporate HTTPS-inspection proxy that logs URLs (common on enterprise networks)
@@ -129,7 +129,7 @@ One Auth category check (`MCP accepts correct access key (?key=)`) verifies the 
 
 The header-based auth check (`x-brain-key`) does **not** have this problem and is always preferred.
 
-If you run this harness from a network with HTTPS proxying, or ship the output anywhere public, **rotate `MCP_ACCESS_KEY`** afterward (Step 5 of the getting-started guide). To skip the `?key=` check entirely on sensitive networks, run `node smoke-all.js --category=MCP\ Server` and the other categories except `Auth` -- you lose a small amount of coverage but the key never touches a URL.
+If you run this harness from a network with HTTPS proxying, or ship the output anywhere public, **rotate `MCP_ACCESS_KEY`** afterward (mint a new line as Step 3 of the getting-started guide shows, replace the old one in `deploy/.env`, restart). To skip the `?key=` check entirely on sensitive networks, run `node smoke-all.js --category=MCP\ Server` and the other categories except `Auth` -- you lose a small amount of coverage but the key never touches a URL.
 
 ## Example Output
 
@@ -244,7 +244,7 @@ Solution: Create `.env.local` in the current directory with `SUPABASE_URL`, `SUP
 Solution: The `MCP_ACCESS_KEY` in `.env.local` is not a key whose hash is in the server's `MCP_ACCESS_KEYS`. Confirm the key in your credential tracker is identical (the URL carries the key, the server's environment its hash).
 
 **Issue: `DB Schema: ✗ thoughts has canonical columns` fails with HTTP 400**
-Solution: Your `public.thoughts` table is missing one of the canonical columns (most commonly `embedding`). Re-run the SQL in [Step 2.2 of the getting-started guide](../../docs/01-getting-started.md). Additive migrations are safe -- the script only reads, it does not drop anything.
+Solution: Your `public.thoughts` table is missing one of the canonical columns (most commonly `embedding`). Re-run the core migrations (`bun db/migrate.ts`, `db/README.md`) — `db/migrations/001` creates the table. Additive migrations are safe -- the script only reads, it does not drop anything.
 
 **Issue: `MCP search_thoughts finds test row` fails even though capture succeeded**
 Solution: Embedding generation is asynchronous in some setups and may not land before search runs. The check already retries once with a 1.5 s delay; if it still fails, read the server's log (`podman compose -f deploy/compose.yaml logs server`) for provider errors (missing or rate-limited key).

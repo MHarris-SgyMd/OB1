@@ -16,7 +16,7 @@ The original `server/` connector remains untouched and safe to leave connected: 
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
 - **Enhanced Thoughts schema applied** — install `schemas/enhanced-thoughts` first (adds type, importance, sensitivity columns and utility RPCs)
-- OpenRouter API key (same one from the Getting Started guide)
+- OpenRouter API key (this server embeds through OpenRouter; the Getting Started guide's hosted-models option has one)
 - [Bun](https://bun.sh) installed, and a checkout of this repository (the server runs under Bun, Step 1)
 - Optional: `schemas/smart-ingest` (unlocks `ops_capture_status` tool)
 - Optional: `schemas/knowledge-graph` (unlocks `graph_search`, `entity_detail`, `ops_source_monitor` tools)

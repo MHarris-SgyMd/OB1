@@ -13,7 +13,7 @@ About 30 minutes. Zero coding experience. Nothing to sign up for: the whole syst
 - **[Git](https://git-scm.com)** — downloads the code (free)
 
 > [!NOTE]
-> **Prefer hosted models?** If your machine is short on memory or disk, or you'd rather not download about 7 GB of models, an [OpenRouter](https://openrouter.ai) key (~$5 in credits, lasts months) replaces the local models. Step 3 has the four lines. Everything else is the same.
+> **Prefer hosted models?** If your machine is short on memory or disk, or you'd rather not download about 7 GB of models, an [OpenRouter](https://openrouter.ai) key (~$5 in credits, lasts months) replaces the local models. Step 3 has the six lines. Everything else is the same.
 
 ---
 
@@ -84,7 +84,7 @@ powershell -c "irm bun.sh/install.ps1 | iex"
 
 Close and reopen PowerShell, then check with `bun --version`.
 
-**1.3 Git and Python.** Install [Git for Windows](https://git-scm.com/download/win) with its defaults. It brings **Git Bash**, the terminal every `bash` block below runs in (it has `openssl` and `curl`). The check script in Step 5 also needs `python3` on the PATH: install [Python](https://www.python.org/downloads/windows/) and tick "Add python.exe to PATH".
+**1.3 Git and Python.** Install [Git for Windows](https://git-scm.com/download/win) with its defaults. It brings **Git Bash**, the terminal every `bash` block below runs in (it has `openssl` and `curl`). The check script in Step 5 calls `python3` by that name. The Microsoft Store build of Python provides it (the python.org installer provides `python` alone): install Python from the Store, then check `python3 --version` in Git Bash before Step 5.
 
 </details>
 
@@ -162,12 +162,12 @@ OB1_LLM_LOCAL=1
 Why it matters: by default the server refuses to send a thought's text to any endpoint it hasn't been told is local — a thought captured without this line lands with no vector and a reply saying why. The line is the declaration.
 
 > [!NOTE]
-> **On a Mac**, the containers run in a small VM with no GPU, so the 7 GB of models load slowly there. [`SETUP.md`](../SETUP.md), "On macOS, install Ollama natively instead", is faster and lighter: install Ollama on the Mac itself, set `OB1_LLM_BASE_URL=http://host.containers.internal:11434/v1` in `deploy/.env` (Option B in the example), keep `OB1_LLM_LOCAL=1`, and leave `--profile local-models` off the Step 4 command.
+> **On a Mac**, the containers run in a small VM with no GPU, so the 7 GB of models load slowly there. [`SETUP.md`](../SETUP.md), "On macOS, install Ollama natively instead", is faster and lighter: install Ollama on the Mac itself, set `OB1_LLM_BASE_URL=http://host.containers.internal:11434/v1` in `deploy/.env` (Option B in the example; with Docker Desktop the host's name is `host.docker.internal`), keep `OB1_LLM_LOCAL=1`, and leave `--profile local-models` off the Step 4 command.
 
 <details>
 <summary>☁️ <strong>Prefer hosted models instead? (OpenRouter)</strong></summary>
 
-Skip 3.4's line and set these four in `deploy/.env` instead (they sit together under "Option C"):
+Skip 3.4's line and set these six in `deploy/.env` instead (the first five sit together under "Option C", the last under "Egress"):
 
 ```text
 OB1_LLM_BASE_URL=https://openrouter.ai/api/v1
@@ -175,13 +175,14 @@ OPENROUTER_API_KEY=sk-or-v1-your-key
 OB1_EMBEDDING_MODEL=openai/text-embedding-3-small
 OB1_EMBEDDING_DIM=1536
 OB1_METADATA_MODEL=openai/gpt-4o-mini
+OB1_EGRESS_POLICY=allow
 ```
 
-Get the key at [openrouter.ai/keys](https://openrouter.ai/keys) (create one named `open-brain`, add $5 in credits) and save it in your tracker. Set all of them, not the key alone: the URL says where to send the calls, and the models change as a pair with it. In Step 4, leave off the `--profile local-models` part. Every captured thought's text then leaves your machine for OpenRouter — fine for most notes, not for anything you'd call sensitive ([`SETUP.md`](../SETUP.md), "What may leave the box").
+Get the key at [openrouter.ai/keys](https://openrouter.ai/keys) (create one named `open-brain`, add $5 in credits) and save it in your tracker. Set all of them, not the key alone: the URL says where to send the calls, the models change as a pair with it, and the last line opens the gate — by default the server refuses to send a thought's text anywhere it hasn't been told is local, so without it every capture would land with no vector and a reply saying why. In Step 4, leave off the `--profile local-models` part. With `allow` set, every captured thought's text leaves your machine for OpenRouter — fine for most notes, not for anything you'd call sensitive ([`SETUP.md`](../SETUP.md), "What may leave the box", has the finer-grained terms).
 
 </details>
 
-✅ **Done when:** `deploy/.env` has `POSTGRES_PASSWORD`, `MCP_ACCESS_KEYS` and `OB1_LLM_LOCAL=1` (or the OpenRouter block) filled in, and your tracker has the key.
+✅ **Done when:** `deploy/.env` has `POSTGRES_PASSWORD`, `MCP_ACCESS_KEYS` and `OB1_LLM_LOCAL=1` (or the six OpenRouter lines) filled in, and your tracker has the key.
 
 ---
 
@@ -208,7 +209,7 @@ If instead it prints `preflight FAILED` and stops, read the row it names — it 
 
 Leave this terminal running and open a second one for the next steps. (To run it in the background instead, add `-d`; `podman compose -f deploy/compose.yaml logs -f server` shows the server's log.)
 
-✅ **Done when:** the log shows `preflight OK` and `Started server`, and the `ollama-pull` container has exited — `podman compose -f deploy/compose.yaml ps` shows it `Exited (0)`. The server does not wait for the pull, so a capture before that fails on a model that is not there yet.
+✅ **Done when:** the log shows `preflight OK` and `Started server`, and the `ollama-pull` container has exited — `podman compose -f deploy/compose.yaml ps -a` shows it `Exited (0)`. The server does not wait for the pull, so a capture before that fails on a model that is not there yet.
 
 ---
 
@@ -356,7 +357,7 @@ startup_timeout_sec = 30
 ```
 
 > [!CAUTION]
-> The `startup_timeout_sec = 30` line is required. Without it, Codex times out after 10 seconds because `mcp-remote` needs longer to establish the connection. If you see `MCP client for open-brain timed out after 10 seconds`, add or increase this value.
+> The `startup_timeout_sec = 30` line is required. Without it, Codex times out after 10 seconds while `npx` fetches `mcp-remote` on first use. If you see `MCP client for open-brain timed out after 10 seconds`, add or increase this value.
 
 Restart Codex and the Open Brain tools should be available immediately.
 
@@ -365,7 +366,7 @@ Restart Codex and the Open Brain tools should be available immediately.
 <details>
 <summary>🤖 <strong>7.5 — Other Clients (Cursor, VS Code Copilot, Windsurf)</strong></summary>
 
-Every MCP client handles remote servers slightly differently. The server accepts your access key two ways — pick whichever your client supports:
+Every MCP client handles remote servers slightly differently. The server accepts your access key two ways — pick whichever your client supports. Cursor takes Option A in its `~/.cursor/mcp.json` `url` field; do not bridge it.
 
 **Option A: URL with key (easiest).** If your client has a field for a remote MCP server URL, paste the full MCP Connection URL including `?key=your-access-key`. This works for any client that supports remote MCP without requiring headers.
 
@@ -387,7 +388,7 @@ Every MCP client handles remote servers slightly differently. The server accepts
 }
 ```
 
-**Option C: mcp-remote bridge (alternative).** `mcp-remote` also works but performs OAuth discovery on startup, which can cause timeouts. If you use it, set a generous startup timeout (30+ seconds) in clients that support it, and pass the key in the URL — newer `mcp-remote` versions attempt OAuth client registration before sending custom headers, so `--header` fails against the server's key check.
+**Option C: mcp-remote bridge (alternative).** `mcp-remote` also works. Set a generous startup timeout (30+ seconds) in clients that support it — `npx` fetches the bridge on first use — and pass the key in the URL — newer `mcp-remote` versions attempt OAuth client registration before sending custom headers, so `--header` fails against the server's key check.
 
 ```json
 {
@@ -463,7 +464,7 @@ Read the row it names. Each row is one setting — the database, the access keys
 
 **❌ Starting over**
 
-A retry after a half-finished attempt: `podman compose -f deploy/compose.yaml down -v` removes the containers and the database volume (every thought in it), and Step 4 builds a fresh brain. Keep `deploy/.env`.
+A retry after a half-finished attempt: `podman compose -f deploy/compose.yaml down -v` removes the containers and the database volume (every thought in it), and Step 4 builds a fresh brain. Keep `deploy/.env`; the pulled models live in their own volume and survive, so nothing downloads again.
 
 **❌ Port 8000 is already in use**
 
@@ -483,7 +484,7 @@ Check the server's log. If no request appears when ChatGPT fails, your server is
 
 **❌ Getting 401 errors**
 
-The key in your URL or header is not one whose hash is in `MCP_ACCESS_KEYS`. The URL carries the **key**; `deploy/.env` holds the **line** with its hash — check you didn't paste the line into the URL. If you're using the header approach (Claude Code or mcp-remote), the header is `x-brain-key` (lowercase, with the dash). A changed `deploy/.env` needs a restart.
+The key in your URL or header is not one whose hash is in `MCP_ACCESS_KEYS`. The URL carries the **key**; `deploy/.env` holds the **line** with its hash — check you didn't paste the line into the URL. If you're using the header approach (Claude Code), the header is `x-brain-key` (lowercase, with the dash). A changed `deploy/.env` needs a restart.
 
 **❌ The capture landed but says it has no vector**
 

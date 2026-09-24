@@ -53,8 +53,8 @@ Solutions for issues that come up across any Open Brain extension. If your probl
 - Check for errors in the SQL output — common issues include missing the pgvector extension or running statements out of order
 
 **"permission denied" or RLS errors**
-- The role in `SUPABASE_URL` needs grants on the extension's tables; `bun db/migrate.ts --grant <role>` grants the core tables (`db/README.md`, "Grants for a capturing role"), and the extension's `schema.sql` carries its own `GRANT` lines — run them as the table owner
-- For extensions using RLS (Extensions 4-6), verify the RLS policies were created by the schema.sql
+- The role in `SUPABASE_URL` needs grants on the extension's tables; `bun db/migrate.ts --grant <role>` grants the core tables (`db/README.md`, "Grants for a capturing role"), and the extension schemas grant nothing — `GRANT` the extension's tables to that role by hand, as the table owner (a role that owns the tables needs nothing)
+- For extensions using RLS (every extension but Family Calendar), verify the RLS policies were created by the schema.sql
 - Check that `user_id` values are valid UUIDs
 - Ensure all RLS-enabled tables have policies created correctly
 

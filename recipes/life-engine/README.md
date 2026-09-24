@@ -476,7 +476,7 @@ The Life Engine needs its own tables to track habits, moods, check-ins, and skil
 
 ### 4.1 Run the Schema
 
-Run the included [`schema.sql`](schema.sql) against your Open Brain's database — `psql "$DATABASE_URL" -f recipes/life-engine/schema.sql`, or Supabase's SQL Editor if that is where it lives. It contains the full schema with CHECK constraints, table comments, GRANT statements for `service_role`, performance indexes, and an auto-update trigger.
+Run the included [`schema.sql`](schema.sql) against your Open Brain's database — `psql "$DATABASE_URL" -f recipes/life-engine/schema.sql`, or Supabase's SQL Editor if that is where it lives. It contains the full schema with CHECK constraints, table comments, performance indexes, an auto-update trigger, and `GRANT … TO service_role` statements that error harmlessly on a Postgres without that role — grant your server's role instead.
 
 ✅ **Checkpoint:** Run the verification query at the bottom of `schema.sql` — you should see 6 tables (`life_engine_habits`, `life_engine_habit_log`, `life_engine_checkins`, `life_engine_briefings`, `life_engine_evolution`, `life_engine_state`).
 

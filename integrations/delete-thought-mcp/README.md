@@ -119,7 +119,7 @@ Left out of the base integration to keep its dependencies to a single table.
 Solution: Confirm the `?key=` in your custom connector URL is the **key** whose hash sits in the `MCP_ACCESS_KEYS` secret (the URL carries the key, the secret its hash). If you rotate the key, update the secret's entry and the connector URL. A `read`-scoped key authenticates but is given no tool — the connector shows nothing to call.
 
 **Issue: `delete_thought error: permission denied for table thoughts`**
-Solution: Ensure your service role has DELETE permission on `public.thoughts`. The getting-started guide grants this in Step 2.5 — re-run `grant select, insert, update, delete on table public.thoughts to service_role;` in the SQL editor if it was missed.
+Solution: Ensure the role `SUPABASE_URL` names has DELETE permission on `public.thoughts` — `bun db/migrate.ts --grant <role>` grants the core tables (`db/README.md`, "Grants for a capturing role"); a role that owns the tables needs nothing.
 
 **Issue: Tool succeeds but the row still shows in your SQL client or dashboard**
 Solution: The view may be cached. Re-run `select id from thoughts where id = '<uuid>'` to confirm the row is gone.

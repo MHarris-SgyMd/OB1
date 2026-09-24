@@ -38,7 +38,7 @@ A maintenance scheduling and history system. Track recurring tasks, log complete
 
 You'll reference these values during setup. Copy this block into a text editor and fill it in as you go.
 
-> **Already have your brain's connection string from the [Setup Guide](../../docs/01-getting-started.md)?** That is the one value this server needs from it.
+> **Your brain's connection string** is the one value this server needs from your setup — with the compose stack, [Run a Remote MCP Server, Step 1](../../primitives/deploy-remote-mcp/README.md#step-1-apply-the-extensions-schema) says how the database reaches the host and what the URL looks like.
 
 ```text
 HOME MAINTENANCE -- CREDENTIAL TRACKER

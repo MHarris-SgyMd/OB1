@@ -475,7 +475,7 @@ are not published at all (`deploy/README.md`, "What is reachable from where").
 A claude.ai or Claude Desktop custom connector (Settings → Connectors → Add
 custom connector) connects from Anthropic's side, not from your machine, so it
 needs a TLS proxy or a tunnel in front. One on this host (caddy, cloudflared,
-`tailscale serve`) dials `127.0.0.1:8000` itself, and the loopback default
+`tailscale funnel` — `tailscale serve` reaches your tailnet alone) dials `127.0.0.1:8000` itself, and the loopback default
 serves it. Only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in
 `deploy/.env` — it opens the server, and only the server, to the network, with
 the key in clear on every request until the proxy.

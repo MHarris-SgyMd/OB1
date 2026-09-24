@@ -61,7 +61,7 @@ Once the schema is in place, you can install either the backfill recipe, the web
 ## Troubleshooting
 
 **Issue: "relation thoughts does not exist"**
-Solution: Run the core Open Brain setup first — the `get_book_highlights` function references the `thoughts` table. Follow [docs/01-getting-started.md](../../docs/01-getting-started.md) through at least the database creation step.
+Solution: Run the core Open Brain setup first — the `get_book_highlights` function references the `thoughts` table. Follow [docs/01-getting-started.md](../../docs/01-getting-started.md) through Step 4, which applies the core migrations.
 
 **Issue: `get_book_highlights` returns no rows after importing highlights**
 Solution: The function filters on `source_type = 'readwise'` (a column added by the [enhanced-thoughts](../enhanced-thoughts/) schema). If you skipped that schema, your highlights will be in `thoughts` but without the top-level `source_type` column set. Either install `enhanced-thoughts` and run its backfill, or modify your import to set `source_type` explicitly.

@@ -96,7 +96,7 @@ This server depends on these database functions:
 
 | RPC | Source | Purpose |
 |-----|--------|---------|
-| `upsert_thought(text, jsonb)` | Core OB1 schema (Step 2.6) | Creates or updates a thought with content and payload |
+| `upsert_thought(text, jsonb)` | Core OB1 schema (`db/migrations/003`, `004`) | Creates or updates a thought with content and payload |
 | `match_thoughts(vector, float, int)` | Core OB1 schema | Semantic similarity search for deduplication |
 | `append_thought_evidence(bigint, jsonb)` | `schemas/smart-ingest-tables` | Appends corroborating evidence to an existing thought's metadata |
 

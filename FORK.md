@@ -7,7 +7,7 @@ rebase.
 
 **What this fork is for:** running Open Brain without Supabase. Upstream assumes a
 supabase.com project — hosted Postgres, an Edge Function, SQL pasted into a
-dashboard, `supabase secrets set`. This fork runs the same six MCP tools and the
+dashboard, `supabase secrets set`. This fork runs the same MCP tools and the
 same schema on infrastructure you control.
 
 There is **no Supabase project to migrate from** here; this was built as a

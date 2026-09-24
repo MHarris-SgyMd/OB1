@@ -77,7 +77,7 @@ this machine, such as Claude Code at user scope
 (`claude mcp add --transport http --scope user open-brain http://127.0.0.1:8000/
 --header "x-brain-key: <key>"`). A claude.ai or Claude Desktop custom connector
 connects from Anthropic's side, not from your machine, so it needs a TLS proxy
-or a tunnel in front; one on this host (caddy, cloudflared, `tailscale serve`)
+or a tunnel in front; one on this host (caddy, cloudflared, `tailscale funnel`)
 dials `127.0.0.1:8000` itself and the loopback default serves it — `SERVER_BIND`
 changes only when the proxy is on another machine, as the next section says.
 `127.0.0.1`, not `localhost`: the mapping binds the IPv4 loopback only, and a

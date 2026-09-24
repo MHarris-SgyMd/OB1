@@ -27,7 +27,7 @@ Replace `extension-name` below with the extension's directory name.
 
 ## Step 1: Apply the Extension's Schema
 
-Run the extension's `schema.sql` against your Open Brain database, as the extension's README Step 1 says — `psql "$DATABASE_URL" -f extensions/extension-name/schema.sql`, with the two `auth.*` stub functions first when the schema's policies call `auth.uid()` (the README says when). The core server's tables are already there from the migrations; this adds the extension's. With the compose stack, the database reaches the host only when the stack came up with `-f deploy/compose.host-ports.yaml` (`deploy/README.md`, "What is reachable from where"), and `DATABASE_URL` is then `postgres://postgres:<POSTGRES_PASSWORD>@127.0.0.1:5432/openbrain` — the same URL Step 4's `SUPABASE_URL` takes.
+Run the extension's `schema.sql` against your Open Brain database, as the extension's README Step 1 says — `psql "$DATABASE_URL" -f extensions/extension-name/schema.sql`, with the two `auth.*` stub functions first when the schema's policies call `auth.uid()` (the README says when). The core server's tables are already there from the migrations; this adds the extension's. With the compose stack, run it inside the database's container — `podman compose -f deploy/compose.yaml exec -T postgres psql -U postgres openbrain < extensions/extension-name/schema.sql` — which needs neither a published port nor psql on the host. The server in Step 4 does need to reach the database from the host, so the stack must have come up with `-f deploy/compose.host-ports.yaml` (`deploy/README.md`, "What is reachable from where"); `SUPABASE_URL` is then `postgres://postgres:<POSTGRES_PASSWORD>@127.0.0.1:5432/openbrain`.
 
 ## Step 2: Install the Pinned Packages
 
@@ -101,7 +101,7 @@ Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its
 
 A client on this machine is done: give it the `http://127.0.0.1:8787/mcp` URL. A hosted connector — Claude Desktop's custom connector, claude.ai, ChatGPT — connects from the vendor's side and needs an HTTPS URL that reaches your port. The same answers serve the core server ([`SETUP.md`](../../SETUP.md), "Connect a client"):
 
-- **A TLS proxy or tunnel on this host** — caddy, cloudflared, `tailscale serve` — dials `127.0.0.1:8787` itself; the server keeps listening on the loopback. One proxy fronts every port you run: the core server on 8000, each extension on its own.
+- **A TLS proxy or tunnel on this host** — caddy, cloudflared, `tailscale funnel` — dials `127.0.0.1:8787` itself; the server keeps listening on the loopback. One proxy fronts every port you run: the core server on 8000, each extension on its own.
 - **Any host that runs Bun and reaches Postgres** — a VPS, a container built from a Bun image with this checkout in it — runs the same command; put its TLS terminator in front. `server-portable/Dockerfile` is the core server's image and the shape to copy.
 
 Save the HTTPS form of the Connection URL, then follow the [Remote MCP Connection](../remote-mcp/) guide to connect it to your AI client. Keep the process up the way you keep any service up — a systemd unit, a compose service, a process manager; `bun` restarts in a second and the URL and key stay.

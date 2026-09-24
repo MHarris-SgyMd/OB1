@@ -176,7 +176,7 @@ The pack record carries `sensitivity: <tier>` and `sensitiveReasons: [...]`. **T
 - **Tag-and-store.** Everything lands in one store but `sensitivity` is indexed so queries can filter.
 
 > [!CAUTION]
-> On this fork the default deployment keeps every thought on your box (local models, the egress gate's `deny` default — `SETUP.md`, "What may leave the box"), but this recipe embeds through OpenRouter: "restricted stays local" is not automatic here — you have to wire it up. If you intend to treat restricted content as off-cloud, write the policy into your ingest pipeline before you run this recipe on a large mailbox.
+> On this fork the default deployment keeps every thought on your box (local models, the egress gate's `deny` default — `SETUP.md`, "What may leave the box"), but this recipe's atomizer sends every long email to Anthropic or OpenRouter (`--atomize-provider`), and the pack is embedded wherever your ingest pipeline runs — so "restricted stays local" is not automatic here; you have to wire it up. If you intend to treat restricted content as off-cloud, write the policy into your ingest pipeline before you run this recipe on a large mailbox.
 
 The patterns are intentionally conservative. If you find false positives (e.g., a specific API-key pattern matches your own account IDs), fork `sensitivity.mjs` and tune the two arrays to taste.
 
