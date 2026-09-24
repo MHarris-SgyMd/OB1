@@ -18,12 +18,9 @@
 // the duplicate-resolve merge's) and the merge's raw metadata write on the
 // survivor still leave rows naming nobody — SMD-1793.
 // ob1-fork (SMD-2054): POST /search drops the restricted tier by the
-// sensitivity_tier COLUMN and applies the date bounds as instants, in both
-// modes — the note above columnsOf(). Semantic mode compared a column
-// match_thoughts never returns and leaked restricted rows; text mode sent
-// `exclude_restricted: true` as a metadata containment and answered nothing.
-// GET /recent, the one route reading thoughts with no tier predicate, takes
-// exclude_restricted (default true) as its siblings do (review pass 1).
+// sensitivity_tier COLUMN and reads its date bounds as instants, in both
+// modes, and GET /recent takes the tier filter its siblings had — the note
+// above columnsOf() says what leaked, what answered nothing, and why.
 /**
  * rest-api — REST API gateway for Open Brain.
  *

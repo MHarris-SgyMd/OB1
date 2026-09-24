@@ -347,6 +347,7 @@ async function clocksOf(id: string): Promise<{ day: string; next: string; later:
     to_char((created_at + interval '1 day') AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS next,
     to_char((created_at + interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') || '+02:00' AS later,
     to_char((created_at - interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') AS earlier FROM thoughts WHERE id = ${id}`;
+  if (!row) throw new Error(`clocksOf: no thought ${id}`);
   return row;
 }
 /** Two chunk rows of the previous vector — 022's stale set, if an edit leaves them. */
