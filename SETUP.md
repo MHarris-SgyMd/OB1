@@ -500,7 +500,6 @@ no backups, no resource limits. For something durable:
 | --- | --- |
 | **Container + managed Postgres** | RDS, Aurora, Neon, Cloud SQL, or Timescale with pgvector 0.8.0 or later; the server as a container. `DATABASE_URL` — the SQL store, the default (FORK.md change 97). The simplest data path. If the provider installs pgvector into a schema off the connection's `search_path` (Supabase uses `extensions`), the migrator heals its own session and preflight fails with the exact `ALTER ROLE … SET search_path` to run for the server — see `FORK.md` change 43. |
 | **Cloudflare Workers** | `server-portable` builds for Workers (`server-portable/README.md` has the bundle size). Workers cannot pool Postgres connections, so `wrangler.toml` selects the PostgREST store there (`OB1_STORE=postgrest`, the one target that still needs a PostgREST endpoint); a Workers-capable Postgres driver is SMD-1847's measurement. |
-| **Self-hosted Supabase** | If you want the Supabase stack without supabase.com. Zero code change — see `recipes/local-brain-no-mcp`. |
 
 ## Two things this does not fix
 

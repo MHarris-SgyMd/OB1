@@ -175,7 +175,6 @@ const SERVERS: Server[] = [
   ext("meal-planning/shared-server.ts", ["view_meal_plan", "view_recipes", "view_shopping_list"], ["mark_item_purchased"],
     { keys: "MCP_HOUSEHOLD_ACCESS_KEYS", legacy: "MCP_HOUSEHOLD_ACCESS_KEY" }),
   // The recipes and integrations (change 67).
-  vendored("recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", "mcp", ["list_vendors"], []),
   vendored("recipes/ob-graph/index.ts", "mcp", ["search_nodes", "get_neighbors", "traverse_graph", "find_path", "list_edge_types"],
     ["create_node", "create_edge", "update_node", "delete_node", "delete_edge"], { health: "/health" }),
   vendored("recipes/work-operating-model-activation/index.ts", "mcp", ["query_operating_model"],
@@ -206,7 +205,7 @@ const WEBHOOK = { file: "integrations/readwise-capture/index.ts", secretEnv: "RE
 // function directory. The list here, the tree, and package.json's sync-auth
 // (the one command that rewrites them all) must agree.
 const COPIES = ["extensions/_shared/auth.ts", "recipes/_shared/auth.ts", "recipes/editorial-policy/_shared/auth.ts",
-  "recipes/edge-function-cost-optimization/examples/_shared/auth.ts", "integrations/_shared/auth.ts", "integrations/consolidation-workers/_shared/auth.ts"];
+  "integrations/_shared/auth.ts", "integrations/consolidation-workers/_shared/auth.ts"];
 const CORE = readFileSync(join(ROOT, "server-portable", "auth.ts"), "utf8");
 for (const copy of COPIES) {
   assert(existsSync(join(ROOT, copy)) && readFileSync(join(ROOT, copy), "utf8") === CORE,
@@ -855,22 +854,12 @@ for (const s of SERVERS) {
   assert(!ACCEPT_PATCH.test(text), `${file}: the Accept patch is gone (change 84)`);
 }
 
-// The files this test cannot import — a sample whose tool modules are not in
-// the repository, a Next.js route, a README's code block, a Node stub — say the
-// same thing in their text.
+// The files this test cannot import — a Next.js route, a README's code block, a
+// Node stub — say the same thing in their text. (The cost recipe's per-session
+// sample, read here for SMD-1497's and SMD-1607's shapes, left with the recipe —
+// SMD-1800.)
 console.log("\n[the files this test reads but cannot run]");
 const TEXT_ONLY: { file: string; must: RegExp[]; mustNot: RegExp[] }[] = [
-  // The after sample binds one server AND one transport per session (SMD-1497): a server shared between
-  // sessions and connect()ed once per session hands its transport to the newest session and hangs the rest.
-  // The sweep closes the transport of each session it drops (SMD-1607), which tells the server too.
-  { file: "recipes/edge-function-cost-optimization/examples/after/index.ts",
-    must: [/from "\.\.\/_shared\/auth\.ts"/, /authenticateRequest\(c\.req\.raw,/, /const server = buildServer\(principal\);[^\n]*\n\s*await server\.connect\(transport\);\n\s*session = \{ server, transport,/, /session\.scope !== principal\.scope/,
-      /sessions\.delete\(id\);\n(?:\s*\/\/[^\n]*\n)*\s*s\.transport\.close\(\)\.catch\(/],
-    mustNot: [/[!=]== ?MCP_ACCESS_KEY\b/, /c\.req\.header\("x-access-key"\)/, /serverFor\(/, /Map<[^>\n]*McpServer/, ACCEPT_PATCH] },
-  { file: "recipes/edge-function-cost-optimization/examples/after/server.ts",
-    must: [/from "\.\.\/_shared\/auth\.ts"/, /export function buildServer\(principal: Principal\): McpServer/, /register\w+\(server, principal\)/],
-    // No module-level declaration naming McpServer: a cache under any name, in any container, is a server shared across sessions.
-    mustNot: [/export const server\b/, /new Map</, /serverFor/, /^(?:export )?(?:const|let|var) [^\n]*\bMcpServer\b/m] },
   { file: "recipes/vercel-neon-telegram/src/app/api/telegram/route.ts",
     must: [/import \{ secretMatches \} from "@\/lib\/auth"/, /secretMatches\(req\.headers\.get\("x-telegram-bot-api-secret-token"\), expectedSecret\)/],
     mustNot: [/secret !== expectedSecret/] },

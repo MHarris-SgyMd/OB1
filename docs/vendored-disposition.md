@@ -72,7 +72,8 @@ exactly one disposition.
   `schemas/smart-ingest` → SMD-1253.
 - **SMD-1798 portability (runtime supabase-js), kept:** `agent-memory-api`, `enhanced-mcp`,
   `open-brain-rest`, `rest-api`, `ob-graph`, `repo-learning-coach`, `schema-aware-routing`,
-  `work-operating-model-activation`, `x-twitter-import`, `local-brain-no-mcp`.
+  `work-operating-model-activation`, `x-twitter-import` (`local-brain-no-mcp`, also listed
+  here, was retired by SMD-1800 instead).
 - **adjacent follow-up filed:** SMD-1929 (purge inherited NBJ brand/funnel assets under
   `dashboards/` + `docs/`, outside this triage's four directories).
 
@@ -198,7 +199,7 @@ remaining drafts are unreferenced markdown working-notes.
 | `claudeception` | keep + audited | Skills-that-create-skills continuous-learning recipe; searches/captures via the core MCP path. |
 | `content-fingerprint-dedup` | keep + audited | The `upsert_thought` redefinition is a **README code example**, annotated "do not paste — migration 003/005 own it (SMD-1250)"; guard check 7 allowlists it (lines 646/1406). It is the fork's canonical dedup-convention doc, cited by `email-history-import` / `edge-function-cost-optimization` / `gmail-smart-pull` / `lint-sweep`. *(Minor: some cross-refs point at `primitives/content-fingerprint-dedup` / an upstream GitHub URL — stale paths to fix; overlaps SMD-1929.)* |
 | `daily-digest` | keep + audited | Gmail-draft daily summary via Claude Code scheduled tasks + core MCP; zero infra. |
-| `edge-function-cost-optimization` | keep + audited | MCP-consolidation/caching optimization recipe; its `examples/_shared/auth.ts` is on the `sync-auth` list. |
+| `edge-function-cost-optimization` | ~~keep + audited~~ → **retired (SMD-1800)** | Was an MCP-consolidation/caching recipe about Supabase Edge Function invocation billing; its measurements were that meter's, which this fork's containers have no analogue of, and its per-session sample's shape (changes 78, 83) lives in those changes' records. Its `examples/_shared/auth.ts` left the `sync-auth` list. |
 | `editorial-policy` | keep + audited | 40-rule synthesis constitution + weekly drift auditor; `auditor/index.ts` is CI-driven (`test-writes.ts` DRIVEN_1524, SMD-1524). No core clobber. |
 | `email-history-import` | keep + audited *(drop one sub-file)* → SMD-1867 candidate | Gmail-history import (an SMD-1867 candidate). **Sub-file removal:** `rollback-chunking-columns.sql` undoes the abandoned upstream PR #27 column-chunking (`parent_id`/`chunk_index`/`full_text` + `insert_thought` RPC) the fork never adopted (it uses `thought_chunks` / migration 007) — a no-op on the fork, dead upstream cruft. It is also an **unguarded `DROP COLUMN` on core `thoughts`** (guard check 5 only guards `ADD COLUMN`) → also a guard-rule candidate for the SMD-1924 verify step. |
 | `entity-wiki` | keep + audited | Per-entity markdown wiki generator; reads the kept `entity-extraction` tables + worker. |
@@ -213,7 +214,7 @@ remaining drafts are unreferenced markdown working-notes.
 | `life-engine-video` | keep + audited | Remotion + ElevenLabs video-briefing add-on for `life-engine`. |
 | `lint-sweep` | keep + audited | Read-only three-tier quality audit (`views.sql` + `lint-sweep.js`); never mutates thoughts. |
 | `live-retrieval` | keep + audited | Read-side "flywheel" workflow that surfaces thoughts on topic shifts. |
-| `local-brain-no-mcp` | keep + audited *(own-database)* + SMD-1798 | Self-hosted LAN Supabase stack; its `match_thoughts`/`upsert_thought` live in its **own container init scripts** (guard check 7 excepts them; owned-set lines 657/1412) — OWN_DATABASE like `kubernetes-deployment`, not a clobber. Its Edge Functions use supabase-js → SMD-1798. |
+| `local-brain-no-mcp` | ~~keep + audited *(own-database)*~~ → **retired (SMD-1800)** | Was a self-hosted LAN Supabase stack with three Edge Functions for curl-only capture/search/list where MCP is blocked. The fork's stack (`SETUP.md`) already runs without a cloud, and `integrations/open-brain-rest` is the HTTP surface without MCP; the companion `skills/ob1-local-http` now calls it. Its check 7/10/11/22 exceptions went with it. |
 | `local-ollama-embeddings` | keep + audited | The `ALTER COLUMN embedding TYPE` is a README example explicitly annotated "not altered by hand on this fork — build at `db/config.mjs`'s width; `upsert_thought` refuses another width." CI-driven (`test-writes.ts:707`, SMD-1524). |
 | `ob-graph` | keep + audited + SMD-1798 | Knowledge-graph layer (own nodes/edges tables + recursive-CTE traversal + MCP server); no core clobber. `index.ts` uses supabase-js at runtime → SMD-1798 portability. |
 | `obsidian-vault-import` | keep + audited → SMD-1867 candidate | Obsidian-vault import. SMD-1867 candidate. |
