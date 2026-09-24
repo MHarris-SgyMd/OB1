@@ -100,8 +100,10 @@
  *      group, a decimal, a date or a number before a unit word excluded, and a
  *      slugged path (or a relative link inside the record) naming the file as
  *      it is. A changes/smd-NNNN.md fragment (16) is held to the name and the
- *      cap here, and listed in the index by ticket until the release step
- *      numbers it (SMD-1917)
+ *      cap here, and is not in the index: the block renders from the numbered
+ *      files alone, so a PR that adds a fragment leaves FORK.md untouched and
+ *      the block moves only when the release step numbers the fragments
+ *      (SMD-1917, SMD-2084)
  *  16. every changes/smd-NNNN.md fragment is well-formed — one of Keep a
  *      Changelog's six types, a bump the migrations it lists allow (a `patch`
  *      that ships a migration fails), an SMD-#### ticket list; exactly one
@@ -3362,7 +3364,10 @@ const LAYOUT_PROBES: [string, () => LayoutArgs, string[]][] = [
   ["a numbered file below 18", () => { const en = LAYOUT_ENTRIES(CH(18), ["005-below.md", "# 5. Below (SMD-1)\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["below-first"]],
   ["a dotfile the OS left", () => { const en = LAYOUT_ENTRIES(CH(18), [".DS_Store", "x"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, []],
   ["two fragments for one ticket", () => { const en = LAYOUT_ENTRIES(CH(18), ["smd-9.md", "---\n"], ["smd-09.md", "---\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["duplicate-fragment"]],
-  ["a stale index", () => { const en = LAYOUT_ENTRIES(CH(18), CH(19)); return { entries: en, forkText: FORK_FOR(en.slice(0, 1)), ceilings: {} }; }, ["index-stale"]],
+  ["a stale index (a numbered file added, FORK.md untouched)", () => { const en = LAYOUT_ENTRIES(CH(18), CH(19)); return { entries: en, forkText: FORK_FOR(en.slice(0, 1)), ceilings: {} }; }, ["index-stale"]],
+  // A PR adds a fragment and nothing else; FORK.md is as main left it (SMD-2084).
+  ["a fragment added, FORK.md untouched", () => { const en = LAYOUT_ENTRIES(CH(18), ["smd-9.md", "---\n"]); return { entries: en, forkText: FORK_FOR(en.slice(0, 1)), ceilings: {} }; }, []],
+  ["a fragment gone, FORK.md untouched", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR([...en, { name: "smd-9.md", text: "---\n" }]), ceilings: {} }; }, []],
   ["a citation above the highest", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 19 }] }; }, ["dangling"]],
   ["a citation of change 0", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 0 }] }; }, ["dangling"]],
   ["a citation of a gapped number", () => { const en = LAYOUT_ENTRIES(CH(18), CH(20)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 19 }] }; }, ["gap", "dangling"]],
