@@ -16,7 +16,9 @@
  */
 
 import { SQL } from "bun";
-import { createAssert, plantLegacyRow, resetSchema } from "../db/test-support.ts";
+import { createAssert, plantLegacyRow, resetSchema, runScript } from "../db/test-support.ts";
+import { readdirSync } from "node:fs";
+import { FORK_VERSION } from "../db/version.mjs";
 import { join, dirname } from "node:path";
 import { TOOL_NAMES } from "./tools.ts";
 import { hashKey } from "./auth.ts";
@@ -946,6 +948,263 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   // The writer sees the hook's summary where a session would look for it.
   const found = await call("search_thoughts", { query: "eta", limit: 10, threshold: 0.1 });
   assert(found.includes(id!), "the summary the hook captured is retrievable by the writer key");
+  await sql.close();
+}
+
+console.log("\n[14] brain_info and the keyed /health body read the live database: versions, the ledger against the tree, counts, size, HNSW (SMD-2041)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  const here = dirname(fileURLToPath(import.meta.url));
+  const treeLast = Math.max(...readdirSync(join(here, "..", "db", "migrations")).filter((n) => /^\d{3}_.*\.sql$/.test(n)).map((n) => Number(n.slice(0, 3))));
+  const health = async (key: string | null) => {
+    const r = await fetch(`${BASE}/health`, { headers: key ? { "x-brain-key": key } : {} });
+    const body = await r.text();
+    try { return JSON.parse(body) as Record<string, any>; } catch { return body; }
+  };
+
+  // resetSchema applies the files with no ledger: the record says so rather
+  // than inventing a number, and does not judge the brain against the tree.
+  // Another tool's schema_migrations (Supabase's supabase_migrations, Rails,
+  // dbmate) is not the fork's ledger: no sha256 column, so the brain still has
+  // none — not one it cannot resolve (review pass 3).
+  await sql.unsafe(`CREATE SCHEMA e2e_other_tool`);
+  await sql.unsafe(`CREATE TABLE e2e_other_tool.schema_migrations (version text PRIMARY KEY)`);
+  const bare = await health("e2e-key") as Record<string, any>;
+  await sql.unsafe(`DROP TABLE e2e_other_tool.schema_migrations`);
+  await sql.unsafe(`DROP SCHEMA e2e_other_tool`);
+  assert(bare.database?.ledger?.present === false && bare.database?.highestMigration === null && bare.ledgerStatus === null,
+    `a brain with no schema_migrations of its own — another tool's in another schema — reports no ledger and no judgement (${JSON.stringify(bare.database?.ledger)}, ${bare.ledgerStatus})`);
+
+  // Adopted the way an operator adopts a hand-built schema: the ledger now
+  // records every file, so its highest is the tree's last — a fresh brain is current.
+  const adopt = await runScript(["bun", join(here, "..", "db", "migrate.ts"), "--url", URL_, "--baseline"], { cwd: join(here, "..", "db") });
+  assert(adopt.code === 0, `migrate.ts --baseline adopts the schema (${adopt.out.trim().split("\n").slice(-1)[0]})`);
+  const info = await health("e2e-key") as Record<string, any>;
+  const db = info.database ?? {};
+  const [truth] = await sql`
+    SELECT current_setting('server_version') AS pg,
+           (SELECT extversion FROM pg_extension WHERE extname = 'vector') AS vec,
+           (SELECT count(*)::int FROM thoughts) AS thoughts,
+           (SELECT count(*)::int FROM thought_audit) AS audit,
+           (SELECT count(*)::int FROM thought_chunks) AS chunks,
+           (SELECT count(*)::int FROM ob1_entities) AS entities,
+           (SELECT value FROM ob1_config WHERE key = 'schema_version') AS schema_version`;
+  assert(db.highestMigration === treeLast && info.latestMigration === treeLast && info.ledgerStatus === "current",
+    `the ledger's highest is the tree's last file, ${treeLast}, and the brain is current (${db.highestMigration}, ${info.latestMigration}, ${info.ledgerStatus})`);
+  assert(db.postgres === truth.pg && db.pgvector?.version === truth.vec && db.pgvector?.schema === "public",
+    `Postgres and pgvector versions are the catalog's (${db.postgres}, ${db.pgvector?.version} in ${db.pgvector?.schema})`);
+  assert(db.schemaVersion === truth.schema_version && db.schemaVersion === FORK_VERSION, `the schema version is ob1_config's, which is FORK_VERSION (${db.schemaVersion})`);
+  assert(db.counts?.thoughts === truth.thoughts && db.counts?.thought_audit === truth.audit && db.counts?.thought_chunks === truth.chunks && db.counts?.ob1_entities === truth.entities && truth.thoughts > 0 && truth.audit > truth.thoughts,
+    `the counts are the tables' (${JSON.stringify(db.counts)})`);
+  assert(typeof db.databaseBytes === "number" && db.databaseBytes > 1_000_000, `the database size is a byte count (${db.databaseBytes})`);
+  const hnsw = (db.hnsw ?? []) as { index: string; table: string; m: number; efConstruction: number }[];
+  assert(hnsw.some((h) => h.table === "thoughts") && hnsw.some((h) => h.table === "thought_chunks") && hnsw.every((h) => h.m === 16 && h.efConstruction === 64),
+    `every HNSW index on the path is listed with pgvector's default build parameters (${hnsw.map((h) => `${h.index}:${h.m}/${h.efConstruction}`).join(", ")})`);
+  assert(Object.keys(db.unread ?? {}).length === 0, `every read answered (${JSON.stringify(db.unread)})`);
+  assert(info.tier === "canary" && info.store === "sql" && info.embedding?.model === EMBEDDING_MODEL && info.embedding?.dim === EMBEDDING_DIM && db.embedding?.dim === EMBEDDING_DIM,
+    `the tier, the store and the embedding contract, the server's and the brain's (${info.tier}, ${info.store}, ${info.embedding?.model} @ ${info.embedding?.dim})`);
+
+  // The tool renders the same read.
+  const text = await call("brain_info");
+  assert(new RegExp(`^Migrations: +${String(treeLast).padStart(3, "0")} applied — this server's tree ends at ${String(treeLast).padStart(3, "0")} \\(current: the ledger's highest is the tree's last\\)$`, "m").test(text),
+    `the tool's Migrations row says the brain is current (${text.split("\n").find((l) => l.startsWith("Migrations"))})`);
+  assert(new RegExp(`^Rows: +${truth.thoughts} thoughts · ${truth.audit} audit`, "m").test(text) && /^Postgres: +\S.* · pgvector \d/m.test(text), "…and its Rows and Postgres rows carry the same counts and versions");
+
+  // A ledger short of the tree's last file is behind it, by name.
+  const last = String(treeLast).padStart(3, "0");
+  const [{ name: lastName }] = await sql`SELECT name FROM schema_migrations WHERE name LIKE ${last + "%"}`;
+  await sql`DELETE FROM schema_migrations WHERE name = ${lastName}`;
+  const behind = await health("e2e-key") as Record<string, any>;
+  assert(behind.ledgerStatus === "behind" && behind.database?.highestMigration === treeLast - 1, `a ledger missing ${last} is behind this server's tree (${behind.ledgerStatus}, ${behind.database?.highestMigration})`);
+
+  // Against the live catalog. A role that may read the
+  // corpus and not the ledger, the chunks or the entities: the ledger is
+  // present and unread as a refusal, each refused count is named, the rest
+  // answer — and the read's timeouts stay inside its transaction.
+  const { readDatabaseFacts } = await import("./brain-info.ts");
+  const holdLocks = async (tables: string) => {
+    const locker = new SQL({ url: URL_, max: 1 });
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => { release = r; });
+    let locked: () => void = () => {};
+    const isLocked = new Promise<void>((r) => { locked = r; });
+    const tx = locker.begin(async (t) => {
+      await t.unsafe(`LOCK TABLE ${tables} IN ACCESS EXCLUSIVE MODE`);
+      locked();
+      await held;
+    });
+    await isLocked;
+    return async () => { release(); await tx; await locker.close(); };
+  };
+  const roleUrl = URL_.replace(/\/\/[^@]*@/, "//brain_reader:reader@");
+  /** Await `work`, sampling pg_stat_activity for backends waiting on a lock in a query LIKE `pattern`; the most seen at once rides on the result. */
+  const sampleWhile = async <T extends object>(work: Promise<T>, pattern: string): Promise<T & { maxWaiting: number }> => {
+    let done = false;
+    let maxWaiting = 0;
+    const settled = work.finally(() => { done = true; });
+    while (!done) {
+      const [{ n }] = await sql`
+        SELECT count(*)::int AS n FROM pg_stat_activity
+         WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE ${pattern}`;
+      maxWaiting = Math.max(maxWaiting, n);
+      await Bun.sleep(25);
+    }
+    return Object.assign(await settled, { maxWaiting });
+  };
+  await sql.unsafe(`DROP ROLE IF EXISTS brain_reader`);
+  await sql.unsafe(`CREATE ROLE brain_reader LOGIN PASSWORD 'reader'`);
+  await sql.unsafe(`GRANT USAGE ON SCHEMA public TO brain_reader`);
+  await sql.unsafe(`GRANT SELECT ON thoughts, thought_audit, ob1_config TO brain_reader`);
+  try {
+    const reader = new SQL({ url: roleUrl, max: 1 });
+    try {
+      const f = await readDatabaseFacts(reader);
+      assert(f.ledger.present === true && f.ledger.names === null && f.unread.ledger?.reason === "refused",
+        `a role without SELECT on schema_migrations sees it present and unread as a refusal (${JSON.stringify(f.ledger)}, ${JSON.stringify(f.unread.ledger)})`);
+      assert(f.counts?.thoughts === truth.thoughts && f.counts?.thought_chunks === null && f.unread["counts.thought_chunks"]?.reason === "refused" && f.unread["counts.ob1_entities"]?.reason === "refused",
+        `…the counts it may read answer, the refused ones are named (${JSON.stringify(f.counts)})`);
+      assert(f.schemaVersion === FORK_VERSION && f.pgvector?.version === truth.vec, "…and the config and catalog reads stand");
+      // set_config(…, true): the ceilings end with the read's transaction; the
+      // one pooled connection it used keeps the role's own (no limit here).
+      const [after] = await reader`SELECT current_setting('statement_timeout') AS st, current_setting('lock_timeout') AS lt`;
+      assert(after.st === "0" && after.lt === "0", `the read's timeouts do not outlive its transaction (statement_timeout ${after.st}, lock_timeout ${after.lt})`);
+    } finally {
+      await reader.close();
+    }
+
+    // A role already stricter keeps its own: lock_timeout 100 ms on the role,
+    // under the read's 1 s ceiling, and a held lock on thoughts is given up at
+    // the role's 100 ms, not the read's 1 s.
+    await sql.unsafe(`ALTER ROLE brain_reader SET lock_timeout = '100ms'`);
+    const strict = new SQL({ url: roleUrl, max: 1 });
+    const unlock = await holdLocks("thoughts");
+    try {
+      const t0 = performance.now();
+      const f = await readDatabaseFacts(strict);
+      const took = performance.now() - t0;
+      assert(f.unread["counts.thoughts"]?.reason === "timeout" && took < 600, `a stricter role lock_timeout is kept, not raised to the read's (${Math.round(took)} ms, ${f.unread["counts.thoughts"]?.message})`);
+    } finally {
+      await unlock();
+      await strict.close();
+      await sql.unsafe(`ALTER ROLE brain_reader RESET lock_timeout`);
+    }
+
+    // A role whose search path does not reach public: every table exists and
+    // none resolves. The ledger is present and invisible — never "no table",
+    // the shape preflight answers with --baseline — and nothing is queried.
+    await sql.unsafe(`ALTER ROLE brain_reader SET search_path = nowhere`);
+    const lost = new SQL({ url: roleUrl, max: 1 });
+    try {
+      const f = await readDatabaseFacts(lost);
+      assert(f.ledger.present === true && f.ledger.names === null && f.unread.ledger?.reason === "invisible" && /schema public/.test(f.unread.ledger?.message ?? ""),
+        `a ledger off this role's search path is present and invisible, not absent (${f.unread.ledger?.message})`);
+      assert(f.unread["counts.thoughts"]?.reason === "invisible" && f.unread.ob1_config?.reason === "invisible", "…and so is every table it asks after");
+    } finally {
+      await lost.close();
+    }
+
+    // Another tool's schema_migrations earlier on the role's path shadows the
+    // fork's (review pass 4): what resolves is not the ledger — no sha256 —
+    // so the fork's is invisible, not "read" and failing with 42703.
+    await sql.unsafe(`CREATE SCHEMA e2e_shadow`);
+    await sql.unsafe(`CREATE TABLE e2e_shadow.schema_migrations (version text PRIMARY KEY)`);
+    await sql.unsafe(`GRANT USAGE ON SCHEMA e2e_shadow TO brain_reader`);
+    await sql.unsafe(`GRANT SELECT ON e2e_shadow.schema_migrations TO brain_reader`);
+    await sql.unsafe(`ALTER ROLE brain_reader SET search_path = e2e_shadow, public`);
+    const shadowed = new SQL({ url: roleUrl, max: 1 });
+    try {
+      const f = await readDatabaseFacts(shadowed);
+      assert(f.unread.ledger?.reason === "invisible" && /schema public/.test(f.unread.ledger?.message ?? "") && /reaches e2e_shadow\.schema_migrations first/.test(f.unread.ledger?.message ?? "")
+          && f.highestMigration === null && f.schemaVersion === FORK_VERSION,
+        `a foreign schema_migrations ahead on the path is not the ledger; the fork's is invisible behind it (${JSON.stringify(f.unread.ledger)})`);
+    } finally {
+      await shadowed.close();
+      await sql.unsafe(`DROP TABLE e2e_shadow.schema_migrations`);
+      await sql.unsafe(`REVOKE USAGE ON SCHEMA e2e_shadow FROM brain_reader`);
+      await sql.unsafe(`DROP SCHEMA e2e_shadow`);
+    }
+  } finally {
+    await sql.unsafe(`REVOKE ALL ON thoughts, thought_audit, ob1_config FROM brain_reader`);
+    await sql.unsafe(`REVOKE USAGE ON SCHEMA public FROM brain_reader`);
+    await sql.unsafe(`DROP ROLE brain_reader`);
+  }
+
+  // An index built WITH its own parameters is read as built, not as pgvector's defaults.
+  await sql.unsafe(`CREATE INDEX e2e_hnsw_tuned ON thought_chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 24, ef_construction = 100)`);
+  const tuned = ((await health("e2e-key") as Record<string, any>).database?.hnsw ?? []).find((h: { index: string }) => h.index === "e2e_hnsw_tuned");
+  assert(tuned?.m === 24 && tuned?.efConstruction === 100, `an index built WITH (m = 24, ef_construction = 100) reports 24/100 (${JSON.stringify(tuned)})`);
+  await sql.unsafe(`DROP INDEX e2e_hnsw_tuned`);
+
+  // A migration holding three tables at once (review pass 2: the per-read
+  // budgets then added past the deadline and the whole database half was
+  // lost). Each locked count is a timeout; everything else answers, inside the
+  // deadline. Ten concurrent probes share one read — one backend waits on the
+  // lock, not ten.
+  {
+    const unlock = await holdLocks("thoughts, thought_audit, thought_chunks");
+    try {
+      const t0 = performance.now();
+      const probes = Array.from({ length: 10 }, () => health("e2e-key") as Promise<Record<string, any>>);
+      // Sampled until the probes answer, not once at a guessed moment (review
+      // pass 3: a slow runner could sample before the read reached the lock).
+      const bodies = await sampleWhile(Promise.all(probes), "%count(*)::float8 AS n FROM thought%");
+      const waiting = bodies.maxWaiting;
+      const took = performance.now() - t0;
+      const d = bodies[0].database ?? {};
+      const locked = ["thoughts", "thought_audit", "thought_chunks"].every((t) => d.unread?.[`counts.${t}`]?.reason === "timeout");
+      assert(locked && d.counts?.ob1_entities === truth.entities && d.highestMigration === treeLast - 1 && d.pgvector?.version === truth.vec && took < 2500,
+        `three locked tables are three timed-out counts and the rest answer, in ${Math.round(took)} ms (${JSON.stringify(d.unread)})`);
+      assert(waiting === 1 && bodies.every((b) => JSON.stringify(b) === JSON.stringify(bodies[0])), `ten concurrent probes share one read: at most ${waiting} backend(s) waiting on the lock, one body`);
+
+      // A probe while the tool's read is in flight has a read of its own, at
+      // the health ceilings (review pass 3: keyed by deadline alone, a shared
+      // entry would hand it the tool's 15 s deadline and 1 s lock waits).
+      const tool = call("brain_info");
+      await Bun.sleep(100);
+      const p0 = performance.now();
+      const probe = await health("e2e-key") as Record<string, any>;
+      const probeTook = performance.now() - p0;
+      const toolText = await tool;
+      assert(probe.database?.unread?.["counts.thought_audit"]?.reason === "timeout" && probeTook < 1800 && /^Rows: +\? thoughts · \? audit events · \? chunks/m.test(toolText),
+        `a probe during the tool's read answers from its own, at the health ceilings (${Math.round(probeTook)} ms)`);
+    } finally {
+      await unlock();
+    }
+  }
+
+  await sql`DELETE FROM schema_migrations`;
+
+  // Keyless stays the literal against a live database too, and a key revoked in
+  // the registry is shown nothing here, as at the MCP route.
+  assert(await health(null) === "ok", "no key → `ok`, with a live database behind it");
+  await call("thought_stats", {}, "bot-raw"); // registers bot-key in the registry, as any first request does
+  await sql`SELECT revoke_agent_key(${hashKey("bot-raw")}, 'SMD-2041 e2e')`;
+  assert(await health("bot-raw") === "ok", "a revoked write key → `ok`, not the record");
+  // A registry that cannot answer by the deadline (its tables locked) could
+  // still say revoked: the revoked key, and a good one, get `ok` (review pass
+  // 2: the revoked key read the whole record).
+  {
+    const unlock = await holdLocks("ob1_agents, ob1_agent_keys");
+    try {
+      const t0 = performance.now();
+      const revoked = await health("bot-raw");
+      const good = await health("op-raw");
+      const took = performance.now() - t0;
+      assert(revoked === "ok" && good === "ok" && took < 6000, `with the registry unanswering, every key gets \`ok\` at the deadline (${Math.round(took)} ms for two)`);
+      // …and a burst of probes with one key holds one registry connection, not
+      // one each (review pass 3: ten probes emptied the pool while /health said ok).
+      // The two probes above each left one resolve waiting (one per key); ten
+      // more of op-raw's share its one, so the count does not move.
+      const [{ n: before }] = await sql`
+        SELECT count(*)::int AS n FROM pg_stat_activity
+         WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE '%resolve_agent%'`;
+      const burst = await sampleWhile(Promise.all(Array.from({ length: 10 }, () => health("op-raw"))), "%resolve_agent%");
+      assert(burst.every((b) => b === "ok") && before === 2 && burst.maxWaiting === before,
+        `ten probes of one key during a registry lock share its one waiting resolve (${before} waiting before, at most ${burst.maxWaiting} during)`);
+    } finally {
+      await unlock();
+    }
+  }
   await sql.close();
 }
 

@@ -252,6 +252,29 @@ console.log("\n[8] Scope applies through the ?key= URL form too");
   assert(capture.join() === "capture_thought", "a capture key in the URL sees capture_thought alone");
 }
 
+console.log("\n[8b] GET /health says what the brain is to a key that may read it, and `ok` to any other (SMD-2041)");
+{
+  // The record is the brain_info tool's, so it goes where that tool goes: a
+  // read or a write key. A capture-only key cannot see brain_info and gets the
+  // literal, as a missing or wrong key does. The store here is refused at once
+  // (the port nothing listens on), so the JSON carries database.error — the
+  // body's shape is test-server's; this is who gets it.
+  const health = async (key: string | null, via: "header" | "query" = "header") => {
+    const r = await fetch(via === "query" && key ? `${BASE}/health?key=${key}` : `${BASE}/health`, { headers: via === "header" && key ? { "x-brain-key": key } : {} });
+    return { status: r.status, body: await r.text() };
+  };
+  for (const [label, key, via] of [["read", READ_KEY, "header"], ["write", WRITE_KEY, "header"], ["read, in the URL", READ_KEY, "query"]] as const) {
+    const r = await health(key, via);
+    let version: unknown;
+    try { version = JSON.parse(r.body).version; } catch { /* not JSON */ }
+    assert(r.status === 200 && typeof version === "string", `a ${label} key gets the record as JSON (${r.body.slice(0, 50)})`);
+  }
+  for (const [label, key, via] of [["capture", CAPTURE_KEY, "header"], ["capture, in the URL", CAPTURE_KEY, "query"], ["wrong", "not-a-key", "header"], ["missing", null, "header"]] as const) {
+    const r = await health(key, via);
+    assert(r.status === 200 && r.body === "ok", `a ${label} key gets \`ok\` and nothing else (${JSON.stringify(r.body.slice(0, 40))})`);
+  }
+}
+
 console.log("\n[9] Rejection still uses the JSON-RPC envelope");
 {
   const r = await fetch(BASE, {

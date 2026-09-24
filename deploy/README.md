@@ -211,6 +211,36 @@ POSTs to the endpoint instead, which also proves the MCP path serves; either is
 fine. Opening the connector URL in a browser shows `Method Not Allowed`, which is
 expected.
 
+With a read or write key, the same `GET <base>/health` answers what the brain is,
+as JSON — version, commit, store, tier, the Postgres and pgvector versions, the
+ledger's highest migration against the server's own, counts, size and HNSW
+parameters (the `brain_info` tool's record; `server-portable/README.md` has the
+fields). A probe with no key still gets `ok`. `smoke.sh` prints the version, the
+commit and the highest migration from it, and asserts the version is the
+checkout's:
+
+```bash
+curl -s -H "x-brain-key: $KEY" http://127.0.0.1:8010/health | jq '{version, commit, ledgerStatus, highest: .database.highestMigration}'
+```
+
+**The commit is a build argument.** `server-portable/Dockerfile` bakes
+`OB1_GIT_SHA` into the image, and compose passes the variable of the same name to
+every server build (the three tier servers too). Set it from the shell, on the
+command that builds — not in `deploy/.env`, where a value written once is baked
+into every later build — with `--dirty`, so an image built from uncommitted
+changes says so. Compose never forwards it at runtime; a runtime variable of that
+name set some other way (`docker run -e`, a Kubernetes `env:` entry) overrides the
+baked one, so set none. Unset at build, the image reports `unknown`; a Worker
+always does (wrangler has no build arg). Rebuild with it:
+
+```bash
+OB1_GIT_SHA=$(git describe --always --dirty --abbrev=8) docker compose up -d --build server
+```
+
+The release images carry the tagged commit — the cut's merge commit, in full
+(`.github/workflows/release.yml`) — which is not `releases.json`'s `server` field
+(the cut's first commit; the server tree is the same).
+
 ## Why the server runs preflight before serving
 
 The data layer is built lazily on first use. Without a gate, a server with a wrong
