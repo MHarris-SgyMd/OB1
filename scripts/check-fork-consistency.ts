@@ -1594,7 +1594,7 @@ const THOUGHT_WRITE_EXCEPTIONS = new Map([
   // The recipe's own container: its upsert_thought body, the guide's shape — the INSERT is the function's own.
   ["recipes/local-brain-no-mcp/volumes/db/init/02-match-thoughts-fn.sh", { why: "the INSERT inside the recipe's own upsert_thought, in its own container's init (check 7 excepts the same definition); the README says what its rows lack", lines: 1 }],
   // The fixtures: a row as an older write left it — fingerprint and label by hand — for the writer under test to move, and a restricted twin for the search tools to hide.
-  ["extensions/test-writes.ts", { why: "plants a thought as an older write left it, fingerprint and label supplied by hand, for the writer under test to move whole; and a restricted twin at a captured thought's vector, the row the three search tools must not show (SMD-1986)", lines: 2 }],
+  ["extensions/test-writes.ts", { why: "plants a thought as an older write left it, fingerprint and label supplied by hand, for the writer under test to move whole; and a restricted twin at a captured thought's vector (plantRestricted, once for both servers), the row no search may show — enhanced-mcp's three tools (SMD-1986), rest-api's POST /search (SMD-2054)", lines: 2 }],
 ]);
 
 function checkThoughtWritesAround() {

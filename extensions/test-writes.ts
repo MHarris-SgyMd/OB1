@@ -77,6 +77,14 @@
  * CI runs this file under TZ=America/Chicago so the zone-less bound's arm
  * distinguishes UTC from the process's zone.
  *
+ * SMD-2054 drives rest-api's POST /search the same way, the leak SMD-1986's
+ * review found: semantic mode filtered the rows on a `sensitivity_tier`
+ * match_thoughts never returns — undefined !== "restricted" — and answered a
+ * restricted thought's full content; text mode sent `exclude_restricted: true`
+ * inside p_filter and answered an empty page, reading no date bound at all. A
+ * restricted twin at that block's capture holds both modes, the open switch,
+ * the bounds as instants, the refusals as 400s and the emptied first page.
+ *
  * The files are imported as modules — each exports Bun's entry shape, and its
  * default export's `fetch` is the handler driven here (SMD-1799) — under the
  * loader extensions/test-auth.ts uses for Deno's specifiers; every server
@@ -260,14 +268,20 @@ async function load(rel: string): Promise<Handler> {
 
 const HEADERS = { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": KEY };
 type Reply = { status: number; json: any; text: string };
+// The writers log what they refuse, and the status is the assertion, so a request runs with console.error and
+// console.warn silenced. Counted, not saved-and-restored per call: two requests in flight at once (a Promise.all of
+// sends, SMD-2054) each saved what they found, and the second saved the first's silence and restored THAT — every
+// later failure of the suite, which assert() prints through console.error, vanished from the log while the tally
+// counted it. The console is restored when the last request in flight returns.
+const CONSOLE = { error: console.error, warn: console.warn };
+let inFlight = 0;
 async function send(handler: Handler, method: string, path: string, body?: unknown, key = KEY): Promise<Reply> {
-  const console_ = { error: console.error, warn: console.warn };
-  console.error = () => {}; console.warn = () => {}; // a writer logs what it refuses; the status is the assertion
+  if (inFlight++ === 0) { console.error = () => {}; console.warn = () => {}; }
   let r: Response;
   try {
     r = await handler(new Request("http://writer.test" + path, { method, headers: { ...HEADERS, "x-brain-key": key }, body: body === undefined ? undefined : JSON.stringify(body) }));
   } finally {
-    Object.assign(console, console_);
+    if (--inFlight === 0) Object.assign(console, CONSOLE);
   }
   const text = await r.text();
   const line = text.startsWith("{") ? text : (text.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6);
@@ -296,6 +310,24 @@ async function plant(tag: string): Promise<string> {
   const [{ id }] = await sql`INSERT INTO thoughts (content, content_fingerprint, embedding, embedding_model, metadata)
     VALUES (${text}, content_fingerprint_of(${text}), ${vec(unit(BEFORE))}::vector, 'model-before', '{"source": "planted"}'::jsonb) RETURNING id`;
   await plantWindows(id);
+  return id as string;
+}
+/**
+ * A restricted twin: a thought at another's vector (`atText`'s axis), with text
+ * a query for that one matches too, so a search that finds the one must drop
+ * the twin — by the `sensitivity_tier` column, the row no search may show
+ * (SMD-1986 for enhanced-mcp's three tools, SMD-2054 for rest-api's /search).
+ * Importance 5 and quality 100: search_thoughts_text's rank adds importance/20
+ * + quality_score/500 to a text score the two contents tie on (the same cover
+ * of the query's words), so the twin's 0.45 beats a stubbed capture's 0.316
+ * (the stub leaves importance at the default 3 and confidence 0.9 becomes
+ * quality 83) and the twin is the first row of the function's order — the
+ * page drives lean on that; a tie would fall to created_at DESC, which the
+ * later-planted twin also wins.
+ */
+async function plantRestricted(hidden: string, atText: string): Promise<string> {
+  const [{ id }] = await sql`INSERT INTO thoughts (content, content_fingerprint, embedding, embedding_model, sensitivity_tier, importance, quality_score, metadata)
+    VALUES (${hidden}, content_fingerprint_of(${hidden}), ${vec(unit(atText))}::vector, ${MODEL}, 'restricted', 5, 100, '{"source": "planted"}'::jsonb) RETURNING id`;
   return id as string;
 }
 /** Two chunk rows of the previous vector — 022's stale set, if an edit leaves them. */
@@ -481,15 +513,10 @@ try {
   // satisfies: every search answered no matches, and this suite pinned it. Now the caller's metadata_filter goes
   // alone and the tier and the dates are applied to the rows — the tier by the COLUMN (match_thoughts returns none,
   // so semantic mode looks it up by id; the old client-side filter compared undefined). A restricted twin at the
-  // captured thought's own vector, whose text the query matches too, is the mutant that shows the filter at work.
-  // Importance 5 and quality 100: the text function's rank adds importance/20 + quality_score/500 to a text score the
-  // two contents tie on (the same three-word cover), so the twin's 0.45 beats the capture's 0.316 (the stub leaves
-  // importance at the default 3 and confidence 0.9 becomes quality 83) and the twin is the first row of the
-  // function's order — the page drive below leans on that; a tie would fall to created_at DESC, which the
-  // later-planted twin also wins.
+  // captured thought's own vector, whose text the query matches too, is the mutant that shows the filter at work;
+  // it ranks first in the text function's order (plantRestricted), which the page drive below leans on.
   const hidden = "a restricted thought captured through enhanced-mcp, which no search may show";
-  const [{ id: rid }] = await sql`INSERT INTO thoughts (content, content_fingerprint, embedding, embedding_model, sensitivity_tier, importance, quality_score, metadata)
-    VALUES (${hidden}, content_fingerprint_of(${hidden}), ${vec(unit(captured))}::vector, ${MODEL}, 'restricted', 5, 100, '{"source": "planted"}'::jsonb) RETURNING id`;
+  const rid = await plantRestricted(hidden, captured);
   const ids = (r: { structured: any }) => ((r.structured?.results ?? []) as { id: string }[]).map((x) => x.id);
   const textMode = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text" });
   assert(!textMode.isError && ids(textMode).includes(cid) && !ids(textMode).includes(rid),
@@ -803,6 +830,45 @@ try {
   // One key, compared in place: a named key is refused here, and the name this server records is its constant's (SMD-1798 moves it onto the module).
   const named = await send(h, "POST", "/capture", { content: "a capture under a named key, refused by rest-api" }, NAMED_KEY);
   assert(named.status === 401, `a named key (MCP_ACCESS_KEYS) is 401 here — this server knows its one MCP_ACCESS_KEY (${named.status})`);
+
+  // POST /search (SMD-2054): the defect SMD-1986 fixed in enhanced-mcp, found here by that ticket's review. Semantic
+  // mode filtered the rows on a `sensitivity_tier` match_thoughts never returns — undefined !== "restricted" — so a
+  // restricted thought's full content came back; text mode sent `exclude_restricted: true` inside p_filter, a
+  // metadata containment no thought satisfies, answered an empty page, and read no date bound at all. A restricted
+  // twin at the capture's vector, whose text the query matches too (the capture's tier is `personal` by now — shown,
+  // as every tier but restricted is). Semantic mode embeds the query through the stub, so the twin's similarity is 1.
+  const hidden = "a restricted thought captured through rest-api, which no search may show";
+  const rid = await plantRestricted(hidden, captured);
+  const ids = (r: Reply) => ((r.json?.results ?? []) as { id: string }[]).map((x) => x.id);
+  const sem = (body: Record<string, unknown>) => send(h, "POST", "/search", { query: captured, min_similarity: 0.5, ...body });
+  const txt = (body: Record<string, unknown>) => send(h, "POST", "/search", { query: "captured through rest-api", mode: "text", ...body });
+  const semantic = await sem({});
+  assert(semantic.status === 200 && ids(semantic).includes(cid) && !ids(semantic).includes(rid),
+    `POST /search in semantic mode finds the capture and not the restricted twin — the tier read by the column, looked up by id after the match (${semantic.status}: ${ids(semantic).length} rows${ids(semantic).includes(rid) ? ", the twin among them" : ""})`);
+  const textMode = await txt({});
+  assert(textMode.status === 200 && ids(textMode).includes(cid) && !ids(textMode).includes(rid) && textMode.json?.total === 2 && textMode.json?.count === 1 && textMode.json?.total_pages === 1,
+    `…and in text mode, through search_thoughts_text with p_filter {}: the page filtered by the column the function returns, total its count with the hidden row, count the rows shown (${textMode.status}: ${JSON.stringify({ count: textMode.json?.count, total: textMode.json?.total, total_pages: textMode.json?.total_pages })})`);
+  const [openSem, openText] = await Promise.all([sem({ exclude_restricted: false }), txt({ exclude_restricted: false })]);
+  assert(ids(openSem).includes(rid) && ids(openSem).includes(cid) && ids(openText).includes(rid) && ids(openText).includes(cid),
+    `exclude_restricted: false shows the twin beside the capture in both modes (${ids(openSem).length}/${ids(openText).length})`);
+  // The date bounds, as instants, in both modes: text mode read none; semantic mode compared the strings.
+  const past = "2000-01-01T00:00:00Z";
+  const [beforeSem, sinceSem, beforeText, sinceText] = await Promise.all([sem({ end_date: past }), sem({ start_date: past }), txt({ end_date: past }), txt({ start_date: past })]);
+  assert(ids(beforeSem).length === 0 && ids(sinceSem).includes(cid) && ids(beforeText).length === 0 && ids(sinceText).includes(cid) && beforeText.json?.total === 2,
+    `a date bound is applied to the rows in both modes: an end_date in the past hides the capture, a start_date in the past shows it; text mode's total still counts the function's rows (${ids(beforeSem).length}/${ids(sinceSem).length}/${ids(beforeText).length}/${ids(sinceText).length}; total ${beforeText.json?.total})`);
+  // `later` names a clock one hour after the capture in a zone two hours ahead: an instant one hour BEFORE it, so a
+  // window opening there holds the capture — compared as strings its digits sorted after the row's and dropped it.
+  const [{ later }] = await sql`SELECT to_char((created_at + interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') || '+02:00' AS later FROM thoughts WHERE id = ${cid}`;
+  const offsetBound = await sem({ start_date: later });
+  assert(ids(offsetBound).includes(cid), `a start_date with a UTC offset is the instant it names — later digits, an earlier instant, so the capture is inside the window (${later}: ${ids(offsetBound).length})`);
+  const [prose, inverted] = await Promise.all([sem({ end_date: "yesterday" }), txt({ start_date: "2026-01-02", end_date: "2026-01-01" })]);
+  assert(prose.status === 400 && /end_date is not an ISO 8601 date or date-time: yesterday/.test(String(prose.json?.error)) && inverted.status === 400 && /is after end_date/.test(String(inverted.json?.error)),
+    `a bound off the ISO shape, or a window closed before it opens, is a 400 naming the field (${prose.status} ${prose.json?.error} / ${inverted.status} ${inverted.json?.error})`);
+  // A page the tier filter emptied, with the hit behind it: the twin ranks first (plantRestricted), so with limit 1 it
+  // is the whole first page — count 0, the total and total_pages the function's — and page 2 holds the capture.
+  const [onePage, secondPage] = await Promise.all([txt({ limit: 1 }), txt({ limit: 1, page: 2 })]);
+  assert(onePage.status === 200 && ids(onePage).length === 0 && onePage.json?.count === 0 && onePage.json?.total === 2 && onePage.json?.total_pages === 2 && ids(secondPage).includes(cid) && secondPage.json?.page === 2,
+    `a text page the tier filter emptied answers count 0 with total 2 and total_pages 2 — another page follows — and page 2 holds the capture (${JSON.stringify({ count: onePage.json?.count, total: onePage.json?.total, total_pages: onePage.json?.total_pages })}; page 2: ${ids(secondPage).length})`);
 }
 
 // ── recipes/repo-learning-coach ──────────────────────────────────────────────
