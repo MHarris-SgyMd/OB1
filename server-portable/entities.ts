@@ -83,7 +83,7 @@ export const MAX_NAME_CHARS = 200;
 export type ExtractedEntity = { name: string; type: EntityType; confidence: number; aliases: string[] };
 export type ExtractedRelation = { from: string; to: string; relation: Relation; confidence: number };
 /** One window's own answer, kept beside the merged result: the derivation record (SMD-1731) the worker dumps. */
-export type ExtractionWindow = Pick<Extraction, "entities" | "relations" | "rejected" | "malformed" | "retried"> & {
+export type ExtractionWindow = Pick<Extraction, "entities" | "relations" | "rejected" | "malformed" | "retried" | "abortedMs"> & {
   index: number;
   /** chunk.ts's estimate of the text sent. */
   tokens: number;
@@ -102,6 +102,15 @@ export type Extraction = {
   parts?: ExtractionWindow[];
   /** Set when any call ran to its budget and was made again with the penalty (ExtractWindowing.retryRunaway). */
   retried?: true;
+  /**
+   * Set when a call's streamed answer was aborted as a runaway
+   * (ExtractWindowing.streamAbort): how many milliseconds into the first
+   * call, its prompt evaluation included — the longest window's, when more
+   * than one window's was. The measurement the eval and the worker's dump
+   * read, against the budget the call would have run to; absent when no call
+   * was aborted. Only a first call is ever aborted: the retry is read whole.
+   */
+  abortedMs?: number;
 };
 
 /**
@@ -190,6 +199,24 @@ export type ExtractWindowing = {
    * to be. Off, the cut answer is the answer (malformed).
    */
   retryRunaway: boolean;
+  /**
+   * Request the answer as a stream and abort the call the moment it holds
+   * RUNAWAY_REPEATS copies of one item (RunawayDetector) — the runaways
+   * measured for SMD-1879 are one entity or relation repeated to the budget,
+   * visible on the stream long before it (SMD-1960). A call aborted so is a
+   * runaway: retried under the penalty when retryRunaway says so, else the
+   * thought's malformed answer. The budget stays the bound. Off, the answer is
+   * read whole, as before. Presumes outputBudget: windowingFor turns the two
+   * off together (reasoning on), and a harness that streams without a budget
+   * gets an aborted call retried without one — its own arm to describe.
+   * The penalised RETRY is read whole whatever this says: measured on the
+   * stragglers, a penalised answer can repeat an item three times and then
+   * recover (155e31a1, the one thought the streamed arm lost to a detector
+   * firing on its retry), and the retry is the last attempt — a false abort
+   * there loses the thought, where a retry that loops costs one budget, the
+   * shipped price, and none of 20 did.
+   */
+  streamAbort: boolean;
 };
 
 /**
@@ -200,6 +227,167 @@ export type ExtractWindowing = {
  * call that converges is the p1 request plus its budget and nothing else.
  */
 export const RUNAWAY_PENALTY = 0.5;
+
+/**
+ * How many copies of one item — an entity by (type, name), a relation by
+ * (relation, from, to), parseExtraction's own keys — make a streamed answer a
+ * runaway (SMD-1960). Chosen against the 31 runaway tails the SMD-1879 probe
+ * captured (evals/README.md): 16 repeat one item and 3 alternate two, and on
+ * the 32 stragglers a third copy was never a converging FIRST answer's —
+ * parseExtraction folds the second already; the 12 that enumerate distinct
+ * ids (every ticket a `uses` edge, tickets counted down) are not loops by
+ * this rule and run to the budget, as the ticket requires. Two copies is one
+ * duplicate, which a converging answer does hold. A PENALISED answer can hold
+ * three and recover (one of 20 measured), so the retry is not read by this.
+ */
+export const RUNAWAY_REPEATS = 3;
+
+/**
+ * Reads a streamed extraction answer as it arrives and says when it has become
+ * a runaway: the RUNAWAY_REPEATS-th copy of one item. An item is an object
+ * directly inside an array — the answer's two arrays, at whatever depth they
+ * sit (sixth review pass: an unbalanced brace in a preamble put the real
+ * object one level down and hid every item from a rule by absolute depth) —
+ * found by a container stack kept outside strings, so braces and quotes inside
+ * a name are text, and outside every container nothing is a string (a stray
+ * quote in a preamble; fifth pass). Items are keyed as parseExtraction keys
+ * them, entities and relations in their own key spaces (`e:`, `r:`), the type
+ * and relation UNVALIDATED: a repeated item the rules would reject (`"type":
+ * "table"`, tails 7, 20 and 21) is a loop all the same, and a copy differing
+ * only in confidence, aliases, case or whitespace is a copy. Text that is not
+ * an item is skipped; the budget bounds an answer this cannot read. `closed`
+ * says the outermost container has closed with an item read — the answer is
+ * complete (a preamble's own `[3 items]` closing is not; seventh pass);
+ * `fired` says which item reached the count, on which item, and in which
+ * array; `runaway` says an item followed it INSIDE THAT ARRAY — the loop going
+ * on, not ending — which is the abort. The array closing disarms it: a loop
+ * that ends with its array, whatever follows in the other array, is an answer
+ * parseExtraction folds, and the verdict does not depend on where the
+ * provider split its frames (sixth and seventh passes); a later array's own
+ * loop arms it anew (eighth pass). An item's own nested objects, in arrays
+ * or not, are the item's — never items, never the answer (eleventh pass:
+ * three passes of "re-rooting" out of an item that looked like the answer
+ * helped only answers a preamble had already made malformed, and each
+ * widening misread a valid one). `closed` needs the answer's own `"entities"`
+ * KEY — a string directly inside the root object followed by `:` — so a
+ * valid empty answer closes and a preamble's own `{…}` does not, whatever it
+ * holds or says (ninth to eleventh passes); nothing after the close is read,
+ * so a stream that carries a complete answer and then another object is read
+ * to the first, where the whole read would fail both (named, accepted).
+ * `closedAt` is where in the text fed the answer closed, so a reader can cut
+ * what a frame carried after it. Not handled, the budget bounding them as it
+ * did before this ticket: preamble chatter with an unbalanced `[` (the answer
+ * becomes one unkeyed item), an unbalanced bracket and a stray quote, or a
+ * quoted bracket (`"["`).
+ */
+/** An item that reached RUNAWAY_REPEATS: its key, the item count then, and the stack depth of the array holding it. */
+type Fire = { key: string; atItem: number; arrayLevel: number };
+
+export class RunawayDetector {
+  // The text: the containers open, and whether the character in hand is inside a string.
+  private readonly stack: ("{" | "[")[] = [];
+  private inString = false;
+  private escaped = false;
+  // The item in hand: the stack depth it opened at (-1 outside one) and its text from earlier pieces.
+  private itemLevel = -1;
+  private item = "";
+  // The root object's keys: the string being read directly inside it, and the one just closed there, pending the `:` that makes it a key rather than a value.
+  private key = "";
+  private pendingKey: string | null = null;
+  private sawEntities = false;
+  private consumed = 0;
+  private readonly counts = new Map<string, number>();
+  /** Items read so far, the one that fired included. */
+  items = 0;
+  /** True once the root object has closed with its own `"entities"` key read in it: the answer is complete. Final — nothing after it is read. */
+  closed = false;
+  /** Characters fed up to and including the brace that closed the answer; -1 while open. */
+  closedAt = -1;
+  /** The first item that reached RUNAWAY_REPEATS — or, once `runaway`, the one whose loop went on. Kept; null while none has. */
+  fired: Fire | null = null;
+  /** The fire still in force — cleared when its array closes, set anew by a later array's own third copy. */
+  private armed: Fire | null = null;
+  /** True once an item followed the third copy inside the same array: the abort. */
+  runaway = false;
+
+  /** Feed the next piece of the answer; the verdict is the state — `fired`, `runaway`, `closed`, `items`. */
+  feed(piece: string): void {
+    const offset = this.consumed;
+    this.consumed += piece.length;
+    // Where the current item's text begins in THIS piece — one slice per item
+    // per piece rather than a concatenation per character (fifth review pass).
+    let start = this.itemLevel >= 0 ? 0 : -1;
+    for (let i = 0; i < piece.length; i++) {
+      if (this.closed) break;
+      const c = piece[i];
+      if (this.stack.length === 0) {
+        // Outside every container nothing is a string: a stray quote in a
+        // preamble ("Here is the "answer:") must not silence the reading of
+        // everything after it (fifth review pass).
+        if (c === "{" || c === "[") this.stack.push(c);
+        continue;
+      }
+      if (this.inString) {
+        if (this.escaped) this.escaped = false;
+        else if (c === "\\") this.escaped = true;
+        else if (c === '"') {
+          this.inString = false;
+          if (this.stack.length === 1) this.pendingKey = this.key;
+        }
+        if (this.inString && this.stack.length === 1) this.key += c;
+        continue;
+      }
+      if (this.pendingKey !== null && this.stack.length === 1 && !/\s/.test(c)) {
+        if (c === ":" && this.pendingKey === "entities") this.sawEntities = true;
+        this.pendingKey = null;
+      }
+      if (c === '"') { this.inString = true; this.key = ""; continue; }
+      if (c === "{" || c === "[") {
+        // An object opening directly inside an array, outside any item, is an
+        // item, at any depth; inside an item it is the item's own.
+        if (c === "{" && this.itemLevel < 0 && this.stack[this.stack.length - 1] === "[") { this.itemLevel = this.stack.length + 1; this.item = ""; start = i; }
+        this.stack.push(c);
+        continue;
+      }
+      if (c === "}" || c === "]") {
+        this.stack.pop();
+        if (this.stack.length === 0 && this.sawEntities) { this.closed = true; this.closedAt = offset + i + 1; }
+        // The array that held the third copy has closed: the loop ended with
+        // it, and a later array's own third copy arms the detector anew.
+        if (this.armed !== null && !this.runaway && this.stack.length < this.armed.arrayLevel) this.armed = null;
+        if (this.itemLevel < 0 || this.stack.length !== this.itemLevel - 1) continue;
+        const key = itemKey(this.item + piece.slice(start, i + 1));
+        this.item = "";
+        start = -1;
+        this.itemLevel = -1;
+        if (key === null) continue;
+        this.items++;
+        if (this.armed !== null && this.items > this.armed.atItem && this.stack.length === this.armed.arrayLevel) { this.runaway = true; this.fired = this.armed; }
+        const n = (this.counts.get(key) ?? 0) + 1;
+        this.counts.set(key, n);
+        if (n >= RUNAWAY_REPEATS && this.armed === null) { this.armed = { key, atItem: this.items, arrayLevel: this.stack.length }; this.fired ??= this.armed; }
+      }
+    }
+    if (start >= 0) this.item += piece.slice(start);
+  }
+}
+
+/** parseExtraction's key for one item of a streamed answer, in the item's kind's key space (`e:` / `r:`, sixth review pass — one map held both and an entity typed `uses` counted with a relation), the type or relation unvalidated; null for text that is not an item. */
+function itemKey(text: string): string | null {
+  let o: unknown;
+  try { o = JSON.parse(text); } catch { return null; }
+  if (!isRecord(o)) return null;
+  // An item carrying `from` or `to` is a relation or nothing — never read as an
+  // entity by its `name`, which parseExtraction would not do (third review pass).
+  if (o.from !== undefined || o.to !== undefined) return typeof o.from === "string" && typeof o.to === "string" ? `r:${relationKey(lowered(o.relation) as Relation, cleanName(o.from), cleanName(o.to))}` : null;
+  if (typeof o.name === "string") return `e:${entityKey(lowered(o.type) as EntityType, cleanName(o.name))}`;
+  return null;
+}
+
+/** A type or relation field as parseExtraction reads it before validating it — trimmed and lower-cased, "" for a non-string; the detector keys by the same reading (first review pass: it was spelt out twice in each). */
+function lowered(v: unknown): string {
+  return typeof v === "string" ? v.trim().toLowerCase() : "";
+}
 
 /**
  * Whether the metadata model is asked to reason before answering
@@ -224,7 +412,9 @@ export function reasoningOn(cfg: EmbedConfig): boolean {
  */
 export function windowingFor(cfg: EmbedConfig): ExtractWindowing {
   const budgeted = !reasoningOn(cfg);
-  return { windowTokens: cfg.extractChunkTokens, overlapTokens: cfg.extractChunkOverlap, header: cfg.extractHeader, outputBudget: budgeted, retryRunaway: budgeted && cfg.extractRetryRunaway };
+  // The stream abort follows the budget too: it makes a runaway of a call,
+  // and only a budgeted call has a retry to send one to (SMD-1960).
+  return { windowTokens: cfg.extractChunkTokens, overlapTokens: cfg.extractChunkOverlap, header: cfg.extractHeader, outputBudget: budgeted, retryRunaway: budgeted && cfg.extractRetryRunaway, streamAbort: budgeted && cfg.extractStreamAbort };
 }
 
 /**
@@ -240,9 +430,14 @@ export function describeExtractWindow(cfg: EmbedConfig): string {
     ? `${cfg.metadataModel}'s ${cfg.extractModelWindow}-token served context${cfg.extractChunkTokensUnfit ? ", which holds no window beside the rules and an answer" : ""}`
     : `${cfg.metadataModel}'s served context, which db/config.mjs's KNOWN_CHAT_MODEL_WINDOW does not list`;
   const w = windowingFor(cfg);
+  const abort = w.streamAbort ? `; the answer is streamed and a call is aborted once it holds ${RUNAWAY_REPEATS} copies of one item` : "";
   const retry = !w.outputBudget
     ? "; no answer budget and no runaway retry — reasoning is on (OB1_METADATA_REASONING), and a budget would cap the thinking, so a call that does not converge ends at the context or the caller's deadline"
-    : w.retryRunaway ? `; a call that runs to its answer budget is made once more with a ${RUNAWAY_PENALTY} frequency penalty` : "";
+    : w.retryRunaway
+      ? `${abort}${w.streamAbort ? ", and a call aborted so or run to its answer budget" : "; a call that runs to its answer budget"} is made once more with a ${RUNAWAY_PENALTY} frequency penalty${w.streamAbort ? ", read whole" : ""}`
+      // Reachable with EXTRACT_RETRY_RUNAWAY flipped and the abort on: the
+      // consequence named, as the worker's failed-row note names it.
+      : abort ? `${abort}, and is the thought's answer, malformed — no retry` : "";
   if (cfg.extractChunkTokensFrom === "OB1_EXTRACT_CHUNK_TOKENS") return `${rule}, from OB1_EXTRACT_CHUNK_TOKENS (${ctx})${retry}`;
   if (cfg.extractChunkTokensFrom === "window") {
     // `capped` is the resolver's own answer (second review pass: inferring it
@@ -297,7 +492,7 @@ const MALFORMED = (): Extraction => ({ ...EMPTY(), malformed: true });
  * entities resolved.
  */
 export function parseExtraction(raw: string): Extraction {
-  const text = raw.trim().replace(/^```(?:json)?\s*\n?/, "").replace(/\n?\s*```$/, "");
+  const text = stripFences(raw);
   if (!text) return MALFORMED();
   let parsed: unknown;
   try {
@@ -318,7 +513,7 @@ export function parseExtraction(raw: string): Extraction {
     for (const e of parsed.entities) {
       if (!isRecord(e)) { out.rejected.entities++; continue; }
       const name = cleanName(e.name);
-      const type = typeof e.type === "string" ? e.type.trim().toLowerCase() : "";
+      const type = lowered(e.type);
       const confidence = clampConfidence(e.confidence);
       if (!name || !(ENTITY_TYPES as readonly string[]).includes(type) || confidence < MIN_CONFIDENCE) { out.rejected.entities++; continue; }
       const key = entityKey(type as EntityType, name);
@@ -343,7 +538,7 @@ export function parseExtraction(raw: string): Extraction {
       if (!isRecord(r)) { out.rejected.relations++; continue; }
       const from = cleanName(r.from);
       const to = cleanName(r.to);
-      const relation = typeof r.relation === "string" ? r.relation.trim().toLowerCase() : "";
+      const relation = lowered(r.relation);
       const confidence = clampConfidence(r.confidence);
       if (!from || !to || !(RELATIONS as readonly string[]).includes(relation) || confidence < MIN_CONFIDENCE) { out.rejected.relations++; continue; }
       // One key for a relation within an answer and across windows (second
@@ -358,6 +553,16 @@ export function parseExtraction(raw: string): Extraction {
     }
   }
   return out;
+}
+
+/** An answer without the markdown fence a chat model may wrap it in — parseExtraction's first step, shared with the stream reader's "is this whole JSON" question. */
+function stripFences(raw: string): string {
+  return raw.trim().replace(/^```(?:json)?\s*\n?/, "").replace(/\n?\s*```$/, "");
+}
+
+/** Whether `text`, fences stripped, parses as JSON at all — a stream that ended with no end sign but a whole answer is an answer, not a closed socket (sixth review pass). */
+function isWholeJson(text: string): boolean {
+  try { JSON.parse(stripFences(text)); return true; } catch { return false; }
 }
 
 /** parseExtraction's own identity for an entity within one answer, applied across windows by mergeExtractions. */
@@ -413,8 +618,10 @@ export function mergeExtractions(parts: ExtractionWindow[]): Extraction {
   const relations = new Map<string, ExtractedRelation>();
   const rejected = { entities: 0, relations: 0 };
   let malformed = false;
+  let abortedMs: number | undefined;
   for (const p of parts) {
     malformed ||= p.malformed;
+    if (p.abortedMs !== undefined) abortedMs = Math.max(abortedMs ?? 0, p.abortedMs);
     rejected.entities += p.rejected.entities;
     rejected.relations += p.rejected.relations;
     for (const e of p.entities) {
@@ -429,7 +636,7 @@ export function mergeExtractions(parts: ExtractionWindow[]): Extraction {
       if (!have || r.confidence > have.confidence) relations.set(k, { ...r });
     }
   }
-  return { entities: [...entities.values()], relations: [...relations.values()], rejected, malformed, windows: parts.length, parts };
+  return { entities: [...entities.values()], relations: [...relations.values()], rejected, malformed, windows: parts.length, parts, ...(abortedMs !== undefined ? { abortedMs } : {}) };
 }
 
 /** The pass's key: the model and the prompt version, so a change to either is a new pass. */
@@ -446,7 +653,10 @@ export function extractionKey(model: string): string {
  * (SMD-1879): an answer that does not converge ends at the budget as a
  * malformed answer — visible, retryable — not at the context's end.
  */
-async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, budget: boolean, retry = false): Promise<Extraction & { runaway: boolean }> {
+async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: Pick<ExtractWindowing, "outputBudget" | "streamAbort">, retry = false): Promise<Extraction & { runaway: boolean }> {
+  // Named by the windowing, not positional booleans (second review pass).
+  const { outputBudget: budget, streamAbort: stream } = w;
+  const t0 = Date.now();
   const r = await fetch(`${cfg.chat.base}/chat/completions`, {
     method: "POST",
     headers: cfg.chat.headers,
@@ -466,6 +676,7 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, pa
       ...cfg.metadataReasoning,
       ...(budget ? { max_tokens: extractOutputBudget(estimateTokens(text)) } : {}),
       ...(retry ? { frequency_penalty: RUNAWAY_PENALTY } : {}),
+      ...(stream ? { stream: true } : {}),
       messages: buildMessages(text, part),
     }),
   });
@@ -475,7 +686,25 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, pa
     (err as Error & { status?: number }).status = r.status;
     throw err;
   }
-  const d = (await r.json()) as { choices?: [{ message?: { content?: string }; finish_reason?: string }] };
+  // Streamed when asked (SMD-1960), and the body read as what it IS rather
+  // than what its content-type says (sixth review pass: an SSE body under
+  // application/json fell to r.json()): a body opening with `{` is the whole
+  // answer a provider that ignores `stream` sends — the suites' stubs — and is
+  // read as before; anything else is the stream.
+  let d: { choices?: [{ message?: { content?: string }; finish_reason?: string }] };
+  if (stream && r.body) {
+    const got = await readStreamedAnswer(r.body, cfg.chat.base);
+    if (got.kind === "sse") {
+      // Aborted: a runaway by the detector's rule, whatever the budget — the
+      // partial answer is not read (it could not parse), and the caller's
+      // deadline, on the fetch's signal, bounds the read as it does the whole.
+      if (got.repeated !== null) return { ...MALFORMED(), runaway: true, abortedMs: Date.now() - t0 };
+      return { ...parseExtraction(got.content), runaway: budget && got.finish === "length" };
+    }
+    d = JSON.parse(got.text);
+  } else {
+    d = (await r.json()) as typeof d;
+  }
   const answer = d?.choices?.[0]?.message?.content;
   // A cut answer is a runaway only when the call was budgeted: without a
   // budget the provider's own limit is what `length` names.
@@ -484,18 +713,175 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, pa
   return { ...parseExtraction(answer), runaway };
 }
 
+type StreamVerdict = { kind: "end" } | { kind: "repeated"; key: string } | null;
+type StreamedBody = { kind: "sse"; content: string; finish: string | undefined; repeated: string | null } | { kind: "json"; text: string };
+/**
+ * A chat completion's body, read as it arrives. Sniffed, not trusted to its
+ * content-type (sixth review pass): a body opening with `{` is a whole JSON
+ * answer — a provider that ignores `stream` — returned as text to be read as
+ * one; anything else is `text/event-stream`, reassembled by the grammar:
+ * lines end at `\n`, `\r\n` or a lone `\r`; the `data:` lines up to a blank
+ * line are one event, joined by `\n` (eighth pass); comments and events that
+ * are not JSON are passed over; the events' `choices[0].delta.content` is
+ * concatenated and the last `finish_reason` kept. The read ENDS — the reader
+ * cancelled, so a gateway holding the connection open does not hold the call
+ * to its deadline — at `[DONE]`, at an event carrying a non-empty
+ * `finish_reason`, or when the detector says the answer's container has
+ * closed (Ollama sends its finish in an event of its own; a frame that carries
+ * more after the closing brace is cut there). EVERY piece of content goes
+ * through the detector, the finishing event's included, and the verdict is
+ * then read from its state in one order — the runaway, the close, the finish
+ * — so the same bytes get the same verdict whether the finish rides on the
+ * last content event or comes alone (ninth pass). The detector's `runaway` —
+ * an item after the third copy inside the same array, the loop going on — is
+ * the abort: the reader is cancelled (the connection closes, Ollama stops
+ * generating) and the repeated item's key returned. An answer that closes or finishes after its
+ * third copy, or goes on in its other array, is complete: parseExtraction
+ * folds the copies (fifth to eighth passes). A stream that ends with content
+ * but no end sign is a socket that closed mid-answer — thrown, so the worker
+ * classifies it (transient) — unless what arrived is whole JSON, which is the
+ * answer; one that ends with no content but an end sign is the provider's
+ * empty answer, returned as the whole read returns it — malformed — and one
+ * with neither content nor end sign is thrown as empty, the row's failure
+ * and not the connection's, as the whole read's r.json() on an empty body
+ * threw (seventh to tenth passes). An event that is the provider's error (`data:
+ * {"error": …}`) throws with its message and HTTP-shaped code, the reader
+ * cancelled on the way out. Assumed: the event that finishes the answer is
+ * the last with content — the OpenAI shape, Ollama's too; a layer sending
+ * content after its finish is read short (named, not handled).
+ */
+async function readStreamedAnswer(body: ReadableStream<Uint8Array>, base: string): Promise<StreamedBody> {
+  const detector = new RunawayDetector();
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let content = "";
+  let finish: string | undefined;
+  let kind: "sse" | "json" | undefined;
+  let frames = 0;
+  /** An event's verdict: the end, a repeated item's key to abort on, or null to go on. */
+  const take = (data: string): StreamVerdict => {
+    if (!data) return null;
+    frames++;
+    if (data === "[DONE]") return { kind: "end" };
+    let frame: { choices?: [{ delta?: { content?: unknown }; finish_reason?: unknown }]; error?: unknown };
+    try { frame = JSON.parse(data); } catch { return null; }
+    // `"error": null` beside the choices is no error (fourth review pass).
+    if (frame && typeof frame === "object" && frame.error !== undefined && frame.error !== null) {
+      const err = frame.error as { message?: unknown; code?: unknown } | string;
+      const msg = typeof err === "string" ? err : typeof err?.message === "string" ? err.message : JSON.stringify(err);
+      const thrown = new Error(`Extraction stream from ${base} answered an error mid-stream: ${msg.slice(0, 300)}`);
+      // The frame's HTTP-shaped code — a number, or a string of one — is the
+      // status the whole read carried on r.status, and the worker's
+      // transient/fatal rule reads (third review pass: a runner's 500
+      // mid-stream was a per-row failure, not a pause). A frame with no such
+      // code (Ollama's compat layer sends `code: null`) carries no status: the
+      // worker records THIS row failed with the provider's message, visible,
+      // rather than a status this reader would have had to invent.
+      const raw = typeof err === "object" && err !== null ? err.code : undefined;
+      const code = typeof raw === "number" ? raw : typeof raw === "string" && /^\d{3}$/.test(raw) ? Number(raw) : NaN;
+      if (Number.isInteger(code) && code >= 400 && code < 600) (thrown as Error & { status?: number }).status = code;
+      throw thrown;
+    }
+    const choice = frame?.choices?.[0];
+    const piece = typeof choice?.delta?.content === "string" ? choice.delta.content : "";
+    content += piece;
+    // A non-empty finish_reason: some compat layers send "" on every frame
+    // where the OpenAI shape sends null (seventh review pass).
+    const finished = typeof choice?.finish_reason === "string" && choice.finish_reason !== "";
+    if (finished) finish = choice.finish_reason as string;
+    if (piece) detector.feed(piece);
+    if (detector.runaway && detector.fired !== null) return { kind: "repeated", key: detector.fired.key };
+    if (detector.closed) { content = content.slice(0, detector.closedAt); return { kind: "end" }; }
+    return finished ? { kind: "end" } : null;
+  };
+  // The `data:` lines of the event in hand, dispatched at the blank line that ends it.
+  const event: string[] = [];
+  const line = (text: string): StreamVerdict => {
+    if (text !== "") {
+      if (text.startsWith("data:")) event.push(text.slice(5).replace(/^ /, ""));
+      return null;
+    }
+    if (event.length === 0) return null;
+    const data = event.join("\n").trim();
+    event.length = 0;
+    return take(data);
+  };
+  let verdict: StreamVerdict = null;
+  let heldCR = "";
+  try {
+    outer: for (;;) {
+      const { done, value } = await reader.read();
+      let chunk = heldCR + (done ? decoder.decode() : decoder.decode(value, { stream: true }));
+      heldCR = "";
+      if (kind !== "json") {
+        // Line ends normalised per chunk, a `\r` at its very end held back
+        // until the next read says whether a `\n` follows — split, it would
+        // make a blank line, and a blank line ends an event (ninth and tenth
+        // passes). A whole-JSON body needs none of this.
+        if (!done && chunk.endsWith("\r")) { heldCR = "\r"; chunk = chunk.slice(0, -1); }
+        chunk = chunk.replace(/\r\n?/g, "\n");
+      }
+      buffer += chunk;
+      if (kind === undefined) {
+        const head = buffer.trimStart();
+        if (!head && !done) continue;
+        kind = head.startsWith("{") ? "json" : "sse";
+      }
+      if (kind === "json") {
+        if (done) return { kind, text: buffer };
+        continue;
+      }
+      // One slice per read, however many lines it carried (first review pass).
+      let from = 0;
+      let nl: number;
+      while ((nl = buffer.indexOf("\n", from)) >= 0) {
+        const v = line(buffer.slice(from, nl));
+        from = nl + 1;
+        if (v !== null) { verdict = v; break outer; }
+      }
+      buffer = buffer.slice(from);
+      if (done) break;
+    }
+  } catch (e) {
+    // A throw from an event (the provider's error) leaves by here: the reader
+    // is cancelled so the connection closes now, not at the deadline (third
+    // review pass). A throw from read() itself — the deadline — has no
+    // connection left to close, and cancel() on it is a no-op.
+    await reader.cancel().catch(() => {});
+    throw e;
+  }
+  if (verdict !== null) {
+    // An end sign or the runaway mid-stream: the connection closes now.
+    await reader.cancel().catch(() => {});
+  } else {
+    // The stream ended: a last line without its newline, then the event in hand.
+    if (buffer) line(buffer);
+    verdict = line("");
+  }
+  if (verdict?.kind === "repeated") return { kind: "sse", content, finish, repeated: verdict.key };
+  if (!content && verdict === null) throw new Error(`Extraction stream from ${base} was empty: no answer in ${frames} frame(s)`);
+  if (verdict === null && !isWholeJson(content)) {
+    throw new Error(`Extraction stream from ${base} closed mid-answer: the socket closed after ${content.length} characters with no finish_reason — not an answer`);
+  }
+  return { kind: "sse", content, finish, repeated: null };
+}
+
 /**
  * extractOnce, and once more with the penalty when the windowing says so and
- * the first answer ran to its budget. `onCall` is told of every call BEFORE
- * it is made, so a retry that throws is still counted (third review pass).
+ * the first answer ran to its budget or was aborted on the stream — the retry
+ * read WHOLE, never aborted (ExtractWindowing.streamAbort says why). `onCall`
+ * is told of every call BEFORE it is made, so a retry that throws is still
+ * counted (third review pass).
  */
 async function extractCall(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: ExtractWindowing, onCall: () => void): Promise<Omit<Extraction, "retried"> & { runaway: boolean; retried: boolean }> {
   onCall();
-  const first = await extractOnce(text, cfg, timeoutMs, part, w.outputBudget);
+  const first = await extractOnce(text, cfg, timeoutMs, part, w);
   if (!(w.retryRunaway && first.runaway && first.malformed)) return { ...first, retried: false };
   onCall();
-  const second = await extractOnce(text, cfg, timeoutMs, part, w.outputBudget, true);
-  return { ...second, retried: true };
+  const second = await extractOnce(text, cfg, timeoutMs, part, { outputBudget: w.outputBudget, streamAbort: false }, true);
+  // The first call's abort rides on the thought's answer; the retry has none.
+  return { ...second, ...(first.abortedMs !== undefined ? { abortedMs: first.abortedMs } : {}), retried: true };
 }
 
 /**
@@ -544,7 +930,7 @@ export async function extractEntities(content: string, cfg: EmbedConfig, timeout
       const t0 = Date.now();
       const ex = await extractCall(w.content, cfg, deadline, { index: w.index, of: windows.length, header }, windowing, onCall);
       retriedAny ||= ex.retried;
-      parts.push({ index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, retried: ex.retried || undefined, ms: Date.now() - t0 });
+      parts.push({ index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, retried: ex.retried || undefined, ...(ex.abortedMs !== undefined ? { abortedMs: ex.abortedMs } : {}), ms: Date.now() - t0 });
     }
     return { ...mergeExtractions(parts), retried: retriedAny || undefined };
   } catch (e) {

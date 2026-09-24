@@ -216,9 +216,26 @@ jobs:
       # too on the first rehearsal (caught: run-it, PR #119) — and on a tag the
       # two OB1 images with it, which proves the registry serves what was
       # pushed, under the job's token.
+      # Since SMD-1875 preflight dials the provider address once (GET /models)
+      # and the container refuses to start when nothing answers, so the same
+      # listener the `Full stack, no Supabase` job puts on the runner stands in
+      # for the provider here: the runner is the container's host.docker.internal
+      # through compose.yaml's extra_hosts host-gateway, bound on every
+      # interface because host-gateway is the bridge address. The first
+      # rehearsal after that change proved the alias resolves on Linux Docker —
+      # the row read "the connection was refused", not "does not resolve" — and
+      # that this job had no listener (caught: CI, PR #138).
       - name: Bring up the stack from the images
         working-directory: deploy
         run: |
+          nohup python3 - <<'PY' > /tmp/provider-stub.log 2>&1 &
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          class H(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  body = b'{"object":"list","data":[]}'
+                  self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+          HTTPServer(("0.0.0.0", 11434), H).serve_forever()
+          PY
           KEY=$(openssl rand -hex 32)
           HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
           echo "OB1_SMOKE_KEY=$KEY" >> "$GITHUB_ENV"
@@ -254,6 +271,7 @@ jobs:
         run: |
           LOG="$(docker compose -f compose.yaml -f compose.release.yaml logs --no-color server)"
           grep -E 'model provider +http://host\.docker\.internal:11434/v1\b.*\(local — no credential needed\)' <<<"$LOG"
+          grep -E '✓ +provider endpoint +http://host\.docker\.internal:11434/v1 answers — HTTP 200 to GET /models' <<<"$LOG"
           grep -E 'embeddings egress +http://host\.docker\.internal:11434/v1 is declared local \(OB1_LLM_LOCAL\)' <<<"$LOG"
           grep -F 'ON (OB1_QUERY_LOG=on) here' <<<"$LOG"
           grep -F 'preflight OK' <<<"$LOG"
@@ -275,7 +293,10 @@ jobs:
       - name: Logs on failure
         if: failure()
         working-directory: deploy
-        run: docker compose -f compose.yaml -f compose.release.yaml logs --tail 60
+        run: |
+          docker compose -f compose.yaml -f compose.release.yaml logs --tail 60
+          echo "--- provider stub (the runner's listener on :11434) ---"
+          cat /tmp/provider-stub.log 2>/dev/null || echo "(no stub log)"
 
       - name: Tear down
         if: always()

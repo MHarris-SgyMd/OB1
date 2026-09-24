@@ -57,7 +57,6 @@
  *   MCP_ACCESS_KEYS (or the older single MCP_ACCESS_KEY)
  */
 
-import "../../compat/deno-on-bun.ts"; // ob1-original-types: jsr:@supabase/functions-js/edge-runtime.d.ts
 
 // Deno reads the SDK's types through the extensionless subpath: its exports map
 // names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
@@ -71,9 +70,9 @@ import { z } from "zod";
 import { createClient } from "../../compat/supabase-sql/index.ts";
 import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") ?? "";
+const SUPABASE_URL = process.env.SUPABASE_URL!;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ?? "";
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 // The label written beside every vector this function produces (021): the
@@ -284,8 +283,8 @@ app.all("*", async (c) => {
   // MCP_ACCESS_KEY still works, compared by digest. A read-scoped key is never
   // given the tool, so it cannot see it, let alone call it.
   const principal = authenticateRequest(c.req.raw, {
-    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
-    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+    MCP_ACCESS_KEYS: process.env.MCP_ACCESS_KEYS,
+    MCP_ACCESS_KEY: process.env.MCP_ACCESS_KEY,
   });
   if (!principal) {
     return c.json({ error: "Invalid or missing access key" }, 401, corsHeaders);
@@ -302,4 +301,7 @@ app.all("*", async (c) => {
   return transport.handleRequest(c);
 });
 
-Deno.serve(app.fetch);
+export default {
+  port: Number(process.env.PORT || 8000),
+  fetch: app.fetch,
+};

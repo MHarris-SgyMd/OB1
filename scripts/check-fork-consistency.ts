@@ -40,11 +40,13 @@
  *      files as 7, with counted per-file exceptions for a file whose README
  *      says it bypasses them (seven: three deployments with a database of
  *      their own, three function bodies shown, one test fixture)
- *  11. a file that imports the SQL shim (Bun's client) and uses a Deno global
- *      imports compat/deno-on-bun.ts first, uses no member of `Deno` beyond
- *      the two it provides (`env.get`, `serve`) and no specifier Bun cannot
- *      resolve (`jsr:`, `npm:`, a URL) — itself or through the files it
- *      imports — so `bun <file>` serves it (SMD-1480); no exceptions
+ *  11. no code file under the seven category directories or docs/ reaches
+ *      `Deno` — the vendored files are Bun-native since SMD-1799 (`process.env`,
+ *      `export default { port, fetch }`, what `bun <file>` serves) — save the
+ *      Edge Function deployments SMD-1800 retires, counted per file in
+ *      DENO_EXCEPTIONS; and a file that imports the SQL shim (Bun's client)
+ *      imports no specifier Bun cannot resolve (`jsr:`, `npm:`, a URL), itself
+ *      or through the files it imports (SMD-1480)
  *  12. a .sql file under schemas/ or db/ runs nothing that needs Supabase — no
  *      `service_role`, `authenticated` or `anon`, no `auth.uid()`, `auth.role()`
  *      or `auth.users`, no `supabase_`-prefixed name, no RLS or policy —
@@ -1627,62 +1629,97 @@ function checkThoughtWritesAround() {
   }
 }
 
-// ── 11: a file on the SQL shim runs under Bun ────────────────────────────────
+// ── 11: the vendored files are Bun-native ────────────────────────────────────
 //
-// SMD-1480 (FORK.md change 74). The shim imports `bun`, and the files fix 13's
-// codemod put on it were Supabase Edge Functions — `Deno.env.get` for their
-// environment, `Deno.serve` at the end. One import line therefore left sixteen
-// of them running nowhere: not under Deno, which cannot resolve `bun`, and not
-// under Bun, which has no `Deno` — exercised only under the tests' stand-in for
-// those globals, their READMEs sending a reader to `supabase functions deploy`.
-// compat/deno-on-bun.ts is the second line: imported FIRST, it gives Bun
-// exactly `Deno.env.get` and `Deno.serve`, and `bun <file>` serves the file as
-// written. This holds the state a migrated file must be in to run:
-//   - a file that imports compat/supabase-sql and — itself, or through the
-//     relative imports it evaluates — uses a member of `Deno` imports
-//     compat/deno-on-bun.ts as its first import statement (ES modules evaluate
-//     imports in order; a helper whose module body reads `Deno.env` before the
-//     polyfill has run is a ReferenceError at startup);
-//   - no member of `Deno` beyond `env.get` and `serve` is used, in the file or
-//     the files it imports — the polyfill provides only those two, and an
-//     emulation of `readTextFile`, `exit` or `args` would be a guess at another
-//     runtime's semantics; a new use fails at the call under Bun, and here;
-//   - no import specifier Bun cannot resolve remains — `jsr:`, `npm:`, a URL —
-//     in the file or the files it imports, a dynamic `import("…")` included
-//     (`node:` is fine; the codemod swaps the one such line these files had
-//     and records it);
-//   - `Deno` is reached only as `Deno.env.get` or `Deno.serve`: an alias, a
-//     bracket or a destructure is a use the rule cannot follow, so it is
-//     refused as one — and so are `typeof Deno` and `"Deno" in globalThis`:
-//     a migrated file does not detect its runtime, the polyfill is that.
-// Comments and string contents are not code: members and specifiers are read
-// with both blanked (line numbers kept). Scanned: every .ts/.js/.mjs under the
-// seven category directories and docs/ that imports the shim. No exceptions —
-// a file that must stay a Deno deployment is kept on supabase-js by the
-// codemod's KEEP list (the local-brain recipe's client), not excepted here.
-/** Members of `Deno` compat/deno-on-bun.ts provides. */
-const DENO_PROVIDED = new Set(["env.get", "serve"]);
-/** `Deno` wherever it appears in code: a member chain of up to two names, or bare — an alias (`const D = Deno`), a bracket (`Deno["env"]`), a destructure. */
+// SMD-1799 (SMD-1480 before it, FORK.md change 74). The files under the
+// category directories were Supabase Edge Functions — `Deno.env.get` for their
+// environment, `Deno.serve` at the end — and ran on Bun, where the SQL shim
+// lives, only through compat/deno-on-bun.ts, a polyfill for those two members
+// that this check held as each file's first import. SMD-1799 gave the files
+// Bun's own shape instead: `process.env` for the environment and
+// `export default { port, fetch }` at the tail — the shape server-portable/index.ts
+// has, and what `bun <file>` serves — and the polyfill is gone. This holds
+// the tree there:
+//   - no code file under the seven category directories or docs/ reaches
+//     `Deno` — any member, or the bare name (an alias, a bracket, a
+//     destructure, `typeof Deno`: a Bun-native file does not detect its
+//     runtime) — save the Edge Function deployments DENO_EXCEPTIONS names
+//     with the reason and the exact count of lines, so a new line fails and
+//     a stale entry fails (SMD-1800 removes each entry with its file);
+//   - a file that imports compat/supabase-sql (Bun's client) imports no
+//     specifier Bun cannot resolve — `jsr:`, `npm:`, a URL — in the file or
+//     the files it imports, relatively and transitively, a dynamic
+//     `import("…")` included (`node:` is fine).
+// Comments, string contents and regex literals are not code, and a template
+// literal's `${…}` expressions are: members and specifiers are read with the
+// former blanked (line numbers kept). Scanned: every .ts/.tsx/.mts/.cts/.js/
+// .jsx/.mjs/.cjs under the seven category directories and docs/.
+/** `Deno` wherever it appears in code: a member chain of up to two names, or bare. */
 const DENO_MEMBER = /\bDeno\b(?:\.([A-Za-z_$][\w$]*)(?:\.([A-Za-z_$][\w$]*))?)?/g;
 /** A dynamic import's literal specifier — quoted or in a plain backtick literal; one with `${…}` is not a literal and is not read. */
 const DYNAMIC_IMPORT = /\bimport\s*\(\s*(["'\x60])([^"'\x60\n$]+)\1/g;
 const SHIM_SPECIFIER = /compat\/supabase-sql\/index\.ts$/;
-const RUNTIME_SPECIFIER = /compat\/deno-on-bun\.ts$/;
 /** A specifier Bun does not resolve: Deno's registries and a URL. */
 const NOT_ON_BUN = /^(?:jsr:|npm:|https?:\/\/)/;
+/**
+ * file → the reason it still reaches `Deno`, and the exact count of lines that do: the Edge Function
+ * deployments SMD-1800 retires. A line past the count fails; a count no line reaches fails as stale.
+ */
+const DENO_EXCEPTIONS = new Map<string, CountedException>([
+  ["recipes/local-brain-no-mcp/functions/_shared/db.ts",
+    { why: "runs inside the recipe's own self-hosted Supabase stack, on its Deno edge runtime (the codemod's KEEP client) — SMD-1800", lines: 2 }],
+  ["recipes/local-brain-no-mcp/functions/_shared/embed.ts", { why: "the same recipe's embedder, on that stack's Deno runtime — SMD-1800", lines: 3 }],
+  ["recipes/local-brain-no-mcp/functions/capture/index.ts", { why: "the same recipe's Edge Function — SMD-1800", lines: 1 }],
+  ["recipes/local-brain-no-mcp/functions/list/index.ts", { why: "the same recipe's Edge Function — SMD-1800", lines: 1 }],
+  ["recipes/local-brain-no-mcp/functions/search/index.ts", { why: "the same recipe's Edge Function — SMD-1800", lines: 1 }],
+  ["recipes/edge-function-cost-optimization/examples/after/index.ts",
+    { why: "the cost recipe's Edge Function sample — read by extensions/test-auth.ts's TEXT_ONLY, never run here; SMD-1800 retires the recipe", lines: 3 }],
+  ["recipes/edge-function-cost-optimization/examples/after/410-stub.ts", { why: "the same recipe's 410 stub for a retired Edge Function — SMD-1800", lines: 1 }],
+]);
 
 /**
- * `text` with comments blanked, and — when `stringsToo` — string contents
- * blanked as well; every blanked character becomes a space, newlines stay, so
- * offsets and line numbers hold. A regex literal is not tracked: a quote or
- * `//` inside one may blank to the next quote or line end, which only ever
- * hides text from this check, never invents a member or a specifier. A
- * template literal is blanked whole, `${…}` included, so a `Deno` member
- * inside one is not seen either way (no file on the shim has one).
+ * `text` with comments and regex literals blanked, and — when `stringsToo` —
+ * string contents blanked as well; every blanked character becomes a space,
+ * newlines stay (a `\`-newline continuation keeps its newline), so offsets and
+ * line numbers hold. One scanner, `scan`, linear in the text: a template
+ * literal's `${…}` expressions are code and stay — read by the same rules, so
+ * a quote, a `}` or a comment inside a regex or string within one is read as
+ * such, and the expression ends at the first `}` at depth 0 — while the
+ * literal's own text is blanked (`\`${Deno.env.get("X")}/y\`` is the Edge
+ * Function idiom; SMD-1799's first review pass found the whole literal
+ * blanked, its second found the expression's end read by a scanner that knew
+ * no regex). A `/` opens a regex literal where a value cannot end — after `(`,
+ * `,`, `=`, `:`, `[`, `!`, `&`, `|`, `?`, `{`, `}`, `;`, an arithmetic
+ * operator, the start of the text, or a keyword such as `return` (not a member
+ * named like one: `a.return / b`) — and is blanked to its closing `/` on the
+ * same line (a `]`-closed class may hold one); a `/` with no close on its line
+ * is a division, and so is one after `)` or `<` (`</td>` is JSX's closer, and
+ * two on a line read as a regex spanning the cell between, .tsx being in
+ * scope). What this cannot read: a regex after `)` with a quote inside hides
+ * the rest of that line, never a later one (a string stops at the newline);
+ * an apostrophe in JSX text (`<td>it's</td><td>{Deno.pid}</td>`) does the
+ * same — the .tsx analogue of the prose hazard check 22 met — and matters
+ * only when `Deno` shares the line.
  */
-function blanked(text: string, stringsToo: boolean) {
+const REGEX_AFTER_WORD = new Set(["return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw", "yield", "await", "instanceof"]);
+function blanked(text: string, stringsToo: boolean): string {
+  return scan(text, 0, stringsToo, false).out;
+}
+/** The scanner behind `blanked`: from `from`; when `inExpression`, stops at the first `}` at depth 0 and says where. */
+function scan(text: string, from: number, stringsToo: boolean, inExpression: boolean): { out: string; end: number } {
   let out = "";
-  for (let i = 0; i < text.length;) {
+  // The last code character that is not a space, the last identifier (kept across the spaces after it) and whether it
+  // followed a `.` — for the regex-or-division question at a `/`.
+  let last = "", word = "", wordOpen = false, afterDot = false, depth = 0;
+  const blank = (s: string) => s.replace(/[^\n]/g, " ");
+  const emit = (ch: string) => {
+    out += ch;
+    if (/\s/.test(ch)) { wordOpen = false; return; }
+    if (/[\w$]/.test(ch)) { if (!wordOpen) afterDot = last === "."; word = wordOpen ? word + ch : ch; wordOpen = true; } else { word = ""; wordOpen = false; }
+    last = ch;
+  };
+  let i = from;
+  for (; i < text.length;) {
     const c = text[i], d = text[i + 1];
     if (c === "/" && d === "/") { while (i < text.length && text[i] !== "\n") { out += " "; i++; } continue; }
     if (c === "/" && d === "*") {
@@ -1690,139 +1727,215 @@ function blanked(text: string, stringsToo: boolean) {
       for (; i < stop; i++) out += text[i] === "\n" ? "\n" : " ";
       continue;
     }
-    if (c === '"' || c === "'" || c === "`") {
+    if (c === '"' || c === "'") {
       out += c; i++;
-      while (i < text.length && text[i] !== c) {
-        if (text[i] === "\\") { out += stringsToo ? "  " : text.slice(i, i + 2); i += 2; continue; }
-        out += stringsToo && text[i] !== "\n" ? " " : text[i]; i++;
+      while (i < text.length && text[i] !== c && text[i] !== "\n") {
+        if (text[i] === "\\") { const esc = text.slice(i, i + 2); out += stringsToo ? blank(esc) : esc; i += esc.length; continue; }
+        out += stringsToo ? " " : text[i]; i++;
       }
-      if (i < text.length) { out += c; i++; }
+      if (i < text.length && text[i] === c) { out += c; i++; }
+      last = c; word = "";
       continue;
     }
-    out += c; i++;
+    if (c === "`") {
+      out += c; i++;
+      while (i < text.length && text[i] !== "`") {
+        if (text[i] === "\\") { const esc = text.slice(i, i + 2); out += stringsToo ? blank(esc) : esc; i += esc.length; continue; }
+        if (text[i] === "$" && text[i + 1] === "{") {
+          const inner = scan(text, i + 2, stringsToo, true);
+          out += "${" + inner.out + (inner.end < text.length ? "}" : "");
+          i = inner.end + 1;
+          continue;
+        }
+        out += stringsToo && text[i] !== "\n" ? " " : text[i]; i++;
+      }
+      if (i < text.length) { out += "`"; i++; }
+      last = "`"; word = "";
+      continue;
+    }
+    if (c === "/" && (last === "" || "(,=:[!&|?{};+-*%>~^".includes(last) || (REGEX_AFTER_WORD.has(word) && !afterDot))) {
+      // A regex literal, if one closes on this line; else the `/` is a division.
+      let j = i + 1, inClass = false, closed = false;
+      for (; j < text.length && text[j] !== "\n"; j++) {
+        if (text[j] === "\\" && text[j + 1] !== "\n") { j++; continue; } // an escape, never past the line's end
+        if (text[j] === "[") inClass = true;
+        else if (text[j] === "]") inClass = false;
+        else if (text[j] === "/" && !inClass) { closed = true; break; }
+      }
+      if (closed) {
+        out += "/" + " ".repeat(j - i - 1) + "/"; i = j + 1;
+        while (i < text.length && /[a-z]/.test(text[i])) { out += " "; i++; } // the flags
+        last = "/"; word = "";
+        continue;
+      }
+    }
+    if (inExpression) {
+      if (c === "{") depth++;
+      else if (c === "}") { if (depth === 0) return { out, end: i }; depth--; }
+    }
+    emit(c); i++;
   }
-  return out;
+  return { out, end: text.length };
 }
+/** The index of the `}` that closes a template expression opened at `start`; `text.length` when none does. */
+function expressionEnd(text: string, start: number): number { return scan(text, start, true, true).end; }
 
 /**
  * Every import (and export-from) statement's specifier, with the line it starts
- * on, in order. A statement ends at its `;` — the tree's imports all carry one;
- * a semicolon-less import would run on to the next `;` and its specifier be
- * missed (a silent miss, never a false catch), so the rule says so here.
+ * on, in order. A statement ends at its `;`, or — for one written on a single
+ * line with no `;` (recipes/repo-learning-coach is semicolon-less throughout;
+ * SMD-1799's second review pass found its twelve files' imports unread) — at
+ * its line's end. A semicolon-less import that spans lines is still missed (a
+ * silent miss, never a false catch), so the rule says so here.
  */
 function importSpecifiers(text: string) {
   const code = blanked(text, false);
   const out: { spec: string; line: number }[] = [];
-  for (const m of code.matchAll(/^[ \t]*(?:import|export)\b[^;]*;/gm)) {
-    const spec = /\bfrom\s*(["'])([^"'\n]+)\1\s*;$/.exec(m[0]) ?? /^[ \t]*import\s*(["'])([^"'\n]+)\1\s*;$/.exec(m[0]);
-    if (spec) out.push({ spec: spec[2], line: code.slice(0, m.index).split("\n").length });
+  const lineOf = lineIndexer(code);
+  // A statement runs to its `;` but never across a newline into a line that opens another statement or leads
+  // with `;` (standard style's `;[…]` and `;(…)` idioms): the third review pass found a semicolon-less import
+  // counted twice through the next line's leading `;`, and a mixed file's `;`-terminated import credited to the
+  // semicolon-less line above it. The `;` must sit on the specifier's own line.
+  for (const m of code.matchAll(/^[ \t]*(?:import|export)\b(?:[^;\n]|\n(?![ \t]*(?:import\b|export\b|;)))*;/gm)) {
+    const spec = /\bfrom\s*(["'])([^"'\n]+)\1[ \t]*;$/.exec(m[0]) ?? /^[ \t]*import\s*(["'])([^"'\n]+)\1[ \t]*;$/.exec(m[0]);
+    if (spec) out.push({ spec: spec[2], line: lineOf(m.index) });
   }
-  return out;
+  for (const m of code.matchAll(/^[ \t]*(?:import|export)\b[^;\n]*$/gm)) {
+    const spec = /\bfrom\s*(["'])([^"'\n]+)\1\s*$/.exec(m[0]) ?? /^[ \t]*import\s*(["'])([^"'\n]+)\1\s*$/.exec(m[0]);
+    if (spec) out.push({ spec: spec[2], line: lineOf(m.index) });
+  }
+  return out.sort((a, b) => a.line - b.line);
 }
 
 /** Whether `text` imports the SQL shim by a relative specifier. */
 const importsShim = (text: string) => importSpecifiers(text).some((s) => SHIM_SPECIFIER.test(s.spec));
 
+/** Every `Deno` reached in `text`'s code, as `{ member, line }` — `<bare>` when not through a member; `globalThis.Deno.x` reads as `Deno.x`. */
+function denoLinesIn(text: string): { member: string; line: number }[] {
+  const code = blanked(text, true);
+  const lineOf = lineIndexer(text);
+  const out: { member: string; line: number }[] = [];
+  for (const m of code.matchAll(DENO_MEMBER)) {
+    const member = m[1] === undefined ? "<bare>" : m[2] ? `${m[1]}.${m[2]}` : m[1];
+    out.push({ member, line: lineOf(m.index!) });
+  }
+  return out;
+}
 /**
- * The gaps between a shim-importing entry file and running under Bun, as
- * strings: `no-runtime-import` / `runtime-not-first` (the entry, given that it
- * or a dependency uses `Deno`), `deno-member:<m>@<line>` for a member the
- * polyfill does not provide, `specifier:<s>@<line>` for one Bun does not
- * resolve. `deps` are the texts of the files the entry imports, relatively and
- * transitively; their own gaps come back prefixed with their index (`dep0:`).
- * Pure over texts so the probes below need no files.
+ * The specifiers Bun does not resolve, as `specifier:<s>@<line>`: in `entry`'s
+ * imports, export-froms and literal dynamic imports, and in `deps` — the texts
+ * of the files the entry imports, relatively and transitively — prefixed with
+ * their index (`dep0:`). Pure over texts so the probes below need no files.
  */
-function shimRuntimeGapsIn(entry: string, deps: string[] = []) {
+function specifierGapsIn(entry: string, deps: string[] = []): string[] {
   const gaps: string[] = [];
-  let usesDeno = false;
   [entry, ...deps].forEach((text, i) => {
     const at = i === 0 ? "" : `dep${i - 1}:`;
-    const code = blanked(text, true);
-    for (const m of code.matchAll(DENO_MEMBER)) {
-      usesDeno = true;
-      // `globalThis.Deno.x` reads as `Deno.x`; a bare `Deno` (aliased, bracketed, destructured) is a use the rule cannot follow, so it is refused as one.
-      const member = m[1] === undefined ? "<bare>" : m[2] ? `${m[1]}.${m[2]}` : m[1];
-      const line = text.slice(0, m.index).split("\n").length;
-      if (!DENO_PROVIDED.has(member)) gaps.push(`${at}deno-member:${member}@${line}`);
-    }
     for (const s of importSpecifiers(text)) if (NOT_ON_BUN.test(s.spec)) gaps.push(`${at}specifier:${s.spec}@${s.line}`);
+    const code = blanked(text, true);
+    const lineOf = lineIndexer(text);
     for (const m of code.matchAll(DYNAMIC_IMPORT)) {
       // The specifier's text is blanked in `code`; read it from the original at the same offset.
       const spec = text.slice(m.index + m[0].length - m[2].length - 1, m.index + m[0].length - 1);
-      if (NOT_ON_BUN.test(spec)) gaps.push(`${at}specifier:${spec}@${text.slice(0, m.index).split("\n").length}`);
+      if (NOT_ON_BUN.test(spec)) gaps.push(`${at}specifier:${spec}@${lineOf(m.index!)}`);
     }
   });
-  if (usesDeno) {
-    const specs = importSpecifiers(entry);
-    const runtime = specs.findIndex((s) => RUNTIME_SPECIFIER.test(s.spec));
-    if (runtime < 0) gaps.push("no-runtime-import");
-    else if (runtime > 0) gaps.push(`runtime-not-first@${specs[runtime].line}`);
-  }
   return gaps;
 }
 
-const SHIM_RUNTIME_PROBES: [string, string][] = [
-  // The state fix 13 left the files in: the shim, a Deno global, no runtime line.
-  ['import { createClient } from "../../compat/supabase-sql/index.ts";\nconst u = Deno.env.get("SUPABASE_URL");\nDeno.serve(() => new Response("ok"));\n', "no-runtime-import"],
-  // The runtime line present, but after another import whose module body may read Deno.env.
-  ['import { Hono } from "hono";\nimport "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nDeno.serve(() => new Response("ok"));\n', "runtime-not-first@2"],
-  // A member the polyfill does not provide, in three spellings.
-  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst t = await Deno.readTextFile("x");\n', "deno-member:readTextFile@3"],
-  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nif (!ok) Deno.exit(1);\n', "deno-member:exit@3"],
-  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst all = Deno.env.toObject();\n', "deno-member:env.toObject@3"],
-  // `Deno` reached around the member syntax: an alias, a bracket, a destructure — each a use the rule cannot follow.
-  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst D = Deno;\nD.exit(1);\n', "deno-member:<bare>@3"],
-  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst k = Deno["env"].get("X");\n', "deno-member:<bare>@3"],
-  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst { readTextFile } = Deno;\n', "deno-member:<bare>@3"],
-  // A dynamic import of a specifier Bun does not resolve.
-  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst p = await import("jsr:@std/path");\nDeno.serve(() => new Response("ok"));\n', "specifier:jsr:@std/path@3"],
-  // Specifiers Bun does not resolve: Deno's registries and a URL, in an import and an export-from.
-  ['import "../../compat/deno-on-bun.ts";\nimport "jsr:@supabase/functions-js/edge-runtime.d.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nDeno.serve(() => new Response("ok"));\n', "specifier:jsr:@supabase/functions-js/edge-runtime.d.ts@2"],
-  ['import "../../compat/deno-on-bun.ts";\nimport { Hono } from "npm:hono@4.9.2";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nDeno.serve(() => new Response("ok"));\n', "specifier:npm:hono@4.9.2@2"],
-  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nexport {\n  Pool,\n} from "https://deno.land/x/postgres@v0.17.0/mod.ts";\nDeno.serve(() => new Response("ok"));\n', "specifier:https://deno.land/x/postgres@v0.17.0/mod.ts@3"],
+/** [text, the `member@line` list it must report]: every spelling of reaching `Deno`, and the texts that do not. */
+const DENO_PROBES: [string, string[]][] = [
+  // The Edge Function shape: an env read and the serve tail.
+  ['import { createClient } from "../../compat/supabase-sql/index.ts";\nconst u = Deno.env.get("SUPABASE_URL");\nDeno.serve(() => new Response("ok"));\n', ["env.get@2", "serve@3"]],
+  // The members the polyfill never provided.
+  ['const t = await Deno.readTextFile("x");\n', ["readTextFile@1"]],
+  ['if (!ok) Deno.exit(1);\n', ["exit@1"]],
+  ['const all = Deno.env.toObject();\n', ["env.toObject@1"]],
+  // `Deno` reached around the member syntax — an alias, a bracket, a destructure, a runtime test — each `<bare>`.
+  ['const D = Deno;\nD.exit(1);\n', ["<bare>@1"]],
+  ['const k = Deno["env"].get("X");\n', ["<bare>@1"]],
+  ['const { readTextFile } = Deno;\n', ["<bare>@1"]],
+  ['if (typeof Deno !== "undefined") run();\n', ["<bare>@1"]],
+  // Through globalThis, and after a multi-line import.
+  ['import {\n  createClient,\n} from "../../compat/supabase-sql/index.ts";\nconst u = globalThis.Deno.env.get("X");\n', ["env.get@4"]],
+  // A Node-shaped file on the shim: nothing.
+  ['#!/usr/bin/env node\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst url = process.env.SUPABASE_URL;\n', []],
+  // Members in comments and strings are prose.
+  ['// All env reads use Deno.env.get(); never Deno.readTextFile.\nconst note = "Deno.serve(app.fetch)"; /* Deno.exit */\n', []],
+  // Bun's entry shape, the tail the sweep left.
+  ['export default {\n  port: Number(process.env.PORT || 8000),\n  fetch: app.fetch,\n};\n', []],
+  // A template literal's expressions are code (the first review pass found the whole literal blanked), nested or not.
+  ['const u = `${Deno.env.get("SUPABASE_URL")}/rest/v1`;\n', ["env.get@1"]],
+  ['const s = `a ${cond ? `${Deno.env.get("A")}` : "b"} c`;\n', ["env.get@1"]],
+  ['const t = `plain ${x} text`;\nDeno.exit(1);\n', ["exit@2"]],
+  // A regex literal is not code: a quote inside one used to open a "string" that hid the next line (the same pass);
+  // `\bDeno\.env\b` inside one is prose; a division is not a regex; a regex after `return` is one.
+  ['const re = /["\']?Deno\\.env/;\nDeno.exit(1);\n', ["exit@2"]],
+  ['const m = text.match(/\\bDeno\\.env\\b/g);\n', []],
+  ['const half = total / 2;\nDeno.exit(1);\n', ["exit@2"]],
+  ['function f(s) { return /Deno/.test(s); }\nDeno.exit(1);\n', ["exit@2"]],
+  // The second review pass, against a parser oracle: a `/` after `<` is JSX's closer, not a regex (two on a .tsx
+  // line read as one spanning the cell between); a quote or a `}` inside a regex within `${…}` is the regex's; a
+  // member named like a keyword is not the keyword; a `\`-newline continuation keeps its line count.
+  ['return <tr><td>{a}</td><td>{Deno.env.get("B")}</td></tr>;\n', ["env.get@1"]],
+  ['const s = `${/"/.test(a)}`; Deno.exit(1);\n', ["exit@1"]],
+  ['const t = `${/}/.test(Deno.pid)}`;\n', ["pid@1"]],
+  ['const r = a.return / Deno.pid / 2;\n', ["pid@1"]],
+  ['const s = "a\\\nb";\nDeno.exit(1);\n', ["exit@3"]],
+  // Not read, by design: `globalThis["Deno"]`, `Reflect.get(globalThis, "Deno")`, `eval("Deno")` — strings are prose,
+  // and a rule on the string "Deno" would refuse every README's code block; a file that hides its runtime that way
+  // is a review finding, not a checker's.
 ];
-/** [entry, dep, gap]: the transitive cases — the entry itself reads no Deno member. */
-const SHIM_RUNTIME_DEP_PROBES: [string, string, string][] = [
-  ['import { createClient } from "../../compat/supabase-sql/index.ts";\nimport { key } from "./_shared/helpers.ts";\nexport const c = createClient(key(), "");\n', 'export const key = () => Deno.env.get("SUPABASE_URL") ?? "";\n', "no-runtime-import"],
-  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nimport { key } from "./_shared/helpers.ts";\n', 'export const key = () => Deno.args[0];\n', "dep0:deno-member:args@1"],
-  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nimport { db } from "./_shared/db.ts";\n', 'import { Pool } from "npm:pg@8";\nexport const db = new Pool();\n', "dep0:specifier:npm:pg@8@1"],
-];
-const SHIM_RUNTIME_NON_PROBES = [
-  // The state the codemod leaves: the runtime line first, node: fine, both members.
-  '// MIGRATED OFF SUPABASE: imports compat/supabase-sql instead of @supabase/supabase-js.\nimport "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nimport { createHash } from "node:crypto";\nconst u = Deno.env.get("SUPABASE_URL")!;\nDeno.serve(app.fetch);\n',
-  // The runtime line in the jsr: types import's place, the original recorded in a comment.
-  'import "../../compat/deno-on-bun.ts"; // ob1-original-types: jsr:@supabase/functions-js/edge-runtime.d.ts\n\nimport { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nDeno.serve(app.fetch);\n',
-  // A Node script on the shim: no Deno global, so no runtime line owed.
-  '#!/usr/bin/env node\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst url = process.env.SUPABASE_URL;\n',
-  // Members and specifiers in comments and strings are prose.
-  'import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\n// All env reads use Deno.env.get(); never Deno.readTextFile — see "jsr:@supabase/functions-js".\nconst note = "Deno.exit is not provided; import \\"npm:x\\" fails";\n/* Deno.args too */\nDeno.serve(app.fetch);\n',
-  // A multi-line import after the runtime line; `Deno.serve({ port }, handler)`; `globalThis.Deno.env.get`; a dynamic import Bun resolves.
-  'import "../../compat/deno-on-bun.ts";\nimport {\n  createClient,\n  type SupabaseClient,\n} from "../../compat/supabase-sql/index.ts";\nconst u = globalThis.Deno.env.get("X");\nconst m = await import("./tools.ts");\nDeno.serve({ port: 8000 }, (req) => new Response("ok"));\n',
-  // Not on the shim at all: whatever it does with Deno is a Deno deployment's business.
-  'import "jsr:@supabase/functions-js/edge-runtime.d.ts";\nimport { createClient } from "@supabase/supabase-js";\nconst t = await Deno.readTextFile("x");\nDeno.serve(app.fetch);\n',
+/** The files check 11 reads: every code extension check 22's CODE_FILE reads, less the markup ones (a `Deno` in a Svelte or HTML script is check 22's kind of rare, and the roots' markup is the dashboards'). */
+const BUN_CODE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
+/** [entry, deps, the gaps it must report]: specifiers Bun does not resolve, in the entry and through a dependency. */
+const SPECIFIER_PROBES: [string, string[], string[]][] = [
+  // Deno's registries and a URL, in an import and an export-from; a dynamic import; through a dependency.
+  ['import "jsr:@supabase/functions-js/edge-runtime.d.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\n', [], ["specifier:jsr:@supabase/functions-js/edge-runtime.d.ts@1"]],
+  ['import { Hono } from "npm:hono@4.9.2";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\n', [], ["specifier:npm:hono@4.9.2@1"]],
+  ['import { createClient } from "../../compat/supabase-sql/index.ts";\nexport {\n  Pool,\n} from "https://deno.land/x/postgres@v0.17.0/mod.ts";\n', [], ["specifier:https://deno.land/x/postgres@v0.17.0/mod.ts@2"]],
+  ['import { createClient } from "../../compat/supabase-sql/index.ts";\nconst p = await import("jsr:@std/path");\n', [], ["specifier:jsr:@std/path@2"]],
+  ['import { createClient } from "../../compat/supabase-sql/index.ts";\nimport { db } from "./_shared/db.ts";\n', ['import { Pool } from "npm:pg@8";\nexport const db = new Pool();\n'], ["dep0:specifier:npm:pg@8@1"]],
+  // `node:` is fine, a relative dynamic import is fine, a specifier in a comment or a string is prose.
+  ['import { createHash } from "node:crypto";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst m = await import("./tools.ts");\n// see "jsr:@supabase/functions-js"\nconst s = "npm:hono";\n', [], []],
+  // Semicolon-less, single-line (the second review pass: repo-learning-coach's shape, unread until then).
+  ["import { Hono } from 'npm:hono@4'\nimport { createClient } from '../../compat/supabase-sql/index.ts'\n", [], ["specifier:npm:hono@4@1"]],
+  // The third pass: a `;`-led next line counts the import once; a mixed file credits each import to its own line.
+  ["import { a } from 'npm:a'\n;[1].forEach(f)\n", [], ["specifier:npm:a@1"]],
+  ["import { a } from 'npm:a'\nimport { b } from 'npm:b';\nimport { c } from 'npm:c'\n", [], ["specifier:npm:a@1", "specifier:npm:b@2", "specifier:npm:c@3"]],
+  // A multi-line, `;`-terminated import is still read whole.
+  ['import {\n  createClient,\n} from "npm:@supabase/supabase-js@2";\nimport { x } from "../../compat/supabase-sql/index.ts";\n', [], ["specifier:npm:@supabase/supabase-js@2@1"]],
 ];
 
-function checkShimRuntime() {
-  for (const [probe, gap] of SHIM_RUNTIME_PROBES) {
-    const got = shimRuntimeGapsIn(probe);
-    if (got.length !== 1 || got[0] !== gap) fail(SELF, `shim-runtime rule no longer reports exactly "${gap}" for its probe (reported ${JSON.stringify(got)}): ${JSON.stringify(probe)}`);
+function checkBunNative() {
+  for (const [probe, want] of DENO_PROBES) {
+    const got = denoLinesIn(probe).map((d) => `${d.member}@${d.line}`);
+    if (got.join() !== want.join()) fail(SELF, `bun-native rule reports ${JSON.stringify(got)} for a probe that must report ${JSON.stringify(want)}: ${JSON.stringify(probe)}`);
   }
-  for (const [entry, dep, gap] of SHIM_RUNTIME_DEP_PROBES) {
-    const got = shimRuntimeGapsIn(entry, [dep]);
-    if (got.length !== 1 || got[0] !== gap) fail(SELF, `shim-runtime rule no longer reports exactly "${gap}" through a dependency (reported ${JSON.stringify(got)}): ${JSON.stringify(entry)} + ${JSON.stringify(dep)}`);
+  for (const [entry, deps, want] of SPECIFIER_PROBES) {
+    const got = specifierGapsIn(entry, deps);
+    if (got.join() !== want.join()) fail(SELF, `bun-native rule reports ${JSON.stringify(got)} for a specifier probe that must report ${JSON.stringify(want)}: ${JSON.stringify(entry)}`);
   }
-  for (const text of SHIM_RUNTIME_NON_PROBES) {
-    const got = importsShim(text) ? shimRuntimeGapsIn(text) : [];
-    if (got.length > 0) fail(SELF, `shim-runtime rule reports ${JSON.stringify(got)} on text it must not: ${JSON.stringify(text)}`);
-  }
+  for (const name of ["x.ts", "x.tsx", "x.mts", "x.cts", "x.js", "x.jsx", "x.mjs", "x.cjs"]) if (!BUN_CODE_FILE.test(name)) fail(SELF, `check 11's BUN_CODE_FILE no longer reads ${name} (its own probe)`);
+  for (const name of ["x.md", "x.json", "x.sql", "x.svelte", "x.html"]) if (BUN_CODE_FILE.test(name)) fail(SELF, `check 11's BUN_CODE_FILE reads ${name}, which it should not (its own probe)`);
+  if (!importsShim("import { createClient } from '../../compat/supabase-sql/index.ts'\nexport const c = createClient(u, k)\n")) fail(SELF, "importsShim no longer sees a semicolon-less shim import (its own probe)");
+  if (importsShim("// import { createClient } from '../../compat/supabase-sql/index.ts';\nconst s = 'compat/supabase-sql/index.ts';\n")) fail(SELF, "importsShim reads a shim import out of a comment or a string (its own probe)");
+  const gone = new Set([...DENO_EXCEPTIONS.keys()].filter((rel) => !existsSync(join(ROOT, rel))));
+  for (const rel of gone) fail(SELF, `DENO_EXCEPTIONS names ${rel}, which is not in the tree — remove the entry with the file`);
 
-  const WHY = "imports compat/supabase-sql, which imports `bun`, and uses a Deno global";
-  const code = textFilesUnder(SCANNED_ROOTS).filter((f) => /\.(ts|js|mjs)$/.test(f) && !f.includes(`${sep}node_modules${sep}`));
+  const HOW = "reaches `Deno` — the vendored files are Bun-native (SMD-1799): `process.env` for the environment, `export default { port, fetch }` at the tail, Bun's own APIs for files and arguments; the Edge Function deployments SMD-1800 retires are the counted exceptions in DENO_EXCEPTIONS";
+  const code = textFilesUnder(SCANNED_ROOTS).filter((f) => BUN_CODE_FILE.test(f) && !f.includes(`${sep}node_modules${sep}`));
+  const reached = new Map<string, number>();
   for (const file of code) {
     const text = readFileSync(file, "utf8");
-    if (!importsShim(text)) continue;
     const rel = relOf(file);
-    // The files it evaluates: relative imports, transitively, that exist in the tree — not the shim or the polyfill themselves.
+    const lines = [...new Set(denoLinesIn(text).map((d) => d.line))].sort((a, b) => a - b);
+    if (lines.length) {
+      if (DENO_EXCEPTIONS.has(rel)) reached.set(rel, lines.length);
+      else for (const line of lines) fail(`${rel}:${line}`, HOW);
+    }
+    if (!importsShim(text)) continue;
+    // The files it evaluates: relative imports, transitively, that exist in the tree — not the shim itself.
     const deps: string[] = [];
     const seen = new Set([file]);
     const queue = [file];
@@ -1831,27 +1944,32 @@ function checkShimRuntime() {
       const src = from === file ? text : readFileSync(from, "utf8");
       for (const { spec } of importSpecifiers(src)) {
         if (!spec.startsWith("./") && !spec.startsWith("../")) continue;
-        const p = join(dirname(from), spec);
-        if (seen.has(p) || !existsSync(p) || !statSync(p).isFile() || relOf(p).startsWith("compat/")) continue;
+        // As Bun resolves it: the path as written; a `.js`/`.mjs` specifier for a `.ts`/`.tsx`/`.mts` file; an
+        // extensionless one; a directory's index — in Bun's order, the first that is a file.
+        const target = join(dirname(from), spec);
+        const p = [target, target.replace(/\.js$/, ".ts"), target.replace(/\.js$/, ".tsx"), target.replace(/\.mjs$/, ".mts"),
+          ...(/\.\w+$/.test(spec) ? [] : [`${target}.ts`, `${target}.tsx`, `${target}.js`]),
+          join(target, "index.ts"), join(target, "index.tsx"), join(target, "index.js")]
+          .find((c) => existsSync(c) && statSync(c).isFile());
+        if (!p || seen.has(p) || relOf(p).startsWith("compat/")) continue;
         seen.add(p); queue.push(p); deps.push(p);
       }
     }
-    for (const gap of shimRuntimeGapsIn(text, deps.map((d) => readFileSync(d, "utf8")))) {
-      // The gap strings, above; a bare `Deno` reports as `<bare>`.
+    for (const gap of specifierGapsIn(text, deps.map((d) => readFileSync(d, "utf8")))) {
       const dep = /^dep(\d+):/.exec(gap);
       const where = dep ? relOf(deps[Number(dep[1])]) : rel;
       const g = dep ? gap.slice(dep[0].length) : gap;
+      const spec = g.slice("specifier:".length).replace(/@\d+$/, "");
       const line = /@(\d+)$/.exec(g)?.[1];
-      const at = line ? `${where}:${line}` : where;
-      if (g === "no-runtime-import") fail(rel, `${WHY} (itself or through ${deps.length ? "a file it imports" : "its own text"}) but does not import compat/deno-on-bun.ts — under Bun \`Deno\` is undefined at the first read, under Deno the shim's \`bun\` import fails, so the file runs nowhere; \`bun scripts/migrate-to-sql-shim.ts --apply --all\` adds the line as the first import (SMD-1480, FORK.md change 74)`);
-      else if (g.startsWith("runtime-not-first")) fail(at, `imports compat/deno-on-bun.ts after another import — a module evaluated before it may read \`Deno.env\` in its body and throw at startup; make it the first import statement (SMD-1480, FORK.md change 74)`);
-      else if (g.startsWith("deno-member:")) {
-        const member = g.slice("deno-member:".length).replace(/@\d+$/, "");
-        fail(at, `uses ${member === "<bare>" ? "\`Deno\` other than as \`Deno.env.get\` or \`Deno.serve\` (aliased, bracketed or destructured — a use this rule cannot follow)" : `\`Deno.${member}\``} in a file that runs under Bun through compat/deno-on-bun.ts, which provides only \`Deno.env.get\` and \`Deno.serve\` — the call fails under Bun; use the Node API Bun and Deno both have (node:fs, process.argv, process.exit), or extend the polyfill deliberately and say so (SMD-1480, FORK.md change 74)`);
-      }
-      else if (g.startsWith("specifier:")) fail(at, `imports \`${g.slice("specifier:".length).replace(/@\d+$/, "")}\` in a file that runs under Bun, which does not resolve jsr:, npm: or URL specifiers — a bare package name resolves from extensions/node_modules (NODE_PATH, as the README says); a type-only jsr: import is what the codemod swaps for the polyfill line (SMD-1480, FORK.md change 74)`);
-      else fail(at, `shim-runtime gap ${g}`);
+      fail(`${where}:${line}`, `imports \`${spec}\` in a file that runs under Bun, which does not resolve it — the shim's servers run as \`bun <file>\` (a \`jsr:\` type import goes; \`npm:pkg@v\` is \`pkg\` in the directory's package.json; a URL import is a package)`);
     }
+  }
+  for (const [rel, { why, lines }] of DENO_EXCEPTIONS) {
+    if (gone.has(rel)) continue; // failed once above
+    const n = reached.get(rel) ?? 0;
+    if (n !== lines) fail(rel, n === 0
+      ? `listed as a Deno exception (${why}) but reaches \`Deno\` on no line — remove it from DENO_EXCEPTIONS`
+      : `listed as a Deno exception for ${lines} line(s) (${why}) but reaches \`Deno\` on ${n} — a new line is a new use, a gone line a stale count`);
   }
 }
 
@@ -2176,7 +2294,7 @@ checkShellHazards(dirs);
 checkCoreFunctions();
 checkCredentialCompares();
 checkThoughtWritesAround();
-checkShimRuntime();
+checkBunNative();
 checkSupabaseIsms();
 checkPublishedPorts();
 

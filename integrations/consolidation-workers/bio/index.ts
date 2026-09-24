@@ -48,7 +48,6 @@
  * See docs/05-tool-audit.md for the full tool and worker inventory.
  */
 
-import "../../../compat/deno-on-bun.ts";
 import { createClient } from "../../../compat/supabase-sql/index.ts";
 import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 import {
@@ -66,14 +65,14 @@ import { fetchWithTimeout, isTransientError, resolveLlmFetchTimeoutMs } from "..
 
 // --- Environment ---
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") ?? "";
-const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY") ?? "";
-const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
+const SUPABASE_URL = process.env.SUPABASE_URL ?? "";
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ?? "";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "";
 
 // OB1: OpenRouter-first model selection
-const BIO_MODEL = Deno.env.get("OPENROUTER_CLASSIFIER_MODEL") ?? CLASSIFIER_MODEL_OPENROUTER;
+const BIO_MODEL = process.env.OPENROUTER_CLASSIFIER_MODEL ?? CLASSIFIER_MODEL_OPENROUTER;
 const BIO_MODEL_ANTHROPIC = CLASSIFIER_MODEL_ANTHROPIC;
 
 const MAX_SOURCE_THOUGHTS = 50;
@@ -548,7 +547,7 @@ async function logConsolidation(
 
 // --- Main handler ---
 
-Deno.serve(async (req) => {
+const handler = async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: getCorsHeaders() });
   }
@@ -558,8 +557,8 @@ Deno.serve(async (req) => {
   // form — x-brain-key, x-access-key, ?key=, a bearer token — is tried. Fail
   // closed with neither configured, as before.
   const keys = {
-    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
-    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+    MCP_ACCESS_KEYS: process.env.MCP_ACCESS_KEYS,
+    MCP_ACCESS_KEY: process.env.MCP_ACCESS_KEY,
   };
   if (!keys.MCP_ACCESS_KEYS && !keys.MCP_ACCESS_KEY) {
     console.warn("MCP_ACCESS_KEYS not set — rejecting all requests.");
@@ -634,4 +633,9 @@ Deno.serve(async (req) => {
     const message = err instanceof Error ? err.message : String(err);
     return json({ error: "Profile synthesis failed", details: message }, 500);
   }
-});
+};
+
+export default {
+  port: Number(process.env.PORT || 8000),
+  fetch: handler,
+};

@@ -208,7 +208,9 @@ services:
   # ── the shared model provider ────────────────────────────────────────────
   # One Ollama for all three tiers (the cost SMD-1806 contains — one model server,
   # three brains). Optional, enabled with `--profile local-models`; the three
-  # servers' OB1_LLM_BASE_URL falls back to it by name.
+  # servers' OB1_LLM_BASE_URL falls back to it by name — and since SMD-1875
+  # each server's preflight dials that name once and refuses to start without
+  # the profile or a base URL of its own in deploy/.env.
   ollama:
     image: *ollama-image
     profiles: ["local-models"]

@@ -9,7 +9,7 @@ Source filtering lets you scope `search_thoughts`, `list_thoughts`, and `thought
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- Deno 1.40+ (for backfill script only)
+- [Bun](https://bun.sh) 1.2+ (for the backfill script only)
 - Supabase project URL and service role key
 - OpenRouter API key (for backfill script only)
 
@@ -112,25 +112,25 @@ export OPENROUTER_API_KEY="your-openrouter-key"
 Start with a dry run to see what would be updated:
 
 ```bash
-deno run --allow-net --allow-env backfill-metadata.ts --dry-run --limit=10
+bun backfill-metadata.ts --dry-run --limit=10
 ```
 
 Then run a small live batch:
 
 ```bash
-deno run --allow-net --allow-env backfill-metadata.ts --limit=10
+bun backfill-metadata.ts --limit=10
 ```
 
 If that looks good, run the full backfill:
 
 ```bash
-deno run --allow-net --allow-env backfill-metadata.ts --limit=1000
+bun backfill-metadata.ts --limit=1000
 ```
 
 You can also scope the backfill to a specific source:
 
 ```bash
-deno run --allow-net --allow-env backfill-metadata.ts --source=gmail --limit=500
+bun backfill-metadata.ts --source=gmail --limit=500
 ```
 
 ### Step 6: Verify
@@ -171,7 +171,7 @@ All your thoughts already have LLM-extracted metadata. This happens if everythin
 The script batches requests (default 10 concurrent) with a 500ms pause between batches. If you hit rate limits, reduce the batch size:
 
 ```bash
-deno run --allow-net --allow-env backfill-metadata.ts --batch-size=3
+bun backfill-metadata.ts --batch-size=3
 ```
 
 **Source strings are case-sensitive**

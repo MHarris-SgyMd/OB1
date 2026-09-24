@@ -107,7 +107,7 @@ jobs:
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
       # and every developer here uses, and checks 13, 14, 18 and 20 parse YAML with
       # Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the shim's runtime, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, and runtime supabase-js imports
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, and runtime supabase-js imports
         run: bun scripts/check-fork-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -124,7 +124,7 @@ jobs:
         working-directory: scripts
         run: bunx tsc --noEmit
 
-      # The session-end capture hook (SMD-1298): both transcript parsers, the
+      # The session capture hook (SMD-1298, SMD-2012): both transcript parsers, the
       # summary's shape, every secret pattern's probe, the refusal, the detached
       # hand-off and the MCP post — against synthetic transcripts and a fake
       # endpoint on localhost. Bun only, no database, so it runs here.
@@ -167,7 +167,8 @@ jobs:
       # job starts each, the data-layer job drives their tools — so none
       # resolves under Deno any more; the five steps that checked the last six
       # of them went with the move. kubernetes-deployment is the one vendored
-      # file still written for Deno alone (its own database, SMD-1524).
+      # file still deployed on Deno (its image, SMD-1800's; its own database,
+      # SMD-1524) — Bun-shaped since SMD-1799, `deno serve` serving the export.
       - name: deno check integrations/kubernetes-deployment
         working-directory: integrations/kubernetes-deployment
         run: deno check --node-modules-dir=none index.ts
@@ -251,6 +252,15 @@ jobs:
         working-directory: evals
         run: bun eval-calibration.ts --self-check
 
+      # The write-path eval's rules (SMD-1713): the corpus's shape, the stub
+      # provider's three answers, the reader's policy, the parsers, the
+      # scorer's partitions, the pairing and the floor comparison — probed
+      # with hand-known answers, the ticket's mutant among them. No database,
+      # no model; the run itself is the data-layer job's gate.
+      - name: Write-path rules
+        working-directory: evals
+        run: bun eval-write-path.ts --self-check
+
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
       - name: Cloudflare Workers build
@@ -271,12 +281,13 @@ jobs:
         working-directory: extensions
         run: bun install --frozen-lockfile
 
-      # Imported as deployed under a stand-in for Deno's two globals and a loader
-      # for Deno's specifiers: a wrong or revoked key is refused, a read-scoped
-      # key never sees a tool that writes, is told so by a route that writes and
-      # may only dry-run a worker, every copy is byte for byte auth.ts. Then every
-      # server on the SQL shim is started under `bun` for real and answered over
-      # its port (change 74). No database.
+      # Imported as modules — each server's default export's `fetch`, the shape
+      # `bun <file>` serves (SMD-1799) — under a loader for Deno's specifiers: a
+      # wrong or revoked key is refused, a read-scoped key never sees a tool that
+      # writes, is told so by a route that writes and may only dry-run a worker,
+      # every copy is byte for byte auth.ts. Then every server on the SQL shim is
+      # started under `bun` for real and answered over its port (change 74). No
+      # database.
       - name: Scoped access keys reach every vendored server
         working-directory: extensions
         run: bun test-auth.ts
@@ -308,6 +319,15 @@ jobs:
       - name: Board sync rules
         working-directory: db
         run: bun sync-linear.ts --self-check
+
+      # The ingestion contract's adapters and pipeline (SMD-1867): the Linear
+      # adapter (markup out of the text, structure into links and mentions),
+      # the Markdown adapter (the canonical round-trips byte for byte, the
+      # lossy cases enumerated, two inputs refused) and the ingester's pure
+      # rules (the corpus path, the allowlist). No network, no database.
+      - name: Ingestion adapters
+        working-directory: db
+        run: bun ingest-linear.ts --self-check && bun ingest-markdown.ts --self-check && bun ingest-records.ts --self-check
 
       # The embedding width is configurable and must hold at more than one value.
       - name: Schema builds at a non-default embedding width
@@ -439,6 +459,27 @@ jobs:
       - name: Local model provider, no OpenRouter
         working-directory: server-portable
         run: bun test-local-provider.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # The write-path gate (SMD-1713): twenty fictional sessions through the
+      # real server with the provider scripted, four deliverables written by a
+      # fixed reader, one process per arm; fails when the default arm's
+      # salient-survival, error-catch or citation-coverage rate falls below
+      # the floor evals/baselines.json records, and proves the floor has teeth
+      # with a reader that ignores every label. Keyless, as the replay gate
+      # is; here rather than its own job because the write path needs the
+      # server and this database, and a step in a required job gates a merge
+      # without a new name in the ruleset (SMD-1856). No install for evals/
+      # or db/: the eval, the workers it spawns (db/extract-entities.ts,
+      # db/consolidate.ts) and the db/ modules they share import only bun,
+      # node and ../server-portable, whose packages the first step installed;
+      # a package added to db/ or evals/ and imported on this path would fail
+      # here first. The evals' own packages (LanceDB, Arrow) belong to the
+      # store comparison.
+      - name: Write-path gate
+        working-directory: evals
+        run: bun eval-write-path.ts --gate
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
@@ -581,13 +622,26 @@ jobs:
           HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
           echo "OB1_SMOKE_KEY=$KEY" >> "$GITHUB_ENV"
           # No OPENROUTER_API_KEY: the provider is a local endpoint, which
-          # needs no credential (preflight decides), and nothing in this job
-          # dials it — smoke.sh captures nothing and preflight runs without
-          # --deep. The address is neither the code's default nor the compose
-          # fallback, so the log line below can only come from this file
-          # (SMD-1843); the query log likewise. OB1_LLM_LOCAL declares the
-          # endpoint to the egress gate (SMD-1903), which reads the flag and
-          # never the address; the log line below holds the forward.
+          # needs no credential (preflight decides). Preflight dials it once
+          # (GET /models, SMD-1875) and nothing else in this job does —
+          # smoke.sh captures nothing and preflight runs without --deep — so
+          # a listener on the runner that answers GET is the whole provider:
+          # the runner is the container's host.docker.internal (compose.yaml's
+          # extra_hosts host-gateway), and the listener binds every interface
+          # because host-gateway is the bridge address, not loopback. The
+          # address is neither the code's default nor the compose fallback,
+          # so the log line below can only come from this file (SMD-1843);
+          # the query log likewise. OB1_LLM_LOCAL declares the endpoint to the
+          # egress gate (SMD-1903), which reads the flag and never the
+          # address; the log line below holds the forward.
+          nohup python3 - <<'PY' > /tmp/provider-stub.log 2>&1 &
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          class H(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  body = b'{"object":"list","data":[]}'
+                  self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+          HTTPServer(("0.0.0.0", 11434), H).serve_forever()
+          PY
           # OB1_GIT_SHA reaches the image as compose's build arg (SMD-2041),
           # and the smoke step asserts the health body reports it.
           cat > .env <<EOF
@@ -615,9 +669,39 @@ jobs:
         run: |
           LOG="$(docker compose -f compose.yaml logs --no-color server)"
           grep -E 'model provider +http://host\.docker\.internal:11434/v1\b.*\(local — no credential needed\)' <<<"$LOG"
+          grep -E '✓ +provider endpoint +http://host\.docker\.internal:11434/v1 answers — HTTP 200 to GET /models' <<<"$LOG"
           grep -E 'embeddings egress +http://host\.docker\.internal:11434/v1 is declared local \(OB1_LLM_LOCAL\)' <<<"$LOG"
           grep -F 'ON (OB1_QUERY_LOG=on) here' <<<"$LOG"
           grep -F 'preflight OK' <<<"$LOG"
+
+      # SMD-1875, the ticket's first Verify item on every PR: the compose
+      # fallback (the `ollama` service) with no profile is a name that does not
+      # resolve, and the container must refuse to start on it — where it used
+      # to say `preflight OK` and fail the first capture on it (getaddrinfo
+      # ENOTFOUND ollama). The
+      # built image, the running database, one environment line changed, and
+      # preflight alone (the image's entrypoint is `sh -c "bun preflight.ts &&
+      # exec bun index.ts"`, so the command is replaced through --entrypoint).
+      # Exit 1, the `provider endpoint` row failed, the remedy naming the
+      # profile; and the same run with the reachable address (the runner's
+      # listener from the first step, still up) passes, so the step proves
+      # the probe and not a broken container.
+      - name: A local endpoint that answers nothing refuses to start
+        working-directory: deploy
+        run: |
+          set +e
+          docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun -e OB1_LLM_BASE_URL=http://ollama:11434/v1 server preflight.ts > /tmp/negative.out 2>&1
+          CODE=$?
+          set -e
+          # The report is printed whole when a line is missing, so a runner
+          # whose resolver answers differently is read, not guessed at (the
+          # first run read the unknown name as the timeout kind; caught: CI, PR #138).
+          hold() { grep -E "$1" /tmp/negative.out || { echo "--- expected /$1/ in preflight's report: ---" >&2; cat /tmp/negative.out >&2; exit 1; }; }
+          hold '✗ +provider endpoint +nothing answers at http://ollama:11434/v1 — the name does not resolve'
+          hold 'is the local-models profile.*start the stack with --profile local-models'
+          hold 'preflight FAILED'
+          [ "$CODE" -eq 1 ] || { echo "preflight exited $CODE, expected 1" >&2; cat /tmp/negative.out >&2; exit 1; }
+          docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun server preflight.ts | grep -F 'preflight OK'
 
       # SMD-1844. An address-less mapping binds 0.0.0.0; this stack holds a brain
       # behind one password and one key over plain HTTP. Read compose's own
@@ -659,7 +743,10 @@ jobs:
       - name: Logs on failure
         if: failure()
         working-directory: deploy
-        run: docker compose -f compose.yaml logs --tail 60
+        run: |
+          docker compose -f compose.yaml logs --tail 60
+          echo "--- provider stub (the runner's listener on :11434) ---"
+          cat /tmp/provider-stub.log 2>/dev/null || echo "(no stub log)"
 
       - name: Tear down
         if: always()

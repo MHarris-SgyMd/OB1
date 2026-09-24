@@ -36,21 +36,20 @@
 // scoped, hashed entries in AUDITOR_ACCESS_KEYS (the older single AUDITOR_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key may only dry_run. FORK.md
 // change 67; extensions/test-auth.ts exercises it.
-import "../../../compat/deno-on-bun.ts";
 import { createClient } from "../../../compat/supabase-sql/index.ts";
 import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 
 // ── Env ──────────────────────────────────────────────────────────────────
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
-const SLACK_BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN")!;
-const SLACK_CAPTURE_CHANNEL = Deno.env.get("SLACK_CAPTURE_CHANNEL")!;
+const SUPABASE_URL = process.env.SUPABASE_URL!;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY!;
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN!;
+const SLACK_CAPTURE_CHANNEL = process.env.SLACK_CAPTURE_CHANNEL!;
 const SLACK_DIGEST_CHANNEL =
-  Deno.env.get("SLACK_DIGEST_CHANNEL") ?? SLACK_CAPTURE_CHANNEL;
+  process.env.SLACK_DIGEST_CHANNEL ?? SLACK_CAPTURE_CHANNEL;
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
-const POLICY_VERSION = Deno.env.get("POLICY_VERSION") ?? "1.3"; // bump when docs/editorial-policy.md changes
+const POLICY_VERSION = process.env.POLICY_VERSION ?? "1.3"; // bump when docs/editorial-policy.md changes
 
 // Types EXCLUDED from the audit corpus.
 // Note: briefings and summaries ARE included — drift in synthesis outputs is
@@ -522,15 +521,15 @@ async function postToSlack(channel: string, text: string): Promise<void> {
 }
 
 // ── HTTP entrypoint ──────────────────────────────────────────────────────
-Deno.serve(async (req: Request): Promise<Response> => {
+const handler = async (req: Request): Promise<Response> => {
   try {
     // Named, scoped, hashed keys through the shared module (AUDITOR_ACCESS_KEYS;
     // the older single AUDITOR_ACCESS_KEY still works, compared by digest),
     // presented as ?key= — the schedule's form — x-brain-key, x-access-key or a
     // bearer token, and no other: an undocumented header is a rule nobody can learn.
     const keys = {
-      MCP_ACCESS_KEYS: Deno.env.get("AUDITOR_ACCESS_KEYS"),
-      MCP_ACCESS_KEY: Deno.env.get("AUDITOR_ACCESS_KEY"),
+      MCP_ACCESS_KEYS: process.env.AUDITOR_ACCESS_KEYS,
+      MCP_ACCESS_KEY: process.env.AUDITOR_ACCESS_KEY,
     };
     const principal = authenticateRequest(req, keys);
     if (!principal) {
@@ -636,4 +635,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
       { status: 500, headers: { "Content-Type": "application/json" } },
     );
   }
-});
+};
+
+export default {
+  port: Number(process.env.PORT || 8000),
+  fetch: handler,
+};
