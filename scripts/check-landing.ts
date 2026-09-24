@@ -14,7 +14,7 @@
  * as a PR).
  *
  * The rule, CONTRIBUTING.md's "Changelog & versioning": every PR that touches
- * db/migrations/, server-portable/ or evals/ ships a changes/smd-NNNN.md
+ * db/migrations/, server-portable/, evals/ or jev/ ships a changes/smd-NNNN.md
  * fragment — added, or extended when a ticket lands in slices (SMD-1806 did);
  * a deleted one is not shipped. The one exception is a release cut (SMD-1860):
  * it adds the migration that writes the version and deletes the fragments it
@@ -43,7 +43,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 export type Change = [status: string, path: string];
 
 /** The directories whose change is a change to the fork itself, as CONTRIBUTING.md names them. */
-export const FRAGMENT_DIRS = ["db/migrations/", "server-portable/", "evals/"];
+export const FRAGMENT_DIRS = ["db/migrations/", "server-portable/", "evals/", "jev/"];
 /** Inside those directories, what asks no fragment: a test file in the tree's spelling (`test-x.ts`, `x.test.ts`) or a Markdown file. */
 export const FRAGMENT_EXEMPT = /(?:^|\/)(?:test-[^/]+|[^/]+\.test)\.(?:ts|mjs|js|py|sh)$|\.md$/i;
 /** A fragment, as changes/README.md names one — a numbered `changes/NNN-slug.md` is the release step's, and ships with no PR. */

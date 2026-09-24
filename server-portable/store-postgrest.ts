@@ -393,7 +393,9 @@ export class PostgrestStore implements ThoughtStore {
       p_label: opts.label,
       p_scope: opts.scope ?? null,
     });
-    if (error) throw new Error(error.message);
+    // The SQLSTATE on `errno`, where Bun's SQL puts it: agents.ts reads a
+    // timeout (a role's statement_timeout on a locked registry) as busy.
+    if (error) throw Object.assign(new Error(error.message), { errno: error.code });
     return normaliseAgentResolution(data);
   }
 
