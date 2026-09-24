@@ -836,6 +836,7 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   const iso = (ms) => new Date(ms).toISOString();
   const named = (ms, sid) => `${ms}-0-aaaa-${sid}.json`;
   const holder = join(STATE, "inflight", String(process.ppid)); // a claim under a pid that is alive and never clears: the suite's own parent
+  const gone0 = await new Promise((res) => { const c = spawn(process.execPath, ["-e", "0"]); c.on("close", () => res(c.pid)); }); // a pid proven dead
   const DEFERRED = /^deferred: the session's earlier post is in flight \(pid \d+\); kept under pending\/ for the run that lands it$/;
   // The compaction's payload answers slowly (2.5 s); the end's, prepared while
   // that child is in flight, would otherwise land first with no pointer, and
@@ -1040,14 +1041,62 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   const capSlow = prepare({ session_id: "s-cap-beside", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
   const capEnd = prepare({ session_id: "s-cap", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
   const capBody = JSON.parse(readFileSync(capEnd.payloadPath, "utf8")); unlinkSync(capEnd.payloadPath);
+  // A second cleared session with two ends: the room is shared in rounds —
+  // every session's newest before any session's second (sixth review pass:
+  // the first session's obsolete older ends took the room the second's
+  // newest needed).
+  const capOwed2 = prepare({ session_id: "s-cap2", transcript_path: CODEX_T, hook_event_name: "SessionEnd" });
+  writeFileSync(capOwed2.payloadPath, JSON.stringify({ ...capOwed2.payload, captured_id: uuid(61) }));
   const capRunning = postPending(cfg);
-  await sleep(600); // the owed bookkeeping is done, the other session's slow payload is posting: the six ends reach pending/ now, for the follow-up alone
-  for (let i = 1; i <= 6; i++) writeFileSync(join(STATE, "pending", `999999999999${i}-${i}-cap${i}-s-cap.json`), JSON.stringify({ ...capBody, fingerprint: `cap-${i}`, prepared_at: iso(Date.parse(capBody.prepared_at) + i), text: capBody.text.replace(/\n\nSession s-cap/, `\n\nLater ${i}.\n\nSession s-cap`) }));
+  await sleep(600); // the owed bookkeepings are done, the other session's slow payload is posting: the ends reach pending/ now, for the follow-up alone
+  for (let i = 1; i <= 6; i++) writeFileSync(join(STATE, "pending", `99999999999${i}-${i}-cap${i}-s-cap.json`), JSON.stringify({ ...capBody, fingerprint: `cap-${i}`, prepared_at: iso(Date.parse(capBody.prepared_at) + i), text: capBody.text.replace(/\n\nSession s-cap/, `\n\nLater ${i}.\n\nSession s-cap`) }));
+  for (let i = 1; i <= 2; i++) writeFileSync(join(STATE, "pending", `99999999999${i}-${i}-cap${i}-s-cap2.json`), JSON.stringify({ ...capBody, session_id: "s-cap2", fingerprint: `cap2-${i}`, prepared_at: iso(Date.parse(capBody.prepared_at) + i), text: capBody.text.replace(/\n\nSession s-cap/, `\n\nSecond ${i}.\n\nSession s-cap2`) }));
   const capRun = await capRunning;
-  assert(capRun.length === 7 && received.length === 2 && /\n\nLater 6\./.test(received[1].args.content) && readdirSync(join(STATE, "pending")).join() === "9999999999991-1-cap1-s-cap.json" && readdirSync(join(STATE, "dead")).length === 4 && /following up: 5 payload\(s\) of s-cap waited/.test(logText()),
-    `the follow-up takes the newest five of six: the newest posts, four are obsolete, the oldest waits for the next run (${received.length} post(s); pending: ${readdirSync(join(STATE, "pending")).join()})`);
-  assert((await postPending(cfg)).find((x) => x.file === join(STATE, "pending", "9999999999991-1-cap1-s-cap.json"))?.obsolete && readdirSync(join(STATE, "pending")).length === 0, "…and the next run drops the oldest as obsolete beside the state");
+  const posted = received.slice(1).map((r) => (/\n\n(Later \d|Second \d)\./.exec(r.args.content) ?? [])[1]).sort().join(",");
+  assert(capRun.length === 8 && posted === "Later 6,Second 2" && readdirSync(join(STATE, "pending")).sort().join() === ["999999999991-1-cap1-s-cap.json", "999999999992-2-cap2-s-cap.json", "999999999993-3-cap3-s-cap.json"].join() && readdirSync(join(STATE, "dead")).length === 3 && /following up: 5 payload\(s\) of (?:s-cap, s-cap2|s-cap2, s-cap) waited/.test(logText()),
+    `the follow-up shares its five in rounds across the two sessions: each session's newest posts, three older ones are obsolete, the first session's three oldest wait for the next run (posted: ${posted}; pending: ${readdirSync(join(STATE, "pending")).join()})`);
+  const capNext = await postPending(cfg);
+  assert(capNext.length === 3 && capNext.every((x) => x.obsolete) && readdirSync(join(STATE, "pending")).length === 0, "…and the next run drops those three as obsolete beside the state");
   void capSlow;
+  // A payload of another session whose id sanitises to the same file tail
+  // ("s.dot" and "s_dot" both name s_dot.json) is not this run's to follow
+  // up: it goes back where it was, not to dead/ as obsolete (sixth review pass).
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const dotOwed = prepare({ session_id: "s.dot", transcript_path: CODEX_T, hook_event_name: "SessionEnd" });
+  writeFileSync(dotOwed.payloadPath, JSON.stringify({ ...dotOwed.payload, captured_id: uuid(62) })); await sleep(2);
+  const dotSlow = prepare({ session_id: "s-dot-beside", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const underscore = prepare({ session_id: "s_dot", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const underscoreAside = join(TMP, basename(underscore.payloadPath));
+  renameSync(underscore.payloadPath, underscoreAside);
+  const dotRunning = postPending(cfg);
+  await sleep(600);
+  renameSync(underscoreAside, underscore.payloadPath);
+  const dotRun = await dotRunning;
+  assert(dotRun.length === 2 && dotRun.find((x) => x.file === dotSlow.payloadPath)?.ok && existsSync(underscore.payloadPath) && readdirSync(join(STATE, "dead")).length === 0 && !/following up/.test(logText()),
+    `the other session's payload under the shared tail is left under pending/, unjudged (${dotRun.length} outcomes; dead: ${readdirSync(join(STATE, "dead")).length})`);
+  // Two children finishing one session's owed bookkeepings at once write the
+  // state together: each writes beside under its own pid and renames, so
+  // neither's rename finds the other's file gone (sixth review pass: one
+  // shared temp name, and one child's bookkeeping "failed" every time).
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const raceA = prepare({ session_id: "s-race", transcript_path: CODEX_T, hook_event_name: "SessionEnd" }); await sleep(2);
+  const raceB = prepare({ session_id: "s-race", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  writeFileSync(raceA.payloadPath, JSON.stringify({ ...raceA.payload, captured_id: uuid(63) }));
+  writeFileSync(raceB.payloadPath, JSON.stringify({ ...raceB.payload, captured_id: uuid(64) }));
+  mkdirSync(join(STATE, "s-race.json.tmp"), { recursive: true }); // a stranger's temp name standing in the way: a write under one shared name would fail on it, a write under this process's own never meets it
+  const [ra, rb] = await Promise.all([spawnScript(["--post", raceA.payloadPath]), spawnScript(["--post", raceB.payloadPath])]);
+  assert(ra.code === 0 && rb.code === 0 && !/bookkeeping failed/.test(logText()) && readState("s-race")?.thought_id === uuid(64) && readdirSync(join(STATE, "pending")).length === 0 && readdirSync(STATE).filter((f) => f.endsWith(".tmp") && f !== "s-race.json.tmp").length === 0,
+    `two children finish one session's owed bookkeepings together without a failed rename, each under its own temp name; the state names the newer (${(logText().match(/bookkeeping failed/g) ?? []).length} failure(s))`);
+  rmSync(join(STATE, "s-race.json.tmp"), { recursive: true, force: true });
+  // A temp file a child left mid-write in its claim directory is no payload:
+  // the sweep unlinks it rather than moving it under pending/ for ever.
+  const deadDir = join(STATE, "inflight", String(gone0));
+  mkdirSync(deadDir, { recursive: true });
+  writeFileSync(join(deadDir, `${Date.now()}-0-aaaa-s-tmp.json.${gone0}.tmp`), "{");
+  await postPending(cfg);
+  assert(!existsSync(deadDir) && readdirSync(join(STATE, "pending")).length === 0, "a dead child's half-written temp file is unlinked by the sweep, not swept into pending/");
   // A payload that steps aside goes back under pending/ AT ONCE, not at the
   // run's end: while this run goes on posting another session's slow payload,
   // the landing child's follow-up must be able to see it, and a newer payload

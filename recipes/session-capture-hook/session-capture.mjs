@@ -157,7 +157,7 @@ function sweepInflight() {
     let age = Infinity;
     try { age = Date.now() - statSync(dir).mtimeMs; } catch { continue; }
     if (isAlive(pid) && age < CLAIM_MAX_AGE_MS) continue;
-    for (const f of readdirSync(dir)) { try { renameSync(join(dir, f), join(PENDING_DIR(), f)); } catch { /* a sibling swept it */ } }
+    for (const f of readdirSync(dir)) { try { if (f.endsWith(".json")) renameSync(join(dir, f), join(PENDING_DIR(), f)); else unlinkSync(join(dir, f)); } catch { /* a sibling swept it */ } } // a `.tmp` a child left mid-write is no payload (sixth review pass: swept along, it lived under pending/ for ever)
     try { rmdirSync(dir); } catch { /* not empty after all, or gone */ }
   }
 }
@@ -223,11 +223,14 @@ export function readState(sessionId) {
  * owner-only. One home for the mode (seventh review pass: it was spelled four
  * times). Written beside and renamed into place: a sibling run reads a landed
  * payload's `captured_id` and the state (SMD-2035), and a truncating write
- * would show it an empty file for a moment (fifth review pass). The `.tmp`
- * name ends in no `.json`, so no reader of the directories takes it for a
- * payload.
+ * would show it an empty file for a moment (fifth review pass). The temp
+ * name carries this process's pid: the state file is one path for every
+ * child, and two finishing one session's bookkeeping at once shared a name,
+ * so one's rename found nothing (sixth review pass). It ends in no `.json`,
+ * so no reader of the directories takes it for a payload, and the sweep
+ * unlinks one a child left behind.
  */
-const writeJson = (p, obj) => { writeFileSync(`${p}.tmp`, JSON.stringify(obj, null, 2) + "\n", { mode: 0o600 }); renameSync(`${p}.tmp`, p); };
+const writeJson = (p, obj) => { const tmp = `${p}.${process.pid}.tmp`; writeFileSync(tmp, JSON.stringify(obj, null, 2) + "\n", { mode: 0o600 }); renameSync(tmp, p); };
 function writeState(sessionId, state) {
   ensureDirs();
   writeJson(statePath(sessionId), state);
@@ -1023,24 +1026,33 @@ export async function postPending(cfg, own) {
   const followUps = (room) => {
     // Not what this run has itself returned to pending/ — a failed post, a
     // deferral — which would be retried at once and counted twice (third
-    // review pass). A session's NEWEST first under the cap: the older ones
-    // are obsolete beside it, and left under pending/ they are dropped by the
-    // next run, where a stale one claimed instead would have posted (fifth
-    // review pass).
+    // review pass). Each cleared session's candidates NEWEST first, taken in
+    // rounds across the sessions — every session's newest before any
+    // session's second — so one session's obsolete older ends never spend
+    // the room another's newest needs (fifth and sixth review passes); the
+    // older ones left under pending/ are dropped by the next run.
     const done = new Set(outcomes.map((o) => o.file));
+    const lists = [...clearedSessions].map((sid) => [sid, sessionPayloads(sid).filter((q) => q.pid === null && !done.has(q.path)).sort((x, y) => y.name.localeCompare(x.name))]);
     const next = [];
-    for (const sid of clearedSessions) {
-      const mine_ = [];
-      for (const p of sessionPayloads(sid).filter((q) => q.pid === null && !done.has(q.path)).sort((x, y) => y.name.localeCompare(x.name))) {
-        if (next.length + mine_.length >= room) break;
+    const named = new Set();
+    for (let k = 0; next.length < room && lists.some(([, l]) => l.length > k); k++) {
+      for (const [sid, l] of lists) {
+        const p = l[k];
+        if (!p || next.length >= room) continue;
         const here = join(mine, p.name);
         try { renameSync(p.path, here); } catch { continue; }
         let payload;
         try { payload = JSON.parse(readFileSync(here, "utf8")); } catch { moveTo(here, DEAD_DIR()); continue; }
-        mine_.push({ home: p.path, here, payload });
+        // A name is matched by its sanitised tail, which two ids can share
+        // ("a.b" and "a_b"): a payload of another session is not this run's
+        // to judge (sixth review pass — it was dropped as obsolete beside a
+        // session it did not belong to).
+        if (payload.session_id !== sid) { moveTo(here, PENDING_DIR()); continue; }
+        if (!named.has(sid)) { named.add(sid); newestOf.set(sid, p.path); }
+        next.push({ home: p.path, here, payload });
       }
-      if (mine_.length) { newestOf.set(sid, mine_[0].home); next.push(...mine_.reverse()); }
     }
+    next.sort((a, b) => basename(a.home).localeCompare(basename(b.home))); // oldest first, as the run posts
     if (next.length) log(`following up: ${next.length} payload(s) of ${[...new Set(next.map((n) => n.payload.session_id))].join(", ")} waited under pending/ behind a claim this run cleared`);
     return next;
   };
@@ -1129,7 +1141,7 @@ export async function postPending(cfg, own) {
       // so the last resort is taken on the payload's LAST chance — a pointer
       // failing once a day died of age at attempt three, never tried without
       // the pointer (twelfth review pass).
-      const waited = Date.now() - (Date.parse(payload.prepared_at ?? "") || Number(basename(here).split("-")[0]));
+      const waited = Date.now() - (pastMs(payload.prepared_at) || Number(basename(here).split("-")[0]));
       let lastResort = "";
       if (!payload.captured_id && payload.supersedes && onPointer > 0 && (attemptsSoFar >= 4 || waited > PENDING_MAX_AGE_MS)) {
         lastResort = `supersedes dropped: ${onPointer} of ${attemptsSoFar} attempts failed on it${waited > PENDING_MAX_AGE_MS ? ", the payload a week old" : ""}: ${oneLine(payload.last_error ?? "").slice(0, 120)}`;
@@ -1192,7 +1204,7 @@ export async function postPending(cfg, own) {
     }
   } finally {
     // Anything still claimed (an unexpected throw) goes back; then the claim directory goes.
-    try { for (const f of readdirSync(mine)) moveTo(join(mine, f), PENDING_DIR()); } catch { /* swept from under us: nothing left to return */ }
+    try { for (const f of readdirSync(mine)) { if (f.endsWith(".json")) moveTo(join(mine, f), PENDING_DIR()); else { try { unlinkSync(join(mine, f)); } catch { /* gone */ } } } } catch { /* swept from under us: nothing left to return */ }
     try { rmdirSync(mine); } catch { /* gone */ }
   }
   return outcomes;
