@@ -20,9 +20,11 @@
  *              whose name has a letter. A WEAK label — frequent is not the same
  *              as right — so its numbers bound the gate's false rejections from
  *              above, no more.
- *   typed      every `person` and `place` the extractor minted. No label: the
- *              layer SMD-1935 found ~90% noise, reported as a distribution for
- *              a human to read, since a regex cannot judge "operator".
+ *   typed      the `person` and `place` entities not already in `bad` (a
+ *              numeric-named person is `bad` first), the most mentioned
+ *              `--per-cohort`. No label: the layer SMD-1935 found ~90% noise,
+ *              reported for a human to read, since a regex cannot judge
+ *              "operator".
  *
  * Arms: the deterministic baseline (reject ^[0-9.:]+$, SMD-1935's proposed
  * gate — right on `bad` and `positive` by construction, which is why SMD-1937
@@ -41,7 +43,7 @@
 
 import { SQL } from "bun";
 import { loadEnv } from "./env.ts";
-import { jevDecideMany, resolveJevConfig, type JevDecision, type JevEnv } from "../server-portable/jev.ts";
+import { INSUFFICIENT_EVIDENCE, jevDecideMany, resolveJevConfig, type JevDecision, type JevEnv } from "../server-portable/jev.ts";
 
 loadEnv();
 const arg = (flag: string) => {
@@ -88,7 +90,7 @@ async function candidates(): Promise<Candidate[]> {
       const out: Candidate[] = [];
       for (const cohort of ["bad", "positive", "typed"] as const) {
         const pick = rows.filter((r) => r.cohort === cohort).sort((a, b) => Number(b.mentions) - Number(a.mentions) || a.name.localeCompare(b.name));
-        for (const r of cohort === "typed" ? pick : pick.slice(0, perCohort)) out.push({ cohort, name: r.name, type: r.entity_type, context: windowAround(r.content, r.name) });
+        for (const r of pick.slice(0, perCohort)) out.push({ cohort, name: r.name, type: r.entity_type, context: windowAround(r.content, r.name) });
       }
       return out;
     });
@@ -141,13 +143,15 @@ const cohort = (k: Candidate["cohort"]) => all.map((c, i) => ({ c, v: valid[i], 
 const bad = cohort("bad"), positive = cohort("positive"), typedLayer = cohort("typed");
 const baselineRejects = (c: Candidate) => /^[0-9.:]+$/.test(c.name);
 const rejects = (v: { p: number | null; abstained: boolean }) => v.abstained || (v.p ?? 0) < 0.5;
+/** The choice arm rejects as the binary arm does: a number, a generic word, or an abstention. */
+const CHOICE_REJECTS = ["number", "generic", INSUFFICIENT_EVIDENCE];
 
 console.log(`\n${all.length} candidates from the brain (${bad.length} bad, ${positive.length} positive, ${typedLayer.length} person/place); tier ${cfg!.endpoint.base}; ${(wall / 1000).toFixed(1)} s\n`);
 console.log("| arm | rejects bad (recall) | rejects positive (false rejections, weak label) |");
 console.log("| --- | --- | --- |");
 console.log(`| baseline ^[0-9.:]+$ | ${pct(bad.filter((x) => baselineRejects(x.c)).length, bad.length)} | ${pct(positive.filter((x) => baselineRejects(x.c)).length, positive.length)} |`);
 console.log(`| tier, binary validity (p < 0.5 or abstained) | ${pct(bad.filter((x) => rejects(x.v)).length, bad.length)} | ${pct(positive.filter((x) => rejects(x.v)).length, positive.length)} |`);
-console.log(`| tier, choice → number or generic | ${pct(bad.filter((x) => ["number", "generic"].includes(x.t.selected)).length, bad.length)} | ${pct(positive.filter((x) => ["number", "generic"].includes(x.t.selected)).length, positive.length)} |`);
+console.log(`| tier, choice → number, generic or abstained | ${pct(bad.filter((x) => CHOICE_REJECTS.includes(x.t.selected)).length, bad.length)} | ${pct(positive.filter((x) => CHOICE_REJECTS.includes(x.t.selected)).length, positive.length)} |`);
 const pv = (xs: typeof bad) => xs.map((x) => x.v.p ?? 0);
 console.log(`\nbinary p_true: AUROC positive vs bad ${auroc(pv(positive), pv(bad)).toFixed(3)}; median bad ${quantile(pv(bad), 0.5)?.toFixed(3)}, median positive ${quantile(pv(positive), 0.5)?.toFixed(3)}; abstained ${pct(valid.filter((v) => v.abstained).length, valid.length)}`);
 console.log(`choice: positives typed as the extractor typed them ${pct(positive.filter((x) => x.t.selected === x.c.type).length, positive.length)}; bad typed number ${pct(bad.filter((x) => x.t.selected === "number").length, bad.length)}`);
@@ -157,4 +161,4 @@ console.log(`latency, one binary decision per request: p50 ${quantile(ms, 0.5)?.
 console.log("\nperson/place layer — the extractor's type, the tier's choice, P(named):");
 for (const x of typedLayer) console.log(`  ${x.c.type.padEnd(6)} ${x.c.name.padEnd(28).slice(0, 28)} → ${x.t.selected.padEnd(12)} ${x.v.p === null ? "—" : x.v.p.toFixed(2)}`);
 const agrees = typedLayer.filter((x) => x.t.selected === x.c.type).length;
-console.log(`\nthe tier keeps the extractor's person/place type on ${agrees} of ${typedLayer.length}; it types ${typedLayer.filter((x) => ["number", "generic"].includes(x.t.selected)).length} as number or generic`);
+console.log(`\nthe tier keeps the extractor's person/place type on ${agrees} of ${typedLayer.length}; it types ${typedLayer.filter((x) => CHOICE_REJECTS.includes(x.t.selected)).length} as number or generic, or abstains`);

@@ -10,12 +10,24 @@
  * memory, and the OS pages or Ollama unloads; or the three compete for the
  * CPU and GPU and each call slows. So this measures, on the box it runs on:
  *
- *   1. before: Ollama's loaded models (/api/ps: name, size, VRAM, expiry), the
- *      tier's resident memory, the box's free memory;
- *   2. alone: N embeddings, N short chat completions, N decisions, each serial,
- *      each on its own — p50 and p95;
- *   3. together: the same three loops at once;
- *   4. after: /api/ps again — is every model that was loaded still loaded?
+ *   1. before: Ollama's loaded models (/api/ps), its model runners (the
+ *      llama-server processes: pid and start time), its own OLLAMA_* settings
+ *      (read from its process, not this shell), the tier's memory footprint
+ *      (macOS `footprint`, which counts the compressed pages `ps` leaves out),
+ *      the box's free memory;
+ *   2. alone: N embeddings, N/3 short chat completions, N decisions, each
+ *      serial, each on its own — p50 and p95;
+ *   3. together: the three loops at once, each running to one shared deadline
+ *      so the three overlap for the whole phase;
+ *   4. after: the same — a runner that is gone, or new, or started since, is an
+ *      unload or a reload that a name comparison of /api/ps would not see
+ *      (the loops themselves reload a model the moment it is evicted).
+ *
+ * What it does not test, said by the run too: no model load is requested, and
+ * no memory pressure is applied. Ollama evicts on a load request; a tier that
+ * is not an Ollama model never makes one. So this shows the tier does not by
+ * itself cause an eviction, and what it costs in contention — not what a box
+ * short of memory would do.
  *
  *   bun eval-jev-coload.ts [--n 30] [--jev-pid <pid>]
  *
@@ -50,11 +62,28 @@ if (!cfg || !Number.isInteger(n) || n < 1) {
 type Loaded = { name: string; size: number; size_vram: number; expires_at: string };
 const ps = async (): Promise<Loaded[]> => ((await (await fetch(`${ollama}/api/ps`)).json()) as { models: Loaded[] }).models ?? [];
 const gb = (b: number) => `${(b / 2 ** 30).toFixed(1)} GB`;
-const rssMb = async (pid: string | undefined) => {
-  if (!pid) return null;
-  const out = (await Bun.$`ps -o rss= -p ${pid}`.nothrow().text()).trim();
-  return out ? Math.round(Number(out) / 1024) : null;
-};
+/** The tier's memory: macOS `footprint` (compressed pages included), else ps's resident set, labelled which. */
+async function tierMemory(pid: string | undefined): Promise<string> {
+  if (!pid) return "—";
+  const fp = await Bun.$`footprint -p ${pid}`.nothrow().quiet().text();
+  const m = /Footprint:\s+([\d.]+)\s+(KB|MB|GB)/.exec(fp);
+  if (m) return `${Math.round(Number(m[1]) * (m[2] === "GB" ? 1024 : m[2] === "KB" ? 1 / 1024 : 1))} MB footprint`;
+  const rss = (await Bun.$`ps -o rss= -p ${pid}`.nothrow().quiet().text()).trim();
+  return rss ? `${Math.round(Number(rss) / 1024)} MB rss (excludes compressed pages)` : "—";
+}
+/** Ollama's model runners, as pid@start-time, so an unload or a reload between two snapshots shows. */
+async function runners(): Promise<string[]> {
+  const out = await Bun.$`ps -A -o pid=,lstart=,command=`.nothrow().quiet().text();
+  return out.split("\n").filter((l) => /llama-server|ollama runner/.test(l)).map((l) => l.trim().replace(/\s+\/.*$/, "").replace(/\s+/g, " ")).sort();
+}
+/** Ollama's own OLLAMA_* settings, from its process's environment — the eval's own shell says nothing about them. */
+async function ollamaSettings(): Promise<string> {
+  const pid = (await Bun.$`pgrep -x ollama`.nothrow().quiet().text()).trim().split("\n")[0];
+  if (!pid) return "unknown (no ollama process on this box)";
+  const env = await Bun.$`ps eww -o command= -p ${pid}`.nothrow().quiet().text();
+  const vars = env.split(/\s+/).filter((w) => /^OLLAMA_[A-Z_]+=/.test(w));
+  return vars.length ? vars.join(" ") : "none set (Ollama's defaults)";
+}
 /** Free memory as the OS reports it: pages free + inactive (macOS vm_stat), else /proc/meminfo's MemAvailable. */
 async function freeMemory(): Promise<string> {
   const vm = await Bun.$`vm_stat`.nothrow().text();
@@ -87,15 +116,17 @@ const decideOnce = async () => {
   await jevDecide(cfg!, { proposition: "the note describes a worker writing vectors", context: TEXT }, { kind: "decision", actor: "eval-jev-coload" });
 };
 
-async function timed(label: string, once: () => Promise<void>, count: number): Promise<{ label: string; p50: number; p95: number }> {
+type Timing = { label: string; calls: number; p50: number; p95: number };
+/** `count` calls, or — with `until` — as many as fit before that instant (at least three), so loops run together overlap throughout. */
+async function timed(label: string, once: () => Promise<void>, count: number, until?: number): Promise<Timing> {
   const ms: number[] = [];
-  for (let i = 0; i < count; i++) {
+  while (until === undefined ? ms.length < count : performance.now() < until || ms.length < 3) {
     const t = performance.now();
     await once();
     ms.push(performance.now() - t);
   }
   ms.sort((a, b) => a - b);
-  return { label, p50: ms[Math.floor(ms.length / 2)], p95: ms[Math.min(ms.length - 1, Math.floor(ms.length * 0.95))] };
+  return { label, calls: ms.length, p50: ms[Math.floor(ms.length / 2)], p95: ms[Math.min(ms.length - 1, Math.floor(ms.length * 0.95))] };
 }
 
 const showPs = (models: Loaded[]) => models.map((m) => `${m.name} ${gb(m.size)} (VRAM ${gb(m.size_vram)})`).join("; ") || "none";
@@ -105,17 +136,28 @@ await embedOnce();
 await chatOnce();
 await decideOnce();
 const before = await ps();
-console.log(`\nbefore: Ollama holds ${showPs(before)}; OLLAMA_MAX_LOADED_MODELS ${env.OLLAMA_MAX_LOADED_MODELS ?? "unset in this shell (Ollama's default applies)"}`);
-console.log(`        tier rss ${(await rssMb(jevPid)) ?? "—"} MB; free memory ${await freeMemory()}`);
+const runnersBefore = await runners();
+console.log(`\nbefore: Ollama holds ${showPs(before)}`);
+console.log(`        Ollama's settings: ${await ollamaSettings()}; runners ${runnersBefore.join(", ") || "none seen"}`);
+console.log(`        tier ${await tierMemory(jevPid)}; free memory ${await freeMemory()}`);
 
 const alone = [await timed("embedding", embedOnce, n), await timed("chat (16 tokens)", chatOnce, Math.max(3, Math.floor(n / 3))), await timed("decision", decideOnce, n)];
-const together = await Promise.all([timed("embedding", embedOnce, n), timed("chat (16 tokens)", chatOnce, Math.max(3, Math.floor(n / 3))), timed("decision", decideOnce, n)]);
+// Together for as long as the three took alone, all to one deadline.
+const phaseMs = alone.reduce((s, t) => s + t.p50 * t.calls, 0);
+const deadline = performance.now() + phaseMs;
+const together = await Promise.all([timed("embedding", embedOnce, 0, deadline), timed("chat (16 tokens)", chatOnce, 0, deadline), timed("decision", decideOnce, 0, deadline)]);
 const after = await ps();
+const runnersAfter = await runners();
 
-console.log(`\n| call | alone p50 / p95 | beside the other two p50 / p95 |`);
-console.log(`| --- | --- | --- |`);
-for (let i = 0; i < 3; i++) console.log(`| ${alone[i].label} | ${alone[i].p50.toFixed(0)} / ${alone[i].p95.toFixed(0)} ms | ${together[i].p50.toFixed(0)} / ${together[i].p95.toFixed(0)} ms |`);
+console.log(`\n| call | alone: calls, p50 / p95 | beside the other two: calls, p50 / p95 | p50 ratio |`);
+console.log(`| --- | --- | --- | --- |`);
+for (let i = 0; i < 3; i++) console.log(`| ${alone[i].label} | ${alone[i].calls}, ${alone[i].p50.toFixed(0)} / ${alone[i].p95.toFixed(0)} ms | ${together[i].calls}, ${together[i].p50.toFixed(0)} / ${together[i].p95.toFixed(0)} ms | ${(together[i].p50 / alone[i].p50).toFixed(2)}× |`);
 const evicted = before.filter((m) => !after.some((a) => a.name === m.name)).map((m) => m.name);
-console.log(`\nafter: Ollama holds ${showPs(after)}`);
-console.log(`       tier rss ${(await rssMb(jevPid)) ?? "—"} MB; free memory ${await freeMemory()}`);
-console.log(evicted.length ? `EVICTED while the tier ran: ${evicted.join(", ")}` : "no Ollama model was evicted while the tier ran beside it");
+const reloaded = runnersBefore.length > 0 && JSON.stringify(runnersBefore) !== JSON.stringify(runnersAfter);
+console.log(`\nafter: Ollama holds ${showPs(after)}; runners ${runnersAfter.join(", ") || "none seen"}`);
+console.log(`       tier ${await tierMemory(jevPid)}; free memory ${await freeMemory()}`);
+console.log(evicted.length ? `EVICTED while the tier ran: ${evicted.join(", ")}`
+  : reloaded ? "a runner stopped or started while the tier ran: a model was unloaded and reloaded (see the runners above)"
+  : runnersBefore.length ? "no Ollama model was evicted or reloaded while the tier ran beside it (same runners, same start times)"
+  : "no Ollama model was evicted (runners not visible from here: the name comparison alone)");
+console.log("not tested: no model load was requested and no memory pressure applied — Ollama evicts on a load, which the tier never makes");

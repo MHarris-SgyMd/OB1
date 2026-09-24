@@ -127,8 +127,9 @@ of eight measured no faster than eight singles on this CPU, so the engine runs
 one forward pass per decision; the service runs one request at a time, in
 arrival order. Beside the embedder and the metadata model it is a separate
 process of about 1 GB with nothing for Ollama to evict — measured beside both
-of Ollama's models under `OLLAMA_MAX_LOADED_MODELS=2`: no eviction, each call
-~1.5× slower at p50 while all three run (`evals/eval-jev-coload.ts`).
+of Ollama's models under `OLLAMA_MAX_LOADED_MODELS=2`: a 943 MB footprint, no
+model evicted or reloaded, and 1.3–1.7× at p50 while all three run
+(`evals/eval-jev-coload.ts`).
 
 **Provenance names the rules, not only the weights.** The same weights
 under two prompt engines answer differently — the two JevBench rows, the
