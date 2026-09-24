@@ -75,6 +75,7 @@ let refusedOnce = new Set();
 const READ = ["fetch", "list_supersession_proposals", "list_thoughts", "search", "search_thoughts", "search_thoughts_keyword", "thought_changes", "thought_stats"]; // main's read surface as of SMD-1296; the capture rule does not depend on its length
 const fake = Bun.serve({
   port: 0,
+  hostname: "127.0.0.1", // the address the suite posts to: an ephemeral port chosen on localhost's other address could be one another app holds on this one (eleventh review pass: Notion answered 401 to a run)
   async fetch(req) {
     const key = req.headers.get("x-brain-key");
     if (new URL(req.url).pathname === "/not-the-endpoint") return new Response("Method Not Allowed", { status: 405 });
@@ -979,8 +980,8 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   const ownRun = await postPending(cfg);
   assert(ownRun.length === 4 && ownRun.filter((x) => x.file === failing.payloadPath).length === 1 && !ownRun.find((x) => x.file === failing.payloadPath).ok && received.length === 1 && JSON.parse(readFileSync(failing.payloadPath, "utf8")).attempts === 1,
     `a payload the run itself returned to pending/ after a failed post is not followed up: one outcome, one post, one attempt (${ownRun.length} outcomes, ${received.length} post(s))`);
-  assert(ownRun.filter((x) => x.file === stepping.payloadPath).length === 1 && ownRun.find((x) => x.file === stepping.payloadPath).deferred && ownRun.find((x) => x.file === owed2.payloadPath).ok && (logText().match(/deferred session=s-own2/g) ?? []).length === 1 && !/following up/.test(logText()),
-    "…nor one that stepped aside: one deferred outcome, one deferred line, no follow-up while the claim stands — and the owed one beside it, outdated by the newer in this run, finishes at once (the newer follows)");
+  assert(ownRun.filter((x) => x.file === stepping.payloadPath).length === 1 && ownRun.find((x) => x.file === stepping.payloadPath).deferred && ownRun.find((x) => x.file === owed2.payloadPath).deferred && (logText().match(/deferred session=s-own2/g) ?? []).length === 2 && !/following up/.test(logText()),
+    "…nor one that stepped aside: one deferred outcome each, one deferred line each, no follow-up while the claim stands — the owed one beside a newer sibling steps aside for the older claim too, its state write after that one's (eleventh review pass)");
   rmSync(holder, { recursive: true, force: true });
   // The follow-up runs for a session whose claim this run cleared by DROPPING
   // a payload, not only by landing one: the child holding the newer payload
@@ -1036,12 +1037,21 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   const cpB = prepare({ session_id: "s-link", transcript_path: slow2T, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "manual" }); // after the first child's claim: a second compaction while the first is still posting
   const childLinkB = await spawnScript(["--post", cpB.payloadPath]);
   assert(childLinkB.code === 0 && existsSync(cpB.payloadPath) && claimOf(cpA.payloadPath), "the second compaction's child steps aside behind the first's and exits 0");
-  while (!claimOf(cpB.payloadPath) && Date.now() - tL < 10_000) await sleep(20); // the first child lands its checkpoint and follows up with the second
+  const tL2 = Date.now();
+  while (!claimOf(cpB.payloadPath) && Date.now() - tL2 < 10_000) await sleep(20); // the first child lands its checkpoint and follows up with the second
   const linkEnd = prepare({ session_id: "s-link", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
   const linkOut = (await postPending(cfg, linkEnd.payloadPath)).find((x) => x.file === linkEnd.payloadPath);
   const linkA = await childLinkA;
-  assert(linkOut?.deferred && linkA.code === 0 && received.length === 3 && received[2].args.supersedes === uuid(1002) && !/Checkpoint:/.test(received[2].args.content) && readState("s-link")?.thought_id === uuid(1003) && readdirSync(join(STATE, "pending")).length === 0 && (logText().match(/following up: 1 payload/g) ?? []).length === 2,
-    `the end steps aside behind the checkpoint being followed up, and the child's second round posts it superseding that checkpoint (${received.length} posts; rounds: ${(logText().match(/following up/g) ?? []).length})`);
+  // Two interleavings are right (eleventh review pass): the child judges the
+  // second checkpoint before the end looks — it posts it, and its second round
+  // posts the end superseding it; or the end's claim is in the child's sight
+  // when it judges the second checkpoint, which is then obsolete beside it,
+  // and the end's second look finds the claim cleared and takes itself back.
+  const rounds = (logText().match(/following up/g) ?? []).length;
+  const chained = rounds === 2 && linkOut?.deferred && received.length === 3 && received[2].args.supersedes === uuid(1002) && !/Checkpoint:/.test(received[2].args.content) && readState("s-link")?.thought_id === uuid(1003);
+  const retook = rounds === 1 && linkOut?.ok && received.length === 2 && received[1].args.supersedes === uuid(1001) && !/Checkpoint:/.test(received[1].args.content) && readdirSync(join(STATE, "dead")).includes(basename(cpB.payloadPath)) && readState("s-link")?.thought_id === uuid(1002);
+  assert(linkA.code === 0 && (chained || retook) && readdirSync(join(STATE, "pending")).length === 0 && readdirSync(join(STATE, "inflight")).length === 0,
+    `the end steps aside behind the checkpoint being followed up and the child's second round posts it, or the checkpoint is obsolete beside the end and the end takes itself back — one current thought either way (${received.length} posts; rounds: ${rounds}; ${chained ? "chained" : retook ? "retook" : linkOut?.error ?? "?"})`);
   // Under the cap the follow-up takes a session's NEWEST payloads: six ends of
   // one session behind a cleared claim, five taken, the newest posted, the
   // oldest left under pending/ for the next run to drop (fifth review pass: the
@@ -1065,10 +1075,9 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   for (let i = 1; i <= 2; i++) writeFileSync(join(STATE, "pending", `99999999999${i}-${i}-cap${i}-s-cap2.json`), JSON.stringify({ ...capBody, session_id: "s-cap2", fingerprint: `cap2-${i}`, prepared_at: iso(Date.parse(capBody.prepared_at) + i), text: capBody.text.replace(/\n\nSession s-cap/, `\n\nSecond ${i}.\n\nSession s-cap2`) }));
   const capRun = await capRunning;
   const posted = received.slice(1).map((r) => (/\n\n(Later \d|Second \d)\./.exec(r.args.content) ?? [])[1]).sort().join(",");
-  assert(capRun.length === 8 && posted === "Later 6,Second 2" && readdirSync(join(STATE, "pending")).sort().join() === ["999999999991-1-cap1-s-cap.json", "999999999992-2-cap2-s-cap.json", "999999999993-3-cap3-s-cap.json"].join() && readdirSync(join(STATE, "dead")).length === 3 && /following up: 5 payload\(s\) of (?:s-cap, s-cap2|s-cap2, s-cap) waited/.test(logText()),
-    `the follow-up shares its five in rounds across the two sessions: each session's newest posts, three older ones are obsolete, the first session's three oldest wait for the next run (posted: ${posted}; pending: ${readdirSync(join(STATE, "pending")).join()})`);
-  const capNext = await postPending(cfg);
-  assert(capNext.length === 3 && capNext.every((x) => x.obsolete) && readdirSync(join(STATE, "pending")).length === 0, "…and the next run drops those three as obsolete beside the state");
+  assert(capRun.length === 11 && posted === "Later 6,Second 2" && readdirSync(join(STATE, "pending")).length === 0 && readdirSync(join(STATE, "dead")).length === 6 && /following up: 5 payload\(s\) of (?:s-cap, s-cap2|s-cap2, s-cap) waited/.test(logText()) && (logText().match(/following up/g) ?? []).length === 2,
+    `the follow-up shares its room in rounds across the two sessions: each session's newest posts, the six older ones are obsolete — the drops spend no room, so a second round finishes them (posted: ${posted}; dead: ${readdirSync(join(STATE, "dead")).length}; rounds: ${(logText().match(/following up/g) ?? []).length})`);
+  assert((await postPending(cfg)).length === 0, "…and the next run has nothing of them left to drop");
   void capSlow;
   // Three cleared sessions of three ends each under the cap of five: the
   // first round takes every session's newest, the second round two more and
@@ -1081,9 +1090,30 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   await sleep(600);
   for (const sid of ["s-t1", "s-t2", "s-t3"]) for (let i = 1; i <= 3; i++) writeFileSync(join(STATE, "pending", `99999999999${i}-${i}-t${i}-${sid}.json`), JSON.stringify({ ...capBody, session_id: sid, fingerprint: `${sid}-${i}`, prepared_at: iso(Date.now() + i), text: capBody.text.replace(/\n\nSession s-cap/, `\n\nThird ${i}.\n\nSession ${sid}`) }));
   const threeRun = await threeRunning;
-  assert(threeRun.length === 9 && received.length === 4 && ["s-t1", "s-t2", "s-t3"].every((sid) => /\n\nThird 3\./.test(received.find((r) => new RegExp(`Session ${sid}[,.]`).test(r.args.content))?.args.content ?? "")) && readdirSync(join(STATE, "pending")).length === 4 && /following up: 5 payload\(s\)/.test(logText()),
-    `three sessions of three: five followed up — every session's newest posted, two more obsolete, four left for the next run (${received.length} posts; pending: ${readdirSync(join(STATE, "pending")).length})`);
+  assert(threeRun.length === 13 && received.length === 4 && ["s-t1", "s-t2", "s-t3"].every((sid) => /\n\nThird 3\./.test(received.find((r) => new RegExp(`Session ${sid}[,.]`).test(r.args.content))?.args.content ?? "")) && readdirSync(join(STATE, "pending")).length === 0 && readdirSync(join(STATE, "dead")).length === 6 && /following up: 5 payload\(s\)/.test(logText()),
+    `three sessions of three: the first round takes every session's newest and two more, later rounds the rest — three posted, six obsolete, none left (${received.length} posts; pending: ${readdirSync(join(STATE, "pending")).length}; rounds: ${(logText().match(/following up/g) ?? []).length})`);
   void threeOwed; void threeSlow;
+  // The cap counts what the follow-up posts or defers, not what it drops: five
+  // stale ends of one cleared session, four obsolete beside the newest, must
+  // not spend the room a second session's end, deferred meanwhile, needs
+  // (eleventh review pass: the round's five claims were the five).
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const owedT = prepare({ session_id: "s-capT", transcript_path: CODEX_T, hook_event_name: "SessionEnd" }); writeFileSync(owedT.payloadPath, JSON.stringify({ ...owedT.payload, captured_id: uuid(58) })); await sleep(2);
+  const owedS = prepare({ session_id: "s-capS", transcript_path: CODEX_T, hook_event_name: "SessionEnd" }); writeFileSync(owedS.payloadPath, JSON.stringify({ ...owedS.payload, captured_id: uuid(59) })); await sleep(2);
+  const capX = prepare({ session_id: "s-capX", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const capT = postPending(cfg);
+  await sleep(600); // the owed bookkeepings are done; the slow payload posts: T's five ends arrive, the newest slow too
+  for (let i = 1; i <= 5; i++) writeFileSync(join(STATE, "pending", `99999999999${i}-${i}-t${i}-s-capT.json`), JSON.stringify({ ...capBody, session_id: "s-capT", fingerprint: `T-${i}`, prepared_at: iso(Date.now() + i), text: capBody.text.replace(/\n\nSession s-cap/, `\n\n${i === 5 ? "[[slow]] " : ""}Tail ${i}.\n\nSession s-capT`) }));
+  await sleep(3000); // round 1 posts T's newest, slowly: S's end steps in meanwhile
+  writeFileSync(join(STATE, "pending", `999999999996-6-s1-s-capS.json`), JSON.stringify({ ...capBody, session_id: "s-capS", fingerprint: "S-1", prepared_at: iso(Date.now()), text: capBody.text.replace(/\n\nSession s-cap/, "\n\nEnd of S.\n\nSession s-capS") }));
+  const capTRun = await capT;
+  assert(capTRun.length === 9 && received.length === 3 && /Tail 5\./.test(received[1].args.content) && /End of S\./.test(received[2].args.content) && readdirSync(join(STATE, "pending")).length === 0 && readdirSync(join(STATE, "dead")).length === 4 && (logText().match(/following up/g) ?? []).length === 2,
+    `the follow-up's five drops of T's stale ends do not spend the room: S's end, deferred meanwhile, is followed up in the second round (${received.length} posts; rounds: ${(logText().match(/following up/g) ?? []).length}; outcomes: ${capTRun.length})`);
+  // A pending file that parses to no object — a literal null — is a dead letter, not a crash that leaves every claim in the run's hands.
+  writeFileSync(join(STATE, "pending", `${Date.now()}-0-aaaa-s-null.json`), "null");
+  const nullRun = await postPending(cfg);
+  assert(nullRun.length === 0 && readdirSync(join(STATE, "pending")).length === 0 && readdirSync(join(STATE, "dead")).some((f) => f.endsWith("-s-null.json")) && readdirSync(join(STATE, "inflight")).length === 0, "a payload that is JSON but no object is a dead letter; the run goes on");
   // A payload of another session whose id sanitises to the same file tail
   // ("s.dot" and "s_dot" both name s_dot.json) is not this run's to follow
   // up: it goes back where it was, not to dead/ as obsolete (sixth review pass).

@@ -180,7 +180,11 @@ function release(dir, { keepTemps = false } = {}) {
 function claim(home, mine) {
   const here = join(mine, basename(home));
   try { renameSync(home, here); } catch { return null; } // a sibling has it
-  try { return { home, here, payload: JSON.parse(readFileSync(here, "utf8")) }; } catch { moveTo(here, DEAD_DIR()); log(`dead ${basename(home)} — not a payload this run can read`); return null; }
+  try {
+    const payload = JSON.parse(readFileSync(here, "utf8"));
+    if (!payload || typeof payload !== "object") throw new Error("not an object"); // a literal `null` parses, and would have thrown at the first field, outside every guard (eleventh review pass)
+    return { home, here, payload };
+  } catch { moveTo(here, DEAD_DIR()); log(`dead ${basename(home)} — not a payload this run can read`); return null; }
 }
 const moveTo = (from, dir) => { try { renameSync(from, join(dir, basename(from))); return true; } catch { return false; } };
 /** Dead letters are kept for an operator to read (the README's troubleshooting), not forever: after thirty days they are removed (eighth review pass — an endpoint down for an afternoon filled dead/ and nothing pruned it). */
@@ -990,7 +994,7 @@ function landedPayloads(sessionId) {
     // The name's millisecond was written by the same clock as prepared_at: a
     // future one decides nothing either, and the payload ranks last — a clock
     // that ran ahead never puts it over the state (fifth review pass).
-    if (j?.captured_id && j.session_id === sessionId) out.push({ name: p.name, id: j.captured_id, ms: momentOf(j.prepared_at, p.ms <= Date.now() ? p.ms : 0) });
+    if (j?.captured_id && j.session_id === sessionId) out.push({ name: p.name, id: j.captured_id, ms: payloadMoment(j.prepared_at, p.ms) });
   }
   return out;
 }
@@ -1004,6 +1008,8 @@ export function landedAfter(sessionId, name) {
 }
 /** A recorded moment for ranking: `pastMs`, else the fallback. */
 const momentOf = (iso, fallbackMs) => { const t = pastMs(iso); return Number.isNaN(t) ? fallbackMs : t; };
+/** A payload's moment: when it was prepared, else the millisecond in its name — written by the same clock, so a future one decides nothing either and the payload ranks last (fifth review pass; spelled once, eleventh). */
+const payloadMoment = (preparedAt, nameMs) => momentOf(preparedAt, nameMs <= Date.now() ? nameMs : 0);
 /**
  * The thought a payload supersedes: the session's newest landed one by the
  * time its payload was prepared — what the state records (`summary_at`, the
@@ -1094,7 +1100,7 @@ export async function postPending(cfg, own) {
         if (c.payload.session_id !== sid) { moveTo(c.here, PENDING_DIR()); bounced.add(`${sid}:${p.path}`); continue; } // by session: its own may still follow it up (tenth review pass)
         // The session's newest, across rounds: a later round must not name an older payload newest when the newest was taken before and failed (ninth review pass).
         if (!newestOf.has(sid) || basename(newestOf.get(sid)).localeCompare(p.name) < 0) newestOf.set(sid, p.path);
-        next.push(c);
+        next.push({ ...c, followUp: true });
       }
     }
     next.sort((a, b) => basename(a.home).localeCompare(basename(b.home))); // oldest first, as the run posts
@@ -1109,11 +1115,14 @@ export async function postPending(cfg, own) {
         if (followedUp >= FOLLOW_UP_MAX) break;
         const more = followUps(FOLLOW_UP_MAX - followedUp);
         if (!more.length) break;
-        followedUp += more.length;
         queue.push(...more);
       }
-      const { home, here, payload, retaken } = queue.shift();
+      const { home, here, payload, retaken, followUp } = queue.shift();
       const file = home;
+      // The cap counts what the follow-up posts or defers, not what it drops:
+      // five stale ends of one session, four of them obsolete, spent the room
+      // another session's deferred end needed (eleventh review pass).
+      if (followUp) followedUp++;
       try { const now = new Date(); utimesSync(mine, now, now); } catch { /* the claim is judged by its age; a touch that fails leaves it judged from the last one */ }
       // Whether a newer summary of the session exists anywhere — this run holds
       // a newer payload, the state records a later one, a newer payload has
@@ -1137,7 +1146,10 @@ export async function postPending(cfg, own) {
       // an older sibling's, and two children finishing one session's owed
       // bookkeepings at once wrote the state in no order (tenth review pass;
       // the first pass had spared it the wait, which is gone).
-      const ahead = outdated(readState(payload.session_id)) ? [] : aheadOf(payload.session_id, basename(here));
+      // A landed one consults them whatever its siblings: outdated or not, its
+      // state write must follow an older sibling's (eleventh review pass: one
+      // beside a newer payload in this run wrote at once, and raced).
+      const ahead = !payload.captured_id && outdated(readState(payload.session_id)) ? [] : aheadOf(payload.session_id, basename(here));
       if (ahead.length) {
         const moved = moveTo(here, PENDING_DIR());
         // Between the look and that move the predecessor may have landed and
@@ -1163,6 +1175,7 @@ export async function postPending(cfg, own) {
       // an old checkpoint posted as "continuing" after the end had landed).
       const obsolete = !payload.captured_id && outdated(state);
       if (obsolete) {
+        if (followUp) followedUp--; // a drop is no work the cap bounds
         clearedSessions.add(payload.session_id);
         moveTo(here, DEAD_DIR());
         log(`obsolete session=${payload.session_id} — a later capture of the session has a summary; this one is not posted`);
@@ -1224,8 +1237,7 @@ export async function postPending(cfg, own) {
       }
       const { id } = posted;
       clearedSessions.add(payload.session_id);
-      const nameMs = Number(basename(here).split("-")[0]);
-      landedHere.set(payload.session_id, { id, ms: momentOf(payload.prepared_at, nameMs <= Date.now() ? nameMs : 0) }); // the same rule as a file's (tenth review pass)
+      landedHere.set(payload.session_id, { id, ms: payloadMoment(payload.prepared_at, Number(basename(here).split("-")[0])) });
       const note = [posted.note, lastResort].filter(Boolean).join("; ");
       // Bookkeeping, apart from the post: the id goes onto the payload first, so a
       // fault here leaves a file the next run finishes without posting twice. A
@@ -1242,7 +1254,7 @@ export async function postPending(cfg, own) {
         if (!payload.captured_id) writeJson(here, { ...payload, captured_id: id, captured_note: note });
         const stateIsNewerNow = stateIsNewer || recordedAfter(readState(payload.session_id), payload.prepared_at);
         // summary_at never runs ahead of the clock that will read it back.
-        const summaryAt = payload.prepared_at && Date.parse(payload.prepared_at) <= Date.now() ? payload.prepared_at : new Date().toISOString();
+        const summaryAt = Number.isNaN(pastMs(payload.prepared_at)) ? new Date().toISOString() : payload.prepared_at;
         if (!stateIsNewerNow) writeState(payload.session_id, { thought_id: id, fingerprint: payload.fingerprint, captured_at: new Date().toISOString(), summary_at: summaryAt, harness: payload.harness, prompts: payload.prompts, sources: (payload.derived_from ?? []).length });
         unlinkSync(here);
         log(`captured session=${payload.session_id} harness=${payload.harness}${payload.event && payload.event !== "SessionEnd" ? ` event=${payload.event}${payload.trigger ? ` trigger=${payload.trigger}` : ""}` : ""} id=${id} sources=${(payload.derived_from ?? []).length}${payload.supersedes ? ` supersedes=${payload.supersedes}` : ""}${note ? ` note="${note}"` : ""}`);
