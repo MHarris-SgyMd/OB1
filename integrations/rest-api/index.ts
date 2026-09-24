@@ -23,7 +23,7 @@
 // above columnsOf() says what leaked, what answered nothing, and why.
 // ob1-fork (SMD-2079): every response carries the request's CORS headers, set
 // once on the way out of the main handler (withCors) — json() built them from
-// the request only when handed `req`, and forty-seven answers were not.
+// the request only when handed `req`, and forty-five answers were not.
 /**
  * rest-api — REST API gateway for Open Brain.
  *
@@ -121,31 +121,33 @@ const CORS_ALLOWED_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS ?? "")
   .map((s) => s.trim())
   .filter(Boolean);
 
-/** The CORS headers for one request: its Origin when the allowlist names it, `*` when there is no list, `null` otherwise. */
+/**
+ * The CORS headers for one request: Access-Control-Allow-Origin is the request's Origin when the allowlist names it,
+ * `*` when there is no list, and absent otherwise — the literal `null` this answered an unlisted origin with until
+ * SMD-2079 is what an opaque origin (a sandboxed iframe, a `data:` or `file:` document) sends as its Origin, so such
+ * a document matched the allowlist it was meant to fail (review pass 1). Retry-After is exposed for the 429's sake.
+ */
 function corsHeadersFor(req: Request): Record<string, string> {
   const origin = req.headers.get("origin") ?? "";
-  let allow: string;
-  if (CORS_ALLOWED_ORIGINS.length === 0) {
-    // Legacy default: permissive. README warns against this for writes.
-    allow = "*";
-  } else if (origin && CORS_ALLOWED_ORIGINS.includes(origin)) {
-    allow = origin;
-  } else {
-    allow = "null";
-  }
-  return {
-    "Access-Control-Allow-Origin": allow,
+  const headers: Record<string, string> = {
     "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, x-brain-key",
+    "Access-Control-Expose-Headers": "Retry-After",
     "Vary": "Origin",
   };
+  if (CORS_ALLOWED_ORIGINS.length === 0) {
+    headers["Access-Control-Allow-Origin"] = "*"; // Legacy default: permissive. README warns against this for writes.
+  } else if (origin && CORS_ALLOWED_ORIGINS.includes(origin)) {
+    headers["Access-Control-Allow-Origin"] = origin;
+  }
+  return headers;
 }
 
 /**
  * The handler's answer with the request's CORS headers over its own (SMD-2079). Set here, once, on every response
  * the main handler returns — a page, a refusal, the preflight, the 404, the 500. Until this, json() built the headers
- * from the request only when handed `req`, and forty-seven of the file's answers were not: under an allowlist they
- * said `Access-Control-Allow-Origin: null`, so a browser client could read the auth refusals, the preflight, the
+ * from the request only when handed `req`, and forty-five of the file's sixty-two answers were not: under an allowlist
+ * they said `Access-Control-Allow-Origin: null`, so a browser client could read the auth refusals, the preflight, the
  * rate limit and POST /search, and no route's page. A header the handler set under the same name is replaced.
  */
 function withCors(req: Request, res: Response): Response {
