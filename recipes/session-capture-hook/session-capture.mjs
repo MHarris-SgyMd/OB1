@@ -20,7 +20,8 @@
  * common key prefixes, credential assignments, a URL carrying a password, and
  * high-entropy tokens. A hit refuses the whole capture: the reason is printed
  * (never the match), the exit code is 1, and the session ends as it would have.
- * Exit 2 is the one code a Stop hook may block with; this script never uses it.
+ * Exit 2 is the one code a Stop hook may block with; as a hook this script
+ * never uses it (the by-hand forms — --print-hook, --dry-run — exit 2 on misuse).
  *
  * Time budget: Claude Code gives SessionEnd hooks 1.5 s by default (raised to the
  * hook's `timeout`, at most 60), Codex 1 s (at most 3); PreCompact shares no
@@ -1107,7 +1108,7 @@ function intervalFlag(args, { aboveZero }) {
   const raw = flag(args, "--min-interval");
   if (raw === undefined) return { minInterval: undefined };
   const n = Number(raw);
-  if (!(raw.trim() !== "" && Number.isFinite(n) && n >= 0 && (!aboveZero || n > 0))) return { error: `--min-interval takes a number of minutes${aboveZero ? " above zero" : ""}, not "${raw}"`, raw };
+  if (!(raw.trim() !== "" && Number.isFinite(n) && n >= 0 && (!aboveZero || n > 0))) return { error: `--min-interval takes a number of minutes${aboveZero ? " above zero" : ""}${raw.trim() ? `, not "${raw}"` : "; none was given"}`, raw };
   return { minInterval: n, raw };
 }
 

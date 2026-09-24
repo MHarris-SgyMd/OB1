@@ -986,6 +986,7 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   assert(eqDangling.code === 2 && /none was given/.test(eqDangling.err), "`--event=--min-interval` is an event forgotten, as `--event --min-interval` is (fifth review pass: the = form returned the flag as the value)");
   const eqStop = await run(["--print-hook=claude-code", "--event=Stop", "--min-interval=45"]);
   assert(eqStop.code === 0 && /--min-interval 45/.test(eqStop.out) && Object.keys(JSON.parse(eqStop.out).hooks).join() === "Stop", `…and --print-hook=claude-code --event=Stop --min-interval=45 prints a Stop hook at 45 (exit ${eqStop.code})`);
+  assert(/--min-interval takes a number of minutes above zero; none was given/.test((await run(["--print-hook", "claude-code", "--event", "Stop", "--min-interval"])).err), "a dangling --min-interval says none was given, in its siblings' words");
   const zero = await run(["--print-hook", "claude-code", "--event", "Stop", "--min-interval", "0"]);
   assert(zero.code === 2 && /above zero/.test(zero.err), "a printed Stop hook needs a floor above zero — at zero it would capture every turn");
   assert(received.length === 1, "…and sends nothing");
