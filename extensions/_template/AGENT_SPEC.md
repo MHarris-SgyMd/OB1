@@ -245,7 +245,7 @@ If the extension uses embeddings or LLM extraction (like the core brain), add:
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY!;
 ```
 
-And include the embedding/extraction helper functions from `server/index.ts`.
+And include the embedding/extraction helper functions from `server-portable/index.ts`.
 
 ---
 

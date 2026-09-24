@@ -936,17 +936,6 @@ for (const t of TEXT_ONLY) {
     const drift = Object.entries(pkg).filter(([name, version]) => deps[name] !== version);
     assert(drift.length === 0 && Object.keys(deps).length === Object.keys(pkg).length, `integrations/kubernetes-deployment/package.json pins exactly what extensions/package.json installs${drift.length ? ` (${drift.map(([n, v]) => `${n}: ${deps[n] ?? "absent"} vs ${v}`).join(", ")})` : ""}`);
   }
-  // server/package.json mirrors server/deno.json on the MCP stack (change 84's
-  // review: a nested zod 4.5.4 had arrived in its lock unheld). supabase-js is
-  // left out — the Node suites never load it — and left out by regex: a quoted
-  // supabase-js literal makes this file a target for the shim codemod.
-  {
-    const MCP_STACK = /^(hono|zod|@hono\/mcp|@modelcontextprotocol\/sdk)$/;
-    const imports = JSON.parse(readFileSync(join(ROOT, "server/deno.json"), "utf8")).imports as Record<string, string>;
-    const dev = JSON.parse(readFileSync(join(ROOT, "server/package.json"), "utf8")).devDependencies as Record<string, string>;
-    const drift = Object.entries(imports).filter(([name, spec]) => MCP_STACK.test(name) && spec !== `npm:${name}@${dev[name]}`);
-    assert(drift.length === 0, `server/package.json pins what server/deno.json deploys, MCP stack entire${drift.length ? ` (${drift.map(([n, s]) => `${n}: ${s} vs ${dev[n] ?? "absent"}`).join(", ")})` : ""}`);
-  }
 }
 
 // ── The pinned transport, across a session ──────────────────────────────────

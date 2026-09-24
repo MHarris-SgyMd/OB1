@@ -49,7 +49,7 @@ The core user journey is:
 - `docs/03-faq.md`: Common user questions and troubleshooting, especially ChatGPT, search, import, storage, and key rotation.
 - `docs/04-ai-assisted-setup.md`: Guide for using AI coding tools to build the same system.
 - `docs/05-tool-audit.md`: Guidance for keeping MCP tool surfaces useful and not bloated.
-- `server/index.ts`: Canonical core MCP server deployed as the `open-brain-mcp` Supabase Edge Function.
+- `server-portable/index.ts`: Canonical core MCP server — Bun, a container or Cloudflare Workers (`SETUP.md`); upstream deploys its copy as the `open-brain-mcp` Supabase Edge Function.
 - `extensions/`: Curated six-part learning path for practical Open Brain builds.
 - `recipes/`: Standalone imports, workflows, automation patterns, and alternative architectures.
 - `skills/`: Reusable AI client skills or prompt packs.
@@ -67,7 +67,7 @@ The base Open Brain system has three layers:
 2. Intelligence: OpenRouter generates embeddings with `openai/text-embedding-3-small` and extracts simple metadata with `openai/gpt-4o-mini`.
 3. Access: a Supabase Edge Function exposes MCP tools to AI clients.
 
-The core MCP server in `server/index.ts` exposes:
+The core MCP server in `server-portable/index.ts` exposes:
 
 - `capture_thought`: write a standalone thought, generate embedding, extract metadata, and store it.
 - `search_thoughts`: semantic search over stored thoughts.
@@ -120,7 +120,7 @@ Key ChatGPT guidance:
 
 ## Common Troubleshooting
 
-Start with logs and configuration. Do not tell users to rewrite `server/index.ts` unless logs prove the code is the issue.
+Start with logs and configuration. Do not tell users to rewrite `server-portable/index.ts` unless logs prove the code is the issue.
 
 Common issues:
 

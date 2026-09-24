@@ -1,8 +1,10 @@
 # Fork-local CI.
 #
 # Upstream runs no tests at all: 11 test files across ~85k lines of code and no
-# workflow invokes any of them. That is how server/test-stateless.mjs came to
-# assert the opposite of production for three months without anyone noticing.
+# workflow invokes any of them. That is how upstream's server/test-stateless.mjs
+# came to assert the opposite of production for three months without anyone
+# noticing (the Edge Function build and its three mirror suites left this fork
+# with SMD-1800; server-portable/ is the server, and its suites import it).
 #
 # This workflow exists so the fork's patch series cannot rot the same way. It is
 # additive — it touches no upstream workflow — so it survives a rebase onto
@@ -32,38 +34,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  server-tests:
-    name: Server tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.4.0"
-
-      # bun.lock pins the full transitive tree; package.json pins the direct deps
-      # exactly to server/deno.json, so the tests exercise the same libraries the
-      # Edge Function deploys with. (`npm install && npm test` also works for
-      # anyone without bun — the suites are plain node-compatible ESM.)
-      - name: Install pinned test dependencies
-        working-directory: server
-        run: bun install --frozen-lockfile
-
-      # Three suites, each carrying a drift guard that reads server/index.ts and
-      # fails if the behaviour it asserts is no longer what the server implements.
-      - name: Stateless transport + auth contract
-        working-directory: server
-        run: bun test-stateless.mjs
-
-      - name: thought_stats pagination
-        working-directory: server
-        run: bun test-stats-pagination.mjs
-
-      - name: capture_thought atomicity
-        working-directory: server
-        run: bun test-capture-atomicity.mjs
-
   repo-consistency:
     name: Repo consistency
     runs-on: ubuntu-latest
@@ -130,41 +100,6 @@ jobs:
       # endpoint on localhost. Bun only, no database, so it runs here.
       - name: Session capture hook
         run: bun recipes/session-capture-hook/test-session-capture.mjs
-
-  deno-check:
-    name: Edge Function typecheck
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
-      # The Node suites cannot import index.ts (Deno.env at module scope, jsr:
-      # imports), so this is the only thing that typechecks the file as deployed.
-      #
-      # --node-modules-dir=none resolves imports through deno.json exactly as
-      # Supabase does. Without it, a stray node_modules/ (bun creates one in
-      # server/ when running the test suites locally) flips Deno into manual
-      # node_modules mode and the check fails with "Could not find a matching
-      # package for 'npm:@supabase/supabase-js'". The flag makes this behave the
-      # same in CI and on a developer machine that has just run the tests.
-      #
-      # Since SDK 1.29 the package's exports name its types `./dist/esm/*.d.ts`,
-      # which for a `.js` subpath is a file that does not exist; tsc substitutes
-      # `.d.ts` for `.js`, Deno does not, and the module — every tool handler's
-      # arguments with it — is `any`. Each SDK import in these files carries a
-      # `// @ts-types` pragma naming the extensionless subpath, and test-auth.ts
-      # holds it there (change 84). A file that loses the pragma fails here
-      # with `implicitly has an 'any' type` at every handler.
-      # Every vendored MCP server, API and worker runs under Bun — the 22 on the
-      # SQL shim since SMD-1798, kubernetes-deployment on Bun's own Postgres
-      # client since SMD-1800 — and the Portable-server job imports and starts
-      # each, so none is checked here any more.
-      - name: deno check server/index.ts
-        working-directory: server
-        run: deno check --node-modules-dir=none index.ts
 
   portable-server:
     name: Portable server (Bun + Workers)
