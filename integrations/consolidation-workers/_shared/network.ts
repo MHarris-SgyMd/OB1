@@ -21,7 +21,7 @@ export const DEFAULT_DB_FETCH_TIMEOUT_MS = 30_000;
 
 /** Resolve the LLM fetch timeout from env, falling back to the default. */
 export function resolveLlmFetchTimeoutMs(): number {
-  const raw = Deno.env.get("FETCH_TIMEOUT_MS");
+  const raw = process.env.FETCH_TIMEOUT_MS;
   if (!raw) return DEFAULT_LLM_FETCH_TIMEOUT_MS;
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_LLM_FETCH_TIMEOUT_MS;

@@ -164,8 +164,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1475 assertions: 1475 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports fifty-two (52) migrations applied, and
+`bun test-schema.ts` prints `1552 assertions: 1552 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports fifty-three (53) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -204,7 +204,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
-051 SMD-1804, 052 SMD-1296).
+051 SMD-1804, 052 SMD-1296, 053 SMD-1867).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -279,6 +279,30 @@ bounded head of the text, an update's moved keys, the
 `supersedes` pointer before and after, and who. The MCP tool of the same name
 renders it; a self-hosted server role needs `SELECT` on `thought_audit` (the
 server group below).
+
+Migration 053 puts the source beside the thought (SMD-1867, the ingestion
+adapter contract; SMD-1865 is its Linear instance). `thought_sources` holds, for
+a thought that came from a source system, the system, the identity that
+survives a rename there and the **canonical** form byte for byte — the truth a
+two-way connector writes back, from which the row's text and its edges are
+derived, never the other way — with its hash and the ingest run; one thought
+per `(system, identity)`, written by `record_thought_source()` (the same
+canonical twice writes nothing; an identity another thought holds is refused,
+not re-pointed, unless the caller takes it — `p_take`, the board sync's case,
+below) and resolved by `source_thought(system, identity)` (this table
+first; for `linear`, the board sync's `metadata.issue` claim at the head of a
+twin chain). A second facet kind, `link` — `{relation, system, target, origin}`,
+relation one of `references | child_of | blocks | blocked_by | relates_to |
+duplicate_of`, the target named by identity, never by id — is written as a SET
+by `record_source_links(thought, system, links)`: a link the source no longer
+states is closed (`valid_until`, history), one already active is kept, a new
+one added; a partial unique index holds one active row per (thought, system,
+relation, target). And `record_thought_entities` gains the **resolution rule**:
+a `source:<system>` extraction key is a structured pass (the source's own
+project and labels as mentions, no model call) that keeps its own rows as a set — the same set twice writes nothing,
+an `extract:*` pass replaces only extracted rows, and where both name one
+(thought, entity) or edge the structured row stands. Additive, no data change,
+no ACL; the ingester and the board sync write through it (below).
 
 ## What changed relative to the guide
 
@@ -856,7 +880,17 @@ running to the model's context and the worker's timeout — and a call cut that
 way is made once more with a frequency penalty (`RUNAWAY_PENALTY`, 0.5), which
 taxes the repetition the runaways were measured to be: on the fork's brain that
 retry, with the budget sized to both measured models, extracted all 32 thoughts
-one call could not finish, where windows alone reached 10 to 13. A thought whose retry also runs away is recorded
+one call could not finish, where windows alone reached 10 to 13. The answer is
+streamed, and a call is aborted the moment its answer holds three copies of one
+item (`RunawayDetector`, `RUNAWAY_REPEATS`; SMD-1960) — the loop is visible on
+the stream long before the budget, so a runaway costs seconds rather than the
+minute the budget allows (the 32 stragglers' pass measured 1,796 s against
+3,158, 31 of 32 extracting; the 32nd extracts on a re-run under the shipped
+retry rule, so 32 of 32 is derived, not re-measured whole) — and a call
+aborted so is retried as a cut one is, the retry read whole, since a penalised
+answer was measured to repeat an item three times and recover; an
+answer that enumerates distinct ids is not a loop by that rule and runs to the
+budget, which stays the bound. A thought whose retry also runs away is recorded
 failed, retryable. The window is the **metadata model's**, not the embedding
 model's: `OB1_EXTRACT_CHUNK_TOKENS` when set, else derived from the model's
 served context (`KNOWN_CHAT_MODEL_WINDOW`, measured as `KNOWN_MODEL_WINDOW` is)
@@ -865,9 +899,10 @@ the table does not list gets that default. The banner's `window:` line and
 preflight's `extraction window` row print the same sentence. The prompt version
 is 2 — a pass under it re-extracts a brain whose thoughts were cut at 8,000
 characters under p1 — so the first run after upgrading needs `--switch-key`.
-`--dump`'s line carries `windows` and, for a windowed thought, each window's own
-answer in `parts` beside the merged one. Why, measured: `evals/README.md`,
-"Entity extraction in windows".
+`--dump`'s line carries `windows`, `retried` and `abortedMs` — how far into
+the call a runaway was aborted on the stream — and, for a windowed thought,
+each window's own answer in `parts` beside the merged one. Why, measured:
+`evals/README.md`, "Entity extraction in windows".
 
 **What may leave.** The egress gate (SMD-1903) reads each row's own
 `metadata` — `source`, `type`, `topics` — and its text against `OB1_EGRESS_POLICY`
@@ -1520,22 +1555,23 @@ wipe costs one re-ingest, and that re-ingest is two commands:
 ```bash
 # 1. the records → rows (bare: no vectors, no chunks yet)
 bun ingest-records.ts --url postgres://… \
-  --linear /tmp/linear-corpus-full.json \
+  --linear /tmp/linear-corpus-full.json --allow linear:corpus \
   --memory-dir ~/.claude/projects/<project>/memory
 # 2. rows → vectors + chunks, through the owned embedding path (below)
 bun reembed.ts --url postgres://…
 ```
 
-`ingest-records.ts` reads four sources, each a record becoming one thought row
+`ingest-records.ts` reads five sources, each a record becoming one thought row
 with a deterministic id and a `metadata.source` label (SMD-1806 rule 5 — an
-agent-written capture is one source among four):
+agent-written capture is one source among several):
 
 | source | what | needs |
 | --- | --- | --- |
 | `fork` | the fork's changes, one `changes/*.md` file each (SMD-1917) | in the tree |
 | `commit` | git commit messages since the upstream pin (the fork's whole delta) | in the tree; `--since <ref>` to move the range start |
-| `linear` | a corpus dump built by `evals/build-linear-corpus.ts` | `--linear <dump.json>` |
+| `linear` | a corpus dump built by `evals/build-linear-corpus.ts` — each record's `issue`, through the Linear adapter: the row the board sync writes (SMD-1958) | `--linear <dump.json>` and `--allow linear:corpus` |
 | `memory` | the `*.md` memory files (`MEMORY.md`, the index, excluded) | `--memory-dir <path>` or `OB1_MEMORY_DIR` |
+| `markdown` | a Markdown / Obsidian vault, through the Markdown adapter | `--markdown <root>` or `OB1_MARKDOWN_DIR`, and `--allow <root>` |
 
 `--source all` (the default) ingests every source it has an input for and says on
 stderr which it skipped; `--source <one>` restricts it; `--dry-run` counts per
@@ -1551,6 +1587,62 @@ writes **bare** rows on purpose: vectors and
 chunk rows are `reembed.ts`'s job, which walks the new rows through the claim table
 and embeds them exactly as a capture would (chunking long records), so the two
 tools together produce the same rows a live capture would.
+
+**The write merges, and clears what the text no longer vouches for.** A row's
+`metadata` is merged (`thoughts.metadata || record`), never replaced, so the
+board sync's facets, the extractor's tags and 050's actor marks on a row survive
+a rebuild over it; a record whose text stood while its metadata gained a key is
+`patched`. A record whose text moved is `updated`, and its vector, its label and
+its chunk rows are cleared — they were the old text's — so `reembed.ts`, which
+pools rows without a vector, picks it up (SMD-1958's second half; before, a
+rebuild over an embedded brain left a stale vector under new text that nothing
+re-embedded). A record that carries the source's clock (the contract's
+`watermark` — a Linear record's `linear_updated_at`) is written only when the
+row's stored value is not newer, and at an equal value only when the row was
+not written — by anyone — after the record's view was taken (the dump's
+`fetchedAt`);
+otherwise it is `stale`, nothing is written, structure included, and the run
+says how many — the board sync had moved those tickets past the dump (SMD-1958,
+"Two writers of one identity" below).
+
+**The ingestion contract (SMD-1867).** The `linear` and `markdown` sources go
+through an **adapter** — `ingest-linear.ts`, `ingest-markdown.ts`, each a pure
+map from one source item to the five things `ingest-contract.ts` names: a stable
+**identity** within the system (a Linear identifier; a note's name, which is
+what a wikilink names — its frontmatter `id` is a facet), the **canonical** form byte for byte (the issue as fetched, as
+JSON with keys in one order; the file's bytes), the clean **text** that is
+stored and embedded (Linear's autolink markup stripped to the identifier; a
+note's frontmatter dropped and its `[[wikilinks]]` flattened to their alias or
+name), the **links** the source's structured layer states (cross-references,
+parent, blocks / related / duplicate relations; wikilinks), the **mentions** it
+names (project and labels; tags) and the **facets**. The rule the contract is
+built on: *preserve the source, derive the text and the edges* — a corpus that
+stripped and stored could never be written back to Obsidian or Notion without
+shredding the page (SMD-949's connectors). So each such record's transaction
+also writes, through migration 053, its canonical (`thought_sources`), its links
+(`link` facets, as a set — a link the source drops is closed, never deleted) and
+its mentions (`record_thought_entities` under `source:<system>`, confidence 1,
+no model call — rows 016's extractor never displaces and never doubles: where
+both name one pair the structured row stands); the three writes are
+`ingest-structure.ts`'s `recordStructure`, a module of bun and the contract
+alone so `sync-linear.ts` can load it inside its container (which mounts `db/`
+and `server-portable/` and nothing else — the sync's `--self-check` holds its
+whole import closure to those two). Re-ingesting an unchanged item
+writes nothing at any of the four. Every adapter passes one test: its canonical
+IS the input; the Markdown adapter enumerates what its text cannot reproduce
+(`MARKDOWN_LOSSY`) and the two inputs it refuses rather than store mangled — a
+file that is not UTF-8, one holding NUL (`MARKDOWN_LIMITS`). `bun
+ingest-linear.ts --self-check` and `bun ingest-markdown.ts --self-check` run the
+pure rules; `test-schema.ts` [48] drives 053 with the Linear adapter's output.
+
+**The allowlist (SMD-1813).** The two adapter sources are external content —
+stored un-isolated, embedded, sent to a model provider — and are ingested only
+for a **scope** the operator cleared: `--allow <scope,scope>` or
+`OB1_INGEST_ALLOW`, an exact match on the scope each record names (the corpus:
+`linear:corpus`; a vault: its resolved root path), never a prefix and never "the
+whole workspace". The default is nothing; a record refused is counted per source
+and the refusal names the knob that clears it. The fork's own records (`fork`,
+`commit`, `memory`) are not external and are not gated.
 
 **The brain reports its tier.** `OB1_TIER` (`stable` | `canary` | `working`,
 default `stable`); the ingester stamps `ob1_config.tier` and `.last_ingest` on
@@ -1685,9 +1777,18 @@ model call — on the dogfood brain 224 of 268 hand captures rendered byte-ident
 and cost nothing but the patch. Every write goes through `server-portable/store-sql.ts`
 as the actor `board-sync` via `db/sync-linear.ts`, the egress gate asked first
 (refused, the row lands without a vector and the audit row says so), so a synced
-ticket differs from a captured one in `metadata.source` alone. Linear's autolink
-markup (`<issue …>SMD-x</issue>`) is stripped to the identifier before storing
-(SMD-1865's first item; the typed edges are its second and stay there). "Same
+ticket differs from a captured one in `metadata.source` alone. The text, the
+facets and the structure are the Linear adapter's (`ingest-linear.ts`, SMD-1867):
+Linear's autolink markup (`<issue …>SMD-x</issue>`) is stripped to the identifier
+in the text, and once the head row is settled — captured, adopted, patched or
+edited — the pass records beside it, with no model call, the issue as fetched as
+its canonical (`thought_sources`), its cross-references, parent and relations
+(`blocks`, `blocked_by`, `relates_to`, `duplicate_of`, from both sides of each
+relation) as `link` facets, a set that follows the board — a relation removed in
+Linear is closed, not deleted — and its project and labels as mentions under
+`source:linear`, which 016's extractor leaves standing (migration 053; SMD-1865's
+second item). So "the issues blocking X" and "everything under epic Y" are
+answered from the edges, not the prose. "Same
 text" is judged by `content_fingerprint_of` — the rule `update_thought` refuses
 duplicates by, asked of the database — so a paste with a trailing newline is the
 same text. When one identifier has several ticket rows — the hand re-captures —
@@ -1739,13 +1840,59 @@ ends the pass after the issue in hand (the compose service allows 60 s); the nex
 pass finds what was left.
 
 **Two writers of one identity.** `ingest-records.ts --linear <dump>` and this tool
-both key a ticket on `metadata.issue`, but render different text (the corpus's
-`title / text` against the board header) and the ingester replaces `metadata`
-wholesale — so on one brain they would rewrite each other's rows on every run. A
-brain this tool keeps takes the board from it: rebuild that brain with
-`ingest-records.ts` and no `--linear` (the fork, commit and memory sources), then
-one sync pass fills the board; the corpus dump stays the eval harnesses'
-(SMD-1958 has the one-renderer resolution).
+both key a ticket on `metadata.issue`, and since SMD-1958 they write the same
+row: the dump carries each issue as the API gave it (`issue`, the selection this
+tool fetches — `ISSUE_FIELDS`, the adapter's), both feed it to the one Linear
+adapter, and the text, the facets, the canonical, the links and the mentions
+come out byte for byte the same. Run in either order on one brain, the second
+writer finds nothing to write — `test-live.ts` [22] drives both orders over the
+real store. Three rules keep it so. *The identity has one holder:*
+`thought_sources` names one thought per `(linear, SMD-N)`; this tool takes the
+identity for the ticket's head row (`record_thought_source(…, p_take)` — the head
+moves when an older paste becomes the chain's head, and the structure moves with
+it: the old head's linear links are closed and its `source:linear` mentions
+removed, so the ticket's edges are read once), and the ingester, whose ids are
+deterministic, does not: a corpus record for a ticket this tool captured first
+comes back `held`, its transaction rolled back, no second row, counted and said
+— while a ticket the ingester wrote first is this tool's to keep, on the
+ingester's row. *Metadata merges:* the ingester never replaces a row's
+`metadata`, so the tags and 050's marks this tool's capture put there survive a
+rebuild. *The source's clock wins:* the record carries the issue's
+`linear_updated_at` as its watermark, and a row whose stored watermark is newer
+— this tool moved the ticket after the dump was built — is not written; the
+record is `stale`, its structure unrecorded, and the row keeps the current
+text. Without that a Monday dump on Friday would move every ticket that moved
+back to Monday, and the next pass forward again. Where Linear's clock cannot
+settle it — a project, state or label **renamed** in Linear leaves `updatedAt`
+where it was, and this tool re-renders the ticket from the census — the
+brain's does: the dump carries its build instant (`fetchedAt`), and at an equal
+watermark a row written after it is left as it is and the record is `stale` too
+(the builder's clock and the brain's must agree to the order of that gap; a
+dump with no build instant writes at an equal clock). `updated_at` is the
+brain's last write by anyone — a facet patch, a re-embed, a retag, a hand edit
+as much as this tool's re-render — so a rename the dump did see can read
+`stale` behind such a write; this tool's next pass lands it from the census,
+so the cost is a delay and an overstated count, never a lost write. The dump
+holds the issues the builder kept — those whose description and comments make
+a non-empty text (`OB1_CORPUS_MIN_CHARS` can drop more), in the state it was
+asked for (`OB1_CORPUS_STATE`, `completed` by default) — and every other
+ticket is this tool's alone. A dump built before the `issue` field
+is refused by name with the rebuild command — one renderer, not two.
+
+**Structure on a brain from before 053.** A scheduled pass fetches only the
+missing and stale tickets, so the rows a brain already held gain their
+canonical, links and mentions only as each ticket next moves in Linear. To
+record them for every ticket at once, run one `--full` pass after applying 053:
+every issue is fetched and compared, the rows read *unchanged* or *patched*,
+and the structure lands beside each head row (no model call, ~1 s of Linear per
+fifty issues). On a brain without 053 the tool says so at boot and writes rows
+alone. A ticket whose structure write fails — a validator refusal, a race —
+has its watermark cleared so the next pass fetches it and tries again, every
+pass until it lands: one fetch, the facet patch, the hook's rolled-back
+transaction and the clearing patch per failing ticket per interval — two audit
+rows — and the error under *errors* in every report, which is the signal
+to look. The retry is not capped; a ticket that fails forever costs that
+forever, and says so each time.
 
 **Not removed, not commented.** An issue deleted in Linear or moved out of the
 initiative keeps its row (`--audit` lists it under *extra*; `ingest-records.ts` has
@@ -1760,8 +1907,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1475 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 627 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1552 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 660 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

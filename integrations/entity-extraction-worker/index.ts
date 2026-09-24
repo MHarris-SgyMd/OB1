@@ -30,7 +30,6 @@
  *   - Enhanced thoughts columns (schemas/enhanced-thoughts)
  */
 
-import "../../compat/deno-on-bun.ts";
 import { createClient } from "../../compat/supabase-sql/index.ts";
 import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 import {
@@ -46,11 +45,11 @@ import {
 
 // ── Environment ─────────────────────────────────────────────────────────────
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") ?? "";
-const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY") ?? "";
-const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
+const SUPABASE_URL = process.env.SUPABASE_URL ?? "";
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ?? "";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "";
 
 const WORKER_VERSION = "entity-extraction-worker-v1";
 const MAX_ATTEMPTS = 5;
@@ -66,7 +65,7 @@ const MAX_ATTEMPTS = 5;
  */
 const ENTITY_EXTRACTION_MAX_CALLS = Math.max(
   0,
-  Number.parseInt(Deno.env.get("ENTITY_EXTRACTION_MAX_CALLS") ?? "10000", 10) || 10000,
+  Number.parseInt(process.env.ENTITY_EXTRACTION_MAX_CALLS ?? "10000", 10) || 10000,
 );
 let llmCallCount = 0;
 
@@ -81,7 +80,7 @@ let llmCallCount = 0;
  */
 const FETCH_TIMEOUT_MS = Math.max(
   1000,
-  Number.parseInt(Deno.env.get("FETCH_TIMEOUT_MS") ?? "60000", 10) || 60000,
+  Number.parseInt(process.env.FETCH_TIMEOUT_MS ?? "60000", 10) || 60000,
 );
 
 /** Wrap fetch with an AbortController so stuck upstreams can't exceed the timeout. */
@@ -567,7 +566,7 @@ async function markError(thoughtId: string, error: string, attemptCount: number)
 
 // ── Main Handler ────────────────────────────────────────────────────────────
 
-Deno.serve(async (req) => {
+const handler = async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: CORS_HEADERS });
   }
@@ -577,8 +576,8 @@ Deno.serve(async (req) => {
   // form — x-brain-key, x-access-key, ?key=, a bearer token — is tried. Fail
   // closed with neither configured, as before.
   const keys = {
-    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
-    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+    MCP_ACCESS_KEYS: process.env.MCP_ACCESS_KEYS,
+    MCP_ACCESS_KEY: process.env.MCP_ACCESS_KEY,
   };
   if (!keys.MCP_ACCESS_KEYS && !keys.MCP_ACCESS_KEY) {
     console.warn("MCP_ACCESS_KEYS not set — rejecting all requests.");
@@ -795,4 +794,9 @@ Deno.serve(async (req) => {
   summary.llm_calls = llmCallCount;
   (summary as Record<string, unknown>).elapsed_ms = Date.now() - startTime;
   return json(summary);
-});
+};
+
+export default {
+  port: Number(process.env.PORT || 8000),
+  fetch: handler,
+};

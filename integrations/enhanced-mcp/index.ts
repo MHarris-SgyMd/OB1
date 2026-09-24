@@ -18,7 +18,6 @@
 // — one built at module scope and connect()ed to a fresh transport each request
 // answered the first of two overlapping requests on the second's transport.
 // FORK.md change 78; extensions/test-auth.ts fires three overlapping requests.
-import "../../compat/deno-on-bun.ts"; // ob1-original-types: jsr:@supabase/functions-js/edge-runtime.d.ts
 
 // Deno reads the SDK's types through the extensionless subpath: its exports map
 // names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
@@ -52,9 +51,9 @@ import {
 
 // ── Environment ───────────────────────────────────────────────────────────
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
+const SUPABASE_URL = process.env.SUPABASE_URL!;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const MCP_ACCESS_KEY = process.env.MCP_ACCESS_KEY!;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -140,7 +139,7 @@ function truncateContent(content: string, maxLen: number): string {
 // first of two overlapping requests on the second's transport (the header note
 // at the top of the file; FORK.md change 78 for the mechanism). Registering the
 // thirteen tools costs about half a millisecond on Bun and two to four times
-// that under Deno, the runtime this deploys on — a fraction of the database
+// that under Deno, where it deployed until SMD-1798 — a fraction of the database
 // round trip every tool then makes.
 function buildServer(): McpServer {
   const server = new McpServer({
@@ -1744,4 +1743,7 @@ app.all("*", async (c) => {
   return transport.handleRequest(c);
 });
 
-Deno.serve(app.fetch);
+export default {
+  port: Number(process.env.PORT || 8000),
+  fetch: app.fetch,
+};

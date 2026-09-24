@@ -68,6 +68,10 @@ function preflight(extraEnv: Record<string, string | undefined> = {}) {
     ...process.env,
     MCP_ACCESS_KEY: "x".repeat(64),
     OPENROUTER_API_KEY: "sk-stub",
+    // A hosted name with a key: not dialled without --deep. The default base
+    // is the loopback, which preflight dials since SMD-1875 and which reaches
+    // nothing in CI; this suite's subject is the search_path.
+    OB1_LLM_BASE_URL: "https://provider.invalid/v1",
     OB1_STORE: "sql",
     DATABASE_URL: URL_,
     SUPABASE_URL: undefined,

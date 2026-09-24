@@ -114,10 +114,10 @@ CREATE POLICY "Household members update shared lists"
 
 ### Step 3: Build a Separate MCP Server
 
-Create a new Edge Function for the shared server. This is a Supabase Edge Function using Hono and the MCP SDK — the same pattern as the core Open Brain and all extensions.
+Create a second server file beside the extension's — `extensions/<name>/shared-server.ts`, where the relative imports below resolve; the real one is `extensions/meal-planning/shared-server.ts`. It is a Bun-native Hono + MCP SDK server (SMD-1799) — the same pattern as the core Open Brain and all extensions.
 
 ```typescript
-// shared-server index.ts (Supabase Edge Function)
+// extensions/<name>/shared-server.ts — a second, Bun-native server beside the extension's index.ts
 import { Hono } from "hono";
 // Deno reads the SDK's types through the extensionless subpath: its exports map
 // names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
@@ -125,7 +125,7 @@ import { Hono } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { z } from "zod";
-import { createClient } from "@supabase/supabase-js";
+import { createClient } from "../../compat/supabase-sql/index.ts"; // Bun's Postgres client in supabase-js's shape
 import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 
 const app = new Hono();
@@ -135,8 +135,8 @@ app.post("/mcp", async (c) => {
   // scoped, hashed entries (see the core server's auth.ts); give a household
   // member a read-scoped key unless they should mark items purchased.
   const principal = authenticateRequest(c.req.raw, {
-    MCP_ACCESS_KEYS: Deno.env.get("MCP_HOUSEHOLD_ACCESS_KEYS"),
-    MCP_ACCESS_KEY: Deno.env.get("MCP_HOUSEHOLD_ACCESS_KEY"),
+    MCP_ACCESS_KEYS: process.env.MCP_HOUSEHOLD_ACCESS_KEYS,
+    MCP_ACCESS_KEY: process.env.MCP_HOUSEHOLD_ACCESS_KEY,
   });
   if (!principal) {
     return c.json({ error: "Unauthorized" }, 401);
@@ -144,8 +144,8 @@ app.post("/mcp", async (c) => {
 
   // Use SCOPED credentials — not the service role key
   const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_HOUSEHOLD_KEY")!, // Limited key
+    process.env.SUPABASE_URL!,
+    process.env.SUPABASE_HOUSEHOLD_KEY!, // Limited key
   );
 
   const server = new McpServer(
@@ -232,84 +232,51 @@ app.post("/mcp", async (c) => {
 
 app.get("/", (c) => c.json({ status: "ok", service: "Household Shared", version: "1.0.0" }));
 
-Deno.serve(app.fetch);
+// Bun serves the entry module's default export on PORT (8000 unset); the suites import `fetch`.
+export default {
+  port: Number(process.env.PORT || 8000),
+  fetch: app.fetch,
+};
 ```
 
-### Step 4: Configure Separate Secrets
+### Step 4: Mint Separate Keys
 
-Set the shared server's secrets in Supabase (separate from your main server's secrets):
+The shared server's keys are its own environment, separate from the extension server's — there is no Supabase project holding secrets; the variables go on the `bun` command in Step 5:
 
 ```bash
 # Mint a separate, named key for the shared server — read-scoped unless this
 # member should add or check off items (Step 3 of the Deploy an Edge Function
-# primitive shows the by-hand form). The HASH is stored; the key goes in the URL.
-# Run from a checkout of this repository, in a subshell so the cwd stays here:
+# primitive shows the by-hand form). The HASH goes in MCP_HOUSEHOLD_ACCESS_KEYS;
+# the key goes in the other person's connector URL. From a checkout, in a
+# subshell so the cwd stays here:
 (cd /path/to/your/OB1/checkout/server-portable && bun keygen.ts --name spouse --scope read)
-
-# Set secrets
-supabase secrets set MCP_HOUSEHOLD_ACCESS_KEYS=spouse:read:paste-the-hash-here
-supabase secrets set SUPABASE_HOUSEHOLD_KEY=your-limited-supabase-key  # LIMITED KEY
-
-# Optional: Household ID for RLS
-SHARED_HOUSEHOLD_ID=uuid-here
 ```
 
-Add to `package.json`:
+The shared server reads `MCP_HOUSEHOLD_ACCESS_KEYS` (the older single `MCP_HOUSEHOLD_ACCESS_KEY` still works, compared by digest) and `SUPABASE_HOUSEHOLD_KEY`, which the SQL shim accepts and ignores — the credentials are in `SUPABASE_URL`, so the household's scope is the key's `read`/`write`, not a second database credential. No `package.json` of its own: `extensions/package.json` and the extension's `deno.json` pin the packages the file imports.
 
-```json
-{
-  "name": "household-shared-server",
-  "version": "1.0.0",
-  "type": "module",
-  "scripts": {
-    "build": "tsc",
-    "start": "node --env-file=.env.shared dist/shared-server.js"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^0.5.0",
-    "@supabase/supabase-js": "^2.39.0"
-  },
-  "devDependencies": {
-    "@types/node": "^20.0.0",
-    "typescript": "^5.3.0"
-  }
-}
-```
+### Step 5: Run It as a Separate Server
 
-### Step 5: Deploy as a Separate Edge Function
-
-Deploy the shared server as its own Supabase Edge Function:
+The shared server is its own process on its own port, with its own keys — the extension's server never sees them:
 
 ```bash
-supabase functions new household-shared-mcp
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+SUPABASE_HOUSEHOLD_KEY='unused-by-the-shim' \
+MCP_HOUSEHOLD_ACCESS_KEYS='partner:read:<sha256-of-the-shared-key>' \
+PORT=8788 bun extensions/<name>/shared-server.ts
 ```
 
-Copy the shared server code into `supabase/functions/household-shared-mcp/index.ts`, generate a separate access key, and deploy:
-
-```bash
-# Generate a separate access key for the shared server
-openssl rand -hex 32
-
-# Set the shared server's secrets
-supabase secrets set MCP_HOUSEHOLD_ACCESS_KEY=generated-key-here
-supabase secrets set SUPABASE_HOUSEHOLD_KEY=household-scoped-api-key
-
-# Deploy
-supabase functions deploy household-shared-mcp --no-verify-jwt
-```
-
-The other person connects via Claude Desktop:
+`bun extensions/meal-planning/shared-server.ts` is the real one (`extensions/test-auth.ts` starts it under `bun` in CI). The other person connects via Claude Desktop:
 
 1. Open Claude Desktop → **Settings** → **Connectors**
 2. Click **Add custom connector**
 3. Name: `Household Shared`
-4. Remote MCP server URL: `https://YOUR_PROJECT_REF.supabase.co/functions/v1/household-shared-mcp?key=shared-access-key`
+4. Remote MCP server URL: `https://your-host/mcp?key=shared-access-key` — the shared server's port behind TLS, never the extension's
 5. Click **Add**
 
 **Key points:**
 - They connect via URL — no Node.js, no config files, no terminal needed on their end
 - They do NOT need access to your main MCP server or credentials
-- You can revoke access by changing the shared access key in Supabase secrets
+- You can revoke access by removing their line from `MCP_HOUSEHOLD_ACCESS_KEYS` in the shared server's environment and restarting it
 
 ### Step 6: Test the Access Boundaries
 
@@ -533,7 +500,7 @@ For Supabase: Create a custom JWT with limited claims, or use connection pooling
 
    - Check that the `?key=` value is the **key** whose hash sits in the `MCP_HOUSEHOLD_ACCESS_KEYS` secret (the URL carries the key, the secret its hash), and that the line's scope is what you expect
    - Try removing and re-adding the connector in Settings → Connectors
-   - Verify the Edge Function is deployed: `supabase functions list`
+   - Verify the shared server is running: its terminal shows Bun's start line, and `curl http://your-host:8788/mcp` without a key answers 401
 
 ## Extensions That Use This
 

@@ -13,7 +13,7 @@ Pulls your Gmail history via the Gmail API and loads each email into Open Brain 
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- Deno runtime installed
+- [Bun](https://bun.sh) 1.2+ installed
 - Google Cloud project with Gmail API enabled
 - Gmail API OAuth credentials (Client ID + Client Secret)
 - OpenRouter API key (same one from your Open Brain setup)
@@ -54,7 +54,7 @@ GENERATED DURING SETUP
 4. **First run — authenticate:**
 
    ```bash
-   deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --dry-run --limit=5
+   bun pull-gmail.ts --dry-run --limit=5
    ```
 
    This opens a browser window for OAuth consent. After authorizing, your token is cached in `token.json`.
@@ -63,16 +63,16 @@ GENERATED DURING SETUP
 
 ```bash
 # Dry run — see what would be imported
-deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --dry-run
+bun pull-gmail.ts --dry-run
 
 # Import sent emails from the last 90 days
-deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --window=90d --limit=500
+bun pull-gmail.ts --window=90d --limit=500
 
 # Import starred emails
-deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --labels=STARRED
+bun pull-gmail.ts --labels=STARRED
 
 # List all Gmail labels
-deno run --allow-net --allow-read --allow-write --allow-env pull-gmail.ts --list-labels
+bun pull-gmail.ts --list-labels
 ```
 
 ### Options

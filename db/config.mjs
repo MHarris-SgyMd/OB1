@@ -397,6 +397,16 @@ export const EXTRACT_WINDOW_HEADER = false;
  */
 export const EXTRACT_RETRY_RUNAWAY = true;
 
+/**
+ * Whether an extraction call's answer is streamed and aborted the moment it
+ * is a runaway — RUNAWAY_REPEATS copies of one item (server-portable/entities.ts,
+ * RunawayDetector) — rather than read whole once it has run to its budget
+ * (SMD-1960). The budget stays the bound and this is the early exit: a call
+ * aborted so is a runaway, and is retried as a cut one is. On, and not a knob,
+ * as the retry is not: measured in evals/README.md.
+ */
+export const EXTRACT_STREAM_ABORT = true;
+
 /** `max_tokens` for an extraction call over `inputTokens` estimated tokens of thought text. */
 export function extractOutputBudget(inputTokens) {
   return Math.ceil(inputTokens * EXTRACT_OUTPUT_RATIO) + EXTRACT_OUTPUT_FLOOR;
