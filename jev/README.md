@@ -67,9 +67,11 @@ the caller's own text (`<<LABEL>>` or `<<SEP>>` in a context, a proposition,
 an option) would add a slot and shift every probability onto the wrong
 option — measured, `p_insufficient` 0.194 → 0.034 — and labels that overrun
 the 512 tokens would be answered without the question or context ever read —
-measured, 24 fifty-token options kept 9 markers and still answered. Both are
-422 naming the decision; the whole request is refused. A cut that ends inside
-the context is the reference engine's rule and is answered, `truncated: true`.
+measured, 24 fifty-token options kept 9 markers and still answered, and a
+separator at token 506 kept every label and read four tokens. Both are 422
+naming the decision; the whole request is refused. A cut that leaves the
+question, the `Context:` line and some context is the reference engine's rule
+for a long context and is answered, `truncated: true`.
 
 ## Running it
 
@@ -89,7 +91,7 @@ unauthenticated, like Ollama's, and binds loopback by default.
 
 **The weights are referenced, not vendored.** `verdict.ts`'s `VERDICT` pins the
 repository, revision `8af2496e…` and each file's size and sha256;
-`fetch-model.ts` fetches exactly those bytes, to `<file>.part`, renamed only
+`fetch-model.ts` fetches exactly those bytes, to a part of the fetch's own (`<file>.part-<pid>-<random>`, removed on failure), renamed only
 after they hash to the pin. Every file is hashed on every start (0.2 s on the
 host, 0.5–0.7 s in the container), and one that does not match is replaced,
 never loaded — measured by
@@ -218,8 +220,8 @@ FSL-1.1-MIT.
 
 ## Tests
 
-`bun test-jev.ts` — 89 assertions with no model; with `JEV_TEST_MODEL_DIR`
+`bun test-jev.ts` — 96 assertions with no model; with `JEV_TEST_MODEL_DIR`
 naming the pinned files, [9] adds the model's presets and its refusals on the
 real tokenizer, [10] the receipt run and [11] both JevBench rows and the
-served-prompt equivalence (102, about three minutes). CI runs it in the
+served-prompt equivalence (109, about three minutes). CI runs it in the
 portable-server job, with `bunx tsc --noEmit` here (check 18 lists `jev`).

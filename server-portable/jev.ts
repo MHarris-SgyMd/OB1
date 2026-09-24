@@ -108,6 +108,9 @@ async function exchange<T>(cfg: JevConfig, method: "GET" | "POST", path: "/info"
       timeout: false,
     });
   } catch (e) {
+    // The caller's own signal first: its reason is the caller's, even when
+    // that reason is a timeout of the caller's making (second review pass).
+    if (opts.signal?.aborted) throw e;
     if ((e as Error).name === "TimeoutError") throw timedOut();
     throw e;
   }
@@ -115,9 +118,11 @@ async function exchange<T>(cfg: JevConfig, method: "GET" | "POST", path: "/info"
   try {
     text = await r.text();
   } catch (e) {
+    if (opts.signal?.aborted) throw e;
     if ((e as Error).name === "TimeoutError") throw timedOut();
-    // The caller's abort, or a reset: not an answer to read as "not JSON"
-    // (first review pass — it was swallowed and reported as a body error).
+    // A reset after a 2xx is not an answer to read as "not JSON" (first review
+    // pass); after an error status the status is the fact — a 413 whose body
+    // did not arrive is still a 413, providerCall's rule.
     if (r.ok) throw e;
   }
   const capped = text.slice(0, 500);
@@ -148,18 +153,41 @@ export function jevAnswerProblem(cfg: Pick<JevConfig, "model">, decisions: JevDe
   return null;
 }
 
+/** Every text a decision sends, ids included. */
+function textsOf(d: JevDecision): string[] {
+  return d.kind === "binary" ? [d.id ?? "", d.proposition, d.context] : [d.id ?? "", d.question, d.context, ...d.options.flatMap((o) => [o.id, o.description])];
+}
+
 /**
- * The subject a decision is judged as: the caller's, with every text the
- * requests carry — ids included — joined to its content, so the `marker` unit
- * reads what is sent and not only what the caller named (first review pass: a
- * caller's `content` used to replace the decisions' text, and a marker in a
- * context it did not name went unread).
+ * The gate over a list of decisions, each judged on its own — one decision's
+ * allowance is not another's — and the first refusal refuses the call. The
+ * `marker` unit reads a different text by mode, because a marker can only
+ * make its own mode's answer:
+ *
+ * - Under deny, an OB1_EGRESS_ALLOW `marker:` term lets a decision leave only
+ *   when THAT decision's context — the thought's text, where a writer puts
+ *   `#public` — carries it. Not the caller's `content`, not an option
+ *   description, not another decision's context: each of those vouched for
+ *   text it is not (second review pass: one `#public` context let a PHI row
+ *   in the same list leave, and a fixed option description reading "a #public
+ *   note" let any row leave).
+ * - Under allow, an OB1_EGRESS_DENY term refuses when it matches anything the
+ *   decision sends, or the caller's own `content` (first review pass: the
+ *   caller's content used to replace the decisions' text, and a marker in a
+ *   context it did not name went unread).
+ *
+ * The other units — actor, source, type, topic — are the caller's subject,
+ * the same for every decision.
  */
-function gatedSubject(subject: EgressSubject, decisions: JevDecision[]): EgressSubject {
-  const texts = decisions.flatMap((d) =>
-    d.kind === "binary" ? [d.id ?? "", d.proposition, d.context] : [d.id ?? "", d.question, d.context, ...d.options.flatMap((o) => [o.id, o.description])],
-  );
-  return { ...subject, content: [subject.content ?? "", ...texts].filter(Boolean).join("\n") };
+function gateDecisions(subject: EgressSubject, decisions: JevDecision[], cfg: JevConfig): ReturnType<typeof mayLeaveBox> {
+  const allowTermsDecide = cfg.egress.mode === "deny" && !cfg.egress.problems.length;
+  let gate = mayLeaveBox({ ...subject, content: "" }, cfg.endpoint, cfg.egress);
+  for (const [i, d] of decisions.entries()) {
+    const content = allowTermsDecide ? d.context : [subject.content ?? "", ...textsOf(d)].filter(Boolean).join("\n");
+    gate = mayLeaveBox({ ...subject, content }, cfg.endpoint, cfg.egress);
+    if (!gate.allowed) return decisions.length > 1 ? { ...gate, reason: `decision ${i}: ${gate.reason}` } : gate;
+  }
+  return gate;
 }
 
 const utf8 = new TextEncoder();
@@ -174,15 +202,16 @@ export async function jevInfo(cfg: JevConfig, opts: CallOpts = {}): Promise<JevI
 /**
  * Many decisions about one subject — the classify-every-span caller (SMD-2017,
  * 2049) — packed in order into requests of at most JEV_MAX_BATCH decisions and
- * JEV_MAX_BODY_BYTES bytes. One subject for the whole list: a caller deciding
- * about several rows under a policy with source/type/topic terms calls once per
- * row, since one row's allowance is not another's. Refused by the gate before
+ * JEV_MAX_BODY_BYTES bytes. The caller's subject (actor, and the row's
+ * metadata for source/type/topic terms) is one for the list — a caller
+ * deciding about several rows under such terms calls once per row — while the
+ * marker unit is read per decision (gateDecisions). Refused by the gate before
  * anything is sent; a malformed decision is refused before anything is sent,
  * with its index. A decision the model cannot read (422) refuses its request,
  * and the requests before it are already answered: the error says how many.
  */
 export async function jevDecideMany(cfg: JevConfig, decisions: JevDecision[], subject: EgressSubject, opts: CallOpts = {}): Promise<{ results: JevResult[]; model: JevModelInfo; ms: number }> {
-  const gate = mayLeaveBox(gatedSubject(subject, decisions), cfg.endpoint, cfg.egress);
+  const gate = gateDecisions(subject, decisions, cfg);
   if (!gate.allowed) throw refuseEgress("Decision", cfg.endpoint.base, gate);
   // Every request built and checked before the first is sent: a bad decision
   // at index 70 must not leave the first 64 decided and the caller holding

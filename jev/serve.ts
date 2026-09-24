@@ -28,9 +28,10 @@
  * otherwise, and compose publishes nothing (deploy/compose.yaml).
  */
 
+import { rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { JEV_CONTRACT, JEV_MAX_BODY_BYTES, jevRequestProblem, type JevRequest, type JevResponse } from "../server-portable/jev-contract.ts";
-import { DEFAULT_HUB, ensureModel } from "./fetch-model.ts";
+import { DEFAULT_HUB, ensureModel, openParts } from "./fetch-model.ts";
 import { createVerdictEngine, DecisionRefused, VERDICT, type Engine } from "./verdict.ts";
 
 /** The contract's body cap, which the client splits its batches under (first review pass: this was 2 MB, under what a valid batch could be). */
@@ -138,11 +139,16 @@ if (import.meta.main) {
   const log = (line: string) => console.log(`jev: ${line}`);
   // Before the fetch and the load, not after: as a container's PID 1 the
   // process has no default SIGTERM action, so a stop during the 20 s fetch
-  // waited out the grace period and was killed (first review pass).
+  // waited out the grace period and was killed (first review pass). A stop
+  // while serving is the ordinary end, 0; one before the service ever served
+  // is an interruption, 128 + the signal, so `serve.ts --fetch-only && …`
+  // does not carry on with nothing fetched (second review pass).
   let server: ReturnType<typeof Bun.serve> | undefined;
-  for (const sig of ["SIGTERM", "SIGINT"] as const) {
+  for (const [sig, code] of [["SIGTERM", 143], ["SIGINT", 130]] as const) {
     process.on(sig, () => {
-      server?.stop();
+      for (const part of openParts) rmSync(part, { force: true });
+      if (!server) process.exit(code);
+      server.stop();
       process.exit(0);
     });
   }

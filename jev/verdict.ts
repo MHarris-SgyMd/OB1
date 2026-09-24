@@ -89,21 +89,28 @@ export const INFO: JevInfo = {
   max_tokens: MAX_TOKENS,
 };
 
-/** The prompt for one decision and the option ids its labels stand for, in order. */
-export function buildPrompt(d: JevDecision): { prompt: string; ids: string[] } {
+/**
+ * The prompt for one decision, the option ids its labels stand for in order,
+ * and `head` — the text before the context, which a cut must leave whole with
+ * some context after it for the model to have read the decision at all.
+ */
+export function buildPrompt(d: JevDecision): { prompt: string; ids: string[]; head: string } {
   let labels: string[];
   let ids: string[];
+  let head: string;
   let text: string;
   if (d.kind === "binary") {
     labels = [`true: ${d.proposition}`, `false: not ${d.proposition}`, INSUFFICIENT_LABEL];
     ids = ["true", "false", INSUFFICIENT_EVIDENCE];
-    text = `Context:\n${d.context}\n\nEvaluate proposition: ${d.proposition}`;
+    head = "Context:\n";
+    text = `${head}${d.context}\n\nEvaluate proposition: ${d.proposition}`;
   } else {
     labels = [...d.options.map((o) => `It is ${o.description}`), INSUFFICIENT_LABEL];
     ids = [...d.options.map((o) => o.id), INSUFFICIENT_EVIDENCE];
-    text = `Question: ${d.question}\n\nContext:\n${d.context}`;
+    head = `Question: ${d.question}\n\nContext:\n`;
+    text = `${head}${d.context}`;
   }
-  return { prompt: `${labels.map((l) => `${LABEL_MARKER}${l}`).join("")}${SEP_MARKER}${text}`, ids };
+  return { prompt: `${labels.map((l) => `${LABEL_MARKER}${l}`).join("")}${SEP_MARKER}${text}`, ids, head };
 }
 
 /** The calibrator's shape: a global temperature and, for some option counts, its own. */
@@ -194,22 +201,24 @@ export class DecisionRefused extends Error {
  *   option's probability is read off its neighbour's — measured: a description
  *   carrying one moved `p_insufficient` from 0.194 to 0.034. Notes about this
  *   tier contain the strings; the refusal names them.
- * - The labels alone overrun the 512 tokens. The cut keeps the head, so a long
- *   option list loses its later labels, the separator and every word of the
- *   question and context — measured: 24 fifty-token options kept 9 markers and
- *   still answered `o8`, not abstaining. A cut that ends inside the context is
- *   the reference engine's rule and is answered, `truncated: true`.
+ * - The labels overrun the 512 tokens — or leave too little of them for the
+ *   decision's head. The cut keeps the prompt's start, so a long option list
+ *   loses its later labels, the separator and every word of the question and
+ *   context — measured: 24 fifty-token options kept 9 markers and still
+ *   answered `o8`, not abstaining — and a list that ends at token 505 keeps
+ *   every label and reads "Question: Which of these" (second review pass: the
+ *   first check fired only when the separator itself was cut). A cut is
+ *   answered, `truncated: true`, only when the head (`buildPrompt`'s: the
+ *   question and the `Context:` line) and some context survive it — the
+ *   reference engine's rule for a long context.
  */
-function markersProblem(ids: number[], options: number, cut: boolean, index: number): DecisionRefused | null {
-  let labels = 0, seps = 0;
-  for (const id of ids) {
+function countMarkers(ids: number[]): { labels: number; seps: number; sepAt: number } {
+  let labels = 0, seps = 0, sepAt = -1;
+  for (const [i, id] of ids.entries()) {
     if (id === MARKER_IDS.label) labels++;
-    else if (id === MARKER_IDS.sep) seps++;
+    else if (id === MARKER_IDS.sep) { seps++; sepAt = i; }
   }
-  if (labels === options && seps === 1) return null;
-  return cut
-    ? new DecisionRefused(`decision ${index}: its labels take more than the model's ${MAX_TOKENS} tokens, so the model would read ${labels} of ${options} options and none of the question or context — shorten the option descriptions or the proposition, or split the options`, index)
-    : new DecisionRefused(`decision ${index}: its text contains the model's own markers (${LABEL_MARKER} or ${SEP_MARKER}), which would move every option's slot — remove or rewrite them before asking`, index);
+  return { labels, seps, sepAt };
 }
 
 /**
@@ -218,8 +227,8 @@ function markersProblem(ids: number[], options: number, cut: boolean, index: num
  * singles on the dogfood Mac's CPU (720 ms against 8 × 75), and batch 1 needs
  * no pad token. Decisions run one at a time; the runner's own threads are
  * where the parallelism is. Every decision's prompt is encoded and checked
- * (markersProblem) before the first forward pass, so a refused decision at
- * index 40 does not leave 39 computed and discarded.
+ * (the markers, the cut) before the first forward pass, so a refused decision
+ * at index 40 does not leave 39 computed and discarded.
  */
 export function createEngine(encoder: Encoder, run: Runner, cal: Calibrator): Engine {
   temperatureFor(cal, 3); // a calibrator with no usable global temperature is refused at load, not at the first request
@@ -227,13 +236,22 @@ export function createEngine(encoder: Encoder, run: Runner, cal: Calibrator): En
     info: INFO,
     async decide(decisions) {
       const prepared = decisions.map((d, i) => {
-        const { prompt, ids } = buildPrompt(d);
+        const { prompt, ids, head } = buildPrompt(d);
         const full = encoder.encode(prompt).ids;
-        const injected = markersProblem(full, ids.length, false, i);
-        if (injected) throw injected;
+        const whole = countMarkers(full);
+        if (whole.labels !== ids.length || whole.seps !== 1) {
+          throw new DecisionRefused(`decision ${i}: its text contains the model's own markers (${LABEL_MARKER} or ${SEP_MARKER}), which would move every option's slot — remove or rewrite them before asking`, i);
+        }
         const cut = truncate(full, MAX_TOKENS);
-        const overrun = cut.truncated ? markersProblem(cut.ids, ids.length, true, i) : null;
-        if (overrun) throw overrun;
+        if (cut.truncated) {
+          const kept = countMarkers(cut.ids);
+          // Text tokens after the separator, before the closing [SEP]; the head's own, without [CLS]/[SEP].
+          const read = kept.sepAt < 0 ? 0 : cut.ids.length - kept.sepAt - 2;
+          const headTokens = encoder.encode(head).ids.length - 2;
+          if (kept.sepAt < 0 || read <= headTokens) {
+            throw new DecisionRefused(`decision ${i}: its labels leave the model's ${MAX_TOKENS} tokens too little room — it would read ${kept.labels} of its ${ids.length} labels (the options and the tier's own) and ${read} tokens of the question and context, of the ${headTokens} the question's head alone takes — shorten the option descriptions or the proposition, or split the options`, i);
+          }
+        }
         return { d, ids, cut };
       });
       const out: JevResult[] = [];

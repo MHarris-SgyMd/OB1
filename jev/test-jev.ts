@@ -37,6 +37,10 @@
  * cap, no skip for a caller gone, no 422 mapping, HEAD refused ([5b]); pack by
  * count only, the caller's content replacing what is sent, no partial-answer
  * note ([7]–[8]); one shared part name, no stale-part removal ([6]).
+ * Second review pass, each run and killed: allow markers read from the joined
+ * text, one gate for the whole list ([7]); no head check on a cut ([5]); no id
+ * cap ([1]); a failed download keeping its part ([6]); the caller's own
+ * timeout read as ours ([8]).
  *
  *   bun test-jev.ts
  */
@@ -68,6 +72,7 @@ section("[1] jevRequestProblem — one rule for the client and the service");
     [{ model: "", decisions: [binary()] }, /`model`/, "an empty model"],
     [{ decisions: [{ ...binary(), kind: "score" }] }, /"binary" or "choice"/, "an unknown kind"],
     [{ decisions: [{ ...binary(), id: 7 }] }, /`id`/, "a numeric id"],
+    [{ decisions: [{ ...binary(), id: "i".repeat(JEV_MAX_TEXT + 1) }] }, /`id`.*at most/, "an id over the text limit (it would outgrow the body cap)"],
     [{ decisions: [{ ...binary(), context: "  " }] }, /`context`/, "a blank context"],
     [{ decisions: [{ ...binary(), proposition: "x".repeat(JEV_MAX_TEXT + 1) }] }, /proposition/, "a proposition over the text limit"],
     [choice([]), /1 to 24 options/, "a choice with no options"],
@@ -167,7 +172,15 @@ section("[5] createEngine — what reaches the runner");
   refused = undefined;
   const long = Array.from({ length: 24 }, (_, i) => ({ id: `o${i}`, description: "d".repeat(40) }));
   try { await engine.decide([{ kind: "choice", question: "q", context: "c", options: long }]); } catch (e) { refused = e; }
-  assert(refused instanceof DecisionRefused && /read \d+ of 25 options/.test(refused.message), `options whose labels overrun 512 tokens are refused, not answered (${(refused as Error)?.message?.slice(0, 70)})`);
+  assert(refused instanceof DecisionRefused && /read \d+ of its 25 labels/.test(refused.message), `options whose labels overrun 512 tokens are refused, not answered (${(refused as Error)?.message?.slice(0, 70)})`);
+  // The separator at token 506 of 512: every label kept, four tokens of text —
+  // not even the "Context:" head. Refused, though nothing marker-shaped was cut.
+  refused = undefined;
+  const edge = { kind: "binary" as const, proposition: "p".repeat(232), context: "c".repeat(100) };
+  const edgeIds = encoder.encode(buildPrompt(edge).prompt).ids;
+  try { await engine.decide([edge]); } catch (e) { refused = e; }
+  assert(edgeIds.indexOf(MARKER_IDS.sep) === 506 && refused instanceof DecisionRefused && /read 3 of its 3 labels \(the options and the tier.s own\) and 4 tokens/.test(refused.message),
+         `a separator that lands at 506 of 512 leaves no question or context to read: refused (${(refused as Error)?.message?.slice(0, 110)})`);
   const [ctxCut] = await engine.decide([{ kind: "choice", question: "q", context: "c".repeat(2000), options: long.slice(0, 3) }]);
   assert(ctxCut.truncated && ctxCut.logits.length === 4 && ctxCut.tokens === MAX_TOKENS, "a cut that ends inside the context is answered — every option read — truncated: true");
 }
@@ -265,6 +278,16 @@ section("[6] ensureModel — fetch the pinned bytes or nothing");
   msg = "";
   try { await ensureModel(dir, { pins: { ...pins, files: { "gone.bin": pins.files["m.bin"] } }, hub: base }); } catch (e) { msg = (e as Error).message; }
   assert(/gone\.bin.*answered 404/.test(msg), "a fetch that fails names the file and the status");
+  // A download that fails midway removes its own part and names the file.
+  const flaky = Bun.serve({
+    port: 0,
+    fetch: () => new Response(new ReadableStream({ start(c) { c.enqueue(good.subarray(0, 5)); setTimeout(() => c.error(new Error("connection reset")), 10); } })),
+  });
+  await rm(dir, { recursive: true, force: true });
+  msg = "";
+  try { await ensureModel(dir, { pins, hub: `http://127.0.0.1:${flaky.port}` }); } catch (e) { msg = (e as Error).message; }
+  flaky.stop(true);
+  assert(/m\.bin .*failed after \d+ of \d+ bytes.*nothing kept/.test(msg) && (await readdir(dir)).length === 0, `a download that fails midway names the file and leaves no part (${msg.slice(0, 90)}; ${(await readdir(dir)).join(", ") || "empty"})`);
   // Two fetches into one directory at once (serve.ts and conformance.ts on the
   // host cache): each writes its own part, both end with the pinned file.
   served = good;
@@ -332,6 +355,18 @@ section("[7] the client's egress gate — refused decisions send nothing");
   err = undefined;
   try { await jevChoose(marked, { question: "q", options: [{ id: "a", description: "A" }], context: "a note tagged #phi" }, { ...subj, content: "the query the caller named" }); } catch (e) { err = e; }
   assert(err instanceof ProviderError && err.kind === "egress" && stub.requests.length === 0, "…and when the caller gave content of its own: the gate reads what is sent, not only what was named");
+  // Under deny, an allow marker vouches only for the context that carries it
+  // (second review pass): not an option's text, not another decision's context.
+  const tagged = resolveJevConfig({ OB1_JEV_BASE_URL: BASE, OB1_EGRESS_ALLOW: "marker:#public" })!;
+  stub.requests = [];
+  err = undefined;
+  try { await jevChoose(tagged, { question: "q", options: [{ id: "a", description: "a #public note" }], context: "an untagged row" }, { ...subj, content: "the row" }); } catch (e) { err = e; }
+  assert(err instanceof ProviderError && err.kind === "egress" && stub.requests.length === 0, "an allow marker in an option's description lets no untagged context leave");
+  err = undefined;
+  try { await jevDecideMany(tagged, [{ kind: "binary", proposition: "p", context: "a #public note" }, { kind: "binary", proposition: "p", context: "a private row" }], subj); } catch (e) { err = e; }
+  assert(err instanceof ProviderError && err.kind === "egress" && /decision 1:/.test(err.message) && stub.requests.length === 0, `…nor does one tagged context let another leave; the refusal names decision 1 (${(err as Error)?.message?.slice(0, 60)})`);
+  await jevDecideMany(tagged, [{ kind: "binary", proposition: "p", context: "a #public note" }, { kind: "binary", proposition: "p", context: "#public too" }], subj);
+  assert(stub.requests.length === 1, "every context tagged: the decisions leave");
 }
 
 section("[8] the client's batches and answers");
@@ -393,6 +428,12 @@ section("[8] the client's batches and answers");
   const t0 = performance.now();
   try { await jevDecide(local, { proposition: "p", context: "c" }, subj, { timeoutMs: 200 }); } catch (e) { err = e; }
   assert(err?.kind === "timeout" && performance.now() - t0 < 2000, "a tier that never answers is a timeout at the deadline");
+  // A caller's own deadline is the caller's: its error, not "timed out after 30 s".
+  stub.answer = () => new Promise(() => {});
+  err = undefined;
+  try { await jevDecide(local, { proposition: "p", context: "c" }, subj, { signal: AbortSignal.timeout(150) }); } catch (e) { err = e; }
+  assert(err && !(err instanceof ProviderError) && err.name === "TimeoutError", `a caller's own signal firing surfaces as the caller's error, not the config's timeout (${err?.name}: ${err?.message?.slice(0, 50)})`);
+  stub.answer = honest;
   const info = await jevInfo(local);
   assert(info.model.revision === VERDICT.revision, "jevInfo reads the tier's pins");
 }

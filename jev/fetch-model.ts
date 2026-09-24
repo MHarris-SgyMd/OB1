@@ -38,6 +38,13 @@ async function sizeOf(path: string): Promise<number | null> {
   }
 }
 
+/**
+ * The parts this process is writing now, so a signal handler that exits
+ * mid-fetch (serve.ts) can remove them — process.exit runs no catch or
+ * finally, and the part would otherwise wait out STALE_PART_MS.
+ */
+export const openParts = new Set<string>();
+
 /** A part file untouched this long belongs to a fetch that died; a live one is written continuously. */
 export const STALE_PART_MS = 10 * 60_000;
 
@@ -115,15 +122,32 @@ export async function ensureModel(
     // Streamed through a sink, never held whole. Not `Bun.write(part, r)`:
     // once `r.body` has been read — as the check above reads it — Bun 1.4's
     // write of the Response never settles (measured; the suite hung here).
+    // A fetch that fails midway removes its own part and names the file
+    // (second review pass: each failed attempt left its own part, up to
+    // 606 MB, and the error was the runtime's bare "connection reset").
+    openParts.add(part);
     const sink = Bun.file(part).writer();
-    for await (const chunk of r.body) sink.write(chunk);
-    await sink.end();
+    let received = 0;
+    try {
+      for await (const chunk of r.body) {
+        sink.write(chunk);
+        received += chunk.byteLength;
+      }
+      await sink.end();
+    } catch (e) {
+      await Promise.resolve(sink.end()).catch(() => {});
+      await rm(part, { force: true });
+      openParts.delete(part);
+      throw new Error(`fetching ${name} from ${url} failed after ${received} of ${pin.bytes} bytes: ${(e as Error).message} — nothing kept`);
+    }
     if (!(await matchesPin(part, pin))) {
       const [got, size] = [await sha256File(part), await sizeOf(part)];
       await rm(part, { force: true });
+      openParts.delete(part);
       throw new Error(`${name} from ${url} is ${size} bytes with sha256 ${got}; the pin is ${pin.bytes} bytes, ${pin.sha256} — refused, nothing kept`);
     }
     await rename(part, path);
+    openParts.delete(part);
     fetched.push(name);
   }
   return { fetched, verified, ms: performance.now() - t0 };

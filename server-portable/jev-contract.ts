@@ -47,10 +47,11 @@ export const JEV_MAX_TEXT = 20_000;
 
 /**
  * Bytes in one request body. Chosen so the largest decision the rule above
- * accepts always fits in a request of its own: a choice has at most 50 text
- * fields (question, context, 24 ids, 24 descriptions) of 20,000 UTF-16 units,
- * and a unit costs at most 6 bytes of JSON (a control character written as
- * \u00XX), so 6 MB. The client packs decisions into requests under both this
+ * accepts always fits in a request of its own: a choice has at most 51 text
+ * fields (its id, question, context, 24 option ids, 24 descriptions) of 20,000
+ * UTF-16 units — the id too, since the second review pass: an unbounded id
+ * made a decision no request could hold — and a unit costs at most 6 bytes of
+ * JSON (a control character written as \u00XX), so 6.1 MB. The client packs decisions into requests under both this
  * and JEV_MAX_BATCH (first review pass: the cap was 2 MB, and 64 valid
  * decisions of 20,000 characters made a 2.5 MB request the service refused).
  */
@@ -147,7 +148,7 @@ export function jevRequestProblem(body: unknown): string | null {
     const at = `decision ${i}`;
     if (!d || typeof d !== "object") return `${at} is not an object`;
     const { id, kind, context } = d as Record<string, unknown>;
-    if (id !== undefined && typeof id !== "string") return `${at}: \`id\`, when given, is a string`;
+    if (id !== undefined && (typeof id !== "string" || id.length > JEV_MAX_TEXT)) return `${at}: \`id\`, when given, is a string of at most ${JEV_MAX_TEXT} characters`;
     if (!text(context)) return `${at}: \`context\` is a non-empty string of at most ${JEV_MAX_TEXT} characters`;
     if (kind === "binary") {
       if (!text((d as { proposition?: unknown }).proposition)) return `${at}: a binary decision's \`proposition\` is a non-empty string of at most ${JEV_MAX_TEXT} characters`;
