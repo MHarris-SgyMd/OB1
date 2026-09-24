@@ -198,6 +198,18 @@ jobs:
         working-directory: evals
         run: bun eval-projection-replay.ts --self-check
 
+      # The writable-projection spike's rules (SMD-1999): the four options and
+      # fourteen criteria, the judgement of probes, the pre-registered verdict
+      # (GO only when every contract criterion PASSes and every behaviour
+      # holds), the recommendation's tie-break, the differential's
+      # normalisation, the replay rule and its one tolerated difference, the
+      # recorded matrix and the drift from it, the report — probed with
+      # hand-known observations. No database; the prototype runs in the
+      # data-layer job.
+      - name: Writable-projection rules
+        working-directory: evals
+        run: bun eval-writable-projection.ts --self-check
+
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
       - name: Cloudflare Workers build
@@ -434,6 +446,28 @@ jobs:
       - name: Projection-replay fixture
         working-directory: evals
         run: bun eval-projection-replay.ts --fixture-check
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+          OB1_FIXTURE_RESET: "1"
+
+      # The writable-projection spike's prototype (SMD-1999): the schema reset
+      # to 053 four times — as it stands, with option 2's functions (append
+      # the event, project the row), with a view named thoughts over a renamed
+      # table and 053's functions, with the view and option 2's functions —
+      # and the same scripted writes run against each: the vendored capture as
+      # readwise sends it, the 2- and 4-argument forms, the server's and the
+      # integrations' update_thought calls, delete_thought plain and refused,
+      # a raw INSERT, ingest-records' statement, the community DDL verbatim,
+      # the three concurrency behaviours, the trigger counts, read-your-writes
+      # with the drop-the-projector control, the replay of the whole log.
+      # --check holds the run to the matrix the spike recorded, so a Postgres
+      # or prototype change that moves a cell is named. No provider (vectors at
+      # width 8). It DROPS the schema and refuses a database holding thoughts
+      # unless told; this one is a throwaway. Runs after the fixture above,
+      # which leaves its rows; every suite after this resets for itself.
+      - name: Writable-projection prototype
+        working-directory: evals
+        run: bun eval-writable-projection.ts --check
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
           OB1_FIXTURE_RESET: "1"
