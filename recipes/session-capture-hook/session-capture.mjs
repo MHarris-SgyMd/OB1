@@ -172,18 +172,11 @@ function pruneDead() {
   }
 }
 /**
- * When the session's summary was last ATTEMPTED: the state's recorded time,
- * or a payload of the session still pending or in flight (its name begins with
- * the millisecond it was prepared). The Stop interval gates on this, not on the
- * last LANDED capture — with the endpoint away nothing lands, and a gate on
- * landings let every turn queue a payload and spawn a child (eighth review pass).
- */
-/**
  * The session's payloads still pending or in flight: a name is
  * `<ms>-<seq>-<rand>-<session>.json`, so the session is everything after the
  * third hyphen, compared whole — a suffix match let session `abc` claim
  * `run-abc`'s payloads (eleventh review pass). `pid` is the child whose claim
- * holds it, null under pending/ (SMD-2035); a poll that only asks what other
+ * holds it, null under pending/ (SMD-2035); a look that only asks what other
  * children hold leaves pending/ unread.
  */
 function sessionPayloads(sessionId, { pending = true } = {}) {
@@ -201,6 +194,13 @@ function sessionPayloads(sessionId, { pending = true } = {}) {
   }
   return out;
 }
+/**
+ * When the session's summary was last ATTEMPTED: the state's recorded time,
+ * or a payload of the session still pending or in flight (its name begins with
+ * the millisecond it was prepared). The Stop interval gates on this, not on the
+ * last LANDED capture — with the endpoint away nothing lands, and a gate on
+ * landings let every turn queue a payload and spawn a child (eighth review pass).
+ */
 function lastAttemptMs(sessionId, state, queued = sessionPayloads(sessionId)) {
   const times = [];
   const recorded = state?.summary_at ?? state?.captured_at;
@@ -655,7 +655,7 @@ export class CaptureError extends Error {
 export const REFUSAL_RE = /^\s*Refused\b/;
 export const SDK_ERROR_RE = /^\s*MCP error -3260[12]\b/;
 
-/** One request's ceiling — and how long a run waits, in all, for an earlier payload of a session that another child is posting (SMD-2035). */
+/** One request's ceiling, named (SMD-2035). */
 export const POST_TIMEOUT_MS = 90_000;
 
 let rpcId = 1;
@@ -874,16 +874,21 @@ export function prepare(hook, opts = {}) {
 }
 
 /**
+ * A recorded time as milliseconds, or NaN when it is none or lies in the
+ * FUTURE: a clock that was wrong decides nothing (fourth review pass of
+ * SMD-1298) — else one skewed payload would make every honest later ending
+ * obsolete until the wall clock caught up. The one spelling of that rule, for
+ * `recordedAfter` and `momentOf` (SMD-2035's boyscout: it was written twice).
+ */
+const pastMs = (iso) => { const t = Date.parse(iso ?? ""); return t <= Date.now() ? t : NaN; };
+/**
  * Whether the state records a summary NEWER than a payload prepared at
  * `preparedAt`. States from before summary_at carry the post time — close
- * enough. A recorded time in the FUTURE (a clock that was wrong) decides
- * nothing — else one skewed payload would make every honest later ending
- * obsolete until the wall clock caught up (fourth review pass). One rule,
- * read before the post and again after it (ninth review pass: it was spelled twice).
+ * enough. One rule, read before the post and again after it (ninth review
+ * pass: it was spelled twice).
  */
 function recordedAfter(state, preparedAt) {
-  const recordedMs = Date.parse(state?.summary_at ?? state?.captured_at ?? "");
-  return Boolean(preparedAt && recordedMs <= Date.now() && recordedMs > Date.parse(preparedAt));
+  return Boolean(preparedAt && pastMs(state?.summary_at ?? state?.captured_at) > Date.parse(preparedAt));
 }
 
 /**
@@ -933,8 +938,8 @@ export function landedBefore(sessionId, name) {
 export function landedAfter(sessionId, name) {
   return landedPayloads(sessionId).some((p) => p.name.localeCompare(name) > 0);
 }
-/** A recorded moment for ranking: the time when it is one and not in the future — a clock that was wrong decides nothing, recordedAfter's rule — else the fallback. */
-const momentOf = (iso, fallbackMs) => { const t = Date.parse(iso ?? ""); return Number.isFinite(t) && t <= Date.now() ? t : fallbackMs; };
+/** A recorded moment for ranking: `pastMs`, else the fallback. */
+const momentOf = (iso, fallbackMs) => { const t = pastMs(iso); return Number.isNaN(t) ? fallbackMs : t; };
 /**
  * The thought a payload supersedes: the session's newest landed one by the
  * time its payload was prepared — what the state records (`summary_at`, the

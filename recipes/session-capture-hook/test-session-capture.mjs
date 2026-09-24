@@ -1044,22 +1044,21 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   // The rule alone: only an OLDER payload of the SAME session under a LIVE
   // other pid is ahead.
   const gone = await new Promise((res) => { const c = spawn(process.execPath, ["-e", "0"]); c.on("close", () => res(c.pid)); }); // a pid proven dead, not a number assumed so (first review pass)
-  const at = (ms, s) => `${ms}-0-aaaa-${s}.json`;
-  const mine = at(Date.now(), "s-chain");
+  const mine = named(Date.now(), "s-chain");
   const live = join(STATE, "inflight", String(process.ppid)), dead = join(STATE, "inflight", String(gone));
   mkdirSync(live, { recursive: true }); mkdirSync(dead, { recursive: true });
-  writeFileSync(join(live, at(Date.now() + 1000, "s-chain")), "{}");
-  writeFileSync(join(live, at(Date.now() - 1000, "s-chained")), "{}");
-  writeFileSync(join(dead, at(Date.now() - 1000, "s-chain")), "{}");
-  const unheld = join(STATE, "pending", at(Date.now() - 1000, "s-chain")), own = join(STATE, "inflight", String(process.pid));
+  writeFileSync(join(live, named(Date.now() + 1000, "s-chain")), "{}");
+  writeFileSync(join(live, named(Date.now() - 1000, "s-chained")), "{}");
+  writeFileSync(join(dead, named(Date.now() - 1000, "s-chain")), "{}");
+  const unheld = join(STATE, "pending", named(Date.now() - 1000, "s-chain")), own = join(STATE, "inflight", String(process.pid));
   writeFileSync(unheld, "{}");
-  mkdirSync(own, { recursive: true }); writeFileSync(join(own, at(Date.now() - 1000, "s-chain")), "{}");
+  mkdirSync(own, { recursive: true }); writeFileSync(join(own, named(Date.now() - 1000, "s-chain")), "{}");
   assert(aheadOf("s-chain", mine).length === 0, "a NEWER payload of the session in a live child's hands is not ahead (only the newer of two steps aside, so two children never wait on each other); nor an older one of another session, nor one under a pid that is gone, nor one under pending/ that no child holds, nor one in this run's own hands");
-  writeFileSync(join(dead, at(Date.now() + 3000, "s-chain")), "{}"); writeFileSync(join(own, at(Date.now() + 3000, "s-chain")), "{}");
-  assert(newerInFlight("s-chain", mine) === true && newerInFlight("s-chain", at(Date.now() + 2000, "s-chain")) === false && newerInFlight("s-chained", at(Date.now() - 2000, "s-chained")) === true && newerInFlight("s-chain", at(Date.now() + 1500, "s-chain")) === false,
+  writeFileSync(join(dead, named(Date.now() + 3000, "s-chain")), "{}"); writeFileSync(join(own, named(Date.now() + 3000, "s-chain")), "{}");
+  assert(newerInFlight("s-chain", mine) === true && newerInFlight("s-chain", named(Date.now() + 2000, "s-chain")) === false && newerInFlight("s-chained", named(Date.now() - 2000, "s-chained")) === true && newerInFlight("s-chain", named(Date.now() + 1500, "s-chain")) === false,
     "…while that newer one in a live child's hands outdates this one — by session, by name, by liveness: a newer one under a pid that is gone, or in this run's own hands, outdates nothing");
   unlinkSync(unheld); rmSync(own, { recursive: true, force: true });
-  writeFileSync(join(live, at(Date.now() - 1000, "s-chain")), "{}");
+  writeFileSync(join(live, named(Date.now() - 1000, "s-chain")), "{}");
   assert(aheadOf("s-chain", mine).length === 1 && aheadOf("s-chain", mine)[0].pid === process.ppid && POST_TIMEOUT_MS === 90_000, "an older one under a live pid is ahead, named by its pid; the request timeout keeps its name");
   rmSync(live, { recursive: true, force: true }); rmSync(dead, { recursive: true, force: true });
 }
