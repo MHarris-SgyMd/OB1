@@ -271,7 +271,7 @@ async function load(rel: string): Promise<Handler> {
 // ── One request ──────────────────────────────────────────────────────────────
 
 const HEADERS = { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": KEY };
-type Reply = { status: number; json: any; text: string };
+type Reply = { status: number; json: any; text: string; headers: Headers };
 // The writers log what they refuse, and the status is the assertion, so a request runs with console.error and
 // console.warn silenced. Counted, not saved-and-restored per call: two requests in flight at once (a Promise.all of
 // sends, SMD-2054) each saved what they found, and the second saved the first's silence and restored THAT — every
@@ -279,11 +279,12 @@ type Reply = { status: number; json: any; text: string };
 // counted it. The console is restored when the last request in flight returns.
 const CONSOLE = { error: console.error, warn: console.warn };
 let inFlight = 0;
-async function send(handler: Handler, method: string, path: string, body?: unknown, key = KEY): Promise<Reply> {
+async function send(handler: Handler, method: string, path: string, body?: unknown, key = KEY, origin?: string): Promise<Reply> {
   if (inFlight++ === 0) { console.error = () => {}; console.warn = () => {}; }
   let r: Response;
   try {
-    r = await handler(new Request("http://writer.test" + path, { method, headers: { ...HEADERS, "x-brain-key": key }, body: body === undefined ? undefined : JSON.stringify(body) }));
+    const headers = { ...HEADERS, "x-brain-key": key, ...(origin ? { Origin: origin } : {}) };
+    r = await handler(new Request("http://writer.test" + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }));
   } finally {
     if (--inFlight === 0) Object.assign(console, CONSOLE);
   }
@@ -291,7 +292,7 @@ async function send(handler: Handler, method: string, path: string, body?: unkno
   const line = text.startsWith("{") ? text : (text.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6);
   let json: any = null;
   try { json = line ? JSON.parse(line) : null; } catch { json = null; }
-  return { status: r.status, json, text };
+  return { status: r.status, json, text, headers: r.headers };
 }
 /** An MCP tools/call, JSON-RPC over POST /mcp; the tool's first text block and structured content. */
 async function call(handler: Handler, name: string, args: Record<string, unknown>, key = KEY) {
@@ -334,6 +335,19 @@ async function plantRestricted(hidden: string, atText: string): Promise<string> 
   const [{ id }] = await sql`INSERT INTO thoughts (content, content_fingerprint, embedding, embedding_model, sensitivity_tier, importance, quality_score, metadata)
     VALUES (${hidden}, content_fingerprint_of(${hidden}), ${vec(unit(atText))}::vector, ${MODEL}, 'restricted', 5, 100, '{"source": "planted"}'::jsonb) RETURNING id`;
   return id as string;
+}
+/**
+ * Four clocks around a row's created_at, rendered by Postgres: its UTC day and
+ * the next (date-only bounds), one hour later in a zone two hours ahead (an
+ * offset bound naming an instant an hour BEFORE the row), and one hour earlier
+ * with no zone. The date-bound arms of both search blocks read them.
+ */
+async function clocksOf(id: string): Promise<{ day: string; next: string; later: string; earlier: string }> {
+  const [row] = await sql`SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
+    to_char((created_at + interval '1 day') AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS next,
+    to_char((created_at + interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') || '+02:00' AS later,
+    to_char((created_at - interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') AS earlier FROM thoughts WHERE id = ${id}`;
+  return row;
 }
 /** Two chunk rows of the previous vector — 022's stale set, if an edit leaves them. */
 async function plantWindows(id: string) {
@@ -551,10 +565,7 @@ try {
   // The bounds are instants, not strings (review pass 1). The meaning first: a date-only value is that day's
   // midnight UTC, so the capture's own day as end_date closes before it and the next day's keeps it, in both modes
   // (the string comparison agreed on these two — the pins that tell the schemes apart follow).
-  const [{ day, next, later, earlier }] = await sql`SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
-    to_char((created_at + interval '1 day') AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS next,
-    to_char((created_at + interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') || '+02:00' AS later,
-    to_char((created_at - interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') AS earlier FROM thoughts WHERE id = ${cid}`;
+  const { day, next, later, earlier } = await clocksOf(cid);
   const ownDay = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, end_date: day });
   const nextDay = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, end_date: next });
   const nextDayText = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", end_date: next });
@@ -880,7 +891,7 @@ try {
     `a date bound is applied to the rows in both modes: an end_date in the past hides the capture (the arms with teeth), a start_date in the past leaves it (the controls); text mode's total still counts the function's rows (${ids(beforeSem).length}/${ids(sinceSem).length}/${ids(beforeText).length}/${ids(sinceText).length}; total ${beforeText.json?.total})`);
   // `later` names a clock one hour after the capture in a zone two hours ahead: an instant one hour BEFORE it, so a
   // window opening there holds the capture — compared as strings its digits sorted after the row's and dropped it.
-  const [{ later }] = await sql`SELECT to_char((created_at + interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') || '+02:00' AS later FROM thoughts WHERE id = ${cid}`;
+  const { later } = await clocksOf(cid);
   const offsetBound = await sem({ start_date: later });
   assert(ids(offsetBound).includes(cid), `a start_date with a UTC offset is the instant it names — later digits, an earlier instant, so the capture is inside the window (${later}: ${ids(offsetBound).length})`);
   const [prose, inverted] = await Promise.all([sem({ end_date: "yesterday" }), txt({ start_date: "2026-01-02", end_date: "2026-01-01" })]);
@@ -903,14 +914,13 @@ try {
     `GET /recent hides the restricted twin by default and shows it under exclude_restricted=false, as its siblings do — it filtered nothing before (${recent.status}: ${ids(recent).length} rows${ids(recent).includes(rid) ? ", the twin among them" : ""}; open: ${ids(recentOpen).length})`);
   // Every answer of /search carries the request's CORS headers (review pass 3): the second pass passed `req` on the
   // 400s and said the 200s did the same — they did not, so under an allowlist a browser could read the refusal and
-  // not the page. Direct calls, since send() drops the headers; the allowlist was set before the module loaded (above).
-  // The file's other routes still answer null under an allowlist — SMD-2079.
-  const withOrigin = (origin: string, body: Record<string, unknown>) =>
-    h(new Request("http://writer.test/search", { method: "POST", headers: { ...HEADERS, Origin: origin }, body: JSON.stringify(body) }));
+  // not the page. The allowlist was set before the module loaded (above); send() carries the Origin and returns the
+  // headers. The file's other routes still answer null under an allowlist — SMD-2079.
   const [okCors, refusedCors, strangerCors] = await Promise.all([
-    withOrigin("https://dash.test", { query: captured, min_similarity: 0.5 }), withOrigin("https://dash.test", { query: captured, end_date: "yesterday" }),
-    withOrigin("https://elsewhere.test", { query: captured, min_similarity: 0.5 })]);
-  const allow = (r: Response) => r.headers.get("access-control-allow-origin");
+    send(h, "POST", "/search", { query: captured, min_similarity: 0.5 }, KEY, "https://dash.test"),
+    send(h, "POST", "/search", { query: captured, end_date: "yesterday" }, KEY, "https://dash.test"),
+    send(h, "POST", "/search", { query: captured, min_similarity: 0.5 }, KEY, "https://elsewhere.test")]);
+  const allow = (r: Reply) => r.headers.get("access-control-allow-origin");
   assert(okCors.status === 200 && allow(okCors) === "https://dash.test" && refusedCors.status === 400 && allow(refusedCors) === "https://dash.test" && strangerCors.status === 200 && allow(strangerCors) === "null",
     `every answer of POST /search carries the request's CORS headers under an allowlist — the 200 and the 400 echo a listed origin, an unlisted one gets null (${allow(okCors)} / ${allow(refusedCors)} / ${allow(strangerCors)})`);
   delete process.env.CORS_ALLOWED_ORIGINS;

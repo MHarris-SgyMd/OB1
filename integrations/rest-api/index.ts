@@ -461,8 +461,10 @@ async function columnsOf(ids: string[]): Promise<Map<string, ThoughtColumns>> {
   if (ids.length === 0) return new Map();
   const { data, error } = await supabase.from("thoughts").select("id, sensitivity_tier, type, source_type").in("id", ids);
   if (error) throw new Error(`thoughts column lookup failed: ${error.message}`);
-  return new Map(((data ?? []) as Record<string, unknown>[]).map((r) => [String(r.id),
-    { sensitivity_tier: String(r.sensitivity_tier ?? "standard"), type: r.type ?? null, source_type: r.source_type ?? null }]));
+  const rows = (data ?? []) as Record<string, unknown>[];
+  return new Map(rows.map((r): [string, ThoughtColumns] => [String(r.id), {
+    sensitivity_tier: String(r.sensitivity_tier ?? "standard"), type: r.type ?? null, source_type: r.source_type ?? null,
+  }]));
 }
 
 /**
