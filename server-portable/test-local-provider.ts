@@ -522,7 +522,8 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   // request, how many frames it got out before the client hung up.
   type Run = { sent: number; total: number; cancelled: boolean; body: { stream?: boolean; frequency_penalty?: number } };
   const runs: Run[] = [];
-  let gMode: "loop" | "good" | "json" | "slow" | "cut" | "error" | "nodone" | "oneframe" | "sepfinish" | "cleanclose" | "mislabelled" | "emptyfinish" | "empty" | "cr" | "multiline" | "doneonly" | "braceopen" = "loop";
+  let gMode: "loop" | "good" | "json" | "slow" | "cut" | "error" | "nodone" | "oneframe" | "sepfinish" | "cleanclose" | "mislabelled" | "emptyfinish" | "empty" | "cr" | "multiline" | "doneonly" | "braceopen" | "finishtail" | "loop4finish" | "rolefinish" | "crlfsplit" = "loop";
+  const LOOP4 = JSON.stringify({ entities: [{ name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }, { name: "Anita", type: "person", confidence: 0.9 }], relationships: [] });
   // A converging answer whose LAST item is a third copy: the object closes
   // after it, so the abort that was pending never fires. (Anita first: a
   // fourth item after the third copy would be the answer going on — an abort.)
@@ -581,6 +582,22 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
       } else if (gMode === "braceopen") {
         // The answer's last brace and a second object's first in ONE frame.
         frames = [frame(`${GOOD}\n{`), frame(GOOD.slice(1)), frame("", "stop"), "data: [DONE]\n\n"];
+      } else if (gMode === "finishtail") {
+        // The whole answer AND chatter after its brace, in the finishing frame.
+        frames = [frame(`${GOOD}\n\nHope this helps!`, "stop"), "data: [DONE]\n\n"];
+      } else if (gMode === "loop4finish") {
+        // A loop that went on, complete, in the finishing frame: the same
+        // runaway it is when the finish comes alone (ninth pass).
+        frames = [frame(LOOP4, "stop"), "data: [DONE]\n\n"];
+      } else if (gMode === "rolefinish") {
+        // The OpenAI shape with nothing said: a role frame, a finish, [DONE].
+        frames = [`data: ${JSON.stringify({ choices: [{ delta: { role: "assistant" }, finish_reason: null }] })}\n\n`, frame("", "stop"), "data: [DONE]\n\n"];
+      } else if (gMode === "crlfsplit") {
+        // A CRLF event on two data: lines, the chunk boundary between the \r
+        // and the \n of the first — one event still (ninth pass).
+        const one = JSON.stringify({ choices: [{ delta: { content: GOOD }, finish_reason: null }] });
+        const cut = one.indexOf("[") + 1;
+        frames = [`data: ${one.slice(0, cut)}\r`, `\ndata: ${one.slice(cut)}\r\n\r\n`, frame("", "stop").replace(/\n/g, "\r\n"), "data: [DONE]\r\n\r\n"];
       } else if (gMode === "cleanclose") {
         // The whole answer, then the stream closes with no finish_reason and
         // no [DONE]: an answer, not a closed socket (sixth pass).
@@ -709,6 +726,23 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   gMode = "braceopen";
   const braceOpen = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
   assert(!braceOpen.malformed && braceOpen.entities.length === 2 && braceOpen.retried === undefined && runs.length === 1, `the answer's last brace followed by a second object's first in the same frame is the answer, cut at the brace (${JSON.stringify(braceOpen).slice(0, 80)})`);
+  // Ninth review pass, probed: the finishing frame's content is read too.
+  runs.length = 0;
+  gMode = "finishtail";
+  const finishTail = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!finishTail.malformed && finishTail.entities.length === 2 && runs.length === 1, "chatter after the brace in the FINISHING frame is cut at the brace too");
+  runs.length = 0;
+  gMode = "loop4finish";
+  const loop4 = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(loop4.retried === true && loop4.abortedMs !== undefined && runs.length === 2 && runs[1].body.stream === undefined, "a loop that went on, arriving complete in the finishing frame, is the runaway it is when the finish comes alone — retried, read whole");
+  gMode = "rolefinish";
+  let roleFinish = "";
+  try { await extractEntities(short, cfgG, undefined, { kind: "extraction" }); } catch (e) { roleFinish = (e as Error).message; }
+  assert(/was empty: no answer in 2 frame/.test(roleFinish), `a role frame and a finish with no content is the empty answer, whatever the frame count — the finish ends the read before [DONE] (${roleFinish.slice(0, 90)})`);
+  runs.length = 0;
+  gMode = "crlfsplit";
+  const crlfSplit = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!crlfSplit.malformed && crlfSplit.entities.length === 2 && runs.length === 1, "a CRLF event split between its \\r and \\n across reads is one event still");
   runs.length = 0;
   gMode = "cleanclose";
   const wholeClose = await extractEntities(short, cfgG, undefined, { kind: "extraction" });

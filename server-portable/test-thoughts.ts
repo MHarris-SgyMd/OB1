@@ -483,6 +483,14 @@ console.log("\n[8c] A streamed answer is a runaway at the third copy of one item
   const one = answer([ent("Loop")]);
   twice.feed(`${one}\n{"entities": [`);
   assert(twice.closed && twice.closedAt === one.length, `closed is final and says where: a second object opening in the same piece after the answer's last brace does not reopen it, and closedAt is that brace (${twice.closedAt} of ${one.length})`);
+  // Ninth review pass.
+  twice.feed(`${ent("Loop")}, ${ent("Loop")}, ${ent("Loop")}, ${ent("Loop")}]}`);
+  assert(twice.closed && !twice.runaway && twice.items === 1, "…and nothing after the close is read: a second object's loop is not the answer's");
+  assert(verdictAt(`{"entities": [], "relationships": []}`, 3) === "quiet/closed/0", "a valid empty answer closes — an array opened in the answer counts, so the read can end at its brace");
+  assert(verdictAt(`Here is {the answer}: ${answer([ent("Loop")])}`, 3) === "quiet/closed/1", "…while a preamble's own {…} — no item, no array — is not the answer closing");
+  assert([1, 3].every((step) => verdictAt(`[${answer([ent("Anita", "person")])}`, step) === "quiet/closed/1"), "a re-rooted answer closes at ITS brace, though the preamble's bracket never does");
+  const nestedArrays = answer([item({ name: "Loop", type: "tool", confidence: 1, aliases: [{ x: 1 }] }), item({ name: "Loop", type: "tool", confidence: 1, aliases: [{ x: 1 }] }), item({ name: "Loop", type: "tool", confidence: 1, aliases: [{ x: 1 }] }), item({ name: "Loop", type: "tool", confidence: 1, aliases: [{ x: 1 }] })]);
+  assert([1, 5].every((step) => verdictAt(nestedArrays, step) === "runaway/closed/4"), `an item whose own nested array holds objects keeps them as its own — four such items are four items and a loop (${verdictAt(nestedArrays, 5)})`);
 
   // The shipped windowing streams and aborts, and the sentence says so; with
   // reasoning on nothing is streamed — no budget, so no retry to send an
