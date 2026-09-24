@@ -34,7 +34,8 @@
     "write-path:gate": "../db/with-postgres.sh bun eval-write-path.ts --gate",
     "write-path:self-check": "bun eval-write-path.ts --self-check",
     "projection-replay": "bun eval-projection-replay.ts",
-    "projection-replay:self-check": "bun eval-projection-replay.ts --self-check"
+    "projection-replay:self-check": "bun eval-projection-replay.ts --self-check",
+    "projection-replay:fixture-check": "../db/with-postgres.sh bun eval-projection-replay.ts --fixture-check"
   },
   "devDependencies": {
     "@types/bun": "1.4.0",
