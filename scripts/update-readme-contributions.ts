@@ -60,7 +60,6 @@ function rootForPath(filePath: string): string {
   }
 
   if (first === "docs" && parts.length >= 2) return parts.slice(0, 2).join("/");
-  if (first === "server") return "server/index.ts";
   return filePath;
 }
 

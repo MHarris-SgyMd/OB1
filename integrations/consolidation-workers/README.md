@@ -41,7 +41,7 @@ For the full tool and worker inventory, see `docs/05-tool-audit.md` in the repos
 
 ### 1. Check Out the Integration
 
-The workers run from a checkout of this repository: each imports the repository's SQL shim by relative path, and the access-key module from `../_shared/auth.ts` beside it (the core server's, held byte-identical by `extensions/test-auth.ts`). Nothing is copied anywhere; there is no Supabase Edge Function to deploy, and the directory's `deno.json` pins nothing any more.
+The workers run from a checkout of this repository: each imports the repository's SQL shim by relative path, and the access-key module from `../_shared/auth.ts` beside it (the core server's, held byte-identical by `extensions/test-auth.ts`). Nothing is copied anywhere; there is no Supabase Edge Function to deploy and no `deno.json` (SMD-1800).
 
 ### 2. Run the Workers
 
@@ -210,7 +210,6 @@ consolidation-workers/
     index.ts         # Biographical profile synthesis worker
   metadata-norm/
     index.ts         # Metadata quality improvement worker
-  deno.json          # Deno configuration
   metadata.json      # OB1 contribution metadata
   README.md          # This file
 ```

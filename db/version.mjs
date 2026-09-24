@@ -19,7 +19,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -43,6 +43,20 @@ export const FORK_VERSION = `1.1.0+upstream.${UPSTREAM_PIN}`;
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RELEASES_PATH = join(ROOT, "releases.json");
+const MIGRATIONS_DIR = join(ROOT, "db", "migrations");
+
+/**
+ * The highest `NNN_*.sql` number in a migrations directory — the tree's last
+ * migration — or null when the directory is absent or holds none (the server
+ * image carries no db/migrations/). One rule for scripts/gen-version.ts, which
+ * writes it into server-portable/version.ts, and preflight's `version module`
+ * row, which holds that file to it (SMD-2041).
+ */
+export function latestMigration(dir = MIGRATIONS_DIR) {
+  if (!existsSync(dir)) return null;
+  const nums = readdirSync(dir).filter((n) => /^\d{3}_.*\.sql$/.test(n)).map((n) => Number(n.slice(0, 3)));
+  return nums.length ? Math.max(...nums) : null;
+}
 
 /**
  * Hash a migration TEMPLATE (not the substituted SQL) — first 12 hex of sha256,

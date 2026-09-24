@@ -28,20 +28,19 @@
  * module and nowhere else, every `_shared/auth.ts` is byte-for-byte
  * server-portable/auth.ts (a Supabase function is bundled from
  * supabase/functions/, so the module is copied beside the servers rather than
- * imported across the tree), and each deno.json still pins what package.json
- * installs — and the pinned `@hono/mcp` lets go of each request once it has
+ * imported across the tree), and the MCP stack is one set of versions across
+ * the tree's three installs (this directory's, server-portable's, the Kubernetes
+ * image's) — and the pinned `@hono/mcp` lets go of each request once it has
  * answered it (SMD-1607, change 83: 0.1.1 kept every one until close()).
  *
  * The files are imported as modules: each exports Bun's entry shape,
  * `export default { port, fetch }` (SMD-1799), and its `fetch` is the handler
  * driven here — console.error/warn silenced for the length of a request, since
  * a refused port is the proof and not noise — and, for the recipes and
- * integrations, under a loader that reads their Deno specifiers on Bun: a
- * `jsr:` type-only import is dropped, `npm:pkg@version` becomes `pkg`, the
- * Deno postgres driver becomes a stub that never connects, and a bare package
- * name resolves from this directory's install, since theirs is a deno.json.
- * Nothing stands in for `Deno`: a server that still reached it would throw at
- * import or answer 500, a counted failure either way.
+ * integrations, under a loader that resolves their bare package names from
+ * this directory's install, since they have none of their own. Nothing stands
+ * in for `Deno`: a server that still reached it would throw at import or
+ * answer 500, a counted failure either way.
  * No database: nothing here reaches a handler that queries with a key that
  * would let it, or the client refuses at once (a port nothing listens on) —
  * the SQL shim and supabase-js both connect lazily, so a stub URL is never
@@ -60,12 +59,11 @@
  * Run: bun install && bun test-auth.ts   (in extensions/)
  */
 
-import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "./_shared/auth.ts";
-import { createAssert } from "../db/test-support.ts";
+import { createAssert, PACKAGES, STACK } from "../db/test-support.ts";
 
 const { assert, report } = createAssert();
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -88,30 +86,26 @@ async function importServer(file: string): Promise<Handler> {
   return mod.default.fetch as Handler;
 }
 
-// ── Deno's specifiers, on Bun ────────────────────────────────────────────────
-// Dead for the 22 servers on the shim since SMD-1799 (check 11 refuses a `jsr:`/`npm:`/URL specifier in them); the
-// `postgres` stub still stands in for kubernetes-deployment, a Deno deployment until SMD-1800.
+// ── The vendored servers' packages, from this directory's install ────────────
+// A recipe or integration imports STACK's four (hono, zod, @hono/mcp, the SDK) by
+// bare name and has no install of its own beside it (kubernetes-deployment's
+// package.json is the image's, SMD-1800; run from a checkout, Bun fetches the four
+// on demand — SMD-1991), so this loader resolves those names from
+// extensions/node_modules, the pinned versions. Until SMD-1800 it also read Deno's specifiers — a `jsr:`
+// type-only import dropped, `npm:pkg@version` unprefixed, the deno.land postgres
+// driver stubbed for kubernetes-deployment; none is left in the tree (check 11
+// refuses them in every shim importer).
 
-/** The packages this directory installs; the recipes' and integrations' deno.json pin the same names. */
-const PACKAGES = /^(hono|zod|@hono\/mcp|@modelcontextprotocol\/sdk)(\/|$)/;
-const PG_STUB = join(tmpdir(), `ob1-test-auth-deno-postgres-stub-${process.pid}.ts`);
-await Bun.write(PG_STUB,
-  "export class Pool { constructor(..._: unknown[]) {} connect(): never { throw new Error('the test never queries'); } }\n");
+// STACK and PACKAGES — the four packages this directory installs, and a specifier of one — come from
+// db/test-support.ts, so test-writes.ts's loader reads the same list.
 /** Only this checkout's recipes/ and integrations/ — not a checkout that happens to sit under a directory so named. */
 const VENDORED = new RegExp("^" + ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/(recipes|integrations)/.*\\.ts$");
 Bun.plugin({
-  name: "deno-specifiers-on-bun",
+  name: "vendored-packages-from-extensions",
   setup(build) {
     build.onLoad({ filter: VENDORED }, async (args) => {
-      let src = await Bun.file(args.path).text();
-      src = src.replace(/^import\s+"jsr:[^"]+";\s*$/gm, "");
-      src = src.replace(/(from\s+|import\s+)(["'])([^"']+)\2/g, (whole, lead, q, spec) => {
-        let s = spec as string;
-        if (s.startsWith("npm:")) s = s.slice(4).replace(/^(@?[^@/]+(?:\/[^@/]+)?)@[^/]*/, "$1");
-        if (s === "postgres") return `${lead}${q}${PG_STUB}${q}`;
-        if (PACKAGES.test(s)) return `${lead}${q}${Bun.resolveSync(s, HERE)}${q}`;
-        return whole;
-      });
+      const src = (await Bun.file(args.path).text()).replace(/(from\s+|import\s+)(["'])([^"']+)\2/g, (whole, lead, q, spec) =>
+        PACKAGES.test(spec as string) ? `${lead}${q}${Bun.resolveSync(spec as string, HERE)}${q}` : whole);
       return { contents: src, loader: "ts" };
     });
   },
@@ -158,8 +152,8 @@ const vendored = (file: string, kind: Kind, reads: string[], writes: string[], o
 // HTTPS stubs supabase-js took went with it); `kind` picks the assertions; a REST server
 // lists its routes as "METHOD /path" and needs `readProbe`, a worker `dryRun`
 // and `unconfigured`. Then, as needed: RPC_READS and LOG_TABLES for what its
-// reads may call; PACKAGES and extensions/package.json for a new npm package
-// (the pin guard then holds its deno.json to it); a TEXT_ONLY entry for a file
+// reads may call; STACK (db/test-support.ts) and extensions/package.json for a new
+// npm package (the pin guard then holds the other two installs to it); a TEXT_ONLY entry for a file
 // that cannot run; COPIES and package.json's sync-auth for a new _shared/. A
 // REST server's routes must be mounted `app.<verb>("…", …)` at column 0, or
 // the classifier cannot see them.
@@ -181,7 +175,6 @@ const SERVERS: Server[] = [
   ext("meal-planning/shared-server.ts", ["view_meal_plan", "view_recipes", "view_shopping_list"], ["mark_item_purchased"],
     { keys: "MCP_HOUSEHOLD_ACCESS_KEYS", legacy: "MCP_HOUSEHOLD_ACCESS_KEY" }),
   // The recipes and integrations (change 67).
-  vendored("recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", "mcp", ["list_vendors"], []),
   vendored("recipes/ob-graph/index.ts", "mcp", ["search_nodes", "get_neighbors", "traverse_graph", "find_path", "list_edge_types"],
     ["create_node", "create_edge", "update_node", "delete_node", "delete_edge"], { health: "/health" }),
   vendored("recipes/work-operating-model-activation/index.ts", "mcp", ["query_operating_model"],
@@ -212,7 +205,7 @@ const WEBHOOK = { file: "integrations/readwise-capture/index.ts", secretEnv: "RE
 // function directory. The list here, the tree, and package.json's sync-auth
 // (the one command that rewrites them all) must agree.
 const COPIES = ["extensions/_shared/auth.ts", "recipes/_shared/auth.ts", "recipes/editorial-policy/_shared/auth.ts",
-  "recipes/edge-function-cost-optimization/examples/_shared/auth.ts", "integrations/_shared/auth.ts", "integrations/consolidation-workers/_shared/auth.ts"];
+  "integrations/_shared/auth.ts", "integrations/consolidation-workers/_shared/auth.ts"];
 const CORE = readFileSync(join(ROOT, "server-portable", "auth.ts"), "utf8");
 for (const copy of COPIES) {
   assert(existsSync(join(ROOT, copy)) && readFileSync(join(ROOT, copy), "utf8") === CORE,
@@ -253,11 +246,9 @@ try {
   // A server that listens or connects at import, or reaches a `Deno` nothing installs, is a
   // counted failure with a tally, not a stack trace in place of one; nothing below could run.
   assert(false, `a server threw at import — as a module nothing should listen, connect or reach \`Deno\`: ${e instanceof Error ? e.message : String(e)}`);
-  unlinkSync(PG_STUB);
   report();
 }
 assert(!("Deno" in globalThis), "no import installed a `Deno` global — every server is Bun-native (SMD-1799)");
-unlinkSync(PG_STUB); // every import that wanted it has it
 
 // ── One request ──────────────────────────────────────────────────────────────
 
@@ -787,16 +778,6 @@ const OLD_SPELLINGS = /c\.req\.query\("key"\)|c\.req\.header\("x-access-key"\)|[
  */
 const builtPerRequest = (text: string) =>
   !/^(?:export )?(?:const|let|var) [^\n]*(?:\bMcpServer\b|\bStreamableHTTPTransport\b|= buildServer\(|= new Map[<(])/m.test(text);
-// Every SDK subpath import is preceded by its `@ts-types` pragma: without it,
-// `deno check` reads the module — and every tool handler's arguments — as
-// `any` at SDK 1.29 and later (change 84 has the mechanism).
-const sdkTyped = (text: string) => {
-  const imports = [...text.matchAll(/^(.*)\n(?:\s*)import (?:type )?[^\n]* from "@modelcontextprotocol\/sdk\/([\w/]+)\.js";/gm)];
-  // Every SDK specifier in the file is one the line above matched — a multi-line, single-quoted or
-  // semicolon-less import would otherwise slip past as long as one other import carried its pragma.
-  const named = (text.match(/from ['"]@modelcontextprotocol\/sdk\/[^'"]+['"]/g) ?? []).length;
-  return imports.length > 0 && imports.length === named && imports.every((m) => m[1].trim() === `// @ts-types="@modelcontextprotocol/sdk/${m[2]}"`);
-};
 /** The Accept patch by its mechanism — every one re-wrapped the request over `c.req.raw` — not by the header it set, which an outgoing fetch may set too. */
 const ACCEPT_PATCH = /Object\.defineProperty\(\s*c\.req,\s*['"]raw['"]/;
 
@@ -826,7 +807,6 @@ for (const s of SERVERS) {
     assert(builtPerRequest(text), "…the McpServer is built inside a function, per request: no module-level declaration names McpServer, holds what buildServer() returns, or is a `new Map` (a server that outlives the request is connect()ed to a fresh transport each time and answers on the wrong one — SMD-1497, change 78)");
     assert(!ACCEPT_PATCH.test(text),
       "…and no Accept patch: the transport at @hono/mcp 0.3.x takes a missing Accept as */* and either token as enough, so the re-wrap of every request for Claude Desktop connectors is gone (change 84)");
-    assert(sdkTyped(text), "…and each SDK import carries its @ts-types pragma, so `deno check` types the tool handlers rather than reading the module as any (change 84) — or an SDK import is in a spelling this guard does not read");
   } else if (s.kind === "rest") {
     const mounted = [...text.matchAll(/^app\.(get|post|put|patch|delete)\("([^"]+)",\s*(requireWrite,\s*)?/gm)]
       .map((m) => ({ route: `${m[1].toUpperCase()} ${m[2]}`, gated: Boolean(m[3]), at: m.index! }));
@@ -871,28 +851,15 @@ for (const s of SERVERS) {
   const text = readFileSync(join(ROOT, file), "utf8");
   assert(builtPerRequest(text) && text.includes("await buildServer().connect(transport)"),
     `${file}: the McpServer is built per request by buildServer() and connected to that request's transport (SMD-1497, change 78)`);
-  assert(sdkTyped(text) && !ACCEPT_PATCH.test(text),
-    `${file}: each SDK import carries its @ts-types pragma (or one is in a spelling this guard does not read), and the Accept patch is gone (change 84)`);
+  assert(!ACCEPT_PATCH.test(text), `${file}: the Accept patch is gone (change 84)`);
 }
 
-// The files this test cannot import — a sample whose tool modules are not in
-// the repository, a Next.js route, a README's code block, a Node stub — say the
-// same thing in their text.
+// The files this test cannot import — a Next.js route, a README's code block, a
+// Node stub — say the same thing in their text. (The cost recipe's per-session
+// sample, read here for SMD-1497's and SMD-1607's shapes, left with the recipe —
+// SMD-1800.)
 console.log("\n[the files this test reads but cannot run]");
 const TEXT_ONLY: { file: string; must: RegExp[]; mustNot: RegExp[] }[] = [
-  // The after sample binds one server AND one transport per session (SMD-1497): a server shared between
-  // sessions and connect()ed once per session hands its transport to the newest session and hangs the rest.
-  // The sweep closes the transport of each session it drops (SMD-1607), which tells the server too.
-  { file: "recipes/edge-function-cost-optimization/examples/after/index.ts",
-    must: [/from "\.\.\/_shared\/auth\.ts"/, /authenticateRequest\(c\.req\.raw,/, /const server = buildServer\(principal\);[^\n]*\n\s*await server\.connect\(transport\);\n\s*session = \{ server, transport,/, /session\.scope !== principal\.scope/,
-      /sessions\.delete\(id\);\n(?:\s*\/\/[^\n]*\n)*\s*s\.transport\.close\(\)\.catch\(/,
-      /\/\/ @ts-types="@modelcontextprotocol\/sdk\/server\/mcp"\nimport type \{ McpServer \} from "@modelcontextprotocol\/sdk\/server\/mcp\.js";/],
-    mustNot: [/[!=]== ?MCP_ACCESS_KEY\b/, /c\.req\.header\("x-access-key"\)/, /serverFor\(/, /Map<[^>\n]*McpServer/, ACCEPT_PATCH] },
-  { file: "recipes/edge-function-cost-optimization/examples/after/server.ts",
-    must: [/from "\.\.\/_shared\/auth\.ts"/, /export function buildServer\(principal: Principal\): McpServer/, /register\w+\(server, principal\)/,
-      /\/\/ @ts-types="@modelcontextprotocol\/sdk\/server\/mcp"\nimport \{ McpServer \} from "@modelcontextprotocol\/sdk\/server\/mcp\.js";/],
-    // No module-level declaration naming McpServer: a cache under any name, in any container, is a server shared across sessions.
-    mustNot: [/export const server\b/, /new Map</, /serverFor/, /^(?:export )?(?:const|let|var) [^\n]*\bMcpServer\b/m] },
   { file: "recipes/vercel-neon-telegram/src/app/api/telegram/route.ts",
     must: [/import \{ secretMatches \} from "@\/lib\/auth"/, /secretMatches\(req\.headers\.get\("x-telegram-bot-api-secret-token"\), expectedSecret\)/],
     mustNot: [/secret !== expectedSecret/] },
@@ -912,43 +879,28 @@ for (const t of TEXT_ONLY) {
   for (const re of t.mustNot) assert(!re.test(text), `${t.file} no longer says ${re}`);
 }
 
-// Each deno.json pins what package.json installs, so this test exercises the
-// libraries the functions deploy with: every import of an extension exactly;
-// for a recipe or integration, every npm pin of a package installed here.
+// One MCP stack across the tree's three installs (the recurring defect this fork
+// guards against is a value defined twice): what this directory installs is what
+// the vendored servers run under here and what `bun <file>` resolves for the
+// extensions; server-portable/package.json is the core server's and the
+// container's; integrations/kubernetes-deployment/package.json is that image's
+// (SMD-1800 — until then each server carried a deno.json import map, held here to
+// this file, and server/deno.json anchored the set). Every pin equal, or this
+// names the package and the two versions.
 {
   const pkg = JSON.parse(readFileSync(join(HERE, "package.json"), "utf8")).devDependencies as Record<string, string>;
-  const dirs = readdirSync(HERE, { withFileTypes: true }).filter((d) => d.isDirectory() && !d.name.startsWith("_") && d.name !== "node_modules").map((d) => d.name);
-  for (const dir of dirs) {
-    if (!existsSync(join(HERE, dir, "deno.json"))) { assert(false, `${dir}/deno.json exists — every extension pins its imports`); continue; }
-    const imports = JSON.parse(readFileSync(join(HERE, dir, "deno.json"), "utf8")).imports as Record<string, string>;
-    const drift = Object.entries(imports).filter(([name, spec]) => spec !== `npm:${name}@${pkg[name]}`);
-    assert(drift.length === 0, `extensions/${dir}/deno.json pins what package.json installs${drift.length ? ` (${drift.map(([n, s]) => `${n}: ${s}`).join(", ")})` : ""}`);
-  }
-  const seen = new Set<string>();
-  for (const s of SERVERS.filter((s) => !s.file.startsWith("extensions/"))) {
-    let dir = dirname(s.file);
-    while (dir.includes("/") && !existsSync(join(ROOT, dir, "deno.json"))) dir = dirname(dir);
-    const file = join(dir, "deno.json");
-    if (!existsSync(join(ROOT, file)) || seen.has(file)) continue;
-    seen.add(file);
-    // A deno.json with no import map at all (consolidation-workers', once supabase-js left it) pins nothing.
-    const imports = (JSON.parse(readFileSync(join(ROOT, file), "utf8")).imports ?? {}) as Record<string, string>;
-    // Every import of a package installed here — scoped or not, and whatever its spelling (an unversioned
-    // `npm:hono`, a `jsr:` or URL import would deploy on latest while the test ran the pin) — is this exact npm pin.
-    const drift = Object.entries(imports).filter(([name, spec]) => name in pkg && spec !== `npm:${name}@${pkg[name]}`);
-    assert(drift.length === 0, `${file} pins what package.json installs${drift.length ? ` (${drift.map(([n, s]) => `${n}: ${s}`).join(", ")})` : ""}`);
-  }
-  // server/package.json mirrors server/deno.json on the MCP stack (change 84's
-  // review: a nested zod 4.5.4 had arrived in its lock unheld). supabase-js is
-  // left out — the Node suites never load it — and left out by regex: a quoted
-  // supabase-js literal makes this file a target for the shim codemod.
-  {
-    const MCP_STACK = /^(hono|zod|@hono\/mcp|@modelcontextprotocol\/sdk)$/;
-    const imports = JSON.parse(readFileSync(join(ROOT, "server/deno.json"), "utf8")).imports as Record<string, string>;
-    const dev = JSON.parse(readFileSync(join(ROOT, "server/package.json"), "utf8")).devDependencies as Record<string, string>;
-    const drift = Object.entries(imports).filter(([name, spec]) => MCP_STACK.test(name) && spec !== `npm:${name}@${dev[name]}`);
-    assert(drift.length === 0, `server/package.json pins what server/deno.json deploys, MCP stack entire${drift.length ? ` (${drift.map(([n, s]) => `${n}: ${s} vs ${dev[n] ?? "absent"}`).join(", ")})` : ""}`);
-  }
+  // The stack is STACK's names: a test-only devDependency added here (a fixture library, say) is not
+  // demanded of the image or the core server.
+  const stack = Object.entries(pkg).filter(([name]) => PACKAGES.test(name));
+  assert(stack.map(([n]) => n).sort().join() === [...STACK].sort().join(), `extensions/package.json installs the ${STACK.length} packages of the MCP stack (${stack.map(([n]) => n).join(", ") || "none"})`);
+  const hold = (file: string, deps: Record<string, string>, exact: boolean) => {
+    const drift = stack.filter(([name, version]) => deps[name] !== version);
+    const extra = exact ? Object.keys(deps).filter((name) => !PACKAGES.test(name)) : [];
+    assert(drift.length === 0 && extra.length === 0, `${file} pins ${exact ? "exactly " : ""}the MCP stack extensions/package.json installs${drift.length || extra.length ? ` (${[...drift.map(([n, v]) => `${n}: ${deps[n] ?? "absent"} vs ${v}`), ...extra.map((n) => `${n}: not one of the stack`)].join(", ")})` : ""}`);
+  };
+  // The core server installs supabase-js beside the stack for its Workers store (SMD-1847), so its set is a superset.
+  hold("server-portable/package.json", JSON.parse(readFileSync(join(ROOT, "server-portable/package.json"), "utf8")).dependencies as Record<string, string>, false);
+  hold("integrations/kubernetes-deployment/package.json", JSON.parse(readFileSync(join(ROOT, "integrations/kubernetes-deployment/package.json"), "utf8")).dependencies as Record<string, string>, true);
 }
 
 // ── The pinned transport, across a session ──────────────────────────────────

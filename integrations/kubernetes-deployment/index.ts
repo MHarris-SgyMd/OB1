@@ -16,6 +16,7 @@
  *   MCP_ACCESS_KEYS - name:scope:sha256 access keys (the older single MCP_ACCESS_KEY still works);
  *                     capture_thought is registered only for a write-scoped key
  *   OPEN_BRAIN_CITATION_BASE_URL - Optional base URL for search/fetch citation links
+ *   PORT - the port the export at the tail listens on (default 8000; the image and k8s/openbrain.yml leave it)
  */
 
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
@@ -24,17 +25,12 @@
 // works, compared by digest), and a read-scoped key is never given the tools
 // that write. FORK.md change 67; extensions/test-auth.ts exercises it.
 // The import is this file's first from outside its own directory (see the Dockerfile).
-// Deno reads the SDK's types through the extensionless subpath: its exports map
-// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
-// @ts-types="@modelcontextprotocol/sdk/server/mcp"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
-import { Pool } from "postgres";
+import { SQL } from "bun";
 import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
-// Named, not the global: `deno check` types the import; Bun and Deno both resolve it (SMD-1799).
-import process from "node:process";
 
 // ob1-fork (SMD-1524): capture_thought writes `thoughts` with a raw INSERT, by design —
 // this deployment's Postgres is its own, built by k8s/init.sql from the guide's shape,
@@ -60,34 +56,45 @@ const CHAT_MODEL = process.env.CHAT_MODEL || "openai/gpt-4o-mini";
 
 // --- PostgreSQL Connection Pool ---
 
-const pool = new Pool({
+// Bun's own Postgres client (SMD-1800; the Deno driver from deno.land/x went with
+// the Deno image): a pool of up to 20 connections, opened on the first query, so
+// importing this module — as extensions/test-auth.ts does — dials nothing.
+const sql = new SQL({
   hostname: DB_HOST,
   port: DB_PORT,
   database: DB_NAME,
-  user: DB_USER,
+  username: DB_USER,
   password: DB_PASSWORD,
-}, 20);
+  max: 20,
+});
+
+/**
+ * One statement with positional parameters, its rows. Not named `query`: two
+ * tools take an argument of that name, which would shadow it in their handlers.
+ */
+async function pgQuery<T>(text: string, params: unknown[] = []): Promise<T[]> {
+  return (await sql.unsafe(text, params)) as unknown as T[];
+}
 
 type ThoughtMatch = {
   id: string;
   content: string;
   metadata: Record<string, unknown>;
   similarity: number;
-  created_at: string;
+  created_at: Date;
 };
 
 type ThoughtRecord = {
   id: string;
   content: string;
   metadata: Record<string, unknown>;
-  created_at: string;
-  updated_at?: string | null;
+  created_at: Date;
 };
 
 const CITATION_BASE_URL =
   process.env.OPEN_BRAIN_CITATION_BASE_URL || "https://openbrain.local/thoughts";
 
-function thoughtTitle(content: string, createdAt?: string): string {
+function thoughtTitle(content: string, createdAt?: Date): string {
   const firstLine = content.replace(/\s+/g, " ").trim().slice(0, 80);
   const datePrefix = createdAt ? new Date(createdAt).toLocaleDateString() : "Open Brain";
   return firstLine ? `${datePrefix} - ${firstLine}` : `${datePrefix} thought`;
@@ -180,30 +187,25 @@ function buildServer(principal: Principal): McpServer {
         const qEmb = await getEmbedding(query);
         const embStr = `[${qEmb.join(",")}]`;
 
-        const client = await pool.connect();
-        try {
-          const result = await client.queryObject<ThoughtMatch>(
-            `SELECT id, content, metadata, created_at,
-                    1 - (embedding <=> $1::vector) AS similarity
-             FROM thoughts
-             WHERE 1 - (embedding <=> $1::vector) >= $2
-             ORDER BY embedding <=> $1::vector
-             LIMIT $3`,
-            [embStr, 0.5, 10]
-          );
+        const rows = await pgQuery<ThoughtMatch>(
+          `SELECT id, content, metadata, created_at,
+                  1 - (embedding <=> $1::vector) AS similarity
+           FROM thoughts
+           WHERE 1 - (embedding <=> $1::vector) >= $2
+           ORDER BY embedding <=> $1::vector
+           LIMIT $3`,
+          [embStr, 0.5, 10]
+        );
 
-          const results = result.rows.map((t) => ({
-            id: t.id,
-            title: thoughtTitle(t.content, t.created_at),
-            url: thoughtUrl(t.id),
-          }));
+        const results = rows.map((t) => ({
+          id: t.id,
+          title: thoughtTitle(t.content, t.created_at),
+          url: thoughtUrl(t.id),
+        }));
 
-          return {
-            content: [{ type: "text" as const, text: JSON.stringify({ results }) }],
-          };
-        } finally {
-          client.release();
-        }
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({ results }) }],
+        };
       } catch (err: unknown) {
         return {
           content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
@@ -228,42 +230,36 @@ function buildServer(principal: Principal): McpServer {
     },
     async ({ id }) => {
       try {
-        const client = await pool.connect();
-        try {
-          const result = await client.queryObject<ThoughtRecord>(
-            `SELECT id, content, metadata, created_at, updated_at
-             FROM thoughts
-             WHERE id = $1
-             LIMIT 1`,
-            [id]
-          );
+        const rows = await pgQuery<ThoughtRecord>(
+          `SELECT id, content, metadata, created_at
+           FROM thoughts
+           WHERE id = $1
+           LIMIT 1`,
+          [id]
+        );
 
-          const thought = result.rows[0];
-          if (!thought) {
-            return {
-              content: [{ type: "text" as const, text: `No thought found for ID ${id}.` }],
-              isError: true,
-            };
-          }
-
-          const document = {
-            id: thought.id,
-            title: thoughtTitle(thought.content, thought.created_at),
-            text: thought.content,
-            url: thoughtUrl(thought.id),
-            metadata: {
-              ...thought.metadata,
-              created_at: thought.created_at,
-              updated_at: thought.updated_at,
-            },
-          };
-
+        const thought = rows[0];
+        if (!thought) {
           return {
-            content: [{ type: "text" as const, text: JSON.stringify(document) }],
+            content: [{ type: "text" as const, text: `No thought found for ID ${id}.` }],
+            isError: true,
           };
-        } finally {
-          client.release();
         }
+
+        const document = {
+          id: thought.id,
+          title: thoughtTitle(thought.content, thought.created_at),
+          text: thought.content,
+          url: thoughtUrl(thought.id),
+          metadata: {
+            ...thought.metadata,
+            created_at: thought.created_at,
+          },
+        };
+
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(document) }],
+        };
       } catch (err: unknown) {
         return {
           content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
@@ -294,52 +290,47 @@ function buildServer(principal: Principal): McpServer {
         const qEmb = await getEmbedding(query);
         const embStr = `[${qEmb.join(",")}]`;
 
-        const client = await pool.connect();
-        try {
-          const result = await client.queryObject<ThoughtMatch>(
-            `SELECT id, content, metadata, created_at,
-                    1 - (embedding <=> $1::vector) AS similarity
-             FROM thoughts
-             WHERE 1 - (embedding <=> $1::vector) >= $2
-             ORDER BY embedding <=> $1::vector
-             LIMIT $3`,
-            [embStr, threshold, limit]
-          );
+        const rows = await pgQuery<ThoughtMatch>(
+          `SELECT id, content, metadata, created_at,
+                  1 - (embedding <=> $1::vector) AS similarity
+           FROM thoughts
+           WHERE 1 - (embedding <=> $1::vector) >= $2
+           ORDER BY embedding <=> $1::vector
+           LIMIT $3`,
+          [embStr, threshold, limit]
+        );
 
-          if (!result.rows.length) {
-            return {
-              content: [{ type: "text" as const, text: `No thoughts found matching "${query}".` }],
-            };
-          }
-
-          const results = result.rows.map((t, i) => {
-            const m = t.metadata || {};
-            const parts = [
-              `--- Result ${i + 1} (${(t.similarity * 100).toFixed(1)}% match) ---`,
-              `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
-              `Type: ${m.type || "unknown"}`,
-            ];
-            if (Array.isArray(m.topics) && m.topics.length)
-              parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
-            if (Array.isArray(m.people) && m.people.length)
-              parts.push(`People: ${(m.people as string[]).join(", ")}`);
-            if (Array.isArray(m.action_items) && m.action_items.length)
-              parts.push(`Actions: ${(m.action_items as string[]).join("; ")}`);
-            parts.push(`\n${t.content}`);
-            return parts.join("\n");
-          });
-
+        if (!rows.length) {
           return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Found ${result.rows.length} thought(s):\n\n${results.join("\n\n")}`,
-              },
-            ],
+            content: [{ type: "text" as const, text: `No thoughts found matching "${query}".` }],
           };
-        } finally {
-          client.release();
         }
+
+        const results = rows.map((t, i) => {
+          const m = t.metadata || {};
+          const parts = [
+            `--- Result ${i + 1} (${(t.similarity * 100).toFixed(1)}% match) ---`,
+            `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
+            `Type: ${m.type || "unknown"}`,
+          ];
+          if (Array.isArray(m.topics) && m.topics.length)
+            parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
+          if (Array.isArray(m.people) && m.people.length)
+            parts.push(`People: ${(m.people as string[]).join(", ")}`);
+          if (Array.isArray(m.action_items) && m.action_items.length)
+            parts.push(`Actions: ${(m.action_items as string[]).join("; ")}`);
+          parts.push(`\n${t.content}`);
+          return parts.join("\n");
+        });
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Found ${rows.length} thought(s):\n\n${results.join("\n\n")}`,
+            },
+          ],
+        };
       } catch (err: unknown) {
         return {
           content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
@@ -394,42 +385,37 @@ function buildServer(principal: Principal): McpServer {
 
         const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 
-        const client = await pool.connect();
-        try {
-          const result = await client.queryObject<{
-            content: string;
-            metadata: Record<string, unknown>;
-            created_at: string;
-          }>(
-            `SELECT content, metadata, created_at
-             FROM thoughts
-             ${whereClause}
-             ORDER BY created_at DESC
-             LIMIT $${paramIdx}`,
-            [...params, limit]
-          );
+        const rows = await pgQuery<{
+          content: string;
+          metadata: Record<string, unknown>;
+          created_at: Date;
+        }>(
+          `SELECT content, metadata, created_at
+           FROM thoughts
+           ${whereClause}
+           ORDER BY created_at DESC
+           LIMIT $${paramIdx}`,
+          [...params, limit]
+        );
 
-          if (!result.rows.length) {
-            return { content: [{ type: "text" as const, text: "No thoughts found." }] };
-          }
-
-          const results = result.rows.map((t, i) => {
-            const m = t.metadata || {};
-            const tags = Array.isArray(m.topics) ? (m.topics as string[]).join(", ") : "";
-            return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}`;
-          });
-
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `${result.rows.length} recent thought(s):\n\n${results.join("\n\n")}`,
-              },
-            ],
-          };
-        } finally {
-          client.release();
+        if (!rows.length) {
+          return { content: [{ type: "text" as const, text: "No thoughts found." }] };
         }
+
+        const results = rows.map((t, i) => {
+          const m = t.metadata || {};
+          const tags = Array.isArray(m.topics) ? (m.topics as string[]).join(", ") : "";
+          return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}`;
+        });
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `${rows.length} recent thought(s):\n\n${results.join("\n\n")}`,
+            },
+          ],
+        };
       } catch (err: unknown) {
         return {
           content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
@@ -452,68 +438,62 @@ function buildServer(principal: Principal): McpServer {
     },
     async () => {
       try {
-        const client = await pool.connect();
-        try {
-          const countResult = await client.queryObject<{ count: number }>(
-            "SELECT COUNT(*)::int AS count FROM thoughts"
-          );
+        const countRows = await pgQuery<{ count: number }>(
+          "SELECT COUNT(*)::int AS count FROM thoughts"
+        );
 
-          const dataResult = await client.queryObject<{
-            metadata: Record<string, unknown>;
-            created_at: string;
-          }>(
-            "SELECT metadata, created_at FROM thoughts ORDER BY created_at DESC"
-          );
+        const data = await pgQuery<{
+          metadata: Record<string, unknown>;
+          created_at: Date;
+        }>(
+          "SELECT metadata, created_at FROM thoughts ORDER BY created_at DESC"
+        );
 
-          const count = countResult.rows[0]?.count || 0;
-          const data = dataResult.rows;
+        const count = countRows[0]?.count || 0;
 
-          const types: Record<string, number> = {};
-          const topics: Record<string, number> = {};
-          const people: Record<string, number> = {};
+        const types: Record<string, number> = {};
+        const topics: Record<string, number> = {};
+        const people: Record<string, number> = {};
 
-          for (const r of data) {
-            const m = r.metadata || {};
-            if (m.type) types[m.type as string] = (types[m.type as string] || 0) + 1;
-            if (Array.isArray(m.topics))
-              for (const t of m.topics) topics[t as string] = (topics[t as string] || 0) + 1;
-            if (Array.isArray(m.people))
-              for (const p of m.people) people[p as string] = (people[p as string] || 0) + 1;
-          }
-
-          const sort = (o: Record<string, number>): [string, number][] =>
-            Object.entries(o)
-              .sort((a, b) => b[1] - a[1])
-              .slice(0, 10);
-
-          const lines: string[] = [
-            `Total thoughts: ${count}`,
-            `Date range: ${
-              data.length
-                ? new Date(data[data.length - 1].created_at).toLocaleDateString() +
-                  " -> " +
-                  new Date(data[0].created_at).toLocaleDateString()
-                : "N/A"
-            }`,
-            "",
-            "Types:",
-            ...sort(types).map(([k, v]) => `  ${k}: ${v}`),
-          ];
-
-          if (Object.keys(topics).length) {
-            lines.push("", "Top topics:");
-            for (const [k, v] of sort(topics)) lines.push(`  ${k}: ${v}`);
-          }
-
-          if (Object.keys(people).length) {
-            lines.push("", "People mentioned:");
-            for (const [k, v] of sort(people)) lines.push(`  ${k}: ${v}`);
-          }
-
-          return { content: [{ type: "text" as const, text: lines.join("\n") }] };
-        } finally {
-          client.release();
+        for (const r of data) {
+          const m = r.metadata || {};
+          if (m.type) types[m.type as string] = (types[m.type as string] || 0) + 1;
+          if (Array.isArray(m.topics))
+            for (const t of m.topics) topics[t as string] = (topics[t as string] || 0) + 1;
+          if (Array.isArray(m.people))
+            for (const p of m.people) people[p as string] = (people[p as string] || 0) + 1;
         }
+
+        const sort = (o: Record<string, number>): [string, number][] =>
+          Object.entries(o)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 10);
+
+        const lines: string[] = [
+          `Total thoughts: ${count}`,
+          `Date range: ${
+            data.length
+              ? new Date(data[data.length - 1].created_at).toLocaleDateString() +
+                " -> " +
+                new Date(data[0].created_at).toLocaleDateString()
+              : "N/A"
+          }`,
+          "",
+          "Types:",
+          ...sort(types).map(([k, v]) => `  ${k}: ${v}`),
+        ];
+
+        if (Object.keys(topics).length) {
+          lines.push("", "Top topics:");
+          for (const [k, v] of sort(topics)) lines.push(`  ${k}: ${v}`);
+        }
+
+        if (Object.keys(people).length) {
+          lines.push("", "People mentioned:");
+          for (const [k, v] of sort(people)) lines.push(`  ${k}: ${v}`);
+        }
+
+        return { content: [{ type: "text" as const, text: lines.join("\n") }] };
       } catch (err: unknown) {
         return {
           content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
@@ -550,16 +530,11 @@ function buildServer(principal: Principal): McpServer {
         const embStr = `[${embedding.join(",")}]`;
         const meta: Record<string, unknown> = { ...metadata, source: "mcp" };
 
-        const client = await pool.connect();
-        try {
-          await client.queryObject(
-            `INSERT INTO thoughts (content, embedding, metadata)
-             VALUES ($1, $2::vector, $3::jsonb)`,
-            [content, embStr, JSON.stringify(meta)]
-          );
-        } finally {
-          client.release();
-        }
+        await pgQuery(
+          `INSERT INTO thoughts (content, embedding, metadata)
+           VALUES ($1, $2::vector, $3::jsonb)`,
+          [content, embStr, meta]
+        );
 
         let confirmation = `Captured as ${meta.type || "thought"}`;
         if (Array.isArray(meta.topics) && meta.topics.length)
@@ -631,9 +606,8 @@ app.all("*", async (c) => {
   return response;
 });
 
-// Bun's entry shape, the core server's (SMD-1799): `bun index.ts` serves it on PORT. The image runs
-// `deno serve --port 8000 index.ts`, which serves the same export on the flag's port (a `port` here is
-// Bun's to read; Deno's is the flag), so k8s/openbrain.yml names no PORT.
+// Bun's entry shape, the core server's (SMD-1799): `bun index.ts` serves it on PORT, default 8000 —
+// what the image runs (SMD-1800), so k8s/openbrain.yml names no PORT.
 export default {
   port: Number(process.env.PORT || 8000),
   fetch: app.fetch,

@@ -24,7 +24,6 @@ Why it matters: once more than one agent writes to the same Open Brain (Claude D
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
 - Supabase CLI installed (`npm i -g supabase` or your preferred method)
-- [Deno](https://deno.land/) runtime available locally for type-checking (optional but recommended)
 - OpenRouter API key (only required when your callers pass `content` — needed for re-embedding)
 
 ## Credential Tracker
@@ -73,8 +72,6 @@ supabase functions new update-thought-mcp
 ```bash
 curl -o supabase/functions/update-thought-mcp/index.ts \
   https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/integrations/update-thought-mcp/index.ts
-curl -o supabase/functions/update-thought-mcp/deno.json \
-  https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/integrations/update-thought-mcp/deno.json
 mkdir -p supabase/functions/_shared
 curl -o supabase/functions/_shared/auth.ts \
   https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/integrations/_shared/auth.ts

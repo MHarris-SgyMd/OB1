@@ -39,6 +39,7 @@ export const TOOLS = [
   { name: "list_supersession_proposals", scope: "read" },
   { name: "thought_stats", scope: "read" },
   { name: "thought_changes", scope: "read" },
+  { name: "brain_info", scope: "read" },
   { name: "capture_thought", scope: "capture" },
   { name: "update_thought", scope: "write" },
   { name: "delete_thought", scope: "write" },
