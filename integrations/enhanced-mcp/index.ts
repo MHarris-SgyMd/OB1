@@ -166,12 +166,68 @@ async function tiersOf(ids: string[]): Promise<Map<string, string>> {
 }
 
 /**
- * The client-side date window: `created_at` against the caller's ISO 8601
- * bounds, as strings — PostgREST's and the shim's timestamps are ISO 8601, so
- * the comparison orders them (the shape brain_list_thoughts hands Postgres).
+ * The caller's date window as instants (review pass 1; the first draft
+ * compared the strings, so a bound written with a UTC offset sorted against
+ * the shim's `Z` rendering by its digits — later digits for an earlier
+ * instant — a `start_date` that did not parse hid every row and an `end_date`
+ * that did not parse was ignored, neither with a word). A bound is an ISO
+ * 8601 date or date-time, held to that shape before it is parsed (`Date.parse`
+ * alone would take "Dec 25, 2025"), and read as UTC unless it carries an
+ * offset: a date-only value is that day's midnight UTC, a zone-less date-time
+ * is UTC too — never the process's zone. `brain_list_thoughts` and
+ * `count_thoughts` hand the same string to Postgres, which reads a bare date in
+ * the session's time zone; the four tools agree on a database running in UTC,
+ * the container images' default. A bound that fails the shape, or a window
+ * closed before it opens, is refused by name rather than compared.
  */
-function withinDates(row: ThoughtRow, startDate: string | null, endDate: string | null): boolean {
-  return (!startDate || row.created_at >= startDate) && (!endDate || row.created_at <= endDate);
+type DateWindow = { start: number | null; end: number | null };
+// An offset carries its minutes (`+02:00`, `+0200`): Bun's Date.parse makes `+02` an Invalid Date.
+const ISO_BOUND = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?<zone>Z|[+-]\d{2}:?\d{2})?)?$/i;
+function parseBound(name: string, value: string | null): number | null | { error: string } {
+  if (!value) return null;
+  const m = ISO_BOUND.exec(value);
+  if (!m) return { error: `${name} is not an ISO 8601 date or date-time: ${value}` };
+  const utc = m.groups?.zone || value.length === 10 ? value : `${value}Z`;
+  const t = Date.parse(utc.replace(" ", "T"));
+  return Number.isNaN(t) ? { error: `${name} is not a real date: ${value}` } : t;
+}
+function dateWindow(startDate: string | null, endDate: string | null): DateWindow | { error: string } {
+  const start = parseBound("start_date", startDate);
+  if (typeof start === "object" && start !== null) return start;
+  const end = parseBound("end_date", endDate);
+  if (typeof end === "object" && end !== null) return end;
+  if (start !== null && end !== null && start > end) return { error: `start_date ${startDate} is after end_date ${endDate}` };
+  return { start, end };
+}
+
+/** Is the row's `created_at` inside the window? A row whose timestamp does not parse is outside any bound. */
+function withinDates(row: ThoughtRow, w: DateWindow): boolean {
+  if (w.start === null && w.end === null) return true;
+  const t = Date.parse(String(row.created_at));
+  return (w.start === null || t >= w.start) && (w.end === null || t <= w.end);
+}
+
+/**
+ * A page of search_thoughts_text after the row filters, for both tools that
+ * call it. The function ranks and pages BEFORE the tier (and, in
+ * brain_search_thoughts, the date) filters apply, so: `total` is the
+ * function's count, hidden rows included; `has_more` reads the page the
+ * cursor moved past (`pageLength`), so a page the filters emptied still says
+ * whether another follows — the third tool answered a bare "No matches
+ * found." over a page of hidden rows with hits behind it (review pass 1); and
+ * a line's ordinal is the row's position in that page, `at`, not in the
+ * filtered list, so the numbers stay honest across pages with hidden rows.
+ */
+function textPage(shown: { row: ThoughtRow; at: number }[], pageLength: number, totalCount: number, offset: number, limit: number) {
+  const pagination = { total: totalCount, offset, limit, has_more: offset + pageLength < totalCount };
+  if (shown.length === 0) {
+    return toolSuccess(pagination.has_more ? "No matches on this page; more follow." : "No matches found.", { results: [], pagination });
+  }
+  const lines = shown.map(({ row, at }) => {
+    const score = Number(row.rank ?? 0).toFixed(3);
+    return `${offset + at + 1}. [${score}] (${row.type}) #${row.id} ${truncateContent(row.content, 500)}`;
+  });
+  return toolSuccess(lines.join("\n"), { results: shown.map(({ row }) => row), pagination });
 }
 
 // ── MCP Server ────────────────────────────────────────────────────────────
@@ -251,6 +307,8 @@ function buildServer(): McpServer {
         if (query.length < 2) {
           return toolFailure("query must be at least 2 characters");
         }
+        const window = dateWindow(startDate, endDate);
+        if ("error" in window) return toolFailure(window.error);
 
         if (mode === "text") {
           // p_filter is a metadata containment (the note above tiersOf): the
@@ -276,32 +334,11 @@ function buildServer(): McpServer {
                   (page[0] as Record<string, unknown>).total_count ?? page.length,
                 )
               : 0;
-          const rows = page
-            .filter((row) => row.sensitivity_tier !== "restricted")
-            .filter((row) => withinDates(row, startDate, endDate));
-          // The page the function returned is what the cursor has moved past,
-          // hidden rows included — so a page the filters emptied still says
-          // whether another follows.
-          const pagination = {
-            total: totalCount,
-            offset,
-            limit,
-            has_more: offset + page.length < totalCount,
-          };
-
-          if (rows.length === 0) {
-            return toolSuccess(
-              pagination.has_more ? "No matches on this page; more follow." : "No matches found.",
-              { results: [], pagination },
-            );
-          }
-
-          const lines = rows.map((row, index) => {
-            const score = Number(row.rank ?? 0).toFixed(3);
-            return `${offset + index + 1}. [${score}] (${row.type}) #${row.id} ${truncateContent(row.content, 500)}`;
-          });
-
-          return toolSuccess(lines.join("\n"), { results: rows, pagination });
+          const shown = page
+            .map((row, at) => ({ row, at }))
+            .filter(({ row }) => row.sensitivity_tier !== "restricted")
+            .filter(({ row }) => withinDates(row, window));
+          return textPage(shown, page.length, totalCount, offset, limit);
         }
 
         // Semantic search (default)
@@ -333,9 +370,11 @@ function buildServer(): McpServer {
 
         const allRows = (data ?? []) as ThoughtRow[];
         const tiers = await tiersOf(allRows.map((row) => row.id));
+        // An id the lookup did not return (deleted between the two calls) is
+        // treated as restricted: the filter fails closed.
         const rows = allRows
-          .filter((row) => tiers.get(row.id) !== "restricted")
-          .filter((row) => withinDates(row, startDate, endDate))
+          .filter((row) => (tiers.get(row.id) ?? "restricted") !== "restricted")
+          .filter((row) => withinDates(row, window))
           .slice(0, limit);
 
         if (rows.length === 0) {
@@ -944,20 +983,12 @@ function buildServer(): McpServer {
           throw new Error(`search_thoughts_text failed: ${error.message}`);
         }
 
-        const rows = ((data ?? []) as ThoughtRow[]).filter(
-          (row) => row.sensitivity_tier !== "restricted",
-        );
-
-        if (rows.length === 0) {
-          return toolSuccess("No matches found.", { results: [] });
-        }
-
-        const lines = rows.map((row, index) => {
-          const score = Number(row.rank ?? 0).toFixed(3);
-          return `${offset + index + 1}. [${score}] (${row.type}) #${row.id} ${truncateContent(row.content, 500)}`;
-        });
-
-        return toolSuccess(lines.join("\n"), { results: rows });
+        const page = (data ?? []) as ThoughtRow[];
+        const totalCount = page.length > 0 ? Number((page[0] as Record<string, unknown>).total_count ?? page.length) : 0;
+        const shown = page
+          .map((row, at) => ({ row, at }))
+          .filter(({ row }) => row.sensitivity_tier !== "restricted");
+        return textPage(shown, page.length, totalCount, offset, limit);
       } catch (error) {
         console.error("search_thoughts_text failed", error);
         return toolFailure(String(error));

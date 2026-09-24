@@ -470,9 +470,11 @@ try {
   // alone and the tier and the dates are applied to the rows — the tier by the COLUMN (match_thoughts returns none,
   // so semantic mode looks it up by id; the old client-side filter compared undefined). A restricted twin at the
   // captured thought's own vector, whose text the query matches too, is the mutant that shows the filter at work.
+  // Importance 5: the text function's rank adds importance/20, so the twin outranks the capture (the stub's 4) and is
+  // the first row of the function's order — the page drive below leans on that.
   const hidden = "a restricted thought captured through enhanced-mcp, which no search may show";
-  const [{ id: rid }] = await sql`INSERT INTO thoughts (content, content_fingerprint, embedding, embedding_model, sensitivity_tier, metadata)
-    VALUES (${hidden}, content_fingerprint_of(${hidden}), ${vec(unit(captured))}::vector, ${MODEL}, 'restricted', '{"source": "planted"}'::jsonb) RETURNING id`;
+  const [{ id: rid }] = await sql`INSERT INTO thoughts (content, content_fingerprint, embedding, embedding_model, sensitivity_tier, importance, metadata)
+    VALUES (${hidden}, content_fingerprint_of(${hidden}), ${vec(unit(captured))}::vector, ${MODEL}, 'restricted', 5, '{"source": "planted"}'::jsonb) RETURNING id`;
   const ids = (r: { structured: any }) => ((r.structured?.results ?? []) as { id: string }[]).map((x) => x.id);
   const textMode = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text" });
   assert(!textMode.isError && ids(textMode).includes(cid) && !ids(textMode).includes(rid),
@@ -499,6 +501,44 @@ try {
     `a date bound is applied to the rows in both modes: an end_date in the past hides the capture, a start_date in the past shows it (${ids(before).length}/${ids(since).length}/${ids(beforeText).length}/${ids(sinceText).length})`);
   assert(beforeText.structured?.pagination?.has_more === false && /^No matches found/.test(beforeText.toolText),
     `…and a text page the bounds emptied, with none following, says so plainly (${beforeText.toolText})`);
+  // The bounds are instants, not strings (review pass 1). The meaning first: a date-only value is that day's
+  // midnight UTC, so the capture's own day as end_date closes before it and the next day's keeps it, in both modes
+  // (the string comparison agreed on these two — the pins that tell the schemes apart follow).
+  const [{ day, next, later, earlier }] = await sql`SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
+    to_char((created_at + interval '1 day') AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS next,
+    to_char((created_at + interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') || '+02:00' AS later,
+    to_char((created_at - interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') AS earlier FROM thoughts WHERE id = ${cid}`;
+  const ownDay = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, end_date: day });
+  const nextDay = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, end_date: next });
+  const nextDayText = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", end_date: next });
+  const [{ sqlKeeps }] = await sql`SELECT count(*)::int = 1 AS "sqlKeeps" FROM thoughts WHERE id = ${cid} AND created_at <= (${day} || 'T00:00:00Z')::timestamptz`;
+  assert(ids(ownDay).length === 0 && ids(nextDay).includes(cid) && ids(nextDayText).includes(cid) && sqlKeeps === false,
+    `a date-only end_date is that day's midnight UTC — Postgres agrees on the instant: the capture's own day closes before it, the next day keeps it, in both modes (${day}: ${ids(ownDay).length}, ${next}: ${ids(nextDay).length}/${ids(nextDayText).length}, SQL keeps ${sqlKeeps})`);
+  // `later` names a clock one hour after the capture in a zone two hours ahead: an instant one hour BEFORE it, so a
+  // window opening there holds the capture — compared as strings its digits sorted after the row's and dropped it.
+  const offsetBound = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, start_date: later });
+  assert(ids(offsetBound).includes(cid), `a start_date with a UTC offset is the instant it names — later digits, an earlier instant, so the capture is inside the window (${later}: ${ids(offsetBound).length})`);
+  // `earlier` is a zone-less clock one hour before the capture: read as UTC it opens the window before the row;
+  // read in this process's zone (a machine west of UTC) it would open hours after it.
+  const zoneless = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, start_date: earlier });
+  assert(ids(zoneless).includes(cid), `a zone-less date-time is read as UTC, never the process's zone (${earlier}: ${ids(zoneless).length})`);
+  const unparsable = await call(h, "brain_search_thoughts", { query: captured, end_date: "yesterday" });
+  const prose = await call(h, "brain_search_thoughts", { query: captured, start_date: "Dec 25, 2025" });
+  const inverted = await call(h, "brain_search_thoughts", { query: captured, mode: "text", start_date: "2026-01-02", end_date: "2026-01-01" });
+  assert(unparsable.isError && /end_date is not an ISO 8601 date or date-time: yesterday/.test(unparsable.toolText) && prose.isError && /start_date is not an ISO 8601/.test(prose.toolText)
+    && inverted.isError && /is after end_date/.test(inverted.toolText),
+    `a bound off the ISO shape — prose Date.parse would take included — or a window closed before it opens is refused by name (${unparsable.toolText.slice(0, 60)} / ${prose.toolText.slice(0, 50)} / ${inverted.toolText.slice(0, 60)})`);
+  // A page the tier filter emptied, with hits behind it: the twin ranks first (importance 5, above), so with limit 1
+  // it is the whole page — hidden, and the tool says another page follows rather than a false end; the third tool
+  // answers the same page the same way (its first draft said "No matches found.").
+  const onePage = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", limit: 1 });
+  const onePageDirect = await call(h, "search_thoughts_text", { query: "captured through enhanced", limit: 1 });
+  const secondPage = await call(h, "search_thoughts_text", { query: "captured through enhanced", limit: 1, offset: 1 });
+  assert(ids(onePage).length === 0 && /^No matches on this page; more follow\./.test(onePage.toolText) && onePage.structured?.pagination?.has_more === true
+    && ids(onePageDirect).length === 0 && /more follow/.test(onePageDirect.toolText) && onePageDirect.structured?.pagination?.has_more === true,
+    `a page the tier filter emptied says more follow, in both tools, with has_more true (${onePage.toolText} / ${onePageDirect.toolText}; ${JSON.stringify(onePageDirect.structured?.pagination)})`);
+  assert(ids(secondPage).includes(cid) && secondPage.structured?.pagination?.has_more === false && /^2\. /.test(secondPage.toolText),
+    `…and the next page holds the capture, numbered by its place in the function's order, with no page after (${secondPage.toolText.slice(0, 40)}; ${JSON.stringify(secondPage.structured?.pagination)})`);
   const listed = await call(h, "brain_list_thoughts", { limit: 1, type: "idea" });
   const pagination = listed.structured?.pagination;
   assert(!listed.isError && listed.structured?.results?.length === 1 && typeof pagination?.total === "number" && pagination.total >= 2 && pagination.has_more === true,
