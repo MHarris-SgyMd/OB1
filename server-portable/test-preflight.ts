@@ -12,7 +12,8 @@
  */
 
 import { join, dirname } from "node:path";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
 import { DIRECT_CHECK_SKIP_OVER_POSTGREST } from "./store.ts";
@@ -54,6 +55,9 @@ async function run(env: Record<string, string | undefined>, ...args: string[]) {
     if (v !== undefined) clean[k] = String(v);
   }
   for (const [k, v] of Object.entries(env)) if (v === undefined) delete clean[k];
+  // A developer's proxy would route every loopback probe below through it
+  // (Bun reads these four; fifth review pass): only a case that sets one has one.
+  for (const k of ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"]) if (!(k in env)) delete clean[k];
   return runScript(["bun", join(HERE, "preflight.ts"), ...args], { env: clean, cwd: HERE });
 }
 
@@ -2092,8 +2096,69 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   const chatDown = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: LOCAL_STUB, OB1_CHAT_BASE_URL: "http://127.0.0.1:1/v1" });
   assert(chatDown.code === 1 && /✓\s+provider endpoint/.test(chatDown.out) && /✗\s+chat endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:1\/v1 — the connection was refused/.test(row(chatDown.out, "chat endpoint")),
          `a down chat server beside a live embedder fails the chat endpoint row and not the provider's (exit ${chatDown.code})`);
+  assert(/fix the port in OB1_CHAT_BASE_URL\./.test(fix(chatDown.out, "chat endpoint")) && /fix the port in OB1_LLM_BASE_URL\./.test(fix(refused.out, "provider endpoint")),
+         "…and each row's remedy names its own knob (fifth review pass)");
   const hostedChat = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: LOCAL_STUB, OB1_CHAT_BASE_URL: "https://provider.invalid/v1", OB1_CHAT_API_KEY: "k-chat" });
   assert(row(hostedChat.out, "chat endpoint") === "" && /✓\s+provider endpoint/.test(hostedChat.out), "…and a hosted chat endpoint beside a local embedder is not dialled");
+
+  // A proxy in the environment: Bun routes loopback through it too, and so do
+  // the server's calls, so the row names the route before the endpoint and the
+  // remedy leads with NO_PROXY (fifth review pass: a dead corporate proxy read
+  // as "127.0.0.1 refused" with the container remedy).
+  const proxied = Bun.serve({ port: 0, fetch: () => Response.json({ object: "list", data: [] }) });
+  const PROXIED = `http://127.0.0.1:${proxied.port}/v1`;
+  const deadProxy = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: PROXIED, HTTP_PROXY: "http://127.0.0.1:1" });
+  assert(deadProxy.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 — the connection was refused \(GET \/models, 2\.5 s timeout\); HTTP_PROXY is set, so this call and every one the server makes go through that proxy unless NO_PROXY names 127\.0\.0\.1; the first capture/.test(row(deadProxy.out, "provider endpoint")),
+         `a live endpoint behind a dead HTTP_PROXY fails naming the proxy variable (exit ${deadProxy.code})`);
+  assert(/→ Add 127\.0\.0\.1 to NO_PROXY \(and no_proxy\) for the server, or unset HTTP_PROXY for it\. Otherwise: Inside a container/.test(fix(deadProxy.out, "provider endpoint")), "…with NO_PROXY first in the remedy, the hostname's remedy after");
+  const exempt = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: PROXIED, http_proxy: "http://127.0.0.1:1", NO_PROXY: "127.0.0.1" });
+  assert(/✓\s+provider endpoint\s+http:\/\/127\.0\.0\.1:\d+\/v1 answers — HTTP 200/.test(exempt.out) && !/proxy/.test(row(exempt.out, "provider endpoint")), "…and NO_PROXY naming the host passes with no proxy text on the row");
+  const httpsProxyOnly = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: PROXIED, HTTPS_PROXY: "http://127.0.0.1:1" });
+  assert(/✓\s+provider endpoint\s+http:\/\/127\.0\.0\.1:\d+\/v1 answers — HTTP 200/.test(httpsProxyOnly.out), "…and HTTPS_PROXY alone does not touch an http base");
+  proxied.stop(true);
+
+  // Userinfo in the base: fetch never sends it, and the rows must not print
+  // it on every start (fifth review pass).
+  const seenAuth: (string | null)[] = [];
+  const plain = Bun.serve({ port: 0, fetch: (req) => { seenAuth.push(req.headers.get("authorization")); return Response.json({ object: "list", data: [] }); } });
+  const withUser = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://user:s3cret-in-url@127.0.0.1:${plain.port}/v1` });
+  plain.stop(true);
+  assert(!/s3cret-in-url/.test(withUser.out) && /✓\s+provider endpoint\s+http:\/\/\*\*\*@127\.0\.0\.1:\d+\/v1 answers/.test(withUser.out) && /✓\s+model provider\s+http:\/\/\*\*\*@127\.0\.0\.1:\d+\/v1 — embeddings/.test(withUser.out),
+         "userinfo in the base URL is masked on the endpoint and provider rows and appears nowhere in the report");
+  assert(seenAuth.length === 1 && seenAuth[0] === null, `…and fetch sent no Authorization for it (${JSON.stringify(seenAuth)})`);
+
+  // A listener that accepts and closes with no HTTP — an https port dialled
+  // as http is the common shape — is its own wording, without Bun's advice
+  // about its verbose option (fifth review pass).
+  const closer = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { open(sock) { sock.end(); }, data() {} } });
+  const reset = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://127.0.0.1:${closer.port}/v1` });
+  closer.stop(true);
+  assert(reset.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 — the connection was accepted and closed with no HTTP answer, as an https endpoint dialled as http does \(GET \/models/.test(row(reset.out, "provider endpoint")) && !/verbose: true/.test(reset.out),
+         `a listener that closes on accept reads as accepted-and-closed, without Bun's advice (exit ${reset.code}; ${row(reset.out, "provider endpoint").slice(0, 160)})`);
+
+  // TLS: something answered and its certificate was refused. The lead says
+  // "answers, but", the remedy is trust, not addresses; under
+  // NODE_TLS_REJECT_UNAUTHORIZED=0 it passes as the server's calls would
+  // (fifth review pass). The certificate is minted here with openssl; a box
+  // without one skips the case rather than passing it.
+  const certDir = mkdtempSync(join(tmpdir(), "ob1-preflight-tls-"));
+  const minted = Bun.spawnSync(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(certDir, "k.pem"), "-out", join(certDir, "c.pem"), "-subj", "/CN=localhost", "-days", "1"], { stdout: "ignore", stderr: "ignore" });
+  if (minted.exitCode !== 0) {
+    skipRaw("a self-signed TLS endpoint reads as answering with an untrusted certificate", "no openssl to mint a certificate");
+    skipRaw("…and passes under NODE_TLS_REJECT_UNAUTHORIZED=0", "no openssl to mint a certificate");
+  } else {
+    const tlsStub = Bun.serve({ port: 0, tls: { key: Bun.file(join(certDir, "k.pem")), cert: Bun.file(join(certDir, "c.pem")) }, fetch: () => Response.json({ object: "list", data: [] }) });
+    const TLS = `https://127.0.0.1:${tlsStub.port}/v1`;
+    const untrusted = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: TLS, NODE_TLS_REJECT_UNAUTHORIZED: undefined });
+    assert(untrusted.code === 1 && new RegExp(String.raw`✗\s+provider endpoint\s+${rx(TLS)} answers, but its TLS certificate is not trusted \(DEPTH_ZERO_SELF_SIGNED_CERT\) \(GET /models, 2\.5 s timeout\); every capture would fail the same way`).test(row(untrusted.out, "provider endpoint")),
+           `a self-signed TLS endpoint reads as answering with an untrusted certificate (exit ${untrusted.code}; ${row(untrusted.out, "provider endpoint").slice(0, 160)})`);
+    assert(/→ Serve it over http:\/\/ on the box, or trust its issuer for the server \(NODE_EXTRA_CA_CERTS=<ca\.pem>\); NODE_TLS_REJECT_UNAUTHORIZED=0 disables the check for every call the server makes\./.test(fix(untrusted.out, "provider endpoint")) && !/Inside a container/.test(fix(untrusted.out, "provider endpoint")),
+           "…with a trust remedy and not an address one");
+    const trusted = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: TLS, NODE_TLS_REJECT_UNAUTHORIZED: "0" });
+    assert(new RegExp(String.raw`✓\s+provider endpoint\s+${rx(TLS)} answers — HTTP 200`).test(trusted.out), "…and passes under NODE_TLS_REJECT_UNAUTHORIZED=0");
+    tlsStub.stop(true);
+  }
+  rmSync(certDir, { recursive: true, force: true });
 
   // The row is in the JSON report too, by name, so a pipeline gate reads it.
   const asJson = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1" }, "--json");
