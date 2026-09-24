@@ -28,7 +28,7 @@ Three failure modes the policy + auditor pair catches that scattered prompt-tuni
 
 - **`editorial-policy.md`** — the full 40-rule constitution. Copy to your `docs/editorial-policy.md`. Adapt the operator-specific rules (R1.1, R9.2, R9.3) to your name and timezone; keep everything else.
 - **`schema.sql`** — adds one helper RPC (`get_recent_audit_reports`) and one partial index on the `thoughts` table. No new tables.
-- **`auditor/index.ts`** + **`deno.json`** — Supabase Edge Function that runs weekly, scans recent thoughts, returns structured JSON findings, stores them as `type=audit_report` thoughts, and posts to Slack on critical findings only. On this fork the report is stored through the database's `upsert_thought` (FORK.md change 71, SMD-1524), so the row carries its content fingerprint and 008's audit row names the key that ran the audit — the raw insert it replaced left the fingerprint NULL and the actor unnamed; the report carries no vector, so it has no model label and is not a search target.
+- **`auditor/index.ts`** — the auditor server (`bun recipes/editorial-policy/auditor/index.ts`) that runs weekly, scans recent thoughts, returns structured JSON findings, stores them as `type=audit_report` thoughts, and posts to Slack on critical findings only. On this fork the report is stored through the database's `upsert_thought` (FORK.md change 71, SMD-1524), so the row carries its content fingerprint and 008's audit row names the key that ran the audit — the raw insert it replaced left the fingerprint NULL and the actor unnamed; the report carries no vector, so it has no model label and is not a search target.
 - **`schedule.sql`** — pg_cron entry to fire the auditor weekly.
 
 ## Prerequisites
@@ -135,7 +135,6 @@ POLICY_VERSION = 1.3   # or whatever your editorial-policy.md says
 # From your OB1 working directory:
 mkdir -p supabase/functions/auditor supabase/functions/_shared
 cp <recipe>/auditor/index.ts  supabase/functions/auditor/index.ts
-cp <recipe>/auditor/deno.json supabase/functions/auditor/deno.json
 cp <recipe>/_shared/auth.ts   supabase/functions/_shared/auth.ts   # the access-key module index.ts imports as ../_shared/auth.ts
 supabase functions deploy auditor
 ```

@@ -83,9 +83,9 @@ const BLOCKERS = [
  * but deployed as an Edge Function, until SMD-1798 moved it with the other
  * five servers that were still on supabase-js.)
  */
-const KEEP = new Map([
-  ["recipes/local-brain-no-mcp/functions/_shared/db.ts",
-    "runs inside the recipe's own self-hosted Supabase stack (setup.sh symlinks functions/ into its edge runtime), where PostgREST is present and bun is not"],
+const KEEP = new Map<string, string>([
+  // None today: the one entry, recipes/local-brain-no-mcp's client inside that recipe's own Supabase stack,
+  // left with the recipe (SMD-1800). An entry is a file that deploys where bun is not and PostgREST is.
 ]);
 
 /** One file the scan found — on supabase-js, or already on the shim — with the reasons it cannot move. */

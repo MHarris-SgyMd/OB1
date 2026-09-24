@@ -17,7 +17,7 @@
     "keygen": "bun keygen.ts",
     "test:local": "../db/with-postgres.sh bun test-local-provider.ts"
   },
-  "comment": "Runtime dependencies are pinned to the exact versions in ../server/deno.json so all four targets run identical library code. Bump both files in the same commit.",
+  "comment": "Runtime dependencies are pinned to the exact versions extensions/package.json installs for the vendored servers, so every target runs identical library code; extensions/test-auth.ts fails if the two drift. Bump both files in the same commit.",
   "dependencies": {
     "@hono/mcp": "0.3.2",
     "@modelcontextprotocol/sdk": "1.30.0",
