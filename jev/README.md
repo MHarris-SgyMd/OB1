@@ -126,8 +126,9 @@ The same decision gave the same probability on both (p 0.712). A padded batch
 of eight measured no faster than eight singles on this CPU, so the engine runs
 one forward pass per decision; the service runs one request at a time, in
 arrival order. Beside the embedder and the metadata model it is a separate
-process of about 1 GB with nothing for Ollama to evict; the co-load under
-`OLLAMA_MAX_LOADED_MODELS` memory pressure is measured in SMD-2050's second PR.
+process of about 1 GB with nothing for Ollama to evict — measured beside both
+of Ollama's models under `OLLAMA_MAX_LOADED_MODELS=2`: no eviction, each call
+~1.5× slower at p50 while all three run (`evals/eval-jev-coload.ts`).
 
 **Provenance names the rules, not only the weights.** The same weights
 under two prompt engines answer differently — the two JevBench rows, the
