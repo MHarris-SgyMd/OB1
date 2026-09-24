@@ -60,9 +60,12 @@ export type JevEnv = EgressEnv & {
 };
 
 /**
- * Per request. A decision is tens of milliseconds on a CPU (75 ms measured on
- * the dogfood Mac), so a full batch of 64 is a few seconds; this is the bound
- * for a request that never returns, not a budget for a slow one.
+ * Per request. A decision is 18–146 ms on the dogfood Mac's CPU (60–512
+ * tokens), so a full batch of 64 at the budget is ~9 s — and the service runs
+ * one request at a time, so a request's wait includes the ones ahead of it: a
+ * full batch behind two others passes 30 s and is skipped (499) when its
+ * caller gives up. A caller sending full batches to a shared tier passes a
+ * larger `timeoutMs`; this is the bound for a request that never returns.
  */
 export const DEFAULT_JEV_TIMEOUT_MS = 30_000;
 

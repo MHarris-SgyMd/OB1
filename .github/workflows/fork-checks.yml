@@ -241,9 +241,9 @@ jobs:
       # the client in server-portable/jev.ts, which the suite imports — so it
       # runs in THIS job, after server-portable's install. No model: [1]–[8]
       # hold the contract, the Verdict port, the handler, the verified fetch
-      # and the client's gate against stubs; [9], the model itself, skips
-      # unless JEV_TEST_MODEL_DIR names the pinned files (606 MB, not fetched
-      # in CI). onnxruntime-node's postinstall stays untrusted: it fetches only
+      # and the client's gate against stubs; [9]-[11], the model itself, its
+      # published receipt and JevBench's rows, skip unless JEV_TEST_MODEL_DIR
+      # names the pinned files (606 MB, not fetched in CI). onnxruntime-node's postinstall stays untrusted: it fetches only
       # CUDA binaries, and the typecheck needs none.
       - name: Install the decision tier's pinned packages
         working-directory: jev

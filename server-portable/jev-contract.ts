@@ -39,10 +39,14 @@ export const INSUFFICIENT_EVIDENCE = "__insufficient_evidence__";
 /** Options a caller may supply to one choice (the model's 25 slots, less the tier's own). */
 export const JEV_MAX_OPTIONS = 24;
 
-/** Decisions in one request; the client splits a longer list into requests of this size. */
+/** Decisions in one request; the client packs a longer list into requests under this and JEV_MAX_BODY_BYTES. */
 export const JEV_MAX_BATCH = 64;
 
-/** Characters in any one text field — the model reads 512 tokens, so this only bounds the tokenizer's work. */
+/**
+ * Characters in any one text field, the decision's id included. The model
+ * reads 512 tokens, so for the texts this only bounds the tokenizer's work;
+ * for every field it is what JEV_MAX_BODY_BYTES is derived from.
+ */
 export const JEV_MAX_TEXT = 20_000;
 
 /**
@@ -75,7 +79,12 @@ export type JevRequest = {
   decisions: JevDecision[];
 };
 
-/** What decided, pinned: enough to reproduce the probability and to record it as provenance. */
+/**
+ * What decided, pinned: enough to reproduce the probability and to record it
+ * as provenance. The weights alone are not — the same weights under two
+ * prompt engines answer differently (jev/README.md, "Conformance") — so
+ * `rules` names the prompt and calibration rules too.
+ */
 export type JevModelInfo = {
   /** The name OB1_JEV_MODEL compares against, e.g. `verdict-v1.4`. */
   name: string;
@@ -87,6 +96,13 @@ export type JevModelInfo = {
   weights_sha256: string;
   /** sha256 of the calibration the probabilities are scaled by. */
   calibrator_sha256: string;
+  /**
+   * The rules a prompt is built and scaled by: the reference engine's
+   * revision and a fingerprint the service computes from its own prompt,
+   * budget and temperature rules, so it changes whenever they do — not a
+   * version someone has to remember to bump (third review pass).
+   */
+  rules: string;
 };
 
 export type JevInfo = {
@@ -95,7 +111,7 @@ export type JevInfo = {
   kinds: JevDecision["kind"][];
   max_options: number;
   max_batch: number;
-  /** Tokens the model reads; a longer input is truncated and its result says so. */
+  /** Tokens the model reads; a longer context is truncated and its result says so, labels that do not fit are refused (422). */
   max_tokens: number;
 };
 

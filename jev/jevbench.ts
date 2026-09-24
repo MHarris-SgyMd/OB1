@@ -74,6 +74,10 @@ type Task = {
  * ", " and ": " separators, strings escaped as JSON (Python and JSON agree on
  * the escapes ensure_ascii=False keeps), no floats (none in the public set —
  * checked; JavaScript cannot tell 1.0 from 1, so a float would be refused).
+ * One limit it cannot lift: a JavaScript object lists integer-like keys first,
+ * where Python keeps insertion order. The public set has one such key
+ * (`footnotes."9"` in a hard task) and its order happens to agree; [11]'s
+ * 231/231 would show a state where it did not.
  */
 export function pyDumps(v: unknown): string {
   if (v === null) return "null";
@@ -157,16 +161,21 @@ export function byTier(outcomes: TaskOutcome[]): Record<Tier | "all", { correct:
   return acc;
 }
 
-/** McNemar's exact two-sided test: b tasks only A gets right, c only B does. */
+/**
+ * McNemar's exact two-sided test: b tasks only A gets right, c only B does.
+ * Summed in log space — 2^n overflows past n ≈ 1,023 (third review pass).
+ */
 export function mcnemar(b: number, c: number): number {
   const n = b + c;
   if (n === 0) return 1;
-  let tail = 0, coef = 1; // C(n, 0)
+  const logHalfN = n * Math.log(0.5);
+  let logCoef = 0; // log C(n, 0)
+  let tail = 0;
   for (let i = 0; i <= Math.min(b, c); i++) {
-    tail += coef;
-    coef = (coef * (n - i)) / (i + 1);
+    tail += Math.exp(logCoef + logHalfN);
+    logCoef += Math.log(n - i) - Math.log(i + 1);
   }
-  return Math.min(1, (2 * tail) / 2 ** n);
+  return Math.min(1, 2 * tail);
 }
 
 if (import.meta.main) {

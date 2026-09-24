@@ -63,14 +63,6 @@ export const VERDICT = {
 
 export type VerdictFile = keyof typeof VERDICT.files;
 
-export const MODEL_INFO: JevModelInfo = {
-  name: VERDICT.name,
-  source: `https://huggingface.co/${VERDICT.repo}`,
-  revision: VERDICT.revision,
-  weights_sha256: VERDICT.files["model.onnx"].sha256,
-  calibrator_sha256: VERDICT.files["calibrator.json"].sha256,
-};
-
 export const LABEL_MARKER = "<<LABEL>>";
 export const SEP_MARKER = "<<SEP>>";
 /** The label the reference engine gives the tier's own option. */
@@ -79,15 +71,6 @@ export const INSUFFICIENT_LABEL = "insufficient evidence";
 export const MAX_TOKENS = 512;
 /** The model's output slots — options plus the tier's own. */
 export const SLOTS = JEV_MAX_OPTIONS + 1;
-
-export const INFO: JevInfo = {
-  contract: JEV_CONTRACT,
-  model: MODEL_INFO,
-  kinds: ["binary", "choice"],
-  max_options: JEV_MAX_OPTIONS,
-  max_batch: JEV_MAX_BATCH,
-  max_tokens: MAX_TOKENS,
-};
 
 /**
  * The prompt for one decision, the option ids its labels stand for in order,
@@ -136,6 +119,47 @@ export function truncate(ids: number[], max: number): { ids: number[]; truncated
   if (ids.length <= max) return { ids, truncated: false };
   return { ids: [...ids.slice(0, max - 1), ids[ids.length - 1]], truncated: true };
 }
+
+/** The reference engine revision these rules are ported from (openJev-verdict-2.0 PR #3). */
+export const ENGINE_REVISION = "00b5ee96";
+
+/**
+ * A fingerprint of the rules a probability depends on beyond the weights:
+ * buildPrompt over one decision of each kind, the token budget, the
+ * truncation rule and the temperature rule. Part of MODEL_INFO.rules, so a
+ * change to any of them changes the provenance every answer carries — the
+ * same weights under two engines answered differently on both published sets
+ * (third review pass). test-jev.ts [2] pins the value, so the change is seen.
+ */
+export function rulesFingerprint(): string {
+  const cal: Calibrator = { temperature: 2, per_k: { "3": 5 } };
+  const probe = JSON.stringify([
+    buildPrompt({ kind: "binary", proposition: "P", context: "C" }),
+    buildPrompt({ kind: "choice", question: "Q", context: "C", options: [{ id: "a", description: "A" }] }),
+    MAX_TOKENS,
+    truncate([1, 2, 3, 4], 3),
+    [temperatureFor(cal, 3), temperatureFor(cal, 4)],
+  ]);
+  return new Bun.CryptoHasher("sha256").update(probe).digest("hex").slice(0, 12);
+}
+
+export const MODEL_INFO: JevModelInfo = {
+  name: VERDICT.name,
+  source: `https://huggingface.co/${VERDICT.repo}`,
+  revision: VERDICT.revision,
+  weights_sha256: VERDICT.files["model.onnx"].sha256,
+  calibrator_sha256: VERDICT.files["calibrator.json"].sha256,
+  rules: `openjev-engine@${ENGINE_REVISION}#${rulesFingerprint()}`,
+};
+
+export const INFO: JevInfo = {
+  contract: JEV_CONTRACT,
+  model: MODEL_INFO,
+  kinds: ["binary", "choice"],
+  max_options: JEV_MAX_OPTIONS,
+  max_batch: JEV_MAX_BATCH,
+  max_tokens: MAX_TOKENS,
+};
 
 /** One result from one decision's K logits. */
 export function resultFrom(d: JevDecision, ids: string[], logits: number[], temperature: number, tokens: number, truncated: boolean): JevResult {

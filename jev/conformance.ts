@@ -26,7 +26,7 @@
  *   prompt and a different calibration, and what it costs on this workload is
  *   the record (jev/README.md, "Conformance").
  *
- *   bun conformance.ts <model dir>    # both arms, the table; exits 1 when the receipt arm does not conform
+ *   bun conformance.ts <model dir>    # both arms, the table; exits 1 when the receipt arm does not conform (every row, and every total)
  *
  * test-jev.ts [10] runs the same functions when JEV_TEST_MODEL_DIR is set.
  */
@@ -158,7 +158,9 @@ if (import.meta.main) {
   console.log(`\nreceipt arm: the predicted option agrees on ${a.agree}/${l.rows.length} rows, confidence within ${a.maxConfidenceDelta.toExponential(2)} (${(a.ms / 1000).toFixed(1)} s)`);
   for (const d of a.disagreements.slice(0, 10)) console.log(`  ${d}`);
   console.log(`served arm: ${s.differsFromReceipt} answers differ from the receipt's (${(s.ms / 1000).toFixed(1)} s)`);
-  const conforms = a.agree === l.rows.length && a.maxConfidenceDelta < 1e-4;
+  const near = (x: number, y: number) => Math.abs(x - y) < 1e-4;
+  const conforms = a.agree === l.rows.length && a.maxConfidenceDelta < 1e-4 && near(a.accuracy, r.accuracy) && near(a.abstentionRecall, r.abstention.recall)
+    && near(a.abstentionPrecision, r.abstention.precision) && near(a.ece, r.ece_equal_width) && near(a.brier, r.brier_score);
   console.log(conforms ? "\nCONFORMS — the runtime reproduces the published receipt" : "\nDOES NOT CONFORM");
   process.exit(conforms ? 0 : 1);
 }

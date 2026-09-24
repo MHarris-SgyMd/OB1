@@ -7,9 +7,10 @@
  * its reference engine's own strings and rules — the prompt layout, the
  * per-K-else-global temperature, the truncation that keeps [SEP], the
  * binary result's P(true | sufficient) — since a prompt one marker off gives
- * a probability the calibrator was never fitted to. [5] holds the HTTP
- * handler over a fake engine: every status the contract names, and one
- * request at a time. [6] holds the verified fetch against a stub hub: a file
+ * a probability the calibrator was never fitted to — and [2] pins the rules'
+ * fingerprint the provenance carries. [5] holds the engine over a fake
+ * tokenizer and runner, and its refusals; [5b] the HTTP handler over a fake
+ * engine: every status the contract names, the caps, one request at a time. [6] holds the verified fetch against a stub hub: a file
  * that does not hash to its pin is refused and nothing of it kept. [7]–[8]
  * hold the client against a stub tier that counts requests: a refused
  * decision is a ProviderError of kind `egress` and the stub sees NOTHING; a
@@ -98,6 +99,9 @@ section("[2] buildPrompt — core/formatting.py's strings, byte for byte");
   const c = buildPrompt({ kind: "choice", question: "Q", context: "C", options: [{ id: "x", description: "an x" }, { id: "y", description: "a y" }] });
   assert(c.prompt === "<<LABEL>>It is an x<<LABEL>>It is a y<<LABEL>>insufficient evidence<<SEP>>Question: Q\n\nContext:\nC", `choice is the NLI-framed layout (${JSON.stringify(c.prompt)})`);
   assert(JSON.stringify(c.ids) === JSON.stringify(["x", "y", INSUFFICIENT_EVIDENCE]), "choice ids in option order, the tier's own last");
+  // The rules the provenance names: a change to buildPrompt, the budget, the
+  // cut or the temperature rule changes this, and every answer's `rules` with it.
+  assert(MODEL_INFO.rules === "openjev-engine@00b5ee96#d1c5fb07e514", `the prompt rules' fingerprint is the pinned one (${MODEL_INFO.rules}) — a change here is a change to what reproduces a probability: update the pin and jev/README.md's provenance note together`);
 }
 
 // ── [3] Calibration and truncation ──────────────────────────────────────────

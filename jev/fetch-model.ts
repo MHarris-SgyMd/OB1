@@ -15,7 +15,8 @@
  * appended to (first review pass: both happened, measured) — and is renamed
  * only after it hashes to the pin. An interrupted fetch leaves nothing that
  * looks complete; a part no one has written for STALE_PART_MS is removed at
- * the next start. A file that hashes wrong is removed and named, never loaded.
+ * the next start. A file that hashes wrong is named and never loaded: replaced
+ * when fetching is on, left where it is (and refused) under --no-fetch.
  */
 
 import { mkdir, readdir, rename, rm, stat } from "node:fs/promises";

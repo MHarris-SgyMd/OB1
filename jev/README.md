@@ -82,6 +82,11 @@ bun serve.ts --fetch-only     # pre-pull into ~/.cache/ob1-jev/<revision> and ex
 bun serve.ts --no-fetch       # refuse to start unless the files are already there
 ```
 
+On the host, `serve.ts` binds 127.0.0.1: a container reaches it as
+`host.containers.internal` under podman machine on macOS (gvproxy forwards to
+the host's loopback — measured for Ollama), not under rootless podman on
+Linux, where the profile below is the route.
+
 Or `podman compose -f deploy/compose.yaml --profile jev up -d` —
 `deploy/README.md`, "The typed-decision tier". Knobs of its own: `JEV_HOST`
 (127.0.0.1; the image sets 0.0.0.0), `JEV_PORT` (8020), `JEV_MODEL_DIR`,
@@ -114,6 +119,15 @@ one forward pass per decision; the service runs one request at a time, in
 arrival order. Beside the embedder and the metadata model it is a separate
 process of about 1 GB with nothing for Ollama to evict; the co-load under
 `OLLAMA_MAX_LOADED_MODELS` memory pressure is measured in SMD-2050's second PR.
+
+**Provenance names the rules, not only the weights.** The same weights
+under two prompt engines answer differently — the two JevBench rows, the
+banking arms — so every answer's `model` carries `rules`,
+`openjev-engine@00b5ee96#<fingerprint>`: the reference engine's revision and
+a hash the service computes at load from `buildPrompt`, the token budget, the
+cut and the temperature rule (`verdict.ts`, `rulesFingerprint`). A change to
+any of them changes what a stored probability names, without anyone having to
+remember a version; test-jev [2] pins today's value.
 
 **What the numbers do not say.** Whether a Verdict probability is useful for
 any of the seven applications. A naive binary framing ("`021` is a named
@@ -204,7 +218,11 @@ Paired on the same items, with the token budget held at the served 512:
 | banking receipt, the model's own domain (1,000) | 95.5% | 93.1% | 25 | 1 | < 0.0001 |
 
 **The framing's effect depends on the domain.** On the fine-tuning domain it
-is a clear loss — all 25 on in-scope rows, abstention untouched; on
+is a clear loss, and mostly a loss of nerve: of the 25 rows only bare labels
+get right, 23 are in scope and 2 should abstain, and on 15 of the 23 `It is`
+abstains wrongly — it abstains on 230 rows where bare labels abstain on 214
+(the right number is 200), which is the 5 points of abstention precision
+above; on
 open-domain tasks it is a gain of 3.5 points that stops just short of p 0.05
 on 231 items. The tier keeps `It is` (the author's current engine, and
 JevBench's direction), and neither set is the fork's own workload: which
@@ -220,8 +238,8 @@ FSL-1.1-MIT.
 
 ## Tests
 
-`bun test-jev.ts` — 96 assertions with no model; with `JEV_TEST_MODEL_DIR`
+`bun test-jev.ts` — 97 assertions with no model; with `JEV_TEST_MODEL_DIR`
 naming the pinned files, [9] adds the model's presets and its refusals on the
 real tokenizer, [10] the receipt run and [11] both JevBench rows and the
-served-prompt equivalence (109, about three minutes). CI runs it in the
+served-prompt equivalence (110, about three minutes). CI runs it in the
 portable-server job, with `bunx tsc --noEmit` here (check 18 lists `jev`).

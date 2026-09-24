@@ -117,7 +117,8 @@ export function createHandler(engine: Engine): (req: Request) => Promise<Respons
 function intKnob(name: string, fallback: number, max: number): number {
   const raw = process.env[name]?.trim();
   if (!raw) return fallback;
-  const n = Number(raw);
+  // Digits only: Number() also reads 0x1f, 1e3 and 8020.0 (third review pass).
+  const n = /^\d+$/.test(raw) ? Number(raw) : NaN;
   if (!Number.isInteger(n) || n < 1 || n > max) {
     console.error(`${name}=${raw} is not a whole number from 1 to ${max}`);
     process.exit(2);
