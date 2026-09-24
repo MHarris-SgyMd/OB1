@@ -107,7 +107,8 @@ import { extractMetadata, metadataRefused, tagsOverExisting } from "../server-po
 import type { Actor } from "../server-portable/store.ts";
 import { describeEnv, loadEnv } from "./env.ts";
 import { linearClient, strict, type Gql } from "./linear-api.ts";
-import { IDENTIFIER_PATTERN, ISSUE_FIELDS, issueFacets, LABELS_BOUND, labelNames, linearAdapter, RELATIONS_BOUND, renderIssue, SAMPLE_ISSUE, stripAutolinks, type LinearIssue } from "./ingest-linear.ts";
+import { IDENTIFIER_PATTERN, ISSUE_FIELDS, issueFacets, LABELS_BOUND, labelNames, LINEAR_SYSTEM, linearAdapter, RELATIONS_BOUND, renderIssue, SAMPLE_ISSUE, stripAutolinks, type LinearIssue } from "./ingest-linear.ts";
+import type { Derived } from "./ingest-contract.ts";
 // From ingest-structure.ts, NOT ingest-records.ts: the ingester imports evals/
 // and scripts/, which the board-sync container does not mount (third review
 // pass; the self-check holds this file's import closure to db/ and
@@ -435,12 +436,17 @@ export async function fetchIssues(gql: Gql, identifiers: string[]): Promise<{ is
 // ---------------------------------------------------------------------------
 
 export type Outcome = "captured" | "updated" | "patched" | "unchanged" | "refused";
+/** What a ticket's derived parts — its dated sections (SMD-2059) — came to, one word per part; summed over the pass. */
+export type DerivedTally = Record<Outcome, number>;
+export const noDerived = (): DerivedTally => ({ captured: 0, updated: 0, patched: 0, unchanged: 0, refused: 0 });
 export type PassReport = {
   initiative: string;
   projects: number;
   census: number;
   plan: Plan;
   tally: Record<Outcome, number>;
+  /** The tickets' dated sections, written as thoughts of their own beside the head rows (SMD-2059). */
+  derived: DerivedTally;
   twinsMarked: number;
   noVector: number;
   errors: { identifier: string; error: string }[];
@@ -476,6 +482,14 @@ export type Writer = {
    * brain before 053).
    */
   structure?: (thoughtId: string, structure: Structure) => Promise<void>;
+  /**
+   * The row that holds a source identity (053's `source_thought`), as a row
+   * this tool can read — how a ticket's derived parts (its dated sections,
+   * SMD-2059) find their own row across passes and across the two writers,
+   * whichever wrote it. Absent, as `structure` is on a brain before 053: the
+   * parts are not written.
+   */
+  holderOfIdentity?: (system: string, key: string) => Promise<BrainRow | null>;
 };
 
 /**
@@ -591,7 +605,7 @@ async function chainRows(w: Writer, identifier: string, order: BrainRow[]): Prom
  * the ticket stale — visible in --audit, retried each pass at the cost of one
  * lookup — until the holder is edited or gone (fourth review pass).
  */
-export type SyncOutcome = { outcome: Outcome; noVector: boolean; twinsMarked: number; chainRefusal?: string; headWindow?: boolean };
+export type SyncOutcome = { outcome: Outcome; noVector: boolean; twinsMarked: number; chainRefusal?: string; headWindow?: boolean; derived?: DerivedTally };
 
 /**
  * What the embedder had to settle for, said on the line and counted in the
@@ -609,7 +623,96 @@ function caveat(e: { wholeContentFellBack?: boolean; wholeContentError?: string;
   return parts.length ? ` — caveat: ${parts.join("; ")}` : "";
 }
 
+/**
+ * A ticket's dated sections as thoughts of their own beside its head row
+ * (SMD-2059): each part found by its identity (`SMD-N#<slug>`) — this tool's
+ * row from an earlier pass or the ingester's, either way — then judged as the
+ * ticket's own text is: same text, a facet patch or nothing; new or moved
+ * text, a vector and tags and a capture `derived_from` the head (or an edit of
+ * the part's row); a text another thought holds, refused and said. The
+ * canonical, the `child_of` link and the identity land through the structure
+ * hook, which takes the identity for the row as it does for the head. Not on
+ * a brain before 053 (no `holderOfIdentity`), never on a dry run (the caller
+ * returns before this).
+ */
+async function syncDerived(w: Writer, headId: string, parts: readonly Derived[]): Promise<DerivedTally> {
+  const t = noDerived();
+  if (!parts.length || !w.holderOfIdentity || !w.structure) return t;
+  for (const part of parts) {
+    const label = part.identity.key;
+    const content = part.text;
+    const facets = { ...part.facets, source: LINEAR_SYSTEM };
+    const structure: Structure = { identity: part.identity, canonical: part.canonical, links: part.links, mentions: part.mentions };
+    const row = await w.holderOfIdentity(part.identity.system, part.identity.key);
+    const fp = await w.fingerprintOf(content);
+    if (row && (row.content === content || (fp !== null && row.fingerprint === fp))) {
+      const patch = facetPatch(row.metadata ?? {}, facets);
+      if (patch) {
+        const r = await w.store.updateThought({ id: row.id, metadataPatch: patch, actor: w.actor });
+        if (!r.ok) throw new Error(`section ${label}: patching ${row.id}: ${r.error}`);
+        w.log(`  · ${label}: facets patched (${Object.keys(patch).join(", ")})`);
+      }
+      await w.structure(row.id, structure);
+      t[patch ? "patched" : "unchanged"]++;
+      continue;
+    }
+    // The text held by another thought — a near-twin section (016's fingerprint
+    // folds case and whitespace; the adapter's same-text rule is exact), a
+    // paste — is refused HERE, before a model call is paid and before a capture
+    // could merge this part's facets onto that row wholesale; the ticket path
+    // asks the same question first (second review pass, independent read: the
+    // `existed` refusal below cost two model calls and a facet ping-pong on the
+    // holder every pass). One holder this refuses that it should adopt: this
+    // part's own row from a pass whose structure write failed after the
+    // capture below (two statements, not one transaction) — identity-less,
+    // refused on every later visit. Adopting an unclaimed holder, as the
+    // ticket path adopts a paste, is SMD-2075 (third review pass).
+    const holder = fp !== null ? await w.holderOf(fp) : null;
+    if (holder && holder.id !== row?.id) { w.log(`  ! ${label}: the section's text is held by ${holder.id}, which is not this section's row; not written (DUPLICATE_CONTENT)`); t.refused++; continue; }
+    // New or moved text: the vector and the tags, gated as the ticket's own text
+    // is — an edit judged with the row's own metadata under the facets, as the
+    // ticket's edit is (first review pass, independent read).
+    const subject: EgressSubject = { kind: row ? "edit" : "capture", actor: w.actor.name, metadata: { ...(row?.metadata ?? {}), ...facets }, content };
+    const g = decideCalls(subject, w.cfg, w.cfg.egress);
+    const embedded = g.embeddings.allowed ? await w.embed(content, subject) : undefined;
+    // The model's `status` is a workflow guess about a ticket; a section is
+    // an observation and has none — the tag is dropped, where the ticket's
+    // path lets Linear's own `status` facet override it.
+    const { status: _status, ...tags } = g.chat.allowed ? await w.tags(content, subject) : metadataRefused();
+    const actor: Actor = { ...w.actor, ...(g.record ? { egress: g.record } : {}) };
+    if (row) {
+      const r = await w.store.updateThought({ id: row.id, content, metadataPatch: facetPatch(row.metadata ?? {}, { ...tagsOverExisting(tags), ...facets }) ?? undefined, embedding: embedded?.embedding, chunks: embedded?.chunks, actor, embeddingModel: embedded?.model });
+      if (!r.ok && r.error === "DUPLICATE_CONTENT") { w.log(`  ! ${label}: the section's text is held by another thought (DUPLICATE_CONTENT); its row left as it was`); t.refused++; continue; }
+      if (!r.ok) throw new Error(`section ${label}: updating ${row.id}: ${r.error}`);
+      await w.structure(row.id, structure);
+      w.log(`  ~ ${label}: updated${embedded ? "" : " WITHOUT a vector (egress refused)"}`);
+      t.updated++;
+      continue;
+    }
+    // The facets over the tags, as at a ticket's capture: `type: observation` is the adapter's word, not the model's guess.
+    const captured = await w.store.captureThought({ content, payload: { metadata: { ...tags, ...facets } }, chunks: embedded?.chunks ?? [], actor, embedding: embedded?.embedding ?? null, embeddingModel: embedded?.model, derivedFrom: [headId] });
+    // The text landed on another row in the window since the look above (a
+    // race): a thought holds ONE identity (thought_sources' key is the
+    // thought), so taking it would re-key that row — and two same-text parts
+    // would re-key one row between their identities every pass (first review
+    // pass, independent read). Refused and said, as the ticket path refuses an
+    // outside holder; the facets the capture merged onto the row stand.
+    if (captured.existed === true) { w.log(`  ! ${label}: ${captured.id} took the section's text in the last instant under another identity or none; not taken`); t.refused++; continue; }
+    await w.structure(captured.id, structure);
+    w.log(`  + ${label}: captured${embedded ? "" : " WITHOUT a vector (egress refused)"}`);
+    t.captured++;
+  }
+  return t;
+}
+
+/** One ticket: its row (below), then its dated sections beside the settled head (SMD-2059); the sections' tally rides the outcome. */
 export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[]): Promise<SyncOutcome> {
+  const derived = noDerived();
+  const r = await syncTicket(w, issue, rows, derived);
+  return { ...r, derived };
+}
+
+async function syncTicket(w: Writer, issue: LinearIssue, rows: BrainRow[], derived: DerivedTally): Promise<SyncOutcome> {
   // One mapping, the adapter's: the text, the facets and the structure of one issue (SMD-1867).
   const mapped = linearAdapter.map(issue);
   const content = mapped.text;
@@ -622,6 +725,11 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
     if (w.dryRun || !w.structure) return;
     try {
       await w.structure(thoughtId, structure);
+      // …and the ticket's dated sections beside it (SMD-2059), inside the same
+      // recovery: a part that fails clears the watermark as a failed structure
+      // does, so the next pass fetches the ticket and tries the parts again.
+      const parts = await syncDerived(w, thoughtId, mapped.derived ?? []);
+      for (const k of Object.keys(parts) as Outcome[]) derived[k] += parts[k];
     } catch (e) {
       // The row already carries this pass's watermark, so the next scheduled
       // pass would read the ticket as unchanged and never retry the structure
@@ -884,7 +992,7 @@ export async function planBoard(opts: { gql: Gql; readRows: ReadRows; initiative
 export async function runPass(opts: { gql: Gql; readRows: ReadRows; writer: Writer; initiative: string; full: boolean; only?: string[]; board?: Board }): Promise<PassReport> {
   const { initiative, projects, census, groups, plan } = await planBoard(opts);
   const tally: Record<Outcome, number> = { captured: 0, updated: 0, patched: 0, unchanged: 0, refused: 0 };
-  const report: PassReport = { initiative, projects: projects.length, census: census.length, plan, tally, twinsMarked: 0, noVector: 0, errors: [], chainRefusals: [], headWindow: 0 };
+  const report: PassReport = { initiative, projects: projects.length, census: census.length, plan, tally, derived: noDerived(), twinsMarked: 0, noVector: 0, errors: [], chainRefusals: [], headWindow: 0 };
   let wanted = plan.fetch;
   if (opts.only) {
     const listed = new Set(census.map((c) => c.identifier));
@@ -899,6 +1007,7 @@ export async function runPass(opts: { gql: Gql; readRows: ReadRows; writer: Writ
     try {
       const r = await syncIssue(opts.writer, issue, groups.get(issue.identifier) ?? []);
       tally[r.outcome]++;
+      for (const k of Object.keys(report.derived) as Outcome[]) report.derived[k] += r.derived?.[k] ?? 0;
       report.twinsMarked += r.twinsMarked;
       if (r.noVector) report.noVector++;
       if (r.chainRefusal) report.chainRefusals.push({ identifier: issue.identifier, refusal: r.chainRefusal });
@@ -919,6 +1028,8 @@ export function formatReport(r: PassReport, dryRun: boolean): string {
     `  ${dryRun ? "would write" : "wrote"}: captured ${r.tally.captured}  updated ${r.tally.updated}  patched ${r.tally.patched}  unchanged ${r.tally.unchanged}${r.twinsMarked ? `  pointers re-chained ${r.twinsMarked}` : ""}${r.noVector ? `  without a vector ${r.noVector}` : ""}`,
   ];
   if (r.tally.refused) lines.push(`  refused: ${r.tally.refused} ticket(s) whose text another thought holds (DUPLICATE_CONTENT) — facets patched, text left, stale until the holder moves`);
+  const d = r.derived;
+  if (d.captured + d.updated + d.patched + d.unchanged + d.refused) lines.push(`  sections (dated, as their own thoughts): captured ${d.captured}  updated ${d.updated}  patched ${d.patched}  unchanged ${d.unchanged}${d.refused ? `  refused ${d.refused}` : ""}`);
   if (r.chainRefusals.length) lines.push(`  chain refusals: ${r.chainRefusals.length} — ${r.chainRefusals.slice(0, 5).map((c) => `${c.identifier}: ${c.refusal}`).join("; ")}`);
   if (r.headWindow) lines.push(`  head-window vectors: ${r.headWindow} row(s) the provider refused whole — reembed.ts --retry-fallbacks repairs them`);
   if (r.stopped) lines.push(`  stopped: ${r.stopped} issue(s) left for the next pass`);
@@ -1091,7 +1202,7 @@ function selfCheck(): Promise<number> {
   const calls: string[] = [];
   const recorder: Writer = {
     store: {
-      captureThought: async (o) => { calls.push(`capture ${JSON.stringify(o.payload.metadata.status)} vec=${o.embedding ? "yes" : "no"} type=${o.payload.metadata.type ?? "-"}`); return { id: "new" }; },
+      captureThought: async (o) => { calls.push(`capture ${o.payload.metadata.status === undefined ? "-" : JSON.stringify(o.payload.metadata.status)} vec=${o.embedding ? "yes" : "no"} type=${o.payload.metadata.type ?? "-"}${o.derivedFrom ? ` from=${o.derivedFrom.join(",")}` : ""}`); return { id: "new" }; },
       updateThought: async (o) => { calls.push(`update ${o.id}${o.content !== undefined ? " content" : ""}${o.metadataPatch ? ` patch(${Object.keys(o.metadataPatch).join(",")})` : ""}${o.provenance ? ` supersedes=${o.provenance.supersedes}` : ""}${o.embedding ? " vec" : ""}`); return { ok: true, id: o.id }; },
     },
     cfg: resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_EGRESS_POLICY: "off" }),
@@ -1378,6 +1489,52 @@ function selfCheck(): Promise<number> {
       try { await syncIssue(failing, issue, [row("cur", text, { source: "linear", issue: "SMD-1936" }, null, null), row("twin", "older text", { ...issueFacets(issue) }, "2026-09-20T00:00:00Z", null)]); } catch { /* the hook's error */ }
       ok(calls.filter((c) => /patch\(linear_updated_at\)$/.test(c)).map((c) => c.split(" ")[1]).sort().join(",") === "cur,twin", `…and every row of the group carrying a watermark is cleared, not the head alone (${calls.filter((c) => /linear_updated_at\)$/.test(c)).join("; ")})`);
     }
+    // A ticket's dated sections beside the head (SMD-2059): captured with the
+    // ticket, derived_from its row, type observation over the model's guess;
+    // found by identity on later passes and judged as the ticket's text is.
+    {
+      const sectioned: LinearIssue = { ...issue, description: "## Problem\n\nx\n\n## Update 2026-09-19 (board audit)\n\nStill open." };
+      const part = linearAdapter.map(sectioned).derived![0];
+      const seen: string[] = [];
+      const parts: Writer = { ...recorder, structure: async (id, s) => { seen.push(`${id}:${s.identity.key}`); }, holderOfIdentity: async () => null };
+      const headRow = row("cur", renderIssue(sectioned), { ...issueFacets(sectioned) }, null, null);
+      calls.length = 0;
+      let r = await syncIssue(parts, sectioned, []);
+      ok(r.outcome === "captured" && r.derived?.captured === 1 && calls.join("; ") === 'embed; tags; capture "Backlog" vec=yes type=task; embed; tags; capture - vec=yes type=observation from=new' && seen.join(" ") === `new:SMD-1936 new:${part.identity.key}`, `a capture writes the ticket, then its dated section — a vector and tags of its own, type observation over the model's guess, no status, derived_from the head — and records both structures (${calls.join("; ")}; ${seen.join(" ")})`);
+      const existed: Writer = { ...parts, store: { ...recorder.store, captureThought: async (o) => (o.derivedFrom ? { id: "other", existed: true, supersedes: null } : recorder.store.captureThought(o)) } };
+      seen.length = 0;
+      r = await syncIssue(existed, sectioned, []);
+      ok(r.derived?.refused === 1 && r.derived.captured === 0 && seen.join(" ") === "new:SMD-1936", `a section's text taken by another row in the last instant is refused, not taken — the identity is not re-keyed onto that row (${JSON.stringify(r.derived)}; ${seen.join(" ")})`);
+      // …and a holder known BEFORE the write is refused before any model call
+      // is paid (second review pass, independent read: a near-twin section —
+      // 016's fingerprint folds case and whitespace — cost two model calls and
+      // a facet merge onto the holder every pass).
+      const heldText: Writer = { ...parts, holderOf: async (fp) => (fp === fakeFingerprint(part.text) ? row("twin", part.text, { source: "linear", ticket: "SMD-1936" }, null, null) : null) };
+      calls.length = 0; seen.length = 0;
+      r = await syncIssue(heldText, sectioned, []);
+      ok(r.derived?.refused === 1 && calls.join("; ") === 'embed; tags; capture "Backlog" vec=yes type=task' && seen.join(" ") === "new:SMD-1936", `a section whose text another thought holds is refused before the vector and the tags are paid for; the ticket's own capture is the only model work (${calls.join("; ")}; ${seen.join(" ")})`);
+      const held: Writer = { ...parts, holderOfIdentity: async () => row("d1", part.text, { ...part.facets, source: "linear" }, null, null) };
+      calls.length = 0; seen.length = 0;
+      r = await syncIssue(held, sectioned, [headRow]);
+      ok(r.outcome === "unchanged" && r.derived?.unchanged === 1 && calls.length === 0 && seen.join(" ") === `cur:SMD-1936 d1:${part.identity.key}`, `an unchanged ticket whose section already stands as written: no model call, both structures re-recorded (${calls.join("; ") || "no calls"}; ${seen.join(" ")})`);
+      const movedPart: Writer = { ...parts, holderOfIdentity: async () => row("d1", "old section text", { ...part.facets, source: "linear" }, null, null) };
+      calls.length = 0;
+      r = await syncIssue(movedPart, sectioned, [headRow]);
+      ok(r.derived?.updated === 1 && /^embed; tags; update d1 content patch\(.*\) vec$/.test(calls.join("; ")), `a section whose text moved is edited on its own row with a fresh vector and tags (${calls.join("; ")})`);
+      const behind: Writer = { ...parts, holderOfIdentity: async () => row("d1", part.text, { source: "linear", ticket: "SMD-1936" }, null, null) };
+      calls.length = 0;
+      r = await syncIssue(behind, sectioned, [headRow]);
+      ok(r.derived?.patched === 1 && calls.join("; ") === "update d1 patch(section,observed_at,type,url,linear_updated_at)", `a section row behind on its facets is patched alone, no model call (${calls.join("; ")})`);
+      const dup: Writer = { ...movedPart, store: { ...recorder.store, updateThought: async (o) => (o.content !== undefined ? { ok: false, error: "DUPLICATE_CONTENT" } : recorder.store.updateThought(o)) } };
+      r = await syncIssue(dup, sectioned, [headRow]);
+      ok(r.derived?.refused === 1 && r.outcome === "unchanged", "a section whose new text another thought holds is refused and said; the ticket's own outcome stands");
+      ok((await syncIssue({ ...parts, dryRun: true }, sectioned, [])).derived?.captured === 0 && (await syncIssue(recorder, sectioned, [])).derived?.captured === 0, "a dry run and a brain before 053 (no identity lookup) write no sections");
+      const failing: Writer = { ...parts, holderOfIdentity: async () => { throw new Error("identity lookup failed"); } };
+      calls.length = 0;
+      let thrownPart = "";
+      try { await syncIssue(failing, sectioned, [headRow]); } catch (e) { thrownPart = (e as Error).message; }
+      ok(/identity lookup failed/.test(thrownPart) && /watermark cleared/.test(thrownPart) && calls.at(-1) === "update cur patch(linear_updated_at)", `a section that fails clears the ticket's watermark, as a failed structure does, so the next pass retries it (${thrownPart.slice(0, 70)})`);
+    }
     // No projects is no board.
     let refusedEmpty = false;
     const empty: Gql = async <T,>() => ({ data: { initiatives: { pageInfo: { hasNextPage: false, endCursor: "" }, nodes: [{ name: "Open Brain", projects: { pageInfo: { hasNextPage: false }, nodes: [] } }] } } as T, errors: [] });
@@ -1518,7 +1675,14 @@ async function main(): Promise<void> {
     // land together or not at all — three autocommit statements left a ticket
     // edge-less until it next moved when the second failed (third review pass,
     // independent read).
-    ...(has053 ? { structure: async (id: string, s: Structure) => { await sql.begin(async (tx) => { await recordStructure(tx, id, s, run, { take: true }); }); } } : {}),
+    ...(has053 ? {
+      structure: async (id: string, s: Structure) => { await sql.begin(async (tx) => { await recordStructure(tx, id, s, run, { take: true }); }); },
+      // A ticket's dated sections find their row by identity (SMD-2059).
+      holderOfIdentity: async (system: string, key: string) => {
+        const [r] = await sql`SELECT ${rowColumns(sql)} FROM thoughts WHERE id = source_thought(${system}, ${key})`;
+        return (r as BrainRow | undefined) ?? null;
+      },
+    } : {}),
   };
 
   let resolved: Board | undefined;

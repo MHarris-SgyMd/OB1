@@ -104,7 +104,7 @@ Legacy names (still accepted with a deprecation warning):
 
 ![Step 6](https://img.shields.io/badge/Step_6-Install_MCP_Tools-1E88E5?style=for-the-badge)
 
-1. Open your `open-brain-mcp` server (in this repo, [`server/index.ts`](../../server/index.ts); in a deployed Supabase copy, usually `supabase/functions/open-brain-mcp/index.ts`) and paste the three `server.registerTool(...)` blocks from [`mcp-tools.ts`](./mcp-tools.ts) alongside your other tool registrations. The `capture_derived_thought` block reuses the canonical `getEmbedding` and `extractMetadata` helpers already defined in `index.ts` — paste it after those are in scope.
+1. Open your `open-brain-mcp` server (in this repo, [`server-portable/index.ts`](../../server-portable/index.ts); in a deployed Supabase copy, usually `supabase/functions/open-brain-mcp/index.ts`) and paste the three `server.registerTool(...)` blocks from [`mcp-tools.ts`](./mcp-tools.ts) alongside your other tool registrations. The `capture_derived_thought` block reuses the canonical `getEmbedding` and `extractMetadata` helpers already defined in `index.ts` — paste it after those are in scope.
 
    Deploy the function:
 

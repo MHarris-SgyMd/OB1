@@ -27,7 +27,9 @@
  *   linear   — a corpus dump built by evals/build-linear-corpus.ts. Needs --linear.
  *              Each record's `issue` goes through the Linear adapter
  *              (db/ingest-linear.ts, SMD-1867) — the mapping the board sync
- *              feeds its own fetch to, so the two write one text (SMD-1958).
+ *              feeds its own fetch to, so the two write one text (SMD-1958);
+ *              a ticket's dated sections become rows of their own, derived
+ *              from the ticket's (SMD-2059).
  *   memory   — the *.md memory files (not MEMORY.md, the index). Needs --memory-dir
  *              or OB1_MEMORY_DIR — they live outside the repo, in the operator's
  *              ~/.claude, so there is no portable default and this tool reads,
@@ -77,7 +79,7 @@ import { PIPELINE_TIERS } from "./config.mjs";
 import { loadLinearCorpus, linearThoughtId, type LinearDoc } from "../evals/linear-corpus.ts";
 import { parseFragment, fragmentSection } from "../scripts/fragments.ts";
 import { headingOf, ticketsOf } from "../scripts/fork-index.ts";
-import { AdapterRefusal, allowlistFrom, scopeRefusal, type Allowlist, type Ingested } from "./ingest-contract.ts";
+import { AdapterRefusal, allowlistFrom, scopeRefusal, type Allowlist, type Identity, type Ingested } from "./ingest-contract.ts";
 import { LINEAR_SYSTEM, linearAdapter, renderIssue, SAMPLE_ISSUE, WATERMARK_KEY } from "./ingest-linear.ts";
 import { markdownAdapter, markdownFiles, MARKDOWN_SYSTEM } from "./ingest-markdown.ts";
 import { IdentityHeld, recordStructure, runName as structureRunName, type Structure, type StructureResult } from "./ingest-structure.ts";
@@ -110,6 +112,8 @@ export type Doc = {
   scope?: string;
   /** The source's clock for the item (ingest-contract.ts): a stored row whose value under `key` is newer — or the same, written after `asOf` — is not written over; the record is `stale`. */
   watermark?: { key: string; value: string; asOf?: string };
+  /** For a record that is a PART of another (a ticket's dated section, SMD-2059): the parent's identity, resolved at the write to whichever writer's row holds it (`source_thought`) and written as the row's `derived_from`. */
+  derivedFrom?: Identity;
 };
 
 /**
@@ -246,6 +250,23 @@ export function docOf(ingested: Ingested): Doc {
   };
 }
 
+/**
+ * An item and its parts (SMD-2059) as Docs: the item's own Doc first, then one
+ * per derived part — under the item's scope and watermark (the allowlist and
+ * the clock judge the parts as they judge the whole), on the part's own
+ * identity, and `derivedFrom` the item's identity, which the write resolves to
+ * the row that holds it. The parent first, so a derived row finds its parent
+ * in the same run.
+ */
+export function docsOf(ingested: Ingested): Doc[] {
+  const parent = docOf(ingested);
+  const parts = (ingested.derived ?? []).map((d) => ({
+    ...docOf({ ...d, scope: ingested.scope, watermark: ingested.watermark }),
+    derivedFrom: ingested.identity,
+  }));
+  return [parent, ...parts];
+}
+
 /** The scope a corpus dump's records carry: the dump is one deliberate export, cleared as one. */
 export const LINEAR_CORPUS_SCOPE = "linear:corpus";
 /** What a dump built before the `issue` field is refused with — once per run, with the way out. */
@@ -278,7 +299,7 @@ export function linearDocs(path: string): { docs: Doc[]; refused: number; reason
   let refused = 0;
   let reason: string | null = null;
   for (const d of loadLinearCorpus(path).docs) {
-    try { docs.push(docOf(corpusIngested(d))); }
+    try { docs.push(...docsOf(corpusIngested(d))); }
     catch (e) {
       if (!(e instanceof AdapterRefusal)) throw e;
       refused++;
@@ -486,6 +507,15 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()):
         const [h] = (await tx`SELECT source_thought(${doc.structure.identity.system}, ${doc.structure.identity.key})::text AS t`) as { t: string | null }[];
         if (h?.t && h.t !== doc.id) return { outcome: "held", heldBy: h.t };
       }
+      // A part's parent (SMD-2059): the row that holds the parent's identity
+      // NOW — this run's own row, or the board sync's — so `derived_from` names
+      // whichever writer's ticket row stands. A parent no row holds (refused,
+      // or not in this run) leaves the column NULL rather than name nothing.
+      let derivedFrom: string[] | null = null;
+      if (doc.derivedFrom) {
+        const [p] = (await tx`SELECT source_thought(${doc.derivedFrom.system}, ${doc.derivedFrom.key})::text AS t`) as { t: string | null }[];
+        if (p?.t) derivedFrom = [p.t];
+      }
       // `old` is read before the write so RETURNING can say whether the text
       // moved — an UPDATE's RETURNING sees only the new row. The two actor
       // keys are removed from EXCLUDED on both sides: 050's BEFORE INSERT
@@ -493,19 +523,21 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()):
       // classified since the last run would otherwise re-write every row once.
       const rows = (await tx`
         WITH old AS (SELECT content_fingerprint AS fp FROM thoughts WHERE id = ${doc.id}::uuid)
-        INSERT INTO thoughts (id, content, metadata, content_fingerprint, created_at)
-        VALUES (${doc.id}::uuid, ${doc.content}, ${meta}::jsonb, content_fingerprint_of(${doc.content}), COALESCE(${created}::timestamptz, now()))
+        INSERT INTO thoughts (id, content, metadata, content_fingerprint, created_at, derived_from)
+        VALUES (${doc.id}::uuid, ${doc.content}, ${meta}::jsonb, content_fingerprint_of(${doc.content}), COALESCE(${created}::timestamptz, now()), ${derivedFrom}::jsonb)
         ON CONFLICT (id) DO UPDATE
           SET content = CASE WHEN thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint THEN EXCLUDED.content ELSE thoughts.content END,
               content_fingerprint = CASE WHEN thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint THEN EXCLUDED.content_fingerprint ELSE thoughts.content_fingerprint END,
               embedding = CASE WHEN thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint THEN NULL ELSE thoughts.embedding END,
               embedding_model = CASE WHEN thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint THEN NULL ELSE thoughts.embedding_model END,
-              metadata = COALESCE(thoughts.metadata, '{}'::jsonb) || (EXCLUDED.metadata - 'actor_kind' - 'actor_name')
+              metadata = COALESCE(thoughts.metadata, '{}'::jsonb) || (EXCLUDED.metadata - 'actor_kind' - 'actor_name'),
+              derived_from = COALESCE(EXCLUDED.derived_from, thoughts.derived_from)
           WHERE (${wmValue}::text IS NULL OR thoughts.metadata->>(${wmKey}::text) IS NULL
                  OR thoughts.metadata->>(${wmKey}::text) < ${wmValue}::text
                  OR (thoughts.metadata->>(${wmKey}::text) = ${wmValue}::text AND (${asOf}::timestamptz IS NULL OR thoughts.updated_at <= ${asOf}::timestamptz)))
             AND (thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint
-              OR (COALESCE(thoughts.metadata, '{}'::jsonb) || (EXCLUDED.metadata - 'actor_kind' - 'actor_name')) IS DISTINCT FROM thoughts.metadata)
+              OR (COALESCE(thoughts.metadata, '{}'::jsonb) || (EXCLUDED.metadata - 'actor_kind' - 'actor_name')) IS DISTINCT FROM thoughts.metadata
+              OR COALESCE(EXCLUDED.derived_from, thoughts.derived_from) IS DISTINCT FROM thoughts.derived_from)
         RETURNING (xmax = 0) AS inserted, ((SELECT fp FROM old) IS DISTINCT FROM thoughts.content_fingerprint) AS moved`) as { inserted: boolean; moved: boolean }[];
       // The guard asks "would the merge change the row" — the merged value
       // against the stored one — not containment: `@>` holds when an array
@@ -523,7 +555,8 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()):
           SELECT ((metadata->>(${wmKey}::text)) > ${wmValue}::text
                   OR ((metadata->>(${wmKey}::text)) = ${wmValue}::text AND updated_at > ${asOf}::timestamptz)) AS blocked,
                  (content_fingerprint IS DISTINCT FROM content_fingerprint_of(${doc.content})
-                  OR (COALESCE(metadata, '{}'::jsonb) || (${meta}::jsonb - 'actor_kind' - 'actor_name')) IS DISTINCT FROM metadata) AS pending
+                  OR (COALESCE(metadata, '{}'::jsonb) || (${meta}::jsonb - 'actor_kind' - 'actor_name')) IS DISTINCT FROM metadata
+                  OR COALESCE(${derivedFrom}::jsonb, derived_from) IS DISTINCT FROM derived_from) AS pending
           FROM thoughts WHERE id = ${doc.id}::uuid`) as { blocked: boolean | null; pending: boolean | null }[];
         if (w?.blocked === true && w.pending === true) return { outcome: "stale" };
       }
@@ -626,6 +659,16 @@ function selfCheck(): number {
   const doc = docOf(corpus);
   ok(doc.id === linearThoughtId("SMD-10") && doc.source === "linear" && doc.meta.issue === "SMD-10" && doc.content === corpus.text && doc.structure?.identity.key === "SMD-10" && doc.scope === LINEAR_CORPUS_SCOPE && doc.watermark?.key === WATERMARK_KEY, "docOf: the eval's id space, the source, the facets, the structure and the watermark carried");
   ok(docOf({ ...corpus, facets: { issue: "SMD-10" }, watermark: { key: "clock", value: "v1" } }).meta.clock === "v1", "…and the watermark is written into the row's metadata by the pipeline, so the clock guard is never inert for an adapter that forgot the facet");
+  // A ticket's dated sections as records of their own (SMD-2059): the parent
+  // first, then each part on its own identity under the parent's scope and
+  // clock, derived from the parent's identity.
+  const sectioned = corpusIngested({ ...record, fetchedAt: "2026-09-24T00:00:00.000Z", issue: { ...issue, description: "## Problem\n\nx\n\n## Update 2026-09-19 (board audit)\n\nStill open." } });
+  const family = docsOf(sectioned);
+  ok(family.length === 2 && family[0].id === linearThoughtId("SMD-10") && family[0].derivedFrom === undefined, "the parent is the first Doc, on the ticket's id, derived from nothing");
+  const part = family[1];
+  ok(part.id === recordId("linear", "SMD-10#update-2026-09-19-board-audit") && part.source === "linear" && part.derivedFrom?.key === "SMD-10" && part.scope === LINEAR_CORPUS_SCOPE && part.watermark?.value === issue.updatedAt && part.watermark.asOf === "2026-09-24T00:00:00.000Z", `a part is a Doc on its own id, derived from the parent's identity, under the parent's scope and clock (${part.id})`);
+  ok(part.meta.type === "observation" && part.meta.ticket === "SMD-10" && part.meta.issue === undefined && part.meta.observed_at === "2026-09-19" && part.createdAt === "2026-09-19T00:00:00.000Z" && part.structure?.identity.key === "SMD-10#update-2026-09-19-board-audit", "…an observation naming the ticket under `ticket`, dated by its heading, with a structure of its own");
+  ok(applyAllowlist(family, allowlistFrom("")).refused.length === 2 && applyAllowlist(family, allowlistFrom(LINEAR_CORPUS_SCOPE)).docs.length === 2, "the allowlist judges the parts with the whole");
   ok(docOf({ ...corpus, identity: { system: "markdown", key: "Note" } }).id === recordId("markdown", "Note"), "…and a markdown record lands on its own source-qualified id");
   let refusal = "";
   try { corpusIngested({ id: "SMD-10", title: "A title", text: "old dump" }); } catch (e) { refusal = e instanceof AdapterRefusal ? e.message : `wrong: ${(e as Error).name}`; }
@@ -806,7 +849,8 @@ async function main(): Promise<void> {
   }
 
   printCounts();
-  console.log(`  tier=${tier}  inserted ${tally.inserted}  updated ${tally.updated}  patched ${tally.patched}  unchanged ${tally.unchanged}  skipped ${tally.skipped}  held ${tally.held}  stale ${tally.stale}${dropped ? `  (+${dropped} duplicate-content dropped)` : ""}`);
+  const parts = docs.filter((d) => d.derivedFrom).length;
+  console.log(`  tier=${tier}  inserted ${tally.inserted}  updated ${tally.updated}  patched ${tally.patched}  unchanged ${tally.unchanged}  skipped ${tally.skipped}  held ${tally.held}  stale ${tally.stale}${dropped ? `  (+${dropped} duplicate-content dropped)` : ""}${parts ? `  (${parts} of the records are derived parts — a ticket's dated sections, SMD-2059)` : ""}`);
   for (const [source, n] of heldBy) console.log(`  ${source}: ${n} record(s) HELD — another thought already is that source item (the board sync's row for a ticket, on a brain it keeps); nothing written for them. db/README.md, "Two writers of one identity".`);
   if (tally.stale) console.log(`  ${tally.stale} record(s) STALE — the row carries a newer watermark than the record (the board sync moved the ticket past this dump); nothing written for them. Rebuild the dump, or let the sync keep the board.`);
   if (structure.records) {

@@ -14,8 +14,10 @@ There is **no Supabase project to migrate from** here; this was built as a
 greenfield alternative, not a data migration. Nothing in this fork moves rows out
 of Supabase, and there is no cutover step. **Start at [`SETUP.md`](SETUP.md).**
 
-The upstream Supabase path still works and is untouched — `server/` is the
-original Deno Edge Function build. Read this file before changing anything there.
+The upstream Supabase path is upstream's: this fork no longer carries `server/`,
+the Deno Edge Function build, nor anything that ran on Deno (SMD-1800; the last
+of SMD-1795's runtime items). Read this file before changing anything under the
+vendored directories.
 
 ---
 
@@ -101,25 +103,17 @@ upstream leftover no workflow ran, is removed so there is one release mechanism.
 
 ### Deploying
 
-For a non-Supabase deployment, see [`SETUP.md`](SETUP.md) — that is the intended
-path. The rest of this section covers deploying the original Supabase Edge
-Function build, which is still supported.
-
-The upstream guide tells you to fetch `server/index.ts` from `main`, unpinned:
-
-```bash
-# DON'T — this is whatever is on upstream main at that moment
-curl -o supabase/functions/open-brain-mcp/index.ts \
-  https://raw.githubusercontent.com/NateBJones-Projects/OB1/main/server/index.ts
-```
-
-Deploy from a checkout of this fork instead:
-
-```bash
-git checkout siggymd/fork-baseline
-cp server/index.ts server/deno.json supabase/functions/open-brain-mcp/
-supabase functions deploy open-brain-mcp --no-verify-jwt
-```
+[`SETUP.md`](SETUP.md) is the path: Postgres with pgvector, the migrations, the
+server as a Bun process or the container `server-portable/Dockerfile` builds
+(`deploy/compose.yaml` is the working reference), or Cloudflare Workers. There is
+no Supabase Edge Function build in this fork to deploy — `server/` left with
+SMD-1800 — and the vendored MCP servers, APIs and workers under the category
+directories run the same way, `bun <file>` (their READMEs say so; SMD-1802
+brings the remaining deploy instructions to it). To deploy upstream's Edge
+Function, use upstream's checkout and guide; this fork's schema is a superset of
+the guide's, so that function runs against a brain built here — at its model's
+width (`openai/text-embedding-3-small`, 1536; `SETUP.md`'s local default is
+1024, and `upsert_thought` refuses another width).
 
 ### Required migration
 
@@ -289,7 +283,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 133 | [Shim everywhere](changes/133-shim-everywhere.md) | SMD-1798 |
 | 134 | [Entity extraction sent the whole thought in one unbounded call](changes/134-entity-extraction-sent-the-whole-thought-in-one.md) | SMD-1879 |
 
-Landed since the last release and numbered at the next one (SMD-1804): [SMD-1296](changes/smd-1296.md), [SMD-1713](changes/smd-1713.md), [SMD-1799](changes/smd-1799.md), [SMD-1867](changes/smd-1867.md), [SMD-1875](changes/smd-1875.md), [SMD-1958](changes/smd-1958.md), [SMD-1960](changes/smd-1960.md), [SMD-1982](changes/smd-1982.md), [SMD-2012](changes/smd-2012.md), [SMD-2035](changes/smd-2035.md).
+Landed since the last release and numbered at the next one (SMD-1804): [SMD-1296](changes/smd-1296.md), [SMD-1713](changes/smd-1713.md), [SMD-1799](changes/smd-1799.md), [SMD-1800](changes/smd-1800.md), [SMD-1867](changes/smd-1867.md), [SMD-1875](changes/smd-1875.md), [SMD-1958](changes/smd-1958.md), [SMD-1960](changes/smd-1960.md), [SMD-1982](changes/smd-1982.md), [SMD-1986](changes/smd-1986.md), [SMD-1998](changes/smd-1998.md), [SMD-2012](changes/smd-2012.md), [SMD-2035](changes/smd-2035.md), [SMD-2059](changes/smd-2059.md).
 <!-- changes-index:end -->
 
 ### Files we own
@@ -297,12 +291,12 @@ Landed since the last release and numbered at the next one (SMD-1804): [SMD-1296
 Rebase conflicts will only ever come from these:
 
 ```
-server/index.ts                  # fixes 3, 4, 5
-server/package.json              # fix 2
-server/bun.lock                  # fix 2
-server/test-stateless.mjs        # fix 1
-server/test-stats-pagination.mjs # fix 3   (new file)
-server/test-capture-atomicity.mjs# fix 5   (new file)
+server/index.ts                  # fixes 3, 4, 5; deleted by SMD-1800 (the Edge Function build; server-portable is the server)
+server/package.json              # fix 2; deleted by SMD-1800
+server/bun.lock                  # fix 2; deleted by SMD-1800
+server/test-stateless.mjs        # fix 1; deleted by SMD-1800 (test-server [4]–[5] hold the envelope)
+server/test-stats-pagination.mjs # fix 3   (new file); deleted by SMD-1800 (thought_stats aggregates in SQL, migration 024)
+server/test-capture-atomicity.mjs# fix 5   (new file); deleted by SMD-1800 (test-store-sql [2], test-e2e-sql hold the one write)
 db/migrations/                   # fix 9   (moved here from server/ in fix 9)
 .github/metadata.schema.json     # fix 7   (3 additive optional fields); SMD-1933 adds `connectors`
 .github/workflows/fork-checks.yml# fix 7   (new file)
@@ -382,13 +376,13 @@ scripts/migrate-to-sql-shim.ts   # fix 13  (new file — the codemod); change 74
 <23 recipe/integration files>    # fix 13  (one import line each; revert with the codemod; 24 until change 74 put the local-brain client back)
 <7 extension servers>            # change 64 (keys through extensions/_shared/auth.ts; the tools that write gated)
 extensions/_shared/auth.ts       # change 64 (new file — server-portable/auth.ts byte for byte; the test holds them equal)
-extensions/test-auth.ts          # change 64 (new file — the seven servers under scoped keys); change 67 widened it to every vendored server; change 74 starts every server on the shim under bun
-extensions/package.json          # change 64 (new file — test deps pinned to the extensions' deno.json)
+extensions/test-auth.ts          # change 64 (new file — the seven servers under scoped keys); change 67 widened it to every vendored server; change 74 starts every server on the shim under bun; SMD-1800 holds the tree's three package.json to one MCP stack
+extensions/package.json          # change 64 (new file — test deps pinned to the extensions' deno.json; since SMD-1800 the pin the other two installs are held to)
 extensions/bun.lock              # change 64 (new file)
 <17 vendored files>              # change 67 (thirteen servers and samples onto scoped keys through _shared/auth.ts; four onto a timing-safe compare, one through the same module)
 recipes/_shared/auth.ts          # change 67 (new file — server-portable/auth.ts byte for byte)
 recipes/editorial-policy/_shared/auth.ts            # change 67 (new file — the same)
-recipes/edge-function-cost-optimization/examples/_shared/auth.ts  # change 67 (new file — the same)
+recipes/edge-function-cost-optimization/examples/_shared/auth.ts  # change 67 (new file — the same); deleted with the recipe by SMD-1800
 integrations/_shared/auth.ts     # change 67 (new file — the same)
 integrations/consolidation-workers/_shared/auth.ts  # change 67 (new file — the same, beside the workers' existing _shared/)
 <9 vendored files>               # change 69 (a thought's content and vector through update_thought / the 3-argument upsert_thought; the enhanced columns beside them)
@@ -408,7 +402,7 @@ db/migrations/043_*.sql          # change 98 (new file — query_log.tool's two 
 evals/eval-quant.ts              # change 81 (new file — vector, halfvec and binary-with-rerank measured on real vectors at the shipped width; test-schema [38], test-upgrade [16])
 <4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
 <17 pin sites, 3 lockfiles>      # change 83 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
-<19 pin sites, 3 lockfiles, 15 servers, 20 SDK importers> # change 84 (SDK 1.30.0, @hono/mcp 0.3.2, hono 4.13.8, zod 4.6.5 together; the Accept patches removed; an @ts-types pragma on every SDK import so Deno types it)
+<19 pin sites, 3 lockfiles, 15 servers, 20 SDK importers> # change 84 (SDK 1.30.0, @hono/mcp 0.3.2, hono 4.13.8, zod 4.6.5 together; the Accept patches removed; an @ts-types pragma on every SDK import so Deno types it; the pragmas and the deno.json pins went with SMD-1800)
 server-portable/tools.ts         # change 100 (new file — the typed source of the MCP tool surface: TOOLS as const, ToolName, visibleToolNames())
 server-portable/tools.json       # change 100 (new file — GENERATED from tools.ts by scripts/gen-tools.ts; deploy/smoke.sh reads it)
 scripts/gen-tools.ts             # change 100 (new file — writes tools.json from tools.ts; renderToolsJson() shared with the round-trip check)
@@ -435,24 +429,27 @@ are deliberately **unmodified** — their violations were resolved by widening
 `.github/metadata.schema.json` instead, so the contributor credit and env-var
 manifests they carry survive a rebase untouched.
 
-`server/index.ts` is the only file where a conflict is likely to need thought.
-It has changed **9 times in upstream's entire history** and not since June.
+Until SMD-1800 the one file where a conflict was likely to need thought was
+`server/index.ts`, upstream's Edge Function (changed 9 times in upstream's
+history, not since June 2026); it is gone, and what remains of upstream's tree
+here is the vendored content, where every server's head (`process.env`, the SQL
+shim import) and tail (`export default { port, fetch }`) is the fork's. Measured
+on the day `server/` left: `git merge-tree --write-tree upstream/main HEAD`
+against upstream's three commits since the pin conflicts on **three files, all
+workflows this fork deleted** (`.github/workflows/{markdown-lint,ob1-gate-v2,
+ob1-pr-followups}.yml`, SMD-1256's decision) and on **no vendored file**;
+`CONTRIBUTING.md`, `docs/01-getting-started.md` and `recipes/README.md`
+auto-merge. The same before the deletion: upstream never touched `server/`
+after the pin. Re-run it before a rebase; the number is the cost.
 
 ### Drift guards
 
-The Node test suites cannot import `server/index.ts` (it reads `Deno.env` at
-module scope and imports from `jsr:`), so they mirror its logic. A silent mirror
-is exactly how fix 1's bug happened, so **every suite under `server/` opens with a
-drift guard** that reads `index.ts` as text and fails if the behaviour it asserts
-is no longer what the server implements. Each guard was verified against the
-pre-fix source.
-
-If you change `server/index.ts`, expect the guards to tell you. That is the point.
-
-`server-portable/` needs none of this. Its env is read lazily, so `test-server.ts`
-imports the server and asserts against the running handler — there is nothing to
-drift from. That is the strongest argument for eventually making it the primary
-build.
+The three suites that once mirrored `server/index.ts` inline behind guards that
+read it as text (a silent mirror is how fix 1's bug happened) left with the file
+(SMD-1800). `server-portable/` never needed them: its env is read lazily, so
+`test-server.ts` imports the server and asserts against the running handler,
+and the vendored servers are imported and started the same way by
+`extensions/test-auth.ts` — there is nothing to drift from.
 
 ---
 
@@ -496,7 +493,7 @@ checksum) with `shellcheck` over this workflow's `run:` steps; the workflow now
 sets `defaults.run.shell: bash`, so every step runs under `-eo pipefail` and a
 masked `cmd | grep` failure is surfaced rather than swallowed. Both are opt-in
 locally (`bun scripts/install-hooks.ts` for the commit hook), and both are
-*required* on `main` with the other ten jobs since SMD-1856.
+*required* on `main` with the other eight jobs since SMD-1856 (ten in all; twelve until SMD-1800 retired the two Deno jobs).
 
 ## Detached from the fork network
 
@@ -542,21 +539,22 @@ Roughly quarterly, or when something lands that we want.
 ```bash
 git fetch upstream
 git log --oneline upstream-pin-9543c29..upstream/main -- server/ docs/01-getting-started.md
+git merge-tree --write-tree --name-only upstream/main HEAD   # the dry run: which files conflict,
+                                                             # before anything moves (the count
+                                                             # under "Files we own" is this)
 
 git checkout -b siggymd/rebase-$(date +%Y%m%d) siggymd/fork-baseline
-git rebase -X ignore-space-change upstream/main   # change 78 re-indented 1,517 lines of
-                                                  # integrations/enhanced-mcp/index.ts; the flag
-                                                  # resolves whitespace-only hunks and takes an
-                                                  # upstream edit inside the span at its old
-                                                  # indentation, to re-indent by hand
+git rebase -X ignore-space-change upstream/main   # every vendored server's head and tail is the
+                                                  # fork's (the shim import, process.env, the Bun
+                                                  # export — changes 74, 133, SMD-1799), and change
+                                                  # 78 re-indented 1,517 lines of enhanced-mcp; the
+                                                  # flag resolves whitespace-only hunks and takes an
+                                                  # upstream edit inside a span at its old
+                                                  # indentation, to re-indent by hand. An upstream
+                                                  # edit to a server's Deno head or tail is a
+                                                  # conflict to resolve as the fork's shape.
 
-cd server
-bun install --frozen-lockfile
-bun test-stateless.mjs && bun test-stats-pagination.mjs && bun test-capture-atomicity.mjs
-deno check --node-modules-dir=none index.ts   # --node-modules-dir=none is required
-                                              # once the line above has created
-                                              # server/node_modules
-cd ../server-portable
+cd server-portable
 bun install --frozen-lockfile && bun test-server.ts && bunx tsc --noEmit
 bun run test:sql && bun run test:e2e            # needs podman or docker
 bunx wrangler deploy --dry-run --outdir=.cf-out   # Workers target still builds
@@ -590,7 +588,7 @@ its measurements are in the change file named.
 ### Landing a rebase on `main`, which is protected
 
 `main` is the working default and carries a ruleset: every one of
-`fork-checks.yml`'s twelve jobs required, on a head up to date with `main` and
+`fork-checks.yml`'s ten jobs required, on a head up to date with `main` and
 satisfied only by a run of the Actions app; changes only through a pull request;
 no deletion, **no force-push**, and no bypass actors — it applies to admins too.
 The ruleset is a file, `.github/rulesets/main.json`, applied with
@@ -612,7 +610,7 @@ reaching `main` goes through a PR, which is two commands:
 
 ```bash
 gh pr create --fill --base main --head siggymd/rebase-$(date +%Y%m%d)
-gh pr merge --merge --auto        # lands itself once the twelve checks pass
+gh pr merge --merge --auto        # lands itself once the ten checks pass
 ```
 
 History keeps both lines, which is what happened when the fork's work first landed
@@ -658,7 +656,7 @@ closed on exactly that basis:
 > community contributions in this repo… If we want this behavior upstream, it
 > needs to come through a focused maintainer-led path instead.
 
-Fixes 1–5 all live in `server/index.ts`. Fixes 6 and 7 are contributable in
+Fixes 1–5 all lived in `server/index.ts` (deleted by SMD-1800). Fixes 6 and 7 are contributable in
 principle; note that [issue #482](https://github.com/NateBJones-Projects/OB1/issues/482)
 reports the upstream PR gate currently fails on **every** fork-originated PR.
 
@@ -815,10 +813,6 @@ Deliberate. Recorded so nobody assumes they were missed.
   size) and CI rebuilds it on
   every push, but no request has gone through `workerd` end to end. Smoke-test a
   real deploy before relying on it.
-- **Two suites still test mirrors.** `server/test-stats-pagination.mjs` and
-  `server/test-capture-atomicity.mjs` need a stubbed Supabase client, which the
-  lazy `db()` accessor makes easy to inject but which is not built. Until then they
-  keep their drift guards.
 - **The eval sample is small.** Twenty retrieval queries and eight extraction
   captures. Differences under ~0.05 MRR, or one point of a per-field score, are not
   meaningful; the clear separations (the long-document slice, the structural
@@ -840,9 +834,10 @@ Deliberate. Recorded so nobody assumes they were missed.
   real Postgres, and CI checks every migrated file still parses and that the
   codemod round-trips byte-for-byte — but exercise the ones you actually run
   before trusting them.
-- **Seven files still need a human.** Four use PostgREST resource embedding (a
-  join), two use nested `.or()` grouping, and one is a type-only import. Run
-  `bun scripts/migrate-to-sql-shim.ts` for the current list and the reason.
+- **One file still needs a human.** The dashboard's type-only supabase-js
+  import (SMD-1801's); the six servers that used resource embedding and nested
+  `.or()` moved with SMD-1798. Run `bun scripts/migrate-to-sql-shim.ts` for
+  the current list and the reason.
 - **`CLAUDE.md` and `AGENTS.md` disagree** — a duplicated worktrees block, then
   divergent content, and `AGENTS.md` mandates updating a private tracker.
   [PR #274](https://github.com/NateBJones-Projects/OB1/pull/274) proposed the

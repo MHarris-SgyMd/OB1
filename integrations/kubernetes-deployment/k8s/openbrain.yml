@@ -1,6 +1,6 @@
 ---
 # Open Brain - Self-hosted on Kubernetes
-# Multi-container pod: PostgreSQL+pgvector + MCP Server (Deno)
+# Multi-container pod: PostgreSQL+pgvector + MCP Server (Bun)
 # Containers share network namespace (communicate via 127.0.0.1)
 ---
 apiVersion: v1
@@ -110,7 +110,7 @@ spec:
             limits:
               memory: 1Gi
 
-        # Container 2: Open Brain MCP Server (Deno)
+        # Container 2: Open Brain MCP Server (Bun)
         - name: mcp-server
           image: openbrain-mcp-server:latest
           imagePullPolicy: IfNotPresent

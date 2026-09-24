@@ -1,8 +1,10 @@
 # Fork-local CI.
 #
 # Upstream runs no tests at all: 11 test files across ~85k lines of code and no
-# workflow invokes any of them. That is how server/test-stateless.mjs came to
-# assert the opposite of production for three months without anyone noticing.
+# workflow invokes any of them. That is how upstream's server/test-stateless.mjs
+# came to assert the opposite of production for three months without anyone
+# noticing (the Edge Function build and its three mirror suites left this fork
+# with SMD-1800; server-portable/ is the server, and its suites import it).
 #
 # This workflow exists so the fork's patch series cannot rot the same way. It is
 # additive — it touches no upstream workflow — so it survives a rebase onto
@@ -32,38 +34,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  server-tests:
-    name: Server tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.4.0"
-
-      # bun.lock pins the full transitive tree; package.json pins the direct deps
-      # exactly to server/deno.json, so the tests exercise the same libraries the
-      # Edge Function deploys with. (`npm install && npm test` also works for
-      # anyone without bun — the suites are plain node-compatible ESM.)
-      - name: Install pinned test dependencies
-        working-directory: server
-        run: bun install --frozen-lockfile
-
-      # Three suites, each carrying a drift guard that reads server/index.ts and
-      # fails if the behaviour it asserts is no longer what the server implements.
-      - name: Stateless transport + auth contract
-        working-directory: server
-        run: bun test-stateless.mjs
-
-      - name: thought_stats pagination
-        working-directory: server
-        run: bun test-stats-pagination.mjs
-
-      - name: capture_thought atomicity
-        working-directory: server
-        run: bun test-capture-atomicity.mjs
-
   repo-consistency:
     name: Repo consistency
     runs-on: ubuntu-latest
@@ -130,48 +100,6 @@ jobs:
       # endpoint on localhost. Bun only, no database, so it runs here.
       - name: Session capture hook
         run: bun recipes/session-capture-hook/test-session-capture.mjs
-
-  deno-check:
-    name: Edge Function typecheck
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
-      # The Node suites cannot import index.ts (Deno.env at module scope, jsr:
-      # imports), so this is the only thing that typechecks the file as deployed.
-      #
-      # --node-modules-dir=none resolves imports through deno.json exactly as
-      # Supabase does. Without it, a stray node_modules/ (bun creates one in
-      # server/ when running the test suites locally) flips Deno into manual
-      # node_modules mode and the check fails with "Could not find a matching
-      # package for 'npm:@supabase/supabase-js'". The flag makes this behave the
-      # same in CI and on a developer machine that has just run the tests.
-      #
-      # Since SDK 1.29 the package's exports name its types `./dist/esm/*.d.ts`,
-      # which for a `.js` subpath is a file that does not exist; tsc substitutes
-      # `.d.ts` for `.js`, Deno does not, and the module — every tool handler's
-      # arguments with it — is `any`. Each SDK import in these files carries a
-      # `// @ts-types` pragma naming the extensionless subpath, and test-auth.ts
-      # holds it there (change 84). A file that loses the pragma fails here
-      # with `implicitly has an 'any' type` at every handler.
-      - name: deno check server/index.ts
-        working-directory: server
-        run: deno check --node-modules-dir=none index.ts
-
-      # Every vendored MCP server, API and worker imports the SQL shim (which
-      # imports `bun`) since SMD-1798 and runs under Bun — the Portable-server
-      # job starts each, the data-layer job drives their tools — so none
-      # resolves under Deno any more; the five steps that checked the last six
-      # of them went with the move. kubernetes-deployment is the one vendored
-      # file still deployed on Deno (its image, SMD-1800's; its own database,
-      # SMD-1524) — Bun-shaped since SMD-1799, `deno serve` serving the export.
-      - name: deno check integrations/kubernetes-deployment
-        working-directory: integrations/kubernetes-deployment
-        run: deno check --node-modules-dir=none index.ts
 
   portable-server:
     name: Portable server (Bun + Workers)
@@ -261,6 +189,15 @@ jobs:
         working-directory: evals
         run: bun eval-write-path.ts --self-check
 
+      # The projection-replay spike's rules (SMD-1998): the snapshot key per
+      # projection, the replay rule branch by branch, the five scenarios on a
+      # hand-known corpus, the sample, the cost arithmetic, the verdict against
+      # the pre-registered bar and the report — probed with hand-known rows. No
+      # database, no model; the measurement itself reads the dogfood brain.
+      - name: Projection-replay rules
+        working-directory: evals
+        run: bun eval-projection-replay.ts --self-check
+
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
       - name: Cloudflare Workers build
@@ -275,14 +212,14 @@ jobs:
       # servers, HTTP APIs, workers and webhook receiver (change 67) — through a
       # _shared/auth.ts beside it, a byte copy. Their test runs in THIS job
       # because main's ruleset requires it: a separate job would not gate a
-      # merge. Pinned to the servers' deno.json files — the test fails if one
-      # drifts — so they run on the libraries they deploy with.
+      # merge. One MCP stack across the tree's three installs — the test fails
+      # if server-portable's or the Kubernetes image's pins drift from these.
       - name: Install the vendored servers' pinned test dependencies
         working-directory: extensions
         run: bun install --frozen-lockfile
 
       # Imported as modules — each server's default export's `fetch`, the shape
-      # `bun <file>` serves (SMD-1799) — under a loader for Deno's specifiers: a
+      # `bun <file>` serves (SMD-1799) — their packages from this install: a
       # wrong or revoked key is refused, a read-scoped key never sees a tool that
       # writes, is told so by a route that writes and may only dry-run a worker,
       # every copy is byte for byte auth.ts. Then every server on the SQL shim is
@@ -483,6 +420,24 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
+      # The projection-replay spike's SQL (SMD-1998): the schema reset and
+      # seeded with one row per branch of the replay rule, the stale-graph
+      # rule and the pool rule — a NULL label, no vector, no fingerprint, a
+      # key left stale by a raw update, another model's label, three graph
+      # thoughts whose text moved after extraction with the pool queued,
+      # failed and succeeded before the move, two whose graph is fresh — then
+      # read back through the same queries the live measurement runs, and
+      # held to the contract. The live brain cannot show these branches:
+      # every row there reuses. No provider. The check DROPS the schema and
+      # refuses a database holding thoughts unless told; this one holds the
+      # write-path gate's rows, and is a throwaway.
+      - name: Projection-replay fixture
+        working-directory: evals
+        run: bun eval-projection-replay.ts --fixture-check
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+          OB1_FIXTURE_RESET: "1"
+
       # The egress gate (SMD-1903): under the default, deny, a thought's text
       # never reaches an endpoint not declared local — zero requests at the
       # stub, the capture lands without a vector and says why, a search is
@@ -585,11 +540,15 @@ jobs:
         working-directory: extensions
         run: bun install --frozen-lockfile
 
+      # TZ: the enhanced-mcp block holds that a zone-less date bound is read as
+      # UTC, never the process's zone — an arm that proves nothing on a UTC
+      # runner, so the suite runs west of UTC here (SMD-1986).
       - name: Vendored writers leave what update_thought leaves
         working-directory: extensions
         run: bun test-writes.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+          TZ: America/Chicago
 
       # Every tool of the five extension servers on the SQL shim, called through
       # tools/call against the extensions' own schema.sql files (applied after
@@ -610,6 +569,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # The other container this repository ships (SMD-1800): kubernetes-deployment's
+      # image, Bun's base with its pinned install, built from integrations/ so the
+      # shared auth module is in the context. Built, not run — its database is its
+      # own (k8s/init.sql) and extensions/test-auth.ts starts the server itself.
+      # First, before the compose stack: a bring-up or smoke failure below must not
+      # hide whether this image builds.
+      - name: The Kubernetes image builds
+        run: docker build -f integrations/kubernetes-deployment/Dockerfile -t ob1-k8s-mcp:ci integrations
 
       # The Phase 4 exit test, literally: bring up Postgres, apply the schema and
       # serve MCP, with no Supabase CLI installed and no supabase.com account.

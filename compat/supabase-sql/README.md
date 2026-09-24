@@ -95,12 +95,11 @@ every server but `work-operating-model-activation`, which refuses to start
 without it — set it to any value there. An extension's `schema.sql` carries
 Supabase RLS policies on `auth.uid()`; its README's Step 1 gives the two stub
 functions a plain Postgres needs before the file runs. Check 11 of `scripts/check-fork-consistency.ts` holds
-every code file under the category directories and docs/ to no `Deno` (save the seven Edge Function files DENO_EXCEPTIONS counts, SMD-1800's), and every shim-importing file to no
+every code file under the category directories and docs/ to no `Deno` (the seven Edge Function files it excepted left with SMD-1800), and every shim-importing file to no
 `jsr:`/`npm:`/URL specifier, through the files it imports — and
 `extensions/test-auth.ts` starts each one under `bun` and answers it over its port
-in CI. One file is kept on supabase-js by the codemod's `KEEP` list, with the
-reason: `recipes/local-brain-no-mcp`'s client runs inside that recipe's own
-self-hosted Supabase stack, where PostgREST is present and `bun` is not.
+in CI. The codemod's `KEEP` list — a file that deploys where PostgREST is present
+and `bun` is not — is empty since SMD-1800 retired its one entry with its recipe.
 
 ### 4. Run the tests
 
