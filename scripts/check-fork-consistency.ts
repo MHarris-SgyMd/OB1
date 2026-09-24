@@ -42,9 +42,9 @@
  *      their own, three function bodies shown, one test fixture)
  *  11. no code file under the seven category directories or docs/ reaches
  *      `Deno` — the vendored files are Bun-native since SMD-1799 (`process.env`,
- *      `export default { port, fetch }`, what `bun <file>` serves) — save the
- *      Edge Function deployments SMD-1800 retires, counted per file in
- *      DENO_EXCEPTIONS; and a file that imports the SQL shim (Bun's client)
+ *      `export default { port, fetch }`, what `bun <file>` serves), and the
+ *      Edge Function deployments that were excepted left with SMD-1800
+ *      (DENO_EXCEPTIONS counts per file; none today); and a file that imports the SQL shim (Bun's client)
  *      imports no specifier Bun cannot resolve (`jsr:`, `npm:`, a URL), itself
  *      or through the files it imports (SMD-1480)
  *  12. a .sql file under schemas/ or db/ runs nothing that needs Supabase — no
@@ -204,10 +204,10 @@
  *      esm.sh URL, a subpath), comments blanked, in any code file under the
  *      seven category directories and docs/: every vendored server reaches the
  *      brain through compat/supabase-sql, and supabase-js stays only in
- *      server/index.ts (the Edge Function build, SMD-1800's) and
- *      server-portable's Workers store; counted per-file exceptions as 7's —
- *      the codemod's KEEP client (local-brain-no-mcp, SMD-1800's) and the
- *      dashboard's type-only import (SMD-1801's) (SMD-1798)
+ *      server-portable's Workers store (server/index.ts, the Edge Function
+ *      build that also held it, left with SMD-1800); counted per-file
+ *      exceptions as 7's — the dashboard's type-only import (SMD-1801's)
+ *      (SMD-1798)
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18 and 20 parse YAML with Bun.YAML)
@@ -826,7 +826,6 @@ const COLUMN_COMMENT_NON_PROBES = [
 // add to one. Exactly this many lines, for exactly these functions.
 const GUIDE = "the guide migrations 001-003 were extracted from, creating the brain; SETUP.md sends this fork's readers past it";
 const NEON = "creates the recipe's own Neon database from the guide's shape; never run against a migrated brain";
-const LOCAL_INIT = "the init script of the recipe's own Postgres container, run once on an empty database";
 const one = (why: string): CountedException => ({ why, lines: 1 });
 const CORE_FUNCTION_EXCEPTIONS = new Map<string, Record<string, CountedException>>([
   ["docs/01-getting-started.md", { update_updated_at: one(GUIDE), match_thoughts: one(GUIDE), upsert_thought: one(GUIDE) }],
@@ -840,11 +839,6 @@ const CORE_FUNCTION_EXCEPTIONS = new Map<string, Record<string, CountedException
   }],
   ["integrations/kubernetes-deployment/k8s/openbrain.yml", {
     match_thoughts: one("the ConfigMap carrying k8s/init.sql, the deployment's own Postgres init, run once on an empty database"),
-  }],
-  ["recipes/local-brain-no-mcp/volumes/db/init/01-thoughts-schema.sh", { update_updated_at: one(LOCAL_INIT) }],
-  ["recipes/local-brain-no-mcp/volumes/db/init/02-match-thoughts-fn.sh", {
-    match_thoughts: one(LOCAL_INIT),
-    upsert_thought: one(`${LOCAL_INIT} (a third signature, text/vector/jsonb)`),
   }],
 ]);
 
@@ -1593,10 +1587,8 @@ const THOUGHT_WRITE_EXCEPTIONS = new Map([
   ["integrations/kubernetes-deployment/index.ts", OWN_DATABASE("its own Postgres in the cluster, built by k8s/init.sql")],
   ["recipes/vercel-neon-telegram/src/lib/db.ts", OWN_DATABASE("its own Neon database, built by sql/001-create-thoughts.sql")],
   ["recipes/schema-aware-routing/index.ts", OWN_DATABASE("its own five-table project, built by its README's SQL (a `thoughts` with domain/status/source columns)")],
-  // The recipe's own container: its upsert_thought body, the guide's shape — the INSERT is the function's own.
-  ["recipes/local-brain-no-mcp/volumes/db/init/02-match-thoughts-fn.sh", { why: "the INSERT inside the recipe's own upsert_thought, in its own container's init (check 7 excepts the same definition); the README says what its rows lack", lines: 1 }],
-  // The fixture: a row as an older write left it — fingerprint and label by hand — for the writer under test to move.
-  ["extensions/test-writes.ts", { why: "plants a thought as an older write left it, fingerprint and label supplied by hand, for the writer under test to move whole", lines: 1 }],
+  // The fixtures: a row as an older write left it — fingerprint and label by hand — for the writer under test to move, and a restricted twin for the search tools to hide.
+  ["extensions/test-writes.ts", { why: "plants a thought as an older write left it, fingerprint and label supplied by hand, for the writer under test to move whole; and a restricted twin at a captured thought's vector, the row the three search tools must not show (SMD-1986)", lines: 2 }],
 ]);
 
 function checkThoughtWritesAround() {
@@ -1643,9 +1635,11 @@ function checkThoughtWritesAround() {
 //   - no code file under the seven category directories or docs/ reaches
 //     `Deno` — any member, or the bare name (an alias, a bracket, a
 //     destructure, `typeof Deno`: a Bun-native file does not detect its
-//     runtime) — save the Edge Function deployments DENO_EXCEPTIONS names
-//     with the reason and the exact count of lines, so a new line fails and
-//     a stale entry fails (SMD-1800 removes each entry with its file);
+//     runtime) — save what DENO_EXCEPTIONS names with the reason and the
+//     exact count of lines, so a new line fails and a stale entry fails
+//     (none today: the seven Edge Function files it counted, the
+//     local-brain-no-mcp recipe's five and the cost recipe's two, left the
+//     tree with SMD-1800);
 //   - a file that imports compat/supabase-sql (Bun's client) imports no
 //     specifier Bun cannot resolve — `jsr:`, `npm:`, a URL — in the file or
 //     the files it imports, relatively and transitively, a dynamic
@@ -1662,20 +1656,13 @@ const SHIM_SPECIFIER = /compat\/supabase-sql\/index\.ts$/;
 /** A specifier Bun does not resolve: Deno's registries and a URL. */
 const NOT_ON_BUN = /^(?:jsr:|npm:|https?:\/\/)/;
 /**
- * file → the reason it still reaches `Deno`, and the exact count of lines that do: the Edge Function
- * deployments SMD-1800 retires. A line past the count fails; a count no line reaches fails as stale.
+ * file → the reason it still reaches `Deno`, and the exact count of lines that do. A line past the count
+ * fails; a count no line reaches fails as stale; a file that is gone fails until its entry goes. None today:
+ * the seven Edge Function files this held (local-brain-no-mcp's five, the cost recipe's after sample and its
+ * 410 stub) left the tree with SMD-1800. An entry here is a deployment on another runtime, with the ticket
+ * that retires it.
  */
-const DENO_EXCEPTIONS = new Map<string, CountedException>([
-  ["recipes/local-brain-no-mcp/functions/_shared/db.ts",
-    { why: "runs inside the recipe's own self-hosted Supabase stack, on its Deno edge runtime (the codemod's KEEP client) — SMD-1800", lines: 2 }],
-  ["recipes/local-brain-no-mcp/functions/_shared/embed.ts", { why: "the same recipe's embedder, on that stack's Deno runtime — SMD-1800", lines: 3 }],
-  ["recipes/local-brain-no-mcp/functions/capture/index.ts", { why: "the same recipe's Edge Function — SMD-1800", lines: 1 }],
-  ["recipes/local-brain-no-mcp/functions/list/index.ts", { why: "the same recipe's Edge Function — SMD-1800", lines: 1 }],
-  ["recipes/local-brain-no-mcp/functions/search/index.ts", { why: "the same recipe's Edge Function — SMD-1800", lines: 1 }],
-  ["recipes/edge-function-cost-optimization/examples/after/index.ts",
-    { why: "the cost recipe's Edge Function sample — read by extensions/test-auth.ts's TEXT_ONLY, never run here; SMD-1800 retires the recipe", lines: 3 }],
-  ["recipes/edge-function-cost-optimization/examples/after/410-stub.ts", { why: "the same recipe's 410 stub for a retired Edge Function — SMD-1800", lines: 1 }],
-]);
+const DENO_EXCEPTIONS = new Map<string, CountedException>([]);
 
 /**
  * `text` with comments and regex literals blanked, and — when `stringsToo` —
@@ -1923,7 +1910,7 @@ function checkBunNative() {
   const gone = new Set([...DENO_EXCEPTIONS.keys()].filter((rel) => !existsSync(join(ROOT, rel))));
   for (const rel of gone) fail(SELF, `DENO_EXCEPTIONS names ${rel}, which is not in the tree — remove the entry with the file`);
 
-  const HOW = "reaches `Deno` — the vendored files are Bun-native (SMD-1799): `process.env` for the environment, `export default { port, fetch }` at the tail, Bun's own APIs for files and arguments; the Edge Function deployments SMD-1800 retires are the counted exceptions in DENO_EXCEPTIONS";
+  const HOW = "reaches `Deno` — the vendored files are Bun-native (SMD-1799): `process.env` for the environment, `export default { port, fetch }` at the tail, Bun's own APIs for files and arguments (the Edge Function deployments that were excepted left with SMD-1800; DENO_EXCEPTIONS counts a deployment on another runtime, with the ticket that retires it — none today)";
   const code = textFilesUnder(SCANNED_ROOTS).filter((f) => BUN_CODE_FILE.test(f) && !f.includes(`${sep}node_modules${sep}`));
   const reached = new Map<string, number>();
   for (const file of code) {
@@ -4034,7 +4021,7 @@ checkConnectorRegistry();
  * omits — so FORK.md names the one command that re-applies it.
  *
  * SMD-1857 wanted the merge queue as a fifth rule: a PR is queued, GitHub
- * builds the merge result and runs the twelve checks on it (the workflow's
+ * builds the merge result and runs the required checks on it (the workflow's
  * `merge_group` trigger), and merges only what passes — so the checks judge
  * the tree that lands without the author merging `main` first, which is what
  * strict up-to-date makes them do. GitHub offers the queue on
@@ -4418,10 +4405,10 @@ checkDestructiveSql();
 // worker and script reaches the brain through compat/supabase-sql — Bun's
 // Postgres client in supabase-js's shape — so running any of them needs no
 // Supabase project, PostgREST or service key; supabase-js stays in the tree in
-// server/index.ts — the Edge Function build, SMD-1800's to retire — and in
-// server-portable/store-postgrest.ts for the Cloudflare Workers target
-// (SMD-1847), both outside this scan (the shim's own suite writes its
-// PostgREST expectations by hand and loads no oracle). This is what keeps the next rebase, or
+// server-portable/store-postgrest.ts alone, for the Cloudflare Workers target
+// (SMD-1847), outside this scan (the shim's own suite writes its PostgREST
+// expectations by hand and loads no oracle; server/index.ts, the Edge Function
+// build that also held it, left with SMD-1800). This is what keeps the next rebase, or
 // the next vendored file, from bringing a PostgREST client back: a
 // specifier-shaped string naming the package — "@supabase/supabase-js",
 // "npm:@supabase/supabase-js@2", "jsr:@supabase/supabase-js@2", a CDN URL
@@ -4432,11 +4419,10 @@ checkDestructiveSql();
 // `// ob1-original-import:` record is a comment; a README's sample is prose,
 // SMD-1802's), is a hit, whatever statement holds it: an import, a type-only
 // import, a require, a dynamic import. Counted per-file exceptions, as check 7
-// counts them: the one client the codemod's KEEP list holds on supabase-js
-// (local-brain-no-mcp's, which runs inside that recipe's own Supabase stack —
-// SMD-1800 decides the recipe) and the dashboard's type-only import
-// (SMD-1801's). Every other vendored client moved: the rest in change 74, the
-// last six here.
+// counts them: the dashboard's type-only import (SMD-1801's); the one client
+// the codemod's KEEP list held on supabase-js — local-brain-no-mcp's, inside
+// that recipe's own Supabase stack — left with the recipe (SMD-1800). Every
+// other vendored client moved: the rest in change 74, the last six here.
 const SUPABASE_JS_SPECIFIER = /(["'])(?:npm:|jsr:|https?:\/\/[^"'\s]*\/)?@supabase\/supabase-js(?:@[^"'/]*)?(?:\/[^"']*)?\1/g;
 /** Code, and HTML for the inline `<script type="module">` a dashboard's page may carry. */
 const CODE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|svelte|vue|html)$/;
@@ -4462,7 +4448,6 @@ const SUPABASE_JS_PROBES: [string, boolean, boolean?][] = [
 ];
 /** file → rule → the reason and the exact hit count; a hit past the count fails, a count no hit reaches fails as stale. */
 const SUPABASE_JS_EXCEPTIONS = new Map<string, Record<string, CountedException>>([
-  ["recipes/local-brain-no-mcp/functions/_shared/db.ts", { "supabase-js": { why: "runs inside the recipe's own self-hosted Supabase stack, where PostgREST is present and bun is not — the codemod's KEEP list; SMD-1800 decides the recipe", lines: 1 } }],
   ["dashboards/open-brain-dashboard/src/app.d.ts", { "supabase-js": { why: "the dashboard's type-only import: the one client left that reads the brain over PostgREST — SMD-1801 moves it onto the fork's REST API", lines: 1 } }],
 ]);
 /** A markup file's code is its `<script>` bodies: everything else, an HTML comment included, is blanked (newlines kept). */
@@ -4513,7 +4498,7 @@ function checkSupabaseJsImports() {
       continue;
     }
     for (const line of lines) {
-      fail(`${rel}:${line}`, `imports @supabase/supabase-js at runtime — every vendored server reaches the brain through compat/supabase-sql since SMD-1798 (\`bun scripts/migrate-to-sql-shim.ts --apply ${rel}\`; the shim's README says what it still refuses); supabase-js stays only in server/index.ts (the Edge Function build) and in server-portable's Workers store`);
+      fail(`${rel}:${line}`, `imports @supabase/supabase-js at runtime — every vendored server reaches the brain through compat/supabase-sql since SMD-1798 (\`bun scripts/migrate-to-sql-shim.ts --apply ${rel}\`; the shim's README says what it still refuses); supabase-js stays only in server-portable's Workers store`);
     }
   }
   for (const rel of SUPABASE_JS_EXCEPTIONS.keys()) if (!seen.has(rel)) fail(rel, "check 22's exception names a file the scan does not reach — stale, or the file is gone");

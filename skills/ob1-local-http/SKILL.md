@@ -1,28 +1,30 @@
 ---
 name: ob1-local-http
 description: |
-  Capture and search thoughts against a self-hosted Open Brain over plain
-  HTTPS, with no MCP transport involved. Use this skill in environments
-  where Claude Code's MCP feature is disabled or the network blocks remote
-  MCP endpoints, but the brain stack from the companion `local-brain-no-mcp`
-  recipe is reachable on the local network. Triggers: prompts like
-  "remember this", "save that for later", "what did I note about X",
-  "search my brain for Y", "what thoughts touched on Z", or any explicit
-  request to record or recall personal memory.
+  Capture, search and browse thoughts in an Open Brain over plain HTTP, with
+  no MCP transport involved. Use this skill where Claude Code's MCP feature
+  is disabled or the network blocks remote MCP endpoints, but the brain's
+  REST gateway (`integrations/open-brain-rest`, on a brain built as this
+  skill's README says) is reachable. Triggers: prompts like "remember this", "save that
+  for later", "what did I note about X", "search my brain for Y", "what
+  thoughts touched on Z", or any explicit request to record or recall
+  personal memory.
 author: dhanjit
-version: 0.1.0
+version: 0.2.0
 ---
 
 # OB1 Local HTTP
 
 ## Problem
 
-The canonical Open Brain stack assumes Claude Code can talk to a remote
-Supabase MCP server. In environments that disable MCP entirely -- corporate
-networks, air-gapped offices, restricted Claude Code builds -- that path is
-not available. This skill replaces it with `curl` calls to a LAN-resident
-Open Brain (see the `local-brain-no-mcp` recipe), keeping the same
-capture-and-recall behavior without any MCP protocol involvement.
+The canonical Open Brain path is a remote MCP server. In environments that
+disable MCP entirely -- corporate networks, air-gapped offices, restricted
+Claude Code builds -- that path is not available. This skill replaces it with
+`curl` calls to the brain's REST gateway, `integrations/open-brain-rest`,
+keeping the same capture-and-recall behavior without any MCP protocol
+involvement. (Until SMD-1800 the skill called a self-hosted Supabase stack's
+Edge Functions, the retired `local-brain-no-mcp` recipe; the gateway runs on
+the fork's own stack, no Supabase.)
 
 ## When to Use
 
@@ -36,53 +38,67 @@ capture-and-recall behavior without any MCP protocol involvement.
 
 - The environment has a working remote Open Brain MCP connection -- prefer
   the canonical MCP-based capture/search tools.
-- The required environment variables `BRAIN_URL` and `BRAIN_ANON_KEY` are
-  not set on the dev host -- this skill cannot function without them; ask
-  the user to follow `local-brain-no-mcp`'s install instructions first.
+- The required environment variables `BRAIN_URL` and `BRAIN_KEY` are not set
+  on the dev host -- this skill cannot function without them; ask the user to
+  follow this skill's README first (the brain must be built at the gateway's
+  embedding width and carry the schema the README names, or capture, search
+  and browse answer 500).
 
 ## Required Environment
 
 On each dev host that will use this skill, the user must export:
 
 ```sh
-export BRAIN_URL="http://<brain-host>:8000"   # Supabase Kong gateway
-export BRAIN_ANON_KEY="eyJhbGciOi..."          # written by setup.sh
+export BRAIN_URL="http://<brain-host>:8787"   # where open-brain-rest listens
+export BRAIN_KEY="<the raw access key>"        # a write-scoped key minted for this host
 ```
 
-If either is missing, stop and tell the user. Do not guess values.
+If either is missing, stop and tell the user. Do not guess values. A
+read-scoped key can search and browse but every capture answers HTTP 403.
 
 ## Process
+
+Every call presents the key as `x-brain-key`. The gateway also accepts
+`x-access-key`, `?key=` and a bearer token. The commands use `curl -sS`, not
+`-f`: a refusal's JSON body (`{"error":"…"}`) is what tells you why, and `-f`
+would hide it.
 
 ### Capture
 
 When the user says something like "remember X" or "save this thought":
 
 ```sh
-curl -fsS -X POST "$BRAIN_URL/functions/v1/capture" \
-  -H "apikey: $BRAIN_ANON_KEY" \
-  -H "Authorization: Bearer $BRAIN_ANON_KEY" \
+curl -sS -X POST "$BRAIN_URL/capture" \
+  -H "x-brain-key: $BRAIN_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"content":"<the thought>","metadata":{"source":"claude-code"}}'
+  -d '{"content":"<the thought>","source_type":"claude-code"}'
 ```
 
-Optional `metadata` fields: `source`, `tags` (array of strings),
-`thread_id`, anything else useful. The server fingerprints content and
-de-duplicates -- re-capturing identical text returns the existing id.
+Optional fields: `type` (any string; the gateway's extractor uses
+`observation`, `task`, `idea`, `reference`, `person_note` among others),
+`metadata` (an object; when given, the gateway stores it as is instead of
+extracting metadata with its model), `importance` and `quality_score` (0-100),
+`sensitivity_tier`, `status`. The brain fingerprints content and de-duplicates
+-- re-capturing identical text answers `"action":"updated"` with the existing
+`thought_id`.
 
 ### Search
 
 When the user wants to recall:
 
 ```sh
-curl -fsS -X POST "$BRAIN_URL/functions/v1/search" \
-  -H "apikey: $BRAIN_ANON_KEY" \
-  -H "Authorization: Bearer $BRAIN_ANON_KEY" \
+curl -sS -X POST "$BRAIN_URL/search" \
+  -H "x-brain-key: $BRAIN_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"query":"<what to find>","match_count":10,"match_threshold":0.65}'
+  -d '{"query":"<what to find>","limit":10,"threshold":0.3}'
 ```
 
-`match_threshold` defaults to 0.7. Lower it to 0.5-0.65 for broader recall;
-raise to 0.8+ for precision. Cap `match_count` at 100.
+`mode` defaults to `semantic` (by meaning); `"mode":"text"` matches words.
+`threshold` defaults to 0.35. Lower it to 0.2-0.3 for broader recall; raise to
+0.5+ for precision. Cap `limit` at 100. The reply is
+`{"results":[…],"count":N,"total":M,"page":1,"per_page":10,"total_pages":…,"mode":"semantic"}`;
+each result carries `id`, `content`, `type`, `metadata`, `created_at`, `rank`
+and, in semantic mode, `similarity`.
 
 ### Browse recent
 
@@ -90,15 +106,18 @@ When the user asks "what have I been thinking about" or wants a list rather
 than a similarity search:
 
 ```sh
-curl -fsS "$BRAIN_URL/functions/v1/list?limit=20" \
-  -H "apikey: $BRAIN_ANON_KEY" \
-  -H "Authorization: Bearer $BRAIN_ANON_KEY"
+curl -sS "$BRAIN_URL/thoughts?per_page=20&page=1" \
+  -H "x-brain-key: $BRAIN_KEY"
 ```
+
+Optional filters: `type=task`, `source_type=claude-code`, `status=new`. The
+reply is `{"data":[…],"total":N,"page":1,"per_page":20}`, newest first.
 
 ## Output
 
-- For captures: confirm the id and the de-dupe fingerprint to the user in
-  one sentence. Don't paraphrase the captured content back at them.
+- For captures: confirm the `thought_id` and whether it was `created` or
+  `updated` (already captured) to the user in one sentence. Don't paraphrase
+  the captured content back at them.
 - For searches: surface the top results with similarity scores and
   created_at timestamps. Order by similarity descending. If no results
   cross the threshold, say so plainly and suggest lowering it.
@@ -107,21 +126,26 @@ curl -fsS "$BRAIN_URL/functions/v1/list?limit=20" \
 
 ## Failure Modes
 
-- HTTP 502 with "unable to reach Ollama": the brain host's Ollama service
-  is down. Tell the user to `docker compose ps` on the brain host.
-- HTTP 502 with "did you 'ollama pull...'": the embedding model isn't
-  loaded. Tell the user to run the documented `ollama pull` step.
-- HTTP 502 with "embedding-dim mismatch": the brain's `EMBED_DIM` env was
-  changed after the volume was initialized. Tell the user to read the
-  "one-way door" section of `local-brain-no-mcp`'s README.
-- HTTP 401 or 403: `BRAIN_ANON_KEY` is wrong or expired. Tell the user to
-  check `supabase-docker/docker/.env` on the brain host.
-- Network timeout: the brain host is unreachable. Tell the user to ping
-  the brain host from this dev host.
+- HTTP 401 `Invalid or missing access key`: `BRAIN_KEY` is wrong or was
+  revoked. Tell the user to check the key against the gateway's
+  `MCP_ACCESS_KEYS`.
+- HTTP 403 `Forbidden: this key is read-scoped and this route writes`: the
+  key can search and browse but not capture. Tell the user to mint a
+  write-scoped key.
+- HTTP 500: the gateway logs nothing for these, so the body is the
+  diagnosis — read its `error`. `OPENROUTER_API_KEY is not configured` or
+  `OpenRouter embeddings failed: 401 …`: the gateway's key is unset or wrong
+  (`"mode":"text"` search works without it). `expected 1024 dimensions, not
+  1536` (or another pair): the brain was built at a width other than the
+  gateway's model's. `column "type" does not exist`: the enhanced-thoughts
+  schema the README names is not applied (browse, text search and stats all
+  fail this way). Tell the user which, in the body's own words.
+- Connection refused or a network timeout: the gateway is down or the host is
+  unreachable. Tell the user to check the process and ping the brain host from
+  this dev host.
 
 ## Notes
 
-- Never log or echo `BRAIN_ANON_KEY` -- it's a long-lived JWT.
+- Never log or echo `BRAIN_KEY`.
 - This skill never installs or invokes any MCP server, by design.
-- The brain host generates embeddings itself; this dev host doesn't need
-  Ollama or any model files.
+- The gateway generates embeddings itself; this dev host needs no model.

@@ -8,15 +8,16 @@ import { FORK_VERSION } from "../db/version.mjs";
  * Tests the REAL server. Not a mirror of it.
  *
  * ── Why that sentence is the whole point ──────────────────────────────────────
- * `../server/index.ts` cannot be imported by a test runner: it reads `Deno.env`
- * at module scope and imports `jsr:@supabase/functions-js/edge-runtime.d.ts`.
- * So the suites next to it (`server/test-*.mjs`) reimplement the server inline
- * and assert against the copy.
+ * Upstream's Edge Function build, `server/index.ts` (in this fork until
+ * SMD-1800), could not be imported by a test runner: it read `Deno.env` at
+ * module scope and imported `jsr:@supabase/functions-js/edge-runtime.d.ts`.
+ * So the suites next to it reimplemented the server inline and asserted
+ * against the copy.
  *
- * That is not a stylistic choice — it is how upstream's auth assertions came to
- * claim HTTP 401 for three months after PR #243 changed the server to HTTP 200.
- * The copy kept passing. The fork's answer was a drift guard that greps
- * index.ts as text, which detects the problem but does not remove it.
+ * That was not a stylistic choice — it is how upstream's auth assertions came
+ * to claim HTTP 401 for three months after PR #243 changed the server to HTTP
+ * 200. The copy kept passing. The fork's first answer was a drift guard that
+ * grepped index.ts as text, which detected the problem but did not remove it.
  *
  * This file removes it. Because env is read lazily here, `index.ts` imports
  * cleanly under Bun/Node and every assertion below runs against the same code

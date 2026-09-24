@@ -18,9 +18,10 @@
 //   - `getEmbedding`    (Tool 3 only) canonical index.ts helper — text → vector
 //   - `EMBEDDING_MODEL` (Tool 3 only) the model getEmbedding calls, as
 //                        OB1_EMBEDDING_MODEL spells it — the label migration
-//                        021 writes beside the vector (this fork's server/index.ts
-//                        defines it; an older copy hard-codes the model name in
-//                        getEmbedding, so lift it into a constant)
+//                        021 writes beside the vector (this fork's
+//                        server-portable/index.ts defines it; an older copy
+//                        hard-codes the model name in getEmbedding, so lift it
+//                        into a constant)
 //   - `extractMetadata` (Tool 3 only) canonical index.ts helper — text → metadata
 //                        (in this fork's server-portable/index.ts both helpers
 //                        take an EgressSubject second — whose text this is, for
@@ -35,7 +36,7 @@
 //
 // Return envelopes are inlined as the literal
 //   { content: [{ type: "text", text: JSON.stringify(...) }] }
-// shape that the canonical server/index.ts uses — no toolSuccess /
+// shape that the canonical server-portable/index.ts uses — no toolSuccess /
 // toolFailure helper is required. Errors set `isError: true` on the
 // envelope and put a plain-text explanation in the content block so
 // Claude Desktop can render the failure inline.

@@ -1736,7 +1736,7 @@ if (configFailed) {
           JOIN pg_namespace n ON n.oid = p.pronamespace
           WHERE p.proname = 'thought_stats_summary' AND n.nspname = 'public'`;
         // And whose body (SMD-1250): 024 took this function from the
-        // edge-function-cost-optimization recipe and hardened it — topics and
+        // edge-function-cost-optimization recipe (retired by SMD-1800) and hardened it — topics and
         // people unnested only when they are arrays, null elements dropped. The
         // recipe's migration, pasted onto a migrated brain, puts the recipe's
         // body back under the same signature with no error, and thought_stats

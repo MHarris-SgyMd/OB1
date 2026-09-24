@@ -1,8 +1,9 @@
 # server-portable
 
 A runtime-neutral build of the Open Brain MCP server. Same tools, same wire
-behaviour as `../server/index.ts`, but with no dependency on Deno or on Supabase
-Edge Functions as a host.
+behaviour as upstream's Edge Function build (`server/index.ts`, in this fork
+until SMD-1800), with no dependency on Deno or on Supabase Edge Functions as a
+host.
 
 This exists so the runtime decision in the Supabase migration can be made last,
 and changed later. One file targets four runtimes.
@@ -14,7 +15,7 @@ and changed later. One file targets four runtimes.
   [the getting-started guide](../docs/01-getting-started.md)
 - For the Cloudflare target: a Cloudflare account and `wrangler` (a dev dependency here)
 
-## What differs from `../server/index.ts`
+## What differs from upstream's Edge Function build
 
 Three changes.
 
@@ -221,9 +222,10 @@ cannot take a parameter and sends a fixed weight; `db/migrations/020_*.sql` and
 bun install
 ```
 
-Runtime dependencies are pinned to the exact versions in `../server/deno.json`, so
-every target runs identical library code. **If you bump one file, bump both in the
-same commit.**
+Runtime dependencies are pinned to the exact versions `../extensions/package.json`
+installs for the vendored servers, so every target runs identical library code;
+`extensions/test-auth.ts` fails if the two drift. **If you bump one file, bump
+both in the same commit.**
 
 ### 2. Pick a target
 
@@ -394,16 +396,17 @@ to start and remove a throwaway `pgvector/pgvector:0.8.6-pg16`.
 
 `test-server.ts` **imports the real server.** That is the point of this directory.
 
-`../server/index.ts` cannot be imported by a test runner — it reads `Deno.env` at
-module scope and imports from `jsr:` — so the suites beside it reimplement the
-server inline and assert against the copy. That is precisely how upstream's auth
-assertions came to claim HTTP 401 for three months after the server started
-returning HTTP 200 ([issue #487](https://github.com/NateBJones-Projects/OB1/issues/487)).
-The copy kept passing.
+Upstream's Edge Function build, `server/index.ts` (in this fork until SMD-1800),
+could not be imported by a test runner — it read `Deno.env` at module scope and
+imported from `jsr:` — so the suites beside it reimplemented the server inline and
+asserted against the copy. That is precisely how upstream's auth assertions came
+to claim HTTP 401 for three months after the server started returning HTTP 200
+([issue #487](https://github.com/NateBJones-Projects/OB1/issues/487)). The copy
+kept passing.
 
-The fork's answer over there is a drift guard that greps `index.ts` as text, which
-detects the divergence but does not prevent it. Here there is nothing to diverge
-from, so the guards are unnecessary and absent.
+The fork's first answer over there was a drift guard that grepped `index.ts` as
+text, which detected the divergence but did not prevent it. Here there is nothing
+to diverge from, so the guards are unnecessary and absent.
 
 `test-e2e-sql.ts` goes further: it boots the real server with `OB1_STORE` unset —
 the default store is what it drives — and `SUPABASE_URL` deleted from the
@@ -419,10 +422,12 @@ reaches the stub. Every other suite that boots the server against a stub
 declares it local (`OB1_LLM_LOCAL=1`), which is the upgrade every stack from
 before the gate makes.
 
-**Not yet ported:** `test-stats-pagination.mjs` and `test-capture-atomicity.mjs`
-still live in `../server/` and still test mirrors of the Deno build. They are now
-largely superseded for the portable build — the store interface makes both paths
-directly testable — but the Deno build still needs them.
+The three mirror suites went with the Edge Function build (SMD-1800): what they
+asserted is this server's behaviour, tested on the server itself — the auth
+envelope (`test-server.ts` [4]–[5]), `thought_stats` aggregated in SQL with no page
+to fall off (migration 024, `test-e2e-sql.ts`), and the vector written in the same
+statement as the row (`test-store-sql.ts` [2], `test-e2e-sql.ts` "the embedding was
+stored in the same write").
 
 ## Caveats
 

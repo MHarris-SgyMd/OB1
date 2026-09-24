@@ -65,6 +65,18 @@
  * on an edit) and tolerates only a copy of the origin, the one case the rule
  * allows; server-portable/test-audit.ts holds the trigger itself.
  *
+ * SMD-1986 drives enhanced-mcp's three search tools, which SMD-1798's block
+ * had pinned answering nothing: each sent `exclude_restricted` and the date
+ * bounds as keys of the `filter` that match_thoughts and search_thoughts_text
+ * read as a metadata containment. A restricted twin is planted at the captured
+ * thought's own vector, with text the query matches and a rank above the
+ * capture's, so every search that finds the capture must drop the twin — by
+ * the `sensitivity_tier` column, which match_thoughts does not return and the
+ * tool looks up by id — and the paging over a hidden first row, the date
+ * bounds as instants and the refusals by name are held around the same pair.
+ * CI runs this file under TZ=America/Chicago so the zone-less bound's arm
+ * distinguishes UTC from the process's zone.
+ *
  * The files are imported as modules — each exports Bun's entry shape, and its
  * default export's `fetch` is the handler driven here (SMD-1799) — under the
  * loader extensions/test-auth.ts uses for Deno's specifiers; every server
@@ -107,7 +119,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SQL } from "bun";
-import { createAssert, requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
+import { createAssert, PACKAGES, requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
@@ -186,26 +198,21 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   return Response.json({ choices: [{ message: { content: JSON.stringify(STUB_METADATA) } }] });
 }) as typeof fetch;
 
-// ── The servers' handlers; Deno's specifiers, on Bun ─────────────────────────
+// ── The servers' handlers; their packages from this directory's install ──────
 
 type Handler = (req: Request) => Response | Promise<Response>;
-const PACKAGES = /^(hono|zod|@hono\/mcp|@modelcontextprotocol\/sdk)(\/|$)/;
+// PACKAGES (db/test-support.ts): the stack's four names, the same list test-auth.ts's loader and pin guard read.
 const VENDORED = new RegExp("^" + ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/(recipes|integrations)/.*\\.ts$");
-// Until SMD-1798 this loader also resolved a quoted supabase-js specifier to the shim, for the two servers still on
-// it; every vendored server imports the shim itself now, and a file that imports supabase-js at runtime is check
-// 22's failure, not something a test loader papers over.
+// A recipe or integration imports STACK's four by bare name and has no install of its own beside it, so they resolve
+// from extensions/node_modules here (test-auth.ts has the same loader). Until SMD-1798 this loader also resolved a
+// quoted supabase-js specifier to the shim; until SMD-1800 it read Deno's specifiers (a `jsr:` line, an `npm:`
+// prefix) — neither is in the tree now, and check 11 and 22 refuse them.
 Bun.plugin({
-  name: "deno-specifiers-on-bun",
+  name: "vendored-packages-from-extensions",
   setup(build) {
     build.onLoad({ filter: VENDORED }, async (args) => {
-      let src = await Bun.file(args.path).text();
-      src = src.replace(/^import\s+"jsr:[^"]+";\s*$/gm, "");
-      src = src.replace(/(from\s+|import\s+)(["'])([^"']+)\2/g, (whole, lead, q, spec) => {
-        let s = spec as string;
-        if (s.startsWith("npm:")) s = s.slice(4).replace(/^(@?[^@/]+(?:\/[^@/]+)?)@[^/]*/, "$1");
-        if (PACKAGES.test(s)) return `${lead}${q}${Bun.resolveSync(s, HERE)}${q}`;
-        return whole;
-      });
+      const src = (await Bun.file(args.path).text()).replace(/(from\s+|import\s+)(["'])([^"']+)\2/g, (whole, lead, q, spec) =>
+        PACKAGES.test(spec as string) ? `${lead}${q}${Bun.resolveSync(spec as string, HERE)}${q}` : whole);
       return { contents: src, loader: "ts" };
     });
   },
@@ -463,19 +470,93 @@ try {
   assert(named.status === 401, `a named key (MCP_ACCESS_KEYS) is 401 here — this server knows its one MCP_ACCESS_KEY (${named.status})`);
 
   // The other nine tools, on the shim (SMD-1798): the reads by construction, the schema-backed ones degrading as they say.
-  // The three search tools answer, and answer nothing: each sends `exclude_restricted: true` (and any date bound) as
-  // a key of the `filter` it hands match_thoughts and search_thoughts_text, and both functions — this fork's 014 and
-  // the enhanced-thoughts sidecar's own — read that argument as `metadata @> filter`, which no thought's metadata
-  // satisfies. A defect of the tool, not the shim (the shim ran the calls; the rows came back empty), pinned here so
-  // SMD-1986's fix flips these three by name.
+  // The three search tools (SMD-1986). Each sent `exclude_restricted: true` (and any date bound) as a key of the
+  // `filter` it hands match_thoughts and search_thoughts_text, and both functions — this fork's 014 and the
+  // enhanced-thoughts sidecar's own — read that argument as `metadata @> filter`, which no thought's metadata
+  // satisfies: every search answered no matches, and this suite pinned it. Now the caller's metadata_filter goes
+  // alone and the tier and the dates are applied to the rows — the tier by the COLUMN (match_thoughts returns none,
+  // so semantic mode looks it up by id; the old client-side filter compared undefined). A restricted twin at the
+  // captured thought's own vector, whose text the query matches too, is the mutant that shows the filter at work.
+  // Importance 5 and quality 100: the text function's rank adds importance/20 + quality_score/500 to a text score the
+  // two contents tie on (the same three-word cover), so the twin's 0.45 beats the capture's 0.316 (the stub leaves
+  // importance at the default 3 and confidence 0.9 becomes quality 83) and the twin is the first row of the
+  // function's order — the page drive below leans on that; a tie would fall to created_at DESC, which the
+  // later-planted twin also wins.
+  const hidden = "a restricted thought captured through enhanced-mcp, which no search may show";
+  const [{ id: rid }] = await sql`INSERT INTO thoughts (content, content_fingerprint, embedding, embedding_model, sensitivity_tier, importance, quality_score, metadata)
+    VALUES (${hidden}, content_fingerprint_of(${hidden}), ${vec(unit(captured))}::vector, ${MODEL}, 'restricted', 5, 100, '{"source": "planted"}'::jsonb) RETURNING id`;
+  const ids = (r: { structured: any }) => ((r.structured?.results ?? []) as { id: string }[]).map((x) => x.id);
   const textMode = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text" });
-  assert(!textMode.isError && Array.isArray(textMode.structured?.results) && textMode.structured.results.length === 0 && textMode.structured?.pagination?.total === 0,
-    `brain_search_thoughts in text mode reaches search_thoughts_text and answers no matches — its exclude_restricted key is read as a containment (${textMode.toolText.slice(0, 80)})`);
+  assert(!textMode.isError && ids(textMode).includes(cid) && !ids(textMode).includes(rid),
+    `brain_search_thoughts in text mode finds the captured thought through search_thoughts_text and not the restricted twin (${textMode.toolText.slice(0, 80)})`);
+  assert(textMode.structured?.pagination?.total === 2 && textMode.structured?.pagination?.has_more === false,
+    `…its total is the function's count, the hidden row included, and has_more reads the page the cursor passed (${JSON.stringify(textMode.structured?.pagination)})`);
   const semantic = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5 });
-  assert(!semantic.isError && Array.isArray(semantic.structured?.results) && semantic.structured.results.length === 0,
-    `…and in semantic mode embeds the query through the stub, calls match_thoughts, and answers no matches for the same reason (${semantic.toolText.slice(0, 80)})`);
+  assert(!semantic.isError && ids(semantic).includes(cid) && !ids(semantic).includes(rid),
+    `…and in semantic mode embeds the query through the stub, calls match_thoughts, and drops the twin by its sensitivity_tier column — one match_thoughts does not return (${semantic.toolText.slice(0, 80)})`);
   const direct = await call(h, "search_thoughts_text", { query: "captured through enhanced" });
-  assert(!direct.isError && Array.isArray(direct.structured?.results) && direct.structured.results.length === 0, `search_thoughts_text likewise (${direct.toolText.slice(0, 60)})`);
+  assert(!direct.isError && ids(direct).includes(cid) && !ids(direct).includes(rid), `search_thoughts_text likewise (${direct.toolText.slice(0, 60)})`);
+  // The one containment that IS meant: a metadata_filter no thought satisfies answers nothing, in both modes.
+  const noneText = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", metadata_filter: { nothing_has_this: true } });
+  const noneSem = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, metadata_filter: { nothing_has_this: true } });
+  assert(!noneText.isError && ids(noneText).length === 0 && noneText.structured?.pagination?.total === 0 && !noneSem.isError && ids(noneSem).length === 0,
+    `a metadata_filter no thought satisfies answers nothing in both modes — the containment the argument is for (${noneText.toolText.slice(0, 40)} / ${noneSem.toolText.slice(0, 40)})`);
+  // The date bounds, applied to the rows in both modes: a window that closed before the capture hides it; one that opened before shows it.
+  const past = "2000-01-01T00:00:00Z";
+  const before = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, end_date: past });
+  const since = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, start_date: past });
+  const beforeText = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", end_date: past });
+  const sinceText = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", start_date: past });
+  assert(ids(before).length === 0 && ids(since).includes(cid) && ids(beforeText).length === 0 && ids(sinceText).includes(cid),
+    `a date bound is applied to the rows in both modes: an end_date in the past hides the capture, a start_date in the past shows it (${ids(before).length}/${ids(since).length}/${ids(beforeText).length}/${ids(sinceText).length})`);
+  assert(beforeText.structured?.pagination?.has_more === false && /^No matches found/.test(beforeText.toolText),
+    `…and a text page the bounds emptied, with none following, says so plainly (${beforeText.toolText})`);
+  // The bounds are instants, not strings (review pass 1). The meaning first: a date-only value is that day's
+  // midnight UTC, so the capture's own day as end_date closes before it and the next day's keeps it, in both modes
+  // (the string comparison agreed on these two — the pins that tell the schemes apart follow).
+  const [{ day, next, later, earlier }] = await sql`SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
+    to_char((created_at + interval '1 day') AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS next,
+    to_char((created_at + interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') || '+02:00' AS later,
+    to_char((created_at - interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') AS earlier FROM thoughts WHERE id = ${cid}`;
+  const ownDay = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, end_date: day });
+  const nextDay = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, end_date: next });
+  const nextDayText = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", end_date: next });
+  const [{ sqlKeeps }] = await sql`SELECT count(*)::int = 1 AS "sqlKeeps" FROM thoughts WHERE id = ${cid} AND created_at <= (${day} || 'T00:00:00Z')::timestamptz`;
+  assert(ids(ownDay).length === 0 && ids(nextDay).includes(cid) && ids(nextDayText).includes(cid) && sqlKeeps === false,
+    `a date-only end_date is that day's midnight UTC — Postgres agrees on the instant: the capture's own day closes before it, the next day keeps it, in both modes (${day}: ${ids(ownDay).length}, ${next}: ${ids(nextDay).length}/${ids(nextDayText).length}, SQL keeps ${sqlKeeps})`);
+  // `later` names a clock one hour after the capture in a zone two hours ahead: an instant one hour BEFORE it, so a
+  // window opening there holds the capture — compared as strings its digits sorted after the row's and dropped it.
+  const offsetBound = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, start_date: later });
+  assert(ids(offsetBound).includes(cid), `a start_date with a UTC offset is the instant it names — later digits, an earlier instant, so the capture is inside the window (${later}: ${ids(offsetBound).length})`);
+  // `earlier` is a zone-less clock one hour before the capture: read as UTC it opens the window before the row;
+  // read in this process's zone it would open hours after it — on a machine west of UTC, which is why CI's step
+  // runs this suite under TZ=America/Chicago (fork-checks.yml); on a UTC machine the two readings coincide and this
+  // arm proves nothing. Text mode, so the instant reading is pinned in both modes (offsetBound is semantic).
+  const zoneless = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", start_date: earlier });
+  assert(ids(zoneless).includes(cid), `a zone-less date-time is read as UTC, never the process's zone — text mode (${earlier}: ${ids(zoneless).length})`);
+  const unparsable = await call(h, "brain_search_thoughts", { query: captured, end_date: "yesterday" });
+  const prose = await call(h, "brain_search_thoughts", { query: captured, start_date: "Dec 25, 2025" });
+  const rolled = await call(h, "brain_search_thoughts", { query: captured, start_date: "2026-02-30" });
+  const inverted = await call(h, "brain_search_thoughts", { query: captured, mode: "text", start_date: "2026-01-02", end_date: "2026-01-01" });
+  assert(unparsable.isError && /end_date is not an ISO 8601 date or date-time: yesterday/.test(unparsable.toolText) && prose.isError && /start_date is not an ISO 8601/.test(prose.toolText)
+    && rolled.isError && /start_date is not a real date: 2026-02-30/.test(rolled.toolText) && inverted.isError && /is after end_date/.test(inverted.toolText),
+    `a bound off the ISO shape (prose Date.parse would take), a day the calendar lacks (Date.parse rolls it to March), or a window closed before it opens is refused by name (${unparsable.toolText.slice(0, 60)} / ${prose.toolText.slice(0, 50)} / ${rolled.toolText.slice(0, 50)} / ${inverted.toolText.slice(0, 60)})`);
+  // A page the tier filter emptied, with hits behind it: the twin ranks first (importance 5, above), so with limit 1
+  // it is the whole page — hidden, and the tool says another page follows rather than a false end; the third tool
+  // answers the same page the same way (its first draft said "No matches found.").
+  const onePage = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", limit: 1 });
+  const onePageDirect = await call(h, "search_thoughts_text", { query: "captured through enhanced", limit: 1 });
+  const secondPage = await call(h, "search_thoughts_text", { query: "captured through enhanced", limit: 1, offset: 1 });
+  assert(ids(onePage).length === 0 && /^No matches on this page; more follow\./.test(onePage.toolText) && onePage.structured?.pagination?.has_more === true
+    && ids(onePageDirect).length === 0 && /more follow/.test(onePageDirect.toolText) && onePageDirect.structured?.pagination?.has_more === true,
+    `a page the tier filter emptied says more follow, in both tools, with has_more true (${onePage.toolText} / ${onePageDirect.toolText}; ${JSON.stringify(onePageDirect.structured?.pagination)})`);
+  assert(ids(secondPage).includes(cid) && secondPage.structured?.pagination?.has_more === false,
+    `…and the next page holds the capture, with no page after (${secondPage.toolText.slice(0, 40)}; ${JSON.stringify(secondPage.structured?.pagination)})`);
+  // The ordinal's teeth (review pass 2): one page of two, the hidden twin first — the capture's line is `2.`, its
+  // place in the function's order; numbered by its place in the filtered list it would read `1.`.
+  const twoPage = await call(h, "search_thoughts_text", { query: "captured through enhanced", limit: 2 });
+  assert(ids(twoPage).length === 1 && /^2\. /.test(twoPage.toolText) && twoPage.structured?.pagination?.has_more === false,
+    `a line is numbered by the row's place in the page, hidden rows counted: the capture behind the twin is 2. (${twoPage.toolText.slice(0, 30)})`);
   const listed = await call(h, "brain_list_thoughts", { limit: 1, type: "idea" });
   const pagination = listed.structured?.pagination;
   assert(!listed.isError && listed.structured?.results?.length === 1 && typeof pagination?.total === "number" && pagination.total >= 2 && pagination.has_more === true,

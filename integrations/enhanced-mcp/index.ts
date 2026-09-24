@@ -18,10 +18,13 @@
 // — one built at module scope and connect()ed to a fresh transport each request
 // answered the first of two overlapping requests on the second's transport.
 // FORK.md change 78; extensions/test-auth.ts fires three overlapping requests.
+// ob1-fork (SMD-1986): the three search tools hand match_thoughts and
+// search_thoughts_text the caller's metadata_filter alone — the tier and date
+// keys they folded in were containment keys no metadata holds, and every search
+// answered nothing — and apply the restricted tier (by the column, looked up by
+// id where the function returns none) and the date bounds to the rows; the note
+// above tiersOf(). extensions/test-writes.ts drives it against a restricted twin.
 
-// Deno reads the SDK's types through the extensionless subpath: its exports map
-// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
-// @ts-types="@modelcontextprotocol/sdk/server/mcp"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
@@ -132,6 +135,119 @@ function truncateContent(content: string, maxLen: number): string {
   return content.slice(0, maxLen) + "...";
 }
 
+// ob1-fork (SMD-1986): the three search tools hand the database the caller's
+// `metadata_filter` ALONE. Both functions they call read that argument as a
+// containment — `t.metadata @> filter` in this fork's match_thoughts
+// (db/migrations/014, 041's body) and `t.metadata @> coalesce(p_filter, '{}')`
+// in the enhanced-thoughts sidecar's search_thoughts_text — so the
+// `exclude_restricted: true` and `start_date` / `end_date` keys the tools used
+// to fold in were containment keys no thought's metadata holds, and every
+// search answered "No matches found." (extensions/test-writes.ts pinned it).
+// The tier and the date bounds are applied here, to the rows, by the helpers
+// below; the restricted tier is read from the COLUMN the sidecar adds, never
+// from metadata, which a capture's caller can set.
+
+/**
+ * The `sensitivity_tier` column of each id, one query. match_thoughts returns
+ * id, content, metadata, similarity, created_at and score — not the sidecar's
+ * column — so semantic mode reads the tier this way before it drops a
+ * restricted row; the text function returns the column and needs no lookup.
+ */
+async function tiersOf(ids: string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from("thoughts")
+    .select("id, sensitivity_tier")
+    .in("id", ids);
+  if (error) throw new Error(`sensitivity_tier lookup failed: ${error.message}`);
+  return new Map(
+    ((data ?? []) as { id: unknown; sensitivity_tier: unknown }[]).map((r) => [
+      String(r.id),
+      String(r.sensitivity_tier ?? "standard"),
+    ]),
+  );
+}
+
+/**
+ * The caller's date window as instants (review pass 1; the first draft
+ * compared the strings, so a bound written with a UTC offset sorted against
+ * the shim's `Z` rendering by its digits — later digits for an earlier
+ * instant — a `start_date` that did not parse hid every row and an `end_date`
+ * that did not parse was ignored, neither with a word). A bound is an ISO
+ * 8601 date or date-time, held to that shape before it is parsed (`Date.parse`
+ * alone would take "Dec 25, 2025"), and read as UTC unless it carries an
+ * offset: a date-only value is that day's midnight UTC, a zone-less date-time
+ * is UTC too — never the process's zone. `brain_list_thoughts` and
+ * `count_thoughts` hand the same string to Postgres, which reads a bare date in
+ * the session's time zone and takes shapes this refuses (`yesterday`, an
+ * hour-only offset); for a bound all three accept, they agree on the instant
+ * on a database running in UTC, the container images' default. A bound that
+ * fails the shape, or a window closed before it opens, is refused by name
+ * rather than compared.
+ */
+type DateWindow = { start: number | null; end: number | null };
+// An offset carries its minutes (`+02:00`, `+0200`): Bun's Date.parse makes `+02` an Invalid Date.
+const ISO_BOUND = /^(?<y>\d{4})-(?<mo>\d{2})-(?<d>\d{2})(?:[T ](?<h>\d{2}):(?<mi>\d{2})(?::(?<s>\d{2})(?:\.\d{1,9})?)?(?<zone>Z|[+-]\d{2}:?\d{2})?)?$/i;
+function parseBound(name: string, value: string | null): number | null | { error: string } {
+  if (!value) return null;
+  const m = ISO_BOUND.exec(value);
+  if (!m) return { error: `${name} is not an ISO 8601 date or date-time: ${value}` };
+  // The fields in range, as Postgres holds them: Bun's Date.parse rolls
+  // `2026-02-30` over to March 2 (review pass 2), where Postgres refuses the
+  // string — a rolled bound is a silently different day. An hour past 23 or a
+  // minute past 59 Bun refuses on its own; the clause holds them the same way.
+  // `24:00` is ISO's end of day and stays.
+  const g = m.groups!;
+  const [y, mo, d, h, mi, s] = [g.y, g.mo, g.d, g.h ?? "0", g.mi ?? "0", g.s ?? "0"].map(Number);
+  const daysIn = new Date(Date.UTC(y, mo, 0)).getUTCDate(); // day 0 of the next month
+  const inRange = mo >= 1 && mo <= 12 && d >= 1 && d <= daysIn && mi <= 59 && s <= 60 && (h <= 23 || (h === 24 && mi === 0 && s === 0));
+  if (!inRange) return { error: `${name} is not a real date: ${value}` };
+  const utc = g.zone || value.length === 10 ? value : `${value}Z`;
+  const t = Date.parse(utc.replace(" ", "T"));
+  return Number.isNaN(t) ? { error: `${name} is not a real date: ${value}` } : t;
+}
+function dateWindow(startDate: string | null, endDate: string | null): DateWindow | { error: string } {
+  const start = parseBound("start_date", startDate);
+  if (typeof start === "object" && start !== null) return start;
+  const end = parseBound("end_date", endDate);
+  if (typeof end === "object" && end !== null) return end;
+  if (start !== null && end !== null && start > end) return { error: `start_date ${startDate} is after end_date ${endDate}` };
+  return { start, end };
+}
+
+/** Is the row's `created_at` inside the window? A row whose timestamp does not parse is outside any bound. */
+function withinDates(row: ThoughtRow, w: DateWindow): boolean {
+  if (w.start === null && w.end === null) return true;
+  const t = Date.parse(String(row.created_at));
+  return (w.start === null || t >= w.start) && (w.end === null || t <= w.end);
+}
+
+/**
+ * A page of search_thoughts_text after the row filters, for both tools that
+ * call it. The function ranks and pages BEFORE the tier (and, in
+ * brain_search_thoughts, the date) filters apply, so: `total` is the
+ * function's count, hidden rows included; `has_more` reads the page the
+ * cursor moved past (`pageLength`), so a page the filters emptied still says
+ * whether another follows — the third tool answered a bare "No matches
+ * found." over a page of hidden rows with hits behind it (review pass 1); and
+ * a line's ordinal is the row's position in that page, `at`, not in the
+ * filtered list, so the numbers stay honest across pages with hidden rows.
+ * The function's count rides on every row as `total_count`; an empty page
+ * carries none, so an offset past the last hit reads as a total of 0.
+ */
+function textPage(shown: { row: ThoughtRow; at: number }[], page: ThoughtRow[], offset: number, limit: number) {
+  const totalCount = page.length > 0 ? Number((page[0] as Record<string, unknown>).total_count ?? page.length) : 0;
+  const pagination = { total: totalCount, offset, limit, has_more: offset + page.length < totalCount };
+  if (shown.length === 0) {
+    return toolSuccess(pagination.has_more ? "No matches on this page; more follow." : "No matches found.", { results: [], pagination });
+  }
+  const lines = shown.map(({ row, at }) => {
+    const score = Number(row.rank ?? 0).toFixed(3);
+    return `${offset + at + 1}. [${score}] (${row.type}) #${row.id} ${truncateContent(row.content, 500)}`;
+  });
+  return toolSuccess(lines.join("\n"), { results: shown.map(({ row }) => row), pagination });
+}
+
 // ── MCP Server ────────────────────────────────────────────────────────────
 
 // ob1-fork (SMD-1497): built per request, inside buildServer(), and connected
@@ -209,19 +325,17 @@ function buildServer(): McpServer {
         if (query.length < 2) {
           return toolFailure("query must be at least 2 characters");
         }
+        const window = dateWindow(startDate, endDate);
+        if ("error" in window) return toolFailure(window.error);
 
         if (mode === "text") {
-          const filter: Record<string, unknown> = {
-            ...(metadataFilter as Record<string, unknown>),
-          };
-          filter.exclude_restricted = true;
-          if (startDate) filter.start_date = startDate;
-          if (endDate) filter.end_date = endDate;
-
+          // p_filter is a metadata containment (the note above tiersOf): the
+          // caller's metadata_filter alone; the tier and the date bounds are
+          // applied to the page, which textPage() renders.
           const { data, error } = await supabase.rpc("search_thoughts_text", {
             p_query: query,
             p_limit: limit,
-            p_filter: filter,
+            p_filter: metadataFilter,
             p_offset: offset,
           });
 
@@ -229,64 +343,25 @@ function buildServer(): McpServer {
             throw new Error(`search_thoughts_text failed: ${error.message}`);
           }
 
-          const rows = (data ?? []) as ThoughtRow[];
-          const totalCount =
-            rows.length > 0
-              ? Number(
-                  (rows[0] as Record<string, unknown>).total_count ?? rows.length,
-                )
-              : 0;
-
-          if (rows.length === 0) {
-            return toolSuccess("No matches found.", {
-              results: [],
-              pagination: {
-                total: 0,
-                offset,
-                limit,
-                has_more: false,
-              },
-            });
-          }
-
-          const lines = rows.map((row, index) => {
-            const score = Number(row.rank ?? 0).toFixed(3);
-            return `${offset + index + 1}. [${score}] (${row.type}) #${row.id} ${truncateContent(row.content, 500)}`;
-          });
-
-          return toolSuccess(lines.join("\n"), {
-            results: rows,
-            pagination: {
-              total: totalCount,
-              offset,
-              limit,
-              has_more: offset + rows.length < totalCount,
-            },
-          });
+          const page = (data ?? []) as ThoughtRow[];
+          const shown = page
+            .map((row, at) => ({ row, at }))
+            .filter(({ row }) => row.sensitivity_tier !== "restricted")
+            .filter(({ row }) => withinDates(row, window));
+          return textPage(shown, page, offset, limit);
         }
 
         // Semantic search (default)
         //
-        // NOTE: `match_thoughts` returns the top-N by similarity and then we
-        // date-filter client-side. When the RPC supports date/tier filters in
-        // its `filter` JSONB payload they'll be honored pre-cutoff and the
-        // behavior is server-side correct; when it doesn't, we rely on an
-        // over-fetch slack to avoid silently returning zero results on active
-        // brains with old date windows. See `known limitations` in the README.
+        // `match_thoughts` returns the top-N by similarity, with the caller's
+        // metadata_filter as its containment (the note above tiersOf); the
+        // tier and the date bounds are applied to the rows here. Over-fetch so
+        // the post-filter has headroom: `limit + 20`, or under a date bound 3×
+        // the limit, at least 50 and at most 500 — the largest count any
+        // caller in the repo sends, which 041 clamps to. Rows ranked below the
+        // over-fetch are not seen; the README's known limitations say when
+        // that matters.
         const dateFilterActive = !!(startDate || endDate);
-        // Forward filters into the RPC payload — ignored by older RPC versions
-        // but used by versions that support them, at which point the
-        // post-filter becomes a no-op.
-        const semanticFilter: Record<string, unknown> = {
-          ...(metadataFilter as Record<string, unknown>),
-          exclude_restricted: true,
-        };
-        if (startDate) semanticFilter.start_date = startDate;
-        if (endDate) semanticFilter.end_date = endDate;
-
-        // Over-fetch when date filter is active so client-side post-filter
-        // has headroom. 3x the requested limit is a reasonable compromise
-        // between cost and correctness for dense recent brains.
         const fetchCount = dateFilterActive
           ? Math.min(Math.max(limit * 3, 50), 500)
           : Math.min(limit + 20, 200);
@@ -296,7 +371,7 @@ function buildServer(): McpServer {
           query_embedding: queryEmbedding,
           match_count: fetchCount,
           match_threshold: minSimilarity,
-          filter: semanticFilter,
+          filter: metadataFilter,
         });
 
         if (error) {
@@ -304,10 +379,12 @@ function buildServer(): McpServer {
         }
 
         const allRows = (data ?? []) as ThoughtRow[];
+        const tiers = await tiersOf(allRows.map((row) => row.id));
+        // An id the lookup did not return (deleted between the two calls) is
+        // treated as restricted: the filter fails closed.
         const rows = allRows
-          .filter((row) => row.sensitivity_tier !== "restricted")
-          .filter((row) => !startDate || row.created_at >= startDate)
-          .filter((row) => !endDate || row.created_at <= endDate)
+          .filter((row) => (tiers.get(row.id) ?? "restricted") !== "restricted")
+          .filter((row) => withinDates(row, window))
           .slice(0, limit);
 
         if (rows.length === 0) {
@@ -903,10 +980,12 @@ function buildServer(): McpServer {
           return toolFailure("query must be at least 2 characters");
         }
 
+        // No metadata filter on this tool, so p_filter is empty (the note
+        // above tiersOf); the restricted tier is dropped from the page.
         const { data, error } = await supabase.rpc("search_thoughts_text", {
           p_query: query,
           p_limit: limit,
-          p_filter: { exclude_restricted: true },
+          p_filter: {},
           p_offset: offset,
         });
 
@@ -914,18 +993,11 @@ function buildServer(): McpServer {
           throw new Error(`search_thoughts_text failed: ${error.message}`);
         }
 
-        const rows = (data ?? []) as ThoughtRow[];
-
-        if (rows.length === 0) {
-          return toolSuccess("No matches found.", { results: [] });
-        }
-
-        const lines = rows.map((row, index) => {
-          const score = Number(row.rank ?? 0).toFixed(3);
-          return `${offset + index + 1}. [${score}] (${row.type}) #${row.id} ${truncateContent(row.content, 500)}`;
-        });
-
-        return toolSuccess(lines.join("\n"), { results: rows });
+        const page = (data ?? []) as ThoughtRow[];
+        const shown = page
+          .map((row, at) => ({ row, at }))
+          .filter(({ row }) => row.sensitivity_tier !== "restricted");
+        return textPage(shown, page, offset, limit);
       } catch (error) {
         console.error("search_thoughts_text failed", error);
         return toolFailure(String(error));
