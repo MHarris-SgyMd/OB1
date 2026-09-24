@@ -30,8 +30,10 @@
  * hands the network call to a detached child and exits 0. The child posts,
  * records the new thought's id in the state directory, and appends a line to the
  * log; a post that fails waits under pending/ for a later run, which claims what
- * it posts by a rename so two runs never share a file, and drops an older
- * payload of a session that has since ended again as obsolete. A later run for
+ * it posts by a rename so two runs never share a file, drops an older
+ * payload of a session that has since ended again as obsolete, and lets an
+ * earlier payload of its own session still in another child's hands land
+ * first, so that the later one supersedes it (SMD-2035). A later run for
  * the same session (a compaction, a Stop hook with --min-interval, or a session
  * resumed under the same id — `claude --resume`, a Codex resume — ending again)
  * captures a fresh summary that SUPERSEDES the earlier one, so a session is one
@@ -109,6 +111,7 @@ const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 const sha256 = (s) => createHash("sha256").update(s, "utf8").digest("hex");
 const clip = (s, n) => (s.length <= n ? s : s.slice(0, n - 1).trimEnd() + "…");
 const oneLine = (s) => s.replace(/\s+/g, " ").trim();
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
 /**
  * Harness-injected blocks a prompt may carry that are not what the human typed:
@@ -127,7 +130,7 @@ function ensureDirs() {
   for (const d of [STATE_DIR, PENDING_DIR(), DEAD_DIR(), INFLIGHT_DIR()]) mkdirSync(d, { recursive: true, mode: 0o700 });
 }
 const isAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e?.code === "EPERM"; } };
-/** Longer than any run can hold a claim: five posts at the 90 s request timeout, and then some. */
+/** Longer than any run can hold a claim: five posts at the request timeout, one wait as long (SMD-2035), and then some. */
 const CLAIM_MAX_AGE_MS = 15 * 60_000;
 /**
  * Payloads claimed by a child that is gone (killed, crashed) go back to
@@ -169,19 +172,20 @@ function pruneDead() {
  * The session's payloads still pending or in flight: a name is
  * `<ms>-<seq>-<rand>-<session>.json`, so the session is everything after the
  * third hyphen, compared whole — a suffix match let session `abc` claim
- * `run-abc`'s payloads (eleventh review pass).
+ * `run-abc`'s payloads (eleventh review pass). `pid` is the child whose claim
+ * holds it, null under pending/ (SMD-2035).
  */
 function sessionPayloads(sessionId) {
   const tail = basename(statePath(sessionId));
   const out = [];
-  const dirs = [PENDING_DIR()];
-  try { for (const pid of readdirSync(INFLIGHT_DIR())) dirs.push(join(INFLIGHT_DIR(), pid)); } catch { /* no inflight dir yet */ }
-  for (const dir of dirs) {
+  const dirs = [{ dir: PENDING_DIR(), pid: null }];
+  try { for (const pid of readdirSync(INFLIGHT_DIR())) dirs.push({ dir: join(INFLIGHT_DIR(), pid), pid: Number(pid) }); } catch { /* no inflight dir yet */ }
+  for (const { dir, pid } of dirs) {
     let names = [];
     try { names = readdirSync(dir); } catch { continue; }
     for (const f of names) {
       const parts = f.split("-");
-      if (parts.slice(3).join("-") === tail) out.push({ path: join(dir, f), ms: Number(parts[0]) });
+      if (parts.slice(3).join("-") === tail) out.push({ path: join(dir, f), name: f, ms: Number(parts[0]), pid });
     }
   }
   return out;
@@ -640,8 +644,11 @@ export class CaptureError extends Error {
 export const REFUSAL_RE = /^\s*Refused\b/;
 export const SDK_ERROR_RE = /^\s*MCP error -3260[12]\b/;
 
+/** One request's ceiling — and how long a run waits, in all, for an earlier payload of a session that another child is posting (SMD-2035). */
+export const POST_TIMEOUT_MS = 90_000;
+
 let rpcId = 1;
-export async function rpc(cfg, method, params, timeoutMs = 90_000) {
+export async function rpc(cfg, method, params, timeoutMs = POST_TIMEOUT_MS) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
   try {
@@ -869,6 +876,34 @@ function recordedAfter(state, preparedAt) {
 }
 
 /**
+ * The payloads a payload must let land first: those of the SAME session that
+ * another LIVE child holds under inflight/<pid>/ and that are OLDER than it —
+ * a name leads with the millisecond it was prepared, so the names order them.
+ * A compaction's child still posting when the session's end spawned its own
+ * (`/compact` then `/exit`; an auto-compaction on the last turn) left the
+ * end's payload pointing at nothing — the checkpoint had not landed — so the
+ * end landed first and the checkpoint after it, a live thought saying
+ * "continuing" of a session that had ended, beside the final summary
+ * (SMD-2035; SMD-2012's second review pass, the gap SMD-1989 had recorded).
+ * The wait is bounded by `boundMs`; a child that is gone holds no one (the
+ * next run's sweep returns its claim); only the NEWER of two waits, so two
+ * children never wait on each other. The caller re-reads the state after the
+ * wait — that is where the pointer comes from.
+ */
+export async function awaitPredecessors(sessionId, name, { boundMs = POST_TIMEOUT_MS } = {}) {
+  const ahead = () => sessionPayloads(sessionId).filter((p) => p.pid !== null && p.pid !== process.pid && p.name.localeCompare(name) < 0 && isAlive(p.pid));
+  const first = ahead();
+  if (!first.length) return { waitedMs: 0, timedOut: false };
+  log(`waiting session=${sessionId} for an earlier payload of the session in flight (pid ${first[0].pid}), at most ${Math.ceil(boundMs / 1000)} s`);
+  const t0 = Date.now();
+  while (ahead().length) {
+    if (Date.now() - t0 >= boundMs) return { waitedMs: Date.now() - t0, timedOut: true };
+    await sleep(50);
+  }
+  return { waitedMs: Date.now() - t0, timedOut: false };
+}
+
+/**
  * The background half: post what is pending, OLDEST FIRST — up to four earlier
  * payloads from runs whose post failed, then the one this run prepared — so a
  * session that ended while the server was down lands on the next session's
@@ -906,9 +941,15 @@ export async function postPending(cfg, own) {
   const landed = new Map(); // session → the id this run landed for it
   const outcomes = [];
   pruneDead();
+  let waitBudgetMs = POST_TIMEOUT_MS; // the run's, shared: five payloads each waiting a whole timeout would outlive the claim sweep
   try {
     for (const { home, here, payload } of claimed) {
       const file = home;
+      // An earlier payload of the session that another child is still posting
+      // lands first (SMD-2035): the state read below is what it wrote, and the
+      // pointer comes from there. A payload that has landed points at nothing.
+      const wait = payload.captured_id ? { waitedMs: 0, timedOut: false } : await awaitPredecessors(payload.session_id, basename(here), { boundMs: waitBudgetMs });
+      waitBudgetMs -= wait.waitedMs;
       const state = readState(payload.session_id);
       const stateIsNewer = recordedAfter(state, payload.prepared_at);
       // A payload that already LANDED is never obsolete: its id must reach the
@@ -975,7 +1016,7 @@ export async function postPending(cfg, own) {
         continue;
       }
       const { id } = posted;
-      const note = [posted.note, lastResort].filter(Boolean).join("; ");
+      const note = [posted.note, lastResort, wait.waitedMs ? `waited ${(wait.waitedMs / 1000).toFixed(1)} s for the session's earlier post${wait.timedOut ? ", which had not landed when the wait ran out" : ""}` : ""].filter(Boolean).join("; ");
       landed.set(payload.session_id, id);
       // The state is read AGAIN after the post: a sibling run may have landed a
       // newer summary of the session meanwhile, and a judgement made before the

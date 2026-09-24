@@ -124,7 +124,7 @@ jobs:
         working-directory: scripts
         run: bunx tsc --noEmit
 
-      # The session capture hook (SMD-1298, SMD-2012): both transcript parsers, the
+      # The session capture hook (SMD-1298, SMD-2012, SMD-2035): both transcript parsers, the
       # summary's shape, every secret pattern's probe, the refusal, the detached
       # hand-off and the MCP post — against synthetic transcripts and a fake
       # endpoint on localhost. Bun only, no database, so it runs here.
