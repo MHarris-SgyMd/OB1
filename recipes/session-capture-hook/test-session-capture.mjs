@@ -303,14 +303,40 @@ let episodesLines;
   assert(asks(BR("main"), P("help with x"), P("now implement SMD-2013")) === "help with x|now implement SMD-2013" && asks(BR("me/smd-2035-x"), P("do smd-2035"), P("also see smd-1297, and file smd-2050")) === "do smd-2035+also see smd-1297, and file smd-2050",
     "an ask naming a new ticket ends an episode with no home; on a branch that names the episode's ticket, a mention does not");
   assert(asks(BR("main"), P("tidy the readme"), P("bump to node-22 and smd-2013")) === "tidy the readme+bump to node-22 and smd-2013" && asks(BR("me/smd-1000-a"), P("tidy"), P("bump to node-22")) === "tidy+bump to node-22" && asks(BR("main"), P("tidy the readme"), P("bump to NODE-22")) === "tidy the readme|bump to NODE-22",
-    "a lower-case key in an ask counts only for a team the session's branches name — node-22 on main is no ticket, smd-2013 under an smd- branch is — while an upper-case key always counts (first review pass)");
-  assert(ticketsIn("smd-2013 and NODE-22 and pg-16", new Set(["SMD"])).join() === "SMD-2013,NODE-22" && ticketsIn("smd-2013 and pg-16", new Set()).length === 0 && ticketsIn("smd-2013 and pg-16").join() === "SMD-2013,PG-16", "…ticketsIn with a team set applies the rule; without one, a branch name, every key");
+    "a lower-case key in an ask counts only for a team the session's branches name — node-22 on main is no ticket, smd-2013 under an smd- branch is — while before any team is known an upper-case key counts (first review pass)");
+  assert(asks(BR("main"), P("tidy the readme"), P("switch the hash to AES-256, RSA-2048")) === "tidy the readme+switch the hash to AES-256, RSA-2048" && asks(BR("me/smd-1000-a"), P("tidy"), P("see XYZ-2013"), P("more")) === "tidy+see XYZ-2013+more" && asks(BR("main"), P("tidy"), P("see XYZ-2013")) === "tidy|see XYZ-2013",
+    "a cipher's name is no key, and once a team is known another team's upper-case key is not one either (second review pass)");
+  const stamped = segment([BR("me/smd-1000-a"), P("do smd-1000"), BR("main"), P("also SMD-1000 and SMD-2000 review")]).episodes;
+  assert(stamped.length === 2 && stamped[1].opened.kind === "branch" && stamped[1].opened.ticket === undefined && !stamped[1].about.has("SMD-2000") && /begun on the move to branch main\.\n/.test(renderSummary(stamped[1])) && segment([BR("me/smd-2035-x"), P("do smd-2035"), { t: "compaction" }, P("create a branch for smd-2013"), BR("me/smd-2013-y"), P("review")]).episodes[1].opened.ticket === "SMD-2013",
+    "an episode opened by a move is not 'with' a key its first ask merely names, nor about it; one opened at a compaction whose ask names the key the session then moves to is (second review pass)");
+  assert(ticketsIn("smd-2013 and NODE-22 and pg-16", new Set(["SMD"])).join() === "SMD-2013" && ticketsIn("smd-2013 and pg-16", new Set()).length === 0 && ticketsIn("smd-2013 and pg-16").join() === "SMD-2013,PG-16", "…ticketsIn with a non-empty team set keeps only those teams' keys, in any case; an empty set keeps upper-case keys alone; no set — a branch name — every key (second review pass)");
+  // The teams are those named SO FAR: a keyed branch made later must not make an earlier mention a key and move a boundary already captured (second review pass — the set was built from the whole transcript up front, and a prefix segmented otherwise than the whole).
+  const early = [CWD("/repo"), BR("main"), P("help with x"), P("now smd-2013 please"), P("more")];
+  assert(asks(...early) === "help with x+now smd-2013 please+more" && asks(...early, BR("me/smd-2099-later"), P("review")) === "help with x+now smd-2013 please+more+review" && asks(...early, BR("me/smd-2099-later"), P("now smd-2013 for real"), BR("me/smd-2013-z"), P("go")) === "help with x+now smd-2013 please+more|now smd-2013 for real+go",
+    "a lower-case key counts from the first keyed branch on, not before it: the earlier episode stands as it was captured, and the branch made under it names its work");
   // The place an episode runs is its own: a move applies to the episode the next ask opens, never to the one it ends (first review pass).
   const moved = segment([CWD("/wt/smd-1844"), BR("me/smd-1844-a"), P("start work"), BR("me/smd-1843-b"), CWD("/wt/smd-1843"), P("review")]).episodes;
   assert(moved.length === 2 && moved[0].branch === "me/smd-1844-a" && moved[0].cwd === "/wt/smd-1844" && [...moved[0].roots].join() === "/wt/smd-1844" && /^Session summary — SMD-1844 — [^\n]*\(me\/smd-1844-a\)/.test(renderSummary(moved[0])) && moved[0].closed.kind === "branch" && moved[0].closed.to === "me/smd-1843-b" && moved[1].branch === "me/smd-1843-b" && moved[1].cwd === "/wt/smd-1843" && /^Session summary — SMD-1843 — /.test(renderSummary(moved[1])),
     `an ended episode keeps its branch, directory and ticket; the move is the next episode's (${renderSummary(moved[0]).split("\n")[0]})`);
-  assert(asks(CWD("/repo"), P("one"), CWD("/repo/db"), CWD("/repo/scripts"), P("two"), CWD("/repo"), P("three")) === "one+two+three" && segment([CWD("/repo"), P("one"), CWD("/repo/db"), P("two")]).episodes[0].cwd === "/repo" && segment([CWD("/repo/db"), P("one"), CWD("/repo"), P("two")]).episodes[0].cwd === "/repo",
-    "a cd between two subdirectories of one checkout is no move, and the shallowest directory names the project (first review pass: db/ to scripts/ split)");
+  assert(asks(CWD("/repo"), P("one"), CWD("/repo/db"), CWD("/repo/scripts"), P("two"), CWD("/repo"), P("three")) === "one+two+three" && segment([CWD("/repo"), P("one"), CWD("/repo/db"), P("two")]).episodes[0].cwd === "/repo" && asks(CWD("/repo/db"), BR("main"), P("one"), CWD("/repo"), P("two")) === "one+two" && segment([CWD("/repo/db"), BR("main"), P("one"), CWD("/repo"), P("two")]).episodes[0].cwd === "/repo/db",
+    "a cd between two subdirectories of one checkout is no move, and the episode's first directory names the project (first review pass: db/ to scripts/ split)");
+  // An ancestor of the checkout is not inside it (second review pass): with no branch to go by a move up and over is a move; on a branch, the shell's.
+  const up = segment([CWD("/Users/me/Projects/OB1"), P("one"), CWD("/Users/me"), CWD("/Users/me/Projects/other"), P("two")]).episodes;
+  assert(up.map((e) => e.prompts.join()).join("|") === "one|two" && up[0].cwd === "/Users/me/Projects/OB1" && !up[0].roots.has("/Users/me") && up[1].cwd === "/Users/me/Projects/other" && segment([CWD("/Users/me/Projects/OB1"), BR("main"), P("one"), CWD("/Users/me"), P("two")]).episodes.length === 1,
+    "a cd to HOME and on to another checkout is a move, and HOME never becomes the episode's directory or a root");
+  // A line writes cwd then branch, so the two are one move: a cwd-first return
+  // from a nested worktree to the repo root must not settle onto the episode it
+  // ends before its branch arrives (second review pass — the closed episode's
+  // text changed as the transcript grew).
+  const wt = [CWD("/r"), BR("me/smd-10-a"), P("start"), CWD("/r/.claude/worktrees/smd-20"), BR("me/smd-20-b"), P("next"), { t: "file", path: "/r/.claude/worktrees/smd-20/x.ts" }];
+  const wtEp2 = segment(wt).episodes[1], wtEp2Whole = segment([...wt, CWD("/r"), BR("main")]).episodes[1];
+  assert(wtEp2.cwd === "/r/.claude/worktrees/smd-20" && [...wtEp2.roots].join() === "/r/.claude/worktrees/smd-20" && [...segment(wt).episodes[0].roots].join() === "/r" && /^Session summary — SMD-20 — smd-20 \(me\/smd-20-b\)/.test(renderSummary(wtEp2)) && renderSummary(wtEp2) === renderSummary(wtEp2Whole),
+    `a return to the repo root from a worktree, cwd before branch, is the next episode's; the worktree episode keeps its place and its text stands as the transcript grows (${renderSummary(wtEp2).split("\n")[0]})`);
+  // An episode's home is read live: once it has moved on, a move back to the
+  // branch it began on is a new piece of work, not its own (second review pass).
+  const backEp = segment([BR("me/smd-50-a"), CP, P("now smd-90"), BR("me/smd-90-b"), P("x"), BR("me/smd-50-a"), P("y"), BR("me/smd-70-c"), P("z")]).episodes;
+  assert(backEp.map((e) => e.prompts.join("+")).join("|") === "now smd-90+x|y|z" && backEp.map((e) => e.branch).join("|") === "me/smd-90-b|me/smd-50-a|me/smd-70-c" && /^Session summary — SMD-90 \(me\/smd-90-b\)/.test(renderSummary(backEp[0])) && /^Session summary — SMD-50 \(me\/smd-50-a\)/.test(renderSummary(backEp[1])),
+    `after an own move to smd-90 the episode's home is smd-90; a return to smd-50 opens a new episode, each head its own branch (${backEp.map((e) => e.prompts.length).join(",")})`);
   assert(asks(CWD("/a"), P("one"), CWD("/b"), CWD("/a"), P("two")) === "one+two" && asks(BR("A"), P("one"), BR("B"), BR("A"), P("two")) === "one+two" && asks(BR("me/smd-1100-x"), P("do it"), BR("HEAD"), BR("me/smd-1100-x"), P("more")) === "do it+more" && asks(BR("me/smd-1100-x"), P("do it"), BR("HEAD"), P("more")) === "do it+more",
     "a move the session came back from before the next ask is no move, and a detached HEAD mid-rebase is no branch (first review pass)");
   assert(asks(CWD("/repo"), BR("main"), P("one"), CWD("/tmp"), P("two"), CWD("/repo"), P("three")) === "one+two+three" && segment([CWD("/repo"), BR("main"), P("one"), CWD("/tmp"), P("two")]).episodes[0].cwd === "/repo" && !segment([CWD("/repo"), BR("main"), P("one"), CWD("/tmp"), P("two")]).episodes[0].roots.has("/tmp"),
@@ -454,8 +480,8 @@ let episodesLines;
   // A checkpoint is the open episode's alone.
   const cpE = prepare({ session_id: "s-ep-cp", transcript_path: EPISODES_T, hook_event_name: "PreCompact", trigger: "auto" });
   const cpBodies = cpE.payloadPaths.map((p) => JSON.parse(readFileSync(p, "utf8")));
-  assert(cpBodies.length === 4 && cpBodies.slice(0, 3).every((b) => !/Checkpoint:/.test(b.text)) && /\n\nEpisode 4 of the session, begun after a compaction\.\n\nCheckpoint: compacted at 2026-09-24 11:31 \(auto\), continuing/.test(cpBodies[3].text) && cpBodies.every((b) => b.event === "PreCompact" && b.trigger === "auto") && /^prepared: session s-ep-cp \(PreCompact auto\), episodes 1, 2, 3, 4 of 4/.test(cpE.message),
-    "at a compaction, the closed episodes' summaries name no checkpoint — they are over — and the open one's does, after its episode line");
+  assert(cpBodies.length === 4 && cpBodies.slice(0, 3).every((b) => !/Checkpoint:/.test(b.text) && b.event === "" && b.trigger === undefined) && /\n\nEpisode 4 of the session, begun after a compaction\.\n\nCheckpoint: compacted at 2026-09-24 11:31 \(auto\), continuing/.test(cpBodies[3].text) && cpBodies[3].event === "PreCompact" && cpBodies[3].trigger === "auto" && /^prepared: session s-ep-cp \(PreCompact auto\), episodes 1, 2, 3, 4 of 4/.test(cpE.message),
+    "at a compaction, the closed episodes' summaries name no checkpoint — they are over, and their payloads carry no event — and the open one's does, after its episode line");
   // A secret in one episode refuses that episode alone.
   writeFileSync(join(TMP, "episodes-secret.jsonl"), episodesLines.map((l) => l.replace("also note SMD-1844's compose fix is merged already", "also note SMD-1844's fix is merged; MCP_ACCESS_KEY=abcdefghijklmnopqrstuvwxyz012345 was the key")).join("\n"));
   const sec = prepare({ session_id: "s-ep-sec", transcript_path: join(TMP, "episodes-secret.jsonl"), hook_event_name: "SessionEnd" });
@@ -470,11 +496,11 @@ let episodesLines;
   for (let i = 1; i <= 7; i++) { const o = { cwd: `/repo/wt/smd-${3000 + i}`, branch: `me/smd-${3000 + i}-x`, ts: t("12", String(i).padStart(2, "0")) }; many.push(ask(`work on smd-${3000 + i}`, o), say(`done ${i}`, o)); }
   writeFileSync(join(TMP, "seven.jsonl"), many.join("\n"));
   const seven = prepare({ session_id: "s-seven", transcript_path: join(TMP, "seven.jsonl"), hook_event_name: "SessionEnd" });
-  assert(seven.payloadPaths.length === RUN_MAX && readdirSync(join(STATE, "pending")).length === 7 && seven.payloadPaths.every((p) => /s-seven_e[3-7]\.json$/.test(p)) && / — the 2 oldest wait under pending\/ for a later run$/.test(seven.message),
-    `seven episodes: seven payloads written, the newest five handed to the run's child, the two oldest left for a later run (${seven.message.slice(-70)})`);
+  assert(seven.payloadPaths.length === 7 && readdirSync(join(STATE, "pending")).length === 7 && /^prepared: session s-seven, episodes 1, 2, 3, 4, 5, 6, 7 of 7 — /.test(seven.message), `seven episodes: seven payloads written, every one handed to the run's child — the five per run bound what waited from before, not the run's own (${seven.message.slice(0, 60)})`);
+  prepare({ session_id: "s-stranded-seven", transcript_path: CODEX_T, hook_event_name: "SessionEnd" }); // one from before, waiting
   const sevenRun = await postPending(cfg, seven.payloadPaths);
-  assert(sevenRun.length === 5 && sevenRun.every((o) => o.ok) && readdirSync(join(STATE, "pending")).length === 2 && received.length === 5, "the child posts its five and nothing else");
-  assert((await postPending(cfg)).length === 2 && readdirSync(join(STATE, "pending")).length === 0 && received.length === 7 && readdirSync(STATE).filter((f) => /^s-seven.*\.json$/.test(f)).length === 7, "…and the next run drains the two");
+  assert(sevenRun.length === 7 && sevenRun.every((o) => o.ok) && readdirSync(join(STATE, "pending")).length === 1 && received.length === 7 && RUN_MAX === 5, "the child posts its seven and nothing else: with more own than the five, no room is left for what waited (second review pass: the run's own two oldest waited for a run that might never come)");
+  assert((await postPending(cfg)).length === 1 && readdirSync(join(STATE, "pending")).length === 0 && readdirSync(STATE).filter((f) => /^s-seven.*\.json$/.test(f)).length === 7, "…and the next run takes the one that waited");
   // As a hook, synchronous and detached.
   rmSync(STATE, { recursive: true, force: true });
   received.length = 0;

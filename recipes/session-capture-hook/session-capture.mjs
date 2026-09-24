@@ -484,20 +484,22 @@ export function summariseTranscript(path, harness) {
  * A ticket key as a branch name or an ask spells it — `SMD-2013`, `smd-2013`:
  * two to five letters, a dash, two to six digits. Not the shapes that look
  * like one and are not (a digest's name, an encoding, a standard, a PR
- * number). In an ASK, a lower-case key counts only for a team the session's
- * branches or directories name (`teams`): `node-22` and `port-8010` are spelled
- * the same way, and split a session on `main` (first review pass); an
- * upper-case key always counts.
+ * number, a cipher). In an ASK, once the session's branches or directories
+ * have named a team (`teams`), only that team's keys count, in any case —
+ * `node-22`, `port-8010` and `AES-256` are spelled the same way, and split a
+ * session on `main` (first and second review passes); before any team is
+ * known, an upper-case key counts, since it is the only way a session with no
+ * keyed branch names its work.
  */
 const TICKET_RE = /\b([A-Za-z]{2,5})-(\d{2,6})\b/g;
-const NOT_TICKETS = new Set(["SHA", "UTF", "ISO", "RFC", "CVE", "IPV", "TLS", "SSL", "HTTP", "PR", "MD"]);
+const NOT_TICKETS = new Set(["SHA", "UTF", "ISO", "RFC", "CVE", "IPV", "TLS", "SSL", "HTTP", "PR", "MD", "AES", "RSA", "GPT", "ED", "HTML"]);
 /** The ticket keys a text names, upper-cased, in first-mention order; with `teams`, under the rule for an ask. */
 export function ticketsIn(text, teams) {
   const out = [];
   for (const m of String(text ?? "").matchAll(TICKET_RE)) {
     const team = m[1].toUpperCase(), id = `${team}-${m[2]}`; // `team`, not `key`: the fork's credential-compare check reads a `key` under an equality operator as a secret compared, comments included
     if (NOT_TICKETS.has(team) || out.includes(id)) continue;
-    if (teams && m[1] !== team && !teams.has(team)) continue;
+    if (teams && (teams.size ? !teams.has(team) : m[1] !== team)) continue;
     out.push(id);
   }
   return out;
@@ -578,25 +580,38 @@ function apply(x, ev, teams) {
  */
 const STAMPED = new Set(["prompt", "outcome", "file", "commit", "push", "pr", "ids"]); // the events that carry a line's time onto an episode: its span is that of its content, so an episode closed at an ask does not reach to that ask's line
 export function segment(events, s = emptySummary()) {
-  // The team prefixes the session's branches and directories name: what a lower-case key in an ask may be a ticket of.
+  // The team prefixes the session's branches and directories have named SO
+  // FAR: what a lower-case key in an ask may be a ticket of. Gathered as the
+  // walk goes, never ahead of it — a branch made later would make an earlier
+  // mention a key and move a boundary already captured (second review pass).
   const teams = new Set();
-  for (const ev of events) if (ev.t === "cwd" || ev.t === "branch") for (const id of ticketsIn(ev.v)) teams.add(id.split("-")[0]);
   const episodes = [];
   let cur, lineAt = "", compacted = false; // the open episode; the current line's time; a compaction since the episode's last ask
   const loc = { cwd: "", branch: "" }; // where the session IS, against where the episode runs
   const branchMoved = () => Boolean(loc.branch && cur.branch && loc.branch !== cur.branch);
-  const inside = () => !loc.cwd || !cur.cwd || [...cur.roots].some((r) => nested(r, loc.cwd));
+  const below = (dir, root) => dir === root || dir.startsWith(`${root}/`);
+  const inside = () => !loc.cwd || !cur.cwd || [...cur.roots].some((r) => below(loc.cwd, r)); // at or under a root: an ancestor of the checkout — HOME, ~/Projects — is not inside it (second review pass: it became the episode's directory, and every checkout under it was then inside)
   /** Away: the session is not where the episode runs — another branch, or with no branch to go by, a directory inside none of its roots. */
   const away = () => branchMoved() || (!(loc.branch && cur.branch) && !inside());
-  /** The episode runs where the session is: the shallowest directory of its checkout names the project. */
+  /** The episode runs where the session is: its first directory names the project, a subdirectory does not. */
   const settle = () => {
-    if (loc.cwd) { cur.roots.add(loc.cwd); if (!cur.cwd || !nested(cur.cwd, loc.cwd) || cur.cwd.startsWith(`${loc.cwd}/`)) cur.cwd = loc.cwd; }
+    if (loc.cwd) { cur.roots.add(loc.cwd); if (!cur.cwd || !below(loc.cwd, cur.cwd)) cur.cwd = loc.cwd; }
     if (loc.branch) cur.branch = loc.branch;
   };
-  /** Whether a move to a place naming these tickets is the episode's own — about one of them, or about nothing yet, in which case it is now about these. */
+  /**
+    * Whether a move to a place naming these tickets is the episode's own —
+    * about one of them (the keys it opened and was asked with), or heading to
+    * where it already runs (its home). An episode about nothing and with no
+    * home yet takes the move's keys as its own. Its home is read LIVE, never
+    * kept in `about`: once the episode has moved on, a move BACK to the branch
+    * it began on is a new piece of work, not its own (second review pass: an
+    * ex-home key lingered in `about`, and a return to the old branch was
+    * absorbed).
+    */
   const own = (names) => {
-    if (names.some((id) => cur.about.has(id))) return true;
-    if (cur.about.size || !names.length) return false;
+    const home = anchorOf(cur.cwd, cur.branch);
+    if (names.some((id) => cur.about.has(id) || home.includes(id))) return true;
+    if (cur.about.size || home.length || !names.length) return false;
     for (const id of names) cur.about.add(id);
     return true;
   };
@@ -605,20 +620,26 @@ export function segment(events, s = emptySummary()) {
     if (cur) cur.closed = boundary;
     next.opened = boundary;
     next.cwd = loc.cwd; next.branch = loc.branch; if (loc.cwd) next.roots.add(loc.cwd);
-    for (const id of boundary?.ticket ? [boundary.ticket] : anchorOf(loc.cwd, loc.branch)) next.about.add(id);
+    if (boundary?.ticket) next.about.add(boundary.ticket); // the key it BEGAN with; its home is read live in `own` (second review pass)
     if (lineAt) next.first = next.last = lineAt;
     episodes.push(next); cur = next; compacted = false;
   };
   open(undefined);
   for (let i = 0; i < events.length; i++) {
     const ev = events[i];
-    apply(s, ev, teams);
+    apply(s, ev); // the session's rollup names every key it mentioned; the episodes' `named` is team-gated
     if (ev.t === "time") { lineAt = ev.at; continue; } // the session's span is every line's; an episode's, its content's (below)
     if (ev.t === "title") { episodes[0].title = ev.text; continue; } // the harness titles the session from its first asks: the first episode's, whenever the line falls
     if (ev.t === "compaction") { if (cur.prompts.length) compacted = true; else cur.opened = { kind: "compaction" }; continue; }
     if (ev.t === "cwd" || ev.t === "branch") {
       if (ev.t === "branch" && ev.v === "HEAD") continue; // detached mid-rebase: the session is where it was
+      for (const id of ticketsIn(ev.v)) teams.add(id.split("-")[0]);
       loc[ev.t] = ev.v;
+      // A line writes its cwd then its branch, so the two are one move: read
+      // the branch before judging the cwd, else a cwd-first return to the repo
+      // root — a parent of the worktree it was in — settles onto the episode it
+      // ends before its branch arrives (second review pass).
+      if (ev.t === "cwd" && events[i + 1]?.t === "branch" && events[i + 1].v !== "HEAD") { const nb = events[++i]; apply(s, nb); for (const id of ticketsIn(nb.v)) teams.add(id.split("-")[0]); loc.branch = nb.v; }
       if (!cur.prompts.length) { settle(); continue; } // before the first ask, the episode is wherever the session is
       if (!branchMoved()) {
         if (inside()) settle(); // a cd within the checkout
@@ -634,15 +655,22 @@ export function segment(events, s = emptySummary()) {
       if (cur.prompts.length) {
         const known = knownTickets(cur), fresh = named.filter((id) => !known.has(id));
         const moved = away();
-        const turned = named.length > 0 && fresh.length === named.length && (!anchored(cur) || movesTo(events, i, named));
+        const fresh_ = named.length > 0 && fresh.length === named.length;
+        const turned = fresh_ && (!anchored(cur) || movesTo(events, i, named));
         if (compacted || moved || turned) {
           const move = moved ? (branchMoved() ? { kind: "branch", to: loc.branch } : { kind: "directory", to: basename(loc.cwd) }) : undefined;
-          const b = { kind: compacted ? "compaction" : move ? move.kind : "ticket", ticket: fresh[0] };
+          // The new episode is "with" the ask's key only on the key's own evidence: the
+          // key alone ended an episode with a home, or the session then moved to its
+          // branch. An ask that names a key beside a compaction or a move may only be
+          // mentioning it (second review pass: a review on main was "with SMD-2000",
+          // and about it, so the move to SMD-2000's branch never began an episode).
+          const began = fresh_ && (anchored(cur) ? movesTo(events, i, named) : !(compacted || moved));
+          const b = { kind: compacted ? "compaction" : move ? move.kind : "ticket", ticket: began ? fresh[0] : undefined };
           if (move) { b.to = move.to; if (compacted) b.moved = move; }
           open(b);
         }
       }
-      if (!cur.prompts.length) for (const id of [...named, ...anchorOf(cur.cwd, cur.branch)]) cur.about.add(id); // the first ask says what the episode is about: its tickets, and its home's
+      if (!cur.prompts.length && cur.n === 1) for (const id of named) cur.about.add(id); // the session's first ask says what its first episode is about: its keys (its home is read live in `own`); a later episode's opening ask says so only through `began`
       compacted = false;
     }
     if (lineAt && STAMPED.has(ev.t)) { if (!cur.first) cur.first = lineAt; cur.last = lineAt; }
@@ -1102,15 +1130,14 @@ export function checkpointOf(hook) {
   return spec.trigger ? { kind: spec.checkpoint, trigger: TRIGGERS.includes(hook.trigger) ? hook.trigger : undefined } : { kind: spec.checkpoint };
 }
 
-/** How many of a run's own payloads its child posts — the queue's five (SMD-2013); older episodes beyond it wait under pending/ for any later run. */
+/** How many payloads a run posts beside its own — the queue's five (SMD-1298); the run's own, one per episode, all post (SMD-2013's second review pass: the oldest of more than five waited for a run that might never come). */
 export const RUN_MAX = 5;
 
 /**
  * The foreground: read the transcript, decide, summarise, scan, hand off.
  * Returns { code, message, payloadPaths, payloadPath?, payload? } — the caller
  * prints the message and exits with the code; `payloadPaths` are the payloads
- * the run's child posts (at most RUN_MAX, the newest episodes), `payloadPath`
- * the newest of them. One payload per episode whose summary changed
+ * the run's child posts, one per episode written, `payloadPath` the newest. One payload per episode whose summary changed
  * (SMD-2013): an episode captured and unchanged is skipped by fingerprint, one
  * whose summary carries a secret is refused alone — the others still post.
  */
@@ -1164,7 +1191,7 @@ export function prepare(hook, opts = {}) {
     const findings = scanSummary(ep, text);
     if (findings.length) { refused.push({ ep, where: findings.map((f) => `${f.reason} at char ${f.at}`).join(", ") }); continue; }
     const payload = {
-      session_id: sessionId, chain_id: chain, episode: ep.n, harness: s.harness, event, trigger: last.checkpoint?.trigger, text, fingerprint,
+      session_id: sessionId, chain_id: chain, episode: ep.n, harness: s.harness, event: ep === last ? event : "", trigger: ep === last ? last.checkpoint?.trigger : undefined, text, fingerprint, // a closed episode's summary is final whatever event the run is: it carries no event, so the log says none (second review pass)
       derived_from: provenanceOf(ep), supersedes: state.thought_id || undefined,
       prompts: distinctPrompts(ep.prompts).length, prepared_at: new Date().toISOString(), attempts: 0,
     };
@@ -1187,11 +1214,10 @@ export function prepare(hook, opts = {}) {
     sentences.push(`refused — ${carrier} carries what looks like a secret (${where}); ${written.length ? `${refused.length === 1 ? "that episode is" : "those episodes are"} not sent, the other ${written.length === 1 ? "episode posts" : `${written.length} episodes post`}` : "nothing sent"}. Remove it from the conversation before ending the session, or capture by hand.`);
   }
   if (written.length) {
-    const posting = written.slice(-RUN_MAX), waiting = written.length - posting.length;
     sentences.push(one ? `prepared: ${who}, ${describe(written[0].payload)}`
-      : `prepared: ${who}, episode${written.length === 1 ? "" : "s"} ${written.map((w) => w.ep.n).join(", ")} of ${episodes.length}${skipped.length ? ` (${skipped.length} unchanged)` : ""} — ${written.map((w) => `${w.ep.n}: ${describe(w.payload)}`).join("; ")}${waiting ? ` — the ${waiting} oldest wait under pending/ for a later run` : ""}`);
-    const newest = posting[posting.length - 1];
-    return { code: refused.length ? 1 : 0, message: sentences.join(" | "), payloadPaths: posting.map((w) => w.payloadPath), payloadPath: newest.payloadPath, payload: newest.payload };
+      : `prepared: ${who}, episode${written.length === 1 ? "" : "s"} ${written.map((w) => w.ep.n).join(", ")} of ${episodes.length}${skipped.length ? ` (${skipped.length} unchanged)` : ""} — ${written.map((w) => `${w.ep.n}: ${describe(w.payload)}`).join("; ")}`);
+    const newest = written[written.length - 1];
+    return { code: refused.length ? 1 : 0, message: sentences.join(" | "), payloadPaths: written.map((w) => w.payloadPath), payloadPath: newest.payloadPath, payload: newest.payload };
   }
   if (refused.length) return { code: 1, message: sentences[0], payloadPaths: [] };
   const queuedOnly = skipped.every((k) => k.queued);
@@ -1331,7 +1357,7 @@ export async function postPending(cfg, own) {
   sweepInflight();
   const mine = join(INFLIGHT_DIR(), String(process.pid));
   mkdirSync(mine, { recursive: true, mode: 0o700 });
-  // The run's own: one payload, or one per episode the run prepared (SMD-2013); the rest of the five go to what waited longest.
+  // The run's own: one payload, or one per episode the run prepared (SMD-2013) — all of them; the five bound what waited from before, taken longest-waiting first.
   const owns = [].concat(own ?? []).filter(Boolean);
   const pending = readdirSync(PENDING_DIR()).filter((f) => f.endsWith(".json")).sort().map((f) => join(PENDING_DIR(), f));
   const earlier = pending.filter((f) => !owns.includes(f)).slice(0, Math.max(0, RUN_MAX - owns.length));
@@ -1346,7 +1372,7 @@ export async function postPending(cfg, own) {
   const outcomes = [];
   pruneDead();
   const clearedSessions = new Set();
-  const landedHere = new Map(); // session → what this run landed: the pointer's last resort
+  const landedHere = new Map(); // chain → what this run landed: the pointer's last resort
   const bounced = new Set(); // files the follow-up found to be another session's: read once
   // After the run: payloads left under pending/ of every session whose claim
   // this run cleared — landed, dropped as obsolete beside a newer one, or
