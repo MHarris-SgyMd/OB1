@@ -59,7 +59,7 @@ EMBEDDING/CHAT API
 
 ### 1. Build the MCP Server Docker Image
 
-From this directory, build and import the image. The context is the parent `integrations/` directory, because `index.ts` imports the shared access-key module from `../_shared/auth.ts` and Docker cannot copy from outside its context. The image is Bun's (`oven/bun`, the core server's base — SMD-1800; it was Deno's until then): `package.json` and `bun.lock` pin what it installs, and the server runs as `bun index.ts`, the same command that runs it from a checkout (`PORT=8000 DB_HOST=… bun integrations/kubernetes-deployment/index.ts`; Bun's own Postgres client, no driver to install).
+From this directory, build and import the image. The context is the parent `integrations/` directory, because `index.ts` imports the shared access-key module from `../_shared/auth.ts` and Docker cannot copy from outside its context. The image is Bun's (`oven/bun`, the core server's base — SMD-1800; it was Deno's until then): `package.json` and `bun.lock` pin what it installs, and the server runs as `bun index.ts`. From a checkout the same file runs after its own install — `cd integrations/kubernetes-deployment && bun install --frozen-lockfile`, then `PORT=8000 DB_HOST=… bun --no-install index.ts` (`--no-install` so a missing install fails naming the package, where Bun would otherwise fetch an unpinned copy from npm; Bun's own Postgres client needs no driver).
 
 ```bash
 docker build -t openbrain-mcp-server:latest -f Dockerfile ..

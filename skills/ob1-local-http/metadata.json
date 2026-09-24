@@ -9,7 +9,7 @@
   "version": "0.2.0",
   "requires": {
     "open_brain": true,
-    "services": ["OpenRouter (the gateway's embeddings; text search and browsing work without it)"],
+    "services": ["OpenRouter (the gateway's embeddings and metadata extraction; text search and browsing work without it)"],
     "tools": [
       "Claude Code (or compatible skill-aware AI tool)",
       "curl"

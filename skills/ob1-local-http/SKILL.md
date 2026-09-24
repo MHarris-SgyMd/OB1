@@ -97,8 +97,8 @@ curl -sS -X POST "$BRAIN_URL/search" \
 `threshold` defaults to 0.35. Lower it to 0.2-0.3 for broader recall; raise to
 0.5+ for precision. Cap `limit` at 100. The reply is
 `{"results":[…],"count":N,"total":M,"page":1,"per_page":10,"total_pages":…,"mode":"semantic"}`;
-each result carries `id`, `content`, `type`, `metadata`, `created_at` and, in
-semantic mode, `similarity` (`rank` in text mode).
+each result carries `id`, `content`, `type`, `metadata`, `created_at`, `rank`
+and, in semantic mode, `similarity`.
 
 ### Browse recent
 

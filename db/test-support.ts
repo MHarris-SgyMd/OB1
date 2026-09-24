@@ -401,6 +401,17 @@ export async function restoreVectorToPublic(url: string): Promise<void> {
 export const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 /**
+ * The MCP stack — the four packages extensions/package.json installs for the
+ * vendored servers, one list (SMD-1800): extensions/test-auth.ts's pin guard
+ * holds server-portable's and the Kubernetes image's package.json to them, and
+ * both extension loaders (test-auth, test-writes) rewrite exactly these bare
+ * names to that install. A name added here alone reaches every reader.
+ */
+export const STACK: readonly string[] = ["hono", "zod", "@hono/mcp", "@modelcontextprotocol/sdk"];
+/** A specifier of one of STACK's packages — the bare name or a subpath of it. No name holds a regex metacharacter. */
+export const PACKAGES = new RegExp(`^(${STACK.join("|")})(/|$)`);
+
+/**
  * A counting assert. Returned as an object rather than module state so two suites
  * in one process cannot pollute each other's tally — and so `report()` owns the
  * exit code, which every suite was also duplicating.

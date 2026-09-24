@@ -107,7 +107,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SQL } from "bun";
-import { createAssert, requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
+import { createAssert, PACKAGES, requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
@@ -189,7 +189,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 // ── The servers' handlers; their packages from this directory's install ──────
 
 type Handler = (req: Request) => Response | Promise<Response>;
-const PACKAGES = /^(hono|zod|@hono\/mcp|@modelcontextprotocol\/sdk)(\/|$)/;
+// PACKAGES (db/test-support.ts): the stack's four names, the same list test-auth.ts's loader and pin guard read.
 const VENDORED = new RegExp("^" + ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/(recipes|integrations)/.*\\.ts$");
 // A recipe or integration imports the four by bare name and has no install of its own beside it, so they resolve
 // from extensions/node_modules here (test-auth.ts has the same loader). Until SMD-1798 this loader also resolved a

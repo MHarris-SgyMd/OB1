@@ -3988,7 +3988,7 @@ checkConnectorRegistry();
  * omits — so FORK.md names the one command that re-applies it.
  *
  * SMD-1857 wanted the merge queue as a fifth rule: a PR is queued, GitHub
- * builds the merge result and runs the twelve checks on it (the workflow's
+ * builds the merge result and runs the required checks on it (the workflow's
  * `merge_group` trigger), and merges only what passes — so the checks judge
  * the tree that lands without the author merging `main` first, which is what
  * strict up-to-date makes them do. GitHub offers the queue on

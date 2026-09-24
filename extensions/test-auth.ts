@@ -63,7 +63,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "./_shared/auth.ts";
-import { createAssert } from "../db/test-support.ts";
+import { createAssert, PACKAGES, STACK } from "../db/test-support.ts";
 
 const { assert, report } = createAssert();
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -96,9 +96,8 @@ async function importServer(file: string): Promise<Handler> {
 // driver stubbed for kubernetes-deployment; none is left in the tree (check 11
 // refuses them in every shim importer).
 
-/** The MCP stack — the packages this directory installs, one list; the loader's regex and the pin guard's count both read it. */
-const STACK = ["hono", "zod", "@hono/mcp", "@modelcontextprotocol/sdk"];
-const PACKAGES = new RegExp(`^(${STACK.join("|")})(/|$)`); // no name holds a regex metacharacter
+// STACK and PACKAGES — the four packages this directory installs, and a specifier of one — come from
+// db/test-support.ts, so test-writes.ts's loader reads the same list.
 /** Only this checkout's recipes/ and integrations/ — not a checkout that happens to sit under a directory so named. */
 const VENDORED = new RegExp("^" + ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/(recipes|integrations)/.*\\.ts$");
 Bun.plugin({
@@ -153,8 +152,8 @@ const vendored = (file: string, kind: Kind, reads: string[], writes: string[], o
 // HTTPS stubs supabase-js took went with it); `kind` picks the assertions; a REST server
 // lists its routes as "METHOD /path" and needs `readProbe`, a worker `dryRun`
 // and `unconfigured`. Then, as needed: RPC_READS and LOG_TABLES for what its
-// reads may call; PACKAGES and extensions/package.json for a new npm package
-// (the pin guard then holds the other two installs to it); a TEXT_ONLY entry for a file
+// reads may call; STACK (db/test-support.ts) and extensions/package.json for a new
+// npm package (the pin guard then holds the other two installs to it); a TEXT_ONLY entry for a file
 // that cannot run; COPIES and package.json's sync-auth for a new _shared/. A
 // REST server's routes must be mounted `app.<verb>("…", …)` at column 0, or
 // the classifier cannot see them.
@@ -890,7 +889,7 @@ for (const t of TEXT_ONLY) {
 // names the package and the two versions.
 {
   const pkg = JSON.parse(readFileSync(join(HERE, "package.json"), "utf8")).devDependencies as Record<string, string>;
-  // The stack is PACKAGES' four names: a test-only devDependency added here (a fixture library, say) is not
+  // The stack is STACK's names: a test-only devDependency added here (a fixture library, say) is not
   // demanded of the image or the core server.
   const stack = Object.entries(pkg).filter(([name]) => PACKAGES.test(name));
   assert(stack.map(([n]) => n).sort().join() === [...STACK].sort().join(), `extensions/package.json installs the ${STACK.length} packages of the MCP stack (${stack.map(([n]) => n).join(", ") || "none"})`);
