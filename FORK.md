@@ -309,6 +309,7 @@ server/test-capture-atomicity.mjs# fix 5   (new file); deleted by SMD-1800 (test
 db/migrations/                   # fix 9   (moved here from server/ in fix 9)
 .github/metadata.schema.json     # fix 7   (3 additive optional fields); SMD-1933 adds `connectors`
 .github/workflows/fork-checks.yml# fix 7   (new file)
+.github/dependabot.yml           # SMD-2093 (new file — moves the workflows' SHA-pinned actions)
 scripts/check-fork-consistency.ts # fix 7 (new file)
 scripts/mechanism-yield.ts       # SMD-1711 (new file — review-pass yield report, not a gate); window and attribution fixed SMD-1728
 scripts/connector-registry.ts    # SMD-1933 (new file — the connector registry's rules and the spec's table renderer)
@@ -503,6 +504,31 @@ sets `defaults.run.shell: bash`, so every step runs under `-eo pipefail` and a
 masked `cmd | grep` failure is surfaced rather than swallowed. Both are opt-in
 locally (`bun scripts/install-hooks.ts` for the commit hook), and both are
 *required* on `main` with the other eight jobs since SMD-1856 (ten in all; twelve until SMD-1800 retired the two Deno jobs).
+
+**The runner image and every action are pinned (SMD-2093).** Every job runs on
+`ubuntu-24.04`, not `ubuntu-latest`, which GitHub moves to Ubuntu 26 from
+2026-10-19. Moving to the next image is a PR of its own, with the stack job's
+lines rerun and actionlint's pin moved too (1.7.7 refuses `ubuntu-26.04` as an
+unknown label). Every `uses:` is a full commit SHA with its tag in a trailing
+comment (`actions/checkout@<sha> # v7.0.1`), because the release job runs its
+actions with `packages: write` and a tag's owner can move it.
+`.github/dependabot.yml` opens a weekly PR that moves the pins, once a release
+is seven days old (a security update does not wait), grouping minor and patch
+releases and sending each major on its own. Read a major before it lands:
+actionlint looks an action's inputs up by tag, so it cannot check a SHA-pinned
+one's, and an input the new major dropped is ignored at run time with a
+warning. Dependabot's commits carry the house header, `[fork] Bump …`, through
+a prefix whose trailing space keeps it from writing `[fork]:`. Check 23 refuses
+a tag, a SHA with no tag comment, a `docker://` step image by tag, a `-latest`
+or expression-picked runner, and a `dependabot.yml` that Dependabot would refuse
+or that can open no PR. It holds a pin's shape, not its truth: a comment naming
+another tag is what zizmor finds, and zizmor ran once for SMD-2093 and is not in
+CI. Two images the release job's actions start by default, QEMU's binfmt and
+the BuildKit builder that pushes to GHCR, are pinned by digest through their
+inputs in `release.yml`, and nothing moves those but a hand edit; nor does
+anything move the `services:` images (pgvector). The rehearsal still runs with
+the release's write token on a PR that touches what it builds from, a
+Dependabot one included (SMD-2111).
 
 ## Detached from the fork network
 

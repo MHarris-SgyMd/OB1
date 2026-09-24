@@ -29,6 +29,15 @@ defaults:
   run:
     shell: bash
 
+# Every job names its runner image (ubuntu-24.04, not ubuntu-latest, which
+# GitHub moves to a new release on its own date), and every `uses:` names a
+# full commit SHA with the tag it was in a trailing comment; Dependabot
+# (.github/dependabot.yml) moves the pins by PR, and check-fork-consistency
+# check 23 refuses a tag or a -latest runner (SMD-2093). Every checkout sets
+# persist-credentials: false: no step talks to the remote after it (a job that
+# reads history takes it at checkout, fetch-depth: 0), so the token has no
+# reason to stay in the workspace.
+
 concurrency:
   group: fork-checks-${{ github.ref }}
   cancel-in-progress: true
@@ -36,15 +45,16 @@ concurrency:
 jobs:
   repo-consistency:
     name: Repo consistency
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # The landing check below diffs the event's range — a PR's base and
           # head, or the merge group's — so it needs the history, not one tree.
           fetch-depth: 0
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
 
@@ -75,9 +85,9 @@ jobs:
       # directories a PR happens to touch. The upstream gate only validates
       # changed dirs, so pre-existing violations never surface there. A Bun
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
-      # and every developer here uses, and checks 13, 14, 18 and 20 parse YAML with
+      # and every developer here uses, and checks 13, 14, 18, 20 and 23 parse YAML with
       # Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, and runtime supabase-js imports
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, and the workflows' runner and action pins
         run: bun scripts/check-fork-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -103,11 +113,13 @@ jobs:
 
   portable-server:
     name: Portable server (Bun + Workers)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
 
@@ -263,11 +275,13 @@ jobs:
 
   db-schema:
     name: Schema migrations
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
 
@@ -308,11 +322,13 @@ jobs:
 
   replay-gate:
     name: Retrieval replay gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
 
@@ -330,7 +346,7 @@ jobs:
 
   db-live:
     name: Schema against real Postgres
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     # A service container, not with-postgres.sh — the runner provides the database
     # and Actions handles readiness. The local script exists for developers, who
@@ -350,9 +366,11 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
 
@@ -381,7 +399,7 @@ jobs:
 
   data-layer:
     name: SQL data layer against real Postgres
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     services:
       postgres:
@@ -398,9 +416,11 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
 
@@ -620,13 +640,15 @@ jobs:
 
   deploy-stack:
     name: Full stack, no Supabase
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # For the three dashboards at the end of this job (SMD-1801): Bun installs
       # and builds them, and drives the SvelteKit one against the stack.
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
 
@@ -825,7 +847,7 @@ jobs:
 
   compat-shim:
     name: supabase-js compatibility shim
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     services:
       postgres:
@@ -842,9 +864,11 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
 
@@ -895,15 +919,16 @@ jobs:
   # Added as reporting jobs; making them required is SMD-1805's ruleset work.
   commit-lint:
     name: Commit messages
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Nothing to lint on a plain push; a PR's own commits — or the queued PR's —
     # are the range, and commitlint ignores the merge commit the queue creates.
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
       - name: commitlint the pushed range against the house grammar
@@ -920,15 +945,17 @@ jobs:
 
   workflow-lint:
     name: Workflow lint (actionlint + shellcheck)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: actionlint (pinned) over the workflows, shellcheck on run bodies
         env:
           ACTIONLINT_VERSION: "1.7.7"
           ACTIONLINT_SHA256: "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757"
         run: |
-          # Pinned by version and checksum; ubuntu-latest ships shellcheck, which
+          # Pinned by version and checksum; ubuntu-24.04 ships shellcheck, which
           # actionlint invokes on every run: body.
           url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
           curl -fsSL -o actionlint.tar.gz "$url"
