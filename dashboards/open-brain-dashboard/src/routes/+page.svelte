@@ -2,6 +2,10 @@
 	import { getStats, getThoughts, captureThought } from '$lib/api';
 	import { THOUGHT_TYPES, type Thought, type ThoughtType } from '$lib/types';
 	import { onMount } from 'svelte';
+	import type { PageProps } from './$types';
+
+	// From the layout: whether the signed-in key may capture (a read key's may not).
+	let { data }: PageProps = $props();
 
 	let thoughts = $state<Thought[]>([]);
 	let loading = $state(true);
@@ -19,6 +23,9 @@
 	let capturing = $state(false);
 	let selectedThought = $state<Thought | null>(null);
 	let latestResultKey = $state<string | null>(null);
+	// What the last call to the brain said when it failed — the proxy's words
+	// (a tool's refusal, an unreachable server), shown, not left in the console.
+	let errorMessage = $state('');
 	let searchInput: HTMLInputElement | null = null;
 
 	const typeButtonClass: Record<ThoughtType, string> = {
@@ -66,6 +73,7 @@
 		}
 
 		searching = true;
+		errorMessage = '';
 		try {
 			const fetchedThoughts = await getThoughts({
 				search: query,
@@ -98,12 +106,14 @@
 			extractFilters();
 		} catch (err) {
 			console.error('Failed to load thoughts:', err);
+			errorMessage = `Search failed: ${err instanceof Error ? err.message : 'unknown error'}`;
 		} finally {
 			searching = false;
 		}
 	}
 
 	async function loadStats() {
+		errorMessage = '';
 		try {
 			const s = await getStats();
 			stats = s;
@@ -111,6 +121,7 @@
 			allPeople = Object.keys(s.people);
 		} catch (err) {
 			console.error('Failed to load stats:', err);
+			errorMessage = `Could not load stats: ${err instanceof Error ? err.message : 'unknown error'}`;
 		}
 	}
 
@@ -210,6 +221,7 @@
 	async function handleCapture() {
 		if (!captureContent.trim()) return;
 		capturing = true;
+		errorMessage = '';
 		try {
 			await captureThought(captureContent);
 			captureContent = '';
@@ -218,6 +230,7 @@
 			if (hasSearched) await loadThoughts();
 		} catch (err) {
 			console.error('Failed to capture:', err);
+			errorMessage = `Capture failed: ${err instanceof Error ? err.message : 'unknown error'}`;
 		}
 		capturing = false;
 	}
@@ -235,16 +248,26 @@
 			<span class="text-2xl font-bold text-text">{stats.total}</span>
 			<span>thoughts captured</span>
 		</div>
-		<button
-			onclick={() => showCapture = !showCapture}
-			class="px-4 py-2 bg-primary hover:bg-primary-light text-white rounded-lg font-medium transition-colors"
-		>
-			{showCapture ? 'Close' : '+ Capture'}
-		</button>
+		{#if data.canCapture}
+			<button
+				onclick={() => showCapture = !showCapture}
+				class="px-4 py-2 bg-primary hover:bg-primary-light text-white rounded-lg font-medium transition-colors"
+			>
+				{showCapture ? 'Close' : '+ Capture'}
+			</button>
+		{:else}
+			<span class="text-sm text-text-muted" title="Sign in with a write-scoped key to capture">Read-only key</span>
+		{/if}
 	</div>
 
+	{#if errorMessage}
+		<div class="mb-6 rounded-xl border border-red-400/30 bg-red-400/10 px-4 py-3 text-sm text-red-300" role="alert">
+			{errorMessage}
+		</div>
+	{/if}
+
 	<!-- Capture Form -->
-	{#if showCapture}
+	{#if showCapture && data.canCapture}
 		<div class="mb-6 bg-bg-card border border-white/10 rounded-xl p-5">
 			<textarea
 				bind:value={captureContent}

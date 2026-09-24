@@ -604,6 +604,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # For the three dashboards at the end of this job (SMD-1801): Bun installs
+      # and builds them, and drives the SvelteKit one against the stack.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
       # The other container this repository ships (SMD-1800): kubernetes-deployment's
       # image, Bun's base with its pinned install, built from integrations/ so the
       # shared auth module is in the context. Built, not run — its database is its
@@ -623,6 +629,15 @@ jobs:
           KEY=$(openssl rand -hex 32)
           HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
           echo "OB1_SMOKE_KEY=$KEY" >> "$GITHUB_ENV"
+          # And a read-scoped key beside it, for the dashboard smoke at the end
+          # of this job (SMD-1801): a read key must get a read-only dashboard.
+          READ_KEY=$(openssl rand -hex 32)
+          READ_HASH=$(printf '%s' "$READ_KEY" | shasum -a 256 | cut -d' ' -f1)
+          echo "OB1_SMOKE_READ_KEY=$READ_KEY" >> "$GITHUB_ENV"
+          # And a capture-only key (SMD-1298), which the dashboard must refuse at sign-in.
+          CAPTURE_KEY=$(openssl rand -hex 32)
+          CAPTURE_HASH=$(printf '%s' "$CAPTURE_KEY" | shasum -a 256 | cut -d' ' -f1)
+          echo "OB1_SMOKE_CAPTURE_KEY=$CAPTURE_KEY" >> "$GITHUB_ENV"
           # No OPENROUTER_API_KEY: the provider is a local endpoint, which
           # needs no credential (preflight decides). Preflight dials it once
           # (GET /models, SMD-1875) and nothing else in this job does —
@@ -648,7 +663,7 @@ jobs:
           # and the smoke step asserts the health body reports it.
           cat > .env <<EOF
           POSTGRES_PASSWORD=$(openssl rand -hex 24)
-          MCP_ACCESS_KEYS=ci:write:$HASH
+          MCP_ACCESS_KEYS=ci:write:$HASH,ci-read:read:$READ_HASH,ci-capture:capture:$CAPTURE_HASH
           OB1_LLM_BASE_URL=http://host.docker.internal:11434/v1
           OB1_LLM_LOCAL=1
           OB1_QUERY_LOG=on
@@ -741,6 +756,39 @@ jobs:
             exit 1
           fi
           echo "No supabase binary in the running stack."
+
+      # SMD-1801. The three dashboards build from their pinned installs, with no
+      # Supabase package among them (check 22 holds the imports; this holds the
+      # builds). The two Next dashboards read their env at build time — the
+      # gateway URL and a session secret, any values — and are built, not run:
+      # they speak to the open-brain-rest gateway, which this stack does not
+      # serve (extensions/test-auth.ts starts it). The SvelteKit one speaks MCP
+      # to the server this stack serves, so it is driven too, below.
+      - name: The three dashboards build
+        env:
+          NEXT_PUBLIC_API_URL: http://127.0.0.1:8787
+          SESSION_SECRET: build-time-only-0123456789abcdef0123456789
+        run: |
+          for d in open-brain-dashboard open-brain-dashboard-next open-brain-dashboard-pro; do
+            echo "::group::$d"
+            # The group closed on failure too, or the rest of the log nests under it.
+            if ! ( cd "dashboards/$d" && bun install --frozen-lockfile && bun run build ); then echo "::endgroup::"; exit 1; fi
+            echo "::endgroup::"
+          done
+          ( cd dashboards/open-brain-dashboard && bun run check )
+
+      # The SvelteKit dashboard as a browser uses it, against the stack that is
+      # up: a wrong key refused at /signin, the write key signed in and the JSON
+      # its first page loads (thought_stats through its proxy) reaching the
+      # database, the read key signed in and refused capture — 403 from the
+      # proxy, before the server is asked — and the capture-only key refused at
+      # sign-in. deploy/.env holds hashes; the raw keys minted above ride in the
+      # three OB1_SMOKE_* variables.
+      - name: The SvelteKit dashboard, driven against the stack
+        working-directory: dashboards/open-brain-dashboard
+        env:
+          MCP_URL: http://127.0.0.1:8010/
+        run: bun smoke.ts --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY"
 
       - name: Logs on failure
         if: failure()
