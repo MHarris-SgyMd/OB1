@@ -34,7 +34,7 @@
  * SMD-1937's to tune (jev/README.md, "Conformance"): this is its first number,
  * not its conclusion.
  *
- *   bun eval-jev-gate.ts --url postgres://…/openbrain [--per-cohort 60]
+ *   bun eval-jev-gate.ts --url postgres://…/openbrain [--per-cohort 60]   (or DATABASE_URL)
  *
  * Needs OB1_JEV_BASE_URL (and OB1_JEV_LOCAL=1 for a tier on the box). Prints
  * aggregates and, for the `typed` cohort, names with their decisions — the
@@ -60,6 +60,7 @@ if (!url || !cfg || !Number.isInteger(perCohort) || perCohort < 1) {
 }
 
 type Candidate = { cohort: "bad" | "positive" | "typed"; name: string; type: string; context: string; metadata: Record<string, unknown> };
+type Validity = { p: number | null; abstained: boolean; ms: number };
 
 /** One window of the thought around the first place it names the entity, else its head. */
 function windowAround(text: string, name: string, span = 400): string {
@@ -136,14 +137,14 @@ const all = await candidates();
 // on either call, so a row refused on the second has sent its window once.
 const subject = (c: Candidate) => ({ kind: "decision" as const, actor: "eval-jev-gate", metadata: c.metadata });
 const t0 = performance.now();
-// One decision per request so the per-decision latency is measured, not a batch's share.
-const answered: { c: Candidate; v: { p: number | null; abstained: boolean; ms: number }; t: JevResult }[] = [];
+const answered: { c: Candidate; v: Validity; t: JevResult }[] = [];
 let refused = 0;
 for (const c of all) {
+  // One decision per request so the per-decision latency is measured, not a batch's share.
   try {
     const t = performance.now();
     const { results } = await jevDecideMany(cfg!, [validity(c)], subject(c));
-    const v = { p: results[0].p_true ?? null, abstained: results[0].abstained, ms: performance.now() - t };
+    const v: Validity = { p: results[0].p_true ?? null, abstained: results[0].abstained, ms: performance.now() - t };
     answered.push({ c, v, t: (await jevDecideMany(cfg!, [typing(c)], subject(c))).results[0] });
   } catch (e) {
     if (!(e instanceof ProviderError && e.kind === "egress")) throw e;
@@ -151,28 +152,28 @@ for (const c of all) {
   }
 }
 const wall = performance.now() - t0;
-const valid = answered.map((x) => x.v);
 
 const cohort = (k: Candidate["cohort"]) => answered.filter((x) => x.c.cohort === k);
 const bad = cohort("bad"), positive = cohort("positive"), typedLayer = cohort("typed");
 const baselineRejects = (c: Candidate) => /^[0-9.:]+$/.test(c.name);
-const rejects = (v: { p: number | null; abstained: boolean }) => v.abstained || (v.p ?? 0) < 0.5;
+const rejects = (v: Validity) => v.abstained || (v.p ?? 0) < 0.5;
 /** The choice arm rejects as the binary arm does: a number, a generic word, or an abstention. */
 const CHOICE_REJECTS = ["number", "generic", INSUFFICIENT_EVIDENCE];
+const choiceRejects = (x: { t: JevResult }) => CHOICE_REJECTS.includes(x.t.selected);
 
 console.log(`\n${all.length} candidates from the brain${refused ? `, ${refused} refused by the egress policy (on either call) and left out` : ""} (${bad.length} bad, ${positive.length} positive, ${typedLayer.length} person/place); tier ${cfg!.endpoint.base}; ${(wall / 1000).toFixed(1)} s\n`);
 console.log("| arm | rejects bad (recall) | rejects positive (false rejections, weak label) |");
 console.log("| --- | --- | --- |");
 console.log(`| baseline ^[0-9.:]+$ | ${pct(bad.filter((x) => baselineRejects(x.c)).length, bad.length)} | ${pct(positive.filter((x) => baselineRejects(x.c)).length, positive.length)} |`);
 console.log(`| tier, binary validity (p < 0.5 or abstained) | ${pct(bad.filter((x) => rejects(x.v)).length, bad.length)} | ${pct(positive.filter((x) => rejects(x.v)).length, positive.length)} |`);
-console.log(`| tier, choice → number, generic or abstained | ${pct(bad.filter((x) => CHOICE_REJECTS.includes(x.t.selected)).length, bad.length)} | ${pct(positive.filter((x) => CHOICE_REJECTS.includes(x.t.selected)).length, positive.length)} |`);
+console.log(`| tier, choice → number, generic or abstained | ${pct(bad.filter(choiceRejects).length, bad.length)} | ${pct(positive.filter(choiceRejects).length, positive.length)} |`);
 const pv = (xs: typeof bad) => xs.map((x) => x.v.p ?? 0);
-console.log(`\nbinary p_true: AUROC positive vs bad ${fixed(auroc(pv(positive), pv(bad)), 3)}; median bad ${fixed(quantile(pv(bad), 0.5), 3)}, median positive ${fixed(quantile(pv(positive), 0.5), 3)}; abstained ${pct(valid.filter((v) => v.abstained).length, valid.length)}`);
+console.log(`\nbinary p_true: AUROC positive vs bad ${fixed(auroc(pv(positive), pv(bad)), 3)}; median bad ${fixed(quantile(pv(bad), 0.5), 3)}, median positive ${fixed(quantile(pv(positive), 0.5), 3)}; abstained ${pct(answered.filter((x) => x.v.abstained).length, answered.length)}`);
 console.log(`choice: positives typed as the extractor typed them ${pct(positive.filter((x) => x.t.selected === x.c.type).length, positive.length)}; bad typed number ${pct(bad.filter((x) => x.t.selected === "number").length, bad.length)}`);
-const ms = valid.map((v) => v.ms);
+const ms = answered.map((x) => x.v.ms);
 console.log(`latency, one binary decision per request: p50 ${fixed(quantile(ms, 0.5), 0)} ms, p95 ${fixed(quantile(ms, 0.95), 0)} ms`);
 
 console.log("\nperson/place layer — the extractor's type, the tier's choice, P(named):");
 for (const x of typedLayer) console.log(`  ${x.c.type.padEnd(6)} ${x.c.name.padEnd(28).slice(0, 28)} → ${x.t.selected.padEnd(12)} ${x.v.p === null ? "—" : x.v.p.toFixed(2)}`);
 const agrees = typedLayer.filter((x) => x.t.selected === x.c.type).length;
-console.log(`\nthe tier keeps the extractor's person/place type on ${agrees} of ${typedLayer.length}; it types ${typedLayer.filter((x) => CHOICE_REJECTS.includes(x.t.selected)).length} as number or generic, or abstains`);
+console.log(`\nthe tier keeps the extractor's person/place type on ${agrees} of ${typedLayer.length}; it types ${typedLayer.filter(choiceRejects).length} as number or generic, or abstains`);

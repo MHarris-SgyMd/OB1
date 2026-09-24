@@ -139,6 +139,9 @@ async function timed(label: string, once: () => Promise<void>, count: number, un
 }
 
 const showPs = (models: Loaded[]) => models.map((m) => `${m.name} ${gb(m.size)} (VRAM ${gb(m.size_vram)})`).join("; ") || "none";
+/** The models `from` holds that `to` does not, by name. */
+const missingFrom = (from: Loaded[], to: Loaded[]) => from.filter((m) => !to.some((t) => t.name === m.name)).map((m) => m.name);
+const sameRunners = (a: string[], b: string[]) => JSON.stringify(a) === JSON.stringify(b);
 
 // Warm all three so "alone" measures a loaded model, not a load — read before
 // and after, since a load here is the one the run can cause.
@@ -149,27 +152,32 @@ await chatOnce();
 await decideOnce();
 const before = await ps();
 const runnersBefore = await runners();
-const warmLoaded = before.filter((m) => !cold.some((c) => c.name === m.name)).map((m) => m.name);
-const warmEvicted = cold.filter((m) => !before.some((b) => b.name === m.name)).map((m) => m.name);
-const warmChanged = JSON.stringify(runnersCold) !== JSON.stringify(runnersBefore);
+const warmLoaded = missingFrom(before, cold);
+const warmEvicted = missingFrom(cold, before);
+const warmChanged = !sameRunners(runnersCold, runnersBefore);
 console.log(`\nwarm-up: ${warmLoaded.length ? `loaded ${warmLoaded.join(", ")}` : "loaded nothing"}${warmEvicted.length ? `; EVICTED ${warmEvicted.join(", ")}` : ""}${warmChanged && !warmLoaded.length ? "; a runner stopped or started" : ""}`);
 console.log(`before: Ollama holds ${showPs(before)}`);
 console.log(`        Ollama's settings: ${await ollamaSettings()}; runners ${runnersBefore.join(", ") || "none seen"}`);
 console.log(`        tier ${await tierMemory(jevPid)}; free memory ${await freeMemory()}`);
 
-const alone = [await timed("embedding", embedOnce, n), await timed("chat (16 tokens)", chatOnce, Math.max(3, Math.floor(n / 3))), await timed("decision", decideOnce, n)];
-// Together for as long as the three took alone, all to one deadline.
-const phaseMs = alone.reduce((s, t) => s + t.p50 * t.calls, 0);
-const deadline = performance.now() + phaseMs;
-const together = await Promise.all([timed("embedding", embedOnce, 0, deadline), timed("chat (16 tokens)", chatOnce, 0, deadline), timed("decision", decideOnce, 0, deadline)]);
+const loops = [
+  { label: "embedding", once: embedOnce, count: n },
+  { label: "chat (16 tokens)", once: chatOnce, count: Math.max(3, Math.floor(n / 3)) },
+  { label: "decision", once: decideOnce, count: n },
+];
+const alone: Timing[] = [];
+for (const l of loops) alone.push(await timed(l.label, l.once, l.count));
+// Together for about as long as the three took alone (p50 × calls), all to one deadline.
+const deadline = performance.now() + alone.reduce((s, t) => s + t.p50 * t.calls, 0);
+const together = await Promise.all(loops.map((l) => timed(l.label, l.once, 0, deadline)));
 const after = await ps();
 const runnersAfter = await runners();
 
 console.log(`\n| call | alone: calls, p50 / p95 | beside the other two: calls, p50 / p95 | p50 ratio |`);
 console.log(`| --- | --- | --- | --- |`);
 for (let i = 0; i < 3; i++) console.log(`| ${alone[i].label} | ${alone[i].calls}, ${alone[i].p50.toFixed(0)} / ${alone[i].p95.toFixed(0)} ms | ${together[i].calls}, ${together[i].p50.toFixed(0)} / ${together[i].p95.toFixed(0)} ms | ${(together[i].p50 / alone[i].p50).toFixed(2)}× |`);
-const evicted = before.filter((m) => !after.some((a) => a.name === m.name)).map((m) => m.name);
-const reloaded = runnersBefore.length > 0 && JSON.stringify(runnersBefore) !== JSON.stringify(runnersAfter);
+const evicted = missingFrom(before, after);
+const reloaded = runnersBefore.length > 0 && !sameRunners(runnersBefore, runnersAfter);
 console.log(`\nafter: Ollama holds ${showPs(after)}; runners ${runnersAfter.join(", ") || "none seen"}`);
 console.log(`       tier ${await tierMemory(jevPid)}; free memory ${await freeMemory()}`);
 console.log(evicted.length ? `EVICTED while the tier ran: ${evicted.join(", ")}`
