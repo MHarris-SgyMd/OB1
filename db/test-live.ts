@@ -38,8 +38,8 @@ import { SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffers
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 import { consolidateKey } from "../server-portable/consolidate.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
-import { corpusIngested, docOf, INGEST_ACTOR, recordId, recordStructure, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
-import { labelNames, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
+import { corpusIngested, docOf, docsOf, INGEST_ACTOR, recordId, recordStructure, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
+import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
@@ -4114,8 +4114,42 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
     `the section leaves the database's tables, views and functions as it found them (${left.tables.size}/${left.views.size}/${left.fns.size})`);
 }
 
-/** A corpus dump's record for an issue (SMD-1958): the shape the sync fetches, through the same adapter; `fetchedAt` is the dump's build instant, absent for a dump with no second clock. [19] and [22]. */
+/** A corpus dump's record for an issue (SMD-1958): the shape the sync fetches, through the same adapter; `fetchedAt` is the dump's build instant, absent for a dump with no second clock. [19], [22] and [23]. */
 const dumpOf = (issue: LinearIssue, fetchedAt?: string): LinearDoc => ({ id: issue.identifier, title: issue.title, text: issue.description ?? "", labels: labelNames(issue), createdAt: issue.createdAt, issue, ...(fetchedAt ? { fetchedAt } : {}) });
+
+/**
+ * The board sync's per-ticket unit over the REAL store (server-portable/store-sql.ts
+ * — upsert_thought, update_thought, 050's stamp, 053's structure hook and
+ * identity lookup) with the two model calls faked and counted: what [22] and
+ * [23] converge on is the text, the facets and the structure the two writers
+ * write, which the self-check's fakes cannot show. `syncIssue` is the sync's
+ * per-ticket unit; the census and the fetch it sits behind are Linear's side.
+ * `unitIndex` picks the fake vector, so two harnesses' rows stay distinct.
+ */
+function syncHarness(unitIndex: number) {
+  const store = new SqlStore(URL_!, { max: 1 });
+  const calls: string[] = [];
+  const brainRow = async (rows: Promise<unknown[]>) => ((await rows)[0] as BrainRow | undefined) ?? null;
+  const writer: Writer = {
+    store,
+    cfg: resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_EGRESS_POLICY: "off" }),
+    embed: async () => { calls.push("embed"); return { embedding: JSON.parse(unit(unitIndex)) as number[], model: EMBEDDING_MODEL, chunks: [] }; },
+    tags: async () => { calls.push("tags"); return { type: "task", topics: ["zqtopic"] }; },
+    fingerprintOf: async (t) => (await sql`SELECT content_fingerprint_of(${t}) AS f`)[0].f as string,
+    holderOf: (fp) => brainRow(sql`SELECT id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint FROM thoughts WHERE content_fingerprint = ${fp} LIMIT 1`),
+    holderOfIdentity: (system, key) => brainRow(sql`SELECT id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint FROM thoughts WHERE id = source_thought(${system}, ${key})`),
+    actor: { name: SYNC_ACTOR, via: "test-live" },
+    dryRun: false,
+    log: () => {},
+    structure: async (id, s) => { await sql.begin(async (tx) => { await recordStructure(tx, id, s, "test-live@sync", { take: true }); }); },
+  };
+  // A dump built NOW, by the brain's clock — `fetchedAt` is compared with the
+  // row's updated_at, and the container's clock is the one that stamps it.
+  const dbNow = async () => (await sql`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS t`)[0].t as string;
+  const rowsFor = async (identifier: string) => groupTicketRows(await readTicketRows(sql, { scanHeaders: true })).get(identifier) ?? [];
+  const sync = async (issue: LinearIssue) => { calls.length = 0; return syncIssue(writer, issue, await rowsFor(issue.identifier)); };
+  return { store, calls, writer, dbNow, sync };
+}
 
 console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled and idempotent, an edit moves one row, duplicate content is skipped (SMD-1806)");
 {
@@ -4371,32 +4405,7 @@ console.log("\n[21] said_by on real pgvector: the mark 050 stamps is filtered th
 
 console.log("\n[22] one renderer, one merge rule: a corpus dump through ingest-records.ts and the board sync through sync-linear.ts converge on one row in both orders, and an older dump does not move a ticket back (SMD-1958)");
 {
-  // The sync's write decisions over the REAL store (server-portable/store-sql.ts
-  // — upsert_thought, update_thought, 050's stamp, 053's structure hook) with
-  // the two model calls faked and counted: what converges here is the text,
-  // the facets and the structure the two tools write, which the self-check's
-  // fakes cannot show. `syncIssue` is the sync's per-ticket unit; the census
-  // and the fetch it sits behind are Linear's side and are not needed to ask
-  // whether the second writer finds anything to write.
-  const store = new SqlStore(URL_!, { max: 1 });
-  const calls: string[] = [];
-  const writer: Writer = {
-    store,
-    cfg: resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_EGRESS_POLICY: "off" }),
-    embed: async () => { calls.push("embed"); return { embedding: JSON.parse(unit(7)) as number[], model: EMBEDDING_MODEL, chunks: [] }; },
-    tags: async () => { calls.push("tags"); return { type: "task", topics: ["zqtopic"] }; },
-    fingerprintOf: async (t) => (await sql`SELECT content_fingerprint_of(${t}) AS f`)[0].f as string,
-    holderOf: async (fp) => ((await sql`SELECT id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint FROM thoughts WHERE content_fingerprint = ${fp} LIMIT 1`)[0] as BrainRow | undefined) ?? null,
-    actor: { name: SYNC_ACTOR, via: "test-live" },
-    dryRun: false,
-    log: () => {},
-    structure: async (id, s) => { await sql.begin(async (tx) => { await recordStructure(tx, id, s, "test-live@sync", { take: true }); }); },
-  };
-  // A dump built NOW, by the brain's clock — `fetchedAt` is compared with the
-  // row's updated_at, and the container's clock is the one that stamps it.
-  const dbNow = async () => (await sql`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS t`)[0].t as string;
-  const rowsFor = async (identifier: string) => groupTicketRows(await readTicketRows(sql, { scanHeaders: true })).get(identifier) ?? [];
-  const sync = async (issue: LinearIssue) => { calls.length = 0; return syncIssue(writer, issue, await rowsFor(issue.identifier)); };
+  const { store, calls, dbNow, sync } = syncHarness(7);
   const ticketRows = async (identifier: string) => (await sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'issue' = ${identifier}`)[0].c as number;
   const holderOf = async (identifier: string) => (await sql`SELECT thought_id::text AS t, canonical FROM thought_sources WHERE system = 'linear' AND identity = ${identifier}`)[0] as { t: string; canonical: string } | undefined;
   const mentionsOf = async (id: string) => (await sql`SELECT en.name FROM thought_entities m JOIN ob1_entities en ON en.id = m.entity_id WHERE m.thought_id = ${id}::uuid AND m.extraction_key = 'source:linear' ORDER BY en.name`).map((r: { name: string }) => r.name).join(",");
@@ -4470,6 +4479,63 @@ console.log("\n[22] one renderer, one merge rule: a corpus dump through ingest-r
   assert((await ticketRows("SMD-90020")) === 1 && (await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${recordId("linear", "SMD-90020")}::uuid`)[0].c === 0, "…no second row, none on the dump's id");
   const sB2 = await sync(issueB);
   assert(sB2.outcome === "unchanged" && calls.length === 0, `and the sync again reads it unchanged (${sB2.outcome}; calls ${calls.join(",") || "none"})`);
+
+  await store.close();
+  for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
+}
+
+console.log("\n[23] a ticket's dated sections are thoughts of their own — derived_from the ticket, type observation, one row per section from either writer, and both writers converge on them (SMD-2059)");
+{
+  const { store, calls, dbNow, sync } = syncHarness(9);
+  const holderOf = async (identifier: string) => (await sql`SELECT thought_id::text AS t FROM thought_sources WHERE system = 'linear' AND identity = ${identifier}`)[0]?.t as string | undefined;
+  const partsOf = async (identifier: string) => (await sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'ticket' = ${identifier}`)[0].c as number;
+  const ids: string[] = [];
+
+  const issue: LinearIssue = { ...SAMPLE_ISSUE, identifier: "SMD-90030", title: "Sectioned", description: "## Problem\n\nThe plan.\n\n## Update 2026-09-19 (board audit)\n\nStill open; see <issue id=\"a\" href=\"h\">SMD-90031</issue>.", project: null, labels: { nodes: [] }, updatedAt: "2026-09-22T01:00:00.000Z" };
+  const partKey = "SMD-90030#update-2026-09-19-board-audit";
+  const partId = recordId("linear", partKey);
+  const partText = linearAdapter.map(issue).derived![0].text;
+
+  // Order A: the dump first. The ticket and its section, two rows, the section derived_from the ticket.
+  const family = docsOf(corpusIngested(dumpOf(issue, await dbNow())));
+  assert(family.length === 2 && family[1].id === partId && family[1].derivedFrom?.key === "SMD-90030", `the dump yields the ticket and one part on its own id (${family.map((d) => d.id.slice(0, 8)).join(",")})`);
+  const written: string[] = [];
+  for (const d of family) { written.push((await upsertRecord(sql, d, "test-live@sections")).outcome); ids.push(d.id); }
+  assert(written.join(",") === "inserted,inserted", `both insert (${written.join(",")})`);
+  const partRow = (await sql`SELECT content, metadata, derived_from, created_at::text AS c FROM thoughts WHERE id = ${partId}::uuid`)[0];
+  assert(JSON.stringify(partRow.derived_from) === JSON.stringify([family[0].id]) && partRow.metadata.type === "observation" && partRow.metadata.ticket === "SMD-90030" && partRow.metadata.issue === undefined && partRow.metadata.observed_at === "2026-09-19" && /^2026-09-19/.test(partRow.c), `the part is derived_from the ticket's row, an observation dated by its heading, naming the ticket under \`ticket\` (${JSON.stringify(partRow.metadata)})`);
+  assert(partRow.content === partText && /^SMD-90030 — Sectioned · Update 2026-09-19/.test(partRow.content) && !/<issue/.test(partRow.content), "…its text is the ticket's identifier and title, the heading, the body with markup stripped");
+  assert((await sql`SELECT content FROM thoughts WHERE id = ${family[0].id}::uuid`)[0].content === renderIssue(issue), "…and the ticket's own text is unchanged — the section is still inside it");
+  const links = (await sql`SELECT payload->>'relation' AS r, payload->>'target' AS t FROM thought_facets WHERE thought_id = ${partId}::uuid AND kind = 'link' ORDER BY 1`).map((l: { r: string; t: string }) => `${l.r}=${l.t}`).join(",");
+  assert(links === "child_of=SMD-90030,references=SMD-90031" && (await holderOf(partKey)) === partId, `the part's links: child_of the ticket, references its autolink; the identity is the part's row's (${links})`);
+  const trace = (await sql`SELECT thought_id::text AS t, depth FROM trace_provenance(${partId}::uuid)`).map((r: { t: string; depth: number }) => `${r.depth}:${r.t === family[0].id ? "ticket" : r.t === partId ? "part" : r.t}`).join(" ");
+  assert(trace === "0:part 1:ticket", `trace_provenance walks the part to its ticket (${trace})`);
+  // The sync over both: nothing to write, no model call, the part read unchanged.
+  const sA = await sync(issue);
+  assert(sA.outcome === "unchanged" && calls.length === 0 && sA.derived?.unchanged === 1 && sA.derived.captured === 0 && (await partsOf("SMD-90030")) === 1, `the sync reads the ticket and its section unchanged with no model call, one part row (${sA.outcome}; ${JSON.stringify(sA.derived)}; calls ${calls.join(",") || "none"})`);
+  // The section is edited in Linear: the ticket's text moves and so does the part's; each is one edit.
+  const edited: LinearIssue = { ...issue, description: issue.description!.replace("Still open", "Now closed"), updatedAt: "2026-09-22T02:00:00.000Z" };
+  const sE = await sync(edited);
+  assert(sE.outcome === "updated" && sE.derived?.updated === 1 && calls.join(",") === "embed,tags,embed,tags" && (await partsOf("SMD-90030")) === 1, `an edited section: the ticket and the part are each edited once, on their own rows — no second part row (${sE.outcome}; ${JSON.stringify(sE.derived)}; ${calls.join(",")})`);
+  assert(/Now closed/.test((await sql`SELECT content FROM thoughts WHERE id = ${partId}::uuid`)[0].content), "…the part's row carries the new text");
+  const fresh = docsOf(corpusIngested(dumpOf(edited, await dbNow())));
+  assert((await upsertRecord(sql, fresh[1], "test-live@sections2")).outcome === "unchanged", "a dump rebuilt after the edit finds the part unchanged");
+
+  // Order B: the sync first.
+  const issueB: LinearIssue = { ...issue, identifier: "SMD-90040", title: "Sync first", description: "## Update 2026-09-20 (In Review)\n\nMerged.", updatedAt: "2026-09-22T03:00:00.000Z" };
+  const sB = await sync(issueB);
+  const headB = await holderOf("SMD-90040");
+  const partB = await holderOf("SMD-90040#update-2026-09-20-in-review");
+  assert(sB.outcome === "captured" && sB.derived?.captured === 1 && calls.join(",") === "embed,tags,embed,tags" && typeof headB === "string" && typeof partB === "string" && partB !== headB, `the sync captures the ticket and its section, each with a vector and tags (${sB.outcome}; ${JSON.stringify(sB.derived)})`);
+  ids.push(headB!, partB!);
+  const partBRow = (await sql`SELECT metadata, derived_from FROM thoughts WHERE id = ${partB}::uuid`)[0];
+  assert(JSON.stringify(partBRow.derived_from) === JSON.stringify([headB]) && partBRow.metadata.type === "observation" && partBRow.metadata.source === "linear" && partBRow.metadata.issue === undefined, `…the part derived_from the sync's ticket row, an observation, no row claim (${JSON.stringify(partBRow.derived_from)})`);
+  const famB = docsOf(corpusIngested(dumpOf(issueB, await dbNow())));
+  const heldB: string[] = [];
+  for (const d of famB) heldB.push((await upsertRecord(sql, d, "test-live@sections3")).outcome);
+  assert(heldB.join(",") === "held,held" && (await sql`SELECT count(*)::int AS c FROM thoughts WHERE id IN (${famB[0].id}::uuid, ${famB[1].id}::uuid)`)[0].c === 0, `the dump for that ticket is held for the ticket AND its part, no row on either dump id (${heldB.join(",")})`);
+  const sB2 = await sync(issueB);
+  assert(sB2.outcome === "unchanged" && sB2.derived?.unchanged === 1 && calls.length === 0, `and the sync again reads both unchanged (${sB2.outcome}; ${JSON.stringify(sB2.derived)})`);
 
   await store.close();
   for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
