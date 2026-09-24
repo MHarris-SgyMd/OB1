@@ -9,18 +9,6 @@ interface McpJsonRpcResponse {
 	error?: { message?: string };
 }
 
-interface ApiThought {
-	id: string;
-	content: string;
-	metadata: {
-		type: ThoughtType;
-		topics: string[];
-		people: string[];
-		action_items?: string[];
-	};
-	created_at: string;
-}
-
 async function callMcpTool(name: string, args: Record<string, unknown> = {}): Promise<McpToolResult> {
 	const response = await fetch('/api/mcp', {
 		method: 'POST',
@@ -52,34 +40,6 @@ async function callMcpTool(name: string, args: Record<string, unknown> = {}): Pr
 	}
 
 	return result.result;
-}
-
-function parseThoughtsFromText(text: string): ApiThought[] {
-	// Parse the formatted text response from list_thoughts
-	const thoughts: ApiThought[] = [];
-	const lines = text.split('\n');
-	
-	for (const line of lines) {
-		// Format: "1. [Mar 15, 2026] (observation - topic1, topic2)\n   Content here"
-		const match = line.match(/^(\d+)\.\s*\[([^\]]+)\]\s*\(([^)]+)\)\s*\n?\s*(.+)$/);
-		if (match) {
-			const [, , dateStr, metaStr, content] = match;
-			const [type, topicsStr] = metaStr.split(' - ');
-			
-			thoughts.push({
-				id: crypto.randomUUID(),
-				content: content.trim(),
-				metadata: {
-					type: type.trim() as ThoughtType,
-					topics: topicsStr ? topicsStr.split(', ').map(t => t.trim()) : [],
-					people: [],
-				},
-				created_at: new Date(dateStr).toISOString(),
-			});
-		}
-	}
-	
-	return thoughts;
 }
 
 function parseStatsFromText(text: string): {
