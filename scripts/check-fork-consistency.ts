@@ -4540,14 +4540,18 @@ checkSupabaseJsImports();
  * was in a trailing comment that opens with a version number (`# v7.0.1`, or
  * `# 7.0.1` for an action whose tags carry no `v`; Dependabot rewrites the two
  * together, and a reader needs the tag), a local `./` path, or a `docker://`
- * image by sha256 digest. And .github/dependabot.yml is a `version: 2` file
- * with a scheduled `github-actions` entry over `/` that can open a PR, so the
- * pins move by PR rather than rot. The structure is read from the parsed
- * document. The comment, which a YAML parser drops, is read from the value's
+ * image by sha256 digest. And .github/dependabot.yml is a `version: 2` file,
+ * every entry on a schedule Dependabot accepts, with a `github-actions` entry
+ * over `/` that can open a PR, so the pins move by PR rather than rot — a
+ * heuristic for the ways a file stops the pins moving, not a validator of
+ * Dependabot's schema (an ignore of `actions/*` passes). The structure is
+ * read from the parsed document. The comment, which a YAML parser drops, is
+ * read from the value's
  * line: the first unclaimed line carrying the value, block scalars (`run: |`,
  * `- |`, an anchored or tagged `&a |`) skipped, since a `uses:` line there is
- * text, not a step. A SHA-pinned `uses:` the line reader cannot find (flow
- * style) is refused, since its tag cannot be read; and every SHA-pinned line
+ * text, not a step. A SHA-pinned `uses:` with no line of its own (flow style, a
+ * folded value, or steps reused by YAML alias, which actionlint 1.7.7 refuses
+ * too) is refused, since its tag cannot be read; and every SHA-pinned line
  * the reader does find carries its tag whether a step claimed it or not, so
  * text the reader cannot tell from a step (a quoted scalar across lines, an
  * input named `uses`) cannot lend its tag to a bare step below it. Check 23
@@ -4563,19 +4567,22 @@ checkSupabaseJsImports();
  */
 const WORKFLOWS_DIR = ".github/workflows";
 const DEPENDABOT = ".github/dependabot.yml";
+/** The `schedule.interval` values Dependabot's options reference accepts; `cron` wants a `cronjob` beside it. */
+const DEPENDABOT_INTERVALS = ["daily", "weekly", "monthly", "quarterly", "semiannually", "yearly", "cron"];
 const FULL_SHA = /^[0-9a-f]{40}$/;
 /** The trailing comment a SHA pin carries: a version number, `# v7`, `# v7.0.1` or `# 7.0.1`, then anything. */
 const TAG_COMMENT = /^#\s*v?\d+(?:\.\d+)*(?:\s|$)/;
 /** A runner label GitHub moves to a new image on its own date: `-latest`, alone or before a size, in any case. */
 const MOVING_LABEL = /-latest(?:-|$)/i;
 /**
- * A line that opens a block scalar: `run: |`, `script: >-`, a list item `- |`,
- * an anchor or tag before the indicator (`run: &a |`, `run: !!str |`). Group 1
- * is the indent, group 2 the item's `- `, group 3 the key; the body is every
- * line indented past the key's column, or past the dash's for a keyless item.
+ * A line that opens a block scalar: `run: |`, `script: >-`, a list item `- |`
+ * (nested, `- - |`, too), an anchor or tag before the indicator (`run: &a |`,
+ * `run: !!str |`). Group 1 is the indent, group 2 the items' dashes, group 3
+ * the key; the body is every line indented past the key's column, or past the
+ * first dash's for a keyless item.
  */
-const BLOCK_SCALAR_KEY = /^(\s*)(-\s+)?(?:([^\s#][^#]*?):\s+)?(?:[&!]\S*\s+)*[|>][-+0-9]*\s*(?:#.*)?$/;
-/** Every line outside a block scalar that reads as `uses: <value> [# comment]`, a `- ` list item or not, the value quoted or not. */
+const BLOCK_SCALAR_KEY = /^(\s*)((?:-\s+)*)(?:([^\s#][^#]*?):\s+)?(?:[&!]\S*\s+)*[|>][-+0-9]*\s*(?:#.*)?$/;
+/** Every line outside a block scalar that reads as `uses: <value> [# comment]`, a `- ` list item (anchored or not) or not, the value quoted or not. */
 function usesLinesOf(text: string): { value: string; comment: string; line: number }[] {
   const out: { value: string; comment: string; line: number }[] = [];
   let blockColumn = -1; // inside a block scalar, the column its body must be indented past; -1 outside one
@@ -4585,8 +4592,8 @@ function usesLinesOf(text: string): { value: string; comment: string; line: numb
       blockColumn = -1;
     }
     const block = raw.match(BLOCK_SCALAR_KEY);
-    if (block) { blockColumn = block[3] !== undefined ? block[1].length + (block[2] ?? "").length : block[1].length; return; }
-    const m = raw.match(/^\s*(?:-\s+)?uses:\s*(["']?)([^"'\s#]+)\1\s*(#.*)?$/);
+    if (block) { blockColumn = block[3] !== undefined ? block[1].length + block[2].length : block[1].length; return; }
+    const m = raw.match(/^\s*(?:-\s+)?(?:&\S+\s+)?uses:\s*(["']?)([^"'\s#]+)\1\s*(#.*)?$/);
     if (m) out.push({ value: m[2], comment: (m[3] ?? "").trim(), line: i + 1 });
   });
   return out;
@@ -4616,7 +4623,7 @@ function workflowPinProblems(file: string, text: string): [string, string][] {
       problems.push([where, `uses ${value}, ${ref ? `a tag or branch (${ref})` : "no ref at all"} its owner can move — pin the full 40-character commit SHA with the tag in a trailing comment, \`${at < 0 ? value : value.slice(0, at)}@<sha> # ${/^v?\d/.test(ref) ? ref : "vX.Y.Z"}\`, and let Dependabot move it (SMD-2093)`]);
       return;
     }
-    if (i < 0) { problems.push([file, `job ${key} uses ${value} on no line check 23 can read (flow style?) — the tag comment beside a SHA cannot be read; write the step as \`uses: ${value} # vX.Y.Z\` (SMD-2093)`]); return; }
+    if (i < 0) { problems.push([file, `job ${key} uses ${value} on no line of its own check 23 can read (flow style, a folded or literal value, or an alias of another step) — the tag comment beside a SHA cannot be read; write the step as \`uses: ${value} # vX.Y.Z\` (SMD-2093)`]); return; }
     if (!TAG_COMMENT.test(lines[i].comment)) problems.push([where, `pins ${value} with no \`# vX.Y.Z\` comment naming the tag — Dependabot rewrites the SHA and the comment together, and a reader cannot tell what a bare SHA is (SMD-2093)`]);
   };
   for (const [key, job] of Object.entries(jobs as Record<string, unknown>)) {
@@ -4662,8 +4669,14 @@ function dependabotProblems(text: string | null): [string, string][] {
   };
   const entries = Array.isArray(updates) ? updates.filter(covers) : [];
   if (!entries.length) return [[DEPENDABOT, "has no `github-actions` update over `/` — nothing moves the workflows' SHA pins, so they stay on the commit they were pinned at (SMD-2093)"]];
-  const scheduled = (e: Update) => !!e.schedule && typeof e.schedule === "object" && typeof (e.schedule as { interval?: unknown }).interval === "string";
-  if (!entries.some(scheduled)) return [[DEPENDABOT, "has a `github-actions` update over `/` with no `schedule.interval` — Dependabot refuses the whole file, and nothing moves the pins (SMD-2093)"]];
+  // Every entry, not only the covering one: one unschedulable entry and Dependabot refuses the file whole.
+  const scheduled = (e: unknown) => {
+    const s = e && typeof e === "object" ? (e as { schedule?: unknown }).schedule : null;
+    if (!s || typeof s !== "object") return false;
+    const { interval, cronjob } = s as { interval?: unknown; cronjob?: unknown };
+    return typeof interval === "string" && DEPENDABOT_INTERVALS.includes(interval) && (interval !== "cron" || typeof cronjob === "string");
+  };
+  if (!(updates as unknown[]).every(scheduled)) return [[DEPENDABOT, `has an update with no schedule Dependabot accepts (\`schedule.interval\` one of ${DEPENDABOT_INTERVALS.join(", ")}, and a \`cronjob\` for cron) — Dependabot refuses the whole file, and nothing moves the pins (SMD-2093)`]];
   // An entry that can open no PR is no entry: a limit of 0, or an ignore of every dependency at every version — a `*`
   // rule with `update-types` or `versions` holds back only those (no majors, say), and the rest still open PRs.
   const ignoresAll = (r: unknown) => !!r && typeof r === "object" && (r as { "dependency-name"?: unknown })["dependency-name"] === "*" && !("update-types" in r) && !("versions" in r);
@@ -4687,6 +4700,9 @@ const PIN_ACCEPTED: [string, string][] = [
   ["a bare copy of the pin in an earlier run body, which does not take the commented step's line", PIN_PROBE("ubuntu-24.04", `- run: |\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
   ["a bare copy of the pin in an earlier `- |` item, skipped as a block too", PIN_PROBE("ubuntu-24.04", `- uses: ./.github/actions/local\n        with:\n          args:\n            - |\n              uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
   ["a workflow with CRLF line ends", PIN_PROBE("ubuntu-24.04", PIN_STEP).replace(/\n/g, "\r\n")],
+  ["a bare copy of the pin in an earlier nested `- - |` item", PIN_PROBE("ubuntu-24.04", `- uses: ./.github/actions/local\n        with:\n          args:\n            - - |\n                uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+  ["a bare copy of the pin after a blank line in an earlier run body", PIN_PROBE("ubuntu-24.04", `- run: |\n          echo one\n\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+  ["an anchored step", PIN_PROBE("ubuntu-24.04", `- &checkout uses: actions/checkout@${PIN_SHA} # v7.0.1`)],
   ["a tag comment with no v, as an action whose tags carry none", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA} # 7.0.1`)],
   ["a runner group alone, which names no image", PIN_PROBE("{ group: big-runners }", PIN_STEP)],
   ["a runner group with a named image", PIN_PROBE("{ group: big-runners, labels: [ubuntu-24.04] }", PIN_STEP)],
@@ -4709,8 +4725,13 @@ const PIN_MUTANTS: [string, string, string][] = [
   ["a -latest label in another case", PIN_PROBE("Ubuntu-Latest", PIN_STEP), "moves to a new image"],
   ["a runner group whose label is -latest", PIN_PROBE("{ group: big-runners, labels: [ubuntu-latest] }", PIN_STEP), "moves to a new image"],
   ["a runner label that is not a string", PIN_PROBE("[ubuntu-24.04, 3]", PIN_STEP), "cannot read"],
-  // Each step claims its own line: without the claim the second step would read the first one's comment.
   ["two steps on one pin, the second bare", PIN_PROBE("ubuntu-24.04", `${PIN_STEP}\n      - uses: actions/checkout@${PIN_SHA}`), "no `# vX.Y.Z` comment"],
+  // Each step claims its own line: without the claim both steps read the bare first line, and it is reported twice.
+  ["two steps on one pin, the first bare", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`), "comment naming the tag"],
+  ["a SHA pin whose comment is a date", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA} # 2026-09-24`), "comment naming the tag"],
+  ["a 41-character ref", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA}0 # v7.0.1`), "can move"],
+  ["a docker digest with text after it", PIN_PROBE("ubuntu-24.04", `- uses: docker://alpine@sha256:${"a".repeat(64)}x`), "by its sha256 digest"],
+  ["steps reused by alias, which have no line of their own", `name: probe\non: push\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: &s\n      ${PIN_STEP}\n  b:\n    runs-on: ubuntu-24.04\n    steps: *s\n`, "an alias of another step"],
   // A run body is skipped: its commented copy of the pin lends the bare step below it nothing.
   ["a bare step under a run body carrying the commented pin", PIN_PROBE("ubuntu-24.04", `- run: |\n          uses: actions/checkout@${PIN_SHA} # v7.0.1\n      - uses: actions/checkout@${PIN_SHA}`), "no `# vX.Y.Z` comment"],
   ["no jobs at all", "name: probe\non: push\n", "no `jobs:` map"],
@@ -4739,6 +4760,7 @@ function checkWorkflowPins() {
     ["a github-actions update over /", DEPENDABOT_OK],
     ["a github-actions update over a directories list naming /", DEPENDABOT_OK.replace("directory: /", "directories: [/]")],
     ["an ignore of every action's majors alone, which still opens PRs", `${DEPENDABOT_OK}    ignore:\n      - dependency-name: "*"\n        update-types: ["version-update:semver-major"]\n`],
+    ["a cron schedule with its cronjob", DEPENDABOT_OK.replace("interval: weekly", "interval: cron\n      cronjob: \"0 6 * * 1\"")],
   ] as const) if (dependabotProblems(text).length) fail(SELF, `check 23 refuses ${why} (its own probe)`);
   for (const [why, text, says] of [
     ["no file", null, "missing"],
@@ -4747,7 +4769,10 @@ function checkWorkflowPins() {
     ["a github-actions update limited to no PRs", `${DEPENDABOT_OK}    open-pull-requests-limit: 0\n`, "can open no PR"],
     ["a github-actions update that ignores every action", `${DEPENDABOT_OK}    ignore:\n      - dependency-name: "*"\n`, "can open no PR"],
     ["version 1, which Dependabot refuses whole", DEPENDABOT_OK.replace("version: 2", "version: 1"), "`version: 2`"],
-    ["a github-actions update with no schedule, which Dependabot refuses whole", DEPENDABOT_OK.replace("    schedule:\n      interval: weekly\n", ""), "no `schedule.interval`"],
+    ["a github-actions update with no schedule, which Dependabot refuses whole", DEPENDABOT_OK.replace("    schedule:\n      interval: weekly\n", ""), "no schedule Dependabot accepts"],
+    ["an interval Dependabot does not know", DEPENDABOT_OK.replace("interval: weekly", "interval: fortnightly"), "no schedule Dependabot accepts"],
+    ["a cron interval with no cronjob", DEPENDABOT_OK.replace("interval: weekly", "interval: cron"), "no schedule Dependabot accepts"],
+    ["a second, unscheduled entry beside a good one", `${DEPENDABOT_OK}  - package-ecosystem: npm\n    directory: /scripts\n`, "no schedule Dependabot accepts"],
   ] as const) {
     const got = dependabotProblems(text);
     if (got.length !== 1 || !got[0][1].includes(says)) fail(SELF, `check 23 reports ${JSON.stringify(got)} for a dependabot.yml with ${why}, not one problem saying "${says}" (its own probe)`);
