@@ -56,10 +56,6 @@ Example: `supabase functions new household-knowledge-mcp`
 curl -o supabase/functions/FUNCTION_NAME/index.ts https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/index.ts
 ```
 
-```bash
-curl -o supabase/functions/FUNCTION_NAME/deno.json https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/deno.json
-```
-
 The server imports the access-key module from `../_shared/auth.ts` — Supabase bundles `supabase/functions/_shared/` with every function. Download it once; every extension shares it, and so do the recipes and integrations that authenticate the same way (every `_shared/auth.ts` under `recipes/` and `integrations/` is the same file byte for byte, so this one copy serves them all):
 
 ```bash
@@ -73,10 +69,6 @@ curl -o supabase/functions/_shared/auth.ts https://raw.githubusercontent.com/MHa
 
 ```powershell
 Invoke-WebRequest -Uri https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/index.ts -OutFile supabase\functions\FUNCTION_NAME\index.ts
-```
-
-```powershell
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/deno.json -OutFile supabase\functions\FUNCTION_NAME\deno.json
 ```
 
 ```powershell
@@ -150,13 +142,12 @@ Save this in your credential tracker, then follow the [Remote MCP Connection](..
 
 ## Updating a Deployed Function
 
-When the extension code is updated in the repo, pull the latest version of all three files — the server, its pins, and the shared access-key module (a server may start using something the module gained) — and redeploy:
+When the extension code is updated in the repo, pull the latest version of both files — the server and the shared access-key module (a server may start using something the module gained) — and redeploy:
 
 🟩 **Mac/Linux:**
 
 ```bash
 curl -o supabase/functions/FUNCTION_NAME/index.ts https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/index.ts
-curl -o supabase/functions/FUNCTION_NAME/deno.json https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/deno.json
 curl -o supabase/functions/_shared/auth.ts https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/extensions/_shared/auth.ts
 ```
 
@@ -164,7 +155,6 @@ curl -o supabase/functions/_shared/auth.ts https://raw.githubusercontent.com/MHa
 
 ```powershell
 Invoke-WebRequest -Uri https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/index.ts -OutFile supabase\functions\FUNCTION_NAME\index.ts
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/deno.json -OutFile supabase\functions\FUNCTION_NAME\deno.json
 Invoke-WebRequest -Uri https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/extensions/_shared/auth.ts -OutFile supabase\functions\_shared\auth.ts
 ```
 
@@ -185,8 +175,7 @@ The URL and access key stay the same — no need to reconfigure your AI clients.
 - Make sure you're in your Open Brain project folder (the one with the `supabase/` directory)
 
 **Import errors or "not in import map"**
-- Verify `deno.json` was downloaded into the function directory, not the project root
-- Run `ls supabase/functions/FUNCTION_NAME/` — you should see both `index.ts` and `deno.json`
+- Run `ls supabase/functions/FUNCTION_NAME/` — you should see `index.ts` (this fork ships no `deno.json` import map since SMD-1800; the servers resolve their packages from `extensions/package.json` under Bun, and SMD-1802 retires this guide)
 - `Module not found "../_shared/auth.ts"`: Step 2's third download is missing — `ls supabase/functions/_shared/` should show `auth.ts`
 
 **Deploy succeeds but function returns errors**

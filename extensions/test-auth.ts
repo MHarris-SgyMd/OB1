@@ -889,10 +889,14 @@ for (const t of TEXT_ONLY) {
 // names the package and the two versions.
 {
   const pkg = JSON.parse(readFileSync(join(HERE, "package.json"), "utf8")).devDependencies as Record<string, string>;
+  // The stack is PACKAGES' four names: a test-only devDependency added here (a fixture library, say) is not
+  // demanded of the image or the core server.
+  const stack = Object.entries(pkg).filter(([name]) => PACKAGES.test(name));
+  assert(stack.length === 4, `extensions/package.json installs the four packages of the MCP stack (${stack.length})`);
   const hold = (file: string, deps: Record<string, string>, exact: boolean) => {
-    const drift = Object.entries(pkg).filter(([name, version]) => deps[name] !== version);
-    const extra = exact ? Object.keys(deps).filter((name) => !(name in pkg)) : [];
-    assert(drift.length === 0 && extra.length === 0, `${file} pins ${exact ? "exactly " : ""}what extensions/package.json installs${drift.length || extra.length ? ` (${[...drift.map(([n, v]) => `${n}: ${deps[n] ?? "absent"} vs ${v}`), ...extra.map((n) => `${n}: not installed here`)].join(", ")})` : ""}`);
+    const drift = stack.filter(([name, version]) => deps[name] !== version);
+    const extra = exact ? Object.keys(deps).filter((name) => !PACKAGES.test(name)) : [];
+    assert(drift.length === 0 && extra.length === 0, `${file} pins ${exact ? "exactly " : ""}the MCP stack extensions/package.json installs${drift.length || extra.length ? ` (${[...drift.map(([n, v]) => `${n}: ${deps[n] ?? "absent"} vs ${v}`), ...extra.map((n) => `${n}: not one of the stack`)].join(", ")})` : ""}`);
   };
   // The core server installs supabase-js beside the stack for its Workers store (SMD-1847), so its set is a superset.
   hold("server-portable/package.json", JSON.parse(readFileSync(join(ROOT, "server-portable/package.json"), "utf8")).dependencies as Record<string, string>, false);

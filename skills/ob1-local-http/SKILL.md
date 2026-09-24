@@ -40,7 +40,9 @@ the fork's own stack, no Supabase.)
   the canonical MCP-based capture/search tools.
 - The required environment variables `BRAIN_URL` and `BRAIN_KEY` are not set
   on the dev host -- this skill cannot function without them; ask the user to
-  follow this skill's README first.
+  follow this skill's README first (the brain must be built at the gateway's
+  embedding width and carry the two schemas the README names, or capture,
+  search and browse answer 500).
 
 ## Required Environment
 
@@ -57,32 +59,35 @@ read-scoped key can search and browse but every capture answers HTTP 403.
 ## Process
 
 Every call presents the key as `x-brain-key`. The gateway also accepts
-`x-access-key`, `?key=` and a bearer token.
+`x-access-key`, `?key=` and a bearer token. The commands use `curl -sS`, not
+`-f`: a refusal's JSON body (`{"error":"…"}`) is what tells you why, and `-f`
+would hide it.
 
 ### Capture
 
 When the user says something like "remember X" or "save this thought":
 
 ```sh
-curl -fsS -X POST "$BRAIN_URL/capture" \
+curl -sS -X POST "$BRAIN_URL/capture" \
   -H "x-brain-key: $BRAIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{"content":"<the thought>","source_type":"claude-code"}'
 ```
 
-Optional fields: `type` (`observation`, `task`, `idea`, `reference`,
-`person_note`), `metadata` (an object; when given, the gateway stores it as is
-instead of extracting metadata with its model), `importance` and
-`quality_score` (0-100), `sensitivity_tier`. The brain fingerprints content and
-de-duplicates -- re-capturing identical text answers `"action":"updated"` with
-the existing `thought_id`.
+Optional fields: `type` (any string; the gateway's extractor uses
+`observation`, `task`, `idea`, `reference`, `person_note` among others),
+`metadata` (an object; when given, the gateway stores it as is instead of
+extracting metadata with its model), `importance` and `quality_score` (0-100),
+`sensitivity_tier`, `status`. The brain fingerprints content and de-duplicates
+-- re-capturing identical text answers `"action":"updated"` with the existing
+`thought_id`.
 
 ### Search
 
 When the user wants to recall:
 
 ```sh
-curl -fsS -X POST "$BRAIN_URL/search" \
+curl -sS -X POST "$BRAIN_URL/search" \
   -H "x-brain-key: $BRAIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{"query":"<what to find>","limit":10,"threshold":0.3}'
@@ -101,7 +106,7 @@ When the user asks "what have I been thinking about" or wants a list rather
 than a similarity search:
 
 ```sh
-curl -fsS "$BRAIN_URL/thoughts?per_page=20&page=1" \
+curl -sS "$BRAIN_URL/thoughts?per_page=20&page=1" \
   -H "x-brain-key: $BRAIN_KEY"
 ```
 
@@ -124,11 +129,16 @@ reply is `{"data":[…],"total":N,"page":1,"per_page":20}`, newest first.
 - HTTP 401 `Invalid or missing access key`: `BRAIN_KEY` is wrong or was
   revoked. Tell the user to check the key against the gateway's
   `MCP_ACCESS_KEYS`.
-- HTTP 403 `this key is read-scoped and this route writes`: the key can
-  search and browse but not capture. Tell the user to mint a write-scoped key.
-- HTTP 500 on capture or semantic search: the gateway could not reach its
-  embedding provider. Tell the user to check the gateway's log and its
-  provider settings (`OPENROUTER_API_KEY`, or the local model it points at).
+- HTTP 403 `Forbidden: this key is read-scoped and this route writes`: the
+  key can search and browse but not capture. Tell the user to mint a
+  write-scoped key.
+- HTTP 500 on capture or semantic search: the gateway could not reach
+  OpenRouter (`OPENROUTER_API_KEY` unset or wrong), or the brain was built at
+  another embedding width than the gateway's model (1536) and refused the
+  vector. Tell the user to check the gateway's log; `"mode":"text"` search
+  works without a provider.
+- HTTP 500 on browse (`/thoughts`): the brain lacks the columns the two
+  schemas in the README add. Tell the user to apply them.
 - Connection refused or a network timeout: the gateway is down or the host is
   unreachable. Tell the user to check the process and ping the brain host from
   this dev host.

@@ -530,6 +530,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The other container this repository ships (SMD-1800): kubernetes-deployment's
+      # image, Bun's base with its pinned install, built from integrations/ so the
+      # shared auth module is in the context. Built, not run — its database is its
+      # own (k8s/init.sql) and extensions/test-auth.ts starts the server itself.
+      # First, before the compose stack: a bring-up or smoke failure below must not
+      # hide whether this image builds.
+      - name: The Kubernetes image builds
+        run: docker build -f integrations/kubernetes-deployment/Dockerfile -t ob1-k8s-mcp:ci integrations
+
       # The Phase 4 exit test, literally: bring up Postgres, apply the schema and
       # serve MCP, with no Supabase CLI installed and no supabase.com account.
       - name: Bring up the compose stack
@@ -599,13 +608,6 @@ jobs:
       - name: Smoke-test it over MCP
         working-directory: deploy
         run: ./smoke.sh
-
-      # The other container this repository ships (SMD-1800): kubernetes-deployment's
-      # image, Bun's base with its pinned install, built from integrations/ so the
-      # shared auth module is in the context. Built, not run — its database is its
-      # own (k8s/init.sql) and extensions/test-auth.ts starts the server itself.
-      - name: The Kubernetes image builds
-        run: docker build -f integrations/kubernetes-deployment/Dockerfile -t ob1-k8s-mcp:ci integrations
 
       - name: Confirm no Supabase CLI anywhere in the stack
         working-directory: deploy

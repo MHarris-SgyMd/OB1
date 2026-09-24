@@ -1908,7 +1908,7 @@ function checkBunNative() {
   const gone = new Set([...DENO_EXCEPTIONS.keys()].filter((rel) => !existsSync(join(ROOT, rel))));
   for (const rel of gone) fail(SELF, `DENO_EXCEPTIONS names ${rel}, which is not in the tree — remove the entry with the file`);
 
-  const HOW = "reaches `Deno` — the vendored files are Bun-native (SMD-1799): `process.env` for the environment, `export default { port, fetch }` at the tail, Bun's own APIs for files and arguments; the Edge Function deployments SMD-1800 retires are the counted exceptions in DENO_EXCEPTIONS";
+  const HOW = "reaches `Deno` — the vendored files are Bun-native (SMD-1799): `process.env` for the environment, `export default { port, fetch }` at the tail, Bun's own APIs for files and arguments (the Edge Function deployments that were excepted left with SMD-1800; DENO_EXCEPTIONS counts a deployment on another runtime, with the ticket that retires it — none today)";
   const code = textFilesUnder(SCANNED_ROOTS).filter((f) => BUN_CODE_FILE.test(f) && !f.includes(`${sep}node_modules${sep}`));
   const reached = new Map<string, number>();
   for (const file of code) {
@@ -4465,7 +4465,7 @@ function checkSupabaseJsImports() {
       continue;
     }
     for (const line of lines) {
-      fail(`${rel}:${line}`, `imports @supabase/supabase-js at runtime — every vendored server reaches the brain through compat/supabase-sql since SMD-1798 (\`bun scripts/migrate-to-sql-shim.ts --apply ${rel}\`; the shim's README says what it still refuses); supabase-js stays only in server/index.ts (the Edge Function build) and in server-portable's Workers store`);
+      fail(`${rel}:${line}`, `imports @supabase/supabase-js at runtime — every vendored server reaches the brain through compat/supabase-sql since SMD-1798 (\`bun scripts/migrate-to-sql-shim.ts --apply ${rel}\`; the shim's README says what it still refuses); supabase-js stays only in server-portable's Workers store`);
     }
   }
   for (const rel of SUPABASE_JS_EXCEPTIONS.keys()) if (!seen.has(rel)) fail(rel, "check 22's exception names a file the scan does not reach — stale, or the file is gone");

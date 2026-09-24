@@ -16,15 +16,17 @@ No MCP server is started, registered, or referenced. The skill is pure bash-via-
 
 ## Prerequisites
 
-- A brain built as `SETUP.md` describes (Postgres with the migrations applied) and the gateway running against it on a host this dev host can reach — from a checkout of this repository, on the brain host:
+- A brain built as `SETUP.md` describes, with two conditions the gateway adds. **Its embedding width:** the gateway embeds through OpenRouter with `openai/text-embedding-3-small` (1536 wide, fixed in its code), so build the brain at `OB1_EMBEDDING_MODEL=openai/text-embedding-3-small` and `OB1_EMBEDDING_DIM=1536` — `SETUP.md`'s local default (1024) makes every capture and semantic search answer 500, since `upsert_thought` refuses another width (the gateway's README says the same). **Its columns:** apply `schemas/enhanced-thoughts/schema.sql` and `schemas/workflow-status/migration.sql` after the migrations; every read selects them.
+- The gateway running against that brain on a host this dev host can reach — from a checkout of this repository, on the brain host, after `cd extensions && bun install` (the vendored servers resolve their packages from that install):
 
   ```sh
-  PORT=8787 SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+  PORT=8787 NODE_PATH=extensions/node_modules \
+    SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
     MCP_ACCESS_KEYS='laptop:write:<sha256-of-the-key>' OPENROUTER_API_KEY='…' \
     bun integrations/open-brain-rest/index.ts
   ```
 
-  The gateway's [README](../../integrations/open-brain-rest/README.md) has the variables (the schemas its columns need, `schemas/enhanced-thoughts` among them) and how to mint a key; bind it to an address the office network reaches, behind TLS if the network is not yours.
+  The gateway's [README](../../integrations/open-brain-rest/README.md) has the variables and how to mint a key; bind it to an address the office network reaches, behind TLS if the network is not yours. Captures and semantic searches leave the brain host for OpenRouter (the text they embed); `"mode":"text"` searches and browsing do not.
 - Claude Code (or a compatible skill-aware AI tool) installed on this dev host.
 - `curl` installed (default on every Linux and macOS).
 
@@ -66,4 +68,5 @@ When asking Claude Code things like "remember that the Q3 sales review is on the
 - **`BRAIN_URL` or `BRAIN_KEY` not set**: re-source your shell rc or export them in the current shell.
 - **HTTP 401**: the key is wrong or was revoked. Ask the brain admin for the entry in the gateway's `MCP_ACCESS_KEYS`.
 - **HTTP 403 on capture**: the key is read-scoped. Ask for a `write` key.
-- **HTTP 500 on capture or search**: the gateway could not reach its embedding provider — a gateway-side problem, not this dev host's; see the failure modes in `SKILL.md`.
+- **HTTP 500 on capture or search**: OpenRouter unreachable or the key unset, or the brain built at another embedding width than 1536 — gateway-side, not this dev host's; see the failure modes in `SKILL.md`.
+- **HTTP 500 on browse**: the two schemas above are not applied.

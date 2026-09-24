@@ -111,7 +111,9 @@ SMD-1800 — and the vendored MCP servers, APIs and workers under the category
 directories run the same way, `bun <file>` (their READMEs say so; SMD-1802
 brings the remaining deploy instructions to it). To deploy upstream's Edge
 Function, use upstream's checkout and guide; this fork's schema is a superset of
-the guide's, so that function runs against a brain built here.
+the guide's, so that function runs against a brain built here — at its model's
+width (`openai/text-embedding-3-small`, 1536; `SETUP.md`'s local default is
+1024, and `upsert_thought` refuses another width).
 
 ### Required migration
 
@@ -400,7 +402,7 @@ db/migrations/043_*.sql          # change 98 (new file — query_log.tool's two 
 evals/eval-quant.ts              # change 81 (new file — vector, halfvec and binary-with-rerank measured on real vectors at the shipped width; test-schema [38], test-upgrade [16])
 <4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
 <17 pin sites, 3 lockfiles>      # change 83 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
-<19 pin sites, 3 lockfiles, 15 servers, 20 SDK importers> # change 84 (SDK 1.30.0, @hono/mcp 0.3.2, hono 4.13.8, zod 4.6.5 together; the Accept patches removed; an @ts-types pragma on every SDK import so Deno types it)
+<19 pin sites, 3 lockfiles, 15 servers, 20 SDK importers> # change 84 (SDK 1.30.0, @hono/mcp 0.3.2, hono 4.13.8, zod 4.6.5 together; the Accept patches removed; an @ts-types pragma on every SDK import so Deno types it; the pragmas and the deno.json pins went with SMD-1800)
 server-portable/tools.ts         # change 100 (new file — the typed source of the MCP tool surface: TOOLS as const, ToolName, visibleToolNames())
 server-portable/tools.json       # change 100 (new file — GENERATED from tools.ts by scripts/gen-tools.ts; deploy/smoke.sh reads it)
 scripts/gen-tools.ts             # change 100 (new file — writes tools.json from tools.ts; renderToolsJson() shared with the round-trip check)
@@ -491,7 +493,7 @@ checksum) with `shellcheck` over this workflow's `run:` steps; the workflow now
 sets `defaults.run.shell: bash`, so every step runs under `-eo pipefail` and a
 masked `cmd | grep` failure is surfaced rather than swallowed. Both are opt-in
 locally (`bun scripts/install-hooks.ts` for the commit hook), and both are
-*required* on `main` with the other ten jobs since SMD-1856.
+*required* on `main` with the other eight jobs since SMD-1856 (ten in all; twelve until SMD-1800 retired the two Deno jobs).
 
 ## Detached from the fork network
 
@@ -586,7 +588,7 @@ its measurements are in the change file named.
 ### Landing a rebase on `main`, which is protected
 
 `main` is the working default and carries a ruleset: every one of
-`fork-checks.yml`'s twelve jobs required, on a head up to date with `main` and
+`fork-checks.yml`'s ten jobs required, on a head up to date with `main` and
 satisfied only by a run of the Actions app; changes only through a pull request;
 no deletion, **no force-push**, and no bypass actors — it applies to admins too.
 The ruleset is a file, `.github/rulesets/main.json`, applied with
@@ -832,9 +834,10 @@ Deliberate. Recorded so nobody assumes they were missed.
   real Postgres, and CI checks every migrated file still parses and that the
   codemod round-trips byte-for-byte — but exercise the ones you actually run
   before trusting them.
-- **Seven files still need a human.** Four use PostgREST resource embedding (a
-  join), two use nested `.or()` grouping, and one is a type-only import. Run
-  `bun scripts/migrate-to-sql-shim.ts` for the current list and the reason.
+- **One file still needs a human.** The dashboard's type-only supabase-js
+  import (SMD-1801's); the six servers that used resource embedding and nested
+  `.or()` moved with SMD-1798. Run `bun scripts/migrate-to-sql-shim.ts` for
+  the current list and the reason.
 - **`CLAUDE.md` and `AGENTS.md` disagree** — a duplicated worktrees block, then
   divergent content, and `AGENTS.md` mandates updating a private tracker.
   [PR #274](https://github.com/NateBJones-Projects/OB1/pull/274) proposed the

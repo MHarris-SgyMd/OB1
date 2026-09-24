@@ -8,7 +8,7 @@ control, with no Supabase account and no Supabase CLI.
 Same six MCP tools, same `thoughts` schema, same clients. Different plumbing.
 
 **Read this instead of `docs/01-getting-started.md`.** That guide still describes
-the Supabase path, which continues to work if you want it — see `FORK.md`.
+the Supabase path, which is upstream's — this fork carries no Edge Function build (`FORK.md`, "Deploying").
 
 ## Two decisions to make first
 

@@ -1,8 +1,9 @@
 # server-portable
 
 A runtime-neutral build of the Open Brain MCP server. Same tools, same wire
-behaviour as `../server/index.ts`, but with no dependency on Deno or on Supabase
-Edge Functions as a host.
+behaviour as upstream's Edge Function build (`server/index.ts`, in this fork
+until SMD-1800), with no dependency on Deno or on Supabase Edge Functions as a
+host.
 
 This exists so the runtime decision in the Supabase migration can be made last,
 and changed later. One file targets four runtimes.
@@ -14,7 +15,7 @@ and changed later. One file targets four runtimes.
   [the getting-started guide](../docs/01-getting-started.md)
 - For the Cloudflare target: a Cloudflare account and `wrangler` (a dev dependency here)
 
-## What differs from `../server/index.ts`
+## What differs from upstream's Edge Function build
 
 Three changes.
 

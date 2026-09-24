@@ -4,7 +4,7 @@ This document is a machine-readable specification for generating new Open Brain 
 
 ## Required Output Files
 
-Every extension produces exactly 5 files in `extensions/{extension-slug}/`:
+Every extension produces exactly four files in `extensions/{extension-slug}/`:
 
 | File | Purpose |
 |------|---------|
