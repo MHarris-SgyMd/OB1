@@ -3072,9 +3072,16 @@ if (!jevCfg) {
   const at = maskUrl(base);
   const masked = (message: string) => message.split(base).join(at);
   const START = "Start it — compose --profile jev, reached as http://jev:8020, or bun jev/serve.ts on the host, reached as http://127.0.0.1:8020 from a checkout and from a container as http://host.containers.internal:8020 under podman machine or http://host.docker.internal:8020 under Docker Desktop (serve.ts binds loopback, which rootless podman and Docker on Linux do not reach: the profile is the route there) — fix OB1_JEV_BASE_URL, or unset it to turn the tier off.";
-  const unresolved = await resolveFirst(hostnameOf(base));
+  const host = hostnameOf(base);
+  // The stack's own service name resolves only while the service runs: the
+  // profile is down, or `compose restart server` ran — which does not start
+  // what the server depends on (fifth review pass: ~5 restarts a second).
+  const START_HERE = host === "jev"
+    ? "The jev service is not running: bring the profile up — compose --profile jev up -d (compose restart server does not start it) — or unset OB1_JEV_BASE_URL to turn the tier off."
+    : START;
+  const unresolved = await resolveFirst(host);
   if (unresolved) {
-    add("jev tier", "fail", `nothing answers at ${at} — ${unresolved.why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)`, START);
+    add("jev tier", "fail", `nothing answers at ${at} — ${unresolved.why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)`, START_HERE);
   } else try {
     const info = await jevInfo(jevCfg, { timeoutMs: LOCAL_PROBE_TIMEOUT_MS });
     const pins = `${info.model.name} (${info.model.source}@${info.model.revision.slice(0, 8)}, weights ${info.model.weights_sha256.slice(0, 12)}…)`;
@@ -3085,12 +3092,26 @@ if (!jevCfg) {
       add("jev tier", "ok", `${at} serves ${pins} — ${info.contract}, ${info.kinds.join(" and ")} decisions, up to ${info.max_options} options, ${info.max_tokens} tokens${jevCfg.model ? " (OB1_JEV_MODEL)" : ""}`);
     }
   } catch (e) {
-    // The tier answered wrongly (a status, a body outside the contract): the
-    // client's own words, masked. It did not answer: the connection's, as the
-    // provider rows word them.
+    // Four answers, worded as the provider rows word them (fifth review pass):
+    // something answered but not as the tier (a status, a redirect, a body
+    // outside the contract — often a base with Ollama's /v1 on it); it
+    // answered with a certificate this runtime does not trust (the tier
+    // serves plain http); nothing answered; and in each, a proxy variable
+    // that routes the call is named, since podman forwards the host's.
     const err = e as Error & { kind?: string };
-    const why = err.kind === "timeout" ? `no HTTP answer in ${LOCAL_PROBE_SECONDS}` : err.kind ? masked(err.message) : probeFailure(e).why;
-    add("jev tier", "fail", err.kind === "http" || err.kind === "body" ? `${at}: ${why}` : `nothing answers at ${at} — ${why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)`, START);
+    const proxy = proxyKnobFor(base);
+    const route = proxy ? `; ${proxy} is set, so this call goes through that proxy unless NO_PROXY names ${host}` : "";
+    const viaProxy = proxy ? `Add ${host} to NO_PROXY (and no_proxy) for the server, or unset ${proxy} for it. Otherwise: ` : "";
+    if (err.kind === "http" || err.kind === "body") {
+      add("jev tier", "fail", `${at} answers, but not as the tier: ${masked(err.message)}${route}`,
+          `${viaProxy}Check OB1_JEV_BASE_URL is the tier's base with no path — its routes are /health, /info and /decide (not Ollama's /v1) — and that it names the jev service, not another.`);
+    } else if (err.kind !== "timeout" && probeFailure(e).kind === "tls") {
+      add("jev tier", "fail", `${at} answers, but ${probeFailure(e).why}${route}`,
+          `${viaProxy}The tier serves plain http: use http:// in OB1_JEV_BASE_URL, or trust the certificate of whatever terminates TLS in front of it (${TLS_REMEDY})`);
+    } else {
+      const why = err.kind === "timeout" ? `no HTTP answer in ${LOCAL_PROBE_SECONDS}` : probeFailure(e).why;
+      add("jev tier", "fail", `nothing answers at ${at} — ${why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)${route}`, viaProxy + START_HERE);
+    }
   }
   egressRow("jev egress", jevCfg.endpoint, "OB1_JEV_LOCAL", "decision",
             "every decision a spike asks for is refused before it is sent (a ProviderError of kind egress)");

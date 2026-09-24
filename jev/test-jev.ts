@@ -41,7 +41,9 @@
  * Second review pass, each run and killed: allow markers read from the joined
  * text, one gate for the whole list ([7]); no head check on a cut ([5]); no id
  * cap ([1]); a failed download keeping its part ([6]); the caller's own
- * timeout read as ours ([8]).
+ * timeout read as ours ([8]). Fifth review pass, each run and killed: the
+ * engine ignoring the caller's signal ([5b]); a flat deadline again ([8]); a
+ * hub that never connects saying only Bun's words ([6]).
  *
  *   bun test-jev.ts
  */
@@ -50,7 +52,7 @@ import { mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createAssert } from "../db/test-support.ts";
 import { INSUFFICIENT_EVIDENCE, JEV_CONTRACT, JEV_MAX_BATCH, JEV_MAX_BODY_BYTES, JEV_MAX_OPTIONS, JEV_MAX_TEXT, jevRequestProblem, type JevDecision, type JevResponse } from "../server-portable/jev-contract.ts";
-import { jevAnswerProblem, jevChoose, jevDecide, jevDecideMany, jevInfo, resolveJevConfig } from "../server-portable/jev.ts";
+import { jevAnswerProblem, jevChoose, jevDecide, jevDecideMany, jevInfo, requestTimeoutMs, resolveJevConfig } from "../server-portable/jev.ts";
 import { ProviderError } from "../server-portable/embed.ts";
 import { ensureModel, sha256File, STALE_PART_MS, type ModelPins } from "./fetch-model.ts";
 import { createHandler, MAX_BODY_BYTES } from "./serve.ts";
@@ -251,6 +253,16 @@ section("[5b] createHandler — the contract's statuses, one request at a time")
   gone.abort();
   const [, left] = await Promise.all([ahead, behind]);
   assert(left.status === 499 && calls === 1, `a request whose caller left while it queued is not computed (${left.status}, ${calls} run)`);
+  // …and one that leaves mid-batch stops the engine between forward passes.
+  let passes = 0;
+  const markerEncoder = { encode: (t: string) => ({ ids: [50281, ...t.split(/(<<LABEL>>|<<SEP>>)/).flatMap((part) => (part === "<<LABEL>>" ? [MARKER_IDS.label] : part === "<<SEP>>" ? [MARKER_IDS.sep] : Array.from(part, (ch) => ch.charCodeAt(0)))), 50282] }) };
+  const slow = createHandler(createEngine(markerEncoder, async () => { passes++; await Bun.sleep(25); return new Float32Array(25); }, { temperature: 1 }));
+  const leaving = new AbortController();
+  const pending = slow(new Request("http://t/decide", { method: "POST", body: JSON.stringify({ decisions: Array.from({ length: 20 }, (_, i) => binary(i)) }), signal: leaving.signal }));
+  await Bun.sleep(80);
+  leaving.abort();
+  const midway = await pending;
+  assert(midway.status === 499 && passes < 10, `a caller that leaves mid-batch stops the engine between passes (${midway.status}, ${passes} of 20 run)`);
 }
 
 // ── [6] The verified fetch ──────────────────────────────────────────────────
@@ -282,6 +294,9 @@ section("[6] ensureModel — fetch the pinned bytes or nothing");
   msg = "";
   try { await ensureModel(dir, { pins: { ...pins, files: { "gone.bin": pins.files["m.bin"] } }, hub: base }); } catch (e) { msg = (e as Error).message; }
   assert(/gone\.bin.*answered 404/.test(msg), "a fetch that fails names the file and the status");
+  msg = "";
+  try { await ensureModel(dir, { pins, hub: "http://127.0.0.1:1" }); } catch (e) { msg = (e as Error).message; }
+  assert(/fetching m\.bin from http:\/\/127\.0\.0\.1:1\/.* failed: .*nothing kept/.test(msg), `a hub that cannot be reached names the file and the URL (${msg.slice(0, 90)})`);
   // A download that fails midway removes its own part and names the file.
   const flaky = Bun.serve({
     port: 0,
@@ -432,6 +447,13 @@ section("[8] the client's batches and answers");
   const t0 = performance.now();
   try { await jevDecide(local, { proposition: "p", context: "c" }, subj, { timeoutMs: 200 }); } catch (e) { err = e; }
   assert(err?.kind === "timeout" && performance.now() - t0 < 2000, "a tier that never answers is a timeout at the deadline");
+  // The default deadline grows with the request: a fixed part and a part per decision.
+  assert(requestTimeoutMs({ timeoutMs: 30_000 }, 64) === 94_000 && requestTimeoutMs({ timeoutMs: 30_000 }, 64, { timeoutMs: 5 }) === 5, "a request's deadline is 30 s + 1 s a decision, and a caller's timeoutMs replaces it");
+  stub.answer = async (b) => { await Bun.sleep(300); return honest(b); };
+  err = undefined;
+  try { await jevDecide({ ...local, timeoutMs: 100 }, { proposition: "p", context: "c" }, subj); } catch (e) { err = e; }
+  assert(err === undefined, `…and jevDecideMany uses it: a 300 ms answer under a 100 ms fixed part and one decision's second arrives (${err?.message ?? "answered"})`);
+  stub.answer = honest;
   // A caller's own deadline is the caller's: its error, not "timed out after 30 s".
   stub.answer = () => new Promise(() => {});
   err = undefined;

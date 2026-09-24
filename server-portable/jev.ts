@@ -60,14 +60,22 @@ export type JevEnv = EgressEnv & {
 };
 
 /**
- * Per request. A decision is 18–146 ms on the dogfood Mac's CPU (60–512
- * tokens), so a full batch of 64 at the budget is ~9 s — and the service runs
- * one request at a time, so a request's wait includes the ones ahead of it: a
- * full batch behind two others passes 30 s and is skipped (499) when its
- * caller gives up. A caller sending full batches to a shared tier passes a
- * larger `timeoutMs`; this is the bound for a request that never returns.
+ * The deadline of a request, by default: a fixed part for the exchange and the
+ * queue, and a part per decision for the forward passes. Measured per
+ * decision at 512 tokens: 146 ms on the dogfood Mac's host, 379 ms in the
+ * podman VM the profile runs in, so a full batch of 64 is 25 s there — and
+ * the service runs one request at a time, so a request also waits for the ones
+ * ahead of it. A flat 30 s timed out the second of two concurrent full batches
+ * (fifth review pass); 30 s + 1 s a decision holds two full batches, one
+ * queued, with room. `timeoutMs` in a call replaces the whole of it.
  */
 export const DEFAULT_JEV_TIMEOUT_MS = 30_000;
+export const JEV_PER_DECISION_MS = 1_000;
+
+/** A request's deadline: the caller's `timeoutMs`, else the fixed part plus a part per decision. */
+export function requestTimeoutMs(cfg: Pick<JevConfig, "timeoutMs">, decisions: number, opts: { timeoutMs?: number } = {}): number {
+  return opts.timeoutMs ?? cfg.timeoutMs + decisions * JEV_PER_DECISION_MS;
+}
 
 export type JevConfig = {
   endpoint: ProviderEndpoint;
@@ -97,7 +105,8 @@ async function exchange<T>(cfg: JevConfig, method: "GET" | "POST", path: "/info"
   const at = cfg.endpoint.base;
   const timeoutMs = opts.timeoutMs ?? cfg.timeoutMs;
   const signal = opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
-  const timedOut = () => new ProviderError(`Decision request to ${at} timed out after ${timeoutMs / 1000} s`, "timeout");
+  const what = path === "/info" ? "Info" : "Decision";
+  const timedOut = () => new ProviderError(`${what} request to ${at} timed out after ${timeoutMs / 1000} s`, "timeout");
   let r: Response;
   try {
     r = await fetch(`${at}${path}`, {
@@ -129,7 +138,9 @@ async function exchange<T>(cfg: JevConfig, method: "GET" | "POST", path: "/info"
     if (r.ok) throw e;
   }
   const capped = text.slice(0, 500);
-  if (!r.ok) throw new ProviderError(`Decision request to ${at}${path} failed: ${r.status} ${capped}`, "http", r.status, capped);
+  // A redirect is not followed (it could point off the box); its Location is the useful part.
+  const location = r.status >= 300 && r.status < 400 ? r.headers.get("location") : null;
+  if (!r.ok) throw new ProviderError(`${what} request to ${at}${path} failed: ${r.status}${location ? ` redirecting to ${location}` : ""} ${capped}`.trimEnd(), "http", r.status, capped);
   try {
     return JSON.parse(text) as T;
   } catch {
@@ -244,7 +255,7 @@ export async function jevDecideMany(cfg: JevConfig, decisions: JevDecision[], su
     const batch = request.decisions;
     let answer: JevResponse;
     try {
-      answer = await exchange<JevResponse>(cfg, "POST", "/decide", request, opts);
+      answer = await exchange<JevResponse>(cfg, "POST", "/decide", request, { ...opts, timeoutMs: requestTimeoutMs(cfg, batch.length, opts) });
     } catch (e) {
       if (results.length && e instanceof ProviderError) e.message += ` (after ${results.length} of ${decisions.length} decisions were answered)`;
       throw e;

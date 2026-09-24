@@ -195,8 +195,17 @@ export type Runner = (inputIds: BigInt64Array, attentionMask: BigInt64Array) => 
 
 export type Engine = {
   info: JevInfo;
-  decide(decisions: JevDecision[]): Promise<JevResult[]>;
+  /** `signal`, when given, is the caller's: once it aborts, no further forward pass runs (CallerGone). */
+  decide(decisions: JevDecision[], signal?: AbortSignal): Promise<JevResult[]>;
 };
+
+/** The caller left mid-request: the decisions after `done` were not computed. */
+export class CallerGone extends Error {
+  constructor(readonly done: number) {
+    super(`the caller went away after ${done} decisions; the rest were not computed`);
+    this.name = "CallerGone";
+  }
+}
 
 /** The two markers' ids in the model's tokenizer (core/formatting.py's LABEL_TOKEN_ID, SEP_TOKEN_ID). */
 export const MARKER_IDS = { label: 50368, sep: 50369 } as const;
@@ -278,10 +287,14 @@ export function createEngine(encoder: Encoder, run: Runner, cal: Calibrator): En
   temperatureFor(cal, 3); // a calibrator with no usable global temperature is refused at load, not at the first request
   return {
     info: INFO,
-    async decide(decisions) {
+    async decide(decisions, signal) {
       const prepared = decisions.map((d, i) => prepareDecision(encoder, d, i));
       const out: JevResult[] = [];
       for (const { d, ids, cut } of prepared) {
+        // Between forward passes, not only before the request's turn: a full
+        // batch is 25 s in the container, and a caller that gave up at its
+        // start should not hold the queue for the rest (fifth review pass).
+        if (signal?.aborted) throw new CallerGone(out.length);
         const inputIds = BigInt64Array.from(cut.ids, BigInt);
         const mask = new BigInt64Array(cut.ids.length).fill(1n);
         const logits = await run(inputIds, mask);

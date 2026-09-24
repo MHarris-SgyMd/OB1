@@ -89,9 +89,12 @@ Docker Desktop, not under rootless podman or Docker on Linux, where the
 profile below is the route.
 
 Or `podman compose -f deploy/compose.yaml --profile jev up -d` —
-`deploy/README.md`, "The typed-decision tier". Knobs of its own: `JEV_HOST`
-(127.0.0.1; the image sets 0.0.0.0), `JEV_PORT` (8020), `JEV_MODEL_DIR`,
-`JEV_THREADS` (4), `JEV_HUB`. The brain's knobs are `OB1_JEV_BASE_URL`,
+`deploy/README.md`, "The typed-decision tier". Knobs of its own, on the host:
+`JEV_HOST` (127.0.0.1), `JEV_PORT` (8020), `JEV_MODEL_DIR`, `JEV_THREADS` (4),
+`JEV_HUB`. Under compose the image fixes host, port and directory (0.0.0.0,
+8020, the `jev-models` volume) and `deploy/.env` reaches the service with
+`JEV_THREADS` and `JEV_HUB` only; there `JEV_PORT` is the host port
+`compose.host-ports.yaml` publishes. The brain's knobs are `OB1_JEV_BASE_URL`,
 `OB1_JEV_MODEL` and `OB1_JEV_LOCAL` (`deploy/.env.example`); the API is
 unauthenticated, like Ollama's, and binds loopback by default.
 
@@ -108,10 +111,10 @@ fetched it again, and served.
 
 | | Host (`bun serve.ts`, macOS arm64) | Container (podman VM, 8 vCPU, linux arm64) |
 | --- | --- | --- |
-| First start | — | fetch 606 MB 20 s, load 0.9 s |
-| Restart (verify only) | pins 0.24 s, load 0.8 s | pins 0.49 s, load 0.7 s |
-| Resident | 1,029 MB after load; 627 MB after use | 926–973 MB |
-| One decision, 60 / 126 / 258 / 512 tokens | p50 18 / 30 / 62 / 146 ms | about 48 ms at ~30 tokens (70 in 3.4 s) |
+| First start | — | fetch 606 MB 17–20 s, load 0.9–3.0 s |
+| Restart (verify only) | pins 0.24–0.31 s, load 0.8 s | pins 0.32–0.49 s, load 0.6–0.7 s; /health in 1.2–1.3 s |
+| Resident | 1,027–1,029 MB after load; 627 MB after use | 926–987 MB |
+| One decision, 60 / 126 / 258 / 512 tokens | p50 18 / 30 / 62 / 146 ms | 25–34 ms at ~33 tokens; 81 / 171 ms at 126 / 258; 379 ms at 512 (4 threads — `JEV_THREADS=8` on the VM's 8 vCPU was 20–30% faster) |
 | Image | — | 491 MB, no weights |
 
 The same decision gave the same probability on both (p 0.712). A padded batch
@@ -239,8 +242,8 @@ FSL-1.1-MIT.
 
 ## Tests
 
-`bun test-jev.ts` — 97 assertions with no model; with `JEV_TEST_MODEL_DIR`
+`bun test-jev.ts` — 101 assertions with no model; with `JEV_TEST_MODEL_DIR`
 naming the pinned files, [9] adds the model's presets and its refusals on the
 real tokenizer, [10] the receipt run and [11] both JevBench rows and the
-served-prompt equivalence (110, about three minutes). CI runs it in the
+served-prompt equivalence (114, about 100 s). CI runs it in the
 portable-server job, with `bunx tsc --noEmit` here (check 18 lists `jev`).

@@ -304,7 +304,12 @@ that does not match (a verify-only restart serves in about a second). About
 server's preflight dials the tier and fails the start when it does not answer,
 so set the knob with the profile, not before it; with the profile the server
 waits for `jev` to be healthy (`depends_on … required: false`), so the first
-start's fetch does not crashloop it. A spike run from a checkout
+start's fetch does not crashloop it. `compose restart server` does not start
+what the server depends on: with `jev` stopped the server's preflight fails
+and restarts it until `compose --profile jev up -d` brings the tier back
+(preflight's remedy says so). A full batch of 64 decisions is ~25 s in the
+container; `JEV_THREADS` (and `JEV_HUB`, a mirror for the weights) in
+`deploy/.env` reach the service. A spike run from a checkout
 adds `-f deploy/compose.host-ports.yaml` and reaches it at
 `http://127.0.0.1:8020`; without compose, `bun jev/serve.ts` on the host serves
 the same contract on the same port.

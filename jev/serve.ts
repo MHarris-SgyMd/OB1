@@ -32,7 +32,7 @@ import { rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { JEV_CONTRACT, JEV_MAX_BODY_BYTES, jevRequestProblem, type JevRequest, type JevResponse } from "../server-portable/jev-contract.ts";
 import { DEFAULT_HUB, ensureModel, openParts } from "./fetch-model.ts";
-import { createVerdictEngine, DecisionRefused, VERDICT, type Engine } from "./verdict.ts";
+import { CallerGone, createVerdictEngine, DecisionRefused, VERDICT, type Engine } from "./verdict.ts";
 
 /** The contract's body cap, which the client splits its batches under (first review pass: this was 2 MB, under what a valid batch could be). */
 export const MAX_BODY_BYTES = JEV_MAX_BODY_BYTES;
@@ -101,13 +101,14 @@ export function createHandler(engine: Engine): (req: Request) => Promise<Respons
     }
     const t0 = performance.now();
     try {
-      const results = await serial(async () => (req.signal.aborted ? null : engine.decide(request.decisions)));
+      const results = await serial(async () => (req.signal.aborted ? null : engine.decide(request.decisions, req.signal)));
       // 499, nginx's "client closed request": there is no one to read it.
       if (results === null) return json(499, { error: "the caller went away before its turn; nothing was computed" });
       const response: JevResponse = { contract: JEV_CONTRACT, model: engine.info.model, results, ms: performance.now() - t0 };
       return json(200, response);
     } catch (e) {
       if (e instanceof DecisionRefused) return json(422, { error: e.message });
+      if (e instanceof CallerGone) return json(499, { error: e.message });
       return json(500, { error: `the model failed: ${(e as Error).message}` });
     }
   };

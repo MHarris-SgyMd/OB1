@@ -425,6 +425,16 @@ services:
     profiles: ["jev"]
     volumes:
       - jev-models:/models
+    # The service's own two knobs worth an operator's hand (fifth review
+    # pass: none reached it before): onnxruntime's threads — 8 on the podman
+    # VM's 8 vCPU measured 20–30% faster than the default 4 — and the hub the
+    # pinned files are fetched from (a mirror). Empty is the default. Its host,
+    # port and model directory are the image's (0.0.0.0, 8020, /models); the
+    # JEV_PORT in deploy/.env is the HOST port compose.host-ports.yaml
+    # publishes, never this service's.
+    environment:
+      JEV_THREADS: ${JEV_THREADS:-}
+      JEV_HUB: ${JEV_HUB:-}
     # No `ports:`. An unauthenticated API, like Ollama's: the server's
     # preflight and a spike in a container reach it as `jev:8020` on the
     # compose network; compose.host-ports.yaml publishes it on loopback for a

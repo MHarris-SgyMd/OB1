@@ -2189,6 +2189,15 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
     },
   });
   const other = Bun.serve({ port: 0, fetch: () => Response.json({ models: [] }) }); // answers, but not the contract
+  // Answers every path with a redirect: something is there, and it is not the tier.
+  const redirector = Bun.serve({ port: 0, fetch: () => new Response(null, { status: 302, headers: { Location: "http://elsewhere.invalid/" } }) });
+  // Answers /info as the tier and fails /decide: the decision row's failure path.
+  const halfTier = Bun.serve({
+    port: 0,
+    fetch: (req) => (new URL(req.url).pathname === "/info"
+      ? Response.json({ contract: JEV_CONTRACT, model: MODEL, kinds: ["binary", "choice"], max_options: 24, max_batch: 64, max_tokens: 512 })
+      : Response.json({ error: "the model failed" }, { status: 500 })),
+  });
   const TIER = `http://127.0.0.1:${stub.port}`;
   const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)) ?? "";
   const JEV = { OB1_JEV_BASE_URL: undefined, OB1_JEV_MODEL: undefined, OB1_JEV_LOCAL: undefined, OB1_EGRESS_POLICY: undefined, OB1_EGRESS_ALLOW: undefined, OB1_EGRESS_DENY: undefined };
@@ -2220,6 +2229,22 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
   assert(!/jevsecret/.test(withUser.out) && /✗\s+jev tier\s+nothing answers at http:\/\/\*\*\*@127\.0\.0\.1:1/.test(withUser.out), "a base with userinfo is shown masked, never in the clear");
   const unknown = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: "http://jev-not-a-host.invalid:8020", OB1_JEV_LOCAL: "1" });
   assert(/✗\s+jev tier\s+nothing answers at http:\/\/jev-not-a-host\.invalid:8020 — the name does not resolve/.test(unknown.out), "a name that does not resolve says so, resolved before it is dialled");
+  // Something answers, not as the tier; the base's userinfo stays masked in
+  // the client's own words too (the fifth review pass's mutant: dropping
+  // masked() passed every case before these).
+  const redirected = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `http://user:jevsecret@127.0.0.1:${redirector.port}`, OB1_JEV_LOCAL: "1" });
+  assert(!/jevsecret/.test(redirected.out) && /✗\s+jev tier\s+http:\/\/\*\*\*@127\.0\.0\.1:\d+ answers, but not as the tier: Info request to http:\/\/\*\*\*@.*302 redirecting to http:\/\/elsewhere\.invalid\//.test(redirected.out) && /→ Check OB1_JEV_BASE_URL is the tier's base with no path/.test(redirected.out),
+         "a redirect is an answer that is not the tier: named, its Location shown, userinfo masked, the base's path the remedy");
+  const halfway = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `http://user:jevsecret@127.0.0.1:${halfTier.port}`, OB1_JEV_LOCAL: "1" }, "--deep");
+  assert(!/jevsecret/.test(halfway.out) && /✗\s+jev decision\s+Decision request to http:\/\/\*\*\*@127\.0\.0\.1:\d+\/decide failed: 500/.test(halfway.out), "a /decide that fails is the decision row's, userinfo masked");
+  const pathed = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `${TIER}/v1`, OB1_JEV_LOCAL: "1" });
+  assert(/✗\s+jev tier\s+http:\/\/127\.0\.0\.1:\d+\/v1 answers, but not as the tier/.test(pathed.out), "a base with Ollama's /v1 on it answers, but not as the tier");
+  const proxied = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", HTTP_PROXY: "http://127.0.0.1:9", http_proxy: undefined, NO_PROXY: undefined, no_proxy: undefined });
+  assert(/✗\s+jev tier\s+.*HTTP_PROXY is set, so this call goes through that proxy unless NO_PROXY names 127\.0\.0\.1/.test(proxied.out) && /→ Add 127\.0\.0\.1 to NO_PROXY/.test(proxied.out), "a proxy variable in the way is named, with NO_PROXY as the fix");
+  const stopped = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: "http://jev:8020", OB1_JEV_LOCAL: "1" });
+  assert(/→ The jev service is not running: bring the profile up — compose --profile jev up -d \(compose restart server does not start it\)/.test(stopped.out), "the stack's own service unresolved: not running, and restart server does not start it");
+  redirector.stop();
+  halfTier.stop();
   const wrongModel = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "semif" });
   assert(/✗\s+jev tier\s+.* serves verdict-v1\.4 .*, and OB1_JEV_MODEL expects semif/.test(wrongModel.out) && /→ Point OB1_JEV_BASE_URL at the tier serving semif, or set OB1_JEV_MODEL=verdict-v1\.4\./.test(wrongModel.out),
          "a tier serving another model than OB1_JEV_MODEL fails, naming both");

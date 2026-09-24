@@ -117,7 +117,12 @@ export async function ensureModel(
     }
     const url = pins.url ? pins.url(name) : `${hub}/${pins.repo}/resolve/${pins.revision}/${name}`;
     log(`${name}: fetching ${(pin.bytes / 2 ** 20).toFixed(1)} MB from ${url}`);
-    const r = await doFetch(url, { redirect: "follow" });
+    // A fetch that never connects names the file and the URL too, not only
+    // Bun's own words (fifth review pass: an unreachable JEV_HUB said only
+    // "Unable to connect").
+    const r = await doFetch(url, { redirect: "follow" }).catch((e: Error) => {
+      throw new Error(`fetching ${name} from ${url} failed: ${e.message.replace(/\.?\s*Is the computer able to access the url\?$/, "")} — nothing kept`);
+    });
     if (!r.ok || !r.body) throw new Error(`fetching ${name} from ${url} answered ${r.status}`);
     const part = `${path}.part-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
     // Streamed through a sink, never held whole. Not `Bun.write(part, r)`:
