@@ -170,6 +170,15 @@ function pruneDead() {
   for (const f of readdirSync(DEAD_DIR())) {
     try { if (Date.now() - statSync(join(DEAD_DIR(), f)).mtimeMs > DEAD_MAX_AGE_MS) unlinkSync(join(DEAD_DIR(), f)); } catch { /* gone, or not ours to remove */ }
   }
+  // A temp file a writer left under the state directory or pending/ — killed
+  // between its write and its rename — is nobody's once older than any run
+  // lasts; the sweep reaches only the claim directories (seventh review pass).
+  for (const dir of [STATE_DIR, PENDING_DIR()]) {
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith(".tmp")) continue;
+      try { if (Date.now() - statSync(join(dir, f)).mtimeMs > CLAIM_MAX_AGE_MS) unlinkSync(join(dir, f)); } catch { /* gone */ }
+    }
+  }
 }
 /**
  * The session's payloads still pending or in flight: a name is
@@ -230,7 +239,11 @@ export function readState(sessionId) {
  * so no reader of the directories takes it for a payload, and the sweep
  * unlinks one a child left behind.
  */
-const writeJson = (p, obj) => { const tmp = `${p}.${process.pid}.tmp`; writeFileSync(tmp, JSON.stringify(obj, null, 2) + "\n", { mode: 0o600 }); renameSync(tmp, p); };
+const writeJson = (p, obj) => {
+  const tmp = `${p}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(obj, null, 2) + "\n", { mode: 0o600 });
+  try { renameSync(tmp, p); } catch (e) { try { unlinkSync(tmp); } catch { /* gone */ } throw e; } // a rename that fails leaves no temp behind (seventh review pass: one per run, for as long as the fault lasted)
+};
 function writeState(sessionId, state) {
   ensureDirs();
   writeJson(statePath(sessionId), state);
@@ -915,7 +928,15 @@ function recordedAfter(state, preparedAt) {
  * A child that is gone holds no one (the next run's sweep returns its claim);
  * only the NEWER of two steps aside, so two children never wait on each other.
  */
-export const aheadOf = (sessionId, name) => sessionPayloads(sessionId, { pending: false }).filter((p) => p.pid !== process.pid && p.name.localeCompare(name) < 0 && isAlive(p.pid));
+/**
+ * Whether a payload file is the session's own: a name is matched by a
+ * sanitised tail two ids can share ("a.b" and "a_b"), so the file says. A
+ * file that cannot be read (mid-write, or gone) says nothing — `undefined`,
+ * and each reader takes the side that costs least if wrong (seventh review
+ * pass: the sixth had fixed one reader of five).
+ */
+const ownedBy = (p, sessionId) => { try { return JSON.parse(readFileSync(p.path, "utf8"))?.session_id === sessionId; } catch { return undefined; } };
+export const aheadOf = (sessionId, name) => sessionPayloads(sessionId, { pending: false }).filter((p) => p.pid !== process.pid && p.name.localeCompare(name) < 0 && isAlive(p.pid) && ownedBy(p, sessionId) !== false); // unreadable: ahead, the safe side
 /**
  * Whether a NEWER payload of the session is in another live child's hands:
  * the older one is then obsolete — a summary is cumulative, the newer covers
@@ -923,7 +944,7 @@ export const aheadOf = (sessionId, name) => sessionPayloads(sessionId, { pending
  * thought (fourth review pass: a sweep returned an older payload to pending/
  * after the newer's run had looked, a sibling claimed it, and both posted).
  */
-export const newerInFlight = (sessionId, name) => sessionPayloads(sessionId, { pending: false }).some((p) => p.pid !== process.pid && p.name.localeCompare(name) > 0 && isAlive(p.pid));
+export const newerInFlight = (sessionId, name) => sessionPayloads(sessionId, { pending: false }).some((p) => p.pid !== process.pid && p.name.localeCompare(name) > 0 && isAlive(p.pid) && ownedBy(p, sessionId) === true); // unreadable: not a reason to drop a payload
 
 /**
  * The session's landed payloads whose bookkeeping is still owed — the post
@@ -940,7 +961,7 @@ function landedPayloads(sessionId) {
     // The name's millisecond was written by the same clock as prepared_at: a
     // future one decides nothing either, and the payload ranks last — a clock
     // that ran ahead never puts it over the state (fifth review pass).
-    if (j?.captured_id) out.push({ name: p.name, id: j.captured_id, ms: momentOf(j.prepared_at, p.ms <= Date.now() ? p.ms : 0) });
+    if (j?.captured_id && j.session_id === sessionId) out.push({ name: p.name, id: j.captured_id, ms: momentOf(j.prepared_at, p.ms <= Date.now() ? p.ms : 0) });
   }
   return out;
 }
@@ -986,10 +1007,11 @@ export function pointerFor(sessionId, name, state) {
  * children wins, so two sessions ending together never post each other's
  * payload or trip over a file the other moved; a child that dies mid-flight
  * leaves its claims for the next run's sweep (third review pass). The run's
- * own payload is always among the five. After its landings the run follows
- * up once with up to five payloads of those sessions that waited under
- * pending/ — an end deferred behind the checkpoint it has just landed
- * (SMD-2035) — never with one it has itself just returned there.
+ * own payload is always among the five. After them the run follows up, round
+ * after round while a round yields, with up to five payloads of the sessions
+ * whose claims it cleared that waited under pending/ — an end deferred behind
+ * the checkpoint it has just landed (SMD-2035) — never with one it has itself
+ * just returned there.
  */
 export async function postPending(cfg, own) {
   ensureDirs();
@@ -1013,6 +1035,7 @@ export async function postPending(cfg, own) {
   const outcomes = [];
   pruneDead();
   const clearedSessions = new Set();
+  const bounced = new Set(); // files the follow-up found to be another session's: read once
   // After the run: payloads left under pending/ of every session whose claim
   // this run cleared — landed, dropped as obsolete beside a newer one, or
   // failed on and returned — are claimed and posted now, with the pointer the
@@ -1032,7 +1055,7 @@ export async function postPending(cfg, own) {
     // the room another's newest needs (fifth and sixth review passes); the
     // older ones left under pending/ are dropped by the next run.
     const done = new Set(outcomes.map((o) => o.file));
-    const lists = [...clearedSessions].map((sid) => [sid, sessionPayloads(sid).filter((q) => q.pid === null && !done.has(q.path)).sort((x, y) => y.name.localeCompare(x.name))]);
+    const lists = [...clearedSessions].map((sid) => [sid, sessionPayloads(sid).filter((q) => q.pid === null && !done.has(q.path) && !bounced.has(q.path)).sort((x, y) => y.name.localeCompare(x.name))]);
     const next = [];
     const named = new Set();
     for (let k = 0; next.length < room && lists.some(([, l]) => l.length > k); k++) {
@@ -1047,7 +1070,7 @@ export async function postPending(cfg, own) {
         // ("a.b" and "a_b"): a payload of another session is not this run's
         // to judge (sixth review pass — it was dropped as obsolete beside a
         // session it did not belong to).
-        if (payload.session_id !== sid) { moveTo(here, PENDING_DIR()); continue; }
+        if (payload.session_id !== sid) { moveTo(here, PENDING_DIR()); bounced.add(p.path); continue; }
         if (!named.has(sid)) { named.add(sid); newestOf.set(sid, p.path); }
         next.push({ home: p.path, here, payload });
       }

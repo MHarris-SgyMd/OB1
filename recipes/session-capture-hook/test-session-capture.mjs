@@ -835,6 +835,7 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   const postOf = (sid, kind) => received.find((r) => new RegExp(`Session ${sid}[,.]`).test(r.args.content) && /Checkpoint:/.test(r.args.content) === (kind === "checkpoint"));
   const iso = (ms) => new Date(ms).toISOString();
   const named = (ms, sid) => `${ms}-0-aaaa-${sid}.json`;
+  const claimJson = (sid) => JSON.stringify({ session_id: sid }); // a planted claim says whose it is, as every real payload does (seventh review pass: the readers ask the file)
   const holder = join(STATE, "inflight", String(process.ppid)); // a claim under a pid that is alive and never clears: the suite's own parent
   const gone0 = await new Promise((res) => { const c = spawn(process.execPath, ["-e", "0"]); c.on("close", () => res(c.pid)); }); // a pid proven dead
   const DEFERRED = /^deferred: the session's earlier post is in flight \(pid \d+\); kept under pending\/ for the run that lands it$/;
@@ -895,6 +896,14 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   rmSync(join(STATE, "s-unbooked.json"), { recursive: true, force: true });
   const settled = await postPending(cfg);
   assert(settled.length === 2 && settled.every((x) => x.ok) && received.length === 2 && readState("s-unbooked")?.thought_id === uuid(1002) && readdirSync(join(STATE, "pending")).length === 0, "the next run finishes both bookkeepings without posting again; the state names the end");
+  assert(readdirSync(STATE).filter((f) => f.endsWith(".tmp")).length === 0, "the state writes that failed on the directory left no temp file behind (seventh review pass: one per run)");
+  // A temp file a writer left under the state directory or pending/ is pruned once older than any run lasts; a fresh one may still be mid-write.
+  const staleTmp = join(STATE, "s-old.json.4242.tmp"), freshTmp = join(STATE, "pending", `${Date.now()}-0-aaaa-s-fresh.json.4243.tmp`);
+  writeFileSync(staleTmp, "{"); writeFileSync(freshTmp, "{");
+  const aged = new Date(Date.now() - 20 * 60_000); utimesSync(staleTmp, aged, aged);
+  await postPending(cfg);
+  assert(!existsSync(staleTmp) && existsSync(freshTmp), "a stale temp file under the state directory is pruned; a fresh one under pending/ is left to its writer");
+  unlinkSync(freshTmp);
   // A run whose own landing's bookkeeping fails does not follow up with the
   // payload it has itself just returned (fourth review pass: one outcome).
   mkdirSync(join(STATE, "s-ok.json"), { recursive: true });
@@ -908,9 +917,9 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   const S = "s-point", now = Date.now(), older = iso(now - 600_000), newer = iso(now - 300_000);
   const lair = join(STATE, "inflight", "424242");
   mkdirSync(join(STATE, "pending"), { recursive: true }); mkdirSync(lair, { recursive: true });
-  writeFileSync(join(STATE, "pending", named(now - 3000, S)), JSON.stringify({ captured_id: uuid(77), prepared_at: newer }));
-  writeFileSync(join(lair, named(now - 4000, S)), JSON.stringify({ captured_id: uuid(76), prepared_at: older }));
-  writeFileSync(join(STATE, "pending", named(now - 2000, S)), JSON.stringify({ prepared_at: newer, text: "never posted" }));
+  writeFileSync(join(STATE, "pending", named(now - 3000, S)), JSON.stringify({ session_id: S, captured_id: uuid(77), prepared_at: newer }));
+  writeFileSync(join(lair, named(now - 4000, S)), JSON.stringify({ session_id: S, captured_id: uuid(76), prepared_at: older }));
+  writeFileSync(join(STATE, "pending", named(now - 2000, S)), JSON.stringify({ session_id: S, prepared_at: newer, text: "never posted" }));
   const me = named(now - 1000, S);
   assert(landedBefore(S, me)?.id === uuid(77) && landedBefore(S, named(now - 3500, S))?.id === uuid(76) && landedBefore(S, named(now - 5000, S)) === undefined,
     "landedBefore: the newest LANDED payload older than the name, wherever it lies and whatever order the directories are read in — not one still owed its post, none when nothing older has landed");
@@ -919,9 +928,9 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   assert(pointerFor(S, me, { thought_id: uuid(78), summary_at: older, captured_at: iso(now) }) === uuid(77) && pointerFor(S, me, { thought_id: uuid(78), captured_at: iso(now - 100_000) }) === uuid(78), "…the state by summary_at, its prepare time, not captured_at, its post time — which serves only a state from before summary_at");
   assert(pointerFor(S, me, { thought_id: uuid(78), summary_at: iso(now + 600_000) }) === uuid(78) && pointerFor(S, me, { thought_id: uuid(78), summary_at: "garbage" }) === uuid(78), "…a state time in the future, or none, leaves the state standing: the normal source is not outranked on a clock that was wrong (fourth review pass)");
   assert(pointerFor(S, me, null) === uuid(77) && pointerFor("s-none", me, null) === undefined && pointerFor("s-none", me, { thought_id: uuid(78), summary_at: older }) === uuid(78), "…no state: the owed payload; nothing landed: the state alone, or no pointer");
-  writeFileSync(join(STATE, "pending", named(now - 1500, S)), JSON.stringify({ captured_id: uuid(79) }));
+  writeFileSync(join(STATE, "pending", named(now - 1500, S)), JSON.stringify({ session_id: S, captured_id: uuid(79) }));
   assert(pointerFor(S, me, { thought_id: uuid(78), summary_at: iso(now - 100_000) }) === uuid(79), "…a landed payload with no prepared_at ranks by the millisecond in its name");
-  writeFileSync(join(STATE, "pending", named(now + 3_600_000, S)), JSON.stringify({ captured_id: uuid(80), prepared_at: iso(now + 3_600_000) }));
+  writeFileSync(join(STATE, "pending", named(now + 3_600_000, S)), JSON.stringify({ session_id: S, captured_id: uuid(80), prepared_at: iso(now + 3_600_000) }));
   assert(pointerFor(S, named(now + 3_700_000, S), { thought_id: uuid(78), summary_at: iso(now - 100_000) }) === uuid(78), "…a payload written by a clock an hour ahead — prepared_at and name alike — ranks last and does not outrank the state (fifth review pass)");
   // An older checkpoint of a session whose END has landed in another child's
   // hands, its bookkeeping owed — or whose end is in another live child's
@@ -959,7 +968,7 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   await sleep(2);
   const failing = prepare({ session_id: "s-own", transcript_path: downT, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
   mkdirSync(holder, { recursive: true });
-  writeFileSync(join(holder, named(Date.now() - 5000, "s-own2")), "{}");
+  writeFileSync(join(holder, named(Date.now() - 5000, "s-own2")), claimJson("s-own2"));
   const owed2 = prepare({ session_id: "s-own2", transcript_path: CODEX_T, hook_event_name: "SessionEnd" });
   writeFileSync(owed2.payloadPath, JSON.stringify({ ...owed2.payload, captured_id: uuid(71) }));
   await sleep(2);
@@ -980,7 +989,7 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   received.length = 0;
   mkdirSync(holder, { recursive: true });
   const dropped = prepare({ session_id: "s-drop", transcript_path: CODEX_T, hook_event_name: "PreCompact", trigger: "auto" }); await sleep(2);
-  const heldNewer = join(holder, named(Date.now(), "s-drop")); writeFileSync(heldNewer, "{}"); await sleep(2);
+  const heldNewer = join(holder, named(Date.now(), "s-drop")); writeFileSync(heldNewer, claimJson("s-drop")); await sleep(2);
   const slowOther = prepare({ session_id: "s-drop-beside", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
   const stepped = prepare({ session_id: "s-drop", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
   const steppedHome = stepped.payloadPath, steppedAside = join(TMP, basename(stepped.payloadPath));
@@ -1058,6 +1067,20 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   const capNext = await postPending(cfg);
   assert(capNext.length === 3 && capNext.every((x) => x.obsolete) && readdirSync(join(STATE, "pending")).length === 0, "…and the next run drops those three as obsolete beside the state");
   void capSlow;
+  // Three cleared sessions of three ends each under the cap of five: the
+  // first round takes every session's newest, the second round two more and
+  // stops mid-round (seventh review pass: the inner room check had no tooth).
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const threeOwed = ["s-t1", "s-t2", "s-t3"].map((sid) => { const o = prepare({ session_id: sid, transcript_path: CODEX_T, hook_event_name: "SessionEnd" }); writeFileSync(o.payloadPath, JSON.stringify({ ...o.payload, captured_id: uuid(66) })); return o; });
+  const threeSlow = prepare({ session_id: "s-t-beside", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const threeRunning = postPending(cfg);
+  await sleep(600);
+  for (const sid of ["s-t1", "s-t2", "s-t3"]) for (let i = 1; i <= 3; i++) writeFileSync(join(STATE, "pending", `99999999999${i}-${i}-t${i}-${sid}.json`), JSON.stringify({ ...capBody, session_id: sid, fingerprint: `${sid}-${i}`, prepared_at: iso(Date.now() + i), text: capBody.text.replace(/\n\nSession s-cap/, `\n\nThird ${i}.\n\nSession ${sid}`) }));
+  const threeRun = await threeRunning;
+  assert(threeRun.length === 9 && received.length === 4 && ["s-t1", "s-t2", "s-t3"].every((sid) => /\n\nThird 3\./.test(received.find((r) => new RegExp(`Session ${sid}[,.]`).test(r.args.content))?.args.content ?? "")) && readdirSync(join(STATE, "pending")).length === 4 && /following up: 5 payload\(s\)/.test(logText()),
+    `three sessions of three: five followed up — every session's newest posted, two more obsolete, four left for the next run (${received.length} posts; pending: ${readdirSync(join(STATE, "pending")).length})`);
+  void threeOwed; void threeSlow;
   // A payload of another session whose id sanitises to the same file tail
   // ("s.dot" and "s_dot" both name s_dot.json) is not this run's to follow
   // up: it goes back where it was, not to dead/ as obsolete (sixth review pass).
@@ -1075,6 +1098,19 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   const dotRun = await dotRunning;
   assert(dotRun.length === 2 && dotRun.find((x) => x.file === dotSlow.payloadPath)?.ok && existsSync(underscore.payloadPath) && readdirSync(join(STATE, "dead")).length === 0 && !/following up/.test(logText()),
     `the other session's payload under the shared tail is left under pending/, unjudged (${dotRun.length} outcomes; dead: ${readdirSync(join(STATE, "dead")).length})`);
+  // …and every other reader says whose a file is by reading it (seventh review pass: one of five had): the stranger's landed payload is no pointer and no reason to drop; in a live child's hands it is neither ahead nor newer in flight.
+  writeFileSync(underscore.payloadPath, JSON.stringify({ ...underscore.payload, captured_id: uuid(65) }));
+  const dotMine = `${Date.now() - 1000}-0-aaaa-s_dot.json`;
+  assert(landedBefore("s.dot", `${Date.now() + 1000}-0-aaaa-s_dot.json`) === undefined && landedAfter("s.dot", dotMine) === false && landedBefore("s_dot", `${Date.now() + 1000}-0-aaaa-s_dot.json`)?.id === uuid(65), "a landed payload under the shared tail counts for its own session alone");
+  mkdirSync(holder, { recursive: true });
+  renameSync(underscore.payloadPath, join(holder, basename(underscore.payloadPath)));
+  writeFileSync(join(holder, `${Date.now() - 6000}-0-aaaa-s_dot.json`), "{"); // unreadable, older
+  writeFileSync(join(holder, `${Date.now() - 5000}-0-aaaa-s_dot.json`), JSON.stringify({ session_id: "s_dot" })); // the stranger's, older
+  writeFileSync(join(holder, `${Date.now() + 5000}-0-aaaa-s_dot.json`), JSON.stringify({ session_id: "s_dot" })); // the stranger's, newer
+  writeFileSync(join(holder, `${Date.now() + 6000}-0-aaaa-s_dot.json`), "{"); // unreadable, newer
+  assert(aheadOf("s.dot", dotMine).length === 1 && aheadOf("s_dot", dotMine).length === 3 && newerInFlight("s.dot", dotMine) === false && newerInFlight("s_dot", dotMine) === true,
+    "in a live child's hands the stranger's older payloads are not ahead of this session — the unreadable one is, the safe side — and its newer one is not newer in flight, nor is the unreadable one, the safe side; for their own session all count but the unreadable newer");
+  rmSync(holder, { recursive: true, force: true });
   // Two children finishing one session's owed bookkeepings at once write the
   // state together: each writes beside under its own pid and renames, so
   // neither's rename finds the other's file gone (sixth review pass: one
@@ -1104,7 +1140,7 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   rmSync(STATE, { recursive: true, force: true });
   received.length = 0;
   mkdirSync(holder, { recursive: true });
-  writeFileSync(join(holder, named(Date.now() - 5000, "s-d1")), "{}");
+  writeFileSync(join(holder, named(Date.now() - 5000, "s-d1")), claimJson("s-d1"));
   const d1 = prepare({ session_id: "s-d1", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }); await sleep(2);
   const d2 = prepare({ session_id: "s-d2", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
   const running = postPending(cfg);
@@ -1139,7 +1175,7 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   rmSync(STATE, { recursive: true, force: true });
   received.length = 0;
   mkdirSync(holder, { recursive: true });
-  for (const sid of ["s-b1", "s-b2", "s-b3", "s-b4"]) writeFileSync(join(holder, named(Date.now() - 5000, sid)), "{}");
+  for (const sid of ["s-b1", "s-b2", "s-b3", "s-b4"]) writeFileSync(join(holder, named(Date.now() - 5000, sid)), claimJson(sid));
   const b1old = prepare({ session_id: "s-b1", transcript_path: CODEX_T, hook_event_name: "SessionEnd" }); await sleep(2);
   const b1 = prepare({ session_id: "s-b1", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }); await sleep(2);
   const b2 = prepare({ session_id: "s-b2", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }); await sleep(2);
@@ -1162,18 +1198,18 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   const mine = named(Date.now(), "s-chain");
   const live = join(STATE, "inflight", String(process.ppid)), dead = join(STATE, "inflight", String(gone));
   mkdirSync(live, { recursive: true }); mkdirSync(dead, { recursive: true });
-  writeFileSync(join(live, named(Date.now() + 1000, "s-chain")), "{}");
-  writeFileSync(join(live, named(Date.now() - 1000, "s-chained")), "{}");
-  writeFileSync(join(dead, named(Date.now() - 1000, "s-chain")), "{}");
+  writeFileSync(join(live, named(Date.now() + 1000, "s-chain")), claimJson("s-chain"));
+  writeFileSync(join(live, named(Date.now() - 1000, "s-chained")), claimJson("s-chained"));
+  writeFileSync(join(dead, named(Date.now() - 1000, "s-chain")), claimJson("s-chain"));
   const unheld = join(STATE, "pending", named(Date.now() - 1000, "s-chain")), own = join(STATE, "inflight", String(process.pid));
-  writeFileSync(unheld, "{}");
-  mkdirSync(own, { recursive: true }); writeFileSync(join(own, named(Date.now() - 1000, "s-chain")), "{}");
+  writeFileSync(unheld, claimJson("s-chain"));
+  mkdirSync(own, { recursive: true }); writeFileSync(join(own, named(Date.now() - 1000, "s-chain")), claimJson("s-chain"));
   assert(aheadOf("s-chain", mine).length === 0, "a NEWER payload of the session in a live child's hands is not ahead (only the newer of two steps aside, so two children never wait on each other); nor an older one of another session, nor one under a pid that is gone, nor one under pending/ that no child holds, nor one in this run's own hands");
-  writeFileSync(join(dead, named(Date.now() + 3000, "s-chain")), "{}"); writeFileSync(join(own, named(Date.now() + 3000, "s-chain")), "{}");
+  writeFileSync(join(dead, named(Date.now() + 3000, "s-chain")), claimJson("s-chain")); writeFileSync(join(own, named(Date.now() + 3000, "s-chain")), claimJson("s-chain"));
   assert(newerInFlight("s-chain", mine) === true && newerInFlight("s-chain", named(Date.now() + 2000, "s-chain")) === false && newerInFlight("s-chained", named(Date.now() - 2000, "s-chained")) === true && newerInFlight("s-chain", named(Date.now() + 1500, "s-chain")) === false,
     "…while that newer one in a live child's hands outdates this one — by session, by name, by liveness: a newer one under a pid that is gone, or in this run's own hands, outdates nothing");
   unlinkSync(unheld); rmSync(own, { recursive: true, force: true });
-  writeFileSync(join(live, named(Date.now() - 1000, "s-chain")), "{}");
+  writeFileSync(join(live, named(Date.now() - 1000, "s-chain")), claimJson("s-chain"));
   assert(aheadOf("s-chain", mine).length === 1 && aheadOf("s-chain", mine)[0].pid === process.ppid, "an older one under a live pid is ahead, named by its pid");
   rmSync(live, { recursive: true, force: true }); rmSync(dead, { recursive: true, force: true });
 }
