@@ -532,11 +532,13 @@ Dependabot one included (SMD-2111).
 
 **"Schema migrations" runs `test-schema.ts` twice at once (SMD-2092).** One
 step runs the suite at the default width and at 768 in the background, each to
-its own log, and waits on both. A passing run's log is folded under its width;
-a failing one is printed open under an error annotation naming the width. The
-step closes with each run's `N assertions: …` line; go to the end of the step
-for those two lines first. "No summary line" means the run died before its
-report, and its log says where. The self-checks after it run either way.
+its own log, and waits on both; nothing prints until both have exited. A
+passing run's log is folded under its width; a failing one is printed open
+under an error annotation naming the width. The two lines at the end of the
+step, each run's `N assertions: …` line, are the first thing to read. "No
+summary line" means the run died before its report, and its log says where;
+exit 124 means it hung past its 15-minute limit. The self-checks after it run
+whether it passes or fails.
 
 ## Detached from the fork network
 

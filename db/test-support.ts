@@ -472,9 +472,9 @@ export function createAssert(): {
       }
     },
     report(): never {
+      console.log(`\n${"─".repeat(52)}`);
       // Fork Checks' schema step greps this line from each width's log for its
       // closing summary (`^[0-9]+ assertions: `, SMD-2092): reword it there too.
-      console.log(`\n${"─".repeat(52)}`);
       console.log(
         `${passed + failed} assertions: ${passed} passed, ${failed} failed` +
           (skipped ? `, ${skipped} skipped` : "") +

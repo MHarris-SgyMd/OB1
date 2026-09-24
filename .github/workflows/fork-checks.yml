@@ -295,20 +295,24 @@ jobs:
       # The embedding width is configurable and must hold at more than one value,
       # so the suite runs twice — the default width and 768 — side by side
       # (SMD-2092): each run is one single-threaded process whose PGlite databases
-      # live in memory, sharing no file, port or database with the other, and the
-      # runner has four cores. Run in series they were the critical path of most
-      # runs. Each run writes its own log, both streams (a failed assertion goes
-      # to stderr); both are waited on, both logs printed — a passing one folded,
-      # a failing one open — and the step fails when either run does. The two
-      # summary lines close the step; they read the report line db/test-support.ts
-      # prints (`N assertions: …`).
+      # live in memory, and neither writes a file, opens a port or spawns
+      # anything; a public repository's runner has four cores. Run in series they
+      # were the critical path of most runs. Each run writes its own log, stdout
+      # and stderr together (a failed assertion goes to stderr); both are waited
+      # on, both logs printed — a passing one folded, a failing one open — and the
+      # step fails when either run does. Nothing prints until both have exited,
+      # so each run has its own time limit: a hung run ends as a failure (exit
+      # 124) with its log printed, where a step killed at the job's limit, or
+      # cancelled, prints neither. The two summary lines close the step; they read the
+      # report line db/test-support.ts prints (`N assertions: …`).
       - name: Apply migrations and assert the schema, at the default width and at 768
         working-directory: db
         run: |
-          bun test-schema.ts > "$RUNNER_TEMP/schema-default.log" 2>&1 &
+          limit=15m
+          timeout --kill-after=10s "$limit" bun test-schema.ts > "$RUNNER_TEMP/schema-default.log" 2>&1 &
           default_pid=$!
           OB1_EMBEDDING_DIM=768 OB1_EMBEDDING_MODEL=nomic-embed-text \
-            bun test-schema.ts > "$RUNNER_TEMP/schema-768.log" 2>&1 &
+            timeout --kill-after=10s "$limit" bun test-schema.ts > "$RUNNER_TEMP/schema-768.log" 2>&1 &
           narrow_pid=$!
           # `|| rc=$?`, not a bare wait: the step runs under -e, and a bare wait
           # on a failed run would end the step before either log is printed.
@@ -319,7 +323,8 @@ jobs:
             width=${leg%%:*}
             rc=${leg#*:}
             log="$RUNNER_TEMP/schema-$width.log"
-            if [ "$rc" -eq 0 ]; then
+            if [ "$rc" -eq 124 ]; then rc="124, over the $limit limit"; fi
+            if [ "$rc" = 0 ]; then
               echo "::group::test-schema.ts at the $width width — passed"
               cat "$log"
               echo "::endgroup::"
@@ -336,8 +341,9 @@ jobs:
       # The board sync's pure rules and write decisions — the rendering the
       # hand captures are recognised by, the plan from a census, which call
       # each state of the brain gets — against a recording store. No network,
-      # no database, no provider (SMD-1954). This and the next step run when the
-      # schema step has failed too, so one broken width does not hide them.
+      # no database, no provider (SMD-1954). This and the next step run when an
+      # earlier step of theirs has failed too (the schema step, or this one for
+      # the next), so one broken width does not hide them.
       - name: Board sync rules
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         working-directory: db
