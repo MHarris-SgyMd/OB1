@@ -128,7 +128,7 @@ function openOne(url: string): SQL {
  */
 export const SNAPSHOT = "isolation level repeatable read read only";
 function snapshot<T>(sql: SQL, fn: (tx: SQL) => Promise<T>): Promise<T> {
-  return sql.begin(SNAPSHOT, fn as never) as Promise<T>;
+  return sql.begin(SNAPSHOT, fn);
 }
 
 async function readBrain(sql: SQL): Promise<{ rows: (ThoughtRow & { content: string })[]; census: Census; claims: ClaimStat[] }> {
@@ -226,7 +226,7 @@ type LiveRow = ThoughtRow & { content: string };
 
 function scenariosOf(rows: readonly LiveRow[], target: string, editN: number, wouldChunk: (r: LiveRow) => boolean): Scenarios {
   const edited = new Set(stratifiedSample(rows, editN).map((r) => r.id));
-  return buildScenarios(rows, target, edited, bumpedName(target), (r) => wouldChunk(r as LiveRow));
+  return buildScenarios(rows, target, edited, bumpedName(target), wouldChunk);
 }
 
 async function run(): Promise<void> {
@@ -351,10 +351,10 @@ async function fixtureCheck(): Promise<void> {
     sql`INSERT INTO thoughts (id, content, content_fingerprint, embedding, embedding_model)
         VALUES (${fid(n)}::uuid, ${content}, ${o.fp === false ? null : sql`content_fingerprint_of(${content})`}, ${o.vector === false ? null : sql`${vec}::vector`}, ${o.model === undefined ? FIXTURE_MODEL : o.model})`;
   let entities = 0;
-  const mention = async (n: number) => {
+  const mention = async (n: number, key = FIXTURE_KEY) => {
     entities++;
     const [{ id }] = (await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', ${`Tool${entities}`}, ${`tool${entities}`}) RETURNING id::text AS id`) as { id: string }[];
-    await sql`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) VALUES (${fid(n)}::uuid, ${id}::uuid, 1.00, ${FIXTURE_KEY})`;
+    await sql`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) VALUES (${fid(n)}::uuid, ${id}::uuid, 1.00, ${key})`;
   };
   // A raw content update around the writers leaves the key as it was (018's stale-key case); a writer refreshes it.
   const moveContent = (n: number, content: string, refreshKey: boolean) =>
@@ -399,10 +399,7 @@ async function fixtureCheck(): Promise<void> {
   await mention(11); await moveContent(11, text("eleven graph, a whitespace-only edit", 450) + "  ", true);
   // Row 12: extracted, moved, re-enqueued under the recorded key and still waiting — and a structured `source:` row
   // (053's ingester, no model) written after the move, which is not the graph projection and must not read it fresh.
-  await mention(12); await moveContent(12, text("twelve moved", 560), true);
-  entities++;
-  const [{ id: srcEntity }] = (await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', ${`Tool${entities}`}, ${`tool${entities}`}) RETURNING id::text AS id`) as { id: string }[];
-  await sql`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) VALUES (${fid(12)}::uuid, ${srcEntity}::uuid, 1.00, 'source:fixture')`;
+  await mention(12); await moveContent(12, text("twelve moved", 560), true); await mention(12, "source:fixture");
   // Row 10: two chunk rows.
   await sql`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding) VALUES (${fid(10)}::uuid, 0, 'w0', ${vec}::vector), (${fid(10)}::uuid, 1, 'w1', ${vec}::vector)`;
 

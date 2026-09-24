@@ -14,9 +14,9 @@
  * The contract, pre-registered on the ticket before the first run, is
  * PROJECTIONS below: per projection, the key a replay derives from the event
  * payload and what the row records of it. The replay rule is decideEmbedding:
- * the payload's fingerprint against the row's, the row's model label against
- * the target, a vector present or not — reuse on a hit, recompute on a miss,
- * every miss with a reason the key can state. The scenarios are the ticket's:
+ * a key on the row at all, the payload's fingerprint against the row's, a
+ * vector present or not, the row's model label against the target — reuse on
+ * a hit, recompute on a miss, every miss with a reason the key can state. The scenarios are the ticket's:
  * a no-op rebuild, N edits, a model bump, a comprehension-only change, a
  * window-recipe change. Nothing here reads a database or calls a provider
  * (lib.ts, imported for `median`, reads a .env file on import — nothing more);
@@ -228,7 +228,7 @@ export type RecipeTally = {
 };
 
 /** E. The window recipe changes (OB1_CHUNK_TOKENS, overlap, chunk_context): every chunk row goes, every parent stays. */
-export function recipeChangeRebuild(rows: readonly ThoughtRow[], wouldChunk: (row: ThoughtRow) => boolean): RecipeTally {
+export function recipeChangeRebuild<T extends ThoughtRow>(rows: readonly T[], wouldChunk: (row: T) => boolean): RecipeTally {
   const chunked = rows.filter((r) => r.chunkRows > 0);
   return {
     parentsReused: rows.length,
@@ -283,7 +283,7 @@ export function staleGraph(rows: readonly ThoughtRow[]): StaleGraph {
 }
 
 /** Every scenario from one set of rows, so the tallies a verdict compares were built on the same corpus. */
-export function buildScenarios(rows: readonly ThoughtRow[], target: string, edited: ReadonlySet<string>, other: string, wouldChunk: (row: ThoughtRow) => boolean): Scenarios {
+export function buildScenarios<T extends ThoughtRow>(rows: readonly T[], target: string, edited: ReadonlySet<string>, other: string, wouldChunk: (row: T) => boolean): Scenarios {
   const noOp = noOpRebuild(rows, target);
   const present = rows.filter((r) => edited.has(r.id)).map((r) => r.id);
   return {
