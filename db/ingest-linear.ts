@@ -222,7 +222,9 @@ export function selfCheck(): number {
   // The selection the fetchers share names every key of the type — a key added
   // to LinearIssue and not to ISSUE_FIELDS would arrive undefined from every
   // fetcher and render as its absence (SMD-1958).
-  const selected = new Set(ISSUE_FIELDS.replace(/\{[^{}]*(\{[^{}]*\}[^{}]*)*\}/g, "").replace(/\([^)]*\)/g, "").split(/\s+/).filter(Boolean));
+  let topLevel = ISSUE_FIELDS.replace(/\([^)]*\)/g, "");
+  while (/\{/.test(topLevel)) topLevel = topLevel.replace(/\{[^{}]*\}/g, ""); // innermost braces out first, however deep the selection nests
+  const selected = new Set(topLevel.split(/\s+/).filter((t) => /^\w+$/.test(t)));
   const keys = Object.keys({ ...SAMPLE_ISSUE, relations: undefined, inverseRelations: undefined });
   ok(keys.every((k) => selected.has(k)) && selected.has("relations") && selected.has("inverseRelations"), `ISSUE_FIELDS selects every key of a LinearIssue (${keys.filter((k) => !selected.has(k)).join(",") || "none missing"})`);
 

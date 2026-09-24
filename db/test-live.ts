@@ -4195,7 +4195,9 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   // A record an adapter mapped (SMD-1867): the row, and in its transaction the
   // canonical, the links and the structured mentions; the same record again
   // writes nothing at any of the four; a record whose identity another thought
-  // holds is 'held' and its transaction rolled back — no second row.
+  // holds is 'held' before any write — no second row (the in-function
+  // IDENTITY_HELD, the backstop for the race between that look and the write,
+  // is test-schema [48]'s).
   // The dump's record is its `issue` (SMD-1958): the shape the sync fetches, through the same adapter.
   const dumped = (issue: LinearIssue): LinearDoc => ({ id: issue.identifier, title: issue.title, text: issue.description ?? "", labels: labelNames(issue), createdAt: issue.createdAt, issue });
   const structured = docOf(corpusIngested(dumped({ ...SAMPLE_ISSUE, identifier: "SMD-90001", title: "A synthetic ticket", description: "Names <issue id=\"a\" href=\"h\">SMD-90002</issue> twice: <issue id=\"b\" href=\"h\">SMD-90002</issue>.", project: null, labels: { nodes: [{ name: "zqlabel" }] }, createdAt: "2026-09-01T00:00:00.000Z" })));
@@ -4221,7 +4223,7 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   const heldDoc = docOf(corpusIngested(dumped({ ...SAMPLE_ISSUE, identifier: "SMD-90003", title: "The same ticket, from the dump", description: "a different text", labels: { nodes: [] } })));
   const held = await upsertRecord(sql, heldDoc, "test-live@4");
   assert(held.outcome === "held" && held.heldBy === syncRow, `an identity another thought holds is 'held', naming it (${JSON.stringify(held)})`);
-  assert((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${heldDoc.id}::uuid`)[0].c === 0, "…and the transaction rolled back: no second row for the ticket");
+  assert((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${heldDoc.id}::uuid`)[0].c === 0, "…and no second row for the ticket: the identity is asked about before any write");
   // Tier identity, for preflight's `tier` check.
   await stampTier(sql, "stable");
   const cfg = Object.fromEntries((await sql`SELECT key, value FROM ob1_config WHERE key IN ('tier','last_ingest')`).map((r: { key: string; value: string }) => [r.key, r.value]));
@@ -4387,7 +4389,10 @@ console.log("\n[22] one renderer, one merge rule: a corpus dump through ingest-r
     log: () => {},
     structure: async (id, s) => { await sql.begin(async (tx) => { await recordStructure(tx, id, s, "test-live@sync", { take: true }); }); },
   };
-  const dump = (issue: LinearIssue): LinearDoc => ({ id: issue.identifier, title: issue.title, text: issue.description ?? "", labels: labelNames(issue), createdAt: issue.createdAt, issue });
+  // A dump built NOW, by the brain's clock — `fetchedAt` is compared with the
+  // row's updated_at, and the container's clock is the one that stamps it.
+  const dbNow = async () => (await sql`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS t`)[0].t as string;
+  const dump = async (issue: LinearIssue, fetchedAt?: string | null): Promise<LinearDoc> => ({ id: issue.identifier, title: issue.title, text: issue.description ?? "", labels: labelNames(issue), createdAt: issue.createdAt, issue, ...(fetchedAt === null ? {} : { fetchedAt: fetchedAt ?? await dbNow() }) });
   const rowsFor = async (identifier: string) => groupTicketRows(await readTicketRows(sql, { scanHeaders: true })).get(identifier) ?? [];
   const sync = async (issue: LinearIssue) => { calls.length = 0; return syncIssue(writer, issue, await rowsFor(issue.identifier)); };
   const ticketRows = async (identifier: string) => (await sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'issue' = ${identifier}`)[0].c as number;
@@ -4398,7 +4403,7 @@ console.log("\n[22] one renderer, one merge rule: a corpus dump through ingest-r
   const issue: LinearIssue = { ...SAMPLE_ISSUE, identifier: "SMD-90010", title: "Converges from the dump", description: "Names <issue id=\"a\" href=\"h\">SMD-90011</issue>.", project: { id: "p", name: "zqproject" }, labels: { nodes: [{ name: "zqlabel" }] }, updatedAt: "2026-09-22T01:00:00.000Z" };
 
   // Order A: the dump first, then the sync.
-  const docA = docOf(corpusIngested(dump(issue)));
+  const docA = docOf(corpusIngested(await dump(issue)));
   ids.push(docA.id);
   const a1 = await upsertRecord(sql, docA, "test-live@dumpA");
   assert(a1.outcome === "inserted" && a1.structure?.canonical === "inserted" && a1.structure.links.added === 1 && a1.structure.mentions === 2, `the dump inserts the ticket's row with its canonical, one link and two mentions (${JSON.stringify(a1)})`);
@@ -4419,7 +4424,8 @@ console.log("\n[22] one renderer, one merge rule: a corpus dump through ingest-r
   const rowM = (await sql`SELECT content, metadata, embedding IS NOT NULL AS vec FROM thoughts WHERE id = ${docA.id}::uuid`)[0];
   assert(rowM.content === renderIssue(moved) && rowM.metadata.status === "Done" && rowM.metadata.type === "task" && rowM.vec === true, `…on the dump's row: the moved text, the facets, the tags and a vector (${rowM.metadata.status}/${rowM.metadata.type}/vec=${rowM.vec})`);
   assert((await mentionsOf(docA.id)) === "zqlabel,zqother,zqproject", `…and the structure moved with it (${await mentionsOf(docA.id)})`);
-  const fresh = await upsertRecord(sql, docOf(corpusIngested(dump(moved))), "test-live@dumpB");
+  const viewOfMoved = await dbNow(); // a dump built now would see `moved`
+  const fresh = await upsertRecord(sql, docOf(corpusIngested(await dump(moved, viewOfMoved))), "test-live@dumpB");
   assert(fresh.outcome === "unchanged" && fresh.structure?.canonical === "unchanged" && fresh.structure.links.kept === 1 && fresh.structure.mentions === 0, `a dump rebuilt after the move finds nothing to write — row, canonical, links or mentions (${JSON.stringify(fresh)})`);
   const stale = await upsertRecord(sql, docA, "test-live@dumpA-again");
   const rowS = (await sql`SELECT content, metadata, embedding IS NOT NULL AS vec FROM thoughts WHERE id = ${docA.id}::uuid`)[0];
@@ -4428,6 +4434,22 @@ console.log("\n[22] one renderer, one merge rule: a corpus dump through ingest-r
   // The tooth: with the watermark clause removed from the guard, the old dump
   // is 'updated' and the row reads Backlog again (drop-the-mechanism mutant).
 
+  // The source's clock cannot settle a RENAME: Linear renames a project, a
+  // state or a label without touching updatedAt, and the sync re-renders the
+  // ticket from the census. The brain's clock does — a dump built before the
+  // rename is stale, one built after it is unchanged, and one with no build
+  // instant (no second clock) writes, as the contract says (first review
+  // pass, independent read: the equal case let a Monday dump undo a rename).
+  const renamed: LinearIssue = { ...moved, project: { id: "p", name: "zqproject-renamed" } };
+  const sR = await sync(renamed);
+  assert(sR.outcome === "updated" && calls.join(",") === "embed,tags" && (await sql`SELECT content FROM thoughts WHERE id = ${docA.id}::uuid`)[0].content === renderIssue(renamed), `a renamed project (same updatedAt) re-renders the row through the sync (${sR.outcome})`);
+  const beforeRename = await upsertRecord(sql, docOf(corpusIngested(await dump(moved, viewOfMoved))), "test-live@dumpB-again");
+  assert(beforeRename.outcome === "stale" && (await sql`SELECT content FROM thoughts WHERE id = ${docA.id}::uuid`)[0].content === renderIssue(renamed), `the dump built before the rename, same updatedAt, is 'stale' by the brain's clock — the row keeps the new name (${beforeRename.outcome})`);
+  const afterRename = await upsertRecord(sql, docOf(corpusIngested(await dump(renamed))), "test-live@dumpD");
+  assert(afterRename.outcome === "unchanged", `a dump built after the rename is 'unchanged' (${afterRename.outcome})`);
+  const noClock = await upsertRecord(sql, docOf(corpusIngested(await dump(moved, null))), "test-live@dumpE");
+  assert(noClock.outcome === "updated" && (await sql`SELECT content FROM thoughts WHERE id = ${docA.id}::uuid`)[0].content === renderIssue(moved), `…and a dump with NO build instant writes at an equal clock, as documented — the second clock is what held the line above (${noClock.outcome})`);
+
   // Order B: the sync first, then the dump.
   const issueB: LinearIssue = { ...issue, identifier: "SMD-90020", title: "Converges from the sync", description: "Plain.", updatedAt: "2026-09-22T03:00:00.000Z" };
   const sB = await sync(issueB);
@@ -4435,7 +4457,7 @@ console.log("\n[22] one renderer, one merge rule: a corpus dump through ingest-r
   const syncRow = (await holderOf("SMD-90020"))?.t;
   assert(typeof syncRow === "string" && syncRow !== recordId("linear", "SMD-90020"), "…on its own id, which holds the identity");
   ids.push(syncRow!);
-  const held = await upsertRecord(sql, docOf(corpusIngested(dump(issueB))), "test-live@dumpC");
+  const held = await upsertRecord(sql, docOf(corpusIngested(await dump(issueB))), "test-live@dumpC");
   assert(held.outcome === "held" && held.heldBy === syncRow, `the dump for that ticket is 'held' by the sync's row (${JSON.stringify(held)})`);
   assert((await ticketRows("SMD-90020")) === 1 && (await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${recordId("linear", "SMD-90020")}::uuid`)[0].c === 0, "…no second row, none on the dump's id");
   const sB2 = await sync(issueB);

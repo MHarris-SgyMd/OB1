@@ -71,8 +71,16 @@ export type Ingested = {
    * the next sync pass forward again (SMD-1958). Values compare as strings, so
    * the clock is an ISO-8601 instant in UTC or another form that sorts as it
    * orders. Absent, the pipeline compares the text and the facets alone.
+   *
+   * `asOf` is WHEN this mapping's view of the source was taken (a dump's build
+   * instant), for the case the source's clock cannot settle: two views with
+   * the same value that differ — Linear renames a project, a state or a label
+   * without touching the issue's `updatedAt`, and the board sync re-renders
+   * the ticket from the census — are ordered by the brain's own clock: a row
+   * written after `asOf` was rendered by a later view, and the older one is
+   * `stale`. A live writer (the sync) has no `asOf`; a dump has one.
    */
-  watermark?: { key: string; value: string };
+  watermark?: { key: string; value: string; asOf?: string };
 };
 
 /** A source adapter: a name and a pure map. It reads; the pipeline writes. */

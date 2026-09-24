@@ -22,10 +22,12 @@ import type { LinearIssue } from "../db/ingest-linear.ts";
  * entity-membership arm ranks by it (SMD-1738). `issue` — the issue as Linear's
  * API gives it, the shape db/sync-linear.ts fetches — is in corpora built on or
  * after 2026-09-24: db/ingest-records.ts maps it through the Linear adapter so
- * the ingester and the board sync write one text (SMD-1958). The harnesses read
- * `title` and `text` alone, as before.
+ * the ingester and the board sync write one text (SMD-1958); `fetchedAt` is the
+ * instant the build began, the ingester's second clock for a view Linear's own
+ * clock cannot order (a rename). The harnesses read `title` and `text` alone,
+ * as before.
  */
-export type LinearDoc = { id: string; title: string; text: string; labels?: string[]; createdAt?: string; issue?: LinearIssue };
+export type LinearDoc = { id: string; title: string; text: string; labels?: string[]; createdAt?: string; issue?: LinearIssue; fetchedAt?: string };
 
 export const DEFAULT_CORPUS = "/tmp/linear-corpus-full.json";
 

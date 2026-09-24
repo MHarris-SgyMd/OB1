@@ -108,8 +108,8 @@ export type Doc = {
   structure?: Structure;
   /** The allowlist's unit, for a gated source. */
   scope?: string;
-  /** The source's clock for the item (ingest-contract.ts): a stored row whose value under `key` is newer is not written over — the record is `stale`. */
-  watermark?: { key: string; value: string };
+  /** The source's clock for the item (ingest-contract.ts): a stored row whose value under `key` is newer — or the same, written after `asOf` — is not written over; the record is `stale`. */
+  watermark?: { key: string; value: string; asOf?: string };
 };
 
 /**
@@ -230,11 +230,15 @@ export function memoryDocs(dir: string): Doc[] {
 export function docOf(ingested: Ingested): Doc {
   const { system, key } = ingested.identity;
   const source = system as Source;
+  // The watermark IS one of the facets — written by the pipeline, not trusted
+  // to the adapter: a key the row never carried would leave the clock guard
+  // inert, silently (first review pass, independent read).
+  const wm = ingested.watermark;
   return {
     id: recordId(source, key),
     content: ingested.text,
     source,
-    meta: { ...ingested.facets },
+    meta: { ...ingested.facets, ...(wm ? { [wm.key]: wm.value } : {}) },
     createdAt: ingested.createdAt,
     structure: { identity: ingested.identity, canonical: ingested.canonical, links: ingested.links, mentions: ingested.mentions },
     scope: ingested.scope,
@@ -262,7 +266,10 @@ export const DUMP_WITHOUT_ISSUE = "the dump carries no `issue` object (built bef
 export function corpusIngested(d: LinearDoc): Ingested {
   if (!d.issue) throw new AdapterRefusal({ system: LINEAR_SYSTEM, key: d.id }, DUMP_WITHOUT_ISSUE);
   if (d.issue.identifier !== d.id) throw new AdapterRefusal({ system: LINEAR_SYSTEM, key: d.id }, `the record's id and its issue's identifier (${d.issue.identifier}) disagree`);
-  return { ...linearAdapter.map(d.issue), scope: LINEAR_CORPUS_SCOPE };
+  const mapped = linearAdapter.map(d.issue);
+  // The dump's build instant is the second clock (ingest-contract.ts `asOf`): a
+  // rename Linear does not stamp is ordered against the brain's last write.
+  return { ...mapped, scope: LINEAR_CORPUS_SCOPE, ...(mapped.watermark && d.fetchedAt ? { watermark: { ...mapped.watermark, asOf: d.fetchedAt } } : {}) };
 }
 
 /** A Linear corpus dump as Docs, on the shared linear id space, through the adapter; the records the adapter refused are counted, with the first reason. */
@@ -443,7 +450,14 @@ export type RecordResult = {
  * included, and the record is "stale" (SMD-1958: a Monday dump on Friday would
  * otherwise put every moved ticket back to Monday, and the next sync pass
  * forward again). The values compare as text, in the same clause that guards
- * the write, so the read and the decision are one statement.
+ * the write, so the read and the decision are one statement. When the two
+ * values are EQUAL the source's clock has not settled it — Linear renames a
+ * project, a state or a label without touching `updatedAt`, and the sync
+ * re-renders the ticket from the census — so the brain's clock does: a row
+ * written after the record's view was taken (`asOf`, the dump's build
+ * instant) was rendered by a later view, and the record is "stale" too;
+ * without an `asOf` the record writes, as before (first review pass,
+ * independent read: the guard let a Monday dump undo Tuesday's rename).
  */
 export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()): Promise<RecordResult> {
   const meta = { ...doc.meta, source: doc.source };
@@ -451,6 +465,7 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()):
   const created = doc.createdAt ?? null;
   const wmKey = doc.watermark?.key ?? null;
   const wmValue = doc.watermark?.value ?? null;
+  const asOf = doc.watermark?.asOf ?? null;
   try {
     return await sql.begin(async (tx) => {
       await tx`SELECT set_config('ob1.actor', ${JSON.stringify(INGEST_ACTOR)}, true)`;
@@ -481,7 +496,9 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()):
               embedding = CASE WHEN thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint THEN NULL ELSE thoughts.embedding END,
               embedding_model = CASE WHEN thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint THEN NULL ELSE thoughts.embedding_model END,
               metadata = COALESCE(thoughts.metadata, '{}'::jsonb) || (EXCLUDED.metadata - 'actor_kind' - 'actor_name')
-          WHERE (${wmValue}::text IS NULL OR thoughts.metadata->>(${wmKey}::text) IS NULL OR thoughts.metadata->>(${wmKey}::text) <= ${wmValue}::text)
+          WHERE (${wmValue}::text IS NULL OR thoughts.metadata->>(${wmKey}::text) IS NULL
+                 OR thoughts.metadata->>(${wmKey}::text) < ${wmValue}::text
+                 OR (thoughts.metadata->>(${wmKey}::text) = ${wmValue}::text AND (${asOf}::timestamptz IS NULL OR thoughts.updated_at <= ${asOf}::timestamptz)))
             AND (thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint
               OR (COALESCE(thoughts.metadata, '{}'::jsonb) || (EXCLUDED.metadata - 'actor_kind' - 'actor_name')) IS DISTINCT FROM thoughts.metadata)
         RETURNING (xmax = 0) AS inserted, ((SELECT fp FROM old) IS DISTINCT FROM thoughts.content_fingerprint) AS moved`) as { inserted: boolean; moved: boolean }[];
@@ -491,12 +508,19 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()):
       // would have kept the stale list for good (first review pass).
       let outcome: UpsertResult = "unchanged";
       if (rows.length) outcome = rows[0].inserted ? "inserted" : rows[0].moved ? "updated" : "patched";
-      // No row written and a watermark to compare: was it the clock that said
-      // no? Then the structure is not recorded either — the record's links and
-      // mentions are the older state's, and would close what the sync wrote.
+      // No row written and a watermark to compare: was it a clock that said
+      // no, to a record that had something to write? Then the structure is not
+      // recorded either — the record's links and mentions are the older
+      // state's, and would close what the sync wrote. A record with nothing to
+      // write is `unchanged` whatever the clocks say (the same dump twice).
       if (!rows.length && wmValue !== null) {
-        const [w] = (await tx`SELECT (metadata->>(${wmKey}::text)) > ${wmValue}::text AS newer FROM thoughts WHERE id = ${doc.id}::uuid`) as { newer: boolean | null }[];
-        if (w?.newer === true) return { outcome: "stale" };
+        const [w] = (await tx`
+          SELECT ((metadata->>(${wmKey}::text)) > ${wmValue}::text
+                  OR ((metadata->>(${wmKey}::text)) = ${wmValue}::text AND updated_at > ${asOf}::timestamptz)) AS blocked,
+                 (content_fingerprint IS DISTINCT FROM content_fingerprint_of(${doc.content})
+                  OR (COALESCE(metadata, '{}'::jsonb) || (${meta}::jsonb - 'actor_kind' - 'actor_name')) IS DISTINCT FROM metadata) AS pending
+          FROM thoughts WHERE id = ${doc.id}::uuid`) as { blocked: boolean | null; pending: boolean | null }[];
+        if (w?.blocked === true && w.pending === true) return { outcome: "stale" };
       }
       // The chunk rows were the old text's windows (022's rule: nothing vouches
       // for them now); reembed.ts writes the new ones with the vector.
@@ -592,9 +616,11 @@ function selfCheck(): number {
   ok(JSON.stringify(corpus.links) === '[{"relation":"references","target":"SMD-11"}]', "a cross-reference is a references link; the record's own identifier is not");
   ok(corpus.mentions.map((m) => `${m.type}:${m.name}`).join(",") === `project:${issue.project!.name},topic:Bug,topic:infra` && corpus.scope === LINEAR_CORPUS_SCOPE, `project and labels are mentions as the sync's are; the scope is the corpus, not the project (${corpus.mentions.map((m) => m.name).join(",")})`);
   ok(/<issue id=/.test(corpus.canonical.form) && corpus.canonical.form === linearAdapter.map(issue).canonical.form, "the canonical is the issue as the API gave it, markup included — the same bytes the sync stores, so a rebuild over a synced brain reads it unchanged");
-  ok(corpus.facets.status === "Backlog" && corpus.facets[WATERMARK_KEY] === issue.updatedAt && corpus.watermark?.value === issue.updatedAt, "the facets are the sync's, the watermark the issue's updatedAt");
+  ok(corpus.facets.status === "Backlog" && corpus.facets[WATERMARK_KEY] === issue.updatedAt && corpus.watermark?.value === issue.updatedAt && corpus.watermark.asOf === undefined, "the facets are the sync's, the watermark the issue's updatedAt; a dump without a build instant carries no asOf");
+  ok(corpusIngested({ ...record, fetchedAt: "2026-09-24T00:00:00.000Z" }).watermark?.asOf === "2026-09-24T00:00:00.000Z", "…and the dump's build instant is the watermark's asOf — the second clock");
   const doc = docOf(corpus);
   ok(doc.id === linearThoughtId("SMD-10") && doc.source === "linear" && doc.meta.issue === "SMD-10" && doc.content === corpus.text && doc.structure?.identity.key === "SMD-10" && doc.scope === LINEAR_CORPUS_SCOPE && doc.watermark?.key === WATERMARK_KEY, "docOf: the eval's id space, the source, the facets, the structure and the watermark carried");
+  ok(docOf({ ...corpus, facets: { issue: "SMD-10" }, watermark: { key: "clock", value: "v1" } }).meta.clock === "v1", "…and the watermark is written into the row's metadata by the pipeline, so the clock guard is never inert for an adapter that forgot the facet");
   ok(docOf({ ...corpus, identity: { system: "markdown", key: "Note" } }).id === recordId("markdown", "Note"), "…and a markdown record lands on its own source-qualified id");
   let refusal = "";
   try { corpusIngested({ id: "SMD-10", title: "A title", text: "old dump" }); } catch (e) { refusal = e instanceof AdapterRefusal ? e.message : `wrong: ${(e as Error).name}`; }
@@ -701,6 +727,10 @@ async function main(): Promise<void> {
     else if (!existsSync(linearPath)) { console.error(`--linear: no such file: ${linearPath}`); process.exit(2); }
     else {
       const { docs, refused, reason } = linearDocs(linearPath);
+      // A dump refused WHOLE is a wrong input, as a missing file is — exit 2,
+      // not a stderr note beside a run that ingests the other sources and
+      // exits 0 (first review pass, independent read).
+      if (refused && docs.length === 0) { console.error(`--linear: every record of ${linearPath} was refused — ${reason}`); process.exit(2); }
       perSource.linear = docs.length;
       collected.push(...docs);
       if (refused) note("linear", `${refused} record(s) refused — ${reason}`);

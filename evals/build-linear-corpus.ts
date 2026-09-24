@@ -177,6 +177,12 @@ async function page(after: string | null): Promise<{ nodes: Node[]; next: string
 console.log(`▸ config: ${describeEnv(ENV_SOURCES)}`);
 console.log(`▸ team ${TEAM}, state "${STATE}", comments ${WITH_COMMENTS ? "included" : "excluded"}`);
 
+// When this view of Linear was taken — the instant the first page was asked
+// for, so anything written to a brain after it counts as a later view (the
+// ingester's second clock, SMD-1958). Read against the brain's `updated_at`, so
+// the builder's clock and the brain's must agree to the order of the gap.
+const FETCHED_AT = new Date().toISOString();
+
 const nodes: Node[] = [];
 let after: string | null = null;
 try {
@@ -258,8 +264,9 @@ const items = nodes
     // created_at is set from it, so age means what it means in the tracker.
     createdAt: n.createdAt,
     completedAt: n.completedAt,
-    // The issue whole, for the ingester (SMD-1958); the harnesses read the fields above.
+    // The issue whole, and when this view of it was taken, for the ingester (SMD-1958); the harnesses read the fields above.
     issue: issueOf(n),
+    fetchedAt: FETCHED_AT,
   }))
   .filter((it) => it.text.length > 0 && it.text.length >= MIN_CHARS)
   .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
