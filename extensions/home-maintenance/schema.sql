@@ -105,6 +105,6 @@ CREATE TRIGGER update_task_after_log
 
 -- Sample data (optional - uncomment to insert examples)
 -- INSERT INTO maintenance_tasks (user_id, name, category, frequency_days, next_due, priority, notes) VALUES
--- (auth.uid(), 'HVAC Filter Replacement', 'hvac', 90, now() + INTERVAL '90 days', 'medium', 'Use 16x25x1 pleated filters'),
--- (auth.uid(), 'Gutter Cleaning', 'exterior', 180, now() + INTERVAL '180 days', 'medium', 'Best to do before rainy season'),
--- (auth.uid(), 'Water Heater Inspection', 'plumbing', 365, now() + INTERVAL '365 days', 'low', 'Check for leaks and sediment buildup');
+-- ('<your DEFAULT_USER_ID>'::uuid, 'HVAC Filter Replacement', 'hvac', 90, now() + INTERVAL '90 days', 'medium', 'Use 16x25x1 pleated filters'),
+-- ('<your DEFAULT_USER_ID>'::uuid, 'Gutter Cleaning', 'exterior', 180, now() + INTERVAL '180 days', 'medium', 'Best to do before rainy season'),
+-- ('<your DEFAULT_USER_ID>'::uuid, 'Water Heater Inspection', 'plumbing', 365, now() + INTERVAL '365 days', 'low', 'Check for leaks and sediment buildup');

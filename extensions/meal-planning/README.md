@@ -96,7 +96,7 @@ Run the SQL in `schema.sql` against your Open Brain database, as the role the se
 
 Nothing is needed first. Upstream's file enabled row-level security on Supabase's `auth.uid()`, and this README used to give two stub functions to create before it; this fork removed the policies (SMD-1810) — one operator's brain on plain Postgres, the server scoping rows itself (SMD-1716). The role that applies the file owns the tables and needs no grant; any other role is granted them by `bun db/migrate.ts --grant <role>` (`db/README.md`, "Grants for a capturing role", the **extensions** group).
 
-**What changed for the shared server:** upstream's policies also let a `household_member` role, read from Supabase's JWT, see recipes and meal plans and edit shopping lists. Here the shared server's scope is the tool set it registers and its own key list (Step 3) — the same rows, a narrower set of verbs — not a row policy.
+**What changed for the shared server:** upstream's policies also let a `household_member` role, read from Supabase's JWT, see recipes and meal plans and edit shopping lists. Here the shared server's scope is the tool set it registers and its own key list ("Decide the Household Member's Scope", below) — the same rows, a narrower set of verbs — not a row policy.
 
 ### 2. Generate Your User ID
 
@@ -156,7 +156,7 @@ The shared server gives household members limited access — they can view meal 
 
 ### 1. Decide the Household Member's Scope
 
-The boundary is the shared server's own key list. Mint the household member a key of their own (Step 3 of [Run a Remote MCP Server](../../primitives/deploy-remote-mcp/)) — `read` unless they should check items off the shopping list — and put its hash in `MCP_HOUSEHOLD_ACCESS_KEYS`, never in the primary server's `MCP_ACCESS_KEYS`. The shared server registers only its four tools, so even a write key there cannot reach your recipes' edits or your meal plans' changes. The schema's `auth.jwt() ->> 'role' = 'household_member'` policies are upstream's Supabase-side line; with the shim the servers connect as one Postgres role and the table owner is not subject to them, so the key list is the line that holds (to have the database hold one too, give the shared server a `SUPABASE_URL` whose role has only the household member's privileges).
+The boundary is the shared server's own key list. Mint the household member a key of their own (Step 3 of [Run a Remote MCP Server](../../primitives/deploy-remote-mcp/)) — `read` unless they should check items off the shopping list — and put its hash in `MCP_HOUSEHOLD_ACCESS_KEYS`, never in the primary server's `MCP_ACCESS_KEYS`. The shared server registers only its four tools, so even a write key there cannot reach your recipes' edits or your meal plans' changes. Upstream's schema carried `auth.jwt() ->> 'role' = 'household_member'` policies as a Supabase-side line; this fork's carries none (SMD-1810) — the servers connect as one Postgres role — so the key list is the line that holds (to have the database hold one too, give the shared server a `SUPABASE_URL` whose role has only the household member's privileges).
 
 ### 2. Run the Shared Server
 
@@ -237,7 +237,7 @@ For common issues (connection errors, 401s, deployment problems), see [Common Tr
 - For production use, you'd want smarter quantity aggregation
 
 **Shared server can see or change more than it should**
-- Its scope is the tool set it registers and its own key list (Step 3); there is no row policy behind it on this fork (SMD-1810). Check which server the connector points at and which key it carries — a household member's key must be on the shared server's list only
+- Its scope is the tool set it registers and its own key list ("Decide the Household Member's Scope"); there is no row policy behind it on this fork (SMD-1810). Check which server the connector points at and which key it carries — a household member's key must be on the shared server's list only
 - Test by trying to add or delete a recipe through the shared server: it registers no tool for that
 
 ## Next Steps

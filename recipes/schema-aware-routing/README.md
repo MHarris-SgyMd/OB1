@@ -139,12 +139,12 @@ create table pending_confirmations (
   created_at timestamptz default now()
 );
 
--- Grant permissions to service_role (required on newer Supabase projects)
-grant select, insert, update, delete on table public.thoughts to service_role;
-grant select, insert, update, delete on table public.people to service_role;
-grant select, insert, update, delete on table public.interactions to service_role;
-grant select, insert, update, delete on table public.action_items to service_role;
-grant select, insert, update, delete on table public.pending_confirmations to service_role;
+-- Grant the role your server connects as (skip when that role owns the tables)
+grant select, insert, update, delete on table public.people to <your_role>;
+grant select, insert, update, delete on table public.interactions to <your_role>;
+grant select, insert, update, delete on table public.action_items to <your_role>;
+grant select, insert, update, delete on table public.pending_confirmations to <your_role>;
+-- `thoughts` itself is `bun db/migrate.ts --grant <role>`'s (db/README.md, "Grants for a capturing role")
 ```
 
 </details>

@@ -237,8 +237,9 @@ BEGIN
     END IF;
 
     -- Validate both endpoints exist for this user. If either is missing or
-    -- belongs to someone else, RLS would have excluded it anyway; return an
-    -- empty result set rather than silently falling through the BFS.
+    -- belongs to someone else, return an empty result set rather than
+    -- silently falling through the BFS (the user_id check here is the only one;
+    -- no row policy stands behind it on this fork — SMD-1810).
     SELECT EXISTS (
         SELECT 1 FROM graph_nodes
         WHERE id = p_start_node_id AND user_id = p_user_id

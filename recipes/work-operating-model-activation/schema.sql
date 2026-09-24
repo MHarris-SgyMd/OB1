@@ -5,7 +5,8 @@
 -- This recipe stores one durable profile per user, versioned sessions,
 -- approved layer checkpoints, canonical entries, and export snapshots.
 --
--- Run this in your Supabase SQL Editor.
+-- Run this against your brain's database:
+--   psql "$DATABASE_URL" -f recipes/work-operating-model-activation/schema.sql
 -- ============================================
 
 CREATE OR REPLACE FUNCTION update_work_operating_model_updated_at()

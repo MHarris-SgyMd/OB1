@@ -1,5 +1,5 @@
 -- Extension 4: Meal Planning
--- Complete meal planning system with RLS for shared household access
+-- Complete meal planning system with a shared, read-mostly server for household access
 
 -- Recipe collection
 CREATE TABLE recipes (

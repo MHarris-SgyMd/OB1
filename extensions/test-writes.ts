@@ -152,10 +152,9 @@ await resetSchema(URL_, { dim: DIM, model: MODEL });
 const sql = new SQL({ url: URL_, max: 2 });
 
 const SIDECARS = ["schemas/enhanced-thoughts/schema.sql", "schemas/agent-memory/schema.sql", "schemas/readwise-books/schema.sql"];
-// All three GRANT to Supabase's roles, which plain Postgres lacks; the sidecars' own headers say to create them.
-for (const role of ["authenticated", "service_role", "anon"]) {
-  await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN CREATE ROLE ${role} NOLOGIN; END IF; END $r$`);
-}
+// The sidecars grant to no Supabase role since change 93 (SMD-1796), so none is created first — until SMD-1810 this
+// suite still created the three, and since CI runs it before test-tools.ts on one Postgres, test-tools' "no
+// Supabase role" probe met them on every run.
 /** What the sidecars create and the shared reset does not know: dropped before they are applied and at the end. */
 async function dropSidecars() {
   for (const file of SIDECARS) {

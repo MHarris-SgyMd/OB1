@@ -10,8 +10,9 @@
 --   - Smarter re-imports (content_hash change detection)
 --
 -- Prerequisites:
---   - pgvector extension must be enabled (standard on Supabase)
---   - Run this in your Supabase SQL Editor before using --store-conversations
+--   - pgvector extension must be enabled
+--   - Run this against your brain's database before using --store-conversations:
+--       psql "$DATABASE_URL" -f recipes/chatgpt-conversation-import/schema.sql
 -- ============================================
 
 -- ----------------------------------------

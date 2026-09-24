@@ -10,7 +10,7 @@ Every extension produces exactly four files in `extensions/{extension-slug}/`:
 |------|---------|
 | `README.md` | Human-readable setup guide (follows template below) |
 | `metadata.json` | Machine-readable metadata (follows schema below) |
-| `schema.sql` | PostgreSQL tables, indexes, RLS policies |
+| `schema.sql` | PostgreSQL tables, indexes, triggers — no RLS, no GRANT (rule 4 below) |
 | `index.ts` | The MCP server — Bun-native, `bun index.ts` serves it (SMD-1799) |
 
 ---
@@ -210,7 +210,7 @@ server.registerTool(
 4. **Use Zod for input validation.** Every parameter needs `.describe()` for the AI to understand it.
 5. **Every tool must include MCP annotations.** Use `readOnlyHint: true` for retrieval/search/reporting tools. For write tools, use `readOnlyHint: false`, `openWorldHint: false` when the write is scoped to your own tables, and `destructiveHint: false` unless the tool deletes, overwrites, or performs irreversible actions. ChatGPT uses this metadata to distinguish read tools from write actions.
 6. **Minimum tools per extension:** one for adding data, one for retrieving/searching data.
-7. **The service role key bypasses RLS.** If the extension uses RLS and needs user-scoped queries, the tool must accept a `user_id` parameter or derive it from context.
+7. **Every query is scoped by `user_id` in the tool, not by the database.** There is no row policy behind the tables (schema rule 4), so a tool that reads or writes them filters on `DEFAULT_USER_ID` (or a `user_id` argument) itself.
 
 ### Extensions That Need OpenRouter
 

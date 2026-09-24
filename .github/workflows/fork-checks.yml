@@ -604,10 +604,11 @@ jobs:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
           TZ: America/Chicago
 
-      # Every tool of the five extension servers on the SQL shim, called through
+      # Every tool of the eight servers on the SQL shim, called through
       # tools/call against the extensions' own schema.sql files (applied as
-      # they are — no auth.* stub, no Supabase role, since SMD-1810 — and
-      # dropped again at the end) — each read's
+      # they are — no auth.* stub and no Supabase role, since SMD-1810, which
+      # also stopped test-writes.ts above creating the three roles on this
+      # shared database — and dropped again at the end) — each read's
       # filters, each write's row, the embedded relation, the trigger's effect,
       # the message a failure carries (change 77, SMD-1588). A shim gap fails a
       # named assertion here rather than a user's first call; a tool added to a

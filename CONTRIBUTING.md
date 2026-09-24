@@ -194,7 +194,7 @@ Example for an extension:
 ```json
 {
   "name": "Meal Planning",
-  "description": "Recipes, weekly meal plans, and shared shopping lists with RLS and a dedicated shared MCP server.",
+  "description": "Recipes, weekly meal plans, and shared shopping lists with a dedicated shared MCP server.",
   "category": "extensions",
   "author": {
     "name": "Nate B. Jones",

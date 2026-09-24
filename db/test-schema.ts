@@ -6700,8 +6700,9 @@ console.log("\n[49] Every extension and recipe schema applies to a migrated brai
   };
   const treeSql = [...walkSql(join(CONTRIB_DIR, "extensions")), ...walkSql(join(CONTRIB_DIR, "recipes"))].map((p) => p.slice(CONTRIB_DIR.length + 1));
   const treeIsms = treeSql.flatMap((f) => supabaseIsmsIn(readFileSync(join(CONTRIB_DIR, f), "utf8")).map((h) => `${f}:${h.line} ${h.rule}`));
-  assert(treeSql.length >= contribFiles.length + 6 && contribFiles.every((f) => treeSql.includes(f)) && treeIsms.length === 0,
-    `no .sql under extensions/ or recipes/ runs a Supabase-ism, the listed files among ${treeSql.length} (${treeIsms.length}: ${treeIsms.slice(0, 4).join("; ") || "none"})`);
+  const unlistedSql = treeSql.filter((f) => !contribFiles.includes(f));
+  assert(contribFiles.every((f) => treeSql.includes(f)) && unlistedSql.every((f) => f.startsWith("recipes/")) && treeIsms.length === 0,
+    `no .sql under extensions/ or recipes/ runs a Supabase-ism — the ${contribFiles.length} listed files and the ${unlistedSql.length} a brain does not apply as a schema, all of those under recipes/ (${treeIsms.length}: ${treeIsms.slice(0, 4).join("; ") || "none"})`);
 
   const xdb = new PGlite({ extensions: { vector, pg_trgm } });
   for (const f of files) await xdb.exec(subst(readFileSync(join(MIGRATIONS, f), "utf8")));
@@ -6736,7 +6737,7 @@ console.log("\n[49] Every extension and recipe schema applies to a migrated brai
   const objects = grantedObjects([...GROUPS]);
   const presence = (await xdb.query<{ kind: string; name: string; present: boolean }>(grantPresenceSql(objects))).rows;
   const absent = presence.filter((r) => !r.present).map((r) => `${r.kind} ${r.name}`);
-  assert(presence.length === objects.length && objects.length === 56 && absent.length === 0, `every object the two groups name exists once the files are applied (${objects.length}; absent: ${absent.join(", ") || "none"})`);
+  assert(presence.length === objects.length && objects.length === 63 && absent.length === 0, `every object the two groups name exists once the files are applied (${objects.length}; absent: ${absent.join(", ") || "none"})`);
   const listedTables = new Set(grantedTables([...GROUPS]));
   const listedViews = new Set(grantedViews([...GROUPS]));
   const newTables = [...(await tablesNow())].filter((t) => !baseTables.has(t)).sort();
@@ -6745,8 +6746,9 @@ console.log("\n[49] Every extension and recipe schema applies to a migrated brai
     `the files created exactly the 48 tables the two groups list — 18 in extensions, 30 in recipes (created: ${newTables.length}; unlisted: ${newTables.filter((t) => !listedTables.has(t)).join(", ") || "none"})`);
   assert(grantedTables(["extensions"]).length === 18 && grantedTables(["recipes"]).length === 30 && newTables.every((t) => !grantedTables(["community"]).includes(t)),
     "…18 and 30, and none of them a community table under another name");
-  assert(newViews.length === 8 && listedViews.size === 8 && newViews.every((v) => listedViews.has(v)) && newViews.every((v) => v.startsWith("ops_")),
-    `…and exactly the eight ops_* views, the three guarded ones included since their tables are present (${newViews.join(", ")})`);
+  const opsViews = newViews.filter((v) => v.startsWith("ops_")), lintViews = newViews.filter((v) => v.startsWith("lint_"));
+  assert(newViews.length === 15 && listedViews.size === 15 && newViews.every((v) => listedViews.has(v)) && opsViews.length === 8 && lintViews.length === 7,
+    `…and exactly the fifteen views — eight ops_* and seven lint_*, the guarded ones included since their tables and column are present (${newViews.join(", ")})`);
   const newSeqs = [...(await seqsNow())].filter((s) => !baseSeqs.has(s));
   const newLocked = [...(await lockedFnsNow())].filter((f) => !baseLocked.has(f));
   assert(newSeqs.length === 0 && grantedSequences([...GROUPS]).length === 0, `no sequence was created (every id is a uuid or text), so the groups list none (${newSeqs.join(", ") || "none"})`);
@@ -6778,14 +6780,16 @@ console.log("\n[49] Every extension and recipe schema applies to a migrated brai
   assert(before.length === 0, `ungranted, the role's INSERT into every listed table and SELECT from every listed view is refused with 42501 (${listedTables.size + listedViews.size} objects; exceptions: ${before.join(", ") || "none"})`);
   const present = new Set(presence.map((r) => r.name));
   const statements = grantStatements("ob1_contrib", { groups: [...GROUPS], present });
-  assert(statements.length === 56 && statements.every((s) => /^GRANT (SELECT|SELECT, INSERT, UPDATE(, DELETE)?) ON \w+ TO "ob1_contrib";$/.test(s)) &&
-         statements.includes(`GRANT SELECT ON ops_graph_coverage TO "ob1_contrib";`) && statements.includes(`GRANT SELECT, INSERT, UPDATE ON capture_thresholds TO "ob1_contrib";`),
+  assert(statements.length === 63 && statements.every((s) => /^GRANT (SELECT|SELECT, INSERT, UPDATE(, DELETE)?) ON \w+ TO "ob1_contrib";$/.test(s)) &&
+         statements.includes(`GRANT SELECT ON ops_graph_coverage TO "ob1_contrib";`) && statements.includes(`GRANT SELECT ON lint_exact_duplicates TO "ob1_contrib";`) && statements.includes(`GRANT SELECT, INSERT, UPDATE ON capture_thresholds TO "ob1_contrib";`),
     `--grant's statements for the two groups: one per table and view (${statements.length}), no sequence or function among them, the views granted as tables are, adaptive-capture's three verbs`);
   for (const s of statements) await xdb.exec(s);
   const after = [...(await codes())].filter(([, c]) => c === "42501").map(([n]) => n);
   assert(after.length === 0, `granted both groups, no listed table refuses the role's INSERT and no view its SELECT (still refused: ${after.join(", ") || "none"})`);
   const verify = (await xdb.query<{ held: boolean; privilege: string; name: string }>(grantVerifySql("ob1_contrib", mergedGrants([...GROUPS], present)))).rows;
-  assert(verify.length === 1 + 18 * 4 + 26 * 4 + 4 * 3 + 8 && verify.every((r) => r.held),
+  // One row per privilege plus the schema's USAGE: 18 + 26 four-verb tables, adaptive-capture's four at three, and one SELECT per view.
+  const fourVerb = listedTables.size - 4;
+  assert(fourVerb === 44 && verify.length === 1 + fourVerb * 4 + 4 * 3 + listedViews.size && verify.every((r) => r.held),
     `grantVerifySql holds every privilege of both groups (${verify.length} rows; not held: ${verify.filter((r) => !r.held).map((r) => `${r.privilege} on ${r.name}`).join(", ") || "none"})`);
   // Upstream's privileges, kept where they were narrower: adaptive-capture's
   // API role could not DELETE, so the granted role cannot either — the row

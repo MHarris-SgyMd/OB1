@@ -151,4 +151,4 @@ CREATE TRIGGER update_applications_updated_at
 
 -- Sample data (optional - uncomment to insert examples)
 -- INSERT INTO companies (user_id, name, industry, size, remote_policy) VALUES
--- (auth.uid(), 'TechCorp', 'Enterprise Software', 'enterprise', 'remote');
+-- ('<your DEFAULT_USER_ID>'::uuid, 'TechCorp', 'Enterprise Software', 'enterprise', 'remote');

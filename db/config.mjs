@@ -1812,14 +1812,16 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "interviews",            privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
     Object.freeze({ table: "job_contacts",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
   ]),
-  // The recipe SQL files that create tables or views — eight files, applied by
-  // hand as each README says (SMD-1810). Upstream granted these TO
-  // service_role (adaptive-capture's four TO authenticated), ENABLEd RLS on
-  // most with policies on auth.uid(), and REVOKEd ob-graph's three functions
-  // FROM anon and authenticated; all cut, the REVOKEs too (none is SECURITY
-  // DEFINER, and there is no PostgREST here to expose them), so EXECUTE stays
-  // PUBLIC's and no function row is needed. Every id is a uuid or text: no
-  // sequence rows. The privileges are upstream's own for its roles.
+  // The recipe SQL files a brain applies as a schema — nine files creating
+  // tables or views, applied by hand as each README says (SMD-1810; the list
+  // is test-support's CONTRIB_SCHEMA_FILES). Upstream granted most of these
+  // TO service_role (adaptive-capture's four TO authenticated; lint-sweep's
+  // views nothing), ENABLEd RLS on most with policies on auth.uid(), and
+  // REVOKEd ob-graph's three functions FROM anon and authenticated; all cut,
+  // the REVOKEs too (none is SECURITY DEFINER, and there is no PostgREST here
+  // to expose them), so EXECUTE stays PUBLIC's and no function row is needed.
+  // Every id is a uuid or text: no sequence rows. The privileges are
+  // upstream's own for its roles.
   recipes: Object.freeze([
     // recipes/adaptive-capture-classification (upstream's SELECT, INSERT, UPDATE to its API role, kept — the recipe deletes nothing)
     Object.freeze({ table: "correction_learnings",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "recipes/adaptive-capture-classification" }),
@@ -1844,6 +1846,14 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "life_engine_briefings", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/life-engine" }),
     Object.freeze({ table: "life_engine_evolution", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/life-engine" }),
     Object.freeze({ table: "life_engine_state",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/life-engine" }),
+    // recipes/lint-sweep/views.sql (seven read-only views over thoughts; the last two are guarded — on content_fingerprint and thought_entities, both the migrations' — so all seven exist on a migrated brain)
+    Object.freeze({ view: "lint_orphans_by_tag",           privileges: Object.freeze(["SELECT"]), since: "recipes/lint-sweep" }),
+    Object.freeze({ view: "lint_over_tagged",              privileges: Object.freeze(["SELECT"]), since: "recipes/lint-sweep" }),
+    Object.freeze({ view: "lint_empty_content",            privileges: Object.freeze(["SELECT"]), since: "recipes/lint-sweep" }),
+    Object.freeze({ view: "lint_very_long",                privileges: Object.freeze(["SELECT"]), since: "recipes/lint-sweep" }),
+    Object.freeze({ view: "lint_low_signal",               privileges: Object.freeze(["SELECT"]), since: "recipes/lint-sweep" }),
+    Object.freeze({ view: "lint_exact_duplicates",         privileges: Object.freeze(["SELECT"]), since: "recipes/lint-sweep" }),
+    Object.freeze({ view: "lint_high_importance_isolated", privileges: Object.freeze(["SELECT"]), since: "recipes/lint-sweep" }),
     // recipes/ob-graph
     Object.freeze({ table: "graph_nodes", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/ob-graph" }),
     Object.freeze({ table: "graph_edges", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/ob-graph" }),

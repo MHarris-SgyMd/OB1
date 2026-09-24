@@ -69,5 +69,5 @@ CREATE TRIGGER update_household_items_updated_at
 
 -- Sample data (optional - uncomment to insert examples)
 -- INSERT INTO household_items (user_id, name, category, location, details, notes) VALUES
--- (auth.uid(), 'Living Room Paint', 'paint', 'Living Room', '{"brand": "Sherwin Williams", "color": "Sea Salt", "code": "SW 6204"}', 'Purchased 2 gallons in March 2025'),
--- (auth.uid(), 'Dishwasher', 'appliance', 'Kitchen', '{"brand": "Bosch", "model": "SHPM65Z55N", "serial": "FD12345678", "purchase_date": "2024-06-15"}', 'Still under warranty until June 2026');
+-- ('<your DEFAULT_USER_ID>'::uuid, 'Living Room Paint', 'paint', 'Living Room', '{"brand": "Sherwin Williams", "color": "Sea Salt", "code": "SW 6204"}', 'Purchased 2 gallons in March 2025'),
+-- ('<your DEFAULT_USER_ID>'::uuid, 'Dishwasher', 'appliance', 'Kitchen', '{"brand": "Bosch", "model": "SHPM65Z55N", "serial": "FD12345678", "purchase_date": "2024-06-15"}', 'Still under warranty until June 2026');
