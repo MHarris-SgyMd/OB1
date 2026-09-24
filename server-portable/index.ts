@@ -2125,6 +2125,11 @@ const HEALTH_METHOD_NOT_ALLOWED_HEADERS = { ...corsHeaders, Allow: HEALTH_ALLOWE
 // cache) instead of dying.
 const JSON_RPC_UNAUTHORIZED_CODE = -32001;
 
+// A request refused for now, to be retried: the agent registry could not
+// confirm the key in time (agents.ts's `busy`). Its own code, in the same
+// implementation-defined range, so a client can tell "retry" from "denied".
+const JSON_RPC_BUSY_CODE = -32003;
+
 /**
  * The ids in `ids` that name a thought, or undefined when none does — the one
  * rule for trimming a capture-only key's `derived_from` before the write and
@@ -2148,6 +2153,14 @@ const UNAUTHORIZED_MESSAGE = "Unauthorized: missing or invalid authentication.";
  */
 const REVOKED_MESSAGE =
   "Unauthorized: this access key has been revoked. Its history is retained; request a new key.";
+
+/**
+ * The registry is locked (a migration, a transaction holding the key's row)
+ * and has not confirmed the key. Says what to do — retry — and nothing about
+ * the key, which may be valid or revoked.
+ */
+const BUSY_MESSAGE =
+  "Temporarily unavailable: the agent registry is busy and could not confirm this key. Retry in a few seconds.";
 
 /**
  * Read the request body as text. This CONSUMES the body: both callers return a
@@ -2194,12 +2207,13 @@ function extractJsonRpcId(bodyText: string | null): string | number | null {
  */
 function unauthorizedResponse(
   id: string | number | null,
-  message: string = UNAUTHORIZED_MESSAGE
+  message: string = UNAUTHORIZED_MESSAGE,
+  code: number = JSON_RPC_UNAUTHORIZED_CODE
 ): Response {
   const body = {
     jsonrpc: "2.0",
     error: {
-      code: JSON_RPC_UNAUTHORIZED_CODE,
+      code,
       message,
     },
     id,
@@ -2291,7 +2305,9 @@ app.get("*", async (c, next) => {
   // what an unknown key gets (review pass 2: a revoked key read the whole
   // record while the registry's tables were locked); one that answers that it
   // cannot reach the database (agents.ts: not a refusal) lets the record
-  // through with the database's error.
+  // through with the database's error. A registry whose lock outlasts the
+  // lookup's retries answers `busy` for the same reason (agents.ts), and so is
+  // `ok` here too.
   const info = readBrainInfo("health");
   let timer: ReturnType<typeof setTimeout> | undefined;
   const identity = await Promise.race([
@@ -2299,7 +2315,7 @@ app.get("*", async (c, next) => {
     new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), HEALTH_DEADLINE_MS); }),
   ]);
   clearTimeout(timer);
-  if (!identity || identity.status === "revoked") return c.text("ok", 200, corsHeaders);
+  if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
   return c.json(await info, 200, corsHeaders);
 });
 
@@ -2507,16 +2523,20 @@ app.on(MCP_METHODS, "*", async (c) => {
    * likeliest thing anyone ever revokes.
    *
    * Cached, so the steady state adds no query; see agents.ts for what happens
-   * when the registry cannot answer, which is deliberately NOT a refusal.
+   * when the registry cannot answer, which is deliberately NOT a refusal —
+   * except when it is locked (`busy`, a refusal for now), or for a key whose
+   * revocation this process has already read.
    */
   const identity = await agents().resolve(db(), principal);
-  if (identity.status === "revoked") {
+  if (identity.status === "revoked" || identity.status === "busy") {
     const bodyText = await readBodyText(c.req.raw);
     settled = true;
-    return unauthorizedResponse(extractJsonRpcId(bodyText), REVOKED_MESSAGE);
+    return identity.status === "revoked"
+      ? unauthorizedResponse(extractJsonRpcId(bodyText), REVOKED_MESSAGE)
+      : unauthorizedResponse(extractJsonRpcId(bodyText), BUSY_MESSAGE, JSON_RPC_BUSY_CODE);
   }
   principal.agentId = identity.agentId;
-  if (identity.status === "ok") principal.agentUnresolved = identity.unresolved;
+  principal.agentUnresolved = identity.unresolved;
 
   // The label, read through Hono's request, which caches the body for the
   // transport's own read of it — the same text, the same rejection: a body
