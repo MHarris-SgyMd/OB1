@@ -214,7 +214,8 @@
  *      `-latest` label in any case or size, no expression — and pins every
  *      `uses:` (a step's, or a job's reusable workflow) to a full commit SHA
  *      with its tag in a trailing `# vX.Y.Z` comment, a local `./` path, or a
- *      `docker://` image by sha256 digest; .github/dependabot.yml keeps a
+ *      `docker://` image by sha256 digest; .github/dependabot.yml is a
+ *      `version: 2` file, every entry on a schedule Dependabot accepts, with a
  *      `github-actions` update over `/` that can open a PR, so the pins move.
  *      The structure is read with Bun.YAML, the tag comment from the value's
  *      own line, block scalars skipped; the rules are workflowPinProblems
@@ -4637,7 +4638,7 @@ function workflowPinProblems(file: string, text: string): [string, string][] {
       for (const label of labels) {
         if (typeof label !== "string") problems.push([file, `job ${key}'s runs-on ${JSON.stringify(runsOn)} carries a label check 23 cannot read (SMD-2093)`]);
         else if (label.includes("${{")) problems.push([file, `job ${key} picks its runner by an expression (${label}) — check 23 cannot tell whether it resolves to a -latest image; name the image (SMD-2093)`]);
-        else if (MOVING_LABEL.test(label)) problems.push([file, `job ${key} runs on ${label}, which GitHub moves to a new image on its own date — name the image (ubuntu-24.04), and move to the next one in a PR of its own (SMD-2093)`]);
+        else if (MOVING_LABEL.test(label)) problems.push([file, `job ${key} runs on ${label}, which GitHub moves to a new image on its own date — name the image (ubuntu-24.04, macos-15, windows-2025), and move to the next one in a PR of its own (SMD-2093)`]);
       }
     }
     if (j.uses !== undefined) holdUses(key, j.uses);
@@ -4669,19 +4670,26 @@ function dependabotProblems(text: string | null): [string, string][] {
   };
   const entries = Array.isArray(updates) ? updates.filter(covers) : [];
   if (!entries.length) return [[DEPENDABOT, "has no `github-actions` update over `/` — nothing moves the workflows' SHA pins, so they stay on the commit they were pinned at (SMD-2093)"]];
-  // Every entry, not only the covering one: one unschedulable entry and Dependabot refuses the file whole.
-  const scheduled = (e: unknown) => {
-    const s = e && typeof e === "object" ? (e as { schedule?: unknown }).schedule : null;
+  // Every entry, not only the covering one: one unschedulable entry and Dependabot refuses the file whole. An entry in
+  // a multi-ecosystem group takes the group's schedule instead of its own.
+  const validSchedule = (s: unknown) => {
     if (!s || typeof s !== "object") return false;
     const { interval, cronjob } = s as { interval?: unknown; cronjob?: unknown };
     return typeof interval === "string" && DEPENDABOT_INTERVALS.includes(interval) && (interval !== "cron" || typeof cronjob === "string");
+  };
+  const groups = (doc as { "multi-ecosystem-groups"?: unknown })["multi-ecosystem-groups"];
+  const scheduled = (e: unknown) => {
+    if (!e || typeof e !== "object") return false;
+    const { schedule, "multi-ecosystem-group": group } = e as { schedule?: unknown; "multi-ecosystem-group"?: unknown };
+    if (typeof group === "string" && groups && typeof groups === "object") return validSchedule((groups as Record<string, { schedule?: unknown } | null>)[group]?.schedule) || validSchedule(schedule);
+    return validSchedule(schedule);
   };
   if (!(updates as unknown[]).every(scheduled)) return [[DEPENDABOT, `has an update with no schedule Dependabot accepts (\`schedule.interval\` one of ${DEPENDABOT_INTERVALS.join(", ")}, and a \`cronjob\` for cron) — Dependabot refuses the whole file, and nothing moves the pins (SMD-2093)`]];
   // An entry that can open no PR is no entry: a limit of 0, or an ignore of every dependency at every version — a `*`
   // rule with `update-types` or `versions` holds back only those (no majors, say), and the rest still open PRs.
   const ignoresAll = (r: unknown) => !!r && typeof r === "object" && (r as { "dependency-name"?: unknown })["dependency-name"] === "*" && !("update-types" in r) && !("versions" in r);
   const opens = (e: Update) => e["open-pull-requests-limit"] !== 0 && !(Array.isArray(e.ignore) && e.ignore.some(ignoresAll));
-  if (!entries.some((e) => scheduled(e) && opens(e))) return [[DEPENDABOT, "has a `github-actions` update over `/` that can open no PR (`open-pull-requests-limit: 0`, or an ignore of `*` at every version) — the pins stay where they are (SMD-2093)"]];
+  if (!entries.some(opens)) return [[DEPENDABOT, "has a `github-actions` update over `/` that can open no PR (`open-pull-requests-limit: 0`, or an ignore of `*` at every version) — the pins stay where they are (SMD-2093)"]];
   return [];
 }
 const PIN_SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1";
@@ -4702,7 +4710,9 @@ const PIN_ACCEPTED: [string, string][] = [
   ["a workflow with CRLF line ends", PIN_PROBE("ubuntu-24.04", PIN_STEP).replace(/\n/g, "\r\n")],
   ["a bare copy of the pin in an earlier nested `- - |` item", PIN_PROBE("ubuntu-24.04", `- uses: ./.github/actions/local\n        with:\n          args:\n            - - |\n                uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
   ["a bare copy of the pin after a blank line in an earlier run body", PIN_PROBE("ubuntu-24.04", `- run: |\n          echo one\n\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
-  ["an anchored step", PIN_PROBE("ubuntu-24.04", `- &checkout uses: actions/checkout@${PIN_SHA} # v7.0.1`)],
+  ["a `uses:` key with an anchor", PIN_PROBE("ubuntu-24.04", `- &checkout uses: actions/checkout@${PIN_SHA} # v7.0.1`)],
+  ["a step whose folded `name: >-` precedes its `uses:`", PIN_PROBE("ubuntu-24.04", `- name: >-\n          Check out\n        uses: actions/checkout@${PIN_SHA} # v7.0.1`)],
+  ["a bare copy of the pin in an earlier tagged run body", PIN_PROBE("ubuntu-24.04", `- run: !!str |\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
   ["a tag comment with no v, as an action whose tags carry none", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA} # 7.0.1`)],
   ["a runner group alone, which names no image", PIN_PROBE("{ group: big-runners }", PIN_STEP)],
   ["a runner group with a named image", PIN_PROBE("{ group: big-runners, labels: [ubuntu-24.04] }", PIN_STEP)],
@@ -4735,6 +4745,7 @@ const PIN_MUTANTS: [string, string, string][] = [
   // A run body is skipped: its commented copy of the pin lends the bare step below it nothing.
   ["a bare step under a run body carrying the commented pin", PIN_PROBE("ubuntu-24.04", `- run: |\n          uses: actions/checkout@${PIN_SHA} # v7.0.1\n      - uses: actions/checkout@${PIN_SHA}`), "no `# vX.Y.Z` comment"],
   ["no jobs at all", "name: probe\non: push\n", "no `jobs:` map"],
+  ["a `uses:` that is not a string", PIN_PROBE("ubuntu-24.04", "- uses: 3"), "not a string"],
   // Block scalars the skip must know as blocks: the bare step then claims its own line.
   ["a bare step under a `- |` item carrying the commented pin", PIN_PROBE("ubuntu-24.04", `- uses: ./.github/actions/local\n        with:\n          args:\n            - |\n              uses: actions/checkout@${PIN_SHA} # v7.0.1\n      - uses: actions/checkout@${PIN_SHA}`), "comment naming the tag"],
   ["a bare step under an anchored run body carrying the commented pin", PIN_PROBE("ubuntu-24.04", `- run: &body |\n          uses: actions/checkout@${PIN_SHA} # v7.0.1\n      - uses: actions/checkout@${PIN_SHA}`), "comment naming the tag"],
@@ -4761,6 +4772,8 @@ function checkWorkflowPins() {
     ["a github-actions update over a directories list naming /", DEPENDABOT_OK.replace("directory: /", "directories: [/]")],
     ["an ignore of every action's majors alone, which still opens PRs", `${DEPENDABOT_OK}    ignore:\n      - dependency-name: "*"\n        update-types: ["version-update:semver-major"]\n`],
     ["a cron schedule with its cronjob", DEPENDABOT_OK.replace("interval: weekly", "interval: cron\n      cronjob: \"0 6 * * 1\"")],
+    ["an ignore of every action at some versions alone, which still opens PRs", `${DEPENDABOT_OK}    ignore:\n      - dependency-name: "*"\n        versions: [">= 8"]\n`],
+    ["an entry scheduled by its multi-ecosystem group", `${DEPENDABOT_OK}  - package-ecosystem: npm\n    directory: /scripts\n    multi-ecosystem-group: infra\nmulti-ecosystem-groups:\n  infra:\n    schedule:\n      interval: weekly\n`],
   ] as const) if (dependabotProblems(text).length) fail(SELF, `check 23 refuses ${why} (its own probe)`);
   for (const [why, text, says] of [
     ["no file", null, "missing"],
