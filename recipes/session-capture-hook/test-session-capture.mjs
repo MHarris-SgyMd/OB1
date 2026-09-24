@@ -930,6 +930,8 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   assert(pointerFor(S, me, null) === uuid(77) && pointerFor("s-none", me, null) === undefined && pointerFor("s-none", me, { thought_id: uuid(78), summary_at: older }) === uuid(78), "…no state: the owed payload; nothing landed: the state alone, or no pointer");
   writeFileSync(join(STATE, "pending", named(now - 1500, S)), JSON.stringify({ session_id: S, captured_id: uuid(79) }));
   assert(pointerFor(S, me, { thought_id: uuid(78), summary_at: iso(now - 100_000) }) === uuid(79), "…a landed payload with no prepared_at ranks by the millisecond in its name");
+  assert(pointerFor(S, me, { thought_id: uuid(78), summary_at: iso(now - 100_000) }, { id: uuid(70), ms: now - 200_000 }) === uuid(79) && pointerFor(S, me, { thought_id: uuid(78), summary_at: iso(now - 100_000) }, { id: uuid(70), ms: now - 1000 }) === uuid(70) && pointerFor("s-none", me, null, { id: uuid(70), ms: now - 1000 }) === uuid(70),
+    "…what the run itself landed ranks by its time like the rest — the last resort when nothing else knows, not a trump (eighth review pass)");
   writeFileSync(join(STATE, "pending", named(now + 3_600_000, S)), JSON.stringify({ session_id: S, captured_id: uuid(80), prepared_at: iso(now + 3_600_000) }));
   assert(pointerFor(S, named(now + 3_700_000, S), { thought_id: uuid(78), summary_at: iso(now - 100_000) }) === uuid(78), "…a payload written by a clock an hour ahead — prepared_at and name alike — ranks last and does not outrank the state (fifth review pass)");
   // An older checkpoint of a session whose END has landed in another child's
@@ -1108,8 +1110,8 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   writeFileSync(join(holder, `${Date.now() - 5000}-0-aaaa-s_dot.json`), JSON.stringify({ session_id: "s_dot" })); // the stranger's, older
   writeFileSync(join(holder, `${Date.now() + 5000}-0-aaaa-s_dot.json`), JSON.stringify({ session_id: "s_dot" })); // the stranger's, newer
   writeFileSync(join(holder, `${Date.now() + 6000}-0-aaaa-s_dot.json`), "{"); // unreadable, newer
-  assert(aheadOf("s.dot", dotMine).length === 1 && aheadOf("s_dot", dotMine).length === 3 && newerInFlight("s.dot", dotMine) === false && newerInFlight("s_dot", dotMine) === true,
-    "in a live child's hands the stranger's older payloads are not ahead of this session — the unreadable one is, the safe side — and its newer one is not newer in flight, nor is the unreadable one, the safe side; for their own session all count but the unreadable newer");
+  assert(aheadOf("s.dot", dotMine).length === 1 && aheadOf("s_dot", dotMine).length === 2 && landedBefore("s_dot", dotMine)?.id === uuid(65) && newerInFlight("s.dot", dotMine) === false && newerInFlight("s_dot", dotMine) === true,
+    "in a live child's hands the stranger's older payloads are not ahead of this session — the unreadable one is, the safe side — and its newer one is not newer in flight, nor is the unreadable one, the safe side; for their own session the unposted older ones are ahead, the landed one is not (its bookkeeping alone is outstanding, and the pointer reads it), all but the unreadable count as newer");
   rmSync(holder, { recursive: true, force: true });
   // Two children finishing one session's owed bookkeepings at once write the
   // state together: each writes beside under its own pid and renames, so
@@ -1126,6 +1128,51 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   assert(ra.code === 0 && rb.code === 0 && !/bookkeeping failed/.test(logText()) && readState("s-race")?.thought_id === uuid(64) && readdirSync(join(STATE, "pending")).length === 0 && readdirSync(STATE).filter((f) => f.endsWith(".tmp") && f !== "s-race.json.tmp").length === 0,
     `two children finish one session's owed bookkeepings together without a failed rename, each under its own temp name; the state names the newer (${(logText().match(/bookkeeping failed/g) ?? []).length} failure(s))`);
   rmSync(join(STATE, "s-race.json.tmp"), { recursive: true, force: true });
+  // The landed payload's own id write fails — the temp path taken, as a full
+  // disk would fail it — so it goes back under pending/ without its id and
+  // the state is never written: the end that stepped aside for it, followed
+  // up in the same run, still supersedes what the run landed, and the next
+  // run drops the id-less payload as obsolete instead of posting it again
+  // (eighth review pass; the seventh had declined this as unreachable).
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const idO = prepare({ session_id: "s-idless", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" }); await sleep(2);
+  const idSlow = prepare({ session_id: "s-idless-beside", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" }); await sleep(2);
+  const idEnd = prepare({ session_id: "s-idless", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const idEndAside = join(TMP, basename(idEnd.payloadPath));
+  renameSync(idEnd.payloadPath, idEndAside);
+  mkdirSync(join(STATE, "inflight", String(process.pid), `${basename(idO.payloadPath)}.${process.pid}.tmp`), { recursive: true }); // the temp path, taken
+  const idRunning = postPending(cfg);
+  await sleep(600);
+  renameSync(idEndAside, idEnd.payloadPath); // the end reaches pending/ while the run posts the slow one
+  const idRun = await idRunning;
+  const idO_ = idRun.find((x) => x.file === idO.payloadPath), idEnd_ = idRun.find((x) => x.file === idEnd.payloadPath);
+  assert(idO_?.ok && /bookkeeping deferred/.test(idO_.note) && JSON.parse(readFileSync(idO.payloadPath, "utf8")).captured_id === undefined && idEnd_?.ok && received.length === 3 && received[2].args.supersedes === uuid(1001) && readState("s-idless")?.thought_id === uuid(1003),
+    `the end followed up supersedes what the run landed though the landed payload carries no id (${received[2]?.args.supersedes}; ${idO_?.note})`);
+  rmSync(join(STATE, "inflight", String(process.pid)), { recursive: true, force: true });
+  const idNext = await postPending(cfg);
+  assert(idNext.find((x) => x.file === idO.payloadPath)?.obsolete && received.length === 3 && readdirSync(join(STATE, "pending")).length === 0, "…and the next run drops the id-less payload as obsolete beside the state, not posting it again");
+  void idSlow;
+  // …and it is a last resort, not a trump: a sibling landing a newer summary
+  // of the session meanwhile writes the state, and the state's thought — later
+  // than what this run landed, earlier than the end — is the pointer.
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const id2O = prepare({ session_id: "s-idless2", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" }); await sleep(3);
+  const id2Slow = prepare({ session_id: "s-idless2-beside", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" }); await sleep(3);
+  const id2End = prepare({ session_id: "s-idless2", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const id2EndAside = join(TMP, basename(id2End.payloadPath));
+  renameSync(id2End.payloadPath, id2EndAside);
+  mkdirSync(join(STATE, "inflight", String(process.pid), `${basename(id2O.payloadPath)}.${process.pid}.tmp`), { recursive: true });
+  const id2Running = postPending(cfg);
+  await sleep(600);
+  writeFileSync(join(STATE, "s-idless2.json"), JSON.stringify({ thought_id: uuid(88), fingerprint: "sib", captured_at: iso(Date.now()), summary_at: iso(Date.parse(id2O.payload.prepared_at) + 1) }));
+  renameSync(id2EndAside, id2End.payloadPath);
+  const id2Run = await id2Running;
+  assert(id2Run.find((x) => x.file === id2End.payloadPath)?.ok && received.length === 3 && received[2].args.supersedes === uuid(88),
+    `a sibling's newer state outranks what the run landed: the end supersedes the state's thought (${received[2]?.args.supersedes})`);
+  rmSync(join(STATE, "inflight", String(process.pid)), { recursive: true, force: true });
+  void id2Slow;
   // A temp file a child left mid-write in its claim directory is no payload:
   // the sweep unlinks it rather than moving it under pending/ for ever.
   const deadDir = join(STATE, "inflight", String(gone0));

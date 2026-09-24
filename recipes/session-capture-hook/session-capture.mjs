@@ -937,9 +937,19 @@ function recordedAfter(state, preparedAt) {
 }
 
 /**
+ * What a payload file says of itself, or `undefined` when it cannot be read
+ * (mid-write, or gone) — then each reader takes the side that costs least if
+ * wrong. A name is matched by a sanitised tail two ids can share ("a.b" and
+ * "a_b"), so the file says whose it is (seventh review pass: the sixth had
+ * fixed one reader of five); and it says whether it has landed.
+ */
+const payloadOf = (p) => { try { return JSON.parse(readFileSync(p.path, "utf8")) ?? undefined; } catch { return undefined; } };
+/**
  * The claims a payload steps aside for: payloads of its session that another
- * LIVE child holds under inflight/<pid>/ and that are OLDER than it — a name
- * leads with the millisecond it was prepared, so the names order them. A
+ * LIVE child holds under inflight/<pid>/, OLDER than it — a name leads with
+ * the millisecond it was prepared, so the names order them — and not yet
+ * landed: one that carries its `captured_id` is over, only its bookkeeping
+ * outstanding, and `landedBefore` reads it (eighth review pass). A
  * compaction's child still posting when the session's end spawned its own
  * (`/compact` then `/exit`; an auto-compaction on the last turn) left the
  * end's payload pointing at nothing — the checkpoint had not landed — so the
@@ -949,15 +959,11 @@ function recordedAfter(state, preparedAt) {
  * A child that is gone holds no one (the next run's sweep returns its claim);
  * only the NEWER of two steps aside, so two children never wait on each other.
  */
-/**
- * Whether a payload file is the session's own: a name is matched by a
- * sanitised tail two ids can share ("a.b" and "a_b"), so the file says. A
- * file that cannot be read (mid-write, or gone) says nothing — `undefined`,
- * and each reader takes the side that costs least if wrong (seventh review
- * pass: the sixth had fixed one reader of five).
- */
-const ownedBy = (p, sessionId) => { try { return JSON.parse(readFileSync(p.path, "utf8"))?.session_id === sessionId; } catch { return undefined; } };
-export const aheadOf = (sessionId, name) => sessionPayloads(sessionId, { pending: false }).filter((p) => p.pid !== process.pid && p.name.localeCompare(name) < 0 && isAlive(p.pid) && ownedBy(p, sessionId) !== false); // unreadable: ahead, the safe side
+export const aheadOf = (sessionId, name) => sessionPayloads(sessionId, { pending: false }).filter((p) => {
+  if (p.pid === process.pid || p.name.localeCompare(name) >= 0 || !isAlive(p.pid)) return false;
+  const j = payloadOf(p);
+  return j === undefined || (j.session_id === sessionId && !j.captured_id); // unreadable: ahead, the safe side
+});
 /**
  * Whether a NEWER payload of the session is in another live child's hands:
  * the older one is then obsolete — a summary is cumulative, the newer covers
@@ -965,7 +971,7 @@ export const aheadOf = (sessionId, name) => sessionPayloads(sessionId, { pending
  * thought (fourth review pass: a sweep returned an older payload to pending/
  * after the newer's run had looked, a sibling claimed it, and both posted).
  */
-export const newerInFlight = (sessionId, name) => sessionPayloads(sessionId, { pending: false }).some((p) => p.pid !== process.pid && p.name.localeCompare(name) > 0 && isAlive(p.pid) && ownedBy(p, sessionId) === true); // unreadable: not a reason to drop a payload
+export const newerInFlight = (sessionId, name) => sessionPayloads(sessionId, { pending: false }).some((p) => p.pid !== process.pid && p.name.localeCompare(name) > 0 && isAlive(p.pid) && payloadOf(p)?.session_id === sessionId); // unreadable: not a reason to drop a payload
 
 /**
  * The session's landed payloads whose bookkeeping is still owed — the post
@@ -1007,9 +1013,10 @@ const momentOf = (iso, fallbackMs) => { const t = pastMs(iso); return Number.isN
  * state, or failed and left the payload owed under pending/ — the per-run map
  * SMD-1298's sixth pass added for it was the third spelling of the same fact.
  */
-export function pointerFor(sessionId, name, state) {
+export function pointerFor(sessionId, name, state, landedHere) {
   // A state whose time is in the future or unreadable STANDS (its moment is now): it is the pointer's normal source, and a clock that was wrong is no reason to rank an owed payload — the exception — over it (fourth review pass).
-  const cands = [state?.thought_id && { id: state.thought_id, ms: momentOf(state.summary_at ?? state.captured_at, Date.now()) }, landedBefore(sessionId, name)].filter(Boolean);
+  // What this run itself landed is the last resort: when the landed payload's own id write failed — the disk full, the temp path taken — the file went back to pending/ without it, the state was never written, and a follow-up of the session would post pointerless while the next run posted the landed payload again (eighth review pass; the first pass had dropped this map as redundant, and it is, but for that fault).
+  const cands = [state?.thought_id && { id: state.thought_id, ms: momentOf(state.summary_at ?? state.captured_at, Date.now()) }, landedBefore(sessionId, name), landedHere].filter(Boolean);
   cands.sort((a, b) => b.ms - a.ms);
   return cands[0]?.id;
 }
@@ -1049,6 +1056,7 @@ export async function postPending(cfg, own) {
   const outcomes = [];
   pruneDead();
   const clearedSessions = new Set();
+  const landedHere = new Map(); // session → what this run landed: the pointer's last resort
   const bounced = new Set(); // files the follow-up found to be another session's: read once
   // After the run: payloads left under pending/ of every session whose claim
   // this run cleared — landed, dropped as obsolete beside a newer one, or
@@ -1133,7 +1141,7 @@ export async function postPending(cfg, own) {
         // got to it first, in which case that run posts it and this one says so.
         let why = `the session's earlier post is in flight (pid ${ahead[0].pid}); ${moved ? "kept under pending/ for the run that lands it" : "pending/ refused the move, so it stays in this run's hands until the run ends"}`;
         if (moved && !retaken && !aheadOf(payload.session_id, basename(here)).length) {
-          try { renameSync(home, here); queue.unshift({ home, here, payload, retaken: true }); continue; } catch { why = "the session's earlier post has landed and that run has taken this payload up"; }
+          try { renameSync(home, here); queue.unshift({ home, here, payload, retaken: true }); continue; } catch { why = "the session's earlier post has cleared and its run has taken this payload up"; }
         }
         log(`deferred session=${payload.session_id} — ${why}`);
         outcomes.push({ file, ok: false, deferred: true, error: `deferred: ${why}` });
@@ -1161,7 +1169,7 @@ export async function postPending(cfg, own) {
       // prepare time is stale the moment the state names another id — a payload
       // prepared before its predecessor landed pointed past it, and two
       // summaries stood (seventh and eighth review passes).
-      if (!payload.captured_id) payload.supersedes = pointerFor(payload.session_id, basename(here), state) ?? payload.supersedes;
+      if (!payload.captured_id) payload.supersedes = pointerFor(payload.session_id, basename(here), state, landedHere.get(payload.session_id)) ?? payload.supersedes;
       // A pointer the server has kept failing on — its registry away for good,
       // its audit table unreadable — must not take the summary down with it:
       // on the last attempt it is dropped and the summary lands (seventh review
@@ -1210,6 +1218,7 @@ export async function postPending(cfg, own) {
       }
       const { id } = posted;
       clearedSessions.add(payload.session_id);
+      landedHere.set(payload.session_id, { id, ms: momentOf(payload.prepared_at, 0) });
       const note = [posted.note, lastResort].filter(Boolean).join("; ");
       // The state is read AGAIN after the post: a sibling run may have landed a
       // newer summary of the session meanwhile, and a judgement made before the
