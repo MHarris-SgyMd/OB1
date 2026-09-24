@@ -5323,8 +5323,8 @@ in the path.
   `organization`, and 50 each of `tool`, `topic` and `project`;
 - two blind Claude graders worked from the name and a window of the thought,
   without the extractor's type or any tier output;
-- they agree on validity for 91% (kappa 0.82) and on the type for 90%
-  (kappa 0.83);
+- they agree on validity for 91% (kappa 0.82), and on the type for 75 of the
+  78 mentions both call valid (kappa 0.94);
 - 81 of 201 are valid. By type, 42 of the 50 topics, 37 of the 50 tools,
   15 of the 50 projects, and 8 of the 11 places are invalid.
 - The invalid ones are mostly code identifiers named as entities (tables,
@@ -5334,88 +5334,111 @@ in the path.
 ```sh
 podman run --rm --network open-brain_default --env-file deploy/.env \
   -e OB1_JEV_BASE_URL=http://host.containers.internal:8020 -e OB1_JEV_LOCAL=1 \
-  -v "$PWD":/repo:ro -w /repo/evals oven/bun:1.4.0-alpine sh -c \
-  'export DATABASE_URL="postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/openbrain"; exec bun eval-jev-gate.ts --cache /tmp/jev-gate.json'
+  -v "$PWD":/repo:ro -v "$HOME/.cache/ob1":/cache -w /repo/evals oven/bun:1.4.0-alpine sh -c \
+  'export DATABASE_URL="postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/openbrain"; exec bun eval-jev-gate.ts --cache /cache/jev-gate.json'
 ```
 
-(`--cache` keeps the answers, probabilities and logits only, by what was
-asked, so a re-analysis makes no tier pass. `--dump-sample` writes the grading
-sample, the brain's text, so write it outside the tree.)
+`--cache` keeps the tier's answers on the host, as probabilities and logits
+only. They are keyed by the model's provenance and by what was asked, so a
+re-analysis makes no tier pass and another model is asked afresh.
+`--dump-sample` writes the grading sample, which is the brain's text, so write
+it outside the tree.
 
 On the test split (90 mentions, 52 invalid), with the threshold, temperature
-and Platt refit taken from dev:
+and Platt refit taken from dev, and the Brier skill measured against a constant
+at dev's base rate:
 
-| arm | AUROC | ECE served | Brier / ECE, Platt | balanced accuracy | rejects invalid | keeps valid |
-| --- | --- | --- | --- | --- | --- | --- |
-| B1 (SMD-1935's gate) | — | — | — | 0.545 | 11.5% | 97.4% |
-| v1: SMD-2050's validity framing | 0.586 | 0.114 | 0.242 / 0.052 | 0.562 | 51.9% | 60.5% |
-| **v2**: validity in the prompt's words | **0.658** | 0.136 | 0.229 / 0.118 | **0.645** | 71.2% | 57.9% |
-| claim: "X is <the extractor's type>" | 0.559 | 0.156 | 0.244 / 0.035 | 0.503 | 5.8% | 94.7% |
-| pertype: six binaries, the max | 0.547 | 0.191 | 0.242 / 0.035 | 0.529 | 5.8% | 100.0% |
-| choice: types + number + generic | 0.516 | 0.366 | 0.245 / 0.050 | 0.515 | 34.6% | 68.4% |
-| the extractor's stored confidence | 0.487 | 0.577 | 0.246 / 0.030 | 0.500 | 0.0% | 100.0% |
+| arm | AUROC | served p: mean (range) | ECE served | Brier / skill / ECE, Platt | balanced accuracy | rejects invalid | keeps valid |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| B1 (SMD-1935's gate) | — | — | — | — | 0.545 | 11.5% | 97.4% |
+| v1: SMD-2050's validity framing | 0.586 | 0.54 (0.35–0.66) | 0.114 | 0.242 / −1.8% / 0.052 | 0.562 | 51.9% | 60.5% |
+| **v2**: validity in the prompt's words | **0.658** | 0.55 (0.29–0.67) | 0.136 | 0.229 / 3.6% / 0.118 | **0.645** | 71.2% | 57.9% |
+| claim: "X is <the extractor's type>" | 0.559 | 0.57 (0.41–0.72) | 0.156 | 0.244 / −2.9% / 0.035 | 0.503 | 5.8% | 94.7% |
+| pertype: six binaries, the max | 0.547 | 0.60 (0.45–0.72) | 0.191 | 0.242 / −2.0% / 0.035 | 0.529 | 5.8% | 100.0% |
+| choice: types + number + generic | 0.516 | 0.75 (0.34–0.96) | 0.366 | 0.245 / −3.3% / 0.050 | 0.515 | 34.6% | 68.4% |
+| the extractor's stored confidence | 0.487 | 1.00 (0.90–1.00) | 0.577 | 0.246 / −3.5% / 0.030 | 0.500 | 0.0% | 100.0% |
 
-- **The margin is not met.** v2 was chosen on dev (0.637).
-  - On test, v2 − B1 = +10.1 points, 95% interval −0.7 to +21.0.
-  - Against either grader's labels alone it is +7.8 to +7.9, with the interval
-    below 0 (−3.2).
-  - B1 then v2, the order a deployment would use, adds +8.8 (−1.4 to +18.8).
+- **The margin is not met.** v2 was chosen on dev, by a hair: its dev balanced
+  accuracy is 0.637, against 0.635 for the choice.
+
+  | on test, over 10,000 paired resamples in fixture order | difference in balanced accuracy, points | 95% interval |
+  | --- | --- | --- |
+  | v2 − B1 | +10.1 | −1.0 to +21.0 |
+  | B1 then v2 (the order a deployment would use) − B1 | +8.8 | −1.6 to +18.9 |
+  | v2 − B1, without the 4 test windows that lack the name | +10.7 | −0.6 to +21.8 |
+  | grader A's labels alone, the whole procedure refit on dev (chooses v2) | +7.9 | −3.3 to +19.0 |
+  | grader B's labels alone, refit on dev (chooses the choice) | **−6.1** | −17.1 to +4.8 |
+
+  In 9 of the 201 windows the name does not appear: the extractor named what
+  the text does not spell (`OpenBrain`), so the window is the thought's head.
+  7 of those 9 are graded invalid.
 - **The signal is real but weak.** Across 1,000 permutations of v2's scores,
-  chance sits at AUROC 0.501, and 0.5% reach 0.658 (p = 0.005). On SMD-1982's
-  29 hand-graded mentions (another grader, the same definition), the tier arms'
-  AUROC is 0.55–0.68, and B1's balanced accuracy is 0.75, above v2's 0.575: that
-  set holds numbers and vocabulary words, which B1 catches.
+  chance sits at AUROC 0.501, and 4 reach 0.658 (p = 0.005, with the observed
+  order counted as one). On SMD-1982's 29 hand-graded mentions (another grader,
+  the same definition; 4 of them are also in this set), the tier arms' AUROC is
+  0.55–0.68. B1's balanced accuracy there is 0.75, above v2's 0.575: that set
+  holds numbers and vocabulary words, which B1 catches.
 - **Calibration.**
-  - The served probabilities sit on the wrong side of the base rate. The binary
-    arms average 0.54–0.60 (range 0.29–0.72) and the choice 0.75, while 42% of
-    the test mentions are valid.
-  - A temperature alone cannot move them: the fit flattens every arm to a coin
-    (Brier 0.250).
-  - Platt's offset brings the ECE to 0.03–0.12. It brings the Brier score to
-    0.229–0.246, where the base-rate constant scores 0.244. Only v2 carries any
-    Brier skill (about 6%).
+  - The served probabilities lean valid while 42% of the test mentions are:
+    the binary arms average 0.54–0.60 and the choice 0.75.
+  - A temperature alone cannot move them. The fit flattens every arm toward a
+    coin (Brier 0.250), and for claim, pertype and the choice it sits at the
+    search's floor.
+  - Platt's offset brings the ECE to 0.03–0.12. Only v2 then beats the
+    base-rate constant's Brier score (skill 3.6%); the rest score 2–4% worse
+    than it.
 - **Typing is worse than the extractor's.** On the 38 valid test mentions:
 
   | typer | right type |
   | --- | --- |
   | the extractor | 71% |
-  | the choice | 55% |
+  | always `project` | 58% |
+  | the choice (no type when it abstains or picks number or generic) | 53% |
   | pertype (argmax) | 21% |
 
-  pertype − extractor = −50 points (−66 to −32). The per-type binaries call
-  nearly everything a tool.
+  pertype − extractor = −50 points (−66 to −32). The per-type binaries call 23
+  of the 38 a tool.
 - **A stored confidence (SMD-1925).** The extractor's column carries no signal:
-  two values (0.90, 1.00), AUROC 0.487. v2's P after Platt trades precision for
-  recall, but barely:
+  it is 1.00 on 89 of the 90 test mentions (41.6% valid) and 0.90 on one;
+  AUROC 0.487. v2's P after Platt trades precision for recall, but barely:
 
-  | keep at | precision | recall |
-  | --- | --- | --- |
-  | 0.4 | 60.5% | 60.5% |
-  | 0.5 | 87.5% | 18.4% |
+  | keep at | kept | precision | recall |
+  | --- | --- | --- | --- |
+  | 0.3 | 72 | 44.4% | 84.2% |
+  | 0.4 | 38 | 60.5% | 60.5% |
+  | 0.5 | 8 | 87.5% | 18.4% |
 
-  Everything is kept below 0.3, and nothing at 0.6 or above.
-- **Cost.** A thought holds 13 mentions at p50, 34 at p95 and 64 at most. With a
-  whole thought's list in one request, container to host:
+  At 0.2 and below it keeps 88 to 90 of the 90, and at 0.6 and above none.
+- **Cost.** A thought holds 13 mentions at p50, 34 at p95 and 64 at most. I
+  timed 40 whole thoughts drawn by md5 (candidates: 11 at p50, 28 at p90, 42 at
+  most), each thought's list in one call, container to host. The client packs a
+  call into requests of at most 64 decisions, sent in turn.
 
-  | shape | p50 | p95 |
-  | --- | --- | --- |
-  | one binary a candidate | 0.87 s | 3.5 s |
-  | six binaries a candidate | 5.0 s | 17.6 s |
+  | shape | p50 | p90 | max | requests a call |
+  | --- | --- | --- | --- | --- |
+  | one binary a candidate (v2) | 0.89 s | 2.3 s | 3.1 s | 1 |
+  | six binaries a candidate (pertype) | 4.8 s | 13.0 s | 17.7 s | 2–4 |
 
-  One binary is about a tenth of a 9-second extraction call. Six are as much
-  as the call itself.
+  The reference is SMD-1879's measurement of a 3,000-token thought: one
+  9-second extraction call ("Entity extraction in windows", above). Against
+  that, one binary a candidate is about a tenth of the call, and six are about
+  half at p50 and more than the call at p90.
 - **It cannot replace B0.** Of the 60 most-mentioned numeric names, v2 rejects
   65% and pertype 5%; B0 rejects all of them.
 - **Post hoc, not in the verdict.** B1's shapes read for every type reject 40%
   of the invalid mentions and 40% of the valid ones (a ticket id is a valid
   project), balanced accuracy 0.505. No shape rule separates the code
   identifiers either.
-- **Controls.**
-  - With the gate off, 90 of 90 test mentions are kept with the extractor's
-    type: today's graph exactly.
-  - `--self-check` (a fork-checks step) holds the rules and the arithmetic. It
-    includes a mutant for each refit: a clamped log loss let the temperature
-    walk to its bound on the extractor's column, which the first run showed.
+- **What the self-check holds.** `--self-check` is a fork-checks step.
+  - The gate is a post-filter with no other path to the graph. Off, it keeps
+    every candidate with the extractor's type: today's graph. That is
+    `gate()`'s identity, held by the self-check, not a live measurement.
+  - It holds the rules and the arithmetic, each with a mutant: the bootstrap's
+    pairing and percentiles, the permutation p, the threshold's tie, the
+    pinned split, the window, each arm's reading, each grades-file rule, and
+    the refits.
+  - Among the refits, a clamped log loss let the temperature walk to its bound
+    on the extractor's column, which the first live run showed.
 
 **What it settles.** Verdict v1.4 does not earn a place in the extraction path,
 as a validity gate or as a typer. Ship SMD-1935's deterministic gate, which
