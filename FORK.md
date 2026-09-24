@@ -517,14 +517,15 @@ one's, and an input the new major dropped is ignored at run time with a
 warning. Dependabot's commits carry the house header, `[fork] Bump …`, through
 a prefix whose trailing space keeps it from writing `[fork]:`. Check 23 refuses
 a tag, a SHA with no tag comment, a `docker://` step image by tag, a `-latest`
-or expression-picked runner, and a `dependabot.yml` that cannot move the pins.
-It holds a pin's shape, not its truth: a comment naming another tag is what
-zizmor finds, and zizmor ran once for SMD-2093 and is not in CI. Two images the
-release job's actions start by default, QEMU's binfmt and the BuildKit builder
-that pushes to GHCR, are pinned by digest through their inputs in
-`release.yml`, and nothing moves those but a hand edit; nor does anything move
-the `services:` images (pgvector). The rehearsal still runs with the release's
-write token on a PR, a Dependabot one included (SMD-2111).
+or expression-picked runner, and a `dependabot.yml` that Dependabot would refuse
+or that can open no PR. It holds a pin's shape, not its truth: a comment naming
+another tag is what zizmor finds, and zizmor ran once for SMD-2093 and is not in
+CI. Two images the release job's actions start by default, QEMU's binfmt and
+the BuildKit builder that pushes to GHCR, are pinned by digest through their
+inputs in `release.yml`, and nothing moves those but a hand edit; nor does
+anything move the `services:` images (pgvector). The rehearsal still runs with
+the release's write token on a PR that touches what it builds from, a
+Dependabot one included (SMD-2111).
 
 ## Detached from the fork network
 

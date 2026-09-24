@@ -4547,10 +4547,9 @@ checkSupabaseJsImports();
  * heuristic for the ways a file stops the pins moving, not a validator of
  * Dependabot's schema (an ignore of `actions/*` passes). The structure is
  * read from the parsed document. The comment, which a YAML parser drops, is
- * read from the value's
- * line: the first unclaimed line carrying the value, block scalars (`run: |`,
- * `- |`, an anchored or tagged `&a |`) skipped, since a `uses:` line there is
- * text, not a step. A SHA-pinned `uses:` with no line of its own (flow style, a
+ * read from the value's line: the first unclaimed line carrying the value,
+ * block scalars (`run: |`, `run: |- # note`, `- |`, an anchored or tagged
+ * `&a |`) skipped, since a `uses:` line there is text, not a step. A SHA-pinned `uses:` with no line of its own (flow style, a
  * folded value, or steps reused by YAML alias, which actionlint 1.7.7 refuses
  * too) is refused, since its tag cannot be read; and every SHA-pinned line
  * the reader does find carries its tag whether a step claimed it or not, so
@@ -4571,7 +4570,7 @@ const DEPENDABOT = ".github/dependabot.yml";
 /** The `schedule.interval` values Dependabot's options reference accepts; `cron` wants a `cronjob` beside it. */
 const DEPENDABOT_INTERVALS = ["daily", "weekly", "monthly", "quarterly", "semiannually", "yearly", "cron"];
 const FULL_SHA = /^[0-9a-f]{40}$/;
-/** The trailing comment a SHA pin carries: a version number, `# v7`, `# v7.0.1` or `# 7.0.1`, then anything. */
+/** The trailing comment a SHA pin carries: a version number, `# v7`, `# v7.0.1` or `# 7.0.1`, then a space or the line's end (a date or a prerelease suffix is refused). */
 const TAG_COMMENT = /^#\s*v?\d+(?:\.\d+)*(?:\s|$)/;
 /** A runner label GitHub moves to a new image on its own date: `-latest`, alone or before a size, in any case. */
 const MOVING_LABEL = /-latest(?:-|$)/i;
@@ -4583,7 +4582,7 @@ const MOVING_LABEL = /-latest(?:-|$)/i;
  * first dash's for a keyless item.
  */
 const BLOCK_SCALAR_KEY = /^(\s*)((?:-\s+)*)(?:([^\s#][^#]*?):\s+)?(?:[&!]\S*\s+)*[|>][-+0-9]*\s*(?:#.*)?$/;
-/** Every line outside a block scalar that reads as `uses: <value> [# comment]`, a `- ` list item (anchored or not) or not, the value quoted or not. */
+/** Every line outside a block scalar that reads as `uses: <value> [# comment]`: a `- ` list item or not, the key anchored or not, the value quoted or not. */
 function usesLinesOf(text: string): { value: string; comment: string; line: number }[] {
   const out: { value: string; comment: string; line: number }[] = [];
   let blockColumn = -1; // inside a block scalar, the column its body must be indented past; -1 outside one
@@ -4681,10 +4680,10 @@ function dependabotProblems(text: string | null): [string, string][] {
   const scheduled = (e: unknown) => {
     if (!e || typeof e !== "object") return false;
     const { schedule, "multi-ecosystem-group": group } = e as { schedule?: unknown; "multi-ecosystem-group"?: unknown };
-    if (typeof group === "string" && groups && typeof groups === "object") return validSchedule((groups as Record<string, { schedule?: unknown } | null>)[group]?.schedule) || validSchedule(schedule);
+    if (typeof group === "string" && groups && typeof groups === "object" && !Array.isArray(groups)) return validSchedule((groups as Record<string, { schedule?: unknown } | null>)[group]?.schedule) || validSchedule(schedule);
     return validSchedule(schedule);
   };
-  if (!(updates as unknown[]).every(scheduled)) return [[DEPENDABOT, `has an update with no schedule Dependabot accepts (\`schedule.interval\` one of ${DEPENDABOT_INTERVALS.join(", ")}, and a \`cronjob\` for cron) — Dependabot refuses the whole file, and nothing moves the pins (SMD-2093)`]];
+  if (!(updates as unknown[]).every(scheduled)) return [[DEPENDABOT, `has an update with no schedule Dependabot accepts (\`schedule.interval\` one of ${DEPENDABOT_INTERVALS.join(", ")}, and a \`cronjob\` for cron — its own, or its \`multi-ecosystem-group\`'s) — Dependabot refuses the whole file, and nothing moves the pins (SMD-2093)`]];
   // An entry that can open no PR is no entry: a limit of 0, or an ignore of every dependency at every version — a `*`
   // rule with `update-types` or `versions` holds back only those (no majors, say), and the rest still open PRs.
   const ignoresAll = (r: unknown) => !!r && typeof r === "object" && (r as { "dependency-name"?: unknown })["dependency-name"] === "*" && !("update-types" in r) && !("versions" in r);
@@ -4712,7 +4711,9 @@ const PIN_ACCEPTED: [string, string][] = [
   ["a bare copy of the pin after a blank line in an earlier run body", PIN_PROBE("ubuntu-24.04", `- run: |\n          echo one\n\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
   ["a `uses:` key with an anchor", PIN_PROBE("ubuntu-24.04", `- &checkout uses: actions/checkout@${PIN_SHA} # v7.0.1`)],
   ["a step whose folded `name: >-` precedes its `uses:`", PIN_PROBE("ubuntu-24.04", `- name: >-\n          Check out\n        uses: actions/checkout@${PIN_SHA} # v7.0.1`)],
-  ["a bare copy of the pin in an earlier tagged run body", PIN_PROBE("ubuntu-24.04", `- run: !!str |\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+  ["a bare copy of the pin in an earlier `run: |-` body, a chomping indicator after the `|`", PIN_PROBE("ubuntu-24.04", `- run: |-\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+  ["a bare copy of the pin in an earlier `run: | # note` body, a comment after the `|`", PIN_PROBE("ubuntu-24.04", `- run: | # note\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+  ["a bare copy of the pin in an earlier tagged run body",PIN_PROBE("ubuntu-24.04", `- run: !!str |\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
   ["a tag comment with no v, as an action whose tags carry none", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA} # 7.0.1`)],
   ["a runner group alone, which names no image", PIN_PROBE("{ group: big-runners }", PIN_STEP)],
   ["a runner group with a named image", PIN_PROBE("{ group: big-runners, labels: [ubuntu-24.04] }", PIN_STEP)],
@@ -4773,7 +4774,8 @@ function checkWorkflowPins() {
     ["an ignore of every action's majors alone, which still opens PRs", `${DEPENDABOT_OK}    ignore:\n      - dependency-name: "*"\n        update-types: ["version-update:semver-major"]\n`],
     ["a cron schedule with its cronjob", DEPENDABOT_OK.replace("interval: weekly", "interval: cron\n      cronjob: \"0 6 * * 1\"")],
     ["an ignore of every action at some versions alone, which still opens PRs", `${DEPENDABOT_OK}    ignore:\n      - dependency-name: "*"\n        versions: [">= 8"]\n`],
-    ["an entry scheduled by its multi-ecosystem group", `${DEPENDABOT_OK}  - package-ecosystem: npm\n    directory: /scripts\n    multi-ecosystem-group: infra\nmulti-ecosystem-groups:\n  infra:\n    schedule:\n      interval: weekly\n`],
+    ["an entry in a multi-ecosystem group whose own schedule stands where the group names none", `${DEPENDABOT_OK}  - package-ecosystem: npm\n    directory: /scripts\n    multi-ecosystem-group: infra\n    schedule:\n      interval: weekly\nmulti-ecosystem-groups:\n  infra: {}\n`],
+    ["an entry scheduled by its multi-ecosystem group",`${DEPENDABOT_OK}  - package-ecosystem: npm\n    directory: /scripts\n    multi-ecosystem-group: infra\nmulti-ecosystem-groups:\n  infra:\n    schedule:\n      interval: weekly\n`],
   ] as const) if (dependabotProblems(text).length) fail(SELF, `check 23 refuses ${why} (its own probe)`);
   for (const [why, text, says] of [
     ["no file", null, "missing"],
@@ -4786,6 +4788,7 @@ function checkWorkflowPins() {
     ["an interval Dependabot does not know", DEPENDABOT_OK.replace("interval: weekly", "interval: fortnightly"), "no schedule Dependabot accepts"],
     ["a cron interval with no cronjob", DEPENDABOT_OK.replace("interval: weekly", "interval: cron"), "no schedule Dependabot accepts"],
     ["a second, unscheduled entry beside a good one", `${DEPENDABOT_OK}  - package-ecosystem: npm\n    directory: /scripts\n`, "no schedule Dependabot accepts"],
+    ["multi-ecosystem groups written as a list, not a map", `${DEPENDABOT_OK}  - package-ecosystem: npm\n    directory: /scripts\n    multi-ecosystem-group: "0"\nmulti-ecosystem-groups:\n  - schedule:\n      interval: weekly\n`, "no schedule Dependabot accepts"],
   ] as const) {
     const got = dependabotProblems(text);
     if (got.length !== 1 || !got[0][1].includes(says)) fail(SELF, `check 23 reports ${JSON.stringify(got)} for a dependabot.yml with ${why}, not one problem saying "${says}" (its own probe)`);
