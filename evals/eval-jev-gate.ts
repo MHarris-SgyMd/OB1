@@ -386,7 +386,10 @@ async function sample(sql: SQL): Promise<Candidate[]> {
 /** The graded mentions as the brain holds them now, and the ones it no longer does. */
 async function graded(sql: SQL, keys: { thought: string; entity: string }[]): Promise<{ found: Candidate[]; missing: number }> {
   return sql.begin("read only", async (tx) => {
-    const thoughts = keys.map((k) => k.thought), entities = keys.map((k) => k.entity);
+    // Bun binds a JS array as a comma-joined string, not an array (SMD-1803's
+    // trap), so each list goes as a Postgres array literal; the ids are uuids.
+    const literal = (ids: string[]) => `{${ids.join(",")}}`;
+    const thoughts = literal(keys.map((k) => k.thought)), entities = literal(keys.map((k) => k.entity));
     const rows = (await tx`
       SELECT t.id::text AS thought, e.id::text AS entity, e.name, e.entity_type, t.content, t.metadata, te.confidence
       FROM unnest(${thoughts}::uuid[], ${entities}::uuid[]) AS k(thought_id, entity_id)
@@ -439,7 +442,7 @@ const quantile = (xs: number[], q: number) => (xs.length ? [...xs].sort((a, b) =
 const table = (header: string[], rows: (string | number)[][]) =>
   [`| ${header.join(" | ")} |`, `| ${header.map(() => "---").join(" | ")} |`, ...rows.map((r) => `| ${r.join(" | ")} |`)].join("\n");
 
-type Scoredrow = { c: Candidate; g: Grade; split: "dev" | "test"; arms: Record<ArmName, Reading>; b1: string | null };
+type Scoredrow = { c: Candidate; g: GradedMention; split: "dev" | "test"; arms: Record<ArmName, Reading>; b1: string | null };
 
 /** ECE over the deciles, the calibration harness's bins. */
 const eceOf = (rows: Scored[]) => ece(reliability(rows, binOf(Infinity)));
@@ -541,6 +544,11 @@ async function report(url: string, perCohort: number, costThoughts: number) {
   console.log(`\nchosen on dev: ${chosen} (dev balanced accuracy ${fixed(devBa(chosen), 3)}). On test, ${chosen} − B1 = ${fixed(100 * margin.diff, 1)} points, 95% interval ${fixed(100 * margin.lo, 1)} to ${fixed(100 * margin.hi, 1)}: the pre-registered margin (≥ 10 points, interval above 0) is ${passes ? "MET" : "NOT met"}.`);
   const combined = pairedBootstrap(test, (rs) => [balancedAccuracy(rs.map((r) => ({ keep: keepB1(r) && armKeep(chosen)(r), y: y(r) }))), balancedAccuracy(rs.map((r) => ({ keep: keepB1(r), y: y(r) })))]);
   console.log(`B1 then ${chosen} (the deployable order) − B1 alone: ${fixed(100 * combined.diff, 1)} points, 95% interval ${fixed(100 * combined.lo, 1)} to ${fixed(100 * combined.hi, 1)}.`);
+  // The labels' own uncertainty: the same arm, threshold and refit, scored against each grader alone.
+  for (const who of ["grader_a", "grader_b"] as const) {
+    const m = pairedBootstrap(test, (rs) => [balancedAccuracy(rs.map((r) => ({ keep: armKeep(chosen)(r), y: r.g[who][0] }))), balancedAccuracy(rs.map((r) => ({ keep: keepB1(r), y: r.g[who][0] })))]);
+    console.log(`  against ${who}'s labels alone (${test.filter((r) => r.g[who][0] === 0).length} invalid): ${chosen} − B1 = ${fixed(100 * m.diff, 1)} points, 95% interval ${fixed(100 * m.lo, 1)} to ${fixed(100 * m.hi, 1)}`);
+  }
 
   // Typing, on the valid mentions the graders typed.
   const typedRows = test.filter((r) => r.g.valid === 1);

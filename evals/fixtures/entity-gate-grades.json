@@ -1,0 +1,2821 @@
+{
+ "generated": "2026-09-24T16:53:49Z",
+ "origin": "the dogfood brain on the maintainer's machine at migration 053, 2026-09-24: eval-jev-gate.ts's pre-registered sample (every person, place and organization entity past NUMERIC_NAME_RE and 50 each of tool, topic and project by md5 of the entity id), one mention each, the entity's first thought (SMD-1937)",
+ "note": "Graded blind by two independent Claude Opus 5.5 graders working for the maintainer, from the name and a window of the thought alone (no extractor type, no tier output, no baseline verdict, the lines shuffled), against the extraction prompt's rules: valid 1 = a clearly identifiable, specific named entity of one of the six types that the text holds; type = the index in ENTITY_TYPES of the most defensible type, -1 for none. grader_a and grader_b are each grader's [valid, type]; valid and type are the adjudication, made before any tier call on the set. The one systematic disagreement was a repository script or file named as software: grader_a held every code identifier (file, table, function, environment variable, branch, directory) not a named entity, grader_b took runnable scripts as tools; the adjudication followed grader_a, the line both graders drew for every other code identifier, and the report prints the margin under each grader's labels too.",
+ "mentions": [
+  {
+   "thought": "68992652-1adc-45b7-819d-900da74a8750",
+   "entity": "46df5a0f-2888-4b1e-95f0-bb7d1ba3387c",
+   "valid": 1,
+   "type": 1,
+   "grader_a": [
+    1,
+    1
+   ],
+   "grader_b": [
+    1,
+    1
+   ]
+  },
+  {
+   "thought": "738f31e4-df71-43e4-813b-da007a601e07",
+   "entity": "fcd21cf0-5d6d-474c-96a8-95008ad53ba0",
+   "valid": 1,
+   "type": 1,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    1
+   ]
+  },
+  {
+   "thought": "ffdce7e7-f6d2-486e-874e-b423132a46d1",
+   "entity": "07bbfda4-9264-4c84-b2de-41af8d25731f",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "39b715f4-2be4-4d0f-a559-bbf4f5e9a48f",
+   "entity": "29d208b8-b215-4c80-9a66-13d64a50354c",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "42562f94-9a2d-48f7-9f96-74ccf7c6ddfe",
+   "entity": "bf7a9ae5-c41d-4088-b5fc-41ba4df0b01e",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "738f31e4-df71-43e4-813b-da007a601e07",
+   "entity": "57631047-9ed9-4d62-b5ce-2616af73b62c",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "9d83d293-fd1a-49b4-9af6-0f9b6131e01c",
+   "entity": "e821c216-877b-4c2b-a435-e3586be54226",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "03bbac6f-f38f-4b4f-9f84-f355a88441fe",
+   "entity": "dc70c811-eedb-4ba8-8dde-01554f379f3b",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "6d5c6c03-f6e0-4817-aaf9-d76df064b710",
+   "entity": "1822d8d0-df6f-4cc2-92c8-68b0b39442fd",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "b8ee8d61-aed0-46d5-9022-640f3d598e9d",
+   "entity": "c94f47cb-2133-4cb0-b657-d4203894a70f",
+   "valid": 1,
+   "type": 1,
+   "grader_a": [
+    1,
+    1
+   ],
+   "grader_b": [
+    1,
+    1
+   ]
+  },
+  {
+   "thought": "c98f0736-1377-4df1-8ec6-d9bd677a6a21",
+   "entity": "9b406878-0905-4dfa-a588-c3b7709a8c75",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "b9ccc543-66eb-4b83-93cb-5dcc7fa90cc6",
+   "entity": "15a68a17-b77b-4461-b95d-34afd28d9d41",
+   "valid": 1,
+   "type": 1,
+   "grader_a": [
+    1,
+    1
+   ],
+   "grader_b": [
+    1,
+    1
+   ]
+  },
+  {
+   "thought": "75291d19-a460-47ba-912e-f1956f4b4306",
+   "entity": "c2dc0185-4002-47cb-b791-1d358cf36986",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "c9d64152-0be0-4386-a84c-8925e27c913f",
+   "entity": "113492cb-18a8-4576-8b45-eabe6a6a96ce",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "068e8529-9633-4f51-94eb-c215b5b1a858",
+   "entity": "5ac81a15-15f1-4334-a7d9-bba7882d4f6b",
+   "valid": 1,
+   "type": 1,
+   "grader_a": [
+    1,
+    1
+   ],
+   "grader_b": [
+    1,
+    1
+   ]
+  },
+  {
+   "thought": "a3b46742-976f-47fe-879d-1ae7273f9840",
+   "entity": "01126548-055c-46e8-955f-95ef51966cb7",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "0fc673dc-8afc-40d1-8840-615a59257cb3",
+   "entity": "9effabba-d5f7-4daa-b698-afc16a154252",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "c25e49a7-4052-414b-8bb2-d3b6a23b8f0f",
+   "entity": "10acf82b-0223-406b-b2de-379b4c74b4b7",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "87ad3bf1-2942-4ab7-8b5e-89b8aef3a0bf",
+   "entity": "3c65f1e9-02c2-4a76-b844-0696dc3ea062",
+   "valid": 1,
+   "type": 1,
+   "grader_a": [
+    1,
+    1
+   ],
+   "grader_b": [
+    1,
+    1
+   ]
+  },
+  {
+   "thought": "8ac8c989-0640-4b8a-8708-699359a0ba78",
+   "entity": "1612337c-effc-4d20-bf93-f9a34b76adce",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "39b715f4-2be4-4d0f-a559-bbf4f5e9a48f",
+   "entity": "20284995-5c71-4ea6-a796-acfdf49e7e6a",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "dd8d5d13-7e6d-4c10-941d-ff0e52dae16f",
+   "entity": "15108a56-7494-448b-a52d-ef08abb35187",
+   "valid": 1,
+   "type": 1,
+   "grader_a": [
+    1,
+    1
+   ],
+   "grader_b": [
+    1,
+    1
+   ]
+  },
+  {
+   "thought": "e82ff46e-dab2-48f5-bb12-e16ba9869576",
+   "entity": "2e2dfc96-6e20-4e10-b83e-f141d2aafdb9",
+   "valid": 1,
+   "type": 0,
+   "grader_a": [
+    1,
+    0
+   ],
+   "grader_b": [
+    1,
+    0
+   ]
+  },
+  {
+   "thought": "24598e54-7cec-4038-ac71-ae6dfd800ac7",
+   "entity": "1885f8f2-146e-4dba-bfdd-5046f4bf448b",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "ff690613-0841-4089-a649-1c1967af2c5e",
+   "entity": "c06c3103-f5de-4122-b7da-b98fc393449f",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "3a37f18b-316d-4831-b2d5-45df4670d82e",
+   "entity": "b02f4d4a-beb6-4323-8372-1e2be8b1900c",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "8e1b3a44-7464-4571-bc90-710427121ecb",
+   "entity": "2c7ffbdf-620d-4aa5-9a9c-80c7ef7f2edd",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "ad33c0a1-2e57-4988-822b-06d5c3f191fc",
+   "entity": "57f4766e-ac2c-403f-8f28-f13028aefe4e",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "5f1aaf77-0429-4f80-bd83-d23bbd944649",
+   "entity": "06542361-2782-442f-9cf3-63af6c96af4d",
+   "valid": 1,
+   "type": 0,
+   "grader_a": [
+    1,
+    0
+   ],
+   "grader_b": [
+    1,
+    0
+   ]
+  },
+  {
+   "thought": "70002379-bb01-4bb9-bc4c-9db63f81189b",
+   "entity": "342d907b-2887-4e65-98a3-5f058fb12014",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "43d5a3ad-5b60-4823-853c-e72d796ea1b7",
+   "entity": "5d15fd10-d1ab-4a48-9234-1bfbad743715",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "5f1aaf77-0429-4f80-bd83-d23bbd944649",
+   "entity": "1b5bab7c-e6c2-499c-827d-e1403b74d0cc",
+   "valid": 1,
+   "type": 0,
+   "grader_a": [
+    1,
+    0
+   ],
+   "grader_b": [
+    1,
+    0
+   ]
+  },
+  {
+   "thought": "f4dea341-a640-40bd-b099-3e32020e7096",
+   "entity": "c0cd03d8-4a70-4377-86d6-839e80af6c71",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "82ae4805-2c3e-4bcf-95ad-3e855153c775",
+   "entity": "66e44c00-100b-479d-9749-b9d324f0f412",
+   "valid": 1,
+   "type": 0,
+   "grader_a": [
+    1,
+    0
+   ],
+   "grader_b": [
+    1,
+    0
+   ]
+  },
+  {
+   "thought": "e82ff46e-dab2-48f5-bb12-e16ba9869576",
+   "entity": "68564f4b-946f-4fae-bbfa-69dbe24bf6e3",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "6d5c6c03-f6e0-4817-aaf9-d76df064b710",
+   "entity": "4ef3c077-0651-45b7-9c84-9a3725061661",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "1b608fb9-a68a-4977-9adf-6ca720d6bac4",
+   "entity": "14d3175e-baa9-4ad0-aafa-a6484249f348",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "c0911901-02ce-4ab5-ba68-e49c6936f7dc",
+   "entity": "803eb084-6b8b-46a2-89c1-5ae28f1eb6bb",
+   "valid": 1,
+   "type": 1,
+   "grader_a": [
+    1,
+    1
+   ],
+   "grader_b": [
+    1,
+    1
+   ]
+  },
+  {
+   "thought": "6b7ebf81-5515-4b73-8560-b801036fac52",
+   "entity": "cacdfa47-063c-4b25-8739-d16324aa6a97",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "bfa6d729-5065-4a12-8f0c-c437cb111df9",
+   "entity": "e6ba2c9c-d712-4681-b59c-582e1aeba1f5",
+   "valid": 1,
+   "type": 0,
+   "grader_a": [
+    1,
+    0
+   ],
+   "grader_b": [
+    1,
+    0
+   ]
+  },
+  {
+   "thought": "e82ff46e-dab2-48f5-bb12-e16ba9869576",
+   "entity": "e83d41a7-f47b-4c9e-a04b-23f3188e83d9",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "d821a49e-b6c2-410f-9ff4-57b7d97a1012",
+   "entity": "23747241-dfc5-40c4-b31f-4daeb48aa47f",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "d821a49e-b6c2-410f-9ff4-57b7d97a1012",
+   "entity": "375d1bc4-90ab-427f-8c7c-87dcef14fe2d",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "3d7d1c8e-140d-4dae-90fe-27a123856a24",
+   "entity": "247b4b44-d6b1-45b6-9195-8267222f3c08",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "d821a49e-b6c2-410f-9ff4-57b7d97a1012",
+   "entity": "c4f13c95-e9ae-4537-8586-d73bcbebdeac",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "ca44ba5d-c219-497f-bd9b-338f66031fb4",
+   "entity": "f1d3f5c6-0107-45ed-b035-f83111280234",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "b881d3e1-795d-458d-9a8c-f963e0864dd6",
+   "entity": "4217eb35-eac5-4afb-83d4-712e8e326772",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "c0beb71f-1877-4fb4-811e-566ec6b74c17",
+   "entity": "e8afc5d3-51c6-4d2e-81c1-d98f454ac413",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "3d7d1c8e-140d-4dae-90fe-27a123856a24",
+   "entity": "f6c62a52-2526-483a-affb-c8114d32d3b8",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "d821a49e-b6c2-410f-9ff4-57b7d97a1012",
+   "entity": "8792d4f5-e573-486e-8e1c-324255919cd4",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "6d5c6c03-f6e0-4817-aaf9-d76df064b710",
+   "entity": "52227e1e-0eba-4afa-8ece-92aafdc394a8",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "c0911901-02ce-4ab5-ba68-e49c6936f7dc",
+   "entity": "82dec7a1-ef09-4f71-a42f-52ddaef46614",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "6d4e6e9f-f093-477b-bdf8-3e3e4937753c",
+   "entity": "63bbe9be-7c4a-4e10-a581-932e597bef8c",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "72946098-eae1-43ba-bd4f-032cbea62090",
+   "entity": "79dafe25-d994-469e-9269-796d774552ab",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "4622f44f-e8d6-4973-be5c-093d87abfe1a",
+   "entity": "871d0ff2-73bb-49db-8bac-16e1b7d704ef",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "a6b4f9da-b613-4e67-91b0-d3e50d2b72e5",
+   "entity": "08ff1ecd-7fd7-406a-8f32-3502ccd50788",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "b08b7f39-d6ca-4ec4-8116-348bddef596b",
+   "entity": "6ea6e6ac-a72a-4edb-a9a4-827288342774",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "c98f0736-1377-4df1-8ec6-d9bd677a6a21",
+   "entity": "64874a72-b4c2-4628-8057-d4cb41fc7b2a",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "2e8bb0a0-ba76-4744-8893-dc0d7a1d6d50",
+   "entity": "6f33c452-b368-4e0b-a113-492af0fbfc69",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "3e7c02ec-b644-4c8d-860a-0729c0d1f7f5",
+   "entity": "aad9f90d-a21e-4938-9a3e-e4b63f94daa9",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "3feb9dc1-ae67-418f-8108-9253cfc8ca0d",
+   "entity": "d1e1d8bf-9c32-4790-b819-a542dd9f3f99",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "c0beb71f-1877-4fb4-811e-566ec6b74c17",
+   "entity": "b146849f-8baa-40f2-aade-17c607d123d8",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "1872ab26-126c-481c-9662-1842b9ec76c7",
+   "entity": "710ec38d-c407-4749-a1a6-9f14415456e5",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "c9950214-f594-4bde-a75e-65b515cd3997",
+   "entity": "f13be0ea-05ac-4a43-9fce-40d6292d6927",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "f302667d-0660-4af5-aa9d-c3093ecadc65",
+   "entity": "9cc05240-3045-4cf3-81c0-008490fda769",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "88c5e875-3088-4498-9f3f-48c0ee98b95d",
+   "entity": "1cc65bd5-3f31-4546-b04c-784406c6c434",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "78aa6052-5ffc-446f-aa32-6179d1ba1d78",
+   "entity": "54ddc4c1-b526-4e60-b01f-b3a7846eb0fa",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "761c79c7-18d0-4866-9fc8-d634cee3aeb4",
+   "entity": "9fbc893e-c1e4-4943-b213-1fccb33a3bbf",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "ca44ba5d-c219-497f-bd9b-338f66031fb4",
+   "entity": "4d46d27b-a265-429b-aa38-88d415c34b6e",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "bd7772cf-95e7-4a10-a874-82416f67eee1",
+   "entity": "10cfd7aa-d257-46bd-b38b-a31af1249ffd",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "8fc2911c-90bd-4393-812b-78d23c8ee700",
+   "entity": "92186231-92e2-4ae2-8bd1-fa5ed72bcd8c",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "991e6675-ef9c-4b80-a4d7-e3fff48dabca",
+   "entity": "d53a5b70-bfd8-4b28-a25e-cbc0056e622d",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "b881d3e1-795d-458d-9a8c-f963e0864dd6",
+   "entity": "b9f7e89f-0102-4a9f-99b5-b140b641ae2e",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "c98f0736-1377-4df1-8ec6-d9bd677a6a21",
+   "entity": "491bf90c-75a8-43f2-b4f0-c98a856ea84f",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "8fa771a4-e5c1-417f-b851-1a9ff1838dcd",
+   "entity": "fe032267-6bf8-437c-85b3-335d30a47b49",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "b2547924-6c67-471d-abc4-06fcc10f220c",
+   "entity": "c670e6bf-de18-4e08-b7bc-97e89de8c20b",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "f3a1d8ec-3cbc-401e-a80c-b2b227722241",
+   "entity": "8d4d7450-4b5d-4742-b45c-54eafa28e6fe",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "aa343075-7089-4abe-8371-ba46c18f67fe",
+   "entity": "ee0d99b1-aca9-4093-a1a2-beb307c6f463",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "c58106fa-65f5-442b-9761-8506990fb06f",
+   "entity": "50b09fb3-f12d-4f1f-85ea-b91d670227e9",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "42562f94-9a2d-48f7-9f96-74ccf7c6ddfe",
+   "entity": "0b72e41a-73a8-4bff-ac1b-bc8597ad81a5",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    4
+   ]
+  },
+  {
+   "thought": "b8dcd134-a039-4307-a40b-9bc10df9acc2",
+   "entity": "79dccee3-a0c3-44c0-ac04-66f7aa27edc4",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "b2547924-6c67-471d-abc4-06fcc10f220c",
+   "entity": "4b62da8c-692d-4131-8a3d-90a87ca590c4",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "a9f2267f-e954-4c8a-a809-181712e42a0c",
+   "entity": "fdfe34c8-abe1-4110-a77e-8c3917fcadb4",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "a0aba629-a1da-4cbc-8b16-5c2b9966a45d",
+   "entity": "28ada31b-3218-4b7e-b351-6f6308ea87a1",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "8fdd67b2-2bdd-41bb-8e7d-829403aae546",
+   "entity": "8d8b9c39-793e-4533-a97d-a778a36b0518",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "ebb8e653-2f8f-412d-92a4-4378ce1ad9f9",
+   "entity": "067d8536-0a3c-4bd7-838e-69bc6c20e9e9",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "e8f4222f-7e94-4640-8836-2903f95aaf3c",
+   "entity": "3d32e055-4579-4ad4-b6f0-385c1d9b6678",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "6d5c6c03-f6e0-4817-aaf9-d76df064b710",
+   "entity": "c4e81e41-3a18-4a9b-9602-84044a4c8a96",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "fb2d4db5-27af-48fe-b14a-3cb9a9b80cc4",
+   "entity": "54d7fded-326d-4afa-87c0-a2c7e3751c86",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "5d1ebe2d-b4d4-4ea0-98bd-2f5ecb53814f",
+   "entity": "4bbb1f7b-ab68-4299-a4b1-cff7833ad6bc",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "0fc673dc-8afc-40d1-8840-615a59257cb3",
+   "entity": "d98751c9-8f20-4160-9069-d499eec42f81",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "b9ccc543-66eb-4b83-93cb-5dcc7fa90cc6",
+   "entity": "c5eedc76-3825-4357-bb7c-2c67dc981c99",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "88ed893b-49f9-4254-8271-43da0ad7c135",
+   "entity": "22bf79f3-448d-4d40-8bd2-7e7bee871e66",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "991e6675-ef9c-4b80-a4d7-e3fff48dabca",
+   "entity": "99dbacd9-5245-4580-ae45-100a18b036de",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "bd7772cf-95e7-4a10-a874-82416f67eee1",
+   "entity": "cd1313c0-0ca4-49b2-9641-b1061649ac9f",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "fb2d4db5-27af-48fe-b14a-3cb9a9b80cc4",
+   "entity": "6ae4deb0-cada-4474-950f-9c13db4e82e9",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "0490c415-3f74-4225-b681-b82553329e3b",
+   "entity": "adae3c2c-2bb0-45aa-886e-d12ba3125e98",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "3e7c02ec-b644-4c8d-860a-0729c0d1f7f5",
+   "entity": "323123ad-da4c-4876-bc32-118cda81794e",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "43d5a3ad-5b60-4823-853c-e72d796ea1b7",
+   "entity": "6823347d-ef87-4e81-9784-b6d0ca370db3",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "449c0d8c-774f-4fc6-803c-15f9b28a8028",
+   "entity": "61ed6c79-ee0a-4a32-9cef-993e01920718",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "991e6675-ef9c-4b80-a4d7-e3fff48dabca",
+   "entity": "f480ccfd-a34a-484b-84d2-13f5dbf47b4f",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "b08b7f39-d6ca-4ec4-8116-348bddef596b",
+   "entity": "9cf76f73-dca1-4ace-8ec2-3eaaa0d65e8e",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "300e93a8-44c2-40fe-b42e-303b5fd4a1ae",
+   "entity": "b360f46c-b2d3-4a03-a0ed-6a096c10c7f1",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "a4937254-6883-4425-bd62-6e65c4444f7a",
+   "entity": "cf5527d8-9f60-4210-8900-f87defa0fdf3",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "e0f94860-df5e-449f-8df5-7b478c7bf71d",
+   "entity": "6f55a06b-5975-4415-b93e-aaeb62752852",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "47da6419-c437-41e2-b670-02d404cd0810",
+   "entity": "91c9b202-4b01-4fb8-bb65-3af845d97169",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "554654df-dc79-4f3a-8d6d-6a2af45b624b",
+   "entity": "52e62919-af22-4b41-b43a-8bc0b1baace3",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "6e35fa62-63ee-40b2-9499-8764b3524e2e",
+   "entity": "3114a7ff-7d87-4f90-a0d0-9a66ac16f23f",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "63ba21a4-7182-4128-93c2-b7dc98bc698f",
+   "entity": "38a00311-5b18-40f0-8015-69359a2cd333",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "66e0127d-e56b-4a35-885e-96160cf3d517",
+   "entity": "f4ee9463-c37d-4fe7-bd2d-e9a37e19b47d",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "fb2d4db5-27af-48fe-b14a-3cb9a9b80cc4",
+   "entity": "89cf6f8a-279c-4eda-a336-47a84622cb2b",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "eb9fb047-2800-414e-b422-ce943c1276ab",
+   "entity": "6b421740-22d5-4e1b-9875-69868bf472cb",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "906a7d0b-e836-47e2-bbc8-fcb03e5cd555",
+   "entity": "6fd2849e-491d-42fb-b956-f3e97bd1c09d",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "00299246-c51f-47b8-99ef-14a529a4d244",
+   "entity": "0ad4d146-f1c7-4f77-abc4-615d029fcbf5",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "135f6dfe-30c8-4b05-bd4d-69ee8a9c951a",
+   "entity": "bd775c2e-2790-4e94-b927-5bfda1b7c1db",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "39b715f4-2be4-4d0f-a559-bbf4f5e9a48f",
+   "entity": "4d268804-99df-4570-b0dc-28317fc33c7e",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "738f31e4-df71-43e4-813b-da007a601e07",
+   "entity": "8993a2d0-b0c5-49ff-b61f-ed03e7c88ef5",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "e0f94860-df5e-449f-8df5-7b478c7bf71d",
+   "entity": "ff0281ef-88e2-40c7-9fbc-a8f0090ccf8e",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "34b3b91f-4bea-4355-8671-e12a31369674",
+   "entity": "53ea9633-6bc8-44db-99ce-9d3f2f93320f",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "6658b3d2-4d55-47ee-a84e-2222041ffe8c",
+   "entity": "e449486f-889c-4eaf-b847-f27f5c221685",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "508aeea5-0467-4a70-bef5-23fb64fd92e3",
+   "entity": "c51dfc51-8732-4f12-a8ee-897fb6020df3",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "4d9008a0-3b31-49b6-a38c-3f9015a47b5d",
+   "entity": "544af162-5b54-4616-b7b8-1828391bd9b7",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "e176f235-5d37-45eb-afee-e4ceca52c3ee",
+   "entity": "7030ed6c-3a48-4b39-8cee-f301ef587c21",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "7f5d4590-a4fb-4fd5-a740-91351c0cac9d",
+   "entity": "d701ce1f-3a46-48f6-b063-dfc8b048120f",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "44fbd565-841d-4129-82e5-a5aeef2c03fd",
+   "entity": "1fdcdce2-1b4b-4d9d-a463-2ef44db5c065",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "eff590c9-d17a-4633-87ed-50f6034e5b1c",
+   "entity": "03b8f81c-a0e1-4c5b-a69a-8543b301537b",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "6b7ebf81-5515-4b73-8560-b801036fac52",
+   "entity": "a25c2d75-c836-4746-aae9-9f0b5f37ffdc",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "906a7d0b-e836-47e2-bbc8-fcb03e5cd555",
+   "entity": "537cc13e-6cd2-4a12-b50d-a9b93f16a055",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "34b3b91f-4bea-4355-8671-e12a31369674",
+   "entity": "db36c9c8-798d-4398-8827-8efd309ecdd5",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "4f6767f6-a4d2-410b-bc5b-c89be3585ab1",
+   "entity": "f31e800f-b337-4758-bed8-949a5da9860c",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "0fc673dc-8afc-40d1-8840-615a59257cb3",
+   "entity": "b17e9fb5-7d58-4b30-bdba-637221478c67",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "484462d3-aa26-4777-8dd5-4c11a770010d",
+   "entity": "6928165c-b7b2-4f4b-a4e6-6209b3eaf0e8",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "fb2d4db5-27af-48fe-b14a-3cb9a9b80cc4",
+   "entity": "89000e4e-7a9c-43de-9bba-f94e05856ee1",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "9a3d5f19-2cff-4ec1-a86b-fa6014014204",
+   "entity": "a7a7dfce-ef58-4f0a-8ab5-18135191339b",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "5d1ebe2d-b4d4-4ea0-98bd-2f5ecb53814f",
+   "entity": "f1edc24e-bea9-4c16-96f0-65e0cea79d4f",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "3f31fad1-3cff-45d4-9b5e-677eb033a452",
+   "entity": "4368693a-3f80-45e5-babe-651f6b10d52e",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "8089aea3-51a6-4d05-b537-3c2867de84bb",
+   "entity": "405b4a05-e839-43e0-944c-e489142adec5",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "761c79c7-18d0-4866-9fc8-d634cee3aeb4",
+   "entity": "9cba036e-7113-483c-89f7-e2278be11489",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "300e93a8-44c2-40fe-b42e-303b5fd4a1ae",
+   "entity": "0f625167-4a23-4117-ac6f-37c9f83739fe",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "91c61ae6-f104-43df-a658-11490b92736f",
+   "entity": "0a2770e2-589e-4523-bc2f-2645ad28112b",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "0fc673dc-8afc-40d1-8840-615a59257cb3",
+   "entity": "f3dc1331-4904-4714-843c-cbec8ebbc16c",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "54f612f5-635e-4ce0-bc9d-3e935796ef1c",
+   "entity": "f23767ee-78d6-4871-aa61-2e7a3d294082",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "791660e1-83b2-40a6-bf98-89cfa67cce66",
+   "entity": "0ddd74fa-4fd9-4415-b6f4-9c6ef89e57e3",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "3feb9dc1-ae67-418f-8108-9253cfc8ca0d",
+   "entity": "8cbfd5ca-76ac-4652-a279-a51312f2acbe",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "9e47b564-de48-40b9-af30-6730ee981891",
+   "entity": "76572424-8c0c-4e5a-aaf0-95ea96ac1f55",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "25bceba3-fe80-4cc1-ae61-eff843d2801c",
+   "entity": "cb194339-fa46-4132-96b7-f76042fc6bfb",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "3a0ce9bd-5d08-4acb-8ea5-22d7254561a1",
+   "entity": "f6f78ae2-bb59-41ed-874b-c083de3f8c71",
+   "valid": 1,
+   "type": 3,
+   "grader_a": [
+    1,
+    3
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "7fe96ffe-80a3-44e0-847d-ca2c152606a8",
+   "entity": "eafc83be-2caf-460d-a0e5-7cbc0e7a8d11",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "f4afd5c4-6e15-4d62-84c9-729b66fbc0ac",
+   "entity": "06e5a6bd-b02c-4ad7-8ed6-33e02510ad55",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "92f4147a-4618-4358-9413-8c8994087923",
+   "entity": "1ba033f6-d76b-42a2-a88e-88d9eff03f36",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "b8ee8d61-aed0-46d5-9022-640f3d598e9d",
+   "entity": "37e36a8b-17ce-422f-9b9f-2377cdab2a1e",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    4
+   ]
+  },
+  {
+   "thought": "3a0ce9bd-5d08-4acb-8ea5-22d7254561a1",
+   "entity": "2205809f-ffa6-48f6-aa1d-3cb8a1fd912a",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "84c712db-5a46-4bcf-9ab2-d40b4e32fa5b",
+   "entity": "f2e5d624-2b61-46f9-a674-93015b180d81",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "8089aea3-51a6-4d05-b537-3c2867de84bb",
+   "entity": "7c30dedd-2004-4d48-a785-3d5f30eaf1f0",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "3c7a8a52-bc16-4249-ad0e-363eea61d11b",
+   "entity": "c2054554-676d-452c-9999-62d95b69e034",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "58f22de3-2df5-4784-9776-4459a8ce33c9",
+   "entity": "4591f7d8-3930-44c3-9d7a-9df4d2587e33",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "9e47b564-de48-40b9-af30-6730ee981891",
+   "entity": "3425021a-be13-4e14-a87e-a5e84a11cd46",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "332b6cf7-bc8e-4009-a4b8-9ed0879984c0",
+   "entity": "b1c21087-6a72-4174-911f-4323d4509229",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "7d8e6367-882c-4864-af76-68dc0bae1b0f",
+   "entity": "417a330e-d1ee-49a5-b232-b49785c6855f",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "7d8e6367-882c-4864-af76-68dc0bae1b0f",
+   "entity": "d4c94dd1-5007-4b8e-9905-5da12aa035c9",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "f8eb169c-d603-4e07-898c-469025549dee",
+   "entity": "a98376f6-96d7-4d63-bc4b-9a50b3f59b69",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "7d8e6367-882c-4864-af76-68dc0bae1b0f",
+   "entity": "45fe31f7-c2ed-4149-93d7-06ad7118c664",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "6125af0b-d93e-4710-8dd4-6a5fa707b7ec",
+   "entity": "60446a2d-6b91-47ca-9bb6-5c3e49e421cf",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "1b756124-c4a2-4786-ae4c-307c76a3c638",
+   "entity": "664d2f78-d1be-4fa5-ae18-ee9bf9ae97f3",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "3c7a8a52-bc16-4249-ad0e-363eea61d11b",
+   "entity": "d506db4f-51a6-4c32-94b1-f455b38b3c10",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "c3577158-6b1f-4ef3-a786-4afb7906645e",
+   "entity": "2ed0242f-05b3-4593-b5f4-877ec8372d38",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "336a58d1-156f-4e9e-8d5f-8d29dcaad6f6",
+   "entity": "8fa7af3e-66e4-4357-839c-ad7bdc1d09ce",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "e8934859-5e26-40a2-86eb-a61076573f9a",
+   "entity": "4d18b352-6379-408e-b311-8294d17b33bc",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    1,
+    4
+   ]
+  },
+  {
+   "thought": "ff690613-0841-4089-a649-1c1967af2c5e",
+   "entity": "033fff99-53fd-4558-bbc3-483d388f6629",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "cce65268-bb39-4d43-a1ae-bb2b984e8294",
+   "entity": "6917d025-be20-4d6e-89f8-0adbc8601626",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "6125af0b-d93e-4710-8dd4-6a5fa707b7ec",
+   "entity": "0751c74e-170a-44b5-b958-5cd7c69355aa",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "21de5db2-f969-49e3-a60c-ff11fbdf48d2",
+   "entity": "6e278ffa-65d3-4d38-8ae4-5f54601e0c18",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "a8b555f5-94db-4080-8b90-996436b41263",
+   "entity": "bae72950-9b17-40d1-bbab-b35ca89c9145",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "6d5c6c03-f6e0-4817-aaf9-d76df064b710",
+   "entity": "f49e46e4-8c63-40fe-816b-a8df84f760cc",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "1b756124-c4a2-4786-ae4c-307c76a3c638",
+   "entity": "870a78e8-028b-47d9-922c-8783a877d0b7",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "87d5b566-b89e-4570-8659-9c5b378fc279",
+   "entity": "cbcc7141-8f04-4922-a6f2-70ea830023c0",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "7ba37993-91ff-4f5c-857f-d8a2270ad3bb",
+   "entity": "424d4134-9207-42cf-aa02-82024303e589",
+   "valid": 1,
+   "type": 4,
+   "grader_a": [
+    1,
+    4
+   ],
+   "grader_b": [
+    1,
+    4
+   ]
+  },
+  {
+   "thought": "764eb870-2e1d-4080-aba0-df87d1f90cb4",
+   "entity": "82d6ea18-6b52-4f9c-bdda-c49de90428ae",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "ffdce7e7-f6d2-486e-874e-b423132a46d1",
+   "entity": "3ec34460-35aa-4765-9e3c-6f50b950bbe5",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "87d5b566-b89e-4570-8659-9c5b378fc279",
+   "entity": "e15ab9f9-dbfd-4123-a995-e24fdfd9ae29",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "67b63f99-8c8d-44a9-b82c-88744f65b17c",
+   "entity": "a2a39b2b-864e-4abd-b584-b862ac68ee70",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "f4afd5c4-6e15-4d62-84c9-729b66fbc0ac",
+   "entity": "439a9566-34b6-4f47-9155-85a0352dab9e",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    1,
+    2
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "ad33c0a1-2e57-4988-822b-06d5c3f191fc",
+   "entity": "ea21d7cb-0140-4a2b-a417-becf7943296e",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "c0911901-02ce-4ab5-ba68-e49c6936f7dc",
+   "entity": "e040a7be-c3a6-4984-aaa3-2f15392263ff",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "b7e9b774-4391-43fb-a44c-ca69a55ee044",
+   "entity": "6648b534-5b32-4336-b0a1-c897b493bdd2",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "6e2529f8-a051-4804-bf82-86d45578f06e",
+   "entity": "aa4510e2-9e91-426e-8522-a9475e0db613",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "02af9525-0c98-4b16-8214-6e9771cc6edf",
+   "entity": "d5c4adb3-d209-4c32-b477-94644ff89ee1",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "a75f3476-e4e8-4d15-9a6c-8b665447960e",
+   "entity": "3cdc75a3-0091-4c2f-8432-cba4205709dd",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "67b63f99-8c8d-44a9-b82c-88744f65b17c",
+   "entity": "544e093c-1f35-4abd-9aba-30285e37d84f",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    1,
+    3
+   ]
+  },
+  {
+   "thought": "431c02d1-05fc-423c-a6ca-1f47353d6a72",
+   "entity": "7157574e-18fd-493c-98e1-b70bbd3536cf",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "b7e9b774-4391-43fb-a44c-ca69a55ee044",
+   "entity": "3052a7a0-e396-42b1-a74e-ab60364a1246",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "ed7819e6-0554-4fc0-9d8b-2afa397b0fee",
+   "entity": "d4c5803e-4963-4b60-8afc-2e80d715aa43",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "c0911901-02ce-4ab5-ba68-e49c6936f7dc",
+   "entity": "a771d159-0728-4090-8e0d-82d48b5a8de6",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  },
+  {
+   "thought": "6d5c6c03-f6e0-4817-aaf9-d76df064b710",
+   "entity": "7684ca05-dc99-411b-97a2-1e7ce07fa259",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "3a37f18b-316d-4831-b2d5-45df4670d82e",
+   "entity": "da623753-63e5-45eb-8d18-0f33a7330978",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "1872ab26-126c-481c-9662-1842b9ec76c7",
+   "entity": "156fe27f-b779-44ca-8aaa-292b2f917329",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "76908708-b504-4b5b-9536-ab9112ab06e7",
+   "entity": "03868f37-df47-44ef-aec6-24a6a91df042",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "0b5193ad-4a90-4f05-9181-ab095de570ee",
+   "entity": "7d5e4f52-41be-4d99-b856-419f4bf541dc",
+   "valid": 1,
+   "type": 4,
+   "grader_a": [
+    1,
+    4
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "f320ad31-5762-4930-9f39-ae3fb2ef8abd",
+   "entity": "e825673b-2c8e-46a1-9f8a-9d8af8205f6a",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "92adb50e-3fee-44a1-a696-247a65e1a6f5",
+   "entity": "347ab0fe-f744-4c3e-935e-dd78b8cb04a8",
+   "valid": 0,
+   "type": -1,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    0,
+    -1
+   ]
+  },
+  {
+   "thought": "b10c6bab-83ff-4620-b327-11b7d1dc4bac",
+   "entity": "8ad737d7-c5de-4838-8c2a-49e92b63a310",
+   "valid": 1,
+   "type": 2,
+   "grader_a": [
+    0,
+    -1
+   ],
+   "grader_b": [
+    1,
+    2
+   ]
+  }
+ ]
+}
