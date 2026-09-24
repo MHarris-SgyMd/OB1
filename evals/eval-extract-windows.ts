@@ -24,7 +24,9 @@
  *       whose endpoints do not — the loss windowing is expected to have, and
  *       what the header buys back.
  *
- *   --arms whole,w1200,w1200h,w600,w600h,whole+p,w1200p,w600p    which arms (default: all)
+ *   --arms whole,w1200,w1200h,w600,w600h,whole+p,w1200p,w600p,whole+s,w1200s,w600s    which arms (default: all eleven)
+ *                    the `s` arms stream the answer and abort a runaway at the third copy of one item (SMD-1960);
+ *                    every arm is a full pass over the corpus (the stragglers: 30–55 min each on the 7B), so name the arms wanted
  *   --limit N        first N documents        --timeout S    per call (default 300)
  *
  * Arms: `whole` is one call over the WHOLE text with no answer budget — p1's
@@ -73,7 +75,7 @@ type Arm = { name: string; windowing: ExtractWindowing };
 const overlap = (n: number) => Math.floor(n * EXTRACT_OVERLAP_RATIO);
 const arm = (name: string, windowTokens: number, opts: Partial<ExtractWindowing> = {}): Arm => ({
   name,
-  windowing: { windowTokens, overlapTokens: windowTokens === Number.MAX_SAFE_INTEGER ? 0 : overlap(windowTokens), header: false, outputBudget: true, retryRunaway: false, ...opts },
+  windowing: { windowTokens, overlapTokens: windowTokens === Number.MAX_SAFE_INTEGER ? 0 : overlap(windowTokens), header: false, outputBudget: true, retryRunaway: false, streamAbort: false, ...opts },
 });
 const ALL_ARMS: Arm[] = [
   arm("whole", Number.MAX_SAFE_INTEGER, { outputBudget: false }),
@@ -86,6 +88,11 @@ const ALL_ARMS: Arm[] = [
   arm("whole+p", Number.MAX_SAFE_INTEGER, { retryRunaway: true }),
   arm("w1200p", 1200, { retryRunaway: true }),
   arm("w600p", 600, { retryRunaway: true }),
+  // …and streamed, a runaway aborted at the third copy of one item rather than
+  // read to its budget (SMD-1960): the shipped shape is w1200s.
+  arm("whole+s", Number.MAX_SAFE_INTEGER, { retryRunaway: true, streamAbort: true }),
+  arm("w1200s", 1200, { retryRunaway: true, streamAbort: true }),
+  arm("w600s", 600, { retryRunaway: true, streamAbort: true }),
 ];
 const wanted = flag("arms")?.split(",").map((s) => s.trim()).filter(Boolean);
 const ARMS = wanted ? ALL_ARMS.filter((a) => wanted.includes(a.name)) : ALL_ARMS;
@@ -154,7 +161,8 @@ const sql = new SQL({ url: URL_, max: 2 });
 const norm = async (s: string) => ((await sql`SELECT normalize_entity_name(${s}) AS n`)[0] as { n: string | null }).n ?? "";
 
 /** `calls` is every model call the thought cost — entities.ts's callsOf, the worker's own count, or what a thrown thought had made (fourth and fifth review passes). */
-type Outcome = { arm: string; id: string; tokens: number; windows: number; calls: number; ok: boolean; malformed: boolean; timedOut: boolean; error?: string; seconds: number; entities: number; edges: number; retried: boolean };
+/** `abortedMs` is how far into its call a runaway was aborted on the stream — the longest call's, when several were (SMD-1960); absent when none was. */
+type Outcome = { arm: string; id: string; tokens: number; windows: number; calls: number; ok: boolean; malformed: boolean; timedOut: boolean; error?: string; seconds: number; entities: number; edges: number; retried: boolean; abortedMs?: number };
 const outcomes: Outcome[] = [];
 
 async function runOne(arm: Arm, doc: Doc): Promise<{ thoughtId: string | null; ex: Extraction | null; out: Outcome }> {
@@ -166,14 +174,15 @@ async function runOne(arm: Arm, doc: Doc): Promise<{ thoughtId: string | null; e
     const ex = await extractEntities(doc.content, cfg, TIMEOUT_MS, { kind: "extraction" }, arm.windowing);
     const seconds = (Date.now() - t0) / 1000;
     const retried = ex.retried === true;
+    const aborted = ex.abortedMs !== undefined ? { abortedMs: ex.abortedMs } : {};
     if (ex.malformed) {
-      const out = { arm: arm.name, id: doc.id, tokens, windows: ex.windows, calls: callsOf(ex), ok: false, malformed: true, timedOut: false, seconds, entities: 0, edges: 0, retried };
+      const out = { arm: arm.name, id: doc.id, tokens, windows: ex.windows, calls: callsOf(ex), ok: false, malformed: true, timedOut: false, seconds, entities: 0, edges: 0, retried, ...aborted };
       outcomes.push(out);
       return { thoughtId, ex, out };
     }
     const [{ w }] = await sql`SELECT record_thought_entities(${thoughtId}::uuid, ${key}, ${ex.entities}::jsonb, ${ex.relations}::jsonb) AS w`;
     const res = w as { mentions?: number; edges?: number };
-    const out = { arm: arm.name, id: doc.id, tokens, windows: ex.windows, calls: callsOf(ex), ok: true, malformed: false, timedOut: false, seconds, entities: res.mentions ?? 0, edges: res.edges ?? 0, retried };
+    const out = { arm: arm.name, id: doc.id, tokens, windows: ex.windows, calls: callsOf(ex), ok: true, malformed: false, timedOut: false, seconds, entities: res.mentions ?? 0, edges: res.edges ?? 0, retried, ...aborted };
     outcomes.push(out);
     return { thoughtId, ex, out };
   } catch (e) {
@@ -249,20 +258,20 @@ for (const arm of ARMS) {
   for (const d of docs) {
     process.stderr.write(`  … ${arm.name} ${d.id.slice(0, 8)} (${estimateTokens(d.content)} tokens)\n`);
     const { out } = await runOne(arm, d);
-    console.log(`    ${arm.name.padEnd(13)} ${d.id.slice(0, 8)} ${String(out.tokens).padStart(5)} tok  ${out.ok ? "ok       " : out.malformed ? "malformed" : out.timedOut ? "TIMEOUT  " : "ERROR    "}  ${out.seconds.toFixed(1).padStart(6)} s  windows ${out.windows}  entities ${out.entities}  edges ${out.edges}${out.retried ? "  retried" : ""}${out.error ? `  ${out.error}` : ""}`);
+    console.log(`    ${arm.name.padEnd(13)} ${d.id.slice(0, 8)} ${String(out.tokens).padStart(5)} tok  ${out.ok ? "ok       " : out.malformed ? "malformed" : out.timedOut ? "TIMEOUT  " : "ERROR    "}  ${out.seconds.toFixed(1).padStart(6)} s  windows ${out.windows}  entities ${out.entities}  edges ${out.edges}${out.retried ? "  retried" : ""}${out.abortedMs !== undefined ? `  aborted at ${(out.abortedMs / 1000).toFixed(1)} s` : ""}${out.error ? `  ${out.error}` : ""}`);
   }
 }
 
 console.log(`\n  ${docs.length} documents per arm, ${cfg.metadataModel}, ${TIMEOUT_MS / 1000} s per call\n`);
-console.log("  arm            extracted  malformed  timed out  median s  total s  mean entities  mean edges  calls  retried thoughts");
-console.log("  " + "─".repeat(116));
+console.log("  arm            extracted  malformed  timed out  median s  total s  mean entities  mean edges  calls  retried thoughts  aborted (median s)");
+console.log("  " + "─".repeat(136));
 for (const arm of ARMS) {
   const os = outcomes.filter((o) => o.arm === arm.name);
   const ok = os.filter((o) => o.ok);
   const mean = (f: (o: Outcome) => number) => (ok.length ? ok.reduce((n, o) => n + f(o), 0) / ok.length : 0);
   console.log(
     `  ${arm.name.padEnd(14)} ${String(ok.length).padStart(9)}  ${String(os.filter((o) => o.malformed).length).padStart(9)}  ${String(os.filter((o) => o.timedOut).length).padStart(9)}  ` +
-      `${median(os.map((o) => o.seconds)).toFixed(1).padStart(8)}  ${os.reduce((n, o) => n + o.seconds, 0).toFixed(0).padStart(7)}  ${mean((o) => o.entities).toFixed(1).padStart(13)}  ${mean((o) => o.edges).toFixed(1).padStart(10)}  ${String(os.reduce((n, o) => n + o.calls, 0)).padStart(5)}  ${String(os.filter((o) => o.retried).length).padStart(16)}`
+      `${median(os.map((o) => o.seconds)).toFixed(1).padStart(8)}  ${os.reduce((n, o) => n + o.seconds, 0).toFixed(0).padStart(7)}  ${mean((o) => o.entities).toFixed(1).padStart(13)}  ${mean((o) => o.edges).toFixed(1).padStart(10)}  ${String(os.reduce((n, o) => n + o.calls, 0)).padStart(5)}  ${String(os.filter((o) => o.retried).length).padStart(16)}  ${String(os.filter((o) => o.abortedMs !== undefined).length).padStart(7)} (${median(os.flatMap((o) => (o.abortedMs !== undefined ? [o.abortedMs / 1000] : []))).toFixed(1)})`
   );
 }
 await sql.close();

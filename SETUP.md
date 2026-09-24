@@ -216,9 +216,10 @@ OB1_EGRESS_ALLOW=marker:#public              # what may leave for tagging — un
 A credential belongs to an endpoint: a different chat endpoint gets
 `OB1_CHAT_API_KEY` and never inherits `OB1_LLM_API_KEY`, so a local chat model
 beside a hosted embedder is not handed the hosted key. `preflight.ts` prints a
-row for each endpoint, fails a hosted one with no key of its own, and with
-`--deep` probes each by name — a chat endpoint that is down fails its own row
-while the embeddings row still passes. Note what leaves the host under this
+row for each endpoint, fails a hosted one with no key of its own, and probes
+each by name — a local one on every start, a hosted one with `--deep` — so a
+chat endpoint that is down fails its own row while the embeddings row still
+passes (SMD-1875). Note what leaves the host under this
 shape: a capture's full text, for tagging — and only the captures the gate
 lets through. Under the default policy the hosted chat endpoint is refused for
 every thought until an `OB1_EGRESS_ALLOW` term names what may go (above); the
