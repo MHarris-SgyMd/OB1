@@ -1745,8 +1745,12 @@ function buildServer(): McpServer {
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
+  // The two the Streamable HTTP spec has a client send after initialize — a
+  // browser-hosted client names them at preflight, and a list without them
+  // refuses the request before it arrives (SMD-1668; the core server's list) —
+  // and x-access-key, the second header the shared auth module reads.
   "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-brain-key, accept, mcp-session-id",
+    "authorization, x-client-info, apikey, content-type, x-brain-key, x-access-key, accept, mcp-session-id, mcp-protocol-version, last-event-id",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
 };
 
