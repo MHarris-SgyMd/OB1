@@ -157,9 +157,30 @@ function sweepInflight() {
     let age = Infinity;
     try { age = Date.now() - statSync(dir).mtimeMs; } catch { continue; }
     if (isAlive(pid) && age < CLAIM_MAX_AGE_MS) continue;
-    for (const f of readdirSync(dir)) { try { if (f.endsWith(".json")) renameSync(join(dir, f), join(PENDING_DIR(), f)); else unlinkSync(join(dir, f)); } catch { /* a sibling swept it */ } } // a `.tmp` a child left mid-write is no payload (sixth review pass: swept along, it lived under pending/ for ever)
-    try { rmdirSync(dir); } catch { /* not empty after all, or gone */ }
+    release(dir);
   }
+}
+/**
+ * Give a claim directory's contents back: every payload to pending/, anything
+ * else — a temp file a child left mid-write — unlinked, since it is no
+ * payload (sixth review pass: swept along, it lived under pending/ for ever);
+ * then the directory goes. Spelled once for the sweep and a run's end
+ * (SMD-2035's second boyscout).
+ */
+function release(dir) {
+  try { for (const f of readdirSync(dir)) { try { if (f.endsWith(".json")) renameSync(join(dir, f), join(PENDING_DIR(), f)); else unlinkSync(join(dir, f)); } catch { /* a sibling swept it */ } } } catch { /* swept from under us: nothing left to return */ }
+  try { rmdirSync(dir); } catch { /* not empty after all, or gone */ }
+}
+/**
+ * Take a payload into this run's claim directory `mine`: a rename exactly one
+ * of two children wins, then the file read; one that will not parse goes to
+ * dead/. Null when a sibling has it, or it would not parse. Spelled once for
+ * the run's head and its follow-up (SMD-2035's second boyscout).
+ */
+function claim(home, mine) {
+  const here = join(mine, basename(home));
+  try { renameSync(home, here); } catch { return null; } // a sibling has it
+  try { return { home, here, payload: JSON.parse(readFileSync(here, "utf8")) }; } catch { moveTo(here, DEAD_DIR()); return null; }
 }
 const moveTo = (from, dir) => { try { renameSync(from, join(dir, basename(from))); return true; } catch { return false; } };
 /** Dead letters are kept for an operator to read (the README's troubleshooting), not forever: after thirty days they are removed (eighth review pass — an endpoint down for an afternoon filled dead/ and nothing pruned it). */
@@ -1022,14 +1043,7 @@ export async function postPending(cfg, own) {
   const earlier = pending.filter((f) => f !== own).slice(0, own ? 4 : 5);
   const wanted = [...earlier, ...(own && existsSync(own) ? [own] : [])].sort((a, b) => basename(a).localeCompare(basename(b))); // names lead with the millisecond they were made
   // Claim: the payload's home path stays its name in the outcomes and the state.
-  const claimed = [];
-  for (const home of wanted) {
-    const here = join(mine, basename(home));
-    try { renameSync(home, here); } catch { continue; } // a sibling has it
-    let payload;
-    try { payload = JSON.parse(readFileSync(here, "utf8")); } catch { moveTo(here, DEAD_DIR()); continue; }
-    claimed.push({ home, here, payload });
-  }
+  const claimed = wanted.map((home) => claim(home, mine)).filter(Boolean);
   const newestOf = new Map(); // session → the newest payload's home in this run
   for (const { home, payload } of claimed) newestOf.set(payload.session_id, home);
   const outcomes = [];
@@ -1062,17 +1076,15 @@ export async function postPending(cfg, own) {
       for (const [sid, l] of lists) {
         const p = l[k];
         if (!p || next.length >= room) continue;
-        const here = join(mine, p.name);
-        try { renameSync(p.path, here); } catch { continue; }
-        let payload;
-        try { payload = JSON.parse(readFileSync(here, "utf8")); } catch { moveTo(here, DEAD_DIR()); continue; }
+        const c = claim(p.path, mine);
+        if (!c) continue;
         // A name is matched by its sanitised tail, which two ids can share
         // ("a.b" and "a_b"): a payload of another session is not this run's
         // to judge (sixth review pass — it was dropped as obsolete beside a
         // session it did not belong to).
-        if (payload.session_id !== sid) { moveTo(here, PENDING_DIR()); bounced.add(p.path); continue; }
+        if (c.payload.session_id !== sid) { moveTo(c.here, PENDING_DIR()); bounced.add(p.path); continue; }
         if (!named.has(sid)) { named.add(sid); newestOf.set(sid, p.path); }
-        next.push({ home: p.path, here, payload });
+        next.push(c);
       }
     }
     next.sort((a, b) => basename(a.home).localeCompare(basename(b.home))); // oldest first, as the run posts
@@ -1227,8 +1239,7 @@ export async function postPending(cfg, own) {
     }
   } finally {
     // Anything still claimed (an unexpected throw) goes back; then the claim directory goes.
-    try { for (const f of readdirSync(mine)) { if (f.endsWith(".json")) moveTo(join(mine, f), PENDING_DIR()); else { try { unlinkSync(join(mine, f)); } catch { /* gone */ } } } } catch { /* swept from under us: nothing left to return */ }
-    try { rmdirSync(mine); } catch { /* gone */ }
+    release(mine);
   }
   return outcomes;
 }
