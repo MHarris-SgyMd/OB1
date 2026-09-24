@@ -173,12 +173,12 @@ if (store !== "postgrest" && store !== "sql") {
 // ── Model provider ──────────────────────────────────────────────────────────
 
 add("model provider", "ok",
-    `${embEndpoint.base} — embeddings${chatIsOwn ? "" : " and chat"}${localEmbeddings ? " (local — no credential needed)" : ""}`);
+    `${maskUrl(embEndpoint.base)} — embeddings${chatIsOwn ? "" : " and chat"}${localEmbeddings ? " (local — no credential needed)" : ""}`);
 if (chatIsOwn) {
   // A second endpoint is a second row, so an operator reading the report sees
   // where each of the two calls goes; unsplit, the one row says "and chat".
   add("chat provider", "ok",
-      `${chatEndpoint.base} — chat${env.OB1_CHAT_BASE_URL ? " (OB1_CHAT_BASE_URL)" : ", the embeddings endpoint with its own credential (OB1_CHAT_API_KEY)"}${localChat ? " (local — no credential needed)" : ""}`);
+      `${maskUrl(chatEndpoint.base)} — chat${env.OB1_CHAT_BASE_URL ? " (OB1_CHAT_BASE_URL)" : ", the embeddings endpoint with its own credential (OB1_CHAT_API_KEY)"}${localChat ? " (local — no credential needed)" : ""}`);
 }
 {
   const { resolveEmbeddingDimensions } = await import("../db/config.mjs");
@@ -317,6 +317,144 @@ if (chatIsOwn) {
   credentialRow("chat credential", chatEndpoint, localChat, "OB1_CHAT_API_KEY", "OB1_CHAT_BASE_URL", unshared);
 }
 
+// ── Is the local endpoint there at all? (SMD-1875) ──────────────────────────
+
+/**
+ * A local endpoint is dialled once, by default: one GET of `/models` with no
+ * body and no credential, under a short timeout, and only the connection is
+ * judged — any HTTP status is an endpoint that answers; what it serves is
+ * --deep's question. Until this row preflight's credential rule
+ * (isLocalEndpoint, above) called an endpoint local by its hostname and
+ * connected to nothing without --deep, so an address that reached nothing
+ * — the container's own loopback (the code's default, inside a container), the
+ * `ollama` service name with no profile, `host.docker.internal` where the
+ * runtime does not provide it, a typo in the port — was `preflight OK`, and the
+ * first capture failed in 7 ms with the server log ending at `Started server`
+ * (measured 2026-09-21 on SMD-1843's baseline). A hosted endpoint is not
+ * dialled here: it costs a credential to prove anything about, which is --deep.
+ */
+const LOCAL_PROBE_TIMEOUT_MS = 2500;
+const LOCAL_PROBE_SECONDS = `${LOCAL_PROBE_TIMEOUT_MS / 1000} s`;
+/** The three spellings an operator reaches for, in the remedy's own words: the two host aliases, and the stack's own service. */
+const HOST_ALIASES = "http://host.containers.internal:11434/v1 under podman or http://host.docker.internal:11434/v1 under Docker";
+const STACK_OWN = "http://ollama:11434/v1 with --profile local-models";
+const HOST_SPELLINGS = `an Ollama on the host is ${HOST_ALIASES}, and the stack's own is ${STACK_OWN}`;
+/**
+ * What went wrong at the connection, in words, from Bun's error for it — and
+ * what the first capture would have done there, which differs by kind: a
+ * refusal or an unresolved name fails it in milliseconds; a silent endpoint
+ * (a SYN dropped, a listener that never answers) holds it for the whole
+ * request budget (first review pass). Resolution is judged by the syscall,
+ * not one code: ENOTFOUND is the common case, and a resolver that answers
+ * ETIMEOUT or EAI_AGAIN inside the probe's window is the same finding with
+ * its code shown; a resolver stalled past the window reads as the timeout
+ * kind, which is why that kind says "up to" — measured on Linux, Bun's fetch
+ * reports a blackholed resolver as `getaddrinfo ETIMEOUT` at about 2.5 s
+ * (second review pass). "Up to" is one request budget, the default path: with
+ * OB1_CHUNK_CONTEXT=on a windowed capture spends a blurb budget first, then
+ * the embedding's (third review pass).
+ */
+function probeFailure(e: unknown): { kind: "silent" | "unresolved" | "refused" | "reset" | "tls" | "other"; why: string; then: string } {
+  const err = e as Error & { code?: string | number; syscall?: string };
+  const code = String(err.code ?? "");
+  const fast = "the first capture would fail on it in milliseconds";
+  if (err.name === "TimeoutError") return { kind: "silent", why: `no HTTP answer in ${LOCAL_PROBE_SECONDS}`, then: "the first capture would wait on it, up to the whole request timeout (OB1_LLM_TIMEOUT), and then fail" };
+  if (err.syscall === "getaddrinfo" || code === "ENOTFOUND") return { kind: "unresolved", why: `the name does not resolve${code && code !== "ENOTFOUND" ? ` (${code})` : ""}`, then: fast };
+  if (code === "ConnectionRefused" || code === "ECONNREFUSED") return { kind: "refused", why: "the connection was refused", then: fast };
+  // Accepted and closed with no HTTP: an https endpoint dialled as http, or a
+  // listener that is not HTTP at all. Bun's message ends in advice about its
+  // own `verbose` option, which is nothing to an operator (fifth review pass).
+  if (code === "ECONNRESET") return { kind: "reset", why: "the connection was accepted and closed with no HTTP answer, as an https endpoint dialled as http does", then: fast };
+  // Something answered and its certificate was refused; the server's own
+  // calls fail the same way, and pass under the same trust (fifth review pass).
+  if (/CERT|SSL|TLS/i.test(code) || /certificate/i.test(err.message)) return { kind: "tls", why: `its TLS certificate is not trusted (${code || err.message})`, then: "every capture would fail the same way" };
+  return { kind: "other", why: err.message.replace(/\.?\s*For more information.*$/s, ""), then: fast };
+}
+/** The hostname of a base URL, lower-cased as the URL parser leaves it; "" for a value that is not a URL (which isLocalEndpoint already calls not local). */
+function hostnameOf(base: string): string {
+  try { return new URL(base).hostname.toLowerCase(); } catch { return ""; }
+}
+/** The remedy for the hostname's kind: which of the three spellings this one is, and what it needs. */
+function probeRemedy(base: string, knob: string): string {
+  const host = hostnameOf(base);
+  if (LOCAL_PROVIDER_SERVICES.includes(host)) {
+    return `\`${host}\` is the local-models profile's service and exists only under it: start the stack with --profile local-models, or set ${knob} to an Ollama on the host (${HOST_ALIASES}) or to a hosted provider with a key.`;
+  }
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]" || host === "0.0.0.0") {
+    return `Inside a container ${host} is the container itself, not the host: ${HOST_SPELLINGS}. From a shell on the host, start the provider or fix the port in ${knob}.`;
+  }
+  if (host === "host.docker.internal" || host === "host.containers.internal") {
+    return `Nothing on the host answers at that port, or this runtime does not provide the name: podman writes both names; Docker Desktop only host.docker.internal; Docker on Linux neither unless extra_hosts host-gateway is set, and deploy/compose.yaml sets it for host.docker.internal. Start the provider on the host and name it in ${knob} (${HOST_ALIASES}), or use the stack's own (${STACK_OWN}).`;
+  }
+  return `Start the provider at that address or fix the host and port in ${knob}; ${HOST_SPELLINGS}.`;
+}
+const TLS_REMEDY = "Serve it over http:// on the box, or trust its issuer for the server (NODE_EXTRA_CA_CERTS=<ca.pem>); NODE_TLS_REJECT_UNAUTHORIZED=0 disables the check for every call the server makes.";
+/**
+ * The proxy variable Bun's fetch reads for this base — HTTP_PROXY/http_proxy
+ * for http, HTTPS_PROXY/https_proxy for https — or null. Loopback and private
+ * addresses go through it too unless NO_PROXY names them, and so does every
+ * call the server makes, so a failure here is the route's before it is the
+ * endpoint's; podman forwards the host's proxy variables into containers by
+ * default (fifth review pass). Whether NO_PROXY exempts the host is Bun's
+ * rule to apply, so the text says "unless" rather than deciding.
+ */
+function proxyKnobFor(base: string): string | null {
+  const names = base.startsWith("https:") ? ["HTTPS_PROXY", "https_proxy"] : ["HTTP_PROXY", "http_proxy"];
+  return names.find((n) => process.env[n]) ?? null;
+}
+/**
+ * The name, resolved before anything is dialled, under the same bound as the
+ * connection. Judged apart because on a GitHub runner the first run of PR #138
+ * read the unknown `ollama` name as the TIMEOUT kind — the resolver took
+ * longer than the probe's window to say NXDOMAIN, so the fetch aborted first —
+ * and a resolver that never answers deserves its own words either way. An IP
+ * literal resolves to itself. `Bun.dns.lookup` is the resolver the suite asks
+ * too, so the two agree by construction (caught: CI, PR #138).
+ */
+async function resolveFirst(host: string): Promise<{ why: string; then: string } | null> {
+  if (!host || /^[\d.]+$/.test(host) || host.startsWith("[")) return null;
+  const outcome = await Promise.race([
+    Bun.dns.lookup(host).then(() => null, (e) => (e as Error & { code?: string })),
+    Bun.sleep(LOCAL_PROBE_TIMEOUT_MS).then(() => "stall" as const),
+  ]);
+  if (outcome === null) return null;
+  if (outcome === "stall") return { why: `the name does not resolve within ${LOCAL_PROBE_SECONDS} — the resolver did not answer`, then: "the first capture would wait on the resolver, up to its request timeout (OB1_LLM_TIMEOUT), and then fail" };
+  const code = String(outcome.code ?? "").replace(/^DNS_/, "");
+  return { why: `the name does not resolve${code && code !== "ENOTFOUND" ? ` (${code})` : ""}`, then: "the first capture would fail on it in milliseconds" };
+}
+async function probeLocal(row: string, at: ProviderEndpoint, knob: string): Promise<void> {
+  const started = performance.now();
+  // Userinfo in the URL is never sent by fetch and would otherwise land in the
+  // log on every start (fifth review pass); maskUrl is store.ts's, the one the
+  // DATABASE_URL row uses.
+  const shown = maskUrl(at.base);
+  const unresolved = await resolveFirst(hostnameOf(at.base));
+  if (unresolved) {
+    add(row, "fail", `nothing answers at ${shown} — ${unresolved.why} (GET /models, ${LOCAL_PROBE_SECONDS} timeout); ${unresolved.then}`, probeRemedy(at.base, knob));
+    return;
+  }
+  try {
+    // No redirects followed: a 3xx is an answer from THIS address, and
+    // following one would judge — and dial — wherever it points, off the box
+    // included, under a row that names the base (first review pass).
+    const r = await fetch(`${at.base}/models`, { method: "GET", redirect: "manual", signal: AbortSignal.timeout(LOCAL_PROBE_TIMEOUT_MS) });
+    await r.body?.cancel();
+    add(row, "ok", `${shown} answers — HTTP ${r.status} to GET /models in ${Math.max(1, Math.round(performance.now() - started))} ms; what it serves is checked under --deep`);
+  } catch (e) {
+    const { kind, why, then } = probeFailure(e);
+    const proxy = proxyKnobFor(at.base);
+    const host = hostnameOf(at.base);
+    const lead = kind === "tls" ? `${shown} answers, but ${why}` : `nothing answers at ${shown} — ${why}`;
+    const route = proxy ? `; ${proxy} is set, so this call and every one the server makes go through that proxy unless NO_PROXY names ${host}` : "";
+    add(row, "fail", `${lead} (GET /models, ${LOCAL_PROBE_SECONDS} timeout)${route}; ${then}`,
+        (proxy ? `Add ${host} to NO_PROXY (and no_proxy) for the server, or unset ${proxy} for it. Otherwise: ` : "") + (kind === "tls" ? TLS_REMEDY : probeRemedy(at.base, knob)));
+  }
+}
+if (localEmbeddings) await probeLocal("provider endpoint", embEndpoint, "OB1_LLM_BASE_URL");
+// A chat endpoint at the same base is the same socket: one probe. Its own
+// local base is its own row, so a down chat server fails by its own name.
+if (chatIsOwn && chatEndpoint.base !== embEndpoint.base && localChat) await probeLocal("chat endpoint", chatEndpoint, "OB1_CHAT_BASE_URL");
+
 // ── Egress: what may leave the box (SMD-1903) ───────────────────────────────
 
 /**
@@ -372,7 +510,7 @@ const CHAT_REFUSED = "captures land untagged (no topics, no type) and the entity
 function egressRow(row: string, at: ProviderEndpoint, knob: string, calls: string, refusedMeans: string): void {
   const host = hostOf(at.base);
   if (at.local) {
-    add(row, "ok", `${at.base} is declared local (${knob}) — the ${calls} text stays on the box; the gate does not apply`);
+    add(row, "ok", `${maskUrl(at.base)} is declared local (${knob}) — the ${calls} text stays on the box; the gate does not apply`);
     return;
   }
   if (isLocalEndpoint(at.base)) {
@@ -388,7 +526,7 @@ function egressRow(row: string, at: ProviderEndpoint, knob: string, calls: strin
         : egress.mode === "allow"
           ? `, and under allow any ${calls} call an OB1_EGRESS_DENY term matches is refused`
           : "; the gate is off, so nothing is refused today — a later deny would refuse every call";
-    add(row, "warn", `${at.base} looks local but is not declared so — the gate treats it as remote${consequence}`,
+    add(row, "warn", `${maskUrl(at.base)} looks local but is not declared so — the gate treats it as remote${consequence}`,
         `Set ${knob}=1 if this endpoint is on this machine or its private network (declared, not guessed — SMD-1903).`);
     return;
   }

@@ -17,6 +17,8 @@
  *
  *   OB1_EVAL_CORPUS=/tmp/linear-corpus-full.json ../db/with-postgres.sh bun eval-entities.ts --corpus [--workers 2]
  *   … --corpus --replay [--allow-stale-dump]   re-apply the dumped answers without the model; refuses a dump whose text changed unless told
+ *   ../db/with-postgres.sh bun eval-entities.ts qwen2.5:7b --unstreamed   the fourteen captures with every answer read whole instead of streamed
+ *                                              (SMD-1960's parity run: same tp/fp/fn either way); refused with --corpus, whose calls the worker makes
  *       The real corpus (441 Linear issues, built by build-linear-corpus.ts),
  *       loaded as thoughts and run through db/extract-entities.ts itself, so
  *       the wall clock is the tool's wall clock. The model's answers are dumped
@@ -43,7 +45,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadEnv } from "./env.ts";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
-import { extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
+import { extractEntities, extractionKey, windowingFor, type Extraction } from "../server-portable/entities.ts";
 import { requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
 import { loadLinearCorpus, insertLinearThought, entityAnswersPath, readEntityAnswers } from "./linear-corpus.ts";
 
@@ -53,6 +55,9 @@ const URL_ = requireDatabaseUrl("eval-entities.ts");
 const args = process.argv.slice(2);
 const has = (n: string) => args.includes(`--${n}`);
 const flag = (n: string) => { const i = args.indexOf(`--${n}`); return i >= 0 && !args[i + 1]?.startsWith("--") ? args[i + 1] : undefined; };
+/** Read every answer whole instead of streaming it (SMD-1960): the parity run — the streamed answer must score the same tp/fp/fn. The fourteen captures only: --corpus's calls are the worker's, which streams (first review pass: the flag was documented beside --corpus and silently ignored there). */
+const UNSTREAMED = has("unstreamed");
+if (UNSTREAMED && has("corpus")) { console.error("--unstreamed applies to the fourteen captures; --corpus runs db/extract-entities.ts, which streams every call"); process.exit(2); }
 
 // OB1_EVAL_BASE (or lib.ts's OLLAMA_BASE fallback) is what the other harnesses use for the endpoint; honour it.
 const evalBase = process.env.OB1_EVAL_BASE ?? process.env.OLLAMA_BASE;
@@ -169,7 +174,7 @@ async function scoreModel(model: string) {
       // Per call, as the worker's --timeout is (SMD-1879): a windowed capture
       // has this per window, and again per retry. None of the fourteen is long
       // enough to window.
-      ex = await extractEntities(cs.text, c, 120_000, { kind: "extraction" });
+      ex = await extractEntities(cs.text, c, 120_000, { kind: "extraction" }, UNSTREAMED ? { ...windowingFor(c), streamAbort: false } : undefined);
     } catch (e) {
       // A thrown call is scored like a malformed answer — every labelled entity
       // missed — not skipped: a skipped case inflated recall while the header
@@ -227,7 +232,10 @@ if (!has("corpus")) {
     rows.push(await scoreModel(m));
   }
   const labelled = CASES.reduce((n, c) => n + c.entities.length, 0);
-  console.log(`\n  ${CASES.length} captures, ${labelled} labelled entities; scored over (type, normalised name) through the real write path\n`);
+  // The label is the windowing's, not the flag's: with OB1_METADATA_REASONING
+  // on nothing streams whatever the flag (second review pass).
+  const answers = UNSTREAMED ? "read whole (--unstreamed)" : windowingFor(cfg).streamAbort ? "streamed, a runaway aborted at the third copy of one item" : "read whole (reasoning on: nothing streams)";
+  console.log(`\n  ${CASES.length} captures, ${labelled} labelled entities; scored over (type, normalised name) through the real write path; answers ${answers}\n`);
   console.log("  model                  prec   recall   tp  fp  fn  forbidden  relations  malformed  rejected   sec");
   console.log("  " + "─".repeat(104));
   for (const s of rows) {
