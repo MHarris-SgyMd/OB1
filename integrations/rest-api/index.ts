@@ -24,6 +24,11 @@
 // ob1-fork (SMD-2079): every response carries the request's CORS headers, set
 // once on the way out of the main handler (withCors) — json() built them from
 // the request only when handed `req`, and forty-five answers were not.
+// ob1-fork (SMD-2110): the ingest proxy's upstream is SMART_INGEST_URL, an
+// http(s) address of its own, refused at boot under any other scheme; unset,
+// POST /ingest and POST /ingestion-jobs/:id/execute answer 503 naming it. Both
+// built the URL from SUPABASE_URL — the Postgres DSN here — so every call
+// handed fetch() the database credentials and answered 502.
 /**
  * rest-api — REST API gateway for Open Brain.
  *
@@ -42,7 +47,7 @@
  *   GET  /thought/:id/connections — related thoughts
  *   GET  /count               — count thoughts with filters
  *   GET  /stats               — brain stats summary
- *   POST /ingest              — proxy to smart-ingest function
+ *   POST /ingest              — proxy to the smart-ingest server (SMART_INGEST_URL)
  *   GET  /ingestion-jobs      — list ingestion jobs
  *   GET  /ingestion-jobs/:id  — get job detail
  *   POST /ingestion-jobs/:id/execute — execute a dry-run job
@@ -90,6 +95,21 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
 const MCP_ACCESS_KEY = process.env.MCP_ACCESS_KEY ?? "";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+/**
+ * An HTTP target read from its own variable, or null when unset: never derived from SUPABASE_URL, which on this fork is the
+ * Postgres connection string — a URL built on it carries the database credentials into fetch() and fails there
+ * (SMD-2110). Any scheme but http(s) is refused at boot; the message names the scheme, not the value.
+ */
+function httpTargetFrom(name: string): string | null {
+  const value = process.env[name]?.trim().replace(/\/+$/, "");
+  if (!value) return null;
+  const scheme = value.match(/^([a-z][a-z0-9+.-]*):/i)?.[1] ?? "";
+  if (!/^https?$/i.test(scheme)) throw new Error(`${name} must be an http(s) URL — it is ${scheme ? `a ${scheme}:// URL` : "not a URL"}`);
+  return value;
+}
+/** The smart-ingest server's address (integrations/smart-ingest), the proxy routes' upstream; unset, they answer 503. */
+const SMART_INGEST_URL = httpTargetFrom("SMART_INGEST_URL");
 
 // ob1-fork (SMD-1541): the name 008's audit row records for a write through
 // this server. It holds one key, MCP_ACCESS_KEY, compared in place (change 67
@@ -1127,16 +1147,27 @@ async function proxyFetchJson(
   }
 }
 
+/** The two proxy routes' answer with no upstream configured: a 503 naming the variable, not a 502 from a dead fetch. */
+function smartIngestNotConfigured(): Response {
+  return json({
+    error: "smart_ingest_not_configured",
+    variable: "SMART_INGEST_URL",
+    hint: "Set SMART_INGEST_URL to the smart-ingest server's http(s) address (integrations/smart-ingest) and restart.",
+  }, 503);
+}
+
 async function handleIngest(req: Request): Promise<Response> {
+  if (!SMART_INGEST_URL) return smartIngestNotConfigured();
   const read = await readJsonWithCap(req);
   if (!read.ok) return read.resp;
   const body = read.body;
   if (body.auto_execute) { body.dry_run = false; delete body.auto_execute; }
-  return await proxyFetchJson(`${SUPABASE_URL}/functions/v1/smart-ingest`, body);
+  return await proxyFetchJson(SMART_INGEST_URL, body);
 }
 
 async function handleExecuteJob(jobId: string): Promise<Response> {
-  return await proxyFetchJson(`${SUPABASE_URL}/functions/v1/smart-ingest/execute`, { job_id: jobId });
+  if (!SMART_INGEST_URL) return smartIngestNotConfigured();
+  return await proxyFetchJson(`${SMART_INGEST_URL}/execute`, { job_id: jobId });
 }
 
 async function handleListJobs(url: URL): Promise<Response> {

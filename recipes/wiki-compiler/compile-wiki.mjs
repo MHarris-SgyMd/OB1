@@ -156,7 +156,7 @@ Entity wiki:
 Environment:
   OPEN_BRAIN_URL
   OPEN_BRAIN_SERVICE_KEY
-  ENTITY_EXTRACTION_WORKER_URL (optional; defaults from OPEN_BRAIN_URL)
+  ENTITY_EXTRACTION_WORKER_URL (the entity-extraction-worker server's address; unset, the trigger is skipped)
   ENTITY_EXTRACTION_MCP_ACCESS_KEY or MCP_ACCESS_KEY (for worker trigger)
   LLM_API_KEY / LLM_MODEL / related vars used by the underlying recipes
 `);
@@ -195,13 +195,16 @@ function spawnNode(scriptPath, scriptArgs, envOverrides = {}) {
 }
 
 async function triggerEntityExtraction(args, env) {
-  const workerUrl =
-    env.ENTITY_EXTRACTION_WORKER_URL ||
-    (env.OPEN_BRAIN_URL ? `${String(env.OPEN_BRAIN_URL).replace(/\/+$/, "")}/functions/v1/entity-extraction-worker` : null);
+  // The worker's own address, never derived from another URL: the `${OPEN_BRAIN_URL}/functions/v1/…` fallback was
+  // upstream's Edge Function path, and on this fork the worker is a server of its own (SMD-2110).
+  const workerUrl = String(env.ENTITY_EXTRACTION_WORKER_URL || "").trim() || null;
+  if (workerUrl && !/^https?:\/\//i.test(workerUrl)) {
+    throw new Error("ENTITY_EXTRACTION_WORKER_URL must be an http(s) URL — the entity-extraction-worker server's address.");
+  }
   const accessKey = env.ENTITY_EXTRACTION_MCP_ACCESS_KEY || env.MCP_ACCESS_KEY || null;
   if (!workerUrl || !accessKey) {
     const missing = [];
-    if (!workerUrl) missing.push("ENTITY_EXTRACTION_WORKER_URL or OPEN_BRAIN_URL");
+    if (!workerUrl) missing.push("ENTITY_EXTRACTION_WORKER_URL");
     if (!accessKey) missing.push("ENTITY_EXTRACTION_MCP_ACCESS_KEY or MCP_ACCESS_KEY");
     const message = `Skipping entity extraction trigger; missing ${missing.join(" and ")}.`;
     if (args.requireExtraction) throw new Error(message);

@@ -142,7 +142,7 @@ bun integrations/smart-ingest/index.ts
 
 ### 2. Set the environment
 
-`MCP_ACCESS_KEY` is the one key this server holds — the raw key, compared constant-time (this server predates the hashed `MCP_ACCESS_KEYS` list, change 67) — sent as `x-brain-key`. Optional multi-provider fallback, in the same environment:
+`MCP_ACCESS_KEY` is the one key this server holds — the raw key, compared constant-time (this server predates the hashed `MCP_ACCESS_KEYS` list, change 67) — sent as `x-brain-key`. `ENTITY_EXTRACTION_WORKER_URL`, optional, is the entity-extraction worker's http(s) address (`integrations/entity-extraction-worker`): after a write that adds or revises a thought, this server POSTs to it with its key and `?limit=` the count, so extraction runs at once; unset, the server says so when it starts and the queue waits for whatever runs the worker on a schedule, and any scheme but `http`/`https` is refused at start (SMD-2110 — until it the address was built from `SUPABASE_URL`, the Postgres connection string here, so every trigger failed). Optional multi-provider fallback, in the same environment:
 
 ```bash
 OPENAI_API_KEY="your-openai-key" ANTHROPIC_API_KEY="your-anthropic-key"

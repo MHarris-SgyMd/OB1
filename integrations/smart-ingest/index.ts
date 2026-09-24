@@ -4,8 +4,18 @@
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: @supabase/supabase-js
 // Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
+// ob1-fork (SMD-2110): the extraction trigger after a write POSTs to
+// ENTITY_EXTRACTION_WORKER_URL, the worker's own http(s) address, refused at
+// boot under any other scheme and skipped when unset — it built the URL from
+// SUPABASE_URL, the Postgres DSN here, so every trigger handed fetch() the
+// database credentials and failed inside its timeout. The trigger fires only
+// after an add the server counts, and it counted none here: upsert_thought
+// answers the fork's UUID id, which extractThoughtId read as no id at all, so
+// every add was reported failed — a UUID is an id now; the rest of the write
+// path's fork gap (the vector in the 2-argument form's payload, the bigint
+// item columns) is SMD-2128's.
 /**
- * smart-ingest — Supabase Edge Function for the Smart Ingest pipeline.
+ * smart-ingest — the Smart Ingest server.
  *
  * Accepts raw text, extracts atomic thoughts via LLM, deduplicates against
  * existing thoughts (fingerprint + semantic), and optionally writes them to
@@ -57,6 +67,22 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ?? "";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+/**
+ * An HTTP target read from its own variable, or null when unset: never derived from SUPABASE_URL, which on this fork is the
+ * Postgres connection string — a URL built on it carries the database credentials into fetch() and fails there
+ * (SMD-2110). Any scheme but http(s) is refused at boot; the message names the scheme, not the value.
+ */
+function httpTargetFrom(name: string): string | null {
+  const value = process.env[name]?.trim().replace(/\/+$/, "");
+  if (!value) return null;
+  const scheme = value.match(/^([a-z][a-z0-9+.-]*):/i)?.[1] ?? "";
+  if (!/^https?$/i.test(scheme)) throw new Error(`${name} must be an http(s) URL — it is ${scheme ? `a ${scheme}:// URL` : "not a URL"}`);
+  return value;
+}
+/** The entity-extraction worker's address (integrations/entity-extraction-worker), POSTed to after a write; unset, no trigger. */
+const ENTITY_EXTRACTION_WORKER_URL = httpTargetFrom("ENTITY_EXTRACTION_WORKER_URL");
+if (!ENTITY_EXTRACTION_WORKER_URL) console.warn("ENTITY_EXTRACTION_WORKER_URL is not set — a write here queues extraction and triggers no worker; run integrations/entity-extraction-worker on a schedule, or set the variable.");
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -353,29 +379,36 @@ function mergeTags(existing: unknown, extras: string[]): string[] {
   ]);
 }
 
-function extractThoughtId(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
+/** An id upsert_thought answered: upstream's integer, or this fork's UUID (`thoughts.id` is uuid here; SMD-2110). */
+function isThoughtId(value: unknown): value is number | string {
+  return (typeof value === "number" && Number.isFinite(value)) || (typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value));
+}
+function extractThoughtId(value: unknown): number | string | null {
+  if (isThoughtId(value)) return value;
   if (value && typeof value === "object" && "thought_id" in value) {
     const thoughtId = (value as UpsertThoughtResult).thought_id;
-    if (typeof thoughtId === "number" && Number.isFinite(thoughtId)) return thoughtId;
+    if (isThoughtId(thoughtId)) return thoughtId;
   }
   if (value && typeof value === "object" && "id" in value) {
     const id = (value as UpsertThoughtResult).id;
-    if (typeof id === "number" && Number.isFinite(id)) return id;
+    if (isThoughtId(id)) return id;
   }
   return null;
 }
 
-/** Best-effort entity extraction drain. Non-fatal if the worker is not deployed.
+/** Best-effort entity extraction drain. Non-fatal if the worker is not deployed,
+ * and skipped when ENTITY_EXTRACTION_WORKER_URL is unset (SMD-2110).
  * Uses a short 10s timeout so a hung worker cannot extend the caller's response
- * by the full Edge Function budget (Wave 2.5 HIGH-9).
+ * by the full request budget (Wave 2.5 HIGH-9).
  */
 async function scheduleEntityExtraction(writtenCount: number): Promise<void> {
-  if (writtenCount <= 0 || !SUPABASE_URL || !MCP_ACCESS_KEY) return;
+  if (writtenCount <= 0 || !ENTITY_EXTRACTION_WORKER_URL || !MCP_ACCESS_KEY) return;
   try {
     const limit = Math.min(Math.max(writtenCount, 1), ENTITY_EXTRACTION_BATCH_MAX);
+    const target = new URL(ENTITY_EXTRACTION_WORKER_URL);
+    target.searchParams.set("limit", String(limit));
     const response = await fetchWithTimeout(
-      `${SUPABASE_URL}/functions/v1/entity-extraction-worker?limit=${limit}`,
+      target.toString(),
       {
         method: "POST",
         headers: { "x-brain-key": MCP_ACCESS_KEY },
@@ -685,7 +718,7 @@ async function executeItem(
   sourceType: string | null,
   sourceMetadata?: Record<string, unknown> | null,
   skipClassification = false,
-): Promise<number | null> {
+): Promise<number | string | null> {
   switch (item.action) {
     case "add": {
       const prepared = await prepareThoughtPayload(item.content, {
