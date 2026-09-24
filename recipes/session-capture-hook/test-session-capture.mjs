@@ -300,8 +300,32 @@ let episodesLines;
     "a move to another directory ends the episode at the next ask; the next says where it went and runs there");
   assert(asks(BR("main"), P("fix the cors thing"), BR("me/smd-2079-cors"), P("review")) === "fix the cors thing+review", "a branch that names a ticket, made under an episode that names none, gives the work its name — no boundary");
   assert(asks(BR("me/smd-1844-a"), P("do smd-1844"), BR("me/smd-1843-b"), P("review")) === "do smd-1844|review" && asks(BR("me/smd-1844-a"), P("do it"), BR("main"), P("review")) === "do it|review", "…while a move to a branch naming another ticket, or none, ends it");
-  assert(asks(BR("main"), P("help with x"), P("now implement smd-2013")) === "help with x|now implement smd-2013" && asks(BR("me/smd-2035-x"), P("do smd-2035"), P("also see smd-1297, and file smd-2050")) === "do smd-2035+also see smd-1297, and file smd-2050",
+  assert(asks(BR("main"), P("help with x"), P("now implement SMD-2013")) === "help with x|now implement SMD-2013" && asks(BR("me/smd-2035-x"), P("do smd-2035"), P("also see smd-1297, and file smd-2050")) === "do smd-2035+also see smd-1297, and file smd-2050",
     "an ask naming a new ticket ends an episode with no home; on a branch that names the episode's ticket, a mention does not");
+  assert(asks(BR("main"), P("tidy the readme"), P("bump to node-22 and smd-2013")) === "tidy the readme+bump to node-22 and smd-2013" && asks(BR("me/smd-1000-a"), P("tidy"), P("bump to node-22")) === "tidy+bump to node-22" && asks(BR("main"), P("tidy the readme"), P("bump to NODE-22")) === "tidy the readme|bump to NODE-22",
+    "a lower-case key in an ask counts only for a team the session's branches name — node-22 on main is no ticket, smd-2013 under an smd- branch is — while an upper-case key always counts (first review pass)");
+  assert(ticketsIn("smd-2013 and NODE-22 and pg-16", new Set(["SMD"])).join() === "SMD-2013,NODE-22" && ticketsIn("smd-2013 and pg-16", new Set()).length === 0 && ticketsIn("smd-2013 and pg-16").join() === "SMD-2013,PG-16", "…ticketsIn with a team set applies the rule; without one, a branch name, every key");
+  // The place an episode runs is its own: a move applies to the episode the next ask opens, never to the one it ends (first review pass).
+  const moved = segment([CWD("/wt/smd-1844"), BR("me/smd-1844-a"), P("start work"), BR("me/smd-1843-b"), CWD("/wt/smd-1843"), P("review")]).episodes;
+  assert(moved.length === 2 && moved[0].branch === "me/smd-1844-a" && moved[0].cwd === "/wt/smd-1844" && [...moved[0].roots].join() === "/wt/smd-1844" && /^Session summary — SMD-1844 — [^\n]*\(me\/smd-1844-a\)/.test(renderSummary(moved[0])) && moved[0].closed.kind === "branch" && moved[0].closed.to === "me/smd-1843-b" && moved[1].branch === "me/smd-1843-b" && moved[1].cwd === "/wt/smd-1843" && /^Session summary — SMD-1843 — /.test(renderSummary(moved[1])),
+    `an ended episode keeps its branch, directory and ticket; the move is the next episode's (${renderSummary(moved[0]).split("\n")[0]})`);
+  assert(asks(CWD("/repo"), P("one"), CWD("/repo/db"), CWD("/repo/scripts"), P("two"), CWD("/repo"), P("three")) === "one+two+three" && segment([CWD("/repo"), P("one"), CWD("/repo/db"), P("two")]).episodes[0].cwd === "/repo" && segment([CWD("/repo/db"), P("one"), CWD("/repo"), P("two")]).episodes[0].cwd === "/repo",
+    "a cd between two subdirectories of one checkout is no move, and the shallowest directory names the project (first review pass: db/ to scripts/ split)");
+  assert(asks(CWD("/a"), P("one"), CWD("/b"), CWD("/a"), P("two")) === "one+two" && asks(BR("A"), P("one"), BR("B"), BR("A"), P("two")) === "one+two" && asks(BR("me/smd-1100-x"), P("do it"), BR("HEAD"), BR("me/smd-1100-x"), P("more")) === "do it+more" && asks(BR("me/smd-1100-x"), P("do it"), BR("HEAD"), P("more")) === "do it+more",
+    "a move the session came back from before the next ask is no move, and a detached HEAD mid-rebase is no branch (first review pass)");
+  assert(asks(CWD("/repo"), BR("main"), P("one"), CWD("/tmp"), P("two"), CWD("/repo"), P("three")) === "one+two+three" && segment([CWD("/repo"), BR("main"), P("one"), CWD("/tmp"), P("two")]).episodes[0].cwd === "/repo" && !segment([CWD("/repo"), BR("main"), P("one"), CWD("/tmp"), P("two")]).episodes[0].roots.has("/tmp"),
+    "a cd out of the checkout with the branch unchanged is the shell's, not the session's: no move, and the episode's place stands");
+  const both = segment([BR("main"), P("one"), CP, BR("feat/x"), P("two")]).episodes;
+  assert(both.length === 2 && both[1].opened.kind === "compaction" && both[1].opened.moved?.kind === "branch" && both[1].opened.to === "feat/x" && /Episode 2 of the session, begun after a compaction and on the move to branch feat\/x\./.test(renderSummary(both[1])) && /Episode 1 of the session, ended at a compaction and when the session moved to branch feat\/x\./.test(renderSummary(both[0])) && segment([BR("main"), P("one"), BR("feat/x"), CP, P("two")]).episodes[1].opened.moved?.kind === "branch",
+    "a compaction and a move between two asks are both recorded, in either order (first review pass: the later overwrote the earlier)");
+  assert(asks(BR("me/smd-2035-x"), P("do smd-2035"), P("now plan smd-2013"), P("looks good, implement it"), BR("me/smd-2013-y"), P("review"), P("ship it")) === "do smd-2035+now plan smd-2013+looks good, implement it|review+ship it",
+    "a ticket an ask merely mentioned makes no later move its own: the move to its branch ends the anchored episode at the next ask (first review pass: plan, approve, implement made one episode)");
+  assert(asks(BR("me/smd-1100-x"), P("do smd-1100"), P("look at smd-2200"), P("more"), BR("me/smd-2200-y"), P("review")) === "do smd-1100+look at smd-2200+more|review", "…and the look-ahead for the move stops at the next ask");
+  assert(asks(CWD("/wt/smd-1843-x"), BR("me/smd-1000-z"), P("do it"), BR("me/smd-1843-y"), P("next")) === "do it+next" && asks(CWD("/wt/smd-1843-x"), BR("main"), P("do it"), P("also smd-2050"), P("more")) === "do it+also smd-2050+more",
+    "the directory's ticket counts as the episode's home too: a move to its branch is its own, and a mention under it does not split");
+  assert(asks(BR("main"), P("do SMD-1001"), P("SMD-1001 and SMD-1002"), P("more")) === "do SMD-1001+SMD-1001 and SMD-1002+more" && asks(CWD("/a"), CWD("/b"), P("one"), P("two")) === "one+two", "an ask naming a known ticket beside a new one is no turn; moves before the first ask begin nothing");
+  const titled = segment([P("one"), CP, P("two"), { t: "title", text: "the session's title" }]).episodes;
+  assert(titled[0].title === "the session's title" && titled[1].title === "", "the harness's title is the first episode's, whenever the line falls");
   assert(asks(BR("me/smd-2035-x"), P("do smd-2035"), P("now smd-2013"), BR("me/smd-2013-y"), P("review")) === "do smd-2035|now smd-2013+review" && segment([BR("me/smd-2035-x"), P("do smd-2035"), P("now smd-2013"), BR("me/smd-2013-y"), P("review")]).episodes[1].opened.kind === "ticket",
     "…unless the session then moves to the new ticket's branch before the next ask: the ask began that work, and the move is its own");
   assert(asks(P("one"), CP, CP, P("two"), CP) === "one|two" && segment([CP, P("one")]).episodes[0].opened.kind === "compaction" && segment([P("one"), CP]).episodes.length === 1 && !segment([P("one"), CP]).episodes[0].closed,
@@ -348,6 +372,8 @@ let episodesLines;
   // The harness's flag is a boundary on its own: a compaction summary worded another way still ends the episode (a mutant that read the sentence alone survived).
   writeFileSync(join(TMP, "flag.jsonl"), [ask("one", { ts: t("09", "00") }), ask("Earlier in this conversation, before compaction, we did X.", { ts: t("09", "10"), isCompactSummary: true }), ask("two", { ts: t("09", "20") })].join("\n"));
   assert(summariseTranscript(join(TMP, "flag.jsonl")).episodes.map((e) => e.prompts.join()).join("|") === "one|two" && summariseTranscript(join(TMP, "flag.jsonl")).prompts.join() === "one,two", "a line the harness flags as its compaction summary is a boundary and not an ask, whatever its first sentence");
+  writeFileSync(join(TMP, "flag-origin.jsonl"), [ask("one", { ts: t("09", "00") }), ln("user", "Earlier in this conversation we did X.", { ts: t("09", "10"), isCompactSummary: true, origin: { kind: "system" } }), ask("two", { ts: t("09", "20") })].join("\n"));
+  assert(summariseTranscript(join(TMP, "flag-origin.jsonl")).episodes.map((e) => e.prompts.join()).join("|") === "one|two", "…whoever the harness says the line is from: the flag is read before the origin gate (first review pass)");
   const s = summariseTranscript(EPISODES_T);
   const eps = s.episodes;
   assert(eps.length === 4 && eps.map((e) => e.n).join() === "1,2,3,4" && s.prompts.length === 6 && s.n === 0 && s.retrieved.size === 4, `four episodes; the session's own summary still holds everything (${eps.length}: ${eps.map((e) => e.prompts[0].slice(0, 30)).join(" | ")})`);
@@ -392,13 +418,17 @@ let episodesLines;
   rmSync(STATE, { recursive: true, force: true });
   received.length = 0;
   const cfg = { url: URL_, key: "cap-key" };
-  const pe = prepare({ session_id: E_SID, transcript_path: EPISODES_T, hook_event_name: "SessionEnd" });
+  const pe = prepare({ session_id: E_SID, transcript_path: EPISODES_T, cwd: "/repo/wt/smd-1917-fork-md", hook_event_name: "SessionEnd" });
   assert(pe.code === 0 && pe.payloadPaths.length === 4 && pe.payloadPath === pe.payloadPaths[3] && pe.payload.episode === 4 && /^prepared: session s-ep, episodes 1, 2, 3, 4 of 4 — 1: 2 prompt\(s\), 1 source id\(s\); 2: 2 prompt\(s\), 3 source id\(s\); 3: 1 prompt\(s\), 0 source id\(s\); 4: 1 prompt\(s\), 1 source id\(s\)$/.test(pe.message),
     `one payload per episode, the newest the run's own, the message naming each (${pe.message})`);
   const bodies = pe.payloadPaths.map((p) => JSON.parse(readFileSync(p, "utf8")));
   assert(bodies.map((b) => b.chain_id).join() === "s-ep,s-ep#e2,s-ep#e3,s-ep#e4" && bodies.every((b) => b.session_id === E_SID) && bodies.map((b) => b.episode).join() === "1,2,3,4" && pe.payloadPaths.map((p) => basename(p).split("-").slice(3).join("-")).join() === "s-ep.json,s-ep_e2.json,s-ep_e3.json,s-ep_e4.json",
     "each payload carries its session and its chain — the first the session's own id, the rest keyed under it — and is named for its chain");
   assert(bodies.every((b) => b.supersedes === undefined) && bodies[0].derived_from.join() === uuid(11) && bodies[1].derived_from.join() === [uuid(12), uuid(13), uuid(14)].join() && bodies[2].text === x3, "no episode has a predecessor yet; each carries its own provenance and text");
+  assert(/^Session summary — SMD-1844 — claude-code — main-wt \(/.test(bodies[0].text) && /^Session summary — SMD-1917 — claude-code — smd-1917-fork-md \(/.test(bodies[3].text), "the hook's cwd is the open episode's place, not a closed one's");
+  const twin = prepare({ session_id: E_SID, transcript_path: EPISODES_T, cwd: "/repo/wt/smd-1917-fork-md", hook_event_name: "SessionEnd" });
+  assert(twin.payloadPaths.length === 0 && /^skip: session s-ep's 4 episodes are already captured or queued \(the newest as a pending payload\)$/.test(twin.message) && readdirSync(join(STATE, "pending")).length === 4,
+    `the same ending again before anything posts writes no twin: every episode is deduped against its own queue (${twin.message})`);
   const outs = await postPending(cfg, pe.payloadPaths);
   assert(outs.length === 4 && outs.every((o) => o.ok) && received.length === 4 && received.map((r) => r.args.derived_from?.length ?? 0).join() === "1,3,0,1" && ["s-ep", "s-ep_e2", "s-ep_e3", "s-ep_e4"].every((f) => existsSync(join(STATE, `${f}.json`))) && readdirSync(join(STATE, "pending")).length === 0,
     `the run posts every episode, oldest first, each with its own provenance, and records four states (${received.map((r) => r.args.content.split("\n")[0].slice(18, 40)).join(" | ")})`);
@@ -413,6 +443,14 @@ let episodesLines;
   assert(received.length === 5 && received[4].args.supersedes === ids[3] && ["s-ep", "s-ep#e2", "s-ep#e3"].every((c, i) => readState(c).thought_id === ids[i]) && readState("s-ep#e4").thought_id === uuid(1005),
     "…and posts it alone: the earlier episodes' thoughts and states are untouched");
   assert(/^skip: session s-ep's 4 episodes are already captured \(the newest as 00001005-/.test(prepare({ session_id: E_SID, transcript_path: EPISODES_T, hook_event_name: "SessionEnd" }).message), "the same transcript again: every episode is a skip, said once");
+  // A new episode inside the Stop interval is not a reason to capture: the gate reads the session's last attempt across its chains (first review pass).
+  const D = { cwd: "/repo/wt/smd-2014-model", branch: "michaelharris/smd-2014-model" };
+  writeFileSync(join(TMP, "episodes-five.jsonl"), [...episodesLines, ask("now smd-2014: the opt-in model summary", { ...C, ts: t("12", "00") }), say("Planned.", { ...D, ts: t("12", "05") })].join("\n"));
+  const gated = prepare({ session_id: E_SID, transcript_path: join(TMP, "episodes-five.jsonl"), hook_event_name: "Stop" }, { minIntervalMin: 20 });
+  const ungated = prepare({ session_id: E_SID, transcript_path: join(TMP, "episodes-five.jsonl"), hook_event_name: "Stop" });
+  assert(/^skip: last capture 0 min ago, interval 20$/.test(gated.message) && ungated.payloadPaths.length === 2 && ungated.payload.episode === 5 && /Episode 4 of the session, begun after a compaction, ended when SMD-2014 was taken up\./.test(JSON.parse(readFileSync(ungated.payloadPaths[0], "utf8")).text),
+    `a Stop inside the interval skips though a fifth episode has opened; without the interval it prepares the closed fourth and the new fifth (${gated.message} | ${ungated.message.slice(0, 60)})`);
+  for (const p of ungated.payloadPaths) unlinkSync(p);
   // A checkpoint is the open episode's alone.
   const cpE = prepare({ session_id: "s-ep-cp", transcript_path: EPISODES_T, hook_event_name: "PreCompact", trigger: "auto" });
   const cpBodies = cpE.payloadPaths.map((p) => JSON.parse(readFileSync(p, "utf8")));
