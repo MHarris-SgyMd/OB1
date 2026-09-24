@@ -67,7 +67,7 @@ mkdir -p supabase/functions/_shared
 curl -o supabase/functions/_shared/auth.ts https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/extensions/_shared/auth.ts
 ```
 
-> **Two extensions deploy this way: Family Calendar and Job Hunt.** The other four run under Bun against your Postgres instead — they import this repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and `compat/deno-on-bun.ts` for the two Deno globals they use (FORK.md change 74) — so their READMEs' Step 3 is a `bun extensions/<name>/index.ts` command, not this guide. Step 3 below, the access key, is the same for all six; `extensions/test-auth.ts` starts the four under `bun` in CI, and `extensions/test-tools.ts` drives every one of their twenty-nine tools (the shared meal-planning server's four among them) against a real Postgres there (FORK.md change 77, SMD-1588).
+> **None of the six extensions deploys this way any more.** All run under Bun against your Postgres — they import this repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and are Bun-native, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1798 moved the last two; SMD-1799 the shape) — so their READMEs' Step 3 is a `bun extensions/<name>/index.ts` command, not this guide, which stays as upstream's Supabase path until SMD-1800 retires it. Step 3 below, the access key, is the same for all six; `extensions/test-auth.ts` starts the six (and meal-planning's shared server) under `bun` in CI, and `extensions/test-tools.ts` drives every one of their tools against a real Postgres there (FORK.md change 77, SMD-1588).
 
 🟦 **Windows (PowerShell):**
 

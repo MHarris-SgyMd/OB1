@@ -53,7 +53,7 @@ OPTIONAL (for multi-provider fallback)
 
 ### 1. Run the MCP Server
 
-This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and `compat/deno-on-bun.ts` (the two Deno globals it uses, on Bun), so it is not a Supabase Edge Function and `supabase functions deploy` does not apply (FORK.md change 74; SMD-1798 moved this server). From a checkout of this repository:
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — so it is not a Supabase Edge Function and `supabase functions deploy` does not apply (FORK.md change 74; SMD-1798 moved this server). From a checkout of this repository:
 
 ```bash
 (cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports
@@ -64,7 +64,7 @@ OPENROUTER_API_KEY='your-openrouter-key' \
 PORT=8787 bun integrations/enhanced-mcp/index.ts
 ```
 
-`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset; `NODE_PATH` resolves `hono`, `zod` and `@hono/mcp` from the pinned install, since an integration has no `node_modules` of its own, while the MCP SDK's subpaths Bun fetches into its own cache on first start — unpinned, and needing npm egress once — until SMD-1991 gives integrations an install of their own ([Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun)). The server prints `Listening on http://localhost:8787/` (`PORT` unset, it listens on 8000, Deno's default — which podman's `gvproxy` also holds on macOS, hence 8787 here). To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI, and `extensions/test-writes.ts` drives its thirteen tools against a real Postgres carrying `schemas/enhanced-thoughts` (SMD-1798).
+`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset; `NODE_PATH` resolves `hono`, `zod` and `@hono/mcp` from the pinned install, since an integration has no `node_modules` of its own, while the MCP SDK's subpaths Bun fetches into its own cache on first start — unpinned, and needing npm egress once — until SMD-1991 gives integrations an install of their own ([Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun)). Bun prints its start line, `Started development server: http://localhost:8787` (`Started server:` under `NODE_ENV=production`; `PORT` unset, it listens on 8000 — which podman's `gvproxy` also holds on macOS, hence 8787 here). To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI, and `extensions/test-writes.ts` drives its thirteen tools against a real Postgres carrying `schemas/enhanced-thoughts` (SMD-1798).
 
 ### 2. Set Environment Variables
 

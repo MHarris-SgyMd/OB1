@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-net --allow-env
+#!/usr/bin/env bun
 
 /**
  * Open Brain — Retroactive Metadata Extraction
@@ -11,7 +11,7 @@
  * (skipping the ingest endpoint) have embeddings but no structured metadata.
  *
  * Usage:
- *   deno run --allow-net --allow-env scripts/backfill-metadata.ts [options]
+ *   bun backfill-metadata.ts [options]
  *
  * Options:
  *   --source=gmail          Only backfill thoughts from this source (default: all)
@@ -22,13 +22,13 @@
  * Requires: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, OPENROUTER_API_KEY
  */
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY");
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !OPENROUTER_API_KEY) {
   console.error("Missing required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, OPENROUTER_API_KEY");
-  Deno.exit(1);
+  process.exit(1);
 }
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
@@ -44,7 +44,7 @@ interface Args {
 
 function parseArgs(): Args {
   const args: Args = { source: null, limit: 100, dryRun: false, batchSize: 10 };
-  for (const arg of Deno.args) {
+  for (const arg of Bun.argv.slice(2)) {
     if (arg.startsWith("--source=")) args.source = arg.split("=")[1];
     else if (arg.startsWith("--limit=")) args.limit = parseInt(arg.split("=")[1]);
     else if (arg === "--dry-run") args.dryRun = true;

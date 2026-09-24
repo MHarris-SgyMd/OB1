@@ -32,29 +32,30 @@
  * installs — and the pinned `@hono/mcp` lets go of each request once it has
  * answered it (SMD-1607, change 83: 0.1.1 kept every one until close()).
  *
- * The files are imported under a stand-in for the two Deno globals they use —
- * `Deno.env.get` hands the process environment through, `Deno.serve` captures
- * the fetch handler instead of listening, and console.error/warn silenced for
- * the length of a request, since a refused port is the proof and not noise —
- * and, for the recipes and integrations, under a loader that reads their Deno
- * specifiers on Bun: a `jsr:` type-only import is dropped, `npm:pkg@version`
- * becomes `pkg`, the Deno postgres driver becomes a stub that never connects,
- * and a bare package name resolves from this directory's install, since theirs
- * is a deno.json.
+ * The files are imported as modules: each exports Bun's entry shape,
+ * `export default { port, fetch }` (SMD-1799), and its `fetch` is the handler
+ * driven here — console.error/warn silenced for the length of a request, since
+ * a refused port is the proof and not noise — and, for the recipes and
+ * integrations, under a loader that reads their Deno specifiers on Bun: a
+ * `jsr:` type-only import is dropped, `npm:pkg@version` becomes `pkg`, the
+ * Deno postgres driver becomes a stub that never connects, and a bare package
+ * name resolves from this directory's install, since theirs is a deno.json.
+ * Nothing stands in for `Deno`: a server that still reached it would throw at
+ * import or answer 500, a counted failure either way.
  * No database: nothing here reaches a handler that queries with a key that
  * would let it, or the client refuses at once (a port nothing listens on) —
  * the SQL shim and supabase-js both connect lazily, so a stub URL is never
  * dialled otherwise.
  *
- * Then, for real (SMD-1480, change 74): every server that imports the SQL
- * shim — which imports `bun` — also imports compat/deno-on-bun.ts first, the
- * two Deno members these files use on Bun, and `bun <file>` serves it. The
- * stand-in above is installed before any import, so nothing above exercised
- * that; the last section starts each such file as a child process on a port
- * of the OS's choosing, with the environment its README documents, asks it
- * over HTTP for the one thing that proves it is that server authenticating,
- * and stops it. Every file in the tree that imports the shim and calls
- * Deno.serve is started, or this fails.
+ * Then, for real: every server that imports the SQL shim — which imports
+ * `bun` — is what `bun <file>` serves, Bun starting the default export it
+ * finds in the entry module (SMD-1480 gave these files a polyfill for the two
+ * Deno members they used, change 74; SMD-1799 gave them Bun's own shape). The
+ * last section starts each such file as a child process on a port this test
+ * chose, with the environment its README documents, asks it over HTTP for the
+ * one thing that proves it is that server authenticating, and stops it. Every
+ * file in the tree that imports the shim and exports the entry shape is
+ * started, or this fails.
  *
  * Run: bun install && bun test-auth.ts   (in extensions/)
  */
@@ -70,21 +71,26 @@ const { assert, report } = createAssert();
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
 
-// ── The stand-in for Deno ────────────────────────────────────────────────────
+// ── The servers' handlers ────────────────────────────────────────────────────
 
 type Handler = (req: Request) => Response | Promise<Response>;
-const served: Handler[] = [];
-const STAND_IN = {
-  env: { get: (name: string) => process.env[name] },
-  // `Deno.serve(handler)` and `Deno.serve({ port }, handler)` both capture the handler.
-  serve: (a: Handler | object, b?: Handler) => {
-    served.push(typeof a === "function" ? a : b!);
-    return { finished: Promise.resolve() };
-  },
-};
-(globalThis as unknown as { Deno: unknown }).Deno = STAND_IN;
+/** Each server's handler in SERVERS order, the webhook receiver's after them. */
+const handlers: Handler[] = [];
+/**
+ * A server imported as a module: the handler Bun would serve is its default
+ * export's `fetch` (SMD-1799). Nothing stands in for `Deno` — a file that still
+ * reached it fails here (module scope) or answers 500 (a request), and either
+ * is counted.
+ */
+async function importServer(file: string): Promise<Handler> {
+  const mod = (await import(join(ROOT, file))) as { default?: { fetch?: unknown } };
+  if (typeof mod.default?.fetch !== "function") throw new Error(`${file} does not export default { fetch }`);
+  return mod.default.fetch as Handler;
+}
 
 // ── Deno's specifiers, on Bun ────────────────────────────────────────────────
+// Dead for the 22 servers on the shim since SMD-1799 (check 11 refuses a `jsr:`/`npm:`/URL specifier in them); the
+// `postgres` stub still stands in for kubernetes-deployment, a Deno deployment until SMD-1800.
 
 /** The packages this directory installs; the recipes' and integrations' deno.json pin the same names. */
 const PACKAGES = /^(hono|zod|@hono\/mcp|@modelcontextprotocol\/sdk)(\/|$)/;
@@ -237,21 +243,20 @@ process.env[WEBHOOK.secretEnv] = WEBHOOK.secret;
 try {
   for (const s of SERVERS) {
     process.env.SUPABASE_URL = s.url;
-    await import(join(ROOT, s.file));
-    assert(served.length === SERVERS.indexOf(s) + 1, `${s.file} imports as deployed and hands Deno.serve one handler`);
+    handlers.push(await importServer(s.file));
+    assert(handlers.length === SERVERS.indexOf(s) + 1, `${s.file} imports as a module and exports default { fetch }`);
   }
   process.env.SUPABASE_URL = PG;
-  await import(join(ROOT, WEBHOOK.file));
-  assert(served.length === SERVERS.length + 1, `${WEBHOOK.file} imports as deployed and hands Deno.serve one handler`);
+  handlers.push(await importServer(WEBHOOK.file));
+  assert(handlers.length === SERVERS.length + 1, `${WEBHOOK.file} imports as a module and exports default { fetch }`);
 } catch (e) {
-  // A server that listens for real at import (the polyfill installed over the stand-in, say) is a
+  // A server that listens or connects at import, or reaches a `Deno` nothing installs, is a
   // counted failure with a tally, not a stack trace in place of one; nothing below could run.
-  assert(false, `a server threw at import — under the stand-in nothing should listen or connect: ${e instanceof Error ? e.message : String(e)}`);
+  assert(false, `a server threw at import — as a module nothing should listen, connect or reach \`Deno\`: ${e instanceof Error ? e.message : String(e)}`);
   unlinkSync(PG_STUB);
   report();
 }
-assert((globalThis as unknown as { Deno: unknown }).Deno === STAND_IN,
-  "the stand-in is still `Deno` after every import — compat/deno-on-bun.ts, which each shim-migrated file imports first, installed nothing over it");
+assert(!("Deno" in globalThis), "no import installed a `Deno` global — every server is Bun-native (SMD-1799)");
 unlinkSync(PG_STUB); // every import that wanted it has it
 
 // ── One request ──────────────────────────────────────────────────────────────
@@ -273,7 +278,7 @@ function unhush() { if (--hushed === 0) Object.assign(console, CONSOLE); }
 /** One request to server `s`; `also` carries further presented forms beside the one under test. */
 async function request(s: Server, key: string | null, via: Via, also: Partial<Record<Via, string>>,
   init: { method: string; path: string; body?: unknown; rawBody?: string | ReadableStream<Uint8Array>; accept?: boolean }): Promise<Reply> {
-  const handler = served[SERVERS.indexOf(s)];
+  const handler = handlers[SERVERS.indexOf(s)];
   // Where createClient runs per request, the URL shape must be the one THIS server's client accepts.
   process.env.SUPABASE_URL = s.url;
   const headers: Record<string, string> = init.accept === false ? { "Content-Type": RPC["Content-Type"] } : { ...RPC };
@@ -459,14 +464,14 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
   console.log(`\n[${file}]`);
   process.env.SUPABASE_URL = PG;
   process.env.MCP_ACCESS_KEY = LEGACY_KEY;
-  const before = served.length;
+  const before = handlers.length;
   try {
-    await import(join(ROOT, file));
+    handlers.push(await importServer(file));
   } catch (e) {
     assert(false, `${file} threw at import: ${e instanceof Error ? e.message : String(e)}`);
   }
-  assert(served.length === before + 1, `${file} imports as deployed and hands Deno.serve one handler`);
-  const handler = served[before];
+  assert(handlers.length === before + 1, `${file} imports as a module and exports default { fetch }`);
+  const handler = handlers[before];
   const ids = [11, 12, 13];
   // No handler (the import failed above) is already a counted failure; the probe is skipped rather than thrown from.
   const answers = handler ? await overlapping(ids, (id, late) => answer(handler, new Request("http://extension.test/mcp",
@@ -546,7 +551,7 @@ for (const s of SERVERS.filter((s) => s.kind === "worker")) {
 
 console.log(`\n[${WEBHOOK.file}]`);
 {
-  const handler = served[SERVERS.length];
+  const handler = handlers[SERVERS.length];
   const post = async (body: unknown) => {
     const r = await handler(new Request("http://extension.test/", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
     return { status: r.status, text: await r.text() };
@@ -561,14 +566,13 @@ console.log(`\n[${WEBHOOK.file}]`);
 
 // ── Under bun, for real ──────────────────────────────────────────────────────
 //
-// Everything above ran under this file's stand-in for Deno's globals. The
-// servers that import the SQL shim (which imports `bun`) import
-// compat/deno-on-bun.ts as their first line (SMD-1480, FORK.md change 74) —
-// `Deno.env.get` and `Deno.serve` on Bun, nothing else — and that is what
-// lets `bun <file>` serve them; the stand-in is installed first, so nothing
-// above touched it. Each is started here as a child process: `bun <file>`
-// with the environment its README documents — PORT=0, and the polyfill
-// prints the port the OS chose in Deno's own `Listening on` line; NODE_PATH,
+// Everything above drove each server's `fetch` in this process. `bun <file>`
+// serves the same export: Bun starts the entry module's default export on
+// PORT (SMD-1799; until then compat/deno-on-bun.ts stood in for Deno's `serve`,
+// SMD-1480, FORK.md change 74). Each server on the SQL shim (which imports
+// `bun`) is started here as a child process: `bun <file>` with the
+// environment its README documents — PORT a port this test bound for a
+// moment and released, then polled until the child answers on it; NODE_PATH,
 // since a recipe or integration has no node_modules on its own path and
 // resolves hono, zod and @hono/mcp from this directory's pinned install (the
 // MCP SDK's subpaths it does not: Bun fetches those into its cache, SMD-1991), as its
@@ -580,7 +584,7 @@ console.log(`\n[${WEBHOOK.file}]`);
 // their own constant-time compare of a single key (rest-api, smart-ingest;
 // not consumers of _shared/auth.ts, and check 8 passes them) are started too,
 // with a probe of their own. Every file in the tree that imports the shim and
-// calls Deno.serve is in the list, or the guard below fails.
+// exports the entry shape is in the list, or the guard below fails.
 console.log("\n[each server on the SQL shim starts under bun and answers over the port]");
 type Live = { file: string; env: Record<string, string>; probe: (base: string) => Promise<void> };
 const onShim = (file: string) => /["'][^"'\n]*compat\/supabase-sql\/index\.ts["']/.test(readFileSync(join(ROOT, file), "utf8"));
@@ -633,43 +637,53 @@ const LIVE: Live[] = [
     assert((await fetch(`${base}/mcp`, { method: "POST", headers: { ...RPC, "x-brain-key": "not-a-key" }, body: JSON.stringify(LIST) })).status === 401, "…and a wrong key is refused with 401");
   } },
 ];
+/** Bun's entry shape as the servers spell it — the tail server-portable/index.ts has — held to the letter (SMD-1799). */
+const ENTRY_SHAPE = /^export default \{\n  port: Number\(process\.env\.PORT \|\| 8000\),\n  fetch: (?:app\.fetch|handler),\n\};\n/m;
 {
   const inTree = [...new Bun.Glob("{extensions,recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
-    .filter((f) => !f.includes("node_modules") && onShim(f) && /^Deno\.serve\(/m.test(readFileSync(join(ROOT, f), "utf8"))).sort();
-  assert(inTree.join() === LIVE.map((l) => l.file).sort().join(), `every file that imports the shim and calls Deno.serve is started here (${inTree.length}: ${inTree.join(", ")})`);
+    .filter((f) => !f.includes("node_modules") && onShim(f) && ENTRY_SHAPE.test(readFileSync(join(ROOT, f), "utf8"))).sort();
+  assert(inTree.join() === LIVE.map((l) => l.file).sort().join(), `every file that imports the shim and exports Bun's entry shape is started here (${inTree.length}: ${inTree.join(", ")})`);
 }
 const DEADLINE_MS = 30_000;
+/**
+ * A port nothing holds: bound for a moment and released, then handed to the child as PORT. Another process
+ * may take it in between (a container publishing a port on the same host did, once, while the suite ran);
+ * the child then fails to bind — Bun refuses a held port, exit 1 — or a stranger answers the poll and the
+ * probe's assertions name the file. A counted failure either way, within the deadline; rerun.
+ */
+function freePort(): number {
+  const held = Bun.serve({ port: 0, fetch: () => new Response() });
+  const port = held.port!;
+  held.stop(true);
+  return port;
+}
 for (const live of LIVE) {
-  const env: Record<string, string | undefined> = { ...process.env, PORT: "0", NODE_PATH: join(HERE, "node_modules"), ...live.env };
+  const port = freePort();
+  const env: Record<string, string | undefined> = { ...process.env, PORT: String(port), NODE_PATH: join(HERE, "node_modules"), ...live.env };
   // The READMEs say the Supabase key variables may be left unset with the shim (the credentials are in the
   // URL); the process above set them, so they are removed here and the claim is what the start proves.
   for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_HOUSEHOLD_KEY"]) delete env[name];
   Object.assign(env, live.env);
-  const proc = Bun.spawn([process.execPath, join(ROOT, live.file)], { env, cwd: ROOT, stdout: "pipe", stderr: "pipe" });
-  // The port, from the polyfill's `Listening on http://host:port/` line — or nothing: the child
-  // exited (its stdout drained once at EOF, its exit awaited — `exitCode` is set only when
-  // `exited` settles, and a loop that polled it spun for the whole deadline; pass 1), or the
-  // deadline passed with the child alive and silent.
-  const reader = proc.stdout.getReader();
+  // Bun's own start line (`Started development server:`, or `Started server:` in production) goes unread: the port is known, so stdout is dropped and the
+  // child is up when the port answers at all (SMD-1799).
+  const proc = Bun.spawn([process.execPath, join(ROOT, live.file)], { env, cwd: ROOT, stdout: "ignore", stderr: "pipe" });
+  // Up when the port answers — any status: Bun serves the file's default export on PORT, so a refused
+  // connection is "not yet" — or the child exited (`exitCode` is set only when `exited` settles, and a
+  // loop that polled it spun for the whole deadline; change 74's pass 1), or the deadline passed.
+  const base = `http://127.0.0.1:${port}`;
   const exited = proc.exited.then(() => "exited" as const);
   const deadline = Date.now() + DEADLINE_MS;
-  let out = "", port: number | null = null, pending: Promise<ReadableStreamReadResult<Uint8Array>> | null = null, eof = false;
-  const parsePort = () => Number(/Listening on http:\/\/[^/:]+:(\d+)\//.exec(out)?.[1] ?? NaN) || null;
-  while (port === null && Date.now() < deadline) {
-    if (!eof) pending ??= reader.read();
-    const tick = new Promise<"tick">((res) => setTimeout(() => res("tick"), 500));
-    const r = await Promise.race([...(pending ? [pending] : []), exited, tick]);
-    if (r === "exited") { if (pending) { const last = await Promise.race([pending, tick]); if (last !== "tick" && last.value) out += new TextDecoder().decode(last.value); } port = parsePort(); break; }
-    if (r === "tick") continue;
-    pending = null;
-    if (r.value) out += new TextDecoder().decode(r.value);
-    if (r.done) eof = true;
-    port = parsePort();
+  let up = false;
+  while (!up && Date.now() < deadline) {
+    const r = await Promise.race([exited, fetch(base, { signal: AbortSignal.timeout(2000) }).then(() => "up" as const, () => "down" as const)]);
+    if (r === "exited") break;
+    if (r === "up") { up = true; break; }
+    if (await Promise.race([exited, new Promise<"tick">((res) => setTimeout(() => res("tick"), 100))]) === "exited") break;
   }
-  if (port !== null) {
-    // A child that printed its port and then died fails the probe's fetch: a counted failure, not a crash of the suite.
-    try { await live.probe(`http://127.0.0.1:${port}`); }
-    catch (e) { assert(false, `${live.file}: answers over the port it announced (${e instanceof Error ? e.message : String(e)})`); }
+  if (up) {
+    // A child that answered the port and then died fails the probe's fetch: a counted failure, not a crash of the suite.
+    try { await live.probe(base); }
+    catch (e) { assert(false, `${live.file}: answers over the port it was given (${e instanceof Error ? e.message : String(e)})`); }
     assert(proc.exitCode === null, "…and is still running after the probes");
   }
   // Stop the child BEFORE reading its stderr: a server alive without a port would
@@ -677,14 +691,13 @@ for (const live of LIVE) {
   const alive = proc.exitCode === null;
   proc.kill();
   await proc.exited;
-  await reader.cancel().catch(() => {});
-  if (port === null) {
+  if (!up) {
     // The error line — `error: …`, `TypeError: …` — not the code frame Bun prints above it (`throw new Error(` is a frame line).
     const lines = (await new Response(proc.stderr).text()).trim().split("\n");
     const stderr = (lines.filter((l) => /^\s*(?:\w*Error|error)\b\s*:/.test(l)).slice(0, 2).concat(lines.slice(0, 2))).slice(0, 3).join(" | ");
-    assert(false, `${live.file}: \`bun ${live.file}\` starts and says which port it listens on (${alive ? `alive after ${DEADLINE_MS / 1000} s without a Listening line` : `exit ${proc.exitCode}`}: ${stderr || "no stderr"})`);
+    assert(false, `${live.file}: \`bun ${live.file}\` starts and listens on PORT (${alive ? `alive after ${DEADLINE_MS / 1000} s, port ${port} never answered` : `exit ${proc.exitCode}`}: ${stderr || "no stderr"})`);
   } else {
-    assert(true, `${live.file}: \`bun ${live.file}\` starts and says which port it listens on`);
+    assert(true, `${live.file}: \`bun ${live.file}\` starts and listens on PORT`);
   }
 }
 
@@ -719,7 +732,7 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp" && s.writes.length > 0)) 
     "…and is still refused with a wrong key");
 }
 for (const s of SERVERS.filter((s) => s.health)) {
-  const health = await served[SERVERS.indexOf(s)](new Request(`http://extension.test${s.health}`, { method: "GET" }));
+  const health = await handlers[SERVERS.indexOf(s)](new Request(`http://extension.test${s.health}`, { method: "GET" }));
   assert(health.status === 200 && (await health.json()).status === "ok", `${s.file}: the unauthenticated GET ${s.health} health check still answers`);
 }
 
@@ -821,7 +834,9 @@ for (const s of SERVERS) {
       `${s.file}: every mounted route is classified above (${mounted.length})`);
     assert(mounted.filter((m) => m.gated).map((m) => m.route).sort().join() === [...s.writes].sort().join(),
       `…and exactly the writes take requireWrite (${mounted.filter((m) => m.gated).length})`);
-    const starts = mounted.map((m) => m.at).concat(text.indexOf("\nDeno.serve("));
+    // The last route's block ends where the entry shape begins: the wrapper that strips the Edge Function
+    // path prefix (`const handler = …`), then the export (SMD-1799).
+    const starts = mounted.map((m) => m.at).concat(text.search(/^(?:const handler = |export default \{)/m));
     for (const m of mounted) {
       const end = Math.min(...starts.filter((a) => a > m.at));
       const block = text.slice(m.at, end);
