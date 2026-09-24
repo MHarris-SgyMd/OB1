@@ -45,7 +45,7 @@ production use. All ceilings are environment-controlled; `0` disables a cap.
 | `SMART_INGEST_MAX_INPUT_CHARS` | `100000` | Hard 413 reject above this size |
 | `SMART_INGEST_MAX_CHUNKS` | `10` | Abort if text splits into more chunks |
 | `SMART_INGEST_MAX_CALLS` | `10000` | Abort after N LLM calls in one request |
-| `SMART_INGEST_BUDGET_MS` | `140000` | Stop before Supabase's 150s kill |
+| `SMART_INGEST_BUDGET_MS` | `140000` | Stop a request here (upstream's host killed it at 150 s; a process has no such limit, so this is the cap) |
 | `FETCH_TIMEOUT_MS` | `60000` | Per-fetch timeout for chat calls |
 | `EMBEDDING_TIMEOUT_MS` | `30000` | Per-fetch timeout for embedding calls |
 
@@ -109,8 +109,7 @@ SMART INGEST -- CREDENTIAL TRACKER
 ------------------------------------
 
 FROM YOUR OPEN BRAIN SETUP
-  Project URL:           ____________
-  Service role key:      ____________
+  Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
   MCP access key:        ____________
 
 LLM EXTRACTION (at least one required)
@@ -129,7 +128,7 @@ EMBEDDING (at least one required)
 
 ### 1. Run the server
 
-This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and the access-key module from `../_shared/auth.ts` beside it (the same file every server on this fork shares), and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — one HTTP process, as every server here is. From a checkout of this repository ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps):
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and its own `_shared/` helpers, and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — one HTTP process, as every server here is. From a checkout of this repository ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps):
 
 ```bash
 PORT=8787 \
@@ -143,7 +142,7 @@ bun integrations/smart-ingest/index.ts
 
 ### 2. Set the environment
 
-`MCP_ACCESS_KEY` is the one key this server holds, compared by digest, sent as `x-brain-key`. Optional multi-provider fallback, in the same environment:
+`MCP_ACCESS_KEY` is the one key this server holds — the raw key, compared constant-time (this server predates the hashed `MCP_ACCESS_KEYS` list, change 67) — sent as `x-brain-key`. Optional multi-provider fallback, in the same environment:
 
 ```bash
 OPENAI_API_KEY="your-openai-key" ANTHROPIC_API_KEY="your-anthropic-key"

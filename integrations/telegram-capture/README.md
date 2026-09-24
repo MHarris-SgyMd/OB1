@@ -126,8 +126,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // Whether the secret Telegram echoes is the configured one, compared timing-safe:
 // both sides hashed, so the digests are one length, then compared byte for byte
-// with the time taken independent of where they differ. node:crypto resolves on
-// Supabase's Deno runtime; the Web Crypto timing-safe compare Deno 1 had is gone in Deno 2.
+// with the time taken independent of where they differ.
 function secretMatches(presented: string | null, expected: string): boolean {
   if (!presented) return false;
   const digest = (s: string) => createHash("sha256").update(s, "utf8").digest();

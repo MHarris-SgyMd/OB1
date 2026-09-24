@@ -77,7 +77,7 @@ Be explicit. Default to not sharing unless there's a clear reason.
 
 ### Step 2: Create a Scoped Database Role
 
-In Supabase SQL Editor (or via psql):
+Against your database (`psql`, or Supabase's SQL Editor if that is where it lives):
 
 ```sql
 -- Create a new database role for shared access
@@ -277,57 +277,22 @@ PORT=8788 bun extensions/<name>/shared-server.ts
 
 ### Step 6: Test the Access Boundaries
 
-Verify the security model works:
+Verify the boundary from the outside, as the household member's client would see it — the shared server's tool list under each key. An MCP `tools/list` under a read-scoped household key shows the three reading tools; under a write-scoped one, `mark_item_purchased` too; and the primary server's key opens nothing on the shared port:
 
-```typescript
-// Test script: test-boundaries.ts
-import { createClient } from "@supabase/supabase-js";
+```bash
+# From a checkout, with the shared server on 8788 (Step 5):
+curl -s -X POST http://127.0.0.1:8788/mcp -H 'x-brain-key: <the household READ key>' \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | grep -o '"name":"[a-z_]*"'
+# → view_meal_plan, view_recipes, view_shopping_list — no mark_item_purchased
 
-const sharedClient = createClient(
-  process.env.SHARED_SUPABASE_URL!,
-  process.env.SHARED_SUPABASE_KEY!
-);
-
-async function testBoundaries() {
-  console.log("Testing allowed access...");
-
-  // Should succeed: reading meal plans
-  const { data: meals, error: mealsError } = await sharedClient
-    .from("meal_plans")
-    .select("*");
-  console.log("meal_plans:", mealsError ? "BLOCKED" : "ALLOWED");
-
-  // Should succeed: reading shopping list
-  const { data: shopping, error: shoppingError } = await sharedClient
-    .from("shopping_list_items")
-    .select("*");
-  console.log("shopping_list_items (SELECT):", shoppingError ? "BLOCKED" : "ALLOWED");
-
-  // Should fail: reading thoughts
-  const { data: thoughts, error: thoughtsError } = await sharedClient
-    .from("thoughts")
-    .select("*");
-  console.log("thoughts:", thoughtsError ? "BLOCKED ✓" : "ALLOWED (BAD)");
-
-  // Should fail: deleting from shopping list
-  const { error: deleteError } = await sharedClient
-    .from("shopping_list_items")
-    .delete()
-    .eq("id", "test-id");
-  console.log("shopping_list_items (DELETE):", deleteError ? "BLOCKED ✓" : "ALLOWED (BAD)");
-}
-
-testBoundaries();
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8788/mcp -H 'x-brain-key: <your PRIMARY key>' \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+# → 401: the primary server's key is not in MCP_HOUSEHOLD_ACCESS_KEYS
 ```
 
-Expected output:
-
-```
-meal_plans: ALLOWED
-shopping_list_items (SELECT): ALLOWED
-thoughts: BLOCKED ✓
-shopping_list_items (DELETE): BLOCKED ✓
-```
+The list is the whole boundary: a tool a key is not given is not registered for it, so there is nothing to call. (`extensions/test-auth.ts` asserts exactly this for the shared server in CI.) To have the database hold a second line, give the shared server a `SUPABASE_URL` whose role has only the household tables' privileges, and verify with `psql` as that role — `select count(*) from thoughts` should be refused.
 
 ## Concrete Example: Spouse Access to Meal Planning
 

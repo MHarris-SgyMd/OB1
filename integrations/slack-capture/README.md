@@ -248,7 +248,7 @@ Replace the values with:
 
 ### Put It Behind HTTPS
 
-Slack calls this server from its side, so it needs an HTTPS URL that reaches port 8789 — the same TLS proxy or tunnel that fronts the core server ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)). That URL is your **Capture URL**.
+Slack calls this server from its side, so it needs an HTTPS URL that reaches port 8789. The sample checks no Slack signature — anyone who learns the URL can post an event shaped like Slack's and store a thought — so keep the URL private, or add Slack's signing-secret check before exposing it for long — the same TLS proxy or tunnel that fronts the core server ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)). That URL is your **Capture URL**.
 
 Save this URL — you'll need it in Step 4.
 

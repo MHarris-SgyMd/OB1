@@ -130,8 +130,11 @@ SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
 AUDITOR_ACCESS_KEYS='cron:write:<sha256-of-your-key>' \
 OPENROUTER_API_KEY='…' \
 POLICY_VERSION='1.3' \
+SLACK_BOT_TOKEN='xoxb-…' SLACK_CAPTURE_CHANNEL='C0…' \
 bun recipes/editorial-policy/auditor/index.ts
 ```
+
+The two Slack variables are read only when a run posts (`post_to_slack: true` and a critical finding); a run without them stores its report and then fails on the post, so either set them or schedule with `post_to_slack: false`.
 
 `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the core server holds — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI, and `extensions/test-writes.ts` drives its report against Postgres. Nothing else calls it, so it needs no public URL: the scheduler in Step 6 runs on the same machine and dials `127.0.0.1`.
 

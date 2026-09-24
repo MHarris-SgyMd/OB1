@@ -75,7 +75,7 @@ bun integrations/readwise-capture/index.ts
 
 Readwise calls this server from its side, so it needs an HTTPS URL that reaches port 8789 — the same TLS proxy or tunnel that fronts the core server ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)). That URL is your **Capture URL**; save it in the tracker for Step 3.
 
-The third variable, `READWISE_WEBHOOK_SECRET`, is set in Step 4 after Readwise generates it — until then the server rejects every real webhook with 401. Readwise's "Test Webhook" button — which sends an empty body — will still pass, because the empty-body check short-circuits before the secret check.
+The webhook secret, `READWISE_WEBHOOK_SECRET`, is set in Step 4 after Readwise generates it — until then the server rejects every real webhook with 401. Readwise's "Test Webhook" button — which sends an empty body — will still pass, because the empty-body check short-circuits before the secret check.
 
 ---
 

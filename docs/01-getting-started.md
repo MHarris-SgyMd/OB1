@@ -53,7 +53,7 @@ Three installs. Each is a download-and-click, or one line in a terminal.
 <details>
 <summary>🟩 <strong>Step 1 — Mac / Linux</strong> (click to expand)</summary>
 
-**1.1 A container runtime.** Install [Podman Desktop](https://podman-desktop.io) or [Docker Desktop](https://www.docker.com/products/docker-desktop/), open it once, and let it finish starting. On Linux, your distribution's `podman` or `docker` package with the compose plugin is enough.
+**1.1 A container runtime.** Install [Podman Desktop](https://podman-desktop.io) or [Docker Desktop](https://www.docker.com/products/docker-desktop/), open it once, and let it finish starting (Podman Desktop offers to install its Compose provider during setup — say yes; `podman compose` needs it). On Linux, your distribution's `podman` or `docker` package with the compose plugin is enough.
 
 **1.2 Bun.**
 
@@ -167,7 +167,7 @@ Why it matters: by default the server refuses to send a thought's text to any en
 <details>
 <summary>☁️ <strong>Prefer hosted models instead? (OpenRouter)</strong></summary>
 
-Skip 3.4's line and set these six in `deploy/.env` instead (the first five sit together under "Option C", the last under "Egress"):
+Skip 3.4's line and set these six in `deploy/.env` instead (the first five sit together under "Option C", the last under "What may leave the box"):
 
 ```text
 OB1_LLM_BASE_URL=https://openrouter.ai/api/v1
@@ -231,7 +231,7 @@ Every check should pass: the server answers, the key is enforced, the database i
 curl -H "x-brain-key: your-access-key" http://127.0.0.1:8000/health
 ```
 
-The JSON names the server's version, the migration it is at, the store and the embedding model — `brain_info`, the same record your AI can ask for.
+The JSON names the server's version, the migration it is at, the store and the embedding model — `brain_info`, the same record your AI can ask for. A key the server does not know gets a bare `ok` instead, so a plain `ok` here means the key is wrong.
 
 ✅ **Done when:** `smoke.sh` reports every check passed.
 
@@ -464,7 +464,7 @@ Read the row it names. Each row is one setting — the database, the access keys
 
 **❌ Starting over**
 
-A retry after a half-finished attempt: `podman compose -f deploy/compose.yaml down -v` removes the containers and the database volume (every thought in it), and Step 4 builds a fresh brain. Keep `deploy/.env`; the pulled models live in their own volume and survive, so nothing downloads again.
+A retry after a half-finished attempt: `podman compose -f deploy/compose.yaml down -v` removes the containers and both volumes — the database (every thought in it) and the pulled models, which download again (about 7 GB). To keep the models, run `podman compose -f deploy/compose.yaml down` and then remove the database volume alone (`podman volume ls` names it, `<project>_pgdata`; `podman volume rm` removes it). Step 4 then builds a fresh brain. Keep `deploy/.env`.
 
 **❌ Port 8000 is already in use**
 
@@ -488,7 +488,7 @@ The key in your URL or header is not one whose hash is in `MCP_ACCESS_KEYS`. The
 
 **❌ The capture landed but says it has no vector**
 
-`OB1_LLM_LOCAL=1` is missing from `deploy/.env` (Step 3.4): the server refused to send the text to a model endpoint it wasn't told is local. Add the line, restart, and capture the thought again — a re-capture of the same text replaces its vector. (A whole brain of such rows is `db/reembed.ts`'s job, which needs the database published to the host: `db/README.md`, "Re-embedding", and `deploy/README.md`, "What is reachable from where".)
+`OB1_LLM_LOCAL=1` is missing from `deploy/.env` (Step 3.4) — or, with the OpenRouter lines, `OB1_EGRESS_POLICY=allow` is: the server refused to send the text to a model endpoint it wasn't told is local or allowed. Add the line, restart, and capture the thought again — a re-capture of the same text replaces its vector. (A whole brain of such rows is `db/reembed.ts`'s job, which needs the database published to the host: `db/README.md`, "Re-embedding", and `deploy/README.md`, "What is reachable from where".)
 
 **❌ Search returns no results**
 
