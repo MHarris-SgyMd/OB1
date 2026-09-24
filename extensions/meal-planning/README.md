@@ -17,7 +17,7 @@ Your agent can reason across five datasets — what you've cooked before, what's
 
 ## What You'll Learn
 
-- Row Level Security (first introduction to multi-user access)
+- Scoping rows without Row Level Security — what upstream's policies did and why this fork's schema leaves them out (the [RLS primitive](../../primitives/rls/), as background)
 - Shared MCP server (separate server with limited, scoped access)
 - JSONB for complex data (ingredients, instructions)
 - Auto-generating derivative data (shopping lists from meal plans)
@@ -51,7 +51,7 @@ A complete meal planning system with recipes, weekly meal plans, and auto-genera
 - Working Open Brain setup
 - Extensions 1-3 recommended (Extension 3's family_members table is referenced for cross-extension integration)
 - [Bun](https://bun.sh) 1.4+ and a Postgres carrying the Open Brain schema ([`SETUP.md`](../../SETUP.md)) — this server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/); FORK.md change 74)
-- **Required reading:** [Row Level Security](../../primitives/rls/) primitive
+- **Background reading:** [Row Level Security](../../primitives/rls/) primitive — the per-user policies upstream's `schema.sql` carried; this fork's carries none (SMD-1810), the server scopes rows by `DEFAULT_USER_ID`
 - **Required reading:** [Shared MCP Server](../../primitives/shared-mcp/) primitive
 
 ## Credential Tracker
@@ -92,9 +92,11 @@ NOTE: This extension runs TWO servers, each on its own port with its own keys:
 
 ### 1. Create the Database Schema
 
-Run the SQL in `schema.sql` against your Open Brain database, as the role the servers will connect with. Its row-level-security policies call Supabase's `auth.uid()` and `auth.jwt()`, which a plain Postgres does not have, so give it both first (the servers connect as one role and scope rows by `DEFAULT_USER_ID` themselves; the table owner is not subject to the policies) — **on a Supabase database skip this first command**, which has both and whose row-level security would break if they were replaced (the plain `CREATE` refuses with "already exists"): `psql "$DATABASE_URL" -c "CREATE SCHEMA IF NOT EXISTS auth; CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS 'SELECT NULL::uuid'; CREATE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT ''{}''::jsonb';"` and then `psql "$DATABASE_URL" -f extensions/meal-planning/schema.sql` — or paste `schema.sql` alone into the Supabase SQL Editor, if that is where it lives. This creates three RLS-enabled tables:
+Run the SQL in `schema.sql` against your Open Brain database, as the role the servers will connect with — `psql "$DATABASE_URL" -f extensions/meal-planning/schema.sql`, or paste it into the SQL client you use. This creates three tables (`recipes`, `meal_plans`, `shopping_lists`), each with a `user_id` column both servers fill from `DEFAULT_USER_ID`.
 
-**Important:** The schema includes Row Level Security policies. Make sure you understand what RLS does before proceeding (see the [RLS primitive](../../primitives/rls/)).
+Nothing is needed first. Upstream's file enabled row-level security on Supabase's `auth.uid()`, and this README used to give two stub functions to create before it; this fork removed the policies (SMD-1810) — one operator's brain on plain Postgres, the server scoping rows itself (SMD-1716). The role that applies the file owns the tables and needs no grant; any other role is granted them by `bun db/migrate.ts --grant <role>` (`db/README.md`, "Grants for a capturing role", the **extensions** group).
+
+**What changed for the shared server:** upstream's policies also let a `household_member` role, read from Supabase's JWT, see recipes and meal plans and edit shopping lists. Here the shared server's scope is the tool set it registers and its own key list (Step 3) — the same rows, a narrower set of verbs — not a row policy.
 
 ### 2. Generate Your User ID
 
@@ -207,7 +209,7 @@ Who's home for dinner this week? Adjust the meal plan servings accordingly.
 Cross-reference pantry inventory: "Do we have the ingredients for chicken stir-fry?" queries both the recipe's ingredients and your knowledge base entries about pantry stock.
 
 **Pattern reuse:**
-The RLS patterns you learn here apply directly to Extensions 5 (Professional CRM) and 6 (Job Hunt Pipeline). The shared MCP server pattern is reusable for any future extension where you want to give someone else partial access.
+The table shape you build here — a `user_id` the server fills — is the one Extensions 5 (Professional CRM) and 6 (Job Hunt Pipeline) reuse. The shared MCP server pattern is reusable for any future extension where you want to give someone else partial access.
 
 ## Expected Outcome
 
@@ -226,11 +228,6 @@ For common issues (connection errors, 401s, deployment problems), see [Common Tr
 
 **Extension-specific issues:**
 
-**RLS policies blocking queries on the shared server**
-- Verify your user has the `household_member` role set in `raw_app_meta_data`
-- Check the RLS policies match the schema.sql
-- Test with service role key first to confirm it's not an RLS issue
-
 **JSONB ingredient search not working**
 - The `search_recipes` tool uses `.cs.` (contains) operator for JSONB — ingredient names must match exactly (case-insensitive)
 - For more flexible search, consider adding a GIN index on the ingredients JSONB column
@@ -239,19 +236,18 @@ For common issues (connection errors, 401s, deployment problems), see [Common Tr
 - The current implementation does simple string concatenation for quantities (e.g., "1 cup + 2 cups")
 - For production use, you'd want smarter quantity aggregation
 
-**Shared server can see all data**
-- Double-check that RLS policies are enabled (`ALTER TABLE ... ENABLE ROW LEVEL SECURITY`)
-- Verify the `household_member` role is set correctly in the JWT claims
-- Test by trying to insert/delete from the shared server (should fail)
+**Shared server can see or change more than it should**
+- Its scope is the tool set it registers and its own key list (Step 3); there is no row policy behind it on this fork (SMD-1810). Check which server the connector points at and which key it carries — a household member's key must be on the shared server's list only
+- Test by trying to add or delete a recipe through the shared server: it registers no tool for that
 
 ## Next Steps
 
-**Extension 5: Professional CRM** — You'll apply the RLS skills you just learned to protect professional contact data. The shared server pattern isn't needed here (your work contacts are private), but the multi-entity relationship (contacts → interactions) is the same pattern you used in Extension 3 (family members → activities).
+**Extension 5: Professional CRM** — You'll reuse the table shape you just built — a `user_id` the server fills — for professional contact data. The shared server pattern isn't needed here (your work contacts are private), but the multi-entity relationship (contacts → interactions) is the same pattern you used in Extension 3 (family members → activities).
 
 **Key concepts in Extension 5:**
 - Contact management with interaction history
 - Relationship tracking and follow-up reminders
-- RLS for sensitive professional data
+- A `user_id` the server fills, for sensitive professional data
 - Integration with calendar (Extension 3) for scheduling follow-ups
 
 Continue to [Extension 5: Professional CRM](../professional-crm/)

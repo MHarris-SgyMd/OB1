@@ -65,26 +65,18 @@ CREATE INDEX IF NOT EXISTS idx_contact_interactions_contact_occurred
 CREATE INDEX IF NOT EXISTS idx_opportunities_user_stage
     ON opportunities(user_id, stage);
 
--- Row Level Security (RLS)
-ALTER TABLE professional_contacts ENABLE ROW LEVEL SECURITY;
-ALTER TABLE contact_interactions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE opportunities ENABLE ROW LEVEL SECURITY;
-
--- RLS Policies: Users can only see their own data
-CREATE POLICY professional_contacts_user_policy ON professional_contacts
-    FOR ALL
-    USING (auth.uid() = user_id)
-    WITH CHECK (auth.uid() = user_id);
-
-CREATE POLICY contact_interactions_user_policy ON contact_interactions
-    FOR ALL
-    USING (auth.uid() = user_id)
-    WITH CHECK (auth.uid() = user_id);
-
-CREATE POLICY opportunities_user_policy ON opportunities
-    FOR ALL
-    USING (auth.uid() = user_id)
-    WITH CHECK (auth.uid() = user_id);
+-- This fork (SMD-1810): upstream's file ENABLEd ROW LEVEL SECURITY on the
+-- three tables here, with a policy `auth.uid() = user_id` FOR ALL on each.
+-- auth.uid() is GoTrue's, which exists only on Supabase: on plain Postgres
+-- the first policy stopped the file (`function auth.uid() does not exist`),
+-- and with a stub returning NULL to get past it the policy denied every row
+-- to any role but the tables' owner. Removed. The server connects as one role
+-- and scopes rows by DEFAULT_USER_ID itself.
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `extensions` group, which covers this
+-- file's three tables (SELECT, INSERT, UPDATE, DELETE); a role that owns the
+-- tables needs nothing. Row-level security on this fork: SMD-1716.
 
 -- Function to automatically update updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at_column()

@@ -23,7 +23,7 @@
 
 CREATE TABLE IF NOT EXISTS chatgpt_conversations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID REFERENCES auth.users(id) DEFAULT auth.uid(),  -- NULL allowed for service_role inserts; set USER_ID env var for multi-tenant
+    user_id UUID,                          -- NULL allowed; set USER_ID env var for multi-tenant (this fork: a plain uuid — the note under Row Level Security)
 
     -- ChatGPT identifiers
     chatgpt_id TEXT UNIQUE,                 -- Original ChatGPT conversation ID
@@ -71,22 +71,21 @@ CREATE TABLE IF NOT EXISTS chatgpt_conversations (
 COMMENT ON TABLE chatgpt_conversations IS 'ChatGPT conversation summaries with pyramid detail levels. Populated by import-chatgpt.py --store-conversations.';
 
 -- ----------------------------------------
--- Row Level Security
+-- Row Level Security and grants
 -- ----------------------------------------
-
-ALTER TABLE chatgpt_conversations ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY chatgpt_conversations_user_policy ON chatgpt_conversations
-    FOR ALL
-    USING (auth.uid() = user_id)
-    WITH CHECK (auth.uid() = user_id);
-
--- ----------------------------------------
--- GRANT permissions to service_role
--- ----------------------------------------
--- Supabase no longer auto-grants CRUD on new projects.
-
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.chatgpt_conversations TO service_role;
+-- This fork (SMD-1810): upstream's file ENABLEd ROW LEVEL SECURITY on the
+-- table here, with a policy `auth.uid() = user_id` FOR ALL, and GRANTed it TO
+-- service_role; the column above referenced auth.users(id) with DEFAULT
+-- auth.uid(). Those are Supabase's: on plain Postgres the REFERENCES stopped
+-- the file (`relation "auth.users" does not exist`) and the GRANT would have
+-- (`role "service_role" does not exist`), and a stub auth.uid() returning
+-- NULL left the policy denying every row to any role but the table's owner.
+-- Removed; user_id stays a plain nullable uuid the importer fills (USER_ID).
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `recipes` group, which covers this table
+-- (SELECT, INSERT, UPDATE, DELETE); a role that owns the tables needs
+-- nothing. Row-level security on this fork: SMD-1716.
 
 -- ----------------------------------------
 -- Indexes for performance

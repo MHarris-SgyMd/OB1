@@ -2,7 +2,8 @@
 -- Adds four tables to your Open Brain database to support confidence gating,
 -- per-type threshold learning, A/B model comparison, and spell correction learning.
 --
--- Run this migration once against your Supabase project.
+-- Run this once against your Open Brain's database:
+--   psql "$DATABASE_URL" -f recipes/adaptive-capture-classification/schema.sql
 -- No existing OB1 tables are modified.
 
 -- ============================================================
@@ -17,15 +18,6 @@ CREATE TABLE IF NOT EXISTS correction_learnings (
     rejected    INTEGER DEFAULT 0,
     PRIMARY KEY (word, correction)
 );
-
-GRANT SELECT, INSERT, UPDATE ON correction_learnings TO authenticated;
-
-ALTER TABLE correction_learnings ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "Users manage their own correction learnings"
-    ON correction_learnings
-    FOR ALL
-    USING (auth.role() = 'authenticated');
 
 -- ============================================================
 -- 2. classification_outcomes
@@ -50,15 +42,6 @@ CREATE INDEX IF NOT EXISTS idx_outcomes_model ON classification_outcomes (model)
 CREATE INDEX IF NOT EXISTS idx_outcomes_type  ON classification_outcomes (item_type);
 CREATE INDEX IF NOT EXISTS idx_outcomes_date  ON classification_outcomes (created_at);
 
-GRANT SELECT, INSERT, UPDATE ON classification_outcomes TO authenticated;
-
-ALTER TABLE classification_outcomes ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "Users manage their own outcomes"
-    ON classification_outcomes
-    FOR ALL
-    USING (auth.role() = 'authenticated');
-
 -- ============================================================
 -- 3. capture_thresholds
 --    Stores the current auto-classify threshold for each
@@ -72,15 +55,6 @@ CREATE TABLE IF NOT EXISTS capture_thresholds (
     sample_count INTEGER DEFAULT 0,
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-GRANT SELECT, INSERT, UPDATE ON capture_thresholds TO authenticated;
-
-ALTER TABLE capture_thresholds ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "Users manage their own thresholds"
-    ON capture_thresholds
-    FOR ALL
-    USING (auth.role() = 'authenticated');
 
 -- ============================================================
 -- 4. ab_comparisons
@@ -108,11 +82,16 @@ CREATE TABLE IF NOT EXISTS ab_comparisons (
 CREATE INDEX IF NOT EXISTS idx_ab_model_a ON ab_comparisons (model_a);
 CREATE INDEX IF NOT EXISTS idx_ab_model_b ON ab_comparisons (model_b);
 
-GRANT SELECT, INSERT, UPDATE ON ab_comparisons TO authenticated;
-
-ALTER TABLE ab_comparisons ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "Users manage their own A/B comparisons"
-    ON ab_comparisons
-    FOR ALL
-    USING (auth.role() = 'authenticated');
+-- This fork (SMD-1810): after each of the four tables upstream's file GRANTed
+-- SELECT, INSERT, UPDATE on it TO authenticated, ENABLEd ROW LEVEL SECURITY
+-- and created a policy FOR ALL USING (auth.role() = 'authenticated'). Those
+-- are Supabase's: on plain Postgres the first GRANT stopped the file (`role
+-- "authenticated" does not exist`), auth.role() is GoTrue's, and with the
+-- role created to get past the grant the policy denied every row to any role
+-- but the tables' owner. Removed, all four times.
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `recipes` group, which covers the four
+-- tables (SELECT, INSERT, UPDATE — upstream's privileges, kept; the recipe
+-- deletes nothing); a role that owns the tables needs nothing. Row-level
+-- security on this fork: SMD-1716.

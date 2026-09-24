@@ -163,47 +163,20 @@ CREATE INDEX IF NOT EXISTS idx_ome_details
 CREATE INDEX IF NOT EXISTS idx_omx_session_artifact
   ON operating_model_exports(session_id, artifact_name);
 
-ALTER TABLE operating_model_profiles ENABLE ROW LEVEL SECURITY;
-ALTER TABLE operating_model_sessions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE operating_model_layer_checkpoints ENABLE ROW LEVEL SECURITY;
-ALTER TABLE operating_model_entries ENABLE ROW LEVEL SECURITY;
-ALTER TABLE operating_model_exports ENABLE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS operating_model_profiles_user_policy ON operating_model_profiles;
-CREATE POLICY operating_model_profiles_user_policy ON operating_model_profiles
-  FOR ALL
-  USING (auth.uid() = user_id)
-  WITH CHECK (auth.uid() = user_id);
-
-DROP POLICY IF EXISTS operating_model_sessions_user_policy ON operating_model_sessions;
-CREATE POLICY operating_model_sessions_user_policy ON operating_model_sessions
-  FOR ALL
-  USING (auth.uid() = user_id)
-  WITH CHECK (auth.uid() = user_id);
-
-DROP POLICY IF EXISTS operating_model_layer_checkpoints_user_policy ON operating_model_layer_checkpoints;
-CREATE POLICY operating_model_layer_checkpoints_user_policy ON operating_model_layer_checkpoints
-  FOR ALL
-  USING (auth.uid() = user_id)
-  WITH CHECK (auth.uid() = user_id);
-
-DROP POLICY IF EXISTS operating_model_entries_user_policy ON operating_model_entries;
-CREATE POLICY operating_model_entries_user_policy ON operating_model_entries
-  FOR ALL
-  USING (auth.uid() = user_id)
-  WITH CHECK (auth.uid() = user_id);
-
-DROP POLICY IF EXISTS operating_model_exports_user_policy ON operating_model_exports;
-CREATE POLICY operating_model_exports_user_policy ON operating_model_exports
-  FOR ALL
-  USING (auth.uid() = user_id)
-  WITH CHECK (auth.uid() = user_id);
-
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.operating_model_profiles TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.operating_model_sessions TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.operating_model_layer_checkpoints TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.operating_model_entries TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.operating_model_exports TO service_role;
+-- This fork (SMD-1810): upstream's file ENABLEd ROW LEVEL SECURITY on the
+-- five tables here, with a policy `auth.uid() = user_id` FOR ALL on each
+-- (DROP POLICY IF EXISTS first), and GRANTed each TO service_role. Those are
+-- Supabase's: auth.uid() is GoTrue's, so on plain Postgres the first policy
+-- stopped the file (`function auth.uid() does not exist`), the GRANTs would
+-- have (`role "service_role" does not exist`), and with a stub auth.uid()
+-- returning NULL the policies denied every row to any role but the tables'
+-- owner. Removed. The recipe's server connects as one role and passes user_id
+-- itself.
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `recipes` group, which covers this file's
+-- five tables (SELECT, INSERT, UPDATE, DELETE); a role that owns the tables
+-- needs nothing. Row-level security on this fork: SMD-1716.
 
 DROP TRIGGER IF EXISTS update_operating_model_profiles_updated_at ON operating_model_profiles;
 CREATE TRIGGER update_operating_model_profiles_updated_at
@@ -612,9 +585,11 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-GRANT EXECUTE ON FUNCTION public.operating_model_next_layer(TEXT[]) TO service_role;
-GRANT EXECUTE ON FUNCTION public.operating_model_start_session(UUID, TEXT) TO service_role;
-GRANT EXECUTE ON FUNCTION public.operating_model_save_layer(UUID, TEXT, TEXT, JSONB) TO service_role;
+-- This fork (SMD-1810): upstream GRANTed EXECUTE on the three functions above
+-- TO service_role here. Supabase's role; on plain Postgres the statement
+-- fails (`role "service_role" does not exist`). Removed — EXECUTE is PUBLIC's
+-- by default and none of the three REVOKEs it, so any role that can reach the
+-- tables can call them.
 
 -- Verification
 -- SELECT table_name FROM information_schema.tables

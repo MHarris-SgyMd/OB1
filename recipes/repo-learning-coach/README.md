@@ -55,7 +55,7 @@ This recipe keeps its structured state in these tables:
 - `repo_learning_quiz_responses`
 - `repo_learning_lesson_comments`
 
-The SQL also creates the `updated_at` trigger helper and grants `service_role` access for every table.
+The SQL also creates the `updated_at` trigger helper. It grants nothing (this fork, SMD-1810): a role other than the tables' owner is granted the ten tables by `bun db/migrate.ts --grant <role>` (`db/README.md`, "Grants for a capturing role", the **recipes** group).
 
 </details>
 

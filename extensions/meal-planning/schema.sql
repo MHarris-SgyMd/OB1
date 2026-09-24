@@ -50,64 +50,18 @@ CREATE INDEX idx_recipes_user_tags ON recipes USING GIN (tags);
 CREATE INDEX idx_meal_plans_user_week ON meal_plans(user_id, week_start);
 CREATE INDEX idx_shopping_lists_user_week ON shopping_lists(user_id, week_start);
 
--- Enable Row Level Security
-ALTER TABLE recipes ENABLE ROW LEVEL SECURITY;
-ALTER TABLE meal_plans ENABLE ROW LEVEL SECURITY;
-ALTER TABLE shopping_lists ENABLE ROW LEVEL SECURITY;
-
--- RLS Policies for recipes
-CREATE POLICY "Users can CRUD their own recipes"
-    ON recipes
-    FOR ALL
-    USING (auth.uid() = user_id)
-    WITH CHECK (auth.uid() = user_id);
-
-CREATE POLICY "Household members can view recipes"
-    ON recipes
-    FOR SELECT
-    USING (
-        auth.jwt() ->> 'role' = 'household_member'
-        OR auth.uid() = user_id
-    );
-
--- RLS Policies for meal_plans
-CREATE POLICY "Users can CRUD their own meal plans"
-    ON meal_plans
-    FOR ALL
-    USING (auth.uid() = user_id)
-    WITH CHECK (auth.uid() = user_id);
-
-CREATE POLICY "Household members can view meal plans"
-    ON meal_plans
-    FOR SELECT
-    USING (
-        auth.jwt() ->> 'role' = 'household_member'
-        OR auth.uid() = user_id
-    );
-
--- RLS Policies for shopping_lists
-CREATE POLICY "Users can CRUD their own shopping lists"
-    ON shopping_lists
-    FOR ALL
-    USING (auth.uid() = user_id)
-    WITH CHECK (auth.uid() = user_id);
-
-CREATE POLICY "Household members can view shopping lists"
-    ON shopping_lists
-    FOR SELECT
-    USING (
-        auth.jwt() ->> 'role' = 'household_member'
-        OR auth.uid() = user_id
-    );
-
-CREATE POLICY "Household members can update shopping lists"
-    ON shopping_lists
-    FOR UPDATE
-    USING (
-        auth.jwt() ->> 'role' = 'household_member'
-        OR auth.uid() = user_id
-    )
-    WITH CHECK (
-        auth.jwt() ->> 'role' = 'household_member'
-        OR auth.uid() = user_id
-    );
+-- This fork (SMD-1810): upstream's file ENABLEd ROW LEVEL SECURITY on the
+-- three tables here, with a policy `auth.uid() = user_id` FOR ALL on each,
+-- and a SELECT (on shopping_lists also an UPDATE) policy for a
+-- `household_member` role read from auth.jwt() — the shared server's scope.
+-- auth.uid() is GoTrue's, which exists only on Supabase: on plain Postgres
+-- the first policy stopped the file (`function auth.uid() does not exist`),
+-- and with a stub returning NULL to get past it the policy denied every row
+-- to any role but the tables' owner. Removed. The server connects as one role
+-- and scopes rows by DEFAULT_USER_ID itself.
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `extensions` group, which covers this
+-- file's three tables (SELECT, INSERT, UPDATE, DELETE); the shared server's
+-- scope is the tool set it registers, not a row policy; a role that owns the
+-- tables needs nothing. Row-level security on this fork: SMD-1716.

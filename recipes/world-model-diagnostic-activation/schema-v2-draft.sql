@@ -4,7 +4,7 @@
 
 create table if not exists public.world_model_assessments (
     id uuid primary key default gen_random_uuid(),
-    user_id uuid references auth.users(id) on delete cascade not null,
+    user_id uuid not null, -- this fork: a plain uuid (the note at the end of the file)
     company_name text,
     company_size_band text,
     industry text,
@@ -37,7 +37,7 @@ create index if not exists idx_world_model_assessments_user_paradigm
 
 create table if not exists public.world_model_boundary_flows (
     id uuid primary key default gen_random_uuid(),
-    user_id uuid references auth.users(id) on delete cascade not null,
+    user_id uuid not null, -- this fork: a plain uuid (the note at the end of the file)
     assessment_id uuid references public.world_model_assessments(id) on delete cascade not null,
     flow_name text not null,
     source text,
@@ -75,44 +75,18 @@ before update on public.world_model_assessments
 for each row
 execute function public.world_model_set_updated_at();
 
-alter table public.world_model_assessments enable row level security;
-alter table public.world_model_boundary_flows enable row level security;
-
-do $$
-begin
-    if not exists (
-        select 1
-        from pg_policies
-        where schemaname = 'public'
-          and tablename = 'world_model_assessments'
-          and policyname = 'world_model_assessments_user_policy'
-    ) then
-        create policy world_model_assessments_user_policy
-            on public.world_model_assessments
-            for all
-            using (auth.uid() = user_id)
-            with check (auth.uid() = user_id);
-    end if;
-end
-$$;
-
-do $$
-begin
-    if not exists (
-        select 1
-        from pg_policies
-        where schemaname = 'public'
-          and tablename = 'world_model_boundary_flows'
-          and policyname = 'world_model_boundary_flows_user_policy'
-    ) then
-        create policy world_model_boundary_flows_user_policy
-            on public.world_model_boundary_flows
-            for all
-            using (auth.uid() = user_id)
-            with check (auth.uid() = user_id);
-    end if;
-end
-$$;
-
-grant select, insert, update, delete on table public.world_model_assessments to service_role;
-grant select, insert, update, delete on table public.world_model_boundary_flows to service_role;
+-- This fork (SMD-1810): upstream's draft ended here by enabling row level
+-- security on both tables, with a policy `auth.uid() = user_id` for all on
+-- each (created inside a DO block when absent) and grants on both to
+-- service_role; the two user_id columns above referenced auth.users(id) on
+-- delete cascade. Those are Supabase's: on plain Postgres the first
+-- REFERENCES stopped the file (`relation "auth.users" does not exist`), as
+-- the grants would have (`role "service_role" does not exist`), and with a
+-- stub auth.uid() returning NULL the policies denied every row to any role
+-- but the tables' owner. Removed; user_id stays a NOT NULL uuid the recipe
+-- fills.
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `recipes` group, which covers both tables
+-- (SELECT, INSERT, UPDATE, DELETE); a role that owns the tables needs
+-- nothing. Row-level security on this fork: SMD-1716.

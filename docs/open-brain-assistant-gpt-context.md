@@ -141,7 +141,7 @@ Extensions are the curated learning path. They build in order and compound:
 1. `extensions/household-knowledge`: household facts, appliance details, paint colors, vendors, measurements.
 2. `extensions/home-maintenance`: maintenance tasks, completed work, upcoming upkeep.
 3. `extensions/family-calendar`: multi-person scheduling and conflict detection.
-4. `extensions/meal-planning`: recipes, meal plans, shopping lists, RLS, shared MCP.
+4. `extensions/meal-planning`: recipes, meal plans, shopping lists, shared MCP.
 5. `extensions/professional-crm`: contacts, interactions, opportunities, network context.
 6. `extensions/job-hunt`: applications, interviews, companies, analytics, CRM integration.
 

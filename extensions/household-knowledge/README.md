@@ -59,16 +59,9 @@ GENERATED DURING SETUP
 
 ### 1. Set Up the Database Schema
 
-Run the SQL in `schema.sql` against your Open Brain database, as the role the server will connect with. Its row-level-security policies call Supabase's `auth.uid()`, which a plain Postgres does not have, so give it that function first — the server connects as one role and scopes rows by `DEFAULT_USER_ID` itself, and the table owner is not subject to the policies. **On a Supabase database skip the first command**: it has both functions, and replacing them would break row-level security across the project (the plain `CREATE` below refuses with "already exists" rather than replacing):
+Run the SQL in `schema.sql` against your Open Brain database, as the role the server will connect with — `psql "$DATABASE_URL" -f extensions/household-knowledge/schema.sql`, or paste it into the SQL client you use. This creates two tables, `household_items` and `household_vendors`, each with a `user_id` column the server fills from `DEFAULT_USER_ID`.
 
-```bash
-psql "$DATABASE_URL" -c "CREATE SCHEMA IF NOT EXISTS auth;
-  CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS 'SELECT NULL::uuid';
-  CREATE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT ''{}''::jsonb';"
-psql "$DATABASE_URL" -f extensions/household-knowledge/schema.sql
-```
-
-(Or paste `schema.sql` alone into the Supabase SQL Editor, if that is where your database lives.)
+Nothing is needed first. Upstream's file enabled row-level security on Supabase's `auth.uid()`, and this README used to give two stub functions to create before it; this fork removed the policies (SMD-1810) — one operator's brain on plain Postgres, the server scoping rows itself (SMD-1716). The role that applies the file owns the tables and needs no grant; any other role is granted them by `bun db/migrate.ts --grant <role>` (`db/README.md`, "Grants for a capturing role", the **extensions** group).
 
 ### 2. Generate Your User ID
 

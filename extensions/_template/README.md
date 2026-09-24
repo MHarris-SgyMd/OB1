@@ -103,7 +103,7 @@ GENERATED DURING SETUP
 
 ![1.1](https://img.shields.io/badge/1.1-Create_the_Tables-555?style=for-the-badge&labelColor=HEX_COLOR)
 
-Run `schema.sql` against your Open Brain database — `psql "$DATABASE_URL" -f extensions/extension-name/schema.sql`, or paste it into the SQL client you use. If its policies call `auth.uid()`, create the two stub functions first, as [Household Knowledge](../household-knowledge/README.md) Step 1 shows:
+Run `schema.sql` against your Open Brain database — `psql "$DATABASE_URL" -f extensions/extension-name/schema.sql`, or paste it into the SQL client you use. It needs nothing first — no `auth.*` stub, no Supabase role (SMD-1810; check 12 refuses both in any `.sql`):
 
 <details>
 <summary>📋 <strong>SQL: Extension tables</strong> (click to expand)</summary>
@@ -136,7 +136,7 @@ grant select, insert, update, delete on table public.table_name_2 to your_role;
 </details>
 
 > [!IMPORTANT]
-> This step is required unless the server connects as the table owner. Nothing grants the connecting role anything by default (`db/README.md`, "Grants for a capturing role"). Without this, your MCP server will return "permission denied" errors.
+> This step is required unless the server connects as the table owner. Nothing grants the connecting role anything by default (`db/README.md`, "Grants for a capturing role"). Without this, your MCP server will return "permission denied" errors. The extensions in this tree take the other route: their tables are rows of `ROLE_GRANTS.extensions` in `db/config.mjs`, and `bun db/migrate.ts --grant <role>` issues them with everything else (SMD-1810) — add yours there too when the extension lands.
 
 ![1.3](https://img.shields.io/badge/1.3-Verify-555?style=for-the-badge&labelColor=HEX_COLOR)
 
