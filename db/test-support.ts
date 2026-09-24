@@ -36,6 +36,7 @@ export async function hasKeptCorpus(sql: SQL): Promise<boolean> {
  * holding them, so anything with a foreign key has to be named before it.
  */
 const TABLES = [
+  "thought_sources",
   "thought_facets",
   "thought_audit",
   "thought_chunks",
@@ -122,6 +123,11 @@ const FUNCTIONS = [
   "review_supersession_proposal(uuid, text, text, text, jsonb, boolean)",
   "list_supersession_proposals(text, int)",
   "thought_changes(timestamptz, uuid, text, text, text[], int)",
+  // 053 (SMD-1867); its table is listed above, its two indexes drop with thought_facets,
+  // and record_thought_entities / thought_facets_validate are 016's and 042's names.
+  "record_thought_source(uuid, text, text, text, text, text, boolean)",
+  "source_thought(text, text)",
+  "record_source_links(uuid, text, jsonb)",
   "consolidation_pool(text)",
   "stale_entities(interval, int)",
   // 032 (SMD-1323)
