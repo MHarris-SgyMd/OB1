@@ -71,7 +71,6 @@ fixture carries them; only the synthetic gate fixture is content-free). A self-h
 | `nomic-embed-text` | 768 | The obvious small default, and measurably worse — 5th of 10 on the synthetic set, 9th of 11 on the 97-issue table. |
 | `mxbai-embed-large` | 1024 | Measured here: 0.882 MRR on the 97-issue real-corpus table, 10th of its 11 rows and below `nomic-embed-text`'s 0.890 there (`evals/README.md`; the 441-issue build measured two models, not this one). The retired `recipes/local-ollama-embeddings` ranked it first of its three on four text pairs — the toy and the corpus disagree (SMD-2138). |
 | `rjmalagon/gte-qwen2-1.5b-instruct-embed-f16` | 1536 | Unmeasured here; community-published, not an official Ollama model, and `db/config.mjs` knows no width for it, so a wrong `OB1_EMBEDDING_DIM` beside it is caught by `preflight.ts --deep`'s provider probe or, without that, when the first vector is refused. The retired recipe's only measurement was four text pairs — run `evals/eval-real.ts` before choosing it (SMD-2138). |
-| `qwen3-embedding:4b` | 2560 → **1024** | **Best measured on real data** (0.903 MRR vs `embeddinggemma`'s 0.873 over 441 full-length issues). Too wide to index natively — needs `OB1_EMBEDDING_DIMENSIONS=on`, below. Costs ~5x the embedding time. |
 | `openai/text-embedding-3-large` | 3072 | **Exceeds pgvector's HNSW limit of 2000.** The column works, but no index can be built, so every search becomes a full table scan. Truncatable to 1536 with `OB1_EMBEDDING_DIMENSIONS=on`. |
 
 #### Using a model that is too wide to index
@@ -108,9 +107,10 @@ opaque cast error from Postgres.
 
 Every capture makes two calls: an embedding, and a metadata extraction that
 produces the `topics`, `people`, `type` and `action_items` behind
-`list_thoughts`'s filters and the `thought_stats` tallies. By default both go to
-OpenRouter, which means **the text of every thought you capture leaves your
-machine**.
+`list_thoughts`'s filters and the `thought_stats` tallies. Pointed at OpenRouter
+(`OB1_LLM_BASE_URL` with a key set) both go there, which means **the text of
+every thought you capture leaves your machine**; the shipped default is the
+local endpoint above, refused until you declare it local.
 
 Both are configurable, and both speak the OpenAI-compatible shapes that Ollama
 exposes at `/v1` — so a fully local brain is a URL change, not a code change:
