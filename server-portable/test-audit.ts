@@ -107,9 +107,10 @@ console.log("\n[2] The row records WHICH key wrote it");
 console.log("\n[2b] A duplicate re-capture is not an event");
 {
   // The fingerprint dedup exists so a bulk re-import is idempotent. A re-capture
-  // of identical content takes the ON CONFLICT branch and moves `updated_at` and
-  // nothing else — which produced an audit row with an empty diff per duplicate,
-  // so re-running a large import wrote thousands of rows saying nothing happened.
+  // of identical content moved `updated_at` and nothing else until 057 (since
+  // which it writes nothing at all) — and before 008's guard produced an audit
+  // row with an empty diff per duplicate, so re-running a large import wrote
+  // thousands of rows saying nothing happened.
   const before = Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
   await laptop.call("capture_thought", { content: "the first captured thought" });
   await laptop.call("capture_thought", { content: "the first captured thought" });

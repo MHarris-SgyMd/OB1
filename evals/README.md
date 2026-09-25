@@ -5000,10 +5000,10 @@ CONFLICT` / `UPDATE` / `DELETE` becomes: compute the after-image, the diff,
 append, project with the caller's vector — a vector arriving on a row that
 already has one is a projection refresh with no event, verified as such. The
 contract sentinels preflight and test-schema read stay where the behaviours
-stay. `option1-view.sql` renames the table to `thought_rows`, creates the
+stay. `option1-view.sql` renamed the table to `thought_rows`, created the
 view `thoughts` and its INSTEAD OF INSERT/UPDATE/DELETE triggers (the same
-append and projector); `option1-undo.sql` reverses it so test-support's
-reset can run again. `writable-projection.ts` held every rule pure and
+append and projector); `option1-undo.sql` reversed it so test-support's
+reset could run again. `writable-projection.ts` held every rule pure and
 `--self-check` (62 probes) ran in the portable-server job; `--check` ran
 the prototype in the data-layer job and held it to the matrix recorded
 below (`EXPECTED`, an outcome and a probe count per measured cell), so a

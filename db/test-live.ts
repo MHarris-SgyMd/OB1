@@ -5247,6 +5247,31 @@ console.log("\n[26] Migration 057 on a real server: the windowed capture and an 
   const bResult = await bDone;
   assert(bResult.existed === true && bResult.id === aResult!.id, "…and once the first commits, the second reads its row and reports existed");
   assert(Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content = '057 live: the same text twice'`)[0].c) === 1 && (await audits(aResult!.id)) === 1, "one row, one event — the second wrote nothing, not even a bump");
+  // The 2-argument form's row lock is new (057's delta 5): the same race
+  // through it — the waiter seen on the advisory lock, one row, one event
+  // (cold read, first review pass: held by a source grep alone until here).
+  let releaseA2: () => void = () => {};
+  const held2 = new Promise<void>((resolve) => { releaseA2 = resolve; });
+  let a2: Cap | undefined, b2Pid = 0;
+  const a2Done = connA.begin(async (tx: SQL) => {
+    a2 = ((await tx`SELECT upsert_thought('057 live: the same text twice, no vector', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`) as { r: Cap }[])[0].r;
+    await held2;
+  });
+  for (let i = 0; i < 250 && a2 === undefined; i++) await Bun.sleep(20);
+  const b2Done = connB.begin(async (tx: SQL) => {
+    b2Pid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+    return ((await tx`SELECT upsert_thought('057 live: the same text twice, no vector', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`) as { r: Cap }[])[0].r;
+  });
+  let waiting2 = 0;
+  for (let i = 0; i < 250 && waiting2 === 0; i++) {
+    if (b2Pid) waiting2 = Number((await sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND pid = ${b2Pid}`)[0].n);
+    if (!waiting2) await Bun.sleep(20);
+  }
+  releaseA2();
+  await a2Done;
+  const b2 = await b2Done;
+  assert(waiting2 === 1 && b2.id === a2!.id && Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content = '057 live: the same text twice, no vector'`)[0].c) === 1 && (await audits(a2!.id)) === 1,
+    `the 2-argument form: the second capture waits on the lock, reads the first's row, writes nothing — one row, one event (${waiting2} waiting)`);
   await connA.close(); await connB.close();
 
   // A fold's replay on one connection beside live captures on another: the
@@ -5256,7 +5281,10 @@ console.log("\n[26] Migration 057 on a real server: the windowed capture and an 
   await sql`SELECT update_thought(${p.id}::uuid, '057 live: replay P, edited', NULL, ${unit(7)}::vector, NULL, NULL, ${ACTOR}::jsonb, ${MODEL}, NULL, NULL)`;
   const image = async () => JSON.stringify(await sql`SELECT id, content, content_fingerprint, metadata, embedding::text AS e, embedding_model, supersedes, created_at::text AS c, updated_at::text AS u FROM thoughts WHERE id = ${p.id}::uuid`);
   const before = await image();
-  const evs = (await sql`SELECT id FROM thought_audit WHERE thought_id = ${p.id}::uuid ORDER BY created_at, seq`) as { id: string }[];
+  // The log's order (055's rule; the migration's header): seq since the
+  // boundary, the clock before it.
+  const ORDERED = (ids: string[]) => sql`SELECT a.id FROM thought_audit a, (SELECT COALESCE((SELECT value::timestamptz FROM ob1_config WHERE key = 'audit_seq_exact_since'), 'infinity') AS b) k WHERE a.thought_id = ANY(${sql.array(ids, "UUID")}::uuid[]) ORDER BY (a.created_at >= k.b), CASE WHEN a.created_at >= k.b THEN NULL ELSE a.created_at END, a.seq`;
+  const evs = (await ORDERED([p.id])) as { id: string }[];
   const replayer = new SQL({ url: URL_, max: 1 });
   await replayer.begin(async (tx: SQL) => {
     await tx`ALTER TABLE thoughts DISABLE TRIGGER USER`;
@@ -5277,6 +5305,37 @@ console.log("\n[26] Migration 057 on a real server: the windowed capture and an 
   assert(Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === auditsBefore + live.length && Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content LIKE '057 live: beside the replay %'`)[0].c) === live.length,
     `…while the live captures beside it were each appended once and projected — the replay's settings never reached their session (${live.length} captures)`);
   await replayer.close();
+
+  // created_at is the transaction's clock: a transaction that opened early
+  // and wins the row lock late is stamped before the writer it followed
+  // and numbered after it. A replay by (created_at, seq) inverts that row's
+  // history; by the log's order it rebuilds it (run-it, first review pass:
+  // eight connections' log refused at a tombstone under the clock's order).
+  const contested = (await sql`SELECT upsert_thought('057 live: a contested row', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(30)}::vector) AS r`)[0].r as Cap;
+  const early = new SQL({ url: URL_, max: 1 }), late = new SQL({ url: URL_, max: 1 });
+  await early.unsafe(`BEGIN`);
+  await early.unsafe(`SELECT now()`);  // the transaction's clock is fixed here
+  await Bun.sleep(150);
+  await late`SELECT update_thought(${contested.id}::uuid, NULL, '{"who": "late"}'::jsonb, NULL, NULL, NULL, ${ACTOR}::jsonb, NULL, NULL, NULL)`;
+  await early`SELECT update_thought(${contested.id}::uuid, NULL, '{"who": "early"}'::jsonb, NULL, NULL, NULL, ${ACTOR}::jsonb, NULL, NULL, NULL)`;
+  await early.unsafe(`COMMIT`);
+  await early.close(); await late.close();
+  const bySeq = (await sql`SELECT diff->'metadata'->'after'->>'who' AS who FROM thought_audit WHERE thought_id = ${contested.id}::uuid AND action = 'update' ORDER BY seq`).map((r: { who: string }) => r.who).join(">");
+  const byClock = (await sql`SELECT diff->'metadata'->'after'->>'who' AS who FROM thought_audit WHERE thought_id = ${contested.id}::uuid AND action = 'update' ORDER BY created_at, seq`).map((r: { who: string }) => r.who).join(">");
+  assert(bySeq === "late>early" && byClock === "early>late" && (await rowOf(contested.id))!.content === "057 live: a contested row" && (await sql`SELECT metadata->>'who' AS who FROM thoughts WHERE id = ${contested.id}::uuid`)[0].who === "early",
+    `the two orders disagree on the contested row: seq says ${bySeq} (the row's history — early won the lock last), the clock says ${byClock}`);
+  const cImage = async () => JSON.stringify(await sql`SELECT content, metadata, embedding::text AS e, updated_at::text AS u FROM thoughts WHERE id = ${contested.id}::uuid`);
+  const cBefore = await cImage();
+  const cEvs = (await ORDERED([contested.id])) as { id: string }[];
+  const wiper = new SQL({ url: URL_, max: 1 });
+  await wiper.begin(async (tx: SQL) => { await tx`ALTER TABLE thoughts DISABLE TRIGGER USER`; await tx`DELETE FROM thoughts WHERE id = ${contested.id}::uuid`; await tx`ALTER TABLE thoughts ENABLE TRIGGER USER`; });
+  for (const e of cEvs) await wiper`SELECT ob1_project_thought_event(${e.id}::uuid, NULL, NULL, true)`;
+  assert((await cImage()) === cBefore, "replayed in the log's order the contested row is rebuilt as it stood — the later-locking writer's metadata last");
+  await wiper.begin(async (tx: SQL) => { await tx`ALTER TABLE thoughts DISABLE TRIGGER USER`; await tx`DELETE FROM thoughts WHERE id = ${contested.id}::uuid`; await tx`ALTER TABLE thoughts ENABLE TRIGGER USER`; });
+  const clockEvs = (await sql`SELECT id FROM thought_audit WHERE thought_id = ${contested.id}::uuid ORDER BY created_at, seq`) as { id: string }[];
+  for (const e of clockEvs) await wiper`SELECT ob1_project_thought_event(${e.id}::uuid, NULL, NULL, true)`;
+  assert((await cImage()) !== cBefore && (await sql`SELECT metadata->>'who' AS who FROM thoughts WHERE id = ${contested.id}::uuid`)[0].who === "late", "…and by the clock alone it is rebuilt inverted — the mutant that orders a fold by (created_at, seq) is caught here");
+  await wiper.close();
 
   // A delete of a thought racing an edit that names it as supersedes (036's
   // order, SMD-1462's behaviour): both go through the appending bodies; the

@@ -46,9 +46,24 @@
 --      a vector the event does not flip stays unless the snapshot holds one
 --      for the new text; a replayed capture whose text the snapshot does not
 --      hold lands with no vector, readable while 015's pass fills it. The
---      one thing a projection fills that the log does not say is nothing: a
---      raw insert's NULL key is 003's rule in the functions, and a raw insert
---      is not projected here (SMD-2117's fold owns that arm). A capture
+--      one thing a projection fills that the event does not carry is a
+--      capture's KEY: derived from the content (003's rule), as the decision
+--      says a raw insert's NULL key is filled — and a raw insert's wrong key
+--      is corrected the same way, since a capture event carries no key and
+--      the check requires the content's; such a row's vector was never in
+--      the snapshot (a NULL key never enters it) and re-embeds under 015's
+--      pass (run-it, first review pass). THE ORDER a fold replays in is the
+--      log's: by seq for rows since ob1_config.audit_seq_exact_since, by
+--      (created_at, seq) before it (055's rule, db/README.md). created_at is
+--      the TRANSACTION's clock: an older transaction that wins the row lock
+--      later is stamped earlier and numbered later, so a replay by the clock
+--      inverts that row's history and refuses at its tombstone, while seq —
+--      the row-lock serialisation order, since every writer locks the row
+--      before it appends — rebuilds every column (run-it, first review pass:
+--      eight connections' log). Live, the event projected must be the
+--      thought's latest (OB002 otherwise): a re-projection of an earlier
+--      event would roll a row back with no event, and PUBLIC executes this
+--      function because SECURITY INVOKER writers must. A capture
 --      event carrying no content (008's shape, before 055's pass) is refused
 --      by name (SQLSTATE OB003), not projected as an empty thought. On a
 --      replay a tombstone never refuses: 042's guard runs in detach mode for
@@ -67,10 +82,18 @@
 --   2. THE THREE FUNCTIONS APPEND THEN PROJECT. upsert_thought (2- and
 --      3-argument; 013's 4-argument form delegates to the 3-argument body and
 --      is not redefined), update_thought (10-argument), delete_thought
---      (3-argument): the same locks in the same order as at 046 — 036's
---      supersession lock first where the call names supersedes, 033's
---      advisory lock on the fingerprint, 032's row lock FOR NO KEY UPDATE —
---      then the after-image computed in plpgsql (050's two stamp arms and
+--      (3-argument): the same locks in the same order as at 046 and 042 —
+--      update_thought: 036's supersession lock first where the call names
+--      supersedes, 033's advisory lock on the fingerprint, 032's row lock
+--      FOR NO KEY UPDATE; upsert_thought: the fingerprint lock, then the row
+--      lock (new to the 2-argument form, 7 below); delete_thought: 036's
+--      supersession lock first, unconditionally, then a row lock FOR NO KEY
+--      UPDATE that 042 never took — the tombstone is computed from the row
+--      before the DELETE, where the trigger read OLD — which deadlocks with
+--      nothing: every delete is already serialised on the supersession lock
+--      it holds, the row lock sits where the DELETE's own lock sat, and
+--      042's guard locks the citing rows after it, as before (cold read,
+--      first review pass) — then the after-image computed in plpgsql (050's two stamp arms and
 --      046's diff rule, the functions 055 lifted out), ob1_append_thought_event
 --      (046's trigger tail: who from the key, the registry's kind, the trust
 --      ceiling, the door, the claim, the late gate), then the projector.
@@ -82,7 +105,10 @@
 --      WOULD_CYCLE, CITED — returns before any append, so a refused call
 --      leaves no event; a delete the guard refuses (OB001, raised from the
 --      base table's DELETE inside the projector) rolls back the tombstone
---      with the row, since both sit in delete_thought's sub-block.
+--      with the row, since both sit in delete_thought's sub-block — the
+--      appended row's seq is spent, so a brain with refused cited deletes
+--      has gaps in thought_audit.seq (052's thought_changes orders by it
+--      and reads nothing into a gap).
 --
 --   3. THE TRIGGER IS THE CHECK. thoughts_write_audit, seeing ob1.projecting
 --      = <event id>, recomputes the diff from the row it sees and RAISES
@@ -100,8 +126,10 @@
 --      OTHER than the event's that moves under its projection is a
 --      consequence the schema draws — a tombstone's ON DELETE SET NULL on a
 --      successor's pointer (025), 042's guard bumping a citing thought's
---      stamp on a detach — judged on the whole diff: a bump (an empty diff)
---      is nothing; a successor's nulled pointer under a tombstone's
+--      stamp on a detach — judged on the whole diff (a cascade that flips a
+--      vector's presence is not a bump; one that swaps a vector for another
+--      is, the vector being a projection the snapshot records): a bump (an
+--      empty diff) is nothing; a successor's nulled pointer under a tombstone's
 --      projection is appended as its own update event live (as 046 does
 --      today: the successor's row says when its pointer went) and skipped on
 --      a replay (the log already holds that event and will replay it);
@@ -189,7 +217,15 @@
 --      UPDATE it sat in; the 2-argument upsert_thought takes the row lock the
 --      other forms take, under the same advisory lock, so no caller can
 --      observe the difference. A caller reading updated_at as "something
---      happened" reads less than before, and more truly.
+--      happened" reads less than before, and more truly. And a sixth the
+--      write path forces: a capture whose text a writer taking no
+--      fingerprint lock (a raw import beside a live capture) commits between
+--      the row read and the projection met 046's ON CONFLICT and merged;
+--      the projector's INSERT meets the unique index instead, so both
+--      capture forms catch unique_violation on that arm, roll the event
+--      back with it, read the row that landed under the lock still held and
+--      merge as a re-capture — a savepoint per fresh capture, measured in
+--      the cost line (run-it, first review pass).
 --
 --   8. PINS MOVE WITH THE BODIES. Each function's COMMENT (046's on
 --      update_thought said the if_unchanged_since predicate sits in the
@@ -219,19 +255,27 @@
 --   COST. Measured on Postgres 16.15 in a container, width 8, no provider,
 --      the medians of 200 calls each over five rounds, 056's bodies against
 --      this file's on one database: a 3-argument capture with a vector
---      988 us -> 1.03 ms (x1.04), a content edit with a vector 942 us ->
---      1.08 ms (x1.15); the ratio moved x0.89-x1.24 (capture) and
---      x1.06-x1.32 (edit) across the rounds, inside SMD-1999's band
---      (x0.65-x1.8 across fourteen runs) — noise over effect. The edit pays
---      the after-image in plpgsql and the snapshot's upsert; the capture the
---      same upsert and one row read more (the 2-argument form's lock). This
---      file's apply, the seed over 200 rows included, 14-25 ms; over the
+--      844 us -> 829 us (x0.98), a content edit with a vector 780 us ->
+--      858 us (x1.10); the ratio moved x0.61-x1.26 (capture) and
+--      x0.85-x1.29 (edit) across the rounds, inside SMD-1999's band
+--      (x0.65-x1.8 across fourteen runs) — noise over effect (the first
+--      review pass added a savepoint per fresh capture and one index probe
+--      per write, and re-measured: the same band). The edit pays the
+--      after-image in plpgsql and the snapshot's upsert; the capture the
+--      same upsert, the savepoint and one row read more (the 2-argument
+--      form's lock). This file's apply, the seed over 200 rows included,
+--      14-25 ms; over the
 --      dogfood copy's 873 rows with key, model and vector at 1,024 dimensions,
 --      30 ms, every seeded vector byte-equal to its row's with the row's stamp
 --      as taken_at; the scripted writes and a replay of one thought's log
 --      then behaved as test-schema [53] holds.
 --
---   NOT HERE, SAID SO. The redaction arm — the projector skipping every event
+--   NOT HERE, SAID SO. db/reembed.ts does not call the refresh function
+--      directly (the ticket's item 4): the stale-read guard, the chunk
+--      rewrite and 018's duplicate reports live in update_thought, whose
+--      same-text arm IS the refresh (4 above), so the pass keeps calling
+--      update_thought and its docblock says the stamp no longer moves. The
+--      redaction arm — the projector skipping every event
 --      of a redacted thought_id (a redacted thought projects to nothing) — is
 --      SMD-1723's, which lands after this file and owns the marker table the
 --      fold reads (docs/event-log-as-truth.md, Deletion and forgetting); the
@@ -337,8 +381,11 @@ CREATE TABLE IF NOT EXISTS ob1_embedding_snapshot (
   content_fingerprint text        NOT NULL,
   embedding_model     text        NOT NULL,
   embedding           vector({{EMBEDDING_DIM}}) NOT NULL,
-  -- The vector's width as written, beside the column's declared one: a
-  -- fold onto a server at another width reads it before it casts.
+  -- The vector's width as written. On this server every row is the
+  -- column's declared width; the value is for a text dump of this table
+  -- read onto a server declared at another width (SMD-2117's fold copies
+  -- the log and the snapshot), where the column type must be reconciled
+  -- before the vectors cast, and a row says which width it carries.
   dims                integer     NOT NULL,
   taken_at            timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (content_fingerprint, embedding_model)
@@ -416,7 +463,12 @@ DECLARE
   e            thought_audit%ROWTYPE;
   v_content    text;
   v_fp         text;
-  v_vec        vector({{EMBEDDING_DIM}});
+  -- By the column's type, not by name: a DECLAREd type is resolved when the
+  -- body compiles in the caller's session, under the caller's search_path,
+  -- and a brain with pgvector off its path (db/test-search-path.ts) has no
+  -- `vector` by name — a 2-argument text capture would have failed on it
+  -- (cold read, first review pass). Parameters resolve once, at CREATE.
+  v_vec        thoughts.embedding%TYPE;
   v_model      text;
   v_target     text;
   v_found      boolean := false;
@@ -426,6 +478,19 @@ BEGIN
   SELECT * INTO e FROM thought_audit WHERE id = p_event;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'ob1_project_thought_event: no event % in thought_audit', p_event;
+  END IF;
+  -- Live, the event must be the thought's latest: the writers call this
+  -- right after their own append, so it always is — and a caller holding
+  -- the capture grants (PUBLIC executes this, as it must for SECURITY
+  -- INVOKER writers) could otherwise re-project an earlier event and roll a
+  -- row back to a state the log says it left, with no event (run-it, first
+  -- review pass). The fold walks the log in order under p_replay, as the
+  -- owner. One index probe on thought_audit(thought_id) a write.
+  IF NOT p_replay AND EXISTS (SELECT 1 FROM thought_audit a WHERE a.thought_id = e.thought_id AND a.seq > e.seq) THEN
+    RAISE EXCEPTION USING
+      ERRCODE = 'OB002',
+      MESSAGE = 'ob1_project_thought_event: a live projection of an event that is not the thought''s latest — the row would disagree with its log',
+      DETAIL  = jsonb_build_object('thought_id', e.thought_id, 'event', p_event, 'seq', e.seq)::text;
   END IF;
   -- The model a replay reads the snapshot under: 006's configured one. Read
   -- on a replay alone — the live path needs no privilege on ob1_config (the
@@ -524,6 +589,15 @@ BEGIN
                                  ELSE t.embedding_model END,
       updated_at          = e.created_at
     WHERE t.id = e.thought_id;
+    -- No row: nothing was projected and the check never ran. A fold that
+    -- meets an update before its capture, or after a raw delete, must hear
+    -- so rather than report the event applied (cold read, first review pass).
+    IF NOT FOUND THEN
+      RAISE EXCEPTION USING
+        ERRCODE = 'OB003',
+        MESSAGE = 'ob1_project_thought_event: the update event names a thought with no row — projected out of order, or the row removed around the log',
+        DETAIL  = e.thought_id::text;
+    END IF;
 
   ELSIF e.action = 'delete' THEN
     -- On a replay a tombstone never refuses: the delete happened, and 042's
@@ -533,6 +607,8 @@ BEGIN
     IF p_replay THEN
       PERFORM set_config('ob1.cited_delete', 'detach', true);
     END IF;
+    -- A tombstone for a row already gone deletes nothing and is not refused:
+    -- the state it asserts holds.
     DELETE FROM thoughts WHERE id = e.thought_id;
   ELSE
     RAISE EXCEPTION 'ob1_project_thought_event: unknown action %', e.action;
@@ -554,7 +630,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_project_thought_event(uuid, vector, text, boolean) IS
-  'The projector (SMD-1997, step 2): applies one thought_audit event to the thoughts row — capture -> INSERT (the row''s created_at from the event when it carries one, else the event''s own), update -> UPDATE by the event''s afters, delete -> DELETE — and returns the thought id. Faithful, not corrective: a key the event does not move stays, a vector the event does not flip stays unless (on a replay) ob1_embedding_snapshot holds one for the new text; live, the caller''s vector and label are written. Refuses a capture event without content (SQLSTATE OB003). Announces itself in ob1.projecting (the event id), ob1.projecting_thought and ob1.projecting_replay so the audit trigger checks instead of appending and 001''s stamp yields; runs 050''s stamp under ob1.actor_amend = ''backfill''; clears ob1.event; on a replay runs the citation guard in detach mode. Clears the three and restores ob1.actor_amend and ob1.cited_delete before returning. Called by upsert_thought, update_thought and delete_thought (live) and by the fold (SMD-2117, p_replay). Migration 057 / SMD-2116.';
+  'The projector (SMD-1997, step 2): applies one thought_audit event to the thoughts row — capture -> INSERT (the row''s created_at from the event when it carries one, else the event''s own), update -> UPDATE by the event''s afters (refused, SQLSTATE OB003, when no row stands: the event is out of order or the row went around the log), delete -> DELETE (a row already gone is nothing to refuse) — and returns the thought id. Live (p_replay false) the event must be the thought''s latest by seq, else SQLSTATE OB002: a re-projection of an earlier event would roll the row back with no event. A fold replays in the log''s order — seq since ob1_config.audit_seq_exact_since, (created_at, seq) before it (055''s rule; created_at is the transaction''s clock and inverts a row''s history). Faithful, not corrective: a key the event does not move stays, a vector the event does not flip stays unless (on a replay) ob1_embedding_snapshot holds one for the new text; live, the caller''s vector and label are written. Refuses a capture event without content (SQLSTATE OB003). Announces itself in ob1.projecting (the event id), ob1.projecting_thought and ob1.projecting_replay so the audit trigger checks instead of appending and 001''s stamp yields; runs 050''s stamp under ob1.actor_amend = ''backfill''; clears ob1.event; on a replay runs the citation guard in detach mode. Clears the three and restores ob1.actor_amend and ob1.cited_delete before returning. Called by upsert_thought, update_thought and delete_thought (live) and by the fold (SMD-2117, p_replay). Migration 057 / SMD-2116.';
 
 -- ---------------------------------------------------------------------------
 -- 4. The refresh: a vector onto a row that has one — no event, no bump.
@@ -567,18 +643,26 @@ CREATE OR REPLACE FUNCTION ob1_refresh_thought_vector(
 RETURNS void
 LANGUAGE plpgsql
 AS $$
+DECLARE
+  v_prev_proj    text := current_setting('ob1.projecting', true);
+  v_prev_thought text := current_setting('ob1.projecting_thought', true);
 BEGIN
+  -- As the projector: the announcing settings restored to what the caller
+  -- had, and 046's handoff cleared — a caller that set ob1.event and called
+  -- this directly would otherwise leave it for the next raw write in the
+  -- transaction to inherit (cold read, first review pass).
+  PERFORM set_config('ob1.event', '', true);
   PERFORM set_config('ob1.projecting', 'vector', true);
   PERFORM set_config('ob1.projecting_thought', p_id::text, true);
   UPDATE thoughts SET embedding = p_embedding, embedding_model = p_embedding_model
    WHERE id = p_id;
-  PERFORM set_config('ob1.projecting', '', true);
-  PERFORM set_config('ob1.projecting_thought', '', true);
+  PERFORM set_config('ob1.projecting', COALESCE(v_prev_proj, ''), true);
+  PERFORM set_config('ob1.projecting_thought', COALESCE(v_prev_thought, ''), true);
 END;
 $$;
 
 COMMENT ON FUNCTION ob1_refresh_thought_vector(uuid, vector, text) IS
-  'A projection refresh (SMD-1997, step 2): writes a vector and its label onto a thought that already has one, under ob1.projecting = ''vector'' — the audit trigger verifies that nothing but the vector moved (SQLSTATE OB002 otherwise), 001''s stamp yields, so no event is appended and updated_at does not move; the snapshot trigger records the new vector under the row''s key. update_thought calls it for a same-text edit that carries a vector (the re-embed''s shape). A vector onto a row without one is a presence flip and an event, not this. Migration 057 / SMD-2116.';
+  'A projection refresh (SMD-1997, step 2): writes a vector and its label onto a thought that already has one, under ob1.projecting = ''vector'' — the audit trigger verifies that nothing but the vector moved, its presence included (SQLSTATE OB002 otherwise: a NULL onto a vector, or a vector onto a row without one, is an event and is refused here), 001''s stamp yields, so no event is appended and updated_at does not move; the snapshot trigger records the new vector under the row''s key. update_thought calls it for a same-text edit that carries a vector (the re-embed''s shape). A vector onto a row without one is a presence flip and an event, not this. Migration 057 / SMD-2116.';
 
 -- ---------------------------------------------------------------------------
 -- 5. The audit trigger: the check under a projection, the writer for a raw
@@ -626,16 +710,25 @@ BEGIN
   IF v_proj = 'vector' THEN
     -- ob1:projection-checked-against-its-event — a CONTRACT SENTINEL, not
     -- prose (the 014 convention); preflight's `audit events` and test-schema
-    -- read it. A refresh moves the vector and its label and nothing else
-    -- (the label is not in the diff; the vector's presence is).
-    IF TG_OP <> 'UPDATE' OR (v_diff - 'embedding_present') <> '{}'::jsonb THEN
+    -- read it. A refresh moves the vector and its label and nothing else:
+    -- the label is not in the diff, and the vector's PRESENCE must not move
+    -- either — a vector arriving on a row without one, or a NULL replacing
+    -- one, is an event (046 records the presence), not a refresh, so the
+    -- diff must be empty (cold read, first review pass: the prototype
+    -- stripped embedding_present before comparing, and a refresh could blank
+    -- a vector with no trace in the log).
+    IF TG_OP <> 'UPDATE' OR v_diff <> '{}'::jsonb THEN
       RAISE EXCEPTION USING
         ERRCODE = 'OB002',
-        MESSAGE = 'thoughts_write_audit: a vector refresh changed more than the vector',
+        MESSAGE = 'thoughts_write_audit: a vector refresh changed more than the vector, or moved its presence — that is an event, not a refresh',
         DETAIL  = v_diff::text;
     END IF;
     RETURN NULL;
   ELSIF v_proj <> '' THEN
+    IF v_proj !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+      RAISE EXCEPTION USING ERRCODE = 'OB002',
+        MESSAGE = 'thoughts_write_audit: ob1.projecting is neither ''vector'' nor an event id', DETAIL = v_proj;
+    END IF;
     SELECT * INTO e FROM thought_audit WHERE id = v_proj::uuid;
     IF NOT FOUND THEN
       RAISE EXCEPTION USING ERRCODE = 'OB002',
@@ -689,7 +782,12 @@ BEGIN
     -- whose pointer a tombstone nulled), so its before differs and its diff
     -- is a subset — the state the event asserts is what must hold.
     IF TG_OP = 'INSERT' THEN
+      -- The key is not in a capture event (003's rule lives in the functions
+      -- and the projector derives it from the content): derived here the same
+      -- way, so a row that claims another key under a capture's projection is
+      -- refused (cold read, first review pass).
       IF (e.diff->>'content') IS DISTINCT FROM NEW.content
+         OR content_fingerprint_of(e.diff->>'content') IS DISTINCT FROM NEW.content_fingerprint
          OR (e.diff->'metadata') IS DISTINCT FROM NEW.metadata
          OR (e.diff ? 'created_at' AND (e.diff->>'created_at')::timestamptz IS DISTINCT FROM NEW.created_at)
          OR NULLIF(e.diff->'derived_from', 'null'::jsonb) IS DISTINCT FROM NEW.derived_from
@@ -697,6 +795,23 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = 'OB002',
           MESSAGE = 'thoughts_write_audit: the projected row diverges from its capture event',
           DETAIL  = jsonb_build_object('event', e.diff - 'content', 'row', v_diff - 'content')::text;
+      END IF;
+    ELSIF TG_OP = 'DELETE' THEN
+      -- The row projected away must be the one the tombstone describes (008
+      -- keeps it in full): live, delete_thought read it one statement
+      -- earlier; on a replay this is the difference between "the log said
+      -- what was there" and "it was checked" (cold read, first review pass:
+      -- the prototype checked captures and updates alone).
+      -- jsonb null and SQL NULL read as one on both sides: a raw row's
+      -- NULL metadata is a JSON null in its tombstone (jsonb_build_object),
+      -- and the row itself may hold either.
+      IF (e.diff->>'previous_content') IS DISTINCT FROM OLD.content
+         OR NULLIF(e.diff->'previous_metadata', 'null'::jsonb) IS DISTINCT FROM NULLIF(OLD.metadata, 'null'::jsonb)
+         OR NULLIF(e.diff->'previous_derived_from', 'null'::jsonb) IS DISTINCT FROM NULLIF(OLD.derived_from, 'null'::jsonb)
+         OR (e.diff->>'previous_supersedes')::uuid IS DISTINCT FROM OLD.supersedes THEN
+        RAISE EXCEPTION USING ERRCODE = 'OB002',
+          MESSAGE = 'thoughts_write_audit: the row projected away diverges from its tombstone',
+          DETAIL  = jsonb_build_object('event', e.diff - 'previous_content', 'row', v_diff - 'previous_content')::text;
       END IF;
     ELSIF TG_OP = 'UPDATE' THEN
       IF NOT (SELECT COALESCE(bool_and(k IN (SELECT jsonb_object_keys(e.diff))), true) FROM jsonb_object_keys(v_diff) k) THEN
@@ -770,6 +885,7 @@ RETURNS jsonb AS $$
 DECLARE
   v_fingerprint text;
   v_id          uuid;
+  v_existed     boolean := false;
   v_event       jsonb;
   v_old_meta    jsonb;
   v_new_meta    jsonb;
@@ -820,17 +936,35 @@ BEGIN
   -- ob1:capture-appends-then-projects — a CONTRACT SENTINEL, not prose (the
   -- 014 convention); preflight's `atomic capture` reads it. 057: the event
   -- is appended first and the row projected from it.
-  IF NOT FOUND THEN
-    v_id       := gen_random_uuid();
-    v_new_meta := ob1_actor_stamp(COALESCE(p_payload->'metadata', '{}'::jsonb));
-    v_diff     := ob1_thought_diff('capture', NULL, p_content, NULL, v_new_meta, false, false,
-                                   NULL, NULL, NULL, NULL, NULL, v_fingerprint);
-    v_ev       := ob1_append_thought_event(v_id, 'capture', v_new_meta->>'source', v_diff, v_event);
-    IF v_ev IS NULL THEN
-      RAISE EXCEPTION 'upsert_thought: the append recorded no capture event for %', v_id;
-    END IF;
-    PERFORM ob1_project_thought_event(v_ev);
-  ELSE
+  v_existed := FOUND;
+  IF NOT v_existed THEN
+    BEGIN
+      v_id       := gen_random_uuid();
+      v_new_meta := ob1_actor_stamp(COALESCE(p_payload->'metadata', '{}'::jsonb));
+      v_diff     := ob1_thought_diff('capture', NULL, p_content, NULL, v_new_meta, false, false,
+                                     NULL, NULL, NULL, NULL, NULL, v_fingerprint);
+      v_ev       := ob1_append_thought_event(v_id, 'capture', v_new_meta->>'source', v_diff, v_event);
+      IF v_ev IS NULL THEN
+        RAISE EXCEPTION 'upsert_thought: the append recorded no capture event for %', v_id;
+      END IF;
+      PERFORM ob1_project_thought_event(v_ev);
+    EXCEPTION WHEN unique_violation THEN
+      -- A writer that takes no fingerprint lock — a raw import, a backfill,
+      -- a community schema — committed this text between the row read and
+      -- the projection. 046's INSERT ... ON CONFLICT merged into it; the
+      -- projector's INSERT meets the unique index. The event rolls back with
+      -- this block; the row that landed is read under the lock still held
+      -- and merged as a re-capture (run-it, first review pass).
+      SELECT id, metadata INTO v_id, v_old_meta
+        FROM thoughts WHERE content_fingerprint = v_fingerprint FOR NO KEY UPDATE;
+      IF NOT FOUND THEN
+        RAISE;
+      END IF;
+      v_existed := true;
+      v_ev := NULL;
+    END;
+  END IF;
+  IF v_existed THEN
     -- A re-capture: the metadata merged as 046's ON CONFLICT merged it, the
     -- stamp kept (050: the mark follows the content, and the content is the
     -- same), 046's no-op gate — an update event only when the merge changed
@@ -971,19 +1105,37 @@ BEGIN
   -- is appended first and the row projected from it, the caller's vector
   -- and label (021) riding the projection.
   IF NOT v_existed THEN
-    v_id       := gen_random_uuid();
-    -- 050: a new text — the writer from the envelope. 025: derived_from and
-    -- supersedes written on a fresh row, validated above.
-    v_new_meta := ob1_actor_stamp(COALESCE(p_payload->'metadata', '{}'::jsonb));
-    v_diff     := ob1_thought_diff('capture', NULL, p_content, NULL, v_new_meta, false, p_embedding IS NOT NULL,
-                                   NULL, v_supersedes::uuid, NULL, v_derived, NULL, v_fingerprint);
-    v_ev       := ob1_append_thought_event(v_id, 'capture', v_new_meta->>'source', v_diff, v_event);
-    IF v_ev IS NULL THEN
-      RAISE EXCEPTION 'upsert_thought: the append recorded no capture event for %', v_id;
-    END IF;
-    PERFORM ob1_project_thought_event(v_ev, p_embedding, v_label);
-    v_supersedes_now := v_supersedes::uuid;
-  ELSE
+    BEGIN
+      v_id       := gen_random_uuid();
+      -- 050: a new text — the writer from the envelope. 025: derived_from and
+      -- supersedes written on a fresh row, validated above.
+      v_new_meta := ob1_actor_stamp(COALESCE(p_payload->'metadata', '{}'::jsonb));
+      v_diff     := ob1_thought_diff('capture', NULL, p_content, NULL, v_new_meta, false, p_embedding IS NOT NULL,
+                                     NULL, v_supersedes::uuid, NULL, v_derived, NULL, v_fingerprint);
+      v_ev       := ob1_append_thought_event(v_id, 'capture', v_new_meta->>'source', v_diff, v_event);
+      IF v_ev IS NULL THEN
+        RAISE EXCEPTION 'upsert_thought: the append recorded no capture event for %', v_id;
+      END IF;
+      PERFORM ob1_project_thought_event(v_ev, p_embedding, v_label);
+      v_supersedes_now := v_supersedes::uuid;
+    EXCEPTION WHEN unique_violation THEN
+      -- A writer that takes no fingerprint lock — a raw import, a backfill,
+      -- a community schema — committed this text between the row read and
+      -- the projection. 046's INSERT ... ON CONFLICT merged into it; the
+      -- projector's INSERT meets the unique index. The event rolls back with
+      -- this block; the row that landed is read under the lock still held
+      -- and merged as a re-capture below (run-it, first review pass).
+      SELECT id, embedding_model, metadata, embedding IS NOT NULL, supersedes, derived_from
+        INTO v_id, v_old_label, v_old_meta, v_old_has_vec, v_old_sup, v_old_derived
+        FROM thoughts WHERE content_fingerprint = v_fingerprint FOR NO KEY UPDATE;
+      IF NOT FOUND THEN
+        RAISE;
+      END IF;
+      v_existed := true;
+      v_ev := NULL;
+    END;
+  END IF;
+  IF v_existed THEN
     -- ob1:re-capture-writes-no-provenance — a CONTRACT SENTINEL, not prose
     -- (the 014 convention); preflight's `atomic capture` reads it. 035: the
     -- envelope's derived_from and supersedes are NOT written on an existing
@@ -1125,6 +1277,14 @@ BEGIN
     RAISE EXCEPTION
       'update_thought: p_provenance must be a JSON object, got %. A client that binds a JS string to a jsonb parameter double-encodes it — pass an object, or cast explicitly.',
       jsonb_typeof(p_provenance);
+  END IF;
+  -- 057: the same guard for the patch — `{} || 'null'` and `{} || '[…]'`
+  -- make an ARRAY of the row's metadata, after which every later event has
+  -- no source and no mark (run-it, first review pass; 046 accepted it).
+  IF p_metadata_patch IS NOT NULL AND jsonb_typeof(p_metadata_patch) <> 'object' THEN
+    RAISE EXCEPTION
+      'update_thought: p_metadata_patch must be a JSON object, got %. A client that binds a JS string to a jsonb parameter double-encodes it — pass an object, or cast explicitly.',
+      jsonb_typeof(p_metadata_patch);
   END IF;
   IF v_set_supersedes AND jsonb_typeof(p_provenance->'supersedes') <> 'null' THEN
     IF jsonb_typeof(p_provenance->'supersedes') <> 'string'

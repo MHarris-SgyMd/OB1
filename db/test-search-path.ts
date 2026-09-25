@@ -123,6 +123,15 @@ try {
         await sql`INSERT INTO thoughts (content, metadata) VALUES (${`written after ${file}`}, '{}'::jsonb)`;
         written++;
       }
+      // …and the last write through the FUNCTIONS, in this off-path session:
+      // a text capture, an edit and a delete. A plpgsql body that declares a
+      // `vector` local by name compiles in the caller's session and fails
+      // here with `type "vector" does not exist` — 057's projector did until
+      // its first review pass, and no raw INSERT above could have said so.
+      const fn = (await sql`SELECT upsert_thought('written through the functions, off-path', '{"metadata": {"source": "test"}}'::jsonb) AS r`)[0].r as { id: string };
+      const ed = (await sql`SELECT update_thought(${fn.id}::uuid, 'written through the functions, off-path, edited', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL) AS r`)[0].r as { ok: boolean };
+      const dl = (await sql`SELECT delete_thought(${fn.id}::uuid, NULL, false) AS r`)[0].r as { ok: boolean };
+      assert(ed.ok === true && dl.ok === true, "a text capture, an edit and a delete through the write functions run in the off-path session — no body names the vector type where the session cannot resolve it");
       const [{ c }] = await sql`SELECT count(*)::int AS c FROM thoughts`;
       assert(c === written, `every one of the ${written} rows written between migrations survived (${c})`);
       // The column exists and carries the relocated type — the schema really
