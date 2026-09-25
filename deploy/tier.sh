@@ -7,9 +7,15 @@
 # runs this checkout's tier.ts in it, on the stack's network, so the database
 # services are reached by name and nothing is published for it.
 #
-#   deploy/tier.sh --env-file ~/stack/deploy/.env --refresh --from postgres --to open-brain-canary-postgres --tier canary
-#   deploy/tier.sh --env-file ~/stack/deploy/.env --diff    --from postgres --to open-brain-canary-postgres
+#   # replay stable's logged searches on the canary deploy/canary.sh stood up:
+#   # both projects' networks, so by container name (each has a `postgres`)
+#   deploy/tier.sh --env-file ~/stack/deploy/.env --network open-brain_default,open-brain-canary_default \
+#     --diff --since 2026-01-01 --from open-brain-postgres-1 --to open-brain-canary-postgres-1
+#   # the three-tier stack's own network and services
 #   deploy/tier.sh --refresh --from stable-postgres --to canary-postgres --network open-brain-tiers_default
+#
+# (deploy/canary.sh runs the canary's --refresh itself; deploy/README.md,
+# "Refreshing a tier", says what a --diff replays and what it skips.)
 #
 # --from / --to take a database on the network as HOST[:PORT][/DB] — port 5432
 # and database openbrain unless named — and this builds the URL as the stack's
@@ -210,8 +216,9 @@ TO_URL="$(to_url "$TO")"
   fi
 } >> "$TMP_ENV"
 
-# Cached after the first build; rebuilt when db/tier.Dockerfile changes. Its
-# output goes to stderr, so a --diff's report is the only thing on stdout.
+# Cached after the first build; rebuilt when db/tier.Dockerfile changes. The
+# image id it prints is dropped, and a build's errors go to stderr, so a
+# --diff's report is the only thing on stdout.
 # --load for docker with buildx: under a docker-container builder (this Mac's
 # docker CLI over podman is one) a build without it stays in the builder's
 # cache and `run` then looks the tag up in a registry. A docker with no buildx
@@ -219,7 +226,7 @@ TO_URL="$(to_url "$TO")"
 # anyway.
 LOAD=()
 if [ "$RUNTIME" = docker ] && docker buildx version >/dev/null 2>&1; then LOAD=(--load); fi
-"$RUNTIME" build -q ${LOAD[@]+"${LOAD[@]}"} -t "$IMAGE" - < "$REPO/db/tier.Dockerfile" >&2
+"$RUNTIME" build -q ${LOAD[@]+"${LOAD[@]}"} -t "$IMAGE" - < "$REPO/db/tier.Dockerfile" >/dev/null
 
 # --init: bun would otherwise be PID 1, which ignores SIGINT, and Ctrl-C would
 # leave a refresh running. -w /tmp: Bun auto-loads .env files from the working
