@@ -57,3 +57,12 @@ db/bun.lock
 .DS_Store
 .vscode
 .idea
+
+# Parallel-agent worktrees (Claude Code creates these under .claude/worktrees):
+# tens of GB of checkouts and doc assets (e.g. .mp4 walkthroughs) the image never
+# uses. Without this the root context balloons and OOMs the build daemon (SMD-2177).
+.claude
+
+# Local scratch that is not part of any image.
+*.zip
+proposal
