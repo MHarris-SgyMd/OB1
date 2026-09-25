@@ -170,12 +170,13 @@ async function restoreShipped(...fns: string[]): Promise<string[]> {
  * 1,201. The rows are byte for byte what the section inserted. What differs is
  * the graph, built in one pass instead of grown, and the table's size in
  * pg_class, which CREATE INDEX refreshes; the index is in place before the
- * section calls match_thoughts. No assertion of [8c]–[8e] needs it today — each
- * passes with the index dropped, since with no ANALYZE the planner answers the
- * walk with the GIN bitmap and a sort (SMD-2151) — so the rebuild keeps the
- * shipped state, and the walk's index for when SMD-2151 makes it reachable.
+ * section calls match_thoughts. No behavioural assertion of [8c]–[8e] needs it
+ * today — each passes with the index dropped, since with no ANALYZE the planner
+ * answers the walk with the GIN bitmap and a sort (SMD-2151) — so the rebuild
+ * keeps the shipped state, which [8e] reads back at its end, and the walk's
+ * index for when SMD-2151 makes it reachable. Returns the definition it built.
  */
-async function loadWithoutWalkIndex(load: () => Promise<void>): Promise<void> {
+async function loadWithoutWalkIndex(load: () => Promise<void>): Promise<string> {
   const def = await dropWalkIndex();
   try {
     await db.exec(`DELETE FROM thoughts`);
@@ -183,6 +184,7 @@ async function loadWithoutWalkIndex(load: () => Promise<void>): Promise<void> {
   } finally {
     await db.exec(def);
   }
+  return def;
 }
 /** Drop thoughts_embedding_idx and return the statement that builds it again. */
 async function dropWalkIndex(): Promise<string> {
@@ -801,7 +803,7 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
   // mostly pre-empty and the probe passed on an incidental layout (review
   // pass 2). Compacted, 1,000 rows are some sixteen pages, every one live.
   const { unitVector } = seededRandom(1463);
-  await loadWithoutWalkIndex(async () => {
+  const shippedWalkIndex = await loadWithoutWalkIndex(async () => {
     await db.exec(`VACUUM thoughts`);
     for (let i = 0; i < 1000; i += 100) {
       const values = Array.from({ length: 100 }, (_, k) => `('gate ${i + k}', '{"kind":"${(i + k) % 100 === 0 ? "thin" : "broad"}"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
@@ -832,7 +834,7 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
   };
   // Under the shipped floor: this heap is a few dozen pages, and the sample never runs.
   // The row count rides along: loadWithoutWalkIndex empties the table first,
-  // and [8d]'s 1,505 rows left in it would sit in the heap this reads.
+  // and without that DELETE every earlier section's rows would sit in this heap.
   const [{ pages, rows }] = (await db.query<{ pages: number; rows: number }>(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages, (SELECT count(*)::int FROM thoughts) AS rows`)).rows;
   assert(rows === 1000 && pages > 0 && pages < ROUTE_ESTIMATE_MIN_PAGES, `the fixture's heap is its ${rows} rows on ${pages} pages, under the floor of ${ROUTE_ESTIMATE_MIN_PAGES}: the sample does not run and the call is 020's`);
   await agree("under the floor");
@@ -983,11 +985,13 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
   const restored = await restoreShipped("match_thoughts");
   // The index is read back, not assumed: without it the sections up to the
   // next re-apply of 039, whose swap block builds it silently, would run with
-  // no walk index and nothing would say (review pass 1).
+  // no walk index and nothing would say (review pass 1). Compared whole with the
+  // definition the section's load read, not by pattern: a regex missed an index
+  // rebuilt WITH other build parameters (review pass 2).
   const indexBack = (await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('thoughts_embedding_idx')) AS d`)).rows[0].d ?? "";
   assert(restored.length === 1 && restored[0].startsWith("041") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped())
-      && new RegExp(`USING hnsw \\(\\(\\(embedding\\)::halfvec\\(${EMBEDDING_DIM}\\)\\) halfvec_cosine_ops\\)`).test(indexBack),
-    "…and the shipped floor and the walk's index are back for the sections after");
+      && indexBack === shippedWalkIndex,
+    `…and the shipped floor and the walk's index are back for the sections after${indexBack === shippedWalkIndex ? "" : ` (index: ${indexBack || "none"})`}`);
 }
 
 console.log("\n[9] updated_at trigger fires on update, created_at does not move");
