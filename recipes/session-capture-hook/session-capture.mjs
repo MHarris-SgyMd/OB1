@@ -1471,7 +1471,7 @@ export function modelStatusLine(cfg) {
  */
 export async function modelSummary(cfg, payload, fetchImpl = fetch) {
   if (cfg.summary !== "model" || typeof payload.assistant !== "string") return null; // derived: the option is off, or the payload was prepared before it was on
-  const chain = payload.chain_id ?? payload.session_id;
+  const chain = chainOf(payload);
   // A running checkpoint keeps its DERIVED summary: its `Checkpoint: …
   // continuing` line is the signal a sibling session reads and search marks
   // superseded, and a free rewrite would drop it. The model writes the durable

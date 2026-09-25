@@ -1789,35 +1789,24 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
     "egress permits a declared-local endpoint under deny, and any endpoint under allow or off");
   assert(/not declared local/.test(egressRefusalForModel({ egress: "deny", modelLocal: false }) ?? ""), "…and refuses a non-local endpoint under deny (the default), the model URL never guessed local from its address");
 
-  // loadConfig reads the model knobs from the environment and fails egress
-  // closed (the config file's path is frozen at import, so this drives the env).
-  const modelEnv = { OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_SESSION_CAPTURE_MODEL_URL: "http://127.0.0.1:1/v1/", OB1_SESSION_CAPTURE_MODEL: "llama3.1:8b", OB1_CHAT_LOCAL: "1", OB1_EGRESS_POLICY: "sideways" };
-  const restoreEnv = {};
-  for (const [k, v] of Object.entries(modelEnv)) { restoreEnv[k] = process.env[k]; process.env[k] = v; }
-  const mc = loadConfig();
-  for (const k of Object.keys(modelEnv)) { if (restoreEnv[k] === undefined) delete process.env[k]; else process.env[k] = restoreEnv[k]; }
+  // loadConfig reads the model knobs from the environment (the config file's
+  // path is frozen at import, so these drive the env): withEnv sets the vars,
+  // runs loadConfig, and restores them whatever happens.
+  const withEnv = (o, fn) => { const r = {}; for (const [k, v] of Object.entries(o)) { r[k] = process.env[k]; process.env[k] = v; } try { return fn(); } finally { for (const k of Object.keys(o)) { if (r[k] === undefined) delete process.env[k]; else process.env[k] = r[k]; } } };
+  const mc = withEnv({ OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_SESSION_CAPTURE_MODEL_URL: "http://127.0.0.1:1/v1/", OB1_SESSION_CAPTURE_MODEL: "llama3.1:8b", OB1_CHAT_LOCAL: "1", OB1_EGRESS_POLICY: "sideways" }, loadConfig);
   assert(mc.summary === "model" && mc.modelUrl === "http://127.0.0.1:1/v1" && mc.model === "llama3.1:8b" && mc.modelLocal === true, `loadConfig reads the model knobs and strips the URL's trailing slash (${JSON.stringify({ s: mc.summary, u: mc.modelUrl, m: mc.model, l: mc.modelLocal })})`);
   assert(mc.egress === "deny", "an unknown egress value fails closed to deny, as the server's gate does");
   // A full endpoint URL a user pasted is trimmed to its base, and a negative
   // timeout falls to the default rather than aborting at once (review pass 2).
-  const normEnv = { OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_SESSION_CAPTURE_MODEL_URL: "http://127.0.0.1:1/v1/chat/completions/", OB1_SESSION_CAPTURE_MODEL: "m", OB1_SESSION_CAPTURE_MODEL_TIMEOUT: "-5" };
-  const restoreNorm = {};
-  for (const [k, v] of Object.entries(normEnv)) { restoreNorm[k] = process.env[k]; process.env[k] = v; }
-  const nc = loadConfig();
-  for (const k of Object.keys(normEnv)) { if (restoreNorm[k] === undefined) delete process.env[k]; else process.env[k] = restoreNorm[k]; }
+  const nc = withEnv({ OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_SESSION_CAPTURE_MODEL_URL: "http://127.0.0.1:1/v1/chat/completions/", OB1_SESSION_CAPTURE_MODEL: "m", OB1_SESSION_CAPTURE_MODEL_TIMEOUT: "-5" }, loadConfig);
   assert(nc.modelUrl === "http://127.0.0.1:1/v1" && nc.modelTimeout === undefined, `a full /chat/completions URL is trimmed to its base and a negative timeout falls to the default (${nc.modelUrl}, ${nc.modelTimeout})`);
-  const savedT = process.env.OB1_SESSION_CAPTURE_MODEL_TIMEOUT; process.env.OB1_SESSION_CAPTURE_MODEL_TIMEOUT = "999999999999";
-  const bigT = loadConfig();
-  if (savedT === undefined) delete process.env.OB1_SESSION_CAPTURE_MODEL_TIMEOUT; else process.env.OB1_SESSION_CAPTURE_MODEL_TIMEOUT = savedT;
+  const bigT = withEnv({ OB1_SESSION_CAPTURE_MODEL_TIMEOUT: "999999999999" }, loadConfig);
   assert(bigT.modelTimeout === 330_000, `a model_timeout is clamped so the model call plus the worst-case post fit one 15-min claim window, not truncated to a near-zero abort (${bigT.modelTimeout})`);
   // The server's LLM key is never paired with a hook-overridden URL, but pairs
   // with the server's own URL (review pass 4).
-  const setEnv = (o) => { const r = {}; for (const [k, v] of Object.entries(o)) { r[k] = process.env[k]; process.env[k] = v; } return () => { for (const k of Object.keys(o)) { if (r[k] === undefined) delete process.env[k]; else process.env[k] = r[k]; } }; };
-  let undo = setEnv({ OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_SESSION_CAPTURE_MODEL_URL: "http://remote/v1", OB1_SESSION_CAPTURE_MODEL: "m", OB1_LLM_API_KEY: "server-llm-key" });
-  const pc = loadConfig(); undo();
+  const pc = withEnv({ OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_SESSION_CAPTURE_MODEL_URL: "http://remote/v1", OB1_SESSION_CAPTURE_MODEL: "m", OB1_LLM_API_KEY: "server-llm-key" }, loadConfig);
   assert(pc.modelUrl === "http://remote/v1" && pc.modelKey === undefined, `a hook-specific model_url does not borrow the server's LLM key (${pc.modelUrl}, key ${pc.modelKey})`);
-  undo = setEnv({ OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_LLM_BASE_URL: "http://server/v1", OB1_LLM_API_KEY: "server-llm-key" });
-  const sc = loadConfig(); undo();
+  const sc = withEnv({ OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_LLM_BASE_URL: "http://server/v1", OB1_LLM_API_KEY: "server-llm-key" }, loadConfig);
   assert(sc.modelUrl === "http://server/v1" && sc.modelKey === "server-llm-key", "…while the server's own URL and key pair together");
 
   // A joined excerpt over the cap keeps the recent TAIL, where decisions land,
