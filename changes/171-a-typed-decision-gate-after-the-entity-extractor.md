@@ -1,0 +1,137 @@
+# 171. A typed-decision gate after the entity extractor, measured on the cases a regex cannot judge — no margin over the deterministic gate under any rubric, and the name barely moves the model's answer; nothing enters the extraction path (SMD-1937)
+
+**What changed.** Evals only.
+- **`evals/eval-jev-gate.ts`** is rebuilt as SMD-1937's harness. SMD-2050's
+  slice scored one framing against a weak label; this scores against
+  pre-registered baselines:
+  - B0 = `NUMERIC_NAME_RE`;
+  - B1 = SMD-1935's whole gate: numbers, the type vocabulary, an identifier's
+    shape typed person or place;
+  - five tier arms (v1, v2, claim, pertype, choice), plus the extractor's column.
+- **Method.** A dev/test split by md5 of the thought. The refits, the threshold
+  and the arm are taken from dev, and a paired bootstrap in fixture order gives
+  the verdict. The whole procedure is refit per grader.
+- **Flags:**
+  - `--grades`/`--strict-code` score under rubric v2.
+  - `--diagnose` runs the probes of why the tier fails.
+  - `--dump-sample` writes the grading sample, outside the tree.
+  - `--cache` keeps the answers, keyed by the model and what was asked, and
+    written whole on an interrupt too.
+- **`evals/fixtures/entity-gate-grades.json`** (rubric v1, pre-registered) and
+  **`entity-gate-grades-v2.json`** (rubric v2, after the result) hold the same 201
+  mentions whose names pass B0, as ids and numbers only (check 9). Two blind
+  Claude graders labelled each, and both graders' labels are kept beside the
+  adjudication.
+- `bun eval-jev-gate.ts --self-check` runs as a fork-checks step.
+
+**Why.** SMD-2050's first number used the obvious cases, which the regex already
+gets right. SMD-1937's bar is a margin on the ambiguous ones, before a second
+model enters a path SMD-1879 already strains. It was pre-registered in 793b1158,
+before the grades (770cf0be) and any tier call on them: ≥ 10 points of balanced
+accuracy over B1 on test with the interval above 0, and typing ≥ 10 points over
+the extractor.
+
+**Held.** The self-check holds each of these, each with a mutant killed:
+- B0 and B1;
+- AUROC, balanced accuracy and the threshold's tie;
+- the refits: a slope recovered, the base rate at a constant score;
+- `fitOnDev`'s choice, its tie and its labels;
+- kappa;
+- the bootstrap's pairing and its percentiles;
+- the permutation p;
+- the gate-off identity;
+- the split, the window and the sentence around a name;
+- the cache key and the cache file's refusals;
+- each arm's reading, and the seven-way framings;
+- every grades-file rule (v2's categories too), and both committed files.
+
+Of pass 1's 88 mutants, 84 are killed. The four left are an equivalent NaN
+guard, the loss's mean, and Platt's line search and start, killed only
+together. All 16 of pass 2's are killed; pass 3's reachable survivors fall to
+nine probes (11 of 11), the rest in report-only code or equivalent.
+
+**Measured after.** On the dogfood brain at 053, with Verdict v1.4 on the host
+(tables in `evals/README.md`).
+- **The margin is not met.** v2 was chosen on dev by 0.637 to 0.635.
+  - v2 − B1 = +10.1 points (−1.0 to +21.0).
+  - Under grader B's labels alone, the choice arm, −6.1.
+  - Under rubric v2: +10.5 counting code artifacts, +8.9 not; both intervals
+    cross 0.
+- **Typing.** The extractor gets 71% right, the choice 53%, the per-type
+  binaries 21%.
+- **Calibration.** After Platt every arm sits at the base-rate constant; v2's
+  Brier skill is 6.2%.
+- **SMD-1925.** The extractor's confidence is 1.00 on 89 of 90 test mentions.
+- **Cost.** One binary a candidate is 0.88 s a thought p50; six are 4.7 s. The
+  reference is SMD-1879's 9-second call.
+- **Rubric v2** (not pre-registered), on the maintainer's call, grades the entity (up to three
+  mentions), counts a role that points at one person, and puts each mention in
+  a category. The graders agree on validity for 98.5%.
+  - The junk share is one definition: code artifacts. Counting them, about 28%
+    of the 2,420 entities are junk; not counting them, 67%.
+  - Topics are half junk or more either way.
+- **Why it fails** (`--diagnose`, not pre-registered):
+  - The name barely moves it: the entity, `021` and `banana` get one answer
+    on 56 of 60 windows (one framing; no tools or topics in that sample).
+  - Its default follows the labels' wording: `project` for 2,268 of 2,420
+    entities, or `junk` with concrete labels.
+  - It is not the note's length: a sentence scores as the window does.
+  - Our reading, unmeasured: a JevBench answer is in its text, while an
+    entity's type rarely is, so the task needs knowledge of names.
+  - A trap, from a probe outside the harness: examples that included graded
+    names scored 48%, against 33% clean. The wording differed too, so the gap is
+    not all string matching.
+- **What it settles.**
+  - SMD-1935's gate ships first, its shape rule as a retype, and Verdict v1.4
+    stays out of the extraction path.
+  - The next model should know names: SemIf, SMD-2052.
+  - Code artifacts are entities, by the maintainer's decision. So about 28% of
+    the graph is junk: 31 generic words, 10 names not held, 9 URL or path
+    mints and 7 numbers of the sample's 57. SMD-1935 should keep B1's
+    vocabulary rule (3 of 3 here) and its number rule, and retype
+    identifier-shaped persons and places rather than reject them: the shape
+    rule drops 7 valid mentions for 1 junk.
+
+**Review passes.** Independent readers at once: definitions, run-it, cold read.
+
+| Pass | Finding | Caught | Fix (commit) |
+| --- | --- | --- | --- |
+| 1 | the bootstrap read rows by index in whatever order Postgres returned: the lower bound ranged −1.8 to −0.0 over 200 orders | run-it | fixture order, 10,000 resamples (2a01857d) |
+| 1 | the per-grader lines reused the adjudicated arm; refit under grader B, the choice wins at −6.1 | run-it | `fitOnDev` per grader (2a01857d) |
+| 1 | 9 of 201 windows lack the name | run-it | counted, and a margin without them (2a01857d) |
+| 1 | the cost said one request a thought (six binaries pack 2–4), and its 9 s was unsourced | cold read | request counts, the source named (2a01857d) |
+| 1 | the cache key left out the model; the cache was lost on an error | cold read | provenance in the key, written in a `finally` (2a01857d) |
+| 1 | the live drop-the-mechanism line could not fail | cold read | `gate()`'s property, held by the self-check (2a01857d) |
+| 1 | 45 of 88 mutants survived | mutant | probes; 84 killed (2a01857d) |
+| 2 | Brier skill compared a test Brier with dev's base rate: "the rest 2–4% worse" was false | cold read | test's own constant (577fcc63) |
+| 2 | a constant-score Platt fit made a NaN threshold on a −Infinity claim | run-it | the base rate for every row (577fcc63) |
+| 2 | the cache was lost on a signal and torn by a kill mid-write | run-it | atomic write, written on SIGINT/SIGTERM (577fcc63) |
+| 2 | 26 of pass 1's report-only mechanisms had no probe | mutant | exported and probed, 16 of 16 killed (577fcc63) |
+| 3 | the decision record said B1 fits code artifacts; it drops 7 valid (mistyped as place) for 1 junk | run-it | retype, not reject, for SMD-1935 (fd10238c) |
+| 3 | the diagnosis overclaimed: "never reads the name" (56 of 60), a confounded leak read as string matching, an inference stated as fact | cold read | reworded, each claim sized (fd10238c) |
+| 3 | 23 of 70 mutants on the new code survived | mutant | 9 cheap probes (fd10238c) |
+| 4 | "the gate ships first" beside "its shape rule must be a retype"; the typing margin missing from the README; "rubric v1, pre-registered" where the code rule came at adjudication | cold read | one account throughout |
+
+**Not taken.**
+- **No framing chosen on test.** The diagnosis probes framings; it decides
+  nothing.
+- **No bootstrap by thought.** It would only widen an interval that already
+  fails.
+- **No logits guard in the client.** That is server-portable's contract, and all
+  2,288 kept binaries are sound.
+- **No backtick rule for code artifacts.** It is SMD-1935's to measure.
+
+**Boyscout.** After pass 2's stop signal (the code-artifact decision reopened the
+record for pass 3), the tidy-ups the passes cut for space, with
+no behaviour change: the pre-boyscout harness gives an identical report
+against the same brain and cache. The changes:
+- one cached-ask helper, with its signal handling, for the report and the
+  diagnosis;
+- one name finder for the window and the sentence;
+- the choice's type read as the selected option's index;
+- each grader's own label checked for consistency;
+- the cost line printed only when a thought was timed.
+
+The neutrality run was answered from the cache with no timing, so it did not
+reach one real change: "candidates asked" no longer counts a call the egress
+policy refused.

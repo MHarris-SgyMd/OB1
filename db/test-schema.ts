@@ -61,6 +61,8 @@ import {
   grantedSequences,
   grantedTables,
   grantedViews,
+  ROLE_GRANT_GROUPS,
+  ROLE_GRANTS,
   stripSqlComments,
   supabaseIsmsIn,
   UPDATE_THOUGHT_SIGNATURE_9,
@@ -7883,6 +7885,142 @@ console.log("\n[52] Migration 056: the entity name gate — a number or a type w
   assert(/migration 056 needs 016 \(ob1_entity_edges\); this schema lacks it/.test(noEdges), `…and without 016 (${noEdges.slice(0, 90)})`);
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`SELECT prune_orphan_entities()`);
+}
+
+// ── 53. A --grant role runs the entity writer, a structured pass and 056's ───
+//
+// Since 053 record_thought_entities upserts the mention and edge rows, and
+// Postgres checks UPDATE for an INSERT … ON CONFLICT DO UPDATE each time it
+// runs one, conflict or none — so a role migrate.ts --grant set up, holding
+// SELECT/INSERT/DELETE there, failed every call; a structured pass also wrote
+// thought_sources and `link` facets, which no group granted. The role here is
+// set up exactly as
+// --grant sets one up (every group, the objects present), and runs each path
+// as itself; then each added privilege is revoked in turn and its path fails
+// by that table's name (SMD-2216).
+console.log("\n[53] A role migrate.ts --grant set up runs the entity writer (an extraction onto a structured row, a structured pass onto an extracted one), a structured pass's source row and links, and apply_entity_type_gate()'s merge (SMD-2216)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  type J = Record<string, unknown>;
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT prune_orphan_entities()`);
+
+  // The class, not only this instance: every table the migrations create is
+  // named by one of the migrations' own groups, so a table a migration adds
+  // without a grant row fails here, not under an operator's role.
+  // thought_sources was the one (053). A migrations' group is one whose rows
+  // are all dated by a migration number — not the community, extension and
+  // recipe groups (dated by their files), whose table names a migration table
+  // could share (`entities`). OWNER_ONLY is what no role is granted on
+  // purpose: migrate.ts's ledger, which this suite's brain lacks (it applies
+  // the files itself) and a migrated one has.
+  const OWNER_ONLY = new Set(["schema_migrations"]);
+  const migrationGroups = ROLE_GRANT_GROUPS.filter((g) => ROLE_GRANTS[g].every((r) => /^\d{3}$/.test(r.since)));
+  const namedTables = new Set(grantedTables(migrationGroups));
+  assert(migrationGroups.includes("structure") && migrationGroups.includes("capture") && !migrationGroups.includes("community") && !namedTables.has("entities"),
+    `the migrations' groups are the ones dated by migration number (${migrationGroups.join(", ")}), so a community-only table (entities) is not counted as named`);
+  const ungranted = (await q<{ t: string }>(`SELECT tablename AS t FROM pg_tables WHERE schemaname = 'public' ORDER BY 1`)).map((r) => r.t).filter((t) => !namedTables.has(t) && !OWNER_ONLY.has(t));
+  assert(ungranted.length === 0, `every table in the migrated schema is named by one of the migrations' ROLE_GRANTS groups, migrate.ts's ledger aside (unnamed: ${ungranted.join(", ") || "none"})`);
+  // The community row for 016's mention table is issued on every migrated
+  // brain, so it is held to the extraction row's privileges, no wider and now
+  // no narrower (config.mjs, the schemas/entity-extraction comment).
+  const mentionPrivs = (group: string) => (mergedGrants([group]).find((g) => g.name === "thought_entities")?.privileges ?? []).join(", ");
+  assert(mentionPrivs("community") === mentionPrivs("extraction") && mentionPrivs("extraction") === "SELECT, INSERT, UPDATE, DELETE",
+    `the community and extraction rows grant the mention table alike (${mentionPrivs("community")} / ${mentionPrivs("extraction")})`);
+
+  const ROLE = "ob1_granted";
+  await db.exec(`CREATE ROLE ${ROLE} NOLOGIN`);
+  const present = new Set((await q<{ name: string; present: boolean }>(grantPresenceSql(grantedObjects()))).filter((r) => r.present).map((r) => r.name));
+  for (const s of [`GRANT USAGE ON SCHEMA public TO "${ROLE}";`, ...grantStatements(ROLE, { present })]) await db.exec(s);
+  const notHeld = (await q<{ name: string; privilege: string; held: boolean }>(grantVerifySql(ROLE, mergedGrants(undefined, present)))).filter((r) => !r.held);
+  assert(notHeld.length === 0 && present.has("thought_sources"), `the role holds everything --grant issues over the ${present.size} objects present (not held: ${notHeld.map((r) => `${r.privilege} on ${r.name}`).join(", ") || "none"})`);
+
+  // As the role: the result, or the error's first line.
+  const asRole = async (sql: string, params: unknown[] = []): Promise<{ r: J | null; err: string }> => {
+    await db.exec(`SET ROLE ${ROLE}`);
+    try {
+      return { r: (await db.query<{ r: J }>(sql, params)).rows[0]?.r ?? null, err: "" };
+    } catch (e) {
+      return { r: null, err: (e as Error).message.split("\n")[0] };
+    } finally {
+      await db.exec(`RESET ROLE`);
+    }
+  };
+  const put = async (content: string) => (await one<{ id: string }>(`INSERT INTO thoughts (content, metadata, content_fingerprint) VALUES ($1, '{}'::jsonb, content_fingerprint_of($1)) RETURNING id`, [content])).id;
+  const rte = (id: string, key: string, ents: unknown[], rels: unknown[] = []) =>
+    asRole(`SELECT record_thought_entities($1::uuid, $2, $3::jsonb, $4::jsonb, NULL, NULL) AS r`, [id, key, JSON.stringify(ents), JSON.stringify(rels)]);
+  const source = (id: string, identity: string, take = false) =>
+    asRole(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown', 'test-53', $4) AS r`, [id, identity, `canonical of ${identity} on ${id}`, take]);
+  const links = (id: string, targets: string[]) =>
+    asRole(`SELECT record_source_links($1::uuid, 'linear', $2::jsonb) AS r`, [id, JSON.stringify(targets.map((target) => ({ relation: "blocks", target })))]);
+  const E = (name: string, type: string, confidence = 0.9) => ({ name, type, confidence });
+  const R = (from: string, to: string, relation: string) => ({ from, to, relation, confidence: 0.9 });
+  const keyOf = async (thought: string, name: string) => (await one<{ k: string }>(`SELECT m.extraction_key AS k FROM thought_entities m JOIN ob1_entities e ON e.id = m.entity_id WHERE m.thought_id = $1::uuid AND e.name = $2`, [thought, name]))?.k;
+  const edgeKey = async (thought: string) => (await one<{ k: string }>(`SELECT extraction_key AS k FROM ob1_entity_edges WHERE thought_id = $1::uuid`, [thought]))?.k;
+
+  const a = await put("Anita wires Hono into the server; SMD-1 blocks SMD-2.");
+  const b = await put("The head row for SMD-1 moved.");
+  const ents = [E("Hono", "tool"), E("Anita", "person")];
+  const rels = [R("Anita", "Hono", "uses")];
+  const ext1 = await rte(a, "extract:m@p1", ents, rels);
+  assert(ext1.r?.ok === true && ext1.r?.mentions === 2, `an extraction runs as the role (${ext1.err || JSON.stringify(ext1.r)})`);
+  const src1 = await source(a, "SMD-1");
+  const lk1 = await links(a, ["SMD-2"]);
+  assert(src1.r?.ok === true && src1.r?.outcome === "inserted" && lk1.r?.ok === true && lk1.r?.added === 1,
+    `a structured pass records the source row and a link as the role (${src1.err || JSON.stringify(src1.r)}; ${lk1.err || JSON.stringify(lk1.r)})`);
+  const str1 = await rte(a, "source:linear", ents.map((e) => ({ ...e, confidence: 1 })), rels);
+  assert(str1.r?.ok === true && (await keyOf(a, "Hono")) === "source:linear" && (await edgeKey(a)) === "source:linear",
+    `…and its mentions land on the extracted rows through the upsert's DO UPDATE — the structured row stands, mention and edge (${str1.err || JSON.stringify(str1.r)})`);
+  const ext2 = await rte(a, "extract:m@p2", ents, rels);
+  assert(ext2.r?.ok === true && (await keyOf(a, "Hono")) === "source:linear" && (await edgeKey(a)) === "source:linear",
+    `an extraction onto a thought with structured rows runs as the role, and leaves them standing (${ext2.err || JSON.stringify(ext2.r)})`);
+  const take = await source(b, "SMD-1", true);
+  const closed = await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'link' AND valid_until IS NOT NULL`, [a]);
+  assert(take.r?.ok === true && take.r?.taken_from === a && closed.n === 1 && (await keyOf(a, "Hono")) === undefined,
+    `a take runs as the role: the holder's source row deleted, its link closed, its structured mentions removed (${take.err || JSON.stringify(take.r)}; closed links ${closed.n})`);
+
+  // 056's pass, re-run by an operator as the role, on a brain with a retype
+  // that merges: a place written before the gate (inserted as the owner, past
+  // the writer) onto the tool of its name, a mention and an edge re-pointed.
+  const ext3 = await rte(b, "extract:m@p1", [E("hono/mcp", "tool"), E("Anita", "person")]);
+  const place = (await one<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('place', 'hono/mcp', normalize_entity_name('hono/mcp')) RETURNING id`)).id;
+  await db.query(`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, 0.9, 'extract:m@p0')`, [a, place]);
+  await db.query(`INSERT INTO ob1_entity_edges (thought_id, from_entity_id, to_entity_id, relation, confidence, extraction_key) SELECT $1::uuid, id, $2::uuid, 'related_to', 0.9, 'extract:m@p0' FROM ob1_entities WHERE entity_type = 'person' AND name = 'Anita'`, [a, place]);
+  const gate = await asRole(`SELECT apply_entity_type_gate() AS r`);
+  const merged = await one<{ n: number; t: string }>(`SELECT count(*)::int AS n, min(entity_type) AS t FROM ob1_entities WHERE normalized_name = normalize_entity_name('hono/mcp')`);
+  assert(ext3.r?.ok === true && gate.r?.ok === true && gate.r?.merged_entities === 1 && merged.n === 1 && merged.t === "tool" && (await keyOf(a, "hono/mcp")) === "extract:m@p0",
+    `apply_entity_type_gate() runs as the role and merges the place into the tool, its mention re-pointed (${gate.err || JSON.stringify(gate.r)})`);
+
+  // Each privilege SMD-2216 added, taken away in turn: its path fails by that
+  // table's name — so the grant, not something else, is what let it run. It
+  // is given back only if --grant had given it, so the harness never grants
+  // what ROLE_GRANTS omits; a privilege the role lacked answers "not held".
+  const holds = async (privilege: string, table: string) =>
+    (await one<{ h: boolean }>(`SELECT has_table_privilege($1, $2, $3) AS h`, [ROLE, table, privilege])).h;
+  const without = async (privilege: string, table: string, run: () => Promise<{ r: J | null; err: string }>) => {
+    if (!(await holds(privilege, table))) return "not held";
+    await db.exec(`REVOKE ${privilege} ON ${table} FROM ${ROLE}`);
+    try { return (await run()).err; } finally { await db.exec(`GRANT ${privilege} ON ${table} TO ${ROLE}`); }
+  };
+  const c = await put("Anita and Hono again.");
+  const denied = {
+    mentions: await without("UPDATE", "thought_entities", () => rte(c, "extract:m@p1", ents)),
+    edges: await without("UPDATE", "ob1_entity_edges", () => rte(c, "extract:m@p1", ents, rels)),
+    sources: await without("UPDATE", "thought_sources", () => source(c, "SMD-3")),
+    holder: await without("DELETE", "thought_sources", () => source(c, "SMD-1", true)),
+    facets: await without("INSERT", "thought_facets", () => links(b, ["SMD-4"])),
+  };
+  assert(/permission denied for table thought_entities/.test(denied.mentions) && /permission denied for table ob1_entity_edges/.test(denied.edges) &&
+         /permission denied for table thought_sources/.test(denied.sources) && /permission denied for table thought_sources/.test(denied.holder) &&
+         /permission denied for table thought_facets/.test(denied.facets),
+    `without each added privilege its path is refused on that table (${Object.entries(denied).map(([k, v]) => `${k}: ${v || "ran"}`).join("; ")})`);
+  const again = await rte(c, "extract:m@p1", ents, rels);
+  assert(again.r?.ok === true, `…and with it back the writer runs again (${again.err || JSON.stringify(again.r)})`);
+
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT prune_orphan_entities()`);
+  await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected
