@@ -662,7 +662,7 @@ def store_conversation(conv, extraction, conv_meta, message_count, import_batch)
     if embedding:
         body["embedding"] = embedding
 
-    # Include user_id if provided (required for RLS; auth.uid() is NULL with service_role)
+    # Include user_id if provided (the column is a plain nullable uuid on this fork — SMD-1810)
     user_id = os.environ.get("USER_ID", "")
     if user_id:
         body["user_id"] = user_id

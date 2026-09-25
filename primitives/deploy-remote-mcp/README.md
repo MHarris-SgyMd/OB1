@@ -27,7 +27,7 @@ Replace `extension-name` below with the extension's directory name.
 
 ## Step 1: Apply the Extension's Schema
 
-Run the extension's `schema.sql` against your Open Brain database, as the extension's README Step 1 says — `psql "$DATABASE_URL" -f extensions/extension-name/schema.sql`, with the two `auth.*` stub functions first when the schema's policies call `auth.uid()` (the README says when). The core server's tables are already there from the migrations; this adds the extension's. With the compose stack, run it inside the database's container — `podman compose -f deploy/compose.yaml exec -T postgres psql -U postgres openbrain < extensions/extension-name/schema.sql` — which needs neither a published port nor psql on the host (the `auth.*` stub line a README gives runs the same way, its `CREATE …` after `psql -U postgres openbrain -c` in place of the redirect). The server in Step 4 does need to reach the database from the host, so the stack must have come up with `-f deploy/compose.host-ports.yaml` (`deploy/README.md`, "What is reachable from where"); `SUPABASE_URL` is then `postgres://postgres:<POSTGRES_PASSWORD>@127.0.0.1:5432/openbrain`.
+Run the extension's `schema.sql` against your Open Brain database, as the extension's README Step 1 says — `psql "$DATABASE_URL" -f extensions/extension-name/schema.sql`, nothing first (no `auth.*` stub, no Supabase role — SMD-1810). The core server's tables are already there from the migrations; this adds the extension's. With the compose stack, run it inside the database's container — `podman compose -f deploy/compose.yaml exec -T postgres psql -U postgres openbrain < extensions/extension-name/schema.sql` — which needs neither a published port nor psql on the host. The server in Step 4 does need to reach the database from the host, so the stack must have come up with `-f deploy/compose.host-ports.yaml` (`deploy/README.md`, "What is reachable from where"); `SUPABASE_URL` is then `postgres://postgres:<POSTGRES_PASSWORD>@127.0.0.1:5432/openbrain`.
 
 ## Step 2: Install the Pinned Packages
 
@@ -136,8 +136,8 @@ The URL and access key stay the same — no need to reconfigure your AI clients.
 **`relation "…" does not exist`**
 - Step 1 was skipped, or ran against another database than `SUPABASE_URL` names. Re-run the extension's `schema.sql` against that database.
 
-**`function auth.uid() does not exist`**
-- The extension's policies call Supabase's `auth.uid()`, which a plain Postgres lacks. The extension's README Step 1 gives the two stub functions to create first.
+**`permission denied for table …`**
+- The server's role is not the tables' owner and was not granted them. Apply the schema as the role the server connects with, or grant that role with `bun db/migrate.ts --grant <role>` — the **extensions** and **recipes** groups (`db/README.md`, "Grants for a capturing role"). (`function auth.uid() does not exist` was this entry until SMD-1810; a `schema.sql` from this tree calls no `auth.*` function.)
 
 **The connector in Claude Desktop or ChatGPT cannot reach the server**
 - It dials from the vendor's side: the URL must be HTTPS and reachable from the internet (Step 5). A `127.0.0.1` or LAN address works only for a client on this machine or network.

@@ -178,7 +178,7 @@ if (grantRole !== undefined) {
     );
     const missing = wanted.filter((o) => !present.has(o.name)).map((o) => o.name);
     // "; " between names: a function's name carries ", " inside its argument list.
-    const skippedHint = `not yet present, skipped (run --grant again after applying the migration or community schema that creates them; a function listed here may instead exist under another argument list, which --grant does not reach): ${missing.join("; ")}`;
+    const skippedHint = `not yet present, skipped (run --grant again after applying the migration, community schema or extension/recipe schema that creates them; a function listed here may instead exist under another argument list, which --grant does not reach): ${missing.join("; ")}`;
     const statements = [`GRANT USAGE ON SCHEMA public TO ${quoteIdent(grantRole)};`, ...grantStatements(grantRole, { present })];
     if (dryRun) {
       console.log(`\n--grant ${grantRole}  (--dry-run: nothing run)\n`);

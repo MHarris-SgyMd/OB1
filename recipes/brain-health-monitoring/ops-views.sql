@@ -116,7 +116,6 @@ BEGIN
       GROUP BY status
       ORDER BY job_count DESC
     $v$;
-    EXECUTE 'GRANT SELECT ON public.ops_ingestion_summary TO service_role';
   ELSE
     RAISE NOTICE 'skipping ops_ingestion_summary -- public.ingestion_jobs not found (install schemas/smart-ingest)';
   END IF;
@@ -146,7 +145,6 @@ BEGIN
          OR (status = 'failed')
       ORDER BY queued_at DESC
     $v$;
-    EXECUTE 'GRANT SELECT ON public.ops_stalled_entity_queue TO service_role';
   ELSE
     RAISE NOTICE 'skipping ops_stalled_entity_queue -- public.entity_extraction_queue not found (install schemas/entity-extraction)';
   END IF;
@@ -177,22 +175,23 @@ BEGIN
         END AS coverage_pct
       FROM public.entity_extraction_queue
     $v$;
-    EXECUTE 'GRANT SELECT ON public.ops_graph_coverage TO service_role';
   ELSE
     RAISE NOTICE 'skipping ops_graph_coverage -- public.entity_extraction_queue not found (install schemas/entity-extraction)';
   END IF;
 END$$;
 
 -- ============================================================
--- 9. GRANTS (for always-installed views 1-5)
---    Views 6-8 are granted inside their guarded DO blocks above
---    so grants only run when the view was actually created.
+-- 9. GRANTS
 -- ============================================================
-
-GRANT SELECT ON public.ops_source_volume_24h TO service_role;
-GRANT SELECT ON public.ops_recent_thoughts TO service_role;
-GRANT SELECT ON public.ops_enrichment_gaps TO service_role;
-GRANT SELECT ON public.ops_type_distribution TO service_role;
-GRANT SELECT ON public.ops_sensitivity_distribution TO service_role;
-
-NOTIFY pgrst, 'reload schema';
+-- This fork (SMD-1810): upstream's file ended here with `GRANT SELECT … TO
+-- service_role` on the five always-installed views — the three guarded views
+-- were granted the same way inside their DO blocks, as `EXECUTE 'GRANT …'`
+-- strings — and a `NOTIFY pgrst, 'reload schema'` for PostgREST. Supabase's
+-- role and Supabase's API layer: on plain Postgres the first GRANT stopped
+-- the file (`role "service_role" does not exist`), and nothing here listens
+-- for pgrst. Removed, the three EXECUTE strings with them.
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `recipes` group, which covers the eight
+-- ops_* views (SELECT), each issued only once its view exists; a role that
+-- owns the tables needs nothing. Row-level security on this fork: SMD-1716.

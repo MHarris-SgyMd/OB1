@@ -1,6 +1,6 @@
 {
   "name": "Meal Planning",
-  "description": "Recipes, weekly meal plans, and shared shopping lists with RLS and a dedicated shared MCP server for household access.",
+  "description": "Recipes, weekly meal plans, and shared shopping lists with a dedicated shared MCP server for household access.",
   "category": "extensions",
   "author": {
     "name": "Nate B. Jones",

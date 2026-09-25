@@ -5,7 +5,8 @@
 -- habit tracking, check-ins, briefing logs,
 -- and self-improvement evolution tracking.
 --
--- Run this in your Supabase SQL Editor.
+-- Run this against your Open Brain's database:
+--   psql "$DATABASE_URL" -f recipes/life-engine/schema.sql
 -- ============================================
 
 -- ----------------------------------------
@@ -140,7 +141,7 @@ COMMENT ON TABLE life_engine_evolution IS 'Self-improvement history — tracks s
 -- System state that doesn't belong in user-facing tables.
 -- Examples: cron_job_id, cron_interval, wake_time, sleep_time, latitude, longitude.
 -- Note: No user_id column — this table assumes a single Life Engine instance
--- per Supabase project. For multi-user setups, prefix keys with user ID.
+-- per brain. For multi-user setups, prefix keys with user ID.
 
 CREATE TABLE IF NOT EXISTS life_engine_state (
   key TEXT PRIMARY KEY,
@@ -151,30 +152,20 @@ CREATE TABLE IF NOT EXISTS life_engine_state (
 COMMENT ON TABLE life_engine_state IS 'Key-value store for Life Engine runtime state (cron ID, sleep schedule, etc.)';
 
 -- ----------------------------------------
--- Row Level Security
+-- Row Level Security and grants
 -- ----------------------------------------
--- No row-level policies needed — Life Engine accesses all
--- tables via service_role, which bypasses RLS. RLS is enabled
--- as a safety net to block anon/authenticated access.
-
-ALTER TABLE life_engine_habits ENABLE ROW LEVEL SECURITY;
-ALTER TABLE life_engine_habit_log ENABLE ROW LEVEL SECURITY;
-ALTER TABLE life_engine_checkins ENABLE ROW LEVEL SECURITY;
-ALTER TABLE life_engine_briefings ENABLE ROW LEVEL SECURITY;
-ALTER TABLE life_engine_evolution ENABLE ROW LEVEL SECURITY;
-ALTER TABLE life_engine_state ENABLE ROW LEVEL SECURITY;
-
--- ----------------------------------------
--- GRANT permissions to service_role
--- ----------------------------------------
--- Supabase no longer auto-grants CRUD on new projects.
-
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.life_engine_habits TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.life_engine_habit_log TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.life_engine_checkins TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.life_engine_briefings TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.life_engine_evolution TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.life_engine_state TO service_role;
+-- This fork (SMD-1810): upstream's file ENABLEd ROW LEVEL SECURITY on the six
+-- tables here — with no policy, as "a safety net to block anon/authenticated
+-- access", since its skill wrote through service_role, which bypasses RLS —
+-- and GRANTed each TO service_role. Those are Supabase's: on plain Postgres
+-- the first GRANT stopped the file (`role "service_role" does not exist`),
+-- and RLS with no policy denied every row to any role but the tables' owner —
+-- the skill's own writes, where it connects as anything else. Removed.
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `recipes` group, which covers this file's
+-- six tables (SELECT, INSERT, UPDATE, DELETE); a role that owns the tables
+-- needs nothing. Row-level security on this fork: SMD-1716.
 
 -- ----------------------------------------
 -- Indexes for performance
@@ -210,11 +201,13 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS life_engine_habits_updated ON life_engine_habits;
 CREATE TRIGGER life_engine_habits_updated
   BEFORE UPDATE ON life_engine_habits
   FOR EACH ROW
   EXECUTE FUNCTION update_life_engine_updated_at();
 
+DROP TRIGGER IF EXISTS life_engine_state_updated ON life_engine_state;
 CREATE TRIGGER life_engine_state_updated
   BEFORE UPDATE ON life_engine_state
   FOR EACH ROW
