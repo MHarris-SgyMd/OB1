@@ -5526,10 +5526,26 @@ intents does not have.
 - **SMD-1935's deterministic gate ships first.**
 - **The next model should know names.** SemIf (SMD-2052), the same contract over
   Qwen3.5-4B, is the one untried lever on this harness.
-- **The largest decision is a definition:** whether code artifacts belong in
-  the graph (28% junk against 67%).
+- **Code artifacts are entities: the maintainer's decision (2026-09-24).**
+  Files, scripts, tables, functions, environment variables, branches and CI jobs
+  belong in this brain's graph, as tools (or as projects, for a directory of
+  work). So rubric v2 counting them is the brain's working definition, and the
+  verdict above stays on v1 only as what was pre-registered. Under it:
+  - **The junk is about 28% of the graph** (~690 of 2,420). In the graded
+    sample it is 57 of 201: 31 generic words or roles, 10 names no window
+    holds, 9 minted from URLs or paths alone, and 7 numbers or hashes.
+  - **Topics are the noisiest type** (54% junk), then organizations (36%) and
+    persons (33%). Tools (16%) and projects (12%) are mostly sound once code
+    artifacts count.
+  - **SMD-1935's gate must not reject code artifacts.** B1 bars an identifier's
+    shape only as a person or a place, which fits. The post-hoc
+    every-type shape rule above would reject real entities.
+  - **The targets are the rest:** generic words, URL fragments, numbers and
+    hashes, and the extractor splitting one thing over two types (`Linear` as
+    organization and as tool; SMD-1913).
 - **A free signal is untested:** the notes write code artifacts in backticks,
-  which a deterministic rule on the source text could read.
+  which a deterministic rule on the source text could read to type them as
+  tools rather than drop them.
 - **The confidence column stays uninformative** until something earns the place.
 
 ## Related
