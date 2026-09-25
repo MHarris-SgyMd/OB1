@@ -240,7 +240,9 @@ export const markdownAdapter: Adapter<MarkdownFile> = {
     const md = decoded.text;
     const { fm, body } = parseFrontmatter(md);
     const key = noteKey(noteName);
-    if (key.length > IDENTITY_MAX) throw new AdapterRefusal({ system: MARKDOWN_SYSTEM, key: key.slice(0, 40) + "…" }, `${file.path} has an identity of ${key.length} characters; thought_sources.identity holds ${IDENTITY_MAX}`);
+    // Characters, as the column's length() counts them, not UTF-16 code units (SMD-2136, fourth review pass).
+    const keyChars = [...key].length;
+    if (keyChars > IDENTITY_MAX) throw new AdapterRefusal({ system: MARKDOWN_SYSTEM, key: key.slice(0, 40) + "…" }, `${file.path} has an identity of ${keyChars} characters; thought_sources.identity holds ${IDENTITY_MAX}`);
     const tags = noteTags(fm, body);
     const links: Link[] = wikilinks(body).filter((w) => w.note && !NON_NOTE_EXTENSIONS.test(w.note)).map((w) => ({ relation: "references", target: noteKey(w.note) }));
     const mentions: Mention[] = tags.map((t) => ({ name: t, type: "topic" as const }));

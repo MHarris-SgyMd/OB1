@@ -104,7 +104,7 @@ jobs:
         working-directory: scripts
         run: bunx tsc --noEmit
 
-      # The session capture hook (SMD-1298, SMD-2012, SMD-2035, SMD-2013, SMD-2014): both transcript parsers, the segmenter, the
+      # The session capture hook (SMD-1298, SMD-2012, SMD-2035, SMD-2013, SMD-2014, SMD-1978): both transcript parsers, the segmenter, the
       # summary's shape, every secret pattern's probe, the refusal, the opt-in
       # model summary and its fallbacks, the detached hand-off and the MCP post —
       # against synthetic transcripts and fake endpoints on localhost. Bun only,
@@ -369,12 +369,14 @@ jobs:
       # The ingestion contract's adapters and pipeline (SMD-1867): the Linear
       # adapter (markup out of the text, structure into links and mentions),
       # the Markdown adapter (the canonical round-trips byte for byte, the
-      # lossy cases enumerated, two inputs refused) and the ingester's pure
-      # rules (the corpus path, the allowlist). No network, no database.
+      # lossy cases enumerated, two inputs refused), the file adapter (a line
+      # of items validated in the contract's terms, each malformed kind refused
+      # naming its line and field — SMD-2136) and the ingester's pure rules
+      # (the corpus path, the items path, the allowlist). No network, no database.
       - name: Ingestion adapters
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         working-directory: db
-        run: bun ingest-linear.ts --self-check && bun ingest-markdown.ts --self-check && bun ingest-records.ts --self-check
+        run: bun ingest-linear.ts --self-check && bun ingest-markdown.ts --self-check && bun ingest-items.ts --self-check && bun ingest-records.ts --self-check
 
   replay-gate:
     name: Retrieval replay gate

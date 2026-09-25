@@ -785,7 +785,8 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
 {
   // The raw envelope, not call(): this section reads errors as answers. One
   // helper per key (fifth review pass: three hand-rolled copies).
-  type Envelope = { error?: { message: string }; result?: { isError?: boolean; content?: { text?: string }[]; tools?: { name: string }[] } };
+  type Envelope = { error?: { message: string }; result?: { isError?: boolean; content?: { text?: string }[]; tools?: { name: string }[]; structuredContent?: { code?: string; retryable?: boolean; positions?: number[] } } };
+  const sc = (e: Envelope) => e.result?.structuredContent;
   const rpcAs = (key: string) => async (method: string, params: Record<string, unknown>): Promise<Envelope> => {
     const r = await fetch(BASE, { method: "POST", headers: { ...H, "x-brain-key": key }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method, params }) });
     const text = await r.text();
@@ -833,9 +834,14 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
 
   // supersedes through a capture key (first review pass): only what it wrote.
   const steal = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — a later ending — claims to replace eta", source: "claude-code", supersedes: retrieved } });
-  assert(steal.result?.isError === true && /only a thought it captured itself/.test(textOf(steal)), `a capture key may not supersede another key's thought (${textOf(steal).slice(0, 80)})`);
+  assert(steal.result?.isError === true && /only a thought it captured itself/.test(textOf(steal)) && sc(steal)?.code === "REFUSED_SUPERSEDES_OWNERSHIP" && sc(steal)?.retryable === false, `a capture key may not supersede another key's thought — refused, code and all (${sc(steal)?.code})`);
   const [[untouched]] = [await sql`SELECT count(*)::int AS n FROM thoughts WHERE content LIKE 'Session summary — a later ending%'`];
   assert(untouched?.n === 0, "…and nothing was written");
+  // A reader/write key naming a ghost supersedes reaches the write (it skips the
+  // ownership check), where the self-FK refuses it: REFUSED_SUPERSEDES_UNKNOWN,
+  // final — the fifth code pinned against the real server (SMD-1978).
+  const ghostSup = await rpcAs("e2e-key")("tools/call", { name: "capture_thought", arguments: { content: "a write key naming a ghost supersedes", supersedes: "00000000-0000-0000-0000-000000000000" } });
+  assert(ghostSup.result?.isError === true && /no thought with the id given as supersedes/.test(textOf(ghostSup)) && sc(ghostSup)?.code === "REFUSED_SUPERSEDES_UNKNOWN" && sc(ghostSup)?.retryable === false, `a supersedes naming no thought is REFUSED_SUPERSEDES_UNKNOWN, final (${sc(ghostSup)?.code})`);
   const own = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — claude-code — the same session, ended again", source: "claude-code", supersedes: id } });
   const ownId = idIn(textOf(own));
   assert(own.result?.isError !== true && ownId !== undefined, `…while superseding its own earlier summary is allowed (${textOf(own).split("\n")[0].slice(0, 70)})`);
@@ -863,8 +869,8 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   await sql`ALTER TABLE thought_audit RENAME TO thought_audit_away`;
   try {
     const unreadable = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — claude-code — with the audit table away", source: "claude-code", supersedes: ownId } });
-    assert(unreadable.result?.isError === true && /^Error: /.test(textOf(unreadable)) && /could not be checked/.test(textOf(unreadable)) && /does not exist/.test(textOf(unreadable)) && !/--grant/.test(textOf(unreadable)),
-      `a supersedes the server cannot check is the server's error — "Error:", not "Refused:" — carrying the store's words, and no grant remedy for what is not a privilege error (${textOf(unreadable).slice(0, 70)})`);
+    assert(unreadable.result?.isError === true && /^Error: /.test(textOf(unreadable)) && /could not be checked/.test(textOf(unreadable)) && /does not exist/.test(textOf(unreadable)) && !/--grant/.test(textOf(unreadable)) && sc(unreadable)?.code === "SUPERSEDES_UNJUDGED" && sc(unreadable)?.retryable === true,
+      `a supersedes the server cannot check is the server's error — "Error:", not "Refused:" — carrying the store's words and the SUPERSEDES_UNJUDGED code, retryable, and no grant remedy for what is not a privilege error (${sc(unreadable)?.code})`);
   } finally {
     await sql`ALTER TABLE thought_audit_away RENAME TO thought_audit`;
   }
@@ -894,12 +900,15 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     await sql`ALTER SEQUENCE race_seq RESTART`;
     const raced = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — claude-code — a source deleted between the check and the write", source: "claude-code", derived_from: [id, retrieved] } });
     const racedText = textOf(raced);
-    assert(raced.result?.isError === true && /^Refused: a `derived_from` id names no thought\./.test(racedText) && !/derived_from\[/.test(racedText) && !racedText.includes(id!) && !racedText.includes(retrieved!),
-      `a refusal in the write itself tells a key that cannot read no position, no id and no count (${racedText.slice(0, 60)})`);
+    assert(raced.result?.isError === true && /^Refused: a `derived_from` id names no thought\./.test(racedText) && !/derived_from\[/.test(racedText) && !racedText.includes(id!) && !racedText.includes(retrieved!) && sc(raced)?.code === "DERIVED_FROM_MISSING" && sc(raced)?.positions === undefined,
+      `a refusal in the write itself tells a key that cannot read no position, no id and no count — the code carries no positions either (${JSON.stringify(sc(raced))})`);
     let racedWriter = "";
     try { await call("capture_thought", { content: "Session summary — the writer, same race", derived_from: ["0000dead-0000-4000-8000-000000000011", "0000dead-0000-4000-8000-000000000012"] }); } catch (e) { racedWriter = (e as Error).message; }
     assert(/derived_from\[0\] \(/.test(racedWriter) && /derived_from\[1\] \(/.test(racedWriter) && / name no thought/.test(racedWriter),
       `…while a reader is told both positions with their ids, plural (${racedWriter.slice(0, 80)})`);
+    // …and the code carries those positions to a reader, none to the capture key above (SMD-1978).
+    const racedWriterSc = await rpcAs("e2e-key")("tools/call", { name: "capture_thought", arguments: { content: "Session summary — the writer, coded race", derived_from: ["0000dead-0000-4000-8000-000000000013", "0000dead-0000-4000-8000-000000000014"] } });
+    assert(sc(racedWriterSc)?.code === "DERIVED_FROM_MISSING" && JSON.stringify(sc(racedWriterSc)?.positions) === "[0,1]", `the code carries both positions to a reader, none to the capture key (${JSON.stringify(sc(racedWriterSc))})`);
   } finally {
     await sql`DROP FUNCTION validate_derived_from(jsonb)`;
     await sql`ALTER FUNCTION validate_derived_from_real(jsonb) RENAME TO validate_derived_from`;
@@ -921,8 +930,8 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     assert(byOtherName.result?.isError === true && /only a thought it captured itself/.test(textOf(byOtherName)),
       "…and another key with no id either is refused BY NAME (fifth review pass: the name path had no negative case)");
     const away3 = await rpc2({ content: "Session summary — codex — a claim on the other key's thought", source: "codex", supersedes: id });
-    assert(away3.result?.isError === true && /^Error: .*could not be attributed while the agent registry is unavailable/.test(textOf(away3)),
-      `…while an ATTRIBUTED row met by a key with no id is the server's error to retry, not a refusal (${textOf(away3).slice(0, 70)})`);
+    assert(away3.result?.isError === true && /^Error: .*could not be attributed while the agent registry is unavailable/.test(textOf(away3)) && sc(away3)?.code === "SUPERSEDES_UNJUDGED" && sc(away3)?.retryable === true,
+      `…while an ATTRIBUTED row met by a key with no id is the server's error to retry, not a refusal — SUPERSEDES_UNJUDGED, retryable (${sc(away3)?.code})`);
   } finally {
     await sql`ALTER FUNCTION resolve_agent_away(text, text, text) RENAME TO resolve_agent`;
   }
