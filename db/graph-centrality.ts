@@ -143,8 +143,10 @@
  * Centrality here is ATTENTION, not value, and the output says so every run:
  *   • Edges are unweighted. On real runs every edge carries confidence 1.00
  *     (SMD-1925), so the only weight an edge has is how many thoughts assert it.
- *   • Entity typing is noisy (SMD-1935): the extractor mints bare migration and
- *     port numbers as `person`/`tool`/`project` rows. Names that are only digits,
+ *   • Entity typing is noisy (SMD-1935): the extractor minted bare migration and
+ *     port numbers as `person`/`tool`/`project` rows, which the writer refuses
+ *     since migration 056 — a brain before it, a name a structured source states
+ *     or an entity a human curated still holds them. Names that are only digits,
  *     dots, colons and spaces are out of scope by default (`--keep-numeric`
  *     admits them); `--types` narrows further. Out of scope means out of every
  *     count: a numeric neighbour adds no degree and appears in no list.
