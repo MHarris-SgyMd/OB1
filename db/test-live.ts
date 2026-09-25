@@ -4088,15 +4088,18 @@ console.log("\n[18] Every schemas/*.sql, then every extension and recipe schema,
              "…grants nothing of the community group, and grants the migrations' tables");
 
       const failed: string[] = [];
+      // A file that opens a transaction (BEGIN … COMMIT — agent-memory, per-agent-identity, typed-reasoning-edges,
+      // smart-ingest) and fails leaves it aborted on this pool's one connection: rolled back, as [40] and [50] do, or every
+      // statement after it answers "current transaction is aborted" (SMD-2128, review pass 3).
       for (const f of schemaFiles) {
         try { await sql.unsafe(readFileSync(join(SCHEMAS, f), "utf8")); }
-        catch (e) { failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); }
+        catch (e) { failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); await sql.unsafe("ROLLBACK").catch(() => {}); }
       }
       assert(schemaFiles.length >= 14 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files; failed: ${failed.join(" | ") || "none"})`);
       const contribFailed: string[] = [];
       for (const f of contribFiles) {
         try { await sql.unsafe(readFileSync(join(CONTRIB_DIR, f), "utf8")); }
-        catch (e) { contribFailed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); }
+        catch (e) { contribFailed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); await sql.unsafe("ROLLBACK").catch(() => {}); }
       }
       assert(contribFiles.length === 15 && contribFailed.length === 0, `…and so does every listed extension and recipe schema after them, with no auth schema either (${contribFiles.length} files; failed: ${contribFailed.join(" | ") || "none"})`);
 

@@ -36,7 +36,7 @@ SUPABASE (from your Open Brain setup)
 
 ## Steps
 
-1. Apply `schema.sql` to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
+1. Apply `schema.sql` to your brain: `psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console). The file is one transaction, `BEGIN` to `COMMIT`, so a refusal leaves nothing applied — under plain `psql -f`, which runs on past an error, too; `ON_ERROR_STOP` makes the exit code say so.
 2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>` so the role your server connects as can use what the file creates — the file itself grants nothing (this fork, SMD-1796: upstream's `GRANT … TO service_role` lines and its row-level security are gone; `db/README.md`, "Grants for a capturing role", lists the `community` group).
 3. Open **Table Editor** and confirm two new tables appear: `ingestion_jobs` and `ingestion_items`
 4. Navigate to **Database > Functions** and verify the `append_thought_evidence` function exists
@@ -51,11 +51,11 @@ SUPABASE (from your Open Brain setup)
 
 After running the migration:
 
-- Two new tables: `ingestion_jobs` (tracks job lifecycle with status, counters, and metadata) and `ingestion_items` (stores extracted thoughts with action codes, dedup reasons, and execution results). Both tables include a nullable `user_id uuid` column (upstream's foreign key into Supabase's `auth.users` is gone on this fork — SMD-1796).
+- Two new tables: `ingestion_jobs` (tracks job lifecycle with status, counters, and metadata) and `ingestion_items` (stores extracted thoughts with action codes, dedup reasons, and execution results). Both tables include a nullable `user_id uuid` column (upstream's foreign key into Supabase's `auth.users` is gone on this fork — SMD-1796). The two item columns that name a thought, `matched_thought_id` and `result_thought_id`, are `uuid` — `thoughts.id` is a UUID on this fork, where upstream's is an integer and the columns were `bigint` (SMD-2128). A table created before that change is retyped in place when the file is re-applied: an integer either column held could name no thought here and is kept in the row's `metadata` as `<column>_bigint`; `result_thought_id` is filled from `metadata.result_thought_uuid`, where the server parked the written thought's id between SMD-2110 and SMD-2128. The retype is an `ALTER TABLE` that rewrites the table under an `ACCESS EXCLUSIVE` lock, once — stop the ingest server for it if `ingestion_items` is large — and Postgres refuses it while anything of yours reads either column or fixes its type — a view, rule, trigger, policy, generated column, constraint, index predicate, default or foreign key: the file then stops with a message carrying Postgres's own words, the column, the object and the fix (remove it, apply the file again, recreate it over the `uuid` column), and the transaction rolls back whole, nothing half done.
 - Three indexes: `ingestion_items_job_idx` on `ingestion_items(job_id)` for fast job-to-item lookups, plus partial indexes `idx_ingestion_jobs_pending` (jobs in `status = 'pending'`) and `idx_ingestion_items_pending` (items in `status IN ('pending','ready')`) to keep the worker's queue polling small.
 - No row-level security in the file (this fork, SMD-1796): upstream enabled RLS on both tables with a `service_role ALL` policy and, on Supabase, an `authenticated SELECT` policy scoped to `user_id = auth.uid()`; neither role exists off Supabase, and RLS with no policy for the role you connect as denies it every row.
-- One RPC function `append_thought_evidence(bigint, jsonb)` that idempotently appends evidence entries to a thought's metadata.
-- The file grants nothing; `bun migrate.ts --grant <role>` gives the role your worker connects as both tables, their two sequences (an `INSERT` into a `bigserial` table needs `USAGE` on its sequence) and `EXECUTE` on `append_thought_evidence`, which stays `REVOKE`d `FROM PUBLIC` — it is `SECURITY DEFINER` and writes `thoughts.metadata`, so only a role granted it may call it (upstream granted Supabase's `service_role`; the companion Edge Function called it with that key).
+- One RPC function `append_thought_evidence(uuid, jsonb)` that idempotently appends evidence entries to a thought's metadata (`bigint` upstream; the file drops that form first, so one function answers the name — SMD-2128).
+- The file grants nothing; `bun migrate.ts --grant <role>` gives the role your worker connects as both tables, their two sequences (an `INSERT` into a `bigserial` table needs `USAGE` on its sequence) and `EXECUTE` on `append_thought_evidence`, which stays `REVOKE`d `FROM PUBLIC` — it is `SECURITY DEFINER` and writes `thoughts.metadata`, so only a role granted it may call it (upstream granted Supabase's `service_role`; the companion Edge Function called it with that key). Re-applying the file to a brain that had the `bigint` form drops that form's grant with it: run `--grant` again.
 
 ## Job Claim Semantics
 
@@ -87,7 +87,10 @@ If you are building a custom worker, do not replace `FOR UPDATE SKIP LOCKED` wit
 Solution: These are safe to ignore. The `CREATE TABLE IF NOT EXISTS` syntax prevents errors but may log informational notices. The migration is fully idempotent.
 
 **Issue: append_thought_evidence raises "thought not found"**
-Solution: The function requires a valid thought ID. Confirm the thought exists in the `thoughts` table before calling the function. This error means the referenced thought was deleted or the ID is incorrect.
+Solution: The function requires a valid thought ID — a UUID on this fork. Confirm the thought exists in the `thoughts` table before calling the function. This error means the referenced thought was deleted or the ID is incorrect.
+
+**Issue: `permission denied for function append_thought_evidence` after re-applying the file**
+Solution: The file drops upstream's `append_thought_evidence(bigint, jsonb)` and creates the `uuid` form (SMD-2128); the `EXECUTE` your role held on the old form went with it. Run `bun migrate.ts --url … --grant <role>` from `db/` again.
 
 **Issue: ingestion_items not linked to a job**
 Solution: Items require a valid `job_id` foreign key referencing `ingestion_jobs`. Create the job first, then insert items with the returned job ID. The foreign key uses `ON DELETE CASCADE`, so deleting a job automatically removes its items.
