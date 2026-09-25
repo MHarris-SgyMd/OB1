@@ -37,7 +37,7 @@ delete process.env.OB1_CAPTURE_KEY;
 
 const {
   stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, provenanceOf,
-  scanForSecrets, scanSummary, SECRET_PATTERNS, redactSecrets, redactEpisode, cleanEpisode, secretMode, SECRET_MODES, redactionMarker, describeRedactions, residualKeyMaterial, parseRpcBody, postCapture, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX,
+  scanForSecrets, scanSummary, SECRET_PATTERNS, redactSecrets, redactEpisode, cleanEpisode, secretMode, SECRET_MODES, redactionMarker, describeRedactions, parseRpcBody, postCapture, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX,
 } = await import(SCRIPT);
 
 let passed = 0, failed = 0;
@@ -716,50 +716,34 @@ console.log("\n[4] The secret scan catches every shape it names and leaves the s
     "a ticket id, a file name in capitals and HEAD beside a token stay — the summaries are searched by ticket");
   const tk = redactSecrets("a sk-ant-api03-" + "Ab1".repeat(12) + " b sk-ant-api03-" + "Ab1".repeat(12));
   assert(tk.spans.length === 2 && tk.spans.every((s) => tk.text.slice(s.at, s.end) === "[redacted:anthropic key]"), "the spans returned sit where the markers sit in the blanked text, the second moved by the first");
-  // Third review pass: a BLOCK of key material is one span — its lines with no run of thirty-two were no hit and went out verbatim where the episode used to be refused.
+  // A BLOCK of key material spanning MULTIPLE LINES is a pasted key blob: the scope call REFUSES it, not redacts it (SMD-2127), since a precise blanking of a block leaked over four review passes. redactSecrets reports such a span in `blocks`; a secret confined to ONE line is blanked and sent.
+  const A33 = "Ab12Cd34Ef56Gh78Ij90Kl12Mn34Op56X"; // 34 chars, one 32-run
+  const WORDISH = "vExVngytkbgo5TegmX+J7ulqDCkyimrbudns6yghqtY="; // a key line that READS word-shaped (share 0.659) and is no token hit on its own
   assert(SEEDED.length === 64 && SEEDLESS.length === 64 && scanForSecrets(SEEDED).length === 1 && scanForSecrets(SEEDLESS).length === 0, "the fixture: one line is a hit on its own, the other is not");
-  assert(redactSecrets(`key:\n-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n${SEEDED}\n${SEEDLESS}\n${SEEDED}\nAb3d==\n-----END PGP PRIVATE KEY BLOCK-----\nthen`).text === "key:\n[redacted:private key block, high-entropy token]\nthen", "PGP armor — BEGIN … PRIVATE KEY BLOCK — is one span, header to footer, the tokens inside it coalesced in");
-  const footerless = redactSecrets(`-----BEGIN PRIVATE KEY-----\n${SEEDLESS}\n${SEEDED}\n${SEEDLESS} and prose`);
-  assert(footerless.text === "[redacted:private key block, high-entropy token] and prose", `a header with no footer takes the body's lines with it, the seedless ones included (${footerless.text.slice(0, 80)})`);
-  const blob = redactSecrets(`paste:\n${SEEDED}\n${SEEDLESS}\n${SEEDED}\nAb3d==\nthen more`);
-  assert(blob.text === "paste:\n[redacted:high-entropy token]\nthen more" && redactSecrets(`paste: ${SEEDED} ${SEEDLESS} ${SEEDED} Ab3d== then`).text === "paste: [redacted:high-entropy token] then",
-    `a wrapped blob with no header: the seedless line and the padded tail join the seeded lines' span, across newlines or the spaces a prompt reads with (${blob.text.slice(0, 60)})`);
-  assert(redactSecrets(`${SEEDLESS}\n${SEEDED} prose`).text === "[redacted:high-entropy token] prose" && redactSecrets(`paste ${SEEDLESS} ${SEEDED} end`).text === "paste [redacted:high-entropy token] end",
-    "a blob whose FIRST line has no run of thirty-two joins the seed after it — the span grows LEFT, not only right");
+  assert((WORDISH.match(/[a-z]{3,}/g) ?? []).join("").length / WORDISH.length >= 0.6 && scanForSecrets(WORDISH).length === 0, "the word-shaped fixture is no token hit on its own");
+  const pgp = redactSecrets(`key:\n-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n${SEEDED}\n${SEEDLESS}\n${SEEDED}\nAb3d==\n-----END PGP PRIVATE KEY BLOCK-----\nthen`);
+  assert(pgp.blocks.length === 1 && /private key block/.test(pgp.blocks[0].reasons.join()), `PGP armor — a multi-line key block — is reported for refusal, not redacted (${pgp.blocks.length})`);
+  assert(redactSecrets(`-----BEGIN PRIVATE KEY-----\n${SEEDLESS}\n${SEEDED}\n${SEEDLESS} and prose`).blocks.length === 1, "a footer-less PEM body across lines is a block");
+  assert(redactSecrets(`paste:\n${SEEDED}\n${SEEDLESS}\n${SEEDED}\nAb3d==\nthen more`).blocks.length === 1, "a newline-wrapped blob is a block");
+  assert(redactSecrets(`${A33}/xy\n${SEEDLESS}\nmore prose`).blocks.length === 1 && redactSecrets(`-----BEGIN PRIVATE KEY-----\n${SEEDED}\n${SEEDLESS}\nZWJoiPk/XvENLy5RUEiF8qxm`).blocks.length === 1,
+    "a block whose interior or trailing line has no run of thirty-two is still ONE multi-line block — refused, never partially blanked (passes 3–4's leaks cannot recur)");
+  assert(redactSecrets(`${SEEDED}\n${WORDISH}\nmore`).blocks.length === 1, "a word-shaped key line contiguous to a block line makes the block multi-line — refused whatever its shape (pass 5's escape closed by refusing the blob)");
+  // A SINGLE-LINE secret is redacted and SENT (blocks empty).
+  const inlineKey = redactSecrets("LINEAR_API_KEY=lin_api_a1b2c3d4e5f6g7h8i9j0k1l2 please");
+  assert(inlineKey.blocks.length === 0 && inlineKey.text === "LINEAR_API_KEY=[redacted:linear key, credential assignment, high-entropy token] please", "an inline single-line key is redacted and sent, not refused — the live incident's shape");
+  const oneLineBlob = redactSecrets(`paste: ${SEEDED} ${SEEDLESS} ${SEEDED} Ab3d== then`);
+  assert(oneLineBlob.blocks.length === 0 && oneLineBlob.text === "paste: [redacted:high-entropy token] then", "a blob on ONE line is redacted whole and sent — the span covers it, no newline crossed");
+  assert(redactSecrets(`the value L4HmvD0hgfx/z2Ov9zukFDtJufEIt41DZORiSBylHXw= for the run`).text === "the value [redacted:high-entropy token] for the run" && redactSecrets(`the value L4HmvD0hgfx/z2Ov9zukFDtJufEIt41DZORiSBylHXw= for the run`).blocks.length === 0,
+    "a single-line base64 token with a slash is blanked whole and sent");
   assert(redactSecrets(`${SEEDED} Pneumonoultramicroscopicsilicovolcanoconiosis and fetchUserAccountBalanceByIdV3Legacy2026 and ${highEntropy}/README.md`).text === `[redacted:high-entropy token] Pneumonoultramicroscopicsilicovolcanoconiosis and fetchUserAccountBalanceByIdV3Legacy2026 and [redacted:high-entropy token]/README.md`,
     "a long word, an identifier or a file name beside a token is not a line of the block");
-  assert(redactSecrets('password: “correct horse battery” and password: `correct horse battery` and password: «correct horse battery» and password: ‘correct horse battery’ end').text === 'password: “[redacted:password assignment]” and password: `[redacted:password assignment]` and password: «[redacted:password assignment]» and password: ‘[redacted:password assignment]’ end',
-    "typographic quotes, guillemets and a backtick close a quoted value as the straight quotes do — the opening one is no value character");
-  assert(redactSecrets("t eyJhbGciOiJSU0EtT0FFUCJ9.abcdefghij1234.abcdefghij5678.abcdefghij9012.FuKgOY7Ph6CX1oIDbrkvrA t").text === "t [redacted:jwt] t", "a five-segment JWE is blanked whole, not to its third segment");
-  // Fourth review pass: a block line whose only seed sits behind a `/` at the span's edge — the orphan interior/trailing line — is blanked with it, the whole LINE snapped when it is a single block run, and a short trailing line taken.
-  const A33 = "Ab12Cd34Ef56Gh78Ij90Kl12Mn34Op56X"; // 34 chars, one 32-run, one whitespace run
-  assert(scanForSecrets(A33).length === 1 && scanForSecrets(`${A33}/xy`).length === 1, "the seed line has a 32-run; its `/xy` tail is outside the token span");
-  assert(redactSecrets(`${A33}/xy\n${SEEDLESS}\nmore prose`).text === "[redacted:high-entropy token]\nmore prose" && !redactSecrets(`${A33}/xy\n${SEEDLESS}\nmore prose`).text.includes(SEEDLESS.slice(0, 20)),
-    "the seed line snapped whole (its `/xy` re-taken) and the seedless line after it grown in — a `/` at the edge no longer stops the block");
-  assert(redactSecrets(`-----BEGIN PRIVATE KEY-----\n${SEEDED}\n${SEEDLESS}\nZWJoiPk/XvENLy5RUEiF8qxm`).text === "[redacted:private key block, high-entropy token]" && redactSecrets(`-----BEGIN PRIVATE KEY-----\n${SEEDED}\n${SEEDLESS}\nZWJoiPk/XvENLy5RUEiF8qxm`).text.length < 60,
-    "a footer-less key's short final line of fewer than thirty-two characters joins the block");
-  assert(redactSecrets(`see /Users/me/Projects/${highEntropy}/notes.md now`).text === `see /Users/me/Projects/[redacted:high-entropy token]/notes.md now` && redactSecrets(`${highEntropy}/HEAD here`).text === "[redacted:high-entropy token]/HEAD here",
-    "a token on a line WITH other words keeps its tight span — the path and HEAD around it are not a block line");
-  assert(redactSecrets(`note ${A33} Ab3d1x done`).text === "note [redacted:high-entropy token] Ab3d1x done",
-    "a short base64-ish word beside an inline token, not in a block, is NOT eaten — a short run is taken only after a full block line");
-  // The coarse backstop: a block a name splits leaves key material the growth cannot reach; on the blanked text, beside a marker, it is a hit — a git sha or a data URI is not.
-  const split = redactSecrets(`-----BEGIN PRIVATE KEY-----\n${SEEDLESS}\napi_key=abcdef1234567890abcdefghij\n${SEEDLESS}\nend`);
-  const resid = residualKeyMaterial(split.text);
-  assert(resid.length >= 1 && resid.every((f) => f.reason === "key material beside a redaction") && split.text.slice(resid[0].at, resid[0].end).includes("ZVEiR2Bwp"),
-    `a base64 line a name split off, still beside a marker, is caught by the backstop (${resid.length})`);
-  assert(residualKeyMaterial("nothing redacted here " + SEEDLESS).length === 0, "…inert on a text with no marker: the raw first scan and refuse mode do not trip it");
-  assert(residualKeyMaterial("MCP_ACCESS_KEY=[redacted:credential assignment, high-entropy token] and a sha 8541cec9f2a1b3c4d5e6f7a8b9c0d1e2f3a4b5c6 here").length === 0, "…a lower-case hex sha beside a marker is not key material");
-  assert(residualKeyMaterial("img [redacted:high-entropy token] data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ").length === 0, "…nor a data URI's payload beside a marker");
-  assert(residualKeyMaterial(`clean [redacted:high-entropy token]\n${SEEDLESS}\nend`).length === 1, "…but an orphaned base64 line on the next line is");
-  // Fifth review pass: a real key line can read WORD-SHAPED (lowercase-3+-run share >= 0.6) — the token scan, the block test and the backstop all shared that blind spot, so such a line escaped every one. WORDISH is a base64 line of key material at 0.659, with `=` padding; WORDISH_NP the same without it.
-  const WORDISH = "vExVngytkbgo5TegmX+J7ulqDCkyimrbudns6yghqtY=";
-  const WORDISH_NP = "vExVngytkbgo5TegmX0J7ulqDCkyimrbudns6yghqtY";
-  assert((WORDISH.match(/[a-z]{3,}/g) ?? []).join("").length / WORDISH.length >= 0.6 && scanForSecrets(WORDISH).length === 0, "the fixture reads word-shaped and is no token hit on its own — the exact escape");
-  assert(redactSecrets(`${SEEDED}\n${WORDISH}\nmore`).text === "[redacted:high-entropy token]\nmore" && redactSecrets(`${SEEDED}\n${WORDISH_NP}\nmore`).text === "[redacted:high-entropy token]\nmore",
-    "a word-shaped key line contiguous to a confirmed block line is absorbed whatever its shape — with `=` padding or without");
-  assert(residualKeyMaterial(`clean [redacted:high-entropy token]\n${WORDISH}\nend`).length === 1, "…and beside a marker with no block to grow, the `=`-padded run is caught by the backstop");
-  assert(residualKeyMaterial(`[redacted:high-entropy token]\ngetUserAccountBalanceByIdV3LegacyQuickJumps2026Version here`).length === 0 && residualKeyMaterial(`[redacted:high-entropy token]\n${WORDISH_NP} tail`).length === 0,
-    "…while a long camel-case identifier, or a word-shaped run without `=` padding, beside a marker is NOT refused — the backstop stays discriminating");
+  assert(redactSecrets('password: “correct horse battery” and password: `correct horse battery` and password: «correct horse battery» end').text === 'password: “[redacted:password assignment]” and password: `[redacted:password assignment]` and password: «[redacted:password assignment]» end',
+    "typographic quotes, guillemets and a backtick close a quoted value — the opening one is no value character");
+  assert(redactSecrets("t eyJhbGciOiJSU0EtT0FFUCJ9.abcdefghij1234.abcdefghij5678.abcdefghij9012.FuKgOY7Ph6CX1oIDbrkvrA t").text === "t [redacted:jwt] t", "a five-segment JWE is blanked whole");
+  assert(redactSecrets(`see /Users/me/Projects/${highEntropy}/notes.md now`).text === `see /Users/me/Projects/[redacted:high-entropy token]/notes.md now` && redactSecrets(`${highEntropy}/HEAD here`).text === "[redacted:high-entropy token]/HEAD here" && redactSecrets(`see /Users/me/Projects/${highEntropy}/notes.md now`).blocks.length === 0,
+    "a token on a line WITH other words keeps its tight span and is sent — the path and HEAD around it are not a block");
+  assert(redactSecrets(`note ${A33} Ab3d1x done`).text === "note [redacted:high-entropy token] Ab3d1x done" && redactSecrets(`note ${A33} Ab3d1x done`).blocks.length === 0,
+    "a short base64-ish word beside an inline token, not in a block, is not eaten")
   assert(redactSecrets("t eyJhbGciOiJSU0EtT0FFUCJ9.abcdefghij1234.abcdefghij5678.abcdefghij9012.FuKgOY7Ph6CX1oIDbrkvrA t").text === "t [redacted:jwt] t", "a five-segment JWE is blanked whole, not to its third segment");
   const many = describeRedactions([...Array.from({ length: 30 }, () => ({ reason: "password assignment", at: 26, in: "prompt 1" })), { reason: "anthropic key", at: 4, in: "the outcome" }]);
   assert(many === "password assignment at chars 26, 26, 26 and 27 more in prompt 1; anthropic key at char 4 in the outcome", `the message groups a reason and source, listing three offsets and counting the rest (${many})`);
@@ -948,17 +932,17 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   assert(thirteen.code === 0 && thirteen.payload.redactions?.[0]?.in === "prompt 13 (past the 12 the text lists)" && /- … and 1 more\n/.test(thirteen.payload.text) && !/Ab1Ab1/.test(JSON.stringify(thirteen.payload)),
     `a redaction in an ask the text does not list says so (${thirteen.payload?.redactions?.[0]?.in})`);
   if (thirteen.payloadPath) unlinkSync(thirteen.payloadPath);
-  // …and a pasted PGP armor, footer and all, or a footer-less PEM body, reaches the text as one marker and nothing of its lines (third review pass: the seedless lines went out).
+  // …and a pasted PGP armor, or a footer-less PEM body — a MULTI-LINE key blob — is REFUSED, not redacted (SMD-2127 scope call).
   writeFileSync(join(TMP, "armor.jsonl"), [user(`export:\n-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n${SEEDED}\n${SEEDLESS}\n${SEEDED}\nAb3d==\n-----END PGP PRIVATE KEY BLOCK-----\ndone`, { origin: { kind: "human" } }), assistant([{ type: "text", text: `saved -----BEGIN PRIVATE KEY-----\n${SEEDLESS}\n${SEEDED}\n${SEEDLESS}` }])].join("\n"));
   const armor = prepare({ ...base, session_id: "s-armor", transcript_path: join(TMP, "armor.jsonl") });
-  assert(armor.code === 0 && armor.payload && !armor.payload.text.includes(SEEDLESS.slice(0, 12)) && !armor.payload.text.includes(SEEDED.slice(0, 12)) && /export: \[redacted:private key block, high-entropy token\] done/.test(armor.payload.text) && /saved \[redacted:private key block, high-entropy token\]/.test(armor.payload.text) && armor.payload.redactions.length === 2,
-    `PGP armor in a prompt and a footer-less body in the outcome: one marker each, none of the lines (${armor.message.slice(0, 100)})`);
+  assert(armor.code === 1 && /a multi-line key block \(private key block/.test(armor.message) && armor.payloadPaths.length === 0 && !existsSync(join(STATE, "s-armor.json")) && !/ZVEiR2Bwp|MIIEvQ/.test(armor.message),
+    `a multi-line key blob is refused, naming the block, nothing of its lines, nothing sent (${armor.message.slice(0, 120)})`);
   if (armor.payloadPath) unlinkSync(armor.payloadPath);
-  // …and a block a name splits — key material the growth cannot cross — is refused by the coarse backstop under redact, not half-sent (fourth review pass).
-  writeFileSync(join(TMP, "split.jsonl"), [user(`stored:\n-----BEGIN PRIVATE KEY-----\n${"ZVEiR2BwpZOOkE/Z0/BVnhZYL71oZV34bKfWjQIt6V/isSMahdsAASACp4ZTGtwi"}\napi_key=abcdef1234567890abcdefghij\n${"ZVEiR2BwpZOOkE/Z0/BVnhZYL71oZV34bKfWjQIt6V/isSMahdsAASACp4ZTGtwi"}\ndone`, { origin: { kind: "human" } }), assistant([{ type: "text", text: "ok" }])].join("\n")); // eslint-disable-line
+  // …and a block a name splits is still a MULTI-LINE key block (the header's span grows across a line) → refused.
+  writeFileSync(join(TMP, "split.jsonl"), [user(`stored:\n-----BEGIN PRIVATE KEY-----\n${SEEDLESS}\napi_key=abcdef1234567890abcdefghij\n${SEEDLESS}\ndone`, { origin: { kind: "human" } }), assistant([{ type: "text", text: "ok" }])].join("\n"));
   const splitR = prepare({ ...base, session_id: "s-split", transcript_path: join(TMP, "split.jsonl") });
-  assert(splitR.code === 1 && /key material beside a redaction/.test(splitR.message) && / after \d+ redactions/.test(splitR.message) && splitR.payloadPaths.length === 0 && !existsSync(join(STATE, "s-split.json")) && !/ZVEiR2Bwp/.test(splitR.message),
-    `a name-split key block: the growth blanks what it can, the backstop refuses the rest, nothing sent (${splitR.message.slice(0, 120)})`);
+  assert(splitR.code === 1 && /a multi-line key block/.test(splitR.message) && splitR.payloadPaths.length === 0 && !existsSync(join(STATE, "s-split.json")) && !/ZVEiR2Bwp/.test(splitR.message),
+    `a name-split key block is refused as a multi-line block, nothing sent (${splitR.message.slice(0, 120)})`);
   // …while a clean summary with an ordinary redacted inline key is NOT refused by the backstop.
   writeFileSync(join(TMP, "inline-ok.jsonl"), [user("rotate MCP_ACCESS_KEY=abcdefghijklmnopqrstuvwxyz012345 today", { origin: { kind: "human" } }), assistant([{ type: "text", text: "the commit is 8541cec9f2a1b3c4d5e6f7a8b9c0d1e2f3a4b5c6" }])].join("\n"));
   const inlineOk = prepare({ ...base, session_id: "s-inline-ok", transcript_path: join(TMP, "inline-ok.jsonl") });

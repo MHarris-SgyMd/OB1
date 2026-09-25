@@ -21,13 +21,15 @@
  *
  * Before anything leaves the machine the summary is scanned for secrets — the
  * common key prefixes, credential assignments, a URL carrying a password, and
- * high-entropy tokens. A hit is REDACTED (SMD-2127): the span becomes
- * `[redacted:<reason>]` in the prompts, the outcome and the title before the
- * text is rendered, the text is scanned again, and only a text that second scan
- * finds clean is sent — one it does not is refused, as every hit was before
- * this change: the reason is printed (never the match), the exit code is 1, and
- * the session ends as it would have. OB1_CAPTURE_ON_SECRET=refuse restores that
- * for every hit. Exit 2 is the one code a Stop hook may block with; as a hook
+ * high-entropy tokens. A secret on ONE line is REDACTED (SMD-2127): the span
+ * becomes `[redacted:<reason>]` in the prompts, the outcome and the title
+ * before the text is rendered, the text is scanned again, and only a text that
+ * second scan finds clean is sent. A MULTI-LINE key blob — a pasted PEM or PGP
+ * block, a wrapped base64 key — is REFUSED, not redacted: blanking a block
+ * precisely proved leaky, and losing one summary beats sending a line of a key.
+ * A refusal prints the reason (never the match), exits 1, and the session ends
+ * as it would have. OB1_CAPTURE_ON_SECRET=refuse refuses on every hit, blob or
+ * not. Exit 2 is the one code a Stop hook may block with; as a hook
  * this script never uses it (the by-hand forms — --print-hook, --dry-run — exit
  * 2 on misuse).
  *
@@ -834,8 +836,7 @@ export function renderSummary(s) {
  * a fragment no pattern matched). Findings from a source name where they sit.
  */
 export function scanSummary(s, text) {
-  // The backstop over the blanked text runs beside the scan (fourth review pass): key material a block split by a name left beside a marker.
-  const found = [...scanForSecrets(text), ...residualKeyMaterial(text)];
+  const found = scanForSecrets(text);
   // Each prompt on its own (SMD-2127's first review pass): the redaction blanks
   // one prompt at a time, so a hit that existed only across the join —
   // `--password` ending one prompt, its value opening the next — was a refusal
@@ -1084,7 +1085,9 @@ const contiguousKey = (run) => run.length >= 4 && /^[A-Za-z0-9+/=]+$/.test(run) 
  * clean, where the episode used to be refused (third and fourth review
  * passes). A run that is not a block line — a token in a path or a sentence, a
  * `NAME=value` — keeps its tight span; a block split by such a run leaves key
- * material the growth cannot reach, which `residualKeyMaterial` refuses.
+ * material the growth cannot reach; a span that ends up crossing a newline is
+ * a multi-line blob the caller REFUSES (SMD-2127 scope call), so the block need
+ * not be blanked precisely — only detected.
  */
 function growBlock(text, at, end) {
   const runStart = (i) => { let j = i; while (j > 0 && !/\s/.test(text[j - 1])) j--; return j; };
@@ -1116,37 +1119,6 @@ function growBlock(text, at, end) {
   grow(true); grow(false);
   return [at, end];
 }
-/**
- * The coarse backstop (fourth review pass) — the ticket's "refusal as the net"
- * for what the precise spans cannot reach. On the ALREADY-BLANKED text: a run
- * of base64 of twenty or more sitting on a line that carries, or is next to a
- * line that carries, a `[redacted:…]` marker is key material a block split by
- * a name or a header left orphaned — a git sha (lower-case hex, no upper, no
- * `+/`), a data URI's payload and a word-shaped run are not. Reported so the
- * gate refuses, since a fragment that was never a hit is invisible to the scan
- * itself. Inert on a text with no marker (the raw first scan, and `refuse`
- * mode, which redacts nothing).
- */
-export function residualKeyMaterial(text) {
-  if (!text.includes("[redacted:")) return [];
-  const findings = [];
-  const lines = text.split("\n");
-  const marked = lines.map((l) => /\[redacted:[^\]]*\]/.test(l));
-  let pos = 0;
-  for (let i = 0; i < lines.length; i++) {
-    if (marked[i] || marked[i - 1] || marked[i + 1]) {
-      for (const m of lines[i].matchAll(/[A-Za-z0-9+/=]{20,}/g)) {
-        const run = m[0];
-        if (!/[A-Z]/.test(run) && !/[+/]/.test(run)) continue; // a base64 signal, so a lower-case hex sha is not one
-        if (!run.endsWith("=") && (run.match(/[a-z]{3,}/g) ?? []).join("").length / run.length >= 0.6) continue; // word-shaped, and not a `=`-padded key tail (fifth review pass: a real key line reads word-shaped, but `=` padding is never a word or a path)
-        if (lines[i].slice(0, m.index).endsWith("base64,")) continue; // a data URI's payload
-        findings.push({ reason: "key material beside a redaction", at: pos + m.index, end: pos + m.index + run.length });
-      }
-    }
-    pos += lines[i].length + 1;
-  }
-  return findings;
-}
 /** The marker a span becomes: what kind of thing was there — never how long, never what. */
 export const redactionMarker = (reasons) => `[redacted:${reasons.join(", ")}]`;
 /**
@@ -1172,14 +1144,22 @@ export function redactSecrets(text) {
     if (last && f.at <= last.end) { last.end = Math.max(last.end, f.end); if (!last.reasons.includes(f.reason)) last.reasons.push(f.reason); continue; }
     spans.push({ reasons: [f.reason], at: f.at, end: f.end });
   }
+  // A span crossing a newline is MULTI-LINE key material — a pasted key block.
+  // The scope call (SMD-2127): a blob is REFUSED, not redacted, since a precise
+  // blanking of a block leaked over four review passes (a fragment the second
+  // scan could not see); only a secret confined to one line is blanked and
+  // sent. Marked before the offsets shift; the span is blanked here too (so the
+  // text a bug might still send is best-effort clean), but a block makes the
+  // caller refuse.
+  for (const span of spans) span.multiline = text.slice(span.at, span.end).includes("\n");
   let out = text;
   for (let i = spans.length - 1; i >= 0; i--) out = out.slice(0, spans[i].at) + redactionMarker(spans[i].reasons) + out.slice(spans[i].end);
   // The spans as they sit in the text RETURNED — each marker's place, where a
   // reader of the blanked text looks — an earlier marker having moved every
   // later one (second review pass: the offsets were the input's).
   let delta = 0;
-  for (const s of spans) { const taken = s.end - s.at; s.at += delta; s.end = s.at + redactionMarker(s.reasons).length; delta += s.end - s.at - taken; }
-  return { text: out, spans };
+  for (const span of spans) { const taken = span.end - span.at; span.at += delta; span.end = span.at + redactionMarker(span.reasons).length; delta += span.end - span.at - taken; }
+  return { text: out, spans: spans.filter((x) => !x.multiline), blocks: spans.filter((x) => x.multiline) };
 }
 /**
  * An episode with its secrets blanked and its summary rendered from the
@@ -1192,21 +1172,42 @@ export function redactSecrets(text) {
  */
 export function redactEpisode(ep) {
   const redactions = [];
+  const blocks = [];
+  // A pasted key blob is found on the RAW sources: the summary flattens a
+  // prompt's newlines (oneLine), so a multi-line block must be seen before that
+  // — a key-material span crossing a newline is a blob the caller refuses
+  // (SMD-2127 scope call). The blanking below runs on the flattened summary.
+  const addBlocks = (raw, place) => { if (typeof raw === "string" && raw) for (const b of redactSecrets(raw).blocks) blocks.push({ reason: b.reasons.join(", "), in: place }); };
+  for (const p of ep.prompts) addBlocks(p, "a prompt");
+  addBlocks(ep.outcome, "the outcome");
+  addBlocks(ep.title, "the title");
   const take = (text, place) => {
     if (typeof text !== "string" || !text) return text;
     const r = redactSecrets(text);
-    for (const s of r.spans) redactions.push({ reason: s.reasons.join(", "), at: s.at, in: place });
+    for (const sp of r.spans) redactions.push({ reason: sp.reasons.join(", "), at: sp.at, in: place });
     return r.text;
   };
   // The DISTINCT prompts, as the summary lists them: a retried prompt is one
   // line in the text and one redaction in the count.
   const redacted = { ...ep, prompts: distinctPrompts(ep.prompts).map((p, i) => take(p, promptLabel(i))), outcome: take(ep.outcome, "the outcome"), title: take(ep.title, "the title") };
   const text = take(renderSummary(redacted), "the text");
-  return { ep: redacted, text, redactions };
+  return { ep: redacted, text, redactions, blocks };
 }
 /** The episode's summary as it would be sent under a mode: blanked and re-rendered, or as rendered. */
 export function cleanEpisode(ep, onSecret) {
-  return onSecret === "redact" ? redactEpisode(ep) : { ep, text: renderSummary(ep), redactions: [] };
+  return onSecret === "redact" ? redactEpisode(ep) : { ep, text: renderSummary(ep), redactions: [], blocks: [] };
+}
+/**
+ * The gate over a cleaned episode, whatever the mode: any MULTI-LINE key block
+ * — a pasted key blob the scope call refuses rather than redacts (SMD-2127) —
+ * and the single-line secrets the scan still sees in the blanked sources and
+ * the text (the net under the redaction). Returns a phrase per finding for the
+ * refusal message; empty means the summary may be sent.
+ */
+export function gateFindings(cleaned, text) {
+  const where = (cleaned.blocks ?? []).map((b) => `a multi-line key block (${b.reason}) in ${b.in}`);
+  for (const f of scanSummary(cleaned.ep, text)) where.push(`${f.reason} at char ${f.at}`);
+  return where;
 }
 /**
  * `<reason> at char N in <source>` per span, for the message, the log and the
@@ -1481,11 +1482,11 @@ export function prepare(hook, opts = {}) {
     // again with no new turn would queue the same summary twice, and the run
     // that drains them would dead-letter the first as "obsolete" (eleventh review pass).
     if (sessionPayloads(chain, {}, listing).some((p) => payloadOf(p)?.fingerprint === fingerprint)) { skipped.push({ ep, queued: true }); continue; }
-    // The gate, whatever the mode: under `redact` it reads the blanked sources
-    // and text — the net under the redaction, so nothing the scan can see is
-    // sent, a span mis-measured included (SMD-2127).
-    const findings = scanSummary(cleaned.ep, text);
-    if (findings.length) { refused.push({ ep, where: `${findings.map((f) => `${f.reason} at char ${f.at}`).join(", ")}${redactions.length ? ` after ${countRedactions(redactions.length)}` : ""}` }); continue; }
+    // The gate, whatever the mode: a multi-line key block is refused, and under
+    // `redact` the blanked sources and text are re-scanned — the net under the
+    // redaction, so no single-line secret the scan can see is sent (SMD-2127).
+    const where = gateFindings(cleaned, text);
+    if (where.length) { refused.push({ ep, where: `${where.join(", ")}${redactions.length ? ` after ${countRedactions(redactions.length)}` : ""}` }); continue; }
     const payload = {
       session_id: sessionId, chain_id: chain, episode: ep.n, harness: s.harness, event: ep === last ? event : "", trigger: ep === last ? last.checkpoint?.trigger : undefined, text, fingerprint, // a closed episode's summary is final whatever event the run is: it carries no event, so the log says none (second review pass)
       derived_from: provenanceOf(ep), supersedes: state.thought_id || undefined,
@@ -2079,12 +2080,12 @@ export async function main(argv) {
     for (const ep of s.episodes) {
       const cleaned = cleanEpisode(ep, onSecret);
       const { text, redactions } = cleaned;
-      const findings = scanSummary(cleaned.ep, text);
+      const where = gateFindings(cleaned, text);
       const ids = provenanceOf(ep);
       if (several) console.log(`\n=== episode ${ep.n} ===`);
       console.log(text);
       console.log(`\n--- would send${several ? ` (episode ${ep.n})` : ""}: source=${s.harness}, derived_from=${ids.length} id(s)${ids.length ? ` [${ids.slice(0, 5).join(", ")}${ids.length > 5 ? ", …" : ""}]` : ""}`);
-      if (findings.length) { console.log(`--- would REFUSE${several ? ` episode ${ep.n}` : ""}: ${findings.map((f) => `${f.reason} at char ${f.at}`).join(", ")}${redactions.length ? ` after ${countRedactions(redactions.length)}` : ""}`); code = 1; }
+      if (where.length) { console.log(`--- would REFUSE${several ? ` episode ${ep.n}` : ""}: ${where.join(", ")}${redactions.length ? ` after ${countRedactions(redactions.length)}` : ""}`); code = 1; }
       else if (redactions.length) console.log(`--- secret scan: ${countRedactions(redactions.length)} — ${describeRedactions(redactions)}; the text above is what would be sent`);
       else console.log("--- secret scan: clean");
     }
