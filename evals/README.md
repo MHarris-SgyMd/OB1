@@ -5591,8 +5591,8 @@ have. SemIf (SMD-2052) is the test of that reading.
 SMD-1863 asks which self-hosted workflow tool — n8n, Activepieces or Windmill —
 should own the fork's ingestion and sync (vendor auth, schedules, triggers,
 retries) instead of one hand-rolled recipe per service, and whether to adopt one
-at all. The decision is an ADR's, in its own pull request on the ticket; this
-is the evidence it reads. The criteria, the bar and the prior were posted on
+at all. The decision is `../docs/orchestration-tool.md` (n8n); this is the
+evidence it reads. The criteria, the bar and the prior were posted on
 the ticket before any candidate ran (2026-09-25).
 
 **The setup.** `eval-orchestration.ts` runs each candidate as its own compose
@@ -5706,7 +5706,10 @@ inherits every capture's latency, and only n8n let the workflow say so.
   workflows: with `workflow:create` and `workflow:activate` a holder can publish
   a workflow that sends any credential not pinned to a domain anywhere, and the
   key does not expire (`expiresAt: null`), so it is a secret on a par with the
-  owner's password. Then `POST /credentials`
+  owner's password. n8n enforces the scopes — a call outside them (`GET /users`,
+  `DELETE /executions/{id}`) answered 403 — although n8n's docs say keys on a
+  non-Enterprise instance have full access; and a re-mint leaves the key it
+  replaced valid (both measured in the third review pass). Then `POST /credentials`
   (into the encrypted store; n8n chooses each id, which replaces the
   placeholder the workflow files reference), `POST /workflows`, and `POST
   /workflows/{id}/publish` (v1's "activate", now deprecated), which registers
@@ -5793,11 +5796,23 @@ not to sell, resell, serve as a managed service, modify or wrap under any form
 without an explicit agreement" — the ticket's "Apache 2.0" was wrong. What the
 licenses mean for a profile OB1 ships is the ADR's to decide.
 
+**The live AI-client check (n8n).** The verifier is the MCP SDK's client; the
+ticket asked for the AI client itself. A headless Claude Code session (Opus
+5.5; Claude Code 2.1.282, the version installed that day) was given n8n's MCP
+endpoint and nothing else — `claude -p <prompt> --mcp-config <file>
+--strict-mcp-config --allowedTools
+mcp__ob1-n8n__brain_search_thoughts,mcp__ob1-n8n__linear_issue --output-format
+json`, the file a
+throwaway holding the endpoint's URL and header, so no user or project
+configuration was touched — and asked to call both tools and report. In four
+turns it listed `brain_search_thoughts` and `linear_issue`, searched the brain
+(top hit SMD-1863) and returned SMD-1863's live Linear state ("In Progress")
+and `updatedAt`. Run once, by hand; the kit does not re-run it.
+
 **What this does not measure.** Gmail: self-hosted OAuth needs the operator's own
 Google Cloud client on every candidate (n8n: "Managed OAuth2 isn't available for
 self-hosted n8n users"), so the ingestion source is Linear with an API key, and
-OAuth custody is untested. A live AI session: the verifier is the MCP SDK's
-client over Streamable HTTP, the transport Claude Code speaks. Egress: the
+OAuth custody is untested. Egress: the
 overlays set each tool's documented telemetry switches, and nothing probed
 what the containers dial — the egress measurements are Activepieces' sync mode
 and n8n's credential domain pin, both above. The schedule is checked only with `--wait-schedule` (C1s: up to
@@ -5813,4 +5828,5 @@ run at a time. Upgrades, backups and the reference multi-container shapes
 
 - `../SETUP.md` — the two decisions these evals inform
 - `../docs/event-log-as-truth.md` — the decision the two gate sections above (SMD-1998, SMD-1999) opened: the event log as the source of truth, the `thoughts` row its projection (SMD-1997)
+- `../docs/orchestration-tool.md` — the decision the orchestration section above informs: n8n, as an opt-in sidecar, with the licence and egress gates (SMD-1863)
 - `../db/config.mjs` — `KNOWN_MODEL_DIMS`, so a model/width mismatch is caught
