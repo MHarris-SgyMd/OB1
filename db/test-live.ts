@@ -2206,6 +2206,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     return v.indexOf(1);
   };
 
+  // 42 thoughts in all, which the heartbeat run's --batch 15 is sized to.
   const shorts = Array.from({ length: 30 }, (_, i) => `short thought ${i} about topic ${i}`);
   for (const s of shorts) await sql`SELECT upsert_thought(${s}, ${{ metadata: {} }}::jsonb, ${unit(0)}::vector)`;
   await sql`SELECT upsert_thought(${long}, ${{ metadata: {} }}::jsonb, ${unit(0)}::vector)`;
@@ -2893,18 +2894,17 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   // worker on their second attempt, the first's releases returned false, and
   // three such batches marked rows failed. Six seconds, not three, because a
   // runner that pauses the process for two seconds must not read as a lapse —
-  // a beat is missed only when the process is, and the lease covers five — and
-  // fifteen, not eight, because eight rows fit inside six seconds and the run
-  // would then pass with renewal a no-op (third review pass, which set
-  // sixteen for two workers). Three workers
-  // over the 42 thoughts claim 15, 15 and 12 at once, one round (SMD-2135;
-  // two workers of sixteen took two rounds, some sixteen seconds): the one
-  // with twelve finishes near 7.3 s and claims again, and that claim reaps any
-  // lease past its 6 s deadline — so a beat that renewed nothing would hand it
-  // the others' last rows on their second attempt. Fifteen is the batch that
-  // does this for 42 thoughts: 14 ends all three together, 16 leaves ten rows
-  // that finish at 6.1 s, barely past the lease. A fresh backfill key, so
-  // the pool is every thought; the recorded model is the configured one here.
+  // a beat is missed only when the process is, and the lease covers five.
+  // Three workers over the 42 thoughts claim 15, 15 and 12 at once, one round
+  // (SMD-2135; two workers of sixteen, SMD-1023's third review pass, took two
+  // rounds, some sixteen seconds). The fifteens outlast the lease — eight rows
+  // would fit inside it, and the run would pass with renewal a no-op — and the
+  // twelve finishes near 7.3 s and claims again, reaping any lease past its
+  // 6 s deadline, so a beat that renewed nothing hands it the others' last
+  // rows on their second attempt. Fifteen is the batch with margin both ways
+  // for 42 thoughts: 14 ends all three together, 16 leaves ten rows that end
+  // at 6.1 s. A fresh backfill key, so the pool is every thought; the recorded
+  // model is the configured one here.
   slowMs = 600;
   const SLOW_KEY = `reembed:stub-embed@${DIM}:slow`;
   const slow = await reembed("--job", SLOW_KEY, "--workers", "3", "--batch", "15", "--ttl", "6", "--heartbeat", "1");
@@ -2922,18 +2922,17 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
 
   // A lease taken from under a running worker: the batch a one-worker run
   // holds is re-assigned by hand to a holder whose lease is far ahead — what
-  // another worker's claim after a reap does to it. The row in hand learns it at
-  // release; the rest at a beat or at their release (which depends on the
-  // 1 s beat against how fast the rows run, and is not asserted). Every stolen row is
-  // counted lost and none finished, the worker finishes the rest, and the run
-  // says the rows are still leased; --status names the thief. The stub is slow
-  // only until the theft lands, and the rows after it run at full speed — at
-  // 610 ms each, one worker's pass was some 25 s of the section (SMD-2135).
-  // Its release is refused because release_thought matches the holder; the
-  // 600 ms on the first batch is what makes the theft land inside it, a
-  // 100 ms poll against a 610 ms row. The stolen rows after it now meet their
-  // loss at release, not at a beat, so no run here reaches reembed.ts's
-  // lost-at-beat skip — which nothing asserted before either (SMD-2190).
+  // another worker's claim after a reap does to it. Every stolen row is counted
+  // lost and none finished, the worker finishes the rest, and the run says the
+  // rows are still leased; --status names the thief. The stub is slow only
+  // until the theft lands, and the rows after it run at full speed — at 610 ms
+  // each, one worker's pass was some 25 s of the section (SMD-2135). The slow
+  // first batch is what makes the theft land inside it, a 100 ms poll against
+  // a 610 ms row. The row in hand's release is refused because release_thought
+  // matches the holder, and the other stolen rows, fast now, are all released
+  // before the worker's first 1 s beat — so every one learns it at release,
+  // and no run here reaches reembed.ts's lost-at-beat skip, which nothing
+  // asserted before either (SMD-2190).
   slowMs = 600;
   const THIEF_KEY = `reembed:stub-embed@${DIM}:thief`;
   const thiefRun = reembed("--job", THIEF_KEY, "--workers", "1", "--batch", "4", "--ttl", "6", "--heartbeat", "1");
