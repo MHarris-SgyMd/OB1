@@ -114,6 +114,22 @@
  * boot refusal; and the tail asserts no URL the stub was handed, all suite
  * long, began postgres:// or carried /functions/v1/.
  *
+ * SMD-2128: smart-ingest's write path is the fork's — the 3-argument
+ * upsert_thought with the vector as p_embedding, its model's label and the
+ * actor in the envelope, the enhanced columns by an update on a fresh row —
+ * where upstream's 2-argument call put the vector inside the payload, which
+ * the fork's function ignores, so every thought the server wrote had no
+ * vector; and the item columns that hold a thought id are uuid, where the
+ * fork's UUID into upstream's bigint failed every item of a job with a match
+ * and recorded no result. The smart-ingest block asserts the row's vector at
+ * the stub's axis, its label, its enhanced columns and 008's row; the item's
+ * result_thought_id; the same text again as a skip by fingerprint naming the
+ * first thought; and, through a stub vector 0.88 from the first thought's,
+ * the two branches between the thresholds — append_thought_evidence(uuid,
+ * jsonb) on the richer existing thought, and a revision whose `supersedes`
+ * is the thought it revises. The sidecar's retype of a table created under
+ * upstream's shape is driven before the sidecars are applied.
+ *
  * The files are imported as modules — each exports Bun's entry shape, and its
  * default export's `fetch` is the handler driven here (SMD-1799) — under the
  * loader extensions/test-auth.ts uses for Deno's specifiers; every server
@@ -194,7 +210,69 @@ async function dropSidecars() {
   await sql.unsafe("DROP TABLE IF EXISTS public.consolidation_log CASCADE");
 }
 await dropSidecars(); // an earlier run that aborted left its tables (CREATE TABLE IF NOT EXISTS keeps their rows)
+// A brain that applied schemas/smart-ingest before SMD-2128 has upstream's shape: the two thought-id columns bigint, the
+// evidence function taking one. Re-applied, the sidecar retypes them in place — driven here by creating that shape from the
+// file's own CREATE TABLEs with the two columns turned back (its IF NOT EXISTS then keeps them), with one item the way
+// SMD-2110 left an executed one — the written thought's UUID in metadata.result_thought_uuid, the column null — and an
+// integer in the other column, which could name no thought here and must survive in the row's metadata.
+const SMART_INGEST_SQL = readFileSync(join(ROOT, "schemas/smart-ingest/schema.sql"), "utf8");
+const PRIOR_UUID = crypto.randomUUID();
+{
+  const table = (name: string) => SMART_INGEST_SQL.match(new RegExp(`CREATE TABLE IF NOT EXISTS public\\.${name} \\([\\s\\S]*?\\);`))?.[0];
+  const jobs = table("ingestion_jobs"), items = table("ingestion_items");
+  if (!jobs || !items || !/(matched|result)_thought_id uuid/.test(items)) throw new Error("test-writes.ts: schemas/smart-ingest/schema.sql no longer defines the two tables with uuid thought-id columns");
+  await sql.unsafe(`${jobs}\n${items.replace(/(matched_thought_id|result_thought_id) uuid/g, "$1 bigint")}
+    CREATE FUNCTION public.append_thought_evidence(p_thought_id bigint, p_evidence jsonb) RETURNS jsonb LANGUAGE sql AS $$ SELECT '{}'::jsonb $$;
+    INSERT INTO public.ingestion_jobs (input_hash, status) VALUES ('prior-shape', 'complete');
+    INSERT INTO public.ingestion_items (job_id, extracted_content, action, status, matched_thought_id, metadata)
+      SELECT id, 'an item executed under upstream''s shape', 'add', 'executed', 42, '{"type":"idea","result_thought_uuid":"${PRIOR_UUID}"}' FROM public.ingestion_jobs WHERE input_hash = 'prior-shape';
+    CREATE VIEW public.prior_shape_items AS SELECT id, matched_thought_id FROM public.ingestion_items;`);
+  // Postgres will not retype a column a view reads: the file refuses, naming itself, the column, the object (the error's
+  // DETAIL) and what to do, and the file — one transaction since review pass 2, so plain `psql -f`, which runs on past an
+  // error, leaves nothing half done either — rolls back whole (review pass 1: the raw error left the file stopped mid-way
+  // with no word on why). On a connection of its own: the refused transaction is open until it is rolled back here, and a
+  // pooled query after it would meet "current transaction is aborted".
+  const refusal = async () => {
+    const own = await sql.reserve();
+    try { return await own.unsafe(SMART_INGEST_SQL).then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e))); }
+    finally { await own.unsafe("ROLLBACK").catch(() => {}); own.release(); }
+  };
+  const refused = await refusal();
+  const [still] = await sql`SELECT format_type(atttypid, atttypmod) AS type FROM pg_attribute WHERE attrelid = 'public.ingestion_items'::regclass AND attname = 'matched_thought_id'`;
+  const [untouched] = await sql`SELECT metadata FROM ingestion_items WHERE extracted_content = 'an item executed under upstream''s shape'`;
+  // …and the statements after the block did not run either — the bigint function stands, not the uuid one — so "apply
+  // this file again" meets the shape the message describes (review pass 2).
+  const fnsAfterRefusal = await sql`SELECT pg_get_function_identity_arguments(oid) AS args FROM pg_proc WHERE proname = 'append_thought_evidence'`;
+  const REFUSAL = /^schemas\/smart-ingest: ingestion_items\.matched_thought_id is bigint and Postgres refused to retype it to uuid — (.*) \((.*)\)\. Something of yours reads the column or fixes its type: .*\. Remove it, apply this file again, then recreate it over the uuid column\.$/;
+  const [, cause = "", detail = ""] = refused?.match(REFUSAL) ?? [];
+  assert(refused !== null && /^cannot alter type of a column used by a view or rule$/.test(cause) && /view prior_shape_items/.test(detail)
+    && still?.type === "bigint" && untouched?.metadata?.matched_thought_id_bigint === undefined && fnsAfterRefusal.length === 1 && fnsAfterRefusal[0].args === "p_thought_id bigint, p_evidence jsonb",
+    `with a view over the old column, schemas/smart-ingest refuses by name — the column, Postgres's words, the view by name from the error's DETAIL, what to do — and nothing after runs: the column bigint, its metadata untouched, the bigint function alone (${refused ?? "applied"}; ${still?.type}; ${JSON.stringify(untouched?.metadata)}; ${JSON.stringify(fnsAfterRefusal)})`);
+  await sql`DROP VIEW public.prior_shape_items`;
+  // A CHECK on the column is another refusal under another SQLSTATE (the predicate's `>` has no uuid form; 42883, not the
+  // view's 0A000) — pass 2 caught the one code and let this through raw; the handler relays whatever the ALTER raises
+  // (review pass 3).
+  await sql`ALTER TABLE public.ingestion_items ADD CONSTRAINT prior_shape_positive CHECK (matched_thought_id > 0)`;
+  const refusedCheck = await refusal();
+  const [, causeCheck = ""] = refusedCheck?.match(REFUSAL) ?? [];
+  assert(refusedCheck !== null && /^operator does not exist: uuid > integer/.test(causeCheck),
+    `with a CHECK on the old column, the same refusal by name carries Postgres's own words for that case — not the view's, and not a raw error (${refusedCheck ?? "applied"})`);
+  await sql`ALTER TABLE public.ingestion_items DROP CONSTRAINT prior_shape_positive`;
+}
 for (const file of SIDECARS) await sql.unsafe(readFileSync(join(ROOT, file), "utf8"));
+{
+  const cols = await sql`SELECT attname, format_type(atttypid, atttypmod) AS type FROM pg_attribute WHERE attrelid = 'public.ingestion_items'::regclass AND attname IN ('matched_thought_id', 'result_thought_id') ORDER BY attname`;
+  const [prior] = await sql`SELECT matched_thought_id, result_thought_id, metadata FROM ingestion_items WHERE extracted_content = 'an item executed under upstream''s shape'`;
+  const fns = await sql`SELECT pg_get_function_identity_arguments(oid) AS args FROM pg_proc WHERE proname = 'append_thought_evidence'`;
+  assert(cols.length === 2 && cols.every((c) => c.type === "uuid") && prior?.matched_thought_id === null && prior?.result_thought_id === PRIOR_UUID
+    && prior?.metadata?.matched_thought_id_bigint === 42 && prior?.metadata?.result_thought_uuid === PRIOR_UUID && prior?.metadata?.type === "idea"
+    && fns.length === 1 && fns[0].args === "p_thought_id uuid, p_evidence jsonb",
+    `schemas/smart-ingest re-applied to upstream's shape retypes the two thought-id columns to uuid, keeps the integer in the row's metadata, fills result_thought_id from SMD-2110's metadata key, and leaves one append_thought_evidence, taking a uuid (SMD-2128; ${JSON.stringify(cols)} ${JSON.stringify(prior)} ${JSON.stringify(fns)})`);
+  // And applied once more, on the shape it made: nothing to do, nothing refused.
+  const twice = await sql.unsafe(SMART_INGEST_SQL).then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
+  assert(twice === null, `…and the file applies again on its own shape (${twice ?? "ok"})`);
+  await sql`DELETE FROM ingestion_jobs WHERE input_hash = 'prior-shape'`; // the enhanced-mcp block reads "no job yet"
+}
 // The bio worker logs each run to consolidation_log (non-fatally, so a missing table would hide nothing but the log): the
 // table from the entity-extraction sidecar's own definition, alone.
 const LOG_TABLE = readFileSync(join(ROOT, "schemas/entity-extraction/schema.sql"), "utf8").match(/CREATE TABLE IF NOT EXISTS public\.consolidation_log \([\s\S]*?\);/)?.[0];
@@ -213,6 +291,13 @@ const vec = (v: number[]) => `[${v.join(",")}]`;
 const STUB_METADATA = { type: "idea", summary: "stubbed", topics: ["stubbed"], tags: [], people: [], action_items: [], dates_mentioned: [], confidence: 0.9 };
 /** When set, the embeddings endpoint answers 500 — the provider outage a writer must survive visibly. */
 let embeddingsDown = false;
+/**
+ * Texts whose stub vector is 0.88 from another text's — inside smart-ingest's append-or-revise band (0.85–0.92), where a
+ * one-hot vector alone is 0 or 1 from every other (SMD-2128): 0.88 of the base text's axis and 0.475 of the text's own,
+ * a unit vector to four places.
+ */
+const nearOf = new Map<string, string>();
+const near = (base: string, text: string) => { const own = unit(text); return unit(base).map((x, i) => 0.88 * x + 0.475 * own[i]); };
 /** The user message of each bio prompt the stub answered — what the worker's filters gathered. */
 const bioPrompts: string[] = [];
 /** The book Readwise's API answers for any book id — the receiver's write-through cache reads it once. */
@@ -253,7 +338,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const body = JSON.parse(String(init?.body ?? "{}"));
   if (url.endsWith("/embeddings")) {
     if (embeddingsDown) return new Response("stub: embeddings down", { status: 500 });
-    return Response.json({ data: [{ embedding: unit(String(body.input)) }] });
+    const input = String(body.input);
+    const base = nearOf.get(input);
+    return Response.json({ data: [{ embedding: base ? near(base, input) : unit(input) }] });
   }
   // The bio worker's prompt is answered with a profile — text, not metadata — naming its run, so each run's text is new.
   if (/synthesizing a biographical profile/.test(String(body.messages?.[0]?.content ?? ""))) {
@@ -1053,7 +1140,7 @@ try {
     `…and one with a query string, which a path is appended to, is refused as not bare (${refusedQuery === null ? "loaded" : refusedQuery})`);
 }
 
-// ── integrations/smart-ingest (SMD-2110) ─────────────────────────────────────
+// ── integrations/smart-ingest (SMD-2110 / SMD-2128) ──────────────────────────
 
 {
   const F = "integrations/smart-ingest/index.ts";
@@ -1063,23 +1150,96 @@ try {
   // upsert_thought, and the write POSTs to the extraction worker at ENTITY_EXTRACTION_WORKER_URL — set before the module
   // loaded — with its key and the count as ?limit=. Main's file built that URL from SUPABASE_URL, the Postgres DSN, so every
   // trigger handed fetch() the credentials and failed inside its timeout — and fired never, on this fork: upsert_thought
-  // answers a UUID id, which the file read as no id, so every add was reported failed (the arm's first run said so: added 0,
-  // failed 1, "upsert_thought returned no thought_id"). A UUID is an id now; the vector the 2-argument form drops from its
-  // payload and the bigint item columns are SMD-2128's, so the row is held by content and fingerprint, not its vector.
+  // answers a UUID id, which the file read as no id, so every add was reported failed (SMD-2110). The row is the fork's
+  // capture (SMD-2128): the 3-argument form, so the vector is stored at the stub's axis under the model's label, the
+  // enhanced columns set beside it and 008's row naming the key and this server — upstream's 2-argument call put the
+  // vector inside the payload, where the fork's function does not look, and every thought this server wrote had none.
   const text = "The shim binds a vector by its column's declared type, so a raw write with a number array reaches Postgres as JSON text.";
   const mark = reached.length;
   const ingested = await send(h, "POST", "/", { text, dry_run: false, skip_classification: true, source_label: "test-writes" });
   const calls = reached.slice(mark);
-  const items = await sql`SELECT action, reason, status, error_message, result_thought_id, metadata->>'result_thought_uuid' AS result_thought_uuid FROM ingestion_items WHERE job_id = ${Number(ingested.json?.job_id) || 0}`;
+  const jobItems = (jobId: number) => sql`SELECT action, reason, status, error_message, matched_thought_id, result_thought_id, similarity_score::float AS similarity FROM ingestion_items WHERE job_id = ${jobId || 0} ORDER BY id`;
+  const items = await jobItems(Number(ingested.json?.job_id));
   assert(ingested.status === 200 && ingested.json?.status === "complete" && ingested.json?.added_count === 1 && Number(ingested.json?.job_id) > 0,
     `POST / extracts one thought through the stubbed model, records the job and writes the thought (${ingested.status} ${JSON.stringify(ingested.json).slice(0, 160)}; items ${JSON.stringify(items).slice(0, 300)})`);
-  const rows = await sql`SELECT id FROM thoughts WHERE content = ${text} AND content_fingerprint IS NOT NULL`;
-  assert(rows.length === 1, `…the row through upsert_thought, its fingerprint beside the content (${rows.length}; the vector is SMD-2128's)`);
-  // The item's row says so too: one statement set status and result_thought_id together before, and the fork's UUID in the
-  // bigint column failed it whole, unread — the item stayed `ready` under a job marked complete (review pass 1). The
-  // status lands, and the UUID rides in the item's metadata until SMD-2128 widens the column.
-  assert(items.length === 1 && items[0].action === "add" && items[0].reason === "no_semantic_match" && items[0].status === "executed" && items[0].result_thought_id === null && items[0].result_thought_uuid === rows[0]?.id,
-    `…and the item's row is an add for no semantic match (the stub's one-hot vectors make any collision with an earlier thought a duplicate, review pass 2), executed, with the thought's UUID in its metadata — the bigint result column left null, not failed whole (${JSON.stringify(items).slice(0, 200)})`);
+  const rows = await sql`SELECT id, embedding IS NOT NULL AS has_vec, embedding = ${vec(unit(text))}::vector AS at_axis, embedding_model, type, importance, quality_score, source_type, sensitivity_tier, metadata FROM thoughts WHERE content = ${text} AND content_fingerprint IS NOT NULL`;
+  const row = rows[0];
+  assert(rows.length === 1 && row.has_vec === true && row.at_axis === true && row.embedding_model === MODEL,
+    `…the row through the 3-argument upsert_thought: the stub's vector at its axis, labelled with the model that made it (021) — the 2-argument form left the text alone, no vector (${JSON.stringify({ n: rows.length, has_vec: row?.has_vec, at_axis: row?.at_axis, label: row?.embedding_model })})`);
+  // Asserted at values the sidecar's column defaults cannot supply — type and source_type default NULL, importance 3,
+  // quality_score 50 (the server's is round(0.55 × 70 + 20) = 59 with classification skipped); the tier's default IS
+  // `standard`, the value here, so it proves nothing about the update and is not claimed (review pass 1).
+  assert(row?.type === "idea" && row?.importance === 4 && row?.source_type === "smart_ingest" && Number(row?.quality_score) === 59 && row?.metadata?.source_label === "test-writes" && (row?.metadata?.tags ?? []).includes("stub"),
+    `…with the enhanced columns the function does not know set by the update beside it — the extractor's type and importance, source_type smart_ingest, the computed quality score, none of them the column's default — and the item's metadata on the row (${JSON.stringify({ type: row?.type, importance: row?.importance, source_type: row?.source_type, quality: row?.quality_score, label: row?.metadata?.source_label, tags: row?.metadata?.tags })})`);
+  judgeActor("smart-ingest add", await auditRow(row?.id, "capture"), "smart-ingest");
+  // The item's row: executed, and result_thought_id IS the thought — a uuid column now (SMD-2128), where the bigint one took
+  // nothing and SMD-2110 parked the id in the item's metadata.
+  assert(items.length === 1 && items[0].action === "add" && items[0].reason === "no_semantic_match" && items[0].status === "executed" && items[0].result_thought_id === row?.id && items[0].matched_thought_id === null,
+    `…and the item's row is an add for no semantic match, executed, its result_thought_id the thought's UUID (${JSON.stringify(items).slice(0, 200)})`);
+  // The same text again (reprocess, or the job's input hash answers "existing"): the fingerprint the server computes is the
+  // one the function wrote — the two normalise alike — so the item is a skip by fingerprint naming the first thought as
+  // matched_thought_id. On main the INSERT of that item failed whole, a UUID into a bigint column, and no item of a job
+  // with any match was ever persisted: the job said complete over an empty item list.
+  const again = await send(h, "POST", "/", { text, dry_run: false, skip_classification: true, source_label: "test-writes", reprocess: true });
+  const skipped = await jobItems(Number(again.json?.job_id));
+  const [{ n: rowsOfText }] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE content = ${text}`;
+  assert(again.status === 200 && again.json?.skipped_count === 1 && again.json?.added_count === 0 && skipped.length === 1 && skipped[0].action === "skip" && skipped[0].reason === "fingerprint_match" && skipped[0].matched_thought_id === row?.id && skipped[0].status === "executed" && skipped[0].result_thought_id === row?.id && rowsOfText === 1,
+    `the same text ingested again is one item skipped by fingerprint, persisted with the first thought's UUID as matched_thought_id and as its result, executed, and no second row — main's bigint column refused the item and the job completed over none (${again.status} ${JSON.stringify(again.json).slice(0, 120)}; items ${JSON.stringify(skipped).slice(0, 200)}; rows ${rowsOfText})`);
+  // The same through a dry run and /execute: that path stepped over a skipped item — `ready` for ever under a complete
+  // job, and in the pending index a custom worker claims from — a row that could not exist while the bigint column refused
+  // every item with a match (review pass 1).
+  const dryDup = await send(h, "POST", "/", { text, dry_run: true, skip_classification: true, source_label: "test-writes", reprocess: true });
+  const dupJob = Number(dryDup.json?.job_id);
+  // Beside it, an item the way a reconciliation error is persisted — the skip action under a `failed` status: /execute's
+  // skip branch flipped it to executed and counted it skipped (review pass 2); it stays failed, counted as such.
+  await sql`INSERT INTO ingestion_items (job_id, extracted_content, action, status, reason, error_message) VALUES (${dupJob || 0}, 'a reconciliation that failed at the dry run', 'skip', 'failed', 'reconciliation_error: stub', 'stub')`;
+  const ranDup = await send(h, "POST", "/execute", { job_id: dupJob });
+  const dupItems = await jobItems(dupJob);
+  assert(dryDup.json?.status === "dry_run_complete" && dupJob > 0 && ranDup.status === 200 && ranDup.json?.status === "complete" && ranDup.json?.skipped_count === 1 && ranDup.json?.added_count === 0 && ranDup.json?.failed_count === 1
+    && dupItems.length === 2 && dupItems[0].action === "skip" && dupItems[0].status === "executed" && dupItems[0].result_thought_id === row?.id && dupItems[1].status === "failed" && dupItems[1].result_thought_id === null,
+    `a dry run of the same text parks the skip as ready, and /execute marks it executed with the matched thought as its result — the path left it ready under a complete job — while an item persisted failed stays failed, counted in failed_count and not in skipped_count (${dryDup.json?.status} #${dupJob}; ${ranDup.status} ${JSON.stringify(ranDup.json).slice(0, 120)}; items ${JSON.stringify(dupItems).slice(0, 220)})`);
+  // The two actions between the thresholds, driven by a stub vector 0.88 from the first thought's (the band is 0.85–0.92;
+  // one-hot vectors alone are 0 or 1 apart, so no arm drove either branch before): a shorter text appends evidence to the
+  // richer existing thought through append_thought_evidence — its p_thought_id uuid now; the bigint form refused the call —
+  // and a longer one is a revision: a new row whose `supersedes` is the thought it revises, the pointer 025 made the one
+  // mechanism for supersession (upstream wrote the id into metadata.supersedes, a second place for the fact).
+  const axisOf = (t: string) => unit(t).indexOf(1);
+  let shorter = "The shim binds a vector by its column's type.";
+  while (axisOf(shorter) === axisOf(text)) shorter += " Yes.";
+  let longer = `${text} The shim reads the catalog for that type, so a vector column is bound as a vector and never as JSON text.`;
+  while (axisOf(longer) === axisOf(text)) longer += " Yes.";
+  nearOf.set(shorter, text); nearOf.set(longer, text);
+  const appended = await send(h, "POST", "/", { text: shorter, dry_run: false, skip_classification: true, source_label: "test-writes" });
+  const appendedItems = await jobItems(Number(appended.json?.job_id));
+  const [evidence] = await sql`SELECT metadata->'evidence' AS list FROM thoughts WHERE id = ${row?.id}`;
+  assert(appended.status === 200 && appended.json?.appended_count === 1 && appendedItems.length === 1 && appendedItems[0].action === "append_evidence" && appendedItems[0].reason === "existing_is_richer" && appendedItems[0].status === "executed"
+    && appendedItems[0].matched_thought_id === row?.id && appendedItems[0].result_thought_id === row?.id && appendedItems[0].similarity > 0.85 && appendedItems[0].similarity < 0.92
+    && Array.isArray(evidence?.list) && evidence.list.length === 1 && evidence.list[0].source_label === "test-writes" && evidence.list[0].source === "smart_ingest",
+    `a shorter text 0.88 from the first thought appends evidence to it: the item an append_evidence for existing_is_richer with the thought as matched and result, and the thought's metadata.evidence one entry from this source — append_thought_evidence(uuid, jsonb) (${appended.status} ${JSON.stringify(appended.json).slice(0, 120)}; items ${JSON.stringify(appendedItems).slice(0, 220)}; evidence ${JSON.stringify(evidence?.list).slice(0, 120)})`);
+  const revised = await send(h, "POST", "/", { text: longer, dry_run: false, skip_classification: true, source_label: "test-writes" });
+  const revisedItems = await jobItems(Number(revised.json?.job_id));
+  const revision = (await sql`SELECT id, embedding IS NOT NULL AS has_vec, embedding_model, supersedes, type, metadata->>'supersedes' AS meta_supersedes FROM thoughts WHERE content = ${longer}`)[0];
+  assert(revised.status === 200 && revised.json?.revised_count === 1 && revisedItems.length === 1 && revisedItems[0].action === "create_revision" && revisedItems[0].reason === "new_has_more_info" && revisedItems[0].status === "executed"
+    && revisedItems[0].matched_thought_id === row?.id && revision !== undefined && revisedItems[0].result_thought_id === revision.id && revision.supersedes === row?.id && revision.has_vec === true && revision.embedding_model === MODEL && revision.type === "idea" && revision.meta_supersedes === null,
+    `a longer text 0.88 from the first thought is a revision: a new row with its vector and label whose supersedes is the first thought (025's pointer, not metadata.supersedes), the item a create_revision with the first as matched and the new row as result (${revised.status} ${JSON.stringify(revised.json).slice(0, 120)}; items ${JSON.stringify(revisedItems).slice(0, 220)}; row ${JSON.stringify(revision).slice(0, 200)})`);
+  judgeActor("smart-ingest revision", await auditRow(revision?.id, "capture"), "smart-ingest");
+  // A revision parked by a dry run whose text is captured meanwhile: the function writes `supersedes` on a fresh row only
+  // and keeps the existing row's provenance (035), so the pointer is not written — the item fails saying so, where it was
+  // counted revised with nothing to show (review pass 2).
+  let meanwhile = `${text} A near copy of the first thought, longer, parked by a dry run and captured through the function before the job runs.`;
+  while (axisOf(meanwhile) === axisOf(text)) meanwhile += " Yes.";
+  nearOf.set(meanwhile, text);
+  const dryRev = await send(h, "POST", "/", { text: meanwhile, dry_run: true, skip_classification: true, source_label: "test-writes" });
+  const revJob = Number(dryRev.json?.job_id);
+  const parked = await jobItems(revJob);
+  await sql`SELECT upsert_thought(${meanwhile}, '{}'::jsonb)`;
+  const ranRev = await send(h, "POST", "/execute", { job_id: revJob });
+  const revItems = await jobItems(revJob);
+  const [captured] = await sql`SELECT id, supersedes FROM thoughts WHERE content = ${meanwhile}`;
+  assert(dryRev.json?.status === "dry_run_complete" && parked.length === 1 && parked[0].action === "create_revision" && parked[0].status === "ready"
+    && ranRev.status === 200 && ranRev.json?.status === "complete" && ranRev.json?.revised_count === 0 && ranRev.json?.failed_count === 1
+    && revItems.length === 1 && revItems[0].status === "failed" && /the text is already thought/.test(revItems[0].error_message ?? "") && captured !== undefined && captured.supersedes === null,
+    `a revision parked ready by a dry run, whose text is captured meanwhile, fails on /execute saying the text is already a thought — not counted revised, the captured row's supersedes unset (${dryRev.json?.status} ${JSON.stringify(parked).slice(0, 80)}; ${ranRev.status} ${JSON.stringify(ranRev.json).slice(0, 120)}; items ${JSON.stringify(revItems).slice(0, 200)}; row ${JSON.stringify(captured)})`);
   // The other half of the pipeline, the one rest-api's execute route proxies: a dry run parks the item as `ready`, and
   // POST /execute writes it — through recordItemResult's second call site, and with job_id as the STRING the proxy sent
   // until review pass 2, which the server takes now beside the number it required (a proxied execute was a 400 for every
@@ -1089,11 +1249,11 @@ try {
   const jobId = Number(dry.json?.job_id);
   const mark3 = reached.length;
   const ran = await send(h, "POST", "/execute", { job_id: String(jobId) });
-  const items2 = await sql`SELECT action, reason, status, result_thought_id, metadata->>'result_thought_uuid' AS result_thought_uuid FROM ingestion_items WHERE job_id = ${jobId || 0}`;
-  const rows2 = await sql`SELECT id FROM thoughts WHERE content = ${text2}`;
+  const items2 = await jobItems(jobId);
+  const rows2 = await sql`SELECT id, embedding IS NOT NULL AS has_vec FROM thoughts WHERE content = ${text2}`;
   assert(dry.status === 200 && dry.json?.status === "dry_run_complete" && jobId > 0 && ran.status === 200 && ran.json?.status === "complete" && ran.json?.added_count === 1 && ran.json?.job_id === jobId
-    && items2.length === 1 && items2[0].status === "executed" && items2[0].result_thought_uuid === rows2[0]?.id && reached.slice(mark3).some((u) => u === `${WORKER}/?limit=1`),
-    `a dry run and then POST /execute with job_id as a numeric string: the job completes with one add, the item's row is executed with the thought's UUID in its metadata, and the worker is triggered once (${dry.status} ${dry.json?.status} #${jobId}; ${ran.status} ${JSON.stringify(ran.json).slice(0, 100)}; items ${JSON.stringify(items2).slice(0, 160)})`);
+    && items2.length === 1 && items2[0].status === "executed" && items2[0].result_thought_id === rows2[0]?.id && rows2[0]?.has_vec === true && reached.slice(mark3).some((u) => u === `${WORKER}/?limit=1`),
+    `a dry run and then POST /execute with job_id as a numeric string: the job completes with one add, the item's row is executed with the thought's UUID as its result, the row has its vector (the execute path embeds again), and the worker is triggered once (${dry.status} ${dry.json?.status} #${jobId}; ${ran.status} ${JSON.stringify(ran.json).slice(0, 100)}; items ${JSON.stringify(items2).slice(0, 160)})`);
   assert(calls.filter((u) => u.startsWith(`${WORKER}/`)).join() === `${WORKER}/?limit=1` && workerKeys.at(-1) === KEY,
     `…and POSTs once to the extraction worker at ENTITY_EXTRACTION_WORKER_URL with the count as ?limit= and the server's key — the knob's address, not a path on the DSN (${calls.filter((u) => !/openrouter/.test(u)).join(" ") || "no call"}; key ${workerKeys.at(-1) === KEY ? "sent" : String(workerKeys.at(-1))})`);
   // Without the knob: the write lands and triggers nothing — no call to the worker, and no URL on the DSN either — and the
@@ -1359,14 +1519,15 @@ for (const [file, readme] of [["integrations/kubernetes-deployment/index.ts", "i
 // Every runnable file the three changes touched is driven above, or read: the headers name them.
 const BIO = "integrations/consolidation-workers/bio/index.ts";
 const DRIVEN = ["integrations/update-thought-mcp/index.ts", "integrations/enhanced-mcp/index.ts", "integrations/agent-memory-api/index.ts",
-  "integrations/open-brain-rest/index.ts", "integrations/rest-api/index.ts", "recipes/repo-learning-coach/server/brain.ts", BIO];
+  "integrations/open-brain-rest/index.ts", "integrations/rest-api/index.ts", "recipes/repo-learning-coach/server/brain.ts", BIO,
+  "integrations/smart-ingest/index.ts"]; // smart-ingest joined the 3-argument form's callers with SMD-2128
 const TEXT_ONLY = ["recipes/provenance-chains/mcp-tools.ts"];
 const DRIVEN_1524 = ["integrations/readwise-capture/index.ts", "recipes/editorial-policy/auditor/index.ts", BIO];
 const TEXT_ONLY_1524 = ["recipes/adaptive-capture-classification/capture-with-gating.ts"];
 const BYPASS_1524 = ["integrations/kubernetes-deployment/index.ts", "recipes/vercel-neon-telegram/src/lib/db.ts", "recipes/schema-aware-routing/index.ts"];
 const DRIVEN_1544 = [BIO];
 const DRIVEN_1541 = ["integrations/update-thought-mcp/index.ts", "integrations/enhanced-mcp/index.ts", "integrations/agent-memory-api/index.ts",
-  "integrations/open-brain-rest/index.ts", "integrations/rest-api/index.ts"]; // change 69's five servers: the ones that hold a key
+  "integrations/open-brain-rest/index.ts", "integrations/rest-api/index.ts", "integrations/smart-ingest/index.ts"]; // change 69's five servers, the ones that hold a key — and smart-ingest, which passes the actor since SMD-2128
 // Every vendored .ts, read once; each ticket's rule tests the same texts.
 const HEADED = [...new Bun.Glob("{recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
   .filter((f) => !f.includes("node_modules")).map((f) => [f, readFileSync(join(ROOT, f), "utf8")] as const);
@@ -1385,6 +1546,22 @@ assert(reached.length > 0 && !reached.some((u) => /^postgres(ql)?:/.test(u) || u
 // The literal forms — a template `${SUPABASE_URL}/…` or a concatenation `SUPABASE_URL + "/…"` — in the two files' text; an
 // alias or a `new URL(path, SUPABASE_URL)` would pass this and fail the arm above at run time.
 for (const f of ["integrations/rest-api/index.ts", "integrations/smart-ingest/index.ts"]) spells(f, /^(?![\s\S]*(?:\$\{SUPABASE_URL\}\/|SUPABASE_URL\s*\+\s*["'`]\/))/, " writes no `${SUPABASE_URL}/…` template and no `SUPABASE_URL + \"/…\"` concatenation");
+// SMD-2128: smart-ingest's text — one upsert_thought call site, the 3-argument form with the vector as p_embedding and the
+// actor in the envelope, and no `embedding` key inside the payload (upstream's shape, which the fork's function ignores).
+{
+  const F = "integrations/smart-ingest/index.ts";
+  assert((readFileSync(join(ROOT, F), "utf8").match(/rpc\("upsert_thought"/g) ?? []).length === 1, `${F} calls upsert_thought from one place, writeThought`);
+  spells(F, /rpc\("upsert_thought",\s*\{\s*p_content:[^}]*p_payload:\s*\{[\s\S]{0,300}?actor: ACTOR[\s\S]{0,200}?p_embedding: vector/, "passes the actor in upsert_thought's envelope and the vector as p_embedding — the 3-argument form");
+  // The payload block read whole, braces balanced — the label's spread is a `{ … }` inside it, and a regex over the block
+  // either stopped at that spread's closing brace (an `embedding:` after it passed: the 2-argument mutant was killed by the
+  // run-time arms while this guard stayed green) or swallowed the spread whole (a key inside it passed) — review pass 1.
+  const text = readFileSync(join(ROOT, F), "utf8");
+  const at = text.indexOf("p_payload: {");
+  let depth = 0, end = -1;
+  for (let i = at; at >= 0 && i < text.length && end < 0; i++) { if (text[i] === "{") depth++; else if (text[i] === "}" && --depth === 0) end = i; }
+  const payload = at >= 0 && end > at ? text.slice(at, end + 1) : "";
+  assert(payload.length > 0 && !/(?:^|[^\w])["'`]?embedding["'`]?\s*:/.test(payload), `${F} puts no \`embedding\` key inside upsert_thought's payload — the 2-argument form's shape, which the fork's function does not read (${payload.replace(/\s+/g, " ").slice(0, 160)})`);
+}
 // The two servers each carry httpTargetFrom (they deploy alone and share only their own _shared/): held identical to the
 // character, comment lines aside, as the date helpers are above.
 {

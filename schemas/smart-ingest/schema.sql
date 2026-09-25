@@ -1,7 +1,18 @@
 -- Smart Ingest Pipeline Tables
 -- Adds ingestion_jobs and ingestion_items tables for tracking
 -- the extract-deduplicate-execute lifecycle of bulk text ingestion.
--- Safe to run multiple times (fully idempotent).
+-- Safe to run multiple times (fully idempotent), and one transaction, BEGIN to
+-- COMMIT (this fork, SMD-2128): a refusal anywhere leaves nothing applied, under
+-- a client that sends the file as one query and under plain `psql -f`, which
+-- runs on past an error, alike. One exception in kind, not in effect: section 2b
+-- retypes two columns on a table created before it, once — an ALTER TABLE that
+-- rewrites the table under ACCESS EXCLUSIVE, so on a brain with a large
+-- ingestion_items stop the ingest server for it — and refuses, relaying
+-- Postgres's own words and the object's name, while anything of yours reads
+-- either column or fixes its type (a view, trigger, policy, constraint, index
+-- predicate, default, foreign key).
+
+BEGIN;
 
 -- ============================================================
 -- 1. INGESTION JOBS
@@ -40,9 +51,9 @@ CREATE TABLE IF NOT EXISTS public.ingestion_items (
   action text NOT NULL DEFAULT 'pending',   -- pending, add, skip, append_evidence, create_revision
   status text NOT NULL DEFAULT 'pending',   -- pending, ready, executed, failed
   reason text,
-  matched_thought_id bigint,
+  matched_thought_id uuid,                  -- thoughts.id is uuid on this fork (section 2b; SMD-2128)
   similarity_score numeric(5,4),
-  result_thought_id bigint,
+  result_thought_id uuid,
   error_message text,
   metadata jsonb DEFAULT '{}',
   created_at timestamptz DEFAULT now()
@@ -84,14 +95,68 @@ ALTER TABLE public.ingestion_items
   ADD COLUMN IF NOT EXISTS user_id uuid;
 
 -- ============================================================
+-- 2b. THE TWO THOUGHT-ID COLUMNS ARE uuid (this fork, SMD-2128)
+--     Upstream's thoughts.id is an integer and the two columns above were
+--     bigint. On this fork thoughts.id is a uuid, so every value the server
+--     records here is one: a fingerprint or semantic match, the thought an
+--     item wrote. Against bigint, an INSERT carrying a matched id failed
+--     whole — no item of a job with any match was ever persisted — the
+--     result column could take nothing, and SMD-2110 parked the written
+--     thought's id in metadata.result_thought_uuid meanwhile. A table that
+--     predates this section is retyped in place, once: an integer found in
+--     either column could name no thought here and is kept as
+--     metadata.<column>_bigint rather than dropped; result_thought_id is
+--     filled from SMD-2110's metadata key. Guarded on the column's type, so
+--     a re-run finds uuid and does nothing. Postgres will not retype a column
+--     something reads or something fixes the type of — a view, rule, trigger,
+--     policy or generated column (SQLSTATE 0A000), a CHECK or a partial
+--     index's predicate (42883), a default (42804), a foreign key (42830) —
+--     so whatever the ALTER raises is re-raised naming the file, the column,
+--     Postgres's words, the object (the error's DETAIL) and what to do; the
+--     transaction rolls back whole, so the function stays the bigint form
+--     beside the bigint columns until the file is applied again.
+-- ============================================================
+
+DO $$
+DECLARE
+  v_col    text;
+  v_detail text;
+BEGIN
+  FOREACH v_col IN ARRAY ARRAY['matched_thought_id', 'result_thought_id'] LOOP
+    IF (SELECT format_type(a.atttypid, a.atttypmod) FROM pg_attribute a
+         WHERE a.attrelid = 'public.ingestion_items'::regclass AND a.attname = v_col AND NOT a.attisdropped) = 'bigint' THEN
+      EXECUTE format('UPDATE public.ingestion_items SET metadata = coalesce(metadata, ''{}''::jsonb) || jsonb_build_object(%L, %I) WHERE %I IS NOT NULL',
+                     v_col || '_bigint', v_col, v_col);
+      BEGIN
+        EXECUTE format('ALTER TABLE public.ingestion_items ALTER COLUMN %I TYPE uuid USING %s', v_col,
+                       CASE WHEN v_col = 'result_thought_id'
+                            THEN 'CASE WHEN metadata->>''result_thought_uuid'' ~* ''^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'' THEN (metadata->>''result_thought_uuid'')::uuid END'
+                            ELSE 'NULL' END);
+      EXCEPTION WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS v_detail = PG_EXCEPTION_DETAIL;
+        RAISE EXCEPTION 'schemas/smart-ingest: ingestion_items.% is bigint and Postgres refused to retype it to uuid — % (%). Something of yours reads the column or fixes its type: a view, rule, trigger, policy, generated column, constraint, index predicate, default or foreign key. Remove it, apply this file again, then recreate it over the uuid column.', v_col, SQLERRM, coalesce(v_detail, 'no detail');
+      END;
+    END IF;
+  END LOOP;
+END $$;
+
+-- ============================================================
 -- 3. APPEND THOUGHT EVIDENCE RPC
 --    Appends an evidence entry to thoughts.metadata.evidence[].
 --    Idempotent via SHA256 identity of (source_label + excerpt + thought_id).
 --    Returns { thought_id, evidence_count, action: 'appended' | 'already_exists' }.
+--
+--    This fork (SMD-2128): p_thought_id is uuid, thoughts.id's type here. The
+--    bigint form is dropped first so one function answers the name — beside
+--    a second overload the server's call would be ambiguous — which also
+--    drops the EXECUTE `--grant` gave that form: on a brain that had it, run
+--    `bun migrate.ts --grant <role>` again after this file.
 -- ============================================================
 
+DROP FUNCTION IF EXISTS public.append_thought_evidence(bigint, jsonb);
+
 CREATE OR REPLACE FUNCTION public.append_thought_evidence(
-  p_thought_id bigint,
+  p_thought_id uuid,
   p_evidence jsonb  -- {source, extracted_at, excerpt, source_label}
 )
 RETURNS jsonb
@@ -170,7 +235,7 @@ $$;
 -- 4. GRANTS
 -- ============================================================
 
-REVOKE EXECUTE ON FUNCTION public.append_thought_evidence(bigint, jsonb) FROM public;
+REVOKE EXECUTE ON FUNCTION public.append_thought_evidence(uuid, jsonb) FROM public;
 
 -- This fork (SMD-1796): upstream's section 4 also GRANTed ALL on both tables,
 -- USAGE, SELECT on their two sequences and EXECUTE on the append TO
@@ -187,7 +252,9 @@ REVOKE EXECUTE ON FUNCTION public.append_thought_evidence(bigint, jsonb) FROM pu
 -- issues db/config.mjs ROLE_GRANTS' `community` group, which covers this file's
 -- two tables (SELECT, INSERT, UPDATE, DELETE), the two bigserial sequences
 -- (USAGE, SELECT — an INSERT needs the sequence) and EXECUTE on
--- append_thought_evidence(bigint, jsonb). Row-level security: SMD-1716.
+-- append_thought_evidence(uuid, jsonb). Row-level security: SMD-1716.
 
 -- Notify PostgREST to reload schema cache
 NOTIFY pgrst, 'reload schema';
+
+COMMIT;
