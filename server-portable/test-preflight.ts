@@ -1292,14 +1292,23 @@ else {
     // still at read committed, so the fixture reaches no neighbour — set on
     // the role instead, it passed the assertion above and crashed test-upgrade
     // beside it only when a session of [20b]'s opened inside this window.
-    const u = new URL(LIVE);
-    const otherDb = u.pathname === "/postgres" ? "template1" : "postgres";
-    u.pathname = `/${otherDb}`;
-    const elsewhere = new SQL({ url: u.toString(), max: 1 });
-    const level = await elsewhere`SELECT current_setting('default_transaction_isolation') AS l`.then((r: { l: string }[]) => r[0].l, () => null);
-    await elsewhere.close();
-    if (level === null) skipRaw("…and only this database's sessions start at repeatable read", `the role cannot connect to database ${otherDb}`);
-    else assert(level === "read committed", `…and only this database's sessions start at repeatable read: one as the same role in ${otherDb} is at ${level}`);
+    // The other database is `postgres`; the suite's own is asked of the
+    // server, since a URL without a path lands there too. A role that may
+    // not connect there skips; any other error fails.
+    const onlyHere = "…and only this database's sessions start at repeatable read";
+    const [{ db }] = (await claims`SELECT current_database() AS db`) as { db: string }[];
+    if (db === "postgres") skipRaw(onlyHere, "the suite's own database is postgres, the one it would read as another");
+    else {
+      const u = new URL(LIVE);
+      u.pathname = "/postgres";
+      const elsewhere = new SQL({ url: u.toString(), max: 1 });
+      const got = await elsewhere`SELECT current_setting('default_transaction_isolation') AS l`.then(
+        (r: { l: string }[]) => ({ level: r[0].l, err: null }),
+        (e: { errno?: string; message: string }) => ({ level: null, err: e }));
+      await elsewhere.close();
+      if (got.err && /^(42501|3D000|28)/.test(got.err.errno ?? "")) skipRaw(onlyHere, `the role cannot connect to database postgres (${got.err.message})`);
+      else assert(got.level === "read committed", `${onlyHere}: one as the same role in postgres is at ${got.level ?? `— it failed: ${got.err?.message}`}`);
+    }
   } finally {
     await onThisDatabase("RESET default_transaction_isolation");
   }
