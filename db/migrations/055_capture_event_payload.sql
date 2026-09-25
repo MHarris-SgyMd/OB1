@@ -41,7 +41,7 @@
 --      own value is. update: `content_fingerprint` {before, after} when the
 --      key moved, 018's NULL and 023's fill included. Outside these three the
 --      event is byte-equal to 046's: SMD-1999's differential held it so, and
---      test-schema [50] runs one scripted set of writes under 046's trigger
+--      test-schema [51] runs one scripted set of writes under 046's trigger
 --      and under this one and compares every audit column outside the three
 --      keys. Readers of 046's shape ignore the added keys (052's
 --      thought_changes lists an update's diff keys, so `content_fingerprint`
@@ -106,9 +106,16 @@
 --      before 050 is after the capture when (created_at, seq) is larger, and
 --      is ordered so. The boundary is ob1_config.audit_seq_exact_since —
 --      050's applied_at from the ledger, recorded once by this file; the
---      apply's own time where no ledger says (the suites); a brain baselined
---      after 050 counts its rows between as before-050, the ADR's default
---      order, not a wrong one. And the events read stop at the first later
+--      apply's own time where no ledger says (the suites). Every degradation
+--      falls to the clock path, the ADR's default order, which cannot cross
+--      an incarnation: a brain baselined after 050 counts its rows between as
+--      before-050; a key pruned from ob1_config reads as 'infinity', every
+--      row before it (third review pass — the first draft fell to '-infinity',
+--      the identity path, the one that can). One set is mis-read the other
+--      way and cannot be told from the log at 055: rows a writer committed
+--      while 050's ALTER waited for its lock, stamped after the apply's start
+--      yet numbered in heap order — narrow, and the verify mode's to name.
+--      And the events read stop at the first later
 --      tombstone or capture, that row included: an id db/ingest-records.ts
 --      re-uses after a delete has a second incarnation whose edits are not
 --      this capture's. What the first two readings got wrong: "the first
@@ -752,9 +759,14 @@ RETURNS TABLE (content text, row_created_at timestamptz, source text)
 LANGUAGE sql
 STABLE
 AS $$
+  -- Absent (a pruned ob1_config, a partial restore), the boundary is
+  -- 'infinity': every row takes the clock path — the ADR's default order,
+  -- which cannot cross an incarnation — never the identity path, which on a
+  -- brain with pre-050 history can (third review pass: '-infinity' chose the
+  -- corrupting direction).
   WITH exact AS (
     SELECT COALESCE((SELECT c.value::timestamptz FROM ob1_config c WHERE c.key = 'audit_seq_exact_since'),
-                    '-infinity'::timestamptz) AS since
+                    'infinity'::timestamptz) AS since
   ),
   -- The rows after the capture, and the clock that orders them: a row from
   -- before the boundary keeps its created_at (heap-order seq breaks ties, as

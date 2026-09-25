@@ -1707,6 +1707,7 @@ if (configFailed) {
               : denied === "ob1_agent_keys" ? "the server group's row"
               : denied === "thought_audit" ? "the community group's row"
               : denied === "thoughts" ? "the capture group's row since 001, read by the payload census since 055"
+              : denied === "ob1_config" ? "the server group's row since 006, read by the payload census since 055 (the boundary from which seq is exact)"
               : "a row of the grants table";
             add("audit events", "skip", `not checked — this role cannot read the census (${msg}); the shape is checked, the waiting keys are not`,
                 `GRANT SELECT ON ${denied} TO <the connector's role>; — ${group}, which migrate.ts --grant issues (db/README.md, Grants for a capturing role).`);

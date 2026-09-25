@@ -3265,7 +3265,7 @@ on to open. This loop captures it and gates PRs on it.
 
 **Utilization — did the caller use what came back (SMD-1719).** Every number
 above is layer one of the four the literature now asks for (evidence retrieval,
-evidence use, task outcome, cost). MERIT (arXiv 2609.05541) measured the second
+evidence use, task outcome, cost). MERIT (arXiv 2609.05441) measured the second
 and found agents ignore 45–53% of correctly retrieved facts. The query log can
 answer it, because a later `capture_thought` that names a returned id in
 `derived_from` or `supersedes` is logged as an action row under its own tool

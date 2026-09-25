@@ -5135,7 +5135,7 @@ console.log("\n[43] Migration 046: the event shape at the write boundary — who
   assert(/INCLUDE \(canonical_agent_id, actor_kind\)/.test(idx.find((i) => i.indexname === "thought_audit_awaiting_kind_idx")?.indexdef ?? "") && /WHERE \(\(origin IS NULL\) AND \(actor_context \? 'via'::text\) AND \(ob1_door_of\(actor_context\) IS NOT NULL\)\)/.test(idx.find((i) => i.indexname === "thought_audit_awaiting_door_idx")?.indexdef ?? ""),
     `…the kind index carrying the agent id and the kind so the census filters and groups without the heap, the door index holding only rows whose via IS a door, by the one reading (seventh review pass; ${idx.map((i) => i.indexdef.replace(/.*USING btree /, "")).join(" | ")})`);
   assert(lastDefinerOf("thoughts_write_audit").startsWith("055") && lastDefinerOf("thought_audit_refuse_mutation").startsWith("055") && lastDefinerOf("upsert_thought").startsWith("046") && lastDefinerOf("update_thought").startsWith("046") && lastDefinerOf("delete_thought").startsWith("042"),
-    `046 is the last definer of both writers; 055 of the audit trigger and the refusal trigger (046's bodies with the rules as functions and the payload arm — [50]); delete_thought stays 042's — a tombstone declares nothing (${lastDefinerOf("delete_thought")})`);
+    `046 is the last definer of both writers; 055 of the audit trigger and the refusal trigger (046's bodies with the rules as functions and the payload arm — [51]); delete_thought stays 042's — a tombstone declares nothing (${lastDefinerOf("delete_thought")})`);
   const tbl = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_audit"])).c ?? "";
   assert(/RANGE on created_at by month/.test(tbl) && /not applied/.test(tbl) && /SMD-1697/.test(tbl), "the table's comment states the partition key chosen and not applied, and what decides when");
   const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
@@ -6434,7 +6434,7 @@ console.log("\n[47] Migration 052: thought_changes — one page of the log, olde
   // (055 records a key's move as a diff key beside these; bob's edit is a raw
   // UPDATE of content, which leaves 003's key stale and so moves none — the
   // log is faithful, not corrective. An edit through update_thought would
-  // list content_fingerprint here too; [50] holds that.)
+  // list content_fingerprint here too; [51] holds that.)
   assert(editA.thought_id === A && editA.actor_name === "bob" && arr(editA.changed).join(",") === "content,metadata" && arr(editA.metadata_keys).join(",") === "actor_kind,actor_name,status,topics" && editA.head === "the first note, edited",
     `the edit: changed content and metadata, the keys that moved (050's two marks, status, topics — not type), the new text as the head (${arr(editA.changed).join("/")}; ${arr(editA.metadata_keys).join("/")})`);
   assert(handB.actor_name === null && handB.actor_kind === null && arr(handB.metadata_keys).join(",") === "hand" && handB.head === null,
@@ -6716,7 +6716,7 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   await db.exec(`DELETE FROM ob1_entities`);
 }
 
-// ── 49. Migration 055: the capture event carries the payload ─────────────────
+// ── 51. Migration 055: the capture event carries the payload ─────────────────
 //
 // The three additions to 046's event (a capture's content and a backdating
 // writer's created_at, an update's key move) and nothing else — one scripted
@@ -6724,7 +6724,7 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
 // outside the three keys; 046's rules as functions the triggers call; the
 // third amendment of the append-only table (the payload arm, key by key) and
 // the backfill that uses it, source by source (SMD-2115, step 1 of SMD-1997).
-console.log("\n[50] Migration 055: the capture event carries the payload — a capture's content and a backdating writer's created_at, an update's key move; 046's rules as functions the triggers call; the payload amendment and its backfill (SMD-2115)");
+console.log("\n[51] Migration 055: the capture event carries the payload — a capture's content and a backdating writer's created_at, an update's key move; 046's rules as functions the triggers call; the payload amendment and its backfill (SMD-2115)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -6764,6 +6764,7 @@ console.log("\n[50] Migration 055: the capture event carries the payload — a c
   assert(/\(created_at, seq\)/.test(pidx) && /WHERE \(\(action = 'capture'::text\) AND \(NOT COALESCE\(\(diff \? 'content'::text\), false\)\)\)/.test(pidx), `the payload index holds exactly the capture rows without content — a NULL diff among them — in (created_at, seq) order (${pidx})`);
   const since = (await one<{ v: string | null }>(`SELECT value AS v FROM ob1_config WHERE key = 'audit_seq_exact_since'`))?.v ?? null;
   assert(since !== null && new Date(since).getTime() <= Date.now() && /^\d{4}-\d{2}-\d{2}/.test(since), `055 records the boundary from which seq is exact insertion order — the apply's own time here, where no ledger names 050 (${since})`);
+  const sinceMs = new Date(since!).getTime();
   const colc = (await one<{ c: string | null }>(COLUMN_COMMENT_SQL, ["thought_audit", "diff"])).c ?? "";
   assert(/since 055, the content/.test(colc) && /content_fingerprint when the key moved/.test(colc) && /backfill_thought_payloads/.test(colc), "diff's comment states the three additions and the backfill that fills the rows from before");
   assert(/two lawful amendments/.test((await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_audit"])).c ?? "") && /RANGE on created_at by month/.test((await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_audit"])).c ?? ""), "the table's comment counts two amendments and keeps the partition key it chose");
@@ -6923,25 +6924,28 @@ console.log("\n[50] Migration 055: the capture event carries the payload — a c
   // after it — created_at is the transaction's start, so the update event is
   // stamped EARLIER than the capture while its seq is later (run-it, first
   // review pass: reproduced with two connections on Postgres; planted here).
-  // Planted since the boundary (the suite's apply, minutes ago), so seq
-  // decides the order and an older transaction's stamp cannot mislead it.
-  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+  // Planted since the boundary — stamped from the boundary the suite read
+  // above, not from the wall clock (third review pass: a fast run could have
+  // reached this section inside the plants' 25 s and put V's update before
+  // the boundary, onto the clock path) — so seq decides the order and an
+  // older transaction's stamp cannot mislead it.
+  const past = (ms: number) => new Date(sinceMs + ms).toISOString();
   const V = "54545454-0003-4000-8000-00000000000f";
-  const tV = ago(20_000);
+  const tV = past(10_000);
   await plantRow(V, "055: planted, edited by an older transaction — the second text", tV);
   const vRow = await plantCapture(V, tV);
-  await db.exec(`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES ('${V}', 'update', '{"content": {"before": "055: planted, edited by an older transaction — the first text", "after": "055: planted, edited by an older transaction — the second text"}}'::jsonb, '${ago(25_000)}')`);
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES ('${V}', 'update', '{"content": {"before": "055: planted, edited by an older transaction — the first text", "after": "055: planted, edited by an older transaction — the second text"}}'::jsonb, '${past(5_000)}')`);
   // W: two edits after the capture, the SECOND one stamped before them all —
   // a transaction that began before the capture's and committed after the
   // first edit. Ordered by the clock it would read first and hand the first
   // edit's after-text to the capture (cold read, second review pass); by seq
   // it is second, and the capture derives the text as captured.
   const W = "54545454-0003-4000-8000-000000000011";
-  const tW = ago(20_000);
+  const tW = past(10_000);
   await plantRow(W, "055: planted, edited twice — the third text", tW);
   const wRow = await plantCapture(W, tW);
-  await db.exec(`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES ('${W}', 'update', '{"content": {"before": "055: planted, edited twice — the first text", "after": "055: planted, edited twice — the second text"}}'::jsonb, '${ago(19_000)}')`);
-  await db.exec(`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES ('${W}', 'update', '{"content": {"before": "055: planted, edited twice — the second text", "after": "055: planted, edited twice — the third text"}}'::jsonb, '${ago(30_000)}')`);
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES ('${W}', 'update', '{"content": {"before": "055: planted, edited twice — the first text", "after": "055: planted, edited twice — the second text"}}'::jsonb, '${past(11_000)}')`);
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES ('${W}', 'update', '{"content": {"before": "055: planted, edited twice — the second text", "after": "055: planted, edited twice — the third text"}}'::jsonb, '${past(1_000)}')`);
   // P: a brain with pre-050 history — rows before the boundary, whose seq is
   // heap order: a PRIOR incarnation of the id (captured, then deleted) whose
   // tombstone took a seq far above the standing capture's at 050's ALTER.

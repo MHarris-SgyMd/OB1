@@ -4557,7 +4557,7 @@ await sql.close();
 // run — as CI's pg16-with-JIT job is — is compared to the headline (SMD-1805).
 console.log("\n[25] Migration 055's payload backfill under two connections: a second pass beside a held one skips what the first filled and counts only its own; the derivation of a capture whose update was stamped before it by an older transaction reads that update (SMD-2115)");
 {
-  // PGlite is one connection, so test-schema [49] cannot hold what the
+  // PGlite is one connection, so test-schema [51] cannot hold what the
   // header promises of two passes at once — the fill's re-read under the row
   // lock (`NOT COALESCE(a.diff ? 'content', false)`) is what makes the second
   // pass skip rather than trip the gate's "nothing is filled" (run-it, first
