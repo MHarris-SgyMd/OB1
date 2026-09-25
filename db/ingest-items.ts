@@ -73,8 +73,8 @@ export const MENTION_NAME_MAX = 200;
 const MEDIA_TYPE_RE = /^[A-Za-z0-9][\w!#$&^.+-]{0,126}\/[A-Za-z0-9][\w!#$&^.+-]{0,126}$/;
 /** A UTF-16 code unit with no partner: a high surrogate not followed by a low one, or a low one not preceded by a high one. Without the `u` flag a class matches code units, which is the point; `String.prototype.isWellFormed` says the same and needs a lib the tree's tsconfig does not name. */
 const LONE_SURROGATE_RE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
-/** An ISO-8601 instant with an offset: date, `T`, hh:mm, optional seconds and fraction, `Z` or ±hh:mm. */
-const INSTANT_RE = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)(?::(\d\d)(?:\.\d{1,9})?)?(?:Z|([+-])(\d\d):(\d\d))$/;
+/** An ISO-8601 instant with an offset: date, `T`, hh:mm, optional seconds and a fraction of at most six digits (timestamptz holds microseconds; a seventh digit is rounded at the cast — `23:59:59.9999999` onto the next day; third review pass, run-it), `Z` or ±hh:mm. */
+const INSTANT_RE = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)(?::(\d\d)(?:\.\d{1,6})?)?(?:Z|([+-])(\d\d):(\d\d))$/;
 /** The byte-order mark a Windows redirection puts before the first line; not JSON, and invisible in a message. */
 const BOM = "﻿";
 
@@ -89,9 +89,9 @@ export class ItemsRefusal extends Error {
 /** PostgreSQL's bound on a time zone displacement's hours (datetime.h MAX_TZDISP_HOUR). */
 const TZ_HOUR_MAX = 15;
 /**
- * One strict profile of ISO-8601 — `YYYY-MM-DDThh:mm[:ss[.f]]` with `Z` or
- * `±hh:mm` — every value of which a timestamptz cast accepts as the instant
- * it reads as. A cast takes more shapes (a space for the `T`, `+0530`, a bare
+ * One strict profile of ISO-8601 — `YYYY-MM-DDThh:mm[:ss[.ffffff]]` with `Z`
+ * or `±hh:mm` — every value of which a timestamptz cast accepts as the instant
+ * it reads as, unrounded. A cast takes more shapes (a space for the `T`, `+0530`, a bare
  * date); this takes the one an emitter can be told to write. `Date.parse` is
  * not the judge: it takes `2026-02-30T00:00:00Z` as March the 2nd and a bare
  * date as midnight UTC, and a value it rounded would be written as
@@ -149,7 +149,7 @@ function* strings(root: unknown, rootPath: string): Generator<[string, string]> 
   }
 }
 
-/** The level a line's value may not reach, the line's object being level 0 (its `facets` level 1). PostgreSQL's jsonb reader is recursive and stops at its stack limit — a few thousand levels — with an error at the cast; no facet nests past a handful, so the bound is small and the refusal is this module's, with the line (first review pass, run-it). */
+/** The level an object or array in a line may not reach, the line's object being level 0 (its `facets` level 1); a scalar at any level is fine — the parser's stack is what containers consume (third review pass, cold read). PostgreSQL's jsonb reader is recursive and stops at its stack limit — a few thousand levels — with an error at the cast; no facet nests past a handful, so the bound is small and the refusal is this module's, with the line (first review pass, run-it). */
 export const DEPTH_MAX = 64;
 
 /** Whether a JSON value nests past `max` levels — iterative, so the question itself cannot overflow. */
@@ -176,7 +176,7 @@ export type ParsedItem = { item: Ingested; linksDropped: number };
 export function parseItem(value: unknown, line: number, label: string = "--items"): ParsedItem {
   const refuse = (field: string, reason: string): never => { throw new ItemsRefusal(label, line, field, reason); };
   if (!isObject(value)) return refuse("(line)", `a line is one JSON object, not ${value === null ? "null" : Array.isArray(value) ? "an array" : `a ${typeof value}`}`);
-  if (tooDeep(value, DEPTH_MAX)) return refuse("(line)", `nested too deeply — a value at level ${DEPTH_MAX} or below, the line's object being level 0; a jsonb value has a depth bound too, met at the cast; flatten the facets`);
+  if (tooDeep(value, DEPTH_MAX)) return refuse("(line)", `nested too deeply — an object or array at level ${DEPTH_MAX} or deeper, the line's object being level 0; a jsonb value has a depth bound too, met at the cast; flatten the facets`);
   for (const k of Object.keys(value)) {
     if (!(ITEM_KEYS as readonly string[]).includes(k)) return refuse(k, k === "derived" ? "a part that is a thought of its own is a line of its own; `derived` is not taken from a file" : `not a key of an item — the keys are ${ITEM_KEYS.join(", ")}`);
   }
@@ -191,7 +191,9 @@ export function parseItem(value: unknown, line: number, label: string = "--items
   if ((RESERVED_SYSTEMS as readonly string[]).includes(system)) return refuse("identity.system", `"${system}" is one of the pipeline's own sources (${RESERVED_SYSTEMS.join(", ")}), which it reads itself; a file names the system it was parsed from`);
   if (!isString(key) || key.trim() === "") return refuse("identity.key", "a non-empty string — what survives a rename on the source side");
   if (key !== key.trim()) return refuse("identity.key", "leading or trailing whitespace — a link's target is trimmed (normaliseLinks), so a row under this key could never be linked");
-  if (key.length > IDENTITY_MAX) return refuse("identity.key", `${key.length} characters; thought_sources.identity holds ${IDENTITY_MAX}`);
+  // Characters, as PostgreSQL's length() counts them — `key.length` is UTF-16 code units, and 300 emoji would read as 600 (third review pass, run-it).
+  const keyChars = [...key].length;
+  if (keyChars > IDENTITY_MAX) return refuse("identity.key", `${keyChars} characters; thought_sources.identity holds ${IDENTITY_MAX}`);
 
   // scope
   const scope = value.scope;
@@ -220,6 +222,9 @@ export function parseItem(value: unknown, line: number, label: string = "--items
     for (const k of Object.keys(l)) if (k !== "relation" && k !== "target") return refuse(`links[${i}].${k}`, "not a key of a link — {relation, target}");
     if (!isString(l.relation) || !(LINK_RELATIONS as readonly string[]).includes(l.relation)) return refuse(`links[${i}].relation`, `one of ${LINK_RELATIONS.join(", ")}`);
     if (!isString(l.target)) return refuse(`links[${i}].target`, "a string — the target's identity key within the same system, never a thought id");
+    // A target IS an identity: past the bound, 053's link writer drops the link into a count without a word (third review pass, run-it).
+    const targetChars = [...l.target.trim()].length;
+    if (targetChars > IDENTITY_MAX) return refuse(`links[${i}].target`, `${targetChars} characters; an identity within the system holds ${IDENTITY_MAX}`);
     links.push({ relation: l.relation as Link["relation"], target: l.target });
   }
 
@@ -232,7 +237,8 @@ export function parseItem(value: unknown, line: number, label: string = "--items
     for (const k of Object.keys(m)) if (k !== "name" && k !== "type") return refuse(`mentions[${i}].${k}`, "not a key of a mention — {name, type}");
     if (!isString(m.type) || !(ENTITY_TYPES as readonly string[]).includes(m.type)) return refuse(`mentions[${i}].type`, `one of ${ENTITY_TYPES.join(", ")}`);
     if (!isString(m.name) || m.name.trim() === "") return refuse(`mentions[${i}].name`, "a non-empty string");
-    if (m.name.trim().length > MENTION_NAME_MAX) return refuse(`mentions[${i}].name`, `${m.name.trim().length} characters; a name is at most ${MENTION_NAME_MAX}`);
+    const nameChars = [...m.name.trim()].length;
+    if (nameChars > MENTION_NAME_MAX) return refuse(`mentions[${i}].name`, `${nameChars} characters; a name is at most ${MENTION_NAME_MAX}`);
     mentions.push({ name: m.name, type: m.type as Mention["type"] });
   }
 
@@ -241,7 +247,7 @@ export function parseItem(value: unknown, line: number, label: string = "--items
 
   // createdAt — `null` is absent, as a Python emitter spells None.
   const createdAt = value.createdAt ?? undefined;
-  if (createdAt !== undefined && (!isString(createdAt) || !isInstant(createdAt))) return refuse("createdAt", "an ISO-8601 instant with an offset (2026-09-25T10:00:00Z) — a calendar date that exists; a bare date or a rolled-over one is not taken; omit the key (or write null) when the source has none");
+  if (createdAt !== undefined && (!isString(createdAt) || !isInstant(createdAt))) return refuse("createdAt", "an ISO-8601 instant with an offset (2026-09-25T10:00:00Z; seconds and a fraction of at most six digits optional; the offset within ±15:59) — a calendar date that exists, year 1 or later; a bare date or a rolled-over one is not taken; omit the key (or write null) when the source has none");
 
   // watermark — `null` is absent too.
   let watermark: Ingested["watermark"];
@@ -279,6 +285,10 @@ export function parseItem(value: unknown, line: number, label: string = "--items
   return { item, linksDropped: norm.dropped };
 }
 
+function parses(s: string): boolean {
+  try { JSON.parse(s); return true; } catch { return false; }
+}
+
 /** What a file yields: the items in file order, each with its line, the links set aside, and how many items each system contributed. */
 export type ParsedItems = { items: Ingested[]; lines: number[]; linksDropped: number; systems: Record<string, number> };
 
@@ -300,14 +310,23 @@ function linesOf(input: string | Uint8Array, label: string): string[] {
     for (let i = 0; i <= input.length; i++) {
       if (i < input.length && input[i] !== 0x0a) continue;
       const end = i > start && input[i - 1] === 0x0d ? i - 1 : i;
-      const decoded = decodeUtf8Strict(input.subarray(start, end));
-      if (!decoded.ok) throw new ItemsRefusal(label, lines.length + 1, "(line)", decoded.reason);
+      const segment = input.subarray(start, end);
+      const decoded = decodeUtf8Strict(segment);
+      if (!decoded.ok) throw new ItemsRefusal(label, lines.length + 1, "(line)", lines.length === 0 && looksUtf16(segment) ? "looks like UTF-16 without a byte-order mark (every other byte is 0x00); write the file as UTF-8" : decoded.reason);
       lines.push(decoded.text);
       start = i + 1;
     }
   }
   if (lines.length && lines[0].startsWith(BOM)) lines[0] = lines[0].slice(BOM.length);
   return lines;
+}
+
+/** UTF-16 without its mark: ASCII in either byte order puts 0x00 at every odd or every even position, and "holds a NUL byte" would be true and unhelpful (third review pass, run-it). */
+function looksUtf16(segment: Uint8Array): boolean {
+  if (segment.length < 4) return false;
+  let odd = 0, even = 0;
+  for (let j = 0; j < segment.length; j++) if (segment[j] === 0) { if (j % 2) odd++; else even++; }
+  return odd === Math.floor(segment.length / 2) || even === Math.ceil(segment.length / 2);
 }
 
 /** A UTF-16 byte-order mark: the whole file is the wrong encoding, and "holds a NUL byte" would be true and unhelpful (second review pass, run-it). */
@@ -339,9 +358,10 @@ export function parseItems(input: string | Uint8Array, label: string = "--items"
       parsed = parseItem(value, line, label);
     } catch (e) {
       if (e instanceof ItemsRefusal) throw e;
-      if (e instanceof SyntaxError) throw new ItemsRefusal(label, line, "(line)", raw[i].includes(BOM) ? "not JSON — a byte-order mark (U+FEFF, invisible) inside the line; one is dropped before the first line alone" : `not JSON — ${e.message}; one object per line, no trailing comma, no wrapping array`);
+      // The mark is blamed only when it is the fault: a line that parses once the marks are gone (third review pass: a trailing comma beside a U+FEFF inside a string read as the mark's fault).
+      if (e instanceof SyntaxError) throw new ItemsRefusal(label, line, "(line)", raw[i].includes(BOM) && parses(raw[i].split(BOM).join("")) ? "not JSON — a byte-order mark (U+FEFF, invisible) inside the line; one is dropped before the first line alone" : `not JSON — ${e.message}; one object per line, no trailing comma, no wrapping array`);
       // Bun's JSON.parse reads iteratively (forty million levels, no throw — second review pass, run-it); a runtime whose parser is not would throw here, and a value past its stack is a line to refuse, not a trace to die of.
-      if (e instanceof RangeError) throw new ItemsRefusal(label, line, "(line)", `nested too deeply to read — a value at level ${DEPTH_MAX} or below is refused, and this line passed the parser's own stack first; flatten the facets`);
+      if (e instanceof RangeError) throw new ItemsRefusal(label, line, "(line)", `nested too deeply to read — an object or array at level ${DEPTH_MAX} or deeper is refused, and this line passed the parser's own stack first; flatten the facets`);
       throw e;
     }
     const { item, linksDropped: dropped } = parsed;
@@ -404,6 +424,9 @@ export const MALFORMED: readonly [label: string, line: string, field: string, re
   ["canonical not an object", JSON.stringify({ ...SAMPLE_ITEM, canonical: "{}" }), "canonical", /\{form, mediaType\}/],
   ["a form that is not a string", JSON.stringify({ ...SAMPLE_ITEM, canonical: { form: { id: 1 }, mediaType: "application/json" } }), "canonical.form", /a string/],
   ["a mediaType that is not one", JSON.stringify({ ...SAMPLE_ITEM, canonical: { form: "{}", mediaType: "json" } }), "canonical.mediaType", /type\/subtype/],
+  ["a mediaType with a 128-character subtype", JSON.stringify({ ...SAMPLE_ITEM, canonical: { form: "{}", mediaType: `application/${"x".repeat(128)}` } }), "canonical.mediaType", /type\/subtype/],
+  ["a link target past IDENTITY_MAX", JSON.stringify({ ...SAMPLE_ITEM, links: [{ relation: "references", target: "t".repeat(IDENTITY_MAX + 1) }] }), "links[0].target", new RegExp(`${IDENTITY_MAX + 1} characters`)],
+  ["a key of 300 emoji is 300 characters, not 600 — but 513 emoji are 513", JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "chatgpt", key: "😀".repeat(IDENTITY_MAX + 1) } }), "identity.key", new RegExp(`^${IDENTITY_MAX + 1} characters`)],
   ["text not a string", JSON.stringify({ ...SAMPLE_ITEM, text: 42 }), "text", /a string/],
   ["blank text", JSON.stringify({ ...SAMPLE_ITEM, text: "  \n" }), "text", /blank/],
   ["links not an array", JSON.stringify({ ...SAMPLE_ITEM, links: {} }), "links", /an array/],
@@ -422,11 +445,16 @@ export const MALFORMED: readonly [label: string, line: string, field: string, re
   ["createdAt a number", JSON.stringify({ ...SAMPLE_ITEM, createdAt: 1700000000 }), "createdAt", /ISO-8601 instant/],
   ["watermark not an object", JSON.stringify({ ...SAMPLE_ITEM, watermark: "2026" }), "watermark", /\{key, value, asOf\?\}/],
   ["a watermark with no value", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: "k" } }), "watermark.value", /sorts as it orders/],
-  ["a watermark under the pipeline's key", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: "source", value: "v" } }), "watermark.key", /pipeline's own metadata key/],
+  ...PIPELINE_META_KEYS.map((k): [string, string, string, RegExp] => [`a watermark under the pipeline's key ${k}`, JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: k, value: "v" } }), "watermark.key", /pipeline's own metadata key/]),
+  ["a watermark with an empty value", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: "k", value: "" } }), "watermark.value", /sorts as it orders/],
   ["a watermark asOf that is not an instant", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: "k", value: "v", asOf: "yesterday" } }), "watermark.asOf", /ISO-8601 instant/],
   ["a NUL in the text", JSON.stringify({ ...SAMPLE_ITEM, text: "a\u0000b" }), "text", /NUL/],
   ["a NUL in the form", JSON.stringify({ ...SAMPLE_ITEM, canonical: { form: "a\u0000b", mediaType: "text/plain" } }), "canonical.form", /NUL/],
   ["a lone surrogate in a facet", "{" + SAMPLE_LINE.slice(1).replace("\"title\":\"Postgres pooling\"", "\"title\":\"\\ud800 pooling\""), "facets.title", /lone surrogate/],
+  ["a lone LOW surrogate in the text", "{" + SAMPLE_LINE.slice(1).replace("\"text\":\"Postgres pooling", "\"text\":\"\\udc00 Postgres pooling"), "text", /lone surrogate/],
+  ["a fraction of seven digits", JSON.stringify({ ...SAMPLE_ITEM, createdAt: "2026-09-25T23:59:59.9999999Z" }), "createdAt", /ISO-8601 instant/],
+  ["an offset with minute 60", JSON.stringify({ ...SAMPLE_ITEM, createdAt: "2026-09-25T10:00:00+05:60" }), "createdAt", /ISO-8601 instant/],
+  ["a trailing comma beside a U+FEFF inside a string — the parser's fault, not the mark's", `{"text":"a${BOM}b",}`, "(line)", /^not JSON — (?!a byte-order mark)/],
   ["a NUL in a facet key", JSON.stringify({ ...SAMPLE_ITEM, facets: { "a\u0000b": 1 } }), "facets.a\u0000b", /NUL/],
   ["a NUL in a link target", JSON.stringify({ ...SAMPLE_ITEM, links: [{ relation: "references", target: "a\u0000b" }] }), "links[0].target", /NUL/],
   ["a lone surrogate in a facets array", "{" + JSON.stringify({ ...SAMPLE_ITEM, facets: { tags: ["ok", "LONE pooling"] } }).slice(1).replace("\"LONE pooling\"", "\"\\ud800 pooling\""), "facets.tags[1]", /lone surrogate/],
@@ -435,7 +463,7 @@ export const MALFORMED: readonly [label: string, line: string, field: string, re
   ["createdAt in year 0", JSON.stringify({ ...SAMPLE_ITEM, createdAt: "0000-01-01T00:00:00Z" }), "createdAt", /ISO-8601 instant/],
   ["createdAt with an offset past 15 hours", JSON.stringify({ ...SAMPLE_ITEM, createdAt: "2026-09-25T10:00:00+16:00" }), "createdAt", /ISO-8601 instant/],
   ["a facet nested past any stack", `{"identity":{"system":"chatgpt","key":"deep"},"scope":"s:x","canonical":{"form":"f","mediaType":"text/plain"},"text":"t","links":[],"mentions":[],"facets":{"a":${"[".repeat(200000)}${"]".repeat(200000)}}}`, "(line)", /nested too deeply/],
-  ["a facet nested to the bound exactly", `{"identity":{"system":"chatgpt","key":"deep"},"scope":"s:x","canonical":{"form":"f","mediaType":"text/plain"},"text":"t","links":[],"mentions":[],"facets":{"a":${"[".repeat(DEPTH_MAX - 1)}${"]".repeat(DEPTH_MAX - 1)}}}`, "(line)", /level 64 or below/],
+  ["a facet nested to the bound exactly", `{"identity":{"system":"chatgpt","key":"deep"},"scope":"s:x","canonical":{"form":"f","mediaType":"text/plain"},"text":"t","links":[],"mentions":[],"facets":{"a":${"[".repeat(DEPTH_MAX - 1)}${"]".repeat(DEPTH_MAX - 1)}}}`, "(line)", /level 64 or deeper/],
 ];
 
 export function selfCheck(): number {
@@ -462,9 +490,9 @@ export function selfCheck(): number {
   ok(parseItem({ ...SAMPLE_ITEM, watermark: { key: "k", value: "v", asOf: "2026-09-03T00:00:00+02:00" } }, 1).item.watermark?.asOf === "2026-09-03T00:00:00+02:00", "an asOf with an offset is an instant");
   ok(parseItem({ ...SAMPLE_ITEM, facets: { source: "elsewhere" } }, 1).item.facets.source === "elsewhere", "a facets.source is carried as given — the pipeline overwrites it with the system (ingest-contract.ts)");
   ok(parseItem({ ...SAMPLE_ITEM, scope: "chatgpt:export:2026/09".replace("/", "-") }, 1).item.scope === "chatgpt:export:2026-09", "a scope spelled with colons and dashes passes");
-  // The line's object is level 0 and `facets` level 1, so k brackets under facets.a put the innermost at level k + 1: 62 reach level 63 and pass, 63 reach level 64 and are refused (the fixture above).
+  // The line's object is level 0 and `facets` level 1, so k brackets under facets.a put the innermost array at level k + 1: 62 reach level 63 and pass (the scalar inside, at level 64, is no container), 63 reach level 64 and are refused (the fixture above).
   const deepOk = { ...SAMPLE_ITEM, facets: JSON.parse(`{"a":${"[".repeat(DEPTH_MAX - 2)}1${"]".repeat(DEPTH_MAX - 2)}}`) };
-  ok(parseItem(deepOk, 1).item.facets !== undefined, `a line whose deepest value is at level ${DEPTH_MAX - 1} passes; level ${DEPTH_MAX} is refused`);
+  ok(parseItem(deepOk, 1).item.facets !== undefined, `a line whose deepest array is at level ${DEPTH_MAX - 1} passes, a scalar inside it at ${DEPTH_MAX} too; an array at level ${DEPTH_MAX} is refused`);
   ok(parseItem({ ...SAMPLE_ITEM, mentions: [{ name: "n".repeat(MENTION_NAME_MAX), type: "topic" }], identity: { system: "chatgpt", key: "k".repeat(IDENTITY_MAX) } }, 1).item.identity.key.length === IDENTITY_MAX, `a name of exactly ${MENTION_NAME_MAX} and a key of exactly ${IDENTITY_MAX} pass — the bounds are inclusive`);
 
   // Each malformed kind: refused, on the line given, naming the field. The
@@ -494,6 +522,11 @@ export function selfCheck(): number {
   let utf16: ItemsRefusal | null = null;
   try { parseItems(new Uint8Array([0xff, 0xfe, 0x7b, 0x00, 0x7d, 0x00, 0x0a, 0x00]), "x.jsonl"); } catch (e) { if (e instanceof ItemsRefusal) utf16 = e; else throw e; }
   ok(utf16?.line === 1 && /UTF-16/.test(utf16.reason), "a UTF-16 file is named as such, not as a NUL byte");
+  const utf16Of = (bytes: number[]) => { try { parseItems(new Uint8Array(bytes), "x.jsonl"); return ""; } catch (e) { return e instanceof ItemsRefusal ? e.reason : "wrong"; } };
+  ok(/UTF-16/.test(utf16Of([0xfe, 0xff, 0x00, 0x7b, 0x00, 0x7d, 0x00, 0x0a])), "…big-endian with its mark too");
+  ok(/UTF-16 without a byte-order mark/.test(utf16Of([0x7b, 0x00, 0x22, 0x00, 0x61, 0x00, 0x22, 0x00, 0x7d, 0x00, 0x0a, 0x00])) && /UTF-16 without a byte-order mark/.test(utf16Of([0x00, 0x7b, 0x00, 0x22, 0x00, 0x61, 0x00, 0x22, 0x00, 0x7d, 0x00, 0x0a])), "…and without its mark, in either byte order: every other byte is 0x00");
+  ok(/NUL byte/.test(utf16Of([0x7b, 0x22, 0x61, 0x00, 0x62, 0x22, 0x7d, 0x0a])), "…while one NUL byte in UTF-8 is a NUL byte");
+  ok(parseItem({ ...SAMPLE_ITEM, identity: { system: "chatgpt", key: "😀".repeat(300) }, mentions: [{ name: "😀".repeat(MENTION_NAME_MAX), type: "topic" }], links: [{ relation: "references", target: "😀".repeat(IDENTITY_MAX) }] }, 1).item.mentions.length === 1, "lengths are characters, as the column counts them: 300 emoji are 300, not 600");
   let dup: ItemsRefusal | null = null;
   try { parseItems(`${SAMPLE_LINE}\n${JSON.stringify({ ...SAMPLE_ITEM, text: "another text" })}\n`, "x.jsonl"); }
   catch (e) { if (e instanceof ItemsRefusal) dup = e; else throw e; }
@@ -514,8 +547,8 @@ export function selfCheck(): number {
   ok(nulByte?.line === 2 && /NUL/.test(nulByte.reason), "a raw NUL byte refuses its line");
 
   // The instant rule.
-  ok(isInstant("2026-09-25T10:00:00Z") && isInstant("2026-09-25T10:00Z") && isInstant("2026-09-25T10:00:00.123456789+05:30") && isInstant("2026-02-28T23:59:59-00:00") && isInstant("0042-01-01T00:00:00Z"), "instants: seconds and fraction optional, Z or ±hh:mm, a year under 100 as itself");
-  ok(!isInstant("2026-09-25") && !isInstant("2026-09-25T10:00:00") && !isInstant("2026-02-30T00:00:00Z") && !isInstant("2026-13-01T00:00:00Z") && !isInstant("2026-09-25T24:00:00Z") && !isInstant("2026-09-25T10:60:00Z") && !isInstant("2026-09-25T10:00:60Z") && !isInstant("2026-09-25T10:00:00.1234567890Z") && !isInstant("2026-09-25T10:00:00+16:00") && !isInstant("2026-09-25T10:00:00+24:00") && !isInstant("0000-01-01T00:00:00Z") && !isInstant(" 2026-09-25T10:00:00Z"), "not instants: a bare date, no offset, February the 30th, month 13, hour 24, minute 60, second 60, a ten-digit fraction, offset 16 and 24, year 0, a leading space");
+  ok(isInstant("2026-09-25T10:00:00Z") && isInstant("2026-09-25T10:00Z") && isInstant("2026-09-25T10:00:00.123456+05:30") && isInstant("2026-02-28T23:59:59-00:00") && isInstant("0042-01-01T00:00:00Z"), "instants: seconds and a fraction to six digits optional, Z or ±hh:mm, a year under 100 as itself");
+  ok(!isInstant("2026-09-25") && !isInstant("2026-09-25T10:00:00") && !isInstant("2026-02-30T00:00:00Z") && !isInstant("2026-13-01T00:00:00Z") && !isInstant("2026-09-25T24:00:00Z") && !isInstant("2026-09-25T10:60:00Z") && !isInstant("2026-09-25T10:00:60Z") && !isInstant("2026-09-25T10:00:00.1234567Z") && !isInstant("2026-09-25T10:00:00+05:60") && !isInstant("2026-09-25T10:00:00+16:00") && !isInstant("2026-09-25T10:00:00+24:00") && !isInstant("0000-01-01T00:00:00Z") && !isInstant(" 2026-09-25T10:00:00Z"), "not instants: a bare date, no offset, February the 30th, month 13, hour 24, minute 60, second 60, a seven-digit fraction, offset minute 60, offset 16 and 24, year 0, a leading space");
   ok(isInstant("2026-09-25T10:00:00+15:59") && isInstant("0001-01-01T00:00:00Z"), "…and offset 15:59 and year 1 are the bounds' last accepted values");
   ok(unstorable("plain") === null && /NUL/.test(unstorable("a\u0000b") ?? "") && /surrogate/.test(unstorable("a\ud800") ?? "") && unstorable("😀") === null, "unstorable: NUL and a lone surrogate, and a paired surrogate is fine");
 

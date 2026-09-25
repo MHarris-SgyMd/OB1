@@ -747,7 +747,8 @@ async function main(): Promise<void> {
         seen.add(name);
       }
       if (name !== null && TAKES_ONE.has(name)) {
-        if (i + 1 >= args.length || args[i + 1].startsWith("--")) { console.error(`--${name} takes a value.\n${USAGE}`); process.exit(2); }
+        // An empty value is no value: `--items "$OUT"` with the variable unset would otherwise read as the flag absent and the run would write nothing, exit 0 (third review pass, cold read).
+        if (i + 1 >= args.length || args[i + 1].startsWith("--") || args[i + 1] === "") { console.error(`--${name} takes a value${i + 1 < args.length && args[i + 1] === "" ? " (an empty one was given)" : ""}.\n${USAGE}`); process.exit(2); }
         i++;
         continue;
       }
@@ -848,7 +849,10 @@ async function main(): Promise<void> {
       // pipe — `<(python3 emit.py)`, a FIFO — reads to its end as a file does
       // (second review pass: the first pass refused everything but a plain file).
       else if (statSync(itemsPath).isDirectory()) { console.error(`--items: a directory, not a file: ${itemsPath}`); process.exit(2); }
-      else text = readFileSync(itemsPath);
+      else {
+        try { text = readFileSync(itemsPath); }
+        catch (e) { console.error(`--items: cannot read ${itemsPath}: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`); process.exit(2); }
+      }
       // A malformed line is a wrong input, as a missing file is: exit 2 with the
       // line and the field, the file refused WHOLE, before any write — the
       // gather precedes every write, so no row of a refused file is ever half

@@ -1739,12 +1739,16 @@ pipeline's own six sources (`fork`, `commit`, `linear`, `memory`, `markdown`,
 sync's row with no `held` to say so); `IDENTITY_MAX`; the six relations; the
 six entity types; `normaliseLinks` / `normaliseMentions` — and what no column
 holds: a byte that is not UTF-8 (the file is read as bytes and each line
-decoded strictly, never repaired to U+FFFD), a NUL or a lone surrogate
-anywhere in the line, a value at level 64 or deeper (the line's object is
-level 0, its `facets` level 1), a `createdAt` or `asOf` that is not an instant
-a `timestamptz` cast accepts (February the 30th is refused, not rolled to
-March as `Date.parse` would; year 0 and an offset past `+15:59`, which
-PostgreSQL has no room for, are refused). And what the pipeline's own knobs
+decoded strictly, never repaired to U+FFFD; a UTF-16 file is named as such,
+with or without its byte-order mark), a NUL or a lone surrogate
+anywhere in the line, an object or array at level 64 or deeper (the line's
+object is level 0, its `facets` level 1), a `createdAt` or `asOf` that is not
+an instant a `timestamptz` cast accepts unrounded (February the 30th is
+refused, not rolled to March as `Date.parse` would; year 0 and an offset past
+`+15:59`, which PostgreSQL has no room for, are refused; a fraction stops at
+six digits, the microsecond the column holds). Lengths count characters as
+the column does — a key or a link target within 512, a mention name within
+200. And what the pipeline's own knobs
 could not act on: a `scope` with a `/` (`--allow` reads an entry with one as
 a path) or a `,` (its separator) — spell a scope `chatgpt:export` — or with
 surrounding whitespace, a `key` with surrounding whitespace (a link's target
