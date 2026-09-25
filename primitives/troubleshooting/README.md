@@ -7,7 +7,7 @@ Solutions for issues that come up across any Open Brain extension. If your probl
 **"Cannot connect to the database" / `ECONNREFUSED` on start**
 - `SUPABASE_URL` is the Postgres connection string (`postgres://user:password@host:5432/openbrain`) — the SQL shim keeps supabase-js's variable name, but the value is a database URL, not a `https://…supabase.co` project URL
 - From a shell on the host, the compose stack's database is not published (`deploy/README.md`, "What is reachable from where"); an extension server on the host reaches it only when the stack came up with `-f deploy/compose.host-ports.yaml`, or through its own connection string
-- Ensure Row Level Security (RLS) policies exist for RLS-enabled tables — the connecting role is not the table owner unless you made it so, and the policies need `auth.uid()` (the extension's README Step 1 gives the stub)
+- The extension's tables are the connecting role's own when that role applied the schema; otherwise grant them with `bun db/migrate.ts --grant <role>`. No `auth.uid()` stub is needed (SMD-1810)
 
 **"Getting 401 Unauthorized"**
 - The URL or header must carry the **key**; the server's `MCP_ACCESS_KEYS` holds its **hash** — check that the two are that way round
@@ -42,7 +42,7 @@ Solutions for issues that come up across any Open Brain extension. If your probl
 **The server starts but tool calls error**
 - Read the server's output: a failed tool call logs its cause there
 - `relation "…" does not exist`: the extension's `schema.sql` did not run against the database `SUPABASE_URL` names
-- `function auth.uid() does not exist`: create the two stub functions the extension's README Step 1 gives
+- `schema "auth" does not exist`, or `function auth.uid() does not exist` / `relation "auth.users" does not exist` once an `auth` schema was created by hand: a `schema.sql` from before SMD-1810, or one of your own with Supabase's policies — the files in this tree call no `auth.*` function; take the current file
 - Vector width: a server that embeds through OpenRouter at 1536 dimensions refuses on a brain built at this fork's local default (1024); the README says which width it needs
 
 ## Database Issues
@@ -52,11 +52,9 @@ Solutions for issues that come up across any Open Brain extension. If your probl
 - Re-run it with `psql "$DATABASE_URL" -f extensions/<name>/schema.sql` (or paste it into whatever SQL client you use)
 - Check for errors in the SQL output — common issues include missing the pgvector extension or running statements out of order
 
-**"permission denied" or RLS errors**
-- The role in `SUPABASE_URL` needs grants on the extension's tables; `bun db/migrate.ts --grant <role>` grants the core tables (`db/README.md`, "Grants for a capturing role"), and the extension schemas grant nothing — `GRANT` the extension's tables to that role by hand, as the table owner (a role that owns the tables needs nothing)
-- For extensions using RLS (every extension but Family Calendar), verify the RLS policies were created by the schema.sql
+**"permission denied"**
+- The role in `SUPABASE_URL` needs grants on the extension's tables; `bun db/migrate.ts --grant <role>` grants the core tables and, since SMD-1810, the extension and recipe tables too — the **extensions** and **recipes** groups (`db/README.md`, "Grants for a capturing role"). The schemas grant nothing themselves; a role that owns the tables needs nothing
 - Check that `user_id` values are valid UUIDs
-- Ensure all RLS-enabled tables have policies created correctly
 
 **"Foreign key violation" errors**
 - Parent records must exist before creating child records (e.g., create a company before adding a job posting)

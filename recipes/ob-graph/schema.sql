@@ -65,18 +65,18 @@ CREATE INDEX IF NOT EXISTS idx_graph_edges_type
 -- ============================================================================
 -- Row Level Security
 -- ============================================================================
-ALTER TABLE graph_nodes ENABLE ROW LEVEL SECURITY;
-ALTER TABLE graph_edges ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY graph_nodes_user_policy ON graph_nodes
-    FOR ALL
-    USING (auth.uid() = user_id)
-    WITH CHECK (auth.uid() = user_id);
-
-CREATE POLICY graph_edges_user_policy ON graph_edges
-    FOR ALL
-    USING (auth.uid() = user_id)
-    WITH CHECK (auth.uid() = user_id);
+-- This fork (SMD-1810): upstream's file ENABLEd ROW LEVEL SECURITY on both
+-- tables here, with a policy `auth.uid() = user_id` FOR ALL on each.
+-- auth.uid() is GoTrue's, which exists only on Supabase: on plain Postgres
+-- the first policy stopped the file (`schema "auth" does not exist`),
+-- and with a stub returning NULL to get past it the policy denied every row
+-- to any role but the tables' owner. Removed. The server connects as one role
+-- and scopes rows by DEFAULT_USER_ID itself.
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `recipes` group, which covers graph_nodes
+-- and graph_edges (SELECT, INSERT, UPDATE, DELETE); a role that owns the
+-- tables needs nothing. Row-level security on this fork: SMD-1716.
 
 -- ============================================================================
 -- Triggers: auto-update updated_at
@@ -237,8 +237,9 @@ BEGIN
     END IF;
 
     -- Validate both endpoints exist for this user. If either is missing or
-    -- belongs to someone else, RLS would have excluded it anyway; return an
-    -- empty result set rather than silently falling through the BFS.
+    -- belongs to someone else, return an empty result set rather than
+    -- silently falling through the BFS (the user_id check here is the only one;
+    -- no row policy stands behind it on this fork — SMD-1810).
     SELECT EXISTS (
         SELECT 1 FROM graph_nodes
         WHERE id = p_start_node_id AND user_id = p_user_id
@@ -355,29 +356,21 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- ============================================================================
--- Grant permissions to service_role (required on newer Supabase projects)
+-- Grants and function lock-down
 -- ============================================================================
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.graph_nodes TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.graph_edges TO service_role;
-
--- ============================================================================
--- Lock down internal helper
--- reconstruct_bfs_path is plumbing for find_shortest_path (and any future
--- BFS helper). It should not be exposed as a PostgREST RPC to anon or
--- authenticated roles — only server-side callers (service_role) need it.
--- ============================================================================
-REVOKE ALL ON FUNCTION public.reconstruct_bfs_path(jsonb, uuid, uuid) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.reconstruct_bfs_path(jsonb, uuid, uuid) TO service_role;
-
--- ============================================================================
--- Lock down RPC entry points
--- find_shortest_path and traverse_graph are intended for server-side callers
--- (edge functions using SUPABASE_SERVICE_ROLE_KEY). Revoke default PUBLIC
--- EXECUTE so PostgREST rejects anon/authenticated calls at the entry point
--- rather than crashing inside reconstruct_bfs_path on a permission error.
--- ============================================================================
-REVOKE ALL ON FUNCTION public.find_shortest_path(uuid, uuid, uuid, int) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.find_shortest_path(uuid, uuid, uuid, int) TO service_role;
-
-REVOKE ALL ON FUNCTION public.traverse_graph(uuid, uuid, int, text) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.traverse_graph(uuid, uuid, int, text) TO service_role;
+-- This fork (SMD-1810): upstream's file ended here with GRANTs on both tables
+-- TO service_role, and for each of the three functions a `REVOKE ALL … FROM
+-- PUBLIC, anon, authenticated` and a GRANT EXECUTE TO service_role — so
+-- PostgREST would refuse an anonymous RPC call at the entry point rather than
+-- inside reconstruct_bfs_path. Those are Supabase's roles: on plain Postgres
+-- the first GRANT would have stopped the file (`role "service_role" does not
+-- exist`) had the policies above not stopped it first.
+-- Removed, the REVOKEs with them: none of the three functions is SECURITY
+-- DEFINER, this fork has no PostgREST to expose them as RPCs, and the server
+-- calls them as the role it connects with, so EXECUTE stays PUBLIC's, as it
+-- is by default.
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `recipes` group, which covers graph_nodes
+-- and graph_edges (SELECT, INSERT, UPDATE, DELETE); a role that owns the
+-- tables needs nothing. Row-level security on this fork: SMD-1716.

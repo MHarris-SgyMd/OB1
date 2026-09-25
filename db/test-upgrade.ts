@@ -463,11 +463,12 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // cut's last migration, SMD-1804/SMD-1860), 049 (the three-value CHECK on
   // ob1_agent_keys.scope, SMD-1298), 050 (the writer's mark on the row,
   // SMD-1726), 051 (the second release's schema_version, 1.1.0), 052
-  // (thought_changes, the read over the audit log, SMD-1296) and 053
+  // (thought_changes, the read over the audit log, SMD-1296), 053
   // (thought_sources, the link facet kind and the structured-wins rule,
-  // SMD-1867) and 055 (the capture event carries the payload — the content,
-  // a backdating writer's created_at, an update's key move — 046's rules as
-  // functions, the payload amendment and its backfill, SMD-2115) stay
+  // SMD-1867), 054 (resolve_agent's stale-only write, SMD-2090) and 055 (the
+  // capture event carries the payload — the content, a backdating writer's
+  // created_at, an update's key move — 046's rules as functions, the payload
+  // amendment and its backfill, SMD-2115) stay
   // recorded and are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
   // embedding_model column — are
@@ -495,10 +496,12 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // name without either ([20f]); 053 adds a table on 001's thoughts, two
   // indexes on 042's thought_facets and redefines 016's
   // record_thought_entities and 042's thought_facets_validate on their own
-  // bodies, refusing by name without 016 or 042 ([20g]); 055 redefines 046's
-  // audit trigger, 046's refusal trigger and 050's stamp trigger on their own
-  // bodies, adds functions and one partial index on 008's table, refusing by
-  // name without 008, 046 or 050 ([20i]) — all recorded by
+  // bodies, refusing by name without 016 or 042 ([20g]); 054 redefines 010's
+  // resolve_agent on its own body, refusing by name without 010's table
+  // ([20h]) or its last_used_at or scope (test-schema [49]); 055 redefines
+  // 046's audit trigger, 046's refusal trigger and 050's stamp trigger on
+  // their own bodies, adds functions and one partial index on 008's table,
+  // refusing by name without 008, 046 or 050 ([20i]) — all recorded by
   // the baseline with their prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
@@ -1934,6 +1937,32 @@ console.log("\n[20g] Migration 053 on a schema without 016, and on 016's tables 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "042" });
   const present = (await sql`SELECT to_regclass('thought_sources') IS NOT NULL AS t, to_regprocedure('record_source_links(uuid, text, jsonb)') IS NOT NULL AS f`)[0] as { t: boolean; f: boolean };
   assert(present.t === true && present.f === true, "…and applied once both are there: the table and the writer are present");
+  await sql.close();
+}
+
+console.log("\n[20h] Migration 054 on a schema without 010 — refused up front, naming 010 and --reapply (SMD-2090)");
+{
+  // 054's guard is 049's ([20d]): a plpgsql body is not checked against the
+  // catalog at CREATE, so without it 054 would apply over a pre-010 schema and
+  // fail bare at its COMMENT ON COLUMN. Same drive: a ledger baselined over a
+  // schema that stops before 010, 054 alone made pending.
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "010" });
+  const baselined = await migrate("--baseline");
+  assert(baselined.code === 0, `--baseline records every migration over the pre-010 schema (exit ${baselined.code})`);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the054 = MIGRATIONS.find((f) => f.startsWith("054_"))!;
+  await sql`DELETE FROM schema_migrations WHERE name = ${the054}`;
+  const plain = await migrate();
+  const ok = plain.code === 1 &&
+    /054_resolve_agent_stale_touch\.sql\s+FAILED: migration 054 needs 010 \(ob1_agent_keys\.last_used_at, revoked_at, scope\); this schema lacks it/.test(plain.out) &&
+    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+  assert(ok, `a plain run fails at 054 naming 010 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the054}`)[0].c) === 0, "…054 records nothing");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "010" });
+  // An apply that did not throw is not the function present ([20c]'s lesson): read 054's sentinel off the live body.
+  const [body] = await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure('resolve_agent(text, text, text)')`;
+  assert(/ob1:stale-only-touch/.test(String(body?.s ?? "")), "…and applied once 010's table is there: the live resolve_agent is 054's");
   await sql.close();
 }
 

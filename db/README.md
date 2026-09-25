@@ -164,8 +164,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1672 assertions: 1672 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports fifty-four (54) migrations applied, and
+`bun test-schema.ts` prints `1707 assertions: 1707 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports fifty-five (55) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -204,7 +204,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
-051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 055 SMD-2115).
+051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -313,6 +313,25 @@ an `extract:*` pass replaces only extracted rows, and where both name one
 (thought, entity) or edge the structured row stands. Additive, no data change,
 no ACL; the ingester and the board sync write through it (below).
 
+Migration 054 redefines 010's `resolve_agent` so that a lookup writes a key's
+row only when the write says something (SMD-2090): `last_used_at` NULL,
+over five minutes old or in the future, or a presented scope that differs
+from the recorded one. A recently used key presenting its recorded scope
+takes no row lock, so it answers while another transaction holds its row,
+where 010's body waited on every lookup (the SQL store caps each wait at
+250 ms, and a key still waiting after the server's retries is busy,
+SMD-2072). `last_used_at` now means the last use to within five minutes.
+The write re-checks `revoked_at IS NULL`, and when it writes nothing the row
+is read again: a revocation that commits while the lookup waits answers
+REVOKED, where 010 answered ok and the server cached it for its TTL. A row
+deleted during the wait is registered again (the rotation branch, or first
+sight if its agent went too), and registration's `ON CONFLICT … DO UPDATE`
+no longer writes over a revoked row. Under a REPEATABLE READ or SERIALIZABLE
+default either write fails 40001 instead, which the server retries. Same
+signature and grants, no data change; a role missing UPDATE on
+`ob1_agent_keys` now fails only a lookup that writes (a stale key, a scope
+change, a registration) rather than every known-key lookup.
+
 Migration 055 makes the capture event carry the payload (SMD-2115, step 1 of
 `../docs/event-log-as-truth.md`): a capture's `diff` carries the **content**
 and, when the writer set the row's own time (`db/ingest-records.ts` backdates
@@ -379,7 +398,9 @@ introduce multi-tenancy; do not port this one.
 connects as — and to more than `thoughts`: see [Grants for a capturing
 role](#grants-for-a-capturing-role) below. The community schemas under
 `schemas/` carried the same grants, and RLS with a policy for that role, until
-change 93 (SMD-1796) cut them; their tables are the **community** group there.
+change 93 (SMD-1796) cut them; the extension and recipe schemas carried them
+too, with per-user policies on `auth.uid()`, until SMD-1810. Their tables are
+the **community**, **extensions** and **recipes** groups there.
 
 ## Grants for a capturing role
 
@@ -437,6 +458,21 @@ issues every group at once.
 | | `crm_persons`, `crm_person_mentions` (schemas/crm-person-tiers) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `readwise_books` (schemas/readwise-books — upstream granted the table nothing; its integration wrote it through Supabase's default privileges) | `SELECT, INSERT, UPDATE, DELETE` |
 | | functions `merge_thought_provenance_metadata(uuid, jsonb)`, `merge_thought_eval_metadata(uuid, jsonb)` (schemas/provenance-chains; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
+| **extensions** — the learning path's six `extensions/*/schema.sql`, applied by hand as each README's Step 1 says (SMD-1810). Upstream's five with policies enabled RLS on `auth.uid() = user_id` and granted nothing — Supabase's default privileges carried its service role — and family-calendar's carried neither; the policies are gone, and this group is what a role other than the tables' owner needs. Every id is a `uuid` (no sequences) and no function is `REVOKE`d `FROM PUBLIC` | `household_items`, `household_vendors` (extensions/household-knowledge) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `maintenance_tasks`, `maintenance_logs` (extensions/home-maintenance) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `recipes`, `meal_plans`, `shopping_lists` (extensions/meal-planning) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `professional_contacts`, `contact_interactions`, `opportunities` (extensions/professional-crm) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `family_members`, `activities`, `important_dates` (extensions/family-calendar — upstream's file carried no RLS and no grant; listed so the whole path is one grant) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `companies`, `job_postings`, `applications`, `interviews`, `job_contacts` (extensions/job-hunt) | `SELECT, INSERT, UPDATE, DELETE` |
+| **recipes** — the nine recipe SQL files a brain applies as a schema (tables or views; `CONTRIB_SCHEMA_FILES` in `db/test-support.ts`), applied by hand as each README says (SMD-1810). Upstream granted most of these to `service_role` (adaptive-capture's four to `authenticated`; lint-sweep's views nothing), enabled RLS on most with policies on `auth.uid()`, and `REVOKE`d ob-graph's three functions from `anon` and `authenticated`; all cut, the REVOKEs too (none is SECURITY DEFINER, and there is no PostgREST here to expose them), so EXECUTE stays PUBLIC's and no function row is needed. Every id is a `uuid` or text: no sequences. The privileges are upstream's own for its roles | `correction_learnings`, `classification_outcomes`, `capture_thresholds`, `ab_comparisons` (recipes/adaptive-capture-classification — upstream's three privileges to its API role, kept; the recipe deletes nothing) | `SELECT, INSERT, UPDATE` |
+| | views `ops_source_volume_24h`, `ops_recent_thoughts`, `ops_enrichment_gaps`, `ops_type_distribution`, `ops_sensitivity_distribution`, `ops_ingestion_summary`, `ops_stalled_entity_queue`, `ops_graph_coverage` (recipes/brain-health-monitoring, its `ops-views.sql`; the last three exist only where smart-ingest and entity-extraction are applied, and are skipped until then) | `SELECT` |
+| | `chatgpt_conversations` (recipes/chatgpt-conversation-import; `user_id` is a plain nullable `uuid` now — upstream's referenced `auth.users`) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `life_engine_habits`, `life_engine_habit_log`, `life_engine_checkins`, `life_engine_briefings`, `life_engine_evolution`, `life_engine_state` (recipes/life-engine) | `SELECT, INSERT, UPDATE, DELETE` |
+| | views `lint_orphans_by_tag`, `lint_over_tagged`, `lint_empty_content`, `lint_very_long`, `lint_low_signal`, `lint_exact_duplicates`, `lint_high_importance_isolated` (recipes/lint-sweep, its `views.sql`; the last two are guarded on `content_fingerprint` and `thought_entities`, both the migrations', so all seven exist on a migrated brain) | `SELECT` |
+| | `graph_nodes`, `graph_edges` (recipes/ob-graph) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `repo_learning_projects`, `repo_learning_research_documents`, `repo_learning_tracks`, `repo_learning_lessons`, `repo_learning_quizzes`, `repo_learning_quiz_questions`, `repo_learning_lesson_progress`, `repo_learning_quiz_attempts`, `repo_learning_quiz_responses`, `repo_learning_lesson_comments` (recipes/repo-learning-coach) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `operating_model_profiles`, `operating_model_sessions`, `operating_model_layer_checkpoints`, `operating_model_entries`, `operating_model_exports` (recipes/work-operating-model-activation; its three functions keep PUBLIC's EXECUTE — upstream only granted them to its service role) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `world_model_assessments`, `world_model_boundary_flows` (recipes/world-model-diagnostic-activation, its `schema-v2-draft.sql` — a draft its README's V1 does not apply; listed so applying it is one `--grant` away) | `SELECT, INSERT, UPDATE, DELETE` |
 
 Plus `USAGE ON SCHEMA public`. The migrations' own tables need no sequence
 grant — every primary key is a `uuid` or a natural key — but three community
@@ -471,10 +507,10 @@ create the role first. `--grant --dry-run` prints the statements without running
 them, so a locked-down deployment can grant a subset by hand. A role that only
 ever runs the server needs the **capture** and **server** groups; add **worker**
 for the role your bulk passes connect as, and **extraction** on top of that for
-entity extraction. The **community** group is issued for whichever `schemas/`
-files you have applied — the objects not yet present are skipped and named, so
-run `--grant` again after applying one; apply a community schema with `psql
-"$DATABASE_URL" -f schemas/<name>/schema.sql`, as its README says. Presence is
+entity extraction. The **community**, **extensions** and **recipes** groups are
+issued for whichever schema files you have applied — the objects not yet
+present are skipped and named, so run `--grant` again after applying one; apply
+a schema with `psql "$DATABASE_URL" -f <its path>`, as its README says. Presence is
 per object, not per file, so the two community rows whose tables a migration
 also creates — `thought_audit` (008) and `thought_entities` (016) — are issued
 on every migrated brain: the audit row adds only upstream's `SELECT` on the
@@ -1768,14 +1804,49 @@ bun tier.ts --promote --from <canary-url> --to <stable-url>
 (thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
 migration might touch, so a migration meets *all* the real data), resets the target
 and restores into it, then runs `migrate.ts` forward with the merged tree. It is
-destructive to `--to` and refuses a non-loopback target unless
-`OB1_ALLOW_REMOTE_DB=1`. It needs a `pg_dump`/`pg_restore` whose major version is at
-least the source server's — the pgvector image the tiers run carries matching client
-tools; a host needs `postgresql-client >=` the server. A branch that changes the
+destructive to `--to`, so it guards the target three ways.
+
+- **It is not the `--from` database.** The source session is looked up in the
+  target's `pg_stat_activity`. Two names for one server are still one server,
+  and a copy that shares the source's `system_identifier` is still another.
+- **It is a tier, or empty** (`targetRefusal`). A target is allowed when:
+  - an earlier refresh marked it. Before its reset, each refresh sets
+    `ALTER DATABASE … SET ob1.refresh_target`, which neither the reset nor the
+    restore touches. A refresh that died after its restore therefore retries,
+    even though the restore left the source's `tier=stable` in `ob1_config`;
+  - it is stamped `canary` or `working`;
+  - its public schema holds nothing but what extensions own;
+  - it is an Open Brain schema with no thoughts.
+
+  Anything else is refused, and the refusal names no override: the record
+  (`tier=stable`), a brain with thoughts under no stamp, and another
+  application's schema. For that check, `schema_migrations` alone does not
+  make an Open Brain schema, since Rails and others use the name. `--promote`
+  mirrors this and refuses a `--to` that is the `--from` database, marked, or
+  stamped `canary`/`working`.
+
+  The mark is read from the database's own setting only, never a role's or the
+  server's, and only `canary` or `working` counts. Setting it needs a superuser,
+  or `GRANT SET ON PARAMETER ob1.refresh_target` (PG15+); restoring pgvector
+  needs a superuser in the default install anyway. It lasts until
+  `ALTER DATABASE … RESET ob1.refresh_target`. `deploy/README.md`, "Refreshing
+  a tier", has both statements.
+- **It is loopback,** unless `OB1_ALLOW_REMOTE_DB=1`.
+
+It needs Bun
+and a `pg_dump`/`pg_restore` whose major version is at least the source server's, and
+no image the stack runs has both — the pgvector image has the client and no Bun,
+`oven/bun` the reverse. **`deploy/tier.sh` is the runnable form** (SMD-2036): it
+builds `db/tier.Dockerfile` (`oven/bun:1.4.0-alpine` + `postgresql16-client`, the
+stack server's major) and runs this checkout's `tier.ts` in it on the stack's
+network, so a refresh migrates forward with the tree it was run from —
+`deploy/README.md` has the commands. A host with Bun and `postgresql-client >=` the
+server can still run `bun tier.ts` directly. A branch that changes the
 embedding model or width cannot inherit stable's vectors: `migrate.ts` refuses the
 mismatch on the refreshed copy, so that branch's working tier is rebuilt from the
-records instead (`ingest-records.ts` then `reembed.ts`, the claim path) — a real
-test of the re-embed path, not a cost.
+records instead (`ingest-records.ts --tier working` then `reembed.ts`, the claim
+path; without `--tier` the ingester stamps `stable`) — a real test of the
+re-embed path, not a cost.
 
 **`--replay` / `--diff`** are the *live* half of the replay gate (SMD-1295, whose
 `db/test-replay.ts` is the offline, model-free, fixture-vector half CI runs). For
@@ -2027,8 +2098,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1672 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 687 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1707 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 715 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

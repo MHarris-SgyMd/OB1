@@ -4,8 +4,18 @@
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: @supabase/supabase-js
 // Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
+// ob1-fork (SMD-2110): the extraction trigger after a write POSTs to
+// ENTITY_EXTRACTION_WORKER_URL, the worker's own http(s) address, refused at
+// boot under any other scheme and skipped when unset — it built the URL from
+// SUPABASE_URL, the Postgres DSN here, so every trigger handed fetch() the
+// database credentials and failed inside its timeout. The trigger fires only
+// after an add the server counts, and it counted none here: upsert_thought
+// answers the fork's UUID id, which extractThoughtId read as no id at all, so
+// every add was reported failed — a UUID is an id now; the rest of the write
+// path's fork gap (the vector in the 2-argument form's payload, the bigint
+// item columns) is SMD-2128's.
 /**
- * smart-ingest — Supabase Edge Function for the Smart Ingest pipeline.
+ * smart-ingest — the Smart Ingest server.
  *
  * Accepts raw text, extracts atomic thoughts via LLM, deduplicates against
  * existing thoughts (fingerprint + semantic), and optionally writes them to
@@ -22,8 +32,8 @@
  *   project_path, git_branch, import_key
  *
  * Dependencies:
- *   - Smart ingest tables (schemas/smart-ingest-tables): ingestion_jobs, ingestion_items
- *   - append_thought_evidence RPC (from smart-ingest-tables schema)
+ *   - Smart ingest tables (schemas/smart-ingest): ingestion_jobs, ingestion_items
+ *   - append_thought_evidence RPC (from the smart-ingest schema)
  *   - match_thoughts RPC (base OB1)
  *   - upsert_thought RPC (base OB1)
  *   - Enhanced thoughts columns (schemas/enhanced-thoughts)
@@ -58,6 +68,28 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ?? "";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+/**
+ * An HTTP target read from its own variable, or null when unset: never derived from SUPABASE_URL, which on this fork is the
+ * Postgres connection string — a URL built on it carries the database credentials into fetch() and fails there
+ * (SMD-2110). Parsed at boot and refused unless it is a bare http(s) address — scheme, host, port, an optional path
+ * prefix; no query, fragment or credentials, since a path is appended to it — and the message names the variable and
+ * the scheme, never the value (a connection string's userinfo is the password; Bun's own "Invalid URL" error quotes the
+ * value whole, so it is caught and not rethrown). Trailing slashes are dropped. The same text as in the sibling server
+ * that reads a knob this way; extensions/test-writes.ts holds the two copies identical.
+ */
+function httpTargetFrom(name: string): string | null {
+  const value = process.env[name]?.trim();
+  if (!value) return null;
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error(`${name} must be an http(s) URL — it is not a URL; write it as http://host:port`); }
+  if (!/^https?:$/.test(url.protocol)) throw new Error(`${name} must be an http(s) URL — it is a ${url.protocol}// URL; write it as http://host:port`);
+  if (url.search || url.hash || url.username || url.password) throw new Error(`${name} must be a bare http(s) address — scheme, host, port and an optional path; no query, fragment or credentials`);
+  return url.origin + url.pathname.replace(/\/+$/, "");
+}
+/** The entity-extraction worker's address (integrations/entity-extraction-worker), POSTed to after a write; unset, no trigger. */
+const ENTITY_EXTRACTION_WORKER_URL = httpTargetFrom("ENTITY_EXTRACTION_WORKER_URL");
+if (!ENTITY_EXTRACTION_WORKER_URL) console.warn("ENTITY_EXTRACTION_WORKER_URL is not set — a write here queues extraction and triggers no worker; run integrations/entity-extraction-worker on a schedule, or set the variable.");
+
 // ── Constants ───────────────────────────────────────────────────────────────
 
 const CHUNK_WORD_LIMIT = 5000;
@@ -79,9 +111,10 @@ const MAX_INPUT_CHARS = Number(process.env.SMART_INGEST_MAX_INPUT_CHARS ?? 100_0
 const MAX_CHUNKS_PER_REQUEST = Number(process.env.SMART_INGEST_MAX_CHUNKS ?? 10);
 const MAX_LLM_CALLS_PER_REQUEST = Number(process.env.SMART_INGEST_MAX_CALLS ?? 10_000);
 
-// ── Edge Function wall-clock budget (Wave 2.5 HIGH / BLOCKER-2 assist) ─────
-// Supabase Edge Functions cap at ~150s. Leave a 10s safety margin so we can
-// record partial-completion state before the platform kills us.
+// ── Request wall-clock budget (Wave 2.5 HIGH / BLOCKER-2 assist) ───────────
+// Upstream's Edge Function runtime killed a request at ~150 s; the ceiling is
+// kept (the name with it — `edge_function_budget_reached` is what clients
+// see), with a 10 s margin to record partial-completion state before it.
 const EDGE_FUNCTION_BUDGET_MS = Number(process.env.SMART_INGEST_BUDGET_MS ?? 140_000);
 
 const CORS_HEADERS: Record<string, string> = {
@@ -170,8 +203,8 @@ interface IngestionJob {
 }
 
 type UpsertThoughtResult = {
-  thought_id?: number;
-  id?: number;
+  thought_id?: number | string; // upstream's integer, or this fork's UUID (SMD-2110)
+  id?: number | string;
 };
 
 // ── Auth ────────────────────────────────────────────────────────────────────
@@ -353,29 +386,36 @@ function mergeTags(existing: unknown, extras: string[]): string[] {
   ]);
 }
 
-function extractThoughtId(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
+/** An id upsert_thought answered: upstream's integer, or this fork's UUID (`thoughts.id` is uuid here; SMD-2110). */
+function isThoughtId(value: unknown): value is number | string {
+  return (typeof value === "number" && Number.isFinite(value)) || (typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value));
+}
+function extractThoughtId(value: unknown): number | string | null {
+  if (isThoughtId(value)) return value;
   if (value && typeof value === "object" && "thought_id" in value) {
     const thoughtId = (value as UpsertThoughtResult).thought_id;
-    if (typeof thoughtId === "number" && Number.isFinite(thoughtId)) return thoughtId;
+    if (isThoughtId(thoughtId)) return thoughtId;
   }
   if (value && typeof value === "object" && "id" in value) {
     const id = (value as UpsertThoughtResult).id;
-    if (typeof id === "number" && Number.isFinite(id)) return id;
+    if (isThoughtId(id)) return id;
   }
   return null;
 }
 
-/** Best-effort entity extraction drain. Non-fatal if the worker is not deployed.
+/** Best-effort entity extraction drain. Non-fatal if the worker is not deployed,
+ * and skipped when ENTITY_EXTRACTION_WORKER_URL is unset (SMD-2110).
  * Uses a short 10s timeout so a hung worker cannot extend the caller's response
- * by the full Edge Function budget (Wave 2.5 HIGH-9).
+ * by the full request budget (Wave 2.5 HIGH-9).
  */
 async function scheduleEntityExtraction(writtenCount: number): Promise<void> {
-  if (writtenCount <= 0 || !SUPABASE_URL || !MCP_ACCESS_KEY) return;
+  if (writtenCount <= 0 || !ENTITY_EXTRACTION_WORKER_URL || !MCP_ACCESS_KEY) return;
   try {
     const limit = Math.min(Math.max(writtenCount, 1), ENTITY_EXTRACTION_BATCH_MAX);
+    const target = new URL(ENTITY_EXTRACTION_WORKER_URL);
+    target.searchParams.set("limit", String(limit));
     const response = await fetchWithTimeout(
-      `${SUPABASE_URL}/functions/v1/entity-extraction-worker?limit=${limit}`,
+      target.toString(),
       {
         method: "POST",
         headers: { "x-brain-key": MCP_ACCESS_KEY },
@@ -678,6 +718,28 @@ async function reconcileThought(
 
 // ── Execution ───────────────────────────────────────────────────────────────
 
+/**
+ * The item's row after a successful add, append or revision: `executed`, with the thought's id — in `result_thought_id`
+ * when it is upstream's integer, in `metadata.result_thought_uuid` when it is this fork's UUID, since the column is
+ * bigint until SMD-2128. One statement set the status and the id together before and failed whole on the UUID, its
+ * error unread, so the item stayed `ready` under a job marked complete (SMD-2110, review pass 1); the error is logged now.
+ */
+async function recordItemResult(itemDbId: number, resultThoughtId: number | string | null): Promise<void> {
+  if (!itemDbId) return;
+  const patch: Record<string, unknown> = { status: "executed" };
+  if (typeof resultThoughtId === "number") patch.result_thought_id = resultThoughtId;
+  if (typeof resultThoughtId === "string") {
+    // The row's metadata read first, and merged: written whole, a failed read would have replaced what persistItems put
+    // there (type, importance, tags, the snippet) with the id alone — so on a read error the status lands and the id is
+    // logged instead (review pass 2).
+    const { data: row, error: readError } = await supabase.from("ingestion_items").select("metadata").eq("id", itemDbId).maybeSingle();
+    if (readError) console.warn(`ingestion_items #${itemDbId}: metadata could not be read, so result_thought_uuid ${resultThoughtId} is not recorded — ${readError.message}`);
+    else patch.metadata = { ...((row?.metadata as Record<string, unknown> | null) ?? {}), result_thought_uuid: resultThoughtId };
+  }
+  const { error } = await supabase.from("ingestion_items").update(patch).eq("id", itemDbId);
+  if (error) console.warn(`ingestion_items #${itemDbId}: the result update failed — ${error.message}`);
+}
+
 async function executeItem(
   item: IngestionItem,
   embedding: number[],
@@ -685,7 +747,7 @@ async function executeItem(
   sourceType: string | null,
   sourceMetadata?: Record<string, unknown> | null,
   skipClassification = false,
-): Promise<number | null> {
+): Promise<number | string | null> {
   switch (item.action) {
     case "add": {
       const prepared = await prepareThoughtPayload(item.content, {
@@ -902,8 +964,10 @@ async function handleExecuteJob(req: Request): Promise<Response> {
   let body: Record<string, unknown>;
   try { body = await req.json(); } catch { return json({ error: "Invalid JSON body" }, 400); }
 
-  const jobId = typeof body.job_id === "number" ? body.job_id : 0;
-  if (!jobId) return json({ error: "job_id is required" }, 400);
+  // A number, or a numeric string — rest-api's proxy sent the route's captured `\d+` as a string until SMD-2110's second
+  // review pass, and every proxied execute was a 400 here.
+  const jobId = typeof body.job_id === "number" || typeof body.job_id === "string" ? Number(body.job_id) : 0;
+  if (!Number.isInteger(jobId) || jobId <= 0) return json({ error: "job_id is required" }, 400);
 
   const { data: job, error: jobErr } = await supabase
     .from("ingestion_jobs").select("*").eq("id", jobId).single();
@@ -961,9 +1025,7 @@ async function handleExecuteJob(req: Request): Promise<Response> {
         fakeItem, embedding, sourceLabel, sourceType, jobSourceMetadata, skipClassification,
       );
 
-      await supabase.from("ingestion_items")
-        .update({ status: "executed", result_thought_id: resultThoughtId })
-        .eq("id", item.id);
+      await recordItemResult(item.id, resultThoughtId);
       if (item.action === "add") addedCount++;
       else if (item.action === "append_evidence") appendedCount++;
       else if (item.action === "create_revision") revisedCount++;
@@ -1251,11 +1313,7 @@ const handler = async (req: Request) => {
         item, embeddings[i], sourceLabel, sourceType, sourceMetadata, skipClassification,
       );
       item.status = "executed";
-      if (itemDbId) {
-        await supabase.from("ingestion_items")
-          .update({ status: "executed", result_thought_id: resultThoughtId })
-          .eq("id", itemDbId);
-      }
+      await recordItemResult(itemDbId, resultThoughtId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       item.status = "failed"; item.error_message = msg;
