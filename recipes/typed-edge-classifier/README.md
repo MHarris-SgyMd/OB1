@@ -1,6 +1,6 @@
 # Typed Edge Classifier
 
-> **On this fork (SMD-2126).** `classify-edges.mjs` reaches the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and this fork's stack runs no PostgREST (SETUP.md), so the live mode fails at its first request (`--dry-run` runs). The port onto `compat/supabase-sql` under `bun` (`SUPABASE_URL` a `postgres://` string; the `node` commands below become `bun`) is SMD-2141; the decision for the class is in `docs/vendored-disposition.md`.
+> **On this fork (SMD-2126).** `classify-edges.mjs` reaches the brain as a PostgREST client — `${OPEN_BRAIN_URL}/rest/v1/…` with a service-role key — and this fork's stack runs no PostgREST (SETUP.md), so the live mode fails at its first request (`--dry-run` runs). The port onto `compat/supabase-sql` under `bun` (`OPEN_BRAIN_URL` a `postgres://` string; the `node` commands below become `bun`) is SMD-2141; the decision for the class is in `docs/vendored-disposition.md`.
 
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
 

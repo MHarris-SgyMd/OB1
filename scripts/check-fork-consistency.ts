@@ -233,9 +233,10 @@
  *      the class decision is docs/vendored-disposition.md's "PostgREST-
  *      speaking scripts" (an import emits ingestion-contract items, a
  *      maintenance script moves onto compat/supabase-sql, three retire), and
- *      POSTGREST_EXCEPTIONS counts the thirty files' lines with the ticket
- *      that ports or retires each — a landed port fails until its entry goes,
- *      so the table's size is the class's remaining size (SMD-2126)
+ *      POSTGREST_EXCEPTIONS counts the twenty-eight files with a call site
+ *      (two more reach the gateway through a lib) with the ticket that ports
+ *      or retires each — a landed port fails until its entry goes, so the
+ *      table's size is the class's remaining size (SMD-2126)
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20 and 23 parse YAML with Bun.YAML)
@@ -4851,12 +4852,15 @@ checkWorkflowPins();
 // each, filed under SMD-2126. This holds the class where it stands and stops it
 // growing back: in every code file (.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs, .py,
 // .sh) under the seven category directories and docs/, comments blanked (the
-// JS scanner for JS; a `#` outside a string for Python and shell — a docstring
-// is a string and is read: a file that says it posts to `/rest/v1/rpc/…` is
-// making a claim about itself), a `rest/v1` path in any string, a supabase-py
-// import or `create_client(` (Python and shell alone), or a
-// `@supabase/postgrest-js` specifier is a hit. POSTGREST_EXCEPTIONS counts
-// each of the thirty files' lines with the ticket that ports or retires it: a
+// JS scanner for JS; a `#` outside a string for Python, and for shell one at
+// a word's start — `$#`, `${#a[@]}` and `a#b` are not comments, so a hit after
+// one on the same line is read; a docstring is a string and is read: a file
+// that says it posts to `/rest/v1/rpc/…` is making a claim about itself), a
+// `rest/v1` path in any string, a supabase-py import or `create_client(`
+// (Python and shell alone), or a `@supabase/postgrest-js` specifier is a hit.
+// POSTGREST_EXCEPTIONS counts the twenty-eight files with a call site (two
+// more reach the gateway through a lib) with the ticket that ports or retires
+// each: a
 // line past the count fails (a new call beside the documented ones), a count
 // no line reaches fails as stale (the port landed — remove the entry), a file
 // that is gone fails until its entry goes. So every child PR shrinks the table,
@@ -4872,14 +4876,17 @@ const SUPABASE_PY_FORMS = [/^\s*from\s+supabase(?:\.[\w.]+)?\s+import\b/gm, /^\s
 const POSTGREST_JS_SPECIFIER = /(["'])(?:npm:|jsr:|https?:\/\/[^"'\s]*\/)?@supabase\/postgrest-js(?:@[^"'/]*)?(?:\/[^"']*)?\1/g;
 /**
  * `text` with `#` comments blanked: a `#` outside a string, to the line's end,
- * every blanked character a space so offsets and line numbers hold. Strings —
- * `'…'`, `"…"`, `'''…'''`, `"""…"""` — are kept whole, an escape inside one
- * honoured, so a `#` in a string is text and a quote in a comment is blanked.
- * Not a Python parser: an unterminated quote in a shell word (`don't`) leaves
- * the rest of the file read as a string, which can only add hits — visible,
- * and answered by quoting the word.
+ * every blanked character a space so offsets and line numbers hold — in
+ * Python anywhere, in shell (`shell`) only at a word's start (the text's
+ * start, or after whitespace, `;`, `(`, `|`, `&`), since `$#`, `${#a[@]}` and
+ * `a#b` are not comments and a hit after one on the same line must be read
+ * (the first review pass). Strings — `'…'`, `"…"`, `'''…'''`, `"""…"""` — are
+ * kept whole, an escape inside one honoured, so a `#` in a string is text and
+ * a quote in a comment is blanked. Not a parser: an unterminated quote in a
+ * shell word (`don't`) leaves the rest of the file read as a string, which
+ * can only add hits — visible, and answered by quoting the word.
  */
-function hashCommentsBlanked(text: string): string {
+function hashCommentsBlanked(text: string, shell = false): string {
   let out = "";
   let quote: string | null = null;
   for (let i = 0; i < text.length; i++) {
@@ -4891,7 +4898,7 @@ function hashCommentsBlanked(text: string): string {
       continue;
     }
     if (c === "'" || c === '"') { quote = text.startsWith(c + c + c, i) ? c + c + c : c; out += quote; i += quote.length - 1; continue; }
-    if (c === "#") { let j = i; while (j < text.length && text[j] !== "\n") j++; out += " ".repeat(j - i); i = j - 1; continue; }
+    if (c === "#" && (!shell || i === 0 || /[\s;(|&]/.test(text[i - 1]))) { let j = i; while (j < text.length && text[j] !== "\n") j++; out += " ".repeat(j - i); i = j - 1; continue; }
     out += c;
   }
   return out;
@@ -4899,7 +4906,7 @@ function hashCommentsBlanked(text: string): string {
 /** The 1-based lines of `text` holding a PostgREST form, ascending — comments blanked by the file's kind, strings read. */
 function postgrestIn(text: string, rel: string): number[] {
   const hash = HASH_COMMENT_FILE.test(rel);
-  const code = hash ? hashCommentsBlanked(text) : blanked(text, false);
+  const code = hash ? hashCommentsBlanked(text, /\.sh$/.test(rel)) : blanked(text, false);
   const lineOf = lineIndexer(code);
   const lines = new Set<number>();
   for (const re of hash ? [POSTGREST_PATH, ...SUPABASE_PY_FORMS] : [POSTGREST_PATH, POSTGREST_JS_SPECIFIER]) for (const m of code.matchAll(re)) lines.add(lineOf(m.index!));
@@ -4932,6 +4939,11 @@ const POSTGREST_PROBES: [string, string, boolean][] = [
   ["name = create_client_name(x)", "x.py", false],
   ["const c = create_client(url);", "x.ts", false],
   ["echo '# not a comment: /rest/v1 inside quotes is a hit though'", "x.sh", true],
+  // Shell: `#` inside a word is not a comment, so the hit after it is read; Python: it is, anywhere.
+  ['n=${#arr[@]}; curl -s "$U/rest/v1/thoughts"', "x.sh", true],
+  ["x = 1#c /rest/v1/thoughts", "x.py", false],
+  ["import supabase\nsb = supabase.Client(url, key)", "x.py", true],
+  ["from supabase.client import Client", "x.py", true],
 ];
 /** A helper for the table: the file's kind and its ticket. */
 const POSTGREST = (what: string, ticket: string, lines: number): CountedException => ({ why: `${what} — ${ticket}`, lines });
@@ -4986,6 +4998,9 @@ function checkPostgrestClients() {
   const blankerProbe = "a = 'x#y' # c1\nb = \"p#q\" # c2\nc = '''m#n\n#o''' # c3\nd = \"\"\"s\\\"#t\"\"\" # c4\ne = 1 # c5\n";
   const blankerWant = "a = 'x#y'     \nb = \"p#q\"     \nc = '''m#n\n#o'''     \nd = \"\"\"s\\\"#t\"\"\"     \ne = 1     \n";
   if (hashCommentsBlanked(blankerProbe) !== blankerWant) fail(SELF, `check 24's hashCommentsBlanked no longer blanks exactly the comments of its probe: ${JSON.stringify(hashCommentsBlanked(blankerProbe))}`);
+  const shellProbe = "n=$# ; m=${#a[@]} ;a#b # c1\n#c2\n x=1 #c3\n";
+  const shellWant = "n=$# ; m=${#a[@]} ;a#b     \n   \n x=1    \n";
+  if (hashCommentsBlanked(shellProbe, true) !== shellWant) fail(SELF, `check 24's hashCommentsBlanked (shell) no longer blanks exactly the comments of its probe: ${JSON.stringify(hashCommentsBlanked(shellProbe, true))}`);
   for (const [probe, name, hit] of POSTGREST_PROBES) {
     const n = postgrestIn(probe, name).length;
     if (hit && n === 0) fail(SELF, `check 24 no longer catches its probe: ${JSON.stringify(probe)} (its own probe)`);
@@ -5004,7 +5019,7 @@ function checkPostgrestClients() {
     const excepted = POSTGREST_EXCEPTIONS.get(rel);
     if (excepted) {
       seen.add(rel);
-      if (lines.length !== excepted.lines) fail(rel, `check 24's exception covers ${excepted.lines} line(s) that speak PostgREST and the file has ${lines.length} (${lines.join(", ") || "none"}) — ${lines.length > excepted.lines ? "a new call beside the documented ones, or a moved one" : "the port landed, so the exception is stale: remove the entry"} (${excepted.why})`);
+      if (lines.length !== excepted.lines) fail(rel, `check 24's exception covers ${excepted.lines} line(s) that speak PostgREST and the file has ${lines.length} (${lines.join(", ") || "none"}) — ${lines.length > excepted.lines ? "a new call beside the documented ones" : "the port landed, so the exception is stale: remove the entry"} (${excepted.why})`);
       continue;
     }
     for (const line of lines) fail(`${rel}:${line}`, MSG);
