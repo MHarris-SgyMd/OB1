@@ -68,9 +68,10 @@ exactly one disposition.
   — undoes abandoned upstream PR #27 column-chunking; no-op on the fork; and
   `recipes/fingerprint-dedup-backfill/backfill-fingerprints.mjs` — migration 023 backfills the
   fingerprint server-side (SMD-2126 → SMD-2145).
-- **PostgREST-speaking scripts (SMD-2126, decided 2026-09-24): 30 files in 21 recipes**, one
-  fate each — an import onto the ingestion contract, a maintenance script onto the shim, the
-  two smoke harnesses to their own tickets, the three above retire — in the section below;
+- **PostgREST-speaking scripts (SMD-2126, decided 2026-09-24): 30 files in 21 recipes at the
+  decision (29 in 20 after SMD-2137)**, one fate each — an import onto the ingestion contract, a
+  maintenance script onto the shim, the two smoke harnesses to their own tickets, the three above
+  retire (the first done, SMD-2137) — in the section below;
   check 24 holds the class.
 - **fold-in SMD-1867 (capture-source adapters): 5 integrations** — `chrome-capture-extension`,
   `discord-capture`, `slack-capture`, `telegram-capture`, `readwise-capture`. Plus **~11
@@ -192,8 +193,9 @@ seven category directories and docs/, a `rest/v1` path in a string, a supabase-p
 `create_client(`, or a `@supabase/postgrest-js` specifier is a hit, comments blanked; the
 files below are counted per file in `POSTGREST_EXCEPTIONS` with the ticket that ports or
 retires each, so a new call fails, a landed port fails until its entry goes, and the class
-cannot grow back. `POSTGREST_EXCEPTIONS`'s size is the class's remaining size; a retired row
-below stays as the record and counts nothing.
+cannot grow back. `POSTGREST_EXCEPTIONS`'s size, plus the two scripts that reach the gateway
+through a lib, is the class's remaining size; a retired row below stays as the record and counts
+nothing.
 
 | Recipe | Scripts (lines that speak PostgREST) | Touches | Fate | Ticket |
 |---|---|---|---|---|

@@ -1727,7 +1727,7 @@ agent-written capture is one source among several):
 | `commit` | git commit messages since the upstream pin (the fork's whole delta) | in the tree; `--since <ref>` to move the range start |
 | `linear` | a corpus dump built by `evals/build-linear-corpus.ts` — each record's `issue`, through the Linear adapter: the row the board sync writes (SMD-1958) | `--linear <dump.json>` and `--allow linear:corpus` |
 | `memory` | the `*.md` memory files (`MEMORY.md`, the index, excluded) | `--memory-dir <path>` or `OB1_MEMORY_DIR` |
-| `markdown` | a Markdown / Obsidian vault, through the Markdown adapter — every `.md` under the root (a `Templates/` folder included), `.obsidian/`, `.trash/`, `.git/` and `node_modules/` skipped | `--markdown <root>` or `OB1_MARKDOWN_DIR`, and `--allow <root>` |
+| `markdown` | a Markdown / Obsidian vault, through the Markdown adapter — every `.md` (any case) under the root — a `Templates/` folder and any other dot-folder included, a symlink followed — with only `.obsidian/`, `.trash/`, `.git/` and `node_modules/` skipped, at any depth | `--markdown <root>` or `OB1_MARKDOWN_DIR`, and `--allow <root>` |
 | `items` | ingestion-contract items from a file, one JSON object per line, emitted by a parser in any language — the import recipes' seam (SMD-2136); each row labelled with the item's own system | `--items <file.jsonl>` (`-` reads stdin) and `--allow <scope>`; `--source items` takes the file alone |
 
 `--source all` (the default) ingests every source it has an input for and says on
