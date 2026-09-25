@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1651 assertions: 1651 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1653 assertions: 1653 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-five (55) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -338,17 +338,23 @@ migration number, a port, an address, a CIDR) or to the type vocabulary itself
 identifier's shape is retyped — a ticket id to `project`; a URL, package, path,
 host, domain, file, snake_case name, glob or host:port to `tool` — since code
 artifacts are entities and refusing them dropped real ones (SMD-1937's
-measurement). `record_thought_entities` applies it to every pass, extraction and
-`source:` alike, and returns `refused_entities` and `retyped_entities`; a
+measurement). `record_thought_entities` applies it to every extraction — a
+`source:` pass states its names on the source's authority and is not gated — and
+returns `refused_entities` and `retyped_entities`, one per (type, name); a
 relation naming a refused entity is dropped and counted as any unlisted one is.
-`apply_entity_type_gate()` applies it to the rows written before it — a refused
-entity's edges, mentions and row deleted; a retyped one moved, or merged by
-`merge_entities`' steps into the entity already holding its new (type, name) —
-and the file runs it once, reporting the counts as a NOTICE: on the dogfood
-brain at 053, 116 refused, 8 moved and 4 merged of 3,384. Idempotent; no ACL.
+`apply_entity_type_gate()` applies it to the rows written before it, each entity
+judged on its name and none a structured pass names — a refused entity's edges,
+mentions and row deleted; a retyped one moved, or merged by `merge_entities`'
+steps into the entity already holding its new (type, name), its `merged_from`
+less any name that type holds — and the file runs it once, reporting the counts
+as a NOTICE: on the dogfood brain at 053, 116 refused, 8 moved and 4 merged of
+3,384. Idempotent; no ACL. A writer call already running 053's body when the
+file commits writes by 053's rule: stop the extraction workers for the upgrade,
+or run `SELECT apply_entity_type_gate()` once they have finished.
 `server-portable/entity-gate.ts` is its JavaScript twin, for the capture-time
-`people` facet (`metadata.ts`), which never reaches the function; test-schema
-[51] holds the two to one answer.
+`people` facet (`metadata.ts`), which never reaches the function and drops only
+the shapes a person's handle cannot take (a ticket id, a URL, a package, a
+host:port); test-schema [51] holds the two to one answer.
 
 ## What changed relative to the guide
 
@@ -2076,7 +2082,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1651 assertions, PGlite, no container
+bun test-schema.ts                          # 1653 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 703 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

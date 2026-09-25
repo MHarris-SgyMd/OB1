@@ -22,14 +22,21 @@
  *      typed `place` on the dogfood brain.
  *   4. Anything else keeps the extractor's type.
  *
+ * The rule reads the MODEL's guesses. A `source:` pass states its names on
+ * the source's authority (a Linear label `2024` is a label) and is not gated.
+ *
  * The DATABASE is the one definition: migration 056's `entity_type_gate()`,
- * applied by record_thought_entities to every pass and by
+ * applied by record_thought_entities to every extraction and by
  * apply_entity_type_gate() to the rows written before it. This module is its
  * twin for the writers that never reach that function — the `people` facet in
  * metadata.ts — and test-schema asserts the two answer alike over a probe
- * list. Both read ASCII classes only (`[A-Za-z0-9]`, never `\w`, which
- * Postgres reads by locale and JavaScript as ASCII), so the patterns mean one
- * thing in both engines.
+ * list. The patterns spell their classes out — `[A-Za-z0-9]`, never `\w`;
+ * whitespace as ASCII_SPACE, never `\s` or `\S`, which Postgres reads by
+ * locale and JavaScript by Unicode — and the trim is one pattern both
+ * engines run, so the shapes mean one thing in both (first review pass: a
+ * trailing tab took `SMD-1804\t` past the SQL rule and not the twin). The
+ * normaliser collapses ASCII whitespace; a name holding other whitespace
+ * may still normalise apart, since Postgres's `\s` follows the locale.
  *
  * No imports: the server loads this through metadata.ts, and entities.ts pulls
  * in db/config.mjs.
@@ -49,23 +56,37 @@ export const ENTITY_VOCABULARY: readonly string[] = [
   "project", "projects", "tool", "tools", "topic", "topics", "place", "places", "entity", "entities",
 ];
 
+/** The whitespace the shapes and the trim know: ASCII's six. */
+const ASCII_SPACE = " \\t\\n\\r\\f\\v";
+
+/** The trim both engines apply before a shape is read: leading and trailing ASCII whitespace. */
+export const TRIM_RE = `^[${ASCII_SPACE}]+|[${ASCII_SPACE}]+$`;
+
 /**
  * An identifier's shape, read on the name as written (trimmed): the type a
  * `person` or `place` of that shape becomes. First match wins; a ticket id is
  * a named piece of work (the graph types 376 of them `project`), the rest are
  * code artifacts or addresses, `tool` under the maintainer's decision.
+ * `facet`: whether the `people` facet drops a name of this shape. The facet
+ * has no other type to give it, so a retype there is a loss, and it drops
+ * only the shapes SMD-1935 names — a ticket id, a package, a URL, a
+ * host:port — not the dotted or underscored ones a person's handle takes
+ * (`john.smith`, `@john_doe`; first review pass).
  */
-export const IDENTIFIER_SHAPES: readonly { why: string; pattern: string; type: "project" | "tool" }[] = [
-  { why: "a ticket id", pattern: "^[A-Za-z]+-[0-9]+$", type: "project" },
-  { why: "a URL", pattern: "^[A-Za-z][A-Za-z0-9+.-]*://", type: "tool" },
-  { why: "a package or a path", pattern: "^@?[A-Za-z0-9_.-]+/[A-Za-z0-9_.*/-]*$", type: "tool" },
-  { why: "a host, a domain or a file", pattern: "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+$", type: "tool" },
-  { why: "snake_case or a glob", pattern: "^\\S*[_*]\\S*$", type: "tool" },
-  { why: "a host:port", pattern: "^\\S+:[0-9]+$", type: "tool" },
+export const IDENTIFIER_SHAPES: readonly { why: string; pattern: string; type: "project" | "tool"; facet: boolean }[] = [
+  { why: "a ticket id", pattern: "^[A-Za-z]+-[0-9]+$", type: "project", facet: true },
+  { why: "a URL", pattern: "^[A-Za-z][A-Za-z0-9+.-]*://", type: "tool", facet: true },
+  { why: "a package or a path", pattern: "^@?[A-Za-z0-9_.-]+/[A-Za-z0-9_.*/-]*$", type: "tool", facet: true },
+  { why: "a host, a domain or a file", pattern: "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+$", type: "tool", facet: false },
+  { why: "snake_case or a glob", pattern: `^[^${ASCII_SPACE}]*[_*][^${ASCII_SPACE}]*$`, type: "tool", facet: false },
+  { why: "a host:port", pattern: `^[^${ASCII_SPACE}]+:[0-9]+$`, type: "tool", facet: true },
 ];
 
 const NUMERIC = new RegExp(NUMERIC_NAME_RE);
 const SHAPES = IDENTIFIER_SHAPES.map((s) => ({ ...s, re: new RegExp(s.pattern) }));
+const TRIM = new RegExp(TRIM_RE, "g");
+/** The shape a name has, read on it trimmed as both engines trim it, or undefined. */
+const shapeOf = (name: string) => { const raw = name.replace(TRIM, ""); return SHAPES.find((s) => s.re.test(raw)); };
 const VOCABULARY = new Set(ENTITY_VOCABULARY);
 /** normalize_entity_name's outer strip: whitespace, quotes and punctuation. */
 const OUTER = new Set([..." \t\n\r\"'`.,;:!?()[]{}<>"]);
@@ -83,7 +104,7 @@ export function normalizeEntityName(name: string): string | null {
   let b = chars.length;
   while (a < b && OUTER.has(chars[a])) a++;
   while (b > a && OUTER.has(chars[b - 1])) b--;
-  const out = chars.slice(a, b).join("").replace(/\s+/g, " ");
+  const out = chars.slice(a, b).join("").replace(/[ \t\n\r\f\v]+/g, " ");
   return out === "" ? null : out;
 }
 
@@ -104,19 +125,19 @@ export function refusalOf(name: string): string | null {
 export function entityTypeGate(name: string, type: string): string | null {
   if (refusalOf(name) !== null) return null;
   if (type !== "person" && type !== "place") return type;
-  const raw = name.trim();
-  return SHAPES.find((s) => s.re.test(raw))?.type ?? type;
+  return shapeOf(name)?.type ?? type;
 }
 
 /**
- * The `people` facet with the gate applied: the strings the gate keeps as a
- * `person`, as written and in order. A retyped name is dropped, since the
- * facet holds people only; so is an item that is not a string (`21` is the
- * numeric rule's case in JSON). A non-array is returned as it came — the
- * facet's shape is the extractor's to get wrong, and its reader already
- * tolerates that (thought_stats checks Array.isArray).
+ * The `people` facet with the gate applied, as written and in order: a name
+ * the gate refuses is dropped, and so is one with a shape marked `facet` —
+ * the facet holds people only, so that retype has nowhere to go. An item
+ * that is not a string is dropped too (`21` is the numeric rule's case in
+ * JSON). A non-array is returned as it came — the facet's shape is the
+ * extractor's to get wrong, and its reader already tolerates that
+ * (thought_stats checks Array.isArray).
  */
 export function gatePeople(people: unknown): unknown {
   if (!Array.isArray(people)) return people;
-  return people.filter((p) => typeof p === "string" && entityTypeGate(p, "person") === "person");
+  return people.filter((p) => typeof p === "string" && refusalOf(p) === null && !shapeOf(p)?.facet);
 }

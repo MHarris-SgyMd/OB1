@@ -75,7 +75,7 @@ import {
 } from "./graph-centrality.ts";
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { ENTITY_TYPES, NUMERIC_NAME_RE, RELATIONS } from "../server-portable/entities.ts";
-import { ENTITY_VOCABULARY, entityTypeGate, IDENTIFIER_SHAPES, normalizeEntityName } from "../server-portable/entity-gate.ts";
+import { ENTITY_VOCABULARY, entityTypeGate, IDENTIFIER_SHAPES, normalizeEntityName, TRIM_RE } from "../server-portable/entity-gate.ts";
 import { linearAdapter, SAMPLE_ISSUE } from "./ingest-linear.ts";
 import { LINK_RELATIONS } from "./ingest-contract.ts";
 
@@ -6977,6 +6977,8 @@ console.log("\n[51] Migration 056: the entity name gate — a number or a type w
     ["SMD-1804", "person"], ["SMD-1804", "place"], ["SMD-1804", "topic"], ["ＳＭＤ-１８０４", "person"], ["http://127.0.0.1:65536/v1", "place"], ["@hono/mcp", "person"], ["hono/mcp", "person"], ["siggymd/**", "place"], ["siggymd/test-*", "place"],
     ["host.containers.internal", "place"], ["openrouter.ai", "place"], ["open-brain_default", "place"], ["localhost:11434", "place"], ["localhost.", "place"], ["a.b", "person"],
     ["Anita", "person"], ["Nate B. Jones", "person"], ["claude-code", "person"], ["Mac mini M4 Pro", "place"], ["pg16", "tool"], ["migration 021", "topic"], ["v1.2", "tool"], ["db/README.md", "topic"], ["ob1_entities", "tool"], ["Linear", "organization"], ["x", "vegetable"],
+    // Whitespace other than the space (first review pass: btrim() and \S parted the two on every one of these).
+    ["SMD-1804\n", "person"], ["SMD-1804\t", "person"], ["SMD-1804\v", "person"], ["\u3000SMD-1804", "person"], ["hono/mcp\t", "person"], ["x:80\f", "place"], ["a b_c", "person"], ["open_brai n", "place"], ["a\u00a0b_c", "person"], ["021\f", "tool"], ["\t021\r\n", "person"],
   ];
   const parted: string[] = [];
   for (const [name, type] of probes) {
@@ -6990,8 +6992,8 @@ console.log("\n[51] Migration 056: the entity name gate — a number or a type w
   // The twin is held to the text too, so a pattern edited on one side fails
   // even where no probe reaches the difference.
   const gateSrc = await src("entity_type_gate(text, text)");
-  assert(IDENTIFIER_SHAPES.every((s) => gateSrc.includes(`'${s.pattern}'`)) && ENTITY_VOCABULARY.every((w) => gateSrc.includes(`'${w}'`)) && gateSrc.includes(`'${NUMERIC_NAME_RE}'`) && (gateSrc.match(/'[^']*'/g) ?? []).filter((l) => l.startsWith("'^")).length === IDENTIFIER_SHAPES.length + 1,
-    "the SQL rule spells every shape, every vocabulary word and the numeric pattern entity-gate.ts does, and no pattern beside them");
+  assert(IDENTIFIER_SHAPES.every((s) => gateSrc.includes(`'${s.pattern}'`)) && ENTITY_VOCABULARY.every((w) => gateSrc.includes(`'${w}'`)) && gateSrc.includes(`'${NUMERIC_NAME_RE}'`) && gateSrc.includes(`'${TRIM_RE}'`) && (gateSrc.match(/'[^']*'/g) ?? []).filter((l) => l.startsWith("'^")).length === IDENTIFIER_SHAPES.length + 2,
+    "the SQL rule spells every shape, every vocabulary word, the numeric pattern and the trim entity-gate.ts does, and no pattern beside them");
   const fn = await one<{ v: string; s: boolean }>(`SELECT provolatile AS v, proisstrict AS s FROM pg_proc WHERE oid = 'entity_type_gate(text, text)'::regprocedure`);
   assert(fn.v === "i" && fn.s === true, "entity_type_gate is IMMUTABLE and STRICT");
   assert(lastDefinerOf("record_thought_entities").startsWith("056") && /ob1:name-gate/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)")) && /ob1:structured-wins/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)")),
@@ -7003,7 +7005,8 @@ console.log("\n[51] Migration 056: the entity name gate — a number or a type w
   // package typed as a person beside itself as a tool, a ticket id as a
   // person, a host:port as a place and one real person.
   const t1 = await put("Migration 021 moved hono/mcp; Anita tracked SMD-1804 on host.containers.internal:11434.");
-  const answer = [E("021", "person"), E("person", "topic"), E("hono/mcp", "person", 0.8), E("hono/mcp", "tool", 0.95), E("SMD-1804", "person"), E("Anita", "person"), E("host.containers.internal:11434", "place")];
+  // 021 and SMD-1804 twice: the counts are one per (type, name), as the insert keeps them.
+  const answer = [E("021", "person"), E("021", "person", 0.7), E("person", "topic"), E("hono/mcp", "person", 0.8), E("hono/mcp", "tool", 0.95), E("SMD-1804", "person"), E("SMD-1804", "person", 0.6), E("Anita", "person"), E("host.containers.internal:11434", "place")];
   const relations = [R("021", "Anita", "works_on"), R("Anita", "SMD-1804", "works_on"), R("Anita", "hono/mcp", "uses")];
   const w1 = await rte(t1, "extract:m@p2", answer, relations);
   const after1 = await entities();
@@ -7013,11 +7016,13 @@ console.log("\n[51] Migration 056: the entity name gate — a number or a type w
     `…under the gate's types: the retyped person hono/mcp is the tool, one entity (${after1.join(", ")})`);
   const w2 = await rte(t1, "extract:m@p2", answer, relations);
   assert(w2.ok === true && w2.new_entities === 0 && w2.refused_entities === 2 && JSON.stringify(await entities()) === JSON.stringify(after1), "the same answer again mints nothing and re-mints no fragment: re-extraction is idempotent");
-  // A structured pass is gated as an extraction is.
-  const t2 = await put("SMD-1805, served from 127.0.0.1.");
-  const w3 = await rte(t2, "source:test", [E("127.0.0.1", "place", 1), E("SMD-1805", "person", 1)]);
-  assert(w3.ok === true && w3.refused_entities === 1 && w3.retyped_entities === 1 && (await entities()).includes("project:SMD-1805"), `a source: pass is gated too (${JSON.stringify(w3)})`);
   assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM ob1_entities WHERE normalized_name ~ $1`, [NUMERIC_NAME_RE])).c === 0, "no entity has a numeric name");
+  // A structured pass is not gated: the source states its names (first review pass).
+  const t2 = await put("SMD-1805, served from 127.0.0.1, label 2024.");
+  const w3 = await rte(t2, "source:test", [E("127.0.0.1", "place", 1), E("SMD-1805", "person", 1), E("2024", "topic", 1)]);
+  const structured = ["place:127.0.0.1", "person:SMD-1805", "topic:2024"];
+  assert(w3.ok === true && w3.refused_entities === 0 && w3.retyped_entities === 0 && w3.entities === 3 && (await entities()).filter((e) => structured.includes(e)).length === 3,
+    `a source: pass writes what the source stated, under the type it stated (${JSON.stringify(w3)})`);
 
   // The rows from before the gate: 053's writer stores what 056's refuses,
   // then apply_entity_type_gate() takes them in. hono/mcp the person merges
@@ -7032,7 +7037,13 @@ console.log("\n[51] Migration 056: the entity name gate — a number or a type w
   assert(p3.ok === true && p3.entities === 5 && p3.edges === 4 && p4.ok === true && p4.entities === 3 && !("refused_entities" in p3), `053's writer stores what the gate would refuse (${JSON.stringify(p3)})`);
   const personHono = await idOf("person", "hono mcp");
   const toolHono = await idOf("tool", "hono mcp");
-  await db.query(`UPDATE ob1_entities SET first_seen_at = '2020-01-01', last_seen_at = '2030-01-01' WHERE id = $1::uuid`, [personHono]);
+  // A human merged `hono` and `mcp server` into the person; a tool `Hono`
+  // exists apart. Carried into the tool, `hono` would take that tool's
+  // mentions; `mcp server`, which no tool holds, may go with it.
+  await db.query(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', 'Hono', 'hono')`);
+  await db.query(`UPDATE ob1_entities SET first_seen_at = '2020-01-01', last_seen_at = '2030-01-01', merged_from = '{hono,"mcp server"}' WHERE id = $1::uuid`, [personHono]);
+  // …and into the person a.b, which moves: the same rule.
+  await db.query(`UPDATE ob1_entities SET merged_from = '{hono,ab-old}' WHERE entity_type = 'person' AND normalized_name = 'a.b'`);
   // A self-edge once merged: the person joined to the tool on t4, which no writer would state.
   const [lo, hi] = [personHono, toolHono].sort();
   await db.query(`INSERT INTO ob1_entity_edges (thought_id, from_entity_id, to_entity_id, relation, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, $3::uuid, 'related_to', 0.9, 'extract:m@p2')`, [t4, lo, hi]);
@@ -7059,8 +7070,12 @@ console.log("\n[51] Migration 056: the entity name gate — a number or a type w
   assert(sym !== undefined && sym.f < sym.t && [sym.f, sym.t].sort().join() === [bun, toolHono].sort().join(), "…a symmetric relation re-pointed in the writer's order");
   const e4 = await q<{ f: string; t: string }>(`SELECT from_entity_id AS f, to_entity_id AS t FROM ob1_entity_edges WHERE thought_id = $1::uuid`, [t4]);
   assert(e4.length === 1 && e4[0].f === TOOL_PQ && e4[0].t === ZED, `on t4 the person-to-tool edge, a self-edge once merged, is dropped, and Zed–p.q is flipped to (p.q, Zed) as the survivor's id sorts first (${JSON.stringify(e4)})`);
-  const hono = await one<{ aliases: string[]; f: string; l: string }>(`SELECT aliases, first_seen_at::date::text AS f, last_seen_at::date::text AS l FROM ob1_entities WHERE id = $1::uuid`, [toolHono]);
+  const hono = await one<{ aliases: string[]; f: string; l: string; m: string[] }>(`SELECT aliases, first_seen_at::date::text AS f, last_seen_at::date::text AS l, merged_from AS m FROM ob1_entities WHERE id = $1::uuid`, [toolHono]);
   assert(hono.aliases.includes("@hono/mcp") && !hono.aliases.includes("hono/mcp") && hono.f === "2020-01-01" && hono.l === "2030-01-01", `the survivor keeps the merged row's aliases (its own name is no alias) and the earlier first and later last sighting (${JSON.stringify(hono)})`);
+  const abMerged = (await one<{ m: string[] }>(`SELECT merged_from AS m FROM ob1_entities WHERE id = $1::uuid`, [toolAb])).m;
+  assert(JSON.stringify(hono.m) === JSON.stringify(["mcp server"]) && JSON.stringify(abMerged) === JSON.stringify(["ab-old"]),
+    `a human's merge crosses into the new type less the name a tool already holds — merged or moved (${JSON.stringify(hono.m)}, ${JSON.stringify(abMerged)})`);
+  assert((await entities()).filter((e) => structured.includes(e)).length === 3, "the entities a structured pass names are left as they stand: 127.0.0.1, the person SMD-1805, the label 2024");
   const again = await one<{ r: J }>(`SELECT apply_entity_type_gate() AS r`);
   assert(again.r.refused_entities === 0 && again.r.retyped_entities === 0 && again.r.merged_entities === 0 && again.r.dropped_edges === 0, `the pass is idempotent (${JSON.stringify(again.r)})`);
 

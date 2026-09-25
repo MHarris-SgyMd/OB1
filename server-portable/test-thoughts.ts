@@ -605,6 +605,13 @@ console.log("\n[10] The entity name gate (SMD-1935): a number or a type word is 
 
   assert(JSON.stringify(gatePeople(["Anita", "@hono/mcp", "SMD-1497", "021", 21, "person", "Nate B. Jones", null])) === JSON.stringify(["Anita", "Nate B. Jones"]), "the people facet keeps the names the gate keeps as a person, as written and in order");
   assert(gatePeople("Anita") === "Anita" && gatePeople(undefined) === undefined, "…and a facet that is not an array is left as it came");
+  // The facet has nowhere to retype a name to, so it drops only the shapes
+  // the ticket names — not the dotted or underscored ones a handle takes (first review pass).
+  assert(JSON.stringify(gatePeople(["john.smith", "@john_doe", "T.J.Miller", "localhost:8080", "https://x.dev/me", "SMD-1607", "hono/mcp"])) === JSON.stringify(["john.smith", "@john_doe", "T.J.Miller"]),
+    "…keeping a dotted or underscored handle, dropping a host:port, a URL, a ticket id and a package");
+  // The trim is ASCII whitespace, as the SQL rule's (first review pass: `trim()` stripped a tab the database kept).
+  assert(entityTypeGate("SMD-1804\t", "person") === "project" && entityTypeGate("a b_c", "person") === "person" && entityTypeGate("a b_c", "person") === "tool",
+    "a shape is read trimmed of ASCII whitespace, and a no-break space is no space to it");
 
   // …and extractMetadata applies it: the capture path's own call, against a stub provider.
   const stub = Bun.serve({ port: 0, fetch: () => Response.json({ choices: [{ message: { content: JSON.stringify({ people: ["Anita", "@hono/mcp", "SMD-1607"], topics: ["t"], type: "idea" }) } }] }) });

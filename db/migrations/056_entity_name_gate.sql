@@ -11,9 +11,9 @@
 --   only digits, dots, colons and spaces — migration numbers lifted out of
 --   "migration 021", the Ollama port, loopback addresses, CIDRs — spread over
 --   every type (17 of the 58 `person` rows); 9 are the type vocabulary itself
---   (`person`, `place`); and 11 persons and places are identifiers: `hono/mcp`
---   and `SMD-1804` as people, a host, a domain, a Docker network and three
---   branch globs as places. Every reader that trusts a type (facets, the
+--   (`person`, `place`); and 12 persons and places are identifiers: `hono/mcp`
+--   and `SMD-1804` as people; three hosts, a domain, a Docker network, a URL
+--   and four path globs as places. Every reader that trusts a type (facets, the
 --   person layer, SMD-1933's people handling, graph centrality) is misled,
 --   and graph-centrality has filtered the numbers on read since SMD-1938.
 --
@@ -33,7 +33,9 @@
 --        * retyped, for a `person` or `place` only: a ticket id
 --          (`SMD-1804`) to `project`; a URL, a package or path, a host,
 --          domain or file, a snake_case name or glob, or a host:port to
---          `tool`. Read on the name as written, trimmed, in ASCII classes;
+--          `tool`. Read on the name as written, trimmed of ASCII
+--          whitespace, with every class spelled out (never \w or \S, which
+--          Postgres reads by locale);
 --        * otherwise the type given.
 --      server-portable/entity-gate.ts is its JavaScript twin, for the
 --      `people` metadata facet that never reaches this function; test-schema
@@ -43,19 +45,25 @@
 --      entity's type is the gate's answer, a refused one is not written (and
 --      a relation naming it is dropped and counted, as a relation to an
 --      unlisted entity always was), and the result gains `refused_entities`
---      and `retyped_entities`. Every pass is gated — an extraction and a
---      `source:` pass alike. The body carries the `ob1:name-gate` sentinel.
+--      and `retyped_entities`, one per (type, name). An extraction is gated;
+--      a `source:` pass is not — it states its names on the source's
+--      authority, and a Linear label `2024` or `Tools` is a label (first
+--      review pass). The body carries the `ob1:name-gate` sentinel.
 --
 --   3. apply_entity_type_gate() — the same rule over the rows already
---      written: a refused entity's edges, mentions and row are deleted; a
+--      written, each entity judged on its name (its first-seen spelling),
+--      and none a structured pass names: a refused entity's edges, mentions
+--      and row are deleted; a
 --      retyped one is moved to its new type, or MERGED into the entity of that
 --      type and name when one exists (hono/mcp the person into hono/mcp the
 --      tool) by merge_entities' steps, which 016's function will not take
 --      across types: the mentions the target lacks move, its edges are
 --      re-pointed (a symmetric relation re-ordered, a duplicate or self-edge
 --      dropped), and its name, aliases and merged_from fold into the target's,
---      the earlier first_seen_at and later last_seen_at kept. Returns the
---      counts.
+--      the earlier first_seen_at and later last_seen_at kept. merged_from, a
+--      human's merge within the old type, loses any name an entity of the new
+--      type holds, moved or merged, so it cannot redirect that entity's
+--      mentions. Returns the counts.
 --      This file runs it once and reports the counts as a NOTICE; it is
 --      idempotent, so --reapply finds nothing.
 --
@@ -68,7 +76,10 @@
 --   functions are callable as any function this fork defines (010's reason),
 --   and apply_entity_type_gate() only does what the writer does to every
 --   answer. Its lock (SHARE ROW EXCLUSIVE on ob1_entities) waits for a
---   running extraction's write and holds the next until it commits.
+--   writer that has written and holds the next one's INSERT until it commits;
+--   a writer call already running 053's body when the file commits still
+--   writes by 053's rule, so stop the extraction workers for the upgrade, or
+--   run `SELECT apply_entity_type_gate()` once they have finished.
 --
 -- Dependencies: 016 (the entity tables, normalize_entity_name), 053
 --   (record_thought_entities' body, redefined here).
@@ -109,11 +120,15 @@ AS $$
     WHEN s.r ~ '^[A-Za-z][A-Za-z0-9+.-]*://'
       OR s.r ~ '^@?[A-Za-z0-9_.-]+/[A-Za-z0-9_.*/-]*$'
       OR s.r ~ '^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+$'
-      OR s.r ~ '^\S*[_*]\S*$'
-      OR s.r ~ '^\S+:[0-9]+$' THEN 'tool'
+      OR s.r ~ '^[^ \t\n\r\f\v]*[_*][^ \t\n\r\f\v]*$'
+      OR s.r ~ '^[^ \t\n\r\f\v]+:[0-9]+$' THEN 'tool'
     ELSE p_type
   END
-  FROM (SELECT normalize_entity_name(p_name) AS n, btrim(p_name) AS r) s
+  -- The shapes read the name trimmed of ASCII whitespace, and spell that
+  -- class out, never \S: Postgres reads \s by locale and btrim() strips
+  -- spaces alone, so `SMD-1804` and a trailing tab parted from the twin
+  -- (first review pass).
+  FROM (SELECT normalize_entity_name(p_name) AS n, regexp_replace(p_name, '^[ \t\n\r\f\v]+|[ \t\n\r\f\v]+$', '', 'g') AS r) s
 $$;
 
 COMMENT ON FUNCTION entity_type_gate(text, text) IS
@@ -176,21 +191,29 @@ BEGIN
   ) ON COMMIT DROP;
   DELETE FROM _rte_in WHERE true;
   -- ob1:name-gate (056): what the gate refuses and retypes, over the entities
-  -- the insert below would otherwise have written — the same four conditions.
-  SELECT count(*) FILTER (WHERE g.ntype IS NULL), count(*) FILTER (WHERE g.ntype <> g.xtype)
-    INTO v_refused, v_retyped
-    FROM (SELECT lower(btrim(x->>'type')) AS xtype, entity_type_gate(x->>'name', lower(btrim(x->>'type'))) AS ntype
-            FROM jsonb_array_elements(p_entities) x
-           WHERE jsonb_typeof(x) = 'object'
-             AND normalize_entity_name(x->>'name') IS NOT NULL
-             AND length(btrim(x->>'name')) BETWEEN 1 AND 200
-             AND lower(btrim(x->>'type')) IN ('person', 'organization', 'project', 'tool', 'topic', 'place')) g;
+  -- the insert below would otherwise have written — the same four
+  -- conditions, one per (type, name) as that insert keeps them. An
+  -- extraction only: a structured pass states its names on the source's
+  -- authority (a Linear label `2024` is a label) and is not gated.
+  IF NOT v_structured THEN
+    SELECT count(DISTINCT (g.xtype, g.nname)) FILTER (WHERE g.ntype IS NULL),
+           count(DISTINCT (g.xtype, g.nname)) FILTER (WHERE g.ntype <> g.xtype)
+      INTO v_refused, v_retyped
+      FROM (SELECT lower(btrim(x->>'type')) AS xtype, normalize_entity_name(x->>'name') AS nname,
+                   entity_type_gate(x->>'name', lower(btrim(x->>'type'))) AS ntype
+              FROM jsonb_array_elements(p_entities) x
+             WHERE jsonb_typeof(x) = 'object'
+               AND normalize_entity_name(x->>'name') IS NOT NULL
+               AND length(btrim(x->>'name')) BETWEEN 1 AND 200
+               AND lower(btrim(x->>'type')) IN ('person', 'organization', 'project', 'tool', 'topic', 'place')) g;
+  END IF;
   INSERT INTO _rte_in (name, ntype, nname, confidence, aliases)
   SELECT DISTINCT ON (e.ntype, e.nname) e.name, e.ntype, e.nname, e.confidence, e.aliases
     FROM (
       SELECT btrim(x->>'name')                                            AS name,
              lower(btrim(x->>'type'))                                     AS xtype,
-             entity_type_gate(x->>'name', lower(btrim(x->>'type')))       AS ntype,
+             CASE WHEN v_structured THEN lower(btrim(x->>'type'))
+                  ELSE entity_type_gate(x->>'name', lower(btrim(x->>'type'))) END AS ntype,
              normalize_entity_name(x->>'name')                            AS nname,
              LEAST(GREATEST(COALESCE((x->>'confidence')::numeric, 0.5), 0), 1)::numeric(3,2) AS confidence,
              COALESCE(ARRAY(SELECT DISTINCT btrim(a) FROM jsonb_array_elements_text(
@@ -360,7 +383,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION record_thought_entities(uuid, text, jsonb, jsonb, text, uuid) IS
-  'Writes one thought''s entities and relations atomically (016), with 053''s resolution rule and 056''s name gate. Each entity is written under entity_type_gate()''s type: a number or a type-vocabulary word is refused (not written, and a relation naming it dropped and counted), an identifier-shaped person or place retyped to project or tool. An extraction_key `source:<system>` is a structured pass (the source''s own project, labels, members — no model call) that keeps its own rows as a set — the same set twice writes nothing, and moves no last_seen_at; an `extract:*` pass replaces only extracted rows; and where both name one (thought, entity) or (thought, from, to, relation) the structured row stands — an extracted insert onto it does nothing, a structured insert onto an extracted row takes it over. Entities upserted by (type, normalised name); a relation naming an unlisted entity is dropped and counted; entities left unreferenced are pruned. p_content_fingerprint NULL skips the stale check. Returns {ok, stale, entities, new_entities, mentions, edges, dropped_relations, ambiguous_relations, pruned_entities, refused_entities, retyped_entities}. Migrations 016, 053, 056 / SMD-947, SMD-1867, SMD-1935.';
+  'Writes one thought''s entities and relations atomically (016), with 053''s resolution rule and 056''s name gate. An extraction''s entities are written under entity_type_gate()''s type: a number or a type-vocabulary word is refused (not written, and a relation naming it dropped and counted), an identifier-shaped person or place retyped to project or tool; a structured pass is not gated. An extraction_key `source:<system>` is a structured pass (the source''s own project, labels, members — no model call) that keeps its own rows as a set — the same set twice writes nothing, and moves no last_seen_at; an `extract:*` pass replaces only extracted rows; and where both name one (thought, entity) or (thought, from, to, relation) the structured row stands — an extracted insert onto it does nothing, a structured insert onto an extracted row takes it over. Entities upserted by (type, normalised name); a relation naming an unlisted entity is dropped and counted; entities left unreferenced are pruned. p_content_fingerprint NULL skips the stale check. Returns {ok, stale, entities, new_entities, mentions, edges, dropped_relations, ambiguous_relations, pruned_entities, refused_entities, retyped_entities}. Migrations 016, 053, 056 / SMD-947, SMD-1867, SMD-1935.';
 
 -- ---------------------------------------------------------------------------
 -- apply_entity_type_gate — the rule over the rows written before it
@@ -378,39 +401,58 @@ DECLARE
   v_target   uuid;
   r          record;
 BEGIN
-  -- A writer's call waits for this and this for a running one, so no answer
-  -- lands between the read of a row and its move.
+  -- A writer's INSERT waits for this, and this for a writer that has
+  -- written. It does not reach a call already running 053's body when the
+  -- file commits: that call writes by 053's rule, so run this again once the
+  -- workers that were running have finished (it is idempotent).
   LOCK TABLE ob1_entities IN SHARE ROW EXCLUSIVE MODE;
+
+  -- Each entity's verdict, once: NULL refused, a type retyped. An entity a
+  -- structured pass names is the source's, not the model's guess, and is
+  -- left as it stands (a Linear label `2024`). Judged on the entity's name,
+  -- its first-seen spelling, as the writer judges each answer's.
+  CREATE TEMP TABLE IF NOT EXISTS _aetg (id uuid, to_type text) ON COMMIT DROP;
+  DELETE FROM _aetg WHERE true;
+  INSERT INTO _aetg (id, to_type)
+  SELECT e.id, entity_type_gate(e.name, e.entity_type)
+    FROM ob1_entities e
+   WHERE entity_type_gate(e.name, e.entity_type) IS DISTINCT FROM e.entity_type
+     AND NOT EXISTS (SELECT 1 FROM thought_entities s WHERE s.entity_id = e.id AND s.extraction_key LIKE 'source:%');
 
   -- Refused: the edges on either end, the mentions, the row.
   WITH gone AS (
-    DELETE FROM ob1_entity_edges g USING ob1_entities e
-     WHERE e.id IN (g.from_entity_id, g.to_entity_id) AND entity_type_gate(e.name, e.entity_type) IS NULL
+    DELETE FROM ob1_entity_edges g
+     WHERE g.from_entity_id IN (SELECT id FROM _aetg WHERE to_type IS NULL)
+        OR g.to_entity_id IN (SELECT id FROM _aetg WHERE to_type IS NULL)
     RETURNING 1)
   SELECT count(*) INTO v_edges FROM gone;
   WITH gone AS (
-    DELETE FROM thought_entities m USING ob1_entities e
-     WHERE e.id = m.entity_id AND entity_type_gate(e.name, e.entity_type) IS NULL
+    DELETE FROM thought_entities m WHERE m.entity_id IN (SELECT id FROM _aetg WHERE to_type IS NULL)
     RETURNING 1)
   SELECT count(*) INTO v_mentions FROM gone;
   WITH gone AS (
-    DELETE FROM ob1_entities e WHERE entity_type_gate(e.name, e.entity_type) IS NULL
+    DELETE FROM ob1_entities e WHERE e.id IN (SELECT id FROM _aetg WHERE to_type IS NULL)
     RETURNING 1)
   SELECT count(*) INTO v_refused FROM gone;
 
   -- Retyped, oldest first: moved when its new (type, name) is free, merged
   -- into the entity holding it when not. Two rows bound for one target meet
-  -- here too — the first moves, the second merges into it.
+  -- here too — the first moves, the second merges into it. merged_from is a
+  -- human's merge WITHIN a type; carried into the new type it would redirect
+  -- that type's own entity of the name, so a name an entity of the new type
+  -- holds is dropped from it (first review pass).
   FOR r IN
-    SELECT e.id, e.name, e.normalized_name, e.aliases, e.merged_from, e.first_seen_at, e.last_seen_at,
-           entity_type_gate(e.name, e.entity_type) AS to_type
-      FROM ob1_entities e
-     WHERE entity_type_gate(e.name, e.entity_type) <> e.entity_type
+    SELECT e.id, e.name, e.normalized_name, e.aliases, e.first_seen_at, e.last_seen_at, a.to_type,
+           ARRAY(SELECT m FROM unnest(e.merged_from) m
+                  WHERE NOT EXISTS (SELECT 1 FROM ob1_entities o WHERE o.entity_type = a.to_type AND o.normalized_name = m)
+                  ORDER BY m) AS merged_from
+      FROM _aetg a JOIN ob1_entities e ON e.id = a.id
+     WHERE a.to_type IS NOT NULL
      ORDER BY e.first_seen_at, e.id
   LOOP
     SELECT en.id INTO v_target FROM ob1_entities en WHERE en.entity_type = r.to_type AND en.normalized_name = r.normalized_name;
     IF v_target IS NULL THEN
-      UPDATE ob1_entities SET entity_type = r.to_type WHERE id = r.id;
+      UPDATE ob1_entities SET entity_type = r.to_type, merged_from = r.merged_from WHERE id = r.id;
       v_retyped := v_retyped + 1;
       CONTINUE;
     END IF;
@@ -458,7 +500,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION apply_entity_type_gate() IS
-  'Applies entity_type_gate() to the entities already written (056): a refused entity''s edges, mentions and row are deleted; a retyped one moves to its new type, or merges into the entity already holding that (type, name) by merge_entities'' steps — the mentions it lacks moved, edges re-pointed, aliases, merged_from and seen-at folded. Idempotent. Returns {ok, refused_entities, dropped_mentions, dropped_edges, retyped_entities, merged_entities}. SMD-1935.';
+  'Applies entity_type_gate() to the entities already written (056), each judged on its name and none a structured pass names: a refused entity''s edges, mentions and row are deleted; a retyped one moves to its new type, or merges into the entity already holding that (type, name) by merge_entities'' steps — the mentions it lacks moved, edges re-pointed, aliases and seen-at folded, merged_from less any name the new type holds. Idempotent. Returns {ok, refused_entities, dropped_mentions, dropped_edges, retyped_entities, merged_entities}. SMD-1935.';
 
 -- The rows written before the gate, once. What it did is the NOTICE.
 DO $run$
