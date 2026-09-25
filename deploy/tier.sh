@@ -7,9 +7,15 @@
 # runs this checkout's tier.ts in it, on the stack's network, so the database
 # services are reached by name and nothing is published for it.
 #
-#   deploy/tier.sh --env-file ~/stack/deploy/.env --refresh --from postgres --to open-brain-canary-postgres --tier canary
-#   deploy/tier.sh --env-file ~/stack/deploy/.env --diff    --from postgres --to open-brain-canary-postgres
+#   # replay stable's logged searches on the canary deploy/canary.sh stood up:
+#   # both projects' networks, so by container name (each has a `postgres`)
+#   deploy/tier.sh --env-file ~/stack/deploy/.env --network open-brain_default,open-brain-canary_default \
+#     --diff --since 2026-01-01 --from open-brain-postgres-1 --to open-brain-canary-postgres-1
+#   # the three-tier stack's own network and services
 #   deploy/tier.sh --refresh --from stable-postgres --to canary-postgres --network open-brain-tiers_default
+#
+# (deploy/canary.sh runs the canary's --refresh itself; deploy/README.md,
+# "Refreshing a tier", says what a --diff replays and what it skips.)
 #
 # --from / --to take a database on the network as HOST[:PORT][/DB] — port 5432
 # and database openbrain unless named — and this builds the URL as the stack's
@@ -18,7 +24,11 @@
 # tier.ts unchanged (db/README.md has its verbs).
 #
 # Flags of this wrapper's own, all optional:
-#   --network NAME   the stack's network (default open-brain_default, deploy/compose.yaml's)
+#   --network NAME   the stack's network (default open-brain_default, deploy/compose.yaml's);
+#                    NAME,NAME joins more than one, for a --from and a --to that
+#                    share none (deploy/canary.sh's two projects, SMD-2038) —
+#                    address them by container name then, since each network
+#                    may have a `postgres` of its own
 #   --env-file PATH  the running stack's env file (default deploy/.env beside this
 #                    script — which a branch worktree does not have: it is gitignored)
 #   --runtime CLI    docker or podman (default: docker when on PATH, else podman)
@@ -109,15 +119,30 @@ fi
 
 # Before anything is built: a mistyped network (open-brain_default against
 # open-brain-tiers_default) is a usage error, not the runtime's 125 at the end.
-"$RUNTIME" network inspect "$NETWORK" >/dev/null 2>&1 || {
-  echo "no network $NETWORK — name the stack's with --network. The runtime has:" >&2
-  "$RUNTIME" network ls >&2 || true
-  exit 2
-}
+case "$NETWORK" in
+  ""|,*|*,|*,,*) echo "--network has an empty name: '$NETWORK'" >&2; exit 2 ;;
+  *[[:space:]]*) echo "--network takes NAME[,NAME…] with no spaces: '$NETWORK'" >&2; exit 2 ;;
+esac
+IFS=, read -r -a NETS <<< "$NETWORK"
+SEEN_NETS=" "
+for net in "${NETS[@]}"; do
+  case "$SEEN_NETS" in *" $net "*) echo "--network names $net twice." >&2; exit 2 ;; esac
+  SEEN_NETS="$SEEN_NETS$net "
+  "$RUNTIME" network inspect "$net" >/dev/null 2>&1 || {
+    echo "no network $net — name the stack's with --network. The runtime has:" >&2
+    "$RUNTIME" network ls >&2 || true
+    exit 2
+  }
+done
 
 TMP_ENV="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-env.XXXXXX")"
 COMPOSE_ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-compose.XXXXXX")" # mktemp creates both mode 600
-trap 'rm -f "$TMP_ENV" "$COMPOSE_ERR_FILE"' EXIT
+CID=""
+trap 'rm -f "$TMP_ENV" "$COMPOSE_ERR_FILE"; [ -z "$CID" ] || "$RUNTIME" rm -f "$CID" >/dev/null 2>&1 || true' EXIT
+# A Ctrl-C is a stop, wherever it lands: bash lets a script run on after a
+# child that did not die of the signal (the buildx probe below, say), and a
+# caller must not read an interrupted run as done.
+trap 'exit 130' INT
 
 # The environment as compose builds it for the stack: an empty project, the
 # file, the shell. stderr apart, since a delegating `podman compose` prints a
@@ -191,8 +216,9 @@ TO_URL="$(to_url "$TO")"
   fi
 } >> "$TMP_ENV"
 
-# Cached after the first build; rebuilt when db/tier.Dockerfile changes. Its
-# output goes to stderr, so a --diff's report is the only thing on stdout.
+# Cached after the first build; rebuilt when db/tier.Dockerfile changes. The
+# image id it prints is dropped, and a build's errors go to stderr, so a
+# --diff's report is the only thing on stdout.
 # --load for docker with buildx: under a docker-container builder (this Mac's
 # docker CLI over podman is one) a build without it stays in the builder's
 # cache and `run` then looks the tag up in a registry. A docker with no buildx
@@ -200,19 +226,41 @@ TO_URL="$(to_url "$TO")"
 # anyway.
 LOAD=()
 if [ "$RUNTIME" = docker ] && docker buildx version >/dev/null 2>&1; then LOAD=(--load); fi
-"$RUNTIME" build -q ${LOAD[@]+"${LOAD[@]}"} -t "$IMAGE" - < "$REPO/db/tier.Dockerfile" >&2
+"$RUNTIME" build -q ${LOAD[@]+"${LOAD[@]}"} -t "$IMAGE" - < "$REPO/db/tier.Dockerfile" >/dev/null
 
 # --init: bun would otherwise be PID 1, which ignores SIGINT, and Ctrl-C would
 # leave a refresh running. -w /tmp: Bun auto-loads .env files from the working
 # directory (so does the migrate.ts it spawns), and /tmp has none. The quoted
 # script appends the URLs to the arguments it was given, so tier.ts's own parser
-# sees the one --from and --to. Not `exec`: the EXIT trap removes the temporary
-# files, and set -e hands on the run's status.
+# sees the one --from and --to.
+#
+# Created on the first network, connected to the rest, then started attached
+# (which forwards signals, as run does): `run --network A --network B` needs
+# Docker Engine 25, and Ubuntu 24.04's docker.io is 24. One path for one
+# network or several. No --rm: the status is read back from the container,
+# not taken from `start -a`, which under the docker CLI over podman returns 0
+# when the container dies of the Ctrl-C it forwarded (measured; `run` returned
+# 130), and a refresh stopped mid-restore must not read as done to the script
+# that called this one. The EXIT trap removes the container and the
+# temporary files. Not `exec`, for the trap.
 # shellcheck disable=SC2016 # the container's sh expands them, not this one
-"$RUNTIME" run --rm --init \
-  --network "$NETWORK" \
+CID="$("$RUNTIME" create --init \
+  --network "${NETS[0]}" \
   --env-file "$TMP_ENV" \
   -v "$REPO:/repo:ro" \
   -w /tmp \
   "$IMAGE" \
-  sh -c 'exec bun --no-env-file /repo/db/tier.ts "$@" --from "$TIER_FROM_URL" --to "$TIER_TO_URL"' tier ${PASS[@]+"${PASS[@]}"}
+  sh -c 'exec bun --no-env-file /repo/db/tier.ts "$@" --from "$TIER_FROM_URL" --to "$TIER_TO_URL"' tier ${PASS[@]+"${PASS[@]}"})"
+for net in "${NETS[@]:1}"; do "$RUNTIME" network connect "$net" "$CID" >/dev/null; done
+start_rc=0
+"$RUNTIME" start -a "$CID" || start_rc=$?
+case "$("$RUNTIME" inspect -f '{{.State.Status}}' "$CID" 2>/dev/null || echo gone)" in
+  exited|stopped) status="$("$RUNTIME" inspect -f '{{.State.ExitCode}}' "$CID")" ;;
+  # the CLI came back first (a Ctrl-C): the container's own end decides
+  running|stopping) status="$("$RUNTIME" wait "$CID")" ;;
+  # never ran (docker's created, podman's configured: start's own failure,
+  # a network removed since the check), or a state this does not know
+  # (dead, paused): not done, whatever start said
+  *) exit $(( start_rc ? start_rc : 1 )) ;;
+esac
+exit "$status"
