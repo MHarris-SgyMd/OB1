@@ -6147,8 +6147,8 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
     "a status a jira row borrows through a Linear ticket claim (tR's started, via `ticket`) does not make jira gate: tJ1 stays listed");
   await drop(tJ3);
   const rU = render(await graphReport(run, null, openStart));
-  assert(rU.includes("Dependencies are read from the blocks / blocked_by link facets their sources state (SMD-1867; jira 1, linear 6), each as current as its source's last passes over both ends of each (a relation is read from either side, so one removed at the source counts until both are re-read): 7 active dependency facets; the latest was written or closed ")
-      && rU.includes(". jira states no lifecycle on any row of its own, so its 1 facet gates nothing: a source that states no status_type this tool knows cannot say a blocker is settled (an --items file states it in facets.status_type, and the status's name in facets.status). 7 of ")
+  assert(rU.includes("Dependencies are read from the blocks / blocked_by link facets their sources state (SMD-1867; jira 1, linear 6), each as current as its source's last passes over both ends of each (a relation is read from either side, so one removed at the source keeps its effect — blocking, where its system gates — until both are re-read): 7 active dependency facets; the latest was written or closed ")
+      && rU.includes(". jira states no lifecycle on any row of its own, so its 1 facet gates nothing: a source that states no status_type this tool knows cannot say a blocker is settled (for jira, an --items file states it in facets.status_type, and the status's name in facets.status). 7 of ")
       && rU.includes(" thoughts belong to a ticket a gating dependency names; every other thought has no gating dependency and counts as unblocked."),
     "the line names each source and its facets, says the board's freshness is each source's, and says what the ungated system's facets do and how an --items file settles its blockers");
   await stateOf(tJ2, "In Progress", "started");
@@ -6184,9 +6184,11 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   const lBoard = dep([{ system: "linear", facets: 2, gates: false }]);
   const lTwo = dep([{ system: "acme", facets: 1, gates: false }, { system: "jira", facets: 2, gates: false }, { system: "linear", facets: 6, gates: true }]);
   assert(lBoard.includes("(SMD-1867; linear 2)") && lBoard.includes(" linear states no lifecycle on any row of its own, so its 2 facets gate nothing: a source that states no status_type this tool knows cannot say a blocker is settled. 0 of 10")
-      && lTwo.includes(" acme and jira state no lifecycle on any row of their own, so their 3 facets gate nothing: ") && lTwo.includes("(an --items file states it in facets.status_type, and the status's name in facets.status)")
+      && lTwo.includes(" acme and jira state no lifecycle on any row of their own, so their 3 facets gate nothing: ") && lTwo.includes("(for acme and jira, an --items file states it in facets.status_type, and the status's name in facets.status)")
+      && dep([{ system: "jira", facets: 1, gates: false }, { system: "linear", facets: 2, gates: false }]).includes(" jira and linear state no lifecycle on any row of their own, so their 3 facets gate nothing: a source that states no status_type this tool knows cannot say a blocker is settled (for jira, an --items file")
+      && !dep([{ system: "markdown", facets: 1, gates: false }]).includes("--items")
       && dep([]).startsWith("Dependencies are read from the board's blocks / blocked_by link facets (SMD-1867)"),
-    `the line: a board stating no lifecycle is named and not sent to --items, which may not claim linear; two ungated systems share one clause, their facets summed; no facet at all is the board's line (${JSON.stringify(lBoard)})`);
+    `the line: a board stating no lifecycle is named and not sent to --items, which may not claim linear; two ungated systems share one clause, their facets summed; the hint names only the systems an items file may claim — not linear beside jira, nor a pipeline source like markdown (second review pass); no facet at all is the board's line (${JSON.stringify(lBoard)})`);
   assert(render(await graphReport(run, null, openStart)).includes("--startable: 5 thoughts with an open blocker weigh 0 in this run; a completed") && !weightsSql({ status: "open", decayDone: false, startable: true }, []).includes("END AS blockers")
       && weightsSql({ status: "open", decayDone: false, decayBlocked: true }, []).replace(/,\n +CASE WHEN [^\n]* THEN blockers END AS blockers/, "").replace("THEN 0.25 ELSE", "THEN 0 ELSE") === weightsSql({ status: "open", decayDone: false, startable: true }, [])
       && weightsSql({ status: "open", decayDone: false, decayBlocked: true }, []).includes("END AS blockers") && !("blockers" in (await topThoughts(run, openStart))[0]),

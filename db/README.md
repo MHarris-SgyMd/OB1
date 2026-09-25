@@ -1202,17 +1202,18 @@ dropped), and only `blocks` / `blocked_by`: `child_of` makes nobody a blocker. A
 thought whose ticket no dependency names counts as unblocked. The dependency
 caveat line (`coverage.dependencies` in the JSON) gives the active dependency
 facets and when the latest was written or closed, how many thoughts belong to a
-ticket a dependency names on either side, how many the flag held back in the run
-(took from a weight above 0 to 0), and how many of the held thoughts' blockers
-are unsettled only for want of a known status. The edges are as current as
-board-sync's last passes over both tickets of a relation: it is read from either
-side, so one removed on the board blocks until both are re-read. The flag
-composes with `--status` and `--decay-done` (the weights multiply). Without it
-(or `--decay-blocked`, below) the dependency read is not in the SQL, so every
-other mode renders byte for byte what it did (the JSON's `options` carries two
-more keys, `startable` and `decayBlocked`, both false) and a brain without 053
-runs them. With either, a brain without 053 is exit 2.
-`dependencySql` is the seam SMD-2074's node-state projection replaces.
+ticket a (gating, below) dependency names on either side, how many the flag held
+back in the run (took from a weight above 0 to 0), and how many of the held
+thoughts' blockers are unsettled only for want of a known status. The edges are
+as current as their source's last passes over both ends of a relation
+(board-sync's, for the board): it is read from either side, so one removed at
+the source blocks until both are re-read. The flag composes with `--status` and
+`--decay-done` (the weights multiply). Without it (or `--decay-blocked`, below)
+the dependency read is not in the SQL, so every other mode renders byte for byte
+what it did (the JSON's `options` carries two more keys, `startable` and
+`decayBlocked`, both false) and a brain without 053 runs them. With either, a
+brain without 053 is exit 2. `dependencySql` is the seam SMD-2074's node-state
+projection replaces.
 
 **Blocked decay** (SMD-2181). `--startable` is a filter, so a blocked hub
 vanishes rather than sinks. `--decay-blocked` reads the same dependencies by the
@@ -1233,13 +1234,14 @@ and is unchanged by it. The JSON's `options` gains `decayBlocked: false`.
 both flags read them. A blocker is settled by its row's lifecycle, which a row
 of another system has only if its source stated one (an items file, in
 `facets.status_type`, one of the six types). So a system gates only when some
-row of it states a known status_type, and is then read exactly as the board is,
-an unknown blocker blocking. A system that states none cannot say a blocker is
-settled: its links gate nothing, blocking no thought and naming no ticket,
-rather than hide its tickets for good, and the dependency line names each
-source with its facets and says which gate nothing. While the board is the only
-source the line reads as before. The JSON's `dependencies.systems` lists each
-system's facets and whether it gates.
+source row of it states a known status_type in its own metadata — a status a row
+borrows through a Linear ticket claim does not count — and is then read exactly
+as the board is, an unknown blocker blocking. A system that states none cannot
+say a blocker is settled: its links gate nothing, blocking no thought and naming
+no ticket, rather than hide its tickets for good, and the dependency line names
+each source with its facets and says which gate nothing. While the board is the
+only source, and states its lifecycle, the line reads as before. The JSON's
+`dependencies.systems` lists each system's facets and whether it gates.
 
 Exit 0 when ranked, 1 when no
 entity resolves (a near-miss whose only guesses the numeric rule hid is still

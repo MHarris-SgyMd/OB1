@@ -130,14 +130,14 @@
  * `facets.status_type`, one of the six types above). So a system GATES only
  * when some source row of it states, on its own metadata, a status_type this
  * file knows — a status a row borrows through a Linear ticket claim does not
- * count (first review pass): under that rule
- * its links are read exactly as the board's, an unknown blocker blocking. A
- * system that states none cannot say a blocker is settled, and rather than
- * block its tickets forever its links gate nothing — they block no thought and
- * name no ticket — and the dependency line counts them by system. The board
- * gates by the same rule, not by name. While the board is the only source the
- * line reads as SMD-2061's; the JSON's `dependencies.systems` lists each
- * system's facets and whether it gates.
+ * count (first review pass). Under that rule its links are read exactly as the
+ * board's, an unknown blocker blocking. A system that states none cannot say a
+ * blocker is settled, and rather than block its tickets forever its links gate
+ * nothing — they block no thought and name no ticket — and the dependency line
+ * counts them by system. The board gates by the same rule, not by name. While
+ * the board is the only source and states its lifecycle, the line reads as
+ * SMD-2061's; the JSON's `dependencies.systems` lists each system's facets and
+ * whether it gates (second review pass: "and states its lifecycle").
  *
  * The subject resolves by 016's own rule, one rung at a time: an exact
  * `normalized_name` match (`normalize_entity_name`, so "Open-Brain" finds
@@ -192,6 +192,7 @@ import { SQL } from "bun";
 import { ENTITY_TYPES, NUMERIC_NAME_RE, type EntityType } from "../server-portable/entities.ts";
 import { isoTimestampOrNull, UUID_RE } from "../server-portable/store.ts";
 import { cleanForDisplay } from "../server-portable/consolidate.ts";
+import { RESERVED_SYSTEMS } from "./ingest-items.ts";
 
 /** `(text, params) → rows` — Bun's `sql.unsafe` or PGlite's `query(...).rows`. */
 export type Runner = (text: string, params: unknown[]) => Promise<Record<string, unknown>[]>;
@@ -284,7 +285,7 @@ export type Dependencies = {
   unknown_blockers: number;
   /** The latest dependency facet written or closed. Null when the brain holds none. */
   last_link_change: string | null;
-  /** Per system of the facets read, sorted: how many, and whether it GATES — whether any of its rows states a lifecycle this file knows. A system that does not gates nothing: its links block no thought and name no ticket (SMD-2218). */
+  /** Per system of the facets read, sorted: how many, and whether it GATES — whether any of its own source rows states, in its own metadata, a status_type this file knows (a status borrowed through a Linear ticket claim does not count). A system that does not gates nothing: its links block no thought and name no ticket (SMD-2218). */
   systems: { system: string; facets: number; gates: boolean }[];
 };
 
@@ -854,6 +855,16 @@ export function lifecycleCaveat(c: Coverage, opts: Options): string {
   return source + rule;
 }
 
+/** "a and b" — the systems of one clause. */
+const andList = (names: string[]): string => (names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`);
+/** The ungated systems' clause (SMD-2218), with the items hint for those an --items file may claim. */
+function ungatedClause(systems: string[], facets: number): string {
+  const one = systems.length === 1;
+  const itemsable = systems.filter((s) => !(RESERVED_SYSTEMS as readonly string[]).includes(s));
+  const hint = itemsable.length ? ` (for ${andList(itemsable)}, an --items file states it in facets.status_type, and the status's name in facets.status)` : "";
+  return ` ${andList(systems)} state${one ? "s" : ""} no lifecycle on any row of ${one ? "its" : "their"} own, so ${one ? "its" : "their"} ${facets} facet${facets === 1 ? " gates" : "s gate"} nothing: a source that states no status_type this tool knows cannot say a blocker is settled${hint}.`;
+}
+
 /**
  * The dependency line, under `--startable` or `--decay-blocked` alone: where
  * the edges come from and how current they can be, how many thoughts a
@@ -881,17 +892,12 @@ export function dependencyCaveat(c: Coverage, d: Dependencies, opts: Pick<Option
   const boardOnly = d.systems.every((s) => s.system === "linear" && s.gates);
   const source = boardOnly
     ? "the board's blocks / blocked_by link facets (SMD-1867), as current as board-sync's last passes over both tickets of each (a relation is read from either side, so one removed on the board blocks until both are re-read)"
-    : `the blocks / blocked_by link facets their sources state (SMD-1867; ${d.systems.map((s) => `${s.system} ${s.facets}`).join(", ")}), each as current as its source's last passes over both ends of each (a relation is read from either side, so one removed at the source counts until both are re-read)`;
-  // One clause for every ungated system; the items hint only where an items
-  // file could be the source — `linear` is a system it may not claim (first
-  // review pass).
-  const ungated = d.systems.filter((s) => !s.gates);
-  const one = ungated.length === 1;
-  const n = ungated.reduce((sum, s) => sum + s.facets, 0);
-  const who = one ? ungated[0]?.system : `${ungated.slice(0, -1).map((s) => s.system).join(", ")} and ${ungated.at(-1)?.system}`;
-  const gate = ungated.length
-    ? ` ${who} state${one ? "s" : ""} no lifecycle on any row of ${one ? "its" : "their"} own, so ${one ? "its" : "their"} ${n} facet${n === 1 ? " gates" : "s gate"} nothing: a source that states no status_type this tool knows cannot say a blocker is settled${ungated.some((s) => s.system !== "linear") ? " (an --items file states it in facets.status_type, and the status's name in facets.status)" : ""}.`
-    : "";
+    : `the blocks / blocked_by link facets their sources state (SMD-1867; ${d.systems.map((s) => `${s.system} ${s.facets}`).join(", ")}), each as current as its source's last passes over both ends of each (a relation is read from either side, so one removed at the source keeps its effect — blocking, where its system gates — until both are re-read)`;
+  // One clause for every ungated system; the items hint names the ones an
+  // items file could be the source of — never a system it may not claim, the
+  // board's among them (first and second review passes).
+  const ungated = d.systems.filter((s) => !s.gates).map((s) => s.system);
+  const gate = ungated.length ? ungatedClause(ungated, d.systems.filter((s) => !s.gates).reduce((sum, s) => sum + s.facets, 0)) : "";
   return `Dependencies are read from ${source}: ${d.facets} active dependency facet${d.facets === 1 ? "" : "s"}${moved}.${gate} ${d.in_dependencies} of ${c.thoughts} thoughts belong to a ticket a ${boardOnly ? "" : "gating "}dependency names; every other thought has ${boardOnly ? "none recorded" : "no gating dependency"} and counts as unblocked. ${held}; a completed or canceled ticket is settled, not blocked, a blocker completed or canceled does not block, and a parent is not blocked by its children.${unknown}`;
 }
 
