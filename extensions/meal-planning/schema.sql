@@ -2,7 +2,7 @@
 -- Complete meal planning system with a shared, read-mostly server for household access
 
 -- Recipe collection
-CREATE TABLE recipes (
+CREATE TABLE IF NOT EXISTS recipes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL,
     name TEXT NOT NULL,
@@ -20,7 +20,7 @@ CREATE TABLE recipes (
 );
 
 -- Weekly meal planning
-CREATE TABLE meal_plans (
+CREATE TABLE IF NOT EXISTS meal_plans (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL,
     week_start DATE NOT NULL, -- should be a Monday
@@ -34,7 +34,7 @@ CREATE TABLE meal_plans (
 );
 
 -- Auto-generated or manual grocery lists
-CREATE TABLE shopping_lists (
+CREATE TABLE IF NOT EXISTS shopping_lists (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL,
     week_start DATE NOT NULL,
@@ -45,10 +45,10 @@ CREATE TABLE shopping_lists (
 );
 
 -- Indexes for common queries
-CREATE INDEX idx_recipes_user_cuisine ON recipes(user_id, cuisine);
-CREATE INDEX idx_recipes_user_tags ON recipes USING GIN (tags);
-CREATE INDEX idx_meal_plans_user_week ON meal_plans(user_id, week_start);
-CREATE INDEX idx_shopping_lists_user_week ON shopping_lists(user_id, week_start);
+CREATE INDEX IF NOT EXISTS idx_recipes_user_cuisine ON recipes(user_id, cuisine);
+CREATE INDEX IF NOT EXISTS idx_recipes_user_tags ON recipes USING GIN (tags);
+CREATE INDEX IF NOT EXISTS idx_meal_plans_user_week ON meal_plans(user_id, week_start);
+CREATE INDEX IF NOT EXISTS idx_shopping_lists_user_week ON shopping_lists(user_id, week_start);
 
 -- This fork (SMD-1810): upstream's file ENABLEd ROW LEVEL SECURITY on the
 -- three tables here, with a policy `auth.uid() = user_id` FOR ALL on each,

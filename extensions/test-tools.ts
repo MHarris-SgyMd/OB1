@@ -69,7 +69,7 @@ const sql = new SQL({ url: URL_, max: 2 });
 const SCHEMAS = ["extensions/household-knowledge/schema.sql", "extensions/home-maintenance/schema.sql", "extensions/meal-planning/schema.sql", "extensions/professional-crm/schema.sql",
   "extensions/family-calendar/schema.sql", "extensions/job-hunt/schema.sql", "recipes/ob-graph/schema.sql"];
 const schemaText = (rel: string) => readFileSync(join(ROOT, rel), "utf8");
-/** What the schemas create, dropped before they are applied and at the end. meal-planning's and family-calendar's CREATE TABLE have no IF NOT EXISTS. */
+/** What the schemas create, dropped before they are applied and at the end. family-calendar's CREATE TABLE has no IF NOT EXISTS (meal-planning's gained it under SMD-1810's boyscout). */
 async function dropExtensionSchemas() {
   for (const rel of SCHEMAS) {
     const text = schemaText(rel);

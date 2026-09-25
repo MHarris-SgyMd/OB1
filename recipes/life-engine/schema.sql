@@ -141,7 +141,7 @@ COMMENT ON TABLE life_engine_evolution IS 'Self-improvement history — tracks s
 -- System state that doesn't belong in user-facing tables.
 -- Examples: cron_job_id, cron_interval, wake_time, sleep_time, latitude, longitude.
 -- Note: No user_id column — this table assumes a single Life Engine instance
--- per Supabase project. For multi-user setups, prefix keys with user ID.
+-- per brain. For multi-user setups, prefix keys with user ID.
 
 CREATE TABLE IF NOT EXISTS life_engine_state (
   key TEXT PRIMARY KEY,
@@ -201,11 +201,13 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS life_engine_habits_updated ON life_engine_habits;
 CREATE TRIGGER life_engine_habits_updated
   BEFORE UPDATE ON life_engine_habits
   FOR EACH ROW
   EXECUTE FUNCTION update_life_engine_updated_at();
 
+DROP TRIGGER IF EXISTS life_engine_state_updated ON life_engine_state;
 CREATE TRIGGER life_engine_state_updated
   BEFORE UPDATE ON life_engine_state
   FOR EACH ROW
