@@ -92,6 +92,8 @@ export const LIMITS = {
   files: 20,            // file paths named
   textChars: 6000,      // the whole summary
   derived: 60,          // provenance ids sent (the server validates each; a long list is a long validation)
+  modelMsgs: 30,        // assistant messages kept per episode for an opt-in model summary (SMD-2014): the most recent, decisions land late
+  modelInputChars: 12000, // the assistant text handed to the model, tail-clipped
 };
 
 /** The brain's tool names — only THEIR results are read for thought ids, so a uuid printed by some other tool is never claimed as provenance. */
@@ -311,8 +313,36 @@ export function loadConfig() {
   if (!url || !key) {
     throw new Error(`no endpoint or key — write ${CONFIG_PATH} as {"url": "http://127.0.0.1:8010/", "key": "<capture key>"} (mint the key with: bun server-portable/keygen.ts --name session-hook --scope capture)`);
   }
-  return { url: String(url).replace(/\/*$/, "/"), key: String(key) };
+  // The opt-in model summary (SMD-2014). Off unless `summary` is "model"; then a
+  // local model rewrites the derived summary into what was decided. The endpoint
+  // is the OB1_LLM shape (OpenAI /chat/completions). "Local" is DECLARED
+  // (`model_local`), never guessed from the address, exactly as the server's
+  // egress gate declares it (SMD-1903); the hook carries its OWN policy, since
+  // it is a client on another machine. A hook-specific env wins, then the config
+  // file, then the server's own OB1_* env for a box that already runs one.
+  const env = process.env;
+  const summary = String(env.OB1_SESSION_CAPTURE_SUMMARY || cfg.summary || "derived").toLowerCase() === "model" ? "model" : "derived";
+  const modelUrlRaw = env.OB1_SESSION_CAPTURE_MODEL_URL || cfg.model_url || env.OB1_CHAT_BASE_URL || env.OB1_LLM_BASE_URL;
+  const modelRaw = env.OB1_SESSION_CAPTURE_MODEL || cfg.model || env.OB1_METADATA_MODEL;
+  const modelKey = env.OB1_SESSION_CAPTURE_MODEL_KEY || cfg.model_key || env.OB1_CHAT_API_KEY || env.OB1_LLM_API_KEY;
+  const modelLocal = cfg.model_local ?? (env.OB1_CHAT_LOCAL === "1" || env.OB1_LLM_LOCAL === "1");
+  const egressRaw = String(env.OB1_EGRESS_POLICY || cfg.egress || "deny").toLowerCase();
+  const egress = EGRESS_MODES.has(egressRaw) ? egressRaw : "deny"; // an unknown or unparseable value fails closed to deny, as the server's gate does
+  const modelTimeout = Number(env.OB1_SESSION_CAPTURE_MODEL_TIMEOUT || cfg.model_timeout || 0) || undefined;
+  return {
+    url: String(url).replace(/\/*$/, "/"), key: String(key),
+    summary,
+    modelUrl: modelUrlRaw ? String(modelUrlRaw).replace(/\/*$/, "") : undefined,
+    model: modelRaw ? String(modelRaw) : undefined,
+    modelKey: modelKey ? String(modelKey) : undefined,
+    modelLocal: !!modelLocal,
+    egress,
+    modelTimeout,
+  };
 }
+
+/** The egress modes the hook honours, mirroring the server's (SMD-1903): deny (the default, and the fail-closed value), allow, off. */
+const EGRESS_MODES = new Set(["deny", "allow", "off"]);
 
 // ── Transcript parsing ───────────────────────────────────────────────────────
 
@@ -345,7 +375,10 @@ function emptySummary(n = 0) {
   // of (its opening ask's, its first ask's, its home's), `opened` and `closed`
   // the boundaries at its ends, and `episodes` — the session's alone — its
   // pieces (SMD-2013).
-  return { harness: "", sessionId: "", title: "", cwd: "", branch: "", roots: new Set(), prompts: [], outcome: "", files: new Set(), commits: 0, prs: [], retrieved: new Set(), captured: new Set(), first: "", last: "", pushed: false, checkpoint: undefined, n, named: new Set(), about: new Set(), opened: undefined, closed: undefined, episodes: [] };
+  // `assistant` holds the episode's assistant messages, the most recent kept
+  // (LIMITS.modelMsgs), for the opt-in model summary alone (SMD-2014); it never
+  // reaches a derived payload, so a session with the option off is byte-identical.
+  return { harness: "", sessionId: "", title: "", cwd: "", branch: "", roots: new Set(), prompts: [], outcome: "", assistant: [], files: new Set(), commits: 0, prs: [], retrieved: new Set(), captured: new Set(), first: "", last: "", pushed: false, checkpoint: undefined, n, named: new Set(), about: new Set(), opened: undefined, closed: undefined, episodes: [] };
 }
 
 /**
@@ -533,7 +566,7 @@ function apply(x, ev, teams) {
     case "cwd": x.cwd = ev.v; x.roots.add(ev.v); break;
     case "branch": x.branch = ev.v; break;
     case "prompt": x.prompts.push(ev.text); for (const id of ticketsIn(ev.text, teams)) x.named.add(id); break;
-    case "outcome": x.outcome = ev.text; break;
+    case "outcome": x.outcome = ev.text; x.assistant.push(ev.text); if (x.assistant.length > LIMITS.modelMsgs) x.assistant.shift(); break; // `outcome` is the last, for the derived text; `assistant` keeps the recent window for the model (SMD-2014)
     case "file": x.files.add(ev.path); break;
     case "commit": x.commits++; break;
     case "push": x.pushed = true; break;
@@ -837,6 +870,17 @@ export function provenanceOf(s) {
   return [...s.retrieved, ...s.captured].slice(0, LIMITS.derived);
 }
 
+/**
+ * The episode's assistant messages, oldest of the kept window first, joined and
+ * tail-clipped — the model's input beside the derived summary (SMD-2014). Never
+ * tool results, never a human prompt, never the raw transcript: only what the
+ * assistant itself wrote. Empty when the episode has no assistant text.
+ */
+export function assistantExcerpt(ep) {
+  const joined = (ep.assistant ?? []).map((t) => String(t).trim()).filter(Boolean).join("\n\n----\n\n");
+  return joined.length > LIMITS.modelInputChars ? joined.slice(-LIMITS.modelInputChars) : joined;
+}
+
 // ── Secret scan ──────────────────────────────────────────────────────────────
 
 function entropyBits(token) {
@@ -1039,6 +1083,10 @@ export async function postCapture(cfg, payload) {
   const args = { content: payload.text, source: payload.harness };
   if (payload.derived_from?.length) args.derived_from = payload.derived_from;
   if (payload.supersedes) args.supersedes = payload.supersedes;
+  // The model that wrote this summary, if one did (SMD-2014): metadata.source
+  // stays the harness, so a reader and a per-source weight (SMD-1297) can still
+  // tell a model summary from the derived one by this key.
+  if (payload.summary_model) args.metadata = { summary_model: payload.summary_model };
   const call = () => rpc(cfg, "tools/call", { name: "capture_thought", arguments: args });
   let result = await call();
   let text = textOfResult(result);
@@ -1202,6 +1250,12 @@ export function prepare(hook, opts = {}) {
       derived_from: provenanceOf(ep), supersedes: state.thought_id || undefined,
       prompts: distinctPrompts(ep.prompts).length, prepared_at: new Date().toISOString(), attempts: 0,
     };
+    // The model's input rides the payload only when the option is on, so the
+    // child (which does the call) has it without re-reading the transcript, and
+    // a derived-mode payload is byte-identical to before (SMD-2014). The
+    // fingerprint stays the DERIVED text's, so an episode is asked of the model
+    // once — a re-end with the same derived summary is skipped, not re-modelled.
+    if (opts.summary === "model") payload.assistant = assistantExcerpt(ep);
     ensureDirs();
     // The name orders the queue: the millisecond, then a per-process sequence
     // (two payloads one process prepares in one millisecond sort as made — third
@@ -1337,6 +1391,103 @@ export function pointerFor(sessionId, name, state, landedHere) {
   const cands = [state?.thought_id && { id: state.thought_id, ms: momentOf(state.summary_at ?? state.captured_at, Date.now()) }, landedBefore(sessionId, name), landedHere].filter(Boolean);
   cands.sort((a, b) => b.ms - a.ms);
   return cands[0]?.id;
+}
+
+// ── The opt-in model summary (SMD-2014) ──────────────────────────────────────
+
+/** One model call's ceiling. The detached child has no 1.5 s hook budget, but a summary is not worth a long wait; a slower model falls back to the derived one. */
+const MODEL_TIMEOUT_MS = 30_000;
+
+/** The model's brief: the fork's plain register, what to write, the caps, and the guards. */
+const MODEL_SYSTEM = [
+  "You are writing a memory of one piece of a coding session's work, to be stored and retrieved later by any AI.",
+  "From the derived summary and the assistant's own messages below, write plain, direct prose covering:",
+  "- what was DECIDED, and why;",
+  "- what was left OPEN;",
+  "- what CHANGED.",
+  "Rules: at most ~200 words; no preamble, no headings, no lists, no markdown; name no thought ids and no file paths you were not given; include no keys, tokens or secrets; if the messages do not say, do not invent — write only what they support. Write about this one piece of work alone.",
+].join("\n");
+
+/**
+ * May the model endpoint be called under the hook's egress policy (SMD-2014,
+ * mirroring the server's SMD-1903 gate)? "Local" is DECLARED (`model_local`),
+ * never guessed from the address — a loopback URL behind a forwarding proxy is
+ * not local, and a LAN model a box declares local is. Under deny (the default
+ * and the fail-closed value) only a declared-local endpoint may be called;
+ * allow and off permit any. Returns null when allowed, else the reason.
+ */
+export function egressRefusalForModel(cfg) {
+  if (cfg.egress === "off" || cfg.egress === "allow") return null;
+  if (cfg.modelLocal) return null;
+  return `egress policy "${cfg.egress}" and the model endpoint is not declared local — set "model_local": true in the config for a model on this machine, or "egress" to "allow"`;
+}
+
+/** One line for --check and --dry-run: what the summary will be, and if a model is configured, whether egress would let it run — without calling it. */
+export function modelStatusLine(cfg) {
+  if (cfg.summary !== "model") return `summary: derived (the default; set "summary": "model" for a local model to write what was decided)`;
+  if (!cfg.modelUrl || !cfg.model) return `summary: model — but no model_url/model is configured, so the derived summary is sent`;
+  const refusal = egressRefusalForModel(cfg);
+  if (refusal) return `summary: model at ${cfg.modelUrl} (${cfg.model}) — but egress would refuse it (${refusal}), so the derived summary is sent`;
+  return `summary: model at ${cfg.modelUrl} (${cfg.model}); egress ${cfg.egress}${cfg.modelLocal ? ", endpoint declared local" : ""}`;
+}
+
+/**
+ * The model summary of one episode, or null to keep the derived one already in
+ * the payload (SMD-2014). Runs in the DETACHED child, never the foreground:
+ * the hook's budget is 1.5 s, this is seconds. Every way it can go wrong — the
+ * option off, no endpoint declared, egress refusing a non-local endpoint, a
+ * slow or failed or empty call, or a secret in the model's OWN words — falls
+ * back to the derived summary and logs why: a well-formed memory beats none.
+ * The model is shown the derived summary and the assistant's messages only,
+ * never tool results or the raw transcript, and it names no ids — `derived_from`
+ * stays the derived summary's provenance whichever text is sent.
+ */
+export async function modelSummary(cfg, payload, fetchImpl = fetch) {
+  if (cfg.summary !== "model" || typeof payload.assistant !== "string") return null; // derived: the option is off, or the payload was prepared before it was on
+  const chain = payload.chain_id ?? payload.session_id;
+  // A running checkpoint keeps its DERIVED summary: its `Checkpoint: …
+  // continuing` line is the signal a sibling session reads and search marks
+  // superseded, and a free rewrite would drop it. The model writes the durable
+  // summary at the episode's end (a compaction that CLOSES the episode, or the
+  // session's end), which supersedes the checkpoint's derived text (SMD-2014).
+  if (/\n\nCheckpoint: /.test(payload.text)) return null;
+  if (!cfg.modelUrl || !cfg.model) { log(`model summary skipped for ${chain}: summary=model but no model_url/model configured — derived summary sent`); return null; }
+  const refusal = egressRefusalForModel(cfg);
+  if (refusal) { log(`model summary refused for ${chain}: ${refusal} — derived summary sent`); return null; }
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), cfg.modelTimeout ?? MODEL_TIMEOUT_MS);
+  try {
+    const r = await fetchImpl(`${cfg.modelUrl}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(cfg.modelKey ? { Authorization: `Bearer ${cfg.modelKey}` } : {}) },
+      body: JSON.stringify({
+        model: cfg.model,
+        temperature: 0,
+        messages: [
+          { role: "system", content: MODEL_SYSTEM },
+          { role: "user", content: `Derived summary:\n${payload.text}\n\nThe assistant's messages for this piece of work:\n${payload.assistant || "(none)"}` },
+        ],
+      }),
+      redirect: "manual", // a redirect is a proxy or a login page, not the model
+      signal: ac.signal,
+    });
+    if (!r.ok) { log(`model summary failed for ${chain}: HTTP ${r.status} from the model endpoint — derived summary sent`); return null; }
+    let body; try { body = await r.json(); } catch { log(`model summary failed for ${chain}: the model endpoint did not answer JSON — derived summary sent`); return null; }
+    const text = body?.choices?.[0]?.message?.content;
+    if (typeof text !== "string" || !text.trim()) { log(`model summary empty for ${chain} — derived summary sent`); return null; }
+    const out = text.trim().slice(0, LIMITS.textChars);
+    // The scan runs on the model's OWN words too: it can quote a key the derived
+    // summary would not have (SMD-2014). A hit keeps the derived text, which the
+    // prepare-time scan already cleared, rather than refusing the episode.
+    const findings = scanForSecrets(out);
+    if (findings.length) { log(`model summary refused for ${chain}: ${findings[0].reason} at char ${findings[0].at} in the model's output — derived summary sent`); return null; }
+    return { text: out, model: cfg.model };
+  } catch (e) {
+    log(`model summary failed for ${chain}: ${String(e?.message ?? e).slice(0, 120)} — derived summary sent`);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -1525,6 +1676,15 @@ export async function postPending(cfg, own) {
       if (!payload.captured_id && payload.supersedes && onPointer > 0 && (attemptsSoFar >= 4 || waited > PENDING_MAX_AGE_MS)) {
         lastResort = `supersedes dropped: ${onPointer} of ${attemptsSoFar} attempts failed on it${waited > PENDING_MAX_AGE_MS ? ", the payload a week old" : ""}: ${oneLine(payload.last_error ?? "").slice(0, 120)}`;
         delete payload.supersedes;
+      }
+      // The opt-in model summary (SMD-2014), done here in the detached child:
+      // rewrite the derived text into what was decided, or keep the derived one.
+      // Not for a payload that already landed, and not again once a model wrote
+      // it (summary_model set and persisted by a failed post's writeJson below),
+      // so a retry re-posts the model's text rather than re-calling the model.
+      if (!payload.captured_id && payload.summary_model === undefined) {
+        const m = await modelSummary(cfg, payload);
+        if (m) { payload.text = m.text; payload.summary_model = m.model; }
       }
       let posted;
       try {
@@ -1745,6 +1905,9 @@ export async function main(argv) {
     try { cfg = loadConfig(); } catch (e) { console.error(`session-capture: ${e.message}`); return 2; }
     let tools;
     try { tools = ((await rpc(cfg, "tools/list", {}, 15_000)).tools ?? []).map((t) => t.name).sort(); } catch (e) { console.error(`session-capture: ${cfg.url} did not answer tools/list — ${e.message}`); return 1; }
+    // The summary mode, and whether a configured model would run — read from the
+    // config, the model endpoint not called (SMD-2014).
+    if (cfg.summary === "model") console.log(modelStatusLine(cfg));
     if (tools.join() === "capture_thought") { console.log(`ok: ${cfg.url} answers, and the key sees capture_thought alone (capture scope). State: ${STATE_DIR}`); return 0; }
     if (!tools.includes("capture_thought")) { console.error(`session-capture: the key cannot capture — its surface is [${tools.join(", ")}]. Mint one with: bun server-portable/keygen.ts --name session-hook --scope capture`); return 1; }
     console.error(`warning: the key can capture, and it can also ${tools.filter((t) => t !== "capture_thought").join(", ")} — a leak of this file reads your brain. Prefer a capture-scoped key: bun server-portable/keygen.ts --name session-hook --scope capture`);
@@ -1764,6 +1927,11 @@ export async function main(argv) {
     const { trigger, error: triggerError } = triggerFlag(args, ev);
     if (triggerError) { console.error(triggerError); return 2; }
     if (has(args, "--min-interval")) { console.error("--min-interval is --print-hook's, for a Stop hook; a dry run has no interval"); return 2; }
+    // With the model summary on, say so and that a dry run does NOT call it: the
+    // texts below are the DERIVED summaries — what the model is given, and what
+    // is sent if the call is refused, slow or unconfigured (SMD-2014). Tolerant
+    // of a missing brain config: a dry run is offline.
+    try { const c = loadConfig(); if (c.summary === "model") console.log(`--- ${modelStatusLine(c)}; a dry run shows the DERIVED text below (the model is not called here)\n`); } catch { /* no config: nothing to say about the model */ }
     const s = summariseTranscript(path, harness);
     if (!s.episodes.length) {
       const sniffed = sniffHarness(readFileSync(path, "utf8").split("\n", 5));
@@ -1833,7 +2001,7 @@ export async function main(argv) {
   let cfg;
   try { cfg = loadConfig(); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 1; }
   let prepared;
-  try { prepared = prepare(hook, { minIntervalMin, harness }); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 1; }
+  try { prepared = prepare(hook, { minIntervalMin, harness, summary: cfg.summary }); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 1; }
   // A refused episode exits 1 once the others are on their way (SMD-2013): the
   // secret's episode is not sent, the rest of the session still is.
   const paths = prepared.payloadPaths ?? [];

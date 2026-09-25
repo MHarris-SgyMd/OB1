@@ -190,6 +190,23 @@ console.log("\n[2] capture_thought writes through SQL");
   assert(row.metadata?.source === "mcp", `metadata survived the jsonb binding (${JSON.stringify(row.metadata)})`);
   assert(row.metadata?.type === "idea", "…including the extracted fields");
   await sql.close();
+
+  // A caller `metadata` key rides through beside the server's own (SMD-2014):
+  // the session hook sets `summary_model` when a local model wrote the summary.
+  const withModel = await call("capture_thought", { content: "a thought a model summarised", source: "claude-code", metadata: { summary_model: "test-model:8b" } });
+  assert(/Captured as/.test(withModel), "a capture carrying a metadata key succeeds");
+  const sql2 = new SQL({ url: URL_, max: 1 });
+  const [mrow] = await sql2`SELECT id, metadata FROM thoughts WHERE content = 'a thought a model summarised'`;
+  assert(mrow.metadata?.summary_model === "test-model:8b", `the caller's metadata key is stored (${JSON.stringify(mrow.metadata)})`);
+  assert(mrow.metadata?.source === "claude-code" && mrow.metadata?.type === "idea", "…beside the server's own source and the extracted fields, which it did not overwrite");
+  await sql2.close();
+  // Removed so the corpus the sections below count is unchanged by this one.
+  await call("delete_thought", { id: mrow.id });
+  // A key the server owns is refused, not silently overruled: the origin label,
+  const reserved = async (args: Record<string, unknown>) => { try { await call("capture_thought", args); return ""; } catch (e) { return (e as Error).message; } };
+  assert(/set by the server/.test(await reserved({ content: "names a reserved metadata key", metadata: { source: "spoofed" } })), "a reserved metadata key (source) is refused");
+  assert(/set by the server/.test(await reserved({ content: "names a reserved tag", metadata: { type: "task" } })), "…and one of the extractor's tags (type) is refused");
+  assert(/lower-case/.test(await reserved({ content: "a badly shaped metadata key", metadata: { "Bad Key": "x" } })), "…and a badly-shaped key is refused, before either model call");
 }
 
 console.log("\n[3] search_thoughts ranks over real pgvector");

@@ -35,6 +35,7 @@ delete process.env.OB1_CAPTURE_KEY;
 const {
   stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, provenanceOf,
   scanForSecrets, scanSummary, SECRET_PATTERNS, parseRpcBody, postCapture, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX,
+  loadConfig, modelSummary, egressRefusalForModel, modelStatusLine, assistantExcerpt,
 } = await import(SCRIPT);
 
 let passed = 0, failed = 0;
@@ -1779,6 +1780,97 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const miNoStop = await run(["--print-hook", "claude-code", "--min-interval", "30"]);
   assert(miNoStop.code === 2 && /--min-interval applies to --event Stop alone/.test(miNoStop.err) && !miNoStop.out.trim(), "--min-interval with no Stop event is refused, not validated and dropped");
   assert((await run(["--print-hook", "claude-code", "--event", "PreCompact", "--min-interval", "30"])).code === 2, "…under PreCompact too");
+}
+
+console.log("\n[3d] The opt-in model summary (SMD-2014)");
+{
+  // egressRefusalForModel — "local" is DECLARED, never guessed; deny/allow/off.
+  assert(egressRefusalForModel({ egress: "deny", modelLocal: true }) === null && egressRefusalForModel({ egress: "off", modelLocal: false }) === null && egressRefusalForModel({ egress: "allow", modelLocal: false }) === null,
+    "egress permits a declared-local endpoint under deny, and any endpoint under allow or off");
+  assert(/not declared local/.test(egressRefusalForModel({ egress: "deny", modelLocal: false }) ?? ""), "…and refuses a non-local endpoint under deny (the default), the model URL never guessed local from its address");
+
+  // loadConfig reads the model knobs from the environment and fails egress
+  // closed (the config file's path is frozen at import, so this drives the env).
+  const modelEnv = { OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_SESSION_CAPTURE_MODEL_URL: "http://127.0.0.1:1/v1/", OB1_SESSION_CAPTURE_MODEL: "llama3.1:8b", OB1_CHAT_LOCAL: "1", OB1_EGRESS_POLICY: "sideways" };
+  const restoreEnv = {};
+  for (const [k, v] of Object.entries(modelEnv)) { restoreEnv[k] = process.env[k]; process.env[k] = v; }
+  const mc = loadConfig();
+  for (const k of Object.keys(modelEnv)) { if (restoreEnv[k] === undefined) delete process.env[k]; else process.env[k] = restoreEnv[k]; }
+  assert(mc.summary === "model" && mc.modelUrl === "http://127.0.0.1:1/v1" && mc.model === "llama3.1:8b" && mc.modelLocal === true, `loadConfig reads the model knobs and strips the URL's trailing slash (${JSON.stringify({ s: mc.summary, u: mc.modelUrl, m: mc.model, l: mc.modelLocal })})`);
+  assert(mc.egress === "deny", "an unknown egress value fails closed to deny, as the server's gate does");
+  assert(/summary: model at .*llama3\.1:8b/.test(modelStatusLine(mc)) && /no model_url\/model/.test(modelStatusLine({ summary: "model" })), "the status line names a configured model, and says so when model mode is on but unconfigured");
+
+  // A fake OpenAI /chat/completions endpoint the child and modelSummary call.
+  let modelReply = "DECIDED: ship it. OPEN: nothing. CHANGED: one file.";
+  let modelSeen = null, modelCalls = 0;
+  const modelSrv = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
+    modelCalls++; modelSeen = await req.json();
+    if (typeof modelReply === "number") return new Response("upstream", { status: modelReply });
+    return Response.json({ choices: [{ message: { content: modelReply } }] });
+  } });
+  const MODEL_URL = `http://127.0.0.1:${modelSrv.port}`;
+  const modelCfg = (over = {}) => ({ summary: "model", modelUrl: MODEL_URL, model: "test-model", modelLocal: true, egress: "deny", ...over });
+
+  const ep = summariseTranscript(CLAUDE_T);
+  const basePayload = { chain_id: "s-model", text: renderSummary(ep), assistant: assistantExcerpt(ep) };
+  const good = await modelSummary(modelCfg(), { ...basePayload });
+  assert(good?.text === modelReply && good.model === "test-model", `modelSummary returns the model's text and the model that wrote it (${JSON.stringify(good).slice(0, 60)})`);
+  assert(modelSeen?.messages?.length === 2 && modelSeen.messages[0].role === "system" && /Derived summary:/.test(modelSeen.messages[1].content) && /assistant's messages/.test(modelSeen.messages[1].content),
+    "…the model saw a system brief and the derived summary plus the assistant's messages");
+  assert(!JSON.stringify(modelSeen).includes("tool_result") && !JSON.stringify(modelSeen).includes(uuid(1)), "…and neither tool results nor thought ids were sent to it");
+
+  // Off, unconfigured, or a payload with no excerpt → the derived text (null).
+  assert(await modelSummary({ ...modelCfg(), summary: "derived" }, { ...basePayload }) === null, "with the option off, modelSummary keeps the derived text");
+  assert(await modelSummary(modelCfg(), { chain_id: "x", text: "t" }) === null, "…as for a payload prepared before the option was on (no assistant excerpt)");
+  assert(await modelSummary(modelCfg({ modelUrl: undefined }), { ...basePayload }) === null, "…and when no model_url is configured");
+
+  // Egress refuses a non-local endpoint under deny — before the model is called.
+  const beforeEgress = modelCalls;
+  assert(await modelSummary(modelCfg({ modelLocal: false }), { ...basePayload }) === null && modelCalls === beforeEgress, "egress deny + a non-local endpoint falls back to derived BEFORE anything is sent");
+
+  // A secret in the model's OWN words, an empty answer, an HTTP error → derived.
+  modelReply = "We rotated the key to sk-ant-api03-abcdefabcdefabcdefabcdefabcdefabcdefabcdef and shipped.";
+  assert(await modelSummary(modelCfg(), { ...basePayload }) === null, "a secret in the model's output falls back to the derived summary (the scan runs on it too)");
+  modelReply = "   ";
+  assert(await modelSummary(modelCfg(), { ...basePayload }) === null, "…as does an empty model answer");
+  modelReply = 503;
+  assert(await modelSummary(modelCfg(), { ...basePayload }) === null, "…and an HTTP error from the endpoint");
+
+  // A model slower than the timeout falls back.
+  const slowSrv = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch() { await sleep(300); return Response.json({ choices: [{ message: { content: "too late" } }] }); } });
+  assert(await modelSummary(modelCfg({ modelUrl: `http://127.0.0.1:${slowSrv.port}`, modelTimeout: 50 }), { ...basePayload }) === null, "a model slower than the timeout falls back to derived");
+  slowSrv.stop(true);
+
+  // A running checkpoint keeps its derived summary (the model would drop the
+  // Checkpoint line); the model writes the durable end-of-episode one.
+  const cpText = renderSummary({ ...ep, checkpoint: { kind: "compacted", trigger: "auto" } });
+  assert(/\n\nCheckpoint: /.test(cpText) && await modelSummary(modelCfg(), { chain_id: "s-cp", text: cpText, assistant: assistantExcerpt(ep) }) === null,
+    "a running checkpoint keeps its derived summary — the model writes the durable one at the episode's end");
+
+  // prepare attaches the excerpt only in model mode — off is byte-identical.
+  const onPrep = prepare({ session_id: "s-prep-on", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { summary: "model" });
+  const onPayload = JSON.parse(readFileSync(onPrep.payloadPath, "utf8"));
+  assert(typeof onPayload.assistant === "string" && onPayload.assistant.length > 0, "prepare in model mode writes the assistant excerpt onto the payload");
+  const offPrep = prepare({ session_id: "s-prep-off", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const offPayload = JSON.parse(readFileSync(offPrep.payloadPath, "utf8"));
+  assert(!("assistant" in offPayload), "…and off, the payload carries no assistant key — byte-identical to before the option existed");
+  unlinkSync(onPrep.payloadPath); unlinkSync(offPrep.payloadPath); // not posted here: keep them out of the drain below
+
+  // End to end through the detached child, run synchronously: the posted content
+  // is the model's, metadata.summary_model rides along, source stays the harness.
+  modelReply = "back to good.";
+  received.length = 0;
+  const e2e = await runHook({ session_id: "s-model-e2e", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" },
+    { OB1_SESSION_CAPTURE_SYNC: "1", OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_SESSION_CAPTURE_MODEL_URL: MODEL_URL, OB1_SESSION_CAPTURE_MODEL: "test-model", OB1_CHAT_LOCAL: "1" });
+  assert(e2e.code === 0 && received.length === 1 && received[0].args.content === "back to good." && received[0].args.metadata?.summary_model === "test-model" && received[0].args.source === "claude-code",
+    `the child posted the model's text with metadata.summary_model, source still the harness (${JSON.stringify(received[0]?.args?.metadata)}, content ${JSON.stringify(received[0]?.args?.content)})`);
+
+  // Off, the same shape is the DERIVED summary with no metadata.
+  received.length = 0;
+  const e2eOff = await runHook({ session_id: "s-model-off", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" });
+  assert(e2eOff.code === 0 && received.length === 1 && /^Session summary/.test(received[0].args.content) && received[0].args.metadata === undefined, "with the option off, the derived summary is sent with no metadata");
+
+  modelSrv.stop(true);
 }
 
 fake.stop(true);
