@@ -27,10 +27,10 @@ All endpoints share the same authentication, sensitivity filtering, and enrichme
 | GET | `/thought/:id/connections` | Related thoughts |
 | GET | `/count` | Count thoughts with filters |
 | GET | `/stats` | Brain stats summary |
-| POST | `/ingest` | Proxy to smart-ingest — not available on this fork (SMD-2110) |
-| GET | `/ingestion-jobs` | List ingestion jobs |
-| GET | `/ingestion-jobs/:id` | Get job detail with items |
-| POST | `/ingestion-jobs/:id/execute` | Execute a dry-run job |
+| POST | `/ingest` | Proxy to the smart-ingest server at `SMART_INGEST_URL`; `503` naming the variable when it is unset (SMD-2110) |
+| GET | `/ingestion-jobs` | List ingestion jobs (read from the database) |
+| GET | `/ingestion-jobs/:id` | Get job detail with items (read from the database) |
+| POST | `/ingestion-jobs/:id/execute` | Execute a dry-run job — proxied to `SMART_INGEST_URL/execute`; `503` when unset |
 | GET | `/duplicates` | Find near-duplicate pairs |
 | POST | `/duplicates/resolve` | Merge and resolve a duplicate pair |
 | GET | `/entities` | Browse/search entities |
@@ -48,7 +48,7 @@ All endpoints share the same authentication, sensitivity filtering, and enrichme
 - **Enhanced thoughts schema** applied — install `schemas/enhanced-thoughts` (required for all endpoints)
 - At least one LLM API key: OpenRouter (recommended), OpenAI, or Anthropic (for search embeddings and capture classification)
 - [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/))
-- Optional: `schemas/smart-ingest-tables` (for `/ingest` and `/ingestion-jobs` endpoints)
+- Optional: `schemas/smart-ingest` (the `/ingestion-jobs` reads) and a running smart-ingest server (`integrations/smart-ingest`) named by `SMART_INGEST_URL` (the `/ingest` and `/ingestion-jobs/:id/execute` proxies)
 - Optional: `schemas/knowledge-graph` (for `/entities` endpoints and `/duplicates/resolve` entity reattachment)
 
 ## Steps
@@ -69,7 +69,7 @@ bun integrations/rest-api/index.ts
 
 ### 2. Set the environment
 
-`MCP_ACCESS_KEY` is the one key this gateway holds — the raw key, compared constant-time (this server predates the hashed `MCP_ACCESS_KEYS` list, change 67) — sent by clients as `x-brain-key`; `OPENROUTER_API_KEY` (or `OPENAI_API_KEY`) embeds searches and classifies captures. The optional knobs below — CORS, the rate limit — go in the same environment.
+`MCP_ACCESS_KEY` is the one key this gateway holds — the raw key, compared constant-time (this server predates the hashed `MCP_ACCESS_KEYS` list, change 67) — sent by clients as `x-brain-key`; `OPENROUTER_API_KEY` (or `OPENAI_API_KEY`) embeds searches and classifies captures. `SMART_INGEST_URL` is the smart-ingest server's http(s) address — [that server](../smart-ingest/) started with `PORT=8788` beside this gateway on 8787 is `http://127.0.0.1:8788`; behind a proxy that mounts it under a prefix, the prefix is part of the address — the upstream of `POST /ingest` and `POST /ingestion-jobs/:id/execute`. The two routes forward the request with this gateway's `MCP_ACCESS_KEY`, which smart-ingest compares against its own, so both servers must hold the same key (otherwise the proxy relays smart-ingest's `401`, indistinguishable to the caller from their own key being wrong), and the key travels in the clear to a plain `http://` address, so keep it on loopback or behind TLS. A bare address only — scheme, host, port and an optional path prefix; no query, fragment or credentials — parsed when the gateway starts: unset, the two routes answer `503 smart_ingest_not_configured` naming the variable; anything else is refused before the first request, the message naming the variable and the scheme and never the value (SMD-2110). The optional knobs below — CORS, the rate limit — go in the same environment.
 
 ### 3. Test the Health Endpoint
 
@@ -177,7 +177,7 @@ keys never touch log output.
 
 ## How It Connects to Other Components
 
-The REST API uses the same `_shared/` helpers as the Enhanced MCP Server (`integrations/enhanced-mcp`), ensuring consistent behavior for search, capture, and enrichment. The `/ingest` endpoints are written to proxy to Smart Ingest at `${SUPABASE_URL}/functions/v1/smart-ingest`, upstream's path on a project URL — with the shim's `postgres://` connection string that target is nonsense, so on this fork they fail until SMD-2110 gives the gateway a `SMART_INGEST_URL`.
+The REST API uses the same `_shared/` helpers as the Enhanced MCP Server (`integrations/enhanced-mcp`), ensuring consistent behavior for search, capture, and enrichment. `POST /ingest` and `POST /ingestion-jobs/:id/execute` proxy to the smart-ingest server (`integrations/smart-ingest`) at `SMART_INGEST_URL` — its root and `/execute` — with a 60-second timeout (the file's `PROXY_TIMEOUT_MS` constant), and the `/ingestion-jobs` reads go to the tables `schemas/smart-ingest` creates. Until SMD-2110 the proxy built its URL as `${SUPABASE_URL}/functions/v1/smart-ingest`, upstream's path on a project URL: on this fork `SUPABASE_URL` is the Postgres connection string, so every call handed the database credentials to `fetch()`, which refused the scheme, and answered `502 upstream_unreachable`. An HTTP target here comes from its own variable, never from the connection string.
 
 > **On this fork (FORK.md change 69, SMD-1228).** `:id` is the thought's UUID (`thoughts.id` here; an integer on upstream's enhanced schema — both are accepted). `POST /capture`, `PUT /thought/:id` and `PATCH /thought/:id/enrich` write a thought's content and vector through the database's own functions — the 3-argument `upsert_thought` (`db/migrations/035`) and `update_thought` (`033`) — rather than with a raw update of the row, so the content fingerprint follows the text, the model label follows the vector and the previous vector's chunk rows go; the enhanced-thoughts columns (`type`, `sensitivity_tier`, `importance`, `quality_score`, `source_type`) are written beside them by an update that carries neither. Two consequences: `/capture` reads the fork's return (`id`, `fingerprint`, `existed`) and no longer throws after the write, and a `PUT` whose embedding call failed leaves the row without a vector — not with the old vector under the new text — answers `embedding_updated: false` with a message saying so, and `PATCH /thought/:id/enrich?fill=embedding` refills it. The enhanced-thoughts columns are set for a fresh row; a re-capture of text already stored leaves them (the tier rule is escalation-only, and `PUT` is the way to change them). `extensions/test-writes.ts` drives the three routes against Postgres. The vectors these writers make are `openai/text-embedding-3-small`'s, 1536 wide, so the brain must be built at that model and width (`OB1_EMBEDDING_MODEL=openai/text-embedding-3-small`, `OB1_EMBEDDING_DIM=1536` — upstream's Supabase brain is); on this fork's default, `qwen3-embedding:4b` at 1024, the function refuses the vector and the whole capture or edit fails — loudly, where the raw write failed the same way or had its error ignored. Since FORK.md change 103 (SMD-1541) the audit row a capture, edit or enrich leaves (`thought_audit`, `db/migrations/008`; the trigger's body is `025`'s) names `MCP_ACCESS_KEY` — the one key this server holds — as the actor, with this server named as the row's `origin` (since migration `046`, SMD-1730; as `via` in the row's `actor_context` before it); before it named nobody. `DELETE /thought/:id` and the duplicate-resolve merge still delete raw, and the merge writes the survivor's `metadata` raw, so those audit rows name nobody (SMD-1793).
 
@@ -208,8 +208,8 @@ After completing setup, you should be able to:
 **"search failed" on semantic search**
 No embedding API key configured. The search endpoint needs `OPENROUTER_API_KEY` or `OPENAI_API_KEY` to generate query embeddings.
 
-**"/ingest" returns connection errors**
-Expected on this fork: the proxy target is built from `SUPABASE_URL`, which is a Postgres connection string here (SMD-2110). Call the smart-ingest server (`integrations/smart-ingest`) directly.
+**"/ingest" answers `503 smart_ingest_not_configured`**
+`SMART_INGEST_URL` is not set in the gateway's environment. Start the smart-ingest server (`integrations/smart-ingest`) and set the variable to its http(s) address on the `bun` line, then restart; `POST /ingestion-jobs/:id/execute` answers the same. A `502 upstream_unreachable` or `504 upstream_timeout` means the variable is set and the server at that address did not answer; a `401` relayed from a request whose key this gateway accepted means smart-ingest holds a different `MCP_ACCESS_KEY` (SMD-2110).
 
 **"/entities" returns empty or errors**
 The knowledge graph schema (`schemas/knowledge-graph`) must be applied first. Without it, entity endpoints will fail with table-not-found errors.
