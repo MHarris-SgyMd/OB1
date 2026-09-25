@@ -186,7 +186,7 @@ capability is **in core** retires: `obsidian-vault-import` (the Markdown adapter
 distillation of long sections, its `--min-words` / `--skip-folders` / `--after` filters, its
 secret scan, sync log and source label have no counterpart there and were dropped with it,
 each named in SMD-2137, which removed the directory), `local-ollama-embeddings` (the server embeds locally through
-`OB1_LLM_BASE_URL`; `reembed.ts`; removed in SMD-2138, its measured-models table folded into `SETUP.md`), `fingerprint-dedup-backfill/backfill-fingerprints.mjs`
+`OB1_LLM_BASE_URL`; `reembed.ts`; removed in SMD-2138; two of its three models are rows of `SETUP.md`'s table, with the fork's numbers), `fingerprint-dedup-backfill/backfill-fingerprints.mjs`
 (migration 023).
 
 **Held by check 24** of `scripts/check-fork-consistency.ts`: in every code file under the
