@@ -2155,7 +2155,9 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   // While set, every embedding request but the run's provider probe hangs, so
   // a run can be killed between recording the model and its first write.
   let frozen = false;
-  // While set, every embedding takes this long: the heartbeat run at the end.
+  // While set, every embedding but the run's provider probe takes this long:
+  // the heartbeat and thief runs at the end. Read when a request starts, so a
+  // request already asleep keeps its delay when it is cleared.
   let slowMs = 0;
   const modelsSeen = new Set<string>();
   const axisFor = (text: string) => {
@@ -2191,7 +2193,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
         tarpitOpen = false;
         await neverAnswers();
       }
-      if (slowMs > 0) await Bun.sleep(slowMs);
+      if (slowMs > 0 && input !== "reembed.ts provider probe") await Bun.sleep(slowMs);
       await Bun.sleep(10);
       const v = new Array(DIM).fill(0);
       v[axisFor(input)] = 1;
@@ -2204,6 +2206,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     return v.indexOf(1);
   };
 
+  // 42 thoughts in all, which the heartbeat run's --batch 15 is sized to.
   const shorts = Array.from({ length: 30 }, (_, i) => `short thought ${i} about topic ${i}`);
   for (const s of shorts) await sql`SELECT upsert_thought(${s}, ${{ metadata: {} }}::jsonb, ${unit(0)}::vector)`;
   await sql`SELECT upsert_thought(${long}, ${{ metadata: {} }}::jsonb, ${unit(0)}::vector)`;
@@ -2894,27 +2897,33 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   await sql`DELETE FROM thought_work_claims WHERE work_type = ${CTX_KEY}`;
 
   // The heartbeat end to end (migration 031): a batch whose work outlasts the
-  // lease, under workers that beat. Every embedding takes 600 ms, sixteen per
-  // claim, a 6 s lease with a 1 s heartbeat: a batch runs near ten seconds,
-  // and until 031 its lease expired mid-way — the rows went to the other
+  // lease, under workers that beat. Every embedding takes 600 ms, fifteen per
+  // claim, a 6 s lease with a 1 s heartbeat: a batch runs near nine seconds,
+  // and until 031 its lease expired mid-way — the rows went to another
   // worker on their second attempt, the first's releases returned false, and
   // three such batches marked rows failed. Six seconds, not three, because a
   // runner that pauses the process for two seconds must not read as a lapse —
-  // a beat is missed only when the process is, and the lease covers five — and
-  // sixteen, not eight, because eight rows fit inside six seconds and the run
-  // would then pass with renewal a no-op (third review pass). A fresh backfill
-  // key, so the pool is every thought; the recorded model is the configured
-  // one here.
+  // a beat is missed only when the process is, and the lease covers five.
+  // Three workers over the 42 thoughts claim 15, 15 and 12 at once, one round
+  // (SMD-2135; two workers of sixteen, SMD-1023's third review pass, took two
+  // rounds, some sixteen seconds). The fifteens outlast the lease — eight rows
+  // would fit inside it, and the run would pass with renewal a no-op — and the
+  // twelve finishes at about 7.4 s and claims again, reaping any lease past its
+  // 6 s deadline, so a beat that renewed nothing hands it the others' last
+  // rows on their second attempt. Fifteen is the batch with margin both ways
+  // for 42 thoughts: 14 ends all three together, 16 leaves ten rows that end
+  // at 6.1 s. A fresh backfill key, so the pool is every thought; the recorded
+  // model is the configured one here.
   slowMs = 600;
   const SLOW_KEY = `reembed:stub-embed@${DIM}:slow`;
-  const slow = await reembed("--job", SLOW_KEY, "--workers", "2", "--batch", "16", "--ttl", "6", "--heartbeat", "1");
+  const slow = await reembed("--job", SLOW_KEY, "--workers", "3", "--batch", "15", "--ttl", "6", "--heartbeat", "1");
   slowMs = 0;
-  assert(slow.code === 0 && /42 re-embedded, 0 failed/.test(slow.out) && /16 per claim, 6 s leases renewed every 1 s/.test(slow.out),
-    `two workers re-embed every thought in batches that outlast the lease, and nothing is repeated (exit ${slow.code}: ${slow.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
+  assert(slow.code === 0 && /42 re-embedded, 0 failed/.test(slow.out) && /15 per claim, 6 s leases renewed every 1 s/.test(slow.out),
+    `three workers re-embed every thought in batches that outlast the lease, and nothing is repeated (exit ${slow.code}: ${slow.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
   assert(!/attempt 2/.test(slow.out) && !/no longer this worker's at release/.test(slow.out) && !/no longer this worker's/.test(slow.out) && !/heartbeat failed/.test(slow.out),
     "…no row reached a second worker, no release found its lease gone, none was lost, every beat answered");
   const slowBeats = Number(/, (\d+) heartbeat\(s\)/.exec(slow.out)?.[1] ?? 0);
-  assert(slowBeats >= 10, `…and the summary counts the beats that kept them — two workers, one a second, over some fifteen seconds (${slowBeats})`);
+  assert(slowBeats >= 10, `…and the summary counts the beats that kept them — three workers, one a second, over some nine seconds (${slowBeats})`);
   const slowRows = (await sql`SELECT status, attempt_count::int AS attempts FROM thought_work_claims WHERE work_type = ${SLOW_KEY}`) as { status: string; attempts: number }[];
   assert(slowRows.length === 42 && slowRows.every((r) => r.status === "succeeded" && r.attempts === 1),
     `…and every claim row succeeded on its first attempt (${slowRows.filter((r) => r.attempts !== 1 || r.status !== "succeeded").length} otherwise)`);
@@ -2922,11 +2931,17 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
 
   // A lease taken from under a running worker: the batch a one-worker run
   // holds is re-assigned by hand to a holder whose lease is far ahead — what
-  // another worker's claim after a reap does to it. The row in hand learns it at
-  // release; the rest at a beat or at their release (which, depends on the
-  // 1 s beat against 610 ms rows, and is not asserted). Every stolen row is
-  // counted lost and none finished, the worker finishes the rest, and the run
-  // says the rows are still leased; --status names the thief.
+  // another worker's claim after a reap does to it. Every stolen row is counted
+  // lost and none finished, the worker finishes the rest, and the run says the
+  // rows are still leased; --status names the thief. The stub is slow only
+  // until the theft lands, and the rows after it run at full speed — at 610 ms
+  // each, one worker's pass was some 25 s of the section (SMD-2135). The slow
+  // first batch is what makes the theft land inside it, a 100 ms poll against
+  // a 610 ms row. The row in hand's release is refused because release_thought
+  // matches the holder, and the other stolen rows, fast now, are all released
+  // before the worker's first 1 s beat — so every one learns it at release,
+  // and no run here reaches reembed.ts's lost-at-beat skip, which nothing
+  // asserted before either (SMD-2190).
   slowMs = 600;
   const THIEF_KEY = `reembed:stub-embed@${DIM}:thief`;
   const thiefRun = reembed("--job", THIEF_KEY, "--workers", "1", "--batch", "4", "--ttl", "6", "--heartbeat", "1");
@@ -2937,8 +2952,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     // next claim would reap the rows back after 6 s and finish them itself.
     stolen = (await sql`UPDATE thought_work_claims SET worker_id = 'thief', ttl_expires_at = now() + interval '10 minutes' WHERE work_type = ${THIEF_KEY} AND status = 'claimed' RETURNING thought_id`) as { thought_id: string }[];
   }
-  const theft = await thiefRun;
   slowMs = 0;
+  const theft = await thiefRun;
   assert(stolen.length >= 1 && stolen.length <= 4, `the thief takes the batch a running worker holds (${stolen.length} rows)`);
   assert(theft.code === 1 && new RegExp(`${42 - stolen.length} re-embedded, 0 failed, 0 deleted mid-pass, ${stolen.length} no longer this worker's when checked`).test(theft.out) && new RegExp(`${stolen.length} row\\(s\\) are still leased`).test(theft.out),
     `…the worker finishes the rest, counts exactly the stolen rows as no longer its own, none as finished, and exits 1 naming them as still leased (exit ${theft.code}: ${theft.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
@@ -4222,7 +4237,7 @@ function syncHarness(unitIndex: number) {
   return { store, calls, writer, dbNow, sync };
 }
 
-console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled and idempotent, an edit moves one row, duplicate content is skipped (SMD-1806)");
+console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled and idempotent, an edit moves one row, duplicate content is skipped, and a file of items goes through the CLI end to end (SMD-1806, SMD-2136)");
 {
   const count = (s: string) => sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'source' = ${s}`.then((r) => r[0].c);
   const mk = (source: Doc["source"], key: string, content: string): Doc => ({ id: recordId(source, key), content, source, meta: {} });
@@ -4332,6 +4347,65 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   const held = await upsertRecord(sql, heldDoc, "test-live@4");
   assert(held.outcome === "held" && held.heldBy === syncRow, `an identity another thought holds is 'held', naming it (${JSON.stringify(held)})`);
   assert((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${heldDoc.id}::uuid`)[0].c === 0, "…and no second row for the ticket: the identity is asked about before any write");
+  // Items from a file (SMD-2136), through the CLI end to end against this
+  // server — the pipeline's write path is Bun SQL, which test-schema's PGlite
+  // cannot drive. A dry run counts and writes nothing; two items write two
+  // bare rows labelled with their system, two canonicals, one link and one
+  // mention; the same file again writes nothing; a file with a bad third
+  // line is refused whole, exit 2 naming the line and the field, zero rows;
+  // an item whose scope is not cleared is counted as refused and not written.
+  {
+    const dir = join(tmpdir(), `ob1-items-${process.pid}`);
+    mkdirSync(dir, { recursive: true });
+    const sys = "zqitems";
+    const scope = "zqitems:export";
+    const line = (key: string, text: string, links: unknown[] = [], mentions: unknown[] = [], extra: Record<string, unknown> = {}) =>
+      JSON.stringify({ identity: { system: sys, key }, scope, canonical: { form: JSON.stringify({ key, text }), mediaType: "application/json" }, text, links, mentions, facets: { kind: "probe" }, createdAt: "2026-09-01T10:00:00Z", ...extra });
+    const textA = "Item A: the first synthetic item from a file.";
+    const good = `${line("a-1", textA, [{ relation: "references", target: "a-2" }], [{ name: "zqfiletopic", type: "topic" }])}\n${line("a-2", "Item B: the second synthetic item from a file.")}\n`;
+    const goodPath = join(dir, "good.jsonl");
+    writeFileSync(goodPath, good);
+    const idA = recordId(sys, "a-1");
+    ids.push(idA, recordId(sys, "a-2"));
+    const cli = (...extra: string[]) => {
+      const p = Bun.spawnSync(["bun", join(HERE, "ingest-records.ts"), "--url", URL_!, "--source", "items", ...extra], { cwd: HERE, env: { ...process.env, OB1_INGEST_ALLOW: "" }, stdout: "pipe", stderr: "pipe" });
+      return { code: p.exitCode, out: p.stdout.toString(), err: p.stderr.toString() };
+    };
+    const oneLine = (s: string) => s.trim().split("\n").join(" | ");
+    const rowsOf = async () => (await sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'source' = ${sys}`)[0].c as number;
+    const asDir = cli("--items", dir, "--allow", scope, "--dry-run");
+    assert(asDir.code === 2 && /a directory, not a file/.test(asDir.err), `a directory as --items exits 2 by name (exit ${asDir.code}: ${oneLine(asDir.err).slice(0, 80)})`);
+    const dry = cli("--items", goodPath, "--allow", scope, "--dry-run");
+    assert(dry.code === 0 && /items: 2 record\(s\) \(zqitems 2\)/.test(dry.out) && /nothing written/.test(dry.out) && (await rowsOf()) === 0, `--items --dry-run counts the items by system and writes nothing (exit ${dry.code}: ${oneLine(dry.out)} ${oneLine(dry.err)})`);
+    const first = cli("--items", goodPath, "--allow", scope);
+    assert(first.code === 0 && /inserted 2 /.test(first.out) && /structure \(2 record\(s\)/.test(first.out) && (await rowsOf()) === 2, `two items write two rows and their structure (exit ${first.code}: ${oneLine(first.out)} ${oneLine(first.err)})`);
+    const [rowA] = await sql`SELECT content, metadata, embedding IS NULL AS bare, created_at::text AS c FROM thoughts WHERE id = ${idA}::uuid`;
+    assert(rowA?.content === textA && rowA.metadata.source === sys && rowA.metadata.kind === "probe" && rowA.metadata.actor_name === INGEST_ACTOR.name && rowA.bare === true && /^2026-09-01 /.test(rowA.c), `the row is the item's text, labelled with the item's system, bare, dated by its createdAt, under the ingester's envelope (${JSON.stringify(rowA)})`);
+    const srcs = await sql`SELECT identity, canonical, media_type AS m FROM thought_sources WHERE system = ${sys} ORDER BY identity`;
+    assert(srcs.length === 2 && srcs[0].identity === "a-1" && srcs[0].canonical === JSON.stringify({ key: "a-1", text: textA }) && srcs[0].m === "application/json", `two canonicals, each the line's form byte for byte (${srcs.length})`);
+    const linksA = await sql`SELECT payload AS p FROM thought_facets WHERE thought_id = ${idA}::uuid AND kind = 'link' AND valid_until IS NULL`;
+    assert(linksA.length === 1 && linksA[0].p.relation === "references" && linksA[0].p.target === "a-2" && linksA[0].p.system === sys, `one link, to the second item by identity within the system (${JSON.stringify(linksA.map((l: { p: unknown }) => l.p))})`);
+    const mentionsA = await sql`SELECT m.extraction_key AS k, en.name FROM thought_entities m JOIN ob1_entities en ON en.id = m.entity_id WHERE m.thought_id = ${idA}::uuid`;
+    assert(mentionsA.length === 1 && mentionsA[0].k === `source:${sys}` && mentionsA[0].name === "zqfiletopic", `one mention under source:<system> (${JSON.stringify(mentionsA)})`);
+    const again = cli("--items", goodPath, "--allow", scope);
+    assert(again.code === 0 && /inserted 0 {2}updated 0 {2}patched 0 {2}unchanged 2/.test(again.out) && (await rowsOf()) === 2, `the same file again writes nothing — two unchanged (${oneLine(again.out)})`);
+    // A bad third line: the file refused whole, before any write. The tooth
+    // is line 2, a VALID item not yet written: a writer that wrote each line
+    // as it parsed would have written it before reaching line 3 (first review
+    // pass, cold read — a-1 and a-2 alone could not tell the two apart).
+    const badPath = join(dir, "bad.jsonl");
+    writeFileSync(badPath, `${line("a-1", textA)}\n${line("a-5", "Item E: valid, and never written — its file is refused.")}\n${line("a-3", "Item C: never written.").replace('"mediaType":"application/json"', '"mediaType":"json"')}\n`);
+    const bad = cli("--items", badPath, "--allow", scope);
+    assert(bad.code === 2 && /line 3: canonical\.mediaType: /.test(bad.err) && /refused whole/.test(bad.err) && bad.out === "", `a malformed third line exits 2 naming line 3 and the field, nothing on stdout (exit ${bad.code}: ${oneLine(bad.err).slice(0, 140)})`);
+    assert((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id IN (${recordId(sys, "a-5")}::uuid, ${recordId(sys, "a-3")}::uuid)`)[0].c === 0 && (await rowsOf()) === 2, "…and zero rows for the valid line before it as for the bad one: the file is refused before any write, not line by line");
+    // A scope not cleared: counted as refused under items, said once with the knob, not written.
+    const gatedPath = join(dir, "gated.jsonl");
+    writeFileSync(gatedPath, `${line("a-4", "Item D: not cleared.", [], [], { scope: "zqitems:other" })}\n`);
+    const gated = cli("--items", gatedPath, "--allow", scope);
+    assert(gated.code === 0 && /items: 1 record\(s\) \(zqitems 1\) — 1 REFUSED by the allowlist/.test(gated.out) && /scope "zqitems:other" is not on the allowlist/.test(gated.err) && /--allow "zqitems:other"/.test(gated.err), `an item whose scope is not cleared is counted as refused under items, the knob named (${oneLine(gated.out)} / ${oneLine(gated.err).slice(0, 100)})`);
+    assert((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${recordId(sys, "a-4")}::uuid`)[0].c === 0, "…and not written");
+    rmSync(dir, { recursive: true, force: true });
+  }
   // Tier identity, for preflight's `tier` check.
   await stampTier(sql, "stable");
   const cfg = Object.fromEntries((await sql`SELECT key, value FROM ob1_config WHERE key IN ('tier','last_ingest')`).map((r: { key: string; value: string }) => [r.key, r.value]));
