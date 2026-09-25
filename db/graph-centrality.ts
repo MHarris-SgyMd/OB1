@@ -111,15 +111,16 @@
  * trade `--status` makes and `--decay-done` does not. `--decay-blocked` is the
  * decay: the same read, the same rules, and a held thought weighs
  * `BLOCKED_WEIGHT` (0.25, pre-registered here before any number was read, one
- * weight, exact in binary) times its lifecycle weight instead of 0. It stays
- * in the ranking, and where it is listed it names the blockers that hold it —
- * its ticket's open blockers, sorted, an unknown one included — in a `blocked
- * by` column and the JSON's `blockers`. Like `--startable` it needs 053 (exit 2
- * without it). The two are two answers to one question, so they are refused
- * together, as `--decay-done` is beside `--status`. The decays never meet on
- * one thought: a blocked thought is unsettled and `DONE_WEIGHT` weighs only
- * settled ones, so under both each thought weighs 1 or 0.25, never their
- * product. Degree counts neighbours, not evidence, and is unchanged by it.
+ * weight, exact in binary) times its lifecycle weight instead of 0. It stays in
+ * the ranking, and where it is listed it names the blockers that hold it — its
+ * ticket's open blockers, sorted, an unknown one included, another system's as
+ * `system:key` — in a `blocked by` column and the JSON's `blockers`. Like
+ * `--startable` it needs 053 (exit 2 without it). The two are two answers to
+ * one question, so they are refused together, as `--decay-done` is beside
+ * `--status`. The decays never meet on one thought: a blocked thought is
+ * unsettled and `DONE_WEIGHT` weighs only settled ones, so under both each
+ * thought weighs 1 or 0.25, never their product. Degree counts neighbours, not
+ * evidence, and is unchanged by it.
  *
  * The subject resolves by 016's own rule, one rung at a time: an exact
  * `normalized_name` match (`normalize_entity_name`, so "Open-Brain" finds
@@ -325,9 +326,11 @@ export const LIFECYCLE_CTE = `heads AS (
  * active `blocks` / `blocked_by` link facets, each resolved to the (system,
  * blocked, blocker) identities it states; a blocker whose lifecycle is
  * completed or canceled (the types in `$doneSlot`) is dropped. `dependency` is
- * one row per thought with an open blocker, its blockers' identities sorted.
- * When SMD-2074's node-state projection holds startability, this reads that
- * instead.
+ * one row per thought with an open blocker, its blockers' identities sorted —
+ * a `linear` one bare, as the ticket claim is, and another system's as
+ * `system:key`, since SMD-2136's `--items` writes links for any system and a
+ * bare key would not say whose it is (fourth review pass). When SMD-2074's
+ * node-state projection holds startability, this reads that instead.
  */
 // The identities are the join key, never a thought id: a link names its
 // target by identity (053), and a ticket's rows — its head, its superseded
@@ -349,12 +352,13 @@ export const dependencySql = (doneSlot: number) => `ticket_of AS (
              WHERE f.kind = 'link' AND f.valid_until IS NULL AND f.payload->>'relation' IN ('blocks', 'blocked_by')),
           deps AS MATERIALIZED (SELECT DISTINCT system, blocked, blocker FROM dep_links),
           blockers AS MATERIALIZED (
-            SELECT d.system, d.blocked, d.blocker, bl.status_type AS blocker_status
+            SELECT d.system, d.blocked, d.blocker, bl.status_type AS blocker_status,
+                   CASE WHEN d.system = 'linear' THEN d.blocker ELSE d.system || ':' || d.blocker END AS shown
               FROM (SELECT d.system, d.blocked, d.blocker, source_thought(d.system, d.blocker) AS blocker_id FROM deps d) d
               LEFT JOIN lifecycle bl ON bl.thought_id = d.blocker_id
              WHERE bl.status_type IS NULL OR NOT bl.status_type = ANY($${doneSlot}::text[])),
           dependency AS (
-            SELECT k.thought_id, array_agg(DISTINCT b.blocker ORDER BY b.blocker) AS blockers
+            SELECT k.thought_id, array_agg(DISTINCT b.shown ORDER BY b.shown) AS blockers
               FROM ticket_of k JOIN blockers b ON b.system = k.system AND b.blocked = k.identity
              GROUP BY 1)`;
 
@@ -402,7 +406,8 @@ export function weightsSql(opts: Pick<Options, "status" | "decayDone"> & Partial
   // settled, not blocked — so the factor passes a completed or canceled row
   // untouched, and `--status done` or the decay read it as without the flag
   // (first review pass). `held` marks the rows the factor took from weight
-  // above 0 to 0 — what the flag did in this run, which coverage counts.
+  // above 0 to 0, or to BLOCKED_WEIGHT of it under --decay-blocked — what the
+  // flag did in this run, which coverage counts.
   // Under --decay-blocked the factor is BLOCKED_WEIGHT, a constant written as
   // SQL text as DONE_WEIGHT is, and `blockers` is carried for the held rows
   // alone — a settled ticket's leftover relation holds nothing, so it names

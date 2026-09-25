@@ -166,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1760 assertions: 1760 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1761 assertions: 1761 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-five (55) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -1086,7 +1086,7 @@ bun graph-centrality.ts --url … --types project,tool --json    # a typed subgr
 bun graph-centrality.ts --url … "Open Brain" --status open     # as the live tickets build it: no Done or Canceled evidence
 bun graph-centrality.ts --url … --decay-done                   # a settled ticket weighs 0.25 in every count
 bun graph-centrality.ts --url … --status open --startable      # what you could start now: no ticket with an open blocker
-bun graph-centrality.ts --url … --status open --decay-blocked  # a blocked ticket sinks to 0.25 instead, listed with its blockers
+bun graph-centrality.ts --url … --status open --decay-blocked  # a blocked ticket sinks to 0.25 instead, naming its blockers where listed
 ```
 
 The subject resolves by 016's own rule, one rung at a time — exact
@@ -1184,14 +1184,14 @@ vanishes rather than sinks. `--decay-blocked` reads the same dependencies by the
 same rules and weighs a held thought `BLOCKED_WEIGHT` (0.25, pre-registered, one
 weight) times its lifecycle weight instead of 0. It stays in the ranking, and
 where it is listed it names its ticket's open blockers in a `blocked by` column
-(`blockers` in the JSON rows); the dependency line counts every down-weighted
-thought in the run, listed or not. The filter and the decay are two
-answers to one question, so the two flags are refused together, as
-`--decay-done` is beside `--status`. The decay composes with `--status` and
-`--decay-done` by multiplying, though the two decays never meet on one thought:
-a blocked thought is unsettled and `DONE_WEIGHT` weighs only settled ones.
-Degree counts neighbours, not evidence, and is unchanged by it. The JSON's
-`options` gains `decayBlocked: false`.
+(`blockers` in the JSON rows; a Linear key bare, another system's as
+`system:key`); the dependency line counts every down-weighted thought in the
+run, listed or not. The filter and the decay are two answers to one question, so
+the two flags are refused together, as `--decay-done` is beside `--status`. The
+decay composes with `--status` and `--decay-done` by multiplying, though the two
+decays never meet on one thought: a blocked thought is unsettled and
+`DONE_WEIGHT` weighs only settled ones. Degree counts neighbours, not evidence,
+and is unchanged by it. The JSON's `options` gains `decayBlocked: false`.
 
 Exit 0 when ranked, 1 when no
 entity resolves (a near-miss whose only guesses the numeric rule hid is still
@@ -2231,7 +2231,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1760 assertions, PGlite, no container
+bun test-schema.ts                          # 1761 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 728 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

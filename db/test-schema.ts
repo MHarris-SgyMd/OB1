@@ -6094,6 +6094,16 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   assert(tVrows.length === 1 && tVrows[0].includes("SMD 7010") && tVrows[0].includes("SMD-7107") && !tVrows[0].includes("…") && (await topEntities(run, wide)).byMentions.find((e) => e.name === "Kafka")!.degree === 0,
     `a blocker identity carrying a newline (facet data, untrusted) renders on the row as one space, as every other cell's whitespace does, and ten blockers — nine of its own and tR's blocks — are named in full, the column uncapped (second review pass; third: ten, not nine); and tQ's edge is gone again (${JSON.stringify(tVrows)})`);
   await links(tV, []);
+  // A link of another system (SMD-2136's --items writes any): its blocker is
+  // named with its system, a linear one bare (fourth review pass).
+  const tJ = await thought("PROJ-1 — Open Brain's Kafka export, in another tracker.");
+  await record(tJ, [E("Open Brain", "project"), E("Kafka", "tool")]);
+  await db.query(`SELECT record_thought_source($1::uuid, 'jira', 'PROJ-1', 'PROJ-1', 'text/markdown')`, [tJ]);
+  await db.query(`SELECT record_source_links($1::uuid, 'jira', '[{"relation": "blocked_by", "target": "PROJ-2"}]'::jsonb)`, [tJ]);
+  const jira = (await byId(openDecay)).get(tJ);
+  assert(JSON.stringify(jira?.blockers) === '["jira:PROJ-2"]' && jira?.weight === 0.25 && JSON.stringify((await byId(openDecay)).get(tP)?.blockers) === '["SMD-7002"]',
+    `a blocker of another system is named system:key — PROJ-2 could be anyone's — and a linear one stays bare (${JSON.stringify(jira)})`);
+  await drop(tJ);
   assert(render(await graphReport(run, null, openStart)).includes("--startable: 5 thoughts with an open blocker weigh 0 in this run; a completed") && !weightsSql({ status: "open", decayDone: false, startable: true }, []).includes("END AS blockers")
       && weightsSql({ status: "open", decayDone: false, decayBlocked: true }, []).replace(/,\n +CASE WHEN [^\n]* THEN blockers END AS blockers/, "").replace("THEN 0.25 ELSE", "THEN 0 ELSE") === weightsSql({ status: "open", decayDone: false, startable: true }, [])
       && weightsSql({ status: "open", decayDone: false, decayBlocked: true }, []).includes("END AS blockers") && !("blockers" in (await topThoughts(run, openStart))[0]),
