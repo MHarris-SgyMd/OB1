@@ -591,6 +591,7 @@ export function segment(events, s = emptySummary()) {
   // walk goes, never ahead of it — a branch made later would make an earlier
   // mention a key and move a boundary already captured (second review pass).
   const teams = new Set();
+  const learnTeams = (v) => { for (const id of ticketsIn(v)) teams.add(id.split("-")[0]); }; // the team prefixes a branch or directory names
   const episodes = [];
   let cur, lineAt = "", compacted = false; // the open episode; the current line's time; a compaction since the episode's last ask
   const loc = { cwd: "", branch: "" }; // where the session IS, against where the episode runs
@@ -639,13 +640,13 @@ export function segment(events, s = emptySummary()) {
     if (ev.t === "compaction") { if (cur.prompts.length) compacted = true; else cur.opened = { kind: "compaction" }; continue; }
     if (ev.t === "cwd" || ev.t === "branch") {
       if (ev.t === "branch" && ev.v === "HEAD") continue; // detached mid-rebase: the session is where it was
-      for (const id of ticketsIn(ev.v)) teams.add(id.split("-")[0]);
+      learnTeams(ev.v);
       loc[ev.t] = ev.v;
       // A line writes its cwd then its branch, so the two are one move: read
       // the branch before judging the cwd, else a cwd-first return to the repo
       // root — a parent of the worktree it was in — settles onto the episode it
       // ends before its branch arrives (second review pass).
-      if (ev.t === "cwd" && events[i + 1]?.t === "branch" && events[i + 1].v !== "HEAD") { const nb = events[++i]; apply(s, nb); for (const id of ticketsIn(nb.v)) teams.add(id.split("-")[0]); loc.branch = nb.v; }
+      if (ev.t === "cwd" && events[i + 1]?.t === "branch" && events[i + 1].v !== "HEAD") { const nb = events[++i]; apply(s, nb); learnTeams(nb.v); loc.branch = nb.v; }
       if (!cur.prompts.length) { settle(); continue; } // before the first ask, the episode is wherever the session is
       if (!branchMoved()) {
         if (inside()) settle(); // a cd within the checkout
@@ -750,7 +751,7 @@ export function renderSummary(s) {
   // The tickets first (SMD-2013): those the asks named, else the one the branch
   // or the directory names — a search for the ticket lands on this episode.
   const named = s.named ? [...s.named] : [];
-  const tickets = (named.length ? named : [...new Set([...ticketsIn(s.branch), ...ticketsIn(s.cwd)])]).slice(0, 3).join(", ");
+  const tickets = (named.length ? named : anchorOf(s.cwd, s.branch)).slice(0, 3).join(", ");
   const head = ["Session summary", tickets, s.harness, project, s.branch ? `(${s.branch})` : "", day].filter(Boolean).join(" — ").replace(" — (", " (");
   const parts = [head];
   const title = oneLine(s.title || prompts[0] || "");
@@ -1165,7 +1166,7 @@ export function prepare(hook, opts = {}) {
   // transcript is read, since the fallback comes from it; the read costs ~50 ms.
   if (typeof hook.session_id === "string" ? hook.session_id : typeof hook.session_id === "number") s.sessionId = String(hook.session_id); // an object is not an id
   const sessionId = s.sessionId;
-  for (const ep of s.episodes) ep.sessionId = sessionId;
+  for (const ep of s.episodes) ep.sessionId = sessionId; // the hook's id wins over the transcript's, which segment set
   const episodes = s.episodes;
   if (!episodes.length) return { code: 0, message: `skip: no human prompt in session ${sessionId}` };
   const last = episodes[episodes.length - 1]; // the open episode: where the session is now
@@ -1776,7 +1777,7 @@ export async function main(argv) {
     if (several) {
       console.log(`--- ${s.episodes.length} episodes — one thought each, on its own supersedes chain:`);
       for (const ep of s.episodes) {
-        const tickets = ep.named.size ? [...ep.named].join(", ") : ticketsIn(ep.branch)[0] ?? ticketsIn(ep.cwd)[0] ?? "no ticket";
+        const tickets = ep.named.size ? [...ep.named].join(", ") : anchorOf(ep.cwd, ep.branch)[0] ?? "no ticket";
         console.log(`    ${ep.n}. ${[tickets, ep.branch ? `(${ep.branch})` : "", `${distinctPrompts(ep.prompts).length} prompt(s)`, ep.first ? `${when(ep.first)} → ${when(ep.last)}` : "undated", ep.opened ? `begun ${boundaryBegan(ep.opened)}` : "from the start", ep.closed ? `ended ${boundaryEnded(ep.closed)}` : "still open"].filter(Boolean).join(" — ")}`);
       }
     }
