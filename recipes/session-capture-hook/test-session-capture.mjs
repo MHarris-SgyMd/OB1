@@ -568,6 +568,9 @@ let episodesLines;
 }
 
 // ── [4] Secret scan ──────────────────────────────────────────────────────────
+// Two 64-character base64 lines of a key block: one has a run of thirty-two and is a hit on its own, the other has none (its slashes split it) and is not (third review pass).
+const SEEDED = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKB";
+const SEEDLESS = "ZVEiR2BwpZOOkE/Z0/BVnhZYL71oZV34bKfWjQIt6V/isSMahdsAASACp4ZTGtwi";
 console.log("\n[4] The secret scan catches every shape it names and leaves the summary's own tokens alone");
 {
   const probes = [
@@ -713,6 +716,21 @@ console.log("\n[4] The secret scan catches every shape it names and leaves the s
     "a ticket id, a file name in capitals and HEAD beside a token stay — the summaries are searched by ticket");
   const tk = redactSecrets("a sk-ant-api03-" + "Ab1".repeat(12) + " b sk-ant-api03-" + "Ab1".repeat(12));
   assert(tk.spans.length === 2 && tk.spans.every((s) => tk.text.slice(s.at, s.end) === "[redacted:anthropic key]"), "the spans returned sit where the markers sit in the blanked text, the second moved by the first");
+  // Third review pass: a BLOCK of key material is one span — its lines with no run of thirty-two were no hit and went out verbatim where the episode used to be refused.
+  assert(SEEDED.length === 64 && SEEDLESS.length === 64 && scanForSecrets(SEEDED).length === 1 && scanForSecrets(SEEDLESS).length === 0, "the fixture: one line is a hit on its own, the other is not");
+  assert(redactSecrets(`key:\n-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n${SEEDED}\n${SEEDLESS}\n${SEEDED}\nAb3d==\n-----END PGP PRIVATE KEY BLOCK-----\nthen`).text === "key:\n[redacted:private key block, high-entropy token]\nthen", "PGP armor — BEGIN … PRIVATE KEY BLOCK — is one span, header to footer, the tokens inside it coalesced in");
+  const footerless = redactSecrets(`-----BEGIN PRIVATE KEY-----\n${SEEDLESS}\n${SEEDED}\n${SEEDLESS} and prose`);
+  assert(footerless.text === "[redacted:private key block, high-entropy token] and prose", `a header with no footer takes the body's lines with it, the seedless ones included (${footerless.text.slice(0, 80)})`);
+  const blob = redactSecrets(`paste:\n${SEEDED}\n${SEEDLESS}\n${SEEDED}\nAb3d==\nthen more`);
+  assert(blob.text === "paste:\n[redacted:high-entropy token]\nthen more" && redactSecrets(`paste: ${SEEDED} ${SEEDLESS} ${SEEDED} Ab3d== then`).text === "paste: [redacted:high-entropy token] then",
+    `a wrapped blob with no header: the seedless line and the padded tail join the seeded lines' span, across newlines or the spaces a prompt reads with (${blob.text.slice(0, 60)})`);
+  assert(redactSecrets(`${SEEDLESS}\n${SEEDED} prose`).text === "[redacted:high-entropy token] prose" && redactSecrets(`paste ${SEEDLESS} ${SEEDED} end`).text === "paste [redacted:high-entropy token] end",
+    "a blob whose FIRST line has no run of thirty-two joins the seed after it — the span grows LEFT, not only right");
+  assert(redactSecrets(`${SEEDED} Pneumonoultramicroscopicsilicovolcanoconiosis and fetchUserAccountBalanceByIdV3Legacy2026 and ${highEntropy}/README.md`).text === `[redacted:high-entropy token] Pneumonoultramicroscopicsilicovolcanoconiosis and fetchUserAccountBalanceByIdV3Legacy2026 and [redacted:high-entropy token]/README.md`,
+    "a long word, an identifier or a file name beside a token is not a line of the block");
+  assert(redactSecrets('password: “correct horse battery” and password: `correct horse battery` and password: «correct horse battery» and password: ‘correct horse battery’ end').text === 'password: “[redacted:password assignment]” and password: `[redacted:password assignment]` and password: «[redacted:password assignment]» and password: ‘[redacted:password assignment]’ end',
+    "typographic quotes, guillemets and a backtick close a quoted value as the straight quotes do — the opening one is no value character");
+  assert(redactSecrets("t eyJhbGciOiJSU0EtT0FFUCJ9.abcdefghij1234.abcdefghij5678.abcdefghij9012.FuKgOY7Ph6CX1oIDbrkvrA t").text === "t [redacted:jwt] t", "a five-segment JWE is blanked whole, not to its third segment");
   const many = describeRedactions([...Array.from({ length: 30 }, () => ({ reason: "password assignment", at: 26, in: "prompt 1" })), { reason: "anthropic key", at: 4, in: "the outcome" }]);
   assert(many === "password assignment at chars 26, 26, 26 and 27 more in prompt 1; anthropic key at char 4 in the outcome", `the message groups a reason and source, listing three offsets and counting the rest (${many})`);
   assert(/; and 2 more$/.test(describeRedactions(Array.from({ length: 10 }, (_, i) => ({ reason: `r${i}`, at: i, in: "prompt 1" })))) && describeRedactions([{ reason: "access key in a URL", at: 3, in: "prompt 2" }]) === "access key in a URL at char 3 in prompt 2", "…eight entries then a count; a reason with ` in ` in it survives the grouping");
@@ -900,6 +918,12 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   assert(thirteen.code === 0 && thirteen.payload.redactions?.[0]?.in === "prompt 13 (past the 12 the text lists)" && /- … and 1 more\n/.test(thirteen.payload.text) && !/Ab1Ab1/.test(JSON.stringify(thirteen.payload)),
     `a redaction in an ask the text does not list says so (${thirteen.payload?.redactions?.[0]?.in})`);
   if (thirteen.payloadPath) unlinkSync(thirteen.payloadPath);
+  // …and a pasted PGP armor, footer and all, or a footer-less PEM body, reaches the text as one marker and nothing of its lines (third review pass: the seedless lines went out).
+  writeFileSync(join(TMP, "armor.jsonl"), [user(`export:\n-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n${SEEDED}\n${SEEDLESS}\n${SEEDED}\nAb3d==\n-----END PGP PRIVATE KEY BLOCK-----\ndone`, { origin: { kind: "human" } }), assistant([{ type: "text", text: `saved -----BEGIN PRIVATE KEY-----\n${SEEDLESS}\n${SEEDED}\n${SEEDLESS}` }])].join("\n"));
+  const armor = prepare({ ...base, session_id: "s-armor", transcript_path: join(TMP, "armor.jsonl") });
+  assert(armor.code === 0 && armor.payload && !armor.payload.text.includes(SEEDLESS.slice(0, 12)) && !armor.payload.text.includes(SEEDED.slice(0, 12)) && /export: \[redacted:private key block, high-entropy token\] done/.test(armor.payload.text) && /saved \[redacted:private key block, high-entropy token\]/.test(armor.payload.text) && armor.payload.redactions.length === 2,
+    `PGP armor in a prompt and a footer-less body in the outcome: one marker each, none of the lines (${armor.message.slice(0, 100)})`);
+  if (armor.payloadPath) unlinkSync(armor.payloadPath);
   // The backstop: a blanking the scan still finds something after is refused as every hit was — the net under the redaction. A URL's password blanked, the URL no longer reads as one, and the digest in its path reads as a bare key.
   writeFileSync(join(TMP, "backstop.jsonl"), [user("pull https://u:p4ssw0rd@h/blobs/" + "3f9a".repeat(16) + " now", { origin: { kind: "human" } }), assistant([{ type: "text", text: "pulled" }])].join("\n"));
   const bs = prepare({ ...base, session_id: "s-backstop", transcript_path: join(TMP, "backstop.jsonl") });

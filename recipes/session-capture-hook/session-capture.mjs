@@ -918,10 +918,10 @@ export const SECRET_PATTERNS = [
   ["linear key", /\blin_api_[A-Za-z0-9]{20,}/],
   ["hugging face token", /\bhf_[A-Za-z0-9]{30,}/],
   ["npm token", /\bnpm_[A-Za-z0-9]{36}\b/],
-  ["jwt", /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/],
+  ["jwt", /\beyJ[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]{10,}){2,4}/], // three segments, or a JWE's five — the tail went out with three (third review pass)
   // The whole block when its footer is there, so a redaction takes the body
   // with the header (SMD-2127); the header alone is still a hit.
-  ["private key block", /-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----)?/],
+  ["private key block", /-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----)?/], // PGP's armor says BLOCK (third review pass)
   // A rule with a `v` group names the VALUE as the span a redaction takes and
   // the offset a refusal prints — `LINEAR_API_KEY=[redacted:…]` keeps the name;
   // the `d` flag records the group's indices (SMD-2127). A value that begins
@@ -947,16 +947,16 @@ export const SECRET_PATTERNS = [
   // name — `your-api-key-goes-here`, `REPLACE_WITH_YOUR_KEY`, `********`,
   // `get_random_secret_key()` — each refused a whole session (thirteenth); a
   // real key without a digit is rare, and the entropy rule reads one of 32+.
-  ["credential assignment", /(?<![A-Za-z0-9])(?:x-brain-key|MCP_ACCESS_KEY|OB1_[A-Z_]*KEY|OB1_SMOKE_KEY|(?:[A-Z0-9]+_)*(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret(?:[_-]?(?:access[_-]?)?key)?(?:[_-]?base)?)|(?:[A-Z0-9]+_)+token|bearer)\b["']?\s*[:=]\s*(?<q>["'])?(?<v>(?!\$|<|%|\{|\[|process\.env\b|os\.environ\b|Deno\.env\b|import\.meta\.env\b|[A-Za-z_]\w*(?:\.\w+)+[,;)]?(?:\s|$))(?=[^\s"']*\d)[^\s"']{16,})/di],
+  ["credential assignment", /(?<![A-Za-z0-9])(?:x-brain-key|MCP_ACCESS_KEY|OB1_[A-Z_]*KEY|OB1_SMOKE_KEY|(?:[A-Z0-9]+_)*(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret(?:[_-]?(?:access[_-]?)?key)?(?:[_-]?base)?)|(?:[A-Z0-9]+_)+token|bearer)\b["']?\s*[:=]\s*(?<q>["'`‘“«])?(?<v>(?!\$|<|%|\{|\[|process\.env\b|os\.environ\b|Deno\.env\b|import\.meta\.env\b|[A-Za-z_]\w*(?:\.\w+)+[,;)]?(?:\s|$))(?=[^\s"'`‘’“”«»]*\d)[^\s"'`‘’“”«»]{16,})/di],
   // A credential handed to a command by flag: `--api-key <value>` has no `=`
   // (twelfth review pass). Hyphenated compounds (`--client-secret`,
   // `--refresh-token`), `=` as well as a space; not a path, a `%VAR%`, or
   // docker's `--secret id=…,src=…` spec, and the value carries a digit
   // (thirteenth). A password's floor is six, as in the assignment rule.
-  ["credential flag", /(?<![\w-])--(?:[a-z]+-)*(?:api-?key|access-?token|auth-?token|client-?secret|refresh-?token|token|secret(?:-?key)?)(?:\s+|=)(?<q>["'])?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)(?=[^\s"']*\d)[^\s"']{16,})/di],
-  ["password flag", /(?<![\w-])--(?:[a-z]+-)*password(?:\s+|=)(?<q>["'])?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)[^\s"']{6,})/di],
+  ["credential flag", /(?<![\w-])--(?:[a-z]+-)*(?:api-?key|access-?token|auth-?token|client-?secret|refresh-?token|token|secret(?:-?key)?)(?:\s+|=)(?<q>["'`‘“«])?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)(?=[^\s"'`‘’“”«»]*\d)[^\s"'`‘’“”«»]{16,})/di],
+  ["password flag", /(?<![\w-])--(?:[a-z]+-)*password(?:\s+|=)(?<q>["'`‘“«])?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)[^\s"'`‘’“”«»]{6,})/di],
   // A password can be short — `POSTGRES_PASSWORD=hunter2` reached the brain under the 16-character floor (first review pass).
-  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*(?<q>["'])?(?<v>(?!\[)[^\s"']{6,})/di],
+  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*(?<q>["'`‘“«])?(?<v>(?!\[)[^\s"'`‘’“”«»]{6,})/di],
   // This fork's own access keys are 64 hex characters (keygen.ts), as are their
   // digests — told apart only by where they sit: a digest follows `name:scope:`
   // in MCP_ACCESS_KEYS or `sha256:`; a bare 64-hex run is a key until proven
@@ -1007,7 +1007,7 @@ export function scanForSecrets(text, { every = false } = {}) {
         // spaces included — `password: "correct horse battery"` — where the
         // class stopped at the first space and the tail was sent (second
         // review pass). No close on the line: the class's stop stands.
-        const close = m.input.indexOf(m.groups.q, end), line = m.input.indexOf("\n", end);
+        const close = m.input.indexOf(QUOTE_CLOSE[m.groups.q] ?? m.groups.q, end), line = m.input.indexOf("\n", end);
         if (close !== -1 && (line === -1 || close < line)) end = close;
       } else if (m.indices?.groups?.v) {
         // A value class of `[^\s"']` runs to the next space: a closing bracket,
@@ -1050,19 +1050,63 @@ export function secretMode(env = process.env) {
   if (SECRET_MODES.includes(raw)) return { mode: raw };
   return { error: `OB1_CAPTURE_ON_SECRET takes ${SECRET_MODES.join(" or ")}, not "${raw}"` };
 }
+/** A typographic quote or a guillemet closes with its partner; the straight quotes and the backtick with themselves (third review pass: pass 2's extension knew `"` and `'`, and a value in curly quotes still sent its tail). */
+const QUOTE_CLOSE = { "‘": "’", "“": "”", "«": "»" };
+/** The reasons whose span is KEY MATERIAL — what a block of base64 lines is made of. */
+const KEY_MATERIAL = new Set(["high-entropy token", "private key block", "64-hex token (a raw key, or a digest out of its context)"]);
+/**
+ * A whitespace-delimited run that reads as a line of a key block: base64
+ * characters alone, thirty-two or more (or four or more ending in `=`, a
+ * block's padded last line), with a digit or both cases, and not word-shaped
+ * — a long word or a camel-case identifier beside a token is not key material.
+ */
+const blockLine = (run) => /^[A-Za-z0-9+/=]+$/.test(run) && (run.length >= 32 || (run.length >= 4 && run.endsWith("="))) && (/[0-9]/.test(run) || (/[a-z]/.test(run) && /[A-Z]/.test(run))) && (run.match(/[a-z]{3,}/g) ?? []).join("").length / run.length < 0.6;
+/**
+ * A key-material span grown over the block it sits in: the whitespace-
+ * delimited runs before and after it that read as lines of the block, as far
+ * as they run. A block of base64 — a PEM body with no footer, PGP armor, any
+ * wrapped blob — was blanked run by run, and the eighth or so of its lines
+ * with no run of thirty-two were no hit on their own and went out verbatim,
+ * the second scan clean, where the episode used to be refused (third review
+ * pass). The header alone matches when the footer is gone, so the body joins
+ * the header's span.
+ */
+function growBlock(text, at, end) {
+  for (;;) {
+    const ws = /\s+$/.exec(text.slice(0, at));
+    const run = ws && /\S+$/.exec(text.slice(0, at - ws[0].length))?.[0];
+    if (!run || !blockLine(run)) break;
+    at -= ws[0].length + run.length;
+  }
+  for (;;) {
+    const ws = /^\s+/.exec(text.slice(end));
+    const run = ws && /^\S+/.exec(text.slice(end + ws[0].length))?.[0];
+    if (!run || !blockLine(run)) break;
+    end += ws[0].length + run.length;
+  }
+  return [at, end];
+}
 /** The marker a span becomes: what kind of thing was there — never how long, never what. */
 export const redactionMarker = (reasons) => `[redacted:${reasons.join(", ")}]`;
 /**
  * Every span the scan finds, blanked in place. Overlapping and adjacent spans
  * are ONE — the live case was a credential assignment, a linear key and a
- * high-entropy token at one site — sorted by start and replaced RIGHT TO LEFT,
+ * high-entropy token at one site — a key-material span grown over its block,
+ * sorted by start and replaced RIGHT TO LEFT,
  * so an earlier offset stays true after a later span has changed the length.
  * Returns the text and the spans taken, each its reasons and its offsets in
  * the text returned — where its marker sits; nothing of the match.
  */
 export function redactSecrets(text) {
   const spans = [];
-  for (const f of scanForSecrets(text, { every: true })) {
+  // Key material grown over its block first (third review pass). Growth never
+  // reorders: findings come sorted by start; a key-material span grows left
+  // only over base64 block lines, and any earlier finding in that block is key
+  // material too and grows to the same block start, while a named hit's
+  // `name=value` run is not a block line and stops the growth — so the array
+  // stays sorted for the coalescing below.
+  const found = scanForSecrets(text, { every: true }).map((f) => { if (!KEY_MATERIAL.has(f.reason)) return f; const [at, end] = growBlock(text, f.at, f.end); return { ...f, at, end }; });
+  for (const f of found) {
     const last = spans[spans.length - 1];
     if (last && f.at <= last.end) { last.end = Math.max(last.end, f.end); if (!last.reasons.includes(f.reason)) last.reasons.push(f.reason); continue; }
     spans.push({ reasons: [f.reason], at: f.at, end: f.end });
