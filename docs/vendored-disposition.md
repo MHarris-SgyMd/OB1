@@ -71,7 +71,7 @@ exactly one disposition.
 - **PostgREST-speaking scripts (SMD-2126, decided 2026-09-24): 30 files in 21 recipes at the
   decision (29 in 20 after SMD-2137)**, one fate each — an import onto the ingestion contract, a
   maintenance script onto the shim, the two smoke harnesses to their own tickets, the three above
-  retire (the first done, SMD-2137) — in the section below;
+  retire (`obsidian-vault-import` done, SMD-2137) — in the section below;
   check 24 holds the class.
 - **fold-in SMD-1867 (capture-source adapters): 5 integrations** — `chrome-capture-extension`,
   `discord-capture`, `slack-capture`, `telegram-capture`, `readwise-capture`. Plus **~11
@@ -181,7 +181,7 @@ mentions through the fork's `record_thought_entities`, or its ticket says why no
 
 **Smoke harnesses and retirements.** A **smoke harness** has its own ticket. A script whose
 capability is **in core** retires: `obsidian-vault-import` (the Markdown adapter,
-`ingest-records.ts --markdown`, is the import; the recipe's heading split with LLM
+`ingest-records.ts --source markdown --markdown`, is the import; the recipe's heading split with LLM
 distillation of long sections, its `--min-words` / `--skip-folders` / `--after` filters, its
 secret scan, sync log and source label have no counterpart there and were dropped with it,
 each named in SMD-2137, which removed the directory), `local-ollama-embeddings` (the server embeds locally through
@@ -211,7 +211,7 @@ nothing.
 | `lint-sweep` | `lint-sweep.js` (1) | `thoughts`, the entity tables, the seven `lint_*` views (read; either URL name) | port onto the shim; read-only | SMD-2144 |
 | `local-ollama-embeddings` | `embed-local.py` (2) | `upsert_thought` over `/rest/v1/rpc/` | retire: the server embeds locally (`OB1_LLM_BASE_URL`), `db/reembed.ts` for existing rows | SMD-2138 |
 | `ob-graph` | `smoke-graph-rpcs.mjs` (1); `index.ts` is on the shim since SMD-1798 | `graph_nodes`, `graph_edges`; `traverse_graph`, `find_shortest_path` | the smoke onto the shim or into `extensions/test-tools.ts` | SMD-2146 |
-| `obsidian-vault-import` | `import-obsidian.py` (3) | `thoughts` (raw POST with a vector) | retired: `db/ingest-markdown.ts` is the fork's Obsidian import (`ingest-records.ts --markdown`); the directory, its registry rows and its check 24 entry are gone | SMD-2137 |
+| `obsidian-vault-import` | `import-obsidian.py` (3) | `thoughts` (raw POST with a vector) | retired: `db/ingest-markdown.ts` is the fork's Obsidian import (`ingest-records.ts --source markdown --markdown`); the directory, its registry rows and its check 24 entry are gone | SMD-2137 |
 | `perplexity-conversation-import` | `import-perplexity.py` (1) | `thoughts` (raw POST with a vector) | port onto the ingestion contract | SMD-2148 |
 | `provenance-chains` | `backfill.mjs` (1), `eval.mjs` (1); `mcp-tools.ts` takes an injected client and test-writes drives it on the shim (SMD-1524) | `thoughts` (PATCH); `merge_thought_provenance_metadata` and `merge_thought_eval_metadata` (`schemas/provenance-chains`' functions) over `/rpc/`; `eval.mjs` writes metadata (reads either URL name) | port onto the shim | SMD-2142 |
 | `readwise-import` | `import-readwise.py` (2, supabase-py) | `upsert_thought`, `readwise_books`, `thoughts` (UPDATE of two columns) | port onto the ingestion contract | SMD-2149 |
@@ -335,7 +335,7 @@ remaining drafts are unreferenced markdown working-notes.
 | `local-brain-no-mcp` | ~~keep + audited *(own-database)*~~ → **retired (SMD-1800)** | Was a self-hosted LAN Supabase stack with three Edge Functions for curl-only capture/search/list where MCP is blocked. The fork's stack (`SETUP.md`) already runs without a cloud, and `integrations/open-brain-rest` is the HTTP surface without MCP; the companion `skills/ob1-local-http` now calls it. Its check 7/10/11/22 exceptions went with it. |
 | `local-ollama-embeddings` | ~~keep + audited~~ → **remove** *(no-parity posture; SMD-2126 → SMD-2138)* | The `ALTER COLUMN embedding TYPE` is a README example explicitly annotated "not altered by hand on this fork — build at `db/config.mjs`'s width; `upsert_thought` refuses another width." CI-driven (`test-writes.ts:707`, SMD-1524). **SMD-2126:** the fork embeds locally by default (`OB1_LLM_BASE_URL`, `deploy/compose.yaml --profile local-models`) and `db/reembed.ts` re-embeds existing rows, so the recipe's capability is core and its only transport is one the stack lacks; it retires in SMD-2138 (test-writes' two text assertions on it go with it). |
 | `ob-graph` | keep + audited + SMD-1798 → **SMD-2126**: `smoke-graph-rpcs.mjs` onto the shim or into test-tools (SMD-2146) | Knowledge-graph layer (own nodes/edges tables + recursive-CTE traversal + MCP server); no core clobber. `index.ts` uses supabase-js at runtime → SMD-1798 portability. |
-| `obsidian-vault-import` | ~~keep + audited, an SMD-1867 candidate~~ → **retired (SMD-2137)** *(no-parity posture; SMD-2126 → SMD-2137)* | Was the Obsidian-vault import, an SMD-1867 candidate. **SMD-2126:** the Markdown adapter of the ingestion contract (`db/ingest-markdown.ts`, SMD-1867 — frontmatter, `[[wikilinks]]` and tags as facets and edges, the file kept byte for byte) is the fork's Obsidian import, so the recipe retired in SMD-2137 (the directory is gone); its heading split with LLM distillation, `--min-words` / `--skip-folders` / `--after` filters, secret scan, sync log and source label have no counterpart in the adapter and were dropped with it, each named there — the filters, the label and a pre-allowlist vault scan noted on SMD-1814 as the connector's; the root README row points at the adapter and the registry rows went (the `obsidian` vendor returns with SMD-1814's capability). |
+| `obsidian-vault-import` | ~~keep + audited, an SMD-1867 candidate~~ → **retired (SMD-2137)** *(no-parity posture; SMD-2126 → SMD-2137)* | Was the Obsidian-vault import, an SMD-1867 candidate. **SMD-2126:** the Markdown adapter of the ingestion contract (`db/ingest-markdown.ts`, SMD-1867 — frontmatter, `[[wikilinks]]` and tags as facets and edges, the file kept byte for byte) is the fork's Obsidian import, so the recipe retired in SMD-2137 (the directory is gone); its heading split with LLM distillation, `--min-words` / `--skip-folders` / `--after` filters, secret scan, sync log and source label have no counterpart in the adapter and were dropped with it, each named there — the filters, the label, an mtime date and a pre-allowlist vault scan noted on SMD-1814 as the connector's; the root README row points at the adapter and the registry rows went (the `obsidian` vendor returns with SMD-1814's capability). |
 | `openclaw-agent-memory` | keep + audited | Canonical OpenClaw × OB1 Agent Memory workflow recipe (depends on the kept `agent-memory-api`). Distinct from the `integrations/openclaw-agent-memory` plugin. |
 | `openclaw-code-review-memory` | keep + audited | OpenClaw code-review-agent memory workflow over Agent Memory. |
 | `openclaw-taskflow-work-log` | keep + audited | OpenClaw TaskFlow handoff-log workflow over Agent Memory. |

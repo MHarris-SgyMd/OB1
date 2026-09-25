@@ -238,7 +238,8 @@
  *      (two more reach the gateway through a lib; twenty-eight until
  *      obsidian-vault-import retired, SMD-2137) with the ticket that ports
  *      or retires each — a landed port fails until its entry goes, so the
- *      table's size is the class's remaining size (SMD-2126)
+ *      table's size, plus the two lib-reached scripts, is the class's
+ *      remaining size (SMD-2126)
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20 and 23 parse YAML with Bun.YAML)
