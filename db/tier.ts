@@ -333,7 +333,7 @@ export async function targetRefusal(target: SQL): Promise<string | null> {
            to_regclass('public.schema_migrations') IS NOT NULL AS migrations,
            to_regclass('public.ob1_config') IS NOT NULL AS config,
            to_regclass('public.thoughts') IS NOT NULL AS thoughts`;
-  const tier = config ? await readConfig(target, "tier") : null;
+  const tier = await configTier(target);
   if (tier === "canary" || tier === "working" || relations === 0) return null;
   const held = thoughts && (await target<{ n: number }[]>`SELECT count(*)::int AS n FROM (SELECT 1 FROM thoughts LIMIT 1) t`)[0].n > 0;
   if (migrations && config && thoughts && !held && tier !== "stable") return null;
@@ -474,6 +474,12 @@ async function readConfig(sql: SQL, key: string): Promise<string | null> {
   return rows.length ? rows[0].value : null;
 }
 
+/** The tier ob1_config is stamped with, or null when unstamped or there is no ob1_config (a new database). */
+async function configTier(sql: SQL): Promise<string | null> {
+  const [{ present }] = await sql<{ present: boolean }[]>`SELECT to_regclass('public.ob1_config') IS NOT NULL AS present`;
+  return present ? readConfig(sql, "tier") : null;
+}
+
 /** Upsert an ob1_config KV row — the write half beside readConfig. */
 async function setConfig(sql: SQL, key: string, value: string): Promise<void> {
   await sql`INSERT INTO ob1_config (key, value) VALUES (${key}, ${value})
@@ -492,37 +498,29 @@ async function setConfig(sql: SQL, key: string, value: string): Promise<void> {
 export async function promote(canaryUrl: string, stableUrl: string): Promise<{ version: string | null }> {
   const canary = new SQL({ url: canaryUrl, max: 1 });
   const stable = new SQL({ url: stableUrl, max: 1 });
-  let version: string | null;
   try {
     // The mirror of refresh's guard: promote stamps --to as stable, so --to must
     // not be the canary itself, nor a tier — the shape of --from and --to the
     // wrong way round, which would make the canary read as the record.
     if (await sameDatabase(canary, stable)) throw new Error(`--from and --to name the same database. Refusing: --promote stamps --to as stable.`);
     const mark = await refreshMark(stable);
-    const [{ config }] = await stable<{ config: boolean }[]>`SELECT to_regclass('public.ob1_config') IS NOT NULL AS config`;
-    const tier = config ? await readConfig(stable, "tier") : null;
+    const tier = await configTier(stable);
     if (mark !== null || tier === "canary" || tier === "working") {
       const [{ db }] = await stable<{ db: string }[]>`SELECT quote_ident(current_database()) AS db`;
       throw new Error(`--to is a tier (${mark !== null ? `refresh mark ${mark}` : `tier=${tier}`}), not the record — are --from and --to the wrong way round? Refusing: --promote stamps --to as stable.${mark !== null ? ` If --to really is to be the record now, clear the mark first: ALTER DATABASE ${db} RESET ob1.refresh_target` : ""}`);
     }
-    version = await readConfig(canary, "schema_version");
-  } catch (e) {
-    await stable.close();
-    throw e;
-  } finally {
-    await canary.close();
-  }
-  try {
+    const version = await readConfig(canary, "schema_version");
     // Assert the target is stable — but only the tier key, not stampTier's
     // last_ingest: a promotion is not an ingest, and stable's last_ingest must
     // keep naming the real rebuild time (preflight's `tier` check reads it).
     await setConfig(stable, "tier", "stable");
     if (version !== null) await setConfig(stable, "promoted_schema_version", version);
     await setConfig(stable, "promoted_at", new Date().toISOString());
+    return { version };
   } finally {
+    await canary.close();
     await stable.close();
   }
-  return { version };
 }
 
 // ---------------------------------------------------------------------------

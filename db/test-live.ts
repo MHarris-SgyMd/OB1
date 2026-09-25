@@ -4275,9 +4275,11 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
   // it returned; the canary, refreshed from stable, replays that search and its
   // ids are diffed against stable's. This drives the ENGINE (readLoggedSearches →
   // replayOne → diffResult) end to end over the KEYWORD arm, which needs no model
-  // — the arm CI can run. The pg_dump-based refresh() and the hybrid arm need
-  // client tools / a provider CI does not have; they are exercised by the compose
-  // stack and documented, the same split as eval-replay.ts vs test-replay.ts.
+  // — the arm CI can run. A real pg_dump refresh needs client tools this job
+  // does not have: the deploy-stack job runs one through deploy/tier.sh
+  // (SMD-2036), and below, stand-in tools drive refresh() to its restore and
+  // the guards run before any tool is looked for. The hybrid arm needs a
+  // provider, the same split as eval-replay.ts vs test-replay.ts.
   await sql`DELETE FROM query_log`; // scope the replay window to this section's rows
   const put = (s: SQL, id: string, content: string) =>
     s`INSERT INTO thoughts (id, content, metadata, content_fingerprint)

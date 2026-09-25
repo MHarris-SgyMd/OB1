@@ -755,10 +755,9 @@ jobs:
       # that finds it unmoved, and a retry over a copy left stamped stable, as a
       # refresh that died after its restore leaves it. Then the two guards the
       # wrapper runs under, since from its container every database is remote:
-      # the brain under its service
-      # name and its container name is one database, and a refresh the wrong way
-      # round lands on a brain with no tier stamp. Both are refused, and the
-      # brain still holds its thought.
+      # the brain under its service name and its container name is one
+      # database, and a refresh the wrong way round lands on a brain with no
+      # tier stamp. Both are refused, and the brain still holds its thought.
       - name: The tier refresh runs from deploy/tier.sh
         working-directory: deploy
         run: |
@@ -784,7 +783,7 @@ jobs:
           # behind — the brain's, here no tier; the dogfood's, tier=stable. The
           # mark the refresh set on the database before its reset lets the
           # retry through.
-          [ "$(q ob1_tier_ci "SHOW ob1.refresh_target")" = working ] || { echo "the refresh did not mark its target" >&2; exit 1; }
+          [ "$(q ob1_tier_ci "SELECT count(*) FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase, unnest(s.setconfig) c WHERE d.datname = current_database() AND s.setrole = 0 AND c = 'ob1.refresh_target=working'")" = 1 ] || { echo "the refresh did not mark its target" >&2; exit 1; }
           q ob1_tier_ci "UPDATE ob1_config SET value = 'stable' WHERE key = 'tier'"
           ./tier.sh --refresh --from postgres --to postgres/ob1_tier_ci --tier working
           [ "$(q ob1_tier_ci "SELECT value FROM ob1_config WHERE key = 'tier'")" = working ] || { echo "the retry did not restamp the copy" >&2; exit 1; }

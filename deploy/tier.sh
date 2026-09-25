@@ -116,8 +116,7 @@ fi
 }
 
 TMP_ENV="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-env.XXXXXX")"
-COMPOSE_ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-compose.XXXXXX")"
-chmod 600 "$TMP_ENV"
+COMPOSE_ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-compose.XXXXXX")" # mktemp creates both mode 600
 trap 'rm -f "$TMP_ENV" "$COMPOSE_ERR_FILE"' EXIT
 
 # The environment as compose builds it for the stack: an empty project, the
