@@ -328,11 +328,19 @@ export function loadConfig() {
   const modelLocal = cfg.model_local ?? (env.OB1_CHAT_LOCAL === "1" || env.OB1_LLM_LOCAL === "1");
   const egressRaw = String(env.OB1_EGRESS_POLICY || cfg.egress || "deny").toLowerCase();
   const egress = EGRESS_MODES.has(egressRaw) ? egressRaw : "deny"; // an unknown or unparseable value fails closed to deny, as the server's gate does
-  const modelTimeout = Number(env.OB1_SESSION_CAPTURE_MODEL_TIMEOUT || cfg.model_timeout || 0) || undefined;
+  // A number of milliseconds above zero, else the default: a negative value is
+  // truthy but would abort the fetch at once and always fall back (first review
+  // pass 2), and 0 or a non-number means "use the default" (SMD-2014).
+  const modelTimeoutRaw = Number(env.OB1_SESSION_CAPTURE_MODEL_TIMEOUT || cfg.model_timeout || 0);
+  const modelTimeout = Number.isFinite(modelTimeoutRaw) && modelTimeoutRaw > 0 ? modelTimeoutRaw : undefined;
   return {
     url: String(url).replace(/\/*$/, "/"), key: String(key),
     summary,
-    modelUrl: modelUrlRaw ? String(modelUrlRaw).replace(/\/*$/, "") : undefined,
+    // The base the OpenAI path hangs off: trailing slashes stripped, and a
+    // trailing `/chat/completions` a user pasted from a full endpoint removed,
+    // so modelSummary's own `/chat/completions` is not doubled into a 404 that
+    // would silently fall back (review pass 2).
+    modelUrl: modelUrlRaw ? String(modelUrlRaw).replace(/\/*$/, "").replace(/\/chat\/completions$/, "") : undefined,
     model: modelRaw ? String(modelRaw) : undefined,
     modelKey: modelKey ? String(modelKey) : undefined,
     modelLocal: !!modelLocal,
@@ -1250,12 +1258,15 @@ export function prepare(hook, opts = {}) {
       derived_from: provenanceOf(ep), supersedes: state.thought_id || undefined,
       prompts: distinctPrompts(ep.prompts).length, prepared_at: new Date().toISOString(), attempts: 0,
     };
-    // The model's input rides the payload only when the option is on, so the
-    // child (which does the call) has it without re-reading the transcript, and
-    // a derived-mode payload is byte-identical to before (SMD-2014). The
-    // fingerprint stays the DERIVED text's, so an episode is asked of the model
-    // once — a re-end with the same derived summary is skipped, not re-modelled.
-    if (opts.summary === "model") payload.assistant = assistantExcerpt(ep);
+    // The model's input rides the payload only when the option is on AND the
+    // payload is a durable one the model will actually write — not a running
+    // checkpoint, which keeps its derived text (the same event-table test
+    // modelSummary applies): so a derived-mode payload is byte-identical to
+    // before (SMD-2014), and a checkpoint payload never carries the assistant
+    // excerpt at rest unread (review pass 2). The fingerprint stays the DERIVED
+    // text's, so an episode is asked of the model once — a re-end with the same
+    // derived summary is skipped, not re-modelled.
+    if (opts.summary === "model" && !eventSpec(payload.event)?.checkpoint) payload.assistant = assistantExcerpt(ep);
     ensureDirs();
     // The name orders the queue: the millisecond, then a per-process sequence
     // (two payloads one process prepares in one millisecond sort as made — third

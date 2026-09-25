@@ -207,6 +207,8 @@ console.log("\n[2] capture_thought writes through SQL");
   assert(/set by the server/.test(await reserved({ content: "names a reserved metadata key", metadata: { source: "spoofed" } })), "a reserved metadata key (source) is refused");
   assert(/set by the server/.test(await reserved({ content: "names a reserved tag", metadata: { type: "task" } })), "…and one of the extractor's tags (type) is refused");
   assert(/lower-case/.test(await reserved({ content: "a badly shaped metadata key", metadata: { "Bad Key": "x" } })), "…and a badly-shaped key is refused, before either model call");
+  assert(/at most 8/.test(await reserved({ content: "too many metadata keys", metadata: Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`k${i}`, "v"])) })), "…and more than eight keys is refused");
+  assert(/at most 200/.test(await reserved({ content: "an over-long metadata value", metadata: { note: "x".repeat(201) } })), "…and a value over 200 characters is refused");
 }
 
 console.log("\n[3] search_thoughts ranks over real pgvector");

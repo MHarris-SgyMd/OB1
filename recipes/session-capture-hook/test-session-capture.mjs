@@ -1798,6 +1798,22 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   for (const k of Object.keys(modelEnv)) { if (restoreEnv[k] === undefined) delete process.env[k]; else process.env[k] = restoreEnv[k]; }
   assert(mc.summary === "model" && mc.modelUrl === "http://127.0.0.1:1/v1" && mc.model === "llama3.1:8b" && mc.modelLocal === true, `loadConfig reads the model knobs and strips the URL's trailing slash (${JSON.stringify({ s: mc.summary, u: mc.modelUrl, m: mc.model, l: mc.modelLocal })})`);
   assert(mc.egress === "deny", "an unknown egress value fails closed to deny, as the server's gate does");
+  // A full endpoint URL a user pasted is trimmed to its base, and a negative
+  // timeout falls to the default rather than aborting at once (review pass 2).
+  const normEnv = { OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_SESSION_CAPTURE_MODEL_URL: "http://127.0.0.1:1/v1/chat/completions/", OB1_SESSION_CAPTURE_MODEL: "m", OB1_SESSION_CAPTURE_MODEL_TIMEOUT: "-5" };
+  const restoreNorm = {};
+  for (const [k, v] of Object.entries(normEnv)) { restoreNorm[k] = process.env[k]; process.env[k] = v; }
+  const nc = loadConfig();
+  for (const k of Object.keys(normEnv)) { if (restoreNorm[k] === undefined) delete process.env[k]; else process.env[k] = restoreNorm[k]; }
+  assert(nc.modelUrl === "http://127.0.0.1:1/v1" && nc.modelTimeout === undefined, `a full /chat/completions URL is trimmed to its base and a negative timeout falls to the default (${nc.modelUrl}, ${nc.modelTimeout})`);
+
+  // A joined excerpt over the cap keeps the recent TAIL, where decisions land,
+  // not the head; and the per-episode window keeps the most recent messages,
+  // bounding memory during the parse (review pass 2 teeth).
+  const longExc = assistantExcerpt({ assistant: ["HEAD_MARK" + "a".repeat(LIMITS.modelInputChars), "TAIL_MARK"] });
+  assert(longExc.length <= LIMITS.modelInputChars && longExc.includes("TAIL_MARK") && !longExc.includes("HEAD_MARK"), "assistantExcerpt keeps the recent tail when the joined excerpt exceeds the cap");
+  const windowed = segment([{ t: "prompt", text: "do it" }, ...Array.from({ length: LIMITS.modelMsgs + 5 }, (_, i) => ({ t: "outcome", text: `m${i}` }))]);
+  assert(windowed.episodes[0].assistant.length === LIMITS.modelMsgs && windowed.episodes[0].assistant.at(-1) === `m${LIMITS.modelMsgs + 4}` && windowed.episodes[0].assistant[0] === "m5", "the assistant window keeps the most recent LIMITS.modelMsgs messages per episode");
   assert(/summary: model at .*llama3\.1:8b/.test(modelStatusLine(mc)) && /no model_url\/model/.test(modelStatusLine({ summary: "model" })), "the status line names a configured model, and says so when model mode is on but unconfigured");
 
   // A fake OpenAI /chat/completions endpoint the child and modelSummary call.
@@ -1871,7 +1887,12 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   const offPrep = prepare({ session_id: "s-prep-off", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
   const offPayload = JSON.parse(readFileSync(offPrep.payloadPath, "utf8"));
   assert(!("assistant" in offPayload), "…and off, the payload carries no assistant key — byte-identical to before the option existed");
-  unlinkSync(onPrep.payloadPath); unlinkSync(offPrep.payloadPath); // not posted here: keep them out of the drain below
+  // A running-checkpoint payload carries no excerpt at rest (review pass 2): the
+  // model will keep its derived text, so nothing durable needs the messages.
+  const cpPrep = prepare({ session_id: "s-prep-cp", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" }, { summary: "model" });
+  const cpPayload = JSON.parse(readFileSync(cpPrep.payloadPath, "utf8"));
+  assert(cpPayload.event === "PreCompact" && !("assistant" in cpPayload), "a running-checkpoint payload carries no assistant excerpt at rest — only durable payloads do");
+  unlinkSync(onPrep.payloadPath); unlinkSync(offPrep.payloadPath); unlinkSync(cpPrep.payloadPath); // not posted here: keep them out of the drain below
 
   // End to end through the detached child, run synchronously: the posted content
   // is the model's, metadata.summary_model rides along, source stays the harness.
