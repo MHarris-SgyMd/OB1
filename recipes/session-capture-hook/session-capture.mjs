@@ -1094,6 +1094,37 @@ export async function rpc(cfg, method, params, timeoutMs = POST_TIMEOUT_MS) {
 const textOfResult = (result) => (result?.content ?? []).map((c) => c?.text ?? "").join("\n");
 
 /**
+ * The server's machine-readable verdict on a result (SMD-1978), read from the
+ * MCP result's `structuredContent` — `{ code, retryable, positions? }` — and,
+ * for a server from before that field, derived from the prose rules unchanged.
+ * `retryable` is the transient/final split (a kept payload vs a dead one);
+ * `mend` names a pointer a retry should drop to mend the capture; `positions`
+ * the derived_from indices to drop (absent for a key that may not know a source
+ * exists — the existence-oracle rule); `on` marks a pointer the server could not
+ * judge, which postPending counts. The hook keys on this, not on English.
+ */
+export function verdictOf(result, text) {
+  const sc = result?.structuredContent;
+  if (sc && typeof sc.code === "string") {
+    const positions = Array.isArray(sc.positions) ? sc.positions.filter((n) => Number.isInteger(n)) : [];
+    const mend = sc.code === "DERIVED_FROM_MISSING" ? "derived"
+      : (sc.code === "REFUSED_SUPERSEDES_UNKNOWN" || sc.code === "REFUSED_SUPERSEDES_OWNERSHIP") ? "supersedes"
+        : null;
+    return { code: sc.code, retryable: sc.retryable === true, mend, positions, on: sc.code === "SUPERSEDES_UNJUDGED" ? "supersedes" : undefined };
+  }
+  // A server from before SMD-1978: the prose rules, unchanged. A "Refused:" is
+  // final and may be mended by dropping the pointer it names; an "Error:" (the
+  // store away, a pointer it could not judge) is a transient the payload keeps.
+  const refused = REFUSAL_RE.test(text) || SDK_ERROR_RE.test(text);
+  const mend = REFUSAL_RE.test(text) ? (/derived_from/.test(text) ? "derived" : /supersedes/.test(text) ? "supersedes" : null) : null;
+  return {
+    code: null, retryable: !refused, mend,
+    positions: [...text.matchAll(/derived_from\[(\d+)\]/g)].map((m) => Number(m[1])),
+    on: /this key's `supersedes` could not be (?:checked|attributed)/.test(text) ? "supersedes" : undefined,
+  };
+}
+
+/**
  * capture_thought over MCP. Returns { id, note } on success. A refusal of a
  * pointer — a derived_from id the server does not know (a thought since
  * deleted, a result this parser misread), or a supersedes the server refuses
@@ -1115,35 +1146,38 @@ export async function postCapture(cfg, payload) {
   let result = await call();
   let text = textOfResult(result);
   const notes = [];
-  // Only a "Refused:" is mended by dropping a pointer; the server's own errors
-  // ("Error: … could not be checked", the registry away) are kept whole for a
-  // later run (fifth review pass: the hook told the two apart by wording).
-  for (let retry = 0; retry < 5 && result.isError && REFUSAL_RE.test(text); retry++) {
-    // The server names the POSITIONS that name no thought (second review
-    // pass: a first cut dropped all forty sources over one deleted thought).
-    const at = [...text.matchAll(/derived_from\[(\d+)\]/g)].map((m) => Number(m[1])).filter((i) => args.derived_from && i < args.derived_from.length);
-    if (args.derived_from && at.length) {
-      notes.push(`${at.length} source id(s) dropped: ${oneLine(text).slice(0, 120)}`);
-      args.derived_from = args.derived_from.filter((_, i) => !at.includes(i));
-      if (!args.derived_from.length) delete args.derived_from;
-    } else if (args.derived_from && /derived_from/.test(text)) { notes.push("provenance dropped: " + oneLine(text).slice(0, 160)); delete args.derived_from; }
-    else if (args.supersedes && /supersedes/.test(text)) { notes.push("supersedes dropped: " + oneLine(text).slice(0, 160)); delete args.supersedes; }
+  // A mendable refusal (a droppable pointer, whatever its retryable flag) is
+  // mended by dropping the pointer the verdict names and trying again; the
+  // server's transients (the store away, a pointer it could not judge) name no
+  // pointer to mend and fall through to the classification below.
+  for (let retry = 0; retry < 5 && result.isError; retry++) {
+    const v = verdictOf(result, text);
+    if (v.mend === "derived" && args.derived_from) {
+      // The POSITIONS the verdict names, dropped exactly (second review pass: a
+      // first cut dropped all forty sources over one deleted thought); with
+      // none named — a key not told which — the whole list goes.
+      const at = v.positions.filter((i) => i < args.derived_from.length);
+      if (at.length) {
+        notes.push(`${at.length} source id(s) dropped: ${oneLine(text).slice(0, 120)}`);
+        args.derived_from = args.derived_from.filter((_, i) => !at.includes(i));
+        if (!args.derived_from.length) delete args.derived_from;
+      } else { notes.push("provenance dropped: " + oneLine(text).slice(0, 160)); delete args.derived_from; }
+    } else if (v.mend === "supersedes" && args.supersedes) { notes.push("supersedes dropped: " + oneLine(text).slice(0, 160)); delete args.supersedes; }
     else break;
     result = await call();
     text = textOfResult(result);
   }
   const id = new RegExp(`(?:\\bid |\\(id )(${UUID})`, "i").exec(text)?.[1];
   if (result.isError && !id) {
-    // A refusal is final; anything else — "Error: Failed to connect", a store
-    // timeout — is the server not answering, and the payload is worth keeping
-    // (first review pass: every isError was "refused", and a brain whose
-    // database was down for a minute lost the session for good).
-    const refused = REFUSAL_RE.test(text) || SDK_ERROR_RE.test(text);
-    const err = new CaptureError(refused ? "refused" : "failed", `capture ${refused ? "refused" : "failed"}: ${oneLine(text).slice(0, 200)}`);
-    // The server's two sentences for a pointer it could not judge (index.ts):
-    // a failure ON the pointer, counted by postPending so the last attempt can
-    // drop it — the word alone in some other error is not one (eighth review pass).
-    if (/this key's `supersedes` could not be (?:checked|attributed)/.test(text)) err.on = "supersedes";
+    // Final vs kept is the verdict's `retryable` (SMD-1978): a refusal is dead,
+    // a transient — the store not answering, a pointer it could not judge — is
+    // worth keeping (first review pass: every isError was "refused", and a brain
+    // whose database was down for a minute lost the session for good).
+    const v = verdictOf(result, text);
+    const err = new CaptureError(v.retryable ? "failed" : "refused", `capture ${v.retryable ? "failed" : "refused"}: ${oneLine(text).slice(0, 200)}`);
+    // A pointer the server could not judge: a failure ON the pointer, counted by
+    // postPending so the last attempt can drop it (eighth review pass).
+    if (v.on === "supersedes") err.on = "supersedes";
     throw err;
   }
   if (result.isError) notes.push(oneLine(text).slice(0, 160));
