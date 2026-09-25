@@ -29,11 +29,11 @@
  * is stable on one database and carries no recency. The same rows give the
  * same order on every run.
  *
- *   bun db/graph-centrality.ts --url postgres://…                  # the whole graph: top entities and thoughts
- *   bun db/graph-centrality.ts --url … "Open Brain"                # one subject's neighbourhood
- *   bun db/graph-centrality.ts --url … "Open Brain" --no-edges     # …by co-occurrence alone
- *   bun db/graph-centrality.ts --url … "Open Brain" --status open  # …as the live tickets build it
- *   bun db/graph-centrality.ts --url … --status open --startable   # …as the tickets you could start now build it
+ *   bun db/graph-centrality.ts --url postgres://…                     # the whole graph: top entities and thoughts
+ *   bun db/graph-centrality.ts --url … "Open Brain"                   # one subject's neighbourhood
+ *   bun db/graph-centrality.ts --url … "Open Brain" --no-edges        # …by co-occurrence alone
+ *   bun db/graph-centrality.ts --url … "Open Brain" --status open     # …as the live tickets build it
+ *   bun db/graph-centrality.ts --url … --status open --startable      # …as the tickets you could start now build it
  *   bun db/graph-centrality.ts --url … --status open --decay-blocked  # …with the blocked ones sunk, not dropped
  *   --limit N (20, at most 500)   --types project,tool,…   --keep-numeric   --json
  *   --status all|open|active|done (all)   --decay-done   --startable | --decay-blocked
@@ -321,12 +321,13 @@ export const LIFECYCLE_CTE = `heads AS (
 
 /**
  * Where a thought's open blockers come from — the second seam, read after
- * `lifecycle` and only under `--startable` or `--decay-blocked`. Today: 053's active `blocks` /
- * `blocked_by` link facets, each resolved to the (system, blocked, blocker)
- * identities it states; a blocker whose lifecycle is completed or canceled
- * (the types in `$doneSlot`) is dropped. `dependency` is one row per thought
- * with an open blocker, its blockers' identities sorted. When SMD-2074's
- * node-state projection holds startability, this reads that instead.
+ * `lifecycle` and only under `--startable` or `--decay-blocked`. Today: 053's
+ * active `blocks` / `blocked_by` link facets, each resolved to the (system,
+ * blocked, blocker) identities it states; a blocker whose lifecycle is
+ * completed or canceled (the types in `$doneSlot`) is dropped. `dependency` is
+ * one row per thought with an open blocker, its blockers' identities sorted.
+ * When SMD-2074's node-state projection holds startability, this reads that
+ * instead.
  */
 // The identities are the join key, never a thought id: a link names its
 // target by identity (053), and a ticket's rows — its head, its superseded
@@ -358,16 +359,16 @@ export const dependencySql = (doneSlot: number) => `ticket_of AS (
              GROUP BY 1)`;
 
 /**
- * The per-thought weight, as the header defines it, with `lifecycle` before
- * it: a kept status 1; another known status 0, or DONE_WEIGHT under decay; no
+ * The per-thought weight, as the header defines it, with `lifecycle` before it:
+ * a kept status 1; another known status 0, or DONE_WEIGHT under decay; no
  * status, or one this file does not know, 1 — and under `--startable`, times 0
  * when the thought is not completed or canceled and its ticket has an open
  * blocker (`held` marks the rows that took from above 0), times BLOCKED_WEIGHT
  * under `--decay-blocked` (`blockers` then names what holds each). Returns the
- * CTE text (lifecycle, the dependency CTEs under either, and weights, no leading
- * comma) with its array parameters appended to `params` — under either flag
- * the done types first, then always the kept types and the known types, so the
- * known types are the last slot and a query places its own after them.
+ * CTE text (lifecycle, the dependency CTEs under either, and weights, no
+ * leading comma) with its array parameters appended to `params` — under either
+ * flag the done types first, then always the kept types and the known types, so
+ * the known types are the last slot and a query places its own after them.
  */
 export function weightsSql(opts: Pick<Options, "status" | "decayDone"> & Partial<Pick<Options, "startable" | "decayBlocked">>, params: unknown[]): string {
   // The rules parseArgs applies, applied here too for a caller that builds its
@@ -687,10 +688,11 @@ export async function neighbourhood(run: Runner, subjectIds: readonly string[], 
   const L = `$${params.length}`;
   const weights = weightsSql(opts, params);
   // Only weighed thoughts touch: a filtered-out thought evidences nothing
-  // here, and a decayed one evidences its weight's worth of an edge. Support and the
-  // per-relation counts sum over DISTINCT thoughts (one thought asserting a
-  // relation twice through two subject ids is one thought), and the relation
-  // list renders a whole sum plain and a decayed one to two places.
+  // here, and a decayed one evidences its weight's worth of an edge. Support
+  // and the per-relation counts sum over DISTINCT thoughts (one thought
+  // asserting a relation twice through two subject ids is one thought), and
+  // the relation list renders a whole sum plain and a decayed one to two
+  // places.
   const edgeCtes = opts.edges
     ? `,
        ${ENDS_CTE},
@@ -1058,9 +1060,10 @@ if (import.meta.main) {
   // skip the finally, and could cut a piped --json short).
   // 0 ranked; 1 the subject resolved to nothing; 3 the subject IS an entity
   // and the numeric-name rule excluded it (--keep-numeric would rank it); 2 a
-  // usage error, a brain without 016 (053 under --startable or --decay-blocked), or a query that failed — never 1 for a
-  // failure or an exclusion, so a caller testing for "not in the graph" is not
-  // told that by a connection refused or by SMD-1935's rule.
+  // usage error, a brain without 016 (053 under --startable or
+  // --decay-blocked), or a query that failed — never 1 for a failure or an
+  // exclusion, so a caller testing for "not in the graph" is not told that by
+  // a connection refused or by SMD-1935's rule.
   let code = 0;
   try {
     // The three tables as this connection resolves them — a same-named table in
@@ -1070,7 +1073,8 @@ if (import.meta.main) {
       console.error("This brain has no entity graph: migration 016 is not applied. Run db/migrate.ts, then db/extract-entities.ts.");
       code = 2;
     } else if (readsDependencies(parsed.opts) && !(await run(`SELECT (to_regclass('thought_sources') IS NOT NULL AND to_regprocedure('source_thought(text, text)') IS NOT NULL) AS ok`, []))[0].ok) {
-      // The dependency read is 053's link facets and resolver; every other mode runs without them.
+      // The dependency read is 053's link facets and resolver; every other
+      // mode runs without them.
       console.error(`${parsed.opts.startable ? "--startable" : "--decay-blocked"} reads the board's link facets: migration 053 is not applied. Run db/migrate.ts, or leave the flag out.`);
       code = 2;
     } else {

@@ -6049,7 +6049,8 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
       && rBlocked.includes("1 blocker of the down-weighted thoughts is unsettled") && rBlocked.includes("plus every thought without a lifecycle — it passes every filter; those with an open blocker at 0.25)")
       && render(await graphReport(run, null, { ...wide, decayBlocked: true })).includes("By its lifecycle every thought weighs 1: a Done ticket counts as a live one (--status open|active|done filters; --decay-done down-weights).\n"),
     `the report under the decay: the header names it, the thought table has the weight and a blocked by column (tP's row: ${JSON.stringify(tPline)}), and the dependency and lifecycle lines say what the decay did`);
-  // Two blockers, one from each direction: tR's `blocks` and tV's own blocked_by.
+  // Two blockers, one from each direction: tR's `blocks` and tV's own
+  // blocked_by.
   await links(tV, [["blocked_by", "SMD-7001"]]);
   const tVline = render(await graphReport(run, null, openDecay)).split("\n").find((l) => l.includes(tV)) ?? "";
   assert(JSON.stringify((await byId(openDecay)).get(tV)?.blockers) === JSON.stringify(["SMD-7001", "SMD-7003"]) && tVline.endsWith(" SMD-7001, SMD-7003"),
