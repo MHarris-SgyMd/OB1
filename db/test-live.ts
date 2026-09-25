@@ -4466,8 +4466,9 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     // The settings a refresh copies (SMD-2037): pg_dump leaves out what
     // ALTER DATABASE … SET put on the source (014's HNSW bounds), so refresh
     // writes them onto --to itself. Two scratch databases: the source with
-    // 014's two bounds, a list setting with quoting to survive, and a mark of
-    // its own; the target with a setting the source lacks and its own mark.
+    // 014's two bounds, a list setting with quoting to survive, a value with a
+    // quote in it, an empty list, and a mark of its own; the target with a
+    // setting the source lacks and its own mark.
     const setSrc = "ob1_tier_settings_src", setDst = "ob1_tier_settings_dst";
     const urlOf = (db: string) => { const u = new URL(URL_!); u.pathname = `/${db}`; return u.toString(); };
     for (const db of [setSrc, setDst]) { await sql.unsafe(`DROP DATABASE IF EXISTS ${db}`); await sql.unsafe(`CREATE DATABASE ${db}`); }

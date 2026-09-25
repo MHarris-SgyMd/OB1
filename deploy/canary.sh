@@ -200,12 +200,14 @@ read_connector() {
   esac
   [ -n "$CONN_SCOPE" ] || [ -z "$CONN_URL" ] || CONN_SCOPE=unknown
 }
+# The canary's server container in any state, or nothing.
+server_id() { "$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=server" | head -n 1; }
 # The host port the canary's server container is bound to, running or stopped
 # (after a reboot podman leaves it stopped; Docker restarts the server but
 # not its Postgres), or nothing.
 server_port() {
   local id
-  id="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=server" | head -n 1)"
+  id="$(server_id)"
   [ -n "$id" ] || return 0
   # shellcheck disable=SC2016 # a Go template's variables, not the shell's
   "$RUNTIME" inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}}{{"\n"}}{{end}}{{end}}' "$id" | head -n 1
@@ -323,7 +325,7 @@ taken="$("$RUNTIME" ps --format '{{.Names}}|{{.Ports}}|{{.Label "com.docker.comp
 # Its own server's port is read from the container while it runs or is still
 # stopping (podman finishes a stop a Ctrl-C interrupted, answering meanwhile).
 own=""
-own_id="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=server" | head -n 1)"
+own_id="$(server_id)"
 if [ -n "$own_id" ]; then
   case "$("$RUNTIME" inspect -f '{{.State.Status}}' "$own_id" 2>/dev/null || true)" in
     running|stopping|restarting) own="$(server_port)" ;;

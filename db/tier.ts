@@ -352,9 +352,9 @@ function listElements(value: string): string[] {
  */
 export async function applyDatabaseSettings(dst: SQL, settings: Record<string, string>): Promise<void> {
   const current = await databaseSettings(dst);
-  const [{ db, vector }] = await dst<{ db: string; vector: boolean }[]>`SELECT current_database() AS db, to_regtype('vector') IS NOT NULL AS vector`;
-  if (!vector) await alignVectorSearchPath(dst);
-  const [{ loadable }] = await dst<{ loadable: boolean }[]>`SELECT to_regtype('vector') IS NOT NULL AS loadable`;
+  // A no-op where `vector` already resolves; else the path gains its schema.
+  await alignVectorSearchPath(dst);
+  const [{ db, loadable }] = await dst<{ db: string; loadable: boolean }[]>`SELECT current_database() AS db, to_regtype('vector') IS NOT NULL AS loadable`;
   if (loadable) await dst`SELECT '[1]'::vector`;
   const target = `"${db.replaceAll('"', '""')}"`;
   for (const name of Object.keys(current)) {
