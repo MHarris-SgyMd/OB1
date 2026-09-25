@@ -1697,7 +1697,7 @@ console.log("\n[6i] A citation written while a delete of its source is in flight
     let updErr = "";
     try { await connW`SELECT update_thought(${c}::uuid, p_provenance => jsonb_build_object('supersedes', ${x}::uuid)) AS r`; } catch (e) { updErr = (e as Error).message; }
     const d = await del;
-    try { await connW.unsafe("COMMIT"); } catch { /* Postgres answers COMMIT of an aborted transaction with a ROLLBACK; the ROLLBACK below covers a driver that throws instead */ }
+    try { await connW.unsafe("COMMIT"); } catch { /* COMMIT of an aborted transaction answers ROLLBACK; the ROLLBACK below covers a throw */ }
     try { await connW.unsafe("ROLLBACK"); } catch { /* no transaction in progress */ }
     assert(/deadlock detected/.test(updErr) || /deadlock detected/.test(d.r.error ?? ""),
       `a raw writer that takes the advisory lock after the row closes the cycle record_citation avoids — deadlock detected in one of the two (update: ${updErr.slice(0, 40) || "ok"}; delete: ${(d.r.error ?? "ok").slice(0, 40)})`);
