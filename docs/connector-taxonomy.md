@@ -181,7 +181,7 @@ call on demand → MCP", applied):
 
 | Transport | Default fetcher | Why |
 |---|---|---|
-| `push` | low-code node (native driver until SMD-1863 lands; browser extension when the vendor exposes the data only in the browser) | a webhook receiver or a gateway session is state the tool holds; OB1 grows no listener |
+| `push` | low-code node once SMD-1846 gives the vendor an inbound origin to reach n8n — native driver until then (`orchestration-tool.md`, "The capture layer's sync trigger"); browser extension when the vendor exposes the data only in the browser | a webhook receiver or a gateway session is state the tool holds; OB1 grows no listener |
 | `pull` | low-code node; the client's MCP connector when the AI client asks on demand | a schedule with a cursor is a workflow; "read this thread now" is one call |
 | `batch` | native driver | an archive parse has no workflow state; the tool adds nothing |
 | `push` (sink) | low-code node when the tool schedules it; the client's MCP connector or channel plugin when the AI client sends it | the send is one call either way; what differs is who owns the cadence |
