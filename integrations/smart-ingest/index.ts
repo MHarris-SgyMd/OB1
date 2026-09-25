@@ -769,7 +769,7 @@ async function writeThought(
   embedded: Embedded,
   envelope: Record<string, unknown> = {},
   what = "upsert_thought",
-): Promise<string> {
+): Promise<{ id: string; existed: boolean }> {
   const vector = safeEmbedding(embedded.vector) ?? null;
   const { data, error } = await supabase.rpc("upsert_thought", {
     p_content: prepared.content,
@@ -784,14 +784,15 @@ async function writeThought(
   if (error) throw new Error(`${what} failed: ${error.message}`);
   const thoughtId = extractThoughtId(data);
   if (thoughtId === null) throw new Error(`${what} returned no thought_id`);
-  if (!(data as UpsertThoughtResult).existed) {
+  const existed = (data as UpsertThoughtResult).existed === true;
+  if (!existed) {
     const { error: columnsError } = await supabase.from("thoughts").update({
       type: prepared.type, importance: prepared.importance, quality_score: prepared.quality_score,
       source_type: prepared.source_type, sensitivity_tier: prepared.sensitivity_tier,
     }).eq("id", thoughtId);
     if (columnsError) throw new Error(`${what} stored thought ${thoughtId} but the enhanced columns failed: ${columnsError.message}`);
   }
-  return thoughtId;
+  return { id: thoughtId, existed };
 }
 
 async function executeItem(
@@ -823,7 +824,7 @@ async function executeItem(
         tags: mergeTags((prepared.metadata as Record<string, unknown>).tags, item.tags),
         source_snippet: item.source_snippet,
       };
-      return await writeThought(prepared, embedded);
+      return (await writeThought(prepared, embedded)).id;
     }
 
     case "append_evidence": {
@@ -865,8 +866,12 @@ async function executeItem(
       // The revision supersedes the thought it matched: the row's `supersedes` pointer (db/migrations/025, the one
       // mechanism for supersession on this fork — upstream put the id in metadata.supersedes, a second place for the
       // same fact), validated and written by the function on a fresh row; the self-FK refuses a thought deleted since
-      // the dry run, and the item fails with its message.
-      return await writeThought(prepared, embedded, { supersedes: item.matched_thought_id }, "upsert_thought (revision)");
+      // the dry run, and the item fails with its message. On a fresh row only: a re-capture of text already there keeps
+      // that row's provenance (035), so a revision whose text was captured between the dry run and now would report
+      // "revised" with no pointer written — it fails with why instead (review pass 2).
+      const written = await writeThought(prepared, embedded, { supersedes: item.matched_thought_id }, "upsert_thought (revision)");
+      if (written.existed) throw new Error(`upsert_thought (revision): the text is already thought ${written.id}, whose provenance stays its own — the revision of ${item.matched_thought_id} was not written`);
+      return written.id;
     }
 
     case "skip":
@@ -1019,7 +1024,7 @@ async function handleExecuteJob(req: Request): Promise<Response> {
     return json({ error: "Job execution conflict — another request may have claimed this job" }, 409);
   }
 
-  let addedCount = 0, skippedCount = 0, appendedCount = 0, revisedCount = 0;
+  let addedCount = 0, skippedCount = 0, appendedCount = 0, revisedCount = 0, failedCount = 0;
   const sourceLabel = job.source_label ?? null;
   const jobMeta = (job.metadata ?? {}) as Record<string, unknown>;
   const sourceType = jobMeta.source_type as string ?? "smart_ingest";
@@ -1029,6 +1034,9 @@ async function handleExecuteJob(req: Request): Promise<Response> {
     : null;
 
   for (const item of items) {
+    // An item the dry run persisted `failed` — a reconciliation error — stays so and counts so; it carries the skip
+    // action, and the skip branch flipped it to executed and counted it skipped (review pass 2).
+    if (item.status === "failed") { failedCount++; continue; }
     if (item.action === "skip") { skippedCount++; await recordItemResult(item.id, (item.matched_thought_id as string | null) ?? null); continue; }
     try {
       const fakeItem: IngestionItem = {
@@ -1057,6 +1065,7 @@ async function handleExecuteJob(req: Request): Promise<Response> {
       else if (item.action === "create_revision") revisedCount++;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      failedCount++;
       await supabase.from("ingestion_items")
         .update({ status: "failed", error_message: msg })
         .eq("id", item.id);
@@ -1074,10 +1083,11 @@ async function handleExecuteJob(req: Request): Promise<Response> {
 
   await scheduleEntityExtraction(addedCount + revisedCount);
 
+  // failed_count as the inline path's response carries it (tally); the job row has no column for it.
   return json({
     job_id: jobId, status: "complete",
     added_count: addedCount, skipped_count: skippedCount,
-    appended_count: appendedCount, revised_count: revisedCount,
+    appended_count: appendedCount, revised_count: revisedCount, failed_count: failedCount,
   }, 200);
 }
 
@@ -1330,8 +1340,8 @@ const handler = async (req: Request) => {
     const item = items[i];
     const itemDbId = itemIds[i] ?? 0;
     if (item.action === "skip") {
-      item.status = "executed";
-      await recordItemResult(itemDbId, item.matched_thought_id);
+      // A reconciliation error is a skip persisted `failed`: it stays so, for tally and for the row (review pass 2).
+      if (item.status !== "failed") { item.status = "executed"; await recordItemResult(itemDbId, item.matched_thought_id); }
       continue;
     }
     try {

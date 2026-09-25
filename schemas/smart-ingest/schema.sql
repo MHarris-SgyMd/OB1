@@ -1,11 +1,17 @@
 -- Smart Ingest Pipeline Tables
 -- Adds ingestion_jobs and ingestion_items tables for tracking
 -- the extract-deduplicate-execute lifecycle of bulk text ingestion.
--- Safe to run multiple times (fully idempotent). One exception in kind, not in
--- effect: section 2b retypes two columns on a table created before it, once —
--- an ALTER TABLE that rewrites the table under ACCESS EXCLUSIVE, so on a brain
--- with a large ingestion_items stop the ingest server for it — and refuses,
--- naming the column, while a view or rule of yours reads either column.
+-- Safe to run multiple times (fully idempotent), and one transaction, BEGIN to
+-- COMMIT (this fork, SMD-2128): a refusal anywhere leaves nothing applied, under
+-- a client that sends the file as one query and under plain `psql -f`, which
+-- runs on past an error, alike. One exception in kind, not in effect: section 2b
+-- retypes two columns on a table created before it, once — an ALTER TABLE that
+-- rewrites the table under ACCESS EXCLUSIVE, so on a brain with a large
+-- ingestion_items stop the ingest server for it — and refuses, naming the
+-- column and the object, while a view, rule, trigger, policy or generated
+-- column of yours depends on either column.
+
+BEGIN;
 
 -- ============================================================
 -- 1. INGESTION JOBS
@@ -101,15 +107,17 @@ ALTER TABLE public.ingestion_items
 --     metadata.<column>_bigint rather than dropped; result_thought_id is
 --     filled from SMD-2110's metadata key. Guarded on the column's type, so
 --     a re-run finds uuid and does nothing. Postgres will not retype a column
---     a view or rule reads: the error is re-raised naming the file, the
---     column and what to do, and the block rolls back whole (the UPDATE with
---     it) — the rest of the file does not run, so the function stays the
---     bigint form beside the bigint columns until the file is applied again.
+--     a view, rule, trigger, policy or generated column depends on (one
+--     SQLSTATE, 0A000, for all five): the error is re-raised naming the file,
+--     the column, the object (the error's DETAIL) and what to do, and the
+--     transaction rolls back whole, so the function stays the bigint form
+--     beside the bigint columns until the file is applied again.
 -- ============================================================
 
 DO $$
 DECLARE
-  v_col text;
+  v_col    text;
+  v_detail text;
 BEGIN
   FOREACH v_col IN ARRAY ARRAY['matched_thought_id', 'result_thought_id'] LOOP
     IF (SELECT format_type(a.atttypid, a.atttypmod) FROM pg_attribute a
@@ -122,7 +130,8 @@ BEGIN
                             THEN 'CASE WHEN metadata->>''result_thought_uuid'' ~* ''^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'' THEN (metadata->>''result_thought_uuid'')::uuid END'
                             ELSE 'NULL' END);
       EXCEPTION WHEN feature_not_supported THEN
-        RAISE EXCEPTION 'schemas/smart-ingest: ingestion_items.% is bigint and cannot be retyped to uuid while a view or rule reads it (%). Drop that view or rule, apply this file again, then recreate it over the uuid column.', v_col, SQLERRM;
+        GET STACKED DIAGNOSTICS v_detail = PG_EXCEPTION_DETAIL;
+        RAISE EXCEPTION 'schemas/smart-ingest: ingestion_items.% is bigint and cannot be retyped to uuid while a view, rule, trigger, policy or generated column depends on it (%: %). Drop or disable that object, apply this file again, then recreate it over the uuid column.', v_col, SQLERRM, coalesce(v_detail, 'no detail');
       END;
     END IF;
   END LOOP;
@@ -244,3 +253,5 @@ REVOKE EXECUTE ON FUNCTION public.append_thought_evidence(uuid, jsonb) FROM publ
 
 -- Notify PostgREST to reload schema cache
 NOTIFY pgrst, 'reload schema';
+
+COMMIT;

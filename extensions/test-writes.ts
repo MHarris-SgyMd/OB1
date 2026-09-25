@@ -227,15 +227,23 @@ const PRIOR_UUID = crypto.randomUUID();
     INSERT INTO public.ingestion_items (job_id, extracted_content, action, status, matched_thought_id, metadata)
       SELECT id, 'an item executed under upstream''s shape', 'add', 'executed', 42, '{"type":"idea","result_thought_uuid":"${PRIOR_UUID}"}' FROM public.ingestion_jobs WHERE input_hash = 'prior-shape';
     CREATE VIEW public.prior_shape_items AS SELECT id, matched_thought_id FROM public.ingestion_items;`);
-  // Postgres will not retype a column a view reads: the file refuses, naming itself, the column and what to do, and the
-  // block rolls back whole — the metadata UPDATE before the ALTER with it — so nothing is half done (review pass 1: the
-  // raw error left the file stopped mid-way with no word on why).
-  const refused = await sql.unsafe(SMART_INGEST_SQL).then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
+  // Postgres will not retype a column a view reads: the file refuses, naming itself, the column, the object (the error's
+  // DETAIL) and what to do, and the file — one transaction since review pass 2, so plain `psql -f`, which runs on past an
+  // error, leaves nothing half done either — rolls back whole (review pass 1: the raw error left the file stopped mid-way
+  // with no word on why). On a connection of its own: the refused transaction is open until it is rolled back here, and a
+  // pooled query after it would meet "current transaction is aborted".
+  const own = await sql.reserve();
+  const refused = await own.unsafe(SMART_INGEST_SQL).then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
+  await own.unsafe("ROLLBACK").catch(() => {});
+  own.release();
   const [still] = await sql`SELECT format_type(atttypid, atttypmod) AS type FROM pg_attribute WHERE attrelid = 'public.ingestion_items'::regclass AND attname = 'matched_thought_id'`;
   const [untouched] = await sql`SELECT metadata FROM ingestion_items WHERE extracted_content = 'an item executed under upstream''s shape'`;
-  assert(refused !== null && /^schemas\/smart-ingest: ingestion_items\.matched_thought_id is bigint and cannot be retyped to uuid while a view or rule reads it \(.*\)\. Drop that view or rule, apply this file again, then recreate it over the uuid column\.$/.test(refused)
-    && still?.type === "bigint" && untouched?.metadata?.matched_thought_id_bigint === undefined,
-    `with a view over the old column, schemas/smart-ingest refuses by name — the column, the cause, what to do — and the block rolls back whole, the column bigint and its metadata untouched (${refused ?? "applied"}; ${still?.type}; ${JSON.stringify(untouched?.metadata)})`);
+  // …and the statements after the block did not run either — the bigint function stands, not the uuid one — so "apply
+  // this file again" meets the shape the message describes (review pass 2).
+  const fnsAfterRefusal = await sql`SELECT pg_get_function_identity_arguments(oid) AS args FROM pg_proc WHERE proname = 'append_thought_evidence'`;
+  assert(refused !== null && /^schemas\/smart-ingest: ingestion_items\.matched_thought_id is bigint and cannot be retyped to uuid while a view, rule, trigger, policy or generated column depends on it \(.*: .*view prior_shape_items.*\)\. Drop or disable that object, apply this file again, then recreate it over the uuid column\.$/.test(refused)
+    && still?.type === "bigint" && untouched?.metadata?.matched_thought_id_bigint === undefined && fnsAfterRefusal.length === 1 && fnsAfterRefusal[0].args === "p_thought_id bigint, p_evidence jsonb",
+    `with a view over the old column, schemas/smart-ingest refuses by name — the column, the cause, the view by name from the error's DETAIL, what to do — and nothing after runs: the column bigint, its metadata untouched, the bigint function alone (${refused ?? "applied"}; ${still?.type}; ${JSON.stringify(untouched?.metadata)}; ${JSON.stringify(fnsAfterRefusal)})`);
   await sql`DROP VIEW public.prior_shape_items`;
 }
 for (const file of SIDECARS) await sql.unsafe(readFileSync(join(ROOT, file), "utf8"));
@@ -1169,11 +1177,14 @@ try {
   // every item with a match (review pass 1).
   const dryDup = await send(h, "POST", "/", { text, dry_run: true, skip_classification: true, source_label: "test-writes", reprocess: true });
   const dupJob = Number(dryDup.json?.job_id);
+  // Beside it, an item the way a reconciliation error is persisted — the skip action under a `failed` status: /execute's
+  // skip branch flipped it to executed and counted it skipped (review pass 2); it stays failed, counted as such.
+  await sql`INSERT INTO ingestion_items (job_id, extracted_content, action, status, reason, error_message) VALUES (${dupJob || 0}, 'a reconciliation that failed at the dry run', 'skip', 'failed', 'reconciliation_error: stub', 'stub')`;
   const ranDup = await send(h, "POST", "/execute", { job_id: dupJob });
   const dupItems = await jobItems(dupJob);
-  assert(dryDup.json?.status === "dry_run_complete" && dupJob > 0 && ranDup.status === 200 && ranDup.json?.status === "complete" && ranDup.json?.skipped_count === 1 && ranDup.json?.added_count === 0
-    && dupItems.length === 1 && dupItems[0].action === "skip" && dupItems[0].status === "executed" && dupItems[0].result_thought_id === row?.id,
-    `a dry run of the same text parks the skip as ready, and /execute marks it executed with the matched thought as its result — the path left it ready under a complete job (${dryDup.json?.status} #${dupJob}; ${ranDup.status} ${JSON.stringify(ranDup.json).slice(0, 100)}; items ${JSON.stringify(dupItems).slice(0, 160)})`);
+  assert(dryDup.json?.status === "dry_run_complete" && dupJob > 0 && ranDup.status === 200 && ranDup.json?.status === "complete" && ranDup.json?.skipped_count === 1 && ranDup.json?.added_count === 0 && ranDup.json?.failed_count === 1
+    && dupItems.length === 2 && dupItems[0].action === "skip" && dupItems[0].status === "executed" && dupItems[0].result_thought_id === row?.id && dupItems[1].status === "failed" && dupItems[1].result_thought_id === null,
+    `a dry run of the same text parks the skip as ready, and /execute marks it executed with the matched thought as its result — the path left it ready under a complete job — while an item persisted failed stays failed, counted in failed_count and not in skipped_count (${dryDup.json?.status} #${dupJob}; ${ranDup.status} ${JSON.stringify(ranDup.json).slice(0, 120)}; items ${JSON.stringify(dupItems).slice(0, 220)})`);
   // The two actions between the thresholds, driven by a stub vector 0.88 from the first thought's (the band is 0.85–0.92;
   // one-hot vectors alone are 0 or 1 apart, so no arm drove either branch before): a shorter text appends evidence to the
   // richer existing thought through append_thought_evidence — its p_thought_id uuid now; the bigint form refused the call —
@@ -1199,6 +1210,23 @@ try {
     && revisedItems[0].matched_thought_id === row?.id && revision !== undefined && revisedItems[0].result_thought_id === revision.id && revision.supersedes === row?.id && revision.has_vec === true && revision.embedding_model === MODEL && revision.type === "idea" && revision.meta_supersedes === null,
     `a longer text 0.88 from the first thought is a revision: a new row with its vector and label whose supersedes is the first thought (025's pointer, not metadata.supersedes), the item a create_revision with the first as matched and the new row as result (${revised.status} ${JSON.stringify(revised.json).slice(0, 120)}; items ${JSON.stringify(revisedItems).slice(0, 220)}; row ${JSON.stringify(revision).slice(0, 200)})`);
   judgeActor("smart-ingest revision", await auditRow(revision?.id, "capture"), "smart-ingest");
+  // A revision parked by a dry run whose text is captured meanwhile: the function writes `supersedes` on a fresh row only
+  // and keeps the existing row's provenance (035), so the pointer is not written — the item fails saying so, where it was
+  // counted revised with nothing to show (review pass 2).
+  let meanwhile = `${text} A near copy of the first thought, longer, parked by a dry run and captured through the function before the job runs.`;
+  while (axisOf(meanwhile) === axisOf(text)) meanwhile += " Yes.";
+  nearOf.set(meanwhile, text);
+  const dryRev = await send(h, "POST", "/", { text: meanwhile, dry_run: true, skip_classification: true, source_label: "test-writes" });
+  const revJob = Number(dryRev.json?.job_id);
+  const parked = await jobItems(revJob);
+  await sql`SELECT upsert_thought(${meanwhile}, '{}'::jsonb)`;
+  const ranRev = await send(h, "POST", "/execute", { job_id: revJob });
+  const revItems = await jobItems(revJob);
+  const [captured] = await sql`SELECT id, supersedes FROM thoughts WHERE content = ${meanwhile}`;
+  assert(dryRev.json?.status === "dry_run_complete" && parked.length === 1 && parked[0].action === "create_revision" && parked[0].status === "ready"
+    && ranRev.status === 200 && ranRev.json?.status === "complete" && ranRev.json?.revised_count === 0 && ranRev.json?.failed_count === 1
+    && revItems.length === 1 && revItems[0].status === "failed" && /the text is already thought/.test(revItems[0].error_message ?? "") && captured !== undefined && captured.supersedes === null,
+    `a revision parked ready by a dry run, whose text is captured meanwhile, fails on /execute saying the text is already a thought — not counted revised, the captured row's supersedes unset (${dryRev.json?.status} ${JSON.stringify(parked).slice(0, 80)}; ${ranRev.status} ${JSON.stringify(ranRev.json).slice(0, 120)}; items ${JSON.stringify(revItems).slice(0, 200)}; row ${JSON.stringify(captured)})`);
   // The other half of the pipeline, the one rest-api's execute route proxies: a dry run parks the item as `ready`, and
   // POST /execute writes it — through recordItemResult's second call site, and with job_id as the STRING the proxy sent
   // until review pass 2, which the server takes now beside the number it required (a proxied execute was a 400 for every
