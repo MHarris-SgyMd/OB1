@@ -1120,8 +1120,9 @@ export function verdictOf(result, text) {
   // A server from before SMD-1978: the prose rules, unchanged. A "Refused:" is
   // final and may be mended by dropping the pointer it names; an "Error:" (the
   // store away, a pointer it could not judge) is a transient the payload keeps.
-  const refused = REFUSAL_RE.test(text) || SDK_ERROR_RE.test(text);
-  const mend = REFUSAL_RE.test(text) ? (/derived_from/.test(text) ? "derived" : /supersedes/.test(text) ? "supersedes" : null) : null;
+  const isRefused = REFUSAL_RE.test(text);
+  const refused = isRefused || SDK_ERROR_RE.test(text);
+  const mend = isRefused ? (/derived_from/.test(text) ? "derived" : /supersedes/.test(text) ? "supersedes" : null) : null;
   return {
     code: null, retryable: !refused, mend,
     positions: [...text.matchAll(/derived_from\[(\d+)\]/g)].map((m) => Number(m[1])),
