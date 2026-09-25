@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1625 assertions: 1625 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1651 assertions: 1651 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-four (54) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -1039,6 +1039,7 @@ bun graph-centrality.ts --url … "Open Brain" --no-edges        # the control: 
 bun graph-centrality.ts --url … --types project,tool --json    # a typed subgraph, as data
 bun graph-centrality.ts --url … "Open Brain" --status open     # as the live tickets build it: no Done or Canceled evidence
 bun graph-centrality.ts --url … --decay-done                   # a settled ticket weighs 0.25 in every count
+bun graph-centrality.ts --url … --status open --startable      # what you could start now: no ticket with an open blocker
 ```
 
 The subject resolves by 016's own rule, one rung at a time — exact
@@ -1099,12 +1100,43 @@ thoughts carry a status, how many are settled, the latest `linear_updated_at`
 (the status is as fresh as the last sync pass), and under a filter how many
 thoughts weighed in. `LIFECYCLE_CTE` is the one place the status comes from;
 when SMD-2074 folds `thought_audit`'s transitions into a node-state
-projection, that CTE reads it and nothing downstream changes. Exit 0 when ranked, 1 when no
+projection, that CTE reads it and nothing downstream changes.
+
+**Startability** (SMD-2061). The lifecycle says a ticket is open, not that it
+can be started. Migration 053 (SMD-1867) stores the board's relations as `link`
+facets on the row holding a ticket's identity, `blocks` on the blocker and
+`blocked_by` on the blocked, and `--startable` reads both directions (an edge
+stated on one side only still counts). It multiplies a second factor into the
+same weight: an **unsettled** thought whose ticket has an **open blocker**
+weighs 0. Unsettled, because Linear keeps a relation after a ticket completes: a
+Done ticket whose blocker is still open is settled, not blocked, and weighs what
+its lifecycle says. A blocker is open unless its own lifecycle, resolved through
+`source_thought()` and read by the ticket-head rule above, is completed or
+canceled, so a settled blocker is not a blocker. A blocker the brain does not
+hold, or one with no status_type this tool knows, still blocks, and the output
+counts those. A row derived from a ticket takes its ticket's blockers as it
+takes its status. Only an active link counts (053 closes a relation the source
+dropped), and only `blocks` / `blocked_by`: `child_of` makes nobody a blocker. A
+thought whose ticket no dependency names counts as unblocked. The dependency
+caveat line (`coverage.dependencies` in the JSON) gives the active dependency
+facets and when the latest was written or closed, how many thoughts belong to a
+ticket a dependency names on either side, how many the flag held back in the run
+(took from a weight above 0 to 0), and how many of the held thoughts' blockers
+are unsettled only for want of a known status. The edges are as current as
+board-sync's last passes over both tickets of a relation: it is read from either
+side, so one removed on the board blocks until both are re-read. The flag
+composes with `--status` and `--decay-done` (the weights multiply). Without it
+the dependency read is not in the SQL, so every other mode renders byte for byte
+what it did (the JSON's `options` carries one more key, `startable: false`) and
+a brain without 053 runs them. With it, a brain without 053 is exit 2.
+`dependencySql` is the seam SMD-2074's node-state projection replaces.
+
+Exit 0 when ranked, 1 when no
 entity resolves (a near-miss whose only guesses the numeric rule hid is still
 no entity: exit 1, and the line counts the hidden guesses), 3 when the subject
 IS an entity — by id, name, alias or merged-in name — that the numeric rule
 excluded (`--keep-numeric` would rank it), 2 for a usage error, a brain
-without 016 or a query that failed — never 1 for a failure or an exclusion. `test-schema.ts` [44] runs the
+without 016 (or, under `--startable`, without 053) or a query that failed — never 1 for a failure or an exclusion. `test-schema.ts` [44] runs the
 script's own SQL under PGlite over a graph whose every count is known by
 construction, and its edges-on and edges-off orders differ at every position.
 
@@ -2056,7 +2088,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1625 assertions, PGlite, no container
+bun test-schema.ts                          # 1651 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 703 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
