@@ -668,7 +668,7 @@ console.log("\n[8c] above the exact threshold, the walk branch agrees with an ex
       const values = Array.from({ length: 100 }, (_, k) => `('walk ${i + k}', '{"kind":"c"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
       await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
     }
-    // Two that must not be found: a different kind, nearest to the query.
+    // One that must not be found: a different kind, nearest to the query.
     q = unitVector(EMBEDDING_DIM);
     await db.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ('near but d', '{"kind":"d"}'::jsonb, $1::vector)`, [`[${q.join(",")}]`]);
   });
@@ -929,7 +929,7 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
       `SELECT count(*) FILTER (WHERE ctid >= ('(' || ${hi} || ',0)')::tid)::int AS beyond,
               count(*) FILTER (WHERE ctid >= ('(' || ${lo} || ',0)')::tid AND ctid < ('(' || ${hi} || ',0)')::tid)::int AS inside
        FROM thoughts`)).rows;
-    assert(inside > 0 && beyond > 0, `the band [${lo}, ${hi}) holds ${inside} live rows and ${beyond} live rows lie beyond it, so emptying it leaves the heap its size (the fixture's ${pages} pages need to be at least ${ROUTE_SAMPLE_PAGES + 3} with the last one live — a narrower EMBEDDING_DIM packs more rows a page)`);
+    assert(inside > 0 && beyond > 0, `the band [${lo}, ${hi}) holds ${inside} live rows and ${beyond} live rows lie beyond it, so emptying it leaves the heap its size (the fixture's ${pages} pages need to be at least ${ROUTE_SAMPLE_PAGES + 3} with the last one live — from about 512 dims the vector is stored out of line, so every such width gives this heap, and a narrower one, kept in the row, a larger one)`);
     // The band and everything after it run with the walk's index dropped: the
     // VACUUM took 6.8 s repairing the HNSW graph around the band's dead rows
     // (SMD-2097), and from here on the section reads the heap alone — the pinned
