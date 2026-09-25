@@ -1173,15 +1173,17 @@ console.log("\n[6c] The backfill holds the table: a capture and an edit wait for
  * The sessions of the races in [6d], [6f], [6g] and [6i]. Each section's
  * deadlocking arm provokes a deadlock on purpose, and Postgres looks for a
  * cycle only once a lock wait has lasted deadlock_timeout, 1 s by default, so
- * every provoked deadlock cost a second — fifteen in one CI run of [6g]'s
- * first arm (SMD-2135). At 50 ms a cycle is found within 50 ms of closing.
- * The arms that must not deadlock use the same sessions, so the arms differ
- * only in the code under test and a deadlock that comes back is found as fast.
+ * every provoked deadlock cost up to a second — fifteen in one CI run of
+ * [6g]'s first arm (SMD-2135). At 50 ms a cycle is found within 50 ms of
+ * closing. The arms that must not deadlock use the same sessions, so the arms
+ * differ only in the code under test and a deadlock that comes back is found
+ * as fast.
  *
  * The setting moves when a wait is checked, and so which side of a cycle is
- * the victim, which no assertion names. A wait that is not a cycle — [6i]'s
- * 400 ms "still waiting" probes and arm 1's lower bound on the delete's wait —
- * is untouched, and every other bound on a wait is 8 s or more. [6g]'s first
+ * broken; every deadlocking arm accepts either side. A wait probed before any
+ * cycle closes — [6i]'s 400 ms "still waiting" probes and arm 1's lower bound
+ * on the delete's wait — is untouched, since no cycle is there to find, and
+ * every other bound on a wait is 8 s or more. [6g]'s first
  * arm deadlocks as often at 50 ms as at the default, both through
  * with-postgres.sh and in CI-shaped containers. deadlock_timeout is
  * superuser-only by default and goes as a startup parameter, so it holds for
@@ -1530,11 +1532,11 @@ console.log("\n[6g] delete_thought joins the lock order: an accept racing a dele
   // not depend on where the review takes the advisory lock — so the count
   // varies run to run and the arm only asserts it happens at all.) This is the
   // one deliberately stochastic assertion in the suite: with the delete fully
-  // lockless the per-try cycle rate was roughly half on 033's pass (23 of 40),
-  // so P(0 deadlocks in 40) was on the order of 1e-15. CI's runner deadlocked
+  // lockless the per-try cycle rate was roughly half on 033's pass, so P(0
+  // deadlocks in 40) was on the order of 1e-15. CI's runner deadlocked
   // 15 of 40 on main's run 36131497058, P(0) about 1e-8, and CI-shaped
   // containers about 30%; runs through with-postgres.sh's published port
-  // deadlock 8–10%, which makes a spurious failure about one run in 30 to 70
+  // deadlock 8–13%, which makes a spurious failure about one run in 35 to 250
   // there (SMD-2155).
   {
     const connR = racer();
@@ -1671,8 +1673,13 @@ console.log("\n[6i] A citation written while a delete of its source is in flight
     const wrote = ((await connW`SELECT record_citation(${c}::uuid, ${s}::uuid, 'rests on it', 'retrieved') AS r`) as { r: Env }[])[0].r;
     const del = startDelete(s);
     assert(wrote.ok === true && (await stillWaiting(del)), "the citation is written under the advisory lock and the delete waits on that lock");
-    const upd = ((await connW`SELECT update_thought(${c}::uuid, p_provenance => jsonb_build_object('supersedes', ${x}::uuid)) AS r`) as { r: Env }[])[0].r;
-    await connW.unsafe("COMMIT");
+    // Caught, as arm 3's is: on racer()'s 50 ms timer the session that closes a
+    // cycle is its victim, so a regression that let this write close one raises
+    // here — uncaught, it would end the suite instead of failing the assertion.
+    let upd: Env, updThrew = false;
+    try { upd = ((await connW`SELECT update_thought(${c}::uuid, p_provenance => jsonb_build_object('supersedes', ${x}::uuid)) AS r`) as { r: Env }[])[0].r; }
+    catch (e) { upd = { ok: false, error: (e as Error).message }; updThrew = true; }
+    await connW.unsafe(updThrew ? "ROLLBACK" : "COMMIT");
     const d = await del;
     assert(upd.ok === true && d.r.ok === false && d.r.error === "CITED", `the same transaction's supersedes write proceeds — no deadlock — and the delete is refused after the commit (update ${JSON.stringify(upd)}, delete ${JSON.stringify(d.r)})`);
     assert((await dangling(s)) === 0, "…nothing dangles");
@@ -1691,7 +1698,7 @@ console.log("\n[6i] A citation written while a delete of its source is in flight
     let updErr = "";
     try { await connW`SELECT update_thought(${c}::uuid, p_provenance => jsonb_build_object('supersedes', ${x}::uuid)) AS r`; } catch (e) { updErr = (e as Error).message; }
     const d = await del;
-    try { await connW.unsafe("COMMIT"); } catch { /* an aborted transaction: the ROLLBACK below ends it */ }
+    try { await connW.unsafe("COMMIT"); } catch { /* Postgres answers COMMIT of an aborted transaction with a ROLLBACK; the ROLLBACK below covers a driver that throws instead */ }
     try { await connW.unsafe("ROLLBACK"); } catch { /* no transaction in progress */ }
     assert(/deadlock detected/.test(updErr) || /deadlock detected/.test(d.r.error ?? ""),
       `a raw writer that takes the advisory lock after the row closes the cycle record_citation avoids — deadlock detected in one of the two (update: ${updErr.slice(0, 40) || "ok"}; delete: ${(d.r.error ?? "ok").slice(0, 40)})`);
