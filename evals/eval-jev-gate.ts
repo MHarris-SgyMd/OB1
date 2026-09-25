@@ -94,7 +94,7 @@ import { loadEnv } from "./env.ts";
 import { binOf, brier, ece, readGrades, reliability, skill, type Scored } from "./eval-calibration.ts";
 import { ENTITY_TYPES, NUMERIC_NAME_RE, type EntityType } from "../server-portable/entities.ts";
 import { ProviderError } from "../server-portable/embed.ts";
-import { INSUFFICIENT_EVIDENCE, jevDecideMany, jevInfo, resolveJevConfig, type JevDecision, type JevEnv, type JevOption, type JevResult } from "../server-portable/jev.ts";
+import { INSUFFICIENT_EVIDENCE, jevDecideMany, jevInfo, resolveJevConfig, type JevConfig, type JevDecision, type JevEnv, type JevModelInfo, type JevOption, type JevResult } from "../server-portable/jev.ts";
 import { JEV_MAX_BATCH } from "../server-portable/jev-contract.ts";
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -191,6 +191,7 @@ export function validateGateGrades(g: unknown): string[] {
     for (const k of ["grader_a", "grader_b"] as const) {
       const r = m[k];
       if (!Array.isArray(r) || r.length !== 2 || !isBit(r[0]) || !isType(r[1])) out.push(`mentions[${i}]: ${k} is not [valid, type]`);
+      else if ((r[0] === 1) !== (r[1] >= 0)) out.push(`mentions[${i}]: ${k} is valid ${r[0]} with type ${r[1]}`);
     }
     // Rubric v2: all three categories or none, each an index, each agreeing with its validity (0–2 valid).
     const cats = [["category", "valid"], ["category_a", "grader_a"], ["category_b", "grader_b"]] as const;
@@ -430,7 +431,6 @@ export function readArms(results: JevResult[], extractorType: string, stored: nu
   const top = per.indexOf(Math.max(...per));
   const choice = results[8];
   const pValid = ENTITY_TYPES.reduce((s, t) => s + (choice.probabilities[t] ?? 0), 0);
-  const typed = ENTITY_TYPES.map((t) => choice.probabilities[t] ?? 0);
   const at = ENTITY_TYPES.indexOf(extractorType as EntityType);
   return {
     v1: { s: binaryScore(results[0]), type: null },
@@ -439,7 +439,7 @@ export function readArms(results: JevResult[], extractorType: string, stored: nu
     pertype: { s: per[top], type: top },
     // The choice types a mention only when it picked a type: an abstention, a
     // number or a generic word is no type (-1), one rule for all three.
-    choice: { s: logit(pValid), type: (ENTITY_TYPES as readonly string[]).includes(choice.selected) ? typed.indexOf(Math.max(...typed)) : -1 },
+    choice: { s: logit(pValid), type: ENTITY_TYPES.indexOf(choice.selected as EntityType) },
     extractor: { s: logit(stored), type: null },
   };
 }
@@ -449,6 +449,9 @@ export function readArms(results: JevResult[], extractorType: string, stored: nu
 /** `inWindow`: the window holds the name. The extractor sometimes names what the text does not spell ("OpenBrain"), and the window is then the thought's head. */
 export type Candidate = { thought: string; entity: string; name: string; type: string; context: string; inWindow: boolean; metadata: Record<string, unknown>; stored: number };
 
+/** The first place a text names `name`, without case, the name's regex characters literal. */
+const findName = (text: string, name: string) => new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu").exec(text);
+
 /**
  * One window of the thought around the first place it names the entity, found
  * without case on the text itself (lower-casing first can change a string's
@@ -456,7 +459,7 @@ export type Candidate = { thought: string; entity: string; name: string; type: s
  * holds the name.
  */
 export function windowAround(text: string, name: string, span = 400): { context: string; inWindow: boolean } {
-  const m = new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu").exec(text);
+  const m = findName(text, name);
   if (!m) return { context: text.slice(0, 2 * span), inWindow: false };
   return { context: text.slice(Math.max(0, m.index - span), m.index + m[0].length + span), inWindow: true };
 }
@@ -577,6 +580,38 @@ function writeCache(path: string, cached: Record<string, JevResult[]>) {
   renameSync(tmp, path);
 }
 
+type Ask = (c: Candidate, ds: JevDecision[]) => Promise<JevResult[]>;
+
+/**
+ * The tier's answers through the cache, for the report and the diagnosis: a
+ * question this model was already asked is answered from `cached`, any other
+ * is asked (under the candidate's own thought's metadata, so an egress term
+ * applies row by row) and kept. The cache key names the model and what was
+ * asked, the window included, so another model or window is asked afresh.
+ * `run` goes between a SIGINT/SIGTERM handler and a `finally`, both of which
+ * write the cache: a signal does not run `finally`, and an interrupted
+ * ten-minute run keeps what it asked.
+ */
+async function withCache<T>(cfg: JevConfig, model: JevModelInfo, cachePath: string | undefined, cached: Record<string, JevResult[]>, run: (ask: Ask, counts: { asked: number; hits: number }) => Promise<T>): Promise<T> {
+  const counts = { asked: 0, hits: 0 };
+  const ask: Ask = async (c, ds) => {
+    const key = cacheKey(model, ds);
+    if (cached[key]) { counts.hits++; return cached[key]; }
+    cached[key] = (await jevDecideMany(cfg, ds, { kind: "decision", actor: "eval-jev-gate", metadata: c.metadata })).results;
+    counts.asked++;
+    return cached[key];
+  };
+  const onSignal = (code: number) => () => { if (cachePath) writeCache(cachePath, cached); process.exit(code); };
+  const onInt = onSignal(130), onTerm = onSignal(143);
+  process.once("SIGINT", onInt).once("SIGTERM", onTerm);
+  try {
+    return await run(ask, counts);
+  } finally {
+    process.off("SIGINT", onInt).off("SIGTERM", onTerm);
+    if (cachePath) writeCache(cachePath, cached);
+  }
+}
+
 /** ECE over the deciles, the calibration harness's bins. */
 const eceOf = (rows: Scored[]) => ece(reliability(rows, binOf(Infinity)));
 const TIER_ARMS = ARMS.filter((x) => x !== "extractor");
@@ -624,39 +659,25 @@ async function report(url: string, numericN: number, costThoughts: number, cache
   const gradeOf = new Map(grades.mentions.map((m) => [`${m.thought}:${m.entity}`, m]));
   const secondOf = new Map(second.map((m) => [`${m.thought}:${m.entity}`, m.outcome]));
 
-  // Each window leaves under its own thought's metadata, so a source/type/topic
-  // term the egress policy names applies to it; a refused row is counted, by
-  // cohort, and left out. A cached answer sent nothing, so the gate is not asked.
+  // A row the egress policy refuses is counted, by cohort, and left out. A
+  // cached answer sent nothing, so the gate is not asked.
   const subject = (c: Candidate) => ({ kind: "decision" as const, actor: "eval-jev-gate", metadata: c.metadata });
   const refused = { graded: 0, second: 0, numeric: 0, cost: 0 };
-  // The cache key names the model (its name, revision, weights, calibrator and
-  // rules) and what was asked (the window included): another model or another
-  // window is asked afresh. Written however the run ends, so a tier error late
-  // in the run keeps the answers before it.
-  // A signal does not run `finally`: an interrupted ten-minute run keeps what it asked.
   const m = info.model;
-  const onSignal = (code: number) => () => { if (cachePath) writeCache(cachePath, cached); process.exit(code); };
-  const onInt = onSignal(130), onTerm = onSignal(143);
-  process.once("SIGINT", onInt).once("SIGTERM", onTerm);
-  let asked = 0, hits = 0;
-  const decide = async (c: Candidate, cohort: keyof typeof refused) => {
-    const ds = decisionsFor(c);
-    const key = cacheKey(m, ds);
-    if (cached[key]) { hits++; return cached[key]; }
-    try {
-      asked++;
-      return (cached[key] = (await jevDecideMany(cfg, ds, subject(c))).results);
-    } catch (e) {
-      if (!(e instanceof ProviderError && e.kind === "egress")) throw e;
-      refused[cohort]++;
-      return null;
-    }
-  };
   const t0 = performance.now();
   const rows: ScoredRow[] = [];
   const secondRows: { key: string; y: 0 | 1; arms: Record<ArmName, Reading>; b1: string | null }[] = [];
   const numericRows: Record<ArmName, Reading>[] = [];
-  try {
+  const { asked, hits } = await withCache(cfg, m, cachePath, cached, async (ask, counts) => {
+    const decide = async (c: Candidate, cohort: keyof typeof refused) => {
+      try {
+        return await ask(c, decisionsFor(c));
+      } catch (e) {
+        if (!(e instanceof ProviderError && e.kind === "egress")) throw e;
+        refused[cohort]++;
+        return null;
+      }
+    };
     for (const c of found) {
       const results = await decide(c, "graded");
       if (results) rows.push({ c, g: gradeOf.get(`${c.thought}:${c.entity}`)!, split: splitOf(c.thought), arms: readArms(results, c.type, c.stored), b1: b1Rejects(c.name, c.type) });
@@ -667,10 +688,8 @@ async function report(url: string, numericN: number, costThoughts: number, cache
       if (results) secondRows.push({ key, y: secondOf.get(key)!, arms: readArms(results, c.type, c.stored), b1: b1Rejects(c.name, c.type) });
     }
     for (const c of numeric) { const r = await decide(c, "numeric"); if (r) numericRows.push(readArms(r, c.type, c.stored)); }
-  } finally {
-    process.off("SIGINT", onInt).off("SIGTERM", onTerm);
-    if (cachePath) writeCache(cachePath, cached);
-  }
+    return counts;
+  });
   const wall = performance.now() - t0;
 
   const dev = rows.filter((r) => r.split === "dev"), test = rows.filter((r) => r.split === "test");
@@ -785,7 +804,7 @@ async function report(url: string, numericN: number, costThoughts: number, cache
   }
   const sizes = lists.map((l) => l.length);
   const line = (xs: { ms: number; requests: number }[]) => `p50 ${fixed(quantile(xs.map((x) => x.ms), 0.5), 0)} ms, p90 ${fixed(quantile(xs.map((x) => x.ms), 0.9), 0)} ms, max ${fixed(quantile(xs.map((x) => x.ms), 1), 0)} ms, requests a call ${quantile(xs.map((x) => x.requests), 0)} to ${quantile(xs.map((x) => x.requests), 1)} (p50 ${quantile(xs.map((x) => x.requests), 0.5)})`;
-  if (lists.length) console.log(`\nCost at real volume: mentions per thought in the brain p50 ${quantile(perThought, 0.5)}, p95 ${quantile(perThought, 0.95)}, max ${quantile(perThought, 1)}. Timed: ${cost.binary.length} whole thoughts by md5 (candidates p50 ${quantile(sizes, 0.5)}, p90 ${quantile(sizes, 0.9)}, max ${quantile(sizes, 1)}${refused.cost ? `; ${refused.cost} calls refused` : ""}), each list in one call. One binary a candidate (v2's shape): ${line(cost.binary)}. The six per-type binaries: ${line(cost.pertype)}.`);
+  if (cost.binary.length) console.log(`\nCost at real volume: mentions per thought in the brain p50 ${quantile(perThought, 0.5)}, p95 ${quantile(perThought, 0.95)}, max ${quantile(perThought, 1)}. Timed: ${cost.binary.length} whole thoughts by md5 (candidates p50 ${quantile(sizes, 0.5)}, p90 ${quantile(sizes, 0.9)}, max ${quantile(sizes, 1)}${refused.cost ? `; ${refused.cost} calls refused` : ""}), each list in one call. One binary a candidate (v2's shape): ${line(cost.binary)}. The six per-type binaries: ${line(cost.pertype)}.`);
 
   // For a human: the test mentions the chosen arm and B1 disagree on, with the grade.
   console.log(`\ntest mentions where ${chosen} and B1 disagree — the extractor's type, the name, the grade, ${chosen}'s P, pertype's type, * when the window lacks the name:`);
@@ -830,7 +849,7 @@ export const sevenWayLabel = (r: JevResult) => (r.selected === INSUFFICIENT_EVID
 
 /** The sentence or line holding the name, at most 120 characters either side of it; null when the text lacks it. */
 export function sentenceAround(text: string, name: string): string | null {
-  const m = new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu").exec(text);
+  const m = findName(text, name);
   if (!m) return null;
   const breaks = [...text.slice(0, m.index).matchAll(/[.!?]\s|\n/g)].map((x) => x.index! + x[0].length);
   const start = Math.max(breaks.at(-1) ?? 0, m.index - 120);
@@ -857,21 +876,12 @@ async function diagnose(url: string, cachePath: string | undefined) {
   } finally {
     await sql.close();
   }
-  let asked = 0;
-  const ask = async (c: Candidate, ds: JevDecision[]) => {
-    const key = cacheKey(info.model, ds);
-    if (!cached[key]) { cached[key] = (await jevDecideMany(cfg, ds, { kind: "decision", actor: "eval-jev-gate", metadata: c.metadata })).results; asked++; }
-    return cached[key];
-  };
   const truthOf = new Map(v2.mentions.map((m) => [`${m.thought}:${m.entity}`, m]));
   const truth = (c: Candidate) => { const m = truthOf.get(`${c.thought}:${c.entity}`)!; return m.valid ? ENTITY_TYPES[m.type] : JUNK; };
   const LABELS = [...ENTITY_TYPES, JUNK];
   const spread = (xs: string[]) => LABELS.map((l) => `${l} ${xs.filter((x) => x === l).length}`).join(", ");
   const held = found.filter((c) => c.inWindow);
-  const onSignal = (code: number) => () => { if (cachePath) writeCache(cachePath, cached); process.exit(code); };
-  const onInt = onSignal(130), onTerm = onSignal(143);
-  process.once("SIGINT", onInt).once("SIGTERM", onTerm);
-  try {
+  await withCache(cfg, info.model, cachePath, cached, async (ask, counts) => {
     console.log(`\nDiagnosis (not pre-registered), ${info.model.name}; truth is rubric v2 with code artifacts counted, on the ${held.length} graded mentions whose window holds the name.\n`);
     // D1: the same window asked about the entity, a number and an unrelated word.
     const d1 = held.slice(0, 60);
@@ -923,11 +933,8 @@ async function diagnose(url: string, cachePath: string | undefined) {
     });
     console.log(`\nD5, under each rubric: the graph's junk, weighted by type from the graded strata plus the ${numeric} numeric names; and the 7-way label (the first framing) on the graded mentions, against B1 then the extractor's type:\n`);
     console.log(table(["rubric", "valid of 201", "junk in the graph", "tier's 7-way right", "B1 then the extractor's type"], d5));
-    console.log(`\n${asked} decisions asked, the rest from the cache.`);
-  } finally {
-    process.off("SIGINT", onInt).off("SIGTERM", onTerm);
-    if (cachePath) writeCache(cachePath, cached);
-  }
+    console.log(`\n${counts.asked} asked, ${counts.hits} from the cache.`);
+  });
 }
 
 // ── The self-check ───────────────────────────────────────────────────────────
@@ -1053,9 +1060,9 @@ function selfCheck() {
   const bad = validateGateGrades({ generated: "", note: "", mentions: [
     { ...row, valid: 0 }, { ...row, entity: C, type: 6 }, { ...row, entity: "x" }, { ...row, entity: C, thought: `x${A}` }, { ...row, entity: C, thought: A.toUpperCase().replace("10000000", "1000000A") },
     { ...row, entity: C, valid: 1, type: -1 }, { ...row, entity: C, valid: 2 }, { ...row, entity: C, type: 1.5 },
-    { ...row, entity: C, grader_a: [1] }, { ...row, entity: C, grader_b: [2, 1] }, { ...row, entity: C, grader_b: [1, 1.5] }, null, { ...row }, "a row", { ...row, entity: C, grader_a: [1, 3, 3] },
+    { ...row, entity: C, grader_a: [1] }, { ...row, entity: C, grader_b: [2, 1] }, { ...row, entity: C, grader_b: [1, 1.5] }, null, { ...row }, "a row", { ...row, entity: C, grader_a: [1, 3, 3] }, { ...row, entity: C, grader_a: [1, -1] },
   ] });
-  const expect = ["generated is missing", "origin is missing", "note is missing", "mentions[0]: valid 0 with type 3", "mentions[1]: type 6 is not an index", `mentions[2]: "x" is not a lower-case id`, `mentions[3]: "x${A}" is not a lower-case id`, "mentions[4]: ", "mentions[5]: valid 1 with type -1", "mentions[6]: valid 2 is not 0 or 1", "mentions[7]: type 1.5 is not an index", "mentions[8]: grader_a is not [valid, type]", "mentions[9]: grader_b is not [valid, type]", "mentions[10]: grader_b is not [valid, type]", "mentions[11] is not an object", "mentions[12]: ", "is graded twice", "mentions[13] is not an object", "mentions[14]: grader_a is not [valid, type]"];
+  const expect = ["generated is missing", "origin is missing", "note is missing", "mentions[0]: valid 0 with type 3", "mentions[1]: type 6 is not an index", `mentions[2]: "x" is not a lower-case id`, `mentions[3]: "x${A}" is not a lower-case id`, "mentions[4]: ", "mentions[5]: valid 1 with type -1", "mentions[6]: valid 2 is not 0 or 1", "mentions[7]: type 1.5 is not an index", "mentions[8]: grader_a is not [valid, type]", "mentions[9]: grader_b is not [valid, type]", "mentions[10]: grader_b is not [valid, type]", "mentions[11] is not an object", "mentions[12]: ", "is graded twice", "mentions[13] is not an object", "mentions[14]: grader_a is not [valid, type]", "mentions[15]: grader_a is valid 1 with type -1"];
   const unmet = expect.filter((e) => !bad.some((p) => p.includes(e)));
   ok(unmet.length === 0, `each rule refuses by name: a missing label, an invalid row with a type and a valid one without, a type off the vocabulary or not an integer, a validity not 0/1, a bad id in either column (unanchored, upper case), each grader's label of the wrong shape or values, a row that is not an object, a duplicate (unmet: ${unmet.join("; ") || "none"})`);
   ok(validateGateGrades(null)[0] === "the fixture is not an object" && validateGateGrades([])[0] === "the fixture is not an object" && validateGateGrades({ generated: "g", origin: "o", note: "n" }).includes("mentions is not an array"), "a fixture that is not an object, or has no mentions array, is a problem and not a throw");
