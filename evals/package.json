@@ -40,7 +40,8 @@
     "writable-projection:self-check": "bun eval-writable-projection.ts --self-check",
     "writable-projection:check": "../db/with-postgres.sh bun eval-writable-projection.ts --check",
     "jev-coload": "bun eval-jev-coload.ts",
-    "jev-gate": "bun eval-jev-gate.ts"
+    "jev-gate": "bun eval-jev-gate.ts",
+    "jev-gate:self-check": "bun eval-jev-gate.ts --self-check"
   },
   "devDependencies": {
     "@types/bun": "1.4.0",

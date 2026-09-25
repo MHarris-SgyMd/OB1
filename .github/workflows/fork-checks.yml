@@ -243,6 +243,17 @@ jobs:
         working-directory: evals
         run: bun eval-writable-projection.ts --self-check
 
+      # The entity-gate spike's rules (SMD-1937): the deterministic baselines
+      # on the shapes SMD-1935 names and the ones they must keep, AUROC,
+      # balanced accuracy, the dev threshold, the temperature and Platt refits
+      # recovering a known slope, kappa, the paired bootstrap, the
+      # drop-the-mechanism identity, the permuted-score mutant, the framings
+      # and the committed grades' shape. No database, no tier; the measurement
+      # reads the dogfood brain.
+      - name: Entity-gate rules
+        working-directory: evals
+        run: bun eval-jev-gate.ts --self-check
+
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
       - name: Cloudflare Workers build
@@ -749,9 +760,14 @@ jobs:
           HTTPServer(("0.0.0.0", 11434), H).serve_forever()
           PY
           # OB1_GIT_SHA reaches the image as compose's build arg (SMD-2041),
-          # and the smoke step asserts the health body reports it.
+          # and the smoke step asserts the health body reports it. The quoted
+          # password and the commented OB1_EMBEDDING_DIM are shapes an operator
+          # writes; compose reads them as the bare values, and deploy/tier.sh
+          # must too (SMD-2036): a literal read hands pg_dump a quoted password
+          # and migrate.ts a width of "1024   # …", and the tier step fails.
           cat > .env <<EOF
-          POSTGRES_PASSWORD=$(openssl rand -hex 24)
+          POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+          OB1_EMBEDDING_DIM=1024   # the stack's default, written out as an operator would
           MCP_ACCESS_KEYS=ci:write:$HASH,ci-read:read:$READ_HASH,ci-capture:capture:$CAPTURE_HASH
           OB1_LLM_BASE_URL=http://host.docker.internal:11434/v1
           OB1_LLM_LOCAL=1
@@ -836,6 +852,64 @@ jobs:
         run: ./smoke.sh
         env:
           OB1_SMOKE_COMMIT: ${{ github.sha }}
+
+      # SMD-2036. db/tier.ts --refresh runs under Bun and shells to pg_dump /
+      # pg_restore, which no image in the stack carries together, so the
+      # snapshot half of the tier pipeline ran nowhere in CI (db-live's runner
+      # has a pg14 client, which refuses a pg16 server; test-live [20] drives the
+      # replay engine, the guards, and a refresh whose stand-in pg_restore
+      # fails, never a real one). deploy/tier.sh builds db/tier.Dockerfile
+      # and runs this checkout's tier.ts on the stack's network. The brain is
+      # given something to carry first: smoke.sh captures nothing, so one thought
+      # with a vector goes in through upsert_thought, and one keyword search that
+      # finds it goes through the server, which logs it. Then the refresh into a
+      # second database on the server, read back one test per line (a test inside
+      # an && list does not trip set -e: a schema-only copy passed that way in
+      # review), the tier stamp, a --replay that replays that search and a --diff
+      # that finds it unmoved, and a retry over a copy left stamped stable, as a
+      # refresh that died after its restore leaves it. Then the two guards the
+      # wrapper runs under, since from its container every database is remote:
+      # the brain under its service name and its container name is one
+      # database, and a refresh the wrong way round lands on a brain with no
+      # tier stamp. Both are refused, and the brain still holds its thought.
+      - name: The tier refresh runs from deploy/tier.sh
+        working-directory: deploy
+        run: |
+          q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d "$1" -tAc "$2"; }
+          q openbrain "SELECT upsert_thought('tier refresh probe: the quokka ledger', '{\"metadata\": {\"source\": \"ci-tier\"}}'::jsonb, ('[' || array_to_string(array_fill(0.03125::float8, ARRAY[1024]), ',') || ']')::vector)"
+          curl -s --max-time 20 -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_thoughts_keyword","arguments":{"query":"quokka"}}}' \
+            http://127.0.0.1:8010/ | grep -F 'quokka ledger'
+          docker compose -f compose.yaml exec -T postgres createdb -U postgres ob1_tier_ci
+          ./tier.sh --refresh --from postgres --to postgres/ob1_tier_ci --tier working
+          COUNTS="SELECT (SELECT count(*) FROM schema_migrations) || '/' || (SELECT count(*) FROM thoughts) || '/' || (SELECT count(embedding) FROM thoughts) || '/' || (SELECT count(*) FROM query_log)"
+          STABLE="$(q openbrain "$COUNTS")"
+          COPY="$(q ob1_tier_ci "$COUNTS")"
+          echo "migrations/thoughts/vectors/query_log: stable $STABLE, refreshed $COPY"
+          [ "$STABLE" = "$COPY" ] || { echo "the refreshed copy differs from stable" >&2; exit 1; }
+          [ "$(q ob1_tier_ci "SELECT count(embedding) FROM thoughts WHERE content LIKE '%quokka ledger%'")" = 1 ] || { echo "the probe thought or its vector did not arrive" >&2; exit 1; }
+          [ "$(q ob1_tier_ci "SELECT value FROM ob1_config WHERE key = 'tier'")" = working ] || { echo "the copy is not stamped tier=working" >&2; exit 1; }
+          ./tier.sh --replay --since 1970-01-01T00:00:00Z --from postgres --to postgres/ob1_tier_ci | tee /tmp/tier-replay.out
+          grep -E '^replayed [1-9][0-9]* of ' /tmp/tier-replay.out
+          ./tier.sh --diff --since 1970-01-01T00:00:00Z --from postgres --to postgres/ob1_tier_ci | tee /tmp/tier-diff.out
+          grep -F 'what moved: nothing' /tmp/tier-diff.out
+          # A refresh that dies after its restore leaves the source's ob1_config
+          # behind — the brain's, here no tier; the dogfood's, tier=stable. The
+          # mark the refresh set on the database before its reset lets the
+          # retry through.
+          [ "$(q ob1_tier_ci "SELECT count(*) FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase, unnest(s.setconfig) c WHERE d.datname = current_database() AND s.setrole = 0 AND c = 'ob1.refresh_target=working'")" = 1 ] || { echo "the refresh did not mark its target" >&2; exit 1; }
+          q ob1_tier_ci "UPDATE ob1_config SET value = 'stable' WHERE key = 'tier'"
+          ./tier.sh --refresh --from postgres --to postgres/ob1_tier_ci --tier working
+          [ "$(q ob1_tier_ci "SELECT value FROM ob1_config WHERE key = 'tier'")" = working ] || { echo "the retry did not restamp the copy" >&2; exit 1; }
+          refused() {
+            if ./tier.sh --refresh --from "$1" --to "$2" --tier working 2> /tmp/tier-refused.err; then
+              echo "tier.sh refreshed $1 into $2" >&2; exit 1
+            fi
+            grep -F "$3" /tmp/tier-refused.err || { cat /tmp/tier-refused.err >&2; exit 1; }
+          }
+          refused postgres open-brain-postgres-1 'name the same database'
+          refused postgres/ob1_tier_ci postgres 'holds thoughts and no tier stamp'
+          [ "$(q openbrain "SELECT count(*) FROM thoughts WHERE content LIKE '%quokka ledger%'")" = 1 ] || { echo "the brain lost its thought" >&2; exit 1; }
 
       - name: Confirm no Supabase CLI anywhere in the stack
         working-directory: deploy

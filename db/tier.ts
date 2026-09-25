@@ -31,11 +31,15 @@
  * --refresh uses pg_dump | pg_restore for a faithful whole-database snapshot
  * (thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
  * migration might touch), then runs migrate.ts against the target. It needs a
- * pg_dump / pg_restore whose major version is at least the source server's (the
- * pgvector image the tiers run carries matching client tools; a host that runs
- * this needs postgresql-client >= the server). It is destructive to --to and
- * refuses a non-loopback target unless OB1_ALLOW_REMOTE_DB=1, the same guard
- * test-support's dropSchema uses.
+ * pg_dump / pg_restore whose major version is at least the source server's, AND
+ * Bun: no image the stack runs has both, so deploy/tier.sh runs this file in one
+ * that does (db/tier.Dockerfile, SMD-2036); a host that runs it directly needs
+ * postgresql-client >= the server. It is destructive to --to, so it refuses a
+ * --to that is the --from database (sameDatabase, whatever else is true); a
+ * --to stamped tier=stable, holding thoughts under no canary/working stamp, or
+ * holding some other application's schema, unless an earlier refresh marked it
+ * (targetRefusal); and a non-loopback --to unless OB1_ALLOW_REMOTE_DB=1, the
+ * same guard test-support's dropSchema uses.
  *
  * The replay is the LIVE half of the replay gate (SMD-1295, whose db/test-replay.ts
  * is the offline, model-free, fixture-vector half in CI). For each search row
@@ -55,6 +59,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DB_LEVEL_SETTINGS_SQL, parseSetConfig } from "./config.mjs";
 import { stampTier, TIERS, type Tier } from "./ingest-records.ts";
 import { parsePgUuidArray } from "../evals/query-log.ts";
 import { embed } from "../evals/lib.ts";
@@ -235,7 +240,10 @@ async function serverMajor(sql: SQL): Promise<number> {
 /** The major version of a client tool (`pg_dump (PostgreSQL) 16.4` → 16), or null if the tool is absent. */
 async function toolMajor(tool: string): Promise<number | null> {
   try {
-    const proc = Bun.spawn([tool, "--version"], { stdout: "pipe", stderr: "pipe" });
+    // env passed explicitly: without it Bun resolves the command against the
+    // PATH it started with, not the process's current one (measured, Bun 1.4.0),
+    // and test-live [20] puts stand-in tools on PATH at runtime. run() likewise.
+    const proc = Bun.spawn([tool, "--version"], { stdout: "pipe", stderr: "pipe", env: process.env });
     const out = await new Response(proc.stdout).text();
     if ((await proc.exited) !== 0) return null;
     const m = out.match(/(\d+)(?:\.\d+)?\s*$/m) ?? out.match(/\)\s+(\d+)/);
@@ -243,6 +251,97 @@ async function toolMajor(tool: string): Promise<number | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether `a` and `b` reached the same database. The test is exact: `a`'s own
+ * session — its backend pid and the instant it started, the pair no two live
+ * sessions on one cluster share — is looked up in `b`'s pg_stat_activity, which
+ * lists every session on `b`'s cluster. Found means one cluster, and then the
+ * database names decide. No URL, host name or address is compared, so a compose
+ * service name and its container name, an alias and an IP, are still one
+ * database; and a copy that shares the source's system_identifier (a volume
+ * copy, a base backup) is still another. A role that may not read another
+ * role's backend_start sees it NULL, and a matching pid is then taken as a
+ * match: the error falls on the side of refusing.
+ */
+async function sameDatabase(a: SQL, b: SQL): Promise<boolean> {
+  const [me] = await a<{ pid: number; started: string; db: string }[]>`
+    SELECT pid, extract(epoch FROM backend_start)::text AS started, current_database() AS db
+    FROM pg_stat_activity WHERE pid = pg_backend_pid()`;
+  const [seen] = await b<{ found: boolean; db: string }[]>`
+    SELECT EXISTS (
+             SELECT 1 FROM pg_stat_activity
+             WHERE pid = ${me.pid}
+               AND (backend_start IS NULL OR extract(epoch FROM backend_start)::text = ${me.started})
+           ) AS found,
+           current_database() AS db`;
+  return seen.found && seen.db === me.db;
+}
+
+/**
+ * The mark a refresh leaves on its target: the tier, as a database-level
+ * setting (`ALTER DATABASE … SET ob1.refresh_target`), or null when unmarked.
+ * It lives on the database, not in its schema, so the reset does not drop it
+ * and pg_restore does not overwrite it — unlike ob1_config.tier, which the
+ * restore copies from the SOURCE (stable's `stable`) before the final stamp,
+ * so a refresh that failed after its restore would otherwise read as stable.
+ * Read from the database's own row in pg_db_role_setting (setrole 0), through
+ * config.mjs's DB_LEVEL_SETTINGS_SQL — not current_setting, since a session's
+ * value also comes from ALTER ROLE, ALTER SYSTEM or a connection option, any of
+ * which would make every database it reaches read as marked, a stable brain
+ * included. Only a value a refresh writes (canary, working) is a mark: an
+ * operator who sets it to `stable` or `off` to protect a database has not
+ * armed its reset. It lasts until `ALTER DATABASE … RESET ob1.refresh_target`.
+ */
+async function refreshMark(sql: SQL): Promise<string | null> {
+  const [row] = await sql.unsafe(DB_LEVEL_SETTINGS_SQL);
+  const mark = parseSetConfig(row?.cfg)["ob1.refresh_target"];
+  return mark === "canary" || mark === "working" ? mark : null;
+}
+
+/**
+ * Why `target` must not be reset by a refresh, or null when it may. A refresh
+ * resets only a database that is plainly a tier or plainly empty:
+ *   • marked by an earlier refresh (refreshMark) — whatever its ob1_config
+ *     says, which is how a refresh that failed after its restore is retried;
+ *   • stamped canary or working in ob1_config (a canary refreshed before the
+ *     mark existed);
+ *   • with nothing in its public schema but what extensions own (a new
+ *     `createdb`, whatever its template installed);
+ *   • an Open Brain schema — schema_migrations, ob1_config AND thoughts, since
+ *     schema_migrations alone is Rails', Ecto's, golang-migrate's and dbmate's
+ *     table too — holding no thoughts: a tier stack's database after `up`.
+ * Anything else is refused: the record (tier=stable), a brain with thoughts
+ * under no tier stamp (an untiered stable), and a schema that is not Open
+ * Brain's at all (another application's database, one name away). The
+ * refusal names no override: the likeliest cause is --from and --to the wrong
+ * way round, and marking the target by hand would disarm this guard for it
+ * for good. deploy/README.md says how to mark one deliberately.
+ */
+export async function targetRefusal(target: SQL): Promise<string | null> {
+  if ((await refreshMark(target)) !== null) return null;
+  const [{ db, relations, migrations, config, thoughts }] = await target<{ db: string; relations: number; migrations: boolean; config: boolean; thoughts: boolean }[]>`
+    SELECT current_database() AS db,
+           (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public'
+              -- relations a schema is made of; an index, a composite type or a
+              -- TOAST table follows its owner, and an extension's own (a PostGIS
+              -- primary key, tablefunc's row types) carry no 'e' dependency
+              AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+              AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')) AS relations,
+           to_regclass('public.schema_migrations') IS NOT NULL AS migrations,
+           to_regclass('public.ob1_config') IS NOT NULL AS config,
+           to_regclass('public.thoughts') IS NOT NULL AS thoughts`;
+  const tier = await configTier(target);
+  if (tier === "canary" || tier === "working" || relations === 0) return null;
+  const held = thoughts && (await target<{ n: number }[]>`SELECT count(*)::int AS n FROM (SELECT 1 FROM thoughts LIMIT 1) t`)[0].n > 0;
+  if (migrations && config && thoughts && !held && tier !== "stable") return null;
+  const why =
+    tier === "stable" ? "--to is stamped tier=stable, the record — are --from and --to the wrong way round?"
+    : held ? `--to holds thoughts and ${tier === null ? "no tier stamp" : `tier=${tier}`}, a brain rather than a tier a refresh made — are --from and --to the wrong way round?`
+    : "--to has tables in its public schema and is not an Open Brain schema — another database, one name away?";
+  return `${why} (database ${db}, no refresh mark)`;
 }
 
 /** Whether pg_dump AND pg_restore exist and are new enough to read `serverMaj` — refresh needs both. */
@@ -259,6 +358,7 @@ async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Pr
   const proc = Bun.spawn(cmd, {
     stdout: opts.stdio === "inherit" ? "inherit" : "pipe",
     stderr: opts.stdio === "inherit" ? "inherit" : "pipe",
+    env: process.env,
   });
   const out = opts.stdio === "inherit" ? "" : await new Response(proc.stdout).text();
   const err = opts.stdio === "inherit" ? "" : await new Response(proc.stderr).text();
@@ -269,7 +369,8 @@ async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Pr
  * Snapshot `fromUrl` into `toUrl` and migrate it forward with this tree.
  *   1. pg_dump the source (custom format, no owner/privileges — the target's role
  *      may differ; ROLE_GRANTS are re-issued by migrate --grant, not carried).
- *   2. reset the target's public schema (the destructive step, loopback-guarded).
+ *   2. mark the target as a refresh target (refreshMark), then reset its public
+ *      schema (the destructive step, guarded by targetRefusal and the loopback check).
  *   3. pg_restore the dump.
  *   4. migrate.ts forward — the point of the canary: a migration meets real data.
  *   5. stamp the tier and this refresh's time in ob1_config.
@@ -280,10 +381,24 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     throw new Error(`--to is not loopback and OB1_ALLOW_REMOTE_DB is not 1. Refusing to reset a remote database. (--refresh drops the target's schema.)`);
   }
   const src = new SQL({ url: fromUrl, max: 1 });
-  const serverMaj = await serverMajor(src);
-  await src.close();
+  const target = new SQL({ url: toUrl, max: 1 });
+  let serverMaj: number;
+  try {
+    serverMaj = await serverMajor(src);
+    // The reset below drops --to's schema, so --to must be neither the source
+    // nor the record. The loopback guard covers neither — deploy/tier.sh sets
+    // OB1_ALLOW_REMOTE_DB, since from its container every database is remote —
+    // and the likeliest slips are both: stable under the other name it answers
+    // to on the network, and --from and --to the wrong way round.
+    if (await sameDatabase(src, target)) throw new Error(`--from and --to name the same database. Refusing: --refresh drops the target's schema.`);
+    const refusal = await targetRefusal(target);
+    if (refusal) throw new Error(`${refusal}. Refusing: --refresh drops the target's schema.`);
+  } finally {
+    await src.close();
+    await target.close();
+  }
   const ready = await refreshToolsReady(serverMaj);
-  if (!ready.ready) throw new Error(`--refresh needs pg_dump / pg_restore: ${ready.why}. The pgvector image carries matching client tools; on a host install postgresql-client >= ${serverMaj}.`);
+  if (!ready.ready) throw new Error(`--refresh needs pg_dump / pg_restore: ${ready.why}. deploy/tier.sh runs this in an image with both (db/tier.Dockerfile, postgresql16-client); on a host install postgresql-client >= ${serverMaj}.`);
 
   const dir = await mkdtemp(join(tmpdir(), "ob1-tier-"));
   const dumpFile = join(dir, "stable.dump");
@@ -292,9 +407,23 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     if (dumped.code !== 0) throw new Error(`pg_dump failed (exit ${dumped.code}): ${dumped.err.trim()}`);
 
     // Reset the target so the restore lands on a clean schema. DROP … CASCADE is
-    // the destructive act --refresh exists to perform; it is guarded above.
+    // the destructive act --refresh exists to perform; it is guarded above. The
+    // mark goes first, so a refresh that dies from here on — a migration that
+    // fails on the copy, a Ctrl-C mid-restore — leaves a target the next one
+    // recognises as its own (refreshMark). `tier` is one of TIERS, checked by
+    // the caller; ALTER DATABASE takes no bind parameters.
     const dst = new SQL({ url: toUrl, max: 1 });
     try {
+      if (!TIERS.includes(tier)) throw new Error(`not a tier: ${tier}`);
+      try {
+        await dst.unsafe(`DO $mark$ BEGIN EXECUTE format('ALTER DATABASE %I SET ob1.refresh_target = %L', current_database(), '${tier}'); END $mark$`);
+      } catch (e) {
+        // Nothing is reset yet. A database-level setting of a custom name needs a
+        // superuser, or on PG15+ a role granted SET on the parameter; restoring
+        // pgvector into a public schema the reset emptied needs a superuser in
+        // the default install too, so a role that cannot mark could rarely finish.
+        throw new Error(`--refresh marks --to before resetting it (ALTER DATABASE … SET ob1.refresh_target) and could not: ${(e as Error).message}. That needs a superuser on --to, or GRANT SET ON PARAMETER ob1.refresh_target (PG15+); restoring pgvector needs a superuser in the default install anyway. --to is untouched.`);
+      }
       await dst`DROP SCHEMA IF EXISTS public CASCADE`;
       await dst`CREATE SCHEMA public`;
     } finally {
@@ -345,6 +474,12 @@ async function readConfig(sql: SQL, key: string): Promise<string | null> {
   return rows.length ? rows[0].value : null;
 }
 
+/** The tier ob1_config is stamped with, or null when unstamped or there is no ob1_config (a new database). */
+async function configTier(sql: SQL): Promise<string | null> {
+  const [{ present }] = await sql<{ present: boolean }[]>`SELECT to_regclass('public.ob1_config') IS NOT NULL AS present`;
+  return present ? readConfig(sql, "tier") : null;
+}
+
 /** Upsert an ob1_config KV row — the write half beside readConfig. */
 async function setConfig(sql: SQL, key: string, value: string): Promise<void> {
   await sql`INSERT INTO ob1_config (key, value) VALUES (${key}, ${value})
@@ -362,24 +497,30 @@ async function setConfig(sql: SQL, key: string, value: string): Promise<void> {
  */
 export async function promote(canaryUrl: string, stableUrl: string): Promise<{ version: string | null }> {
   const canary = new SQL({ url: canaryUrl, max: 1 });
-  let version: string | null;
-  try {
-    version = await readConfig(canary, "schema_version");
-  } finally {
-    await canary.close();
-  }
   const stable = new SQL({ url: stableUrl, max: 1 });
   try {
+    // The mirror of refresh's guard: promote stamps --to as stable, so --to must
+    // not be the canary itself, nor a tier — the shape of --from and --to the
+    // wrong way round, which would make the canary read as the record.
+    if (await sameDatabase(canary, stable)) throw new Error(`--from and --to name the same database. Refusing: --promote stamps --to as stable.`);
+    const mark = await refreshMark(stable);
+    const tier = await configTier(stable);
+    if (mark !== null || tier === "canary" || tier === "working") {
+      const [{ db }] = await stable<{ db: string }[]>`SELECT quote_ident(current_database()) AS db`;
+      throw new Error(`--to is a tier (${mark !== null ? `refresh mark ${mark}` : `tier=${tier}`}), not the record — are --from and --to the wrong way round? Refusing: --promote stamps --to as stable.${mark !== null ? ` If --to really is to be the record now, clear the mark first: ALTER DATABASE ${db} RESET ob1.refresh_target` : ""}`);
+    }
+    const version = await readConfig(canary, "schema_version");
     // Assert the target is stable — but only the tier key, not stampTier's
     // last_ingest: a promotion is not an ingest, and stable's last_ingest must
     // keep naming the real rebuild time (preflight's `tier` check reads it).
     await setConfig(stable, "tier", "stable");
     if (version !== null) await setConfig(stable, "promoted_schema_version", version);
     await setConfig(stable, "promoted_at", new Date().toISOString());
+    return { version };
   } finally {
+    await canary.close();
     await stable.close();
   }
-  return { version };
 }
 
 // ---------------------------------------------------------------------------
@@ -503,4 +644,12 @@ async function main(): Promise<void> {
   }
 }
 
-if (import.meta.main) await main();
+// A refusal or a failed step is a sentence for the operator, not a stack trace
+// with Bun's source excerpt around it. Exit 1, as before: --diff's "moved" is
+// also 1, and either one fails a gate.
+if (import.meta.main) {
+  await main().catch((e: unknown) => {
+    console.error(`tier.ts: error: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  });
+}
