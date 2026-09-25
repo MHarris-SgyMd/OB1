@@ -1288,6 +1288,18 @@ else {
     const rr = await run(SQL_ENV);
     assert(rr.code === 0 && /transaction isolation\s+default_transaction_isolation is repeatable read: the writers' lock order \(018\/033\/036\) and the citation guard \(042\) are argued under read committed/.test(rr.out) && /ALTER ROLE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
            `a connection defaulting to repeatable read starts with a warning naming the guarantees that rest on read committed and the ALTER ROLE that restores it (exit ${rr.code})`);
+    // …and nowhere else: a session as the same role in another database is
+    // still at read committed, so the fixture reaches no neighbour — set on
+    // the role instead, it passed the assertion above and crashed test-upgrade
+    // beside it only when a session of [20b]'s opened inside this window.
+    const u = new URL(LIVE);
+    const otherDb = u.pathname === "/postgres" ? "template1" : "postgres";
+    u.pathname = `/${otherDb}`;
+    const elsewhere = new SQL({ url: u.toString(), max: 1 });
+    const level = await elsewhere`SELECT current_setting('default_transaction_isolation') AS l`.then((r: { l: string }[]) => r[0].l, () => null);
+    await elsewhere.close();
+    if (level === null) skipRaw("…and only this database's sessions start at repeatable read", `the role cannot connect to database ${otherDb}`);
+    else assert(level === "read committed", `…and only this database's sessions start at repeatable read: one as the same role in ${otherDb} is at ${level}`);
   } finally {
     await onThisDatabase("RESET default_transaction_isolation");
   }
