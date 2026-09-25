@@ -1787,10 +1787,104 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ function: "merge_thought_provenance_metadata(uuid, jsonb)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/provenance-chains" }),
     Object.freeze({ function: "merge_thought_eval_metadata(uuid, jsonb)",       privileges: Object.freeze(["EXECUTE"]), since: "schemas/provenance-chains" }),
   ]),
+  // The learning path's six extensions/*/schema.sql, applied by hand as each
+  // README's Step 1 says (SMD-1810). Upstream's five with policies ENABLEd RLS
+  // on `auth.uid() = user_id` and granted nothing — Supabase's default
+  // privileges carried its service role — and family-calendar's carried
+  // neither; the policies are gone, and this group is what a role other than
+  // the tables' owner needs. Every id is a uuid, so no sequence rows; no
+  // function is REVOKEd FROM PUBLIC, so no function rows (test-schema [50]
+  // measures both).
+  extensions: Object.freeze([
+    Object.freeze({ table: "household_items",       privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/household-knowledge" }),
+    Object.freeze({ table: "household_vendors",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/household-knowledge" }),
+    Object.freeze({ table: "maintenance_tasks",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/home-maintenance" }),
+    Object.freeze({ table: "maintenance_logs",      privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/home-maintenance" }),
+    Object.freeze({ table: "recipes",               privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/meal-planning" }),
+    Object.freeze({ table: "meal_plans",            privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/meal-planning" }),
+    Object.freeze({ table: "shopping_lists",        privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/meal-planning" }),
+    Object.freeze({ table: "professional_contacts", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
+    Object.freeze({ table: "contact_interactions",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
+    Object.freeze({ table: "opportunities",         privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
+    Object.freeze({ table: "family_members",        privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/family-calendar" }),
+    Object.freeze({ table: "activities",            privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/family-calendar" }),
+    Object.freeze({ table: "important_dates",       privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/family-calendar" }),
+    Object.freeze({ table: "companies",             privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
+    Object.freeze({ table: "job_postings",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
+    Object.freeze({ table: "applications",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
+    Object.freeze({ table: "interviews",            privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
+    Object.freeze({ table: "job_contacts",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
+  ]),
+  // The recipe SQL files a brain applies as a schema — nine files creating
+  // tables or views, applied by hand as each README says (SMD-1810; the list
+  // is test-support's CONTRIB_SCHEMA_FILES). Upstream granted most of these
+  // TO service_role (adaptive-capture's four TO authenticated; lint-sweep's
+  // views nothing), ENABLEd RLS on most with policies on auth.uid(), and
+  // REVOKEd ob-graph's three functions FROM anon and authenticated; all cut,
+  // the REVOKEs too (none is SECURITY DEFINER, and there is no PostgREST here
+  // to expose them), so EXECUTE stays PUBLIC's and no function row is needed.
+  // Every id is a uuid or text: no sequence rows. The privileges are
+  // upstream's own for its roles.
+  recipes: Object.freeze([
+    // recipes/adaptive-capture-classification (upstream's SELECT, INSERT, UPDATE to its API role, kept — the recipe deletes nothing)
+    Object.freeze({ table: "correction_learnings",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "recipes/adaptive-capture-classification" }),
+    Object.freeze({ table: "classification_outcomes", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "recipes/adaptive-capture-classification" }),
+    Object.freeze({ table: "capture_thresholds",      privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "recipes/adaptive-capture-classification" }),
+    Object.freeze({ table: "ab_comparisons",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "recipes/adaptive-capture-classification" }),
+    // recipes/brain-health-monitoring/ops-views.sql (eight views; the last three exist only where smart-ingest and entity-extraction are applied, and are skipped until then)
+    Object.freeze({ view: "ops_source_volume_24h",       privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
+    Object.freeze({ view: "ops_recent_thoughts",         privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
+    Object.freeze({ view: "ops_enrichment_gaps",         privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
+    Object.freeze({ view: "ops_type_distribution",       privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
+    Object.freeze({ view: "ops_sensitivity_distribution", privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
+    Object.freeze({ view: "ops_ingestion_summary",       privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
+    Object.freeze({ view: "ops_stalled_entity_queue",    privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
+    Object.freeze({ view: "ops_graph_coverage",          privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
+    // recipes/chatgpt-conversation-import (user_id a plain nullable uuid now; upstream's referenced auth.users)
+    Object.freeze({ table: "chatgpt_conversations", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/chatgpt-conversation-import" }),
+    // recipes/life-engine
+    Object.freeze({ table: "life_engine_habits",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/life-engine" }),
+    Object.freeze({ table: "life_engine_habit_log", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/life-engine" }),
+    Object.freeze({ table: "life_engine_checkins",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/life-engine" }),
+    Object.freeze({ table: "life_engine_briefings", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/life-engine" }),
+    Object.freeze({ table: "life_engine_evolution", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/life-engine" }),
+    Object.freeze({ table: "life_engine_state",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/life-engine" }),
+    // recipes/lint-sweep/views.sql (seven read-only views over thoughts; the last two are guarded — on content_fingerprint and thought_entities, both the migrations' — so all seven exist on a migrated brain)
+    Object.freeze({ view: "lint_orphans_by_tag",           privileges: Object.freeze(["SELECT"]), since: "recipes/lint-sweep" }),
+    Object.freeze({ view: "lint_over_tagged",              privileges: Object.freeze(["SELECT"]), since: "recipes/lint-sweep" }),
+    Object.freeze({ view: "lint_empty_content",            privileges: Object.freeze(["SELECT"]), since: "recipes/lint-sweep" }),
+    Object.freeze({ view: "lint_very_long",                privileges: Object.freeze(["SELECT"]), since: "recipes/lint-sweep" }),
+    Object.freeze({ view: "lint_low_signal",               privileges: Object.freeze(["SELECT"]), since: "recipes/lint-sweep" }),
+    Object.freeze({ view: "lint_exact_duplicates",         privileges: Object.freeze(["SELECT"]), since: "recipes/lint-sweep" }),
+    Object.freeze({ view: "lint_high_importance_isolated", privileges: Object.freeze(["SELECT"]), since: "recipes/lint-sweep" }),
+    // recipes/ob-graph
+    Object.freeze({ table: "graph_nodes", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/ob-graph" }),
+    Object.freeze({ table: "graph_edges", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/ob-graph" }),
+    // recipes/repo-learning-coach
+    Object.freeze({ table: "repo_learning_projects",           privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/repo-learning-coach" }),
+    Object.freeze({ table: "repo_learning_research_documents", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/repo-learning-coach" }),
+    Object.freeze({ table: "repo_learning_tracks",             privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/repo-learning-coach" }),
+    Object.freeze({ table: "repo_learning_lessons",            privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/repo-learning-coach" }),
+    Object.freeze({ table: "repo_learning_quizzes",            privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/repo-learning-coach" }),
+    Object.freeze({ table: "repo_learning_quiz_questions",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/repo-learning-coach" }),
+    Object.freeze({ table: "repo_learning_lesson_progress",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/repo-learning-coach" }),
+    Object.freeze({ table: "repo_learning_quiz_attempts",      privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/repo-learning-coach" }),
+    Object.freeze({ table: "repo_learning_quiz_responses",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/repo-learning-coach" }),
+    Object.freeze({ table: "repo_learning_lesson_comments",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/repo-learning-coach" }),
+    // recipes/work-operating-model-activation (its three functions keep PUBLIC's EXECUTE; upstream only GRANTed them TO service_role)
+    Object.freeze({ table: "operating_model_profiles",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/work-operating-model-activation" }),
+    Object.freeze({ table: "operating_model_sessions",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/work-operating-model-activation" }),
+    Object.freeze({ table: "operating_model_layer_checkpoints", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/work-operating-model-activation" }),
+    Object.freeze({ table: "operating_model_entries",           privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/work-operating-model-activation" }),
+    Object.freeze({ table: "operating_model_exports",           privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/work-operating-model-activation" }),
+    // recipes/world-model-diagnostic-activation/schema-v2-draft.sql (a draft its README's V1 does not apply; listed so applying it is one --grant away)
+    Object.freeze({ table: "world_model_assessments",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/world-model-diagnostic-activation" }),
+    Object.freeze({ table: "world_model_boundary_flows", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "recipes/world-model-diagnostic-activation" }),
+  ]),
 });
 
 /** The order groups are issued and documented in. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "querylog", "community"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "querylog", "community", "extensions", "recipes"]);
 
 /**
  * The (table, privilege) pairs the core capture/edit/search path needs

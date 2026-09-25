@@ -273,7 +273,7 @@ LANGUAGE sql STABLE AS $$
   LIMIT lim;
 $$;
 
-GRANT EXECUTE ON FUNCTION public.entities_with_min_links(int, int) TO service_role;
+-- EXECUTE is PUBLIC's by default on plain Postgres; no grant is needed (upstream granted it to Supabase's service_role here)
 ```
 
 </details>

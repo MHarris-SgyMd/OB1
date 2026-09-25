@@ -10,7 +10,7 @@ Every extension produces exactly four files in `extensions/{extension-slug}/`:
 |------|---------|
 | `README.md` | Human-readable setup guide (follows template below) |
 | `metadata.json` | Machine-readable metadata (follows schema below) |
-| `schema.sql` | PostgreSQL tables, indexes, RLS policies |
+| `schema.sql` | PostgreSQL tables, indexes, triggers — no RLS, no GRANT (rule 4 below) |
 | `index.ts` | The MCP server — Bun-native, `bun index.ts` serves it (SMD-1799) |
 
 ---
@@ -62,23 +62,14 @@ PostgreSQL DDL that runs against the brain's database with `psql -f`. Must follo
 
 1. **Every table must have:**
    - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
-   - `user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL`
+   - `user_id UUID NOT NULL` — a plain column the server fills from `DEFAULT_USER_ID`; no `REFERENCES auth.users` (Supabase's table, absent here — SMD-1810)
    - `created_at TIMESTAMPTZ DEFAULT now() NOT NULL`
 
 2. **Use `CREATE TABLE IF NOT EXISTS`** — safe to re-run.
 
 3. **Include indexes** for columns that will be queried frequently (user_id + any filter columns).
 
-4. **Include Row Level Security:**
-
-   ```sql
-   ALTER TABLE table_name ENABLE ROW LEVEL SECURITY;
-
-   CREATE POLICY table_name_user_policy ON table_name
-       FOR ALL
-       USING (auth.uid() = user_id)
-       WITH CHECK (auth.uid() = user_id);
-   ```
+4. **No row-level security, no `GRANT`, nothing from Supabase's `auth` schema.** Upstream's template enabled RLS with a policy on `auth.uid()`; this fork runs one operator's brain on plain Postgres (SMD-1716), the server scopes rows by `DEFAULT_USER_ID`, and `scripts/check-fork-consistency.ts` check 12 refuses `auth.*`, `service_role`, `authenticated`, `anon`, `ENABLE ROW LEVEL SECURITY` and `CREATE POLICY` in any `.sql` under the category directories (SMD-1810). A role other than the tables' owner is granted by `bun db/migrate.ts --grant`: add one row per table to `ROLE_GRANTS.extensions` in `db/config.mjs`, the matching rows to `db/README.md`'s grants table (the checker holds the two equal), and the file to `CONTRIB_SCHEMA_FILES` in `db/test-support.ts` so test-schema [50] applies it.
 
 5. **Never modify the core `thoughts` table.** Adding new tables is fine. Referencing `thoughts` via foreign key is fine. Altering or dropping `thoughts` columns is not.
 
@@ -219,7 +210,7 @@ server.registerTool(
 4. **Use Zod for input validation.** Every parameter needs `.describe()` for the AI to understand it.
 5. **Every tool must include MCP annotations.** Use `readOnlyHint: true` for retrieval/search/reporting tools. For write tools, use `readOnlyHint: false`, `openWorldHint: false` when the write is scoped to your own tables, and `destructiveHint: false` unless the tool deletes, overwrites, or performs irreversible actions. ChatGPT uses this metadata to distinguish read tools from write actions.
 6. **Minimum tools per extension:** one for adding data, one for retrieving/searching data.
-7. **The service role key bypasses RLS.** If the extension uses RLS and needs user-scoped queries, the tool must accept a `user_id` parameter or derive it from context.
+7. **Every query is scoped by `user_id` in the tool, not by the database.** There is no row policy behind the tables (schema rule 4), so a tool that reads or writes them filters on `DEFAULT_USER_ID` (or a `user_id` argument) itself.
 
 ### Extensions That Need OpenRouter
 
@@ -274,7 +265,7 @@ Before submitting, verify:
 
 - [ ] `index.ts` imports only `hono`, `zod`, `@hono/mcp`, `@modelcontextprotocol/sdk` (from `extensions/package.json`), the SQL shim and `../_shared/auth.ts` — no supabase-js, no `deno.json`
 - [ ] `metadata.json` validates against `/.github/metadata.schema.json`
-- [ ] `schema.sql` uses `IF NOT EXISTS`, includes RLS, includes indexes
+- [ ] `schema.sql` uses `IF NOT EXISTS`, includes indexes, carries no RLS, no `auth.*` call and no `GRANT` to a Supabase role (check 12), and its tables are in `ROLE_GRANTS.extensions` and `CONTRIB_SCHEMA_FILES`
 - [ ] `schema.sql` does NOT modify the `thoughts` table
 - [ ] `index.ts` follows the exact server structure (imports, auth, Hono app)
 - [ ] `index.ts` tools return `{ content: [{ type: "text" as const, text }] }` format

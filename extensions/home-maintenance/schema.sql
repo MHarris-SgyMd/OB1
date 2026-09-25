@@ -40,21 +40,18 @@ CREATE INDEX IF NOT EXISTS idx_maintenance_logs_task_completed
 CREATE INDEX IF NOT EXISTS idx_maintenance_logs_user_completed
     ON maintenance_logs(user_id, completed_at DESC);
 
--- Row Level Security (RLS) policies
-ALTER TABLE maintenance_tasks ENABLE ROW LEVEL SECURITY;
-ALTER TABLE maintenance_logs ENABLE ROW LEVEL SECURITY;
-
--- Policy: Users can only see their own maintenance tasks
-CREATE POLICY maintenance_tasks_user_policy ON maintenance_tasks
-    FOR ALL
-    USING (auth.uid() = user_id)
-    WITH CHECK (auth.uid() = user_id);
-
--- Policy: Users can only see their own maintenance logs
-CREATE POLICY maintenance_logs_user_policy ON maintenance_logs
-    FOR ALL
-    USING (auth.uid() = user_id)
-    WITH CHECK (auth.uid() = user_id);
+-- This fork (SMD-1810): upstream's file ENABLEd ROW LEVEL SECURITY on both
+-- tables here, with a policy `auth.uid() = user_id` FOR ALL on each.
+-- auth.uid() is GoTrue's, which exists only on Supabase: on plain Postgres
+-- the first policy stopped the file (`schema "auth" does not exist`),
+-- and with a stub returning NULL to get past it the policy denied every row
+-- to any role but the tables' owner. Removed. The server connects as one role
+-- and scopes rows by DEFAULT_USER_ID itself.
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `extensions` group, which covers this
+-- file's two tables (SELECT, INSERT, UPDATE, DELETE); a role that owns the
+-- tables needs nothing. Row-level security on this fork: SMD-1716.
 
 -- Function to automatically update updated_at timestamp on maintenance_tasks
 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -108,6 +105,6 @@ CREATE TRIGGER update_task_after_log
 
 -- Sample data (optional - uncomment to insert examples)
 -- INSERT INTO maintenance_tasks (user_id, name, category, frequency_days, next_due, priority, notes) VALUES
--- (auth.uid(), 'HVAC Filter Replacement', 'hvac', 90, now() + INTERVAL '90 days', 'medium', 'Use 16x25x1 pleated filters'),
--- (auth.uid(), 'Gutter Cleaning', 'exterior', 180, now() + INTERVAL '180 days', 'medium', 'Best to do before rainy season'),
--- (auth.uid(), 'Water Heater Inspection', 'plumbing', 365, now() + INTERVAL '365 days', 'low', 'Check for leaks and sediment buildup');
+-- ('<your DEFAULT_USER_ID>'::uuid, 'HVAC Filter Replacement', 'hvac', 90, now() + INTERVAL '90 days', 'medium', 'Use 16x25x1 pleated filters'),
+-- ('<your DEFAULT_USER_ID>'::uuid, 'Gutter Cleaning', 'exterior', 180, now() + INTERVAL '180 days', 'medium', 'Best to do before rainy season'),
+-- ('<your DEFAULT_USER_ID>'::uuid, 'Water Heater Inspection', 'plumbing', 365, now() + INTERVAL '365 days', 'low', 'Check for leaks and sediment buildup');

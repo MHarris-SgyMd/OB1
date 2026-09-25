@@ -21,7 +21,7 @@ import { vector } from "@electric-sql/pglite/vector";
 // separate bundles that have to be handed in at construction — without this the
 // migration does not merely skip the index, it raises and [1] fails.
 import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import {
   DEFAULT_TRGM_INDEX,
   EMBEDDING_DIM,
@@ -67,7 +67,7 @@ import {
 } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, createAssert, FUNCTION_COMMENT_SQL, ISO_RE, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
+import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, CONTRIB_DIR, CONTRIB_SCHEMA_FILES, createAssert, FUNCTION_COMMENT_SQL, ISO_RE, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
 import {
   DEFAULT_OPTIONS, DONE_WEIGHT, FUZZY_FLOOR, coverage as graphCoverage, lifecycleCaveat, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
@@ -6759,6 +6759,140 @@ console.log("\n[49] Migration 054: resolve_agent writes a key's row only when la
   assert(/ob1:stale-only-touch/.test(String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'resolve_agent(text, text, text)'::regprocedure`)).s)), "…and applies again once the column is back, landing the same body");
   await db.query(`DELETE FROM ob1_agent_keys WHERE key_hash = $1`, [K]);
   await db.query(`DELETE FROM ob1_agents WHERE label = 'touch-key-renamed'`);
+}
+
+console.log("\n[50] Every extension and recipe schema applies to a migrated brain carrying the community schemas, with no Supabase role and no auth schema present, and --grant's extensions and recipes groups are what make them usable (SMD-1810)");
+{
+  // [40]'s model on the files check 12 reaches since SMD-1810: the fourteen
+  // under extensions/ and recipes/ that carried per-user policies on
+  // auth.uid(), GRANTs TO service_role or authenticated, one REFERENCES
+  // auth.users and three `EXECUTE 'GRANT …'` strings. A third PGlite:
+  // ops-views.sql reads columns enhanced-thoughts adds to `thoughts`, and its
+  // three guarded views exist only over smart-ingest's and entity-extraction's
+  // tables, so the community files go first and all eight views are measured.
+  const contribFiles = CONTRIB_SCHEMA_FILES;
+  const extensionSchemas = readdirSync(join(CONTRIB_DIR, "extensions"), { withFileTypes: true })
+    .filter((d) => d.isDirectory() && existsSync(join(CONTRIB_DIR, "extensions", d.name, "schema.sql"))).map((d) => `extensions/${d.name}/schema.sql`).sort();
+  assert(extensionSchemas.length === 6 && extensionSchemas.every((f) => contribFiles.includes(f)) && contribFiles.every((f) => existsSync(join(CONTRIB_DIR, f))),
+    `every extensions/*/schema.sql is in CONTRIB_SCHEMA_FILES and every listed file exists (${extensionSchemas.length} extension schemas; ${contribFiles.length} files listed)`);
+  // The rule, from inside the suite, over the whole of both trees as check 12
+  // walks them — not the listed files alone, since the two directories also
+  // hold SQL no brain applies as a schema, and a Supabase-ism there is as
+  // much a stop for the reader who runs it.
+  const walkSql = (dir: string, out: string[] = []): string[] => {
+    for (const name of readdirSync(dir)) {
+      if (name === "node_modules" || name.startsWith(".")) continue;
+      const p = join(dir, name);
+      if (statSync(p).isDirectory()) walkSql(p, out); else if (name.endsWith(".sql")) out.push(p);
+    }
+    return out;
+  };
+  const treeSql = [...walkSql(join(CONTRIB_DIR, "extensions")), ...walkSql(join(CONTRIB_DIR, "recipes"))].map((p) => p.slice(CONTRIB_DIR.length + 1));
+  const treeIsms = treeSql.flatMap((f) => supabaseIsmsIn(readFileSync(join(CONTRIB_DIR, f), "utf8")).map((h) => `${f}:${h.line} ${h.rule}`));
+  const unlistedSql = treeSql.filter((f) => !contribFiles.includes(f));
+  assert(contribFiles.every((f) => treeSql.includes(f)) && unlistedSql.every((f) => f.startsWith("recipes/")) && treeIsms.length === 0,
+    `no .sql under extensions/ or recipes/ runs a Supabase-ism — the ${contribFiles.length} listed files and the ${unlistedSql.length} a brain does not apply as a schema, all of those under recipes/ (${treeIsms.length}: ${treeIsms.slice(0, 4).join("; ") || "none"})`);
+
+  const xdb = new PGlite({ extensions: { vector, pg_trgm } });
+  for (const f of files) await xdb.exec(subst(readFileSync(join(MIGRATIONS, f), "utf8")));
+  const { roles: xRoles, authSchema } = (await xdb.query<{ roles: number; authSchema: boolean }>(
+    `SELECT (SELECT count(*)::int FROM pg_roles WHERE rolname IN ('authenticated', 'anon', 'service_role')) AS roles, to_regnamespace('auth') IS NOT NULL AS "authSchema"`)).rows[0];
+  assert(xRoles === 0 && authSchema === false, "no Supabase role and no auth schema exist in this database — the stubs the READMEs used to give are not created");
+  const tablesNow = async () => new Set((await xdb.query<{ n: string }>(`SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public'`)).rows.map((r) => r.n));
+  const viewsNow = async () => new Set((await xdb.query<{ n: string }>(`SELECT viewname AS n FROM pg_views WHERE schemaname = 'public'`)).rows.map((r) => r.n));
+  const seqsNow = async () => new Set((await xdb.query<{ n: string }>(`SELECT c.relname AS n FROM pg_class c WHERE c.relkind = 'S' AND c.relnamespace = 'public'::regnamespace`)).rows.map((r) => r.n));
+  const lockedFnsNow = async () => new Set((await xdb.query<{ sig: string }>(
+    `SELECT p.oid::regprocedure::text AS sig FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND NOT has_function_privilege('ob1_contrib', p.oid, 'EXECUTE')`)).rows.map((r) => r.sig));
+  await xdb.exec(`CREATE ROLE ob1_contrib NOLOGIN`);
+  for (const f of communitySchemaFiles()) await xdb.exec(readFileSync(join(SCHEMAS_DIR, f), "utf8"));
+  const [baseTables, baseViews, baseSeqs, baseLocked] = [await tablesNow(), await viewsNow(), await seqsNow(), await lockedFnsNow()];
+  const failed: string[] = [];
+  for (const f of contribFiles) {
+    try {
+      await xdb.exec(readFileSync(join(CONTRIB_DIR, f), "utf8"));
+    } catch (e) {
+      failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`);
+      try { await xdb.exec("ROLLBACK"); } catch { /* the file opened no transaction */ }
+    }
+  }
+  assert(failed.length === 0, `every listed file applies after the community schemas, in that order (${failed.length} failed: ${failed.join(" | ") || "none"})`);
+
+  // The two groups name exactly what the files created that a grant can
+  // reach: every new table and every new view, no sequence (every id is a uuid
+  // or text — measured, not recalled, as [40] measured the six bigserials) and
+  // no function (none is REVOKEd FROM PUBLIC now that ob-graph's three
+  // REVOKEs are gone with the roles they named).
+  const GROUPS = ["extensions", "recipes"] as const;
+  const objects = grantedObjects([...GROUPS]);
+  const presence = (await xdb.query<{ kind: string; name: string; present: boolean }>(grantPresenceSql(objects))).rows;
+  const absent = presence.filter((r) => !r.present).map((r) => `${r.kind} ${r.name}`);
+  assert(presence.length === objects.length && objects.length === 63 && absent.length === 0, `every object the two groups name exists once the files are applied (${objects.length}; absent: ${absent.join(", ") || "none"})`);
+  const listedTables = new Set(grantedTables([...GROUPS]));
+  const listedViews = new Set(grantedViews([...GROUPS]));
+  const newTables = [...(await tablesNow())].filter((t) => !baseTables.has(t)).sort();
+  const newViews = [...(await viewsNow())].filter((v) => !baseViews.has(v)).sort();
+  assert(newTables.length === 48 && listedTables.size === 48 && newTables.every((t) => listedTables.has(t)),
+    `the files created exactly the 48 tables the two groups list — 18 in extensions, 30 in recipes (created: ${newTables.length}; unlisted: ${newTables.filter((t) => !listedTables.has(t)).join(", ") || "none"})`);
+  assert(grantedTables(["extensions"]).length === 18 && grantedTables(["recipes"]).length === 30 && newTables.every((t) => !grantedTables(["community"]).includes(t)),
+    "…18 and 30, and none of them a community table under another name");
+  const opsViews = newViews.filter((v) => v.startsWith("ops_")), lintViews = newViews.filter((v) => v.startsWith("lint_"));
+  assert(newViews.length === 15 && listedViews.size === 15 && newViews.every((v) => listedViews.has(v)) && opsViews.length === 8 && lintViews.length === 7,
+    `…and exactly the fifteen views — eight ops_* and seven lint_*, the guarded ones included since their tables and column are present (${newViews.join(", ")})`);
+  const newSeqs = [...(await seqsNow())].filter((s) => !baseSeqs.has(s));
+  const newLocked = [...(await lockedFnsNow())].filter((f) => !baseLocked.has(f));
+  assert(newSeqs.length === 0 && grantedSequences([...GROUPS]).length === 0, `no sequence was created (every id is a uuid or text), so the groups list none (${newSeqs.join(", ") || "none"})`);
+  assert(newLocked.length === 0 && grantedFunctions([...GROUPS]).length === 0, `no new function is REVOKEd FROM PUBLIC — ob-graph's three keep PUBLIC's EXECUTE — so the groups list none (${newLocked.join(", ") || "none"})`);
+  const graphFns = (await xdb.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('traverse_graph', 'find_shortest_path', 'reconstruct_bfs_path', 'merge_thought_metadata', 'operating_model_save_layer') AND has_function_privilege('ob1_contrib', p.oid, 'EXECUTE')`)).rows[0].n;
+  assert(graphFns === 4, `ob-graph's three functions and work-operating-model's saver are callable by an ungranted role (${graphFns} of 4; gmail-smart-pull's merge is not applied here)`);
+
+  // The role: nothing but USAGE on the schema, then [40]'s probe — an INSERT
+  // of DEFAULT VALUES answers 42501 until the table is granted and some other
+  // code or success after. Every listed table and view is refused first (the
+  // drop-the-mechanism mutant), none after the two groups' statements.
+  await xdb.exec(`GRANT USAGE ON SCHEMA public TO ob1_contrib`);
+  const asRole = async (sql: string): Promise<{ code: string | null; message: string }> => {
+    try {
+      await xdb.exec(`BEGIN; SET ROLE ob1_contrib; ${sql}; ROLLBACK;`);
+      return { code: null, message: "" };
+    } catch (e) {
+      try { await xdb.exec("ROLLBACK"); } catch { /* already rolled back */ }
+      return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] };
+    }
+  };
+  const codes = async () => {
+    const out = new Map<string, string | null>();
+    for (const t of listedTables) out.set(t, (await asRole(`INSERT INTO ${t} DEFAULT VALUES`)).code);
+    for (const v of listedViews) out.set(v, (await asRole(`SELECT 1 FROM ${v} LIMIT 0`)).code);
+    return out;
+  };
+  const before = [...(await codes())].filter(([, c]) => c !== "42501").map(([n, c]) => `${n}=${c}`);
+  assert(before.length === 0, `ungranted, the role's INSERT into every listed table and SELECT from every listed view is refused with 42501 (${listedTables.size + listedViews.size} objects; exceptions: ${before.join(", ") || "none"})`);
+  const present = new Set(presence.map((r) => r.name));
+  const statements = grantStatements("ob1_contrib", { groups: [...GROUPS], present });
+  assert(statements.length === 63 && statements.every((s) => /^GRANT (SELECT|SELECT, INSERT, UPDATE(, DELETE)?) ON \w+ TO "ob1_contrib";$/.test(s)) &&
+         statements.includes(`GRANT SELECT ON ops_graph_coverage TO "ob1_contrib";`) && statements.includes(`GRANT SELECT ON lint_exact_duplicates TO "ob1_contrib";`) && statements.includes(`GRANT SELECT, INSERT, UPDATE ON capture_thresholds TO "ob1_contrib";`),
+    `--grant's statements for the two groups: one per table and view (${statements.length}), no sequence or function among them, the views granted as tables are, adaptive-capture's three verbs`);
+  for (const s of statements) await xdb.exec(s);
+  const after = [...(await codes())].filter(([, c]) => c === "42501").map(([n]) => n);
+  assert(after.length === 0, `granted both groups, no listed table refuses the role's INSERT and no view its SELECT (still refused: ${after.join(", ") || "none"})`);
+  const verify = (await xdb.query<{ held: boolean; privilege: string; name: string }>(grantVerifySql("ob1_contrib", mergedGrants([...GROUPS], present)))).rows;
+  // One row per privilege plus the schema's USAGE: 18 + 26 four-verb tables, adaptive-capture's four at three, and one SELECT per view.
+  const fourVerb = listedTables.size - 4;
+  assert(fourVerb === 44 && verify.length === 1 + fourVerb * 4 + 4 * 3 + listedViews.size && verify.every((r) => r.held),
+    `grantVerifySql holds every privilege of both groups (${verify.length} rows; not held: ${verify.filter((r) => !r.held).map((r) => `${r.privilege} on ${r.name}`).join(", ") || "none"})`);
+  // Upstream's privileges, kept where they were narrower: adaptive-capture's
+  // API role could not DELETE, so the granted role cannot either — the row
+  // that would be widened by a copy-paste of the four DML verbs.
+  const narrow = await asRole(`DELETE FROM capture_thresholds WHERE false`);
+  const wide = await asRole(`DELETE FROM graph_nodes WHERE false`);
+  assert(narrow.code === "42501" && wide.code === null, `the role cannot DELETE from adaptive-capture's tables (${narrow.code}) and can from a four-verb table (${wide.code ?? "allowed"})`);
+  // And a read that only the role's own SELECT on the view could allow: the
+  // ops views are over `thoughts`, which the role was never granted — a view
+  // runs with its owner's privileges, so the grant on the view alone suffices.
+  const viewRead = await asRole(`SELECT * FROM ops_type_distribution`);
+  const tableRead = await asRole(`SELECT 1 FROM thoughts LIMIT 0`);
+  assert(viewRead.code === null && tableRead.code === "42501", `the role reads an ops view over thoughts (${viewRead.code ?? "allowed"}) without any grant on thoughts itself (${tableRead.code})`);
+  await xdb.close();
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

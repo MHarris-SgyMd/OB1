@@ -34,7 +34,7 @@ import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MO
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 import { consolidateKey } from "../server-portable/consolidate.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
@@ -3969,9 +3969,9 @@ console.log("\n[17] Over near-equidistant vectors the HNSW walk misses live rows
 
 // ── 18. The community schemas over TCP ───────────────────────────────────────
 
-console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role present, and migrate.ts --grant makes a LOGIN role able to use them (SMD-1796)");
+console.log("\n[18] Every schemas/*.sql, then every extension and recipe schema, applies over TCP with no Supabase role present, and migrate.ts --grant makes a LOGIN role able to use them (SMD-1796, SMD-1810)");
 {
-  // test-schema [40] is the PGlite half of this; here is what PGlite cannot do:
+  // test-schema [40] and [50] are the PGlite halves of this; here is what PGlite cannot do:
   // the migrator's --grant over TCP — its presence probe against a real
   // server's to_regclass/to_regprocedure, its "not yet present, skipped" list
   // before the files are applied and its full list after — and a role that
@@ -4003,6 +4003,11 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
   };
   const SCHEMAS = SCHEMAS_DIR;
   const schemaFiles = communitySchemaFiles();
+  // The extension and recipe schemas (SMD-1810), after the community files —
+  // ops-views.sql reads enhanced-thoughts' columns and its guarded views need
+  // smart-ingest's and entity-extraction's tables. Same drop in the finally.
+  const contribFiles = CONTRIB_SCHEMA_FILES;
+  const ALL_GROUPS = ["community", "extensions", "recipes"] as const;
   const [{ c: supabaseRoles }] = (await sql`SELECT count(*)::int AS c FROM pg_roles WHERE rolname IN ('authenticated', 'anon', 'service_role')`) as { c: number }[];
   assert(supabaseRoles === 0, "no Supabase role exists on this server");
 
@@ -4029,8 +4034,9 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
       const dry = await migrate("--grant", ROLE, "--dry-run");
       const skippedLine = dry.out.split("\n").find((l) => /not yet present, skipped/.test(l)) ?? "";
       const communityTables = grantedTables(["community"]).filter((t) => t !== "thought_audit" && t !== "thought_entities");
-      assert(dry.code === 0 && communityTables.every((t) => skippedLine.includes(t)) && grantedViews(["community"]).every((v) => skippedLine.includes(v)) && grantedSequences(["community"]).every((s) => skippedLine.includes(s)) && grantedFunctions(["community"]).every((f) => skippedLine.includes(f)),
-             `before the files are applied, --grant --dry-run names every community table, view, sequence and function as not yet present (exit ${dry.code}; ${skippedLine.length} chars of skipped list)`);
+      const contribObjects = [...grantedTables(["extensions", "recipes"]), ...grantedViews(["extensions", "recipes"])];
+      assert(dry.code === 0 && communityTables.every((t) => skippedLine.includes(t)) && grantedViews(["community"]).every((v) => skippedLine.includes(v)) && grantedSequences(["community"]).every((s) => skippedLine.includes(s)) && grantedFunctions(["community"]).every((f) => skippedLine.includes(f)) && contribObjects.every((o) => skippedLine.includes(o)),
+             `before the files are applied, --grant --dry-run names every community table, view, sequence and function, and every extension and recipe table and view, as not yet present (exit ${dry.code}; ${skippedLine.length} chars of skipped list)`);
       assert(!/ON SEQUENCE|ON FUNCTION|agent_memories/.test(dry.out.replace(skippedLine, "")) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
              "…grants nothing of the community group, and grants the migrations' tables");
 
@@ -4040,6 +4046,12 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
         catch (e) { failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); }
       }
       assert(schemaFiles.length >= 14 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files; failed: ${failed.join(" | ") || "none"})`);
+      const contribFailed: string[] = [];
+      for (const f of contribFiles) {
+        try { await sql.unsafe(readFileSync(join(CONTRIB_DIR, f), "utf8")); }
+        catch (e) { contribFailed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); }
+      }
+      assert(contribFiles.length === 15 && contribFailed.length === 0, `…and so does every listed extension and recipe schema after them, with no auth schema either (${contribFiles.length} files; failed: ${contribFailed.join(" | ") || "none"})`);
 
       // After: --grant issues the whole community group, over TCP, in one
       // transaction — views as tables, sequences and functions spelled as GRANT
@@ -4056,16 +4068,16 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
       // error, or success, means it is not.
       asRole = new SQL({ url: ROLE_URL, max: 1 });
       const denied: string[] = [];
-      for (const t of grantedTables(["community"])) {
+      for (const t of grantedTables([...ALL_GROUPS])) {
         try { await asRole.unsafe(`INSERT INTO ${t} DEFAULT VALUES`); }
         catch (e) { if (/permission denied/.test((e as Error).message)) denied.push(`${t}: ${(e as Error).message.split("\n")[0]}`); }
       }
-      assert(denied.length === 0, `the role's INSERT into every community table gets past privileges (${grantedTables(["community"]).length} tables; denied: ${denied.join("; ") || "none"})`);
+      assert(denied.length === 0, `the role's INSERT into every community, extension and recipe table gets past privileges (${grantedTables([...ALL_GROUPS]).length} tables; denied: ${denied.join("; ") || "none"})`);
       let viewDenied = "";
-      for (const v of grantedViews(["community"])) {
+      for (const v of grantedViews([...ALL_GROUPS])) {
         try { await asRole.unsafe(`SELECT 1 FROM ${v} LIMIT 0`); } catch (e) { viewDenied += `${v}: ${(e as Error).message.split("\n")[0]}; `; }
       }
-      assert(viewDenied === "", `…and reads the community view through its own SELECT grant (denied: ${viewDenied || "none"})`);
+      assert(viewDenied === "", `…and reads the community view, the eight ops views and lint-sweep's seven through its own SELECT grants (${grantedViews([...ALL_GROUPS]).length} views; denied: ${viewDenied || "none"})`);
       const seqDenied: string[] = [];
       for (const s of grantedSequences(["community"])) {
         try { await asRole.unsafe(`SELECT nextval('${s}')`); } catch (e) { seqDenied.push(s); }
