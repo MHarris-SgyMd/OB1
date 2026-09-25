@@ -1861,7 +1861,42 @@ else {
       assert(/!\s+migration ledger\s+schema_migrations exists \(schema public\) but does not resolve for this role/.test(lost.out)
                && !/no schema_migrations table/.test(lost.out) && !/Adopt it with: cd db && bun migrate\.ts --url \$DATABASE_URL --baseline/.test(lost.out),
              `a ledger off the role's search path warns that it does not resolve, and recommends no --baseline (${row(lost.out, "migration ledger")})`);
+
+      // The same role granted SELECT on every table, ob1_config among them,
+      // public still off its path (SMD-2062): the write-privileges check tested
+      // public.ob1_config, then read a bare ob1_config, which does not resolve —
+      // and the raise took every later direct row down as "not checked".
+      // The row now names what the role lacks, every later row runs, and the
+      // schema row — thoughts is there, off the path — does not say migrate.
+      await claims.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO pf_reader");
+      const wide = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+      assert(/✗\s+write privileges\s+this connection's role \(pf_reader\) is missing privileges the capture path's writers need/.test(wide.out),
+             `a role that may read ob1_config without public on its path gets the write-privileges row's own result (${row(wide.out, "write privileges")})`);
+      assert(!/not checked — the direct connection failed before it/.test(wide.out)
+               && /✓\s+chunk context/.test(wide.out)
+               && /migration ledger\s+schema_migrations exists \(schema public\) but does not resolve for this role/.test(wide.out)
+               && /schema version\s+could not verify: ob1_config exists \(schema public\) but does not resolve for this role/.test(wide.out),
+             `…and every later direct row runs, the ledger and version rows in their own words (${row(wide.out, "chunk context")} | ${row(wide.out, "schema version")})`);
+      assert(/✗\s+schema\s+relation "thoughts" does not exist — thoughts exists \(schema public\) but does not resolve for this role\n\s+→ Put public on the server role's search_path/.test(wide.out)
+               && !/Apply the migrations: cd db/.test(wide.out),
+             `…and the schema row names the path, not the migrate command (${row(wide.out, "schema")})`);
+
+      // With no USAGE on public — PUBLIC's taken too, which a fresh database
+      // grants — to_regclass('public.…') itself raises. The rows whose reads
+      // are qualified say so each, in their own boundary; none takes the rest.
+      const [{ publicUsage }] = await claims`SELECT has_schema_privilege('public', 'public', 'USAGE') AS "publicUsage"`;
+      await claims.unsafe("REVOKE USAGE ON SCHEMA public FROM pf_reader, PUBLIC");
+      try {
+        const bare = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+        assert(/!\s+write privileges\s+could not verify: permission denied for schema public/.test(bare.out)
+                 && /!\s+chunk context\s+could not verify: permission denied for schema public/.test(bare.out)
+                 && !/not checked — the direct connection failed before it/.test(bare.out),
+               `a role with no USAGE on public: the qualified reads' rows warn, each alone, and every later row runs (${row(bare.out, "write privileges")} | ${row(bare.out, "tier")})`);
+      } finally {
+        if (publicUsage) await claims.unsafe("GRANT USAGE ON SCHEMA public TO PUBLIC");
+      }
     } finally {
+      await claims.unsafe("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM pf_reader");
       await claims.unsafe("REVOKE ALL ON thoughts FROM pf_reader");
       await claims.unsafe("REVOKE USAGE ON SCHEMA public FROM pf_reader");
       await claims.unsafe("DROP ROLE pf_reader");
