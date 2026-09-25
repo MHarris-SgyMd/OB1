@@ -2899,7 +2899,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   // (SMD-2135; two workers of sixteen, SMD-1023's third review pass, took two
   // rounds, some sixteen seconds). The fifteens outlast the lease — eight rows
   // would fit inside it, and the run would pass with renewal a no-op — and the
-  // twelve finishes near 7.3 s and claims again, reaping any lease past its
+  // twelve finishes at about 7.4 s and claims again, reaping any lease past its
   // 6 s deadline, so a beat that renewed nothing hands it the others' last
   // rows on their second attempt. Fifteen is the batch with margin both ways
   // for 42 thoughts: 14 ends all three together, 16 leaves ten rows that end
