@@ -4555,6 +4555,66 @@ await sql.close();
 // db/README.md's Testing block quotes this suite's assertion total. The count
 // is lower when a group is skipped (PostgreSQL 18, or JIT off), so only a full
 // run — as CI's pg16-with-JIT job is — is compared to the headline (SMD-1805).
+console.log("\n[24] Migration 054's payload backfill under two connections: a second pass beside a held one skips what the first filled and counts only its own; the derivation of a capture whose update was stamped before it by an older transaction reads that update (SMD-2115)");
+{
+  // PGlite is one connection, so test-schema [49] cannot hold what the
+  // header promises of two passes at once — the fill's re-read under the row
+  // lock (`NOT COALESCE(a.diff ? 'content', false)`) is what makes the second
+  // pass skip rather than trip the gate's "nothing is filled" (run-it, first
+  // review pass: the mutant that dropped it survived 1,658 assertions).
+  // Its own pool: the section before closes the shared one.
+  const sql = new SQL({ url: URL_, max: 4 });
+  await sql`DELETE FROM thoughts`;
+  const N = 300;
+  for (let i = 0; i < N; i++) {
+    await sql`INSERT INTO thoughts (content, metadata) VALUES (${`concurrent pass row ${i}`}, '{"source": "plant"}'::jsonb)`;
+  }
+  // 046's shape: a second capture row per thought, without content, older than the real one would be irrelevant — plant them as the thought's only capture by stripping 054's.
+  await sql.unsafe(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_immutable`);
+  await sql.unsafe(`UPDATE thought_audit SET diff = diff - 'content' - 'created_at' WHERE action = 'capture' AND diff->'metadata'->>'source' = 'plant'`);
+  await sql.unsafe(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_immutable`);
+  const waiting = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false)`)[0].c);
+  assert((await waiting()) === N, `${N} capture rows wait for their payload (${await waiting()})`);
+  type Bf = { rows: number; from_row: number; skipped: number; unrecoverable: number; awaiting: number };
+  const held = new SQL({ url: URL_, max: 1 });
+  await held`BEGIN`;
+  const first = (await held`SELECT backfill_thought_payloads() AS r`)[0].r as Bf;
+  // The second pass, while the first holds its rows: it waits on the row
+  // locks, re-reads each row as filled, and writes nothing.
+  const pending = sql`SELECT backfill_thought_payloads() AS r`.execute();
+  await new Promise((r) => setTimeout(r, 300));
+  await held`COMMIT`;
+  await held.close();
+  const second = (await pending)[0].r as Bf;
+  assert(first.rows === N && first.from_row === N && first.skipped === 0, `the held pass filled every row from the live rows (${JSON.stringify(first)})`);
+  assert(second.rows === 0 && second.from_row === 0 && second.skipped === N && second.awaiting === 0, `the second pass, beside it, filled nothing, counted every candidate as skipped — not as its own — and raised nothing (${JSON.stringify(second)})`);
+  assert((await waiting()) === 0 && Number((await sql`SELECT count(*)::int AS c FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE a.action = 'capture' AND a.diff->>'content' IS DISTINCT FROM t.content`)[0].c) === 0, "…and every capture row carries its row's text, once");
+
+  // Two connections, the older transaction's edit committed after the newer
+  // one's capture: the update event's created_at (the transaction's start)
+  // precedes the capture's, its seq follows. The derivation reads it — the
+  // text as captured — not the live text (run-it, first review pass).
+  const older = new SQL({ url: URL_, max: 1 });
+  await older`BEGIN`;
+  await older`SELECT now()`;  // the transaction's clock starts here
+  await new Promise((r) => setTimeout(r, 1100));
+  const [{ id: inverted }] = (await sql`INSERT INTO thoughts (content, metadata) VALUES ('inverted: the first text', '{"source": "inverted"}'::jsonb) RETURNING id`) as { id: string }[];
+  await older`UPDATE thoughts SET content = 'inverted: the second text' WHERE id = ${inverted}::uuid`;
+  await older`COMMIT`;
+  await older.close();
+  const events = (await sql`SELECT action, created_at, seq FROM thought_audit WHERE thought_id = ${inverted}::uuid ORDER BY seq`) as { action: string; created_at: Date; seq: string }[];
+  assert(events.length === 2 && events[0].action === "capture" && events[1].action === "update" && events[1].created_at < events[0].created_at, `the update is stamped before the capture and numbered after it (${JSON.stringify(events.map((e) => [e.action, e.created_at.toISOString(), e.seq]))})`);
+  await sql.unsafe(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_immutable`);
+  await sql`UPDATE thought_audit SET diff = diff - 'content' WHERE thought_id = ${inverted}::uuid AND action = 'capture'`;
+  await sql.unsafe(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_immutable`);
+  const [derived] = (await sql`SELECT p.content, p.source FROM thought_audit a CROSS JOIN LATERAL ob1_capture_payload(a.thought_id, a.created_at, a.seq) p WHERE a.thought_id = ${inverted}::uuid AND a.action = 'capture'`) as { content: string; source: string }[];
+  assert(derived.content === "inverted: the first text" && derived.source === "update", `the capture derives from the older-stamped update's before — the text as captured (${JSON.stringify(derived)})`);
+  const fill = (await sql`SELECT backfill_thought_payloads() AS r`)[0].r as Bf;
+  assert(fill.rows === 1 && fill.from_row === 0, `…and the pass writes that text (${JSON.stringify(fill)})`);
+  await sql`DELETE FROM thoughts`;
+  await sql.close();
+}
+
 console.log("\n[doc] db/README.md states this suite's assertion total (full runs only)");
 {
   const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");

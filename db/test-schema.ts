@@ -6761,7 +6761,7 @@ console.log("\n[49] Migration 054: the capture event carries the payload — a c
   assert(/CASE WHEN TG_OP = 'INSERT' AND NEW\.created_at IS DISTINCT FROM now\(\) THEN NEW\.created_at END/.test(trig), "the trigger passes the row's created_at only when it differs from the transaction's now() — a defaulted column says nothing the event's clock does not");
   assert((await one<{ v: string }>(`SELECT provolatile AS v FROM pg_proc WHERE oid = $1::regprocedure`, [DIFF_SIG])).v === "s", "ob1_thought_diff is STABLE, not the prototype's IMMUTABLE — a timestamptz inside jsonb renders in the session's TimeZone");
   const pidx = (await one<{ d: string }>(`SELECT indexdef AS d FROM pg_indexes WHERE indexname = 'thought_audit_awaiting_payload_idx'`))?.d ?? "";
-  assert(/\(created_at, seq\)/.test(pidx) && /WHERE \(\(action = 'capture'::text\) AND \(NOT \(diff \? 'content'::text\)\)\)/.test(pidx), `the payload index holds exactly the capture rows without content, in (created_at, seq) order (${pidx})`);
+  assert(/\(created_at, seq\)/.test(pidx) && /WHERE \(\(action = 'capture'::text\) AND \(NOT COALESCE\(\(diff \? 'content'::text\), false\)\)\)/.test(pidx), `the payload index holds exactly the capture rows without content — a NULL diff among them — in (created_at, seq) order (${pidx})`);
   const colc = (await one<{ c: string | null }>(COLUMN_COMMENT_SQL, ["thought_audit", "diff"])).c ?? "";
   assert(/since 054, the content/.test(colc) && /content_fingerprint when the key moved/.test(colc) && /backfill_thought_payloads/.test(colc), "diff's comment states the three additions and the backfill that fills the rows from before");
   assert(/two lawful amendments/.test((await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_audit"])).c ?? "") && /RANGE on created_at by month/.test((await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_audit"])).c ?? ""), "the table's comment counts two amendments and keeps the partition key it chose");
@@ -6896,7 +6896,7 @@ console.log("\n[49] Migration 054: the capture event carries the payload — a c
   // relative to them.
   const rawCaptures = await q<{ c: string | null }>(`SELECT diff->>'content' AS c FROM thought_audit WHERE thought_id = '54545454-0002-4000-8000-000000000001'::uuid AND action = 'capture' ORDER BY created_at, seq`);
   assert(rawCaptures.length === 2 && rawCaptures.every((r) => r.c === "054 differential: a backdated record"), `re-applying 054 ran its backfill: the content-less capture the 046 run wrote for the raw row carries the text now, from its tombstone (${JSON.stringify(rawCaptures)})`);
-  type Bf = { ok: boolean; rows: number; from_update: number; from_tombstone: number; from_row: number; with_created_at: number; unrecoverable: number; awaiting: number };
+  type Bf = { ok: boolean; rows: number; from_update: number; from_tombstone: number; from_row: number; with_created_at: number; unrecoverable: number; skipped: number; awaiting: number };
   const settle = (await one<{ r: Bf }>(`SELECT backfill_thought_payloads() AS r`)).r;
   const strangers = settle.awaiting;
   assert(settle.rows === 0 && settle.awaiting === settle.unrecoverable, `what still waits is earlier sections' planted rows, which nothing derives for (${JSON.stringify(settle)})`);
@@ -6917,13 +6917,25 @@ console.log("\n[49] Migration 054: the capture event carries the payload — a c
   const uRow = await plantCapture(U, "2024-05-04T00:00:00Z");
   await plantRow(R, "054: planted, deleted, re-captured — the first text", "2024-05-05T00:00:00Z");
   const rRow = await plantCapture(R, "2024-05-05T00:00:00Z");
+  // V: an edit whose transaction began before the capture's and committed
+  // after it — created_at is the transaction's start, so the update event is
+  // stamped EARLIER than the capture while its seq is later (run-it, first
+  // review pass: reproduced with two connections on Postgres; planted here).
+  const V = "54545454-0003-4000-8000-00000000000f";
+  await plantRow(V, "054: planted, edited by an older transaction — the second text", "2024-05-06T00:00:10Z");
+  const vRow = await plantCapture(V, "2024-05-06T00:00:10Z");
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES ('${V}', 'update', '{"content": {"before": "054: planted, edited by an older transaction — the first text", "after": "054: planted, edited by an older transaction — the second text"}}'::jsonb, '2024-05-06T00:00:05Z')`);
+  // N: a capture row whose diff is NULL — a hand INSERT's shape; every writer's is an object.
+  const N = "54545454-0003-4000-8000-000000000010";
+  await plantRow(N, "054: planted with a NULL diff", "2024-05-07T00:00:00Z");
+  const nRow = (await one<{ id: string }>(`INSERT INTO thought_audit (thought_id, action, created_at) VALUES ($1::uuid, 'capture', '2024-05-07T00:00:01Z') RETURNING id`, [N])).id;
   r = await edit(M, "054: planted, then moved — the second text", null, ACTOR);
   assert(r.ok === true, "M's text moves through update_thought (the event's before is the text as captured)");
   await db.query(`SELECT delete_thought($1::uuid, $2::jsonb, false)`, [D, JSON.stringify(ACTOR)]);
   await db.query(`SELECT delete_thought($1::uuid, $2::jsonb, false)`, [R, JSON.stringify(ACTOR)]);
   await db.exec(`INSERT INTO thoughts (id, content, metadata) VALUES ('${R}', '054: planted, deleted, re-captured — the second text', '{"source": "load"}'::jsonb)`);
-  const waiting = async () => (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE action = 'capture' AND NOT (diff ? 'content')`)).c;
-  assert((await waiting()) === strangers + 5, `five planted capture rows wait for their payload beside the ${strangers} stranger(s) (${await waiting()})`);
+  const waiting = async () => (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false)`)).c;
+  assert((await waiting()) === strangers + 7, `seven planted capture rows wait for their payload beside the ${strangers} stranger(s) — the NULL diff among them (${await waiting()})`);
   // What each derives to — the one reading the gate and the backfill share.
   type Pay = { content: string | null; row_created_at: string | null; source: string };
   const derive = async (id: string, rowId: string) => one<Pay>(`SELECT p.content, p.row_created_at::text AS row_created_at, p.source FROM thought_audit a CROSS JOIN LATERAL ob1_capture_payload(a.thought_id, a.created_at, a.seq) p WHERE a.id = $1::uuid`, [rowId]);
@@ -6935,8 +6947,14 @@ console.log("\n[49] Migration 054: the capture event carries the payload — a c
   assert(d.content === "054: planted, then deleted" && d.source === "delete" && d.row_created_at === null, `D derives from the tombstone's previous_content; its created_at is gone with the row (${JSON.stringify(d)})`);
   d = await derive(U, uRow);
   assert(d.content === null && d.source === "none", `U derives to nothing: no later event, no row (${JSON.stringify(d)})`);
+  r = await edit(R, "054: planted, deleted, re-captured — the second text, edited", null, ACTOR);
+  assert(r.ok === true, "R's second incarnation is edited through update_thought — an update event with a `before` that is not the first capture's text");
   d = await derive(R, rRow);
-  assert(d.content === "054: planted, deleted, re-captured — the first text" && d.source === "delete", `R's first capture derives from its tombstone, never from the live row a later capture re-took the id with (${JSON.stringify(d)})`);
+  assert(d.content === "054: planted, deleted, re-captured — the first text" && d.source === "delete", `R's first capture derives from its own tombstone — the events stop at the first later tombstone or capture, so the second incarnation's edit is not read (cold read, first review pass: the first draft derived the second text) — and never from the live row a later capture re-took the id with (${JSON.stringify(d)})`);
+  d = await derive(V, vRow);
+  assert(d.content === "054: planted, edited by an older transaction — the first text" && d.source === "update", `an update written after the capture but stamped before it (the transaction's start) is still this capture's — membership by seq, not by the clock alone (run-it, first review pass) (${JSON.stringify(d)})`);
+  d = await derive(N, nRow);
+  assert(d.content === "054: planted with a NULL diff" && d.source === "row" && d.row_created_at !== null, `a capture row with a NULL diff derives like any other (${JSON.stringify(d)})`);
   // The gate, condition by condition.
   assert(/append-only: UPDATE/.test(await refused(`UPDATE thought_audit SET diff = diff || '{"content": "054: planted, still standing"}'::jsonb WHERE id = $1::uuid`, [lRow])), "without the setting an UPDATE of diff is refused, as 008 refused it");
   assert(/here a column other than actor_kind, trust, origin and backfilled_at changes/.test(await amend("backfill", `UPDATE thought_audit SET diff = diff || '{"content": "054: planted, still standing"}'::jsonb WHERE id = '${lRow}'`)), "under 046's value an UPDATE of diff stays refused — the payload is not that amendment's");
@@ -6944,31 +6962,41 @@ console.log("\n[49] Migration 054: the capture event carries the payload — a c
   assert(/here a column other than diff changes/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": "054: planted, still standing"}'::jsonb, actor_kind = 'agent' WHERE id = '${lRow}'`)), "…a fill beside another column is refused: diff is the fifth column removed from the byte-equal compare under this value alone");
   assert(/here a key of diff other than content and created_at changes/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": "054: planted, still standing", "metadata": {"source": "x"}}'::jsonb WHERE id = '${lRow}'`)), "…a fill that touches another key of diff is refused");
   assert(/here created_at must be the live row's own/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": "054: planted, still standing", "created_at": "2020-01-01T00:00:00Z"}'::jsonb WHERE id = '${lRow}'`)), "…a created_at that is not the live row's is refused");
+  assert(/here content must be a string/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": null}'::jsonb WHERE id = '${lRow}'`)), "…a JSON-null content is refused as a type, not as the wrong text (run-it, first review pass)");
+  assert(/here created_at must be a timestamp/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": "054: planted, still standing", "created_at": "not-a-date"}'::jsonb WHERE id = '${lRow}'`)), "…a created_at that is no timestamp is refused by name, not by the cast's own error (run-it, first review pass)");
   assert(/here only a capture row takes a payload/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": "x"}'::jsonb WHERE thought_id = '${M}' AND action = 'update'`)), "…an update row takes no payload");
   assert(/here no content derives for this row/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": "invented"}'::jsonb WHERE id = '${uRow}'`)), "…a row nothing derives for cannot be filled with an invented text");
   assert(/here no created_at derives for this row/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || jsonb_build_object('created_at', (SELECT created_at FROM thoughts WHERE id = '${M}')) WHERE id = '${mRow}'`)), "…a created_at equal to the event's is not a fill: nothing derives");
   assert(/here nothing is filled/.test(await amend("payload", `UPDATE thought_audit SET diff = diff WHERE id = '${lRow}'`)), "…and a write that fills nothing is refused");
-  assert((await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": "054: planted, still standing"}'::jsonb WHERE id = '${lRow}'`)) === "", "the lawful fill by hand — the derived content — goes through");
-  assert((await amend("payload", `UPDATE thought_audit SET diff = diff || jsonb_build_object('created_at', (SELECT created_at FROM thoughts WHERE id = '${L}')) WHERE id = '${lRow}'`)) === "", "…and the created_at after it, from the live row");
-  assert(/here nothing is filled/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": "054: planted, still standing"}'::jsonb WHERE id = '${lRow}'`)), "…the same fill again fills nothing");
-  assert(/here a content once set is never changed/.test(await amend("payload", `UPDATE thought_audit SET diff = jsonb_set(diff, '{content}', '"another text"') WHERE id = '${lRow}'`)), "…and a content once set is never changed");
+  assert((await amend("payload", `UPDATE thought_audit SET diff = COALESCE(diff, '{}'::jsonb) || '{"content": "054: planted with a NULL diff"}'::jsonb WHERE id = '${nRow}'`)) === "", "the lawful fill by hand — the derived content, onto a NULL diff read as empty — goes through");
+  assert((await amend("payload", `UPDATE thought_audit SET diff = diff || jsonb_build_object('created_at', (SELECT created_at FROM thoughts WHERE id = '${L}')) WHERE id = '${lRow}'`)) === "", "…and a created_at alone, before the content, from the live row");
+  assert(/here nothing is filled/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": "054: planted with a NULL diff"}'::jsonb WHERE id = '${nRow}'`)), "…the same fill again fills nothing");
+  assert(/here a content once set is never changed/.test(await amend("payload", `UPDATE thought_audit SET diff = jsonb_set(diff, '{content}', '"another text"') WHERE id = '${nRow}'`)), "…and a content once set is never changed");
+  assert(/here a created_at is filled with the content or before it/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || jsonb_build_object('created_at', (SELECT created_at FROM thoughts WHERE id = '${N}')) WHERE id = '${nRow}'`)), "…a row that carries its content gains no created_at after the fact (run-it, first review pass)");
+  await db.exec(`UPDATE thoughts SET created_at = '2001-02-03T04:05:06Z' WHERE id = '${a.id}'`);
+  const aRow = (await one<{ id: string }>(`SELECT id FROM thought_audit WHERE thought_id = $1::uuid AND action = 'capture'`, [a.id])).id;
+  assert(/here a created_at is filled with the content or before it/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"created_at": "2001-02-03T04:05:06+00:00"}'::jsonb WHERE id = '${aRow}'`)), "…nor does a complete 054 capture whose row's created_at was moved by hand later — no time it never had");
   assert(/append-only: DELETE/.test(await amend("payload", `DELETE FROM thought_audit WHERE id = '${lRow}'`)) && /append-only: TRUNCATE/.test(await amend("payload", `TRUNCATE thought_audit`)), "…DELETE and TRUNCATE are refused under the setting as without it");
-  const lDiff = (await one<{ d: Diff }>(`SELECT diff AS d FROM thought_audit WHERE id = $1::uuid`, [lRow])).d;
-  const lSame = await one<{ same: boolean }>(`SELECT (a.diff->>'created_at')::timestamptz = t.created_at AS same FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE a.id = $1::uuid`, [lRow]);
-  assert(lDiff.content === "054: planted, still standing" && lSame.same === true && lDiff.metadata?.source === "plant", "L's row now carries the content and the row's created_at, its other keys untouched");
   // The backfill: bounded, by source, idempotent, its report exact.
   assert(/p_limit must be at least 1/.test(await refused(`SELECT backfill_thought_payloads(0)`)), "backfill_thought_payloads(0) is refused as a value");
   let bf = (await one<{ r: Bf }>(`SELECT backfill_thought_payloads(1) AS r`)).r;
-  assert(bf.ok && bf.rows === 1 && bf.from_update === 1 && bf.awaiting === strangers + 3, `p_limit bounds a pass to the oldest waiting row — M's (the planted rows predate the strangers), from the update (${JSON.stringify(bf)})`);
+  assert(bf.ok && bf.rows === 1 && bf.from_row === 1 && bf.with_created_at === 0 && bf.skipped === 0 && bf.awaiting === strangers + 5,
+    `p_limit bounds a pass to the oldest waiting row — L's (the planted rows predate the strangers), from the live row, its hand-filled created_at kept and not counted as this pass's (${JSON.stringify(bf)})`);
+  const lDiff = (await one<{ d: Diff }>(`SELECT diff AS d FROM thought_audit WHERE id = $1::uuid`, [lRow])).d;
+  const lSame = await one<{ same: boolean }>(`SELECT (a.diff->>'created_at')::timestamptz = t.created_at AS same FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE a.id = $1::uuid`, [lRow]);
+  assert(lDiff.content === "054: planted, still standing" && lSame.same === true && lDiff.metadata?.source === "plant", "L's row now carries the content beside the created_at the hand fill set, its other keys untouched — the pass did not re-write the time (cold read, first review pass)");
+  bf = (await one<{ r: Bf }>(`SELECT backfill_thought_payloads(1) AS r`)).r;
+  assert(bf.rows === 1 && bf.from_update === 1 && bf.awaiting === strangers + 4, `…the next bounded pass takes M's, from the update (${JSON.stringify(bf)})`);
   bf = (await one<{ r: Bf }>(`SELECT backfill_thought_payloads() AS r`)).r;
-  assert(bf.rows === 2 && bf.from_tombstone === 2 && bf.from_row === 0 && bf.from_update === 0 && bf.unrecoverable === strangers + 1 && bf.awaiting === strangers + 1 && bf.with_created_at === 0,
-    `the pass fills D's and R's first capture from their tombstones, reports U (and the strangers) as unrecoverable and leaves them waiting (${JSON.stringify(bf)})`);
-  const texts = await q<{ thought_id: string; c: string | null; k: string }>(`SELECT thought_id, diff->>'content' AS c, (diff ? 'created_at')::text AS k FROM thought_audit WHERE thought_id IN ($1::uuid, $2::uuid, $3::uuid, $4::uuid) AND action = 'capture' ORDER BY created_at, seq`, [M, D, U, R]);
+  assert(bf.rows === 3 && bf.from_tombstone === 2 && bf.from_update === 1 && bf.from_row === 0 && bf.unrecoverable === strangers + 1 && bf.skipped === 0 && bf.awaiting === strangers + 1 && bf.with_created_at === 0,
+    `the pass fills D's and R's first capture from their tombstones and V's from the older-stamped update, reports U (and the strangers) as unrecoverable and leaves them waiting (${JSON.stringify(bf)})`);
+  const texts = await q<{ thought_id: string; c: string | null; k: string }>(`SELECT thought_id, diff->>'content' AS c, COALESCE(diff ? 'created_at', false)::text AS k FROM thought_audit WHERE thought_id IN ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid) AND action = 'capture' ORDER BY created_at, seq`, [M, D, U, R, V]);
   assert(texts.find((t) => t.thought_id === M)?.c === "054: planted, then moved" && texts.find((t) => t.thought_id === D)?.c === "054: planted, then deleted" && texts.find((t) => t.thought_id === U)?.c === null
+    && texts.find((t) => t.thought_id === V)?.c === "054: planted, edited by an older transaction — the first text"
     && texts.filter((t) => t.thought_id === R).map((t) => t.c).join(" | ") === "054: planted, deleted, re-captured — the first text | 054: planted, deleted, re-captured — the second text" && texts.every((t) => t.k === "false"),
-    `each capture row holds the text as it was captured — M's first text, D's, R's first and second, U's none — and none gained a created_at (${JSON.stringify(texts.map((t) => t.c))})`);
+    `each capture row holds the text as it was captured — M's first text, D's, R's first and second, V's first, U's none — and none gained a created_at (${JSON.stringify(texts.map((t) => t.c))})`);
   bf = (await one<{ r: Bf }>(`SELECT backfill_thought_payloads() AS r`)).r;
-  assert(bf.rows === 0 && bf.unrecoverable === strangers + 1 && bf.awaiting === strangers + 1, `a second pass fills nothing and still names the rows nothing derives for (${JSON.stringify(bf)})`);
+  assert(bf.rows === 0 && bf.unrecoverable === strangers + 1 && bf.skipped === 0 && bf.awaiting === strangers + 1, `a second pass fills nothing and still names the rows nothing derives for (${JSON.stringify(bf)})`);
   assert((await one<{ s: string | null }>(`SELECT current_setting('ob1.audit_amend', true) AS s`)).s === "" || (await one<{ s: string | null }>(`SELECT current_setting('ob1.audit_amend', true) AS s`)).s === null, "…and leaves the amendment setting as it found it");
   // Re-applying 054 is a no-op: the same bodies, no row moved, the pass finds nothing.
   n = await audits();

@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1658 assertions: 1658 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1666 assertions: 1666 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-four (54) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -334,9 +334,17 @@ an UPDATE of `diff` stays refused). The file calls it once (`OB1_BACKFILL_LIMIT`
 bounds the batch, as for 023 and 050); preflight's `audit events` counts the
 capture rows still without content and names the pass. On the dogfood brain
 every one of 632 rows derived (239 from an update, 1 from a tombstone, 392
-from the live row; 222 gained a `created_at`). Additive, no signature moves,
-no return changes, no row written differently; one delta a reader sees:
-`thought_changes` lists `content_fingerprint` in `changed` when a text moves.
+from the live row; 222 gained a `created_at`). The events read for a capture
+are the thought's rows written after it (`seq` later, or `(created_at, seq)`
+later — `created_at` is the transaction's start, so an edit from an older
+transaction can be stamped before the capture it follows) and no further than
+the first later tombstone or capture — an id `ingest-records.ts` re-uses after
+a delete has a second incarnation whose edits are not the first capture's.
+Additive, no signature moves, no return changes, no row written differently.
+What a reader sees change: `thought_changes` lists `content_fingerprint` in
+`changed` when a text moves; and two passes that wrote no audit row before
+write one per row they key, since a key's move is an event — 023's
+`backfill_content_fingerprints()` and `reembed.ts`'s edit of a legacy twin.
 
 ## What changed relative to the guide
 
@@ -2011,8 +2019,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1658 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 676 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1666 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 683 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

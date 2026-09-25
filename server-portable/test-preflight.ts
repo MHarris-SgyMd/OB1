@@ -1314,8 +1314,8 @@ else {
   // whole, the payload is not — a warning naming 054 (SMD-2115); 054
   // re-applied is the shipped body again.
   const pre054 = await run(SQL_ENV);
-  assert(/!  audit events\s+046's event shape is present but the audit trigger's body is from before 054 \(046 re-applied by hand\): a capture records no content and an update no key move/.test(pre054.out) && /Apply db\/migrations\/054_capture_event_payload\.sql\./.test(pre054.out),
-         "…046 re-applied over 054 puts a trigger back that records no payload: the event check warns — the kind and the event are recorded, the content is not — naming 054 (SMD-2115)");
+  assert(/!  audit events\s+046's event shape present and every key classified, but the audit trigger's body is from before 054 \(migration 054 not yet applied, or 046 re-applied by hand\): a capture records no content and an update no key move/.test(pre054.out) && /Apply db\/migrations\/054_capture_event_payload\.sql\./.test(pre054.out),
+         "…046 re-applied over 054 puts a trigger back that records no payload: the event check warns beside the census — the kind and the event are recorded, the content is not — naming 054 and both causes (SMD-2115)");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("054") });
   const shippedPair = await run(SQL_ENV);
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 046's — the 3-argument body carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop, and both set the write event beside the actor \(046\); the 2-argument body refuses a non-object payload \(005\) and takes the lock\s*$/m.test(shippedPair.out),
@@ -1459,15 +1459,24 @@ else {
   // the thought's own capture (a capture that re-took the id later would
   // leave the earlier one nothing to derive from).
   const [{ id: payloadThought }] = (await claims`SELECT id FROM thoughts ORDER BY created_at LIMIT 1`) as { id: string }[];
-  await claims`INSERT INTO thought_audit (thought_id, action, diff) VALUES (${payloadThought}::uuid, 'capture', '{"metadata": {}}'::jsonb)`;
+  // The first names a classified key with no kind on the row — waiting on the
+  // kind backfill AND the payload — so the line carries both findings and
+  // both remedies (cold read, first review pass: the first draft dropped the
+  // payload clause from the message and spliced "Then As the owner").
+  await claims`INSERT INTO thought_audit (thought_id, action, actor_name, diff) VALUES (${payloadThought}::uuid, 'capture', 'unclassified-key', '{"metadata": {}}'::jsonb)`;
   await claims.unsafe(`INSERT INTO thought_audit (thought_id, action, diff) VALUES (gen_random_uuid(), 'capture', '{"metadata": {}}'::jsonb)`);
+  const both = await run(SQL_ENV);
+  assert(both.code === 0 && /!  audit events\s+0 key\(s\) with no kind and 1 audit row\(s\) naming a key with no kind, 1 of them naming a key classified since — waiting only on the backfill — every write through an unclassified key is recorded with actor_kind and trust unknown, which every read built on them will say; and 2 capture event\(s\) carry no content \(written before migration 054, or under a re-applied 046\), 1 of them with nothing to derive from — the thought gone without a tombstone — 1 of them the payload backfill fills/.test(both.out)
+         && /SELECT backfill_thought_audit_events\(\); fills them — every key they name is classified \(db\/README\.md\)\. Then, as the owner \(the pass amends thought_audit\), SELECT backfill_thought_payloads\(\);/.test(both.out),
+         "a row waiting on the kind backfill beside capture rows waiting on the payload: one line naming both, the two remedies in order (SMD-2115)");
+  await claims.unsafe(`SELECT backfill_thought_audit_events()`);
   const payloadWaiting = await run(SQL_ENV);
   assert(payloadWaiting.code === 0 && /!  audit events\s+046's event shape present and every key classified, but 2 capture event\(s\) carry no content \(written before migration 054, or under a re-applied 046\), 1 of them with nothing to derive from — the thought gone without a tombstone — 1 of them the payload backfill fills; the log alone cannot rebuild those thoughts until it runs/.test(payloadWaiting.out) && /SELECT backfill_thought_payloads\(\);/.test(payloadWaiting.out),
          "two capture rows without content: a warning counting both, saying which the pass fills and which nothing derives for, with the pass as the remedy (SMD-2115)");
   const [{ r: payloadPass }] = (await claims`SELECT backfill_thought_payloads() AS r`) as { r: { rows: number; from_row: number; unrecoverable: number; awaiting: number } }[];
   assert(payloadPass.rows === 1 && payloadPass.from_row === 1 && payloadPass.unrecoverable === 1 && payloadPass.awaiting === 1, `the pass fills the row whose thought stands (from the live row) and reports the other as unrecoverable (${JSON.stringify(payloadPass)})`);
   const payloadAfter = await run(SQL_ENV);
-  assert(/✓  audit events\s+046's event shape present[^\n]*054's payload in every capture event but 1 with nothing to derive it from \(the thought gone without a tombstone; the fold names them\)/.test(payloadAfter.out),
+  assert(/✓  audit events\s+046's event shape present[^\n]*054's payload in every capture event that has one — 1 with nothing to derive it from \(the thought gone without a tombstone; the fold names them\)/.test(payloadAfter.out),
          "…after which the check is ok, naming the one row nothing derives for rather than warning on every start");
   // A column dropped from under 046's trigger is fatal — the trigger INSERTs
   // into it, so every write would fail; the same missing column on a brain

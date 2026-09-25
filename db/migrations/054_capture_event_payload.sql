@@ -46,7 +46,12 @@
 --      keys. Readers of 046's shape ignore the added keys (052's
 --      thought_changes lists an update's diff keys, so `content_fingerprint`
 --      now appears in `changed` beside `content` when a text moves — the same
---      bookkeeping place `embedding_present` already has).
+--      bookkeeping place `embedding_present` already has). Two passes that
+--      wrote no audit row before write one per row they key now, because a
+--      key's move is an event: 023's backfill_content_fingerprints on a
+--      legacy row, and db/reembed.ts's update_thought on a legacy twin it
+--      keys as it passes. A brain with many NULL keys gains that many rows
+--      at its next such pass — the record of a change the log did not hold.
 --
 --   2. 046's RULES AS FUNCTIONS, THE TRIGGERS CALLING THEM. The diff rule is
 --      ob1_thought_diff (046's, lifted out, with the three additions); the
@@ -83,7 +88,35 @@
 --      counted and left as it is. created_at is filled from the live row
 --      alone, and only when it differs from the event's — a deleted
 --      thought's is gone with the row and the fold falls back to the event's
---      clock, as it does for a row captured at now().
+--      clock, as it does for a row captured at now(). A created_at is filled
+--      with the content or before it, never onto a row that already carries
+--      its content: a complete 054 capture gains no time it never had, even
+--      if the row's created_at is moved by hand later (run-it, first review
+--      pass).
+--
+--      WHAT "AFTER THE CAPTURE" MEANS, exactly (first review pass, both
+--      readers). The events read are the thought's rows written after the
+--      capture's — `seq` later (050's identity is insertion order for every
+--      row since 050), or (created_at, seq) later (the ADR's order, which is
+--      what pre-050 rows have) — and they stop at the first later tombstone
+--      or capture, that row included: an id db/ingest-records.ts re-uses
+--      after a delete has a second incarnation whose edits are not this
+--      capture's, and the first draft's "first content-moving update" walked
+--      into it and would have written the second text onto the first
+--      capture, permanently (cold read). And created_at is now(), the
+--      TRANSACTION's start, so an editing transaction that began before the
+--      capturing one and committed after it leaves an update whose
+--      created_at precedes the capture's while its seq follows — a row the
+--      (created_at, seq) comparison alone dropped, so the derivation fell
+--      through to the live text (run-it, reproduced with two connections;
+--      none on the dogfood log). Within the events kept the order is the
+--      ADR's, created_at then seq, so for rows from before 050 — heap-order
+--      seq, one created_at per transaction — a capture and its edit made in
+--      one pre-050 transaction can still sort the wrong way round and derive
+--      from the live text rather than the captured one; the ADR's Time
+--      section owns that caveat, and SMD-2117's verify mode is the check.
+--      A capture row whose diff is NULL (a hand INSERT; every writer's is an
+--      object) counts as waiting and is filled onto an empty object.
 --
 --      A filled row is not marked: the record is the ledger's applied_at
 --      for this file — a capture row older than that whose diff carries
@@ -98,13 +131,21 @@
 --      pass has run, so preflight's census reads an index, not the heap —
 --      in (created_at, seq) order, each derived once, filled under the
 --      setting, the setting restored. Returns {ok, rows, from_update,
---      from_tombstone, from_row, with_created_at, unrecoverable, awaiting}.
+--      from_tombstone, from_row, with_created_at, unrecoverable, skipped,
+--      awaiting}.
 --      Idempotent: a second pass finds nothing. Two passes at once: the
 --      second re-reads each row under its lock and skips what the first
---      filled. A capture whose text moves while a pass derives it derives
---      the same text either way — the update's `before` IS the row's text
---      the pass read — which is why the gate can re-derive under a fresher
---      snapshot without disagreeing.
+--      filled (test-live holds this with two connections; PGlite cannot).
+--      A capture whose text moves while a pass derives it derives the same
+--      text either way — the update's `before` IS the row's text the pass
+--      read — which is why the gate can re-derive under a fresher snapshot
+--      without disagreeing; and the fill re-derives under its own snapshot
+--      too, so a row whose derivation moved between the scan and the fill
+--      (a delete with the audit trigger held off, a tier load) is skipped
+--      and reported, not refused by the gate with the whole pass aborted.
+--      The by-source counts are of the rows THIS pass filled (the UPDATE's
+--      RETURNING), `skipped` the candidates another pass or a moved
+--      derivation took, `unrecoverable` the candidates nothing derives for.
 --
 --      Measured on a copy of the dogfood log (631 thoughts, 2,688 audit rows,
 --      632 capture rows without content, 6.0 MB table and TOAST, Postgres
@@ -667,22 +708,46 @@ RETURNS TABLE (content text, row_created_at timestamptz, source text)
 LANGUAGE sql
 STABLE
 AS $$
+  -- The events written after the capture: seq later (050's identity is
+  -- insertion order for every row since 050) or (created_at, seq) later (the
+  -- ADR's order; what pre-050 rows have). created_at is the transaction's
+  -- start, so a later-written row can carry an earlier created_at (an edit
+  -- whose transaction began before the capture's and committed after) — the
+  -- tuple comparison alone dropped it, and the derivation fell through to the
+  -- live text (run-it, first review pass).
   WITH later AS (
     SELECT a.action, a.diff, a.created_at, a.seq
       FROM thought_audit a
      WHERE a.thought_id = p_thought
-       AND (a.created_at, a.seq) > (p_at, p_seq)
+       AND ((a.created_at, a.seq) > (p_at, p_seq) OR a.seq > p_seq)
+  ),
+  -- …and no further than this incarnation of the id: the first later
+  -- tombstone or capture closes it (that row included, so the tombstone is
+  -- read). An id re-used after a delete (db/ingest-records.ts's stable ids)
+  -- has a second incarnation whose edits are not this capture's (cold read,
+  -- first review pass: the first draft read them and derived the wrong text).
+  edge AS (
+    SELECT l.created_at, l.seq
+      FROM later l
+     WHERE l.action IN ('delete', 'capture')
+     ORDER BY l.created_at, l.seq
+     LIMIT 1
+  ),
+  mine AS (
+    SELECT l.*
+      FROM later l
+     WHERE NOT EXISTS (SELECT 1 FROM edge e WHERE (l.created_at, l.seq) > (e.created_at, e.seq))
   ),
   mv AS (
     SELECT l.diff->'content'->>'before' AS c
-      FROM later l
+      FROM mine l
      WHERE l.action = 'update' AND jsonb_typeof(l.diff->'content'->'before') = 'string'
      ORDER BY l.created_at, l.seq
      LIMIT 1
   ),
   tomb AS (
     SELECT l.diff->>'previous_content' AS c
-      FROM later l
+      FROM mine l
      WHERE l.action = 'delete' AND jsonb_typeof(l.diff->'previous_content') = 'string'
      ORDER BY l.created_at, l.seq
      LIMIT 1
@@ -702,7 +767,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION ob1_capture_payload(uuid, timestamptz, bigint) IS
-  'What a capture row written before 054 derives to, for the payload amendment: its content from the first content-moving update after it (the `before`), else the first tombstone''s previous_content, else the live row''s content when no later capture re-took the id, else NULL with source `none`; its created_at from the live row alone, and only when it differs from the event''s. The gate (thought_audit_refuse_mutation under ob1.audit_amend = ''payload'') and backfill_thought_payloads both read it, so a hand fill can write nothing the pass would not. Migration 054 / SMD-2115.';
+  'What a capture row written before 054 derives to, for the payload amendment: among the thought''s events written after it (seq later, or (created_at, seq) later) and no further than the first later tombstone or capture — this incarnation of the id — its content from the first content-moving update (the `before`), else the tombstone''s previous_content, else the live row''s content when no later capture re-took the id, else NULL with source `none`; its created_at from the live row alone, and only when it differs from the event''s. The gate (thought_audit_refuse_mutation under ob1.audit_amend = ''payload'') and backfill_thought_payloads both read it, so a hand fill can write nothing the pass would not. Migration 054 / SMD-2115.';
 
 -- ---------------------------------------------------------------------------
 -- 7. Immutable by rule: 008's refusal, 046's kind-fill arm verbatim, and the
@@ -721,6 +786,7 @@ DECLARE
   v_content  text;
   v_created  timestamptz;
   v_source   text;
+  v_old      jsonb;
 BEGIN
   IF TG_OP = 'UPDATE' AND current_setting('ob1.audit_amend', true) = 'backfill' THEN
     -- ob1:audit-amend-fills-null-only — a CONTRACT SENTINEL, not prose (the
@@ -765,29 +831,47 @@ BEGIN
     -- byte-equal with `diff` removed as the fifth column under this value
     -- alone, every other key of diff byte-equal, a value once set never
     -- changed, something filled. Each condition named when it fails.
+    -- A NULL diff (a hand INSERT's; every writer's is an object) counts as
+    -- empty before, so the pass can fill it onto an object.
+    v_old := COALESCE(OLD.diff, '{}'::jsonb);
     IF OLD.action <> 'capture' THEN
       v_why := 'only a capture row takes a payload';
     ELSIF (to_jsonb(OLD) - 'diff') <> (to_jsonb(NEW) - 'diff') THEN
       v_why := 'a column other than diff changes';
-    ELSIF jsonb_typeof(OLD.diff) IS DISTINCT FROM 'object' OR jsonb_typeof(NEW.diff) IS DISTINCT FROM 'object' THEN
-      v_why := 'diff must be an object before and after';
-    ELSIF (OLD.diff - 'content' - 'created_at') <> (NEW.diff - 'content' - 'created_at') THEN
+    ELSIF jsonb_typeof(v_old) <> 'object' OR NEW.diff IS NULL OR jsonb_typeof(NEW.diff) <> 'object' THEN
+      v_why := 'diff must be an object before and after (a NULL diff before counts as empty)';
+    ELSIF (v_old - 'content' - 'created_at') <> (NEW.diff - 'content' - 'created_at') THEN
       v_why := 'a key of diff other than content and created_at changes';
-    ELSIF OLD.diff ? 'content' AND NEW.diff->'content' IS DISTINCT FROM OLD.diff->'content' THEN
+    ELSIF v_old ? 'content' AND NEW.diff->'content' IS DISTINCT FROM v_old->'content' THEN
       v_why := 'a content once set is never changed';
-    ELSIF OLD.diff ? 'created_at' AND NEW.diff->'created_at' IS DISTINCT FROM OLD.diff->'created_at' THEN
+    ELSIF v_old ? 'created_at'
+          AND (NEW.diff->>'created_at' IS NULL OR NEW.diff->>'created_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}'
+               OR (NEW.diff->>'created_at')::timestamptz IS DISTINCT FROM (v_old->>'created_at')::timestamptz) THEN
+      -- As an instant, not as bytes: a timestamptz in jsonb renders in the
+      -- session's TimeZone, and a hand fill under another zone is the same time.
       v_why := 'a created_at once set is never changed';
-    ELSIF (NEW.diff ? 'content') = (OLD.diff ? 'content') AND (NEW.diff ? 'created_at') = (OLD.diff ? 'created_at') THEN
+    ELSIF (NEW.diff ? 'content') = (v_old ? 'content') AND (NEW.diff ? 'created_at') = (v_old ? 'created_at') THEN
       v_why := 'nothing is filled';
+    ELSIF (NEW.diff ? 'created_at') AND NOT (v_old ? 'created_at') AND (v_old ? 'content') AND NOT (NEW.diff ? 'content' AND NOT (v_old ? 'content')) THEN
+      -- A complete capture event gains no time it never had, however the
+      -- row's created_at is moved later (run-it, first review pass).
+      v_why := 'a created_at is filled with the content or before it, never onto a row that already carries its content';
     ELSE
       SELECT p.content, p.row_created_at, p.source INTO v_content, v_created, v_source
         FROM ob1_capture_payload(OLD.thought_id, OLD.created_at, OLD.seq) p;
-      IF (NEW.diff ? 'content') AND NOT (OLD.diff ? 'content')
-         AND (jsonb_typeof(NEW.diff->'content') <> 'string' OR v_content IS NULL OR (NEW.diff->>'content') IS DISTINCT FROM v_content) THEN
+      IF (NEW.diff ? 'content') AND NOT (v_old ? 'content') AND jsonb_typeof(NEW.diff->'content') <> 'string' THEN
+        v_why := 'content must be a string';
+      ELSIF (NEW.diff ? 'content') AND NOT (v_old ? 'content')
+         AND (v_content IS NULL OR (NEW.diff->>'content') IS DISTINCT FROM v_content) THEN
         v_why := CASE WHEN v_content IS NULL THEN 'no content derives for this row (no later content-moving update, no tombstone, no live row)'
                       ELSE format('content must be the text the log and the row derive to (from the %s)', v_source) END;
-      ELSIF (NEW.diff ? 'created_at') AND NOT (OLD.diff ? 'created_at')
-         AND (jsonb_typeof(NEW.diff->'created_at') <> 'string' OR v_created IS NULL OR (NEW.diff->>'created_at')::timestamptz IS DISTINCT FROM v_created) THEN
+      ELSIF (NEW.diff ? 'created_at') AND NOT (v_old ? 'created_at')
+         AND (NEW.diff->>'created_at' IS NULL OR NEW.diff->>'created_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}') THEN
+        -- Shape first, so a string that is no timestamp is refused by name
+        -- rather than by the cast's own error (run-it, first review pass).
+        v_why := 'created_at must be a timestamp';
+      ELSIF (NEW.diff ? 'created_at') AND NOT (v_old ? 'created_at')
+         AND (v_created IS NULL OR (NEW.diff->>'created_at')::timestamptz IS DISTINCT FROM v_created) THEN
         v_why := CASE WHEN v_created IS NULL THEN 'no created_at derives for this row (no live row, or the row''s equals the event''s)'
                       ELSE 'created_at must be the live row''s own' END;
       ELSE
@@ -816,7 +900,7 @@ $$;
 -- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS thought_audit_awaiting_payload_idx
   ON thought_audit (created_at, seq)
-  WHERE action = 'capture' AND NOT (diff ? 'content');
+  WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false);
 
 -- ---------------------------------------------------------------------------
 -- 9. The backfill: the payload onto every capture row written before this
@@ -838,6 +922,7 @@ DECLARE
   v_tomb       integer;
   v_row        integer;
   v_none       integer;
+  v_skipped    integer;
   v_stamped    integer;
   v_awaiting   integer;
 BEGIN
@@ -846,13 +931,17 @@ BEGIN
   END IF;
 
   -- The candidates, read through the partial index in (created_at, seq)
-  -- order, each derived once (ob1_capture_payload — the gate's own reading).
+  -- order, each derived once (ob1_capture_payload — the gate's own reading);
+  -- whether the row already carried a created_at (a hand fill of the time
+  -- alone is lawful) and whether this pass filled it ride along.
   EXECUTE format($scan$
     CREATE TEMP TABLE %I ON COMMIT DROP AS
-    SELECT c.id, p.content, p.row_created_at, p.source
-      FROM (SELECT a.id, a.thought_id, a.created_at, a.seq
+    SELECT c.id, p.content, p.row_created_at, p.source,
+           COALESCE(c.diff ? 'created_at', false) AS had_created_at,
+           false AS filled
+      FROM (SELECT a.id, a.thought_id, a.created_at, a.seq, a.diff
               FROM thought_audit a
-             WHERE a.action = 'capture' AND NOT (a.diff ? 'content')
+             WHERE a.action = 'capture' AND NOT COALESCE(a.diff ? 'content', false)
              ORDER BY a.created_at, a.seq
              LIMIT %s) c
       CROSS JOIN LATERAL ob1_capture_payload(c.thought_id, c.created_at, c.seq) p
@@ -861,39 +950,49 @@ BEGIN
   PERFORM set_config('ob1.audit_amend', 'payload', true);
   -- Re-read on the row as it is when the lock is taken (READ COMMITTED): a
   -- pass that ran beside this one and filled the row first leaves it nothing
-  -- to fill, and it is skipped rather than refused (046's rule for its pass).
-  -- The gate re-derives each fill; the derivation is stable under a
-  -- concurrent edit or delete, since the update's `before` and the
-  -- tombstone's previous_content ARE the text the candidates read.
+  -- to fill, and it is skipped rather than refused (046's rule for its pass);
+  -- a created_at a hand fill set stays as it is. The derivation is re-read
+  -- under this statement's snapshot too, and a row whose derivation moved
+  -- since the scan (a delete with the audit trigger held off) is skipped
+  -- rather than refused by the gate, which would abort the whole pass (cold
+  -- read, first review pass). The rows the UPDATE returns are marked, so the
+  -- counts below are of what THIS pass wrote (run-it, first review pass: a
+  -- second pass reported the first's rows as its own).
   EXECUTE format($fill$
-    UPDATE thought_audit a
-       SET diff = a.diff
-                  || jsonb_build_object('content', d.content)
-                  || CASE WHEN d.row_created_at IS NULL THEN '{}'::jsonb
-                          ELSE jsonb_build_object('created_at', d.row_created_at) END
-      FROM %I d
-     WHERE a.id = d.id
-       AND d.content IS NOT NULL
-       AND a.action = 'capture'
-       AND NOT (a.diff ? 'content')
-  $fill$, v_tbl);
+    WITH f AS (
+      UPDATE thought_audit a
+         SET diff = COALESCE(a.diff, '{}'::jsonb)
+                    || jsonb_build_object('content', d.content)
+                    || CASE WHEN d.row_created_at IS NULL OR COALESCE(a.diff ? 'created_at', false) THEN '{}'::jsonb
+                            ELSE jsonb_build_object('created_at', d.row_created_at) END
+        FROM %I d
+       WHERE a.id = d.id
+         AND d.content IS NOT NULL
+         AND a.action = 'capture'
+         AND NOT COALESCE(a.diff ? 'content', false)
+         AND EXISTS (SELECT 1 FROM ob1_capture_payload(a.thought_id, a.created_at, a.seq) p
+                      WHERE p.content = d.content AND p.row_created_at IS NOT DISTINCT FROM d.row_created_at)
+       RETURNING d.id)
+    UPDATE %I t SET filled = true FROM f WHERE t.id = f.id
+  $fill$, v_tbl, v_tbl);
   GET DIAGNOSTICS v_rows = ROW_COUNT;
   PERFORM set_config('ob1.audit_amend', COALESCE(v_prev_amend, ''), true);
 
   EXECUTE format($count$
-    SELECT count(*) FILTER (WHERE source = 'update'),
-           count(*) FILTER (WHERE source = 'delete'),
-           count(*) FILTER (WHERE source = 'row'),
+    SELECT count(*) FILTER (WHERE filled AND source = 'update'),
+           count(*) FILTER (WHERE filled AND source = 'delete'),
+           count(*) FILTER (WHERE filled AND source = 'row'),
            count(*) FILTER (WHERE source = 'none'),
-           count(*) FILTER (WHERE source <> 'none' AND row_created_at IS NOT NULL)
+           count(*) FILTER (WHERE NOT filled AND source <> 'none'),
+           count(*) FILTER (WHERE filled AND row_created_at IS NOT NULL AND NOT had_created_at)
       FROM %I
-  $count$, v_tbl) INTO v_update, v_tomb, v_row, v_none, v_stamped;
+  $count$, v_tbl) INTO v_update, v_tomb, v_row, v_none, v_skipped, v_stamped;
 
   -- What still waits: the capture rows without content — those a bounded
   -- pass did not reach, and those nothing derives for. Read through the index.
   SELECT count(*)::int INTO v_awaiting
     FROM thought_audit
-   WHERE action = 'capture' AND NOT (diff ? 'content');
+   WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false);
 
   RETURN jsonb_build_object(
     'ok', true,
@@ -903,12 +1002,13 @@ BEGIN
     'from_row', v_row,
     'with_created_at', v_stamped,
     'unrecoverable', v_none,
+    'skipped', v_skipped,
     'awaiting', v_awaiting);
 END;
 $$;
 
 COMMENT ON FUNCTION backfill_thought_payloads(integer) IS
-  'Fill diff.content — and diff.created_at where the live row''s differs from the event''s — on capture rows written before 054, from the first content-moving update''s `before`, else the tombstone''s previous_content, else the live row (ob1_capture_payload): the third amendment thought_audit_immutable allows, under ob1.audit_amend = ''payload''. Idempotent; p_limit bounds a pass (each call its own transaction). Returns {ok, rows, from_update, from_tombstone, from_row, with_created_at, unrecoverable, awaiting}: unrecoverable is the rows this pass could derive nothing for (left as they are), awaiting the capture rows still without content. Migration 054 / SMD-2115.';
+  'Fill diff.content — and diff.created_at where the live row''s differs from the event''s — on capture rows written before 054, from the first content-moving update''s `before`, else the tombstone''s previous_content, else the live row (ob1_capture_payload): the third amendment thought_audit_immutable allows, under ob1.audit_amend = ''payload''. Idempotent; p_limit bounds a pass (each call its own transaction). Returns {ok, rows, from_update, from_tombstone, from_row, with_created_at, unrecoverable, skipped, awaiting}: rows and the by-source counts are what THIS pass wrote; with_created_at those of them that gained a created_at; unrecoverable the candidates nothing derives for (left as they are); skipped the candidates another pass filled meanwhile or whose derivation moved between the scan and the fill; awaiting the capture rows still without content. Migration 054 / SMD-2115.';
 
 -- ---------------------------------------------------------------------------
 -- 10. What the columns and the table say now.
