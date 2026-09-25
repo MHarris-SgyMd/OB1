@@ -166,8 +166,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1794 assertions: 1794 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports fifty-six (56) migrations applied, and
+`bun test-schema.ts` prints `1817 assertions: 1817 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports fifty-seven (57) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -206,14 +206,15 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
-051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935).
+051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
 baseline `0.0.0+upstream.9543c29`), and every release cut appends the migration
 that writes its version as the last file of the range it freezes: 048 writes
 `1.0.0+upstream.9543c29`, the first release (`001..048`), and 051 writes
-`1.1.0+upstream.9543c29`, the second (`049..051`). `preflight` prints the
+`1.1.0+upstream.9543c29`, the second (`049..051`), and 057 writes
+`1.2.0+upstream.9543c29`, the third (`052..057`). `preflight` prints the
 value beside the ledger's highest migration and warns when a server is older than
 the brain, or a brain has run past its version's range. Both are introduced by a
 fragment or a cut rather than a hand-numbered change, so they are named here by
@@ -404,8 +405,9 @@ redirect is spelled `@>` now, which 016's GIN index serves. A writer call
 already running 053's body when the file commits writes by 053's rule: stop the
 extraction workers for the upgrade, or run `SELECT apply_entity_type_gate()`
 once they have finished (and again after a source stops stating a name the rule
-refuses), as the role that migrated — a `--grant` role lacks UPDATE on the
-mention tables (SMD-2216). Such a run's counts are its result; `ob1_config`
+refuses), as the role that migrated or a `--grant` role — one granted before
+SMD-2216 lacks UPDATE on the mention tables, which a merge needs, until
+`--grant` is run for it again. Such a run's counts are its result; `ob1_config`
 keeps only the file's. `server-portable/entity-gate.ts` is its JavaScript twin,
 for the capture-time `people` facet (`metadata.ts`), which never reaches the
 function and keeps only the names the rule keeps as a person; test-schema [52]
@@ -472,9 +474,11 @@ issues every group at once.
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `INSERT, UPDATE` |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
-| **extraction** — the entity-extraction worker, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
-| | `thought_entities` (016) | `SELECT, INSERT, DELETE` |
-| | `ob1_entity_edges` (016) | `SELECT, INSERT, DELETE` |
+| **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `thought_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for 016's `merge_entities`, and since 053 for `record_thought_entities`, which upserts (`ON CONFLICT DO UPDATE`): Postgres checks it for every call, conflict or none, so until SMD-2216 a `--grant` role could not record a mention |
+| | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
+| **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` reads the source rows too | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
+| | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets; capture's `SELECT, UPDATE` cover the reads and the closing |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
 | | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
@@ -485,7 +489,7 @@ issues every group at once.
 | | sequences `ingestion_jobs_id_seq`, `ingestion_items_id_seq` (schemas/smart-ingest; `BIGSERIAL` ids) | `USAGE, SELECT` |
 | | function `append_thought_evidence(uuid, jsonb)` (schemas/smart-ingest; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`; the bigint form, dropped by the file since SMD-2128, loses its grant — run `--grant` again) | `EXECUTE` |
 | | `entities`, `edges`, `entity_extraction_queue`, `consolidation_log` (schemas/entity-extraction — upstream's tables, not 016's `ob1_*`) | `SELECT, INSERT, UPDATE, DELETE` |
-| | `thought_entities` (schemas/entity-extraction names 016's table under `IF NOT EXISTS`; the **extraction** row's privileges exactly, so the merge widens nothing) | `SELECT, INSERT, DELETE` |
+| | `thought_entities` (schemas/entity-extraction names 016's table under `IF NOT EXISTS`; the **extraction** row's privileges exactly, so the merge widens nothing) | `SELECT, INSERT, UPDATE, DELETE` |
 | | sequences `entities_id_seq`, `edges_id_seq`, `consolidation_log_id_seq` (schemas/entity-extraction; `BIGSERIAL` ids) | `USAGE, SELECT` |
 | | `thought_edges` (schemas/typed-reasoning-edges) | `SELECT, INSERT, UPDATE, DELETE` |
 | | sequence `thought_edges_id_seq` (schemas/typed-reasoning-edges; `BIGSERIAL` id) | `USAGE, SELECT` |
@@ -512,10 +516,15 @@ issues every group at once.
 | | `operating_model_profiles`, `operating_model_sessions`, `operating_model_layer_checkpoints`, `operating_model_entries`, `operating_model_exports` (recipes/work-operating-model-activation; its three functions keep PUBLIC's EXECUTE — upstream only granted them to its service role) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `world_model_assessments`, `world_model_boundary_flows` (recipes/world-model-diagnostic-activation, its `schema-v2-draft.sql` — a draft its README's V1 does not apply; listed so applying it is one `--grant` away) | `SELECT, INSERT, UPDATE, DELETE` |
 
-Plus `USAGE ON SCHEMA public`. The migrations' own tables need no sequence
-grant — every primary key is a `uuid` or a natural key — but three community
-schemas use `BIGSERIAL` ids, and an `INSERT` into such a table needs `USAGE` on
-the sequence (`permission denied for sequence …` with the table fully granted),
+Plus `USAGE ON SCHEMA public`, and the right to create a temp table:
+`record_thought_entities`, `record_source_links` and `apply_entity_type_gate()`
+stage their rows in `ON COMMIT DROP` temp tables, so a database that has revoked
+`TEMPORARY` from `PUBLIC` (the default grants it) needs `GRANT TEMPORARY ON
+DATABASE … TO your_role` as well — `--grant` does not issue it. The migrations'
+own tables need no sequence grant — every primary key is a `uuid` or a natural
+key — but three community schemas use `BIGSERIAL` ids, and an `INSERT` into such
+a table needs `USAGE` on the sequence (`permission denied for sequence …` with
+the table fully granted),
 so the **community** group names those six sequences; an identity column
 (`wiki_section_revisions.id`) needs none. Both are measured, not recalled:
 test-schema [40] grants the tables alone and watches which inserts are still
@@ -544,10 +553,11 @@ as the objects' owner or a superuser; it never creates the role or sets a passwo
 create the role first. `--grant --dry-run` prints the statements without running
 them, so a locked-down deployment can grant a subset by hand. A role that only
 ever runs the server needs the **capture** and **server** groups; add **worker**
-for the role your bulk passes connect as, and **extraction** on top of that for
-entity extraction. The **community**, **extensions** and **recipes** groups are
-issued for whichever schema files you have applied — the objects not yet
-present are skipped and named, so run `--grant` again after applying one; apply
+for the role your bulk passes connect as, **extraction** on top of that for
+entity extraction, and **structure** as well for a structured pass. The
+**community**, **extensions** and **recipes** groups are issued for whichever
+schema files you have applied — the objects not yet present are skipped and
+named, so run `--grant` again after applying one; apply
 a schema with `psql "$DATABASE_URL" -f <its path>`, as its README says. Presence is
 per object, not per file, so the two community rows whose tables a migration
 also creates — `thought_audit` (008) and `thought_entities` (016) — are issued
@@ -1207,25 +1217,27 @@ weighs 0. Unsettled, because Linear keeps a relation after a ticket completes: a
 Done ticket whose blocker is still open is settled, not blocked, and weighs what
 its lifecycle says. A blocker is open unless its own lifecycle, resolved through
 `source_thought()` and read by the ticket-head rule above, is completed or
-canceled, so a settled blocker is not a blocker. A blocker the brain does not
-hold, or one with no status_type this tool knows, still blocks, and the output
-counts those. A row derived from a ticket takes its ticket's blockers as it
-takes its status. Only an active link counts (053 closes a relation the source
-dropped), and only `blocks` / `blocked_by`: `child_of` makes nobody a blocker. A
-thought whose ticket no dependency names counts as unblocked. The dependency
-caveat line (`coverage.dependencies` in the JSON) gives the active dependency
-facets and when the latest was written or closed, how many thoughts belong to a
-ticket a dependency names on either side, how many the flag held back in the run
-(took from a weight above 0 to 0), and how many of the held thoughts' blockers
-are unsettled only for want of a known status. The edges are as current as
-board-sync's last passes over both tickets of a relation: it is read from either
-side, so one removed on the board blocks until both are re-read. The flag
+canceled, so a settled blocker is not a blocker. Within a system that gates
+(Sources, below: the board does), a blocker the brain does not hold, or one with
+no status_type this tool knows, still blocks, and the output counts those. A row
+derived from a ticket takes its ticket's blockers as it takes its status. Only
+an active link counts (053 closes a relation the source dropped), and only
+`blocks` / `blocked_by`: `child_of` makes nobody a blocker. A thought whose
+ticket no gating dependency names counts as unblocked. The dependency caveat
+line (`coverage.dependencies` in the JSON) gives the active dependency facets
+and when the latest was written or closed, how many thoughts belong to a ticket
+a (gating, below) dependency names on either side, how many the flag held back
+in the run (took from a weight above 0 to 0), and how many of the held thoughts'
+blockers are unsettled only for want of a known status. The edges are as current
+as their source's last passes over both ends of a relation (board-sync's, for
+the board): it is read from either side, so one removed at the source keeps its
+effect, blocking where its system gates, until both are re-read. The flag
 composes with `--status` and `--decay-done` (the weights multiply). Without it
 (or `--decay-blocked`, below) the dependency read is not in the SQL, so every
 other mode renders byte for byte what it did (the JSON's `options` carries two
 more keys, `startable` and `decayBlocked`, both false) and a brain without 053
-runs them. With either, a brain without 053 is exit 2.
-`dependencySql` is the seam SMD-2074's node-state projection replaces.
+runs them. With either, a brain without 053 is exit 2. `dependencySql` is the
+seam SMD-2074's node-state projection replaces.
 
 **Blocked decay** (SMD-2181). `--startable` is a filter, so a blocked hub
 vanishes rather than sinks. `--decay-blocked` reads the same dependencies by the
@@ -1240,6 +1252,20 @@ decay composes with `--status` and `--decay-done` by multiplying, though the two
 decays never meet on one thought: a blocked thought is unsettled and
 `DONE_WEIGHT` weighs only settled ones. Degree counts neighbours, not evidence,
 and is unchanged by it. The JSON's `options` gains `decayBlocked: false`.
+
+**Sources** (SMD-2218). The board is not the only writer of dependencies:
+`ingest-records.ts --items` writes `blocks` / `blocked_by` for any system, and
+both flags read them. A blocker is settled by its row's lifecycle, which a row
+of another system has only if its source stated one (an items file, in
+`facets.status_type`, one of the six types). So a system gates only when some
+source row of it states a known status_type in its own metadata — a status a row
+borrows through a Linear ticket claim does not count — and is then read exactly
+as the board is, an unknown blocker blocking. A system that states none cannot
+say a blocker is settled: its links gate nothing, blocking no thought and naming
+no ticket, rather than hide its tickets for good, and the dependency line names
+each source with its facets and says which gate nothing. While the board is the
+only source, and states its lifecycle, the line reads as before. The JSON's
+`dependencies.systems` lists each system's facets and whether it gates.
 
 Exit 0 when ranked, 1 when no
 entity resolves (a near-miss whose only guesses the numeric rule hid is still
@@ -2281,7 +2307,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1794 assertions, PGlite, no container
+bun test-schema.ts                          # 1817 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 733 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

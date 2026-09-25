@@ -61,6 +61,8 @@ import {
   grantedSequences,
   grantedTables,
   grantedViews,
+  ROLE_GRANT_GROUPS,
+  ROLE_GRANTS,
   stripSqlComments,
   supabaseIsmsIn,
   UPDATE_THOUGHT_SIGNATURE_9,
@@ -70,7 +72,7 @@ import { fileURLToPath } from "node:url";
 import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, CONTRIB_DIR, CONTRIB_SCHEMA_FILES, createAssert, FUNCTION_COMMENT_SQL, ISO_RE, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
 import {
-  BLOCKED_WEIGHT, DEFAULT_OPTIONS, DONE_WEIGHT, FUZZY_FLOOR, coverage as graphCoverage, lifecycleCaveat, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
+  BLOCKED_WEIGHT, DEFAULT_OPTIONS, DONE_WEIGHT, FUZZY_FLOOR, dependencyCaveat, coverage as graphCoverage, lifecycleCaveat, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
   resolveSubject, subjectThoughts, topEntities, topThoughts, weightsSql, type Options as GraphOptions, type Runner,
 } from "./graph-centrality.ts";
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
@@ -5591,7 +5593,7 @@ console.log("\n[43] Migration 046: the event shape at the write boundary — who
 // (SMD-2061) and reads them under --startable, the reports without the flag
 // compared byte for byte before and after the links are written.
 
-console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defined; the resolution ladder; numeric names out of every count; edges on vs off is the drop-the-graph control (SMD-1938); a thought's lifecycle is a weight — the filter, the decay, and the unstamped passing every filter (SMD-1994); --startable weighs a thought with an open blocker 0, a settled blocker none (SMD-2061); --decay-blocked weighs it BLOCKED_WEIGHT and names its blockers (SMD-2181)");
+console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defined; the resolution ladder; numeric names out of every count; edges on vs off is the drop-the-graph control (SMD-1938); a thought's lifecycle is a weight — the filter, the decay, and the unstamped passing every filter (SMD-1994); --startable weighs a thought with an open blocker 0, a settled blocker none (SMD-2061); --decay-blocked weighs it BLOCKED_WEIGHT and names its blockers (SMD-2181); a system that states no lifecycle gates nothing (SMD-2218)");
 {
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`);
@@ -6002,7 +6004,7 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   assert(!startIds.has(tX), "a blocker the brain does not hold still blocks: nothing says it is settled");
   assert([t2, t3, t4, t6, t8].every((id) => startIds.has(id)), "a thought no dependency names — a ticket the relations never reached, or a hand capture — counts as unblocked");
   const covS = await graphCoverage(run, openStart);
-  assert(JSON.stringify({ ...covS.dependencies, last_link_change: null }) === JSON.stringify({ facets: 6, in_dependencies: 7, held: 5, unknown_blockers: 1, last_link_change: null }) && covS.dependencies!.last_link_change !== null && covS.weighed === 8,
+  assert(JSON.stringify({ ...covS.dependencies, last_link_change: null }) === JSON.stringify({ facets: 6, in_dependencies: 7, held: 5, unknown_blockers: 1, last_link_change: null, systems: [{ system: "linear", facets: 6, gates: true }] }) && covS.dependencies!.last_link_change !== null && covS.weighed === 8,
     `coverage: six active dependency facets (tP's, tQ's, tX's and tD's blocked_by, tR's two blocks; the closed one and the child_of links are not); seven thoughts whose ticket a dependency names on either side (tP, tPsec, tQ, tR, tV — named only by tR's blocks, holding no facet — tX, tD; not tS, whose one link is child_of); five held (tP, tPsec, tQ, tV, tX — not the Done tD, which already weighs 0); one blocker nothing settles (SMD-7999); a facet timestamp; eight weigh in (${JSON.stringify(covS.dependencies)}, ${covS.weighed})`);
   // A settled ticket is settled, not blocked: tD passes --status done and the
   // decay exactly as without the flag, and `held` counts only what the flag
@@ -6101,15 +6103,94 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
     `a blocker identity carrying a newline (facet data, untrusted) renders on the row as one space, as every other cell's whitespace does, and ten blockers — nine of its own and tR's blocks — are named in full, the column uncapped (second review pass; third: ten, not nine); and tQ's edge is gone again (${JSON.stringify(tVrows)})`);
   await links(tV, []);
   // A link of another system (SMD-2136's --items writes any): its blocker is
-  // named with its system, a linear one bare (fourth review pass).
+  // named with its system, a linear one bare (fourth review pass). tJ states
+  // a lifecycle, so jira gates (SMD-2218), and the unknown PROJ-2 blocks.
   const tJ = await thought("PROJ-1 — Open Brain's Kafka export, in another tracker.");
   await record(tJ, [E("Open Brain", "project"), E("Kafka", "tool")]);
   await db.query(`SELECT record_thought_source($1::uuid, 'jira', 'PROJ-1', 'PROJ-1', 'text/markdown')`, [tJ]);
   await db.query(`SELECT record_source_links($1::uuid, 'jira', '[{"relation": "blocked_by", "target": "PROJ-2"}]'::jsonb)`, [tJ]);
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"status": "Todo", "status_type": "unstarted"}'::jsonb WHERE id = $1`, [tJ]);
   const jira = (await byId(openDecay)).get(tJ);
   assert(JSON.stringify(jira?.blockers) === '["jira:PROJ-2"]' && jira?.weight === 0.25 && JSON.stringify((await byId(openDecay)).get(tP)?.blockers) === '["SMD-7002"]',
     `a blocker of another system is named system:key — PROJ-2 could be anyone's — and a linear one stays bare (${JSON.stringify(jira)})`);
   await drop(tJ);
+
+  // ── Sources (SMD-2218): a system gates only when some row of it states a
+  // lifecycle this file knows. One that states none cannot say a blocker is
+  // settled, so its links gate nothing rather than block forever, and the
+  // line counts them. The items here are shaped as an --items file writes
+  // them: a source row of their own system, links of that system, and the
+  // status, when stated, on the row (facets.status_type).
+  const item = async (system: string, key: string, content: string) => {
+    const id = await thought(content);
+    await record(id, [E("Open Brain", "project"), E("Kafka", "tool")]);
+    await db.query(`SELECT record_thought_source($1::uuid, $2, $3, $4, 'text/markdown')`, [id, system, key, content]);
+    return id;
+  };
+  const blockedBy = (id: string, system: string, targets: string[]) =>
+    db.query(`SELECT record_source_links($1::uuid, $2, $3::text::jsonb)`, [id, system, JSON.stringify(targets.map((target) => ({ relation: "blocked_by", target })))]);
+  const stateOf = (id: string, status: string, status_type: string) =>
+    db.query(`UPDATE thoughts SET metadata = metadata || $2::jsonb WHERE id = $1`, [id, JSON.stringify({ status, status_type })]);
+  const systemsOf = async (o: GraphOptions) => JSON.stringify((await graphCoverage(run, o)).dependencies!.systems);
+  const tJ1 = await item("jira", "PROJ-1", "PROJ-1 — Open Brain's Kafka audit, filed in Jira.");
+  const tJ2 = await item("jira", "PROJ-2", "PROJ-2 — Open Brain's Kafka quota, filed in Jira.");
+  await blockedBy(tJ1, "jira", ["PROJ-2"]);
+  const covU = await graphCoverage(run, openStart);
+  const decU = (await byId(openDecay)).get(tJ1);
+  assert((await listed(openStart)).has(tJ1) && covU.dependencies!.held === 5 && covU.dependencies!.facets === 7 && covU.dependencies!.in_dependencies === 7 && decU?.weight === 1 && decU?.blockers === null
+      && JSON.stringify(covU.dependencies!.systems) === JSON.stringify([{ system: "jira", facets: 1, gates: false }, { system: "linear", facets: 6, gates: true }]),
+    `a system no row of which states a lifecycle gates nothing: tJ1's blocked_by PROJ-2 is read (seven facets) but holds nothing back, names no ticket, and under the decay tJ1 weighs 1 with no blocker (${JSON.stringify(covU.dependencies)})`);
+  // A jira row claiming a Linear ticket borrows that ticket's status in
+  // `lifecycle`; the gate reads a row's own statement, so jira still gates
+  // nothing (first review pass).
+  const tJ3 = await item("jira", "PROJ-3", "PROJ-3 — Open Brain's Kafka rollout, cross-referenced to SMD-7003.");
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"ticket": "SMD-7003"}'::jsonb WHERE id = $1`, [tJ3]);
+  assert((await listed(openStart)).has(tJ1) && (await graphCoverage(run, openStart)).dependencies!.systems.find((s) => s.system === "jira")?.gates === false,
+    "a status a jira row borrows through a Linear ticket claim (tR's started, via `ticket`) does not make jira gate: tJ1 stays listed");
+  await drop(tJ3);
+  const rU = render(await graphReport(run, null, openStart));
+  assert(rU.includes("Dependencies are read from the blocks / blocked_by link facets their sources state (SMD-1867; jira 1, linear 6), each as current as its source's last passes over both ends of each (a relation is read from either side, so one removed at the source keeps its effect — blocking, where its system gates — until both are re-read): 7 active dependency facets; the latest was written or closed ")
+      && rU.includes(". jira states no lifecycle on any row of its own, so its 1 facet gates nothing: a source that states no status_type this tool knows cannot say a blocker is settled (for jira, an --items file states it in facets.status_type, and the status's name in facets.status). 7 of ")
+      && rU.includes(" thoughts belong to a ticket a gating dependency names; every other thought has no gating dependency and counts as unblocked."),
+    "the line names each source and its facets, says the board's freshness is each source's, and says what the ungated system's facets do and how an --items file settles its blockers");
+  await stateOf(tJ2, "In Progress", "started");
+  const decG = (await byId(openDecay)).get(tJ1);
+  const covG = await graphCoverage(run, openStart);
+  assert(!(await listed(openStart)).has(tJ1) && covG.dependencies!.held === 6 && covG.dependencies!.in_dependencies === 9 && decG?.weight === 0.25 && JSON.stringify(decG?.blockers) === '["jira:PROJ-2"]'
+      && JSON.stringify(covG.dependencies!.systems) === JSON.stringify([{ system: "jira", facets: 1, gates: true }, { system: "linear", facets: 6, gates: true }])
+      && !render(await graphReport(run, null, openStart)).includes("gates nothing"),
+    `once a jira row states a lifecycle (tJ2 started), jira gates as the board does: tJ1 is held by the open PROJ-2, named jira:PROJ-2 under the decay, and PROJ-1 and PROJ-2 join the named tickets (${JSON.stringify(covG.dependencies)})`);
+  await stateOf(tJ2, "Done", "completed");
+  assert((await listed(openStart)).has(tJ1) && (await graphCoverage(run, openStart)).dependencies!.held === 5,
+    "a settled jira blocker does not block: tJ2 completed frees tJ1, as a completed Linear blocker frees its ticket");
+  await blockedBy(tJ1, "jira", ["PROJ-2", "PROJ-9"]);
+  const covK = await graphCoverage(run, openStart);
+  assert(!(await listed(openStart)).has(tJ1) && covK.dependencies!.unknown_blockers === 2 && JSON.stringify((await byId(openDecay)).get(tJ1)?.blockers) === '["jira:PROJ-9"]',
+    `inside a gating system SMD-2061's rule holds: PROJ-9, which no row holds, blocks tJ1 and is counted beside SMD-7999 (${covK.dependencies!.unknown_blockers} unknown)`);
+  const tA = await item("acme", "ACME-1", "ACME-1 — Open Brain's Kafka mirror, filed in Acme.");
+  await blockedBy(tA, "acme", ["ACME-2"]);
+  // acme's one row states a status_type this file does not know: that is no
+  // lifecycle, so acme still gates nothing.
+  await stateOf(tA, "Open", "open");
+  const rA = render(await graphReport(run, null, openStart));
+  assert((await listed(openStart)).has(tA) && (await systemsOf(openStart)) === JSON.stringify([{ system: "acme", facets: 1, gates: false }, { system: "jira", facets: 2, gates: true }, { system: "linear", facets: 6, gates: true }])
+      && rA.includes("(SMD-1867; acme 1, jira 2, linear 6)") && rA.includes(". acme states no lifecycle on any row of its own, so its 1 facet gates nothing:") && !rA.includes("jira states no lifecycle"),
+    "the gate is per system: jira gating does not make acme gate, whose one status_type (\"open\") is none this file knows — ACME-1 stays listed and the line names acme alone as ungated");
+  for (const id of [tJ1, tJ2, tA]) await drop(id);
+  assert((await systemsOf(openStart)) === JSON.stringify([{ system: "linear", facets: 6, gates: true }]) && render(await graphReport(run, null, openStart)).includes("Dependencies are read from the board's blocks / blocked_by link facets (SMD-1867), as current as board-sync's last passes"),
+    "with the board the only source again the line is SMD-2061's word for word, and the systems list is the board's alone");
+  // The line's other branches, on synthetic coverage (first review pass): a
+  // board that states no lifecycle, and two ungated systems.
+  const dep = (systems: { system: string; facets: number; gates: boolean }[]) =>
+    dependencyCaveat({ thoughts: 10 } as Awaited<ReturnType<typeof graphCoverage>>, { facets: systems.reduce((a, s) => a + s.facets, 0), in_dependencies: 0, held: 0, unknown_blockers: 0, last_link_change: null, systems }, { decayBlocked: false });
+  const lBoard = dep([{ system: "linear", facets: 2, gates: false }]);
+  const lTwo = dep([{ system: "acme", facets: 1, gates: false }, { system: "jira", facets: 2, gates: false }, { system: "linear", facets: 6, gates: true }]);
+  assert(lBoard.includes("(SMD-1867; linear 2)") && lBoard.includes(" linear states no lifecycle on any row of its own, so its 2 facets gate nothing: a source that states no status_type this tool knows cannot say a blocker is settled. 0 of 10")
+      && lTwo.includes(" acme and jira state no lifecycle on any row of their own, so their 3 facets gate nothing: ") && lTwo.includes("(for acme and jira, an --items file states it in facets.status_type, and the status's name in facets.status)")
+      && dep([{ system: "jira", facets: 1, gates: false }, { system: "linear", facets: 2, gates: false }]).includes(" jira and linear state no lifecycle on any row of their own, so their 3 facets gate nothing: a source that states no status_type this tool knows cannot say a blocker is settled (for jira, an --items file")
+      && !dep([{ system: "markdown", facets: 1, gates: false }]).includes("--items")
+      && dep([]).startsWith("Dependencies are read from the board's blocks / blocked_by link facets (SMD-1867)"),
+    `the line: a board stating no lifecycle is named and not sent to --items, which may not claim linear; two ungated systems share one clause, their facets summed; the hint names only the systems an items file may claim — not linear beside jira, nor a pipeline source like markdown (second review pass); no facet at all is the board's line (${JSON.stringify(lBoard)})`);
   assert(render(await graphReport(run, null, openStart)).includes("--startable: 5 thoughts with an open blocker weigh 0 in this run; a completed") && !weightsSql({ status: "open", decayDone: false, startable: true }, []).includes("END AS blockers")
       && weightsSql({ status: "open", decayDone: false, decayBlocked: true }, []).replace(/,\n +CASE WHEN [^\n]* THEN blockers END AS blockers/, "").replace("THEN 0.25 ELSE", "THEN 0 ELSE") === weightsSql({ status: "open", decayDone: false, startable: true }, [])
       && weightsSql({ status: "open", decayDone: false, decayBlocked: true }, []).includes("END AS blockers") && !("blockers" in (await topThoughts(run, openStart))[0]),
@@ -7804,6 +7885,142 @@ console.log("\n[52] Migration 056: the entity name gate — a number or a type w
   assert(/migration 056 needs 016 \(ob1_entity_edges\); this schema lacks it/.test(noEdges), `…and without 016 (${noEdges.slice(0, 90)})`);
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`SELECT prune_orphan_entities()`);
+}
+
+// ── 53. A --grant role runs the entity writer, a structured pass and 056's ───
+//
+// Since 053 record_thought_entities upserts the mention and edge rows, and
+// Postgres checks UPDATE for an INSERT … ON CONFLICT DO UPDATE each time it
+// runs one, conflict or none — so a role migrate.ts --grant set up, holding
+// SELECT/INSERT/DELETE there, failed every call; a structured pass also wrote
+// thought_sources and `link` facets, which no group granted. The role here is
+// set up exactly as
+// --grant sets one up (every group, the objects present), and runs each path
+// as itself; then each added privilege is revoked in turn and its path fails
+// by that table's name (SMD-2216).
+console.log("\n[53] A role migrate.ts --grant set up runs the entity writer (an extraction onto a structured row, a structured pass onto an extracted one), a structured pass's source row and links, and apply_entity_type_gate()'s merge (SMD-2216)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  type J = Record<string, unknown>;
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT prune_orphan_entities()`);
+
+  // The class, not only this instance: every table the migrations create is
+  // named by one of the migrations' own groups, so a table a migration adds
+  // without a grant row fails here, not under an operator's role.
+  // thought_sources was the one (053). A migrations' group is one whose rows
+  // are all dated by a migration number — not the community, extension and
+  // recipe groups (dated by their files), whose table names a migration table
+  // could share (`entities`). OWNER_ONLY is what no role is granted on
+  // purpose: migrate.ts's ledger, which this suite's brain lacks (it applies
+  // the files itself) and a migrated one has.
+  const OWNER_ONLY = new Set(["schema_migrations"]);
+  const migrationGroups = ROLE_GRANT_GROUPS.filter((g) => ROLE_GRANTS[g].every((r) => /^\d{3}$/.test(r.since)));
+  const namedTables = new Set(grantedTables(migrationGroups));
+  assert(migrationGroups.includes("structure") && migrationGroups.includes("capture") && !migrationGroups.includes("community") && !namedTables.has("entities"),
+    `the migrations' groups are the ones dated by migration number (${migrationGroups.join(", ")}), so a community-only table (entities) is not counted as named`);
+  const ungranted = (await q<{ t: string }>(`SELECT tablename AS t FROM pg_tables WHERE schemaname = 'public' ORDER BY 1`)).map((r) => r.t).filter((t) => !namedTables.has(t) && !OWNER_ONLY.has(t));
+  assert(ungranted.length === 0, `every table in the migrated schema is named by one of the migrations' ROLE_GRANTS groups, migrate.ts's ledger aside (unnamed: ${ungranted.join(", ") || "none"})`);
+  // The community row for 016's mention table is issued on every migrated
+  // brain, so it is held to the extraction row's privileges, no wider and now
+  // no narrower (config.mjs, the schemas/entity-extraction comment).
+  const mentionPrivs = (group: string) => (mergedGrants([group]).find((g) => g.name === "thought_entities")?.privileges ?? []).join(", ");
+  assert(mentionPrivs("community") === mentionPrivs("extraction") && mentionPrivs("extraction") === "SELECT, INSERT, UPDATE, DELETE",
+    `the community and extraction rows grant the mention table alike (${mentionPrivs("community")} / ${mentionPrivs("extraction")})`);
+
+  const ROLE = "ob1_granted";
+  await db.exec(`CREATE ROLE ${ROLE} NOLOGIN`);
+  const present = new Set((await q<{ name: string; present: boolean }>(grantPresenceSql(grantedObjects()))).filter((r) => r.present).map((r) => r.name));
+  for (const s of [`GRANT USAGE ON SCHEMA public TO "${ROLE}";`, ...grantStatements(ROLE, { present })]) await db.exec(s);
+  const notHeld = (await q<{ name: string; privilege: string; held: boolean }>(grantVerifySql(ROLE, mergedGrants(undefined, present)))).filter((r) => !r.held);
+  assert(notHeld.length === 0 && present.has("thought_sources"), `the role holds everything --grant issues over the ${present.size} objects present (not held: ${notHeld.map((r) => `${r.privilege} on ${r.name}`).join(", ") || "none"})`);
+
+  // As the role: the result, or the error's first line.
+  const asRole = async (sql: string, params: unknown[] = []): Promise<{ r: J | null; err: string }> => {
+    await db.exec(`SET ROLE ${ROLE}`);
+    try {
+      return { r: (await db.query<{ r: J }>(sql, params)).rows[0]?.r ?? null, err: "" };
+    } catch (e) {
+      return { r: null, err: (e as Error).message.split("\n")[0] };
+    } finally {
+      await db.exec(`RESET ROLE`);
+    }
+  };
+  const put = async (content: string) => (await one<{ id: string }>(`INSERT INTO thoughts (content, metadata, content_fingerprint) VALUES ($1, '{}'::jsonb, content_fingerprint_of($1)) RETURNING id`, [content])).id;
+  const rte = (id: string, key: string, ents: unknown[], rels: unknown[] = []) =>
+    asRole(`SELECT record_thought_entities($1::uuid, $2, $3::jsonb, $4::jsonb, NULL, NULL) AS r`, [id, key, JSON.stringify(ents), JSON.stringify(rels)]);
+  const source = (id: string, identity: string, take = false) =>
+    asRole(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown', 'test-53', $4) AS r`, [id, identity, `canonical of ${identity} on ${id}`, take]);
+  const links = (id: string, targets: string[]) =>
+    asRole(`SELECT record_source_links($1::uuid, 'linear', $2::jsonb) AS r`, [id, JSON.stringify(targets.map((target) => ({ relation: "blocks", target })))]);
+  const E = (name: string, type: string, confidence = 0.9) => ({ name, type, confidence });
+  const R = (from: string, to: string, relation: string) => ({ from, to, relation, confidence: 0.9 });
+  const keyOf = async (thought: string, name: string) => (await one<{ k: string }>(`SELECT m.extraction_key AS k FROM thought_entities m JOIN ob1_entities e ON e.id = m.entity_id WHERE m.thought_id = $1::uuid AND e.name = $2`, [thought, name]))?.k;
+  const edgeKey = async (thought: string) => (await one<{ k: string }>(`SELECT extraction_key AS k FROM ob1_entity_edges WHERE thought_id = $1::uuid`, [thought]))?.k;
+
+  const a = await put("Anita wires Hono into the server; SMD-1 blocks SMD-2.");
+  const b = await put("The head row for SMD-1 moved.");
+  const ents = [E("Hono", "tool"), E("Anita", "person")];
+  const rels = [R("Anita", "Hono", "uses")];
+  const ext1 = await rte(a, "extract:m@p1", ents, rels);
+  assert(ext1.r?.ok === true && ext1.r?.mentions === 2, `an extraction runs as the role (${ext1.err || JSON.stringify(ext1.r)})`);
+  const src1 = await source(a, "SMD-1");
+  const lk1 = await links(a, ["SMD-2"]);
+  assert(src1.r?.ok === true && src1.r?.outcome === "inserted" && lk1.r?.ok === true && lk1.r?.added === 1,
+    `a structured pass records the source row and a link as the role (${src1.err || JSON.stringify(src1.r)}; ${lk1.err || JSON.stringify(lk1.r)})`);
+  const str1 = await rte(a, "source:linear", ents.map((e) => ({ ...e, confidence: 1 })), rels);
+  assert(str1.r?.ok === true && (await keyOf(a, "Hono")) === "source:linear" && (await edgeKey(a)) === "source:linear",
+    `…and its mentions land on the extracted rows through the upsert's DO UPDATE — the structured row stands, mention and edge (${str1.err || JSON.stringify(str1.r)})`);
+  const ext2 = await rte(a, "extract:m@p2", ents, rels);
+  assert(ext2.r?.ok === true && (await keyOf(a, "Hono")) === "source:linear" && (await edgeKey(a)) === "source:linear",
+    `an extraction onto a thought with structured rows runs as the role, and leaves them standing (${ext2.err || JSON.stringify(ext2.r)})`);
+  const take = await source(b, "SMD-1", true);
+  const closed = await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'link' AND valid_until IS NOT NULL`, [a]);
+  assert(take.r?.ok === true && take.r?.taken_from === a && closed.n === 1 && (await keyOf(a, "Hono")) === undefined,
+    `a take runs as the role: the holder's source row deleted, its link closed, its structured mentions removed (${take.err || JSON.stringify(take.r)}; closed links ${closed.n})`);
+
+  // 056's pass, re-run by an operator as the role, on a brain with a retype
+  // that merges: a place written before the gate (inserted as the owner, past
+  // the writer) onto the tool of its name, a mention and an edge re-pointed.
+  const ext3 = await rte(b, "extract:m@p1", [E("hono/mcp", "tool"), E("Anita", "person")]);
+  const place = (await one<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('place', 'hono/mcp', normalize_entity_name('hono/mcp')) RETURNING id`)).id;
+  await db.query(`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, 0.9, 'extract:m@p0')`, [a, place]);
+  await db.query(`INSERT INTO ob1_entity_edges (thought_id, from_entity_id, to_entity_id, relation, confidence, extraction_key) SELECT $1::uuid, id, $2::uuid, 'related_to', 0.9, 'extract:m@p0' FROM ob1_entities WHERE entity_type = 'person' AND name = 'Anita'`, [a, place]);
+  const gate = await asRole(`SELECT apply_entity_type_gate() AS r`);
+  const merged = await one<{ n: number; t: string }>(`SELECT count(*)::int AS n, min(entity_type) AS t FROM ob1_entities WHERE normalized_name = normalize_entity_name('hono/mcp')`);
+  assert(ext3.r?.ok === true && gate.r?.ok === true && gate.r?.merged_entities === 1 && merged.n === 1 && merged.t === "tool" && (await keyOf(a, "hono/mcp")) === "extract:m@p0",
+    `apply_entity_type_gate() runs as the role and merges the place into the tool, its mention re-pointed (${gate.err || JSON.stringify(gate.r)})`);
+
+  // Each privilege SMD-2216 added, taken away in turn: its path fails by that
+  // table's name — so the grant, not something else, is what let it run. It
+  // is given back only if --grant had given it, so the harness never grants
+  // what ROLE_GRANTS omits; a privilege the role lacked answers "not held".
+  const holds = async (privilege: string, table: string) =>
+    (await one<{ h: boolean }>(`SELECT has_table_privilege($1, $2, $3) AS h`, [ROLE, table, privilege])).h;
+  const without = async (privilege: string, table: string, run: () => Promise<{ r: J | null; err: string }>) => {
+    if (!(await holds(privilege, table))) return "not held";
+    await db.exec(`REVOKE ${privilege} ON ${table} FROM ${ROLE}`);
+    try { return (await run()).err; } finally { await db.exec(`GRANT ${privilege} ON ${table} TO ${ROLE}`); }
+  };
+  const c = await put("Anita and Hono again.");
+  const denied = {
+    mentions: await without("UPDATE", "thought_entities", () => rte(c, "extract:m@p1", ents)),
+    edges: await without("UPDATE", "ob1_entity_edges", () => rte(c, "extract:m@p1", ents, rels)),
+    sources: await without("UPDATE", "thought_sources", () => source(c, "SMD-3")),
+    holder: await without("DELETE", "thought_sources", () => source(c, "SMD-1", true)),
+    facets: await without("INSERT", "thought_facets", () => links(b, ["SMD-4"])),
+  };
+  assert(/permission denied for table thought_entities/.test(denied.mentions) && /permission denied for table ob1_entity_edges/.test(denied.edges) &&
+         /permission denied for table thought_sources/.test(denied.sources) && /permission denied for table thought_sources/.test(denied.holder) &&
+         /permission denied for table thought_facets/.test(denied.facets),
+    `without each added privilege its path is refused on that table (${Object.entries(denied).map(([k, v]) => `${k}: ${v || "ran"}`).join("; ")})`);
+  const again = await rte(c, "extract:m@p1", ents, rels);
+  assert(again.r?.ok === true, `…and with it back the writer runs again (${again.err || JSON.stringify(again.r)})`);
+
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT prune_orphan_entities()`);
+  await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected
