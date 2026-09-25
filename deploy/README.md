@@ -416,7 +416,12 @@ script does not relabel it for you.
 
 A refresh does not carry the per-database HNSW settings over (SMD-2037), and a
 server already running on the refreshed database keeps its old pool until it
-is recreated. The canary-beside-the-dogfood standup is SMD-2038.
+is recreated. It does not carry grants either (the restore runs with
+`--no-privileges`), so a server that connects to the copy as a role other than
+`postgres` needs `bun db/migrate.ts --url <copy> --grant <role>` first. Since
+migration 054 a key used recently on stable is not written on its next lookup,
+so a missing grant can surface minutes after a start that looked healthy. The
+canary-beside-the-dogfood standup is SMD-2038.
 
 ## The typed-decision tier
 
