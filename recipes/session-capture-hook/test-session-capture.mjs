@@ -34,7 +34,7 @@ delete process.env.OB1_CAPTURE_KEY;
 
 const {
   stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, provenanceOf,
-  scanForSecrets, scanSummary, SECRET_PATTERNS, parseRpcBody, postCapture, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX,
+  scanForSecrets, scanSummary, SECRET_PATTERNS, parseRpcBody, postCapture, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX, verdictOf,
   loadConfig, modelSummary, egressRefusalForModel, modelStatusLine, assistantExcerpt,
 } = await import(SCRIPT);
 
@@ -73,6 +73,10 @@ const runHook = (input, env = {}, args = [], raw = false) => spawnScript(args, {
 //   [[slow]]             the answer takes 2.5 s — a synchronous post would bust the SessionEnd budget
 const received = [];
 let refusedOnce = new Set();
+// The machine-readable verdict the real server carries in structuredContent
+// (SMD-1978); a test flips it off to prove a prose-only server is handled
+// identically (the fallback path).
+let scOn = true;
 const READ = ["fetch", "list_supersession_proposals", "list_thoughts", "search", "search_thoughts", "search_thoughts_keyword", "thought_changes", "thought_stats"]; // main's read surface as of SMD-1296; the capture rule does not depend on its length
 const fake = Bun.serve({
   port: 0,
@@ -99,30 +103,32 @@ const fake = Bun.serve({
       if (!surface.includes(name)) return sse({ result: { isError: true, content: [{ type: "text", text: `MCP error -32602: Tool ${name} not found` }] } });
       const n = received.push({ key, args }); // the id is the post's ordinal at the moment it ARRIVES, so two posts in flight at once never share one (SMD-2035's suite)
       const content = String(args.content);
+      // A refusal with its prose AND (when scOn) its machine-readable verdict, as the real server answers since SMD-1978.
+      const err = (text, sc) => sse({ result: { isError: true, content: [{ type: "text", text }], ...(scOn && sc ? { structuredContent: sc } : {}) } });
       if (/\[\[refuse-derived\]\]/.test(content) && args.derived_from && !refusedOnce.has(content)) {
         refusedOnce.add(content);
-        return sse({ result: { isError: true, content: [{ type: "text", text: `Refused: derived_from[0] names no thought. Each entry must be an existing thought id (the ID: line of a search result).` }] } });
+        return err(`Refused: derived_from[0] names no thought. Each entry must be an existing thought id (the ID: line of a search result).`, { code: "DERIVED_FROM_MISSING", retryable: false, positions: [0] });
       }
       if (/\[\[refuse-derived-old\]\]/.test(content) && args.derived_from && !refusedOnce.has(content)) {
-        refusedOnce.add(content); // a server from before this pass names the whole list
-        return sse({ result: { isError: true, content: [{ type: "text", text: "Refused: a `derived_from` id names no thought — (in [\"…\"]). Each must be an existing thought id (the ID: line of a search result)." }] } });
+        refusedOnce.add(content); // names no position — the code with no positions, as a capture key's refusal is (existence-oracle rule)
+        return err("Refused: a `derived_from` id names no thought — (in [\"…\"]). Each must be an existing thought id (the ID: line of a search result).", { code: "DERIVED_FROM_MISSING", retryable: false });
       }
       if (/\[\[refuse-supersedes\]\]/.test(content) && args.supersedes) {
-        return sse({ result: { isError: true, content: [{ type: "text", text: "Refused: no thought with the id given as supersedes. Pass the id of an existing thought — the ID: line of a search result." }] } });
+        return err("Refused: no thought with the id given as supersedes. Pass the id of an existing thought — the ID: line of a search result.", { code: "REFUSED_SUPERSEDES_UNKNOWN", retryable: false });
       }
-      if (/\[\[store-down\]\]/.test(content)) return sse({ result: { isError: true, content: [{ type: "text", text: "Error: Failed to connect" }] } });
-      if (/\[\[store-401\]\]/.test(content)) return sse({ result: { isError: true, content: [{ type: "text", text: "Error: PostgREST answered 401 Unauthorized: JWT expired" }] } });
+      if (/\[\[store-down\]\]/.test(content)) return err("Error: Failed to connect", { code: "STORE_UNAVAILABLE", retryable: true });
+      if (/\[\[store-401\]\]/.test(content)) return err("Error: PostgREST answered 401 Unauthorized: JWT expired", { code: "STORE_UNAVAILABLE", retryable: true });
       if (/\[\[state-moves\]\]/.test(content)) writeFileSync(join(STATE, "s-raced.json"), JSON.stringify({ thought_id: uuid(82), fingerprint: "sib", captured_at: new Date().toISOString(), summary_at: new Date().toISOString() }));
-      if (/\[\[grant-missing\]\]/.test(content) && args.supersedes) return sse({ result: { isError: true, content: [{ type: "text", text: "Error: this key's `supersedes` could not be checked against the target's capture record (permission denied for table thought_audit) — the server role needs SELECT on thought_audit: cd db && bun migrate.ts --grant <role> --url $DATABASE_URL." }] } });
-      if (/\[\[registry-away\]\]/.test(content) && args.supersedes) return sse({ result: { isError: true, content: [{ type: "text", text: "Error: this key's `supersedes` could not be attributed while the agent registry is unavailable — retry when resolve_agent answers." }] } });
-      if (/\[\[refuse-hard\]\]/.test(content)) return sse({ result: { isError: true, content: [{ type: "text", text: "Refused: the content is not a thought this brain will hold." }] } });
-      if (/\[\[fn-missing\]\]/.test(content)) return sse({ result: { isError: true, content: [{ type: "text", text: "Error: function upsert_thought(text, jsonb, vector) not found; a function must be defined before it is called" }] } });
+      if (/\[\[grant-missing\]\]/.test(content) && args.supersedes) return err("Error: this key's `supersedes` could not be checked against the target's capture record (permission denied for table thought_audit) — the server role needs SELECT on thought_audit: cd db && bun migrate.ts --grant <role> --url $DATABASE_URL.", { code: "SUPERSEDES_UNJUDGED", retryable: true });
+      if (/\[\[registry-away\]\]/.test(content) && args.supersedes) return err("Error: this key's `supersedes` could not be attributed while the agent registry is unavailable — retry when resolve_agent answers.", { code: "SUPERSEDES_UNJUDGED", retryable: true });
+      if (/\[\[refuse-hard\]\]/.test(content)) return err("Refused: the content is not a thought this brain will hold."); // a Refused the server did not code: the hook falls back to the prose rule
+      if (/\[\[fn-missing\]\]/.test(content)) return err("Error: function upsert_thought(text, jsonb, vector) not found; a function must be defined before it is called", { code: "STORE_UNAVAILABLE", retryable: true });
       const at = /\[\[refuse-derived-at:(\d+)\]\]/.exec(content);
       if (at && args.derived_from && !refusedOnce.has(content)) {
         refusedOnce.add(content);
-        return sse({ result: { isError: true, content: [{ type: "text", text: `Refused: derived_from[${at[1]}] names no thought. Each entry must be an existing thought id (the ID: line of a search result).` }] } });
+        return err(`Refused: derived_from[${at[1]}] names no thought. Each entry must be an existing thought id (the ID: line of a search result).`, { code: "DERIVED_FROM_MISSING", retryable: false, positions: [Number(at[1])] });
       }
-      if (/\[\[slow-down\]\]/.test(content)) { await sleep(2500); return sse({ result: { isError: true, content: [{ type: "text", text: "Error: Failed to connect" }] } }); }
+      if (/\[\[slow-down\]\]/.test(content)) { await sleep(2500); return err("Error: Failed to connect", { code: "STORE_UNAVAILABLE", retryable: true }); }
       if (/\[\[slow\]\]/.test(content)) await sleep(2500);
       const id = uuid(1000 + n);
       if (/\[\[embedding-failed\]\]/.test(content)) return sse({ result: { isError: true, content: [{ type: "text", text: `Thought saved (id ${id}) but its embedding failed to attach: stub. It will NOT appear in semantic search until re-captured.` }] } });
@@ -1609,19 +1615,45 @@ console.log("\n[7] As a hook: JSON on stdin, exit codes, and what reaches the en
   assert(n.code === 1 && /not the hook's JSON/.test(n.err), "malformed stdin: exit 1");
   const hb = await runHook({ session_id: "s-h", transcript_path: CLAUDE_T, hook_event_name: "SessionEnd" }, {}, ["--harness", "Codex"]);
   assert(hb.code === 1 && /--harness takes claude-code or codex/.test(hb.err), "a --harness that is neither is refused with usage and exit 1 — never 2, which would block a Stop (seventh review pass)");
-  // The fake server's sentences are the real server's: the hook tells a refusal from an error and a position from a list by the server's PROSE, so the shapes it reads must be the ones index.ts writes (tenth review pass: nothing linked the two).
+  // The hook keys on the server's machine-readable verdict, not its prose
+  // (SMD-1978): verdictOf reads structuredContent, and for a server from before
+  // it derives the SAME verdict from the prose — so a reworded sentence in
+  // index.ts changes no hook behaviour, and the source-text tooth that pinned
+  // the exact prose (tenth review pass) is retired.
   {
-    const serverSrc = readFileSync(join(HERE, "..", "..", "server-portable", "index.ts"), "utf8").replace(/\\`/g, "`"); // the sentences sit in template literals, their backticks escaped
-    for (const sentence of [
-      "Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself",
-      "Refused: no thought with the id given as supersedes",
-      "this key's `supersedes` could not be checked against the target's capture record",
-      "this key's `supersedes` could not be attributed while the agent registry is unavailable",
-      "derived_from[${i}] (${sent[i]})",
-      " no thought. Each entry must be an existing thought id (the ID: line of a search result).", // the verb is built, the rest is literal
-    ]) assert(serverSrc.includes(sentence), `index.ts still says: ${sentence.slice(0, 60)}`);
-    assert(REFUSAL_RE.test("Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself") && !REFUSAL_RE.test("Error: this key's `supersedes` could not be checked against the target's capture record (x)"),
-      "…and the hook's refusal rule reads the server's Refused: and not its Error:");
+    // vc: a verdict on a structured result; vp: on a prose-only one (a server from before the code).
+    const vc = (structuredContent, text = "") => verdictOf({ isError: true, structuredContent }, text);
+    const vp = (text) => verdictOf({ isError: true }, text);
+    const vD = vc({ code: "DERIVED_FROM_MISSING", retryable: false, positions: [2] }, "any prose at all");
+    assert(vD.mend === "derived" && vD.retryable === false && vD.positions.join() === "2", "verdictOf reads DERIVED_FROM_MISSING and its positions from the code, whatever the prose");
+    const vU = vc({ code: "SUPERSEDES_UNJUDGED", retryable: true });
+    assert(vU.retryable === true && vU.on === "supersedes" && vU.mend === null, "…SUPERSEDES_UNJUDGED is a kept transient marking the pointer, mending nothing");
+    const vS = vc({ code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false });
+    assert(vS.retryable === false && vS.mend === "supersedes", "…a supersedes refusal is final and mends by dropping the pointer");
+    const vT = vc({ code: "STORE_UNAVAILABLE", retryable: true });
+    assert(vT.retryable === true && vT.mend === null && vT.on === undefined, "…STORE_UNAVAILABLE is a kept transient with nothing to mend");
+    // The prose fallback derives the same verdicts for a server from before the code.
+    assert(vp("Refused: derived_from[1] (x) names no thought").mend === "derived" && vp("Refused: derived_from[1] names no thought").positions.join() === "1", "…and from prose alone, a Refused naming a derived_from position mends by dropping it");
+    assert(vp("Error: this key's `supersedes` could not be checked against the target's capture record (x)").retryable === true && vp("Error: this key's `supersedes` could not be attributed while the agent registry is unavailable").on === "supersedes", "…an Error the pointer could not be judged is a kept transient marking the pointer");
+    assert(vp("Refused: the content is not a thought this brain will hold").retryable === false && vp("Error: Failed to connect").retryable === true, "…a Refused is final and an Error kept — the prose split the hook falls back to");
+    // A non-conforming server's malformed structuredContent is handled safely —
+    // nothing throws, and the verdict falls to the prose or drops the malformed
+    // parts (review pass 2: the guards are load-bearing but were unpinned).
+    assert(vc({ code: 42, retryable: true }, "Refused: x").retryable === false, "a non-string code is no verdict — the prose decides");
+    assert(vc({ code: "DERIVED_FROM_MISSING", positions: "0" }).positions.length === 0 && vc({ code: "DERIVED_FROM_MISSING", positions: [1.5, "2", -1, 3] }).positions.join() === "3", "a non-array or malformed positions is reduced to its valid non-negative integers");
+    assert(vc({ code: "STORE_UNAVAILABLE", retryable: "true" }).retryable === false, "a non-boolean retryable is fail-closed to final");
+    assert(vc(null, "Error: Failed to connect").retryable === true && vc([1, 2], "Refused: x").retryable === false, "a null or array structuredContent falls to the prose without throwing");
+  }
+  // A server answering with the code and one answering with prose alone reach the
+  // SAME outcome (SMD-1978): the hook keys on the verdict, not the sentence.
+  {
+    const cfg = { url: URL_, key: "cap-key" };
+    scOn = true;
+    const withCode = await postCapture(cfg, { text: "[[refuse-derived]] a summary with a code", harness: "codex", derived_from: [uuid(60)] });
+    scOn = false;
+    const withProse = await postCapture(cfg, { text: "[[refuse-derived]] a summary with prose alone", harness: "codex", derived_from: [uuid(61)] });
+    scOn = true;
+    assert(withCode.id && withProse.id && /1 source id\(s\) dropped/.test(withCode.note) && /1 source id\(s\) dropped/.test(withProse.note), "a code-carrying server and a prose-only one drop the same source and succeed alike");
   }
   const evOnHook = await runHook({ session_id: "s-ev-flag", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" }, ["--event", "PreCompact"]);
   const trOnHook = await runHook({ session_id: "s-tr-flag", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" }, { OB1_SESSION_CAPTURE_SYNC: "1" }, ["--trigger=manual"]);
