@@ -4480,6 +4480,9 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
       await sql.unsafe(`ALTER DATABASE ${setSrc} SET hnsw.scan_mem_multiplier = 8`);
       await sql.unsafe(`ALTER DATABASE ${setSrc} SET search_path = "$user", public, "Odd ""Schema"", with comma"`);
       await sql.unsafe(`ALTER DATABASE ${setSrc} SET statement_timeout = '5min'`);
+      // A value with a quote in it, and a list setting set to the empty list.
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET application_name = 'o''brien'`);
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET temp_tablespaces = ''`);
       await sql.unsafe(`ALTER DATABASE ${setSrc} SET ob1.refresh_target = 'canary'`);
       await sql.unsafe(`ALTER DATABASE ${setDst} SET work_mem = '7MB'`);
       await sql.unsafe(`ALTER DATABASE ${setDst} SET ob1.refresh_target = 'working'`);

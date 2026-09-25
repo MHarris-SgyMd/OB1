@@ -113,22 +113,27 @@ fi
 
 # Before anything is built: a mistyped network (open-brain_default against
 # open-brain-tiers_default) is a usage error, not the runtime's 125 at the end.
-NETWORKS=()
+case "$NETWORK" in
+  ""|,*|*,|*,,*) echo "--network has an empty name: '$NETWORK'" >&2; exit 2 ;;
+  *[[:space:]]*) echo "--network takes NAME[,NAME…] with no spaces: '$NETWORK'" >&2; exit 2 ;;
+esac
 IFS=, read -r -a NETS <<< "$NETWORK"
-for net in ${NETS[@]+"${NETS[@]}"}; do
-  [ -n "$net" ] || { echo "--network has an empty name: $NETWORK" >&2; exit 2; }
+SEEN_NETS=" "
+for net in "${NETS[@]}"; do
+  case "$SEEN_NETS" in *" $net "*) echo "--network names $net twice." >&2; exit 2 ;; esac
+  SEEN_NETS="$SEEN_NETS$net "
   "$RUNTIME" network inspect "$net" >/dev/null 2>&1 || {
     echo "no network $net — name the stack's with --network. The runtime has:" >&2
     "$RUNTIME" network ls >&2 || true
     exit 2
   }
-  NETWORKS+=(--network "$net")
 done
-[ ${#NETWORKS[@]} -gt 0 ] || { echo "--network names no network." >&2; exit 2; }
 
 TMP_ENV="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-env.XXXXXX")"
 COMPOSE_ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-compose.XXXXXX")" # mktemp creates both mode 600
-trap 'rm -f "$TMP_ENV" "$COMPOSE_ERR_FILE"' EXIT
+CID=""
+STARTED=""
+trap 'rm -f "$TMP_ENV" "$COMPOSE_ERR_FILE"; [ -z "$CID" ] || [ -n "$STARTED" ] || "$RUNTIME" rm -f "$CID" >/dev/null 2>&1 || true' EXIT
 
 # The environment as compose builds it for the stack: an empty project, the
 # file, the shell. stderr apart, since a delegating `podman compose` prints a
@@ -217,13 +222,22 @@ if [ "$RUNTIME" = docker ] && docker buildx version >/dev/null 2>&1; then LOAD=(
 # leave a refresh running. -w /tmp: Bun auto-loads .env files from the working
 # directory (so does the migrate.ts it spawns), and /tmp has none. The quoted
 # script appends the URLs to the arguments it was given, so tier.ts's own parser
-# sees the one --from and --to. Not `exec`: the EXIT trap removes the temporary
-# files, and set -e hands on the run's status.
+# sees the one --from and --to.
+#
+# Created on the first network, connected to the rest, then started attached
+# (which forwards signals, as run does, and exits with the container's
+# status): `run --network A --network B` needs Docker Engine 25, and Ubuntu
+# 24.04's docker.io is 24. One path for one network or several. Not `exec`:
+# the EXIT trap removes the temporary files, and the container if it was never
+# started.
 # shellcheck disable=SC2016 # the container's sh expands them, not this one
-"$RUNTIME" run --rm --init \
-  "${NETWORKS[@]}" \
+CID="$("$RUNTIME" create --rm --init \
+  --network "${NETS[0]}" \
   --env-file "$TMP_ENV" \
   -v "$REPO:/repo:ro" \
   -w /tmp \
   "$IMAGE" \
-  sh -c 'exec bun --no-env-file /repo/db/tier.ts "$@" --from "$TIER_FROM_URL" --to "$TIER_TO_URL"' tier ${PASS[@]+"${PASS[@]}"}
+  sh -c 'exec bun --no-env-file /repo/db/tier.ts "$@" --from "$TIER_FROM_URL" --to "$TIER_TO_URL"' tier ${PASS[@]+"${PASS[@]}"})"
+for net in "${NETS[@]:1}"; do "$RUNTIME" network connect "$net" "$CID" >/dev/null; done
+STARTED=1
+"$RUNTIME" start -a "$CID"

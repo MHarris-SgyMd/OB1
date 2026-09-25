@@ -424,7 +424,10 @@ The dump carries no database-level settings (`ALTER DATABASE … SET`), so the
 refresh copies `--from`'s onto `--to` itself before migrating it, and resets
 any `--to` has that `--from` lacks, the refresh mark aside (SMD-2037). That is
 how migration 014's HNSW bounds reach the copy: without them a broad filtered
-search on it walks at pgvector's defaults and returns short. A server already
+search on it walks at pgvector's defaults and returns short. Only the
+database's own settings travel. Where stable's bounds come from the server's
+configuration instead (`postgresql.conf`, `ALTER SYSTEM`, and 014 then seeds
+none), a copy on another server has whatever that server says. A server already
 running on the refreshed database keeps its old pool until it is recreated.
 Grants are not carried either (the restore runs with `--no-privileges`), so a
 server that connects to the copy as a role other than `postgres` needs
@@ -447,54 +450,79 @@ deploy/canary.sh --env-file ~/OB1/deploy/.env down --volumes
 ```
 
 The canary is `compose.yaml` again under the project `open-brain-canary`, with
-its own Postgres, volume, network and images, its server on `127.0.0.1:8011`
-(`--port`) and `OB1_TIER=canary`. It reads the stack's env file, so every knob
-reaches its server as it reaches stable's, and none is copied. Each tier has
-its own Postgres server, never a second database on stable's: a canary exists
-to absorb the risky migration, reembed or index rebuild, and a shared server
-would share its memory, its WAL and its crashes with the record. The canary's
-server is not on stable's network, so it cannot reach stable's database.
+its own Postgres, volume, network and images, and `OB1_TIER=canary`. Its
+server listens on `127.0.0.1:8011` (`--port`), on loopback whatever
+`SERVER_BIND` says for stable. It reads the stack's env file, so the canary's
+server gets stable's knobs and none is copied. Four things are the canary's
+own: the port, the address, the tier, and the compose profiles (none). Each
+tier has its own Postgres server, never a second database on stable's: a
+canary exists to absorb the risky migration, reembed or index rebuild, and a
+shared server would share its memory, its WAL and its crashes with the
+record. The canary's server is not on stable's network, so it cannot reach
+stable's database, or a service a compose profile runs there.
 
 `up` can be re-run, and re-running it is how the canary catches up after
 stable is redeployed:
 
-1. It finds stable's Postgres by its compose labels (`--stable-project`,
-   default `open-brain`) and stamps it `tier=stable` when it has no tier
-   stamp. It refuses one stamped `canary` or `working`, or carrying a
-   refresh's mark: that is a copy, not the record. When stable's server runs without `OB1_TIER=stable`, it says
-   so; set it in the env file and recreate that server.
+1. It refuses, with exit 2 and nothing changed, when:
+   - the canary's server would dial a bare service name for its provider:
+     `OB1_LLM_BASE_URL` unset, which falls back to the `local-models`
+     profile's `ollama`, or `OB1_JEV_BASE_URL=http://jev:8020`. The canary's
+     network has neither. Point the provider at the host
+     (`http://host.docker.internal:11434/v1`) or a remote endpoint;
+   - another container publishes its port, which is what a canary stood up
+     by hand leaves behind. Remove that container first: the new canary is
+     refreshed from stable, so nothing is lost that stable does not hold;
+   - `--connect` finds another connector under the name (below);
+   - stable's Postgres, found by its compose labels (`--stable-project`,
+     default `open-brain`), is stamped `canary` or `working`, or carries a
+     refresh's mark (`canary`, `working`): that is a copy, not the record.
+     A mark of `stable` or `off`, an operator's protection, is not one.
+
+   Stable with no tier stamp is stamped `tier=stable`. When stable's server
+   runs without `OB1_TIER=stable` it says so; set that in the env file and
+   recreate the server.
 2. It starts the canary's Postgres, and refreshes it from stable through
    `tier.sh` on both networks: the dump, the settings, a migration with this
    checkout, the stamp and the mark ("Refreshing a tier", above).
 3. It builds the server from this checkout and recreates it, so the pool
    opens on the refreshed database. `OB1_GIT_SHA` is the checkout's
    `git describe`, unless the shell sets it.
-4. It smoke-tests the canary with `OB1_SMOKE_KEY`: the keyed `/health` must
-   say `tier` `canary`, `smoke.sh` must pass, and `search_thoughts` must find
-   a thought by its own text with a similarity. That last one covers the
-   vector arm, which `smoke.sh` leaves out and a `--diff` replays only with a
-   provider configured. `--no-smoke` skips the smoke and needs no key.
+4. It smoke-tests the canary with `OB1_SMOKE_KEY`. The keyed `/health` must
+   say `tier` `canary`, and `smoke.sh` must pass. Then the vector arm, which
+   `smoke.sh` leaves out and a `--diff` replays only with a provider
+   configured: the newest thought with a vector whose opening text no other
+   thought shares (so a template, like a session summary's header, cannot
+   crowd it out) is searched for by its own text, and its own result block
+   must come back with a similarity. `--no-smoke` skips the smoke and needs
+   no key.
 5. With `--connect` it registers the Claude Code connector
    `open-brain-canary` (`--name`) at user scope, under the same key; a new
    session sees its tools. The URL is the canary's own port until SMD-1846
    puts one origin in front of the stack.
 
-`up` refuses a port some other container publishes, which is what a canary
-stood up by hand leaves behind. Remove that container first; the new canary
-is refreshed from stable, so nothing is lost that stable does not hold.
-
-`down` removes the canary's containers and network, and deregisters the
-connector when `claude` has one by that name at the canary's port. A
-connector by that name at another URL is left alone, and `up --connect`
+`down` removes the canary's containers and network. It deregisters the
+connector only when `claude` has it at user scope and at the canary's port
+(any path or `?key=` after it). One by that name anywhere else, or in local
+or project scope, is left alone with a line saying so, and `up --connect`
 refuses to replace it. `--volumes` also deletes the canary's database, and
-only once it says it is a canary (stamped, or marked by a refresh). Neither touches stable: `down` acts on the project
+only once it says it is a canary: stamped `canary`, marked by a refresh, or
+holding nothing, which is what a first refresh that died before its mark
+leaves. With no canary volume there is nothing to delete, and nothing is
+started to find out. Neither touches stable: `down` acts on the project
 `open-brain-canary` alone.
 
-On every PR, the deploy-stack CI job runs `up` twice beside its stack, then
-`down --volumes`. It checks the stamp, the probe thought on the canary and the
-vector search, and afterwards that the stack's Postgres container, its thought
-and its server are unchanged. The provider stub there embeds every text to the
-probe thought's vector.
+On every PR, the deploy-stack CI job runs `canary.sh` beside its stack:
+- each refusal, with exit 2 and nothing started or stamped;
+- `up --connect` over a stable carrying the protective mark `stable`;
+- a second `up` after a thought is put on stable, which must reach the canary;
+- `down --volumes` refused on a canary stamped `working`;
+- two `down --volumes`: the first leaves another connector alone, the second
+  finds nothing to delete and removes its own.
+
+Afterwards the stack's Postgres container, its thoughts and its server are
+checked unchanged. A stand-in `claude` on PATH answers `mcp get` there, and
+the provider stub embeds every text to the probe thoughts' vector.
 
 ## The typed-decision tier
 

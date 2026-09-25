@@ -3,20 +3,27 @@
 #
 # The canary is this same deploy/compose.yaml run again as its own compose
 # project, open-brain-canary, with its own Postgres, volume, network and images,
-# its server on the next loopback port, and OB1_TIER=canary. It reads the stack's
-# env file, so every knob reaches the canary's server as it reaches stable's,
-# and none is copied. `down` acts on that project alone, so it cannot reach
-# stable. SMD-1806 calls the running stack stable, the record the canary is
-# refreshed from.
+# its server on 127.0.0.1 at the next port, and OB1_TIER=canary. It reads the
+# stack's env file, so the canary's server gets stable's knobs and none is
+# copied. The port, the address, the tier and the profiles are the canary's own.
+# `down` acts on that project alone, so it cannot reach stable. SMD-1806 calls
+# the running stack stable, the record the canary is refreshed from.
 #
 #   deploy/canary.sh --env-file ~/stack/deploy/.env up --connect
 #   deploy/canary.sh --env-file ~/stack/deploy/.env down --volumes
 #
 # `up` stands the canary up, or brings a standing one level with stable again
 # (after stable is redeployed, say). It can be re-run:
-#   1. finds stable's Postgres by its compose labels and stamps it tier=stable
-#      when it has no tier stamp. It refuses one stamped canary or working, or
-#      carrying a refresh's mark: that is a copy, not the record;
+#   1. refuses, before changing anything, when:
+#      - the canary's server could not reach its provider: an OB1_LLM_BASE_URL,
+#        OB1_CHAT_BASE_URL or OB1_JEV_BASE_URL naming a service on stable's
+#        network (`ollama`, `jev`, from a compose profile), which the canary's
+#        own network does not have;
+#      - its port is taken;
+#      - --connect finds another connector under the name;
+#      - stable's Postgres is stamped canary or working, or carries a
+#        refresh's mark (canary, working): that is a copy, not the record.
+#      Stable with no tier stamp is stamped tier=stable;
 #   2. starts the canary's Postgres;
 #   3. refreshes it from stable through deploy/tier.sh, on both projects'
 #      networks. The refresh copies stable's database settings, 014's HNSW
@@ -25,15 +32,18 @@
 #      opens on the refreshed database;
 #   5. smoke-tests it with OB1_SMOKE_KEY, a raw key whose hash is in the env
 #      file's MCP_ACCESS_KEYS (the canary accepts stable's keys). The keyed
-#      /health must report tier canary, deploy/smoke.sh must pass, and a vector
-#      search must find a thought by its own text;
+#      /health must report tier canary, deploy/smoke.sh must pass, and
+#      search_thoughts must find a thought by its own text with a similarity:
+#      one with a vector, whose opening text no other thought shares;
 #   6. with --connect, registers the Claude Code connector (user scope) under
 #      the same key.
 #
-# `down` removes the canary's containers and network, and deregisters the
-# connector when `claude` has one by that name at this canary's port (one at
-# another URL is left alone). --volumes also deletes the canary's database,
-# once it is shown to be stamped or marked canary.
+# `down` removes the canary's containers and network. It deregisters the
+# connector when `claude` has it at user scope and at the canary's port, and
+# says so when one by that name is anything else, leaving it alone. --volumes
+# also deletes the canary's database: when it is stamped or marked canary, or
+# holds nothing (a first refresh that died before its mark). With no canary
+# volume there is nothing to delete, and nothing is created to find out.
 #
 # Options, all optional:
 #   --env-file PATH       the running stack's env file (default deploy/.env beside
@@ -92,7 +102,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$CMD" ] || usage
-case "$PORT" in ''|*[!0-9]*) echo "--port takes a number: $PORT" >&2; exit 2 ;; esac
+case "$PORT" in ''|*[!0-9]*|0*) echo "--port takes a port number, 1-65535: $PORT" >&2; exit 2 ;; esac
+[ "$PORT" -le 65535 ] || { echo "--port takes a port number, 1-65535: $PORT" >&2; exit 2; }
 [ "$STABLE" != "$CANARY" ] || { echo "--stable-project names the canary's own project." >&2; exit 2; }
 [ "$CMD" = up ] || { [ $CONNECT = 0 ] && [ $SMOKE = 1 ]; } || { echo "--connect and --no-smoke go with up." >&2; exit 2; }
 [ "$CMD" = down ] || [ $VOLUMES = 0 ] || { echo "--volumes goes with down." >&2; exit 2; }
@@ -110,16 +121,17 @@ fi
 say() { printf '▸ %s\n' "$*"; }
 
 # The canary's compose: stable's file under the canary's project name. The
-# port, the tier and an empty profile list are set for these calls alone, where
-# the shell wins over the env file; tier.sh, run between them, reads the env
-# file without them.
+# port, the address, the tier and an empty profile list are set for these calls
+# alone, where the shell wins over the env file; tier.sh, run between them,
+# reads the env file without them. The address is loopback whatever
+# SERVER_BIND says for stable: a canary is for this host.
 canary_compose() {
-  SERVER_PORT="$PORT" OB1_TIER=canary COMPOSE_PROFILES="" OB1_GIT_SHA="$GIT_SHA" \
+  SERVER_PORT="$PORT" SERVER_BIND=127.0.0.1 OB1_TIER=canary COMPOSE_PROFILES="" OB1_GIT_SHA="$GIT_SHA" \
     "$RUNTIME" compose -p "$CANARY" --env-file "$ENV_FILE" -f "$HERE/compose.yaml" "$@"
 }
 GIT_SHA="${OB1_GIT_SHA:-$(git -C "$REPO" describe --always --dirty 2>/dev/null || echo unknown)}"
 
-# A container of a project's service, by compose's labels: its name, or nothing.
+# A running container of a project's service, by compose's labels: its name, or nothing.
 container_of() {
   local id
   id="$("$RUNTIME" ps -q --filter "label=com.docker.compose.project=$1" --filter "label=com.docker.compose.service=$2" | head -n 1)"
@@ -137,47 +149,87 @@ stamp_of() {
   [ "$(psql_in "$1" "SELECT to_regclass('public.ob1_config') IS NOT NULL")" = t ] || return 0
   psql_in "$1" "SELECT value FROM ob1_config WHERE key = 'tier'"
 }
-# The refresh mark on a database (tier.ts's refreshMark: its own setting), or nothing.
+# The refresh mark on a database, as tier.ts's refreshMark reads it: the
+# database's own setting, and only a value a refresh writes (canary, working).
+# `stable` or `off` there is an operator protecting it, not a mark.
 mark_of() {
   psql_in "$1" "SELECT substr(c, length('ob1.refresh_target=') + 1)
     FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase, unnest(s.setconfig) c
-    WHERE d.datname = current_database() AND s.setrole = 0 AND c LIKE 'ob1.refresh_target=%'"
+    WHERE d.datname = current_database() AND s.setrole = 0
+      AND c IN ('ob1.refresh_target=canary', 'ob1.refresh_target=working')"
+}
+# How many relations the public schema holds that no extension owns — tier.ts
+# targetRefusal's "empty": 0 for a database nothing was restored into.
+relations_in() {
+  psql_in "$1" "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+      AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')"
 }
 
-# The URL the connector NAME is registered at, or nothing. Only that line is
-# kept: `claude mcp get` prints the key too.
-connector_url() {
+# The connector registered under NAME: CONN_URL and CONN_SCOPE (user, local,
+# project, or what `claude mcp get` said), both empty when there is none. Only
+# those two lines are read: `get` prints the key too. It exits non-zero for a
+# name it does not know, which under pipefail would end the script here.
+CONN_URL=""
+CONN_SCOPE=""
+read_connector() {
+  CONN_URL=""; CONN_SCOPE=""
   command -v claude >/dev/null 2>&1 || return 0
-  # `get` exits non-zero for a name it does not know: under pipefail that
-  # would end the script from inside the caller's assignment.
-  { claude mcp get "$NAME" 2>/dev/null || true; } | sed -n 's/^ *URL: *//p' | head -n 1
+  local got
+  got="$({ claude mcp get "$NAME" 2>/dev/null || true; } | sed -nE 's/^ *(URL|Scope): *//p')"
+  CONN_URL="$(sed -n 2p <<<"$got")"
+  case "$(sed -n 1p <<<"$got")" in
+    User*) CONN_SCOPE=user ;; Local*) CONN_SCOPE=local ;; Project*) CONN_SCOPE=project ;;
+    *) CONN_SCOPE="$(sed -n 1p <<<"$got")" ;;
+  esac
+  [ -n "$CONN_URL" ] || CONN_SCOPE=""
 }
-# Whether a connector URL is this canary's: its port on this host. Another
-# connector under the name is someone else's, and left alone.
-ours() { case "$1" in "http://127.0.0.1:$PORT/"|"http://localhost:$PORT/") return 0 ;; esac; return 1; }
+# The ports the canary answers on: --port, and the one its server publishes
+# now if that differs (a `down` given no --port for a canary stood up with one).
+canary_ports() {
+  printf '%s\n' "$PORT"
+  { canary_compose port server 8000 2>/dev/null || true; } | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p'
+}
+# Whether a connector URL is this canary's: http, this host, one of its ports,
+# any path or query (`?key=` is the documented form) after it.
+ours() {
+  local p
+  for p in $(canary_ports); do
+    case "$1" in "http://127.0.0.1:$p"|"http://127.0.0.1:$p/"*|"http://127.0.0.1:$p?"*|"http://localhost:$p"|"http://localhost:$p/"*|"http://localhost:$p?"*) return 0 ;; esac
+  done
+  return 1
+}
 
 if [ "$CMD" = down ]; then
-  if [ $VOLUMES = 1 ]; then
+  STARTED_PG=""
+  if [ $VOLUMES = 1 ] && [ -n "$("$RUNTIME" volume ls -q --filter "label=com.docker.compose.project=$CANARY")" ]; then
     pg="$(container_of "$CANARY" postgres)"
     if [ -z "$pg" ]; then
-      canary_compose up -d --wait postgres
+      # Stopped, or removed by a plain `down`: started on its volume to be read.
+      canary_compose up -d --wait postgres >&2
       pg="$(container_of "$CANARY" postgres)"
+      STARTED_PG=1
     fi
-    # A canary by its stamp, or by the mark a refresh left (one that died
-    # after its restore leaves stable's stamp behind).
+    # A canary by its stamp, by the mark a refresh left (one that died after
+    # its restore leaves stable's stamp behind), or by holding nothing.
     stamp="$(stamp_of "$pg")"
     mark="$(mark_of "$pg")"
-    [ "$stamp" = canary ] || [ "$mark" = canary ] || {
-      echo "the canary's database ($pg) is stamped '${stamp:-nothing}' and marked '${mark:-nothing}', neither canary — refusing to delete its volume. Take it down without --volumes, and look at it first." >&2
+    held="$(relations_in "$pg")"
+    [ "$stamp" = canary ] || [ -n "$mark" ] || [ "$held" = 0 ] || {
+      [ -z "$STARTED_PG" ] || canary_compose stop postgres >/dev/null 2>&1 || true
+      echo "the canary's database ($pg) is stamped '${stamp:-nothing}', carries no refresh mark and holds $held relations — refusing to delete its volume. Take it down without --volumes, and look at it first." >&2
       exit 2
     }
   fi
-  url="$(connector_url)"
-  if [ -n "$url" ] && ours "$url"; then
-    claude mcp remove --scope user "$NAME" >/dev/null
-    say "connector $NAME removed"
-  elif [ -n "$url" ]; then
-    say "connector $NAME points at $url, not this canary's port $PORT — left as it is"
+  read_connector
+  if [ -n "$CONN_URL" ] && ours "$CONN_URL" && [ "$CONN_SCOPE" = user ]; then
+    if claude mcp remove --scope user "$NAME" >/dev/null 2>&1; then say "connector $NAME removed"
+    else say "connector $NAME: \`claude mcp remove --scope user $NAME\` failed — remove it by hand"
+    fi
+  elif [ -n "$CONN_URL" ] && ours "$CONN_URL"; then
+    say "connector $NAME is in $CONN_SCOPE scope, not user — left as it is (claude mcp remove -s $CONN_SCOPE $NAME)"
+  elif [ -n "$CONN_URL" ]; then
+    say "connector $NAME points at $CONN_URL, not this canary — left as it is"
   fi
   VOLS=()
   [ $VOLUMES = 0 ] || VOLS=(--volumes)
@@ -190,6 +242,23 @@ fi
 KEY="${OB1_SMOKE_KEY:-}"
 [ $SMOKE = 0 ] || [ -n "$KEY" ] || { echo "up smoke-tests the canary with OB1_SMOKE_KEY — a raw key whose hash is in MCP_ACCESS_KEYS. Set it, or pass --no-smoke." >&2; exit 2; }
 
+# Where the canary's server would send its model calls, as compose resolves
+# them for it (the fallbacks included). A bare name is a service on the
+# network the server is on, and the canary's has none of stable's.
+unreachable="$(canary_compose config --format json 2>/dev/null | python3 -c '
+import json, sys
+from urllib.parse import urlparse
+env = json.load(sys.stdin)["services"]["server"].get("environment") or {}
+for k in ("OB1_LLM_BASE_URL", "OB1_CHAT_BASE_URL", "OB1_JEV_BASE_URL"):
+    host = urlparse(env.get(k) or "").hostname or ""
+    if host and "." not in host and host != "localhost":
+        print(f"{k}={env[k]}")
+')" || { echo "could not read the canary's configuration through compose (config --format json)." >&2; exit 2; }
+[ -z "$unreachable" ] || {
+  echo "the canary's server would dial $(tr '\n' ' ' <<<"$unreachable")— a service on stable's network (a compose profile's), which the canary's network does not have. Point it at the host (http://host.docker.internal:11434/v1) or a remote provider in $ENV_FILE." >&2
+  exit 2
+}
+
 STABLE_PG="$(container_of "$STABLE" postgres)"
 [ -n "$STABLE_PG" ] || { echo "no running Postgres in compose project $STABLE — start the stack first, or name it with --stable-project." >&2; exit 2; }
 
@@ -198,6 +267,15 @@ STABLE_PG="$(container_of "$STABLE" postgres)"
 taken="$("$RUNTIME" ps --format '{{.Names}}|{{.Ports}}|{{.Label "com.docker.compose.project"}}' \
   | awk -F'|' -v p=":$PORT->" -v c="$CANARY" 'index($2, p) && $3 != c { print $1 }')"
 [ -z "$taken" ] || { echo "port $PORT is published by $taken, outside project $CANARY — remove it, or pick another --port." >&2; exit 2; }
+
+if [ $CONNECT = 1 ]; then
+  command -v claude >/dev/null 2>&1 || { echo "--connect needs the claude CLI on PATH." >&2; exit 2; }
+  read_connector
+  if [ -n "$CONN_URL" ] && { ! ours "$CONN_URL" || [ "$CONN_SCOPE" != user ]; }; then
+    echo "a connector named $NAME is already registered ($CONN_SCOPE scope, $CONN_URL), and is not this canary's at user scope — left as it is. Remove it, or pass --name." >&2
+    exit 2
+  fi
+fi
 
 # The record carries no refresh mark and no tier stamp but stable's; a
 # database with either is a copy a refresh made (or may reset).
@@ -239,44 +317,59 @@ fi
 
 if [ $SMOKE = 1 ]; then
   say "smoke"
-  health="$(curl -s --max-time 20 -H "x-brain-key: $KEY" "$BASE/health")"
-  tier="$(printf '%s' "$health" | python3 -c 'import sys, json; print(json.load(sys.stdin).get("tier") or "")' 2>/dev/null || true)"
-  [ "$tier" = canary ] || { echo "the keyed /health says tier '${tier:-?}', not canary: $(printf '%s' "$health" | head -c 200)" >&2; exit 1; }
+  health="$(curl -s --max-time 20 -H "x-brain-key: $KEY" "$BASE/health" || true)"
+  tier="$(python3 -c 'import sys, json; print(json.load(sys.stdin).get("tier") or "")' <<<"$health" 2>/dev/null || true)"
+  [ "$tier" = canary ] || { echo "the keyed /health says tier '${tier:-?}', not canary: ${health:0:200}" >&2; exit 1; }
   "$HERE/smoke.sh" "$BASE" "$KEY"
 
-  # The vector arm, which smoke.sh leaves out (it runs with no provider): one
-  # thought's own text must find it with a similarity, which needs the
-  # provider to embed the query and the HNSW walk to reach the row.
-  rpc() {
-    curl -s --max-time 60 -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-      -H "x-brain-key: $KEY" -d "$1" "$BASE/" | grep -E '^(data: )?\{' | sed 's/^data: //' | tail -n 1
-  }
-  text_of() { python3 -c 'import sys, json; r = json.load(sys.stdin); print("\n".join(c.get("text", "") for c in (r.get("result") or {}).get("content", [])) or json.dumps(r.get("error") or r))'; }
-  listed="$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_thoughts","arguments":{"limit":1}}}' | text_of)"
-  id="$(printf '%s\n' "$listed" | sed -nE 's/^ *ID: ([0-9a-f-]{36}).*/\1/p' | head -n 1)"
-  if [ -z "$id" ]; then
-    say "vector search not checked: the canary holds no thought to look for"
+  # The vector arm, which smoke.sh leaves out (it runs with no provider): a
+  # thought with a vector, whose opening text no other thought shares (so a
+  # template — a session summary's header — cannot crowd it out), searched for
+  # by its own text, must come back in its own result block with a similarity.
+  # That needs the provider to embed the query and the HNSW walk to reach the row.
+  probe="$(psql_in "$CANARY_PG" "WITH once AS (SELECT md5(left(content, 300)) AS h FROM thoughts GROUP BY 1 HAVING count(*) = 1)
+    SELECT t.id FROM thoughts t JOIN once ON once.h = md5(left(t.content, 300))
+    WHERE t.embedding IS NOT NULL AND length(btrim(t.content)) >= 20
+    ORDER BY t.created_at DESC NULLS LAST LIMIT 1")"
+  if [ -z "$probe" ]; then
+    say "vector search not checked: the canary holds no thought with a vector and text of its own to look for"
   else
-    query="$(printf '%s\n' "$listed" | awk '/^1\. /{getline; sub(/^ +/, ""); print; exit}' | cut -c1-300)"
+    query="$(psql_in "$CANARY_PG" "SELECT left(content, 1000) FROM thoughts WHERE id = '$probe'")"
     body="$(python3 -c 'import sys, json; print(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "search_thoughts", "arguments": {"query": sys.argv[1], "limit": 5, "threshold": 0}}}))' "$query")"
-    found="$(rpc "$body" | text_of)"
-    if printf '%s\n' "$found" | grep -q "ID: $id" && printf '%s\n' "$found" | grep -qE '^--- Result [0-9]+ \([0-9.]+% match\)'; then
-      echo "  ✓  search_thoughts finds thought $id by its own text, with a similarity — the vector arm answers"
+    reply="$(curl -s --max-time 120 -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+      -H "x-brain-key: $KEY" -d "$body" "$BASE/" || true)"
+    # The reply's last JSON frame (raw, or an SSE `data:` line), its text,
+    # and the result block whose ID line is the probe's: `ok <similarity>`,
+    # or `no <why>`. Never fails itself, so every outcome is said.
+    verdict="$(python3 -c '
+import json, re, sys
+probe, raw = sys.argv[1], sys.stdin.read()
+frames = [l[6:] if l.startswith("data: ") else l for l in raw.splitlines()]
+frames = [f for f in frames if f.startswith("{")]
+if not frames:
+    print("no reply was not JSON: " + raw[:200].replace("\n", " ")); sys.exit()
+r = json.loads(frames[-1])
+if "error" in r:
+    print("no " + json.dumps(r["error"])[:200]); sys.exit()
+text = "\n".join(c.get("text", "") for c in (r.get("result") or {}).get("content", []))
+for block in re.split(r"(?m)^(?=--- Result \d+ )", text):
+    lines = block.splitlines()
+    if len(lines) > 1 and lines[1].strip() == "ID: " + probe:
+        m = re.match(r"--- Result \d+ \(([0-9.]+)% match\)", lines[0])
+        print(("ok " + m.group(1) + "%") if m else "no its block has no similarity: " + lines[0]); sys.exit()
+print("no not among the results: " + text[:200].replace("\n", " "))
+' "$probe" <<<"$reply")"
+    if [ "${verdict%% *}" = ok ]; then
+      echo "  ✓  search_thoughts finds thought $probe by its own text at ${verdict#ok } — the vector arm answers"
     else
-      echo "  ✗  search_thoughts did not find thought $id by its own text with a similarity: $(printf '%s' "$found" | head -c 300)" >&2
+      echo "  ✗  search_thoughts did not find thought $probe by its own text with a similarity: ${verdict#no }" >&2
       exit 1
     fi
   fi
 fi
 
 if [ $CONNECT = 1 ]; then
-  command -v claude >/dev/null 2>&1 || { echo "--connect needs the claude CLI on PATH." >&2; exit 1; }
-  url="$(connector_url)"
-  if [ -n "$url" ] && ! ours "$url"; then
-    echo "a connector named $NAME already points at $url, not this canary's port $PORT — left as it is. Remove it, or pass --name." >&2
-    exit 1
-  fi
-  [ -z "$url" ] || claude mcp remove --scope user "$NAME" >/dev/null
+  [ -z "$CONN_URL" ] || claude mcp remove --scope user "$NAME" >/dev/null
   # Its confirmation echoes the header, key and all: not printed.
   claude mcp add --transport http --scope user "$NAME" "$BASE/" -H "x-brain-key: $KEY" >/dev/null
   say "connector $NAME → $BASE/ (user scope; a new Claude Code session sees its tools)"
