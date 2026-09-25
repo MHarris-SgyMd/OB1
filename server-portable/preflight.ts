@@ -1145,7 +1145,7 @@ if (configFailed) {
           const applied = migration === "046" ? `${apply}${THEN_055}` : apply;
           return ledgerRead || !ledgerPresent
             ? applied
-            : `${applied} — or, if the ledger already records ${migration} (${whyUnread}): ${REAPPLY.charAt(0).toLowerCase()}${REAPPLY.slice(1)}`;
+            : `${applied} — or, if the ledger already records ${migration} (${whyUnread}): ${REAPPLY.charAt(0).toLowerCase()}${REAPPLY.slice(1)}${reapplied ? ` ${reapplied}` : ""}`;
         };
         // By signature, not arity: a vendored bootstrap's upsert_thought(text,
         // vector, jsonb) is a third 3-argument form, and reading whichever the

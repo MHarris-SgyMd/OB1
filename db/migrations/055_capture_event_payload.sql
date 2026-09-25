@@ -90,8 +90,13 @@
 --      `before` that is no string (no writer's is; a hand-planted row's may
 --      be) derives to nothing rather than to the next update's `before`, the
 --      text after an edit (run-it, fourth review pass).
---      created_at is filled from the live row
---      alone, and only when it differs from the event's — a deleted
+--      created_at is filled from the live row alone, only when it differs
+--      from the event's, and only when it renders as the timestamp the gate
+--      reads — a non-finite one, or a year of five digits (a bare timestamptz
+--      column; db/ingest-records.ts writes a record's own string), is a value
+--      the gate could never accept, so it is not offered and the content
+--      fills alone (cold read, fifth review pass: offered, it failed the
+--      apply as the array diff had). A deleted
 --      thought's is gone with the row and the fold falls back to the event's
 --      clock, as it does for a row captured at now(). A created_at is filled
 --      with the content or before it, never onto a row that already carries
@@ -151,8 +156,12 @@
 --
 --      backfill_thought_payloads(p_limit) is the pass: 023's shape (a temp
 --      table per call, dropped at commit), candidates read through a partial
---      index on the capture rows still without content — empty once the
---      pass has run, so preflight's census reads an index, not the heap —
+--      index that holds exactly them — the capture rows without content
+--      whose diff is an object — so a bounded pass, the awaiting count and
+--      preflight's census read the index and not the heap, empty once the
+--      pass has run (fifth review pass, both readers: with the type clause
+--      on the queries alone and not the index, the planner left the index
+--      whenever some rows still waited, measured at 60,000 rows) —
 --      in (created_at, seq) order, each derived once, filled under the
 --      setting, the setting restored. Returns {ok, rows, from_update,
 --      from_tombstone, from_row, with_created_at, unrecoverable, skipped,
@@ -831,7 +840,11 @@ AS $$
   -- `before` when that is a string; nothing when it is not (no writer's is —
   -- 001's content is NOT NULL — a planted row's may be), never the next
   -- update's `before`, which is the text after an edit (run-it, fourth
-  -- review pass).
+  -- review pass). An update row whose diff is itself no object, or whose
+  -- content is no object, reads the same way — nothing, reported
+  -- unrecoverable: the evidence is there and unreadable, and the tombstone
+  -- and the row both hold text from after the edit it announces (run-it,
+  -- fifth review pass).
   mv AS (
     SELECT CASE WHEN jsonb_typeof(l.diff->'content'->'before') = 'string' THEN l.diff->'content'->>'before' END AS c
       FROM mine l
@@ -859,7 +872,13 @@ AS $$
   )
   SELECT CASE WHEN EXISTS (SELECT 1 FROM mv) THEN (SELECT c FROM mv)
               ELSE COALESCE((SELECT c FROM tomb), (SELECT l.content FROM live l)) END AS content,
-         CASE WHEN (SELECT l.created_at FROM live l) IS DISTINCT FROM p_at THEN (SELECT l.created_at FROM live l) END AS row_created_at,
+         -- Offered only as the gate can read it: the rendered form must have
+         -- the timestamp's shape (a non-finite value renders "infinity", a
+         -- five-digit year does not start with four digits) — else the
+         -- content fills alone (cold read, fifth review pass).
+         CASE WHEN (SELECT l.created_at FROM live l) IS DISTINCT FROM p_at
+               AND (to_jsonb((SELECT l.created_at FROM live l)) #>> '{}') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}'
+              THEN (SELECT l.created_at FROM live l) END AS row_created_at,
          CASE WHEN EXISTS (SELECT 1 FROM mv WHERE c IS NOT NULL) THEN 'update'
               WHEN EXISTS (SELECT 1 FROM mv) THEN 'none'
               WHEN EXISTS (SELECT 1 FROM tomb) THEN 'delete'
@@ -868,7 +887,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION ob1_capture_payload(uuid, timestamptz, bigint) IS
-  'What a capture row written before 055 derives to, for the payload amendment: among the thought''s events written after it — a row since ob1_config.audit_seq_exact_since (050''s applied_at) when its seq is larger, a row before it when (created_at, seq) is larger; ordered by seq since, by (created_at, seq) before — and no further than the first later tombstone or capture (this incarnation of the id), its content from the first update carrying a content key (the `before`; nothing when that is no string), else the tombstone''s previous_content, else the live row''s content when no later tombstone or capture closed the incarnation, else NULL with source `none`; its created_at from the live row alone, and only when it differs from the event''s. The gate (thought_audit_refuse_mutation under ob1.audit_amend = ''payload'') and backfill_thought_payloads both read it, so a hand fill can write nothing the pass would not. Migration 055 / SMD-2115.';
+  'What a capture row written before 055 derives to, for the payload amendment: among the thought''s events written after it — a row since ob1_config.audit_seq_exact_since (050''s applied_at) when its seq is larger, a row before it when (created_at, seq) is larger; ordered by seq since, by (created_at, seq) before — and no further than the first later tombstone or capture (this incarnation of the id), its content from the first update carrying a content key (the `before`; nothing when that is no string), else the tombstone''s previous_content, else the live row''s content when no later tombstone or capture closed the incarnation, else NULL with source `none`; its created_at from the live row alone, only when it differs from the event''s and renders as a timestamp the gate reads (a non-finite value or a five-digit year does not). The gate (thought_audit_refuse_mutation under ob1.audit_amend = ''payload'') and backfill_thought_payloads both read it, so a hand fill can write nothing the pass would not. Migration 055 / SMD-2115.';
 
 -- ---------------------------------------------------------------------------
 -- 7. Immutable by rule: 008's refusal, 046's kind-fill arm verbatim, and the
@@ -1012,9 +1031,18 @@ $$;
 --    preflight's census, by index rather than by heap. Empty once the pass has
 --    run on a brain whose every capture derives, so it costs nothing after.
 -- ---------------------------------------------------------------------------
+-- The predicate is the candidate predicate, clause for clause: a query whose
+-- WHERE merely implies an index's predicate may use it, but its remaining
+-- clauses are costed on the planner's defaults (0.5 for the `?` test, 0.005
+-- for the type test), and with some rows still waiting after a bounded pass
+-- those defaults sent the awaiting count and preflight's census to the heap
+-- (both readers, fifth review pass, at 60,000 rows). Matching, the index
+-- holds exactly the candidates, the implied clauses drop, and the path is
+-- costed on the index's own size.
 CREATE INDEX IF NOT EXISTS thought_audit_awaiting_payload_idx
   ON thought_audit (created_at, seq)
-  WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false);
+  WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false)
+    AND jsonb_typeof(COALESCE(diff, '{}'::jsonb)) = 'object';
 
 -- ---------------------------------------------------------------------------
 -- 9. The backfill: the payload onto every capture row written before this
@@ -1101,8 +1129,14 @@ BEGIN
   -- batch and it is raised. (Fourth review pass: one statement over every
   -- candidate, retried five times whatever the retry found, was exhausted by
   -- ten deletes over half a second — run-it, at 5,000 rows.) Each attempt
-  -- costs one savepoint; a productive one marks at least one candidate, so
-  -- a batch runs at most v_batch + 5 times.
+  -- costs one savepoint — a subtransaction; a long pass beside a busy
+  -- deleter runs past the 64 a backend caches and spills to pg_subtrans,
+  -- cost and not correctness (cold read, fifth review pass) — and a
+  -- productive one marks at least one candidate, so a batch runs at most
+  -- v_batch + 5 times. The lower bound of a batch is not load-bearing: a
+  -- fill over every not-yet-filled candidate each time would count the same
+  -- rows and cost more (run-it, fifth review pass: the mutant survived every
+  -- assertion, as an equivalent should).
   WHILE v_lo < v_n LOOP
     v_fruitless := 0;
     LOOP
@@ -1162,11 +1196,10 @@ BEGIN
   $count$, v_tbl) INTO v_update, v_tomb, v_row, v_none, v_skipped, v_stamped;
 
   -- What still waits: the capture rows without content — those a bounded
-  -- pass did not reach, and those nothing derives for. Read through the
-  -- index: with the type clause the planner's estimate stays small and the
-  -- count is a bitmap scan of the index under stale statistics as under
-  -- fresh; without it the default selectivity of the `?` test read half the
-  -- table and the heap was scanned (run-it, fourth review pass, at 20,000).
+  -- pass did not reach, and those nothing derives for. The predicate is the
+  -- index's, clause for clause, so the count is the index's (section 8; the
+  -- fourth review pass's claim that the type clause alone kept it there was
+  -- measured false by the fifth, in the state a bounded pass leaves).
   SELECT count(*)::int INTO v_awaiting
     FROM thought_audit
    WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false)

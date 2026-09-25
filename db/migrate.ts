@@ -765,7 +765,7 @@ if (reapply) {
     `  ${dryRun ? "would re-apply" : "re-applying"} every migration (${recorded} recorded, ${migrations.length - recorded} pending), in order, in one transaction with a ${LOCK_TIMEOUT_S} s lock timeout —\n` +
       "  recorded rows stay as they are, pending ones are recorded. Stop the server and any re-embed or extraction worker first:\n" +
       "  001 and 003 take ACCESS EXCLUSIVE locks on thoughts, 011 builds the trigram index if OB1_TRGM_INDEX is on and it is absent,\n" +
-      "  023's backfill call locks thoughts, 050's and 055's the audit rows they fill (OB1_BACKFILL_LIMIT bounds each, as on a first apply),\n" +
+      "  023's backfill call locks thoughts and 050's takes it EXCLUSIVE, 055's locks the audit rows it fills (OB1_BACKFILL_LIMIT bounds each, as on a first apply),\n" +
       "  025 re-validates its constraints, 055 builds a partial index on thought_audit."
   );
 }

@@ -1984,7 +1984,7 @@ console.log("\n[20i] Migration 055 onto a populated brain at the file before it 
   const still = (await sql`SELECT upsert_thought('upgrade 055: still standing', ${{ metadata: { source: "mcp" }, actor }}::jsonb, ${vec(2)}::vector) AS r`)[0].r as { id: string };
   const RAW = "54545454-2054-4054-8054-000000000001";
   await sql.unsafe(`INSERT INTO thoughts (id, content, metadata, embedding, created_at) VALUES ('${RAW}', 'upgrade 055: a backdated record', '{"source": "load"}'::jsonb, '${vec(3)}'::vector, '2024-02-03T04:05:06Z')`);
-  const waiting = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit WHERE action = 'capture' AND NOT (diff ? 'content')`)[0].c);
+  const waiting = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false) AND jsonb_typeof(COALESCE(diff, '{}'::jsonb)) = 'object'`)[0].c);
   const captureOf = async (id: string) => (await sql`SELECT diff FROM thought_audit WHERE thought_id = ${id}::uuid AND action = 'capture' ORDER BY created_at, seq LIMIT 1`)[0]?.diff as Record<string, unknown> | undefined;
   assert((await waiting()) === 4 && !("content" in (await captureOf(moved.id))!) && !("created_at" in (await captureOf(RAW))!), "at 053 four capture rows carry no content, and the backdated record's event no created_at — the log alone cannot rebuild them");
   const stamps = async () => JSON.stringify(await sql`SELECT id, content, content_fingerprint, updated_at::text AS u FROM thoughts ORDER BY id`);

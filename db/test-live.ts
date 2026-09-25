@@ -4958,7 +4958,7 @@ console.log("\n[25] Migration 055's payload backfill under two connections: a se
   await sql.unsafe(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_immutable`);
   await sql.unsafe(`UPDATE thought_audit SET diff = diff - 'content' - 'created_at' WHERE action = 'capture' AND diff->'metadata'->>'source' = 'plant'`);
   await sql.unsafe(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_immutable`);
-  const waiting = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false)`)[0].c);
+  const waiting = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false) AND jsonb_typeof(COALESCE(diff, '{}'::jsonb)) = 'object'`)[0].c);
   assert((await waiting()) === N, `${N} capture rows wait for their payload (${await waiting()})`);
   type Bf = { rows: number; from_row: number; skipped: number; unrecoverable: number; awaiting: number };
   const held = new SQL({ url: URL_, max: 1 });
@@ -5015,9 +5015,15 @@ console.log("\n[25] Migration 055's payload backfill under two connections: a se
   // one or two attempts of a pass retried five times as one statement, and
   // the arm passed; ten deletes SPREAD over half a second — one per attempt
   // — exhausted the five and failed the apply. So the deleter runs for as
-  // long as the pass does, one delete every 10 ms, and the arm asserts that
-  // more than five landed while it ran: the fill's batches, and a budget only
-  // a fruitless retry spends, are what return it.
+  // long as the pass does. Fifth review pass (run-it): deletes spread over
+  // all eight batches landed about one refusal per batch against a budget of
+  // five per batch, so the arm returned with the budget rule removed as
+  // well. The victims are the FIRST batch's candidates, one deleted every
+  // 3 ms, so each attempt of that batch is refused and re-derived until the
+  // deleter stops: the budget spent by every refusal raises after some
+  // fifteen deletes; spent by a fruitless one alone, the pass returns with
+  // the deleted rows set aside — which is what the arm asserts, not how many
+  // deletes were issued.
   await sql`DELETE FROM thoughts`;
   const M = 8000;
   await sql.unsafe(`INSERT INTO thoughts (content, metadata, created_at) SELECT 'racing pass row ' || g, '{"source": "race"}'::jsonb, now() - interval '1 day' FROM generate_series(1, ${M}) g`);
@@ -5025,7 +5031,7 @@ console.log("\n[25] Migration 055's payload backfill under two connections: a se
   await sql.unsafe(`UPDATE thought_audit SET diff = diff - 'content' - 'created_at' WHERE action = 'capture' AND diff->'metadata'->>'source' = 'race'`);
   await sql.unsafe(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_immutable`);
   assert((await waiting()) === M, `${M} capture rows wait, every one with a created_at the pass would fill (${await waiting()})`);
-  const victims = (await sql`SELECT id FROM thoughts WHERE metadata->>'source' = 'race' ORDER BY random() LIMIT 2000`).map((r: { id: string }) => r.id);
+  const victims = (await sql`SELECT t.id FROM thoughts t JOIN (SELECT thought_id, row_number() OVER (ORDER BY created_at, seq) AS n FROM thought_audit WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false)) a ON a.thought_id = t.id WHERE a.n <= 300 ORDER BY a.n`).map((r: { id: string }) => r.id);
   const deleter = new SQL({ url: URL_, max: 1 });
   let passDone = false;
   const racingPass = (async () => { try { return await sql`SELECT backfill_thought_payloads() AS r`.execute(); } finally { passDone = true; } })();
@@ -5034,12 +5040,12 @@ console.log("\n[25] Migration 055's payload backfill under two connections: a se
     if (passDone) break;
     const [{ r }] = await deleter`SELECT delete_thought(${id}::uuid, NULL::jsonb, false) AS r`;
     if ((r as { ok: boolean }).ok) deleted++;
-    await new Promise((r) => setTimeout(r, 10));
+    await new Promise((r) => setTimeout(r, 3));
   }
   const raced = (await racingPass)[0].r as Bf & { unrecoverable: number };
   await deleter.close();
-  assert(deleted > 5, `more deletes landed while the pass ran than the five attempts the fourth review pass found exhaustible (${deleted})`);
-  assert(raced.rows + raced.skipped + raced.unrecoverable === M && raced.unrecoverable === 0, `the pass beside ${deleted} deletes, one every 10 ms for as long as it ran, returned rather than raising, and accounts for every candidate — ${raced.rows} filled, ${raced.skipped} set aside (${JSON.stringify(raced)})`);
+  assert(deleted > 5 && raced.skipped > 5, `more of the first batch's rows were deleted while the pass ran, and set aside by it, than the five refusals a budget spent by every refusal allows (${deleted} deleted, ${raced.skipped} set aside)`);
+  assert(raced.rows + raced.skipped + raced.unrecoverable === M && raced.unrecoverable === 0, `the pass beside ${deleted} deletes of its first batch's rows, one every 3 ms for as long as it ran, returned rather than raising, and accounts for every candidate — ${raced.rows} filled, ${raced.skipped} set aside (${JSON.stringify(raced)})`);
   const after = (await sql`SELECT backfill_thought_payloads() AS r`)[0].r as Bf & { from_tombstone: number };
   assert(after.rows === raced.skipped && after.from_tombstone === raced.skipped && after.awaiting === 0, `…and the next pass fills what was set aside, from the tombstones, leaving nothing waiting (${JSON.stringify(after)})`);
   await sql`DELETE FROM thoughts`;
