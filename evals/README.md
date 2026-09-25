@@ -5341,29 +5341,37 @@ reach the throwaway brain; a knob for one run (`ORCH_AP_PIECES_SYNC_MODE`) goes
 in `orchestration/.env`. `--up` onto an existing project skips what already
 exists: after editing a workflow file, `--down` first.
 
-**The result — all three pass the POC** (one clean cycle each, 2026-09-25, on
-the dogfood Mac: the podman VM, 8 vCPU, 14.9 GiB; the host's Ollama serving
-nothing else during the runs recorded):
+**The result — n8n and Activepieces pass the POC; Windmill passes C1, C3 and C4
+but not C2**, because the criteria posted before the run ask for the capture to
+go through the tool's own MCP client and Windmill has none outside an AI-agent
+step (below). One clean cycle each, 2026-09-25, on the dogfood Mac: the podman
+VM, 8 vCPU, 14.9 GiB; the host's Ollama serving nothing else during the runs
+recorded:
 
-| candidate | C1: run 1 / run 2 | C2: what carried the capture | C3: the endpoint's tools | C3: no key / wrong key |
+| candidate | C1: run 1 / run 2 (answered by the tool, rows added) | C2: what carried the capture | C3: the endpoint's tools | C3: no key / wrong key |
 | --- | --- | --- | --- | --- |
-| n8n 2.40.6 | PASS: +10 (10 issues) in 24.1 s / +0 | PASS: n8n's MCP Client node | `linear_issue`, `brain_search_thoughts` | PASS: 403 / 403 |
-| activepieces 0.91.3 | PASS: +10 (10 issues) in 22.2 s / +0 | PASS: the MCP Client piece's call-tool action | `linear_issue_szrh_e9lic2_mcp`, `brain_search_krzl_n34gia_mcp` + 42 `ap_*` | PASS: 401 / 401 |
-| windmill CE v1.817.0 | PASS: +10 (10 issues) in 33.6 s / +0 | PASS: a script of ours importing the MCP SDK (Windmill has no MCP-client step) | `s-f_ob1_brain__search`, `s-f_ob1_linear__issue`, `runScriptByPath` | PASS: 401 / 401 |
+| n8n 2.40.6 | PASS: 10, +10 (10 issues) in 31.6 s / 10, +0 | PASS: n8n's MCP Client node | `linear_issue`, `brain_search_thoughts` | PASS: 403 / 403 |
+| activepieces 0.91.3 | PASS: 10, +10 (10 issues) in 22.3 s / 10, +0 | PASS: the MCP Client piece's call-tool action | `linear_issue_lr4n_e9jtph_mcp`, `brain_search_u9lc_n2srby_mcp` + 42 `ap_*` | PASS: 401 / 401 |
+| windmill CE v1.817.0 | PASS: 10, +10 (10 issues) in 20.9 s / 10, +0 | FAIL: a script of ours importing the MCP SDK (Windmill has no MCP-client step) | `s-f_ob1_brain__search`, `s-f_ob1_linear__issue`, `runScriptByPath` | PASS: 401 / 401 |
 
-C1: `--verify` first deletes what `orch-capture` wrote (`delete_thought`), so
-every run must land the whole set — ten rows, ten distinct issues — and the
-second run none. That is the brain's content-fingerprint dedup, not per-issue
-idempotency: the workflows keep no cursor, and an issue edited between the runs
-lands a second thought (a real sync writes one per edit). The time is one run's
-wall clock, n=1, and is mostly the brain's own embedding and metadata calls to
-Ollama, with each tool's own start-up in front (a second n8n process, an
+C1: `--verify` first deletes what `orch-capture` wrote (`delete_thought`), then
+runs the ingestion twice. Each run must report ten `capture_thought` calls
+answered in the tool's own run record (n8n's run data, Activepieces' flow run,
+Windmill's job result) — a skipped run cannot pass as a dedup's "+0" — and the
+brain must hold ten rows, ten distinct issues, after the first and none more
+after the second. That "none more" is the brain's content-fingerprint dedup, not
+per-issue idempotency: the workflows keep no cursor, and an issue edited between
+the runs lands a second thought (a real sync writes one per edit). The time is
+one run's wall clock, n=1, and is mostly the brain's own embedding and metadata
+calls to Ollama, with each tool's own start-up in front (a second n8n process, an
 Activepieces sign-in and MCP session, a Windmill job pickup) — it does not rank
 the tools. C2: the capture's writer is a capture-scope key and the read's the
-read key; the column says what carried the capture. C3: the endpoint lists both
-tools, `brain_search` returns SMD thoughts, `linear_issue` returns SMD-1863 with
-Linear's `updatedAt`, and a session with no key and one with a wrong key are
-each refused with 401 or 403 (any other error counts as not refused). C4: every
+read key, and the capture must go through the tool's own MCP client; the column
+says what carried it. C3: the endpoint lists both tools, `brain_search` returns
+SMD thoughts, `linear_issue` returns SMD-1863 and an `updatedAt` timestamp as
+values (the request carries both as text, so an echoed error cannot pass), and a
+session with no key and one whose key differs in its last character are each
+refused with 401 or 403 (any other error counts as not refused). C4: every
 step below was an API or CLI call.
 
 Memory is `docker stats`' usage per container — the cgroup's, page cache
@@ -5377,9 +5385,9 @@ them.
 
 | candidate | image | candidate: start → after runs | shared Postgres: start → after runs | brain server after |
 | --- | --- | --- | --- | --- |
-| n8n | `docker.io/n8nio/n8n@sha256:9c7871d5cc4fc2565bb905e4df5bf7d6a5a4bf2f4313fb99a2b3fa380f331d7c` (1103 MiB) | 589 → 371 MiB | 53 → 78 MiB | 50 MiB |
-| activepieces | `ghcr.io/activepieces/activepieces@sha256:71184b412cde4cc22fca1dd683744588e68b2d198e21ed3316806d549e31f7a6` (1217 MiB) | 1303 → 1462 MiB | 173 → 198 MiB | 42 MiB |
-| windmill | `ghcr.io/windmill-labs/windmill@sha256:8e54fce496ee000eb99489dc022aadec320c8e726ea7387c674adeea7730f86f` (3795 MiB) | 258 → 236 MiB | 188 → 343 MiB | 38 MiB |
+| n8n | `docker.io/n8nio/n8n@sha256:9c7871d5cc4fc2565bb905e4df5bf7d6a5a4bf2f4313fb99a2b3fa380f331d7c` (1103 MiB) | 568 → 367 MiB | 52 → 78 MiB | 50 MiB |
+| activepieces | `ghcr.io/activepieces/activepieces@sha256:71184b412cde4cc22fca1dd683744588e68b2d198e21ed3316806d549e31f7a6` (1217 MiB) | 1233 → 1463 MiB | 171 → 193 MiB | 44 MiB |
+| windmill | `ghcr.io/windmill-labs/windmill@sha256:8e54fce496ee000eb99489dc022aadec320c8e726ea7387c674adeea7730f86f` (3795 MiB) | 213 → 186 MiB | 171 → 262 MiB | 38 MiB |
 
 **On a busy model server.** A cycle run while another job had the host's Ollama
 swapping a 27B model in and out failed on two of the three: Windmill's script
@@ -5418,7 +5426,7 @@ inherits every capture's latency, and only n8n let the workflow say so.
   first use. On a fresh boot the server can go on refusing a piece whose rows the
   sync has already written — 404 `piece_metadata_not_found` for 300 s with
   11,300 of the rows in place, until a restart rebuilt its index from the
-  database: six of seven fresh boots here, so the adapter waits 120 s and
+  database: eight of nine fresh boots here, so the adapter waits 120 s and
   restarts once (its `--up` line says when). Measured: with `AP_PIECES_SYNC_MODE=NONE`
   on a fresh stack the catalogue stays empty and provisioning cannot start (every
   piece lookup 404s for 300 s); set after provisioning, the published flows keep
@@ -5436,7 +5444,9 @@ inherits every capture's latency, and only n8n let the workflow say so.
   (their npm imports are unpinned in the source; Windmill resolves the versions
   current at deploy into a lockfile stored with each script) and a
   schedule. There is no Linear trigger and no MCP-client step: the scripts are
-  the connectors, each importing the MCP SDK itself. Its migrations need two
+  the connectors, each importing the MCP SDK itself. Windmill's MCP client is
+  an AI-agent flow step, where a model chooses the call; the POC's capture is a
+  fixed call, so it was not tried. Its migrations need two
   cluster-wide roles a superuser must create first — `windmill_user` and
   `windmill_admin WITH BYPASSRLS` — which then exist on the brain's Postgres
   server. The worker's process isolation (`unshare`) is unavailable in an
@@ -5465,9 +5475,13 @@ OAuth custody is untested. A live AI session: the verifier is the MCP SDK's
 client over Streamable HTTP, the transport Claude Code speaks. Egress: the
 overlays set each tool's documented telemetry switches, and nothing probed
 what the containers dial — the one egress measurement is Activepieces' sync
-mode above. Load: ten issues, one run at a time. Upgrades, backups and the
-reference multi-container shapes (Redis and separate workers for Activepieces,
-three workers for Windmill).
+mode above. The schedule: each workflow has one (every 15 minutes) and the
+verifier runs the on-demand path, so a schedule that never fires would pass;
+a scheduled run overlapping a verify was tried (a per-minute schedule, six
+verifies, no flake — its captures dedup), and one committing between the
+reset and the count would read as a FAIL, never a PASS. Load: ten issues, one
+run at a time. Upgrades, backups and the reference multi-container shapes
+(Redis and separate workers for Activepieces, three workers for Windmill).
 
 ## Related
 

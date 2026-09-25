@@ -28,6 +28,21 @@ export function render(template: string, env: Record<string, string>): string {
   });
 }
 
+/**
+ * `n8n execute` prints the run's data after a fixed rule line: the capture
+ * node's last run, if it succeeded, output one item per answered call.
+ */
+export function answered(out: string): number {
+  const rule = "====================================\n";
+  const at = out.indexOf(rule);
+  if (at < 0) throw new Error(`n8n execute printed no run data: ${out.slice(-300)}`);
+  const run = JSON.parse(out.slice(at + rule.length));
+  if (run.data?.resultData?.error) throw new Error(`the run failed: ${run.data.resultData.error.message}`);
+  const capture = run.data?.resultData?.runData?.["Capture into the brain"]?.at(-1);
+  if (!capture || capture.executionStatus !== "success") return 0;
+  return capture.data?.main?.[0]?.length ?? 0;
+}
+
 export const n8n: Adapter = {
   tool: "n8n",
   services: ["orch-db", "n8n"],
@@ -49,12 +64,14 @@ export const n8n: Adapter = {
   async runIngestion() {
     // A second n8n process beside the running one: its task broker needs a
     // port of its own, or it refuses to start (5679 is the server's).
-    exec(["env", "N8N_RUNNERS_BROKER_PORT=5690", "n8n", "execute", `--id=${WORKFLOWS.ingest}`]);
+    const out = exec(["env", "N8N_RUNNERS_BROKER_PORT=5690", "n8n", "execute", `--id=${WORKFLOWS.ingest}`]);
+    return answered(out);
   },
   async mcpServer(env) {
     return { url: "http://127.0.0.1:5678/mcp/ob1", headers: { "x-orch-key": env.ORCH_MCP_KEY } };
   },
   mcpClient: "n8n's MCP Client node",
+  nativeMcpClient: true,
   tools: { search: "brain_search_thoughts", act: "linear_issue" },
   version() {
     return exec(["n8n", "--version"]).trim();

@@ -6,8 +6,8 @@
  * variables and the three scripts from this directory (Bun; Windmill resolves
  * their npm imports into a lockfile when each is deployed), and the ingestion
  * script a schedule. The MCP token is scoped to the two tool scripts alone
- * (`mcp:scripts:` — Windmill's own least-privilege form), so that endpoint lists
- * nothing else.
+ * (`mcp:scripts:` — Windmill's own least-privilege form): the endpoint lists
+ * those two and `runScriptByPath`, which refuses any path outside the scope.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -97,7 +97,9 @@ export const windmill: Adapter = {
   },
   async runIngestion(env) {
     const t = await login(env);
-    await api("POST", `/w/${WS}/jobs/run_wait_result/p/f/ob1/linear_ingest`, {}, t);
+    // The job's own result: the script returns the identifiers it captured.
+    const result = await api("POST", `/w/${WS}/jobs/run_wait_result/p/f/ob1/linear_ingest`, {}, t);
+    return Array.isArray(result?.captured) ? result.captured.length : 0;
   },
   async mcpServer(env) {
     const t = await login(env);
@@ -111,6 +113,7 @@ export const windmill: Adapter = {
   // Windmill names a script's tool from its path: `s-`, then the path with `/`
   // as `_` and every `_` doubled (measured: f/ob1/brain_search → s-f_ob1_brain__search).
   mcpClient: "a script of ours importing the MCP SDK (Windmill has no MCP-client step)",
+  nativeMcpClient: false,
   tools: { search: "s-f_ob1_brain__search", act: "s-f_ob1_linear__issue" },
   version() {
     return "CE v1.817.0";

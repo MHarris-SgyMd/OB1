@@ -44,9 +44,9 @@ services:
     # the container as well — on the image's default port 80 it does not, and
     # every connection's validation dies with "fetch failed".
     ports:
-      - "127.0.0.1:${ORCH_PORT:-8080}:${ORCH_PORT:-8080}"
+      - "127.0.0.1:8080:8080"
     environment:
-      AP_PORT: ${ORCH_PORT:-8080}
+      AP_PORT: "8080"
       AP_DB_TYPE: POSTGRES
       AP_POSTGRES_HOST: postgres
       AP_POSTGRES_PORT: "5432"
@@ -57,7 +57,7 @@ services:
       AP_QUEUE_UI_ENABLED: "false"
       AP_ENCRYPTION_KEY: ${ORCH_KEY16}
       AP_JWT_SECRET: ${ORCH_JWT_SECRET}
-      AP_FRONTEND_URL: http://127.0.0.1:${ORCH_PORT:-8080}
+      AP_FRONTEND_URL: http://127.0.0.1:8080
       AP_EXECUTION_MODE: UNSANDBOXED
       AP_ENVIRONMENT: prod
       # Product analytics off at first boot (the docs: this sets the starting

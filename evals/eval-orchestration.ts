@@ -16,20 +16,25 @@
  *
  * What --verify checks (the ticket's comment of 2026-09-25 has the wording):
  *   C1  it first deletes the thoughts `orch-capture` wrote (delete_thought),
- *       then runs the ingestion workflow twice: the first run must land the
- *       whole fixed set — ten rows, ten distinct identifiers, all written by
- *       `orch-capture` — and the second none. The reset is what makes every
- *       verify prove a run executed: without it a dead workflow passed as
- *       "+0, +0" on any verify after the first (review pass 1, a mutant).
+ *       then runs the ingestion workflow twice. Each run must report, from the
+ *       TOOL's own run record, ten capture_thought calls answered; the brain
+ *       must hold ten rows with ten distinct identifiers, all written by
+ *       `orch-capture`, after the first and none more after the second. The
+ *       reset makes every verify's first run prove itself (review pass 1: a dead
+ *       workflow passed as "+0, +0" on a re-verify); the record makes the second
+ *       (review pass 2: a skipped second run passed as a dedup's "+0"). A run
+ *       that throws is a FAIL row, not an abort.
  *   C2  capture: those rows' writer is `orch-capture`, a CAPTURE-scope record
- *       in MCP_ACCESS_KEYS, reached by the path the adapter names (a native
- *       MCP-client step, or a script of our own where the tool has none); read:
- *       the brain search on the candidate's endpoint answers, and the only
- *       credential on that path is `orch-read`.
+ *       in MCP_ACCESS_KEYS, carried by the TOOL's own MCP client — as the
+ *       criteria were posted; a script of ours standing in where the tool has
+ *       no such step (Windmill) is reported and does not pass. Read: the brain
+ *       search on the candidate's endpoint answers, and the only credential on
+ *       that path is `orch-read`.
  *   C3  the candidate's own MCP endpoint lists both tools, the brain search
- *       returns thoughts, the Linear lookup returns a field only Linear has
- *       (`updatedAt`), and a session with no key and one with a wrong key are
- *       each refused with HTTP 401 or 403.
+ *       returns thoughts, the Linear lookup returns SMD-1863 with an
+ *       `updatedAt` timestamp as values (the request carries both as text), and
+ *       a session with no key and one whose key differs in its last character
+ *       are each refused with HTTP 401 or 403.
  *   M1  memory per container at the start of --verify and after the runs, the
  *       image and its digest, the version.
  * C4 (no UI step) is --up's: it prints the steps it took. --up onto an existing
@@ -83,29 +88,54 @@ function written(): { rows: number; ids: number } {
   return { rows, ids };
 }
 
-/** Delete what `orch-capture` wrote, through the brain's own delete path; returns how many. */
-function reset(): number {
-  return Number(brainSql(tool, `SELECT count(*) FROM (SELECT delete_thought(id) FROM thoughts WHERE metadata->>'actor_name' = '${WRITER}') d`));
+/**
+ * Delete what `orch-capture` wrote, through the brain's own delete path.
+ * delete_thought answers every call — `{ok:false, error:…}` for a row it
+ * refuses — so the deletions are the `ok` answers, not the calls.
+ */
+function reset(): { deleted: number; asked: number } {
+  const [deleted, asked] = brainSql(tool, `SELECT count(*) FILTER (WHERE (r->>'ok')::boolean), count(*) FROM (SELECT delete_thought(id) AS r FROM thoughts WHERE metadata->>'actor_name' = '${WRITER}') d`).split("|").map(Number);
+  return { deleted, asked };
 }
 
-/** The header values replaced by a wrong one: the key an AI client might mistype. */
-const wrongKey = (headers: Record<string, string>) => Object.fromEntries(Object.entries(headers).map(([k, v]) => [k, /^Bearer /i.test(v) ? "Bearer wrong-key" : "wrong-key"]));
+/**
+ * Each header's value with its last character changed: a key or token of the
+ * right shape that is not the right one. A literal "wrong-key" is not a JWT, so
+ * a bearer endpoint that decoded a token without checking its signature would
+ * refuse it as malformed and still pass (review pass 2).
+ */
+const wrongKey = (headers: Record<string, string>) =>
+  Object.fromEntries(Object.entries(headers).map(([k, v]) => [k, v.slice(0, -1) + (v.endsWith("A") ? "B" : "A")]));
+
+/** One ingestion run: what the tool says it answered, what the brain holds after, how long. */
+async function ingest(): Promise<{ answered: number; after: { rows: number; ids: number }; ms: number; error?: string }> {
+  const t0 = performance.now();
+  try {
+    const answered = await adapter.runIngestion(env);
+    return { answered, after: written(), ms: Math.round(performance.now() - t0) };
+  } catch (e) {
+    return { answered: 0, after: written(), ms: Math.round(performance.now() - t0), error: (e instanceof Error ? e.message : String(e)).slice(0, 240) };
+  }
+}
 
 async function verify(): Promise<void> {
   const checks: Check[] = [];
   const idle = memoryByContainer(tool);
   const cleared = reset();
   const before = written();
-  const t0 = performance.now();
-  await adapter.runIngestion(env);
-  const firstMs = Math.round(performance.now() - t0);
-  const first = written();
-  await adapter.runIngestion(env);
-  const second = written();
+  const first = await ingest();
+  const second = first.error ? null : await ingest();
+  // Both runs must say they answered the whole set — the tool's own record,
+  // so a run that did not execute cannot pass as a dedup's "+0" — and the
+  // brain must hold the set after the first and nothing more after the second.
+  const c1 = before.rows === 0
+    && first.answered === EXPECTED_ISSUES && first.after.rows === EXPECTED_ISSUES && first.after.ids === EXPECTED_ISSUES
+    && second !== null && !second.error && second.answered === EXPECTED_ISSUES && second.after.rows === first.after.rows;
+  const run2 = second === null ? "not run" : second.error ? `ERROR ${second.error}` : `the tool answered ${second.answered}, +${second.after.rows - first.after.rows} rows`;
   checks.push({
     id: "C1",
-    pass: before.rows === 0 && first.rows === EXPECTED_ISSUES && first.ids === EXPECTED_ISSUES && second.rows === first.rows,
-    detail: `reset ${cleared} → ${before.rows}; run 1 +${first.rows} rows, ${first.ids} distinct issues in ${firstMs} ms (wall clock, the brain's model calls included); run 2 +${second.rows - first.rows}`,
+    pass: c1,
+    detail: `reset deleted ${cleared.deleted} of ${cleared.asked} → ${before.rows}; run 1 ${first.error ? `ERROR ${first.error}` : `the tool answered ${first.answered}, +${first.after.rows - before.rows} rows, ${first.after.ids} distinct issues in ${first.ms} ms (wall clock, the brain's model calls included)`}; run 2 ${run2}`,
   });
 
   const captureScoped = (env.MCP_ACCESS_KEYS ?? "").split(/[,\n]/).some((r) => r.trim().startsWith(`${WRITER}:capture:`));
@@ -131,13 +161,17 @@ async function verify(): Promise<void> {
   const anon = await refuses(url, {});
   const wrong = await refuses(url, wrongKey(headers));
   const searchOk = !search.isError && /SMD-\d+/.test(search.text);
-  // The identifier alone could be the probe's own argument echoed back;
-  // `updatedAt` comes only from Linear's answer.
-  const actOk = !act.isError && act.text.includes("SMD-1863") && act.text.includes("updatedAt");
+  // Values, not names: the request itself carries `updatedAt` (in the query)
+  // and "SMD-1863" (in the variables), so an error echoing the request must
+  // not pass. A timestamp and the identifier as a value come only from Linear.
+  // `\\?"` allows a tool that returns the JSON as an escaped string.
+  const actOk = !act.isError
+    && /"identifier\\?"\s*:\s*\\?"SMD-1863/.test(act.text)
+    && /"updatedAt\\?"\s*:\s*\\?"\d{4}-\d\d-\d\dT/.test(act.text);
   checks.push({
     id: "C2",
-    pass: first.rows === EXPECTED_ISSUES && captureScoped && searchOk,
-    detail: `capture: ${first.rows} rows by ${WRITER} (${captureScoped ? "a capture-scope record" : "NOT a capture-scope record"}) through ${adapter.mcpClient}; read: brain search through orch-read ${searchOk ? "answered" : "FAILED"}`,
+    pass: adapter.nativeMcpClient && first.after.rows === EXPECTED_ISSUES && captureScoped && searchOk,
+    detail: `capture: ${first.after.rows} rows by ${WRITER} (${captureScoped ? "a capture-scope record" : "NOT a capture-scope record"}) through ${adapter.mcpClient}${adapter.nativeMcpClient ? "" : " — not the tool's MCP client, which C2 as posted requires"}; read: brain search through orch-read ${searchOk ? "answered" : "FAILED"}`,
   });
   checks.push({
     id: "C3",

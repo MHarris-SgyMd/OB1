@@ -38,7 +38,11 @@ export type Keys = { capture: string; read: string };
 /** What docker and compose need from the caller's environment to reach the engine — and nothing else. */
 const PASS_THROUGH = [
   "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "TERM", "XDG_RUNTIME_DIR", "SSH_AUTH_SOCK",
-  "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY", "CONTAINER_HOST", "CONTAINER_CONNECTION",
+  "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY", "DOCKER_BUILDKIT", "CONTAINER_HOST", "CONTAINER_CONNECTION",
+  "XDG_CONFIG_HOME", "SSL_CERT_FILE",
+  // A build behind a proxy (the brain's images run bun install), and the
+  // commit the server image stamps itself with (deploy/compose.yaml's build arg).
+  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "OB1_GIT_SHA",
 ];
 
 /**

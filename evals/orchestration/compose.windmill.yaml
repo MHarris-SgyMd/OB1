@@ -53,10 +53,10 @@ services:
       server:
         condition: service_started
     ports:
-      - "127.0.0.1:${ORCH_PORT:-8090}:8000"
+      - "127.0.0.1:8090:8000"
     environment:
       DATABASE_URL: postgres://orch:${ORCH_DB_PASSWORD}@postgres:5432/orchestration?sslmode=disable
-      BASE_URL: http://127.0.0.1:${ORCH_PORT:-8090}
+      BASE_URL: http://127.0.0.1:8090
       MODE: standalone
       RUST_LOG: info
     volumes:

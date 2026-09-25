@@ -39,7 +39,7 @@ services:
       server:
         condition: service_started
     ports:
-      - "127.0.0.1:${ORCH_PORT:-5678}:5678"
+      - "127.0.0.1:5678:5678"
     environment:
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: postgres
@@ -50,7 +50,7 @@ services:
       # Loopback over plain HTTP: the session cookie cannot be Secure here.
       N8N_SECURE_COOKIE: "false"
       N8N_HOST: 127.0.0.1
-      WEBHOOK_URL: http://127.0.0.1:${ORCH_PORT:-5678}/
+      WEBHOOK_URL: http://127.0.0.1:5678/
       GENERIC_TIMEZONE: UTC
       # n8n's documented switches for usage diagnostics, the version check, the
       # template gallery and the onboarding survey, each off. Set, not probed:

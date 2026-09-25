@@ -74,8 +74,8 @@ export const activepieces: Adapter = {
     // On first boot the piece catalogue arrives from Activepieces' cloud after
     // the API already answers — about 12,800 piece versions written to its
     // database in the background — and a connection for a piece the server does
-    // not yet know is refused (404 piece_metadata_not_found). Of seven fresh
-    // boots behind this wait, the pieces appeared within it once; six times
+    // not yet know is refused (404 piece_metadata_not_found). Of nine fresh
+    // boots behind this wait, the pieces appeared within it once; eight times
     // they stayed 404 (once watched for 300 s with the rows already in
     // piece_metadata) until a restart rebuilt the server's index from the
     // database. So: wait, and restart once if needed.
@@ -121,16 +121,22 @@ export const activepieces: Adapter = {
     if (!id) throw new Error(`no flow named "${INGEST}" — run --up first`);
     const { url, headers } = await mcpEndpoint(s);
     const r = await callTool(url, headers, "ap_test_flow", { flowId: id }, 300_000);
-    // Success is asserted, not failure denied: a status the tool adds later,
-    // or "FAILED" inside an issue's text, must not decide it (review pass 1).
-    // C1's count after the reset is the check either way. ap_test_flow's own
-    // word for it: "✅ Run <id> — SUCCEEDED (21.7s)" (measured).
-    if (r.isError || !/— SUCCEEDED \(/.test(r.text)) throw new Error(`ap_test_flow: ${r.text.slice(0, 600)}`);
+    // Success is asserted, not failure denied, and read from the status line
+    // ap_test_flow opens with ("✅ Run <id> — SUCCEEDED (21.7s)", measured) —
+    // anchored, since the steps it echoes below carry the issues' own text
+    // (review passes 1 and 2).
+    const run = /^✅ Run (\S+) — SUCCEEDED \(/m.exec(r.text);
+    if (r.isError || !run) throw new Error(`ap_test_flow: ${r.text.slice(0, 600)}`);
+    // The run record: one loop iteration per issue, each with the capture step's status.
+    const record = await api("GET", `/v1/flow-runs/${run[1]}`, undefined, s.token);
+    const iterations: any[] = record.steps?.step_3?.output?.iterations ?? [];
+    return iterations.filter((i) => i?.step_4?.status === "SUCCEEDED").length;
   },
   async mcpServer(env) {
     return mcpEndpoint(await session(env));
   },
   mcpClient: "the MCP Client piece's call-tool action",
+  nativeMcpClient: true,
   tools: { search: "brain_search", act: "linear_issue" },
   version() {
     return "0.91.3";
