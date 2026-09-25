@@ -2,7 +2,7 @@
 import { displayDate, thoughtTitle, thoughtUrl, THOUGHT_TYPES } from "./thoughts.ts";
 import { cleanForDisplay } from "./consolidate.ts";
 import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedKind, type EmbeddedCapture } from "./embed.ts";
-import { extractMetadata as extractMetadataWith, metadataRefused } from "./metadata.ts";
+import { extractMetadata as extractMetadataWith, metadataRefused, TAG_KEYS } from "./metadata.ts";
 import { decideCalls, mayLeaveBox, type EgressDecision, type EgressSubject } from "./egress.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
@@ -352,9 +352,25 @@ function gateQuery(query: string, principal: Principal): { subject: EgressSubjec
 
 // --- MCP Server Setup ---
 
-/** The `{ isError: true }` envelope the other tools return, in one place. */
-function toolError(text: string) {
-  return { content: [{ type: "text" as const, text }], isError: true as const };
+/**
+ * A machine-readable verdict carried in `structuredContent` beside the prose
+ * (SMD-1978), so a client — the session-capture hook — need not parse English
+ * to tell a refusal from a transient, which pointer to drop, or which
+ * `derived_from` positions named no thought. `retryable` is the transient/final
+ * split; `positions` are the derived_from indices to drop, present only for a
+ * caller allowed to know they exist (the existence-oracle rule, SMD-1298).
+ */
+type ToolErrorCode =
+  | "REFUSED_SUPERSEDES_OWNERSHIP" // a capture key named a supersedes it did not write
+  | "REFUSED_SUPERSEDES_UNKNOWN"   // the supersedes names no thought
+  | "DERIVED_FROM_MISSING"         // a derived_from id names no thought
+  | "SUPERSEDES_UNJUDGED"          // the server could not check/attribute the supersedes; retry
+  | "STORE_UNAVAILABLE";           // the store did not answer; retry
+type ToolErrorInfo = { code: ToolErrorCode; retryable: boolean; positions?: number[] };
+
+/** The `{ isError: true }` envelope the other tools return, in one place; with a code, its machine-readable verdict rides `structuredContent` (SMD-1978). */
+function toolError(text: string, info?: ToolErrorInfo) {
+  return { content: [{ type: "text" as const, text }], isError: true as const, ...(info ? { structuredContent: { ...info } } : {}) };
 }
 
 /**
@@ -413,6 +429,34 @@ function explainRefusal(
  * an importer says what it imports from, and the default stays `mcp`.
  */
 const SOURCE_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
+
+// A caller-set metadata key (SMD-2014): lower-case, starts with a letter, 2-40
+// characters — the shape a reader can filter on. The server owns some keys of
+// `metadata`, and a caller naming one is refused rather than silently overruled
+// by the merge below: `source` (the origin label, set from the `source` arg),
+// the extractor's tag set (TAG_KEYS: type, topics, people…), the actor columns
+// migration 050 stamps from the key, the embedding model migration 021 records,
+// and the extractor's own failure marker. Everything else — `summary_model`,
+// which the session hook sets when a local model wrote the summary — is the
+// caller's to add.
+const META_KEY_RE = /^[a-z][a-z0-9_]{1,39}$/;
+const RESERVED_META = new Set<string>([...TAG_KEYS, "source", "actor_kind", "actor_name", "embedding_model", "metadata_extraction_failed"]);
+const META_VALUE_MAX = 200;
+const META_KEYS_MAX = 8;
+/** The refusal for a bad `metadata` argument, or null when it is clean (or absent). Checked before the model calls, as the other shape refusals are. */
+function refuseMetadataShape(metadata: Record<string, unknown> | undefined): string | null {
+  if (metadata === undefined) return null;
+  const keys = Object.keys(metadata);
+  if (keys.length > META_KEYS_MAX) return `Refused: \`metadata\` carries ${keys.length} keys — at most ${META_KEYS_MAX}.`;
+  for (const k of keys) {
+    if (!META_KEY_RE.test(k)) return `Refused: the \`metadata\` key "${k.slice(0, 40)}" must be lower-case letters, digits and underscores, 2–40 characters, starting with a letter.`;
+    if (RESERVED_META.has(k)) return `Refused: \`metadata.${k}\` is set by the server, not the caller — use the \`source\` argument for the origin label; drop the rest.`;
+    const v = metadata[k];
+    if (typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") return `Refused: \`metadata.${k}\` must be a string, number or boolean.`;
+    if (typeof v === "string" && v.length > META_VALUE_MAX) return `Refused: \`metadata.${k}\` is ${v.length} characters — at most ${META_VALUE_MAX}.`;
+  }
+  return null;
+}
 
 /**
  * Untrusted text — a thought's, a citation's, a judge's reason — on one line
@@ -1572,9 +1616,17 @@ function buildServer(principal: Principal): McpServer {
         // one spelling.
         source: z.string().regex(SOURCE_RE, "lower-case letters, digits and hyphens, 2–40 characters, starting with a letter or digit").optional()
           .describe("Where this capture comes from, recorded as metadata.source — e.g. `claude-code` or `codex` for a session-end hook, `mcp` (the default) for an agent capturing in conversation. Lower-case letters, digits and hyphens, 2–40 characters. A label the caller gives; the audit row's actor says which key wrote."),
+        // SMD-2014. Extra metadata keys the caller controls, merged UNDER the
+        // server's own (source, the extractor's tags, the actor columns), so a
+        // reserved name is refused, never silently overruled. The session hook
+        // sets `summary_model` when a local model wrote the summary, so a reader
+        // and a per-source weight (SMD-1297) can tell a model summary from the
+        // derived one.
+        metadata: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
+          .describe("Extra metadata keys to store on the thought (e.g. `{\"summary_model\": \"llama3.1:8b\"}`). Lower-case keys, string/number/boolean values; at most 8 keys. Keys the server owns — `source` (use the `source` argument), `type`, `topics`, `people` and the like — are refused. Returned to readers alongside the server's own metadata."),
       },
     },
-    async ({ content, derived_from, supersedes, source }) => {
+    async ({ content, derived_from, supersedes, source, metadata: clientMetadata }) => {
       // What a key that cannot read is told and allowed — decided once here
       // and read below, in the catch too (fifth review pass: six scattered
       // canRead tests; sixth: one survived in the catch).
@@ -1592,6 +1644,11 @@ function buildServer(principal: Principal): McpServer {
         // Existence stays the write's.
         const badDerived = derived_from?.find((d) => !UUID_RE.test(d));
         if (badDerived !== undefined) return toolError(`Refused: every \`derived_from\` entry must be a thought id (the ID: line of a search result), not "${badDerived.slice(0, 40)}".`);
+        // A caller `metadata` key that names a server-owned one, or a bad shape,
+        // is refused BEFORE the two model calls are paid for (SMD-2014), as the
+        // pointer shapes above are.
+        const badMetadata = refuseMetadataShape(clientMetadata);
+        if (badMetadata) return toolError(badMetadata);
         // A capture-only key's provenance is trimmed to the ids that exist
         // BEFORE the write, and the reply says nothing of it — not which
         // (third review pass: positions were an existence oracle on a key that
@@ -1626,7 +1683,7 @@ function buildServer(principal: Principal): McpServer {
             // connection, a timeout or a brain before 010 gets the store's own
             // words, since `--grant` would change nothing there (sixth review pass).
             const noPrivilege = (e as { code?: string }).code === "42501" || /permission denied/i.test(why);
-            return toolError(`Error: this key's \`supersedes\` could not be checked against the target's capture record (${why})${noPrivilege ? " — the server role needs SELECT on thought_audit: cd db && bun migrate.ts --grant <role> --url $DATABASE_URL" : ""}.`);
+            return toolError(`Error: this key's \`supersedes\` could not be checked against the target's capture record (${why})${noPrivilege ? " — the server role needs SELECT on thought_audit: cd db && bun migrate.ts --grant <role> --url $DATABASE_URL" : ""}.`, { code: "SUPERSEDES_UNJUDGED", retryable: true });
           }
           // By agent id when both sides carry one; by name only when NEITHER
           // does (the registry away now, as it was at the write). A row without
@@ -1640,14 +1697,14 @@ function buildServer(principal: Principal): McpServer {
           // label the SQL rejects): that will not heal on a retry, so it is a
           // refusal, and the caller posts without the pointer (sixth review pass).
           if (writer !== null && writer.agentId !== null && principal.agentId === undefined) {
-            if (principal.agentUnresolved === "refused") return toolError("Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself, and this key's identity could not be resolved — the agent registry refused its name or digest; see the server log.");
-            return toolError("Error: this key's `supersedes` could not be attributed while the agent registry is unavailable — retry when resolve_agent answers.");
+            if (principal.agentUnresolved === "refused") return toolError("Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself, and this key's identity could not be resolved — the agent registry refused its name or digest; see the server log.", { code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false });
+            return toolError("Error: this key's `supersedes` could not be attributed while the agent registry is unavailable — retry when resolve_agent answers.", { code: "SUPERSEDES_UNJUDGED", retryable: true });
           }
           const own = writer !== null && (
             writer.agentId !== null && principal.agentId !== undefined ? writer.agentId === principal.agentId
               : writer.agentId === null && principal.agentId === undefined ? writer.actorName === principal.name
                 : false);
-          if (!own) return toolError("Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself.");
+          if (!own) return toolError("Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself.", { code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false });
         }
         // What may leave the box (SMD-1903): asked once, for both calls, and
         // only the allowed ones are made — a refused capture costs no request
@@ -1671,7 +1728,12 @@ function buildServer(principal: Principal): McpServer {
         const chunks = embedded?.chunks ?? [];
         const contextFailures = embedded?.contextFailures ?? 0;
 
-        const payload = { metadata: { ...metadata, source: origin } };
+        // The caller's keys UNDER the server's: the extractor's tags and the
+        // origin label win over anything a caller sent by the same name (the
+        // shape check above has already refused a reserved key outright, so this
+        // only orders the rest), and `summary_model` and its like survive
+        // (SMD-2014).
+        const payload = { metadata: { ...clientMetadata, ...metadata, source: origin } };
 
         // Atomicity is the store's problem now: the SQL path writes content,
         // metadata and vector in one statement, while the PostgREST path keeps the
@@ -1879,7 +1941,7 @@ function buildServer(principal: Principal): McpServer {
         // thought (a re-capture writes no pointer, so it never fires there —
         // migration 035). Said as update_thought says it, not as Postgres does
         // (fourth review pass).
-        if (/thoughts_supersedes_fkey/.test(msg)) return toolError("Refused: no thought with the id given as supersedes. Pass the id of an existing thought — the ID: line of a search result.");
+        if (/thoughts_supersedes_fkey/.test(msg)) return toolError("Refused: no thought with the id given as supersedes. Pass the id of an existing thought — the ID: line of a search result.", { code: "REFUSED_SUPERSEDES_UNKNOWN", retryable: false });
         // Its sibling: validate_derived_from's existence refusal (032), the
         // one provenance refusal that still reached the caller as a raw error
         // (fifth review pass).
@@ -1907,12 +1969,15 @@ function buildServer(principal: Principal): McpServer {
           const where = named.length
             ? named.map((i) => `derived_from[${i}] (${sent[i]})`).join(", ")
             : "a `derived_from` id";
-          return toolError(`Refused: ${where} name${named.length > 1 ? "" : "s"} no thought. Each entry must be an existing thought id (the ID: line of a search result).`);
+          // The positions ride the code only when they are NAMED in the prose —
+          // a caller allowed to know a source exists (the existence-oracle rule);
+          // a capture key gets the code with no positions, as it gets no prose
+          // position (SMD-1978).
+          return toolError(`Refused: ${where} name${named.length > 1 ? "" : "s"} no thought. Each entry must be an existing thought id (the ID: line of a search result).`, { code: "DERIVED_FROM_MISSING", retryable: false, ...(named.length ? { positions: named } : {}) });
         }
-        return {
-          content: [{ type: "text" as const, text: `Error: ${msg}` }],
-          isError: true,
-        };
+        // The store did not answer as itself — down, a missing function, a front
+        // returning 401: a transient the caller keeps and retries (SMD-1978).
+        return toolError(`Error: ${msg}`, { code: "STORE_UNAVAILABLE", retryable: true });
       }
     }
   );

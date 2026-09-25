@@ -1,5 +1,7 @@
 # Email History Import
 
+> **On this fork (SMD-2126).** `pull-gmail.ts` reaches the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and embeds each item itself; this fork's stack runs no PostgREST (SETUP.md), so the import fails at its first request (`--dry-run` runs). It becomes an adapter of the ingestion contract — the parser emits items for `bun db/ingest-records.ts --source items --items`, which inserts each row itself with 003's fingerprint function, the audit actor and its `thought_sources` identity (`bun db/reembed.ts` embeds it) — in SMD-2021 (after SMD-2136); the decision for the class is in `docs/vendored-disposition.md`.
+
 > Import your Gmail email history into Open Brain as searchable, embedded thoughts.
 
 Your email is full of decisions, commitments, and context that your AI has never seen. This recipe connects to Gmail, pulls the emails that matter (filtering out receipts, auto-replies, and noise), and loads them into your Open Brain. Once imported, your AI can recall what you said to someone three months ago, find that pricing discussion from last quarter, or surface commitments you forgot about.

@@ -5009,6 +5009,13 @@ running — is named.
 
 ### Results, 2026-09-24 (PostgreSQL 16.15, pgvector 0.8.6, width 8; the program's output, verbatim)
 
+(The run below is the run at 053, as it was. Since migration 055 — SMD-2115,
+step 1 of the decision — the shipped capture event carries the content, the
+baseline passes C1 and the recorded matrix in `evals/writable-projection.ts`
+says so; the prototype SQL calls the shipped diff rule, append and stamp arms
+rather than defining them, and CI's `--check` holds the live run to the
+matrix as recorded now, not to this block.)
+
 ```
 Writable projection — SMD-1999 (Spike 2 of SMD-1997), PostgreSQL 16.15 (Debian 16.15-1.pgdg12+2)
 
@@ -5260,7 +5267,8 @@ OB1_JEV_BASE_URL=http://127.0.0.1:8020 OB1_JEV_LOCAL=1 \
 It warms and uses the host's Ollama, so it slows a brain sharing it for the
 few seconds it runs, and longer if the warm-up has a model to load.
 
-**SMD-1937's gate, end to end** — `eval-jev-gate.ts`. Candidates from a brain's
+**SMD-1937's gate, end to end** — `eval-jev-gate.ts` as it stood at 2635eb7d
+(SMD-1937 has since rebuilt it on graded mentions: the next section). Candidates from a brain's
 own entity graph in one read-only transaction — `bad` (names `^[0-9.:]+$`,
 SMD-1935's rule: a strong label), `positive` (tools, projects, organizations in
 ≥ 5 thoughts: a weak label) and the `person`/`place` layer (no label) — each
@@ -5297,6 +5305,286 @@ open-domain hard tier is 37% (jev/README.md, "Conformance"); which framing, whic
 calibration and which model (SemIf, SMD-2052) is SMD-1937's measurement to make
 on this harness. What the run shows is the Verify bullet: the spike ran against
 the tier with no serving code of its own.
+
+## The entity gate on the cases a regex cannot judge (SMD-1937)
+
+SMD-1937 asked whether a typed-decision model after the extractor earns a place
+in the extraction path. The bar was a margin over the deterministic gate on
+the **ambiguous** cases, not the numeric ones SMD-1935's regex already catches.
+`eval-jev-gate.ts` measures that against the tier (Verdict v1.4, the only model
+it serves; SemIf is SMD-2052). It writes nothing to the brain and puts nothing
+in the path.
+
+**Pre-registered** in the commit before the grades (793b1158):
+- the baselines: B0 = `NUMERIC_NAME_RE`; B1 = SMD-1935's whole gate, which is B0,
+  the type vocabulary as a name, and an identifier's shape typed `person` or
+  `place`;
+- the sample;
+- the split: dev/test by md5 of the thought;
+- the arms;
+- the margins: the arm chosen on dev beats B1 by 10 points of balanced
+  accuracy on test, with the paired bootstrap's 95% interval above 0; and the
+  per-type gates beat the extractor's own type by 10 points on the valid
+  mentions.
+
+The grading rubric (v1, below) was fixed before any tier call. Its rule that a
+code identifier is never an entity was settled at adjudication, not in the
+pre-registration commit.
+
+**The graded set** is `fixtures/entity-gate-grades.json` (ids and numbers only):
+- 201 dogfood mentions whose name passes B0: every `person`, `place` and
+  `organization`, and 50 each of `tool`, `topic` and `project`;
+- two blind Claude graders worked from the name and a window of the thought,
+  without the extractor's type or any tier output;
+- they agree on validity for 91% (kappa 0.82), and on the type for 75 of the
+  78 mentions both call valid (kappa 0.94);
+- 81 of 201 are valid under this rubric, which is strict in three ways:
+  - it grades the first thought's mention, not the entity;
+  - a role word is never a person;
+  - a code identifier (table, function, environment variable, file, branch) is
+    never an entity.
+
+  Each of the three is a definition, not a finding, and rubric v2 below
+  revisits them.
+
+```sh
+mkdir -p "$HOME/.cache/ob1"   # podman does not create a missing bind source
+podman run --rm --network open-brain_default --env-file deploy/.env \
+  -e OB1_JEV_BASE_URL=http://host.containers.internal:8020 -e OB1_JEV_LOCAL=1 \
+  -v "$PWD":/repo:ro -v "$HOME/.cache/ob1":/cache -w /repo/evals oven/bun:1.4.0-alpine sh -c \
+  'export DATABASE_URL="postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/openbrain"; exec bun eval-jev-gate.ts --cache /cache/jev-gate.json'
+```
+
+`--cache` keeps the tier's answers on the host, as probabilities and logits
+only. They are keyed by the model's provenance and by what was asked, so a
+re-analysis asks the tier only for `/info` and the timed thoughts
+(`--cost-thoughts 0` skips those), and another model is asked afresh. The
+file is replaced whole, and written on an interrupt too.
+`--dump-sample` writes the grading sample, which is the brain's text, so write
+it outside the tree. `--grades fixtures/entity-gate-grades-v2.json` (with or
+without `--strict-code`) runs the report under rubric v2, and `--diagnose`
+runs the probes of why the tier fails. Both are below.
+
+On the test split under rubric v1 (90 mentions, 52 invalid), with the threshold, temperature
+and Platt refit taken from dev. The Brier skill is measured against a constant
+at the test split's base rate, scored on the same rows:
+
+| arm | AUROC | served p: mean (range) | ECE served | Brier / skill / ECE, Platt | balanced accuracy | rejects invalid | keeps valid |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| B1 (SMD-1935's gate) | — | — | — | — | 0.545 | 11.5% | 97.4% |
+| v1: SMD-2050's validity framing | 0.586 | 0.54 (0.35–0.66) | 0.114 | 0.242 / 1.0% / 0.052 | 0.562 | 51.9% | 60.5% |
+| **v2**: validity in the prompt's words | **0.658** | 0.55 (0.29–0.67) | 0.136 | 0.229 / 6.2% / 0.118 | **0.645** | 71.2% | 57.9% |
+| claim: "X is <the extractor's type>" | 0.559 | 0.57 (0.41–0.72) | 0.156 | 0.244 / −0.1% / 0.035 | 0.503 | 5.8% | 94.7% |
+| pertype: six binaries, the max | 0.547 | 0.60 (0.45–0.72) | 0.191 | 0.242 / 0.8% / 0.035 | 0.529 | 5.8% | 100.0% |
+| choice: types + number + generic | 0.516 | 0.75 (0.34–0.96) | 0.366 | 0.245 / −0.5% / 0.049 | 0.515 | 34.6% | 68.4% |
+| the extractor's stored confidence | 0.487 | 1.00 (0.90–1.00) | 0.577 | 0.246 / −0.7% / 0.030 | 0.500 | 0.0% | 100.0% |
+
+- **The margin is not met.** v2 was chosen on dev, by a hair: its dev balanced
+  accuracy is 0.637, against 0.635 for the choice.
+
+  | on test, over 10,000 paired resamples in fixture order | difference in balanced accuracy, points | 95% interval |
+  | --- | --- | --- |
+  | v2 − B1 | +10.1 | −1.0 to +21.0 |
+  | B1 then v2 (the order a deployment would use) − B1 | +8.8 | −1.6 to +18.9 |
+  | v2 − B1, without the 4 test windows that lack the name | +10.7 | −0.6 to +21.8 |
+  | grader A's labels alone, the whole procedure refit on dev (chooses v2) | +7.9 | −3.3 to +19.0 |
+  | grader B's labels alone, refit on dev (chooses the choice) | **−6.1** | −17.1 to +4.8 |
+
+  In 9 of the 201 windows the name does not appear: the extractor named what
+  the text does not spell (`OpenBrain`), so the window is the thought's head.
+  7 of those 9 are graded invalid.
+- **The signal is real but weak.** Across 1,000 permutations of v2's scores,
+  chance sits at AUROC 0.501, and 4 reach 0.658 (p = 0.005, with the observed
+  order counted as one). On SMD-1982's 29 hand-graded mentions (another grader,
+  the same definition; 4 of them are also in this set), the tier arms' AUROC is
+  0.55–0.68. B1's balanced accuracy there is 0.75, above v2's 0.575: that set
+  holds numbers and vocabulary words, which B1 catches.
+- **Calibration.**
+  - The served probabilities lean valid while 42% of the test mentions are:
+    the binary arms average 0.54–0.60 and the choice 0.75.
+  - A temperature alone cannot move them. The fit flattens every arm toward a
+    coin (Brier 0.250), and for claim, pertype and the choice it sits at the
+    search's floor.
+  - Platt's offset brings the ECE to 0.03–0.12, and every arm then sits at the
+    base-rate constant's Brier score. v2 beats it by 6.2%; the rest are within
+    about 1% of it, on either side.
+- **Typing is worse than the extractor's.** On the 38 valid test mentions:
+
+  | typer | right type |
+  | --- | --- |
+  | the extractor | 71% |
+  | always `project`, the commonest graded type on these rows | 58% |
+  | the choice (no type when it abstains or picks number or generic) | 53% |
+  | pertype (argmax) | 21% |
+
+  pertype − extractor = −50 points (−66 to −32), so the pre-registered typing
+  margin is not met either. The per-type binaries call 23 of the 38 a tool.
+- **A stored confidence (SMD-1925).** The extractor's column carries no signal:
+  it is 1.00 on 89 of the 90 test mentions (41.6% valid) and 0.90 on one;
+  AUROC 0.487. v2's P after Platt trades precision for recall, but barely:
+
+  | keep at | kept | precision | recall |
+  | --- | --- | --- | --- |
+  | 0.3 | 72 | 44.4% | 84.2% |
+  | 0.4 | 38 | 60.5% | 60.5% |
+  | 0.5 | 8 | 87.5% | 18.4% |
+
+  At 0.2 and below it keeps 88 to 90 of the 90, and at 0.6 and above none.
+- **Cost.** A thought holds 13 mentions at p50, 34 at p95 and 64 at most. I
+  timed 40 whole thoughts drawn by md5 (candidates: 11 at p50, 28 at p90, 42 at
+  most), each thought's list in one call, container to host. The client packs a
+  call into requests of at most 64 decisions, sent in turn.
+
+  | shape | p50 | p90 | max | requests a call |
+  | --- | --- | --- | --- | --- |
+  | one binary a candidate (v2) | 0.88 s | 2.3 s | 3.2 s | 1 |
+  | six binaries a candidate (pertype) | 4.7 s | 12.6 s | 17.2 s | 1 to 4 (p50 2) |
+
+  The reference is SMD-1879's measurement of a 3,000-token thought: one
+  9-second extraction call ("Entity extraction in windows", above). Against
+  that, one binary a candidate is about a tenth of the call, and six are about
+  half at p50 and more than the call at p90.
+- **It cannot replace B0.** Of the 60 most-mentioned numeric names, v2 rejects
+  65% and pertype 5%; B0 rejects all of them.
+- **Post hoc, not in the verdict.** B1's shapes read for every type reject 40%
+  of the invalid mentions and 40% of the valid ones (a ticket id is a valid
+  project), balanced accuracy 0.505. No shape rule separates the code
+  identifiers either: under rubric v1 they are invalid, and under the
+  maintainer's decision below they are entities.
+- **What the self-check holds.** `--self-check` is a fork-checks step.
+  - The gate is a post-filter with no other path to the graph. Off, it keeps
+    every candidate with the extractor's type: today's graph. That is
+    `gate()`'s identity, held by the self-check, not a live measurement.
+  - It holds the rules and the arithmetic, each with a mutant: the bootstrap's
+    pairing and percentiles, the permutation p, the threshold's tie, the
+    pinned split, the window, each arm's reading, each grades-file rule, and
+    the refits.
+  - Among the refits, a clamped log loss let the temperature walk to its bound
+    on the extractor's column, which the first live run showed.
+
+**Rubric v2, after the result.** Not pre-registered: the maintainer asked
+whether the junk was junk, and three definitions of rubric v1 were revisited.
+`fixtures/entity-gate-grades-v2.json` regrades the same 201 mentions with two
+fresh blind graders:
+- **At the entity level:** up to three windows from different thoughts, and the
+  mention count, not the first thought alone.
+- **Roles:** a role or handle that points at one specific person counts as that
+  person (`the maintainer`, meaning the author). Generic roles do not
+  (`worker`, a process; `principal`, an object in code).
+- **Categories:** each mention gets one, of seven: named, role → person, code
+  artifact, URL or path only, number or hash, generic, not held.
+
+The graders agree on validity for 98.5% (kappa 0.96), and on the category for
+196 of 201. 64 mentions flip from invalid to valid: 59 code artifacts, 3 roles
+pointing at a person, and 2 names judged across their mentions. One flips
+back. `--grades fixtures/entity-gate-grades-v2.json` runs the whole report
+under it, and `--strict-code` reads code artifacts as junk.
+
+| rubric | valid of 201 | junk in the graph, weighted by type (of 2,420) | v2 − B1 on test (the report) | tier's 7-way labels vs B1 then the extractor's type (`--diagnose`, D5) |
+| --- | --- | --- | --- | --- |
+| v1 (the verdict's) | 81 | ~1,620 (67%) | +10.1 (−1.0 to +21.0) | 23.9% vs 33.8% |
+| v2, code artifacts junk | 85 | ~1,610 (67%) | +8.9 (−2.2 to +19.7) | 22.4% vs 35.8% |
+| v2, code artifacts count | 144 | ~690 (28%) | +10.5 (−1.4 to +22.2) | 26.4% vs 48.8% |
+
+- **The margin fails under every rubric.**
+- **The junk share is one definition:** whether a code artifact is an entity.
+  The entity level and the roles barely move it.
+- **Some URL-only junk is a type split, not garbage.** `Linear` typed
+  organization has 2 mentions, both in URLs, while the Linear the notes discuss
+  is a separate tool entity with 160 (SMD-1913's under-merging).
+- **Three windows can miss a real use:** `Siggymd`, with 34 mentions, was graded
+  URL-only from its three.
+
+**Why it fails: the labels' default decides, and the name barely moves it.** Not pre-registered.
+JevBench's easy and standard tiers are where Verdict scores 88% and 69%. There
+it decides about a short text (48–70 characters at p50; the model was trained
+on contexts under 71 tokens) whose answer the text states: "Where is my
+package?" is `track_order`. This gate asks what a name inside a long note is.
+`--diagnose` separates the causes, against rubric v2 with code artifacts
+counted, on the 192 mentions whose window holds the name (50 junk):
+
+| framing | label right (7-way) | junk precision | what it answers |
+| --- | --- | --- | --- |
+| abstract labels, the name in the question, the ~800-character window | 26.6% | 28.6% | project 176 of 192 |
+| … the name's sentence alone (about 158 characters) | 25.0% | 38.5% | project 133 |
+| … the name alone as the text | 26.6% | 1 of 1 | project 174 |
+| concrete labels with examples from outside the brain, the name alone | 33.3% | 25.0% | junk 132 |
+| … the name then its sentence | 32.8% | 29.4% | junk 126 |
+| the extractor's own type (never junk) | 47.9% | — | spread over the six |
+
+- **It barely reads the name.** The same window, asked about the entity, `021`
+  and `banana`, gets one answer for all three on 56 of 60, and the largest move
+  in any option's probability is 0.034 at p50.
+  - This is one framing: abstract labels, with the name in the question.
+  - The sample is the first 60 held mentions in fixture order: 22
+    organizations, 18 persons, 11 places, 9 projects, and no tools or topics.
+- **Length is not the cause.** The sentence alone scores the same as the
+  window.
+- **The labels' wording is its default.** Abstract labels pull everything to
+  the vaguest one, `project` ("a named piece of work"), even for the name alone.
+  Concrete labels move the default to `junk`, and its junk calls are right a
+  quarter of the time, at the base rate.
+- **A trap for the next spike.** A probe outside the harness (`--diagnose` runs
+  only the clean examples) wrote label examples of which 11 of 22 were graded
+  names. It scored 48%, equal to the extractor; with examples from outside the
+  brain, 33%. The two probes also differ in wording, so not all of that gap is
+  string matching. Draw a label's examples from outside the set it is scored
+  on.
+- **The whole graph under the first framing:** `project` for 2,268 of 2,420
+  entities, and 2.6% junk. That includes 3 of the 67 numeric names, where B0
+  catches all 67.
+
+**Our reading, which no probe measures directly:** the cause is the task, not
+the framing. A JevBench answer is written in its text, while an entity's type
+rarely is: nothing near `thought_audit` says it is a table. So the task takes
+knowledge of names, which a 151M model tuned on banking intents is unlikely to
+have. SemIf (SMD-2052) is the test of that reading.
+
+**What it settles.**
+- **Verdict v1.4 stays out of the extraction path,** as a validity gate and as a
+  typer, under every rubric and every framing tried.
+- **SMD-1935's deterministic gate ships first,** with its identifier-shape rule
+  turned into a retype (below).
+- **The next model should know names.** SemIf (SMD-2052), the same contract over
+  Qwen3.5-4B, is the one untried lever on this harness.
+- **Code artifacts are entities: the maintainer's decision (2026-09-24).**
+  Files, scripts, tables, functions, environment variables, branches and CI jobs
+  belong in this brain's graph, as tools (or as projects, for a directory of
+  work). So rubric v2 counting them is the brain's working definition, and the
+  recorded verdict stays on rubric v1, fixed before any tier call. Under it:
+  - **The junk is about 28% of the graph** (~690 of 2,420). In the graded
+    sample it is 57 of 201: 31 generic words or roles, 10 names no window
+    holds, 9 minted from URLs or paths alone, and 7 numbers or hashes.
+  - **Topics are the noisiest type** (54% junk), then organizations (36%),
+    persons (33%) and places (18%). Tools (16%) and projects (12%) are mostly
+    sound once code artifacts count.
+  - **SMD-1935's gate should retype an identifier, not reject it.** Over the
+    201 graded mentions, B1's vocabulary rule rejects 3 junk mentions
+    (`person`, `place`, `organization`) and nothing valid. Its number rule does
+    not fire here, since the sample was drawn past B0; its evidence is the 67
+    numeric names in D4. Its
+    identifier-shape rule, which bars a person or place with an identifier's
+    shape, rejects 1 junk mention (`host.containers.internal`) and 7 valid ones.
+    Five of those are code artifacts the extractor typed as a place
+    (`michaelharris/**`, `open-brain_default` and the like); the other two are
+    `hono/mcp` and `openrouter.ai`. So under this definition B1 scores 0.474
+    balanced accuracy on test, below keeping everything. On test that figure is
+    the shape rule alone, since the three vocabulary words fall in dev. The fix is to keep the
+    number and vocabulary rules and turn the shape rule into a retype, to tool.
+    The post-hoc every-type shape rule above is worse: it would reject real
+    entities of every type.
+  - **The targets are the rest, as measured:**
+    - generic words and roles (31 of the 57 junk);
+    - names no window holds (10);
+    - names minted from URLs or paths (9);
+    - numbers and hashes (7).
+
+    Some URL-only junk is one thing split over two types (`Linear` as
+    organization and as tool; SMD-1913).
+- **A free signal is untested:** the notes write code artifacts in backticks,
+  which a deterministic rule on the source text could read to type them as
+  tools rather than drop them.
+- **The confidence column stays uninformative** until something earns the place.
 
 ## Related
 

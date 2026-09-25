@@ -8,12 +8,19 @@
 // ENTITY_EXTRACTION_WORKER_URL, the worker's own http(s) address, refused at
 // boot under any other scheme and skipped when unset — it built the URL from
 // SUPABASE_URL, the Postgres DSN here, so every trigger handed fetch() the
-// database credentials and failed inside its timeout. The trigger fires only
-// after an add the server counts, and it counted none here: upsert_thought
-// answers the fork's UUID id, which extractThoughtId read as no id at all, so
-// every add was reported failed — a UUID is an id now; the rest of the write
-// path's fork gap (the vector in the 2-argument form's payload, the bigint
-// item columns) is SMD-2128's.
+// database credentials and failed inside its timeout; and it never fired,
+// because upsert_thought answers the fork's UUID id, which extractThoughtId
+// read as no id, so every add was reported failed.
+// ob1-fork (SMD-2128): the write path is the fork's. Upstream's 2-argument
+// upsert_thought carried the vector inside the payload, where the fork's
+// function does not look, so every thought this server wrote landed without a
+// vector, unlabelled, its type and source_type NULL and the other enhanced
+// columns at their defaults — invisible to semantic search. writeThought()
+// below is the 3-argument form every other vendored writer uses (SMD-1228):
+// the vector as p_embedding, its model's label and the actor (SMD-1541) in the
+// envelope, the enhanced columns by an update on a fresh row. The item columns
+// that hold a thought id are uuid (schemas/smart-ingest), so a match is
+// persisted and the written id recorded.
 /**
  * smart-ingest — the Smart Ingest server.
  *
@@ -33,15 +40,16 @@
  *
  * Dependencies:
  *   - Smart ingest tables (schemas/smart-ingest): ingestion_jobs, ingestion_items
- *   - append_thought_evidence RPC (from the smart-ingest schema)
+ *   - append_thought_evidence(uuid, jsonb) RPC (from the smart-ingest schema)
  *   - match_thoughts RPC (base OB1)
- *   - upsert_thought RPC (base OB1)
+ *   - upsert_thought(text, jsonb, vector) RPC (base OB1; db/migrations/004, last redefined by 046)
  *   - Enhanced thoughts columns (schemas/enhanced-thoughts)
  */
 
 import { createClient } from "../../compat/supabase-sql/index.ts";
 import {
-  embedText,
+  embedTextLabelled,
+  type LabelledEmbedding,
   computeContentFingerprint,
   prepareThoughtPayload,
   detectSensitivity,
@@ -67,6 +75,12 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ?? "";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+// ob1-fork (SMD-1541, here since SMD-2128): the name 008's audit row records for a write through this server. It
+// holds one key, MCP_ACCESS_KEY, compared in place, so the name is the variable's — the name _shared/auth.ts gives the
+// same legacy key where a server uses the module. `via` is this server, which the trigger stamps as the row's
+// `origin` column (SMD-1730). Without the actor the row named nobody.
+const ACTOR = { name: "MCP_ACCESS_KEY", via: "smart-ingest" };
 
 /**
  * An HTTP target read from its own variable, or null when unset: never derived from SUPABASE_URL, which on this fork is the
@@ -180,7 +194,7 @@ interface IngestionItem {
   content_fingerprint: string;
   action: ReconcileAction;
   reason: string;
-  matched_thought_id: number | null;
+  matched_thought_id: string | null; // thoughts.id, a UUID on this fork (SMD-2128)
   similarity_score: number | null;
   status: "pending" | "executed" | "failed";
   error_message: string | null;
@@ -202,10 +216,16 @@ interface IngestionJob {
   error_message: string | null;
 }
 
+/** What the fork's upsert_thought answers (db/migrations/035): the row's UUID, and whether the text was already there. */
 type UpsertThoughtResult = {
-  thought_id?: number | string; // upstream's integer, or this fork's UUID (SMD-2110)
-  id?: number | string;
+  thought_id?: string;
+  id?: string;
+  existed?: boolean;
 };
+
+/** A vector and the model that labelled it — or neither, when every embedding provider failed (the write goes on without). */
+type Embedded = LabelledEmbedding | { vector: never[]; model: null };
+const NO_VECTOR: Embedded = { vector: [], model: null };
 
 // ── Auth ────────────────────────────────────────────────────────────────────
 
@@ -386,11 +406,11 @@ function mergeTags(existing: unknown, extras: string[]): string[] {
   ]);
 }
 
-/** An id upsert_thought answered: upstream's integer, or this fork's UUID (`thoughts.id` is uuid here; SMD-2110). */
-function isThoughtId(value: unknown): value is number | string {
-  return (typeof value === "number" && Number.isFinite(value)) || (typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value));
+/** An id a function answered: this fork's UUID (`thoughts.id` is uuid here; SMD-2110/2128 — upstream's integer is not one). */
+function isThoughtId(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
-function extractThoughtId(value: unknown): number | string | null {
+function extractThoughtId(value: unknown): string | null {
   if (isThoughtId(value)) return value;
   if (value && typeof value === "object" && "thought_id" in value) {
     const thoughtId = (value as UpsertThoughtResult).thought_id;
@@ -641,7 +661,7 @@ async function reconcileThought(
     tags: thought.tags,
     source_snippet: thought.source_snippet,
     content_fingerprint: fingerprint,
-    matched_thought_id: null as number | null,
+    matched_thought_id: null as string | null,
     similarity_score: null as number | null,
   };
 
@@ -662,7 +682,7 @@ async function reconcileThought(
       ...base,
       action: "skip",
       reason: "fingerprint_match",
-      matched_thought_id: fpMatch[0].id,
+      matched_thought_id: fpMatch[0].id as string,
     };
   }
 
@@ -695,7 +715,7 @@ async function reconcileThought(
 
   const topMatch = matches[0];
   const similarity = topMatch.similarity as number;
-  const matchedId = topMatch.id as number;
+  const matchedId = topMatch.id as string;
   const existingContent = (topMatch.content ?? "") as string;
 
   base.matched_thought_id = matchedId;
@@ -719,35 +739,69 @@ async function reconcileThought(
 // ── Execution ───────────────────────────────────────────────────────────────
 
 /**
- * The item's row after a successful add, append or revision: `executed`, with the thought's id — in `result_thought_id`
- * when it is upstream's integer, in `metadata.result_thought_uuid` when it is this fork's UUID, since the column is
- * bigint until SMD-2128. One statement set the status and the id together before and failed whole on the UUID, its
- * error unread, so the item stayed `ready` under a job marked complete (SMD-2110, review pass 1); the error is logged now.
+ * The item's row after it is decided: `executed`, with the thought's id in `result_thought_id` — the one an add or
+ * revision wrote, the one an append or a skip matched (a skipped duplicate's result is the thought it duplicates, so a
+ * job view can lead to it). A uuid column since SMD-2128 (it was upstream's bigint, which the fork's UUID failed whole;
+ * SMD-2110 parked the id in the item's metadata meanwhile, and the sidecar moves it into the column). The error is
+ * logged, not thrown: the thought is written, and the job's counts say so. Both paths — the inline execute and
+ * /execute — record a skip through this: /execute stepped over a skipped item, leaving it `ready` under a complete job
+ * and in the pending index a custom worker claims from, a row that could not exist while the bigint column refused
+ * every item with a match (SMD-2128, review pass 1).
  */
-async function recordItemResult(itemDbId: number, resultThoughtId: number | string | null): Promise<void> {
+async function recordItemResult(itemDbId: number, resultThoughtId: string | null): Promise<void> {
   if (!itemDbId) return;
-  const patch: Record<string, unknown> = { status: "executed" };
-  if (typeof resultThoughtId === "number") patch.result_thought_id = resultThoughtId;
-  if (typeof resultThoughtId === "string") {
-    // The row's metadata read first, and merged: written whole, a failed read would have replaced what persistItems put
-    // there (type, importance, tags, the snippet) with the id alone — so on a read error the status lands and the id is
-    // logged instead (review pass 2).
-    const { data: row, error: readError } = await supabase.from("ingestion_items").select("metadata").eq("id", itemDbId).maybeSingle();
-    if (readError) console.warn(`ingestion_items #${itemDbId}: metadata could not be read, so result_thought_uuid ${resultThoughtId} is not recorded — ${readError.message}`);
-    else patch.metadata = { ...((row?.metadata as Record<string, unknown> | null) ?? {}), result_thought_uuid: resultThoughtId };
-  }
-  const { error } = await supabase.from("ingestion_items").update(patch).eq("id", itemDbId);
+  const { error } = await supabase.from("ingestion_items").update({ status: "executed", result_thought_id: resultThoughtId }).eq("id", itemDbId);
   if (error) console.warn(`ingestion_items #${itemDbId}: the result update failed — ${error.message}`);
+}
+
+/**
+ * A capture through the 3-argument upsert_thought — the fork's shape for every server (SMD-1228; db/migrations/004,
+ * last redefined by 046): the vector as p_embedding, its model's label (021) and the actor (008, SMD-1541) in the
+ * envelope, and the enhanced-thoughts columns by an update carrying neither content nor vector, on a fresh row only —
+ * a re-capture of text already there keeps that row's own, as rest-api and enhanced-mcp leave it. Upstream's
+ * 2-argument call put the vector inside the payload, where the fork's function does not look: every thought this
+ * server wrote landed without a vector, unlabelled, the enhanced columns at their defaults (SMD-2128). `envelope` is what a
+ * caller adds to the payload beyond these — a revision's `supersedes`, the pointer 025 made the one mechanism for it.
+ */
+async function writeThought(
+  prepared: Awaited<ReturnType<typeof prepareThoughtPayload>>,
+  embedded: Embedded,
+  envelope: Record<string, unknown> = {},
+  what = "upsert_thought",
+): Promise<{ id: string; existed: boolean }> {
+  const vector = safeEmbedding(embedded.vector) ?? null;
+  const { data, error } = await supabase.rpc("upsert_thought", {
+    p_content: prepared.content,
+    p_payload: {
+      metadata: prepared.metadata,
+      ...(vector ? { embedding_model: embedded.model } : {}),
+      actor: ACTOR,
+      ...envelope,
+    },
+    p_embedding: vector,
+  });
+  if (error) throw new Error(`${what} failed: ${error.message}`);
+  const thoughtId = extractThoughtId(data);
+  if (thoughtId === null) throw new Error(`${what} returned no thought_id`);
+  const existed = (data as UpsertThoughtResult).existed === true;
+  if (!existed) {
+    const { error: columnsError } = await supabase.from("thoughts").update({
+      type: prepared.type, importance: prepared.importance, quality_score: prepared.quality_score,
+      source_type: prepared.source_type, sensitivity_tier: prepared.sensitivity_tier,
+    }).eq("id", thoughtId);
+    if (columnsError) throw new Error(`${what} stored thought ${thoughtId} but the enhanced columns failed: ${columnsError.message}`);
+  }
+  return { id: thoughtId, existed };
 }
 
 async function executeItem(
   item: IngestionItem,
-  embedding: number[],
+  embedded: Embedded,
   sourceLabel: string | null,
   sourceType: string | null,
   sourceMetadata?: Record<string, unknown> | null,
   skipClassification = false,
-): Promise<number | string | null> {
+): Promise<string | null> {
   switch (item.action) {
     case "add": {
       const prepared = await prepareThoughtPayload(item.content, {
@@ -762,30 +816,14 @@ async function executeItem(
         },
         skip_classification: skipClassification,
         skip_embedding: true,
-        embedding,
+        embedding: embedded.vector,
       });
       prepared.metadata = {
         ...prepared.metadata,
         tags: mergeTags((prepared.metadata as Record<string, unknown>).tags, item.tags),
         source_snippet: item.source_snippet,
       };
-      const { data, error } = await supabase.rpc("upsert_thought", {
-        p_content: prepared.content,
-        p_payload: {
-          type: prepared.type,
-          importance: prepared.importance,
-          quality_score: prepared.quality_score,
-          source_type: prepared.source_type,
-          sensitivity_tier: prepared.sensitivity_tier,
-          ...(safeEmbedding(prepared.embedding) && { embedding: prepared.embedding }),
-          metadata: prepared.metadata,
-          content_fingerprint: prepared.content_fingerprint,
-        },
-      });
-      if (error) throw new Error(`upsert_thought failed: ${error.message}`);
-      const thoughtId = extractThoughtId(data);
-      if (thoughtId === null) throw new Error("upsert_thought returned no thought_id");
-      return thoughtId;
+      return (await writeThought(prepared, embedded)).id;
     }
 
     case "append_evidence": {
@@ -804,6 +842,7 @@ async function executeItem(
     }
 
     case "create_revision": {
+      if (!item.matched_thought_id) throw new Error("create_revision requires matched_thought_id");
       const prepared = await prepareThoughtPayload(item.content, {
         source: "smart_ingest",
         source_type: sourceType ?? "smart_ingest",
@@ -812,39 +851,27 @@ async function executeItem(
           importance: item.importance,
           source_label: sourceLabel ?? "smart_ingest",
           extraction_type: item.type,
-          supersedes: item.matched_thought_id,
           ...(sourceMetadata ?? {}),
         },
         skip_classification: skipClassification,
         skip_embedding: true,
-        embedding,
+        embedding: embedded.vector,
       });
       prepared.metadata = {
         ...prepared.metadata,
         tags: mergeTags((prepared.metadata as Record<string, unknown>).tags, item.tags),
         source_snippet: item.source_snippet,
       };
-      const { data, error } = await supabase.rpc("upsert_thought", {
-        p_content: prepared.content,
-        p_payload: {
-          type: prepared.type,
-          importance: prepared.importance,
-          quality_score: prepared.quality_score,
-          source_type: prepared.source_type,
-          sensitivity_tier: prepared.sensitivity_tier,
-          ...(safeEmbedding(prepared.embedding) && { embedding: prepared.embedding }),
-          metadata: prepared.metadata,
-          content_fingerprint: prepared.content_fingerprint,
-        },
-      });
-      if (error) throw new Error(`upsert_thought (revision) failed: ${error.message}`);
-      const thoughtId = extractThoughtId(data);
-      if (thoughtId === null) throw new Error("upsert_thought (revision) returned no thought_id");
-      return thoughtId;
+      // The revision supersedes the thought it matched: the row's `supersedes` pointer (db/migrations/025, the one
+      // mechanism for supersession on this fork — upstream put the id in metadata.supersedes, a second place for the
+      // same fact), validated and written by the function on a fresh row; the self-FK refuses a thought deleted since
+      // the dry run, and the item fails with its message. On a fresh row only: a re-capture of text already there keeps
+      // that row's provenance (035), so a revision whose text was captured between the dry run and now would report
+      // "revised" with no pointer written — it fails with why instead (review pass 2).
+      const written = await writeThought(prepared, embedded, { supersedes: item.matched_thought_id }, "upsert_thought (revision)");
+      if (written.existed) throw new Error(`upsert_thought (revision): the text is already thought ${written.id}, whose provenance stays its own — the revision of ${item.matched_thought_id} was not written`);
+      return written.id;
     }
-
-    case "skip":
-      return item.matched_thought_id;
 
     default:
       throw new Error(`Unknown action: ${item.action}`);
@@ -993,7 +1020,7 @@ async function handleExecuteJob(req: Request): Promise<Response> {
     return json({ error: "Job execution conflict — another request may have claimed this job" }, 409);
   }
 
-  let addedCount = 0, skippedCount = 0, appendedCount = 0, revisedCount = 0;
+  let addedCount = 0, skippedCount = 0, appendedCount = 0, revisedCount = 0, failedCount = 0;
   const sourceLabel = job.source_label ?? null;
   const jobMeta = (job.metadata ?? {}) as Record<string, unknown>;
   const sourceType = jobMeta.source_type as string ?? "smart_ingest";
@@ -1003,7 +1030,10 @@ async function handleExecuteJob(req: Request): Promise<Response> {
     : null;
 
   for (const item of items) {
-    if (item.action === "skip") { skippedCount++; continue; }
+    // An item the dry run persisted `failed` — a reconciliation error — stays so and counts so; it carries the skip
+    // action, and the skip branch flipped it to executed and counted it skipped (review pass 2).
+    if (item.status === "failed") { failedCount++; continue; }
+    if (item.action === "skip") { skippedCount++; await recordItemResult(item.id, (item.matched_thought_id as string | null) ?? null); continue; }
     try {
       const fakeItem: IngestionItem = {
         content: item.extracted_content,
@@ -1019,10 +1049,10 @@ async function handleExecuteJob(req: Request): Promise<Response> {
         status: "pending",
         error_message: null,
       };
-      let embedding: number[] = [];
-      try { embedding = await embedText(item.extracted_content); } catch { /* continue without embedding */ }
+      let embedded: Embedded = NO_VECTOR;
+      try { embedded = await embedTextLabelled(item.extracted_content); } catch { /* continue without embedding */ }
       const resultThoughtId = await executeItem(
-        fakeItem, embedding, sourceLabel, sourceType, jobSourceMetadata, skipClassification,
+        fakeItem, embedded, sourceLabel, sourceType, jobSourceMetadata, skipClassification,
       );
 
       await recordItemResult(item.id, resultThoughtId);
@@ -1031,6 +1061,7 @@ async function handleExecuteJob(req: Request): Promise<Response> {
       else if (item.action === "create_revision") revisedCount++;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      failedCount++;
       await supabase.from("ingestion_items")
         .update({ status: "failed", error_message: msg })
         .eq("id", item.id);
@@ -1048,10 +1079,11 @@ async function handleExecuteJob(req: Request): Promise<Response> {
 
   await scheduleEntityExtraction(addedCount + revisedCount);
 
+  // failed_count as the inline path's response carries it (tally); the job row has no column for it.
   return json({
     job_id: jobId, status: "complete",
     added_count: addedCount, skipped_count: skippedCount,
-    appended_count: appendedCount, revised_count: revisedCount,
+    appended_count: appendedCount, revised_count: revisedCount, failed_count: failedCount,
   }, 200);
 }
 
@@ -1207,7 +1239,7 @@ const handler = async (req: Request) => {
 
   const jobFingerprints = new Set<string>();
   const items: IngestionItem[] = [];
-  const embeddings: number[][] = [];
+  const embeddings: Embedded[] = [];
 
   for (const thought of extractedThoughts) {
     const filterReason = qualityGateReason(thought);
@@ -1226,22 +1258,22 @@ const handler = async (req: Request) => {
         status: "pending",
         error_message: null,
       });
-      embeddings.push([]);
+      embeddings.push(NO_VECTOR);
       continue;
     }
 
     try {
       const fingerprint = await computeContentFingerprint(thought.content);
-      let embedding: number[] = [];
+      let embedded: Embedded = NO_VECTOR;
       try {
-        embedding = await embedText(thought.content);
+        embedded = await embedTextLabelled(thought.content);
       } catch (embedErr) {
         console.warn(`embedText failed for thought (fingerprint=${fingerprint}), proceeding with null embedding:`, embedErr instanceof Error ? embedErr.message : String(embedErr));
       }
-      const reconciled = await reconcileThought(thought, embedding, fingerprint, jobFingerprints);
+      const reconciled = await reconcileThought(thought, embedded.vector, fingerprint, jobFingerprints);
       jobFingerprints.add(fingerprint);
       items.push({ ...reconciled, status: "pending", error_message: null });
-      embeddings.push(embedding);
+      embeddings.push(embedded);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       items.push({
@@ -1254,7 +1286,7 @@ const handler = async (req: Request) => {
         action: "skip", reason: `reconciliation_error: ${msg}`,
         matched_thought_id: null, similarity_score: null, status: "failed", error_message: msg,
       });
-      embeddings.push([]);
+      embeddings.push(NO_VECTOR);
     }
   }
 
@@ -1304,8 +1336,8 @@ const handler = async (req: Request) => {
     const item = items[i];
     const itemDbId = itemIds[i] ?? 0;
     if (item.action === "skip") {
-      item.status = "executed";
-      if (itemDbId) await supabase.from("ingestion_items").update({ status: "executed" }).eq("id", itemDbId);
+      // A reconciliation error is a skip persisted `failed`: it stays so, for tally and for the row (review pass 2).
+      if (item.status !== "failed") { item.status = "executed"; await recordItemResult(itemDbId, item.matched_thought_id); }
       continue;
     }
     try {
