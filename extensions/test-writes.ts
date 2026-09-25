@@ -100,22 +100,38 @@
  * of the module loaded with no allowlist, and the ingest proxy's timeout
  * through the fetch stub.
  *
+ * SMD-2110: rest-api's ingest proxy and smart-ingest's extraction trigger
+ * built their upstream URL from SUPABASE_URL — the Postgres DSN here — so
+ * every call handed fetch() the database credentials and failed. Each takes
+ * its own http(s) knob now (SMART_INGEST_URL, ENTITY_EXTRACTION_WORKER_URL),
+ * set here before the modules load: the rest-api block drives both proxy
+ * routes to the stub at the knob's address (the key on both hops, job_id a
+ * number), the 503 naming the variable through an instance loaded without
+ * it, and the boot refusal of a DSN or a query in it; the smart-ingest block
+ * drives one write whose trigger reaches the stub at ITS knob's address with
+ * the key, a dry run then /execute through the server's own execute path, an
+ * instance without the knob that writes and triggers nothing, and the same
+ * boot refusal; and the tail asserts no URL the stub was handed, all suite
+ * long, began postgres:// or carried /functions/v1/.
+ *
  * The files are imported as modules — each exports Bun's entry shape, and its
  * default export's `fetch` is the handler driven here (SMD-1799) — under the
  * loader extensions/test-auth.ts uses for Deno's specifiers; every server
  * imports compat/supabase-sql itself since SMD-1798 (the loader resolved a
  * supabase-js import to it for the two that did not, until then). The model provider is
  * stubbed — a unit vector keyed off the text, so the vector a writer stored is
- * recognisable — as are Readwise's book lookup and smart-ingest's execute
- * (SMD-2079, the ingest proxy's upstream), and everything below the tool or
+ * recognisable — as are Readwise's book lookup, the smart-ingest server rest-api
+ * proxies to (SMD-2079/2110) and the extraction worker smart-ingest triggers
+ * (SMD-2110), and everything below the tool or
  * route boundary is real; test-auth.ts is where the servers start under bun
  * for real.
  *
- * The database is the fork's migrations plus three vendored sidecars the
+ * The database is the fork's migrations plus four vendored sidecars the
  * writers assume: schemas/enhanced-thoughts (the columns the APIs write
  * beside the function — type, importance, sensitivity_tier …),
- * schemas/agent-memory (the write-back's own tables) and schemas/readwise-books
- * (the receiver's book cache and its counter) — and the bio worker's log
+ * schemas/agent-memory (the write-back's own tables), schemas/readwise-books
+ * (the receiver's book cache and its counter) and schemas/smart-ingest (the
+ * ingest server's job tables, SMD-2110) — and the bio worker's log
  * table, `consolidation_log`, from `schemas/entity-extraction/schema.sql`'s
  * definition alone (that sidecar's other tables include a `thought_entities`
  * migration 016 owns). Their tables and
@@ -164,7 +180,7 @@ const MODEL = "openai/text-embedding-3-small";
 await resetSchema(URL_, { dim: DIM, model: MODEL });
 const sql = new SQL({ url: URL_, max: 2 });
 
-const SIDECARS = ["schemas/enhanced-thoughts/schema.sql", "schemas/agent-memory/schema.sql", "schemas/readwise-books/schema.sql"];
+const SIDECARS = ["schemas/enhanced-thoughts/schema.sql", "schemas/agent-memory/schema.sql", "schemas/readwise-books/schema.sql", "schemas/smart-ingest/schema.sql"];
 // The sidecars grant to no Supabase role since change 93 (SMD-1796), so none is created first — until SMD-1810 this
 // suite still created the three, and since CI runs it before test-tools.ts on one Postgres, test-tools' "no
 // Supabase role" probe met them on every run.
@@ -201,18 +217,39 @@ let embeddingsDown = false;
 const bioPrompts: string[] = [];
 /** The book Readwise's API answers for any book id — the receiver's write-through cache reads it once. */
 const BOOK = { id: 42, title: "Meditations", author: "Marcus Aurelius", category: "books", source: "kindle", source_url: null, cover_image_url: null, num_highlights: 3, last_highlight_at: null, tags: [] };
+/** The smart-ingest server's address rest-api proxies to, and the extraction worker's smart-ingest triggers: the two knobs
+ * SMD-2110 gave the servers, set below before the modules load, where each built the URL on the Postgres DSN before. */
+const INGEST = "http://smart-ingest.test";
+const WORKER = "http://extraction-worker.test";
+/** Every URL the stub was handed, suite long: none may begin postgres:// (SMD-2110; the tail asserts it). */
+const reached: string[] = [];
+/** The key each call to the worker's address carried, and each call to the smart-ingest server's. */
+const workerKeys: (string | null)[] = [];
+const ingestKeys: (string | null)[] = [];
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
+  reached.push(url);
   if (/readwise\.io\/api\/v2\/books\//.test(url)) return Response.json(BOOK);
-  // smart-ingest's execute, which rest-api proxies with a bounded timeout (the function is not on this fork): answered
-  // after a pause with the signal honoured, so a proxy whose timeout is not a number — a Request in the slot, the
-  // defect SMD-2079's first review pass holds — aborts here instead.
-  if (url.endsWith("/functions/v1/smart-ingest/execute")) {
+  // The smart-ingest server at rest-api's SMART_INGEST_URL — its root for POST /ingest, /execute for the job route —
+  // answered after a pause with the signal honoured, so a proxy whose timeout is not a number — a Request in the slot,
+  // the defect SMD-2079's first review pass holds — aborts here instead. Matched whole at the knob's address: main's file
+  // fetched the same paths on the DSN, which this stub refuses below like any URL it does not know (SMD-2110).
+  if (url === INGEST || url === `${INGEST}/execute`) {
     await Bun.sleep(25);
     if (init?.signal?.aborted) throw Object.assign(new Error("the proxy aborted"), { name: "AbortError" });
-    return Response.json({ job_id: JSON.parse(String(init?.body ?? "{}")).job_id, status: "executed", stub: true });
+    ingestKeys.push(new Headers(init?.headers).get("x-brain-key"));
+    const sent = JSON.parse(String(init?.body ?? "{}"));
+    // The server's own check on /execute, mirrored: a job_id that is not a number is a 400 — the string rest-api's proxy sent
+    // until review pass 2 (the route captures \d+ and passed it on as captured).
+    if (url !== INGEST && typeof sent.job_id !== "number") return Response.json({ error: "job_id is required" }, { status: 400 });
+    return Response.json(url === INGEST ? { status: "dry_run_complete", dry_run: sent.dry_run, stub: true } : { job_id: sent.job_id, status: "executed", stub: true });
   }
-  if (!/openrouter\.ai|api\.openai\.com/.test(url)) throw new Error(`test-writes.ts: a writer reached ${url}; only the model provider, Readwise's book lookup and smart-ingest's execute are stubbed`);
+  // The extraction worker at smart-ingest's ENTITY_EXTRACTION_WORKER_URL, POSTed to after a write with the key (SMD-2110).
+  if (url.startsWith(`${WORKER}/`)) {
+    workerKeys.push(new Headers(init?.headers).get("x-brain-key"));
+    return Response.json({ processed: 0, succeeded: 0, failed: 0, entities_created: 0, edges_created: 0, dry_run: false, stub: true });
+  }
+  if (!/openrouter\.ai|api\.openai\.com/.test(url)) throw new Error(`test-writes.ts: a writer reached ${url}; only the model provider, Readwise's book lookup, the smart-ingest server and the extraction worker are stubbed`);
   const body = JSON.parse(String(init?.body ?? "{}"));
   if (url.endsWith("/embeddings")) {
     if (embeddingsDown) return new Response("stub: embeddings down", { status: 500 });
@@ -222,6 +259,12 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   if (/synthesizing a biographical profile/.test(String(body.messages?.[0]?.content ?? ""))) {
     bioPrompts.push(String(body.messages?.[1]?.content ?? ""));
     return Response.json({ choices: [{ message: { content: `Canonical Profile: Test is a reader of the Stoics (run ${bioPrompts.length}).` } }] });
+  }
+  // smart-ingest's extraction prompt is answered with one thought, in the {"thoughts": [...]} wrapper it asks for: the
+  // document's text whole, so the thought written is the text sent (SMD-2110).
+  if (/Return STRICT JSON array/.test(String(body.messages?.[0]?.content ?? ""))) {
+    const document = String(body.messages?.[1]?.content ?? "").replace(/^<document>\s*|\s*<\/document>$/g, "");
+    return Response.json({ choices: [{ message: { content: JSON.stringify({ thoughts: [{ content: document, importance: 4, type: "idea", tags: ["stub"], source_snippet: document.slice(0, 40) }] }) } }] });
   }
   // The metadata worker's classifier is answered with a confident, material reclassification (SMD-1798).
   if (/classifier for personal thoughts/.test(String(body.messages?.[0]?.content ?? ""))) {
@@ -266,6 +309,9 @@ process.env.SUPABASE_SERVICE_ROLE_KEY = "stub";
 process.env.MCP_ACCESS_KEY = KEY;
 process.env.MCP_ACCESS_KEYS = `${NAMED}:write:${createHash("sha256").update(NAMED_KEY, "utf8").digest("hex")}`;
 process.env.OPENROUTER_API_KEY = "stub-openrouter-key"; // the writers' first-choice provider; its model name is the label
+// The two servers' upstream addresses (SMD-2110), read at import: the stub answers at them, and refuses the DSN's paths.
+process.env.SMART_INGEST_URL = INGEST;
+process.env.ENTITY_EXTRACTION_WORKER_URL = WORKER;
 for (const name of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_EMBEDDING_MODEL", "OPENAI_EMBEDDING_MODEL"]) delete process.env[name];
 // The receiver's secret and token, and the auditor's key and Slack settings (read at import; Slack is never reached).
 const READWISE_SECRET = "a-secret-readwise-minted";
@@ -631,7 +677,8 @@ try {
   assert(!stats.isError && typeof stats.structured?.total === "number" && stats.structured.total >= 2 && Array.isArray(stats.structured?.top_types),
     `brain_thought_stats reads brain_stats_aggregate, a jsonb scalar (${stats.toolText.slice(0, 60)})`);
   const ops = await call(h, "ops_capture_status", {});
-  assert(!ops.isError && ops.structured?.available === false, `ops_capture_status says smart-ingest is not installed — tableExists through the shim's head count (${ops.toolText.slice(0, 60)})`);
+  // The smart-ingest sidecar is applied here since SMD-2110 (its block below writes a job), so the tool finds the table.
+  assert(!ops.isError && ops.structured?.available === true && ops.structured?.total_jobs === 0, `ops_capture_status says smart-ingest is installed with no job yet — tableExists through the shim's head count, the sidecar this suite applies (${ops.toolText.slice(0, 60).replace(/\n/g, " ")})`);
   const graph = await call(h, "graph_search", { query: "ada" });
   assert(!graph.isError && graph.structured?.available === false, `graph_search degrades without schemas/knowledge-graph (${graph.toolText.slice(0, 60)})`);
   const entity = await call(h, "entity_detail", { entity_id: "11111111-1111-4111-8111-111111111111" });
@@ -953,14 +1000,19 @@ try {
   // this arm with the others (six of them, review pass 4).
   assert(preflight.status === 204 && allow(preflight) === D && /x-brain-key/.test(String(preflight.headers.get("access-control-allow-headers"))) && unauthorized.status === 401 && allow(unauthorized) === D,
     `the preflight 204 and the 401 keep theirs — they passed the request before, and are the wrapper's now like every answer (${preflight.status} ${allow(preflight)} / ${unauthorized.status} ${allow(unauthorized)})`);
-  // The ingest proxy's timeout: dropping `req` from proxyFetchJson's parameters left handleExecuteJob passing it into the
-  // timeout's slot — NaN, so every execute aborted at once with a 504 (SMD-2079; nothing typechecks the file, SMD-2080).
-  // The stub answers after 25 ms honouring the signal, so a timeout that is not a number aborts it. It matches the URL by
-  // its path: on this fork the route builds it from SUPABASE_URL, the Postgres DSN, and a real fetch refuses the protocol
-  // (SMD-2110) — this arm holds the proxy's timeout and its headers, not the route.
-  const exec = await send(h, "POST", "/ingestion-jobs/7/execute", undefined, KEY, D);
-  assert(exec.status === 200 && exec.json?.status === "executed" && exec.json?.job_id === "7" && allow(exec) === D,
-    `the ingest proxy's timeout is the number it was given, not the request — through the stub, POST /ingestion-jobs/:id/execute answers the upstream's reply with the CORS headers instead of an immediate 504 (${exec.status} ${JSON.stringify(exec.json).slice(0, 80)}; ${allow(exec)})`);
+  // The two proxy routes reach the smart-ingest server at SMART_INGEST_URL, set before the module loaded — /execute for the
+  // job route, the root for /ingest — and answer its reply (SMD-2110): main's file built the URL from SUPABASE_URL, the
+  // Postgres DSN, so a real fetch refused the scheme and every deployment answered 502 with the credentials in the URL it
+  // was handed; the stub here refuses that URL the same way. It answers after 25 ms honouring the signal, so the proxy's
+  // timeout must be the number it was given — dropping `req` from proxyFetchJson's parameters left handleExecuteJob
+  // passing it into the timeout's slot, NaN, an immediate 504 (SMD-2079 review pass 1; nothing typechecks the file, SMD-2080).
+  const [exec, ingest] = await Promise.all([
+    send(h, "POST", "/ingestion-jobs/7/execute", undefined, KEY, D),
+    send(h, "POST", "/ingest", { text: "a note for the ingest server", dry_run: true }, KEY, D)]);
+  assert(exec.status === 200 && exec.json?.status === "executed" && exec.json?.job_id === 7 && allow(exec) === D,
+    `POST /ingestion-jobs/:id/execute reaches the smart-ingest server at SMART_INGEST_URL's /execute with job_id as the number the server requires, and answers its reply with the CORS headers — main's file fetched the DSN and answered 502, the first commit sent "7" for a relayed 400; the proxy's timeout is the number it was given, not the request (${exec.status} ${JSON.stringify(exec.json).slice(0, 80)}; ${allow(exec)})`);
+  assert(ingest.status === 200 && ingest.json?.status === "dry_run_complete" && ingest.json?.dry_run === true && ingest.json?.stub === true && allow(ingest) === D && ingestKeys.length === 2 && ingestKeys.every((k) => k === KEY),
+    `…and POST /ingest reaches its root with the body forwarded, both hops carrying this gateway's key as x-brain-key — the README's "the two hold the same key" (${ingest.status} ${JSON.stringify(ingest.json).slice(0, 80)}; ${allow(ingest)}; keys ${ingestKeys.map((k) => (k === KEY ? "sent" : String(k))).join(",")})`);
   // The 429 rebuilt its header set (it spread the CORS headers itself before): Retry-After and the content type stay, the
   // CORS headers arrive from the wrapper, and Retry-After is exposed, which no answer was (review pass 1). The cap is the
   // default hundred a minute — the block has sent about thirty under KEY, this loop sends the rest, and its bound outlasts
@@ -971,13 +1023,96 @@ try {
     && /\bRetry-After\b/.test(String(limited.headers.get("access-control-expose-headers"))),
     `the 429 carries the request's CORS headers beside Retry-After and its JSON content type, and exposes Retry-After to the browser (${limited?.status} ${limited ? allow(limited) : "-"} / ${limited?.headers.get("retry-after")} / ${limited?.headers.get("content-type")} / ${limited?.headers.get("access-control-expose-headers")})`);
   delete process.env.CORS_ALLOWED_ORIGINS;
-  // The default, no allowlist: `*` to any origin, the README's backward-compatibility promise, which nothing drove while
-  // the block ran under an allowlist (review pass 3). A second instance of the module, loaded with the variable unset;
-  // the query string keeps Bun's module cache from handing back the first.
-  const open = (await import(join(ROOT, F) + "?no-allowlist")) as { default?: { fetch?: Handler } };
-  const star = await send(open.default!.fetch!, "GET", "/health", undefined, KEY, "https://elsewhere.test");
+  delete process.env.SMART_INGEST_URL;
+  // The defaults: no allowlist — `*` to any origin, the README's backward-compatibility promise, which nothing drove while
+  // the block ran under an allowlist (SMD-2079 review pass 3) — and no SMART_INGEST_URL, where the two proxy routes answer
+  // 503 naming the variable (SMD-2110). A second instance of the module, loaded with both variables unset; the query string
+  // keeps Bun's module cache from handing back the first. Its rate-limit bucket is its own, so the 429 loop above is no bar.
+  const open = (await import(join(ROOT, F) + "?defaults")).default!.fetch! as Handler;
+  const [star, unconfigured, unconfiguredIngest] = await Promise.all([
+    send(open, "GET", "/health", undefined, KEY, "https://elsewhere.test"),
+    send(open, "POST", "/ingestion-jobs/7/execute", undefined, KEY, D),
+    send(open, "POST", "/ingest", { text: "a note for the ingest server" }, KEY, D)]);
   assert(star.status === 200 && allow(star) === "*",
     `with no allowlist the gateway answers Access-Control-Allow-Origin: * to any origin — the README's default (${star.status} ${allow(star)})`);
+  assert(unconfigured.status === 503 && unconfigured.json?.error === "smart_ingest_not_configured" && unconfigured.json?.variable === "SMART_INGEST_URL" && allow(unconfigured) === "*"
+    && unconfiguredIngest.status === 503 && unconfiguredIngest.json?.variable === "SMART_INGEST_URL",
+    `with SMART_INGEST_URL unset, POST /ingestion-jobs/:id/execute and POST /ingest answer 503 naming the variable, CORS headers on — main's file fetched the DSN's path and answered 502 upstream_unreachable (${unconfigured.status} ${JSON.stringify(unconfigured.json).slice(0, 80)}; ${unconfiguredIngest.status} ${unconfiguredIngest.json?.variable})`);
+  // The DSN in the knob — the URL main's file built, handed over as configuration — is refused at boot: the module does not
+  // load, and the message names the variable and the scheme and none of the value, whose userinfo is the database password.
+  process.env.SMART_INGEST_URL = URL_;
+  const refused = await import(join(ROOT, F) + "?dsn-in-the-knob").then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
+  process.env.SMART_INGEST_URL = INGEST;
+  assert(refused !== null && /^SMART_INGEST_URL must be an http\(s\) URL — it is a postgres(ql)?:\/\/ URL; write it as http:\/\/host:port$/.test(refused) && !refused.includes(new URL(URL_).host),
+    `a postgres:// SMART_INGEST_URL is refused when the module loads, the message naming the variable and the scheme and not the value (${refused === null ? "loaded" : refused})`);
+  // So is an address with a query: /execute is appended to it, and `?tenant=a/execute` is no path (review pass 1).
+  process.env.SMART_INGEST_URL = `${INGEST}/si?tenant=a`;
+  const refusedQuery = await import(join(ROOT, F) + "?query-in-the-knob").then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
+  process.env.SMART_INGEST_URL = INGEST;
+  assert(refusedQuery !== null && /^SMART_INGEST_URL must be a bare http\(s\) address/.test(refusedQuery),
+    `…and one with a query string, which a path is appended to, is refused as not bare (${refusedQuery === null ? "loaded" : refusedQuery})`);
+}
+
+// ── integrations/smart-ingest (SMD-2110) ─────────────────────────────────────
+
+{
+  const F = "integrations/smart-ingest/index.ts";
+  console.log(`\n[${F}]`);
+  const h = await load(F);
+  // One ingest, executed at once: the stubbed model extracts the text as one thought, the server writes it through
+  // upsert_thought, and the write POSTs to the extraction worker at ENTITY_EXTRACTION_WORKER_URL — set before the module
+  // loaded — with its key and the count as ?limit=. Main's file built that URL from SUPABASE_URL, the Postgres DSN, so every
+  // trigger handed fetch() the credentials and failed inside its timeout — and fired never, on this fork: upsert_thought
+  // answers a UUID id, which the file read as no id, so every add was reported failed (the arm's first run said so: added 0,
+  // failed 1, "upsert_thought returned no thought_id"). A UUID is an id now; the vector the 2-argument form drops from its
+  // payload and the bigint item columns are SMD-2128's, so the row is held by content and fingerprint, not its vector.
+  const text = "The shim binds a vector by its column's declared type, so a raw write with a number array reaches Postgres as JSON text.";
+  const mark = reached.length;
+  const ingested = await send(h, "POST", "/", { text, dry_run: false, skip_classification: true, source_label: "test-writes" });
+  const calls = reached.slice(mark);
+  const items = await sql`SELECT action, reason, status, error_message, result_thought_id, metadata->>'result_thought_uuid' AS result_thought_uuid FROM ingestion_items WHERE job_id = ${Number(ingested.json?.job_id) || 0}`;
+  assert(ingested.status === 200 && ingested.json?.status === "complete" && ingested.json?.added_count === 1 && Number(ingested.json?.job_id) > 0,
+    `POST / extracts one thought through the stubbed model, records the job and writes the thought (${ingested.status} ${JSON.stringify(ingested.json).slice(0, 160)}; items ${JSON.stringify(items).slice(0, 300)})`);
+  const rows = await sql`SELECT id FROM thoughts WHERE content = ${text} AND content_fingerprint IS NOT NULL`;
+  assert(rows.length === 1, `…the row through upsert_thought, its fingerprint beside the content (${rows.length}; the vector is SMD-2128's)`);
+  // The item's row says so too: one statement set status and result_thought_id together before, and the fork's UUID in the
+  // bigint column failed it whole, unread — the item stayed `ready` under a job marked complete (review pass 1). The
+  // status lands, and the UUID rides in the item's metadata until SMD-2128 widens the column.
+  assert(items.length === 1 && items[0].action === "add" && items[0].reason === "no_semantic_match" && items[0].status === "executed" && items[0].result_thought_id === null && items[0].result_thought_uuid === rows[0]?.id,
+    `…and the item's row is an add for no semantic match (the stub's one-hot vectors make any collision with an earlier thought a duplicate, review pass 2), executed, with the thought's UUID in its metadata — the bigint result column left null, not failed whole (${JSON.stringify(items).slice(0, 200)})`);
+  // The other half of the pipeline, the one rest-api's execute route proxies: a dry run parks the item as `ready`, and
+  // POST /execute writes it — through recordItemResult's second call site, and with job_id as the STRING the proxy sent
+  // until review pass 2, which the server takes now beside the number it required (a proxied execute was a 400 for every
+  // job, and no arm drove this path).
+  const text2 = "A dry run parks its items as ready in ingestion_items, and the execute route is what rest-api proxies to.";
+  const dry = await send(h, "POST", "/", { text: text2, dry_run: true, skip_classification: true, source_label: "test-writes" });
+  const jobId = Number(dry.json?.job_id);
+  const mark3 = reached.length;
+  const ran = await send(h, "POST", "/execute", { job_id: String(jobId) });
+  const items2 = await sql`SELECT action, reason, status, result_thought_id, metadata->>'result_thought_uuid' AS result_thought_uuid FROM ingestion_items WHERE job_id = ${jobId || 0}`;
+  const rows2 = await sql`SELECT id FROM thoughts WHERE content = ${text2}`;
+  assert(dry.status === 200 && dry.json?.status === "dry_run_complete" && jobId > 0 && ran.status === 200 && ran.json?.status === "complete" && ran.json?.added_count === 1 && ran.json?.job_id === jobId
+    && items2.length === 1 && items2[0].status === "executed" && items2[0].result_thought_uuid === rows2[0]?.id && reached.slice(mark3).some((u) => u === `${WORKER}/?limit=1`),
+    `a dry run and then POST /execute with job_id as a numeric string: the job completes with one add, the item's row is executed with the thought's UUID in its metadata, and the worker is triggered once (${dry.status} ${dry.json?.status} #${jobId}; ${ran.status} ${JSON.stringify(ran.json).slice(0, 100)}; items ${JSON.stringify(items2).slice(0, 160)})`);
+  assert(calls.filter((u) => u.startsWith(`${WORKER}/`)).join() === `${WORKER}/?limit=1` && workerKeys.at(-1) === KEY,
+    `…and POSTs once to the extraction worker at ENTITY_EXTRACTION_WORKER_URL with the count as ?limit= and the server's key — the knob's address, not a path on the DSN (${calls.filter((u) => !/openrouter/.test(u)).join(" ") || "no call"}; key ${workerKeys.at(-1) === KEY ? "sent" : String(workerKeys.at(-1))})`);
+  // Without the knob: the write lands and triggers nothing — no call to the worker, and no URL on the DSN either — and the
+  // module says so once at load (silenced here). A second instance, loaded with the variable unset.
+  delete process.env.ENTITY_EXTRACTION_WORKER_URL;
+  const warn = console.warn; console.warn = () => {};
+  let quiet: Handler;
+  try { quiet = (await import(join(ROOT, F) + "?no-worker")).default!.fetch! as Handler; } finally { console.warn = warn; }
+  const mark2 = reached.length;
+  const second = await send(quiet, "POST", "/", { text: `${text} (a second note)`, dry_run: false, skip_classification: true });
+  const calls2 = reached.slice(mark2);
+  assert(second.status === 200 && second.json?.added_count === 1 && calls2.length > 0 && calls2.every((u) => /openrouter\.ai/.test(u)),
+    `with ENTITY_EXTRACTION_WORKER_URL unset the write lands and reaches nothing but the model — no worker call, no URL on the DSN (${second.status} ${second.json?.added_count}; ${calls2.filter((u) => !/openrouter/.test(u)).join(" ") || "nothing else"})`);
+  // The DSN in the knob is refused at boot, as rest-api refuses its own.
+  process.env.ENTITY_EXTRACTION_WORKER_URL = URL_;
+  const refused = await import(join(ROOT, F) + "?dsn-in-the-knob").then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
+  process.env.ENTITY_EXTRACTION_WORKER_URL = WORKER;
+  assert(refused !== null && /^ENTITY_EXTRACTION_WORKER_URL must be an http\(s\) URL — it is a postgres(ql)?:\/\/ URL; write it as http:\/\/host:port$/.test(refused) && !refused.includes(new URL(URL_).host),
+    `a postgres:// ENTITY_EXTRACTION_WORKER_URL is refused when the module loads, the message naming the variable and the scheme and not the value (${refused === null ? "loaded" : refused})`);
 }
 
 // ── recipes/repo-learning-coach ──────────────────────────────────────────────
@@ -1242,6 +1377,20 @@ for (const [ticket, files] of [["SMD-1228", [...DRIVEN, ...TEXT_ONLY]], ["SMD-15
 {
   assert(existsSync(join(ROOT, "scripts/check-fork-consistency.ts")) && /function thoughtWritesAroundIn\(/.test(readFileSync(join(ROOT, "scripts/check-fork-consistency.ts"), "utf8")),
     "scripts/check-fork-consistency.ts check 10 holds the text of every file: no raw write of content or vector on thoughts");
+}
+// SMD-2110: an HTTP target comes from its own variable, never from SUPABASE_URL — the connection string on this fork. Every
+// URL the stub was handed, by every writer this suite drove, and the two files' text: no URL built on that variable.
+assert(reached.length > 0 && !reached.some((u) => /^postgres(ql)?:/.test(u) || u.includes("/functions/v1/")),
+  `no writer handed fetch() a postgres:// URL or a /functions/v1/ path, suite long (${reached.length} calls; ${reached.filter((u) => /^postgres(ql)?:/.test(u) || u.includes("/functions/v1/")).slice(0, 3).map((u) => u.replace(/\/\/[^/@]*@/, "//…@")).join(" ")})`); // userinfo redacted: it is the password
+// The literal forms — a template `${SUPABASE_URL}/…` or a concatenation `SUPABASE_URL + "/…"` — in the two files' text; an
+// alias or a `new URL(path, SUPABASE_URL)` would pass this and fail the arm above at run time.
+for (const f of ["integrations/rest-api/index.ts", "integrations/smart-ingest/index.ts"]) spells(f, /^(?![\s\S]*(?:\$\{SUPABASE_URL\}\/|SUPABASE_URL\s*\+\s*["'`]\/))/, " writes no `${SUPABASE_URL}/…` template and no `SUPABASE_URL + \"/…\"` concatenation");
+// The two servers each carry httpTargetFrom (they deploy alone and share only their own _shared/): held identical to the
+// character, comment lines aside, as the date helpers are above.
+{
+  const helper = (rel: string) => (readFileSync(join(ROOT, rel), "utf8").match(/^function httpTargetFrom[\s\S]*?^}$/m)?.[0] ?? "").split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+  const [ours, theirs] = [helper("integrations/rest-api/index.ts"), helper("integrations/smart-ingest/index.ts")];
+  assert(ours.length > 300 && ours === theirs, `integrations/rest-api/index.ts's httpTargetFrom is integrations/smart-ingest/index.ts's to the character (${ours.length} vs ${theirs.length} chars)`);
 }
 
 } catch (e) {
