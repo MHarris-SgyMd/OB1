@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1707 assertions: 1707 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1717 assertions: 1717 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-five (55) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -364,9 +364,11 @@ incarnation whose edits are not the first capture's, and a prior incarnation's
 rows are not the second's. `created_at` is the transaction's start, so an edit
 from an older transaction can be stamped before the capture it follows; the
 boundary is what tells it from a prior incarnation's row. A thought deleted
-while the pass runs makes the gate refuse that row; the pass catches it, sets
-the row aside as `skipped` and runs again, and the next pass fills it from the
-tombstone.
+while the pass runs makes the gate refuse that row; the fill runs in batches of
+1,000, catches the refusal, sets the row aside as `skipped` and runs the batch
+again (a refusal that sets nothing aside is raised after five), and the next
+pass fills it from the tombstone. A capture row whose `diff` is no object is no
+candidate and is not counted as waiting; run one pass at a time.
 Additive, no signature moves, no return changes, no row written differently.
 What a reader sees change: `thought_changes` lists `content_fingerprint` in
 `changed` when a text moves; and two passes that wrote no audit row before
@@ -2098,8 +2100,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1707 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 715 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1717 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 716 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

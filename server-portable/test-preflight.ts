@@ -1399,6 +1399,19 @@ else {
   const pre021 = await run(SQL_ENV);
   assert(pre021.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) is the form from before migration 032; the server sends p_provenance/.test(pre021.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\. Its DROP chain reaches every older form/.test(pre021.out),
          "a 018-era update_thought under this server does not start, and is named by its signature with 046 — whose DROP chain reaches every older form — as the remedy");
+  // The ledger recording 046 makes the remedy the re-run — and the re-run
+  // still says what 046's DROP chain drops, as the apply text does (cold
+  // read, fourth review pass: the sentence rode the apply text alone, and a
+  // ledgered brain with stale forms was not told what re-applying does).
+  const led046 = new SQL({ url: LIVE, max: 1 });
+  await led046.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
+  await led046.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('046_thought_audit_event_shape.sql', 'test')`);
+  const ledgered = await run(SQL_ENV);
+  await led046.unsafe(`DROP TABLE schema_migrations`);
+  await led046.close();
+  // The remedy prints on the line after the finding, so the whole output is read, as the arms above read it.
+  assert(ledgered.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) is the form from before migration 032/.test(ledgered.out) && /re-apply the recorded migrations with the migrator/.test(ledgered.out) && /Re-applied, 046's DROP chain reaches every older form and leaves the one the servers call\./.test(ledgered.out) && !/Apply db\/migrations\/046/.test(ledgered.out),
+         `with 046 recorded in the ledger the edit-signature remedy is the re-run alone, and it says what 046's DROP chain drops (exit ${ledgered.code}: ${ledgered.out.split("\n").filter((l) => /edit signature|re-apply the recorded|DROP chain/.test(l)).join(" | ").trim().slice(0, 400)})`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
   const pre032 = await run(SQL_ENV);
   assert(pre032.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\) is the form from before migration 032; the server sends p_provenance, which only 032's form and its successors take — so every edit would fail, and db\/reembed\.ts refuses to run/.test(pre032.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\. Its DROP chain reaches every older form/.test(pre032.out),

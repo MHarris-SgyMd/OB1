@@ -1132,8 +1132,12 @@ if (configFailed) {
          * the 023 remedy says it, so an unread ledger is never mistaken for one
          * that does not record the migration.
          */
-        const ledgerRemedy = (migration: string, apply: string): string => {
-          if (ledger.has(migration)) return REAPPLY;
+        const ledgerRemedy = (migration: string, apply: string, reapplied = ""): string => {
+          // `reapplied`: what the re-run does that the apply text says of the
+          // apply — 046's DROP chain — said again when the ledger records the
+          // file and the remedy is the re-run alone (cold read, fourth review
+          // pass: the sentence rode the apply text and the re-run lost it).
+          if (ledger.has(migration)) return reapplied ? `${REAPPLY} ${reapplied}` : REAPPLY;
           // 046 applied by hand alone puts 046's audit and refusal bodies back
           // over 055's (SMD-2115): every remedy that names 046 names 055 after
           // it — before the "or, if the ledger…" clause, which is the whole
@@ -1633,6 +1637,7 @@ if (configFailed) {
                 SELECT a.thought_id, a.created_at, a.seq
                   FROM thought_audit a
                  WHERE a.action = 'capture' AND NOT COALESCE(a.diff ? 'content', false)
+                   AND jsonb_typeof(COALESCE(a.diff, '{}'::jsonb)) = 'object'
                  ORDER BY a.created_at, a.seq
                  LIMIT $1),
               derivable AS (
@@ -2120,7 +2125,7 @@ if (configFailed) {
             // start; 046's chain reaches all three (second review pass).
             add("edit signature", "fail",
                 `${extra.join(" and ")} are forms from before migration 046 with none the servers call — every call with fewer than ten arguments is "function is not unique"`,
-                ledgerRemedy("046", `${APPLY_046} Its DROP chain reaches the 9-, 8- and 7-argument forms and leaves the one form.`));
+                ledgerRemedy("046", `${APPLY_046} Its DROP chain reaches the 9-, 8- and 7-argument forms and leaves the one form.`, "Re-applied, 046's DROP chain reaches the 9-, 8- and 7-argument forms and leaves the one form."));
           } else {
             // 046 is the remedy here too: its DROP chain reaches the 8- and
             // 7-argument forms and leaves the one form the servers call, where
@@ -2128,7 +2133,7 @@ if (configFailed) {
             // start (run-it, third review pass).
             add("edit signature", "fail",
                 `${extra.join(" and ")} ${extra.length === 1 ? "is the form" : "are the forms"} from before migration 032; the server sends p_provenance, which only 032's form and its successors take — so every edit would fail, and db/reembed.ts refuses to run`,
-                ledgerRemedy("046", `${APPLY_046} Its DROP chain reaches every older form and leaves the one the servers call.`));
+                ledgerRemedy("046", `${APPLY_046} Its DROP chain reaches every older form and leaves the one the servers call.`, "Re-applied, 046's DROP chain reaches every older form and leaves the one the servers call."));
           }
         } catch (e) {
           add("edit signature", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");

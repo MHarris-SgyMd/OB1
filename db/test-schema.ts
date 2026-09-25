@@ -7193,8 +7193,43 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   await db.query(`SELECT delete_thought($1::uuid, $2::jsonb, false)`, [D, JSON.stringify(ACTOR)]);
   await db.query(`SELECT delete_thought($1::uuid, $2::jsonb, false)`, [R, JSON.stringify(ACTOR)]);
   await db.exec(`INSERT INTO thoughts (id, content, metadata) VALUES ('${R}', '055: planted, deleted, re-captured — the second text', '{"source": "load"}'::jsonb)`);
-  const waiting = async () => (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false)`)).c;
-  assert((await waiting()) === strangers + 11, `eleven planted capture rows wait for their payload beside the ${strangers} stranger(s) — the two NULL diffs among them (${await waiting()})`);
+  // X: a capture row whose diff is an ARRAY — a hand INSERT's; no writer's —
+  // is no candidate: not counted as waiting, not reached by the pass, refused
+  // by name when a hand fills onto it (cold read, fourth review pass: it was
+  // a candidate the fill could not complete, and the apply failed on it).
+  const X = "54545454-0003-4000-8000-000000000014";
+  await plantRow(X, "055: planted with an array for a diff", "2024-05-10T00:00:00Z");
+  const xRow = (await one<{ id: string }>(`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES ($1::uuid, 'capture', '[]'::jsonb, '2024-05-10T00:00:01Z') RETURNING id`, [X])).id;
+  // Y: a created_at set by hand to no timestamp, no content: the pass fills
+  // the content beside it and leaves it as it is — unchanged bytes are
+  // unchanged, whatever they are (cold read, fourth review pass: the shape
+  // test ran on the unchanged value and refused every fill).
+  const Y = "54545454-0003-4000-8000-000000000015";
+  await plantRow(Y, "055: planted beside a created_at that is no timestamp", "2024-05-11T00:00:00Z");
+  const yRow = (await one<{ id: string }>(`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES ($1::uuid, 'capture', '{"created_at": "not-a-date"}'::jsonb, '2024-05-11T00:00:01Z') RETURNING id`, [Y])).id;
+  // Z: captured, deleted (a tombstone), and a row standing under the id
+  // again with no capture event (a load with the trigger off): the content
+  // is the tombstone's and the created_at is nobody's — the row after the
+  // edge is another incarnation's (cold read, fourth review pass: the live
+  // row was excluded only after a later CAPTURE, so the tombstone's text went
+  // out beside the second row's time).
+  const Z = "54545454-0003-4000-8000-000000000016";
+  await plantRow(Z, "055: planted, deleted, standing again without a capture", "2024-05-12T00:00:00Z");
+  const zRow = await plantCapture(Z, "2024-05-12T00:00:00Z");
+  await db.query(`SELECT delete_thought($1::uuid, $2::jsonb, false)`, [Z, JSON.stringify(ACTOR)]);
+  await plantRow(Z, "055: planted, deleted, standing again without a capture — the second row", "2024-05-12T06:00:00Z");
+  // E: the first update after the capture carries a content key whose
+  // `before` is JSON null (no writer's is; a planted row's) and a second
+  // update follows — nothing derives, not the second update's `before`, which
+  // is the text after the first edit (run-it, fourth review pass).
+  const E = "54545454-0003-4000-8000-000000000017";
+  await plantRow(E, "055: planted, the first edit lost its before — the third text", "2024-05-13T00:00:00Z");
+  const eRow = await plantCapture(E, "2024-05-13T00:00:00Z");
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES ('${E}', 'update', '{"content": {"before": null, "after": "055: planted, the first edit lost its before — the second text"}}'::jsonb, '2024-05-13T01:00:00Z')`);
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES ('${E}', 'update', '{"content": {"before": "055: planted, the first edit lost its before — the second text", "after": "055: planted, the first edit lost its before — the third text"}}'::jsonb, '2024-05-13T02:00:00Z')`);
+  const waiting = async () => (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false) AND jsonb_typeof(COALESCE(diff, '{}'::jsonb)) = 'object'`)).c;
+  assert((await waiting()) === strangers + 14, `fourteen planted capture rows wait for their payload beside the ${strangers} stranger(s) — the two NULL diffs among them, the array not (${await waiting()})`);
+  assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE id = $1::uuid AND NOT COALESCE(diff ? 'content', false)`, [xRow])).c === 1, "…the array-diff capture is without content and is not counted");
   // What each derives to — the one reading the gate and the backfill share.
   type Pay = { content: string | null; row_created_at: string | null; source: string };
   const derive = async (id: string, rowId: string) => one<Pay>(`SELECT p.content, p.row_created_at::text AS row_created_at, p.source FROM thought_audit a CROSS JOIN LATERAL ob1_capture_payload(a.thought_id, a.created_at, a.seq) p WHERE a.id = $1::uuid`, [rowId]);
@@ -7220,6 +7255,13 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   assert(d.content === "055: planted, a prior incarnation long deleted" && d.source === "delete", `…and the prior incarnation's own capture derives from its tombstone, which is its edge (${JSON.stringify(d)})`);
   d = await derive(N, nRow);
   assert(d.content === "055: planted with a NULL diff" && d.source === "row" && d.row_created_at !== null, `a capture row with a NULL diff derives like any other (${JSON.stringify(d)})`);
+  d = await derive(Z, zRow);
+  assert(d.content === "055: planted, deleted, standing again without a capture" && d.source === "delete" && d.row_created_at === null, `a capture with a later tombstone derives its text from the tombstone and NO created_at, though a row stands under the id — that row is after the edge, another incarnation's (cold read, fourth review pass: its time went out beside the tombstone's text) (${JSON.stringify(d)})`);
+  d = await derive(E, eRow);
+  assert(d.content === null && d.source === "none", `the first update carrying a content key is the evidence: a JSON-null before derives to nothing, not to the second update's before — the text after the first edit (run-it, fourth review pass) (${JSON.stringify(d)})`);
+  d = await derive(Y, yRow);
+  assert(d.content === "055: planted beside a created_at that is no timestamp" && d.source === "row" && d.row_created_at !== null, `Y derives from its live row like any other (${JSON.stringify(d)})`);
+  assert(/here diff must be an object before and after/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '[{"content": "x"}]'::jsonb WHERE id = '${xRow}'`)), "a fill onto an array diff is refused by name (cold read, fourth review pass)");
   assert(/here nothing is filled/.test(await amend("payload", `UPDATE thought_audit SET diff = diff WHERE id = '${n2Row}'`)), "…and a write that leaves a NULL diff NULL fills nothing (run-it, second review pass: it read as a shape complaint)");
   // The gate, condition by condition.
   assert(/append-only: UPDATE/.test(await refused(`UPDATE thought_audit SET diff = diff || '{"content": "055: planted, still standing"}'::jsonb WHERE id = $1::uuid`, [lRow])), "without the setting an UPDATE of diff is refused, as 008 refused it");
@@ -7246,16 +7288,20 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   // The backfill: bounded, by source, idempotent, its report exact.
   assert(/p_limit must be at least 1/.test(await refused(`SELECT backfill_thought_payloads(0)`)), "backfill_thought_payloads(0) is refused as a value");
   let bf = (await one<{ r: Bf }>(`SELECT backfill_thought_payloads(1) AS r`)).r;
-  assert(bf.ok && bf.rows === 1 && bf.from_row === 1 && bf.with_created_at === 0 && bf.skipped === 0 && bf.awaiting === strangers + 9,
+  assert(bf.ok && bf.rows === 1 && bf.from_row === 1 && bf.with_created_at === 0 && bf.skipped === 0 && bf.awaiting === strangers + 12,
     `p_limit bounds a pass to the oldest waiting row — L's (the planted rows predate the strangers), from the live row, its hand-filled created_at kept and not counted as this pass's (${JSON.stringify(bf)})`);
   const lDiff = (await one<{ d: Diff }>(`SELECT diff AS d FROM thought_audit WHERE id = $1::uuid`, [lRow])).d;
   const lSame = await one<{ same: boolean }>(`SELECT (a.diff->>'created_at')::timestamptz = t.created_at AS same FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE a.id = $1::uuid`, [lRow]);
   assert(lDiff.content === "055: planted, still standing" && lSame.same === true && lDiff.metadata?.source === "plant", "L's row now carries the content beside the created_at the hand fill set, its other keys untouched — the pass did not re-write the time (cold read, first review pass)");
   bf = (await one<{ r: Bf }>(`SELECT backfill_thought_payloads(1) AS r`)).r;
-  assert(bf.rows === 1 && bf.from_update === 1 && bf.awaiting === strangers + 8, `…the next bounded pass takes M's, from the update (${JSON.stringify(bf)})`);
+  assert(bf.rows === 1 && bf.from_update === 1 && bf.awaiting === strangers + 11, `…the next bounded pass takes M's, from the update (${JSON.stringify(bf)})`);
   bf = (await one<{ r: Bf }>(`SELECT backfill_thought_payloads() AS r`)).r;
-  assert(bf.rows === 7 && bf.from_tombstone === 3 && bf.from_update === 2 && bf.from_row === 2 && bf.unrecoverable === strangers + 1 && bf.skipped === 0 && bf.awaiting === strangers + 1 && bf.with_created_at === 1,
-    `the pass fills D's, R's first and P's prior capture from their tombstones, V's and W's from the right update, P's standing and N2's NULL-diff capture from the live row (N2's with the row's created_at), reports U (and the strangers) as unrecoverable and leaves them waiting (${JSON.stringify(bf)})`);
+  assert(bf.rows === 9 && bf.from_tombstone === 4 && bf.from_update === 2 && bf.from_row === 3 && bf.unrecoverable === strangers + 2 && bf.skipped === 0 && bf.awaiting === strangers + 2 && bf.with_created_at === 1,
+    `the pass fills D's, R's first, P's prior and Z's capture from their tombstones, V's and W's from the right update, P's standing, N2's NULL-diff and Y's capture from the live row (N2's with the row's created_at; Y's beside the time it carries), reports U and E (and the strangers) as unrecoverable and leaves them waiting (${JSON.stringify(bf)})`);
+  const yDiff = (await one<{ d: Diff }>(`SELECT diff AS d FROM thought_audit WHERE id = $1::uuid`, [yRow])).d;
+  assert(yDiff.content === "055: planted beside a created_at that is no timestamp" && (yDiff as { created_at?: string }).created_at === "not-a-date", `Y's row carries the content beside the created_at as it was set, unchanged bytes being unchanged — the pass did not fail on it (cold read, fourth review pass) (${JSON.stringify(yDiff)})`);
+  const zDiff = (await one<{ d: Diff }>(`SELECT diff AS d FROM thought_audit WHERE id = $1::uuid`, [zRow])).d;
+  assert(zDiff.content === "055: planted, deleted, standing again without a capture" && !("created_at" in zDiff), `Z's row carries the tombstone's text and no created_at (${JSON.stringify(zDiff)})`);
   const texts = await q<{ thought_id: string; c: string | null; k: string }>(`SELECT thought_id, diff->>'content' AS c, COALESCE(diff ? 'created_at', false)::text AS k FROM thought_audit WHERE thought_id IN ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7::uuid) AND action = 'capture' ORDER BY created_at, seq`, [M, D, U, R, V, W, P]);
   assert(texts.find((t) => t.thought_id === M)?.c === "055: planted, then moved" && texts.find((t) => t.thought_id === D)?.c === "055: planted, then deleted" && texts.find((t) => t.thought_id === U)?.c === null
     && texts.find((t) => t.thought_id === V)?.c === "055: planted, edited by an older transaction — the first text"
@@ -7267,14 +7313,25 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   assert(n2Diff.d !== null && n2Diff.d.content === "055: planted with a NULL diff, filled by the pass" && n2Diff.same === true && Object.keys(n2Diff.d).sort().join(",") === "content,created_at",
     `the pass filled the NULL-diff capture onto an empty object — the content and the row's created_at, nothing else (cold read and run-it, second review pass: the mutant that dropped the COALESCE survived) (${JSON.stringify(n2Diff.d)})`);
   bf = (await one<{ r: Bf }>(`SELECT backfill_thought_payloads() AS r`)).r;
-  assert(bf.rows === 0 && bf.unrecoverable === strangers + 1 && bf.skipped === 0 && bf.awaiting === strangers + 1, `a second pass fills nothing and still names the rows nothing derives for (${JSON.stringify(bf)})`);
+  assert(bf.rows === 0 && bf.unrecoverable === strangers + 2 && bf.skipped === 0 && bf.awaiting === strangers + 2, `a second pass fills nothing and still names the rows nothing derives for (${JSON.stringify(bf)})`);
   assert((await one<{ s: string | null }>(`SELECT current_setting('ob1.audit_amend', true) AS s`)).s === "" || (await one<{ s: string | null }>(`SELECT current_setting('ob1.audit_amend', true) AS s`)).s === null, "…and leaves the amendment setting as it found it");
   // Re-applying 055 is a no-op: the same bodies, no row moved, the pass finds nothing.
   n = await audits();
   const bodiesBefore = JSON.stringify(await q<{ f: string; s: string }>(`SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS f, p.prosrc AS s FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace WHERE ns.nspname = 'public' AND p.proname IN ('thoughts_write_audit', 'thought_audit_refuse_mutation', 'ob1_stamp_actor', 'ob1_thought_diff', 'ob1_append_thought_event', 'ob1_actor_stamp', 'ob1_actor_stamp_kept', 'ob1_capture_payload', 'backfill_thought_payloads') ORDER BY 1`));
   await reapply("055");
   assert(JSON.stringify(await q<{ f: string; s: string }>(`SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS f, p.prosrc AS s FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace WHERE ns.nspname = 'public' AND p.proname IN ('thoughts_write_audit', 'thought_audit_refuse_mutation', 'ob1_stamp_actor', 'ob1_thought_diff', 'ob1_append_thought_event', 'ob1_actor_stamp', 'ob1_actor_stamp_kept', 'ob1_capture_payload', 'backfill_thought_payloads') ORDER BY 1`)) === bodiesBefore
-    && (await audits()) === n && (await waiting()) === strangers + 1, "re-applying 055 keeps every body byte for byte, writes no audit row, and its own backfill call finds nothing to fill");
+    && (await audits()) === n && (await waiting()) === strangers + 2, "re-applying 055 keeps every body byte for byte, writes no audit row, and its own backfill call finds nothing to fill");
+  // More candidates than one batch holds: the fill runs in batches of 1,000
+  // (fourth review pass), and a pass over 1,050 fills every one and counts
+  // them once.
+  await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit`);
+  await db.exec(`INSERT INTO thoughts (id, content, metadata, created_at) SELECT ('54545454-0004-4000-8000-' || lpad(to_hex(g), 12, '0'))::uuid, '055: batch row ' || g, '{"source": "batch"}'::jsonb, '2024-07-01T00:00:00Z'::timestamptz + (g || ' seconds')::interval FROM generate_series(1, 1050) g`);
+  await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit`);
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, source, diff, created_at) SELECT id, 'capture', 'plant', '{"metadata": {"source": "batch"}}'::jsonb, created_at FROM thoughts WHERE metadata->>'source' = 'batch'`);
+  assert((await waiting()) === strangers + 2 + 1050, `1,050 more capture rows wait (${await waiting()})`);
+  bf = (await one<{ r: Bf }>(`SELECT backfill_thought_payloads() AS r`)).r;
+  assert(bf.rows === 1050 && bf.from_row === 1050 && bf.skipped === 0 && bf.unrecoverable === strangers + 2 && bf.awaiting === strangers + 2, `a pass over more candidates than one batch fills every one, from the live rows, and counts each once (${JSON.stringify(bf)})`);
+  assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE t.metadata->>'source' = 'batch' AND a.action = 'capture' AND a.diff->>'content' = t.content`)).c === 1050, "…each batch row's capture carries its row's text");
 
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_agents`);

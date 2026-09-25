@@ -4940,9 +4940,6 @@ console.log("\n[24] resolve_agent under a held key row: a recently used key answ
 
 await sql.close();
 
-// db/README.md's Testing block quotes this suite's assertion total. The count
-// is lower when a group is skipped (PostgreSQL 18, or JIT off), so only a full
-// run — as CI's pg16-with-JIT job is — is compared to the headline (SMD-1805).
 console.log("\n[25] Migration 055's payload backfill under two connections: a second pass beside a held one skips what the first filled and counts only its own; the derivation of a capture whose update was stamped before it by an older transaction reads that update (SMD-2115)");
 {
   // PGlite is one connection, so test-schema [51] cannot hold what the
@@ -5014,29 +5011,44 @@ console.log("\n[25] Migration 055's payload backfill under two connections: a se
   // pass). The pass catches the refusal, sets the moved rows aside and runs
   // again; nothing it filled is lost, and the next pass fills the deleted
   // thoughts' captures from their tombstones.
+  // Fourth review pass (run-it): forty deletes fired at once landed inside
+  // one or two attempts of a pass retried five times as one statement, and
+  // the arm passed; ten deletes SPREAD over half a second — one per attempt
+  // — exhausted the five and failed the apply. So the deleter runs for as
+  // long as the pass does, one delete every 10 ms, and the arm asserts that
+  // more than five landed while it ran: the fill's batches, and a budget only
+  // a fruitless retry spends, are what return it.
   await sql`DELETE FROM thoughts`;
-  const M = 2000;
+  const M = 8000;
   await sql.unsafe(`INSERT INTO thoughts (content, metadata, created_at) SELECT 'racing pass row ' || g, '{"source": "race"}'::jsonb, now() - interval '1 day' FROM generate_series(1, ${M}) g`);
   await sql.unsafe(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_immutable`);
   await sql.unsafe(`UPDATE thought_audit SET diff = diff - 'content' - 'created_at' WHERE action = 'capture' AND diff->'metadata'->>'source' = 'race'`);
   await sql.unsafe(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_immutable`);
   assert((await waiting()) === M, `${M} capture rows wait, every one with a created_at the pass would fill (${await waiting()})`);
-  const victims = (await sql`SELECT id FROM thoughts WHERE metadata->>'source' = 'race' ORDER BY random() LIMIT 40`).map((r: { id: string }) => r.id);
+  const victims = (await sql`SELECT id FROM thoughts WHERE metadata->>'source' = 'race' ORDER BY random() LIMIT 2000`).map((r: { id: string }) => r.id);
   const deleter = new SQL({ url: URL_, max: 1 });
-  const racingPass = sql`SELECT backfill_thought_payloads() AS r`.execute();
+  let passDone = false;
+  const racingPass = (async () => { try { return await sql`SELECT backfill_thought_payloads() AS r`.execute(); } finally { passDone = true; } })();
   let deleted = 0;
   for (const id of victims) {
+    if (passDone) break;
     const [{ r }] = await deleter`SELECT delete_thought(${id}::uuid, NULL::jsonb, false) AS r`;
     if ((r as { ok: boolean }).ok) deleted++;
+    await new Promise((r) => setTimeout(r, 10));
   }
   const raced = (await racingPass)[0].r as Bf & { unrecoverable: number };
   await deleter.close();
-  assert(raced.rows + raced.skipped + raced.unrecoverable === M, `the pass beside ${deleted} deletes returned rather than raising, and accounts for every candidate — ${raced.rows} filled, ${raced.skipped} set aside, ${raced.unrecoverable} nothing derives for (${JSON.stringify(raced)})`);
+  assert(deleted > 5, `more deletes landed while the pass ran than the five attempts the fourth review pass found exhaustible (${deleted})`);
+  assert(raced.rows + raced.skipped + raced.unrecoverable === M && raced.unrecoverable === 0, `the pass beside ${deleted} deletes, one every 10 ms for as long as it ran, returned rather than raising, and accounts for every candidate — ${raced.rows} filled, ${raced.skipped} set aside (${JSON.stringify(raced)})`);
   const after = (await sql`SELECT backfill_thought_payloads() AS r`)[0].r as Bf & { from_tombstone: number };
   assert(after.rows === raced.skipped && after.from_tombstone === raced.skipped && after.awaiting === 0, `…and the next pass fills what was set aside, from the tombstones, leaving nothing waiting (${JSON.stringify(after)})`);
   await sql`DELETE FROM thoughts`;
   await sql.close();
 }
+
+// db/README.md's Testing block quotes this suite's assertion total. The count
+// is lower when a group is skipped (PostgreSQL 18, or JIT off), so only a full
+// run — as CI's pg16-with-JIT job is — is compared to the headline (SMD-1805).
 
 console.log("\n[doc] db/README.md states this suite's assertion total (full runs only)");
 {
