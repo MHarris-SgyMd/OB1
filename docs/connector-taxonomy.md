@@ -5,7 +5,7 @@ interfaces: the SMD-1924 triage counted capture integrations and import recipes
 on the way in, digests and briefings on the way out, and the same vendor on
 both sides more than once (`docs/vendored-disposition.md`). This document is the
 classification that collapses them, and the seam that lets **any** fetcher — a
-node of the orchestration tool SMD-1863 picks, a native OB1 driver, the AI
+node of the orchestration tool (n8n, SMD-1863), a native OB1 driver, the AI
 client's own MCP connector, a browser extension — land in the brain through
 **one schema per family** with no vendor client of OB1's own.
 
@@ -23,7 +23,7 @@ Sibling contracts, so the boundaries are named once:
   metadata / identity. This page names its *input families* and says which
   fetcher may produce them. Nothing here changes SMD-1867's five outputs or its
   round-trip rule (preserve the source, derive the text and the edges).
-- **SMD-1863** picks the orchestration tool. The seam is designed so the pick
+- **SMD-1863** picked the orchestration tool: n8n (`orchestration-tool.md`). The seam is designed so the pick
   changes *how many* fetchers are low-code nodes, not the schema any of them
   hands over.
 - **SMD-1813** decides identity, conflict and the PHI allowlist once. The
@@ -119,7 +119,7 @@ A **fetcher** is whatever obtains the vendor item. Four kinds, one contract:
 
 | Fetcher | When | Owns |
 |---|---|---|
-| **low-code node** — a node of the tool SMD-1863 picks | the default for any vendor the tool exposes; every stateful workflow (schedule, trigger, retry, multi-step, two-way sync) | vendor auth, pagination, rate limit, retry, the persistent connection |
+| **low-code node** — a node of n8n, the tool SMD-1863 picked | the default for any vendor the tool exposes; every stateful workflow (schedule, trigger, retry, multi-step, two-way sync) | vendor auth, pagination, rate limit, retry, the persistent connection |
 | **native driver** — a typed OB1 script or function | a vendor the tool lacks, a one-shot archive parse (a tool adds nothing to a file walk), or where a reviewable typed script is preferred | the same, in OB1's tree, held to the check-fork rules |
 | **MCP server** — the AI client's own connector or channel plugin | one call on demand from the AI client: "draft this digest", "what is on my calendar" | the vendor call, inside the client |
 | **browser extension** — a client in the user's browser | what the user is looking at, pushed when they choose; bulk sync over a session the browser already holds | the DOM or the session the vendor exposes only there |

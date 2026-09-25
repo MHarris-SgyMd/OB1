@@ -5591,8 +5591,8 @@ have. SemIf (SMD-2052) is the test of that reading.
 SMD-1863 asks which self-hosted workflow tool — n8n, Activepieces or Windmill —
 should own the fork's ingestion and sync (vendor auth, schedules, triggers,
 retries) instead of one hand-rolled recipe per service, and whether to adopt one
-at all. The decision is an ADR's, in its own pull request on the ticket; this
-is the evidence it reads. The criteria, the bar and the prior were posted on
+at all. The decision is `../docs/orchestration-tool.md` (n8n); this is the
+evidence it reads. The criteria, the bar and the prior were posted on
 the ticket before any candidate ran (2026-09-25).
 
 **The setup.** `eval-orchestration.ts` runs each candidate as its own compose
@@ -5813,4 +5813,5 @@ run at a time. Upgrades, backups and the reference multi-container shapes
 
 - `../SETUP.md` — the two decisions these evals inform
 - `../docs/event-log-as-truth.md` — the decision the two gate sections above (SMD-1998, SMD-1999) opened: the event log as the source of truth, the `thoughts` row its projection (SMD-1997)
+- `../docs/orchestration-tool.md` — the decision the orchestration section above informs: n8n, as an opt-in sidecar, with the licence and egress gates (SMD-1863)
 - `../db/config.mjs` — `KNOWN_MODEL_DIMS`, so a model/width mismatch is caught
