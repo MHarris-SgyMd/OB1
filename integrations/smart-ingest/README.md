@@ -85,7 +85,7 @@ without human review.
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
 - **Enhanced thoughts schema** applied — install `schemas/enhanced-thoughts` first (adds type, importance, sensitivity columns and utility RPCs)
-- **Smart ingest tables** applied — install `schemas/smart-ingest-tables` to create the `ingestion_jobs` and `ingestion_items` tables plus the `append_thought_evidence` RPC
+- **Smart ingest tables** applied — install `schemas/smart-ingest` to create the `ingestion_jobs` and `ingestion_items` tables plus the `append_thought_evidence` RPC. On this fork an executed item's thought id rides in the item's `metadata.result_thought_uuid`: `result_thought_id` is a `bigint` column and `thoughts.id` a UUID here, so the column stays null and a dashboard's per-item "view thought" link stays dark until SMD-2128 widens it
 - At least one LLM API key for extraction: OpenRouter (recommended), OpenAI, or Anthropic
 - An embedding API key: OpenRouter or OpenAI (required for semantic deduplication)
 - [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/))
@@ -98,7 +98,7 @@ This server depends on these database functions:
 |-----|--------|---------|
 | `upsert_thought(text, jsonb)` | Core OB1 schema (`db/migrations/003`, `004`) | Creates or updates a thought with content and payload |
 | `match_thoughts(vector, float, int)` | Core OB1 schema | Semantic similarity search for deduplication |
-| `append_thought_evidence(bigint, jsonb)` | `schemas/smart-ingest-tables` | Appends corroborating evidence to an existing thought's metadata |
+| `append_thought_evidence(bigint, jsonb)` | `schemas/smart-ingest` | Appends corroborating evidence to an existing thought's metadata |
 
 ## Credential Tracker
 
@@ -138,11 +138,11 @@ OPENROUTER_API_KEY='your-openrouter-key' \
 bun integrations/smart-ingest/index.ts
 ```
 
-`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the core server holds — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI. A caller on another machine reaches it through the same TLS proxy as the core server ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
+`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the core server holds — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). Beside the [rest-api gateway](../rest-api/) on 8787, give this server a port of its own (`PORT=8788`) and point the gateway's `SMART_INGEST_URL` at it (`http://127.0.0.1:8788`); the gateway forwards its `MCP_ACCESS_KEY`, so the two hold the same key (SMD-2110). `extensions/test-auth.ts` starts it this way in CI. A caller on another machine reaches it through the same TLS proxy as the core server ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
 
 ### 2. Set the environment
 
-`MCP_ACCESS_KEY` is the one key this server holds — the raw key, compared constant-time (this server predates the hashed `MCP_ACCESS_KEYS` list, change 67) — sent as `x-brain-key`. Optional multi-provider fallback, in the same environment:
+`MCP_ACCESS_KEY` is the one key this server holds — the raw key, compared constant-time (this server predates the hashed `MCP_ACCESS_KEYS` list, change 67) — sent as `x-brain-key`. `ENTITY_EXTRACTION_WORKER_URL`, optional, is the entity-extraction worker's http(s) address (`integrations/entity-extraction-worker`): after a write that adds or revises a thought, this server POSTs to it with its key and `?limit=` the count, so extraction runs at once; unset, the server says so when it starts and the queue waits for whatever runs the worker on a schedule, and any scheme but `http`/`https` is refused at start (SMD-2110 — until it the address was built from `SUPABASE_URL`, the Postgres connection string here, so every trigger failed). Optional multi-provider fallback, in the same environment:
 
 ```bash
 OPENAI_API_KEY="your-openai-key" ANTHROPIC_API_KEY="your-anthropic-key"
