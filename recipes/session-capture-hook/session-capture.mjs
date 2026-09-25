@@ -3,7 +3,10 @@
  * session-capture.mjs — a session hook for Claude Code and Codex that captures
  * ONE summary thought into Open Brain at each of a session's checkpoints — a
  * compaction (Claude Code's PreCompact) and the session's end — with the
- * thoughts the session retrieved as its provenance (SMD-1298, SMD-2012).
+ * thoughts the session retrieved as its provenance (SMD-1298, SMD-2012) —
+ * one thought per EPISODE of the session, not per session (SMD-2013): a
+ * long session is several pieces of work, and each gets its own summary, its
+ * own provenance and its own supersedes chain.
  *
  * What it sends: a summary this script derives from the transcript — what was
  * asked (the human prompts), what came out (the assistant's last message), what
@@ -215,8 +218,7 @@ function pruneDead() {
  * holds it, null under pending/ (SMD-2035); a look that only asks what other
  * children hold leaves pending/ unread.
  */
-function sessionPayloads(sessionId, { pending = true } = {}) {
-  const tail = basename(statePath(sessionId));
+function listPayloads({ pending = true } = {}) {
   const out = [];
   const dirs = pending ? [{ dir: PENDING_DIR(), pid: null }] : [];
   try { for (const pid of readdirSync(INFLIGHT_DIR())) dirs.push({ dir: join(INFLIGHT_DIR(), pid), pid: Number(pid) }); } catch { /* no inflight dir yet */ }
@@ -225,10 +227,15 @@ function sessionPayloads(sessionId, { pending = true } = {}) {
     try { names = readdirSync(dir); } catch { continue; }
     for (const f of names) {
       const parts = f.split("-");
-      if (parts.slice(3).join("-") === tail) out.push({ path: join(dir, f), name: f, ms: Number(parts[0]), pid });
+      out.push({ path: join(dir, f), name: f, ms: Number(parts[0]), pid, tail: parts.slice(3).join("-") });
     }
   }
   return out;
+}
+/** A session's — a chain's — payloads out of a listing: those whose name ends in its sanitised key. `prepare` walks the queue once for every episode (SMD-2013's first review pass: once per episode). */
+function sessionPayloads(sessionId, opts = {}, listing = listPayloads(opts)) {
+  const tail = basename(statePath(sessionId));
+  return listing.filter((p) => p.tail === tail);
 }
 /**
  * When the session's summary was last ATTEMPTED: the state's recorded time,
@@ -252,7 +259,13 @@ function statePath(sessionId) {
   return join(STATE_DIR, `${String(sessionId).replace(/[^A-Za-z0-9_-]/g, "_")}.json`);
 }
 export function readState(sessionId) {
-  try { return JSON.parse(readFileSync(statePath(sessionId), "utf8")); } catch { return null; }
+  // The state file's name is `sessionId` sanitised, and `#` sanitises to `_`
+  // (SMD-2013), so a chain `<sid>#e2` and a session id literally ending `_e2`
+  // share one file. A state that records a DIFFERENT chain than the one asked
+  // for is not this one's — as the follow-up asks a payload whose it is (third
+  // review pass). A file from before episodes carries no `chain_id` and is its
+  // session's.
+  try { const j = JSON.parse(readFileSync(statePath(sessionId), "utf8")); return j && j.chain_id && j.chain_id !== sessionId ? null : j; } catch { return null; }
 }
 /**
  * Every file in the state directory: pretty JSON, a trailing newline,
@@ -320,39 +333,54 @@ function textOfBlocks(content) {
   return content.map((b) => (typeof b === "string" ? b : (b?.type === "text" || b?.type === "input_text" || b?.type === "output_text") ? String(b.text ?? "") : "")).filter(Boolean).join("\n");
 }
 
-/** An empty summary, filled by either parser. */
-function emptySummary() {
+/** An empty summary — the session's (n = 0) or one episode's (n ≥ 1) — filled by the segmenter from either parser's events. */
+function emptySummary(n = 0) {
   // `cwd` and `branch` are where the session ENDED; `roots` every directory it
   // ran in (a session that moves between worktrees has several), so a file under
   // any of them is inside the project.
   // `checkpoint` is set by prepare() from the hook event (checkpointOf); a
   // transcript read for --dry-run or a test has none, and renders no such line.
-  return { harness: "", sessionId: "", title: "", cwd: "", branch: "", roots: new Set(), prompts: [], outcome: "", files: new Set(), commits: 0, prs: [], retrieved: new Set(), captured: new Set(), first: "", last: "", pushed: false, checkpoint: undefined };
+  // `n` is the episode's ordinal (0: the whole session), `named` the tickets
+  // its asks name in first-mention order, `about` the tickets it is the work
+  // of (its opening ask's, its first ask's, its home's), `opened` and `closed`
+  // the boundaries at its ends, and `episodes` — the session's alone — its
+  // pieces (SMD-2013).
+  return { harness: "", sessionId: "", title: "", cwd: "", branch: "", roots: new Set(), prompts: [], outcome: "", files: new Set(), commits: 0, prs: [], retrieved: new Set(), captured: new Set(), first: "", last: "", pushed: false, checkpoint: undefined, n, named: new Set(), about: new Set(), opened: undefined, closed: undefined, episodes: [] };
 }
 
 /**
- * A user line that is not a human ask: the summary Claude Code writes in the
- * human's voice when it compacts a long session, and a bare slash command.
+ * User lines that are not a human ask: the summary Claude Code writes in the
+ * human's voice when it compacts a long session — an episode boundary
+ * (SMD-2013) — and a bare slash command.
  */
+const COMPACTION_RE = /^This session is being continued from a previous conversation/i;
 // A BARE slash command (`/compact`) is the harness's, not an ask; one with
 // arguments (`/code-review high`, `/implement the hook`) is what the human asked
 // (twelfth review pass: the rule matched the leading word and dropped the rest).
-const NOT_ASKED_RE = /^This session is being continued from a previous conversation|^\/[a-z][\w-]*\s*$/i;
+const NOT_ASKED_RE = /^\/[a-z][\w-]*\s*$/i;
 
-/** Claude Code's ~/.claude/projects/<slug>/<session>.jsonl — one JSON object per line; the shape is internal and changes, so every read here is tolerant. */
+/**
+ * Claude Code's ~/.claude/projects/<slug>/<session>.jsonl — one JSON object per
+ * line; the shape is internal and changes, so every read here is tolerant. Both
+ * parsers emit EVENTS in transcript order — `{ t, … }`, one per fact the
+ * summary needs — and `segment` folds them into the session and its episodes
+ * (SMD-2013). A line's events come as time, directory, branch, then content:
+ * the directory and branch a line records are where its content happened.
+ */
 export function parseClaudeCode(lines, s) {
   const toolNames = new Map(); // tool_use id → name
+  const events = [];
   for (const l of lines) {
     let o; try { o = JSON.parse(l); } catch { continue; }
     if (!o || typeof o !== "object") continue;
     if (o.isSidechain === true) continue; // a subagent's turns are not this session's asks
     if (!s.sessionId && typeof o.sessionId === "string") s.sessionId = o.sessionId;
-    if (o.type === "ai-title" && typeof o.aiTitle === "string") { s.title = o.aiTitle; continue; }
-    if (o.type === "pr-link" && typeof o.prUrl === "string") { if (!s.prs.includes(o.prUrl)) s.prs.push(o.prUrl); continue; }
+    if (o.type === "ai-title" && typeof o.aiTitle === "string") { events.push({ t: "title", text: o.aiTitle }); continue; }
+    if (o.type === "pr-link" && typeof o.prUrl === "string") { events.push({ t: "pr", url: o.prUrl }); continue; }
     if (o.type !== "user" && o.type !== "assistant") continue;
-    if (typeof o.timestamp === "string") { if (!s.first) s.first = o.timestamp; s.last = o.timestamp; }
-    if (typeof o.cwd === "string" && o.cwd) { s.cwd = o.cwd; s.roots.add(o.cwd); }
-    if (typeof o.gitBranch === "string" && o.gitBranch) s.branch = o.gitBranch;
+    if (typeof o.timestamp === "string") events.push({ t: "time", at: o.timestamp });
+    if (typeof o.cwd === "string" && o.cwd) events.push({ t: "cwd", v: o.cwd });
+    if (typeof o.gitBranch === "string" && o.gitBranch) events.push({ t: "branch", v: o.gitBranch });
     const content = o.message?.content;
     if (o.type === "assistant") {
       if (!Array.isArray(content)) continue;
@@ -360,13 +388,13 @@ export function parseClaudeCode(lines, s) {
         if (b?.type === "tool_use") {
           toolNames.set(b.id, String(b.name ?? ""));
           const input = b.input ?? {};
-          if (EDIT_TOOLS.has(b.name) && typeof (input.file_path ?? input.notebook_path) === "string") s.files.add(input.file_path ?? input.notebook_path);
+          if (EDIT_TOOLS.has(b.name) && typeof (input.file_path ?? input.notebook_path) === "string") events.push({ t: "file", path: input.file_path ?? input.notebook_path });
           if (b.name === "Bash" && typeof input.command === "string") {
-            if (/\bgit\s+commit\b/.test(input.command)) s.commits++;
-            if (/\bgit\s+push\b/.test(input.command)) s.pushed = true;
+            if (/\bgit\s+commit\b/.test(input.command)) events.push({ t: "commit" });
+            if (/\bgit\s+push\b/.test(input.command)) events.push({ t: "push" });
           }
         } else if (b?.type === "text" && typeof b.text === "string" && b.text.trim()) {
-          s.outcome = b.text; // the last text block of the last assistant line wins
+          events.push({ t: "outcome", text: b.text }); // the last text block of the last assistant line wins
         }
       }
       continue;
@@ -378,40 +406,46 @@ export function parseClaudeCode(lines, s) {
     for (const r of results) {
       const name = toolNames.get(r.tool_use_id) ?? "";
       if (!BRAIN_TOOL_RE.test(name)) continue;
-      harvestIds(textOfBlocks(r.content), s);
+      events.push({ t: "ids", text: textOfBlocks(r.content) });
     }
     if (results.length) continue;
+    // The compaction summary: the harness's own flag — read before the origin
+    // gate, whoever the line is from — or the sentence it opens with, which a
+    // transcript copied by a tool that dropped the flag still carries.
+    if (o.isCompactSummary === true) { events.push({ t: "compaction" }); continue; }
     if (o.origin && o.origin.kind && o.origin.kind !== "human") continue;
     const text = stripInjected(textOfBlocks(content));
-    if (text && !NOT_ASKED_RE.test(text)) s.prompts.push(text);
+    if (COMPACTION_RE.test(text)) { events.push({ t: "compaction" }); continue; }
+    if (text && !NOT_ASKED_RE.test(text)) events.push({ t: "prompt", text });
   }
-  return s;
+  return segment(events, s);
 }
 
-/** Codex's ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl — {timestamp, type, payload} per line. */
+/** Codex's ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl — {timestamp, type, payload} per line; events as parseClaudeCode emits them. */
 export function parseCodex(lines, s) {
   const calls = new Map(); // call_id → { name, input }
-  let lastAgentMessage = "";
+  const events = [];
   for (const l of lines) {
     let o; try { o = JSON.parse(l); } catch { continue; }
     const p = o?.payload;
     if (!p || typeof p !== "object") continue;
-    if (typeof o.timestamp === "string") { if (!s.first) s.first = o.timestamp; s.last = o.timestamp; }
+    if (typeof o.timestamp === "string") events.push({ t: "time", at: o.timestamp });
     if (o.type === "session_meta") {
       s.sessionId ||= String(p.id ?? p.session_id ?? "");
-      if (typeof p.cwd === "string" && p.cwd) { s.cwd = p.cwd; s.roots.add(p.cwd); }
+      if (typeof p.cwd === "string" && p.cwd) events.push({ t: "cwd", v: p.cwd });
       continue;
     }
-    if (o.type === "turn_context") { if (typeof p.cwd === "string" && p.cwd) { s.cwd = p.cwd; s.roots.add(p.cwd); } continue; }
+    if (o.type === "turn_context") { if (typeof p.cwd === "string" && p.cwd) events.push({ t: "cwd", v: p.cwd }); continue; }
     if (o.type === "event_msg") {
-      if (p.type === "task_complete" && typeof p.last_agent_message === "string" && p.last_agent_message.trim()) lastAgentMessage = p.last_agent_message;
+      // A turn's closing message is its outcome; an assistant message after it (a turn still running at the end) is the later word.
+      if (p.type === "task_complete" && typeof p.last_agent_message === "string" && p.last_agent_message.trim()) events.push({ t: "outcome", text: p.last_agent_message });
       continue;
     }
     if (o.type !== "response_item") continue;
     if (p.type === "message") {
       const text = textOfBlocks(p.content);
-      if (p.role === "user") { const t = stripInjected(text); if (t) s.prompts.push(t); }
-      else if (p.role === "assistant" && text.trim()) s.outcome = text;
+      if (p.role === "user") { const t = stripInjected(text); if (COMPACTION_RE.test(t)) events.push({ t: "compaction" }); else if (t) events.push({ t: "prompt", text: t }); }
+      else if (p.role === "assistant" && text.trim()) events.push({ t: "outcome", text });
       continue;
     }
     if (p.type === "function_call" || p.type === "custom_tool_call") {
@@ -419,22 +453,21 @@ export function parseCodex(lines, s) {
       const raw = p.type === "function_call" ? p.arguments : p.input;
       calls.set(p.call_id, { name, raw });
       if (name === "apply_patch" || /apply_patch/.test(name)) {
-        for (const m of String(raw ?? "").matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)) s.files.add(m[1].trim());
+        for (const m of String(raw ?? "").matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)) events.push({ t: "file", path: m[1].trim() });
       } else if (name === "shell" || name === "exec_command" || name === "container.exec") {
         let cmd = ""; try { const a = JSON.parse(String(raw)); cmd = Array.isArray(a.command) ? a.command.join(" ") : String(a.command ?? a.cmd ?? ""); } catch { cmd = String(raw ?? ""); }
-        if (/\bgit\s+commit\b/.test(cmd)) s.commits++;
-        if (/\bgit\s+push\b/.test(cmd)) s.pushed = true;
+        if (/\bgit\s+commit\b/.test(cmd)) events.push({ t: "commit" });
+        if (/\bgit\s+push\b/.test(cmd)) events.push({ t: "push" });
       }
       continue;
     }
     if (p.type === "function_call_output" || p.type === "custom_tool_call_output") {
       const call = calls.get(p.call_id);
       if (!call || !BRAIN_TOOL_RE.test(call.name)) continue;
-      harvestIds(textOfBlocks(p.output) || String(p.output ?? ""), s);
+      events.push({ t: "ids", text: textOfBlocks(p.output) || String(p.output ?? "") });
     }
   }
-  if (lastAgentMessage) s.outcome = lastAgentMessage;
-  return s;
+  return segment(events, s);
 }
 
 function harvestIds(text, s) {
@@ -450,6 +483,236 @@ export function summariseTranscript(path, harness) {
   s.harness = harness || sniffHarness(lines.slice(0, 5));
   return s.harness === "codex" ? parseCodex(lines, s) : parseClaudeCode(lines, s);
 }
+
+// ── Episodes ─────────────────────────────────────────────────────────────────
+
+/**
+ * A ticket key as a branch name or an ask spells it — `SMD-2013`, `smd-2013`:
+ * two to five letters, a dash, two to six digits. Not the shapes that look
+ * like one and are not (a digest's name, an encoding, a standard, a PR
+ * number, a cipher). In an ASK, once the session's branches or directories
+ * have named a team (`teams`), only that team's keys count, in any case —
+ * `node-22`, `port-8010` and `AES-256` are spelled the same way, and split a
+ * session on `main` (first and second review passes); before any team is
+ * known, an upper-case key counts, since it is the only way a session with no
+ * keyed branch names its work.
+ */
+const TICKET_RE = /\b([A-Za-z]{2,5})-(\d{2,6})\b/g;
+const NOT_TICKETS = new Set(["SHA", "UTF", "ISO", "RFC", "CVE", "IPV", "TLS", "SSL", "HTTP", "PR", "MD", "AES", "RSA", "GPT", "ED", "HTML"]);
+/** The ticket keys a text names, upper-cased, in first-mention order; with `teams`, under the rule for an ask. */
+export function ticketsIn(text, teams) {
+  const out = [];
+  for (const m of String(text ?? "").matchAll(TICKET_RE)) {
+    const team = m[1].toUpperCase(), id = `${team}-${m[2]}`; // `team`, not `key`: the fork's credential-compare check reads a `key` under an equality operator as a secret compared, comments included
+    if (NOT_TICKETS.has(team) || out.includes(id)) continue;
+    if (teams && (teams.size ? !teams.has(team) : m[1] !== team)) continue;
+    out.push(id);
+  }
+  return out;
+}
+/** Whether one directory is the other or lies inside it. */
+const nested = (a, b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+/** The tickets a place — a branch and a directory — names. */
+const anchorOf = (cwd, branch) => [...new Set([...ticketsIn(branch), ...ticketsIn(cwd)])];
+/** The tickets an episode is known by: those its asks named, and those its branch and its directory name. */
+const knownTickets = (ep) => new Set([...ep.named, ...anchorOf(ep.cwd, ep.branch)]);
+/** Anchored: the episode's branch or directory names a ticket — its work has a home, and a ticket an ask merely mentions does not end it. */
+const anchored = (ep) => anchorOf(ep.cwd, ep.branch).length > 0;
+/** Whether, before the next ask, the session moves to a branch or directory naming one of these tickets: then the ask that named them began that work, whatever branch it was typed on. */
+const movesTo = (events, i, ids) => {
+  for (let k = i + 1; k < events.length && events[k].t !== "prompt"; k++) {
+    if ((events[k].t === "cwd" || events[k].t === "branch") && ticketsIn(events[k].v).some((id) => ids.includes(id))) return true;
+  }
+  return false;
+};
+
+/** One parser event onto a summary — the session's, or an episode's. */
+function apply(x, ev, teams) {
+  switch (ev.t) {
+    case "time": if (!x.first) x.first = ev.at; x.last = ev.at; break;
+    case "cwd": x.cwd = ev.v; x.roots.add(ev.v); break;
+    case "branch": x.branch = ev.v; break;
+    case "prompt": x.prompts.push(ev.text); for (const id of ticketsIn(ev.text, teams)) x.named.add(id); break;
+    case "outcome": x.outcome = ev.text; break;
+    case "file": x.files.add(ev.path); break;
+    case "commit": x.commits++; break;
+    case "push": x.pushed = true; break;
+    case "pr": if (!x.prs.includes(ev.url)) x.prs.push(ev.url); break;
+    case "ids": harvestIds(ev.text, x); break;
+    case "title": x.title = ev.text; break;
+    default: break; // a compaction is a boundary, nothing of the summary's
+  }
+}
+
+/**
+ * The segmenter (SMD-2013): the parser's events, in transcript order, folded
+ * into the session's summary `s` and into `s.episodes`, one per piece of work.
+ * The session's PLACE — its branch and directory, `loc` — is followed on every
+ * line; an episode's place (`cwd`, `branch`, `roots`) is where it runs, and a
+ * move away from it is applied to the episode the next ask opens, never to
+ * the one it ends (first review pass: the ended episode was labelled — its
+ * branch, its project, and when its asks named no ticket its TICKET — with
+ * the place the session moved to). An episode ENDS, and the next begins at
+ * the next ask:
+ *   - at a compaction — the harness's summary line;
+ *   - when the session is on another branch at that ask, or, with no branch to
+ *     go by, in a directory inside none of the episode's roots — a cd within
+ *     the checkout is no move, nor is one out of it with the branch unchanged
+ *     (the harness records the shell's directory per command), nor a move the
+ *     session came back from before the ask, nor a detached HEAD mid-rebase;
+ *   - at an ask that names a ticket none of the episode's asks, its branch or
+ *     its directory named — unless the episode's branch or directory names a
+ *     ticket (the work has a home; a mention does not end it), in which case
+ *     only if the session then moves to a branch or directory naming the new
+ *     ticket before the next ask: the ask began that work.
+ * A move to a place that names a ticket the episode is ABOUT — its opening
+ * ask's, its first ask's, its home's — is the episode's own, since the branch
+ * is made a few lines after the ask that names its ticket; and when the
+ * episode is about nothing yet, such a move names the work instead of ending
+ * it. A ticket an ask merely mentioned makes no later move its own (first
+ * review pass: a plan mentioned the next ticket, and the move to its branch
+ * never ended the episode). Work between a boundary and the next ask — the
+ * assistant finishing after a compaction, or after the move — belongs to the
+ * ask that caused it. A compaction and a move between two asks are both
+ * recorded. So a boundary is fixed once written: appending to the transcript
+ * never moves an earlier one, and an episode's ordinal, text and fingerprint
+ * stand — an episode captured and unchanged is skipped, and only the one that
+ * changed supersedes its own earlier summary. The one boundary decided by
+ * what FOLLOWS is the ask that names a new ticket under an anchored episode:
+ * until the move to that ticket's branch is written — or the next ask, which
+ * settles it the other way — the ask is the earlier episode's, and a
+ * checkpoint taken in that window is superseded by that episode's own next
+ * summary, on its own chain. Episodes without an ask are not episodes.
+ */
+const STAMPED = new Set(["prompt", "outcome", "file", "commit", "push", "pr", "ids"]); // the events that carry a line's time onto an episode: its span is that of its content, so an episode closed at an ask does not reach to that ask's line
+export function segment(events, s = emptySummary()) {
+  // The team prefixes the session's branches and directories have named SO
+  // FAR: what a lower-case key in an ask may be a ticket of. Gathered as the
+  // walk goes, never ahead of it — a branch made later would make an earlier
+  // mention a key and move a boundary already captured (second review pass).
+  const teams = new Set();
+  const learnTeams = (v) => { for (const id of ticketsIn(v)) teams.add(id.split("-")[0]); }; // the team prefixes a branch or directory names
+  const episodes = [];
+  let cur, lineAt = "", compacted = false; // the open episode; the current line's time; a compaction since the episode's last ask
+  const loc = { cwd: "", branch: "" }; // where the session IS, against where the episode runs
+  const branchMoved = () => Boolean(loc.branch && cur.branch && loc.branch !== cur.branch);
+  const below = (dir, root) => dir === root || dir.startsWith(`${root}/`);
+  const inside = () => !loc.cwd || !cur.cwd || [...cur.roots].some((r) => below(loc.cwd, r)); // at or under a root: an ancestor of the checkout — HOME, ~/Projects — is not inside it (second review pass: it became the episode's directory, and every checkout under it was then inside)
+  /** Away: the session is not where the episode runs — another branch, or with no branch to go by, a directory inside none of its roots. */
+  const away = () => branchMoved() || (!(loc.branch && cur.branch) && !inside());
+  /** The episode runs where the session is: its first directory names the project, a subdirectory does not. */
+  const settle = () => {
+    if (loc.cwd) { cur.roots.add(loc.cwd); if (!cur.cwd || !below(loc.cwd, cur.cwd)) cur.cwd = loc.cwd; }
+    if (loc.branch) cur.branch = loc.branch;
+  };
+  /**
+    * Whether a move to a place naming these tickets is the episode's own —
+    * about one of them (the keys it opened and was asked with), or heading to
+    * where it already runs (its home). An episode about nothing and with no
+    * home yet takes the move's keys as its own. Its home is read LIVE, never
+    * kept in `about`: once the episode has moved on, a move BACK to the branch
+    * it began on is a new piece of work, not its own (second review pass: an
+    * ex-home key lingered in `about`, and a return to the old branch was
+    * absorbed).
+    */
+  const own = (names) => {
+    const home = anchorOf(cur.cwd, cur.branch);
+    if (names.some((id) => cur.about.has(id) || home.includes(id))) return true;
+    if (cur.about.size || home.length || !names.length) return false;
+    for (const id of names) cur.about.add(id);
+    return true;
+  };
+  const open = (boundary) => {
+    const next = emptySummary(episodes.length + 1);
+    if (cur) cur.closed = boundary;
+    next.opened = boundary;
+    next.cwd = loc.cwd; next.branch = loc.branch; if (loc.cwd) next.roots.add(loc.cwd);
+    if (boundary?.ticket) next.about.add(boundary.ticket); // the key it BEGAN with; its home is read live in `own` (second review pass)
+    if (lineAt) next.first = next.last = lineAt;
+    episodes.push(next); cur = next; compacted = false;
+  };
+  open(undefined);
+  for (let i = 0; i < events.length; i++) {
+    const ev = events[i];
+    apply(s, ev); // the session's rollup names every key it mentioned; the episodes' `named` is team-gated
+    if (ev.t === "time") { lineAt = ev.at; continue; } // the session's span is every line's; an episode's, its content's (below)
+    if (ev.t === "title") { episodes[0].title = ev.text; continue; } // the harness titles the session from its first asks: the first episode's, whenever the line falls
+    if (ev.t === "compaction") { if (cur.prompts.length) compacted = true; else cur.opened = { kind: "compaction" }; continue; }
+    if (ev.t === "cwd" || ev.t === "branch") {
+      if (ev.t === "branch" && ev.v === "HEAD") continue; // detached mid-rebase: the session is where it was
+      learnTeams(ev.v);
+      loc[ev.t] = ev.v;
+      // A line writes its cwd then its branch, so the two are one move: read
+      // the branch before judging the cwd, else a cwd-first return to the repo
+      // root — a parent of the worktree it was in — settles onto the episode it
+      // ends before its branch arrives (second review pass).
+      if (ev.t === "cwd" && events[i + 1]?.t === "branch" && events[i + 1].v !== "HEAD") { const nb = events[++i]; apply(s, nb); learnTeams(nb.v); loc.branch = nb.v; }
+      if (!cur.prompts.length) { settle(); continue; } // before the first ask, the episode is wherever the session is
+      if (!branchMoved()) {
+        if (inside()) settle(); // a cd within the checkout
+        else if (!cur.branch && own(ticketsIn(loc.cwd))) settle(); // no branch to go by: a directory naming the episode's ticket is its own
+        // else: the shell out of the checkout on the same branch — the session's place stands; or, with no branch, a move the next ask decides
+        continue;
+      }
+      if (own([...ticketsIn(loc.branch), ...(inside() ? [] : ticketsIn(loc.cwd))])) settle(); // a move to the episode's own place — judged by what changed: the branch, and the directory once it too has left the roots, in whichever order the line records them; else pending, decided at the next ask
+      continue;
+    }
+    if (ev.t === "prompt") {
+      const named = ticketsIn(ev.text, teams);
+      if (cur.prompts.length) {
+        const known = knownTickets(cur), fresh = named.filter((id) => !known.has(id));
+        const moved = away();
+        const fresh_ = named.length > 0 && fresh.length === named.length;
+        const turned = fresh_ && (!anchored(cur) || movesTo(events, i, named));
+        if (compacted || moved || turned) {
+          const move = moved ? (branchMoved() ? { kind: "branch", to: loc.branch } : { kind: "directory", to: basename(loc.cwd) }) : undefined;
+          // The new episode is "with" the ask's key only on the key's own evidence: the
+          // key alone ended an episode with a home, or the session then moved to its
+          // branch. An ask that names a key beside a compaction or a move may only be
+          // mentioning it (second review pass: a review on main was "with SMD-2000",
+          // and about it, so the move to SMD-2000's branch never began an episode).
+          const began = fresh_ && (anchored(cur) ? movesTo(events, i, named) : !(compacted || moved));
+          const b = { kind: compacted ? "compaction" : move ? move.kind : "ticket", ticket: began ? fresh[0] : undefined };
+          if (move) { b.to = move.to; if (compacted) b.moved = move; }
+          open(b);
+        }
+      }
+      if (!cur.prompts.length && cur.n === 1) for (const id of named) cur.about.add(id); // the session's first ask says what its first episode is about: its keys (its home is read live in `own`); a later episode's opening ask says so only through `began`
+      compacted = false;
+    }
+    if (lineAt && STAMPED.has(ev.t)) { if (!cur.first) cur.first = lineAt; cur.last = lineAt; }
+    apply(cur, ev, teams);
+  }
+  s.episodes = episodes.filter((ep) => ep.prompts.length); // the first, before any ask, is the only one that can be empty
+  for (const ep of s.episodes) { ep.harness = s.harness; ep.sessionId = s.sessionId; }
+  return s;
+}
+
+/** The key an episode's summaries chain under: the session's own id for the first episode — a session of one episode is captured as before — and `<session id>#e<n>` after it. The state file and the payload names carry it sanitised. */
+export const episodeChain = (sessionId, n) => (n > 1 ? `${sessionId}#e${n}` : sessionId);
+/** The chain a payload belongs to: its own, or — a payload from before episodes — its session's. */
+const chainOf = (j) => j?.chain_id ?? j?.session_id;
+
+/** A move as the episode line says it. */
+const moveText = (m) => `${m.kind === "branch" ? "branch " : ""}${clip(m.to ?? "", 80)}`;
+/** The move a boundary carries: itself, or the one recorded beside a compaction. */
+const moveOf = (b) => (b.kind === "compaction" ? b.moved : b.kind === "ticket" ? undefined : b);
+/** How an episode began, for its line in the summary. */
+const boundaryBegan = (b) => {
+  const parts = [];
+  if (b.kind === "compaction") parts.push("after a compaction");
+  if (moveOf(b)) parts.push(`on the move to ${moveText(moveOf(b))}`);
+  const base = parts.join(" and ");
+  return b.ticket ? `${base}${base ? " " : ""}with ${b.ticket}` : base;
+};
+/** …and how it ended. */
+const boundaryEnded = (b) => {
+  const parts = [];
+  if (b.kind === "compaction") parts.push("at a compaction");
+  if (moveOf(b)) parts.push(`when the session moved to ${moveText(moveOf(b))}`);
+  if (b.kind === "ticket") parts.push(`when ${b.ticket} was taken up`);
+  return parts.join(" and ");
+};
 
 // ── The summary text ─────────────────────────────────────────────────────────
 
@@ -473,14 +736,23 @@ function distinctPrompts(prompts) {
 /** An ISO timestamp as the summary shows it: the day and the minute. */
 const when = (iso) => iso.slice(0, 16).replace("T", " ");
 
-/** Render the summary as one thought. Deterministic: the same transcript renders the same text, which is what the fingerprint and the state compare. */
+/**
+ * Render the summary — the session's, or one episode's — as one thought.
+ * Deterministic: the same transcript renders the same text, which is what the
+ * fingerprint and the state compare; and an episode's text depends on nothing
+ * after it (not on how many episodes follow), so a closed one never changes.
+ */
 export function renderSummary(s) {
   const project = s.cwd && s.cwd !== HOME ? basename(s.cwd) : ""; // a session in $HOME names no project (and not the user)
   // A transcript with no timestamp is "undated", never today: the clock would
   // change the fingerprint at midnight and the same session would be captured twice (ninth review pass).
   const day = s.last || s.first ? (s.last || s.first).slice(0, 10) : "undated";
   const prompts = distinctPrompts(s.prompts);
-  const head = [`Session summary — ${s.harness}`, project, s.branch ? `(${s.branch})` : "", day].filter(Boolean).join(" — ").replace(" — (", " (");
+  // The tickets first (SMD-2013): those the asks named, else the one the branch
+  // or the directory names — a search for the ticket lands on this episode.
+  const named = s.named ? [...s.named] : [];
+  const tickets = (named.length ? named : anchorOf(s.cwd, s.branch)).slice(0, 3).join(", ");
+  const head = ["Session summary", tickets, s.harness, project, s.branch ? `(${s.branch})` : "", day].filter(Boolean).join(" — ").replace(" — (", " (");
   const parts = [head];
   const title = oneLine(s.title || prompts[0] || "");
   if (title) parts.push(`Title: ${clip(title, 120)}`);
@@ -521,6 +793,9 @@ export function renderSummary(s) {
   // supersedes it (SMD-2012). The moment is the transcript's last timestamp,
   // never the clock: the fingerprint must not move with time.
   const tail = [];
+  // Which piece of the session this is, and what bounded it (SMD-2013): only
+  // when there is something to say — a session of one episode reads as before.
+  if (s.n > 1 || s.closed) tail.push(`Episode ${s.n} of the session${s.opened ? `, begun ${boundaryBegan(s.opened)}` : ""}${s.closed ? `, ended ${boundaryEnded(s.closed)}` : ""}.`);
   if (s.checkpoint) {
     const at = s.last ? ` at ${when(s.last)}` : "";
     const how = s.checkpoint.kind === "compacted" ? `compacted${at}${s.checkpoint.trigger ? ` (${s.checkpoint.trigger})` : ""}` : `turn ended${at}`;
@@ -862,9 +1137,16 @@ export function checkpointOf(hook) {
   return spec.trigger ? { kind: spec.checkpoint, trigger: TRIGGERS.includes(hook.trigger) ? hook.trigger : undefined } : { kind: spec.checkpoint };
 }
 
+/** How many payloads a run posts beside its own — the queue's five (SMD-1298); the run's own, one per episode, all post (SMD-2013's second review pass: the oldest of more than five waited for a run that might never come). */
+export const RUN_MAX = 5;
+
 /**
  * The foreground: read the transcript, decide, summarise, scan, hand off.
- * Returns { code, message, payloadPath? } — the caller prints the message and exits with the code.
+ * Returns { code, message, payloadPaths, payloadPath?, payload? } — the caller
+ * prints the message and exits with the code; `payloadPaths` are the payloads
+ * the run's child posts, one per episode written, `payloadPath` the newest. One payload per episode whose summary changed
+ * (SMD-2013): an episode captured and unchanged is skipped by fingerprint, one
+ * whose summary carries a secret is refused alone — the others still post.
  */
 let payloadSeq = 0;
 export function prepare(hook, opts = {}) {
@@ -884,43 +1166,71 @@ export function prepare(hook, opts = {}) {
   // transcript is read, since the fallback comes from it; the read costs ~50 ms.
   if (typeof hook.session_id === "string" ? hook.session_id : typeof hook.session_id === "number") s.sessionId = String(hook.session_id); // an object is not an id
   const sessionId = s.sessionId;
-  const state = readState(sessionId) ?? {};
-  const queued = sessionPayloads(sessionId); // walked once: the interval and the dedupe below both read it (thirteenth review pass)
+  for (const ep of s.episodes) ep.sessionId = sessionId; // the hook's id wins over the transcript's, which segment set
+  const episodes = s.episodes;
+  if (!episodes.length) return { code: 0, message: `skip: no human prompt in session ${sessionId}` };
+  const last = episodes[episodes.length - 1]; // the open episode: where the session is now
+  const chainFor = (ep) => episodeChain(sessionId, ep.n);
+  const listing = listPayloads(); // the queue walked once for every episode (thirteenth review pass of SMD-1298; SMD-2013's first)
+  const states = new Map(episodes.map((ep) => [chainFor(ep), readState(chainFor(ep)) ?? {}]));
   if (eventSpec(event)?.interval && opts.minIntervalMin > 0) {
-    const last = lastAttemptMs(sessionId, state, queued);
-    const ageMin = last ? (Date.now() - last.at) / 60_000 : Infinity;
-    if (ageMin < opts.minIntervalMin) return { code: 0, message: `skip: last capture ${ageMin.toFixed(0)} min ago${last.pending ? " (still pending)" : ""}, interval ${opts.minIntervalMin}` };
+    // The session's last attempt across its episodes' chains: a new episode
+    // inside the interval is not a reason to capture (SMD-2013's first review
+    // pass: the gate read the open chain alone, which a new episode has none of).
+    const gates = episodes.map((ep) => lastAttemptMs(chainFor(ep), states.get(chainFor(ep)), sessionPayloads(chainFor(ep), {}, listing))).filter(Boolean);
+    const gate = gates.length ? gates.reduce((a, b) => (b.at > a.at ? b : a)) : null;
+    const ageMin = gate ? (Date.now() - gate.at) / 60_000 : Infinity;
+    if (ageMin < opts.minIntervalMin) return { code: 0, message: `skip: last capture ${ageMin.toFixed(0)} min ago${gate.pending ? " (still pending)" : ""}, interval ${opts.minIntervalMin}` };
   }
-  if (typeof hook.cwd === "string" && hook.cwd) { s.cwd = hook.cwd; s.roots.add(hook.cwd); }
-  if (!s.prompts.length) return { code: 0, message: `skip: no human prompt in session ${s.sessionId}` };
-  s.checkpoint = checkpointOf(hook);
-  const text = renderSummary(s);
-  const fingerprint = sha256(text);
-  if (state.fingerprint === fingerprint) return { code: 0, message: `skip: session ${s.sessionId} already captured as ${state.thought_id}` };
-  // …or already QUEUED: with the endpoint away, a session resumed and ended
-  // again with no new turn would queue the same summary twice, and the run
-  // that drains them would dead-letter the first as "obsolete" (eleventh review pass).
-  for (const p of queued) {
-    try { if (JSON.parse(readFileSync(p.path, "utf8")).fingerprint === fingerprint) return { code: 0, message: `skip: session ${s.sessionId} already queued — a payload with this summary is pending` }; } catch { /* a sibling took or removed it */ }
+  if (typeof hook.cwd === "string" && hook.cwd) { for (const x of [s, last]) { x.cwd = hook.cwd; x.roots.add(hook.cwd); } }
+  last.checkpoint = checkpointOf(hook); // a checkpoint is the open episode's; a closed one is over
+  const written = [], skipped = [], refused = [];
+  for (const ep of episodes) {
+    const chain = chainFor(ep);
+    const text = renderSummary(ep);
+    const fingerprint = sha256(text);
+    const state = states.get(chain);
+    if (state.fingerprint === fingerprint) { skipped.push({ ep, as: state.thought_id }); continue; }
+    // …or already QUEUED: with the endpoint away, a session resumed and ended
+    // again with no new turn would queue the same summary twice, and the run
+    // that drains them would dead-letter the first as "obsolete" (eleventh review pass).
+    if (sessionPayloads(chain, {}, listing).some((p) => payloadOf(p)?.fingerprint === fingerprint)) { skipped.push({ ep, queued: true }); continue; }
+    const findings = scanSummary(ep, text);
+    if (findings.length) { refused.push({ ep, where: findings.map((f) => `${f.reason} at char ${f.at}`).join(", ") }); continue; }
+    const payload = {
+      session_id: sessionId, chain_id: chain, episode: ep.n, harness: s.harness, event: ep === last ? event : "", trigger: ep === last ? last.checkpoint?.trigger : undefined, text, fingerprint, // a closed episode's summary is final whatever event the run is: it carries no event, so the log says none (second review pass)
+      derived_from: provenanceOf(ep), supersedes: state.thought_id || undefined,
+      prompts: distinctPrompts(ep.prompts).length, prepared_at: new Date().toISOString(), attempts: 0,
+    };
+    ensureDirs();
+    // The name orders the queue: the millisecond, then a per-process sequence
+    // (two payloads one process prepares in one millisecond sort as made — third
+    // review pass: a random tail decided, and a test flaked), then a random tail
+    // so two processes never collide; it ends in the chain's sanitised key.
+    const payloadPath = join(PENDING_DIR(), `${Date.now()}-${String(payloadSeq++).padStart(4, "0")}-${randomBytes(3).toString("hex")}-${basename(statePath(chain), ".json")}.json`);
+    writeJson(payloadPath, payload);
+    written.push({ ep, payloadPath, payload });
   }
-  const findings = scanSummary(s, text);
-  if (findings.length) {
-    const where = findings.map((f) => `${f.reason} at char ${f.at}`).join(", ");
-    return { code: 1, message: `refused — the summary for session ${s.sessionId} carries what looks like a secret (${where}); nothing sent. Remove it from the conversation before ending the session, or capture by hand.` };
+  const one = episodes.length === 1;
+  const who = `session ${sessionId}${last.checkpoint ? ` (${event}${last.checkpoint.trigger ? ` ${last.checkpoint.trigger}` : ""})` : ""}`;
+  const describe = (p) => `${p.prompts} prompt(s), ${p.derived_from.length} source id(s)${p.supersedes ? `, supersedes ${p.supersedes}` : ""}`;
+  const sentences = [];
+  if (refused.length) {
+    const carrier = one ? `the summary for session ${sessionId}` : `${refused.length === 1 ? `episode ${refused[0].ep.n}` : `episodes ${refused.map((r) => r.ep.n).join(", ")}`} of session ${sessionId}`;
+    const where = refused.map((r) => (one ? r.where : `episode ${r.ep.n}: ${r.where}`)).join("; ");
+    sentences.push(`refused — ${carrier} carries what looks like a secret (${where}); ${written.length ? `${refused.length === 1 ? "that episode is" : "those episodes are"} not sent, the other ${written.length === 1 ? "episode posts" : `${written.length} episodes post`}` : "nothing sent"}. Remove it from the conversation before ending the session, or capture by hand.`);
   }
-  const payload = {
-    session_id: s.sessionId, harness: s.harness, event, trigger: s.checkpoint?.trigger, text, fingerprint,
-    derived_from: provenanceOf(s), supersedes: state.thought_id || undefined,
-    prompts: distinctPrompts(s.prompts).length, prepared_at: new Date().toISOString(), attempts: 0,
-  };
-  ensureDirs();
-  // The name orders the queue: the millisecond, then a per-process sequence
-  // (two payloads one process prepares in one millisecond sort as made — third
-  // review pass: a random tail decided, and a test flaked), then a random tail
-  // so two processes never collide.
-  const payloadPath = join(PENDING_DIR(), `${Date.now()}-${String(payloadSeq++).padStart(4, "0")}-${randomBytes(3).toString("hex")}-${basename(statePath(s.sessionId), ".json")}.json`);
-  writeJson(payloadPath, payload);
-  return { code: 0, message: `prepared: session ${s.sessionId}${s.checkpoint ? ` (${event}${s.checkpoint.trigger ? ` ${s.checkpoint.trigger}` : ""})` : ""}, ${payload.prompts} prompt(s), ${payload.derived_from.length} source id(s)${payload.supersedes ? `, supersedes ${payload.supersedes}` : ""}`, payloadPath, payload };
+  if (written.length) {
+    sentences.push(one ? `prepared: ${who}, ${describe(written[0].payload)}`
+      : `prepared: ${who}, episode${written.length === 1 ? "" : "s"} ${written.map((w) => w.ep.n).join(", ")} of ${episodes.length}${skipped.length ? ` (${skipped.length} unchanged)` : ""} — ${written.map((w) => `${w.ep.n}: ${describe(w.payload)}`).join("; ")}`);
+    const newest = written[written.length - 1];
+    return { code: refused.length ? 1 : 0, message: sentences.join(" | "), payloadPaths: written.map((w) => w.payloadPath), payloadPath: newest.payloadPath, payload: newest.payload };
+  }
+  if (refused.length) return { code: 1, message: sentences[0], payloadPaths: [] };
+  const queuedOnly = skipped.every((k) => k.queued);
+  if (one) return { code: 0, message: queuedOnly ? `skip: session ${sessionId} already queued — a payload with this summary is pending` : `skip: session ${sessionId} already captured as ${skipped[0].as}`, payloadPaths: [] };
+  const newest = skipped[skipped.length - 1];
+  return { code: 0, message: `skip: session ${sessionId}'s ${episodes.length} episodes are already captured${skipped.some((k) => k.queued) ? " or queued" : ""} (the newest ${newest.queued ? "as a pending payload" : `as ${newest.as}`})`, payloadPaths: [] };
 }
 
 /**
@@ -968,7 +1278,7 @@ const payloadOf = (p) => { try { return JSON.parse(readFileSync(p.path, "utf8"))
 export const aheadOf = (sessionId, name) => sessionPayloads(sessionId, { pending: false }).filter((p) => {
   if (p.pid === process.pid || p.name.localeCompare(name) >= 0 || !isAlive(p.pid)) return false;
   const j = payloadOf(p);
-  return j === undefined || (j !== null && j.session_id === sessionId); // unreadable: ahead, the safe side; gone: not
+  return j === undefined || (j !== null && chainOf(j) === sessionId); // unreadable: ahead, the safe side; gone: not
 });
 /**
  * Whether a NEWER payload of the session is in another live child's hands:
@@ -977,7 +1287,7 @@ export const aheadOf = (sessionId, name) => sessionPayloads(sessionId, { pending
  * thought (fourth review pass: a sweep returned an older payload to pending/
  * after the newer's run had looked, a sibling claimed it, and both posted).
  */
-export const newerInFlight = (sessionId, name) => sessionPayloads(sessionId, { pending: false }).some((p) => p.pid !== process.pid && p.name.localeCompare(name) > 0 && isAlive(p.pid) && payloadOf(p)?.session_id === sessionId); // unreadable: not a reason to drop a payload
+export const newerInFlight = (sessionId, name) => sessionPayloads(sessionId, { pending: false }).some((p) => p.pid !== process.pid && p.name.localeCompare(name) > 0 && isAlive(p.pid) && chainOf(payloadOf(p)) === sessionId); // unreadable: not a reason to drop a payload
 
 /**
  * The session's landed payloads whose bookkeeping is still owed — the post
@@ -994,7 +1304,7 @@ function landedPayloads(sessionId) {
     // The name's millisecond was written by the same clock as prepared_at: a
     // future one decides nothing either, and the payload ranks last — a clock
     // that ran ahead never puts it over the state (fifth review pass).
-    if (j?.captured_id && j.session_id === sessionId) out.push({ name: p.name, id: j.captured_id, ms: payloadMoment(j.prepared_at, p.ms) });
+    if (j?.captured_id && chainOf(j) === sessionId) out.push({ name: p.name, id: j.captured_id, ms: payloadMoment(j.prepared_at, p.ms) });
   }
   return out;
 }
@@ -1054,17 +1364,22 @@ export async function postPending(cfg, own) {
   sweepInflight();
   const mine = join(INFLIGHT_DIR(), String(process.pid));
   mkdirSync(mine, { recursive: true, mode: 0o700 });
+  // The run's own: one payload, or one per episode the run prepared (SMD-2013) — all of them; the five bound what waited from before, taken longest-waiting first.
+  const owns = [].concat(own ?? []).filter(Boolean);
   const pending = readdirSync(PENDING_DIR()).filter((f) => f.endsWith(".json")).sort().map((f) => join(PENDING_DIR(), f));
-  const earlier = pending.filter((f) => f !== own).slice(0, own ? 4 : 5);
-  const wanted = [...earlier, ...(own && existsSync(own) ? [own] : [])].sort((a, b) => basename(a).localeCompare(basename(b))); // names lead with the millisecond they were made
+  const earlier = pending.filter((f) => !owns.includes(f)).slice(0, Math.max(0, RUN_MAX - owns.length));
+  const wanted = [...earlier, ...owns.filter((f) => existsSync(f))].sort((a, b) => basename(a).localeCompare(basename(b))); // names lead with the millisecond they were made
   // Claim: the payload's home path stays its name in the outcomes and the state.
+  // Every session-keyed structure and rule below keys on the CHAIN — the
+  // session's id, or an episode's key under it (SMD-2013): each episode's
+  // summaries order and supersede among themselves alone.
   const claimed = wanted.map((home) => claim(home, mine)).filter(Boolean);
-  const newestOf = new Map(); // session → the newest payload's home in this run
-  for (const { home, payload } of claimed) newestOf.set(payload.session_id, home);
+  const newestOf = new Map(); // chain → the newest payload's home in this run
+  for (const { home, payload } of claimed) newestOf.set(chainOf(payload), home);
   const outcomes = [];
   pruneDead();
   const clearedSessions = new Set();
-  const landedHere = new Map(); // session → what this run landed: the pointer's last resort
+  const landedHere = new Map(); // chain → what this run landed: the pointer's last resort
   const bounced = new Set(); // files the follow-up found to be another session's: read once
   // After the run: payloads left under pending/ of every session whose claim
   // this run cleared — landed, dropped as obsolete beside a newer one, or
@@ -1097,14 +1412,14 @@ export async function postPending(cfg, own) {
         // ("a.b" and "a_b"): a payload of another session is not this run's
         // to judge (sixth review pass — it was dropped as obsolete beside a
         // session it did not belong to).
-        if (c.payload.session_id !== sid) { moveTo(c.here, PENDING_DIR()); bounced.add(`${sid}:${p.path}`); continue; } // by session: its own may still follow it up (tenth review pass)
+        if (chainOf(c.payload) !== sid) { moveTo(c.here, PENDING_DIR()); bounced.add(`${sid}:${p.path}`); continue; } // by session: its own may still follow it up (tenth review pass)
         // The session's newest, across rounds: a later round must not name an older payload newest when the newest was taken before and failed (ninth review pass).
         if (!newestOf.has(sid) || basename(newestOf.get(sid)).localeCompare(p.name) < 0) newestOf.set(sid, p.path);
         next.push({ ...c, followUp: true });
       }
     }
     next.sort((a, b) => basename(a.home).localeCompare(basename(b.home))); // oldest first, as the run posts
-    if (next.length) log(`following up: ${next.length} payload(s) of ${[...new Set(next.map((n) => n.payload.session_id))].join(", ")} waited under pending/ behind a claim this run cleared`);
+    if (next.length) log(`following up: ${next.length} payload(s) of ${[...new Set(next.map((n) => chainOf(n.payload)))].join(", ")} waited under pending/ behind a claim this run cleared`);
     return next;
   };
   const queue = [...claimed];
@@ -1119,6 +1434,8 @@ export async function postPending(cfg, own) {
       }
       const { home, here, payload, retaken, followUp } = queue.shift();
       const file = home;
+      const chain = chainOf(payload);
+      const who = "session=" + payload.session_id + (payload.episode > 1 ? ` episode=${payload.episode}` : "");
       // The cap counts what the follow-up posts or defers, not what it drops:
       // five stale ends of one session, four of them obsolete, spent the room
       // another session's deferred end needed (eleventh review pass).
@@ -1130,8 +1447,8 @@ export async function postPending(cfg, own) {
       // hands about to post, cumulative over this one — is ONE question, asked
       // before stepping aside and again before posting (third and fourth review
       // passes: asked in parts, the parts disagreed).
-      const newestHere = newestOf.get(payload.session_id) === home;
-      const outdated = (state) => !newestHere || recordedAfter(state, payload.prepared_at) || landedAfter(payload.session_id, basename(here)) || newerInFlight(payload.session_id, basename(here));
+      const newestHere = newestOf.get(chain) === home;
+      const outdated = (state) => !newestHere || recordedAfter(state, payload.prepared_at) || landedAfter(chain, basename(here)) || newerInFlight(chain, basename(here));
       // An earlier payload of the session that another child is still posting
       // lands first (SMD-2035): this one steps aside at once — back under
       // pending/, where the run that lands the predecessor follows up with it,
@@ -1149,7 +1466,7 @@ export async function postPending(cfg, own) {
       // A landed one consults them whatever its siblings: outdated or not, its
       // state write must follow an older sibling's (eleventh review pass: one
       // beside a newer payload in this run wrote at once, and raced).
-      const ahead = !payload.captured_id && outdated(readState(payload.session_id)) ? [] : aheadOf(payload.session_id, basename(here));
+      const ahead = !payload.captured_id && outdated(readState(chain)) ? [] : aheadOf(chain, basename(here));
       if (ahead.length) {
         const moved = moveTo(here, PENDING_DIR());
         // Between the look and that move the predecessor may have landed and
@@ -1158,14 +1475,14 @@ export async function postPending(cfg, own) {
         // payload is taken back and posted now — once — unless the landing run
         // got to it first, in which case that run posts it and this one says so.
         let why = `the session's earlier post is in flight (pid ${ahead[0].pid}); ${moved ? "kept under pending/ for the run that lands it" : "pending/ refused the move, so it stays in this run's hands until the run ends"}`;
-        if (moved && !retaken && !aheadOf(payload.session_id, basename(here)).length) {
+        if (moved && !retaken && !aheadOf(chain, basename(here)).length) {
           try { renameSync(home, here); queue.unshift({ home, here, payload, retaken: true }); continue; } catch { why = existsSync(mine) ? "the session's earlier post has cleared and its run has taken this payload up" : "this run's claim directory is gone, swept as stale, so the payload waits under pending/ for the next run"; }
         }
-        log(`deferred session=${payload.session_id} — ${why}`);
+        log(`deferred ${who} — ${why}`);
         outcomes.push({ file, ok: false, deferred: true, error: `deferred: ${why}` });
         continue;
       }
-      const state = readState(payload.session_id);
+      const state = readState(chain);
       const stateIsNewer = recordedAfter(state, payload.prepared_at);
       // A payload that already LANDED is never obsolete: its id must reach the
       // state, and the newer payload behind it must supersede it (sixth review
@@ -1176,9 +1493,9 @@ export async function postPending(cfg, own) {
       const obsolete = !payload.captured_id && outdated(state);
       if (obsolete) {
         if (followUp) followedUp--; // a drop is no work the cap bounds
-        clearedSessions.add(payload.session_id);
+        clearedSessions.add(chain);
         moveTo(here, DEAD_DIR());
-        log(`obsolete session=${payload.session_id} — a later capture of the session has a summary; this one is not posted`);
+        log(`obsolete ${who} — a later capture of the session has a summary; this one is not posted`);
         outcomes.push({ file, ok: false, obsolete: true, error: "obsolete: a later capture of the session has a summary" });
         continue;
       }
@@ -1188,7 +1505,7 @@ export async function postPending(cfg, own) {
       // prepare time is stale the moment the state names another id — a payload
       // prepared before its predecessor landed pointed past it, and two
       // summaries stood (seventh and eighth review passes).
-      if (!payload.captured_id) payload.supersedes = pointerFor(payload.session_id, basename(here), state, landedHere.get(payload.session_id)) ?? payload.supersedes;
+      if (!payload.captured_id) payload.supersedes = pointerFor(chain, basename(here), state, landedHere.get(chain)) ?? payload.supersedes;
       // A pointer the server has kept failing on — its registry away for good,
       // its audit table unreadable — must not take the summary down with it:
       // on the last attempt it is dropped and the summary lands (seventh review
@@ -1229,15 +1546,15 @@ export async function postPending(cfg, own) {
         // outage to wait out (twelfth review pass).
         const dead = e.kind === "refused" || /JSON-RPC -32(?:001|60[12])\b/.test(payload.last_error) || (Number.isFinite(waited) && waited > PENDING_MAX_AGE_MS);
         try { writeJson(here, payload); } catch { /* the claim is gone from under us; nothing to update */ }
-        clearedSessions.add(payload.session_id); // the claim clears: an end that stepped aside for this payload must not wait for an unrelated run (fifth review pass)
+        clearedSessions.add(chain); // the claim clears: an end that stepped aside for this payload must not wait for an unrelated run (fifth review pass)
         moveTo(here, dead ? DEAD_DIR() : PENDING_DIR());
-        log(`${dead ? "dead" : "pending"} session=${payload.session_id} attempt=${payload.attempts}${dead && waited > PENDING_MAX_AGE_MS ? ` waited=${Math.round(waited / 86_400_000)}d` : ""} error="${payload.last_error}"`);
+        log(`${dead ? "dead" : "pending"} ${who} attempt=${payload.attempts}${dead && waited > PENDING_MAX_AGE_MS ? ` waited=${Math.round(waited / 86_400_000)}d` : ""} error="${payload.last_error}"`);
         outcomes.push({ file, ok: false, error: payload.last_error, dead });
         continue;
       }
       const { id } = posted;
-      clearedSessions.add(payload.session_id);
-      landedHere.set(payload.session_id, { id, ms: payloadMoment(payload.prepared_at, Number(basename(here).split("-")[0])) });
+      clearedSessions.add(chain);
+      landedHere.set(chain, { id, ms: payloadMoment(payload.prepared_at, Number(basename(here).split("-")[0])) });
       const note = [posted.note, lastResort].filter(Boolean).join("; ");
       // Bookkeeping, apart from the post: the id goes onto the payload first, so a
       // fault here leaves a file the next run finishes without posting twice. A
@@ -1252,16 +1569,16 @@ export async function postPending(cfg, own) {
       // meanwhile, be overwritten by this older one (ninth review pass).
       try {
         if (!payload.captured_id) writeJson(here, { ...payload, captured_id: id, captured_note: note });
-        const stateIsNewerNow = stateIsNewer || recordedAfter(readState(payload.session_id), payload.prepared_at);
+        const stateIsNewerNow = stateIsNewer || recordedAfter(readState(chain), payload.prepared_at);
         // summary_at never runs ahead of the clock that will read it back.
         const summaryAt = Number.isNaN(pastMs(payload.prepared_at)) ? new Date().toISOString() : payload.prepared_at;
-        if (!stateIsNewerNow) writeState(payload.session_id, { thought_id: id, fingerprint: payload.fingerprint, captured_at: new Date().toISOString(), summary_at: summaryAt, harness: payload.harness, prompts: payload.prompts, sources: (payload.derived_from ?? []).length });
+        if (!stateIsNewerNow) writeState(chain, { chain_id: chain, thought_id: id, fingerprint: payload.fingerprint, captured_at: new Date().toISOString(), summary_at: summaryAt, harness: payload.harness, prompts: payload.prompts, sources: (payload.derived_from ?? []).length });
         unlinkSync(here);
-        log(`captured session=${payload.session_id} harness=${payload.harness}${payload.event && payload.event !== "SessionEnd" ? ` event=${payload.event}${payload.trigger ? ` trigger=${payload.trigger}` : ""}` : ""} id=${id} sources=${(payload.derived_from ?? []).length}${payload.supersedes ? ` supersedes=${payload.supersedes}` : ""}${note ? ` note="${note}"` : ""}`);
+        log(`captured ${who} harness=${payload.harness}${payload.event && payload.event !== "SessionEnd" ? ` event=${payload.event}${payload.trigger ? ` trigger=${payload.trigger}` : ""}` : ""} id=${id} sources=${(payload.derived_from ?? []).length}${payload.supersedes ? ` supersedes=${payload.supersedes}` : ""}${note ? ` note="${note}"` : ""}`);
         outcomes.push({ file, ok: true, id, note });
       } catch (e) {
         moveTo(here, PENDING_DIR());
-        log(`captured session=${payload.session_id} id=${id} but the bookkeeping failed: ${String(e.message ?? e).slice(0, 200)} — the payload keeps the id for the next run`);
+        log(`captured ${who} id=${id} but the bookkeeping failed: ${String(e.message ?? e).slice(0, 200)} — the payload keeps the id for the next run`);
         outcomes.push({ file, ok: true, id, note: [note, "bookkeeping deferred"].filter(Boolean).join("; ") });
       }
     }
@@ -1273,10 +1590,10 @@ export async function postPending(cfg, own) {
 }
 
 /** Hand the network half to a child that outlives this process; stdout/stderr go to the log. */
-function detachPost(payloadPath) {
+function detachPost(payloadPaths) {
   ensureDirs();
   const fd = openSync(LOG_PATH(), "a", 0o600);
-  const child = spawn(process.execPath, [SELF, "--post", payloadPath], {
+  const child = spawn(process.execPath, [SELF, ...payloadPaths.flatMap((p) => ["--post", p])], {
     detached: true,
     stdio: ["ignore", fd, fd],
     env: { ...process.env },
@@ -1337,15 +1654,19 @@ export function hookJson(harness, { event, minInterval = 20, runtime } = {}) {
 function flag(args, name) {
   // The LAST mention wins, in either form (fourth review pass: `=` won over a
   // later space form, so a corrected flag appended to the line was ignored).
-  let value;
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === name) { const v = args[i + 1] ?? ""; value = v.startsWith("--") ? "" : v; }
-    else if (args[i].startsWith(`${name}=`)) { const v = args[i].slice(name.length + 1); value = v.startsWith("--") ? "" : v; } // `--event=--min-interval` is a value forgotten too (fifth review pass)
-  }
-  return value;
+  return flagAll(args, name).at(-1);
 }
 /** Whether a flag is present in either form. */
 const has = (args, name) => flag(args, name) !== undefined;
+/** Every value a flag was given, in order, in either form — `--post a --post b`, one per episode of a run (SMD-2013); `flag` is its last. */
+function flagAll(args, name) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === name) { const v = args[i + 1] ?? ""; out.push(v.startsWith("--") ? "" : v); }
+    else if (args[i].startsWith(`${name}=`)) { const v = args[i].slice(name.length + 1); out.push(v.startsWith("--") ? "" : v); } // `--event=--min-interval` is a value forgotten too (fifth review pass)
+  }
+  return out;
+}
 
 /**
  * `--event` as the CLI reads it, for --print-hook and --dry-run alike (second
@@ -1444,26 +1765,39 @@ export async function main(argv) {
     if (triggerError) { console.error(triggerError); return 2; }
     if (has(args, "--min-interval")) { console.error("--min-interval is --print-hook's, for a Stop hook; a dry run has no interval"); return 2; }
     const s = summariseTranscript(path, harness);
-    if (!s.prompts.length) {
+    if (!s.episodes.length) {
       const sniffed = sniffHarness(readFileSync(path, "utf8").split("\n", 5));
       console.log(`--- would SKIP: no human prompt in ${path} (a compaction, or a transcript with only tool traffic${harness && harness !== sniffed ? `; note: --harness ${harness} was given but the first line says ${sniffed}` : ""})`);
       return 0;
     }
-    if (ev) s.checkpoint = checkpointOf({ hook_event_name: ev, trigger });
-    const text = renderSummary(s);
-    const findings = scanSummary(s, text);
-    const ids = provenanceOf(s);
-    console.log(text);
-    console.log(`\n--- would send: source=${s.harness}, derived_from=${ids.length} id(s)${ids.length ? ` [${ids.slice(0, 5).join(", ")}${ids.length > 5 ? ", …" : ""}]` : ""}`);
-    if (findings.length) { console.log(`--- would REFUSE: ${findings.map((f) => `${f.reason} at char ${f.at}`).join(", ")}`); return 1; }
-    console.log("--- secret scan: clean");
-    return 0;
+    const several = s.episodes.length > 1;
+    if (ev) s.episodes[s.episodes.length - 1].checkpoint = checkpointOf({ hook_event_name: ev, trigger });
+    // The segmentation first (SMD-2013): where the boundaries fell and why, one
+    // line per episode, so an operator sees the pieces before the texts.
+    if (several) {
+      console.log(`--- ${s.episodes.length} episodes — one thought each, on its own supersedes chain:`);
+      for (const ep of s.episodes) {
+        const tickets = ep.named.size ? [...ep.named].join(", ") : anchorOf(ep.cwd, ep.branch)[0] ?? "no ticket";
+        console.log(`    ${ep.n}. ${[tickets, ep.branch ? `(${ep.branch})` : "", `${distinctPrompts(ep.prompts).length} prompt(s)`, ep.first ? `${when(ep.first)} → ${when(ep.last)}` : "undated", ep.opened ? `begun ${boundaryBegan(ep.opened)}` : "from the start", ep.closed ? `ended ${boundaryEnded(ep.closed)}` : "still open"].filter(Boolean).join(" — ")}`);
+      }
+    }
+    let code = 0;
+    for (const ep of s.episodes) {
+      const text = renderSummary(ep);
+      const findings = scanSummary(ep, text);
+      const ids = provenanceOf(ep);
+      if (several) console.log(`\n=== episode ${ep.n} ===`);
+      console.log(text);
+      console.log(`\n--- would send${several ? ` (episode ${ep.n})` : ""}: source=${s.harness}, derived_from=${ids.length} id(s)${ids.length ? ` [${ids.slice(0, 5).join(", ")}${ids.length > 5 ? ", …" : ""}]` : ""}`);
+      if (findings.length) { console.log(`--- would REFUSE${several ? ` episode ${ep.n}` : ""}: ${findings.map((f) => `${f.reason} at char ${f.at}`).join(", ")}`); code = 1; } else console.log("--- secret scan: clean");
+    }
+    return code;
   }
   if (has(args, "--post")) {
-    const file = flag(args, "--post");
+    const files = flagAll(args, "--post").filter(Boolean); // none: drain pending/ alone
     let cfg;
     try { cfg = loadConfig(); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 2; }
-    const outcomes = await postPending(cfg, file || undefined);
+    const outcomes = await postPending(cfg, files.length ? files : undefined);
     // Each outcome is already a timestamped line in the log, where this
     // process's stdout also lands when the hook spawned it; say it again only
     // to a terminal (first review pass: every line twice in the log).
@@ -1473,7 +1807,7 @@ export async function main(argv) {
 
   // The hook itself: JSON on stdin. A terminal is not a hook — say so instead
   // of waiting on it for ever (ninth review pass).
-  if (process.stdin.isTTY) { console.error("session-capture: expected the hook's JSON on stdin (a harness pipes it). By hand: --print-hook [claude-code|codex], --check, --dry-run <transcript>, --post <payload>."); return 2; }
+  if (process.stdin.isTTY) { console.error("session-capture: expected the hook's JSON on stdin (a harness pipes it). By hand: --print-hook [claude-code|codex], --check, --dry-run <transcript>, --post <payload> [--post <payload>…]."); return 2; }
   let hook;
   try { hook = JSON.parse(await readStdin()); } catch (e) { console.error(`session-capture: stdin is not the hook's JSON (${e.message})`); return 1; }
   // A hook takes two flags. Any other — `--event` or `--trigger`, which are
@@ -1500,19 +1834,23 @@ export async function main(argv) {
   try { cfg = loadConfig(); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 1; }
   let prepared;
   try { prepared = prepare(hook, { minIntervalMin, harness }); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 1; }
-  if (prepared.code !== 0) { log(prepared.message); console.error(`session-capture: ${prepared.message}`); return prepared.code; }
-  if (!prepared.payloadPath) { log(prepared.message); console.error(`session-capture: ${prepared.message}`); return 0; }
+  // A refused episode exits 1 once the others are on their way (SMD-2013): the
+  // secret's episode is not sent, the rest of the session still is.
+  const paths = prepared.payloadPaths ?? [];
+  if (!paths.length) { log(prepared.message); console.error(`session-capture: ${prepared.message}`); return prepared.code; }
+  if (prepared.code) { log(prepared.message); console.error(`session-capture: ${prepared.message}`); } // the refusal first, then what posts
   if (process.env.OB1_SESSION_CAPTURE_SYNC === "1") {
-    // The run's own outcome, by file — oldest-first posting puts stranded
-    // payloads before it (third review pass: `[o]` read the first outcome).
-    const o = (await postPending(cfg, prepared.payloadPath)).find((x) => x.file === prepared.payloadPath);
-    if (!o) { console.error("session-capture: another run took this payload (to post it, or as obsolete beside a newer one)"); return 0; } // two runs at once (fourth review pass)
-    console.error(`session-capture: ${o.ok ? `captured ${o.id}` : o.obsolete ? `skip: ${o.error}` : o.deferred ? o.error : `not captured: ${o.error}`}`);
-    return o.ok || o.obsolete || o.deferred ? 0 : 1;
+    // The run's own outcomes, by file — oldest-first posting puts stranded
+    // payloads before them (third review pass: `[o]` read the first outcome).
+    const outcomes = await postPending(cfg, paths);
+    const own = paths.map((p) => outcomes.find((x) => x.file === p));
+    if (own.every((o) => !o)) { console.error(`session-capture: another run took ${paths.length === 1 ? "this payload" : "these payloads"} (to post them, or as obsolete beside a newer one)`); return prepared.code; } // two runs at once (fourth review pass)
+    for (const o of own) if (o) console.error(`session-capture: ${o.ok ? `captured ${o.id}` : o.obsolete ? `skip: ${o.error}` : o.deferred ? o.error : `not captured: ${o.error}`}`);
+    return prepared.code || (own.every((o) => !o || o.ok || o.obsolete || o.deferred) ? 0 : 1);
   }
-  const pid = detachPost(prepared.payloadPath);
-  log(`${prepared.message} → posting in pid ${pid}`);
-  return 0;
+  const pid = detachPost(paths);
+  log(`${prepared.code ? `posting the rest` : prepared.message} → posting in pid ${pid}`);
+  return prepared.code;
 }
 
 // Run as the entry point — argv[1] resolved through any symlink (sixth review

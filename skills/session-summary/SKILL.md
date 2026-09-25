@@ -84,8 +84,9 @@ search result marks a superseded hit.
   naming the same sources. That is fine — they are different kinds of thought,
   and the hook's `source` lets a reader weigh them apart. Do NOT `supersede`
   the hook's thought while the session runs: the hook captures again at each
-  compaction and at the end (SMD-2012), and each capture supersedes the id the
-  hook itself last wrote — so a checkpoint you replaced mid-session is
+  compaction and at the end (SMD-2012), one thought per episode of the session
+  (SMD-2013), and each capture supersedes the id the hook itself last wrote
+  for that episode — so a checkpoint you replaced mid-session is
   superseded twice, and your summary and the hook's final one both stand as
   current. If you want one, supersede the hook's summary from a LATER session,
   once this one has ended and its final thought exists (your key can read and
