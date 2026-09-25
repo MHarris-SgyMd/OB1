@@ -242,6 +242,17 @@ jobs:
         working-directory: evals
         run: bun eval-writable-projection.ts --self-check
 
+      # The entity-gate spike's rules (SMD-1937): the deterministic baselines
+      # on the shapes SMD-1935 names and the ones they must keep, AUROC,
+      # balanced accuracy, the dev threshold, the temperature and Platt refits
+      # recovering a known slope, kappa, the paired bootstrap, the
+      # drop-the-mechanism identity, the permuted-score mutant, the framings
+      # and the committed grades' shape. No database, no tier; the measurement
+      # reads the dogfood brain.
+      - name: Entity-gate rules
+        working-directory: evals
+        run: bun eval-jev-gate.ts --self-check
+
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
       - name: Cloudflare Workers build
