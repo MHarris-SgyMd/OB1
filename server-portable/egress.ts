@@ -201,15 +201,11 @@ export function termMatches(term: EgressTerm, subject: EgressSubject): boolean {
     case "actor":
       return lower(subject.actor) === want;
     case "source":
-      // `source` reads the row's OWN label — the value the server wrote — so it
-      // gates every subject that carries one: an edit and the re-embed and
-      // consolidation passes (the stored row), and db/sync-linear.ts's capture
-      // of a Linear issue (metadata.source = "linear", authoritative). The one
-      // caller-CLAIMED source is capture_thought's; a claim is dodged by naming
-      // another label or none, so the handler keeps it OFF the capture subject
-      // entirely (index.ts) and it never reaches here — who may capture is
-      // named with `actor`, which the key proves (SMD-1941). The gate does not
-      // branch on kind: whether a `source` is on the subject is the call site's.
+      // The row's own label, server-written — an edit, the re-embed and
+      // consolidation passes, and db/sync-linear.ts's authoritative captures.
+      // capture_thought keeps its caller-claimed source OFF the subject, so it
+      // never reaches here; the gate does NOT branch on kind (SMD-1941; the
+      // rationale is on EGRESS_UNITS).
       return lower(subject.metadata?.source) === want;
     case "type":
       return lower(subject.metadata?.type) === want;

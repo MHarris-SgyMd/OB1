@@ -1711,17 +1711,11 @@ function buildServer(principal: Principal): McpServer {
         // and lands all the same, without the vector or the tags the refused
         // call would have produced, with the decision on its audit row.
         const cfg = embedConfig();
-        // The capture is gated on `actor` (the key, proven) and `marker` (the
-        // text) — not `source`. A capture's `source` is the caller's claim
-        // (`origin` above), dodged by naming another label or none, so it MUST
-        // NOT gate egress: the subject carries NO `source`, so no `source:` term
-        // can match this call (SMD-1941). The row still RECORDS the label below,
-        // and the re-embed and consolidation passes that read the row back gate
-        // on it there, where the server wrote it; to gate WHO may capture, an
-        // operator names `actor:<key>`. (db/sync-linear.ts is the other capture
-        // path — its `source` IS the server's, so it puts it on the subject and
-        // a `source:` term gates that capture; the gate itself does not branch
-        // on kind.)
+        // Gated on `actor` (the key, proven) and `marker` (the text), NOT
+        // `source`: a capture's `source` is the caller's claim, so the subject
+        // carries none and no `source:` term can match this call — re-adding it
+        // here reopens the dodge (SMD-1941; egress.ts EGRESS_UNITS). The row
+        // still RECORDS the label below, for the passes and the per-source weight.
         const subject: EgressSubject = { kind: "capture", actor: principal.name, content };
         const gate = decideCalls(subject, cfg, cfg.egress);
         // Independent of each other, so they overlap.
