@@ -167,10 +167,13 @@ async function restoreShipped(...fns: string[]): Promise<string[]> {
  * row at a time, 1.2 s without it and 4.8 s to build it after, and the triggers
  * cost nothing either way. Built over the live rows, the graph also carries no
  * dead rows from the section before — grown, [8d]'s 300 took 11 s behind [8c]'s
- * 1,201. The rows are byte for byte what the section inserted; only the graph
- * over them is built in one pass instead of grown, and it is in place before
- * the section calls match_thoughts. (Whether the walk then scans it is
- * SMD-2151's: with no ANALYZE the planner takes the GIN bitmap and a sort.)
+ * 1,201. The rows are byte for byte what the section inserted. What differs is
+ * the graph, built in one pass instead of grown, and the table's size in
+ * pg_class, which CREATE INDEX refreshes; the index is in place before the
+ * section calls match_thoughts. No assertion of [8c]–[8e] needs it today — each
+ * passes with the index dropped, since with no ANALYZE the planner answers the
+ * walk with the GIN bitmap and a sort (SMD-2151) — so the rebuild keeps the
+ * shipped state, and the walk's index for when SMD-2151 makes it reachable.
  */
 async function loadWithoutWalkIndex(load: () => Promise<void>): Promise<void> {
   const def = await dropWalkIndex();
@@ -828,8 +831,10 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
     assert(ok === 6, `${label}: the 990-row and the 10-row filter — both under the threshold — return the exact top-10 on 3 random queries (${ok}/6 agree)`);
   };
   // Under the shipped floor: this heap is a few dozen pages, and the sample never runs.
-  const [{ pages }] = (await db.query<{ pages: number }>(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages`)).rows;
-  assert(pages > 0 && pages < ROUTE_ESTIMATE_MIN_PAGES, `the fixture's heap is ${pages} pages, under the floor of ${ROUTE_ESTIMATE_MIN_PAGES}: the sample does not run and the call is 020's`);
+  // The row count rides along: loadWithoutWalkIndex empties the table first,
+  // and [8d]'s 1,505 rows left in it would sit in the heap this reads.
+  const [{ pages, rows }] = (await db.query<{ pages: number; rows: number }>(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages, (SELECT count(*)::int FROM thoughts) AS rows`)).rows;
+  assert(rows === 1000 && pages > 0 && pages < ROUTE_ESTIMATE_MIN_PAGES, `the fixture's heap is its ${rows} rows on ${pages} pages, under the floor of ${ROUTE_ESTIMATE_MIN_PAGES}: the sample does not run and the call is 020's`);
   await agree("under the floor");
   // The floor lowered to zero: the gate runs on every filtered call. It cannot
   // skip — condition 1 needs the table at ten times the threshold, and 1,000
@@ -976,8 +981,13 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
     await db.exec(walkIndex);
   }
   const restored = await restoreShipped("match_thoughts");
-  assert(restored.length === 1 && restored[0].startsWith("041") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped()),
-    "…and the shipped floor is back for the sections after");
+  // The index is read back, not assumed: without it the sections up to the
+  // next re-apply of 039, whose swap block builds it silently, would run with
+  // no walk index and nothing would say (review pass 1).
+  const indexBack = (await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('thoughts_embedding_idx')) AS d`)).rows[0].d ?? "";
+  assert(restored.length === 1 && restored[0].startsWith("041") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped())
+      && new RegExp(`USING hnsw \\(\\(\\(embedding\\)::halfvec\\(${EMBEDDING_DIM}\\)\\) halfvec_cosine_ops\\)`).test(indexBack),
+    "…and the shipped floor and the walk's index are back for the sections after");
 }
 
 console.log("\n[9] updated_at trigger fires on update, created_at does not move");
