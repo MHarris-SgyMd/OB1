@@ -3971,7 +3971,7 @@ console.log("\n[17] Over near-equidistant vectors the HNSW walk misses live rows
 
 console.log("\n[18] Every schemas/*.sql, then every extension and recipe schema, applies over TCP with no Supabase role present, and migrate.ts --grant makes a LOGIN role able to use them (SMD-1796, SMD-1810)");
 {
-  // test-schema [40] and [49] are the PGlite halves of this; here is what PGlite cannot do:
+  // test-schema [40] and [50] are the PGlite halves of this; here is what PGlite cannot do:
   // the migrator's --grant over TCP — its presence probe against a real
   // server's to_regclass/to_regprocedure, its "not yet present, skipped" list
   // before the files are applied and its full list after — and a role that
@@ -4551,6 +4551,256 @@ console.log("\n[23] a ticket's dated sections are thoughts of their own — deri
 
   await store.close();
   for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
+}
+
+// ── 24. Migration 054 — resolve_agent under a held key row ──────────────────
+//
+// db/test-schema.ts [49] holds the sequential half: which lookups write the
+// row. This is the concurrent half, which PGlite's single session cannot run.
+// Each lookup runs on its own connection under a lock_timeout, as the server's
+// store runs it (250 ms, SMD-2072); a case that must wait for a commit sets it
+// to 5 s, which also bounds a lock that never released. The holder is a second
+// connection with a transaction held open.
+
+console.log("\n[24] resolve_agent under a held key row: a recently used key answers without waiting, a stale one waits, and a revocation or a delete that commits during the wait is what the lookup answers (migration 054, SMD-2090)");
+{
+  type R = { ok: boolean; error?: string; agent_id?: string; created?: boolean; rotated?: boolean };
+  const keys = { fresh: "b1".repeat(32), stale: "b2".repeat(32), race: "b3".repeat(32), gone: "b4".repeat(32), early: "b5".repeat(32), store: "b6".repeat(32), rr: "b8".repeat(32) };
+  const labelOf = (k: keyof typeof keys) => `live-2090-${k}`;
+  const agentOf: Record<string, string> = {};
+  for (const k of Object.keys(keys) as (keyof typeof keys)[]) {
+    agentOf[k] = ((await sql`SELECT resolve_agent(${keys[k]}, ${labelOf(k)}, 'write') AS r`)[0].r as R).agent_id!;
+  }
+  await sql`UPDATE ob1_agent_keys SET last_used_at = now() - interval '1 hour' WHERE key_hash IN (${keys.stale}, ${keys.race}, ${keys.gone}, ${keys.store}, ${keys.rr})`;
+
+  const looker = new SQL({ url: URL_, max: 1 });
+  const lookerPid = Number((await looker`SELECT pg_backend_pid() AS pid`)[0].pid);
+  /** One lookup, its answer or its SQLSTATE, and how long it took. */
+  const lookup = async (k: keyof typeof keys, scope = "write", capMs = 250) => {
+    const t0 = performance.now();
+    try {
+      const [row] = await looker.begin(async (tx: SQL) => {
+        await tx`SELECT set_config('lock_timeout', ${`${capMs}ms`}, true)`;
+        return tx`SELECT resolve_agent(${keys[k]}, ${labelOf(k)}, ${scope}) AS r`;
+      });
+      return { r: row.r as R, code: "", ms: performance.now() - t0 };
+    } catch (e) {
+      return { r: undefined, code: String((e as { errno?: string }).errno ?? (e as Error).message), ms: performance.now() - t0 };
+    }
+  };
+  /**
+   * A transaction on a connection of its own, held open after `work` until
+   * released. A `work` that throws, or a connection that fails, throws here
+   * rather than leaving the suite waiting on a transaction that never began;
+   * a `work` that itself meets a lock gives up after 5 s.
+   */
+  const hold = async (work: (tx: SQL) => Promise<unknown>) => {
+    const conn = new SQL({ url: URL_, max: 1 });
+    let release: () => void = () => {};
+    const released = new Promise<void>((r) => { release = r; });
+    let ready: () => void = () => {};
+    const isReady = new Promise<void>((r) => { ready = r; });
+    let failed: unknown;
+    const done = conn.begin(async (tx: SQL) => {
+      try { await tx`SELECT set_config('lock_timeout', '5000ms', true)`; await work(tx); } catch (e) { failed = e; throw e; } finally { ready(); }
+      await released;
+    }).catch((e) => { failed ??= e; ready(); }).finally(() => conn.close());
+    await isReady;
+    if (failed) throw failed;
+    return { commit: async () => { release(); await done; } };
+  };
+  /** Until a backend — the looker's, or any other running resolve_agent — waits on a lock, for at most 3 s. */
+  const lookerWaits = async (pid: number | null = lookerPid, everyMs = 20) => {
+    for (let i = 0; i < 3000 / everyMs; i++) {
+      const [w] = pid === null
+        ? await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE '%resolve_agent%'`
+        : await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = ${pid} AND wait_event_type = 'Lock'`;
+      if (w.n > 0) return true;
+      await Bun.sleep(everyMs);
+    }
+    return false;
+  };
+
+  // The rows held, as an operator's SELECT … FOR UPDATE holds them.
+  {
+    const held = await hold((tx) => tx`SELECT 1 FROM ob1_agent_keys WHERE key_hash IN (${keys.fresh}, ${keys.stale}) FOR UPDATE`);
+    try {
+      const fresh = await lookup("fresh");
+      // The row is held for the whole lookup under a 250 ms cap, so a lookup
+      // that waited would raise 55P03: ok alone is the proof, and the time is
+      // for the reader (review pass 2: a bound only added a way to flake).
+      assert(fresh.r?.ok === true && fresh.r.agent_id === agentOf.fresh, `with its row held, a key used moments ago answers ok without waiting (${fresh.code || "ok"}, ${Math.round(fresh.ms)} ms)`);
+      const stale = await lookup("stale");
+      assert(stale.code === "55P03" && stale.ms >= 240, `…a key last used an hour ago writes its row, so it waits and meets the cap (${stale.code || JSON.stringify(stale.r)}, ${Math.round(stale.ms)} ms)`);
+      const scope = await lookup("fresh", "read");
+      assert(scope.code === "55P03", `…and so does a fresh key presenting another scope, since a scope change is written (${scope.code || JSON.stringify(scope.r)})`);
+    } finally {
+      await held.commit();
+    }
+  }
+
+  // A revocation not yet committed, of a key the lookup must write: the
+  // lookup reads the key as active, its UPDATE waits on the revoker, and once
+  // the revoker commits the lookup answers REVOKED (010's body answered ok,
+  // and the server cached it for its TTL).
+  {
+    const revoker = await hold((tx) => tx`SELECT revoke_agent_key(${keys.race}, 'SMD-2090 live')`);
+    let pending: ReturnType<typeof lookup> | undefined;
+    let waited = false;
+    try {
+      pending = lookup("race", "write", 5000);
+      waited = await lookerWaits();
+    } finally {
+      await revoker.commit();
+    }
+    const race = await pending!;
+    assert(waited && race.r?.ok === false && race.r.error === "REVOKED" && race.r.agent_id === agentOf.race,
+      `a lookup waiting on an uncommitted revocation answers REVOKED once it commits, the agent id attached (waited: ${waited}; ${race.code || JSON.stringify(race.r)})`);
+  }
+  // The same race through the server's own statement — SqlStore.resolveAgent,
+  // resolve_agent run from the CTE that sets the 250 ms cap — whose re-read
+  // must see the commit as the bare call's does (review pass 1: only measured).
+  // The revoker commits as soon as the lookup is seen waiting, well inside the cap.
+  {
+    const store = new SqlStore(URL_!, { max: 1 });
+    let pending: Promise<unknown> | undefined;
+    let waited = false;
+    try {
+      const revoker = await hold((tx) => tx`SELECT revoke_agent_key(${keys.store}, 'SMD-2090 live, store')`);
+      try {
+        pending = store.resolveAgent({ keyHash: keys.store, label: labelOf("store"), scope: "write" }).catch((e) => e);
+        waited = await lookerWaits(null, 5);
+      } finally {
+        await revoker.commit();
+      }
+    } finally {
+      await pending;
+      await store.close();
+    }
+    const out = await pending! as { ok?: boolean; error?: string; agentId?: string; errno?: string };
+    assert(waited && out.ok === false && out.error === "REVOKED" && out.agentId === agentOf.store,
+      `…and through SqlStore.resolveAgent, the server's capped statement, it answers REVOKED too (waited: ${waited}; ${out.errno ?? JSON.stringify(out)})`);
+  }
+  // The same, of a key the lookup need not write: it answers from what was
+  // committed when it read — ok, at once, as a lookup a moment earlier would —
+  // and the next lookup, after the commit, is refused.
+  {
+    const revoker = await hold((tx) => tx`SELECT revoke_agent_key(${keys.early}, 'SMD-2090 live')`);
+    let early;
+    try {
+      early = await lookup("early");
+    } finally {
+      await revoker.commit();
+    }
+    const after = await lookup("early");
+    assert(early.r?.ok === true && after.r?.error === "REVOKED",
+      `a fresh key read before its revocation commits answers ok without waiting, and the lookup after the commit is REVOKED (${Math.round(early.ms)} ms; then ${after.r?.error ?? after.code})`);
+  }
+  // A key row deleted by hand while the lookup waited: the key is one never
+  // seen, registered again under its agent — the rotation branch, since the
+  // agent's label is still there.
+  {
+    const deleter = await hold((tx) => tx`DELETE FROM ob1_agent_keys WHERE key_hash = ${keys.gone}`);
+    let pending: ReturnType<typeof lookup> | undefined;
+    let waited = false;
+    try {
+      pending = lookup("gone", "write", 5000);
+      waited = await lookerWaits();
+    } finally {
+      await deleter.commit();
+    }
+    const gone = await pending!;
+    const [back] = await sql`SELECT canonical_agent_id::text AS a FROM ob1_agent_keys WHERE key_hash = ${keys.gone}`;
+    assert(waited && gone.r?.ok === true && gone.r.rotated === true && gone.r.agent_id === agentOf.gone && back?.a === agentOf.gone,
+      `a lookup whose row was deleted while it waited registers the key again under its agent (waited: ${waited}; ${gone.code || JSON.stringify(gone.r)})`);
+  }
+  // A key never seen whose row another transaction is inserting, revoked, as
+  // the lookup registers it: the lookup's INSERT waits on that row, and once it
+  // commits the ON CONFLICT writes nothing over a revoked row and the lookup
+  // answers REVOKED (010's DO UPDATE wrote over it and answered ok — the path
+  // a row deleted during a wait now reaches too; review pass 1).
+  {
+    const unseen = "b7".repeat(32);
+    const inserter = await hold((tx) => tx`
+      INSERT INTO ob1_agent_keys (key_hash, canonical_agent_id, scope, last_used_at, revoked_at, revoked_reason)
+      VALUES (${unseen}, ${agentOf.fresh}::uuid, 'write', now(), now(), 'SMD-2090 live, registration')`);
+    let pending: Promise<{ r?: R; code: string }> | undefined;
+    let waited = false;
+    try {
+      pending = looker.begin(async (tx: SQL) => {
+        await tx`SELECT set_config('lock_timeout', '5000ms', true)`;
+        return tx`SELECT resolve_agent(${unseen}, 'live-2090-unseen', 'write') AS r`;
+      }).then((rows) => ({ r: (rows as { r: R }[])[0].r, code: "" }), (e) => ({ code: String((e as { errno?: string }).errno ?? (e as Error).message) }));
+      waited = await lookerWaits();
+    } finally {
+      await inserter.commit();
+    }
+    try {
+      const reg = await pending!;
+      assert(waited && reg.r?.ok === false && reg.r.error === "REVOKED" && reg.r.agent_id === agentOf.fresh,
+        `a registration meeting a revoked row another transaction inserted answers REVOKED with that row's agent, not ok (waited: ${waited}; ${reg.code || JSON.stringify(reg.r)})`);
+    } finally {
+      await sql`DELETE FROM ob1_agent_keys WHERE key_hash = ${unseen}`;
+    }
+  }
+  // Its other half: the row another transaction is inserting is NOT revoked —
+  // the loser of two first sights, or a rotation meeting one. The lookup's
+  // INSERT waits, the ON CONFLICT writes over the unrevoked row, and the
+  // lookup answers ok, a rotation onto the label's agent (review pass 3: an
+  // inverted re-check, or DO NOTHING, refused every such key as revoked and
+  // no suite saw it).
+  {
+    const loser = "b9".repeat(32);
+    const inserter = await hold((tx) => tx`
+      INSERT INTO ob1_agent_keys (key_hash, canonical_agent_id, scope, last_used_at)
+      VALUES (${loser}, ${agentOf.fresh}::uuid, 'write', now())`);
+    let pending: Promise<{ r?: R; code: string }> | undefined;
+    let waited = false;
+    try {
+      pending = looker.begin(async (tx: SQL) => {
+        await tx`SELECT set_config('lock_timeout', '5000ms', true)`;
+        return tx`SELECT resolve_agent(${loser}, ${labelOf("fresh")}, 'write') AS r`;
+      }).then((rows) => ({ r: (rows as { r: R }[])[0].r, code: "" }), (e) => ({ code: String((e as { errno?: string }).errno ?? (e as Error).message) }));
+      waited = await lookerWaits();
+    } finally {
+      await inserter.commit();
+    }
+    try {
+      const won = await pending!;
+      assert(waited && won.r?.ok === true && won.r.rotated === true && won.r.agent_id === agentOf.fresh,
+        `…and one meeting an unrevoked row another transaction inserted answers ok, a rotation onto the label's agent (waited: ${waited}; ${won.code || JSON.stringify(won.r)})`);
+    } finally {
+      await sql`DELETE FROM ob1_agent_keys WHERE key_hash = ${loser}`;
+    }
+  }
+  // Under REPEATABLE READ — a database or role whose default isolation is not
+  // READ COMMITTED — the waiting UPDATE cannot re-read the committed row:
+  // Postgres fails it 40001, the SQLSTATE agents.ts retries, and a fresh
+  // attempt reads the revocation (review pass 2: the retry was tested only
+  // against a fake store).
+  {
+    const revoker = await hold((tx) => tx`SELECT revoke_agent_key(${keys.rr}, 'SMD-2090 live, repeatable read')`);
+    let pending: Promise<{ r?: R; code: string }> | undefined;
+    let waited = false;
+    try {
+      pending = looker.begin(async (tx: SQL) => {
+        await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`;
+        await tx`SELECT set_config('lock_timeout', '5000ms', true)`;
+        return tx`SELECT resolve_agent(${keys.rr}, ${labelOf("rr")}, 'write') AS r`;
+      }).then((rows) => ({ r: (rows as { r: R }[])[0].r, code: "" }), (e) => ({ code: String((e as { errno?: string }).errno ?? (e as Error).message) }));
+      waited = await lookerWaits();
+    } finally {
+      await revoker.commit();
+    }
+    const rr = await pending!;
+    const retry = await lookup("rr");
+    assert(waited && rr.code === "40001" && retry.r?.error === "REVOKED",
+      `under REPEATABLE READ the waiting write fails 40001, and the retry answers REVOKED (waited: ${waited}; ${rr.code || JSON.stringify(rr.r)}, then ${retry.r?.error ?? retry.code})`);
+  }
+
+  await looker.close();
+  await sql`DELETE FROM ob1_agent_keys WHERE key_hash IN (${keys.fresh}, ${keys.stale}, ${keys.race}, ${keys.gone}, ${keys.early}, ${keys.store}, ${keys.rr})`;
+  await sql`DELETE FROM ob1_agents WHERE label LIKE 'live-2090-%'`;
 }
 
 await sql.close();

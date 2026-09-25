@@ -6672,7 +6672,96 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   await db.exec(`DELETE FROM ob1_entities`);
 }
 
-console.log("\n[49] Every extension and recipe schema applies to a migrated brain carrying the community schemas, with no Supabase role and no auth schema present, and --grant's extensions and recipes groups are what make them usable (SMD-1810)");
+console.log("\n[49] Migration 054: resolve_agent writes a key's row only when last_used_at is stale or the scope changed, and a revoked key is still refused (SMD-2090)");
+{
+  // The sequential half: which lookups write the row. A write is seen by the
+  // row's xmin moving (every UPDATE makes a new row version), not only by
+  // last_used_at, so a write of the same value still counts. The concurrent
+  // half — a held row, a revocation committing mid-wait — needs two sessions
+  // and is db/test-live.ts [24].
+  type R = { ok: boolean; error?: string; agent_id?: string; created?: boolean };
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows[0];
+  const look = async (hash: string, label: string, scope: string | null) =>
+    (await one<{ r: R }>(`SELECT resolve_agent($1, $2, $3) AS r`, [hash, label, scope])).r;
+  const row = async (hash: string) =>
+    one<{ x: string; used: string | null; scope: string | null }>(`SELECT xmin::text AS x, last_used_at::text AS used, scope FROM ob1_agent_keys WHERE key_hash = $1`, [hash]);
+  const age = (hash: string, interval: string | null) =>
+    db.query(`UPDATE ob1_agent_keys SET last_used_at = ${interval === null ? "NULL" : `now() - $2::interval`} WHERE key_hash = $1`, interval === null ? [hash] : [hash, interval]);
+
+  const src = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'resolve_agent(text, text, text)'::regprocedure`)).s);
+  assert(lastDefinerOf("resolve_agent").startsWith("054") && /ob1:stale-only-touch/.test(src), "054 is the last definer of resolve_agent and its body carries the stale-only-touch sentinel");
+
+  const K = "a1".repeat(32);
+  const first = await look(K, "touch-key", "write");
+  assert(first.ok === true && first.created === true, `a first sight registers the key, as 010 did (${JSON.stringify(first)})`);
+  const r0 = await row(K);
+  const again = await look(K, "touch-key", "write");
+  const r1 = await row(K);
+  assert(again.ok === true && again.agent_id === first.agent_id && r1.x === r0.x && r1.used === r0.used,
+    `a lookup of a key used moments ago, presenting the recorded scope, answers ok and writes nothing (xmin ${r0.x} → ${r1.x})`);
+  assert((await look(K, "touch-key", null)).ok === true && (await row(K)).x === r0.x, "…nor does one presenting no scope");
+
+  await age(K, "4 minutes");
+  const r2 = await row(K);
+  await look(K, "touch-key", "write");
+  assert((await row(K)).x === r2.x, "a last use four minutes ago is fresh: no write");
+  await age(K, "6 minutes");
+  const r3 = await row(K);
+  await look(K, "touch-key", "write");
+  const r4 = await row(K);
+  const moved = (await one<{ fresh: boolean }>(`SELECT last_used_at > now() - interval '1 minute' AS fresh FROM ob1_agent_keys WHERE key_hash = $1`, [K])).fresh;
+  assert(r4.x !== r3.x && moved, `one six minutes ago is stale: the lookup writes last_used_at again (${r3.used} → ${r4.used})`);
+  await age(K, null);
+  const r5 = await row(K);
+  await look(K, "touch-key", "write");
+  assert((await row(K)).x !== r5.x && (await row(K)).used !== null, "a NULL last_used_at is written");
+  // A use recorded in the future — a clock stepped back, a skewed restore — would never go stale; it is written.
+  await db.query(`UPDATE ob1_agent_keys SET last_used_at = now() + interval '1 hour' WHERE key_hash = $1`, [K]);
+  const rF = await row(K);
+  await look(K, "touch-key", "write");
+  const futureNow = (await one<{ ok: boolean }>(`SELECT last_used_at <= now() AS ok FROM ob1_agent_keys WHERE key_hash = $1`, [K])).ok;
+  assert((await row(K)).x !== rF.x && futureNow, `a last_used_at an hour in the future is written back to now (${rF.used} → ${(await row(K)).used})`);
+
+  // A scope change is written however fresh the use: the column shows a privilege change (010, 049).
+  const r6 = await row(K);
+  await look(K, "touch-key", "read");
+  const r7 = await row(K);
+  assert(r7.x !== r6.x && r7.scope === "read", `a key presenting another scope is written at once, fresh or not (${r6.scope} → ${r7.scope})`);
+  assert((await look(K, "touch-key", "read")).ok === true && (await row(K)).x === r7.x, "…and the next lookup with that scope writes nothing");
+
+  // A rename is still followed on a fresh key: the label lives on ob1_agents, not in the skipped write.
+  const renamed = (await one<{ r: R & { label?: string } }>(`SELECT resolve_agent($1, 'touch-key-renamed', 'read') AS r`, [K])).r;
+  assert(renamed.ok === true && renamed.label === "touch-key-renamed" && renamed.agent_id === first.agent_id && (await row(K)).x === r7.x,
+    `a rename on a fresh key moves the label and keeps the agent, and writes no key row (${JSON.stringify(renamed)})`);
+
+  await db.query(`SELECT revoke_agent_key($1, 'SMD-2090 schema')`, [K]);
+  const revoked = await look(K, "touch-key-renamed", "read");
+  assert(revoked.ok === false && revoked.error === "REVOKED" && revoked.agent_id === first.agent_id, `a revoked key is refused, its agent id attached (${JSON.stringify(revoked)})`);
+
+  const fnComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["resolve_agent(text, text, text)"])).c ?? "";
+  const colComment = (await one<{ c: string | null }>(COLUMN_COMMENT_SQL, ["ob1_agent_keys", "last_used_at"])).c ?? "";
+  assert(/five minutes/.test(fnComment) && /SMD-2090/.test(fnComment) && /REVOKED/.test(fnComment) && /to within five minutes/.test(colComment) && /SMD-2090/.test(colComment),
+    "the function's comment states the stale-only write and the revocation answer, and last_used_at's states its new meaning");
+
+  // The guard: a registry without the column the body now reads is refused by name, not left to fail at the first lookup.
+  await db.query(`ALTER TABLE ob1_agent_keys RENAME COLUMN last_used_at TO last_used_gone`);
+  let noColumn = "";
+  try { await reapply("054"); } catch (e) { noColumn = (e as Error).message; }
+  assert(/migration 054 needs 010 \(ob1_agent_keys\.last_used_at, revoked_at, scope\); this schema lacks it/.test(noColumn), `054 on a registry without last_used_at refuses by name (${noColumn.slice(0, 90)})`);
+  await db.query(`ALTER TABLE ob1_agent_keys RENAME COLUMN last_used_gone TO last_used_at`);
+  // …and without scope, which the body now reads beside it (review pass 1: the guard counted revoked_at, which 010's body already read).
+  await db.query(`ALTER TABLE ob1_agent_keys RENAME COLUMN scope TO scope_gone`);
+  let noScope = "";
+  try { await reapply("054"); } catch (e) { noScope = (e as Error).message; }
+  assert(/migration 054 needs 010 \(ob1_agent_keys\.last_used_at, revoked_at, scope\)/.test(noScope), `…and one without scope (${noScope.slice(0, 90)})`);
+  await db.query(`ALTER TABLE ob1_agent_keys RENAME COLUMN scope_gone TO scope`);
+  await reapply("054");
+  assert(/ob1:stale-only-touch/.test(String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'resolve_agent(text, text, text)'::regprocedure`)).s)), "…and applies again once the column is back, landing the same body");
+  await db.query(`DELETE FROM ob1_agent_keys WHERE key_hash = $1`, [K]);
+  await db.query(`DELETE FROM ob1_agents WHERE label = 'touch-key-renamed'`);
+}
+
+console.log("\n[50] Every extension and recipe schema applies to a migrated brain carrying the community schemas, with no Supabase role and no auth schema present, and --grant's extensions and recipes groups are what make them usable (SMD-1810)");
 {
   // [40]'s model on the files check 12 reaches since SMD-1810: the fourteen
   // under extensions/ and recipes/ that carried per-user policies on

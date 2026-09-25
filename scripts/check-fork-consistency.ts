@@ -55,7 +55,7 @@
  *      schemas/ and db/ to db/ and the seven category directories by
  *      SMD-1810); the rules are
  *      db/config.mjs's SUPABASE_SQL_RULES, which test-schema [10], [40] and
- *      [49] apply from inside the suite; no exceptions
+ *      [50] apply from inside the suite; no exceptions
  *  13. every port a compose file under deploy/ publishes names its host address
  *      as a knob that defaults to the literal 127.0.0.1 — the short form
  *      `"${X_BIND:-127.0.0.1}:${X_PORT:-n}:n"`, each `X_BIND` documented in

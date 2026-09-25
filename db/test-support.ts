@@ -593,12 +593,12 @@ export const CONTRIB_DIR = join(HERE, "..");
 /**
  * The extension and recipe SQL files that create tables or views — the ones
  * `--grant`'s `extensions` and `recipes` groups cover — in the order test-schema
- * [49] and test-live [18] apply them, after the community files (SMD-1810).
+ * [50] and test-live [18] apply them, after the community files (SMD-1810).
  * Listed, not walked: recipes/ also holds a psql query layer (`\set`
  * variables), a pg_cron line, two helper functions, a column added to
  * entity-extraction's table and a Neon build of `thoughts` itself, none of
  * which a brain applies as a schema over the migrations; lint-sweep's
- * `views.sql` is one, so it is here. Every `extensions/<name>/schema.sql` is here ([49]
+ * `views.sql` is one, so it is here. Every `extensions/<name>/schema.sql` is here ([50]
  * checks), and the order among them is free — no file references another's
  * table — but ops-views.sql reads columns enhanced-thoughts adds to `thoughts`,
  * and its three guarded views exist only over smart-ingest's and

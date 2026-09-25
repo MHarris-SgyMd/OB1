@@ -2155,8 +2155,9 @@ const REVOKED_MESSAGE =
   "Unauthorized: this access key has been revoked. Its history is retained; request a new key.";
 
 /**
- * The registry is locked (a migration, a transaction holding the key's row)
- * and has not confirmed the key. Says what to do — retry — and nothing about
+ * The registry's lookup timed out on a lock (a migration; a transaction
+ * holding a stale key's row) or failed to serialize, through its retries, and
+ * has not confirmed the key. Says what to do — retry — and nothing about
  * the key, which may be valid or revoked.
  */
 const BUSY_MESSAGE =
