@@ -5591,7 +5591,7 @@ console.log("\n[43] Migration 046: the event shape at the write boundary — who
 // (SMD-2061) and reads them under --startable, the reports without the flag
 // compared byte for byte before and after the links are written.
 
-console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defined; the resolution ladder; numeric names out of every count; edges on vs off is the drop-the-graph control (SMD-1938); a thought's lifecycle is a weight — the filter, the decay, and the unstamped passing every filter (SMD-1994); --startable weighs a thought with an open blocker 0, a settled blocker none (SMD-2061); --decay-blocked weighs it BLOCKED_WEIGHT and names its blockers (SMD-2181)");
+console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defined; the resolution ladder; numeric names out of every count; edges on vs off is the drop-the-graph control (SMD-1938); a thought's lifecycle is a weight — the filter, the decay, and the unstamped passing every filter (SMD-1994); --startable weighs a thought with an open blocker 0, a settled blocker none (SMD-2061); --decay-blocked weighs it BLOCKED_WEIGHT and names its blockers (SMD-2181); a system that states no lifecycle gates nothing (SMD-2218)");
 {
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`);
@@ -6002,7 +6002,7 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   assert(!startIds.has(tX), "a blocker the brain does not hold still blocks: nothing says it is settled");
   assert([t2, t3, t4, t6, t8].every((id) => startIds.has(id)), "a thought no dependency names — a ticket the relations never reached, or a hand capture — counts as unblocked");
   const covS = await graphCoverage(run, openStart);
-  assert(JSON.stringify({ ...covS.dependencies, last_link_change: null }) === JSON.stringify({ facets: 6, in_dependencies: 7, held: 5, unknown_blockers: 1, last_link_change: null }) && covS.dependencies!.last_link_change !== null && covS.weighed === 8,
+  assert(JSON.stringify({ ...covS.dependencies, last_link_change: null }) === JSON.stringify({ facets: 6, in_dependencies: 7, held: 5, unknown_blockers: 1, last_link_change: null, systems: [{ system: "linear", facets: 6, gates: true }] }) && covS.dependencies!.last_link_change !== null && covS.weighed === 8,
     `coverage: six active dependency facets (tP's, tQ's, tX's and tD's blocked_by, tR's two blocks; the closed one and the child_of links are not); seven thoughts whose ticket a dependency names on either side (tP, tPsec, tQ, tR, tV — named only by tR's blocks, holding no facet — tX, tD; not tS, whose one link is child_of); five held (tP, tPsec, tQ, tV, tX — not the Done tD, which already weighs 0); one blocker nothing settles (SMD-7999); a facet timestamp; eight weigh in (${JSON.stringify(covS.dependencies)}, ${covS.weighed})`);
   // A settled ticket is settled, not blocked: tD passes --status done and the
   // decay exactly as without the flag, and `held` counts only what the flag
@@ -6101,15 +6101,74 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
     `a blocker identity carrying a newline (facet data, untrusted) renders on the row as one space, as every other cell's whitespace does, and ten blockers — nine of its own and tR's blocks — are named in full, the column uncapped (second review pass; third: ten, not nine); and tQ's edge is gone again (${JSON.stringify(tVrows)})`);
   await links(tV, []);
   // A link of another system (SMD-2136's --items writes any): its blocker is
-  // named with its system, a linear one bare (fourth review pass).
+  // named with its system, a linear one bare (fourth review pass). tJ states
+  // a lifecycle, so jira gates (SMD-2218), and the unknown PROJ-2 blocks.
   const tJ = await thought("PROJ-1 — Open Brain's Kafka export, in another tracker.");
   await record(tJ, [E("Open Brain", "project"), E("Kafka", "tool")]);
   await db.query(`SELECT record_thought_source($1::uuid, 'jira', 'PROJ-1', 'PROJ-1', 'text/markdown')`, [tJ]);
   await db.query(`SELECT record_source_links($1::uuid, 'jira', '[{"relation": "blocked_by", "target": "PROJ-2"}]'::jsonb)`, [tJ]);
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"status": "Todo", "status_type": "unstarted"}'::jsonb WHERE id = $1`, [tJ]);
   const jira = (await byId(openDecay)).get(tJ);
   assert(JSON.stringify(jira?.blockers) === '["jira:PROJ-2"]' && jira?.weight === 0.25 && JSON.stringify((await byId(openDecay)).get(tP)?.blockers) === '["SMD-7002"]',
     `a blocker of another system is named system:key — PROJ-2 could be anyone's — and a linear one stays bare (${JSON.stringify(jira)})`);
   await drop(tJ);
+
+  // ── Sources (SMD-2218): a system gates only when some row of it states a
+  // lifecycle this file knows. One that states none cannot say a blocker is
+  // settled, so its links gate nothing rather than block forever, and the
+  // line counts them. The items here are shaped as an --items file writes
+  // them: a source row of their own system, links of that system, and the
+  // status, when stated, on the row (facets.status_type).
+  const item = async (system: string, key: string, content: string) => {
+    const id = await thought(content);
+    await record(id, [E("Open Brain", "project"), E("Kafka", "tool")]);
+    await db.query(`SELECT record_thought_source($1::uuid, $2, $3, $4, 'text/markdown')`, [id, system, key, content]);
+    return id;
+  };
+  const blockedBy = (id: string, system: string, targets: string[]) =>
+    db.query(`SELECT record_source_links($1::uuid, $2, $3::text::jsonb)`, [id, system, JSON.stringify(targets.map((target) => ({ relation: "blocked_by", target })))]);
+  const stateOf = (id: string, status: string, status_type: string) =>
+    db.query(`UPDATE thoughts SET metadata = metadata || $2::jsonb WHERE id = $1`, [id, JSON.stringify({ status, status_type })]);
+  const systemsOf = async (o: GraphOptions) => JSON.stringify((await graphCoverage(run, o)).dependencies!.systems);
+  const tJ1 = await item("jira", "PROJ-1", "PROJ-1 — Open Brain's Kafka audit, filed in Jira.");
+  const tJ2 = await item("jira", "PROJ-2", "PROJ-2 — Open Brain's Kafka quota, filed in Jira.");
+  await blockedBy(tJ1, "jira", ["PROJ-2"]);
+  const covU = await graphCoverage(run, openStart);
+  const decU = (await byId(openDecay)).get(tJ1);
+  assert((await listed(openStart)).has(tJ1) && covU.dependencies!.held === 5 && covU.dependencies!.facets === 7 && covU.dependencies!.in_dependencies === 7 && decU?.weight === 1 && decU?.blockers === null
+      && JSON.stringify(covU.dependencies!.systems) === JSON.stringify([{ system: "jira", facets: 1, gates: false }, { system: "linear", facets: 6, gates: true }]),
+    `a system no row of which states a lifecycle gates nothing: tJ1's blocked_by PROJ-2 is read (seven facets) but holds nothing back, names no ticket, and under the decay tJ1 weighs 1 with no blocker (${JSON.stringify(covU.dependencies)})`);
+  const rU = render(await graphReport(run, null, openStart));
+  assert(rU.includes("Dependencies are read from the blocks / blocked_by link facets their sources state (SMD-1867) — jira 1, linear 6 —, each as current as its source's last passes over both ends of each (a relation is read from either side, so one removed at the source blocks until both are re-read): 7 active dependency facets; the latest was written or closed ")
+      && rU.includes(". jira states no lifecycle on any row, so its 1 facet gates nothing: a source that states no status_type this tool knows cannot say a blocker is settled (an --items file states it in facets.status_type). 7 of ")
+      && rU.includes(" thoughts belong to a ticket a gating dependency names;"),
+    "the line names each source and its facets, says the board's freshness is each source's, and says what the ungated system's facets do and how an --items file settles its blockers");
+  await stateOf(tJ2, "In Progress", "started");
+  const decG = (await byId(openDecay)).get(tJ1);
+  const covG = await graphCoverage(run, openStart);
+  assert(!(await listed(openStart)).has(tJ1) && covG.dependencies!.held === 6 && covG.dependencies!.in_dependencies === 9 && decG?.weight === 0.25 && JSON.stringify(decG?.blockers) === '["jira:PROJ-2"]'
+      && JSON.stringify(covG.dependencies!.systems) === JSON.stringify([{ system: "jira", facets: 1, gates: true }, { system: "linear", facets: 6, gates: true }])
+      && !render(await graphReport(run, null, openStart)).includes("gates nothing"),
+    `once a jira row states a lifecycle (tJ2 started), jira gates as the board does: tJ1 is held by the open PROJ-2, named jira:PROJ-2 under the decay, and PROJ-1 and PROJ-2 join the named tickets (${JSON.stringify(covG.dependencies)})`);
+  await stateOf(tJ2, "Done", "completed");
+  assert((await listed(openStart)).has(tJ1) && (await graphCoverage(run, openStart)).dependencies!.held === 5,
+    "a settled jira blocker does not block: tJ2 completed frees tJ1, as a completed Linear blocker frees its ticket");
+  await blockedBy(tJ1, "jira", ["PROJ-2", "PROJ-9"]);
+  const covK = await graphCoverage(run, openStart);
+  assert(!(await listed(openStart)).has(tJ1) && covK.dependencies!.unknown_blockers === 2 && JSON.stringify((await byId(openDecay)).get(tJ1)?.blockers) === '["jira:PROJ-9"]',
+    `inside a gating system SMD-2061's rule holds: PROJ-9, which no row holds, blocks tJ1 and is counted beside SMD-7999 (${covK.dependencies!.unknown_blockers} unknown)`);
+  const tA = await item("acme", "ACME-1", "ACME-1 — Open Brain's Kafka mirror, filed in Acme.");
+  await blockedBy(tA, "acme", ["ACME-2"]);
+  // acme's one row states a status_type this file does not know: that is no
+  // lifecycle, so acme still gates nothing.
+  await stateOf(tA, "Open", "open");
+  const rA = render(await graphReport(run, null, openStart));
+  assert((await listed(openStart)).has(tA) && (await systemsOf(openStart)) === JSON.stringify([{ system: "acme", facets: 1, gates: false }, { system: "jira", facets: 2, gates: true }, { system: "linear", facets: 6, gates: true }])
+      && rA.includes("— acme 1, jira 2, linear 6 —") && rA.includes(". acme states no lifecycle on any row, so its 1 facet gates nothing:") && !rA.includes("jira states no lifecycle"),
+    "the gate is per system: jira gating does not make acme gate, whose one status_type (\"open\") is none this file knows — ACME-1 stays listed and the line names acme alone as ungated");
+  for (const id of [tJ1, tJ2, tA]) await drop(id);
+  assert((await systemsOf(openStart)) === JSON.stringify([{ system: "linear", facets: 6, gates: true }]) && render(await graphReport(run, null, openStart)).includes("Dependencies are read from the board's blocks / blocked_by link facets (SMD-1867), as current as board-sync's last passes"),
+    "with the board the only source again the line is SMD-2061's word for word, and the systems list is the board's alone");
   assert(render(await graphReport(run, null, openStart)).includes("--startable: 5 thoughts with an open blocker weigh 0 in this run; a completed") && !weightsSql({ status: "open", decayDone: false, startable: true }, []).includes("END AS blockers")
       && weightsSql({ status: "open", decayDone: false, decayBlocked: true }, []).replace(/,\n +CASE WHEN [^\n]* THEN blockers END AS blockers/, "").replace("THEN 0.25 ELSE", "THEN 0 ELSE") === weightsSql({ status: "open", decayDone: false, startable: true }, [])
       && weightsSql({ status: "open", decayDone: false, decayBlocked: true }, []).includes("END AS blockers") && !("blockers" in (await topThoughts(run, openStart))[0]),

@@ -166,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1794 assertions: 1794 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1801 assertions: 1801 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-six (56) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -1228,6 +1228,19 @@ decays never meet on one thought: a blocked thought is unsettled and
 `DONE_WEIGHT` weighs only settled ones. Degree counts neighbours, not evidence,
 and is unchanged by it. The JSON's `options` gains `decayBlocked: false`.
 
+**Sources** (SMD-2218). The board is not the only writer of dependencies:
+`ingest-records.ts --items` writes `blocks` / `blocked_by` for any system, and
+both flags read them. A blocker is settled by its row's lifecycle, which a row
+of another system has only if its source stated one (an items file, in
+`facets.status_type`, one of the six types). So a system gates only when some
+row of it states a known status_type, and is then read exactly as the board is,
+an unknown blocker blocking. A system that states none cannot say a blocker is
+settled: its links gate nothing, blocking no thought and naming no ticket,
+rather than hide its tickets for good, and the dependency line names each
+source with its facets and says which gate nothing. While the board is the only
+source the line reads as before. The JSON's `dependencies.systems` lists each
+system's facets and whether it gates.
+
 Exit 0 when ranked, 1 when no
 entity resolves (a near-miss whose only guesses the numeric rule hid is still
 no entity: exit 1, and the line counts the hidden guesses), 3 when the subject
@@ -2266,7 +2279,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1794 assertions, PGlite, no container
+bun test-schema.ts                          # 1801 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 728 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
