@@ -79,14 +79,18 @@ let sql = new SQL({ url: URL_, max: 4 });
 console.log(`  server: ${(await sql`SELECT version() AS v`)[0].v.split(" on ")[0]}\n`);
 
 /**
- * One session of a race that [6d], [6f] and [6g] provoke into a deadlock on
- * purpose. Postgres looks for a cycle only once a lock wait has lasted
+ * One session of the races in [6d], [6f] and [6g], whose first arms provoke a
+ * deadlock on purpose and whose second arms show the shipped code does not —
+ * both use it, so the arms differ only in the code under test and a deadlock
+ * that comes back is found as fast as a provoked one. Postgres looks for a cycle only once a lock wait has lasted
  * deadlock_timeout, 1 s by default, so each provoked deadlock cost a second —
- * fifteen of them in one CI run of [6g]'s first arm (SMD-2135). At 50 ms the
- * cycle is found as soon as it closes. The setting changes when a wait is
- * checked, not which waits are cycles, and every assertion here counts
- * deadlocks or reads who waited, never how long. It is a superuser setting,
- * sent as a startup parameter so it holds for the session: CI's service and
+ * fifteen of them in one CI run of [6g]'s first arm (SMD-2135). At 50 ms a
+ * cycle is found within 50 ms of closing. The setting changes when a wait is
+ * checked, and so which side of a cycle is the victim, not which waits are
+ * cycles: no assertion here names the victim of a cycle or reads how long a
+ * wait took, and every bound on a wait (waitFor's 8–12 s, statement_timeout's
+ * 8–15 s) is far above a second. It is superuser-only by default, sent as a
+ * startup parameter so it holds for the session: CI's service and
  * with-postgres.sh connect as postgres, and any other role races at the
  * default, only slower.
  */
@@ -1524,7 +1528,9 @@ console.log("\n[6g] delete_thought joins the lock order: an accept racing a dele
   // varies run to run and the arm only asserts it happens at all.) This is the
   // one deliberately stochastic assertion in the suite: with the delete fully
   // lockless the per-try cycle rate is roughly half, so P(0 deadlocks in 40) is
-  // on the order of 1e-15 — a spurious pass is not a practical risk.
+  // on the order of 1e-15 — a spurious pass is not a practical risk. (That rate
+  // is CI's; a Mac measured 6%, which makes a spurious failure about one run in
+  // twelve — SMD-2155.)
   {
     const connR = racer();
     const connD = racer();
@@ -1955,10 +1961,13 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
 
   // The lease clock for (c) and (e). claim_thoughts reaps a lease whose
   // ttl_expires_at < now() (015) and renew_claims moves it to
-  // GREATEST(ttl_expires_at, now() + the lease) (031); neither reads the time
-  // any other way. So moving a key's deadlines s seconds back is, to both
-  // functions, the same as waiting s seconds, and it takes no time: the sleeps
-  // it replaces were 13 of the section's 20 s on CI (SMD-2135).
+  // GREATEST(ttl_expires_at, now() + the lease) (031); neither compares
+  // against the time any other way, and the stamps they write from it
+  // (claimed_at, finished_at) are read by nothing here. So moving a key's
+  // deadlines s seconds back is, to both functions, the same as waiting s
+  // seconds, and it takes no time: the sleeps it replaces were 13 of the
+  // section's 20 s on CI (SMD-2135). test-schema.ts [30] likewise puts a lease
+  // past its deadline by an UPDATE, not a wait.
   const elapse = (job: string, s: number) =>
     sql`UPDATE thought_work_claims SET ttl_expires_at = ttl_expires_at - make_interval(secs => ${s}::float8) WHERE work_type = ${job} AND status = 'claimed'`;
 
@@ -2027,10 +2036,10 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   // that completes them. Five-second leases, timed on the lease clock: each
   // step is at the clock's time plus the milliseconds the statements take, so
   // the one step with an upper bound — the claim at 5.5 s must land before
-  // the renewed deadline at 9.5 s — has its four seconds on any runner. The
-  // beat at 4.5 s has no upper bound: a lease past its deadline that no claim
-  // has reaped is still the holder's, and the beat renews it ([30] asserts
-  // that).
+  // the renewed deadline at 9.5 s — has its four seconds less only the
+  // statements' own time. The beat at 4.5 s has no upper bound: a lease past
+  // its deadline that no claim has reaped is still the holder's, and the beat
+  // renews it (test-schema.ts [30] asserts that).
   const JOB4 = "test:heartbeat";
   const six = [...pool].slice(8, 14);
   await sql`SELECT enqueue_thoughts(${JOB4}, ${sql.array(six, "TEXT")}::uuid[])`;
