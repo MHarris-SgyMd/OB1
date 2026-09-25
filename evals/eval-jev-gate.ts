@@ -36,6 +36,13 @@
  *              grades are kept in the fixture, so kappa can be recomputed.
  *   split      dev or test by md5 of the thought id. Threshold, temperature and
  *              arm are chosen on dev and reported on test.
+ *   rubric v2  NOT pre-registered: after the first result, on the maintainer's
+ *              call, the grades were redone (entity-gate-grades-v2.json) at
+ *              the entity level (up to three of its mentions, not the first
+ *              alone), with a role that points at one person counted as that
+ *              person, and each mention given a category — a code artifact
+ *              counts as a tool, or as junk with --strict-code. The verdict
+ *              above stays on rubric v1; v2 is reported beside it.
  *   margin     on test, the chosen arm's balanced accuracy at rejecting an
  *              invalid mention must beat B1's by 10 points, with the paired
  *              bootstrap's 95% interval of the difference above 0. For typing,
@@ -65,6 +72,8 @@
  * and applied to test.
  *
  *   bun eval-jev-gate.ts --url postgres://…/openbrain [--cache <file>] [--numeric 60] [--cost-thoughts 40, 0 to skip]
+ *                        [--grades fixtures/entity-gate-grades-v2.json [--strict-code]]
+ *   bun eval-jev-gate.ts --url … --diagnose [--cache <file>]   why the tier fails: the name read or not, the length, the labels, the graph
  *                                                   the report (or DATABASE_URL for --url)
  *   bun eval-jev-gate.ts --url … --dump-sample <file>       the grading sample as JSONL
  *   bun eval-jev-gate.ts --self-check                       the rules and the arithmetic; no tier, no database
@@ -85,7 +94,7 @@ import { loadEnv } from "./env.ts";
 import { binOf, brier, ece, readGrades, reliability, skill, type Scored } from "./eval-calibration.ts";
 import { ENTITY_TYPES, NUMERIC_NAME_RE, type EntityType } from "../server-portable/entities.ts";
 import { ProviderError } from "../server-portable/embed.ts";
-import { INSUFFICIENT_EVIDENCE, jevDecideMany, jevInfo, resolveJevConfig, type JevDecision, type JevEnv, type JevResult } from "../server-portable/jev.ts";
+import { INSUFFICIENT_EVIDENCE, jevDecideMany, jevInfo, resolveJevConfig, type JevDecision, type JevEnv, type JevOption, type JevResult } from "../server-portable/jev.ts";
 import { JEV_MAX_BATCH } from "../server-portable/jev-contract.ts";
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -145,10 +154,22 @@ export function b1Rejects(name: string, type: string): string | null {
 
 /** A type as its index in ENTITY_TYPES, -1 for none: a committed fixture holds ids and numbers only (check 9). */
 export type Grade = { valid: 0 | 1; type: number };
-export type GradedMention = { thought: string; entity: string } & Grade & { grader_a: [0 | 1, number]; grader_b: [0 | 1, number] };
+export type GradedMention = { thought: string; entity: string } & Grade & { grader_a: [0 | 1, number]; grader_b: [0 | 1, number] } & Partial<Categorised>;
+/**
+ * Rubric v2's categories (entity-gate-grades-v2.json), by index: what a
+ * mention is, beside whether it counts. 0 named, 1 a role pointing at one
+ * person, 2 a code artifact (file, table, function, variable, branch, CI job),
+ * 3 only inside URLs or paths, 4 a number, hash or address, 5 generic, 6 not
+ * held. Valid is 0–2, or 0–1 when code artifacts are read as junk (--strict-code).
+ */
+export const CATEGORIES = ["named", "role → person", "code artifact", "URL or path only", "number, hash or address", "generic", "not held"] as const;
+export const CODE_ARTIFACT = 2;
+type Categorised = { category: number; category_a: number; category_b: number };
 export type GateGrades = { generated: string; origin: string; note: string; mentions: GradedMention[] };
 
 export const GATE_GRADES_PATH = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "entity-gate-grades.json");
+export const GATE_GRADES_V2_PATH = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "entity-gate-grades-v2.json");
+const isCategory = (c: unknown): c is number => Number.isInteger(c) && (c as number) >= 0 && (c as number) < CATEGORIES.length;
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const isType = (t: unknown) => Number.isInteger(t) && (t as number) >= -1 && (t as number) < ENTITY_TYPES.length;
 const isBit = (v: unknown) => v === 0 || v === 1;
@@ -171,6 +192,13 @@ export function validateGateGrades(g: unknown): string[] {
       const r = m[k];
       if (!Array.isArray(r) || r.length !== 2 || !isBit(r[0]) || !isType(r[1])) out.push(`mentions[${i}]: ${k} is not [valid, type]`);
     }
+    // Rubric v2: all three categories or none, each an index, each agreeing with its validity (0–2 valid).
+    const cats = [["category", "valid"], ["category_a", "grader_a"], ["category_b", "grader_b"]] as const;
+    if (cats.some(([k]) => k in m)) for (const [k, v] of cats) {
+      const c = (m as Partial<Categorised>)[k], valid = v === "valid" ? m.valid : (m[v] as unknown[] | undefined)?.[0];
+      if (!isCategory(c)) out.push(`mentions[${i}]: ${k} ${JSON.stringify(c)} is not a category`);
+      else if ((c <= CODE_ARTIFACT ? 1 : 0) !== valid) out.push(`mentions[${i}]: ${k} ${c} with ${v} ${JSON.stringify(valid)}`);
+    }
     const key = `${m.thought}:${m.entity}`;
     if (seen.has(key)) out.push(`mentions[${i}]: ${key} is graded twice`);
     seen.add(key);
@@ -178,11 +206,20 @@ export function validateGateGrades(g: unknown): string[] {
   return out;
 }
 
-export function readGateGrades(path = GATE_GRADES_PATH): GateGrades {
+export function readGateGrades(path = GATE_GRADES_PATH, opts: { strictCode?: boolean } = {}): GateGrades {
   const g = JSON.parse(readFileSync(path, "utf8"));
   const problems = validateGateGrades(g);
   if (problems.length) throw new Error(`${path}: ${problems.join("; ")}`);
-  return g;
+  if (!opts.strictCode) return g;
+  if (!g.mentions.every((m: GradedMention) => m.category !== undefined)) throw new Error(`${path}: --strict-code needs rubric v2's categories`);
+  return { ...g, mentions: g.mentions.map((m: GradedMention) => strictCode(m)) };
+}
+
+/** Rubric v2 with code artifacts read as junk: a category-2 label, the adjudicated one or a grader's, becomes invalid with no type. */
+export function strictCode(m: GradedMention): GradedMention {
+  const junk = (c: number | undefined, label: [0 | 1, number]): [0 | 1, number] => (c === CODE_ARTIFACT ? [0, -1] : label);
+  const [valid, type] = junk(m.category, [m.valid, m.type]);
+  return { ...m, valid, type, grader_a: junk(m.category_a, m.grader_a), grader_b: junk(m.category_b, m.grader_b) };
 }
 
 /** Cohen's kappa of two graders' labels over the same rows. */
@@ -565,10 +602,10 @@ export function fitOnDev(dev: ScoredRow[], y: Label): { fitted: Record<ArmName, 
   return { fitted, keep, devBa, chosen };
 }
 
-async function report(url: string, numericN: number, costThoughts: number, cachePath: string | undefined) {
+async function report(url: string, numericN: number, costThoughts: number, cachePath: string | undefined, gradesPath: string, strict: boolean) {
   const cfg = resolveJevConfig(process.env as JevEnv);
   if (!cfg) { console.error("the report needs OB1_JEV_BASE_URL (and OB1_JEV_LOCAL=1 for a tier on this box)"); process.exit(2); }
-  const grades = readGateGrades();
+  const grades = readGateGrades(gradesPath, { strictCode: strict });
   const second = readGrades().mentions;
   const cached = readCache(cachePath);
   const info = await jevInfo(cfg);
@@ -757,6 +794,142 @@ async function report(url: string, numericN: number, costThoughts: number, cache
   }
 }
 
+// ── The diagnosis: why the tier fails here ───────────────────────────────────
+
+/**
+ * NOT pre-registered: probes added after the verdict, asking why Verdict fails
+ * a task its benchmark scores (JevBench easy 88%, standard 69%). JevBench
+ * decides about a short text whose answer the text states; this gate asks what
+ * a name inside a long note is. The probes separate the causes: does the model
+ * read the name at all (D1), is it the note's length (D2), is it the label
+ * wording (D3), and what it says across the whole graph (D4).
+ */
+export const JUNK = "junk";
+const sevenWay = (descriptions: Record<EntityType, string>, junk: string) => [...ENTITY_TYPES.map((t) => ({ id: t, description: descriptions[t] })), { id: JUNK, description: junk }];
+/** The type definitions the arms use, and junk in the same register. */
+export const ABSTRACT_OPTIONS = sevenWay(DEFINITION, "not a specific named entity: a number, version, port or address; or a generic word or role");
+/** Concrete labels, each with examples from OUTSIDE the brain: an example that is a graded name turns the task into string matching (measured: 48% right with in-set examples, 33% without). */
+export const CONCRETE_OPTIONS = sevenWay({
+  person: "a person's name, like Ada Lovelace or Grace Hopper",
+  organization: "a company or organization, like Mozilla or the Red Cross",
+  project: "a named project, repository, product or ticket, like Firefox, Apollo 11 or JIRA-4521",
+  tool: "a piece of software, library, service, command or file, like Kubernetes, numpy, curl or setup.py",
+  topic: "a named subject or method, like quantum computing or gradient descent",
+  place: "a geographic place, like London or California",
+}, "not a name at all: a number, version, port or hash, or an ordinary word or role like manager, user or settings");
+
+/** The name in a note (the question names it) or the name as the text itself (the question does not). */
+export function sevenWayAbout(name: string, context: string, options: JevOption[]): JevDecision {
+  return { kind: "choice", question: `What is "${name}" in this note: one of these kinds of named entity, or junk?`, options, context };
+}
+export function sevenWayOf(text: string, options: JevOption[]): JevDecision {
+  return { kind: "choice", question: "What kind of thing is this name?", options, context: text };
+}
+/** A choice's answer as a label: an abstention is junk (no type it will stand behind). */
+export const sevenWayLabel = (r: JevResult) => (r.selected === INSUFFICIENT_EVIDENCE ? JUNK : r.selected);
+
+/** The sentence or line holding the name, at most 120 characters either side of it; null when the text lacks it. */
+export function sentenceAround(text: string, name: string): string | null {
+  const m = new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu").exec(text);
+  if (!m) return null;
+  const breaks = [...text.slice(0, m.index).matchAll(/[.!?]\s|\n/g)].map((x) => x.index! + x[0].length);
+  const start = Math.max(breaks.at(-1) ?? 0, m.index - 120);
+  const after = text.slice(m.index + m[0].length).search(/[.!?]\s|\n/);
+  const end = Math.min(after < 0 ? text.length : m.index + m[0].length + after + 1, m.index + m[0].length + 120);
+  return text.slice(start, end).trim();
+}
+
+async function diagnose(url: string, cachePath: string | undefined) {
+  const cfg = resolveJevConfig(process.env as JevEnv);
+  if (!cfg) { console.error("the diagnosis needs OB1_JEV_BASE_URL (and OB1_JEV_LOCAL=1 for a tier on this box)"); process.exit(2); }
+  const cached = readCache(cachePath);
+  const info = await jevInfo(cfg);
+  const v2 = readGateGrades(GATE_GRADES_V2_PATH);
+  const sql = new SQL(url);
+  let found: Candidate[], everyone: Candidate[];
+  try {
+    ({ found } = await graded(sql, v2.mentions));
+    everyone = await sql.begin("read only", async (tx) => ((await tx`
+      SELECT DISTINCT ON (e.id) t.id::text AS thought, e.id::text AS entity, e.name, e.entity_type, t.content, t.metadata, te.confidence
+      FROM ob1_entities e JOIN thought_entities te ON te.entity_id = e.id JOIN thoughts t ON t.id = te.thought_id
+      ORDER BY e.id, t.created_at, t.id
+    `) as Row[]).map(toCandidate));
+  } finally {
+    await sql.close();
+  }
+  let asked = 0;
+  const ask = async (c: Candidate, ds: JevDecision[]) => {
+    const key = cacheKey(info.model, ds);
+    if (!cached[key]) { cached[key] = (await jevDecideMany(cfg, ds, { kind: "decision", actor: "eval-jev-gate", metadata: c.metadata })).results; asked++; }
+    return cached[key];
+  };
+  const truthOf = new Map(v2.mentions.map((m) => [`${m.thought}:${m.entity}`, m]));
+  const truth = (c: Candidate) => { const m = truthOf.get(`${c.thought}:${c.entity}`)!; return m.valid ? ENTITY_TYPES[m.type] : JUNK; };
+  const LABELS = [...ENTITY_TYPES, JUNK];
+  const spread = (xs: string[]) => LABELS.map((l) => `${l} ${xs.filter((x) => x === l).length}`).join(", ");
+  const held = found.filter((c) => c.inWindow);
+  const onSignal = (code: number) => () => { if (cachePath) writeCache(cachePath, cached); process.exit(code); };
+  const onInt = onSignal(130), onTerm = onSignal(143);
+  process.once("SIGINT", onInt).once("SIGTERM", onTerm);
+  try {
+    console.log(`\nDiagnosis (not pre-registered), ${info.model.name}; truth is rubric v2 with code artifacts counted, on the ${held.length} graded mentions whose window holds the name.\n`);
+    // D1: the same window asked about the entity, a number and an unrelated word.
+    const d1 = held.slice(0, 60);
+    let same = 0;
+    const moves: number[] = [];
+    for (const c of d1) {
+      const [a, b, z] = await ask(c, [sevenWayAbout(c.name, c.context, ABSTRACT_OPTIONS), sevenWayAbout("021", c.context, ABSTRACT_OPTIONS), sevenWayAbout("banana", c.context, ABSTRACT_OPTIONS)]);
+      if (sevenWayLabel(a) === sevenWayLabel(b) && sevenWayLabel(a) === sevenWayLabel(z)) same++;
+      moves.push(Math.max(...Object.keys(a.probabilities).map((k) => Math.abs(a.probabilities[k] - z.probabilities[k]))));
+    }
+    console.log(`D1, does it read the name? The same window asked about the entity, "021" and "banana": one answer for all three on ${same} of ${d1.length}; the largest move in any option's probability, entity to banana, p50 ${quantile(moves, 0.5).toFixed(3)}, p90 ${quantile(moves, 0.9).toFixed(3)}.`);
+    // D2 and D3: the context's length, and the labels' wording.
+    const arms: { name: string; ds: (c: Candidate) => JevDecision }[] = [
+      { name: "abstract labels, the name in the question, the ~800-character window", ds: (c) => sevenWayAbout(c.name, c.context, ABSTRACT_OPTIONS) },
+      { name: "abstract labels, the name in the question, its sentence alone", ds: (c) => sevenWayAbout(c.name, sentenceAround(c.context, c.name)!, ABSTRACT_OPTIONS) },
+      { name: "abstract labels, the name alone as the text", ds: (c) => sevenWayOf(c.name, ABSTRACT_OPTIONS) },
+      { name: "concrete labels (examples from outside the brain), the name alone", ds: (c) => sevenWayOf(c.name, CONCRETE_OPTIONS) },
+      { name: "concrete labels, the name then its sentence", ds: (c) => sevenWayOf(`${c.name}\n\n(from: ${sentenceAround(c.context, c.name)})`, CONCRETE_OPTIONS) },
+    ];
+    const rows: string[][] = [];
+    for (const arm of arms) {
+      const said: string[] = [];
+      for (const c of held) said.push(sevenWayLabel((await ask(c, [arm.ds(c)]))[0]));
+      const t = held.map(truth), junkSaid = said.filter((x) => x === JUNK).length;
+      rows.push([arm.name, pct(said.filter((x, i) => x === t[i]).length, held.length), pct(said.filter((x, i) => x === JUNK && t[i] === JUNK).length, junkSaid), pct(said.filter((x, i) => x !== JUNK && t[i] !== JUNK).length, t.filter((x) => x !== JUNK).length), spread(said)]);
+    }
+    rows.push(["the extractor's own type (never junk)", pct(held.filter((c) => c.type === truth(c)).length, held.length), "—", "100.0%", spread(held.map((c) => c.type))]);
+    console.log(`\nD2 and D3, the context's length and the labels' wording, against rubric v2 (${held.filter((c) => truth(c) === JUNK).length} of ${held.length} junk):\n`);
+    console.log(table(["framing", "label right (7-way)", "junk precision", "keeps valid", "what it answers"], rows));
+    // D4: the whole graph, the first framing.
+    const said: { c: Candidate; label: string }[] = [];
+    for (const c of everyone) said.push({ c, label: sevenWayLabel((await ask(c, [sevenWayAbout(c.name, c.context, ABSTRACT_OPTIONS)]))[0]) });
+    console.log(`\nD4, the whole graph (${everyone.length} entities, the first framing): it answers ${spread(said.map((x) => x.label))}; it keeps the extractor's type on ${pct(said.filter((x) => x.label === x.c.type).length, said.length)} and calls ${pct(said.filter((x) => x.label === JUNK).length, said.length)} junk, ${pct(said.filter((x) => x.label === JUNK && b0Rejects(x.c.name)).length, said.filter((x) => b0Rejects(x.c.name)).length)} of the numeric names among them.`);
+    // D5: under each rubric, the graph's junk weighted by type from the graded strata, and the 7-way labels on all 201.
+    const byEntity = new Map(said.map((x) => [x.c.entity, x.label]));
+    const rubrics: [string, GradedMention[]][] = [["v1 (the verdict's)", readGateGrades().mentions], ["v2, code artifacts junk", readGateGrades(GATE_GRADES_V2_PATH, { strictCode: true }).mentions], ["v2, code artifacts count", v2.mentions]];
+    const typeOf = new Map(found.map((c) => [c.entity, c]));
+    const numeric = everyone.filter((c) => b0Rejects(c.name)).length;
+    const d5 = rubrics.map(([name, ms]) => {
+      const lab = (m: GradedMention) => (m.valid ? ENTITY_TYPES[m.type] : JUNK);
+      const junk = ENTITY_TYPES.reduce((sum, t) => {
+        const pop = everyone.filter((c) => c.type === t && !b0Rejects(c.name)).length, gs = ms.filter((m) => typeOf.get(m.entity)?.type === t);
+        return sum + (gs.length ? (pop * gs.filter((m) => !m.valid).length) / gs.length : 0);
+      }, numeric);
+      const scored = ms.filter((m) => typeOf.has(m.entity) && byEntity.has(m.entity));
+      const right = (f: (m: GradedMention) => string) => pct(scored.filter((m) => f(m) === lab(m)).length, scored.length);
+      const c = (m: GradedMention) => typeOf.get(m.entity)!;
+      return [name, String(ms.filter((m) => m.valid).length), `~${Math.round(junk)} (${pct(junk, everyone.length)})`, right((m) => byEntity.get(m.entity)!), right((m) => (b1Rejects(c(m).name, c(m).type) ? JUNK : c(m).type))];
+    });
+    console.log(`\nD5, under each rubric: the graph's junk, weighted by type from the graded strata plus the ${numeric} numeric names; and the 7-way label (the first framing) on the graded mentions, against B1 then the extractor's type:\n`);
+    console.log(table(["rubric", "valid of 201", "junk in the graph", "tier's 7-way right", "B1 then the extractor's type"], d5));
+    console.log(`\n${asked} decisions asked, the rest from the cache.`);
+  } finally {
+    process.off("SIGINT", onInt).off("SIGTERM", onTerm);
+    if (cachePath) writeCache(cachePath, cached);
+  }
+}
+
 // ── The self-check ───────────────────────────────────────────────────────────
 
 function selfCheck() {
@@ -842,6 +1015,12 @@ function selfCheck() {
   ok(readArms([bin(0, 0), bin(0, 0), ...per.map((s) => bin(s, 0)), choice], "not-a-type", 1).claim.s === -Infinity, "a claim for a type off the vocabulary scores as a reject");
 
   const A = "10000000-0000-4000-8000-000000000001", B = "10000000-0000-4000-8000-000000000002";
+  // The diagnosis's framings.
+  ok(sentenceAround("First one. Then Bun ran here. After.", "bun") === "Then Bun ran here." && sentenceAround(`${"x".repeat(300)} Bun ${"y".repeat(300)}`, "bun") === `${"x".repeat(119)} Bun ${"y".repeat(119)}` && sentenceAround("line one\nuses Bun\nline three", "bun") === "uses Bun" && sentenceAround("no name", "bun") === null, "the sentence around a name: bounded by a full stop or a line break, at most 120 characters either side, null when the text lacks it");
+  const about = sevenWayAbout("Bun", "ctx", ABSTRACT_OPTIONS), of = sevenWayOf("Bun", CONCRETE_OPTIONS);
+  ok(about.kind === "choice" && about.question.includes('"Bun"') && about.context === "ctx" && of.kind === "choice" && !of.question.includes("Bun") && of.context === "Bun" && [ABSTRACT_OPTIONS, CONCRETE_OPTIONS].every((o) => o.length === 7 && o[6].id === JUNK && ENTITY_TYPES.every((t, i) => o[i].id === t)), "the name goes in the question (about a note) or is the text itself (of a name); both option sets are the six types then junk");
+  ok(sevenWayLabel({ ...choice, selected: INSUFFICIENT_EVIDENCE }) === JUNK && sevenWayLabel(choice) === "tool", "a seven-way abstention reads as junk");
+
   // The dev procedure: the refit, the threshold and the arm, under the labels given.
   const mk = (i: number, scores: Partial<Record<ArmName, number>>, valid: 0 | 1, alt: 0 | 1): ScoredRow => ({
     c: { thought: A, entity: A, name: `n${i}`, type: "tool", context: "c", inWindow: true, metadata: {}, stored: 1 },
@@ -880,6 +1059,15 @@ function selfCheck() {
   const unmet = expect.filter((e) => !bad.some((p) => p.includes(e)));
   ok(unmet.length === 0, `each rule refuses by name: a missing label, an invalid row with a type and a valid one without, a type off the vocabulary or not an integer, a validity not 0/1, a bad id in either column (unanchored, upper case), each grader's label of the wrong shape or values, a row that is not an object, a duplicate (unmet: ${unmet.join("; ") || "none"})`);
   ok(validateGateGrades(null)[0] === "the fixture is not an object" && validateGateGrades([])[0] === "the fixture is not an object" && validateGateGrades({ generated: "g", origin: "o", note: "n" }).includes("mentions is not an array"), "a fixture that is not an object, or has no mentions array, is a problem and not a throw");
+  // Rubric v2: the categories agree with validity, all three or none; --strict-code turns a code artifact into junk.
+  const v2row = { ...row, category: 2, category_a: 2, category_b: 5, grader_b: [0, -1] };
+  ok(validateGateGrades({ ...good, mentions: [v2row] }).length === 0, "a rubric-v2 row, a code artifact one grader called generic, validates");
+  const v2bad = validateGateGrades({ ...good, mentions: [{ ...v2row, category: 4 }, { ...v2row, entity: C, category_b: 2 }, { ...v2row, entity: A, category: 7 }, (({ category_a, ...r }) => ({ ...r, thought: C }))(v2row)] });
+  const v2expect = ["mentions[0]: category 4 with valid 1", "mentions[1]: category_b 2 with grader_b 0", "mentions[2]: category 7 is not a category", "mentions[3]: category_a undefined is not a category"];
+  const v2unmet = v2expect.filter((e) => !v2bad.some((p) => p.includes(e)));
+  ok(v2unmet.length === 0, `a category that disagrees with its validity, one off the list, or one missing beside the others is refused by name (unmet: ${v2unmet.join("; ") || "none"})`);
+  const strict = strictCode({ ...v2row, valid: 1, type: 3, grader_a: [1, 3], grader_b: [0, -1] } as GradedMention);
+  ok(strict.valid === 0 && strict.type === -1 && strict.grader_a[0] === 0 && strict.grader_b[0] === 0 && strictCode({ ...v2row, category: 0, category_a: 0 } as GradedMention).valid === 1, "--strict-code reads a code artifact as junk, for the adjudication and each grader, and leaves a named entity valid");
   ok(splitOf(A) === "test" && splitOf("10000000-0000-4000-8000-000000000003") === "dev", "the split is pinned: md5's first hex digit below 8 is dev");
   const wtext = `${"x".repeat(500)}The Name${"y".repeat(500)}`;
   const win = (t: string, n: string) => windowAround(t, n);
@@ -891,6 +1079,12 @@ function selfCheck() {
     const n = g.mentions.length, dev = g.mentions.filter((m) => splitOf(m.thought) === "dev").length;
     ok(n === 201 && dev === 111, `the committed grades validate: the pre-registered 201 mentions, 111 of them dev (${dev} dev of ${n})`);
     ok(g.mentions.every((m) => m.valid === m.grader_a[0] || m.valid === m.grader_b[0]), "every adjudicated validity is one grader's: adjudication picks, it does not invent");
+  }
+  if (existsSync(GATE_GRADES_V2_PATH)) {
+    const v1 = readGateGrades(), v2 = readGateGrades(GATE_GRADES_V2_PATH);
+    ok(v2.mentions.length === v1.mentions.length && v2.mentions.every((m, i) => m.thought === v1.mentions[i].thought && m.entity === v1.mentions[i].entity && m.category !== undefined), "rubric v2 grades the same 201 mentions in the same order, each with a category");
+    ok(v2.mentions.every((m) => m.category === m.category_a || m.category === m.category_b), "every adjudicated v2 category is one grader's");
+    ok(readGateGrades(GATE_GRADES_V2_PATH, { strictCode: true }).mentions.filter((m) => m.valid).length === v2.mentions.filter((m) => m.valid && m.category !== CODE_ARTIFACT).length, "--strict-code on the committed v2 grades drops exactly the code artifacts");
   }
 
   if (failed) { console.error(`self-check: ${failed} FAILED`); process.exit(1); }
@@ -907,7 +1101,7 @@ if (import.meta.main) {
     const url = arg("--url") ?? process.env.DATABASE_URL;
     const numericN = Number(arg("--numeric") ?? 60), costThoughts = Number(arg("--cost-thoughts") ?? 40);
     if (!url || !Number.isInteger(numericN) || numericN < 1 || !Number.isInteger(costThoughts) || costThoughts < 0) {
-      console.error("usage: bun eval-jev-gate.ts --url postgres://… [--numeric 60] [--cost-thoughts 40] [--cache <file>] | --dump-sample <file> | --self-check");
+      console.error("usage: bun eval-jev-gate.ts --url postgres://… [--numeric 60] [--cost-thoughts 40] [--cache <file>] [--grades <file> [--strict-code]] | --diagnose [--cache <file>] | --dump-sample <file> | --self-check");
       process.exit(2);
     }
     const dump = arg("--dump-sample");
@@ -920,6 +1114,7 @@ if (import.meta.main) {
       } finally {
         await sql.close();
       }
-    } else await report(url, numericN, costThoughts, arg("--cache"));
+    } else if (process.argv.includes("--diagnose")) await diagnose(url, arg("--cache"));
+    else await report(url, numericN, costThoughts, arg("--cache"), arg("--grades") ?? GATE_GRADES_PATH, process.argv.includes("--strict-code"));
   }
 }

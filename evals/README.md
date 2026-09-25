@@ -5325,11 +5325,14 @@ in the path.
   without the extractor's type or any tier output;
 - they agree on validity for 91% (kappa 0.82), and on the type for 75 of the
   78 mentions both call valid (kappa 0.94);
-- 81 of 201 are valid. By type, 42 of the 50 topics, 37 of the 50 tools,
-  15 of the 50 projects, and 8 of the 11 places are invalid.
-- The invalid ones are mostly code identifiers named as entities (tables,
-  functions, environment variables, files, branches) and generic words or
-  roles (`operator`, `evals`, `full stack`).
+- 81 of 201 are valid under this rubric, which is strict in three ways:
+  - it grades the first thought's mention, not the entity;
+  - a role word is never a person;
+  - a code identifier (table, function, environment variable, file, branch) is
+    never an entity.
+
+  Each of the three is a definition, not a finding, and rubric v2 below
+  revisits them.
 
 ```sh
 mkdir -p "$HOME/.cache/ob1"   # podman does not create a missing bind source
@@ -5345,7 +5348,9 @@ re-analysis asks the tier only for `/info` and the timed thoughts
 (`--cost-thoughts 0` skips those), and another model is asked afresh. The
 file is replaced whole, and written on an interrupt too.
 `--dump-sample` writes the grading sample, which is the brain's text, so write
-it outside the tree.
+it outside the tree. `--grades fixtures/entity-gate-grades-v2.json` (with or
+without `--strict-code`) runs the report under rubric v2, and `--diagnose`
+runs the probes of why the tier fails. Both are below.
 
 On the test split (90 mentions, 52 invalid), with the threshold, temperature
 and Platt refit taken from dev. The Brier skill is measured against a constant
@@ -5443,13 +5448,89 @@ at the test split's base rate, scored on the same rows:
   - Among the refits, a clamped log loss let the temperature walk to its bound
     on the extractor's column, which the first live run showed.
 
-**What it settles.** Verdict v1.4 does not earn a place in the extraction path,
-as a validity gate or as a typer. Ship SMD-1935's deterministic gate, which
-does all that a shape rule can. The mass it cannot reach is code identifiers
-and generic words, and those need either another model (SemIf, SMD-2052, is
-the one untried lever on this harness) or the extractor not minting them in
-the first place. The extractor's own confidence column stays uninformative
-until something like this earns the place.
+**Rubric v2, after the result.** Not pre-registered: the maintainer asked
+whether the junk was junk, and three definitions of rubric v1 were revisited.
+`fixtures/entity-gate-grades-v2.json` regrades the same 201 mentions with two
+fresh blind graders:
+- **At the entity level:** up to three windows from different thoughts, and the
+  mention count, not the first thought alone.
+- **Roles:** a role or handle that points at one specific person counts as that
+  person (`the maintainer`, meaning the author). Generic roles do not
+  (`worker`, a process; `principal`, an object in code).
+- **Categories:** each mention gets one, of seven: named, role → person, code
+  artifact, URL or path only, number or hash, generic, not held.
+
+The graders agree on validity for 98.5% (kappa 0.96), and on the category for
+196 of 201. 64 mentions flip from invalid to valid: 59 code artifacts, 3 roles
+pointing at a person, and 2 names judged across their mentions. One flips
+back. `--grades fixtures/entity-gate-grades-v2.json` runs the whole report
+under it, and `--strict-code` reads code artifacts as junk.
+
+| rubric | valid of 201 | junk in the graph, weighted by type (of 2,420) | v2 − B1 on test (the report) | tier's 7-way labels vs B1 then the extractor's type (`--diagnose`, D5) |
+| --- | --- | --- | --- | --- |
+| v1 (the verdict's) | 81 | ~1,620 (67%) | +10.1 (−1.0 to +21.0) | 23.9% vs 33.8% |
+| v2, code artifacts junk | 85 | ~1,610 (67%) | +8.9 (−2.2 to +19.7) | 22.4% vs 35.8% |
+| v2, code artifacts count | 144 | ~690 (28%) | +10.5 (−1.4 to +22.2) | 26.4% vs 48.8% |
+
+- **The margin fails under every rubric.**
+- **The junk share is one definition:** whether a code artifact is an entity.
+  The entity level and the roles barely move it.
+- **Topics are at least half junk either way** (54% counting code, 86% not).
+- **Some URL-only junk is a type split, not garbage.** `Linear` typed
+  organization has 2 mentions, both in URLs, while the Linear the notes discuss
+  is a separate tool entity with 160 (SMD-1913's under-merging).
+- **Three windows can miss a real use:** `Siggymd`, with 34 mentions, was graded
+  URL-only from its three.
+
+**Why it fails: the model reads the text, not the name.** Not pre-registered.
+JevBench's easy and standard tiers are where Verdict scores 88% and 69%. There
+it decides about a short text (48–70 characters at p50; the model was trained
+on contexts under 71 tokens) whose answer the text states: "Where is my
+package?" is `track_order`. This gate asks what a name inside a long note is.
+`--diagnose` separates the causes, against rubric v2 with code artifacts
+counted, on the 192 mentions whose window holds the name (50 junk):
+
+| framing | label right (7-way) | junk precision | what it answers |
+| --- | --- | --- | --- |
+| abstract labels, the name in the question, the ~800-character window | 26.6% | 28.6% | project 176 of 192 |
+| … the name's sentence alone (about 158 characters) | 25.0% | 38.5% | project 133 |
+| … the name alone as the text | 26.6% | 1 of 1 | project 174 |
+| concrete labels with examples from outside the brain, the name alone | 33.3% | 25.0% | junk 132 |
+| … the name then its sentence | 32.8% | 29.4% | junk 126 |
+| the extractor's own type (never junk) | 47.9% | — | spread over the six |
+
+- **It does not read the name.** The same window asked about the entity, `021`
+  and `banana` gets one answer for all three on 56 of 60, and the largest move
+  in any option's probability is 0.034 at p50.
+- **Length is not the cause.** The sentence alone scores the same as the
+  window.
+- **The labels' wording is its default.** Abstract labels pull everything to
+  the vaguest one, `project` ("a named piece of work"), even for the name alone.
+  Concrete labels move the default to `junk`, and its junk calls are right a
+  quarter of the time, at the base rate.
+- **A trap for the next spike.** With examples taken from the graded names, the
+  concrete labels scored 48%, equal to the extractor. That was string matching
+  on the examples, not a gain.
+- **The whole graph under the first framing:** `project` for 2,268 of 2,420
+  entities, and 2.6% junk. That includes 3 of the 67 numeric names, where B0
+  catches all 67.
+
+The cause is the task, not the framing. A JevBench answer is written in its
+text, while an entity's type rarely is: nothing near `thought_audit` says it is
+a table. The task takes knowledge of names, which a 151M model tuned on banking
+intents does not have.
+
+**What it settles.**
+- **Verdict v1.4 stays out of the extraction path,** as a validity gate and as a
+  typer, under every rubric and every framing tried.
+- **SMD-1935's deterministic gate ships first.**
+- **The next model should know names.** SemIf (SMD-2052), the same contract over
+  Qwen3.5-4B, is the one untried lever on this harness.
+- **The largest decision is a definition:** whether code artifacts belong in
+  the graph (28% junk against 67%).
+- **A free signal is untested:** the notes write code artifacts in backticks,
+  which a deterministic rule on the source text could read.
+- **The confidence column stays uninformative** until something earns the place.
 
 ## Related
 
