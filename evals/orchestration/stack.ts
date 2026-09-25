@@ -1,0 +1,137 @@
+/**
+ * stack.ts — the throwaway brain each candidate runs beside (SMD-1863).
+ *
+ * One compose project per candidate: deploy/compose.yaml as it ships (the
+ * reference deployment, built from this checkout) plus the candidate's overlay
+ * from this directory, under the project name `ob1-orch-<tool>` so its volumes,
+ * network and containers are its own and `--down` removes all of them. Nothing
+ * here touches a running dogfood stack: another project name, another port.
+ *
+ * The secrets live in evals/orchestration/.env (gitignored — `.env` at any
+ * depth), written once by `ensureEnv`: the database passwords, the candidate's
+ * encryption key, and three brain keys minted the way keygen.ts mints them —
+ * `orch-capture` (capture scope: the ingestion workflow's, can add, cannot
+ * read), `orch-read` (read scope: the retrieval step's) and `orch-verify`
+ * (read scope: this verifier's). Only their hashes reach MCP_ACCESS_KEYS.
+ * LINEAR_API_KEY is not copied into it: the driver reads it from the usual
+ * search path (db/env.ts) and hands it to compose in the environment.
+ */
+import { randomBytes } from "node:crypto";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { hashKey } from "../../server-portable/auth.ts";
+import { parseEnv } from "../../db/env.ts";
+
+export const HERE = dirname(fileURLToPath(import.meta.url));
+export const REPO = resolve(HERE, "..", "..");
+export const ENV_FILE = join(HERE, ".env");
+
+export type Keys = { capture: string; read: string; verify: string };
+
+/**
+ * The POC's .env: created on first use, reused after, so a second `--up`
+ * meets the database its first one initialised. Returns the parsed values.
+ */
+export function ensureEnv(): Record<string, string> {
+  const hex = (n: number) => randomBytes(n).toString("hex");
+  if (existsSync(ENV_FILE)) {
+    const env = parseEnv(readFileSync(ENV_FILE, "utf8"));
+    // A value a later candidate needs is appended, never a rewrite: the
+    // database passwords are the ones the volume was initialised with.
+    const later: Record<string, () => string> = { ORCH_MCP_KEY: () => hex(32), ORCH_KEY16: () => hex(16), ORCH_JWT_SECRET: () => hex(32) };
+    const missing = Object.keys(later).filter((k) => !env[k]);
+    if (missing.length) {
+      writeFileSync(ENV_FILE, readFileSync(ENV_FILE, "utf8") + missing.map((k) => `${k}=${later[k]()}\n`).join(""), { mode: 0o600 });
+      return parseEnv(readFileSync(ENV_FILE, "utf8"));
+    }
+    return env;
+  }
+  const keys: Keys = { capture: hex(32), read: hex(32), verify: hex(32) };
+  const lines = [
+    "# SMD-1863 orchestration POC — throwaway brain + candidate. Generated; gitignored.",
+    `POSTGRES_PASSWORD=${hex(16)}`,
+    `ORCH_DB_PASSWORD=${hex(16)}`,
+    `ORCH_ENCRYPTION_KEY=${hex(24)}`,
+    // Activepieces wants exactly 32 hex characters for its encryption key.
+    `ORCH_KEY16=${hex(16)}`,
+    `ORCH_JWT_SECRET=${hex(32)}`,
+    `ORCH_ADMIN_PASSWORD=Orch-${hex(8)}`,
+    // The candidate's own MCP endpoint's key — what an AI client presents to it.
+    `ORCH_MCP_KEY=${hex(32)}`,
+    `MCP_ACCESS_KEYS=orch-capture:capture:${hashKey(keys.capture)},orch-read:read:${hashKey(keys.read)},orch-verify:read:${hashKey(keys.verify)}`,
+    `ORCH_BRAIN_CAPTURE_KEY=${keys.capture}`,
+    `ORCH_BRAIN_READ_KEY=${keys.read}`,
+    `ORCH_BRAIN_VERIFY_KEY=${keys.verify}`,
+    // The brain's models: the host's Ollama, declared local to the egress gate.
+    "SERVER_PORT=8012",
+    "OB1_LLM_BASE_URL=http://host.docker.internal:11434/v1",
+    "OB1_LLM_LOCAL=1",
+    "OB1_EMBEDDING_MODEL=qwen3-embedding:4b",
+    "OB1_EMBEDDING_DIM=1024",
+    "OB1_METADATA_MODEL=qwen2.5:7b",
+    "",
+  ];
+  writeFileSync(ENV_FILE, lines.join("\n"), { mode: 0o600 });
+  return parseEnv(readFileSync(ENV_FILE, "utf8"));
+}
+
+export const project = (tool: string) => `ob1-orch-${tool}`;
+
+/** `docker compose` with this candidate's project, env file and the two -f files. */
+export function composeArgs(tool: string): string[] {
+  return [
+    "compose", "-p", project(tool), "--env-file", ENV_FILE,
+    "-f", join(REPO, "deploy", "compose.yaml"),
+    "-f", join(HERE, `compose.${tool}.yaml`),
+  ];
+}
+
+export type Run = { code: number; out: string; err: string };
+
+export function run(cmd: string[], env: Record<string, string> = {}, input?: string): Run {
+  const p = Bun.spawnSync(cmd, { env: { ...process.env, ...env }, stdin: input === undefined ? "ignore" : Buffer.from(input), stdout: "pipe", stderr: "pipe" });
+  return { code: p.exitCode ?? -1, out: p.stdout.toString(), err: p.stderr.toString() };
+}
+
+export function compose(tool: string, args: string[], env: Record<string, string> = {}, input?: string): Run {
+  return run(["docker", ...composeArgs(tool), ...args], env, input);
+}
+
+/** One SQL statement on the brain's database, unaligned, tuples only. */
+export function brainSql(tool: string, sql: string): string {
+  const r = compose(tool, ["exec", "-T", "postgres", "psql", "-U", "postgres", "-d", "openbrain", "-Atc", sql]);
+  if (r.code !== 0) throw new Error(`psql failed: ${r.err.trim()}`);
+  return r.out.trim();
+}
+
+export async function waitFor(what: string, probe: () => Promise<boolean>, timeoutMs = 180_000, everyMs = 2_000): Promise<void> {
+  const until = Date.now() + timeoutMs;
+  while (Date.now() < until) {
+    if (await probe().catch(() => false)) return;
+    await Bun.sleep(everyMs);
+  }
+  throw new Error(`timed out after ${timeoutMs / 1000}s waiting for ${what}`);
+}
+
+/** Resident memory per container of the project, from `docker stats`, in MiB. */
+export function memoryByContainer(tool: string): Record<string, number> {
+  const ids = compose(tool, ["ps", "-q"]).out.trim().split("\n").filter(Boolean);
+  if (!ids.length) return {};
+  const r = run(["docker", "stats", "--no-stream", "--format", "{{.Name}}\t{{.MemUsage}}", ...ids]);
+  const out: Record<string, number> = {};
+  for (const line of r.out.trim().split("\n").filter(Boolean)) {
+    const [name, usage] = line.split("\t");
+    out[name] = toMiB(usage.split("/")[0].trim());
+  }
+  return out;
+}
+
+export function toMiB(s: string): number {
+  const m = /^([\d.]+)\s*([KMGT]?i?B)$/i.exec(s.trim());
+  if (!m) return NaN;
+  const n = Number(m[1]);
+  const unit = m[2].toUpperCase().replace("I", "");
+  const f: Record<string, number> = { B: 1 / 1048576, KB: 1 / 1024, MB: 1, GB: 1024, TB: 1048576 };
+  return Math.round(n * (f[unit] ?? NaN) * 10) / 10;
+}

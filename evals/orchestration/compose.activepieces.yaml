@@ -1,0 +1,74 @@
+# Activepieces beside a throwaway brain (SMD-1863). An overlay on deploy/compose.yaml:
+#
+#   bun evals/eval-orchestration.ts --up activepieces
+#
+# Paths are relative to deploy/ (the first -f file). The candidate's state is a
+# database of its own on the brain's Postgres server, owned by a login role of
+# its own, as for n8n. The single-container shape — app and worker in one
+# process, the job queue in memory (AP_REDIS_TYPE=MEMORY) — is the smallest the
+# docs allow against an external Postgres; their reference compose adds Redis
+# and a separate worker.
+
+services:
+  orch-db:
+    image: pgvector/pgvector:0.8.6-pg16
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      ORCH_DB_PASSWORD: ${ORCH_DB_PASSWORD}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        psql -v ON_ERROR_STOP=1 -v pw="$$ORCH_DB_PASSWORD" -d openbrain <<'SQL'
+        SELECT format('CREATE ROLE orch LOGIN PASSWORD %L', :'pw') WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'orch') \gexec
+        SELECT 'CREATE DATABASE orchestration OWNER orch' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'orchestration') \gexec
+        REVOKE CONNECT ON DATABASE openbrain FROM PUBLIC;
+        SQL
+    restart: "no"
+
+  activepieces:
+    image: ghcr.io/activepieces/activepieces:0.91.3
+    depends_on:
+      orch-db:
+        condition: service_completed_successfully
+      server:
+        condition: service_started
+    # The same port inside and out: the worker fetches piece bundles from the
+    # app's own public URL (AP_FRONTEND_URL), so that URL has to resolve inside
+    # the container as well — on the image's default port 80 it does not, and
+    # every connection's validation dies with "fetch failed".
+    ports:
+      - "127.0.0.1:${ORCH_PORT:-8080}:${ORCH_PORT:-8080}"
+    environment:
+      AP_PORT: ${ORCH_PORT:-8080}
+      AP_DB_TYPE: POSTGRES
+      AP_POSTGRES_HOST: postgres
+      AP_POSTGRES_PORT: "5432"
+      AP_POSTGRES_DATABASE: orchestration
+      AP_POSTGRES_USERNAME: orch
+      AP_POSTGRES_PASSWORD: ${ORCH_DB_PASSWORD}
+      AP_REDIS_TYPE: MEMORY
+      AP_QUEUE_UI_ENABLED: "false"
+      AP_ENCRYPTION_KEY: ${ORCH_KEY16}
+      AP_JWT_SECRET: ${ORCH_JWT_SECRET}
+      AP_FRONTEND_URL: http://127.0.0.1:${ORCH_PORT:-8080}
+      AP_EXECUTION_MODE: UNSANDBOXED
+      AP_ENVIRONMENT: prod
+      # Product analytics off at first boot (the docs: this sets the starting
+      # value only; the UI can turn it back on) and no Activepieces-hosted
+      # OAuth apps — a connection's OAuth client is the operator's own.
+      AP_TELEMETRY_ENABLED: "false"
+      AP_CLOUD_AUTH_ENABLED: "false"
+      # The piece catalogue: OFFICIAL_AUTO (the default) syncs it from
+      # Activepieces' cloud; NONE is the egress probe's setting (evals/README.md).
+      AP_PIECES_SYNC_MODE: ${ORCH_AP_PIECES_SYNC_MODE:-OFFICIAL_AUTO}
+    volumes:
+      - activepieces-cache:/usr/src/app/cache
+
+volumes:
+  activepieces-cache:

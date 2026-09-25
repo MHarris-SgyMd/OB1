@@ -5298,6 +5298,149 @@ calibration and which model (SemIf, SMD-2052) is SMD-1937's measurement to make
 on this harness. What the run shows is the Verify bullet: the spike ran against
 the tier with no serving code of its own.
 
+## Which orchestration tool? The same two workflows on n8n, Activepieces and Windmill (SMD-1863)
+
+SMD-1863 asks which self-hosted workflow tool — n8n, Activepieces or Windmill —
+should own the fork's ingestion and sync (vendor auth, schedules, triggers,
+retries) instead of one hand-rolled recipe per service, and whether to adopt one
+at all. The decision is an ADR's, in its own pull request on the ticket; this
+is the evidence it reads. The criteria, the bar and the prior were posted on
+the ticket before any candidate ran (2026-09-25).
+
+**The setup.** `eval-orchestration.ts` runs each candidate as its own compose
+project, `ob1-orch-<tool>`: `deploy/compose.yaml` as shipped — a throwaway
+brain built from this checkout, embeddings and metadata from the host's Ollama —
+plus `orchestration/compose.<tool>.yaml`, the candidate beside it as the opt-in
+sidecar the ticket proposes, its state in a database of its own
+(`orchestration`) on the brain's Postgres server under a login role of its own
+(`orch`: no superuser, no CONNECT on `openbrain`). Everything is loopback. The
+brain gets three keys: `orch-capture` (capture scope — can add a thought, cannot
+read one), `orch-read` (read scope) and `orch-verify` (the verifier's). Each
+candidate is provisioned with no UI step, its credentials in its own encrypted
+store, and gets the same work:
+
+- **Ingestion** — every 15 minutes (and on demand): ten SMD issues from Linear's
+  GraphQL API with the Linear key the tool holds, one thought each, captured
+  through the candidate's MCP client with the capture key.
+- **MCP server** — the candidate's own MCP endpoint offers two tools an AI
+  client can call: `brain_search` (the brain's `search_thoughts`, through the
+  tool's MCP client with the read key — remember) and `linear_issue` (a live
+  Linear lookup with the tool's Linear key — act).
+
+```sh
+cd evals
+bun eval-orchestration.ts --up n8n        # or activepieces | windmill
+bun eval-orchestration.ts --verify n8n [--json]
+bun eval-orchestration.ts --down n8n      # removes the project and its volumes
+```
+
+It needs `LINEAR_API_KEY` on the usual search path and the host's Ollama; it
+writes `orchestration/.env` (gitignored) once and reuses it.
+
+**The result — all three pass the POC** (one clean cycle each, 2026-09-25, on
+the dogfood Mac: the podman VM, 8 vCPU, 14.9 GiB):
+
+| candidate | C1 ingestion (run 1 / run 2) | C2 capture key | C3 MCP server | C4 headless |
+| --- | --- | --- | --- | --- |
+| n8n 2.40.6 | PASS: +10 in 27.3 s / +0 | PASS | PASS: `linear_issue`, `brain_search_thoughts`; no key refused | PASS |
+| activepieces 0.91.3 | PASS: +10 in 24.2 s / +0 | PASS | PASS: `linear_issue_vijk_e9o7b3_mcp`, `brain_search_v6rb_n2ww19_mcp` + 42 `ap_*`; no key refused | PASS |
+| windmill CE v1.817.0 | PASS: +10 in 31.5 s / +0 | PASS | PASS: `s-f_ob1_brain__search`, `s-f_ob1_linear__issue`, `runScriptByPath`; no key refused | PASS |
+
+C1: the first run lands the ten issues as ten thoughts written by
+`orch-capture`; the second lands none (the brain's fingerprint dedup — the
+workflow keeps no cursor). C3: the endpoint lists both tools, `brain_search`
+returns SMD thoughts, `linear_issue` returns SMD-1863's live state, and a session
+with no credential is refused. C4: every step below was an API or CLI call.
+
+Memory is each container's resident set from `docker stats`, first right after
+provisioning ("idle" — n8n's includes the import's heap, released by the time
+of the second reading), then after the verifier's two ingestion runs and MCP
+calls. The candidate's database lives in the brain's Postgres server, and the
+throwaway brain holds ten thoughts, so that column is nearly all the
+candidate's: it is what the brain's server pays to host it. Image sizes are as
+podman reports them.
+
+| candidate | image | candidate RSS idle → after runs | shared Postgres RSS idle → after runs | brain server |
+| --- | --- | --- | --- | --- |
+| n8n | `docker.io/n8nio/n8n@sha256:9c7871d5cc4fc2565bb905e4df5bf7d6a5a4bf2f4313fb99a2b3fa380f331d7c` (1103 MiB) | 596 → 373 MiB | 51 → 77 MiB | 50 MiB |
+| activepieces | `ghcr.io/activepieces/activepieces@sha256:71184b412cde4cc22fca1dd683744588e68b2d198e21ed3316806d549e31f7a6` (1217 MiB) | 1350 → 1969 MiB | 144 → 204 MiB | 43 MiB |
+| windmill | `ghcr.io/windmill-labs/windmill@sha256:8e54fce496ee000eb99489dc022aadec320c8e726ea7387c674adeea7730f86f` (3795 MiB) | 246 → 201 MiB | 130 → 384 MiB | 39 MiB |
+
+**What each needed, and what it did that the survey did not say.**
+
+- **n8n 2.40.6** — CLI only: `import:credentials` (it encrypts a plain `data`
+  object with the instance key), `import:workflow`, `publish:workflow`, a
+  restart. The MCP Client node is a normal workflow step (Streamable HTTP, a
+  header credential); the MCP Server Trigger exposes exactly the tool nodes wired
+  to it, behind a static header the operator chooses — so an AI client connects
+  with a URL and a header, the OB1 pattern. A toolkit's tools are prefixed with
+  the node's name (`brain_search_thoughts`). The Linear node lists issues with no
+  filter, only a limit, so the fetch is the HTTP Request node with n8n's stored
+  `linearApi` credential — the tool still holds the key. The CLI's `execute` runs
+  a workflow only from an Execute Workflow Trigger, and beside the running
+  server it needs its own task-broker port. n8n says of the brain's Postgres 16:
+  "outside the supported range and receives compatibility support only. Upgrade
+  to Postgres 17 or newer." 918 node types ship in the image; nothing is fetched
+  at run time.
+- **Activepieces 0.91.3** — REST only: the first sign-up becomes the platform
+  admin (sign-up is invitation-only after it), three app connections, each flow
+  created, `IMPORT_FLOW`ed and `LOCK_AND_PUBLISH`ed. One trigger per flow, so
+  three flows. Its container must listen on the port its `AP_FRONTEND_URL`
+  names: the worker fetches piece bundles from that URL, and on the image's
+  default port every connection's validation failed with "fetch failed". The
+  pieces are not in the image (five piece directories ship); the catalogue comes
+  from Activepieces' cloud at boot (12,765 piece versions, written to its
+  database in the background) and each piece's code from the npm registry at
+  first use. On a fresh boot the server can go on refusing a piece whose rows the
+  sync has already written — 404 `piece_metadata_not_found` for 300 s with
+  11,300 of the rows in place, until a restart rebuilt its index from the
+  database: two of three fresh boots here, so the adapter waits 120 s and
+  restarts once (its `--up` line says when). Measured: with `AP_PIECES_SYNC_MODE=NONE`
+  on a fresh stack the catalogue stays empty and provisioning cannot start (every
+  piece lookup 404s for 300 s); set after provisioning, the published flows keep
+  running. The MCP endpoint takes an OAuth access token only — the project's
+  stored token is refused (401) — and a signed-in user can mint a short-lived one
+  over REST; an AI client goes through OAuth consent. Beside the two flow tools
+  (named `brain_search_<id>_mcp`, a suffix that changes with each provisioning)
+  it hands the client 42 of Activepieces' own tools — create, edit, publish and
+  delete flows, run any piece action, read and write tables — unless each is
+  listed in the project's `disabledTools`.
+- **Windmill CE 1.817.0** — REST only: the seeded superadmin
+  (`admin@windmill.dev` / `changeme`) signs in and its password is replaced,
+  telemetry is turned off in the instance settings (no environment variable
+  exists), a workspace, a folder, three secret variables, three Bun scripts
+  (Windmill resolves their npm imports into a lockfile on deploy) and a
+  schedule. There is no Linear trigger and no MCP-client step: the scripts are
+  the connectors, each importing the MCP SDK itself. Its migrations need two
+  cluster-wide roles a superuser must create first — `windmill_user` and
+  `windmill_admin WITH BYPASSRLS` — which then exist on the brain's Postgres
+  server. The worker's process isolation (`unshare`) is unavailable in an
+  unprivileged container and it runs jobs without it. The MCP token can be scoped
+  to named scripts (`mcp:scripts:f/ob1/brain_search,f/ob1/linear_issue`); the
+  endpoint then lists those two (`s-f_ob1_brain__search` — `/` to `_`, `_`
+  doubled) and `runScriptByPath`, which refused a script outside the scope
+  ("not in token scope", measured).
+
+**The licenses, from the files.** n8n: the Sustainable Use License — "You may use
+or modify the software only for your own internal business purposes or for
+non-commercial or personal use", distribution only "free of charge for
+non-commercial purposes"; `.ee.` files excluded. Activepieces: MIT outside
+`packages/ee/` and `packages/server/api/src/app/ee` — every piece, the MCP server
+and everything the POC used are outside them. Windmill: AGPLv3 for the source,
+the clients and the OpenAPI spec Apache 2.0, and the published CE image carries
+proprietary code under "a right to distribute the community edition as is but
+not to sell, resell, serve as a managed service, modify or wrap under any form
+without an explicit agreement" — the ticket's "Apache 2.0" was wrong. What the
+licenses mean for a profile OB1 ships is the ADR's to decide.
+
+**What this does not measure.** Gmail: self-hosted OAuth needs the operator's own
+Google Cloud client on every candidate (n8n: "Managed OAuth2 isn't available for
+self-hosted n8n users"), so the ingestion source is Linear with an API key, and
+OAuth custody is untested. A live AI session: the verifier is the MCP SDK's
+client over Streamable HTTP, the transport Claude Code speaks. Load: ten issues,
+one run at a time. Upgrades, backups and the reference multi-container shapes
+(Redis and separate workers for Activepieces, three workers for Windmill).
+
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform

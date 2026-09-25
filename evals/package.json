@@ -4,6 +4,7 @@
   "type": "module",
   "dependencies": {
     "@lancedb/lancedb": "0.38.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "apache-arrow": "^18.1.0"
   },
   "scripts": {
@@ -40,7 +41,10 @@
     "writable-projection:self-check": "bun eval-writable-projection.ts --self-check",
     "writable-projection:check": "../db/with-postgres.sh bun eval-writable-projection.ts --check",
     "jev-coload": "bun eval-jev-coload.ts",
-    "jev-gate": "bun eval-jev-gate.ts"
+    "jev-gate": "bun eval-jev-gate.ts",
+    "orchestration:up": "bun eval-orchestration.ts --up",
+    "orchestration:verify": "bun eval-orchestration.ts --verify",
+    "orchestration:down": "bun eval-orchestration.ts --down"
   },
   "devDependencies": {
     "@types/bun": "1.4.0",

@@ -1,0 +1,75 @@
+{
+  "id": "ob1LinearIngest1",
+  "name": "OB1 — Linear issues into the brain",
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "nodes": [
+    {
+      "id": "3b7b8f0e-0001-4c1a-9f00-000000000001",
+      "name": "Every 15 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0],
+      "parameters": { "rule": { "interval": [{ "field": "minutes", "minutesInterval": 15 }] } }
+    },
+    {
+      "id": "3b7b8f0e-0005-4c1a-9f00-000000000005",
+      "name": "On demand",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 200],
+      "parameters": { "inputSource": "passthrough" }
+    },
+    {
+      "id": "3b7b8f0e-0002-4c1a-9f00-000000000002",
+      "name": "Fetch the issues",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.linear.app/graphql",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "linearApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"query\": \"query { issues(first: 10, filter: { team: { key: { eq: \\\"SMD\\\" } }, number: { in: [949, 1813, 1814, 1815, 1816, 1817, 1818, 1863, 1933, 1954] } }) { nodes { identifier title url description state { name } project { name } } } }\"}",
+        "options": {}
+      },
+      "credentials": { "linearApi": { "id": "ob1linear0000001", "name": "Linear (read)" } }
+    },
+    {
+      "id": "3b7b8f0e-0003-4c1a-9f00-000000000003",
+      "name": "One thought per issue",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0],
+      "parameters": {
+        "jsCode": "const issues = $input.first().json.data.issues.nodes;\nreturn issues.map((i) => ({ json: { content: [\n  `${i.identifier} — ${i.title}`,\n  `State: ${i.state?.name ?? ''} · Project: ${i.project?.name ?? ''}`,\n  i.url,\n  '',\n  i.description ?? '',\n].join('\\n').trim() } }));"
+      }
+    },
+    {
+      "id": "3b7b8f0e-0004-4c1a-9f00-000000000004",
+      "name": "Capture into the brain",
+      "type": "@n8n/n8n-nodes-langchain.mcpClient",
+      "typeVersion": 1.1,
+      "position": [660, 0],
+      "parameters": {
+        "serverTransport": "httpStreamable",
+        "endpointUrl": "http://server:8000/",
+        "authentication": "headerAuth",
+        "tool": { "__rl": true, "mode": "list", "value": "capture_thought", "cachedResultName": "capture_thought" },
+        "inputMode": "json",
+        "jsonInput": "={{ JSON.stringify({ content: $json.content }) }}",
+        "options": { "timeout": 120000 }
+      },
+      "credentials": { "httpHeaderAuth": { "id": "ob1capture000001", "name": "Brain — capture key" } }
+    }
+  ],
+  "connections": {
+    "Every 15 minutes": { "main": [[{ "node": "Fetch the issues", "type": "main", "index": 0 }]] },
+    "On demand": { "main": [[{ "node": "Fetch the issues", "type": "main", "index": 0 }]] },
+    "Fetch the issues": { "main": [[{ "node": "One thought per issue", "type": "main", "index": 0 }]] },
+    "One thought per issue": { "main": [[{ "node": "Capture into the brain", "type": "main", "index": 0 }]] }
+  }
+}
