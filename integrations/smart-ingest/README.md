@@ -85,7 +85,7 @@ without human review.
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
 - **Enhanced thoughts schema** applied — install `schemas/enhanced-thoughts` first (adds type, importance, sensitivity columns and utility RPCs)
-- **Smart ingest tables** applied — install `schemas/smart-ingest` to create the `ingestion_jobs` and `ingestion_items` tables plus the `append_thought_evidence` RPC. On this fork an executed item's thought id rides in the item's `metadata.result_thought_uuid`: `result_thought_id` is a `bigint` column and `thoughts.id` a UUID here, so the column stays null and a dashboard's per-item "view thought" link stays dark until SMD-2128 widens it
+- **Smart ingest tables** applied — install `schemas/smart-ingest` to create the `ingestion_jobs` and `ingestion_items` tables plus the `append_thought_evidence` RPC. On this fork the two item columns that hold a thought id (`matched_thought_id`, `result_thought_id`) are `uuid`, as `thoughts.id` is here (SMD-2128): an executed item records the thought it wrote or matched, and re-applying the file to a brain that had upstream's `bigint` columns retypes them in place (its header says what is kept). A dashboard's per-item "view thought" link carries that UUID; `open-brain-dashboard-pro`'s thought page still parses its id as an integer (SMD-2152)
 - At least one LLM API key for extraction: OpenRouter (recommended), OpenAI, or Anthropic
 - An embedding API key: OpenRouter or OpenAI (required for semantic deduplication)
 - [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/))
@@ -96,9 +96,9 @@ This server depends on these database functions:
 
 | RPC | Source | Purpose |
 |-----|--------|---------|
-| `upsert_thought(text, jsonb)` | Core OB1 schema (`db/migrations/003`, `004`) | Creates or updates a thought with content and payload |
+| `upsert_thought(text, jsonb, vector)` | Core OB1 schema (`db/migrations/004`, last redefined by `046`) | Creates a thought — content, envelope and vector in one statement, the fork's 3-argument form (SMD-1228): the vector's model label and the actor ride in the envelope, and a revision's `supersedes` pointer; the enhanced columns (`type`, `importance`, `quality_score`, `source_type`, `sensitivity_tier`) follow by an update on a fresh row. Until SMD-2128 this server called upstream's 2-argument form with the vector inside the payload, where the fork's function does not look, so every thought it wrote had no vector and none of those columns; `bun db/reembed.ts` embeds such rows (it takes a thought whose vector is NULL) |
 | `match_thoughts(vector, float, int)` | Core OB1 schema | Semantic similarity search for deduplication |
-| `append_thought_evidence(bigint, jsonb)` | `schemas/smart-ingest` | Appends corroborating evidence to an existing thought's metadata |
+| `append_thought_evidence(uuid, jsonb)` | `schemas/smart-ingest` | Appends corroborating evidence to an existing thought's metadata (`bigint` upstream; the fork's thought id is a UUID — SMD-2128) |
 
 ## Credential Tracker
 
@@ -256,7 +256,7 @@ After completing setup, you should be able to:
 1. Send raw text to the `/smart-ingest` endpoint and receive extracted thoughts
 2. Use dry-run mode to preview extractions before committing
 3. Execute dry-run jobs to write thoughts to the database
-4. See new thoughts in your brain with `source_type = 'smart_ingest'`
+4. See new thoughts in your brain with `source_type = 'smart_ingest'`, each with its vector and `embedding_model`, and a `create_revision` item's thought pointing at the one it revises through `supersedes` (SMD-2128)
 5. Observe deduplication in action — re-sending the same text returns the existing job instead of creating duplicates
 
 ## Troubleshooting
