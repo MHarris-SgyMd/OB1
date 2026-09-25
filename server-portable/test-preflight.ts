@@ -2370,6 +2370,7 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
       const path = new URL(req.url).pathname;
       seen.push(`${req.method} ${path}`);
       if (path === "/info") return Response.json({ contract: JEV_CONTRACT, model: MODEL, kinds: ["binary", "choice"], max_options: 24, max_batch: 64, max_tokens: 512 });
+      if (path !== "/decide") return new Response("not found", { status: 404 });
       const { decisions } = (await req.json()) as { decisions: { id?: string }[] };
       return Response.json({ contract: JEV_CONTRACT, model: MODEL, ms: 1, results: decisions.map((d) => ({ ...(d.id ? { id: d.id } : {}), kind: "binary", probabilities: { true: 0.6, false: 0.2, [INSUFFICIENT_EVIDENCE]: 0.2 }, selected: "true", abstained: false, p_insufficient: 0.2, p_true: 0.75, logits: [1, 0, 0], temperature: 5.0069, tokens: 30, truncated: false })) });
     },
