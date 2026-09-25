@@ -155,12 +155,12 @@
  *     fresh as the last pass, on the synced rows alone, and by default every
  *     thought weighs 1 — a Done ticket counts as a live one until `--status`
  *     or `--decay-done` says otherwise. The lifecycle line gives the numbers.
- *   • Dependencies (`--startable`) are the board's link facets, as current as
- *     board-sync's last passes over both tickets of a relation: the relation
- *     is read from either side, so one removed on the board keeps blocking
- *     until a pass has re-read both — the price of catching one the sync has
- *     so far stated on one side only. `--decay-blocked` reads the same.
- *     The dependency line gives the numbers.
+ *   • Dependencies (`--startable`, `--decay-blocked`) are the board's link
+ *     facets, as current as board-sync's last passes over both tickets of a
+ *     relation: the relation is read from either side, so one removed on the
+ *     board keeps blocking until a pass has re-read both — the price of
+ *     catching one the sync has so far stated on one side only. The
+ *     dependency line gives the numbers.
  *   • Only what has been extracted is in the graph: the coverage line says how
  *     many thoughts db/extract-entities.ts has reached.
  *
@@ -216,7 +216,7 @@ export type Options = Scope & {
   decayDone: boolean;
   /** An unsettled thought whose ticket has an open blocker weighs 0; a completed or canceled one weighs what its lifecycle says. Off, with `decayBlocked` off too: no dependency is read. */
   startable: boolean;
-  /** As `startable`, but such a thought weighs BLOCKED_WEIGHT of its lifecycle weight, and is listed with its blockers. Refused with `startable`. */
+  /** As `startable`, but such a thought weighs BLOCKED_WEIGHT of its lifecycle weight, and names its blockers where it is listed. Refused with `startable`. */
   decayBlocked: boolean;
 };
 export const DEFAULT_OPTIONS: Options = { types: ENTITY_TYPES, excludeNumeric: true, limit: DEFAULT_LIMIT, edges: true, status: "all", decayDone: false, startable: false, decayBlocked: false };
@@ -793,10 +793,10 @@ export function caveats(c: Coverage, opts: Options): string[] {
  */
 export function lifecycleCaveat(c: Coverage, opts: Options): string {
   const source = `Ticket status is read from synced metadata (board-sync, SMD-1954), as fresh as its last pass${c.last_sync ? ` — latest linear_updated_at ${c.last_sync}` : c.with_lifecycle ? " — no linear_updated_at is stamped beside them" : " — none is stamped here"}: ${c.with_lifecycle} of ${c.thoughts} thoughts carry a lifecycle, ${c.done} of them completed or canceled${c.unknown_status ? `, and ${c.unknown_status} carr${c.unknown_status === 1 ? "ies" : "y"} a status_type this tool does not know (weighed 1)` : ""}.`;
-  // Under --startable the lifecycle is one factor of two: the line states the
-  // lifecycle's rule as the lifecycle's, and the run's weighed count carries
-  // both (second review pass: "every thought weighs 1" sat beside a
-  // dependency line holding thoughts at 0).
+  // Under the dependency read the lifecycle is one factor of two: the line
+  // states the lifecycle's rule as the lifecycle's, and the run's weighed
+  // count carries both (second review pass: "every thought weighs 1" sat
+  // beside a dependency line holding thoughts at 0).
   const rule = opts.status !== "all"
     ? ` --status ${opts.status}: ${c.weighed} of ${c.thoughts} thoughts weigh in this run (${LIFECYCLE_FILTERS[opts.status].join(", ")}, plus every thought without a lifecycle — it passes every filter${opts.startable ? "; less those --startable holds back" : opts.decayBlocked ? `; those with an open blocker at ${BLOCKED_WEIGHT}` : ""}).`
     : (opts.decayDone
@@ -873,8 +873,7 @@ function table(rows: Record<string, unknown>[], cols: Col[]): string {
   const cell = (r: Record<string, unknown>, k: string) =>
     r[k] === null || r[k] === undefined ? ""
     : typeof r[k] === "number" ? count(r[k])
-    : Array.isArray(r[k]) ? (r[k] as unknown[]).map((v) => cleanForDisplay(String(v))).join(", ")
-    : cleanForDisplay(String(r[k])).replace(/\s+/g, " ");
+    : cleanForDisplay(Array.isArray(r[k]) ? (r[k] as unknown[]).join(", ") : String(r[k])).replace(/\s+/g, " ");
   const widths = cols.map((c) => Math.min(c.width ?? 80, Math.max(c.head.length, ...rows.map((r) => cell(r, c.key).length))));
   const line = (vals: string[]) => vals.map((v, i) => (cols[i].right ? v.padStart(widths[i]) : v.padEnd(widths[i]))).join("  ").trimEnd();
   // A cell over its column's cap is cut and marked, never cut silently.
@@ -895,9 +894,9 @@ const T_COLS = (o: Options, entitiesHead: string): Col[] => [
   ...(o.edges ? [{ key: "edges", head: "edges", right: true }] : []),
   ...(o.decayDone || o.decayBlocked ? [{ key: "weight", head: "weight", right: true }] : []),
   { key: "status", head: "status", width: 14 },
-  // At the table's own cap: the column is the only place the text names what
-  // holds a thought, and four ids already pass 30 (first review pass).
-  ...(o.decayBlocked ? [{ key: "blockers", head: "blocked by" }] : []),
+  // Uncapped: the column is the only place the text names what holds a
+  // thought (first review pass: 30 cut four ids; second: 80 cut eight).
+  ...(o.decayBlocked ? [{ key: "blockers", head: "blocked by", width: Infinity }] : []),
   { key: "id", head: "thought" },
   { key: "created_at", head: "captured", width: 24 },
   { key: "excerpt", head: "excerpt", width: 90 },
