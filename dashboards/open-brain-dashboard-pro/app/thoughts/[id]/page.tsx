@@ -24,8 +24,11 @@ export default async function ThoughtDetailPage({
   const session = await getSession();
   const excludeRestricted = !session.restrictedUnlocked;
   const { id } = await params;
-  const thoughtId = parseInt(id, 10);
-  if (isNaN(thoughtId)) notFound();
+  // The id as rest-api's /thought/:id takes it — this fork's UUID, or upstream's digits — passed through as a string:
+  // parseInt() 404'd every UUID beginning with a letter and fetched a truncated integer for one beginning with a digit
+  // (SMD-2128; the dashboard's `Thought.id: number` typing is SMD-2152's).
+  if (!/^\d+$|^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) notFound();
+  const thoughtId = id;
 
   let thought;
   try {

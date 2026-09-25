@@ -225,7 +225,18 @@ const PRIOR_UUID = crypto.randomUUID();
     CREATE FUNCTION public.append_thought_evidence(p_thought_id bigint, p_evidence jsonb) RETURNS jsonb LANGUAGE sql AS $$ SELECT '{}'::jsonb $$;
     INSERT INTO public.ingestion_jobs (input_hash, status) VALUES ('prior-shape', 'complete');
     INSERT INTO public.ingestion_items (job_id, extracted_content, action, status, matched_thought_id, metadata)
-      SELECT id, 'an item executed under upstream''s shape', 'add', 'executed', 42, '{"type":"idea","result_thought_uuid":"${PRIOR_UUID}"}' FROM public.ingestion_jobs WHERE input_hash = 'prior-shape';`);
+      SELECT id, 'an item executed under upstream''s shape', 'add', 'executed', 42, '{"type":"idea","result_thought_uuid":"${PRIOR_UUID}"}' FROM public.ingestion_jobs WHERE input_hash = 'prior-shape';
+    CREATE VIEW public.prior_shape_items AS SELECT id, matched_thought_id FROM public.ingestion_items;`);
+  // Postgres will not retype a column a view reads: the file refuses, naming itself, the column and what to do, and the
+  // block rolls back whole — the metadata UPDATE before the ALTER with it — so nothing is half done (review pass 1: the
+  // raw error left the file stopped mid-way with no word on why).
+  const refused = await sql.unsafe(SMART_INGEST_SQL).then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
+  const [still] = await sql`SELECT format_type(atttypid, atttypmod) AS type FROM pg_attribute WHERE attrelid = 'public.ingestion_items'::regclass AND attname = 'matched_thought_id'`;
+  const [untouched] = await sql`SELECT metadata FROM ingestion_items WHERE extracted_content = 'an item executed under upstream''s shape'`;
+  assert(refused !== null && /^schemas\/smart-ingest: ingestion_items\.matched_thought_id is bigint and cannot be retyped to uuid while a view or rule reads it \(.*\)\. Drop that view or rule, apply this file again, then recreate it over the uuid column\.$/.test(refused)
+    && still?.type === "bigint" && untouched?.metadata?.matched_thought_id_bigint === undefined,
+    `with a view over the old column, schemas/smart-ingest refuses by name — the column, the cause, what to do — and the block rolls back whole, the column bigint and its metadata untouched (${refused ?? "applied"}; ${still?.type}; ${JSON.stringify(untouched?.metadata)})`);
+  await sql`DROP VIEW public.prior_shape_items`;
 }
 for (const file of SIDECARS) await sql.unsafe(readFileSync(join(ROOT, file), "utf8"));
 {
@@ -1134,8 +1145,11 @@ try {
   const row = rows[0];
   assert(rows.length === 1 && row.has_vec === true && row.at_axis === true && row.embedding_model === MODEL,
     `…the row through the 3-argument upsert_thought: the stub's vector at its axis, labelled with the model that made it (021) — the 2-argument form left the text alone, no vector (${JSON.stringify({ n: rows.length, has_vec: row?.has_vec, at_axis: row?.at_axis, label: row?.embedding_model })})`);
-  assert(row?.type === "idea" && row?.importance === 4 && row?.source_type === "smart_ingest" && row?.sensitivity_tier === "standard" && Number(row?.quality_score) > 0 && row?.metadata?.source_label === "test-writes" && (row?.metadata?.tags ?? []).includes("stub"),
-    `…with the enhanced columns the function does not know set by the update beside it — the extractor's type and importance, source_type smart_ingest, the tier — and the item's metadata on the row (${JSON.stringify({ type: row?.type, importance: row?.importance, source_type: row?.source_type, tier: row?.sensitivity_tier, quality: row?.quality_score, label: row?.metadata?.source_label, tags: row?.metadata?.tags })})`);
+  // Asserted at values the sidecar's column defaults cannot supply — type and source_type default NULL, importance 3,
+  // quality_score 50 (the server's is round(0.55 × 70 + 20) = 59 with classification skipped); the tier's default IS
+  // `standard`, the value here, so it proves nothing about the update and is not claimed (review pass 1).
+  assert(row?.type === "idea" && row?.importance === 4 && row?.source_type === "smart_ingest" && Number(row?.quality_score) === 59 && row?.metadata?.source_label === "test-writes" && (row?.metadata?.tags ?? []).includes("stub"),
+    `…with the enhanced columns the function does not know set by the update beside it — the extractor's type and importance, source_type smart_ingest, the computed quality score, none of them the column's default — and the item's metadata on the row (${JSON.stringify({ type: row?.type, importance: row?.importance, source_type: row?.source_type, quality: row?.quality_score, label: row?.metadata?.source_label, tags: row?.metadata?.tags })})`);
   judgeActor("smart-ingest add", await auditRow(row?.id, "capture"), "smart-ingest");
   // The item's row: executed, and result_thought_id IS the thought — a uuid column now (SMD-2128), where the bigint one took
   // nothing and SMD-2110 parked the id in the item's metadata.
@@ -1148,8 +1162,18 @@ try {
   const again = await send(h, "POST", "/", { text, dry_run: false, skip_classification: true, source_label: "test-writes", reprocess: true });
   const skipped = await jobItems(Number(again.json?.job_id));
   const [{ n: rowsOfText }] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE content = ${text}`;
-  assert(again.status === 200 && again.json?.skipped_count === 1 && again.json?.added_count === 0 && skipped.length === 1 && skipped[0].action === "skip" && skipped[0].reason === "fingerprint_match" && skipped[0].matched_thought_id === row?.id && skipped[0].status === "executed" && rowsOfText === 1,
-    `the same text ingested again is one item skipped by fingerprint, persisted with the first thought's UUID as matched_thought_id, and no second row — main's bigint column refused the item and the job completed over none (${again.status} ${JSON.stringify(again.json).slice(0, 120)}; items ${JSON.stringify(skipped).slice(0, 200)}; rows ${rowsOfText})`);
+  assert(again.status === 200 && again.json?.skipped_count === 1 && again.json?.added_count === 0 && skipped.length === 1 && skipped[0].action === "skip" && skipped[0].reason === "fingerprint_match" && skipped[0].matched_thought_id === row?.id && skipped[0].status === "executed" && skipped[0].result_thought_id === row?.id && rowsOfText === 1,
+    `the same text ingested again is one item skipped by fingerprint, persisted with the first thought's UUID as matched_thought_id and as its result, executed, and no second row — main's bigint column refused the item and the job completed over none (${again.status} ${JSON.stringify(again.json).slice(0, 120)}; items ${JSON.stringify(skipped).slice(0, 200)}; rows ${rowsOfText})`);
+  // The same through a dry run and /execute: that path stepped over a skipped item — `ready` for ever under a complete
+  // job, and in the pending index a custom worker claims from — a row that could not exist while the bigint column refused
+  // every item with a match (review pass 1).
+  const dryDup = await send(h, "POST", "/", { text, dry_run: true, skip_classification: true, source_label: "test-writes", reprocess: true });
+  const dupJob = Number(dryDup.json?.job_id);
+  const ranDup = await send(h, "POST", "/execute", { job_id: dupJob });
+  const dupItems = await jobItems(dupJob);
+  assert(dryDup.json?.status === "dry_run_complete" && dupJob > 0 && ranDup.status === 200 && ranDup.json?.status === "complete" && ranDup.json?.skipped_count === 1 && ranDup.json?.added_count === 0
+    && dupItems.length === 1 && dupItems[0].action === "skip" && dupItems[0].status === "executed" && dupItems[0].result_thought_id === row?.id,
+    `a dry run of the same text parks the skip as ready, and /execute marks it executed with the matched thought as its result — the path left it ready under a complete job (${dryDup.json?.status} #${dupJob}; ${ranDup.status} ${JSON.stringify(ranDup.json).slice(0, 100)}; items ${JSON.stringify(dupItems).slice(0, 160)})`);
   // The two actions between the thresholds, driven by a stub vector 0.88 from the first thought's (the band is 0.85–0.92;
   // one-hot vectors alone are 0 or 1 apart, so no arm drove either branch before): a shorter text appends evidence to the
   // richer existing thought through append_thought_evidence — its p_thought_id uuid now; the bigint form refused the call —
@@ -1487,7 +1511,15 @@ for (const f of ["integrations/rest-api/index.ts", "integrations/smart-ingest/in
   const F = "integrations/smart-ingest/index.ts";
   assert((readFileSync(join(ROOT, F), "utf8").match(/rpc\("upsert_thought"/g) ?? []).length === 1, `${F} calls upsert_thought from one place, writeThought`);
   spells(F, /rpc\("upsert_thought",\s*\{\s*p_content:[^}]*p_payload:\s*\{[\s\S]{0,300}?actor: ACTOR[\s\S]{0,200}?p_embedding: vector/, "passes the actor in upsert_thought's envelope and the vector as p_embedding — the 3-argument form");
-  spells(F, /^(?![\s\S]*p_payload:\s*\{[^}]*\bembedding\b)/, "puts no `embedding` key inside upsert_thought's payload — the 2-argument form's shape, which the fork's function does not read");
+  // The payload block read whole, braces balanced — the label's spread is a `{ … }` inside it, and a regex over the block
+  // either stopped at that spread's closing brace (an `embedding:` after it passed: the 2-argument mutant was killed by the
+  // run-time arms while this guard stayed green) or swallowed the spread whole (a key inside it passed) — review pass 1.
+  const text = readFileSync(join(ROOT, F), "utf8");
+  const at = text.indexOf("p_payload: {");
+  let depth = 0, end = -1;
+  for (let i = at; at >= 0 && i < text.length && end < 0; i++) { if (text[i] === "{") depth++; else if (text[i] === "}" && --depth === 0) end = i; }
+  const payload = at >= 0 && end > at ? text.slice(at, end + 1) : "";
+  assert(payload.length > 0 && !/(?:^|[^\w])["'`]?embedding["'`]?\s*:/.test(payload), `${F} puts no \`embedding\` key inside upsert_thought's payload — the 2-argument form's shape, which the fork's function does not read (${payload.replace(/\s+/g, " ").slice(0, 160)})`);
 }
 // The two servers each carry httpTargetFrom (they deploy alone and share only their own _shared/): held identical to the
 // character, comment lines aside, as the date helpers are above.

@@ -15,8 +15,9 @@
 // ob1-fork (SMD-2128): the write path is the fork's. Upstream's 2-argument
 // upsert_thought carried the vector inside the payload, where the fork's
 // function does not look, so every thought this server wrote landed without a
-// vector, unlabelled and without the enhanced columns — invisible to semantic
-// search. writeThought() below is the 3-argument form every other vendored
+// vector, unlabelled, its type and source_type NULL and the other enhanced
+// columns at their defaults — invisible to semantic search. writeThought()
+// below is the 3-argument form every other vendored
 // writer uses (SMD-1228): the vector as p_embedding, its model's label and
 // the actor (SMD-1541) in the envelope, the enhanced columns by an update on
 // a fresh row. The item columns that hold a thought id are uuid
@@ -739,10 +740,14 @@ async function reconcileThought(
 // ── Execution ───────────────────────────────────────────────────────────────
 
 /**
- * The item's row after a successful add, append or revision: `executed`, with the thought's id in `result_thought_id`
- * — a uuid column since SMD-2128 (it was upstream's bigint, which the fork's UUID failed whole; SMD-2110 parked the id in
- * the item's metadata meanwhile, and the sidecar moves it into the column). The error is logged, not thrown: the thought
- * is written, and the job's counts say so.
+ * The item's row after it is decided: `executed`, with the thought's id in `result_thought_id` — the one an add or
+ * revision wrote, the one an append or a skip matched (a skipped duplicate's result is the thought it duplicates, so a
+ * job view can lead to it). A uuid column since SMD-2128 (it was upstream's bigint, which the fork's UUID failed whole;
+ * SMD-2110 parked the id in the item's metadata meanwhile, and the sidecar moves it into the column). The error is
+ * logged, not thrown: the thought is written, and the job's counts say so. Both paths — the inline execute and
+ * /execute — record a skip through this: /execute stepped over a skipped item, leaving it `ready` under a complete job
+ * and in the pending index a custom worker claims from, a row that could not exist while the bigint column refused
+ * every item with a match (SMD-2128, review pass 1).
  */
 async function recordItemResult(itemDbId: number, resultThoughtId: string | null): Promise<void> {
   if (!itemDbId) return;
@@ -756,7 +761,7 @@ async function recordItemResult(itemDbId: number, resultThoughtId: string | null
  * envelope, and the enhanced-thoughts columns by an update carrying neither content nor vector, on a fresh row only —
  * a re-capture of text already there keeps that row's own, as rest-api and enhanced-mcp leave it. Upstream's
  * 2-argument call put the vector inside the payload, where the fork's function does not look: every thought this
- * server wrote landed without a vector, unlabelled, none of the enhanced columns set (SMD-2128). `envelope` is what a
+ * server wrote landed without a vector, unlabelled, the enhanced columns at their defaults (SMD-2128). `envelope` is what a
  * caller adds to the payload beyond these — a revision's `supersedes`, the pointer 025 made the one mechanism for it.
  */
 async function writeThought(
@@ -1024,7 +1029,7 @@ async function handleExecuteJob(req: Request): Promise<Response> {
     : null;
 
   for (const item of items) {
-    if (item.action === "skip") { skippedCount++; continue; }
+    if (item.action === "skip") { skippedCount++; await recordItemResult(item.id, (item.matched_thought_id as string | null) ?? null); continue; }
     try {
       const fakeItem: IngestionItem = {
         content: item.extracted_content,
@@ -1326,7 +1331,7 @@ const handler = async (req: Request) => {
     const itemDbId = itemIds[i] ?? 0;
     if (item.action === "skip") {
       item.status = "executed";
-      if (itemDbId) await supabase.from("ingestion_items").update({ status: "executed" }).eq("id", itemDbId);
+      await recordItemResult(itemDbId, item.matched_thought_id);
       continue;
     }
     try {
