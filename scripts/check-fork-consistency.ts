@@ -227,7 +227,8 @@
  *  24. no vendored script speaks PostgREST — a `rest/v1` path in any string,
  *      a supabase-py import or `create_client(` (Python and shell), or a
  *      `@supabase/postgrest-js` specifier, comments blanked (the JS scanner;
- *      a `#` outside a string for .py and .sh), in every code file under the
+ *      a `#` outside a string for .py, one at a word's start for .sh), in
+ *      every code file under the
  *      seven category directories and docs/: the fork's stack runs no
  *      PostgREST, so such a script's live mode fails at its first request;
  *      the class decision is docs/vendored-disposition.md's "PostgREST-
@@ -4853,17 +4854,19 @@ checkWorkflowPins();
 // growing back: in every code file (.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs, .py,
 // .sh) under the seven category directories and docs/, comments blanked (the
 // JS scanner for JS; a `#` outside a string for Python, and for shell one at
-// a word's start — `$#`, `${#a[@]}` and `a#b` are not comments, so a hit after
+// a word's start (after one of bash's metacharacters, whitespace, `;`, `(`,
+// `)`, `|`, `&`, `<`, `>`, or the text's start) — `$#`, `${#a[@]}` and `a#b`
+// are not comments, so a hit after
 // one on the same line is read; a docstring is a string and is read: a file
 // that says it posts to `/rest/v1/rpc/…` is making a claim about itself), a
 // `rest/v1` path in any string, a supabase-py import or `create_client(`
 // (Python and shell alone), or a `@supabase/postgrest-js` specifier is a hit.
 // POSTGREST_EXCEPTIONS counts the twenty-eight files with a call site (two
 // more reach the gateway through a lib) with the ticket that ports or retires
-// each: a
-// line past the count fails (a new call beside the documented ones), a count
-// no line reaches fails as stale (the port landed — remove the entry), a file
-// that is gone fails until its entry goes. So every child PR shrinks the table,
+// each: a line past the count fails (a new call beside the documented ones),
+// a count no line reaches fails as stale (the port landed on those lines —
+// lower the count, or remove the entry when none remains), a file that is
+// gone fails until its entry goes. So every child PR shrinks the table,
 // and the table's size is the class's remaining size.
 const POSTGREST_CODE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|sh)$/;
 /** The files whose comments start at `#`: Python and shell. */
@@ -4878,7 +4881,9 @@ const POSTGREST_JS_SPECIFIER = /(["'])(?:npm:|jsr:|https?:\/\/[^"'\s]*\/)?@supab
  * `text` with `#` comments blanked: a `#` outside a string, to the line's end,
  * every blanked character a space so offsets and line numbers hold — in
  * Python anywhere, in shell (`shell`) only at a word's start (the text's
- * start, or after whitespace, `;`, `(`, `|`, `&`), since `$#`, `${#a[@]}` and
+ * start, or after one of bash's metacharacters: whitespace, `;`, `(`, `)`,
+ * `|`, `&`, `<`, `>` — the second review pass measured `)#c`, `>#c` and `<#c`
+ * as comment starts in bash, dash and zsh), since `$#`, `${#a[@]}` and
  * `a#b` are not comments and a hit after one on the same line must be read
  * (the first review pass). Strings — `'…'`, `"…"`, `'''…'''`, `"""…"""` — are
  * kept whole, an escape inside one honoured, so a `#` in a string is text and
@@ -4898,7 +4903,7 @@ function hashCommentsBlanked(text: string, shell = false): string {
       continue;
     }
     if (c === "'" || c === '"') { quote = text.startsWith(c + c + c, i) ? c + c + c : c; out += quote; i += quote.length - 1; continue; }
-    if (c === "#" && (!shell || i === 0 || /[\s;(|&]/.test(text[i - 1]))) { let j = i; while (j < text.length && text[j] !== "\n") j++; out += " ".repeat(j - i); i = j - 1; continue; }
+    if (c === "#" && (!shell || i === 0 || /[\s;(|&)<>]/.test(text[i - 1]))) { let j = i; while (j < text.length && text[j] !== "\n") j++; out += " ".repeat(j - i); i = j - 1; continue; }
     out += c;
   }
   return out;
@@ -4944,6 +4949,9 @@ const POSTGREST_PROBES: [string, string, boolean][] = [
   ["x = 1#c /rest/v1/thoughts", "x.py", false],
   ["import supabase\nsb = supabase.Client(url, key)", "x.py", true],
   ["from supabase.client import Client", "x.py", true],
+  ["A=1;#c /rest/v1/thoughts", "x.sh", false],
+  ["(true)#c /rest/v1/thoughts", "x.sh", false],
+  ["# /rest/v1/thoughts\nx=1", "x.sh", false],
 ];
 /** A helper for the table: the file's kind and its ticket. */
 const POSTGREST = (what: string, ticket: string, lines: number): CountedException => ({ why: `${what} — ${ticket}`, lines });
@@ -4998,15 +5006,17 @@ function checkPostgrestClients() {
   const blankerProbe = "a = 'x#y' # c1\nb = \"p#q\" # c2\nc = '''m#n\n#o''' # c3\nd = \"\"\"s\\\"#t\"\"\" # c4\ne = 1 # c5\n";
   const blankerWant = "a = 'x#y'     \nb = \"p#q\"     \nc = '''m#n\n#o'''     \nd = \"\"\"s\\\"#t\"\"\"     \ne = 1     \n";
   if (hashCommentsBlanked(blankerProbe) !== blankerWant) fail(SELF, `check 24's hashCommentsBlanked no longer blanks exactly the comments of its probe: ${JSON.stringify(hashCommentsBlanked(blankerProbe))}`);
-  const shellProbe = "n=$# ; m=${#a[@]} ;a#b # c1\n#c2\n x=1 #c3\n";
-  const shellWant = "n=$# ; m=${#a[@]} ;a#b     \n   \n x=1    \n";
+  // Every way a shell comment opens — the text's start, whitespace, `;`, `|`, `&`, `(`, `)`, `>`, `<` — and the three
+  // ways a `#` is not one (`$#`, `${#a[@]}`, `a#b`); the second review pass found the class asserted and unprobed.
+  const shellProbe = "#c0\nn=$# ; m=${#a[@]} ;a#b # c1\n#c2\n x=1 #c3\na;#c4\nb|#c5\nc&#c6\n(#c7\n)#c8\nd>#c9\ne<#c10\n";
+  const shellWant = "   \nn=$# ; m=${#a[@]} ;a#b     \n   \n x=1    \na;   \nb|   \nc&   \n(   \n)   \nd>   \ne<    \n";
   if (hashCommentsBlanked(shellProbe, true) !== shellWant) fail(SELF, `check 24's hashCommentsBlanked (shell) no longer blanks exactly the comments of its probe: ${JSON.stringify(hashCommentsBlanked(shellProbe, true))}`);
   for (const [probe, name, hit] of POSTGREST_PROBES) {
     const n = postgrestIn(probe, name).length;
     if (hit && n === 0) fail(SELF, `check 24 no longer catches its probe: ${JSON.stringify(probe)} (its own probe)`);
     if (!hit && n > 0) fail(SELF, `check 24 catches a non-probe: ${JSON.stringify(probe)} (its own probe)`);
   }
-  // The line is the string's, once, for a probe whose hit and comment share a line (the last hit probe): line 1 alone.
+  // The line is the string's, once, for a probe whose hit and comment share a line (probe 9, the hit beside a comment): line 1 alone.
   const twice = postgrestIn(POSTGREST_PROBES[9][0], "x.mjs");
   if (twice.length !== 1 || twice[0] !== 1) fail(SELF, `check 24 reports lines ${twice.join(",")} for a hit beside a comment, not line 1 once (its own probe)`);
   const files = textFilesUnder(SCANNED_ROOTS).filter((f) => POSTGREST_CODE_FILE.test(f));
@@ -5019,7 +5029,7 @@ function checkPostgrestClients() {
     const excepted = POSTGREST_EXCEPTIONS.get(rel);
     if (excepted) {
       seen.add(rel);
-      if (lines.length !== excepted.lines) fail(rel, `check 24's exception covers ${excepted.lines} line(s) that speak PostgREST and the file has ${lines.length} (${lines.join(", ") || "none"}) — ${lines.length > excepted.lines ? "a new call beside the documented ones" : "the port landed, so the exception is stale: remove the entry"} (${excepted.why})`);
+      if (lines.length !== excepted.lines) fail(rel, `check 24's exception covers ${excepted.lines} line(s) that speak PostgREST and the file has ${lines.length} (${lines.join(", ") || "none"}) — ${lines.length > excepted.lines ? "a new call beside the documented ones" : "the port landed on those lines, so the exception is stale: lower the count, or remove the entry when no line remains"} (${excepted.why})`);
       continue;
     }
     for (const line of lines) fail(`${rel}:${line}`, MSG);

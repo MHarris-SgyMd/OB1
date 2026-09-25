@@ -118,8 +118,9 @@ Thirty scripts in twenty-one recipes reach the brain as PostgREST clients —
 `${SUPABASE_URL}/rest/v1/<table>` or `/rest/v1/rpc/<fn>` with a service-role `apikey`
 from a `.mjs` / `.js` / `.ts` `fetch`, or supabase-py's `create_client` from a `.py` — and
 none imports `compat/supabase-sql`. The fork's stack (SETUP.md) runs no PostgREST, so on
-this fork not one of their live modes reaches a brain (a `--dry-run`, where a script has one,
-runs). SMD-1802 left their READMEs' data-path prose alone for one decision for the class
+this fork not one of their live modes reaches a brain — and an import's `--dry-run` runs
+because it never reaches the URL, where a maintenance script's reads the brain first and fails
+the same way. SMD-1802 left their READMEs' data-path prose alone for one decision for the class
 rather than twenty-one rewrites. This is that decision; the count is the survey of
 `main` at f7693c4c, re-measured on d8e3de60 (`grep -rlE "rest/v1|from supabase import|create_client\(|SUPABASE_SERVICE_ROLE_KEY" recipes --include=*.mjs --include=*.js --include=*.py --include=*.ts`,
 the ten files already on the shim set aside).
