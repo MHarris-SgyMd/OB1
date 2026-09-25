@@ -237,7 +237,8 @@
  *      POSTGREST_EXCEPTIONS counts the twenty-six files with a call site
  *      (two more reach the gateway through a lib; twenty-eight until
  *      obsidian-vault-import and local-ollama-embeddings retired, SMD-2137
- *      and SMD-2138) with the ticket that ports or retires each — a landed port fails until its entry goes, so the
+ *      and SMD-2138) with the ticket that ports or retires each — a landed
+ *      port fails until its entry goes, so the
  *      table's size, plus the two lib-reached scripts, is the class's
  *      remaining size (SMD-2126)
  *
@@ -4864,9 +4865,10 @@ checkWorkflowPins();
 // `rest/v1` path in any string, a supabase-py import or `create_client(`
 // (Python and shell alone), or a `@supabase/postgrest-js` specifier is a hit.
 // POSTGREST_EXCEPTIONS counts the twenty-six files with a call site (two
-// more reach the gateway through a lib; twenty-eight until obsidian-vault-import
-// and local-ollama-embeddings retired, SMD-2137 and SMD-2138) with the ticket
-// that ports or retires each: a line past the count fails (a new call beside the documented ones),
+// more reach the gateway through a lib; twenty-eight until the two retirements,
+// obsidian-vault-import and local-ollama-embeddings — SMD-2137 and SMD-2138)
+// with the ticket that ports or retires each: a line past the count fails (a
+// new call beside the documented ones),
 // a count no line reaches fails as stale (the port landed on those lines —
 // lower the count, or remove the entry when none remains), a file that is
 // gone fails until its entry goes. So every child PR shrinks the table,
