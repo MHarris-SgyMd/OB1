@@ -502,8 +502,9 @@ export async function coverage(run: Runner, opts: Options): Promise<Coverage> {
   // `facets` counts `dep_links` — every link the read took in, the ungated
   // systems' among them (the ranking reads the gating ones, through `deps`),
   // not a second scan with its own predicate (second review pass) — so a
-  // relation the sync stated on both sides is two. `in_dependencies` counts the thoughts whose
-  // ticket a dependency names on either side, from `deps` itself — a link of
+  // relation the sync stated on both sides is two. `in_dependencies` counts
+  // the thoughts whose ticket a gating dependency names on either side, from
+  // `deps` itself — a link of
   // another relation (a section's own child_of, a relates_to) says nothing
   // about blocking, and a ticket blocked only through another's `blocks` is
   // named here though it holds no facet (first review pass: "any active link
@@ -859,7 +860,9 @@ export function lifecycleCaveat(c: Coverage, opts: Options): string {
 /** "a and b" — the systems of one clause. */
 const andList = (names: string[]): string => (names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`);
 /** The ungated systems' clause (SMD-2218), with the items hint for those an --items file may claim. */
-function ungatedClause(systems: string[], facets: number): string {
+function ungatedClause(ungated: Dependencies["systems"]): string {
+  const systems = ungated.map((s) => s.system);
+  const facets = ungated.reduce((sum, s) => sum + s.facets, 0);
   const one = systems.length === 1;
   const itemsable = systems.filter((s) => !(RESERVED_SYSTEMS as readonly string[]).includes(s));
   const hint = itemsable.length ? ` (for ${andList(itemsable)}, an --items file states it in facets.status_type, and the status's name in facets.status)` : "";
@@ -897,8 +900,8 @@ export function dependencyCaveat(c: Coverage, d: Dependencies, opts: Pick<Option
   // One clause for every ungated system; the items hint names the ones an
   // items file could be the source of — never a system it may not claim, the
   // board's among them (first and second review passes).
-  const ungated = d.systems.filter((s) => !s.gates).map((s) => s.system);
-  const gate = ungated.length ? ungatedClause(ungated, d.systems.filter((s) => !s.gates).reduce((sum, s) => sum + s.facets, 0)) : "";
+  const ungated = d.systems.filter((s) => !s.gates);
+  const gate = ungated.length ? ungatedClause(ungated) : "";
   return `Dependencies are read from ${source}: ${d.facets} active dependency facet${d.facets === 1 ? "" : "s"}${moved}.${gate} ${d.in_dependencies} of ${c.thoughts} thoughts belong to a ticket a ${boardOnly ? "" : "gating "}dependency names; every other thought has ${boardOnly ? "none recorded" : "no gating dependency"} and counts as unblocked. ${held}; a completed or canceled ticket is settled, not blocked, a blocker completed or canceled does not block, and a parent is not blocked by its children.${unknown}`;
 }
 
