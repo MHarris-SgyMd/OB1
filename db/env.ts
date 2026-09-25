@@ -37,6 +37,9 @@
  *   3. <repo>/.env     — the obvious place to look
  *   4. deploy/.env     — the fork's existing convention, already gitignored
  *
+ * and none of them when OB1_ENV_FILES=off (deploy/tier.sh's container, whose
+ * environment is the stack's and nothing else).
+ *
  * `.gitignore` covers `.env` unanchored, so every one of those is ignored at any
  * depth. Only the `.example` files are committed.
  */
@@ -85,8 +88,15 @@ export function parseEnv(text: string): Record<string, string> {
   return out;
 }
 
-/** Candidate files, in the order they are consulted. */
+/**
+ * Candidate files, in the order they are consulted — none when OB1_ENV_FILES is
+ * `off`. deploy/tier.sh sets that: it hands its container exactly the stack's
+ * environment, resolved by compose and filtered, and a checkout's own .env files
+ * (mounted along with the code) would otherwise fill in what it left out — an
+ * OB1_ALLOW_REMOTE_DB among them (SMD-2036).
+ */
 export function envFiles(): string[] {
+  if (process.env.OB1_ENV_FILES === "off") return [];
   const explicit = process.env.OB1_ENV_FILE;
   return [
     ...(explicit ? [resolve(explicit)] : []),

@@ -312,6 +312,117 @@ scheduled form is the one built here; a Linear webhook is exact and immediate
 but needs an inbound URL the stack has no origin for until SMD-1846, and the
 handler's shape (signature, replay window, loop guard) is SMD-1862's.
 
+## Refreshing a tier
+
+`db/tier.ts` builds the canary and working tiers from stable (`db/README.md`,
+"The canary and working tiers"). Its `--refresh` runs under Bun and shells to
+`pg_dump` / `pg_restore` at the source server's major, and no image here
+carries both. `tier.sh` is the runnable form. It builds `db/tier.Dockerfile`
+(`oven/bun:1.4.0-alpine` plus `postgresql16-client`, the major of the postgres
+service) as `open-brain-tier:latest`, and runs this checkout's `tier.ts`
+in it, mounted read-only, on the stack's network:
+
+```bash
+# stable (this stack's postgres) into a canary on its own server beside it; from
+# a branch worktree, name the running stack's env file (deploy/.env is gitignored)
+deploy/tier.sh --env-file ~/OB1/deploy/.env --refresh --from postgres --to open-brain-canary-postgres --tier canary
+deploy/tier.sh --env-file ~/OB1/deploy/.env --diff    --from postgres --to open-brain-canary-postgres
+# the three-tier stack's own network and services
+deploy/tier.sh --refresh --from stable-postgres --to canary-postgres --network open-brain-tiers_default
+```
+
+`--from` and `--to` name a database on the network as `HOST[:PORT][/DB]`
+(port 5432 and database `openbrain` by default). The wrapper builds the URL as
+the services here do, with `POSTGRES_PASSWORD`. A full `postgres://` URL is used
+as given. `--network` defaults to `open-brain_default`, and `--runtime` is
+`docker` or `podman` (docker when it is on the PATH). Anything else goes to
+`tier.ts` as given, and a wrapper flag given twice is refused.
+
+The env file (`--env-file`, default `deploy/.env`) is read by compose itself,
+through `compose config --environment`. So a quoted value, an inline comment,
+an `export` line, CRLF line endings or a byte-order mark read here as they do
+for the stack. A variable set in the shell wins over the file, as it does
+there. Only what `tier.ts` and `migrate.ts` read is handed to the container:
+- the `OB1_*` knobs (`migrate.ts` reads `OB1_EMBEDDING_*` on a refresh);
+- `POSTGRES_PASSWORD`;
+- the provider settings the replay's embed reads (`OPENROUTER_API_KEY`,
+  `OLLAMA_BASE`).
+
+Access keys and `LINEAR_API_KEY` stay behind. The values travel in a temporary
+env file (mode 600, removed on exit), so they are not on the wrapper's command
+line or the runtime's. They are in the container's environment, which
+`inspect` shows while it runs, and the URLs are on the argument lists of bun,
+`pg_dump`, `pg_restore` and `migrate.ts` inside it, which a Linux host's `ps`
+shows (SMD-2119). The checkout's own `.env` files are mounted with the code and
+switched off: `OB1_ENV_FILES=off` stops `db/env.ts` reading them, and
+`bun --no-env-file`, run from a working directory outside the checkout, stops
+Bun's auto-load. So only the stack's environment reaches `tier.ts`.
+
+From a container every database is remote, so a short-form `--to` gets
+`OB1_ALLOW_REMOTE_DB=1`. A `--to` given as a URL does not, so export
+`OB1_ALLOW_REMOTE_DB=1` to reset one, as with `tier.ts` itself. In place of the
+loopback check, `tier.ts` guards `--to` two ways:
+
+- **It is not the `--from` database.** The source connection's own session is
+  looked up in the target's `pg_stat_activity`. Only the same cluster lists it,
+  and then the database names decide. So `postgres` and `open-brain-postgres-1`
+  are one database, and a canary copied from stable's volume, which shares its
+  `system_identifier`, is still another.
+- **It is a tier a refresh can own.** That means one of:
+  - a database an earlier refresh marked. Before resetting, each refresh sets
+    `ob1.refresh_target` on the database, where the reset and the restore
+    cannot reach it, so a refresh that failed partway can simply be re-run;
+  - one stamped `canary` or `working`;
+  - one whose public schema holds nothing but what extensions own;
+  - an Open Brain schema (`schema_migrations`, `ob1_config` and `thoughts`)
+    holding no thoughts. `schema_migrations` alone is not enough, since Rails,
+    Ecto, golang-migrate and dbmate use that name too.
+
+  A `--to` stamped `stable`, a brain holding thoughts under no tier stamp,
+  and another application's database are refused. The first two are most
+  often `--from` and `--to` the wrong way round, and the third a name one off.
+  The refusal names no override, because marking such a target by hand
+  disarms the guard for it for good.
+
+**The mark.** The mark is only ever read from the database's own setting (in
+`pg_db_role_setting`), and only `canary` or `working` counts. A value set for
+a role, for the server or on a connection does not count, and neither does a
+`stable` or `off` set there by hand. Setting it needs a superuser, or
+`GRANT SET ON PARAMETER ob1.refresh_target` (PG15+). Restoring pgvector needs
+a superuser in the default install anyway, and a refresh that cannot set the
+mark stops before touching anything. The mark lasts until it is cleared, and a
+database restored from a canary's dump with `--create` brings it along:
+
+```sql
+-- make a database a refresh target on purpose (a new tier's database, say)
+ALTER DATABASE openbrain SET ob1.refresh_target = 'canary';
+-- clear it before a database that was a tier becomes the record
+ALTER DATABASE openbrain RESET ob1.refresh_target;
+```
+
+`--promote` refuses a marked `--to` and prints the `RESET` for it.
+
+The container runs with `--init`, so Ctrl-C stops a refresh, and it publishes
+nothing. The client's major has to be at least the source server's, and
+`refreshToolsReady` refuses the refresh otherwise, so a Postgres bump in the
+compose files means bumping the package in `db/tier.Dockerfile` with it. On
+every PR, the deploy-stack CI job seeds one thought and one logged search, then
+runs through this script: a refresh, a `--replay`, a `--diff`, a retry over a
+copy left stamped `stable` (as a refresh that died after its restore leaves
+it), and both refusals. On a host with SELinux enforcing (Fedora and RHEL,
+where podman labels by default), the container can read the mounted checkout
+only once it is relabelled: `chcon -Rt container_file_t <checkout>`. The
+script does not relabel it for you.
+
+A refresh does not carry the per-database HNSW settings over (SMD-2037), and a
+server already running on the refreshed database keeps its old pool until it
+is recreated. It does not carry grants either (the restore runs with
+`--no-privileges`), so a server that connects to the copy as a role other than
+`postgres` needs `bun db/migrate.ts --url <copy> --grant <role>` first. Since
+migration 054 a key used recently on stable is not written on its next lookup,
+so a missing grant can surface minutes after a start that looked healthy. The
+canary-beside-the-dogfood standup is SMD-2038.
+
 ## The typed-decision tier
 
 The Jev spikes — a reranker, a question router, extraction gates — each need a
