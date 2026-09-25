@@ -11,7 +11,9 @@ re-embedding the world?") and the write functions can append the event first
 and project the row in the same transaction with an empty contributor delta
 (SMD-1999, § "Does the extension contract survive the move?"). This page is
 the decision, the shape it commits to, what it declines, and the path from
-053 to it in three additive steps (SMD-2115, SMD-2116, SMD-2117). Step 1
+053 to it in three additive steps (SMD-2115, SMD-2116, SMD-2117). Step 2 is
+migration 057 (SMD-2116): the three write functions append the event and one
+projector writes the row, the audit trigger the check. Step 1
 is migration 055 (SMD-2115): the capture event carries
 the content and a backdating writer's `created_at`, the update event the
 key's move, the rules are functions, and the backfill filled every capture
@@ -267,7 +269,7 @@ dump of the log without it is a dump that re-embeds.
 
 **"No event, no write" — the deltas against 053, accepted.** SMD-1999's
 record (`changes/smd-1999.md`) named four and its bodies' header
-(`evals/writable-projection/option2-functions.sql`) a fifth; the decision
+(the prototype's `option2-functions.sql`, retired with 057) a fifth; the decision
 takes all five: an
 identical re-capture no longer bumps `updated_at` (053's `ON CONFLICT DO
 UPDATE` does — a write that changes nothing is not a write; `thought_changes`
@@ -533,13 +535,12 @@ bounded fold into a tier that writes on (SMD-2118, Low, blocked by step 3).
 
 Nothing in this page is enforced by this page. What holds the decision:
 
-- the two gates' runners in CI — "Projection-replay rules" and
-  "Writable-projection rules" in the portable-server job (the pure rules,
-  self-checked), "Projection-replay fixture" and "Writable-projection
-  prototype" in the data-layer job (gate 1's rules on a seeded Postgres; the
-  prototype applied to a real Postgres at 053, held to a recorded matrix of
-  outcomes and probe counts; drift fails) — until SMD-2116 ships the bodies
-  and their criteria move into test-schema and test-update-delete;
+- gate 1's runner in CI — "Projection-replay rules" in the portable-server
+  job (the pure rules, self-checked) and "Projection-replay fixture" in the
+  data-layer job (the rules on a seeded Postgres; drift fails). Gate 2's
+  runner was retired when SMD-2116 shipped the bodies it prototyped as
+  migration 057: its contract criteria are `db/test-schema.ts` [53], its
+  behaviours `db/test-live.ts`, its cost line 057's header;
 - test-schema's sentinel reads and preflight's recognisers, which pin the
   write functions' bodies and move with them at every step;
 - the SQL-safety rule (`scripts/check-fork-consistency.ts` check 21): no
@@ -570,7 +571,9 @@ every write and consolidation deciding the row.
 - `evals/README.md` § "Can the read model be rebuilt without re-embedding
   the world?" (SMD-1998) and § "Does the extension contract survive the
   move?" (SMD-1999) — the two gates, their reports verbatim
-- `evals/writable-projection/` — the prototype SQL SMD-2116 ships from
+- `db/migrations/057_append_then_project.sql` — step 2, the prototype's
+  bodies shipped (the prototype SQL under `evals/writable-projection/` was
+  retired with it)
 - `db/migrations/046_thought_audit_event_shape.sql`,
   `050_thought_actor_on_the_row.sql`, `052_thought_changes.sql` — the log as
   it stands

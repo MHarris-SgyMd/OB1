@@ -2404,8 +2404,12 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(refusedClaim?.status === "succeeded" && /refused by the provider \(.*413 .*stub: input too long/.test(refusedClaim?.err ?? "") && /--retry-fallbacks/.test(refusedClaim?.err ?? ""),
     `…and its claim is succeeded with the refusal as its caveat, naming the flag (${refusedClaim?.status}: ${refusedClaim?.err})`);
   assert(axisOf(byContent.get(tarpitText)!.e) === 0, "the tarpit row keeps its old vector");
-  assert(shorts.every((s) => byContent.get(s)!.u > updatedBefore.get(s)!), "updated_at moved on every re-embedded row");
-  assert(byContent.get(poisonText)!.u === updatedBefore.get(poisonText), "…and not on the one that failed");
+  // 057 (SMD-2116): a vector onto a row that has one is a projection refresh
+  // — no event, no updated_at — so the pass moves no stamp; until then every
+  // re-embedded row's updated_at moved and a client's if_unchanged_since read
+  // it as an edit.
+  assert(shorts.every((s) => byContent.get(s)!.u === updatedBefore.get(s)!), "updated_at moved on no re-embedded row — a vector onto a row that has one is a refresh, not an edit (057)");
+  assert(byContent.get(poisonText)!.u === updatedBefore.get(poisonText), "…nor on the one that failed");
 
   // The legacy twins: both re-embedded, whichever worker reached which first;
   // one gained the fingerprint 003 never backfilled and the other was told
@@ -5179,6 +5183,116 @@ console.log("\n[25] Migration 055's payload backfill under two connections: a se
   assert(raced.rows + raced.skipped + raced.unrecoverable === M && raced.unrecoverable === 0, `the pass beside ${deleted} deletes of its first batch's rows, one every 3 ms for as long as it ran, returned rather than raising, and accounts for every candidate — ${raced.rows} filled, ${raced.skipped} set aside (${JSON.stringify(raced)})`);
   const after = (await sql`SELECT backfill_thought_payloads() AS r`)[0].r as Bf & { from_tombstone: number };
   assert(after.rows === raced.skipped && after.from_tombstone === raced.skipped && after.awaiting === 0, `…and the next pass fills what was set aside, from the tombstones, leaving nothing waiting (${JSON.stringify(after)})`);
+  await sql`DELETE FROM thoughts`;
+  await sql.close();
+}
+
+console.log("\n[26] Migration 057 on a real server: the windowed capture and an edit with windows append then project (PGlite cannot drive the chunk INSERT); two identical captures racing serialise on the fingerprint lock into one row and one event; a fold's replay on one connection beside a live capture on another; a delete racing the successor's edit (SMD-2116)");
+{
+  // Its own pool: the section before closes the shared one.
+  const sql = new SQL({ url: URL_, max: 4 });
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM ob1_embedding_snapshot`;
+  await sql`SELECT set_agent_kind('op-key', 'operator')`;
+  const ACTOR = { name: "op-key", via: "live-door" };
+  const MODEL = EMBEDDING_MODEL;
+  type Cap = { id: string; existed: boolean; chunks?: number };
+  const audits = async (id: string) => Number((await sql`SELECT count(*)::int AS c FROM thought_audit WHERE thought_id = ${id}::uuid`)[0].c);
+  const rowOf = async (id: string) => (await sql`SELECT content, embedding::text AS vec, embedding_model AS label, supersedes::text AS supersedes, updated_at::text AS u, created_at::text AS c FROM thoughts WHERE id = ${id}::uuid`)[0] as { content: string; vec: string | null; label: string | null; supersedes: string | null; u: string; c: string } | undefined;
+
+  // The 4-argument form: one capture event, the row its image, the windows
+  // written after it with their context; an edit with windows replaces them.
+  const windows = [{ content: "window one", embedding: unit(1), context: "ctx one" }, { content: "window two", embedding: unit(2), context: null }];
+  const w = (await sql`SELECT upsert_thought('057 live: a windowed capture', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(0)}::vector, ${windows}::jsonb) AS r`)[0].r as Cap;
+  const chunks = async (id: string) => (await sql`SELECT content, context FROM thought_chunks WHERE thought_id = ${id}::uuid ORDER BY chunk_index`) as { content: string; context: string | null }[];
+  assert(w.chunks === 2 && (await audits(w.id)) === 1 && (await chunks(w.id)).map((c) => `${c.content}/${c.context}`).join(",") === "window one/ctx one,window two/null",
+    `the 4-argument form delegates to the appending body — one capture event — and writes the caller's windows after it (${w.chunks} windows, ${await audits(w.id)} event)`);
+  const [ev] = await sql`SELECT diff->>'content' AS content, diff->'metadata'->>'actor_kind' AS kind FROM thought_audit WHERE thought_id = ${w.id}::uuid`;
+  assert(ev.content === "057 live: a windowed capture" && ev.kind === "operator" && (await rowOf(w.id))!.content === ev.content, "…the event carrying the content and the stamp, the row its image");
+  const e = (await sql`SELECT update_thought(${w.id}::uuid, '057 live: the windowed capture, edited', NULL, ${unit(3)}::vector, ${[{ content: "window three", embedding: unit(4), context: "ctx three" }]}::jsonb, NULL, ${ACTOR}::jsonb, ${MODEL}, NULL, NULL) AS r`)[0].r as { ok: boolean; updated_at: string };
+  assert(e.ok === true && (await audits(w.id)) === 2 && (await chunks(w.id)).map((c) => `${c.content}/${c.context}`).join(",") === "window three/ctx three" && (await rowOf(w.id))!.vec === unit(3),
+    "an edit with windows appends its event, projects the row with the caller's vector, and replaces the windows");
+  const snap = Number((await sql`SELECT count(*)::int AS c FROM ob1_embedding_snapshot WHERE embedding_model = ${MODEL}`)[0].c);
+  assert(snap === 2, `both texts' vectors are in the snapshot under the model (${snap})`);
+
+  // Two identical captures at once, on two connections: the second waits on
+  // the fingerprint lock (033) — seen waiting, not assumed — then reads the
+  // first's committed row and writes nothing: one row, one event, existed
+  // true. (SMD-1043's behaviour, C7, under the appending bodies.)
+  const connA = new SQL({ url: URL_, max: 1 });
+  const connB = new SQL({ url: URL_, max: 1 });
+  let releaseA: () => void = () => {};
+  const held = new Promise<void>((resolve) => { releaseA = resolve; });
+  let aResult: Cap | undefined, aPid = 0;
+  const aDone = connA.begin(async (tx: SQL) => {
+    aPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+    aResult = ((await tx`SELECT upsert_thought('057 live: the same text twice', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(5)}::vector) AS r`) as { r: Cap }[])[0].r;
+    await held;
+  });
+  for (let i = 0; i < 250 && aResult === undefined; i++) await Bun.sleep(20);
+  assert(aResult !== undefined && aResult.existed === false, "the first capture, in an open transaction, has its row");
+  let bPid = 0;
+  const bDone = connB.begin(async (tx: SQL) => {
+    bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+    return ((await tx`SELECT upsert_thought('057 live: the same text twice', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(5)}::vector) AS r`) as { r: Cap }[])[0].r;
+  });
+  let waitingOnAdvisory = 0;
+  for (let i = 0; i < 250 && waitingOnAdvisory === 0; i++) {
+    if (bPid) waitingOnAdvisory = Number((await sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND pid = ${bPid}`)[0].n);
+    if (!waitingOnAdvisory) await Bun.sleep(20);
+  }
+  assert(waitingOnAdvisory === 1, `the second capture waits on the fingerprint advisory lock the first holds (${waitingOnAdvisory})`);
+  releaseA();
+  await aDone;
+  const bResult = await bDone;
+  assert(bResult.existed === true && bResult.id === aResult!.id, "…and once the first commits, the second reads its row and reports existed");
+  assert(Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content = '057 live: the same text twice'`)[0].c) === 1 && (await audits(aResult!.id)) === 1, "one row, one event — the second wrote nothing, not even a bump");
+  await connA.close(); await connB.close();
+
+  // A fold's replay on one connection beside live captures on another: the
+  // announcing settings are transaction-local, so the live capture is checked
+  // against its own event and the replayed rows against theirs.
+  const p = (await sql`SELECT upsert_thought('057 live: replay P', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(6)}::vector) AS r`)[0].r as Cap;
+  await sql`SELECT update_thought(${p.id}::uuid, '057 live: replay P, edited', NULL, ${unit(7)}::vector, NULL, NULL, ${ACTOR}::jsonb, ${MODEL}, NULL, NULL)`;
+  const image = async () => JSON.stringify(await sql`SELECT id, content, content_fingerprint, metadata, embedding::text AS e, embedding_model, supersedes, created_at::text AS c, updated_at::text AS u FROM thoughts WHERE id = ${p.id}::uuid`);
+  const before = await image();
+  const evs = (await sql`SELECT id FROM thought_audit WHERE thought_id = ${p.id}::uuid ORDER BY created_at, seq`) as { id: string }[];
+  const replayer = new SQL({ url: URL_, max: 1 });
+  await replayer.begin(async (tx: SQL) => {
+    await tx`ALTER TABLE thoughts DISABLE TRIGGER USER`;
+    await tx`DELETE FROM thoughts WHERE id = ${p.id}::uuid`;
+    await tx`ALTER TABLE thoughts ENABLE TRIGGER USER`;
+  });
+  const auditsBefore = Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const live: Promise<unknown>[] = [];
+  await replayer.begin(async (tx: SQL) => {
+    for (const ev of evs) {
+      await tx`SELECT ob1_project_thought_event(${ev.id}::uuid, NULL, NULL, true)`;
+      // A live capture on the other connection while the replay's transaction is open.
+      live.push(sql`SELECT upsert_thought(${`057 live: beside the replay ${live.length}`}, ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(8 + live.length)}::vector)`.execute());
+    }
+  });
+  await Promise.all(live);
+  assert((await image()) === before, "the replay on its own connection rebuilds the row — every column, the vector from the snapshot");
+  assert(Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === auditsBefore + live.length && Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content LIKE '057 live: beside the replay %'`)[0].c) === live.length,
+    `…while the live captures beside it were each appended once and projected — the replay's settings never reached their session (${live.length} captures)`);
+  await replayer.close();
+
+  // A delete of a thought racing an edit that names it as supersedes (036's
+  // order, SMD-1462's behaviour): both go through the appending bodies; the
+  // edit ends SUPERSEDES_NOT_FOUND or a clean write whose pointer the
+  // tombstone's cascade then nulls — never a raw 23503, never a deadlock.
+  const target = (await sql`SELECT upsert_thought('057 live: a target to supersede', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(20)}::vector) AS r`)[0].r as Cap;
+  const editor = (await sql`SELECT upsert_thought('057 live: the editor', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(21)}::vector) AS r`)[0].r as Cap;
+  const cD = new SQL({ url: URL_, max: 1 }), cE = new SQL({ url: URL_, max: 1 });
+  const outcomes: string[] = [];
+  const del = cD`SELECT delete_thought(${target.id}::uuid, ${ACTOR}::jsonb, false) AS r`.execute().then((r: { r: { ok: boolean } }[]) => outcomes.push(`delete:${r[0].r.ok}`), (e: Error) => outcomes.push(`delete:ERR:${e.message.slice(0, 40)}`));
+  const upd = cE`SELECT update_thought(${editor.id}::uuid, NULL, NULL, NULL, NULL, NULL, ${ACTOR}::jsonb, NULL, ${{ supersedes: target.id }}::jsonb, NULL) AS r`.execute().then((r: { r: { ok: boolean; error?: string } }[]) => outcomes.push(`edit:${r[0].r.ok ? "ok" : r[0].r.error}`), (e: Error) => outcomes.push(`edit:ERR:${e.message.slice(0, 40)}`));
+  await Promise.all([del, upd]);
+  const editorRow = await rowOf(editor.id);
+  assert(outcomes.includes("delete:true") && (outcomes.includes("edit:ok") || outcomes.includes("edit:SUPERSEDES_NOT_FOUND")) && !outcomes.some((o) => /ERR/.test(o)) && editorRow!.supersedes === null,
+    `the delete lands and the edit is a clean write or a named refusal, never an error or a deadlock; the editor's pointer is null either way (${outcomes.join(", ")})`);
+  await cD.close(); await cE.close();
   await sql`DELETE FROM thoughts`;
   await sql.close();
 }

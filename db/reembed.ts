@@ -159,9 +159,14 @@
  * tool as the actor. The per-thought record of the pass is the claim row.
  * db/test-live.ts [9] asserts both counts.
  *
- * Every re-embedded row's `updated_at` moves, because the row was updated. A
- * client holding an `if_unchanged_since` from before the pass gets STALE_READ
- * on its next edit, once, and refetches — the behaviour that guard exists for.
+ * Since migration 057 (SMD-2116) a re-embedded row's `updated_at` does NOT
+ * move: a vector onto a row that has one is a projection refresh inside
+ * update_thought — no event, no stamp — so a client holding an
+ * `if_unchanged_since` from before the pass is not told STALE_READ for it.
+ * (Until 057 every re-embedded row's stamp moved, because the row was
+ * updated, and the client refetched once.) The stale-read guard, the chunk
+ * rewrite and 018's duplicate reports are why this tool still calls
+ * update_thought rather than the refresh function directly.
  *
  * ── Duplicates from before the fingerprint ──────────────────────────────────
  * Migration 003 added content_fingerprint without a backfill, so a brain that

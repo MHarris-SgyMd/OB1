@@ -4894,7 +4894,9 @@ fingerprint on the graph rows, content in the capture event. The record is
 
 ## Does the extension contract survive the move? `thoughts` as a writable projection, prototyped (SMD-1999)
 
-`eval-writable-projection.ts`. Spike 2 of the event-sourcing ADR (SMD-1997):
+`eval-writable-projection.ts` — RETIRED with migration 057 (SMD-2116), which
+shipped the bodies it prototyped; the record stays here, see the note above
+the results. Spike 2 of the event-sourcing ADR (SMD-1997):
 under CQRS-lite the write-side truth is the event log and the `thoughts` row
 is a projection of it — and the entire community surface (recipes, schemas,
 integrations) writes to that row, through `upsert_thought` /
@@ -4967,9 +4969,10 @@ their step's letter; the events' stance, cites, valid window and context (its
 `claimed`) are in the comparison. The cost line is the
 median of 200 captures and 200 edits, baseline against option 2.
 
-**The prototype** is SQL in `evals/writable-projection/`, applied on top of
-053 and thrown away with the database — where check 7 does not look,
-deliberately: the write functions are redefined for the measurement, not
+**The prototype** was SQL in `evals/writable-projection/` (retired with 057;
+the bodies are `db/migrations/057_append_then_project.sql` now), applied on
+top of 053 and thrown away with the database — where check 7 did not look,
+deliberately: the write functions were redefined for the measurement, not
 shipped. `common.sql` lifts 046's diff rule out of the audit trigger into
 `ob1_thought_diff` (one addition: an update records the fingerprint's
 before/after, since 018 sets it NULL for a text another row holds — a decision
@@ -5000,9 +5003,9 @@ contract sentinels preflight and test-schema read stay where the behaviours
 stay. `option1-view.sql` renames the table to `thought_rows`, creates the
 view `thoughts` and its INSTEAD OF INSERT/UPDATE/DELETE triggers (the same
 append and projector); `option1-undo.sql` reverses it so test-support's
-reset can run again. `writable-projection.ts` holds every rule pure and
-`--self-check` (62 probes) runs in the portable-server job; `--check` runs
-the prototype in the data-layer job and holds it to the matrix recorded
+reset can run again. `writable-projection.ts` held every rule pure and
+`--self-check` (62 probes) ran in the portable-server job; `--check` ran
+the prototype in the data-layer job and held it to the matrix recorded
 below (`EXPECTED`, an outcome and a probe count per measured cell), so a
 Postgres or prototype change that moves a cell — or a step that stops
 running — is named.
@@ -5010,11 +5013,17 @@ running — is named.
 ### Results, 2026-09-24 (PostgreSQL 16.15, pgvector 0.8.6, width 8; the program's output, verbatim)
 
 (The run below is the run at 053, as it was. Since migration 055 — SMD-2115,
-step 1 of the decision — the shipped capture event carries the content, the
-baseline passes C1 and the recorded matrix in `evals/writable-projection.ts`
-says so; the prototype SQL calls the shipped diff rule, append and stamp arms
-rather than defining them, and CI's `--check` holds the live run to the
-matrix as recorded now, not to this block.)
+step 1 of the decision — the shipped capture event carries the content and
+the baseline passed C1. Since migration 057 — SMD-2116, step 2 — the shipped
+functions ARE option 2, so the runner's baseline would compare the schema with
+itself and its teardown would drop shipped objects: the runner, its rules
+module and the prototype SQL are retired, and its criteria live on the
+shipped bodies — C1–C6 and C10–C12 in `db/test-schema.ts` [53] (the scripted
+writes, the trigger counts, the forged-row checks, the drop-the-projector
+control, the replay of the log through the projector, the planted community
+triggers), C7–C9 in `db/test-live.ts` (two sessions, read through pg_locks;
+[6g], [6h] and 057's section), C13 measured in 057's header. This block is
+the spike's report as it was published, not a description of the tree.)
 
 ```
 Writable projection — SMD-1999 (Spike 2 of SMD-1997), PostgreSQL 16.15 (Debian 16.15-1.pgdg12+2)
@@ -5223,7 +5232,8 @@ and test-schema's sentinel reads pin the current bodies and move with them.
 Not built here: the production projector, a migration, `thought_changes`
 reading the event, the raw in-tree writers (`review_supersession_proposal`,
 the backfills, the guard's bump — trigger-audited as today), the chunk rows.
-The record is `changes/smd-1999.md`.
+The record is `changes/smd-1999.md`. Steps 1 and 2 have since landed as
+migrations 055 (SMD-2115) and 057 (SMD-2116, `changes/smd-2116.md`).
 
 ## The typed-decision tier beside Ollama, and the entity gate run against it (SMD-2050)
 
