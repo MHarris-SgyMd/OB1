@@ -884,9 +884,9 @@ async function main(): Promise<void> {
   const { docs, dropped, duplicates } = dedupeByContent(gate.docs);
   // An emitter cannot see which of its lines fell to another's text: named,
   // one per dropped item, with the record that holds the text.
+  const name = (d: Doc) => d.structure ? `${d.structure.identity.system} ${JSON.stringify(d.structure.identity.key)}` : `${d.source} ${d.id}`;
   for (const { doc, of } of duplicates) {
     if (!itemIds.has(doc.id)) continue;
-    const name = (d: Doc) => d.structure ? `${d.structure.identity.system} ${JSON.stringify(d.structure.identity.key)}` : `${d.source} ${d.id}`;
     note("items", `${name(doc)} dropped — its text is byte-identical to ${name(of)}'s, which holds it; one text is one row (no canonical, links or mentions are written for the dropped item)`);
   }
   const printCounts = () => {
@@ -917,6 +917,8 @@ async function main(): Promise<void> {
       const r = await upsertRecord(sql, doc, run);
       tally[r.outcome]++;
       if (r.outcome === "held") heldBy.set(doc.source, (heldBy.get(doc.source) ?? 0) + 1);
+      // An item counted but not named is a line the emitter cannot find (fifth review pass, run-it).
+      if (itemIds.has(doc.id) && (r.outcome === "skipped" || r.outcome === "stale" || r.outcome === "held")) note("items", `${name(doc)} ${r.outcome}${r.outcome === "skipped" ? " — another row already holds this text" : r.outcome === "stale" ? " — the row carries a newer watermark, or the same one written after this view was taken" : ` — thought ${r.heldBy} already is this item`}; nothing written for it`);
       if (r.structure) {
         structure.records++;
         structure.canonical[r.structure.canonical] = (structure.canonical[r.structure.canonical] ?? 0) + 1;
@@ -932,8 +934,8 @@ async function main(): Promise<void> {
   printCounts();
   const parts = docs.filter((d) => d.derivedFrom).length;
   console.log(`  tier=${tier}  inserted ${tally.inserted}  updated ${tally.updated}  patched ${tally.patched}  unchanged ${tally.unchanged}  skipped ${tally.skipped}  held ${tally.held}  stale ${tally.stale}${dropped ? `  (+${dropped} duplicate-content dropped)` : ""}${parts ? `  (${parts} of the records are derived parts — a ticket's dated sections, SMD-2059)` : ""}`);
-  for (const [source, n] of heldBy) console.log(`  ${source}: ${n} record(s) HELD — another thought already is that source item (the board sync's row for a ticket, on a brain it keeps); nothing written for them. db/README.md, "Two writers of one identity".`);
-  if (tally.stale) console.log(`  ${tally.stale} record(s) STALE — the row carries a newer watermark than the record (the board sync moved the ticket past this dump); nothing written for them. Rebuild the dump, or let the sync keep the board.`);
+  for (const [source, n] of heldBy) console.log(`  ${source}: ${n} record(s) HELD — another thought already is that source item${source === LINEAR_SYSTEM ? " (the board sync's row for a ticket, on a brain it keeps)" : ""}; nothing written for them. db/README.md, "Two writers of one identity".`);
+  if (tally.stale) console.log(`  ${tally.stale} record(s) STALE — the row carries a newer watermark than the record${perSource.linear ? " (the board sync moved the ticket past this dump)" : ""}; nothing written for them. ${perSource.linear ? "Rebuild the dump, or let the sync keep the board." : "Re-export from the source, or let the newer row stand."}`);
   if (structure.records) {
     console.log(`  structure (${structure.records} record(s), run ${run}): canonical inserted ${structure.canonical.inserted ?? 0} updated ${structure.canonical.updated ?? 0} unchanged ${structure.canonical.unchanged ?? 0}; links added ${structure.links.added} closed ${structure.links.closed} kept ${structure.links.kept} dropped ${structure.links.dropped}; structured mentions ${structure.mentions}`);
   }

@@ -1762,7 +1762,16 @@ file: a part that is a thought of its own is a line of its own. A `watermark`'s
 ISO-8601 instant in UTC is the usual). Two items whose `text` is byte-identical
 are one row — the pipeline's rule for every source — and the run names the
 dropped item and the one that holds its text on stderr, since an emitter
-cannot see which of its lines fell. The emitter an
+cannot see which of its lines fell; an item `skipped` (a row of another run
+holds its text), `stale` (its `watermark` is judged as every record's is —
+the row's value newer, or the same and written after `asOf`) or `held`
+(another thought is this identity) is named the same way. A facet under
+`actor_kind` or `actor_name` is refused — those are 050's trigger's, stamped
+from the ingester's envelope — and a `facets.source` is overwritten with the
+system. A facet integer at or past 2^53, or a magnitude JSON cannot hold, is
+refused rather than stored as its neighbour or as `null`: write it as a
+string (a Python emitter's `json.dumps` writes a snowflake id exactly;
+`JSON.parse` does not read it so). The emitter an
 import recipe copies, its own parser kept (`conv.created_at` is an ISO-8601
 string with an offset, or `None` — `json.dumps` refuses a `datetime`;
 `conv.raw` is the conversation as the export holds it, and the form is its

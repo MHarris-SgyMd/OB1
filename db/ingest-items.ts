@@ -127,20 +127,35 @@ export function unstorable(s: string): string | null {
   return null;
 }
 
+/**
+ * Why a number is not the one the line wrote, or null: an integer at or past 2^53
+ * (`9007199254740993` parses as …992 — Python's json.dumps writes a
+ * snowflake id exactly, JSON.parse does not read it so) or a magnitude JSON
+ * cannot hold (`1e400` parses as Infinity, which JSON.stringify writes as
+ * null at the cast). A float with more than seventeen significant digits
+ * cannot be told from its neighbour after parsing and is not caught (fifth
+ * review pass, cold read).
+ */
+export function inexact(n: number): string | null {
+  if (!Number.isFinite(n)) return "a number JSON cannot hold (it parsed as Infinity or NaN and would be written as null); write it as a string";
+  if (Number.isInteger(n) && !Number.isSafeInteger(n)) return "an integer at or past 2^53 (Number.MAX_SAFE_INTEGER + 1), which JSON.parse does not read exactly (its neighbour would be stored); write it as a string";
+  return null;
+}
+
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isString = (v: unknown): v is string => typeof v === "string";
 
 /**
- * Every string inside a JSON value with the path to it, for the storability
- * check over facets and the rest. Iterative, with its own stack: a value
- * nested two hundred thousand deep is a line to refuse, not a RangeError to
- * die of (first review pass, run-it).
+ * Every string and number inside a JSON value with the path to it, for the
+ * storability check over facets and the rest. Iterative, with its own stack: a
+ * value nested two hundred thousand deep is a line to refuse, not a RangeError
+ * to die of (first review pass, run-it).
  */
-function* strings(root: unknown, rootPath: string): Generator<[string, string]> {
+function* leaves(root: unknown, rootPath: string): Generator<[string, string | number]> {
   const stack: [unknown, string][] = [[root, rootPath]];
   while (stack.length) {
     const [v, path] = stack.pop()!;
-    if (isString(v)) yield [path, v];
+    if (isString(v) || typeof v === "number") yield [path, v];
     else if (Array.isArray(v)) for (let i = v.length - 1; i >= 0; i--) stack.push([v[i], `${path}[${i}]`]);
     else if (isObject(v)) {
       const entries = Object.entries(v);
@@ -244,6 +259,8 @@ export function parseItem(value: unknown, line: number, label: string = "--items
 
   // facets
   if (!isObject(value.facets)) return refuse("facets", "an object — the row's metadata (tags, a title, dates); {} when the item has none");
+  // `source` is the pipeline's and is overwritten with the system (the contract says so); the two actor keys are 050's trigger's and the pipeline deletes them before the INSERT — refused rather than dropped without a word (fifth review pass, cold read).
+  for (const k of PIPELINE_META_KEYS) if (k !== "source" && k in value.facets) return refuse(`facets.${k}`, `the pipeline's own metadata key — 050's trigger stamps it from the ingester's envelope, and a facet under it would be dropped; a source's author belongs under another name`);
 
   // createdAt — `null` is absent, as a Python emitter spells None.
   const createdAt = value.createdAt ?? undefined;
@@ -264,9 +281,10 @@ export function parseItem(value: unknown, line: number, label: string = "--items
 
   // What no column holds, anywhere in the line: text, canonical.form and
   // identity.key go to `text` columns; facets, link targets, mention names
-  // and the watermark to jsonb. One walk, the first offender named by path.
-  for (const [path, s] of strings(value, "")) {
-    const why = unstorable(s);
+  // and the watermark to jsonb. One walk, the first offender named by path —
+  // a string no column holds, or a number JSON.parse did not read exactly.
+  for (const [path, leaf] of leaves(value, "")) {
+    const why = isString(leaf) ? unstorable(leaf) : inexact(leaf);
     if (why) return refuse(path.replace(/^\./, ""), why);
   }
 
@@ -440,6 +458,10 @@ export const MALFORMED: readonly [label: string, line: string, field: string, re
   ["a mention name past the bound", JSON.stringify({ ...SAMPLE_ITEM, mentions: [{ name: "n".repeat(MENTION_NAME_MAX + 1), type: "topic" }] }), "mentions[0].name", /at most 200/],
   ["facets an array", JSON.stringify({ ...SAMPLE_ITEM, facets: [] }), "facets", /an object/],
   ["facets null", JSON.stringify({ ...SAMPLE_ITEM, facets: null }), "facets", /an object/],
+  ["a facet under actor_name", JSON.stringify({ ...SAMPLE_ITEM, facets: { actor_name: "alice" } }), "facets.actor_name", /pipeline's own metadata key/],
+  ["a facet under actor_kind", JSON.stringify({ ...SAMPLE_ITEM, facets: { actor_kind: "human" } }), "facets.actor_kind", /pipeline's own metadata key/],
+  ["an integer past 2^53 in a facet", `{${SAMPLE_LINE.slice(1, -1).replace('"facets":{', '"facets":{"tweet_id":9007199254740993,')}}`, "facets.tweet_id", /past 2\^53/],
+  ["a magnitude JSON cannot hold", `{${SAMPLE_LINE.slice(1, -1).replace('"facets":{', '"facets":{"big":1e400,')}}`, "facets.big", /cannot hold/],
   ["createdAt a bare date", JSON.stringify({ ...SAMPLE_ITEM, createdAt: "2026-09-01" }), "createdAt", /ISO-8601 instant/],
   ["createdAt a rolled-over date", JSON.stringify({ ...SAMPLE_ITEM, createdAt: "2026-02-30T00:00:00Z" }), "createdAt", /ISO-8601 instant/],
   ["createdAt with no offset", JSON.stringify({ ...SAMPLE_ITEM, createdAt: "2026-09-01T10:00:00" }), "createdAt", /ISO-8601 instant/],
@@ -537,6 +559,10 @@ export function selfCheck(): number {
   ok(parseItems(`${JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "constructor", key: "a" } })}\n${JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "constructor", key: "b" } })}\n`).systems[("constructor" as string)] === 2, "a system named `constructor` is tallied as 2, not as Object's constructor");
   ok(/UTF-16 without a byte-order mark/.test(utf16Of([0x0a, 0x00, 0x7b, 0x00, 0x22, 0x00, 0x61, 0x00, 0x22, 0x00, 0x7d, 0x00, 0x0a, 0x00])), "…UTF-16 without its mark behind a blank first line is still named");
   ok(/NUL byte/.test(utf16Of([0x61, 0x00, 0x0a])), "…and a two-byte line with one NUL is a NUL byte — the heuristic needs four");
+  ok(/NUL byte/.test(utf16Of([...new TextEncoder().encode(`${SAMPLE_LINE}\n`), 0x61, 0x00, 0x62, 0x00, 0x0a])), "…and behind a VALID first line the same byte pattern is a NUL byte, not UTF-16");
+  ok(parseItems(`   \n${SAMPLE_LINE}\n\t\n`).lines.join(",") === "2", "a whitespace-only line is a blank line: skipped, counted");
+  ok(parseItem({ ...SAMPLE_ITEM, facets: { n: 9007199254740991, f: 0.1, neg: -1.5e-300, source: "x" } }, 1).item.facets.n === 9007199254740991, "2^53 - 1 (the last safe integer), a float and a tiny magnitude pass (1e300 is an integer to Number.isInteger and is refused: write it as a string); a facets.source passes (overwritten, as the contract says)");
+  ok(inexact(9007199254740992) !== null && inexact(9007199254740991) === null && inexact(Infinity) !== null && inexact(1.5) === null, "inexact: 2^53 itself (the first integer with a neighbour it cannot be told from), Infinity; not 2^53 − 1, not a float");
   let dup: ItemsRefusal | null = null;
   try { parseItems(`${SAMPLE_LINE}\n${JSON.stringify({ ...SAMPLE_ITEM, text: "another text" })}\n`, "x.jsonl"); }
   catch (e) { if (e instanceof ItemsRefusal) dup = e; else throw e; }
