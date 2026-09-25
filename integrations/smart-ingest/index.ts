@@ -8,20 +8,19 @@
 // ENTITY_EXTRACTION_WORKER_URL, the worker's own http(s) address, refused at
 // boot under any other scheme and skipped when unset — it built the URL from
 // SUPABASE_URL, the Postgres DSN here, so every trigger handed fetch() the
-// database credentials and failed inside its timeout. The trigger fires only
-// after an add the server counts, and it counted none here: upsert_thought
-// answers the fork's UUID id, which extractThoughtId read as no id at all, so
-// every add was reported failed — a UUID is an id now.
+// database credentials and failed inside its timeout; and it never fired,
+// because upsert_thought answers the fork's UUID id, which extractThoughtId
+// read as no id, so every add was reported failed.
 // ob1-fork (SMD-2128): the write path is the fork's. Upstream's 2-argument
 // upsert_thought carried the vector inside the payload, where the fork's
 // function does not look, so every thought this server wrote landed without a
 // vector, unlabelled, its type and source_type NULL and the other enhanced
 // columns at their defaults — invisible to semantic search. writeThought()
-// below is the 3-argument form every other vendored
-// writer uses (SMD-1228): the vector as p_embedding, its model's label and
-// the actor (SMD-1541) in the envelope, the enhanced columns by an update on
-// a fresh row. The item columns that hold a thought id are uuid
-// (schemas/smart-ingest), so a match is persisted and the written id recorded.
+// below is the 3-argument form every other vendored writer uses (SMD-1228):
+// the vector as p_embedding, its model's label and the actor (SMD-1541) in the
+// envelope, the enhanced columns by an update on a fresh row. The item columns
+// that hold a thought id are uuid (schemas/smart-ingest), so a match is
+// persisted and the written id recorded.
 /**
  * smart-ingest — the Smart Ingest server.
  *
@@ -873,9 +872,6 @@ async function executeItem(
       if (written.existed) throw new Error(`upsert_thought (revision): the text is already thought ${written.id}, whose provenance stays its own — the revision of ${item.matched_thought_id} was not written`);
       return written.id;
     }
-
-    case "skip":
-      return item.matched_thought_id;
 
     default:
       throw new Error(`Unknown action: ${item.action}`);
