@@ -1397,7 +1397,8 @@ export function verdictOf(result, text) {
     const positions = Array.isArray(sc.positions) ? sc.positions.filter((n) => Number.isInteger(n) && n >= 0) : [];
     const mend = sc.code === "DERIVED_FROM_MISSING" ? "derived"
       : (sc.code === "REFUSED_SUPERSEDES_UNKNOWN" || sc.code === "REFUSED_SUPERSEDES_OWNERSHIP") ? "supersedes"
-        : null;
+        : /metadata/.test(text) ? "metadata" // a coded metadata refusal a later server might send — mended by the prose beside the code, so the structured path is not a gap the prose one covers (SMD-2168 review pass 1)
+          : null;
     return { code: sc.code, retryable: sc.retryable === true, mend, positions, on: sc.code === "SUPERSEDES_UNJUDGED" ? "supersedes" : undefined };
   }
   // A server from before SMD-1978: the prose rules, unchanged. A "Refused:" is

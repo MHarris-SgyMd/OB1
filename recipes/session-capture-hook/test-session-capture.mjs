@@ -1837,10 +1837,13 @@ console.log("\n[7] As a hook: JSON on stdin, exit codes, and what reaches the en
     assert(vS.retryable === false && vS.mend === "supersedes", "…a supersedes refusal is final and mends by dropping the pointer");
     const vT = vc({ code: "STORE_UNAVAILABLE", retryable: true });
     assert(vT.retryable === true && vT.mend === null && vT.on === undefined, "…STORE_UNAVAILABLE is a kept transient with nothing to mend");
+    const vM = vc({ code: "REFUSED_METADATA", retryable: false }, "Refused: `metadata.redactions` is set by the server, not the caller — drop it.");
+    assert(vM.mend === "metadata", "…a coded metadata refusal a later server might send mends by dropping metadata, read from the prose beside the code (SMD-2168 review pass 1: the mend was prose-only, a gap in the structured path)");
     // The prose fallback derives the same verdicts for a server from before the code.
     assert(vp("Refused: derived_from[1] (x) names no thought").mend === "derived" && vp("Refused: derived_from[1] names no thought").positions.join() === "1", "…and from prose alone, a Refused naming a derived_from position mends by dropping it");
     assert(vp("Error: this key's `supersedes` could not be checked against the target's capture record (x)").retryable === true && vp("Error: this key's `supersedes` could not be attributed while the agent registry is unavailable").on === "supersedes", "…an Error the pointer could not be judged is a kept transient marking the pointer");
     assert(vp("Refused: the content is not a thought this brain will hold").retryable === false && vp("Error: Failed to connect").retryable === true, "…a Refused is final and an Error kept — the prose split the hook falls back to");
+    assert(vp("Refused: `metadata.redactions` is set by the server, not the caller — drop it.").mend === "metadata" && vp("Refused: derived_from[0] names no thought").mend === "derived", "…and a Refused naming metadata mends by dropping it, while one naming a pointer still mends the pointer (SMD-2168)");
     // A non-conforming server's malformed structuredContent is handled safely —
     // nothing throws, and the verdict falls to the prose or drops the malformed
     // parts (review pass 2: the guards are load-bearing but were unpinned).
