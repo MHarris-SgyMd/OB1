@@ -180,6 +180,27 @@ async function restoreShipped(...fns: string[]): Promise<string[]> {
   for (const f of files) await db.exec(subst(readFileSync(join(MIGRATIONS, f), "utf8")));
   return files;
 }
+/** thoughts_embedding_idx as the migrations built it, read by the first withoutWalkIndex call. */
+let shippedWalkIndex: string | null = null;
+/**
+ * Run `body` with the walk's HNSW index dropped, then build it again from its
+ * own definition. Grown a row at a time the graph was most of [8c]–[8e]'s run
+ * time, and a VACUUM under it repaired it at length (SMD-2097: 28.6 s to load
+ * [8c] with it, 1.2 s without, 4.8 s to build it after). No behavioural
+ * assertion of those sections needs the index today — with no ANALYZE the
+ * walk is a GIN bitmap and a sort (SMD-2151) — so the rebuild keeps the
+ * shipped state, which [8e] reads back against the first definition read here.
+ */
+async function withoutWalkIndex(body: () => Promise<void>): Promise<void> {
+  const def = (await db.query<{ def: string }>(`SELECT pg_get_indexdef('thoughts_embedding_idx'::regclass) AS def`)).rows[0].def;
+  shippedWalkIndex ??= def;
+  await db.exec(`DROP INDEX thoughts_embedding_idx`);
+  try {
+    await body();
+  } finally {
+    await db.exec(def);
+  }
+}
 
 // ── 1. Migrations apply, in order ────────────────────────────────────────────
 
@@ -658,16 +679,19 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
 
 console.log("\n[8c] above the exact threshold, the walk branch agrees with an exact scan");
 {
-  await db.exec(`DELETE FROM thoughts`);
   const { unitVector } = seededRandom(968);
   const N = 1200;
-  for (let i = 0; i < N; i += 100) {
-    const values = Array.from({ length: 100 }, (_, k) => `('walk ${i + k}', '{"kind":"c"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
-    await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
-  }
-  // Two that must not be found: a different kind, nearest to the query.
-  const q = unitVector(EMBEDDING_DIM);
-  await db.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ('near but d', '{"kind":"d"}'::jsonb, $1::vector)`, [`[${q.join(",")}]`]);
+  let q: number[] = [];
+  await withoutWalkIndex(async () => {
+    await db.exec(`DELETE FROM thoughts`);
+    for (let i = 0; i < N; i += 100) {
+      const values = Array.from({ length: 100 }, (_, k) => `('walk ${i + k}', '{"kind":"c"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
+      await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+    }
+    // One that must not be found: a different kind, nearest to the query.
+    q = unitVector(EMBEDDING_DIM);
+    await db.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ('near but d', '{"kind":"d"}'::jsonb, $1::vector)`, [`[${q.join(",")}]`]);
+  });
   const matches = await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts WHERE metadata @> '{"kind":"c"}'`);
   assert(matches.rows[0].c > 1000, `${matches.rows[0].c} matching rows, above the 1,000-row exact threshold — the walk branch`);
 
@@ -707,22 +731,24 @@ console.log("\n[8c] above the exact threshold, the walk branch agrees with an ex
 
 console.log("\n[8d] rows without a vector or chunks do not count towards the walk threshold");
 {
-  await db.exec(`DELETE FROM thoughts`);
   const { unitVector } = seededRandom(1018);
-  // Enough indexed rows of another kind that a bounded walk cannot stumble on
-  // the wanted ones by luck.
-  for (let i = 0; i < 300; i += 100) {
-    const values = Array.from({ length: 100 }, (_, k) => `('other ${i + k}', '{"kind":"o"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
-    await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
-  }
-  // 1,200 kind "u" rows with no vector (the fallback's shape), plus five with one.
-  for (let i = 0; i < 1200; i += 200) {
-    const values = Array.from({ length: 200 }, (_, k) => `('unscoreable ${i + k}', '{"kind":"u"}'::jsonb, NULL)`).join(",");
-    await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
-  }
-  for (let i = 0; i < 5; i++) {
-    await db.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ($1, '{"kind":"u"}'::jsonb, $2::vector)`, [`scoreable ${i}`, `[${unitVector(EMBEDDING_DIM).join(",")}]`]);
-  }
+  await withoutWalkIndex(async () => {
+    await db.exec(`DELETE FROM thoughts`);
+    // Enough indexed rows of another kind that a bounded walk cannot stumble on
+    // the wanted ones by luck.
+    for (let i = 0; i < 300; i += 100) {
+      const values = Array.from({ length: 100 }, (_, k) => `('other ${i + k}', '{"kind":"o"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
+      await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+    }
+    // 1,200 kind "u" rows with no vector (the fallback's shape), plus five with one.
+    for (let i = 0; i < 1200; i += 200) {
+      const values = Array.from({ length: 200 }, (_, k) => `('unscoreable ${i + k}', '{"kind":"u"}'::jsonb, NULL)`).join(",");
+      await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+    }
+    for (let i = 0; i < 5; i++) {
+      await db.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ($1, '{"kind":"u"}'::jsonb, $2::vector)`, [`scoreable ${i}`, `[${unitVector(EMBEDDING_DIM).join(",")}]`]);
+    }
+  });
   const matching = await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts WHERE metadata @> '{"kind":"u"}'`);
   assert(matching.rows[0].c === 1205, `1,205 rows match the filter, 1,200 of them unscoreable (got ${matching.rows[0].c})`);
   await db.exec(`SET hnsw.max_scan_tuples = 1`);
@@ -787,13 +813,15 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
   // first 38 pages were already empty — the "emptied band" below was then
   // mostly pre-empty and the probe passed on an incidental layout (review
   // pass 2). Compacted, 1,000 rows are some sixteen pages, every one live.
-  await db.exec(`DELETE FROM thoughts`);
-  await db.exec(`VACUUM thoughts`);
   const { unitVector } = seededRandom(1463);
-  for (let i = 0; i < 1000; i += 100) {
-    const values = Array.from({ length: 100 }, (_, k) => `('gate ${i + k}', '{"kind":"${(i + k) % 100 === 0 ? "thin" : "broad"}"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
-    await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
-  }
+  await withoutWalkIndex(async () => {
+    await db.exec(`DELETE FROM thoughts`);
+    await db.exec(`VACUUM thoughts`);
+    for (let i = 0; i < 1000; i += 100) {
+      const values = Array.from({ length: 100 }, (_, k) => `('gate ${i + k}', '{"kind":"${(i + k) % 100 === 0 ? "thin" : "broad"}"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
+      await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+    }
+  });
   const exactTop = async (qv: string, filter: string) => {
     await db.exec(`SET enable_indexscan = off`);
     await db.exec(`SET enable_bitmapscan = off`);
@@ -817,8 +845,10 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
     assert(ok === 6, `${label}: the 990-row and the 10-row filter — both under the threshold — return the exact top-10 on 3 random queries (${ok}/6 agree)`);
   };
   // Under the shipped floor: this heap is a few dozen pages, and the sample never runs.
-  const [{ pages }] = (await db.query<{ pages: number }>(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages`)).rows;
-  assert(pages > 0 && pages < ROUTE_ESTIMATE_MIN_PAGES, `the fixture's heap is ${pages} pages, under the floor of ${ROUTE_ESTIMATE_MIN_PAGES}: the sample does not run and the call is 020's`);
+  // The row count rides along: without the DELETE above, every earlier
+  // section's rows would sit in this heap.
+  const [{ pages, rows }] = (await db.query<{ pages: number; rows: number }>(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages, (SELECT count(*)::int FROM thoughts) AS rows`)).rows;
+  assert(rows === 1000 && pages > 0 && pages < ROUTE_ESTIMATE_MIN_PAGES, `the fixture's heap is its ${rows} rows on ${pages} pages, under the floor of ${ROUTE_ESTIMATE_MIN_PAGES}: the sample does not run and the call is 020's`);
   await agree("under the floor");
   // The floor lowered to zero: the gate runs on every filtered call. It cannot
   // skip — condition 1 needs the table at ten times the threshold, and 1,000
@@ -919,43 +949,60 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
       `SELECT count(*) FILTER (WHERE ctid >= ('(' || ${hi} || ',0)')::tid)::int AS beyond,
               count(*) FILTER (WHERE ctid >= ('(' || ${lo} || ',0)')::tid AND ctid < ('(' || ${hi} || ',0)')::tid)::int AS inside
        FROM thoughts`)).rows;
-    assert(inside > 0 && beyond > 0, `the band [${lo}, ${hi}) holds ${inside} live rows and ${beyond} live rows lie beyond it, so emptying it leaves the heap its size (the fixture's ${pages} pages need to be at least ${ROUTE_SAMPLE_PAGES + 3} with the last one live — a narrower EMBEDDING_DIM packs more rows a page)`);
-    const deleted = (await db.query(`DELETE FROM thoughts WHERE ctid >= ('(' || ${lo} || ',0)')::tid AND ctid < ('(' || ${hi} || ',0)')::tid`)).affectedRows ?? -1;
-    await db.exec(`VACUUM thoughts`);
-    const [{ live_pages, heap_pages }] = (await db.query<{ live_pages: number; heap_pages: number }>(
-      `SELECT count(DISTINCT (ctid::text::point)[0])::int AS live_pages, (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS heap_pages FROM thoughts`)).rows;
-    assert(deleted === inside && heap_pages === pages && live_pages <= pages - ROUTE_SAMPLE_PAGES,
-      `the band's ${deleted} rows deleted and the heap vacuumed: still ${heap_pages} pages, ${live_pages} of them with a live row`);
-    const empties = Array.from({ length: ROUTE_SAMPLE_PAGES }, (_, i) => lo + i);
-    const pinnedText = deployedSample(BROAD, pages, empties);
-    const pinned = await runText(pinnedText);
-    assert(pinned !== null && pinned.hits === 0 && pinned.hit_pages === 0 && pinned.pages_seen === ROUTE_SAMPLE_PAGES,
-      `the body's probe pinned to the ${ROUTE_SAMPLE_PAGES} emptied blocks [${lo}, ${hi}) draws ${pinned?.pages_seen} pages and answers ${pinned?.hits} hits on ${pinned?.hit_pages} — the pages drawn are counted, not the pages that answered`);
-    // The scan node's own Buffers line (its total across the eight loops), not
-    // the top node's: the top node's is cumulative over the whole tree, and
-    // the DISTINCT draw's subtree reads catalog buffers when the syscache is
-    // cold (measured: 5 at the top on a first run, 2 at the scan) — the count
-    // would then hold only because the same statement ran just before
-    // (review pass 3). buffersOf reads one node's line when given the node.
-    const buffers = pinnedText === null ? "" : (await db.query<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, BUFFERS) ${pinnedText}`)).rows.map((r) => r["QUERY PLAN"]).join("\n");
-    const touched = buffersOf(buffers, /Tid Range Scan on thoughts/);
-    assert(touched === ROUTE_SAMPLE_PAGES,
-      `…and the probe touches ${touched} buffers doing it — one page per block, ${ROUTE_SAMPLE_PAGES} in all, on the Tid Range Scan's own line`);
-    // And the random draw over the heap with its band emptied: it still
-    // reaches its pages and the rule still says "collect".
-    const sparse: string[] = [];
-    let stillSound = 0;
-    for (let i = 0; i < 5; i++) {
-      const r = (await drawOnce(BROAD, pages))!;
-      sparse.push(`${r.hits}/${r.hit_pages}/${r.pages_seen}`);
-      if (sound(r) && !skips(r, pages)) stillSound++;
-    }
-    assert(stillSound === 5,
-      `on the heap with ${ROUTE_SAMPLE_PAGES} of ${pages} pages emptied every random draw still reaches 2 to ${ROUTE_SAMPLE_PAGES} pages and the rule still says "collect" (hits/hit pages/pages drawn: ${sparse.join(", ")})`);
+    assert(inside > 0 && beyond > 0, `the band [${lo}, ${hi}) holds ${inside} live rows and ${beyond} live rows lie beyond it, so emptying it leaves the heap its size (the fixture's ${pages} pages need to be at least ${ROUTE_SAMPLE_PAGES + 3} with the last one live — from about 512 dims the vector is stored out of line, so every such width gives this heap, and a narrower one, kept in the row, a larger one)`);
+    // The band and everything after it run with the walk's index dropped: the
+    // VACUUM took 6.8 s repairing the HNSW graph around the band's dead rows
+    // (SMD-2097), and from here on the section reads the heap alone — the pinned
+    // probe, its buffers and the random draws.
+    await withoutWalkIndex(async () => {
+      const deleted = (await db.query(`DELETE FROM thoughts WHERE ctid >= ('(' || ${lo} || ',0)')::tid AND ctid < ('(' || ${hi} || ',0)')::tid`)).affectedRows ?? -1;
+      await db.exec(`VACUUM thoughts`);
+      const [{ live_pages, heap_pages }] = (await db.query<{ live_pages: number; heap_pages: number }>(
+        `SELECT count(DISTINCT (ctid::text::point)[0])::int AS live_pages, (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS heap_pages FROM thoughts`)).rows;
+      assert(deleted === inside && heap_pages === pages && live_pages <= pages - ROUTE_SAMPLE_PAGES,
+        `the band's ${deleted} rows deleted and the heap vacuumed: still ${heap_pages} pages, ${live_pages} of them with a live row`);
+      const empties = Array.from({ length: ROUTE_SAMPLE_PAGES }, (_, i) => lo + i);
+      const pinnedText = deployedSample(BROAD, pages, empties);
+      const pinned = await runText(pinnedText);
+      assert(pinned !== null && pinned.hits === 0 && pinned.hit_pages === 0 && pinned.pages_seen === ROUTE_SAMPLE_PAGES,
+        `the body's probe pinned to the ${ROUTE_SAMPLE_PAGES} emptied blocks [${lo}, ${hi}) draws ${pinned?.pages_seen} pages and answers ${pinned?.hits} hits on ${pinned?.hit_pages} — the pages drawn are counted, not the pages that answered`);
+      // The scan node's own Buffers line (its total across the eight loops), not
+      // the top node's: the top node's is cumulative over the whole tree, and
+      // the DISTINCT draw's subtree reads catalog buffers when the syscache is
+      // cold (measured: 5 at the top on a first run, 2 at the scan) — the count
+      // would then hold only because the same statement ran just before
+      // (review pass 3). buffersOf reads one node's line when given the node.
+      const buffers = pinnedText === null ? "" : (await db.query<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, BUFFERS) ${pinnedText}`)).rows.map((r) => r["QUERY PLAN"]).join("\n");
+      const touched = buffersOf(buffers, /Tid Range Scan on thoughts/);
+      assert(touched === ROUTE_SAMPLE_PAGES,
+        `…and the probe touches ${touched} buffers doing it — one page per block, ${ROUTE_SAMPLE_PAGES} in all, on the Tid Range Scan's own line`);
+      // And the random draw over the heap with its band emptied: it still
+      // reaches its pages and the rule still says "collect".
+      const sparse: string[] = [];
+      let stillSound = 0;
+      for (let i = 0; i < 5; i++) {
+        const r = (await drawOnce(BROAD, pages))!;
+        sparse.push(`${r.hits}/${r.hit_pages}/${r.pages_seen}`);
+        if (sound(r) && !skips(r, pages)) stillSound++;
+      }
+      assert(stillSound === 5,
+        `on the heap with ${ROUTE_SAMPLE_PAGES} of ${pages} pages emptied every random draw still reaches 2 to ${ROUTE_SAMPLE_PAGES} pages and the rule still says "collect" (hits/hit pages/pages drawn: ${sparse.join(", ")})`);
+      // The rows out, which [9] would delete anyway, so the build is over nothing.
+      await db.exec(`DELETE FROM thoughts`);
+    });
   }
   const restored = await restoreShipped("match_thoughts");
-  assert(restored.length === 1 && restored[0].startsWith("041") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped()),
-    "…and the shipped floor is back for the sections after");
+  // The index is read back, not assumed: without it the sections up to the
+  // next re-apply of 039, whose swap block builds it silently, would run with
+  // no walk index and nothing would say (review pass 1). Compared whole, not by
+  // pattern — a regex passed an index rebuilt WITH other build parameters
+  // (review pass 2) — and with the definition read before [8c] dropped it, not
+  // the one this section's load read: that was [8d]'s rebuild, so a helper that
+  // rebuilt wrongly every time compared equal (review pass 3).
+  const indexBack = (await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('thoughts_embedding_idx')) AS d`)).rows[0].d ?? "";
+  assert(restored.length === 1 && restored[0].startsWith("041") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped())
+      && indexBack === shippedWalkIndex,
+    `…and the shipped floor and the walk's index are back for the sections after${indexBack === shippedWalkIndex ? "" : ` (index: ${indexBack || "none"})`}`);
 }
 
 console.log("\n[9] updated_at trigger fires on update, created_at does not move");

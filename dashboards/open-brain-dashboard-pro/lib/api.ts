@@ -108,7 +108,7 @@ export async function fetchThoughts(
 
 export async function fetchThought(
   apiKey: string,
-  id: number,
+  id: number | string, // a UUID on this fork (SMD-2128)
   excludeRestricted: boolean = true
 ): Promise<Thought> {
   const qs = excludeRestricted ? "" : "?exclude_restricted=false";
@@ -117,7 +117,7 @@ export async function fetchThought(
 
 export async function updateThought(
   apiKey: string,
-  id: number,
+  id: number | string,
   data: { content?: string; type?: string; importance?: number }
 ): Promise<{ id: number; action: string; message: string }> {
   return apiFetch<{ id: number; action: string; message: string }>(
@@ -170,7 +170,7 @@ export async function resolveDuplicate(
 
 export async function deleteThought(
   apiKey: string,
-  id: number
+  id: number | string
 ): Promise<void> {
   await apiFetch<unknown>(apiKey, `/thought/${id}`, { method: "DELETE" });
 }

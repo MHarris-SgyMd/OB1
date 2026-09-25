@@ -1,5 +1,7 @@
 # Local Embeddings via Ollama
 
+> **On this fork (SMD-2126).** `embed-local.py` reaches `upsert_thought` only as `/rest/v1/rpc/upsert_thought` with a service-role key, and this fork's stack runs no PostgREST (SETUP.md), so the script fails at its first request (`--dry-run` runs). The fork embeds locally by default — the server through `OB1_LLM_BASE_URL` (`deploy/compose.yaml --profile local-models`), existing rows through `bun db/reembed.ts` — so this recipe retires in SMD-2138; the decision for the class is in `docs/vendored-disposition.md`.
+
 > Generate embeddings locally and insert thoughts into Open Brain — no cloud API key needed.
 
 ## What It Does
