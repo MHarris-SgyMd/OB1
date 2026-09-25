@@ -56,6 +56,17 @@ Never sent: the transcript, tool outputs, file contents, commands, anything from
 
 **The secret scan runs before anything leaves.** The summary text — and the prompts, outcome and title whole, before their clips — is checked for the common key shapes (Anthropic, OpenAI, AWS, GitHub, Slack, Google, Stripe, SendGrid, Linear, Hugging Face, npm, JWTs, private-key blocks), credential assignments (`x-brain-key: …`, `MCP_ACCESS_KEY=…`, `AWS_SECRET_ACCESS_KEY=…`, `<ANY>_API_KEY=…`, `<ANY>_TOKEN=…`, `--api-key <value>`, a bearer token — a value that is a reference, `${VAR}`, `%VAR%` or `process.env.X`, or that carries no digit, a placeholder or a name, is not one), password assignments of six characters or more (`POSTGRES_PASSWORD=hunter2`), URLs carrying a password, a bare 64-hex run with or without `0x` (this fork's own keys are 64 hex; a digest after `name:scope:` or `sha256:` is not one), a key in a URL's query (`?key=…`, the connector form), and 32-character-plus mixed-case high-entropy tokens. Not tokens: a uuid, a git sha, a digest in its context, paths, a URL's path or query, base64 data URIs, file names, and word-shaped identifiers. A hit **refuses the whole capture**: the reason and the character offset are printed, never the match; the exit code is 1; nothing is written. The session ends as it would have — exit 1 blocks nothing in either harness.
 
+## An Optional Model Summary
+
+The derived summary is a log entry: deterministic, free, never wrong about what happened — and unable to say what was **decided** or why. With a local model on the box, an opt-in `summary: "model"` has one rewrite each episode's summary into decisions taken and their reasons, what was left open, and what changed. It is off by default; nothing about the derived summary changes unless you turn it on (SMD-2014).
+
+- **Where it runs.** In the detached child that posts, never in the foreground — the hook's budget is 1.5 seconds, a model call is seconds. The model is shown the **derived summary and the episode's assistant messages only** — never the raw transcript, never tool results. It is asked to name no ids and quote no secrets, under a token cap.
+- **The fallback is the derived summary.** A missing endpoint, an egress refusal, a slow, failed or empty call, or **a secret in the model's own words** (the scan runs on its output too) all fall back to the derived text the payload already carries — a well-formed memory beats none — and the log line says why. `derived_from` stays the derived summary's provenance whichever text is sent; the model names no ids.
+- **The egress gate.** The hook carries its **own** policy, because it is a client on another machine from the server whose gate SMD-1903 defines. `egress` (or `OB1_EGRESS_POLICY`) is `deny` by default and fails closed; under deny only an endpoint **declared** local — `"model_local": true` — may be called. "Local" is declared, never guessed from the address, exactly as the server declares it: a loopback URL behind a forwarding proxy is not local, and a LAN model a box vouches for is. `allow` and `off` permit any endpoint.
+- **How a reader tells the two apart.** `metadata.source` stays the harness (`claude-code` / `codex`). A `summary_model` metadata key records which model wrote it, so a reader — and a per-source weight (SMD-1297) — can tell a model summary from the derived one. The wire contract is otherwise unchanged.
+
+The config keys (each also an env var, which wins, for a container or a test): `summary` (`derived` | `model`, `OB1_SESSION_CAPTURE_SUMMARY`), `model_url` (`OB1_SESSION_CAPTURE_MODEL_URL`, falling back to `OB1_CHAT_BASE_URL` / `OB1_LLM_BASE_URL` — the OpenAI `/chat/completions` shape), `model` (`OB1_SESSION_CAPTURE_MODEL`, falling back to `OB1_METADATA_MODEL`), `model_key` (`OB1_SESSION_CAPTURE_MODEL_KEY`, for an endpoint that needs one), `model_local` (or `OB1_CHAT_LOCAL` / `OB1_LLM_LOCAL`), `egress` (`OB1_EGRESS_POLICY`), and `model_timeout` (`OB1_SESSION_CAPTURE_MODEL_TIMEOUT`, milliseconds; 30 s by default). `--check` and `--dry-run` print the mode and, when a model is configured, whether egress would let it run — without calling it. **`capture_thought` gained an optional `metadata` argument** (SMD-2014): a small object of caller keys, stored beside the server's own; a key the server owns (`source`, the extractor's tags) is refused, not overruled.
+
 ## Prerequisites
 
 - A running Open Brain at release 1.1.0 or later — the portable server at or after SMD-1298 (the `capture` key scope and `capture_thought`'s `source` argument; migration 049) — [`SETUP.md`](../../SETUP.md)
@@ -111,6 +122,17 @@ chmod 600 ~/.config/open-brain/session-capture.json
 ```
 
 The key lives here and nowhere else — not in the hook's command line, which sits in a settings file every tool on the machine can read. (`"key_file": "/path"` is accepted in place of `"key"`.)
+
+To have a local model write the summary instead of the derived one, add the model keys (all optional; see [An optional model summary](#an-optional-model-summary) below):
+
+```json
+{
+  "url": "http://127.0.0.1:8010/", "key": "<the raw capture key>",
+  "summary": "model",
+  "model_url": "http://127.0.0.1:11434/v1", "model": "llama3.1:8b",
+  "model_local": true
+}
+```
 
 ### 3. Check it
 
@@ -196,7 +218,7 @@ Then, from any client with a read key, `search_thoughts` for something the sessi
 
 ## Expected Outcome
 
-- One current thought per episode of the session — captured before each compaction and at the end, each superseding the episode's last — type chosen by the metadata model, `metadata.source` = `claude-code` or `codex`, `derived_from` = the thoughts that episode retrieved and captured.
+- One current thought per episode of the session — captured before each compaction and at the end, each superseding the episode's last — type chosen by the metadata model, `metadata.source` = `claude-code` or `codex`, `derived_from` = the thoughts that episode retrieved and captured. With the opt-in model summary on, the text is what a local model wrote (or the derived text, on any fallback) and `metadata.summary_model` names the model.
 - `~/.local/state/open-brain/session-capture/<session_id>.json` holds the first episode's thought id and its summary's fingerprint, `<session_id>_e2.json` the second's, and so on; the same summary is never sent twice; a changed one supersedes its own.
 - A session with no human prompt, or no transcript, is skipped with exit 0 and a `skip:` line in the log.
 - A summary that carries a secret is refused with exit 1 and a `refused —` line naming the shape and the offset; the episode is not sent, and the session's other episodes still are.
@@ -233,7 +255,7 @@ Solution: Codex allows SessionEnd hooks at most 3 seconds; the foreground finish
 ## Testing
 
 ```bash
-bun recipes/session-capture-hook/test-session-capture.mjs   # no brain, no model: synthetic transcripts and a fake MCP endpoint
+bun recipes/session-capture-hook/test-session-capture.mjs   # no real brain or model: synthetic transcripts, a fake MCP endpoint and a fake model endpoint
 ```
 
-Both parsers, the summary's shape and caps, every secret pattern's probe and the clean probes (uuids, digests in their spellings, paths, URLs, data URIs, identifiers, prose) with each threshold pinned alone, the refusal — a key past a prompt's clip included — the payload, posting, supersession, refused and unreachable pointers, the queue under two children and after a dead one, a session's end stepping aside for its checkpoint's child and posted by it once the checkpoint has landed, superseding it, obsolete and landed payloads, wrong urls and busy endpoints, the SSE shapes, the detached hand-off inside the budget against a slow endpoint, `--check`, `--dry-run`, `--print-hook` (the default pair, one event alone, Codex refused a compaction hook, an unknown event refused), a compaction checkpoint's line and its supersession by the session's end; the segmenter's boundaries rule by rule and a session of four episodes — two compactions, a move, three tickets — captured one thought each with its own provenance, a re-ending superseding only the episode that changed, a secret in one episode refusing that episode alone, the newest five of seven handed to the run's child and the rest to a later run, the segmentation `--dry-run` prints (SMD-2013). It runs in CI's repo-consistency job.
+Both parsers, the summary's shape and caps, every secret pattern's probe and the clean probes (uuids, digests in their spellings, paths, URLs, data URIs, identifiers, prose) with each threshold pinned alone, the refusal — a key past a prompt's clip included — the payload, posting, supersession, refused and unreachable pointers, the queue under two children and after a dead one, a session's end stepping aside for its checkpoint's child and posted by it once the checkpoint has landed, superseding it, obsolete and landed payloads, wrong urls and busy endpoints, the SSE shapes, the detached hand-off inside the budget against a slow endpoint, `--check`, `--dry-run`, `--print-hook` (the default pair, one event alone, Codex refused a compaction hook, an unknown event refused), a compaction checkpoint's line and its supersession by the session's end; the segmenter's boundaries rule by rule and a session of four episodes — two compactions, a move, three tickets — captured one thought each with its own provenance, a re-ending superseding only the episode that changed, a secret in one episode refusing that episode alone, the newest five of seven handed to the run's child and the rest to a later run, the segmentation `--dry-run` prints (SMD-2013); and the opt-in model summary (SMD-2014) — the egress rule (local declared, never guessed; deny/allow/off), the config knobs read from the file and the environment, `modelSummary` returning the model's text on the happy path and the derived text on every fallback (off, unconfigured, egress-refused before anything is sent, a secret in the model's own words, an empty answer, an HTTP error, a timeout), `prepare` attaching the assistant excerpt only in model mode, and the end-to-end child posting the model's text with `metadata.summary_model` while `source` stays the harness. The server's own `capture_thought` `metadata` argument — a caller key stored, a reserved key refused — is covered by `server-portable/test-e2e-sql.ts`. It runs in CI's repo-consistency job.
