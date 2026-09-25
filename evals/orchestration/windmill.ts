@@ -102,12 +102,15 @@ export const windmill: Adapter = {
   async mcpServer(env) {
     const t = await login(env);
     const token = await api("POST", "/users/tokens/create", {
+      // One per --verify, so it expires within the hour rather than piling up.
       label: `ob1-mcp-${Date.now()}`, workspace_id: WS, scopes: ["mcp:scripts:f/ob1/brain_search,f/ob1/linear_issue"],
+      expiration: new Date(Date.now() + 3_600_000).toISOString(),
     }, t);
     return { url: `${BASE}/api/mcp/w/${WS}/mcp`, headers: { authorization: `Bearer ${token}` } };
   },
   // Windmill names a script's tool from its path: `s-`, then the path with `/`
   // as `_` and every `_` doubled (measured: f/ob1/brain_search → s-f_ob1_brain__search).
+  mcpClient: "a script of ours importing the MCP SDK (Windmill has no MCP-client step)",
   tools: { search: "s-f_ob1_brain__search", act: "s-f_ob1_linear__issue" },
   version() {
     return "CE v1.817.0";

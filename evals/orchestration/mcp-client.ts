@@ -26,9 +26,14 @@ export async function listTools(url: string, headers: Record<string, string>): P
   return withMcp(url, headers, async (c) => (await c.listTools()).tools.map((t) => ({ name: t.name, description: t.description })));
 }
 
-export async function callTool(url: string, headers: Record<string, string>, name: string, args: Record<string, unknown>): Promise<CallResult> {
+/**
+ * `timeoutMs` past the SDK's 60 s default for a call that runs a workflow: a
+ * capture waits on the brain's model calls, and on a host whose Ollama is
+ * swapping models for another job one capture took longer than a minute.
+ */
+export async function callTool(url: string, headers: Record<string, string>, name: string, args: Record<string, unknown>, timeoutMs = 60_000): Promise<CallResult> {
   return withMcp(url, headers, async (c) => {
-    const r = await c.callTool({ name, arguments: args });
+    const r = await c.callTool({ name, arguments: args }, undefined, { timeout: timeoutMs });
     const content = Array.isArray(r.content) ? r.content : [];
     const text = content.map((p) => (p && typeof p === "object" && "text" in p ? String(p.text) : "")).join("\n");
     return { isError: r.isError === true, text };
@@ -36,15 +41,19 @@ export async function callTool(url: string, headers: Record<string, string>, nam
 }
 
 /**
- * Does the server refuse a session with these headers? True when connecting or
- * listing fails — the shape a missing or wrong key must take — and false when
- * the tools come back, which is the finding this probe exists to catch.
+ * Does the server refuse a session with these headers as an authorization
+ * failure — HTTP 401 or 403? Any other error is NOT a refusal: a 404 or a 500
+ * on every request would otherwise read as "refused" (review pass 1: a proxy
+ * answering 500 to a missing key in front of an endpoint that ignored the
+ * key's value passed). Tools coming back is the finding this probe exists for.
  */
 export async function refuses(url: string, headers: Record<string, string>): Promise<{ refused: boolean; detail: string }> {
   try {
     const tools = await listTools(url, headers);
-    return { refused: false, detail: `listed ${tools.length} tool(s) without credentials` };
+    return { refused: false, detail: `listed ${tools.length} tool(s)` };
   } catch (e) {
-    return { refused: true, detail: e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160) };
+    const status = typeof (e as { code?: unknown })?.code === "number" ? (e as { code: number }).code : undefined;
+    const text = e instanceof Error ? e.message.slice(0, 120) : String(e).slice(0, 120);
+    return { refused: status === 401 || status === 403, detail: `${status ?? "no status"}: ${text}` };
   }
 }

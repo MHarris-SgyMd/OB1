@@ -54,6 +54,7 @@ export const n8n: Adapter = {
   async mcpServer(env) {
     return { url: "http://127.0.0.1:5678/mcp/ob1", headers: { "x-orch-key": env.ORCH_MCP_KEY } };
   },
+  mcpClient: "n8n's MCP Client node",
   tools: { search: "brain_search_thoughts", act: "linear_issue" },
   version() {
     return exec(["n8n", "--version"]).trim();

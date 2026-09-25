@@ -10,7 +10,7 @@ export async function main(query: string) {
   const client = new Client({ name: "windmill-ob1-search", version: "1" });
   await client.connect(new StreamableHTTPClientTransport(new URL("http://server:8000/"), { requestInit: { headers: { "x-brain-key": brainKey } } }));
   try {
-    const res = await client.callTool({ name: "search_thoughts", arguments: { query, limit: 3 } });
+    const res = await client.callTool({ name: "search_thoughts", arguments: { query, limit: 3 } }, undefined, { timeout: 120_000 });
     const content = Array.isArray(res.content) ? res.content : [];
     return content.map((p: any) => (typeof p?.text === "string" ? p.text : "")).join("\n");
   } finally {

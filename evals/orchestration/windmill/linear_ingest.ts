@@ -33,7 +33,7 @@ export async function main() {
         "",
         i.description ?? "",
       ].join("\n").trim();
-      const res = await client.callTool({ name: "capture_thought", arguments: { content } });
+      const res = await client.callTool({ name: "capture_thought", arguments: { content } }, undefined, { timeout: 180_000 });
       if (res.isError) throw new Error(`capture_thought failed for ${i.identifier}`);
       captured.push(i.identifier);
     }

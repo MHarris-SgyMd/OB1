@@ -17,6 +17,8 @@ export type Adapter = {
   runIngestion(env: Record<string, string>): Promise<void>;
   /** The candidate's own MCP endpoint and the header an AI client presents. */
   mcpServer(env: Record<string, string>): Promise<{ url: string; headers: Record<string, string> }>;
+  /** What carries the capture to the brain: the tool's own MCP-client step, or a script of ours where it has none. */
+  mcpClient: string;
   /** The two tool names that endpoint must list: the brain read, the vendor act. */
   tools: { search: string; act: string };
   version(): string;

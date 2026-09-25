@@ -74,10 +74,11 @@ export const activepieces: Adapter = {
     // On first boot the piece catalogue arrives from Activepieces' cloud after
     // the API already answers — about 12,800 piece versions written to its
     // database in the background — and a connection for a piece the server does
-    // not yet know is refused (404 piece_metadata_not_found). Measured twice:
-    // once the pieces appeared within the wait; once they stayed 404 for 300 s
-    // with their rows already in piece_metadata, until a restart rebuilt the
-    // server's index from the database. So: wait, and restart once if needed.
+    // not yet know is refused (404 piece_metadata_not_found). Of seven fresh
+    // boots behind this wait, the pieces appeared within it once; six times
+    // they stayed 404 (once watched for 300 s with the rows already in
+    // piece_metadata) until a restart rebuilt the server's index from the
+    // database. So: wait, and restart once if needed.
     const known = async (sess: Session) => {
       for (const piece of PIECES) await api("GET", `/v1/pieces/${encodeURIComponent(piece)}?projectId=${sess.projectId}`, undefined, sess.token);
       return true;
@@ -119,12 +120,17 @@ export const activepieces: Adapter = {
     const id = (await flowsByName(s)).get(INGEST);
     if (!id) throw new Error(`no flow named "${INGEST}" — run --up first`);
     const { url, headers } = await mcpEndpoint(s);
-    const r = await callTool(url, headers, "ap_test_flow", { flowId: id });
-    if (r.isError || /FAILED|"status":\s*"(FAILED|INTERNAL_ERROR|TIMEOUT)/.test(r.text)) throw new Error(`ap_test_flow: ${r.text.slice(0, 600)}`);
+    const r = await callTool(url, headers, "ap_test_flow", { flowId: id }, 300_000);
+    // Success is asserted, not failure denied: a status the tool adds later,
+    // or "FAILED" inside an issue's text, must not decide it (review pass 1).
+    // C1's count after the reset is the check either way. ap_test_flow's own
+    // word for it: "✅ Run <id> — SUCCEEDED (21.7s)" (measured).
+    if (r.isError || !/— SUCCEEDED \(/.test(r.text)) throw new Error(`ap_test_flow: ${r.text.slice(0, 600)}`);
   },
   async mcpServer(env) {
     return mcpEndpoint(await session(env));
   },
+  mcpClient: "the MCP Client piece's call-tool action",
   tools: { search: "brain_search", act: "linear_issue" },
   version() {
     return "0.91.3";

@@ -9,12 +9,18 @@
  *
  * The secrets live in evals/orchestration/.env (gitignored — `.env` at any
  * depth), written once by `ensureEnv`: the database passwords, the candidate's
- * encryption key, and three brain keys minted the way keygen.ts mints them —
+ * encryption key, and two brain keys minted the way keygen.ts mints them —
  * `orch-capture` (capture scope: the ingestion workflow's, can add, cannot
- * read), `orch-read` (read scope: the retrieval step's) and `orch-verify`
- * (read scope: this verifier's). Only their hashes reach MCP_ACCESS_KEYS.
- * LINEAR_API_KEY is not copied into it: the driver reads it from the usual
- * search path (db/env.ts) and hands it to compose in the environment.
+ * read) and `orch-read` (read scope: the retrieval tool's). Only their hashes
+ * reach MCP_ACCESS_KEYS. LINEAR_API_KEY is not copied into it: the driver reads
+ * it from the usual search path (db/env.ts) and hands it to compose explicitly.
+ *
+ * compose and docker run with an ALLOWLISTED environment, never the driver's
+ * whole one. loadEnv() fills process.env from deploy/.env and <repo>/.env —
+ * the dogfood stack's POSTGRES_PASSWORD, MCP_ACCESS_KEYS and SERVER_PORT among
+ * them — and compose ranks a shell variable above --env-file, so inheriting it
+ * would hand the throwaway brain the dogfood's port and keys (review pass 1).
+ * A knob for a run (ORCH_AP_PIECES_SYNC_MODE) goes in orchestration/.env.
  */
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -27,7 +33,13 @@ export const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO = resolve(HERE, "..", "..");
 export const ENV_FILE = join(HERE, ".env");
 
-export type Keys = { capture: string; read: string; verify: string };
+export type Keys = { capture: string; read: string };
+
+/** What docker and compose need from the caller's environment to reach the engine — and nothing else. */
+const PASS_THROUGH = [
+  "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "TERM", "XDG_RUNTIME_DIR", "SSH_AUTH_SOCK",
+  "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY", "CONTAINER_HOST", "CONTAINER_CONNECTION",
+];
 
 /**
  * The POC's .env: created on first use, reused after, so a second `--up`
@@ -47,7 +59,7 @@ export function ensureEnv(): Record<string, string> {
     }
     return env;
   }
-  const keys: Keys = { capture: hex(32), read: hex(32), verify: hex(32) };
+  const keys: Keys = { capture: hex(32), read: hex(32) };
   const lines = [
     "# SMD-1863 orchestration POC — throwaway brain + candidate. Generated; gitignored.",
     `POSTGRES_PASSWORD=${hex(16)}`,
@@ -59,10 +71,9 @@ export function ensureEnv(): Record<string, string> {
     `ORCH_ADMIN_PASSWORD=Orch-${hex(8)}`,
     // The candidate's own MCP endpoint's key — what an AI client presents to it.
     `ORCH_MCP_KEY=${hex(32)}`,
-    `MCP_ACCESS_KEYS=orch-capture:capture:${hashKey(keys.capture)},orch-read:read:${hashKey(keys.read)},orch-verify:read:${hashKey(keys.verify)}`,
+    `MCP_ACCESS_KEYS=orch-capture:capture:${hashKey(keys.capture)},orch-read:read:${hashKey(keys.read)}`,
     `ORCH_BRAIN_CAPTURE_KEY=${keys.capture}`,
     `ORCH_BRAIN_READ_KEY=${keys.read}`,
-    `ORCH_BRAIN_VERIFY_KEY=${keys.verify}`,
     // The brain's models: the host's Ollama, declared local to the egress gate.
     "SERVER_PORT=8012",
     "OB1_LLM_BASE_URL=http://host.docker.internal:11434/v1",
@@ -90,7 +101,8 @@ export function composeArgs(tool: string): string[] {
 export type Run = { code: number; out: string; err: string };
 
 export function run(cmd: string[], env: Record<string, string> = {}, input?: string): Run {
-  const p = Bun.spawnSync(cmd, { env: { ...process.env, ...env }, stdin: input === undefined ? "ignore" : Buffer.from(input), stdout: "pipe", stderr: "pipe" });
+  const base = Object.fromEntries(PASS_THROUGH.flatMap((k) => (process.env[k] === undefined ? [] : [[k, process.env[k] as string]])));
+  const p = Bun.spawnSync(cmd, { env: { ...base, ...env }, stdin: input === undefined ? "ignore" : Buffer.from(input), stdout: "pipe", stderr: "pipe" });
   return { code: p.exitCode ?? -1, out: p.stdout.toString(), err: p.stderr.toString() };
 }
 
@@ -114,7 +126,7 @@ export async function waitFor(what: string, probe: () => Promise<boolean>, timeo
   throw new Error(`timed out after ${timeoutMs / 1000}s waiting for ${what}`);
 }
 
-/** Resident memory per container of the project, from `docker stats`, in MiB. */
+/** Memory per container of the project — `docker stats`' MemUsage, the cgroup's usage (page cache included), in MiB. */
 export function memoryByContainer(tool: string): Record<string, number> {
   const ids = compose(tool, ["ps", "-q"]).out.trim().split("\n").filter(Boolean);
   if (!ids.length) return {};
