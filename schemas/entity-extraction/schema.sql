@@ -189,11 +189,11 @@ CREATE TRIGGER trg_queue_entity_extraction
 -- Grant the role your server connects as instead — from db/:
 --   bun migrate.ts --url postgres://… --grant <role>
 -- issues db/config.mjs ROLE_GRANTS' `community` group, which covers this file's
--- five tables (SELECT, INSERT, UPDATE, DELETE; thought_entities is 016's
--- table on a migrated brain, so the extraction group's grant exactly — the
--- same four since SMD-2216) and the three bigserial
--- sequences by name (USAGE, SELECT — an INSERT needs them), instead of every
--- sequence in the schema. The trigger function needs no EXECUTE grant:
+-- five tables (SELECT, INSERT, UPDATE, DELETE; thought_entities is 016's table
+-- on a migrated brain, granted exactly as the extraction group grants it) and
+-- the three bigserial sequences by name (USAGE, SELECT — an INSERT needs
+-- them), instead of every sequence in the schema. The trigger function needs
+-- no EXECUTE grant:
 -- Postgres checks EXECUTE on a trigger function when the trigger is created,
 -- not when it fires. Row-level security: SMD-1716.
 -- ============================================================

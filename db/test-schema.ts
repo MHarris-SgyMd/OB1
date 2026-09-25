@@ -7729,9 +7729,10 @@ console.log("\n[52] Migration 056: the entity name gate — a number or a type w
 //
 // Since 053 record_thought_entities upserts the mention and edge rows, and
 // Postgres checks UPDATE for an INSERT … ON CONFLICT DO UPDATE each time it
-// runs one, conflict or none — so a role migrate.ts --grant set up, holding SELECT/INSERT/DELETE
-// there, failed every call; a structured pass also wrote thought_sources and
-// `link` facets, which no group granted. The role here is set up exactly as
+// runs one, conflict or none — so a role migrate.ts --grant set up, holding
+// SELECT/INSERT/DELETE there, failed every call; a structured pass also wrote
+// thought_sources and `link` facets, which no group granted. The role here is
+// set up exactly as
 // --grant sets one up (every group, the objects present), and runs each path
 // as itself; then each added privilege is revoked in turn and its path fails
 // by that table's name (SMD-2216).

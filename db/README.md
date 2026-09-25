@@ -521,9 +521,9 @@ stage their rows in `ON COMMIT DROP` temp tables, so a database that has revoked
 `TEMPORARY` from `PUBLIC` (the default grants it) needs `GRANT TEMPORARY ON
 DATABASE … TO your_role` as well — `--grant` does not issue it. The migrations'
 own tables need no sequence grant — every primary key is a `uuid` or a natural
-key — but three community
-schemas use `BIGSERIAL` ids, and an `INSERT` into such a table needs `USAGE` on
-the sequence (`permission denied for sequence …` with the table fully granted),
+key — but three community schemas use `BIGSERIAL` ids, and an `INSERT` into such
+a table needs `USAGE` on the sequence (`permission denied for sequence …` with
+the table fully granted),
 so the **community** group names those six sequences; an identity column
 (`wiki_section_revisions.id`) needs none. Both are measured, not recalled:
 test-schema [40] grants the tables alone and watches which inserts are still
@@ -554,9 +554,9 @@ them, so a locked-down deployment can grant a subset by hand. A role that only
 ever runs the server needs the **capture** and **server** groups; add **worker**
 for the role your bulk passes connect as, **extraction** on top of that for
 entity extraction, and **structure** as well for a structured pass. The
-**community**, **extensions** and **recipes** groups are
-issued for whichever schema files you have applied — the objects not yet
-present are skipped and named, so run `--grant` again after applying one; apply
+**community**, **extensions** and **recipes** groups are issued for whichever
+schema files you have applied — the objects not yet present are skipped and
+named, so run `--grant` again after applying one; apply
 a schema with `psql "$DATABASE_URL" -f <its path>`, as its README says. Presence is
 per object, not per file, so the two community rows whose tables a migration
 also creates — `thought_audit` (008) and `thought_entities` (016) — are issued
