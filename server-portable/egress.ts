@@ -60,15 +60,14 @@ export const DEFAULT_EGRESS_MODE: EgressMode = "deny";
  * one unit the key proves; `source`, `type` and `topic` read the row's
  * metadata, so they decide for the passes and the re-embed over rows already
  * tagged and are unknown at a first capture (the tags come FROM the call being
- * gated). `source` is the row's own label at every step where it is judged —
- * an edit, the re-embed, the consolidation passes — all reading the value the
- * server wrote. A CAPTURE's `source` is different: it is the caller's claim
- * (capture_thought's `source`, `mcp` when it gave none; SMD-1298), so a
- * `source:` term does NOT gate a capture (`termMatches` refuses it for the
- * `capture` kind) — it would be dodged by naming another label or none. To
- * gate WHO may send a capture, name `actor`, which the key proves; keep
- * `source:` for what a row's stored label says, at the passes that read it
- * back (SMD-1941). `marker` is a literal the text contains — `#public`,
+ * gated). `source` gates on the row's OWN label — the value the server wrote:
+ * an edit and the re-embed and consolidation passes read the stored row, and
+ * db/sync-linear.ts writes an authoritative `source` on its captures. The one
+ * caller-CLAIMED source is capture_thought's (`mcp` when it gave none;
+ * SMD-1298): a claim is dodged by naming another label or none, so it MUST NOT
+ * gate — the handler keeps it OFF the capture subject entirely, so no `source:`
+ * term can match it, and WHO may capture is named with `actor`, which the key
+ * proves (SMD-1941). `marker` is a literal the text contains — `#public`,
  * `[phi]` — the one unit a writer controls per thought.
  */
 export const EGRESS_UNITS = ["actor", "source", "type", "topic", "marker"] as const;
@@ -202,14 +201,16 @@ export function termMatches(term: EgressTerm, subject: EgressSubject): boolean {
     case "actor":
       return lower(subject.actor) === want;
     case "source":
-      // A capture's `source` is the caller's claim (capture_thought takes it,
-      // `mcp` when omitted; SMD-1298), so a `source:` term MUST NOT gate a
-      // capture — it would be dodged by naming another label or none (SMD-1941).
-      // At every other step the value is the row's own, written by the server,
-      // so it gates: an edit reads the stored row, the re-embed and the
-      // consolidation passes read it back. Who may capture is `actor:`, which
-      // the key proves.
-      return subject.kind === "capture" ? false : lower(subject.metadata?.source) === want;
+      // `source` reads the row's OWN label — the value the server wrote — so it
+      // gates every subject that carries one: an edit and the re-embed and
+      // consolidation passes (the stored row), and db/sync-linear.ts's capture
+      // of a Linear issue (metadata.source = "linear", authoritative). The one
+      // caller-CLAIMED source is capture_thought's; a claim is dodged by naming
+      // another label or none, so the handler keeps it OFF the capture subject
+      // entirely (index.ts) and it never reaches here — who may capture is
+      // named with `actor`, which the key proves (SMD-1941). The gate does not
+      // branch on kind: whether a `source` is on the subject is the call site's.
+      return lower(subject.metadata?.source) === want;
     case "type":
       return lower(subject.metadata?.type) === want;
     case "topic": {

@@ -1713,13 +1713,15 @@ function buildServer(principal: Principal): McpServer {
         const cfg = embedConfig();
         // The capture is gated on `actor` (the key, proven) and `marker` (the
         // text) — not `source`. A capture's `source` is the caller's claim
-        // (`origin` above, recorded on the row below), so a `source:` term does
-        // NOT gate it: it would be dodged by naming another label or none, and
-        // `termMatches` refuses the unit for the `capture` kind (SMD-1941). The
-        // row still CARRIES the label, and the re-embed and consolidation passes
-        // that read the row back gate on it there, where it is the server's; to
-        // gate WHO may capture, an operator names `actor:<key>`. So the subject
-        // carries no `source` — nothing here is judged on it.
+        // (`origin` above), dodged by naming another label or none, so it MUST
+        // NOT gate egress: the subject carries NO `source`, so no `source:` term
+        // can match this call (SMD-1941). The row still RECORDS the label below,
+        // and the re-embed and consolidation passes that read the row back gate
+        // on it there, where the server wrote it; to gate WHO may capture, an
+        // operator names `actor:<key>`. (db/sync-linear.ts is the other capture
+        // path — its `source` IS the server's, so it puts it on the subject and
+        // a `source:` term gates that capture; the gate itself does not branch
+        // on kind.)
         const subject: EgressSubject = { kind: "capture", actor: principal.name, content };
         const gate = decideCalls(subject, cfg, cfg.egress);
         // Independent of each other, so they overlap.
@@ -2046,8 +2048,8 @@ function buildServer(principal: Principal): McpServer {
         // A row that is not there is judged as bare and refused by the write.
         // Here a `source:` term DOES gate: the label is the row's, written by
         // the server at its capture, not a claim on this call — the opposite of
-        // the capture path, where `source` is the caller's and does not gate
-        // (SMD-1941). The `kind` tells the gate which it is.
+        // capture_thought, which keeps its caller-claimed `source` off the
+        // subject so it cannot gate (SMD-1941).
         const cfg = embedConfig();
         const existing = content !== undefined ? await (await db()).getThought(id) : null;
         const subject: EgressSubject = { kind: "edit", actor: principal.name, metadata: existing?.metadata ?? { source: "mcp" }, content };

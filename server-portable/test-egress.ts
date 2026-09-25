@@ -133,7 +133,7 @@ console.log("\n[3] The rules: every unit under deny and allow, with the reason n
   const refused = mayLeaveBox(subject, remote, deny);
   assert(!refused.allowed && refused.rule === "no-allow-term" && /OB1_EGRESS_POLICY=deny \(the default\) and no OB1_EGRESS_ALLOW term matches this capture \(none set\) — the text was not sent to openrouter\.ai/.test(refused.reason),
          `deny with no terms refuses, naming the default and the host (${refused.reason})`);
-  for (const [term, hits] of [["actor:chatgpt", true], ["actor:other", false], ["type:reference", true], ["type:task", false], ["topic:public", true], ["topic:private", false], ["marker:#PUBLIC", true], ["marker:#phi", false]] as [string, boolean][]) {
+  for (const [term, hits] of [["actor:chatgpt", true], ["actor:other", false], ["source:MCP", true], ["source:linear", false], ["type:reference", true], ["type:task", false], ["topic:public", true], ["topic:private", false], ["marker:#PUBLIC", true], ["marker:#phi", false]] as [string, boolean][]) {
     const policy = resolveEgressPolicy({ OB1_EGRESS_ALLOW: term });
     const d = mayLeaveBox(subject, remote, policy);
     assert(d.allowed === hits && (hits ? d.rule === "allow-term" && d.reason.includes(`OB1_EGRESS_ALLOW ${term}`) : d.rule === "no-allow-term"),
@@ -142,23 +142,16 @@ console.log("\n[3] The rules: every unit under deny and allow, with the reason n
     assert(inverse.allowed === !hits && (hits ? inverse.rule === "deny-term" && inverse.reason.includes(`OB1_EGRESS_DENY ${term}`) : inverse.rule === "no-deny-term"),
            `allow + OB1_EGRESS_DENY=${term}: ${hits ? "refused by the term" : "allowed"}`);
   }
-  // `source` is the one unit whose gating depends on the kind (SMD-1941): a
-  // capture's source is the caller's claim, so a `source:` term never gates a
-  // capture — even one that DOES carry the label (`subject` above carries
-  // source "mcp"). At every other step the value is the row's own, so it gates.
-  const capAllow = mayLeaveBox(subject, remote, resolveEgressPolicy({ OB1_EGRESS_ALLOW: "source:mcp" }));
-  assert(!capAllow.allowed && capAllow.rule === "no-allow-term", "deny + OB1_EGRESS_ALLOW=source:mcp does NOT let a capture through — its source is the caller's claim (SMD-1941)");
-  const capDeny = mayLeaveBox(subject, remote, resolveEgressPolicy({ OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "source:mcp" }));
-  assert(capDeny.allowed && capDeny.rule === "no-deny-term", "allow + OB1_EGRESS_DENY=source:mcp does NOT hold a capture back — a source: term cannot gate a capture");
-  for (const kind of ["re-embed", "edit", "judge"] as const) {
-    const row: EgressSubject = { kind, metadata: { source: "mcp" } };
-    const rowAllow = mayLeaveBox(row, remote, resolveEgressPolicy({ OB1_EGRESS_ALLOW: "source:mcp" }));
-    assert(rowAllow.allowed && rowAllow.rule === "allow-term" && rowAllow.reason.includes("OB1_EGRESS_ALLOW source:mcp"), `deny + OB1_EGRESS_ALLOW=source:mcp lets a ${kind} of a row labelled mcp through — the row's own label gates`);
-    const rowDeny = mayLeaveBox(row, remote, resolveEgressPolicy({ OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "source:mcp" }));
-    assert(!rowDeny.allowed && rowDeny.rule === "deny-term", `allow + OB1_EGRESS_DENY=source:mcp holds a ${kind} of a row labelled mcp back`);
-    assert(termMatches({ unit: "source", value: "mcp" }, row) === true, `termMatches: source:mcp matches a ${kind} subject carrying that label`);
-  }
-  assert(termMatches({ unit: "source", value: "mcp" }, { kind: "capture", metadata: { source: "mcp" } }) === false, "termMatches: source:mcp never matches a capture subject, even one carrying the label (SMD-1941)");
+  // `source` gates on whatever subject CARRIES the label, of any kind — the
+  // value is the row's own, written by the server (SMD-1941). db/sync-linear.ts
+  // writes an authoritative `source` on its CAPTURE of a Linear issue, so a
+  // source: term gates that capture; the gate does not branch on kind.
+  assert(termMatches({ unit: "source", value: "linear" }, { kind: "capture", actor: "linear-sync", metadata: { source: "linear" }, content: "an issue" }) === true,
+         "a capture subject that CARRIES a source (db/sync-linear.ts's, authoritative) is gated by a source: term — the gate does not branch on kind");
+  // capture_thought keeps its caller-CLAIMED source OFF the subject (index.ts),
+  // so no source: term can match it — the dodge is closed at the call site.
+  assert(termMatches({ unit: "source", value: "linear" }, { kind: "capture", actor: "mcp-key", content: "a thought" }) === false,
+         "a capture subject with NO source is matched by no source: term — capture_thought omits the caller's claim (SMD-1941)");
   assert(termMatches({ unit: "topic", value: "x" }, { kind: "capture", metadata: { topics: "x" } }) === false, "a topics value that is not an array matches no topic term");
   assert(termMatches({ unit: "actor", value: "a" }, { kind: "query" }) === false && termMatches({ unit: "marker", value: "a" }, { kind: "query" }) === false, "an absent unit matches nothing");
   const off = mayLeaveBox(subject, remote, resolveEgressPolicy({ OB1_EGRESS_POLICY: "off" }));
@@ -381,6 +374,28 @@ console.log("\n[6] The server under deny: a refused capture lands without a vect
          `an edit of a row a type: term names is allowed on the row's metadata — one embeddings request (${seen.length - m})`);
   const untypedEdit = await call(GATED_KEY, "update_thought", { id, content: "gated-thought-marker: edited again, still must not leave" });
   assert(!untypedEdit.isError && /content saved without a vector/.test(untypedEdit.text) && seen.length === m + 1, "…while an edit of the untyped row is still refused at zero requests");
+}
+
+console.log("\n[7] capture_thought keeps its caller-CLAIMED source OFF the egress subject: a source: allow term does not admit a capture that names that source (SMD-1941)");
+{
+  // A `source:` term names the row's server-written label, never the caller's
+  // claim. Under deny with ONLY a source: allow term, a capture that names that
+  // very source must STILL be refused: the handler judges the gate on a subject
+  // carrying no `source`, so the term matches nothing (this is the sole boundary
+  // now the gate no longer branches on kind — the pass-1 finding). The row still
+  // RECORDS the label (SMD-1297's per-source weight reads it); it just does not
+  // open the gate. embedConfig() reads the env live, so the term is set here.
+  const saved = process.env.OB1_EGRESS_ALLOW;
+  process.env.OB1_EGRESS_ALLOW = "source:leak";
+  const n0 = seen.length;
+  const claimed = await call(GATED_KEY, "capture_thought", { content: "claims-to-be-leak: a note naming its own source", source: "leak" });
+  assert(!claimed.isError && /Captured as thought/.test(claimed.text) && /saved WITHOUT a vector/.test(claimed.text) && seen.length === n0,
+         `a capture naming source:leak under OB1_EGRESS_ALLOW=source:leak is still refused at zero requests — the caller's claim does not gate (${seen.length - n0})`);
+  const cid = /id ([0-9a-f-]{36})/.exec(claimed.text)![1];
+  const [crow] = await sql`SELECT metadata, embedding IS NULL AS no_vector FROM thoughts WHERE id = ${cid}::uuid`;
+  assert(crow.no_vector === true && crow.metadata.source === "leak",
+         `…and the row RECORDS source:leak all the same — the label is stored, it just does not open the gate (${JSON.stringify(crow.metadata)})`);
+  if (saved === undefined) delete process.env.OB1_EGRESS_ALLOW; else process.env.OB1_EGRESS_ALLOW = saved;
 }
 
 await sql.close();
