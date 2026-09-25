@@ -6,6 +6,7 @@
  *   bun eval-orchestration.ts --up <tool> [--with <variant>]…   # brain + candidate, provisioned headlessly
  *   bun eval-orchestration.ts --verify <tool> [--json] [--wait-schedule]
  *   bun eval-orchestration.ts --down <tool>      # removes the project's containers AND volumes
+ *   bun eval-orchestration.ts --self-check       # n8n's egress judge on a crafted log, no stack (CI)
  *
  * <tool> is one of n8n | activepieces | windmill. Each runs as its own compose
  * project, `ob1-orch-<tool>`: deploy/compose.yaml as shipped plus
@@ -61,9 +62,10 @@ import { loadEnv } from "./env.ts";
 import type { Adapter, Check, Ctx } from "./orchestration/adapter.ts";
 import { callTool, listTools, refuses } from "./orchestration/mcp-client.ts";
 import { activepieces } from "./orchestration/activepieces.ts";
-import { n8n } from "./orchestration/n8n.ts";
+import { judgeEgress, n8n } from "./orchestration/n8n.ts";
 import { windmill } from "./orchestration/windmill.ts";
-import { brainSql, compose, ensureEnv, memoryByContainer, run, setEnvValue, setLayout, waitFor } from "./orchestration/stack.ts";
+import { brainSql, compose, ENV_FILE, ensureEnv, memoryByContainer, run, setEnvValue, setLayout, waitFor } from "./orchestration/stack.ts";
+import { initSecrets } from "../deploy/orchestration/provision.ts";
 
 const ADAPTERS: Record<string, Adapter> = { n8n, activepieces, windmill };
 /** The ingestion workflow's fixed item set: ten SMD issues, or the probe's ten fixed thoughts (see each candidate's workflow). */
@@ -75,6 +77,40 @@ function usage(msg: string): never {
   process.exit(2);
 }
 
+/**
+ * `--self-check`: the egress judge (n8n's E) against a log in the watcher's
+ * own format. The recorded run's shape passes. Each way out fails: a raw-IP
+ * dial, an outside name, a foreign resolver, a UDP datagram, and a capture
+ * that never saw the brain. No stack and no network (CI).
+ */
+function selfCheck(): number {
+  const base = [
+    "t eth0  Out IP 10.89.4.2.39771 > 10.89.4.1.53: 59194+ A? server.dns.podman. (35)",
+    "t eth0  In  IP 10.89.4.1.53 > 10.89.4.2.39771: 59194 1/0/0 A 10.89.4.3 (51)",
+    "t eth0  Out IP 10.89.4.2.51086 > 10.89.4.3.8000: Flags [S], seq 1, win 64240, length 0",
+    "t eth0  In  IP 10.89.4.4.40026 > 10.89.4.2.5678: Flags [S], seq 2, win 64240, length 0",
+    "t lo    In  IP 127.0.0.1.46852 > 127.0.0.1.5679: Flags [S], seq 3, win 65495, length 0",
+    "t eth0  Out IP 10.89.4.2.48800 > 10.89.4.1.53: 9152+ A? api.linear.app. (32)",
+    "t eth0  In  IP 10.89.4.1.53 > 10.89.4.2.48800: 9152 NXDomain 0/0/0 (32)",
+  ];
+  const cases: [string, string[], boolean, RegExp][] = [
+    ["the recorded shape passes", base, true, /names inside: server\.dns\.podman/],
+    ["a raw-IP dial fails", [...base, "t eth0 Out IP 10.89.4.2.5555 > 9.9.9.9.443: Flags [S], seq 4, length 0"], false, /DIALLED OUTSIDE THE COMPOSE NETWORK: 9\.9\.9\.9:443/],
+    ["an outside name fails", [...base, "t eth0 Out IP 10.89.4.2.4 > 10.89.4.1.53: 1+ A? api.n8n.io. (28)"], false, /NOT A TEMPLATE'S HOST: api\.n8n\.io/],
+    ["a foreign resolver fails", [...base, "t eth0 Out IP 10.89.4.2.4 > 8.8.8.8.53: 2+ A? api.linear.app. (32)"], false, /8\.8\.8\.8:53\/dns/],
+    ["a UDP datagram out fails", [...base, "t eth0 Out IP 10.89.4.2.4 > 1.1.1.1.443: UDP, length 1200"], false, /1\.1\.1\.1:443\/udp/],
+    ["a capture without the brain fails", base.filter((l) => !l.includes(".8000:")), false, /NO SYN to the brain/],
+  ];
+  let failed = 0;
+  for (const [what, lines, pass, re] of cases) {
+    const r = judgeEgress(lines.join("\n"));
+    if (r.pass !== pass || !re.test(r.detail)) { failed++; console.error(`FAIL ${what}: ${r.pass ? "PASS" : "FAIL"} ${r.detail.slice(0, 200)}`); }
+  }
+  console.log(failed ? `eval-orchestration self-check: ${failed} failed` : "eval-orchestration self-check: OK");
+  return failed ? 1 : 0;
+}
+if (process.argv.includes("--self-check")) process.exit(selfCheck());
+
 const args = process.argv.slice(2);
 const mode = ["--up", "--verify", "--down"].find((m) => args.includes(m)) ?? usage("no mode");
 const tool = args[args.indexOf(mode) + 1] ?? usage("no tool");
@@ -85,6 +121,10 @@ const waitSchedule = args.includes("--wait-schedule");
 const SCHEDULE_WAIT_MS = 20 * 60_000;
 
 loadEnv();
+ensureEnv();
+// The profile's own secrets, made by its own --init: the kit's file is the
+// profile's deploy/.env as far as n8n can tell.
+if (adapter.profile === "orchestration") await initSecrets(ENV_FILE);
 const env: Record<string, string> = { ...ensureEnv(), LINEAR_API_KEY: process.env.LINEAR_API_KEY ?? "" };
 
 // The variants: chosen by --up and kept in orchestration/.env, so --verify
@@ -92,6 +132,7 @@ const env: Record<string, string> = { ...ensureEnv(), LINEAR_API_KEY: process.en
 const WITH_KEY = `ORCH_WITH_${tool.toUpperCase()}`;
 const asked = args.flatMap((a, i) => (a === "--with" ? [args[i + 1] ?? usage("--with needs a variant")] : []));
 for (const v of asked) if (!adapter.variants?.[v]) usage(`${tool} has no variant ${v}${adapter.variants ? ` (it has ${Object.keys(adapter.variants).join(", ")})` : ""}`);
+for (const v of asked) for (const x of adapter.variants![v].excludes ?? []) if (asked.includes(x)) usage(`--with ${v} and --with ${x} do not combine: ${adapter.variants![v].why ?? "see the overlays"}`);
 if (asked.length && mode !== "--up") usage("--with is --up's: --verify reads what --up chose, and --down removes every variant");
 const ctx: Ctx = { with: mode === "--up" ? asked : (env[WITH_KEY] ?? "").split(",").filter(Boolean) };
 const sealed = adapter.sealedVariant !== undefined && ctx.with.includes(adapter.sealedVariant);
@@ -117,7 +158,9 @@ async function up(): Promise<void> {
   await waitFor("the brain's /health", brainHealthy);
   const reported = await fetch("http://127.0.0.1:8012/health", { headers: { "x-brain-key": env.ORCH_BRAIN_READ_KEY } }).then((h) => h.json()).then((j: any) => String(j.commit), () => "unreadable");
   if (reported !== stamp) {
-    throw new Error(`the brain reports commit ${reported}, not this --up's build (${stamp}): compose started an image it did not just build. Remove the stale copies (docker image rm localhost/ob1-orch-${tool}-server localhost/ob1-orch-${tool}-migrate), then --down and --up again`);
+    // What the engine holds under the project's names, so the likely stale copy can be seen rather than guessed at.
+    const held = run(["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedAt}}"]).out.split("\n").filter((l) => l.includes(`ob1-orch-${tool}-`)).join("; ");
+    throw new Error(`the brain reports commit ${reported}, not this --up's build (${stamp}): the running server is not the image this --up built — likely a stale copy the engine resolves the name to first. Images under the project's names: ${held || "none"}. Remove the stale ones (docker image rm <name>), then --down and --up again`);
   }
   await waitFor(`${tool} to answer`, () => adapter.ready(env), 300_000);
   const steps = await adapter.provision(env, ctx);

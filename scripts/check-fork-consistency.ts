@@ -2053,8 +2053,8 @@ function checkSupabaseIsms() {
 // fix every published mapping is the short form `"${X_BIND:-127.0.0.1}:
 // ${X_PORT:-n}:n"` — the literal 127.0.0.1 unless the operator names an
 // address, in a knob deploy/.env.example documents — and the base file
-// publishes the server alone (since SMD-2210, and n8n under the opt-in
-// `orchestration` profile); the database and Ollama reach the host only
+// publishes the server, plus n8n under the opt-in `orchestration` profile
+// since SMD-2210; the database and Ollama reach the host only
 // through compose.host-ports.yaml, a second -f an operator adds for a tool run
 // from a checkout.
 //

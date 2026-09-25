@@ -470,8 +470,8 @@ claude mcp add --transport http --scope user open-brain http://127.0.0.1:8000/ -
 
 `127.0.0.1` rather than `localhost`, since the port binds the IPv4 loopback
 only. By default nothing outside your machine can reach it: the server is the
-stack's only published port (n8n adds one under `--profile orchestration`) and
-it binds `127.0.0.1`; the database and Ollama are not published at all (`deploy/README.md`, "What is reachable from where").
+one port the stack publishes without its opt-in profiles (n8n's profile adds
+one, also on loopback), and it binds `127.0.0.1`; the database and Ollama are not published at all (`deploy/README.md`, "What is reachable from where").
 A claude.ai or Claude Desktop custom connector (Settings → Connectors → Add
 custom connector) connects from Anthropic's side, not from your machine, so it
 needs a TLS proxy or a tunnel in front. One on this host (caddy, cloudflared,
@@ -492,10 +492,13 @@ new thought's id, which is what the other two take.
 For ingestion that runs on its own — a mailbox polled on a schedule, a
 tracker synced — the `orchestration` profile runs n8n beside the stack
 (`docs/orchestration-tool.md`). Its workflows capture through the brain's
-MCP endpoint with a capture-scope key. Set its five lines in `deploy/.env`
-(`deploy/.env.example`, "The orchestration tool"), then:
+MCP endpoint with a capture-scope key. Once, `--init` writes its secrets
+into `deploy/.env`. The capture key is yours to mint (`bun keygen.ts --name
+n8n --scope capture`: the key as `N8N_BRAIN_CAPTURE_KEY`, the line it prints
+into `MCP_ACCESS_KEYS`). Then:
 
 ```bash
+bun deploy/orchestration/provision.ts --init
 podman compose -f deploy/compose.yaml --profile orchestration up -d
 bun deploy/orchestration/provision.ts
 ```

@@ -470,30 +470,46 @@ vendored. OB1's part is the provisioning step in `orchestration/` and the
 templates it loads (SMD-2212 ships the first).
 
 ```bash
-# deploy/.env, before the first start (deploy/.env.example, "The orchestration tool"):
-#   N8N_ENCRYPTION_KEY=$(openssl rand -hex 32)       back it up with POSTGRES_PASSWORD
-#   N8N_OWNER_PASSWORD=Ob1-$(openssl rand -hex 12)   8+ characters, a number, a capital
-#   N8N_BRAIN_CAPTURE_KEY=<key>   from: cd server-portable && bun keygen.ts --name n8n --scope capture
-#                                 (and its hash line added to MCP_ACCESS_KEYS)
-#   N8N_MCP_KEY=$(openssl rand -hex 32)       what an AI client presents to n8n
-#   N8N_WEBHOOK_KEY=$(openssl rand -hex 32)   what starts a workflow's on-demand run
-podman compose -f deploy/compose.yaml --profile orchestration up -d
+bun deploy/orchestration/provision.ts --init   # once: the profile's secrets into deploy/.env (it never replaces one)
+# the brain key n8n captures with, a CAPTURE key:
+cd server-portable && bun keygen.ts --name n8n --scope capture && cd ..
+#   the key into deploy/.env as N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS
+podman compose -f deploy/compose.yaml --profile orchestration up -d   # restart the server too, for the new key
 bun deploy/orchestration/provision.ts        # --env-file for another file; --rotate for a new API key
 ```
 
+`--init` writes `N8N_ENCRYPTION_KEY`, `N8N_OWNER_PASSWORD` and its bcrypt
+hash `N8N_OWNER_PASSWORD_HASH` (single-quoted, since compose would read its
+`$`s as variables), `N8N_MCP_KEY` and `N8N_WEBHOOK_KEY`, where the file has
+none. n8n sets its owner from the email and the hash at every start
+(`N8N_INSTANCE_OWNER_MANAGED_BY_ENV`). So the owner exists from the first
+boot, and nobody who reaches the port before provisioning can claim the
+instance. To change the password, edit it, run `--init` again (it re-derives
+a hash that no longer matches), and restart n8n. Without the key or the hash
+the container exits at once with the reason in its log, and `ps` shows it
+restarting.
+
 The provisioning step runs from a checkout against the loopback port. It
-signs in as the owner (setting the owner up on a fresh instance), then keeps
-n8n's API key in `deploy/.env` as `N8N_API_KEY`. The key carries ten of
-n8n's scopes, the ones the step and the eval kit use, and it expires after
+signs in as the owner and keeps n8n's API key in `deploy/.env` with its id
+(`N8N_API_KEY`, `N8N_API_KEY_ID`). The key carries eight of n8n's 106 scopes,
+the credential and workflow calls the step makes, and it expires after
 `N8N_API_KEY_DAYS` (90). A run mints a new key when that one has less than a
-week left, or on `--rotate`, and deletes the key it replaced. n8n then
-answers that key with 401. The step then creates or patches each credential
-from `orchestration/credentials.template.json` with values from the env file,
-and creates or replaces each template. Run it again after changing a key in
-`deploy/.env` or a template. It refuses a brain key that `MCP_ACCESS_KEYS`
-does not list, and one at write scope. No secret sits in n8n's environment
-but the encryption key, and no workflow can read one from there
-(`N8N_BLOCK_ENV_ACCESS_IN_NODE`).
+week left, or on `--rotate`, and every run deletes every other key it
+minted. n8n answers a deleted key with 401, and a key an interrupted run
+left behind goes on the next run. Then the step creates or patches each
+credential from `orchestration/credentials.template.json` with values from
+the env file, and creates or replaces each template. A replaced workflow
+loses edits made in the editor: the template is the source. Run it again
+after changing a key in `deploy/.env` or a template. Before it writes
+anything, it refuses:
+- a brain key at write scope, or one `MCP_ACCESS_KEYS` does not list;
+- a key whose scope is not the one its credential declares (`brainScope`);
+- a template naming a credential no template declares.
+
+No secret sits in n8n's environment but the encryption key and the owner's
+hash, and no workflow can read one from there
+(`N8N_BLOCK_ENV_ACCESS_IN_NODE`). n8n rate-limits sign-in to five a minute,
+so several runs in a row can meet a 429. The step says so.
 
 **An AI client** connects to an MCP endpoint a template publishes, at
 `http://127.0.0.1:5678/mcp/<path>` with the header `x-n8n-key: $N8N_MCP_KEY`
@@ -505,28 +521,40 @@ tools stay on the brain's endpoint, under the client's own key (decision 7).
 `x-n8n-run-key: $N8N_WEBHOOK_KEY`. The two keys are separate: the MCP key
 starts no run, and the run key opens no MCP endpoint (both measured).
 
-**Custody and backups.** The owner password is the profile's standing
-secret, stronger than the API key, since every mint signs in with it.
-`N8N_ENCRYPTION_KEY` encrypts every stored credential: lose it and they are
-unreadable, and without it the container refuses to start rather than make
-one of its own inside the volume. Keep both with `deploy/.env`. n8n's store,
-the `n8n-data` volume, needs keeping as well. The workflows are the
-templates and an API-key credential comes back from `deploy/.env`, but an
-OAuth credential's refresh token (Gmail's) and each polling workflow's
-cursor live only in n8n's store. The store is one SQLite file, and it can be
-copied while n8n runs. Here `compose` stands for `podman compose -f
-deploy/compose.yaml --profile orchestration`, or docker compose:
+**Custody and backups.**
+- **The owner password** is the profile's standing secret, stronger than the
+  API key, since every mint signs in with it.
+- **`N8N_ENCRYPTION_KEY`** encrypts every stored credential: lose it and they
+  are unreadable. n8n also writes it into its volume
+  (`/home/node/.n8n/config`), so a copy of the whole volume carries the key
+  beside the credentials it protects. The copy below is the database alone.
+  Keep the password, the key and the hash with `deploy/.env`.
+- **n8n's store** needs keeping as well. The workflows are the templates, and
+  an API-key credential comes back from `deploy/.env`. But an OAuth
+  credential's refresh token (Gmail's) and each polling workflow's cursor
+  live only in n8n's store.
+
+The store is one SQLite file, and it can be copied while n8n runs. Here
+`compose` stands for `podman compose -f deploy/compose.yaml --profile
+orchestration`, or docker compose:
 
 ```bash
-compose exec -T n8n node -e "new (require('node:sqlite').DatabaseSync)('/home/node/.n8n/database.sqlite').exec(\"VACUUM INTO '/home/node/.n8n/backup.sqlite'\")"
+umask 077   # the copy holds run history (a capture's text) in the clear
+compose exec -T n8n sh -c "rm -f /home/node/.n8n/backup.sqlite && node -e \"new (require('node:sqlite').DatabaseSync)('/home/node/.n8n/database.sqlite').exec(\\\"VACUUM INTO '/home/node/.n8n/backup.sqlite'\\\")\""
 compose exec -T n8n sh -c 'cat /home/node/.n8n/backup.sqlite && rm /home/node/.n8n/backup.sqlite' > n8n-backup.sqlite
-# restore, into a fresh or stopped n8n: written as the image's own user (a `compose cp` lands root-owned, and n8n opens it read-only)
-compose run --rm --no-deps -T --entrypoint sh n8n -c 'cat > /home/node/.n8n/database.sqlite' < n8n-backup.sqlite
+# restore: stop n8n first (compose stop n8n), then write the file as the image's
+# own user, removing the old WAL, which SQLite would otherwise replay onto the copy
+compose run --rm --no-deps -T --entrypoint sh n8n -c 'rm -f /home/node/.n8n/database.sqlite-wal /home/node/.n8n/database.sqlite-shm && cat > /home/node/.n8n/database.sqlite' < n8n-backup.sqlite
+compose up -d --no-deps n8n
 ```
 
-Restored into a fresh volume, with the same `N8N_ENCRYPTION_KEY`, the
-workflows and credentials come back and the stored `N8N_API_KEY` is still
-honoured (measured).
+Both shapes were measured, with the same `N8N_ENCRYPTION_KEY`: a restore
+into a fresh volume, and one over a stopped n8n. The workflows and
+credentials come back. The stored API key is honoured if no mint happened
+since the copy was taken. If one did, the next provisioning run mints a
+fresh key. Two ways to lose the store: `compose cp` writes the file
+root-owned, and n8n then opens it read-only; and a restore that leaves the
+old WAL in place came back as "database disk image is malformed" (measured).
 
 **Run history.** Each run's data is a copy of what the run carried: a
 capture's text, an act tool's arguments. It sits outside `delete_thought`
@@ -540,7 +568,7 @@ text can outlive the window by up to about two and a quarter hours.
 the new image (`bun evals/eval-orchestration.ts --up n8n`, then `--verify n8n
 --wait-schedule`). The endpoints that mint the key and the run data the kit
 counts are not n8n's published contract. The kit runs this profile as it
-ships (`../evals/README.md`, "The orchestration profile").
+ships (`../evals/README.md`, "The orchestration profile (SMD-2210)").
 
 **Licences** (the fork's reading, not legal advice; the ADR's Gate 1). n8n is
 under its Sustainable Use License, OB1 under FSL-1.1-MIT, and an operator

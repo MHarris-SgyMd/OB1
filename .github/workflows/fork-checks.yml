@@ -254,14 +254,26 @@ jobs:
         working-directory: evals
         run: bun eval-jev-gate.ts --self-check
 
-      # The orchestration profile's provisioning rules (SMD-2210): a brain key
-      # refused when it is at write scope or not listed, the template
-      # renderer's escaping, the key-expiry reader, the env writer, and every
-      # credential a shipped template names declared. No n8n and no network.
-      # The eval kit runs the rest against a live profile (evals/README.md).
+      # The orchestration profile's provisioning rules (SMD-2210), with no real
+      # n8n:
+      # - the brain-key rule (write refused, the declared scope held, a key
+      #   under any field seen);
+      # - --init's secrets and bcrypt hash;
+      # - the env writer's quoting and modes;
+      # - every credential a shipped template names declared (the kit's
+      #   templates, until SMD-2212 ships the profile's);
+      # - the key decisions against a fake n8n on loopback: reuse, renewal, a
+      #   refused key, a busy n8n, rotation, missing scopes, the sweep of a
+      #   key a failed run left, and a rate-limited sign-in.
+      # Then the eval kit's egress judge (E) against a watcher-format log. The
+      # kit runs the rest against a live profile (evals/README.md).
       - name: Orchestration provisioning rules
         working-directory: deploy/orchestration
         run: bun provision.ts --self-check
+
+      - name: Orchestration egress judge
+        working-directory: evals
+        run: bun eval-orchestration.ts --self-check
 
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.

@@ -40,6 +40,8 @@ const IMAGE: string = (Bun.YAML.parse(readFileSync(join(HERE, "..", "..", "deplo
 
 const options = (env: Record<string, string>, rotate = false): Options => ({
   base: BASE, env, envFile: ENV_FILE, rotate,
+  // The kit reads run history (C1, C1s, P); an operator's key does not carry these.
+  extraScopes: ["execution:list", "execution:read"],
   credentials: [PROFILE_CREDENTIALS, join(DIR, "credentials.template.json")],
   workflows: ["linear-ingest.json", "brain-tools.json", "probe-capture.json"].map((f) => join(DIR, f)),
 });
@@ -139,40 +141,78 @@ async function pruningCheck(env: Record<string, string>, ctx: Ctx): Promise<Chec
   };
 }
 
+/** The compose network's own names; anything else n8n asks for is outside it. */
+const INTERNAL = /^(server|n8n|n8n-front|egress-watch|postgres)(\.|$)/;
+
 /**
- * The watcher's capture read back: each DNS name n8n asked for, and each TCP
- * connection it tried, by destination. It must include n8n's calls to the
- * brain (a SYN to port 8000). A capture without them saw nothing, and
- * proves nothing.
+ * The watcher's capture read back, and judged. It holds every DNS query n8n
+ * sent and every answer, every TCP connection attempt (a SYN with no ACK),
+ * and every other UDP datagram. It passes when all three hold:
+ * - it saw n8n's calls to the brain (a SYN to :8000). A capture without them
+ *   saw nothing, and proves nothing;
+ * - no name outside the compose network was asked for, beyond the hosts the
+ *   kit's own templates name;
+ * - nothing was dialled beyond addresses the network's own names resolved
+ *   to, and DNS to the resolver that answered for them. A hard-coded address
+ *   fails here, and so does a leaked seal that let Linear answer (review
+ *   pass 1: a mutant with the network not internal passed E on names alone).
+ * Exported for the self-check: pure over the watcher's log.
  */
-function egressRecord(): Check {
-  const log = compose("n8n", ["logs", "--no-log-prefix", "egress-watch"]).out;
+export function judgeEgress(log: string): Check {
   const names = new Map<string, number>();
+  const asked = new Map<string, string>();
+  const allowed = new Set<string>();
+  const resolvers = new Set<string>();
   const dials = new Map<string, number>();
+  const count = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) ?? 0) + 1);
   for (const line of log.split("\n")) {
-    // A query line: `… > 10.89.0.1.53: 4711+ A? api.n8n.io. (28)`. An answer does not repeat the question.
-    const q = / (?:A|AAAA|HTTPS|SVCB|PTR|SRV|TXT|MX)\? (\S+?)\.? \(\d+\)/.exec(line);
-    if (q) names.set(q[1], (names.get(q[1]) ?? 0) + 1);
+    // A query: `… IP 10.89.4.2.39771 > 10.89.4.1.53: 59194+ A? server.dns.podman. (35)`.
+    const q = / > (\S+)\.53: (\d+)\+? (?:A|AAAA|HTTPS|SVCB|PTR|SRV|TXT|MX)\? (\S+?)\.? \(\d+\)/.exec(line);
+    if (q) {
+      count(names, q[3]);
+      asked.set(q[2], q[3]);
+      if (INTERNAL.test(q[3])) resolvers.add(q[1]);
+      continue;
+    }
+    // An answer: `… IP 10.89.4.1.53 > 10.89.4.2.39771: 59194 1/0/0 A 10.89.4.3 (51)`.
+    const a = /\.53 > \S+: (\d+)\*?[-|$]? \d+\/\d+\/\d+ (.*)$/.exec(line);
+    if (a) {
+      if (INTERNAL.test(asked.get(a[1]) ?? "")) for (const m of a[2].matchAll(/\b(?:A|AAAA) ([0-9a-f.:]+)/g)) allowed.add(m[1]);
+      continue;
+    }
     // A SYN to port 5678 is someone connecting TO n8n (the front, the
     // healthcheck). One to loopback stays inside the container (n8n's task
     // runner, the healthcheck). Neither is n8n reaching out.
     const s = / > (\S+)\.(\d+): Flags \[S\]/.exec(line);
-    if (s && s[2] !== "5678" && !/^(127\.|::1$)/.test(s[1])) dials.set(`${s[1]}:${s[2]}`, (dials.get(`${s[1]}:${s[2]}`) ?? 0) + 1);
+    if (s && s[2] !== "5678" && !/^(127\.|::1$)/.test(s[1])) { count(dials, `${s[1]}:${s[2]}`); continue; }
+    const u = / (\S+)\.\d+ > (\S+)\.(\d+): UDP,/.exec(line);
+    if (u && !/^(127\.|::1$)/.test(u[2])) count(dials, `${u[2]}:${u[3]}/udp`);
   }
-  const INTERNAL = /^(server|n8n|n8n-front|egress-watch|postgres)(\.|$)/;
+  // DNS queries to a resolver that never answered for the network's own names count as dials too.
+  for (const line of log.split("\n")) {
+    const q = / > (\S+)\.53: \d+\+? \S+\? /.exec(line);
+    if (q && !resolvers.has(q[1])) count(dials, `${q[1]}:53/dns`);
+  }
   const external = [...names.keys()].filter((n) => !INTERNAL.test(n));
   // What the kit's own templates name, and nothing else: n8n itself must
   // dial no one. Before N8N_DISABLED_MODULES=mcp-registry it asked for
   // api.n8n.io at boot (measured), and a bump that adds a caller fails here.
-  const unexpected = external.filter((n) => !TEMPLATE_HOSTS.includes(n));
-  const toBrain = [...dials.keys()].some((d) => d.endsWith(":8000"));
+  const unexpectedNames = external.filter((n) => !TEMPLATE_HOSTS.includes(n));
+  const unexpectedDials = [...dials.keys()].filter((d) => !allowed.has(d.replace(/:\d+(\/\w+)?$/, "")));
+  const toBrain = [...dials.keys()].some((d) => d.endsWith(":8000") && allowed.has(d.slice(0, -5)));
   const fmt = (m: Map<string, number>, keep: (k: string) => boolean) => [...m].filter(([k]) => keep(k)).map(([k, v]) => `${k} ×${v}`).join(", ") || "none";
   return {
     id: "E",
-    pass: toBrain && unexpected.length === 0,
-    detail: `${toBrain ? "" : "NO SYN to the brain's port 8000 — the watcher saw nothing; "}${unexpected.length ? `NOT A TEMPLATE'S HOST: ${unexpected.join(", ")}; ` : ""}names asked outside the compose network: ${fmt(names, (n) => external.includes(n))} (the templates name ${TEMPLATE_HOSTS.join(", ")}); names inside: ${fmt(names, (n) => !external.includes(n))}; outbound TCP attempts: ${fmt(dials, () => true)}`,
+    pass: toBrain && unexpectedNames.length === 0 && unexpectedDials.length === 0,
+    detail: `${toBrain ? "" : "NO SYN to the brain's port 8000 — the watcher saw nothing; "}`
+      + `${unexpectedNames.length ? `NOT A TEMPLATE'S HOST: ${unexpectedNames.join(", ")}; ` : ""}`
+      + `${unexpectedDials.length ? `DIALLED OUTSIDE THE COMPOSE NETWORK: ${unexpectedDials.join(", ")}; ` : ""}`
+      + `names asked outside the compose network: ${fmt(names, (n) => external.includes(n))} (the templates name ${TEMPLATE_HOSTS.join(", ")}); names inside: ${fmt(names, (n) => !external.includes(n))}; `
+      + `dials (TCP SYN, other UDP): ${fmt(dials, () => true)}, to the network's own addresses ${[...allowed].join(", ") || "none"}`,
   };
 }
+
+const egressRecord = (): Check => judgeEgress(compose("n8n", ["logs", "--no-log-prefix", "egress-watch"]).out);
 
 export const n8n: Adapter = {
   tool: "n8n",
@@ -180,7 +220,10 @@ export const n8n: Adapter = {
   image: IMAGE,
   profile: "orchestration",
   variants: {
-    postgres: { file: "compose.n8n-postgres.yaml", services: ["n8n-db"] },
+    postgres: {
+      file: "compose.n8n-postgres.yaml", services: ["n8n-db"], excludes: ["sealed"],
+      why: "sealed, n8n is on the sealed network alone and n8n-db is not on it; the probe measures the shipped store, SQLite",
+    },
     sealed: { file: "compose.n8n-sealed.yaml", services: ["egress-watch", "n8n-front"] },
   },
   sealedVariant: SEALED,

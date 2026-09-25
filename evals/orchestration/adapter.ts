@@ -16,8 +16,8 @@ export type Adapter = {
   image: string;
   /** The compose profile the services sit under: n8n's is deploy/compose.yaml's `orchestration` (SMD-2210). */
   profile?: string;
-  /** Overlays `--up <tool> --with <name>` adds on top of compose.<tool>.yaml, and the services each starts. */
-  variants?: Record<string, { file: string; services: string[] }>;
+  /** Overlays `--up <tool> --with <name>` adds on top of compose.<tool>.yaml, the services each starts, and any it cannot run beside (and why). */
+  variants?: Record<string, { file: string; services: string[]; excludes?: string[]; why?: string }>;
   /**
    * The variant with no route off the compose network (n8n's `sealed`). Under
    * it the act tool and the schedule cannot reach Linear. The verifier

@@ -47,7 +47,9 @@ what the profile does rather than what it would do.
 4. **It reaches the brain through MCP only.** Captures go through n8n's MCP
    Client node with a **capture-scope** key (can add a thought, cannot read
    one); no workflow holds a write key. The brain grows no n8n-specific route,
-   and n8n reaches no brain table.
+   and n8n reaches no brain table. Amended in SMD-2210: an import template
+   will hold the key of OB1's own pipeline runner, a bounded write path
+   through OB1's code ("Running a pipeline from a workflow").
 5. **OB1 ships templates, not a runtime and not a node.** Workflow definitions
    (JSON, with placeholder credential ids the provisioning replaces) and the
    provisioning that loads them. No community node: every node the POC used is
@@ -56,10 +58,14 @@ what the profile does rather than what it would do.
 6. **n8n's public API is the integration contract, with two named gaps.**
    `/api/v1` (OpenAPI, versioned, `X-N8N-API-KEY`) for credentials, workflows,
    publishing and run history. It has no "run now" — an on-demand run is the
-   workflow's own Webhook trigger — and it cannot mint its own key: owner
-   setup, sign-in and key minting go through the editor's internal endpoints
-   (`/rest/owner/setup`, `/rest/login`, `/rest/api-keys`), at provisioning and
-   at every re-mint (key custody below).
+   workflow's own Webhook trigger — and it cannot mint its own key: sign-in
+   and key minting go through the editor's internal endpoints (`/rest/login`,
+   `/rest/api-keys`), at provisioning and at every re-mint (key custody
+   below). The POC also set the owner up through `/rest/owner/setup`. The
+   profile has n8n set the owner from the environment at every start
+   instead (`N8N_INSTANCE_OWNER_MANAGED_BY_ENV`, SMD-2210). That is one
+   internal endpoint fewer, and no window in which whoever reaches a fresh
+   instance first can claim it.
 7. **The dividing line.** n8n when the need is a stateful workflow — a
    schedule, a trigger, a retry, a multi-step fetch, a cursor, a two-way sync.
    The AI client's own MCP connector (the brain's, or a per-service MCP server)
@@ -235,18 +241,23 @@ concern SMD-1813's allowlist and SMD-1903's egress policy already name.
    presents to n8n's MCP endpoint is not the key that starts an ingestion (the
    POC shared one). In the profile they are `N8N_MCP_KEY` and
    `N8N_WEBHOOK_KEY`, and the kit measures each refused (403) on the other's
-   path. Provisioning refuses a brain key that `MCP_ACCESS_KEYS` does not list,
-   and one at write scope.
-4. **Key custody** (SMD-2210). The POC's key held eight of ~90 scopes. The
-   profile's holds ten: `credential:update` and `workflow:update` were added,
-   so a re-provision patches credentials and replaces workflows in place. The
+   path. Before writing anything, provisioning refuses:
+   - a brain key that `MCP_ACCESS_KEYS` does not list, or one at write scope,
+     wherever in a credential it sits;
+   - a key whose scope differs from the one its credential declares
+     (`brainScope`), so ingestion's credential cannot carry a read key.
+4. **Key custody** (SMD-2210). n8n 2.40.6 offers 106 scopes (measured). The
+   POC's key held eight. The profile's also holds eight, a different eight:
+   it adds `credential:update` and `workflow:update`, so a re-provision
+   patches credentials and replaces workflows in place, and drops the
+   run-history reads, which only the eval kit asks for, on its own key. The
    two calls outside the POC's scopes tried in the third review pass answered
    403, though n8n's docs say non-Enterprise keys have full access. But the
    scopes include creating and publishing workflows, so a holder can publish
    one that sends any unpinned credential anywhere. The profile's key
-   expires (`N8N_API_KEY_DAYS`, 90), and a re-mint deletes the key it
-   replaces, which n8n then answers with 401 (measured; in the POC, replaced
-   keys stayed valid). Every
+   expires (`N8N_API_KEY_DAYS`, 90). Every run deletes every other key it
+   minted, which n8n then answers with 401, including one a run cut short
+   left behind (measured; in the POC, replaced keys stayed valid). Every
    mint and re-mint signs in as the owner, so the **owner password** is a
    standing secret of the profile, stronger than the key; it lives in
    `deploy/.env` beside `POSTGRES_PASSWORD`. So does **`N8N_ENCRYPTION_KEY`**:
@@ -261,8 +272,11 @@ concern SMD-1813's allowlist and SMD-1903's egress policy already name.
    switches. The POC set them and did not probe what the container dials. The
    kit's `--with sealed` puts n8n on an `internal: true` network with a
    tcpdump watcher in its network namespace. The brain-side paths still pass
-   there, and the watcher records every name n8n asked for
-   (`../evals/README.md`, "The orchestration profile (SMD-2210)").
+   there. The watcher records every name n8n asked for and everything it
+   dialled, and the kit's E check fails on anything outside the compose
+   network beyond the templates' own hosts (`../evals/README.md`, "The
+   orchestration profile (SMD-2210)"). The first run found n8n's MCP registry
+   module calling api.n8n.io, which the profile now switches off.
 
 **On the way in**, the seam's inbound allowlist applies to a template exactly as
 to any fetcher (`docs/connector-taxonomy.md`, "One checkpoint"): the Gmail
@@ -277,9 +291,11 @@ not dropped when the recipe retires.
   (decision 3), and one published port on loopback (the house rule, check
   13). It sets the telemetry switches and `N8N_BLOCK_ENV_ACCESS_IN_NODE=true`,
   so no workflow reads a secret from the environment, and a 24-hour
-  execution window. It refuses to start without `N8N_ENCRYPTION_KEY`. The
+  execution window. It refuses to start without `N8N_ENCRYPTION_KEY` and the
+  owner's hash, and n8n sets the owner from the environment. The
   provisioning step is `../deploy/orchestration/provision.ts`, run from a
-  checkout: owner, an expiring key, credentials, templates, publish. It is
+  checkout. `--init` writes the secrets once. Each run then handles an
+  expiring key, credentials, templates and publish. It is
   the POC's adapter grown up, and the eval kit now imports it and runs its
   checks against the profile as it ships, not against the shape decision 3
   rejects.
@@ -347,10 +363,18 @@ runs outside n8n:
   image with Bun and python3, and reachable only on the compose network (no
   published port), behind a key of its own. It runs a fixed allowlist of
   pipelines by name, with the items in the request body. A workflow calls it
-  with an HTTP Request node, and every import template shares it. n8n reaches
-  the runner, never the brain. The runner is OB1's code on OB1's side of the
-  line, as board-sync is, and it writes the way the pipeline writes from a
-  checkout. So decision 4 holds for n8n.
+  with an HTTP Request node, and every import template shares it. This is an
+  amendment to decision 4, not a case of it. The runner writes the way the
+  pipeline writes from a checkout, straight into brain tables
+  (`db/ingest-records.ts` upserts by source). So the runner's key is a
+  write capability, bounded where decision 4's capture key is bounded by
+  scope:
+  - only the allowlisted pipelines;
+  - one source per pipeline;
+  - its own actor on every row it writes.
+
+  n8n still holds no brain write key and reaches no table. Its workflows
+  hold the runner's key, as board-sync's container holds a database URL.
 - **Declined: an n8n image with Bun and python3 added**, and Execute Command
   turned back on. OB1 would then build and distribute an image containing
   n8n, which is what Gate 1's "OB1 does not distribute n8n" rests on. And
@@ -359,8 +383,9 @@ runs outside n8n:
   container engine's socket inside n8n, which is root on the host.
 
 The runner is built with SMD-2212's first import template, not before, since
-nothing calls it until then. Like the rest of the profile it is loopback-only.
-SMD-2211's checkpoint covers the two live-API emitters' own egress.
+nothing calls it until then. It publishes no port, where n8n publishes one
+on loopback. SMD-2211's checkpoint covers the two live-API emitters' own
+egress.
 
 ## What moves, what stays
 
@@ -451,12 +476,14 @@ ships, provisioned by its own step. `--verify` adds three checks:
   exactly one provisioned key.
 - P: a saved run past the window gone from the API and the store, and one
   inside it kept.
-- E, under `--with sealed`: the egress record.
+- E, under `--with sealed`: the egress record. It fails on any name or dial
+  outside the compose network beyond the templates' own hosts.
 
 `--with postgres` measures the store decision 3 did not take. CI runs
-provisioning's pure rules (`provision.ts --self-check`) and holds the
-profile's port to loopback, its image to a digest, and a plain `config` to
-the three services it had before.
+provisioning's rules against a fake n8n (`provision.ts --self-check`) and E's
+judge against a crafted watcher log (`eval-orchestration.ts --self-check`).
+It holds the profile's port to loopback, its image to a digest, and a plain
+`config` to the three services it had before.
 
 ## Related
 

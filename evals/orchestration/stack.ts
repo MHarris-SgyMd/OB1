@@ -15,7 +15,7 @@
  * `orch-capture` (capture scope: the ingestion workflow's, can add, cannot
  * read) and `orch-read` (read scope: the retrieval tool's). Only their hashes
  * reach MCP_ACCESS_KEYS. The profile's keys sit there under deploy/.env's
- * names (profileKeys). LINEAR_API_KEY is not copied into it: the driver reads
+ * names (profileKeys, and the profile's own --init). LINEAR_API_KEY is not copied into it: the driver reads
  * it from the usual search path (db/env.ts) and each adapter hands it to its
  * tool's credential store; compose never sees it.
  *
@@ -98,21 +98,14 @@ export function ensureEnv(): Record<string, string> {
 }
 
 /**
- * The `orchestration` profile's keys, named as deploy/.env names them
- * (SMD-2210), so the kit's env file drives the shipped service unchanged.
- * n8n's capture key is the kit's `orch-capture`, whose hash is already in
- * MCP_ACCESS_KEYS.
+ * The `orchestration` profile's capture key, named as deploy/.env names it
+ * (SMD-2210): the kit's `orch-capture`, whose hash is already in
+ * MCP_ACCESS_KEYS. The profile's other secrets come from its own `--init`
+ * (initSecrets, which the driver runs), so the kit and an operator make them
+ * the same way.
  */
 function profileKeys(env: Record<string, string>): Record<string, () => string> {
-  const hex = (n: number) => randomBytes(n).toString("hex");
-  return {
-    N8N_ENCRYPTION_KEY: () => hex(32),
-    // n8n wants a capital and a number in the owner's password.
-    N8N_OWNER_PASSWORD: () => `Ob1-${hex(12)}`,
-    N8N_MCP_KEY: () => hex(32),
-    N8N_WEBHOOK_KEY: () => hex(32),
-    N8N_BRAIN_CAPTURE_KEY: () => env.ORCH_BRAIN_CAPTURE_KEY,
-  };
+  return { N8N_BRAIN_CAPTURE_KEY: () => env.ORCH_BRAIN_CAPTURE_KEY };
 }
 
 /**

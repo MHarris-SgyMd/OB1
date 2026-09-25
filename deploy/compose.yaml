@@ -472,28 +472,47 @@ services:
   # because the internal endpoints that mint the API key, and the run data
   # the kit counts, are not n8n's published contract.
   #
-  # After `up`, one provisioning step from a checkout:
-  # `bun deploy/orchestration/provision.ts`. It sets the owner up, mints an
-  # expiring API key into deploy/.env and loads credentials and templates
+  # Before the first `up`, `bun deploy/orchestration/provision.ts --init`
+  # writes the secrets below into deploy/.env. After it, one provisioning step
+  # from a checkout, `bun deploy/orchestration/provision.ts`, mints an expiring
+  # API key into deploy/.env and loads credentials and templates
   # (deploy/README.md, "Orchestration").
   n8n:
     image: docker.io/n8nio/n8n:2.40.6@sha256:9c7871d5cc4fc2565bb905e4df5bf7d6a5a4bf2f4313fb99a2b3fa380f331d7c
     profiles: ["orchestration"]
-    # n8n generates an encryption key when it has none and keeps it in its
-    # volume, beside the credentials it encrypts. Backing up deploy/.env would
-    # then miss it, and setting one later leaves n8n refusing to start on the
-    # mismatch. So without the key this container refuses to start, and says
-    # why. Compose's `:?` cannot do that job here: compose interpolates every
-    # service's block, profile or not, so a required-variable error would fail
-    # every `up` (the board-sync lesson above).
+    # n8n generates an encryption key when it has none. Backing up deploy/.env
+    # would then miss it, and setting one later leaves n8n refusing to start
+    # on the mismatch. Without an owner from the environment, a fresh n8n lets
+    # whoever reaches the port first claim it. So without both, this container
+    # exits at once and says why. Compose's `:?` cannot do that job here:
+    # compose interpolates every service's block, profile or not, so a
+    # required-variable error would fail every `up` (the board-sync lesson
+    # above). The restart policy then retries it, and `ps` shows it
+    # restarting, with the reason in its log. For a server that should come
+    # back after a reboot, that beats stopping for good after three tries.
     entrypoint:
       - tini
       - --
       - /bin/sh
       - -c
-      - '[ -n "$$N8N_ENCRYPTION_KEY" ] || { echo "n8n: set N8N_ENCRYPTION_KEY in deploy/.env (openssl rand -hex 32) and back it up with POSTGRES_PASSWORD — every stored credential is encrypted with it" >&2; exit 2; }; exec /docker-entrypoint.sh'
+      - '[ -n "$$N8N_ENCRYPTION_KEY" ] && [ -n "$$N8N_INSTANCE_OWNER_PASSWORD_HASH" ] || { echo "n8n: N8N_ENCRYPTION_KEY or N8N_OWNER_PASSWORD_HASH is not set in deploy/.env — run: bun deploy/orchestration/provision.ts --init, and back both up with POSTGRES_PASSWORD" >&2; exit 2; }; exec /docker-entrypoint.sh'
     environment:
+      # n8n also writes this key into its volume (/home/node/.n8n/config),
+      # beside the credentials it encrypts (read from the 2.40.6 image). So a
+      # copy of the whole volume carries both. deploy/README.md's backup
+      # copies the database alone.
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-}
+      # The owner, set from the environment at every start: it exists from
+      # the first boot, so there is no unclaimed window between `up` and
+      # provisioning. A changed password takes effect on the next restart.
+      # The hash is bcrypt; --init derives it from N8N_OWNER_PASSWORD and
+      # writes it single-quoted, since compose would read its `$`s as
+      # variables (measured).
+      N8N_INSTANCE_OWNER_MANAGED_BY_ENV: "true"
+      N8N_INSTANCE_OWNER_EMAIL: ${N8N_OWNER_EMAIL:-operator@ob1.local}
+      N8N_INSTANCE_OWNER_PASSWORD_HASH: ${N8N_OWNER_PASSWORD_HASH:-}
+      N8N_INSTANCE_OWNER_FIRST_NAME: OB1
+      N8N_INSTANCE_OWNER_LAST_NAME: Operator
       N8N_HOST: 127.0.0.1
       N8N_PORT: "5678"
       WEBHOOK_URL: http://127.0.0.1:${N8N_PORT:-5678}/
@@ -515,9 +534,10 @@ services:
       N8N_PERSONALIZATION_ENABLED: "false"
       N8N_DIAGNOSTICS_CONFIG_FRONTEND: ""
       N8N_DIAGNOSTICS_CONFIG_BACKEND: ""
-      # No secret in this block but the encryption key. Provisioning puts
-      # every key into n8n's encrypted credential store through the public
-      # API, and no workflow can read one from the environment.
+      # No secret in this block but the encryption key and the owner's hash.
+      # Provisioning puts every key into n8n's encrypted credential store
+      # through the public API, and no workflow can read one from the
+      # environment.
       N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"
       # Every run's data is a copy of what the run carried: a capture's text,
       # an act tool's arguments. It sits outside delete_thought and the

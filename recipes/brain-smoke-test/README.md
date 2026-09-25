@@ -6,7 +6,7 @@
 
 Runs ~30 independent checks across seven categories against your deployed Open Brain and prints a pass/skip/fail dashboard. Optional features (REST API, ob-graph, enhanced-thoughts, smart-ingest) are detected automatically and skipped with a clear reason rather than failing the run, so the same script works on stock core installs and fully-loaded instances.
 
-> **On this fork.** This harness was written against upstream's Supabase deployment: it dials the PostgREST gateway with a service-role key and probes RLS with an anon key, so its DB Schema, Access Key Enforcement and Row-Level Security categories have nothing to talk to here, where the brain is a plain Postgres and the server the one published port. The MCP Server, REST API and Auth categories apply to any URL. The fork's own smoke is `deploy/smoke.sh` (`deploy/README.md`). Its ticket is SMD-2103; SMD-2126's class decision (`docs/vendored-disposition.md`) lists it among the PostgREST-speaking scripts and leaves its shape to that ticket.
+> **On this fork.** This harness was written against upstream's Supabase deployment: it dials the PostgREST gateway with a service-role key and probes RLS with an anon key, so its DB Schema, Access Key Enforcement and Row-Level Security categories have nothing to talk to here, where the brain is a plain Postgres and the server the one port it publishes by default. The MCP Server, REST API and Auth categories apply to any URL. The fork's own smoke is `deploy/smoke.sh` (`deploy/README.md`). Its ticket is SMD-2103; SMD-2126's class decision (`docs/vendored-disposition.md`) lists it among the PostgREST-speaking scripts and leaves its shape to that ticket.
 
 ## Why Use This
 
