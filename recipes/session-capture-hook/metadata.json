@@ -1,24 +1,24 @@
 {
   "name": "Session Capture Hook",
-  "description": "A session hook for Claude Code and Codex that captures one summary thought per episode of a session into Open Brain — a piece of work, cut at compactions, moves to another branch or checkout, and new tickets — at each compaction and at session end: what was asked, what came out, what changed, with the thoughts that piece retrieved as its provenance, through a capture-only key, after a secret scan. Off until you paste the hooks it prints.",
+  "description": "A session hook for Claude Code and Codex that captures one summary thought per episode of a session into Open Brain — a piece of work, cut at compactions, moves to another branch or checkout, and new tickets — at each compaction and at session end: what was asked, what came out, what changed, with the thoughts that piece retrieved as its provenance, through a capture-only key, after a secret scan that blanks what it finds. Off until you paste the hooks it prints.",
   "category": "recipes",
   "author": {
     "name": "Michael Harris",
     "github": "MHarris-SgyMd"
   },
-  "version": "1.2.0",
+  "version": "1.3.0",
   "requires": {
     "open_brain": true,
     "services": [],
     "tools": ["Claude Code or Codex CLI", "Bun 1.4+ or Node.js 18+"],
     "env": {
-      "optional": ["OB1_SESSION_CAPTURE_CONFIG", "OB1_SESSION_CAPTURE_STATE", "OB1_BRAIN_URL", "OB1_CAPTURE_KEY", "OB1_SESSION_CAPTURE_SYNC"]
+      "optional": ["OB1_SESSION_CAPTURE_CONFIG", "OB1_SESSION_CAPTURE_STATE", "OB1_BRAIN_URL", "OB1_CAPTURE_KEY", "OB1_SESSION_CAPTURE_SYNC", "OB1_CAPTURE_ON_SECRET"]
     }
   },
   "requires_skills": ["session-summary"],
-  "tags": ["capture", "hooks", "session-end", "claude-code", "codex", "provenance", "derived_from", "capture-scope", "precompact", "checkpoint", "episodes", "segmentation"],
+  "tags": ["capture", "hooks", "session-end", "claude-code", "codex", "provenance", "derived_from", "capture-scope", "precompact", "checkpoint", "episodes", "segmentation", "redaction"],
   "difficulty": "beginner",
   "estimated_time": "10 minutes",
   "created": "2026-09-22",
-  "updated": "2026-09-24"
+  "updated": "2026-09-25"
 }

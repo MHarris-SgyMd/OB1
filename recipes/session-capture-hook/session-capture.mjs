@@ -21,10 +21,15 @@
  *
  * Before anything leaves the machine the summary is scanned for secrets — the
  * common key prefixes, credential assignments, a URL carrying a password, and
- * high-entropy tokens. A hit refuses the whole capture: the reason is printed
- * (never the match), the exit code is 1, and the session ends as it would have.
- * Exit 2 is the one code a Stop hook may block with; as a hook this script
- * never uses it (the by-hand forms — --print-hook, --dry-run — exit 2 on misuse).
+ * high-entropy tokens. A hit is REDACTED (SMD-2127): the span becomes
+ * `[redacted:<reason>]` in the prompts, the outcome and the title before the
+ * text is rendered, the text is scanned again, and only a text that second scan
+ * finds clean is sent — one it does not is refused, as every hit was before
+ * this change: the reason is printed (never the match), the exit code is 1, and
+ * the session ends as it would have. OB1_CAPTURE_ON_SECRET=refuse restores that
+ * for every hit. Exit 2 is the one code a Stop hook may block with; as a hook
+ * this script never uses it (the by-hand forms — --print-hook, --dry-run — exit
+ * 2 on misuse).
  *
  * Time budget: Claude Code gives SessionEnd hooks 1.5 s by default (raised to the
  * hook's `timeout`, at most 60), Codex 1 s (at most 3); PreCompact shares no
@@ -827,7 +832,7 @@ export function scanSummary(s, text) {
   const found = scanForSecrets(text);
   const sources = [["a prompt", s.prompts.join("\n")], ["the outcome", s.outcome ?? ""], ["the title", s.title ?? ""]];
   for (const [where, full] of sources) {
-    for (const f of scanForSecrets(full)) if (!found.some((g) => g.reason.replace(/ in (?:a prompt|the outcome|the title)$/, "") === f.reason)) found.push({ reason: `${f.reason} in ${where}`, at: f.at });
+    for (const f of scanForSecrets(full)) if (!found.some((g) => g.reason.replace(/ in (?:a prompt|the outcome|the title)$/, "") === f.reason)) found.push({ ...f, reason: `${f.reason} in ${where}` });
   }
   return found;
 }
@@ -850,7 +855,7 @@ function entropyBits(token) {
 /** The patterns, named so a refusal can say WHAT kind of thing it saw without showing it. */
 export const SECRET_PATTERNS = [
   ["anthropic key", /\bsk-ant-[A-Za-z0-9_-]{20,}/],
-  ["openai key", /\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,}/],
+  ["openai key", /\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,}/], // not an anthropic key, which the rule above names — a marker naming both would say what was not there (SMD-2127)
   ["aws access key id", /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/],
   ["github token", /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})/],
   ["slack token", /\bxox[aboprs]-[A-Za-z0-9-]{10,}/],
@@ -861,13 +866,20 @@ export const SECRET_PATTERNS = [
   ["hugging face token", /\bhf_[A-Za-z0-9]{30,}/],
   ["npm token", /\bnpm_[A-Za-z0-9]{36}\b/],
   ["jwt", /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/],
-  ["private key block", /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
-  ["url with a password", /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/]{4,}@/i],
+  // The whole block when its footer is there, so a redaction takes the body
+  // with the header (SMD-2127); the header alone is still a hit.
+  ["private key block", /-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----)?/],
+  // A rule with a `v` group names the VALUE as the span a redaction takes and
+  // the offset a refusal prints — `LINEAR_API_KEY=[redacted:…]` keeps the name;
+  // the `d` flag records the group's indices (SMD-2127). A value that begins
+  // with `[` is a placeholder — `[YOUR_API_KEY]`, `[redacted]`, this script's
+  // own marker — not a value: the marker must not be a hit on the second scan.
+  ["url with a password", /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:(?<v>(?!\[)[^\s/]{4,})@/di],
   ["slack webhook url", /https:\/\/hooks\.slack\.com\/services\/T[A-Z0-9]+\/B[A-Z0-9]+\/[A-Za-z0-9]{16,}/],
   // The connector form SETUP.md documents, `…/?key=<raw key>`: URLs are blanked
   // before the hex rule runs, so this one reads the full text (fourth review pass).
-  ["access key in a URL", /[?&](?:key|api[_-]?key|access[_-]?token|token|secret|sig|signature|x-amz-signature)=[A-Za-z0-9._~%+/=-]{16,}/i],
-  ["bearer token", /\b[Bb]earer\s+[A-Za-z0-9._~+/=-]{20,}/],
+  ["access key in a URL", /[?&](?:key|api[_-]?key|access[_-]?token|token|secret|sig|signature|x-amz-signature)=(?<v>[A-Za-z0-9._~%+/=-]{16,})/di],
+  ["bearer token", /\b[Bb]earer\s+(?<v>[A-Za-z0-9._~+/=-]{20,})/d],
   // A credential ASSIGNED: `x-brain-key: <hex>`, `MCP_ACCESS_KEY=…`, `api_key = "…"`. Not DATABASE_URL:
   // a URL without a password is an address, and one with is caught above.
   // Not MCP_ACCESS_KEYS (plural): that value holds name:scope:DIGEST records by construction (keygen.ts), and a session quoting deploy/.env's line is not leaking a key (third review pass).
@@ -882,16 +894,16 @@ export const SECRET_PATTERNS = [
   // name — `your-api-key-goes-here`, `REPLACE_WITH_YOUR_KEY`, `********`,
   // `get_random_secret_key()` — each refused a whole session (thirteenth); a
   // real key without a digit is rare, and the entropy rule reads one of 32+.
-  ["credential assignment", /(?<![A-Za-z0-9])(?:x-brain-key|MCP_ACCESS_KEY|OB1_[A-Z_]*KEY|OB1_SMOKE_KEY|(?:[A-Z0-9]+_)*(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret(?:[_-]?(?:access[_-]?)?key)?(?:[_-]?base)?)|(?:[A-Z0-9]+_)+token|bearer)\b["']?\s*[:=]\s*["']?(?!\$|<|%|\{|process\.env\b|os\.environ\b|Deno\.env\b|import\.meta\.env\b|[A-Za-z_]\w*(?:\.\w+)+[,;)]?(?:\s|$))(?=[^\s"']*\d)[^\s"']{16,}/i],
+  ["credential assignment", /(?<![A-Za-z0-9])(?:x-brain-key|MCP_ACCESS_KEY|OB1_[A-Z_]*KEY|OB1_SMOKE_KEY|(?:[A-Z0-9]+_)*(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret(?:[_-]?(?:access[_-]?)?key)?(?:[_-]?base)?)|(?:[A-Z0-9]+_)+token|bearer)\b["']?\s*[:=]\s*["']?(?<v>(?!\$|<|%|\{|\[|process\.env\b|os\.environ\b|Deno\.env\b|import\.meta\.env\b|[A-Za-z_]\w*(?:\.\w+)+[,;)]?(?:\s|$))(?=[^\s"']*\d)[^\s"']{16,})/di],
   // A credential handed to a command by flag: `--api-key <value>` has no `=`
   // (twelfth review pass). Hyphenated compounds (`--client-secret`,
   // `--refresh-token`), `=` as well as a space; not a path, a `%VAR%`, or
   // docker's `--secret id=…,src=…` spec, and the value carries a digit
   // (thirteenth). A password's floor is six, as in the assignment rule.
-  ["credential flag", /(?<![\w-])--(?:[a-z]+-)*(?:api-?key|access-?token|auth-?token|client-?secret|refresh-?token|token|secret(?:-?key)?)(?:\s+|=)["']?(?!\$|<|%|[\/~.]|\w+=)(?=[^\s"']*\d)[^\s"']{16,}/i],
-  ["password flag", /(?<![\w-])--(?:[a-z]+-)*password(?:\s+|=)["']?(?!\$|<|%|[\/~.]|\w+=)[^\s"']{6,}/i],
+  ["credential flag", /(?<![\w-])--(?:[a-z]+-)*(?:api-?key|access-?token|auth-?token|client-?secret|refresh-?token|token|secret(?:-?key)?)(?:\s+|=)["']?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)(?=[^\s"']*\d)[^\s"']{16,})/di],
+  ["password flag", /(?<![\w-])--(?:[a-z]+-)*password(?:\s+|=)["']?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)[^\s"']{6,})/di],
   // A password can be short — `POSTGRES_PASSWORD=hunter2` reached the brain under the 16-character floor (first review pass).
-  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*["']?[^\s"']{6,}/i],
+  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*["']?(?<v>(?!\[)[^\s"']{6,})/di],
   // This fork's own access keys are 64 hex characters (keygen.ts), as are their
   // digests — told apart only by where they sit: a digest follows `name:scope:`
   // in MCP_ACCESS_KEYS or `sha256:`; a bare 64-hex run is a key until proven
@@ -905,7 +917,9 @@ export const SECRET_PATTERNS = [
 
 /**
  * Scan a text. Returns [] when clean, else one entry per finding: the pattern's
- * name and where (a 0-based character offset), never the matched text. Besides
+ * name and where — `at`, a 0-based character offset, to `end` — never the
+ * matched text; the FIRST match of each pattern, or every match with
+ * `{ every: true }`, which a redaction needs (SMD-2127). Besides
  * the patterns: a 32+ character token of mixed case and digits with high
  * entropy — a key or token by shape. What is NOT a token: hex (a sha, a digest, a uuid —
  * no mixed case), a path (split at its slashes), a URL's path or query (a
@@ -917,8 +931,11 @@ export const SECRET_PATTERNS = [
  */
 /** The patterns that read the URL-blanked text: shapes, not prefixes. */
 const URL_BLIND = new Set(["64-hex token (a raw key, or a digest out of its context)"]);
+/** Each pattern once more with the `g` flag, for matchAll — the table's own objects stay stateless for exec. */
+const GLOBAL = new Map();
+const globalOf = (re) => { let g = GLOBAL.get(re); if (!g) { g = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`); GLOBAL.set(re, g); } return g; };
 
-export function scanForSecrets(text) {
+export function scanForSecrets(text, { every = false } = {}) {
   const findings = [];
   // URLs and base64 payloads blanked in place (offsets kept) for the shape
   // rules — the 64-hex rule and the token scan: a hex id in a URL's path (a
@@ -929,8 +946,12 @@ export function scanForSecrets(text) {
     .replace(/\bhttps?:\/\/[^\s)>\]"']+/gi, (u) => " ".repeat(u.length))
     .replace(/\bbase64,[A-Za-z0-9+/=]+/g, (b) => " ".repeat(b.length));
   for (const [name, re] of SECRET_PATTERNS) {
-    const m = re.exec(URL_BLIND.has(name) ? blanked : text);
-    if (m) findings.push({ reason: name, at: m.index });
+    for (const m of (URL_BLIND.has(name) ? blanked : text).matchAll(globalOf(re))) {
+      // The span: the `v` group's indices where the rule names a value, else the match.
+      const [at, end] = m.indices?.groups?.v ?? [m.index, m.index + m[0].length];
+      findings.push({ reason: name, at, end });
+      if (!every) break;
+    }
   }
   for (const m of blanked.matchAll(/[A-Za-z0-9+_=-]{32,}/g)) {
     const t = m[0];
@@ -938,10 +959,86 @@ export function scanForSecrets(text) {
     if (/^[\w.-]+\.(?:md|ts|mjs|js|json|sql|yml|yaml|txt|sh)$/.test(t)) continue; // a file name
     const wordish = (t.match(/[a-z]{3,}/g) ?? []).join("").length / t.length;
     if (wordish >= 0.6) continue; // an identifier, not a key
-    if (entropyBits(t) >= (t.length >= 48 ? 4.2 : 4.5)) findings.push({ reason: "high-entropy token", at: m.index });
+    if (entropyBits(t) < (t.length >= 48 ? 4.2 : 4.5)) continue;
+    // The span (SMD-2127): `=` and `_` are in the class (base64, snake_case), so
+    // `LINEAR_API_KEY=lin_api_…` is ONE token — judged whole, as above, but the
+    // span a redaction takes starts after a name-shaped `NAME=`, so the marker
+    // keeps the name, as the assignment rule's does.
+    const eq = t.indexOf("=");
+    const value = eq > 0 && t.length - eq - 1 >= 16 && /^[A-Za-z_][\w-]*$/.test(t.slice(0, eq)) ? eq + 1 : 0;
+    findings.push({ reason: "high-entropy token", at: m.index + value, end: m.index + t.length });
   }
-  return findings.sort((a, b) => a.at - b.at);
+  return findings.sort((a, b) => a.at - b.at || a.end - b.end);
 }
+
+// ── Redaction (SMD-2127) ─────────────────────────────────────────────────────
+
+/** How a hit is met: `redact` (the default) blanks the span and sends the rest; `refuse` drops the episode, as every hit was met before SMD-2127. */
+export const SECRET_MODES = ["redact", "refuse"];
+/**
+ * OB1_CAPTURE_ON_SECRET as a mode, or an error naming what it takes — read once
+ * by main() for the hook path, --dry-run and --check: a misspelling takes
+ * neither mode in silence (a hook that took `refuse` for a typo would drop
+ * sessions its operator meant to keep; one that took `redact` would send what
+ * its operator meant to hold back).
+ */
+export function secretMode(env = process.env) {
+  const raw = env.OB1_CAPTURE_ON_SECRET;
+  if (raw === undefined || raw === "") return { mode: "redact" };
+  if (SECRET_MODES.includes(raw)) return { mode: raw };
+  return { error: `OB1_CAPTURE_ON_SECRET takes ${SECRET_MODES.join(" or ")}, not "${raw}"` };
+}
+/** The marker a span becomes: what kind of thing was there — never how long, never what. */
+export const redactionMarker = (reasons) => `[redacted:${reasons.join(", ")}]`;
+/**
+ * Every span the scan finds, blanked in place. Overlapping and adjacent spans
+ * are ONE — the live case was a credential assignment, a linear key and a
+ * high-entropy token at one site — sorted by start and replaced RIGHT TO LEFT,
+ * so an earlier offset stays true after a later span has changed the length.
+ * Returns the text and the spans taken, each its reasons and its offsets in
+ * the text given; nothing of the match.
+ */
+export function redactSecrets(text) {
+  const spans = [];
+  for (const f of scanForSecrets(text, { every: true })) {
+    const last = spans[spans.length - 1];
+    if (last && f.at <= last.end) { last.end = Math.max(last.end, f.end); if (!last.reasons.includes(f.reason)) last.reasons.push(f.reason); continue; }
+    spans.push({ reasons: [f.reason], at: f.at, end: f.end });
+  }
+  let out = text;
+  for (let i = spans.length - 1; i >= 0; i--) out = out.slice(0, spans[i].at) + redactionMarker(spans[i].reasons) + out.slice(spans[i].end);
+  return { text: out, spans };
+}
+/**
+ * An episode with its secrets blanked and its summary rendered from the
+ * blanked sources — the prompts one by one, the outcome and the title, the
+ * sources scanSummary reads whole — so a key a clip would cut in half is
+ * blanked before the clip; then the rendered text once more, for what reaches
+ * it from elsewhere (a path, a link). The episode given is not changed.
+ * `redactions` names each span taken — its reasons, its offset in the source
+ * it sat in — for the payload, the message and the log.
+ */
+export function redactEpisode(ep) {
+  const redactions = [];
+  const take = (text, place) => {
+    if (typeof text !== "string" || !text) return text;
+    const r = redactSecrets(text);
+    for (const s of r.spans) redactions.push({ reason: s.reasons.join(", "), at: s.at, in: place });
+    return r.text;
+  };
+  // The DISTINCT prompts, as the summary lists them: a retried prompt is one
+  // line in the text and one redaction in the count.
+  const redacted = { ...ep, prompts: distinctPrompts(ep.prompts).map((p) => take(p, "a prompt")), outcome: take(ep.outcome, "the outcome"), title: take(ep.title, "the title") };
+  const text = take(renderSummary(redacted), "the text");
+  return { ep: redacted, text, redactions };
+}
+/** The episode's summary as it would be sent under a mode: blanked and re-rendered, or as rendered. */
+export function cleanEpisode(ep, onSecret) {
+  return onSecret === "redact" ? redactEpisode(ep) : { ep, text: renderSummary(ep), redactions: [] };
+}
+/** `redacted <reason> at char N in <source>` per span, for the message, the log and the dry run. */
+export const describeRedactions = (rs) => rs.map((r) => `${r.reason} at char ${r.at} in ${r.in}`).join("; ");
+const countRedactions = (n) => `${n} redaction${n === 1 ? "" : "s"}`;
 
 // ── Posting over MCP ─────────────────────────────────────────────────────────
 
@@ -1146,7 +1243,8 @@ export const RUN_MAX = 5;
  * prints the message and exits with the code; `payloadPaths` are the payloads
  * the run's child posts, one per episode written, `payloadPath` the newest. One payload per episode whose summary changed
  * (SMD-2013): an episode captured and unchanged is skipped by fingerprint, one
- * whose summary carries a secret is refused alone — the others still post.
+ * whose summary carries a secret has it blanked (`opts.onSecret` `redact`, the
+ * default) or is refused alone (`refuse`) — the others still post (SMD-2127).
  */
 let payloadSeq = 0;
 export function prepare(hook, opts = {}) {
@@ -1185,9 +1283,13 @@ export function prepare(hook, opts = {}) {
   if (typeof hook.cwd === "string" && hook.cwd) { for (const x of [s, last]) { x.cwd = hook.cwd; x.roots.add(hook.cwd); } }
   last.checkpoint = checkpointOf(hook); // a checkpoint is the open episode's; a closed one is over
   const written = [], skipped = [], refused = [];
+  const onSecret = opts.onSecret ?? "redact";
   for (const ep of episodes) {
     const chain = chainFor(ep);
-    const text = renderSummary(ep);
+    // Blanked BEFORE the fingerprint (SMD-2127): the fingerprint is of the text
+    // sent, so the same transcript is the same summary, however it was cleaned.
+    const cleaned = cleanEpisode(ep, onSecret);
+    const { text, redactions } = cleaned;
     const fingerprint = sha256(text);
     const state = states.get(chain);
     if (state.fingerprint === fingerprint) { skipped.push({ ep, as: state.thought_id }); continue; }
@@ -1195,12 +1297,16 @@ export function prepare(hook, opts = {}) {
     // again with no new turn would queue the same summary twice, and the run
     // that drains them would dead-letter the first as "obsolete" (eleventh review pass).
     if (sessionPayloads(chain, {}, listing).some((p) => payloadOf(p)?.fingerprint === fingerprint)) { skipped.push({ ep, queued: true }); continue; }
-    const findings = scanSummary(ep, text);
-    if (findings.length) { refused.push({ ep, where: findings.map((f) => `${f.reason} at char ${f.at}`).join(", ") }); continue; }
+    // The gate, whatever the mode: under `redact` it reads the blanked sources
+    // and text — the net under the redaction, so nothing the scan can see is
+    // sent, a span mis-measured included (SMD-2127).
+    const findings = scanSummary(cleaned.ep, text);
+    if (findings.length) { refused.push({ ep, where: `${findings.map((f) => `${f.reason} at char ${f.at}`).join(", ")}${redactions.length ? ` after ${countRedactions(redactions.length)}` : ""}` }); continue; }
     const payload = {
       session_id: sessionId, chain_id: chain, episode: ep.n, harness: s.harness, event: ep === last ? event : "", trigger: ep === last ? last.checkpoint?.trigger : undefined, text, fingerprint, // a closed episode's summary is final whatever event the run is: it carries no event, so the log says none (second review pass)
       derived_from: provenanceOf(ep), supersedes: state.thought_id || undefined,
       prompts: distinctPrompts(ep.prompts).length, prepared_at: new Date().toISOString(), attempts: 0,
+      ...(redactions.length ? { redactions } : {}), // what was blanked, where — the log's and the message's; absent when nothing was
     };
     ensureDirs();
     // The name orders the queue: the millisecond, then a per-process sequence
@@ -1213,7 +1319,7 @@ export function prepare(hook, opts = {}) {
   }
   const one = episodes.length === 1;
   const who = `session ${sessionId}${last.checkpoint ? ` (${event}${last.checkpoint.trigger ? ` ${last.checkpoint.trigger}` : ""})` : ""}`;
-  const describe = (p) => `${p.prompts} prompt(s), ${p.derived_from.length} source id(s)${p.supersedes ? `, supersedes ${p.supersedes}` : ""}`;
+  const describe = (p) => `${p.prompts} prompt(s), ${p.derived_from.length} source id(s)${p.supersedes ? `, supersedes ${p.supersedes}` : ""}${p.redactions?.length ? `, redacted: ${describeRedactions(p.redactions)}` : ""}`;
   const sentences = [];
   if (refused.length) {
     const carrier = one ? `the summary for session ${sessionId}` : `${refused.length === 1 ? `episode ${refused[0].ep.n}` : `episodes ${refused.map((r) => r.ep.n).join(", ")}`} of session ${sessionId}`;
@@ -1574,7 +1680,7 @@ export async function postPending(cfg, own) {
         const summaryAt = Number.isNaN(pastMs(payload.prepared_at)) ? new Date().toISOString() : payload.prepared_at;
         if (!stateIsNewerNow) writeState(chain, { chain_id: chain, thought_id: id, fingerprint: payload.fingerprint, captured_at: new Date().toISOString(), summary_at: summaryAt, harness: payload.harness, prompts: payload.prompts, sources: (payload.derived_from ?? []).length });
         unlinkSync(here);
-        log(`captured ${who} harness=${payload.harness}${payload.event && payload.event !== "SessionEnd" ? ` event=${payload.event}${payload.trigger ? ` trigger=${payload.trigger}` : ""}` : ""} id=${id} sources=${(payload.derived_from ?? []).length}${payload.supersedes ? ` supersedes=${payload.supersedes}` : ""}${note ? ` note="${note}"` : ""}`);
+        log(`captured ${who} harness=${payload.harness}${payload.event && payload.event !== "SessionEnd" ? ` event=${payload.event}${payload.trigger ? ` trigger=${payload.trigger}` : ""}` : ""} id=${id} sources=${(payload.derived_from ?? []).length}${payload.supersedes ? ` supersedes=${payload.supersedes}` : ""}${payload.redactions?.length ? ` redactions=${payload.redactions.length}` : ""}${note ? ` note="${note}"` : ""}`);
         outcomes.push({ file, ok: true, id, note });
       } catch (e) {
         moveTo(here, PENDING_DIR());
@@ -1718,6 +1824,7 @@ export async function main(argv) {
   const harness = flag(args, "--harness");
   // Exit 1, not 2: on a Stop hook 2 would block the assistant's turn over a typo in the command line (seventh review pass).
   if (harness !== undefined && !HARNESSES.includes(harness)) { console.error(`--harness takes ${HARNESSES.join(" or ")}, not "${harness}" (omit it: the transcript's first line says which)`); return 1; }
+  const { mode: onSecret, error: modeError } = secretMode(); // judged where it is read: --check, --dry-run, the hook (SMD-2127)
   if (has(args, "--print-hook")) {
     const h = flag(args, "--print-hook") || "claude-code";
     if (!HARNESSES.includes(h)) { console.error(`--print-hook takes ${HARNESSES.join(" or ")}, not "${h}"`); return 2; }
@@ -1743,9 +1850,10 @@ export async function main(argv) {
   if (has(args, "--check")) {
     let cfg;
     try { cfg = loadConfig(); } catch (e) { console.error(`session-capture: ${e.message}`); return 2; }
+    if (modeError) { console.error(`session-capture: ${modeError}`); return 1; }
     let tools;
     try { tools = ((await rpc(cfg, "tools/list", {}, 15_000)).tools ?? []).map((t) => t.name).sort(); } catch (e) { console.error(`session-capture: ${cfg.url} did not answer tools/list — ${e.message}`); return 1; }
-    if (tools.join() === "capture_thought") { console.log(`ok: ${cfg.url} answers, and the key sees capture_thought alone (capture scope). State: ${STATE_DIR}`); return 0; }
+    if (tools.join() === "capture_thought") { console.log(`ok: ${cfg.url} answers, and the key sees capture_thought alone (capture scope). On a secret: ${onSecret}. State: ${STATE_DIR}`); return 0; }
     if (!tools.includes("capture_thought")) { console.error(`session-capture: the key cannot capture — its surface is [${tools.join(", ")}]. Mint one with: bun server-portable/keygen.ts --name session-hook --scope capture`); return 1; }
     console.error(`warning: the key can capture, and it can also ${tools.filter((t) => t !== "capture_thought").join(", ")} — a leak of this file reads your brain. Prefer a capture-scoped key: bun server-portable/keygen.ts --name session-hook --scope capture`);
     return 0;
@@ -1764,6 +1872,7 @@ export async function main(argv) {
     const { trigger, error: triggerError } = triggerFlag(args, ev);
     if (triggerError) { console.error(triggerError); return 2; }
     if (has(args, "--min-interval")) { console.error("--min-interval is --print-hook's, for a Stop hook; a dry run has no interval"); return 2; }
+    if (modeError) { console.error(modeError); return 2; }
     const s = summariseTranscript(path, harness);
     if (!s.episodes.length) {
       const sniffed = sniffHarness(readFileSync(path, "utf8").split("\n", 5));
@@ -1783,13 +1892,16 @@ export async function main(argv) {
     }
     let code = 0;
     for (const ep of s.episodes) {
-      const text = renderSummary(ep);
-      const findings = scanSummary(ep, text);
+      const cleaned = cleanEpisode(ep, onSecret);
+      const { text, redactions } = cleaned;
+      const findings = scanSummary(cleaned.ep, text);
       const ids = provenanceOf(ep);
       if (several) console.log(`\n=== episode ${ep.n} ===`);
       console.log(text);
       console.log(`\n--- would send${several ? ` (episode ${ep.n})` : ""}: source=${s.harness}, derived_from=${ids.length} id(s)${ids.length ? ` [${ids.slice(0, 5).join(", ")}${ids.length > 5 ? ", …" : ""}]` : ""}`);
-      if (findings.length) { console.log(`--- would REFUSE${several ? ` episode ${ep.n}` : ""}: ${findings.map((f) => `${f.reason} at char ${f.at}`).join(", ")}`); code = 1; } else console.log("--- secret scan: clean");
+      if (findings.length) { console.log(`--- would REFUSE${several ? ` episode ${ep.n}` : ""}: ${findings.map((f) => `${f.reason} at char ${f.at}`).join(", ")}${redactions.length ? ` after ${countRedactions(redactions.length)}` : ""}`); code = 1; }
+      else if (redactions.length) console.log(`--- secret scan: ${countRedactions(redactions.length)} — ${describeRedactions(redactions)}; the text above is what would be sent`);
+      else console.log("--- secret scan: clean");
     }
     return code;
   }
@@ -1825,6 +1937,8 @@ export async function main(argv) {
   }
   const { minInterval: hookInterval, error: intervalError, raw: intervalRaw } = intervalFlag(args, { aboveZero: false });
   if (intervalError) { log(`error: --min-interval "${intervalRaw}" is not a number of minutes`); console.error(`session-capture: ${intervalError}; nothing captured`); return 1; }
+  // Exit 1, as the flags above: a typo in the environment blocks nothing and captures nothing (SMD-2127).
+  if (modeError) { log(`error: ${modeError}`); console.error(`session-capture: ${modeError}; nothing captured`); return 1; }
   const minIntervalMin = hookInterval ?? 0;
   // The config is checked FIRST, before a payload exists: a hook pasted before
   // the config is written would otherwise queue one payload per session end
@@ -1833,7 +1947,7 @@ export async function main(argv) {
   let cfg;
   try { cfg = loadConfig(); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 1; }
   let prepared;
-  try { prepared = prepare(hook, { minIntervalMin, harness }); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 1; }
+  try { prepared = prepare(hook, { minIntervalMin, harness, onSecret }); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 1; }
   // A refused episode exits 1 once the others are on their way (SMD-2013): the
   // secret's episode is not sent, the rest of the session still is.
   const paths = prepared.payloadPaths ?? [];
