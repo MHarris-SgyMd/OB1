@@ -20,7 +20,8 @@
  * What a line is: a JSON object with exactly the keys `Ingested` names for an
  * item — `identity {system, key}`, `scope`, `canonical {form, mediaType}`,
  * `text`, `links`, `mentions`, `facets`, and optionally `createdAt` and
- * `watermark {key, value, asOf?}`. The round-trip rule holds by construction:
+ * `watermark {key, value, asOf?}` (`null` for either is absent — what a
+ * Python emitter writes for None). The round-trip rule holds by construction:
  * the canonical IS the line's `form`, stored byte for byte; the text is the
  * emitter's projection of it. `derived` is not taken from a file — a part
  * that is a thought of its own is a line of its own.
@@ -30,25 +31,39 @@
  * file the emitter cannot re-run cleanly, where a file refused is fixed and
  * run again. The rules are the contract's own (SYSTEM_RE, IDENTITY_MAX,
  * LINK_RELATIONS, ENTITY_TYPES, normaliseLinks / normaliseMentions) plus what
- * a `text` or `jsonb` column cannot hold — a NUL, a lone surrogate — checked
- * here rather than discovered at the cast, which would abort the run on line
- * N of M with N-1 written. Two lines of one identity are refused together:
- * they would land on one row, the second silently over the first.
+ * a `text` or `jsonb` column cannot hold — a NUL, a lone surrogate, a byte
+ * that is not UTF-8, a value nested past what a parser's stack takes —
+ * checked here rather than discovered at the cast, which would abort the run
+ * on line N of M with N-1 written; plus what the pipeline's own knobs could
+ * not act on — a scope with a `/` (`--allow` reads one as a path), a key or
+ * scope with surrounding whitespace (a link's target and an `--allow` entry
+ * are trimmed, so neither could ever match). Two lines of one identity are
+ * refused together: they would land on one row, the second silently over the
+ * first. A system the pipeline reads itself (`fork`, `commit`, `linear`,
+ * `memory`, `markdown`, `items`) is refused: a file's row on the board sync's
+ * id for a ticket would overwrite the sync's row with no `held` to say so.
  *
  * The items are external content and pass SMD-1813's allowlist as the two
  * adapter sources do: each names its `scope`, and the pipeline ingests only a
  * scope the operator cleared (`--allow` / OB1_INGEST_ALLOW), default nothing.
  */
 
-import { IDENTITY_MAX, LINK_RELATIONS, normaliseLinks, normaliseMentions, SYSTEM_RE, type Ingested, type Link, type Mention } from "./ingest-contract.ts";
+import { decodeUtf8Strict, IDENTITY_MAX, LINK_RELATIONS, normaliseLinks, normaliseMentions, SYSTEM_RE, type Ingested, type Link, type Mention } from "./ingest-contract.ts";
 import { ENTITY_TYPES } from "../server-portable/entities.ts";
 
 /** The keys a line may carry — `Ingested`'s, less `derived`. */
 export const ITEM_KEYS = ["identity", "scope", "canonical", "text", "links", "mentions", "facets", "createdAt", "watermark"] as const;
 /** The keys a line must carry. */
 export const REQUIRED_KEYS = ["identity", "scope", "canonical", "text", "links", "mentions", "facets"] as const;
-/** The pipeline's own record sources — the fork's changes, its commits, the memory files. No adapter writes them and a file may not claim them: their rows are the tree's, not an emitter's. */
-export const RESERVED_SYSTEMS = ["fork", "commit", "memory"] as const;
+/**
+ * The pipeline's own sources (ingest-records.ts SOURCES — its self-check
+ * holds the two lists equal). A file may not claim one: the fork's records
+ * have no adapter and their rows are the tree's; `linear` and `markdown` are
+ * the adapters' id spaces, where a file's row would land on the board sync's
+ * row for a ticket and overwrite it — same id, so `held` never trips (first
+ * review pass, run-it); `items` is this flag's name, not a system.
+ */
+export const RESERVED_SYSTEMS = ["fork", "commit", "linear", "memory", "markdown", "items"] as const;
 /** The metadata keys the pipeline owns: `source` is the system's, the two actor keys are 050's trigger's. A watermark under one of them would be overwritten and the clock guard inert. */
 export const PIPELINE_META_KEYS = ["source", "actor_kind", "actor_name"] as const;
 /** normaliseMentions' bound on a name. */
@@ -59,6 +74,8 @@ const MEDIA_TYPE_RE = /^[A-Za-z0-9][\w!#$&^.+-]{0,126}\/[A-Za-z0-9][\w!#$&^.+-]{
 const LONE_SURROGATE_RE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
 /** An ISO-8601 instant with an offset: date, `T`, hh:mm, optional seconds and fraction, `Z` or ±hh:mm. */
 const INSTANT_RE = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)(?::(\d\d)(?:\.\d{1,9})?)?(?:Z|([+-])(\d\d):(\d\d))$/;
+/** The byte-order mark a Windows redirection puts before the first line; not JSON, and invisible in a message. */
+const BOM = "﻿";
 
 /** Why a line cannot be an item: the file (as the flag named it), the line, the field and the reason — the message spells all four. */
 export class ItemsRefusal extends Error {
@@ -69,12 +86,16 @@ export class ItemsRefusal extends Error {
 }
 
 /**
- * An ISO-8601 instant a timestamptz cast accepts, and no other. `Date.parse`
- * is not the judge: it takes `2026-02-30T00:00:00Z` as March the 2nd and a
- * bare date as midnight UTC, and a value it rounded would be written as
+ * One strict profile of ISO-8601 — `YYYY-MM-DDThh:mm[:ss[.f]]` with `Z` or
+ * `±hh:mm` — every value of which a timestamptz cast accepts as the instant
+ * it reads as. A cast takes more shapes (a space for the `T`, `+0530`, a bare
+ * date); this takes the one an emitter can be told to write. `Date.parse` is
+ * not the judge: it takes `2026-02-30T00:00:00Z` as March the 2nd and a bare
+ * date as midnight UTC, and a value it rounded would be written as
  * created_at without a word (ingest-linear.ts's isCalendarDate, for the same
  * reason). The shape is matched, then each field is bounded and the calendar
- * date round-tripped through Date.UTC.
+ * date round-tripped — through setUTCFullYear, which takes a year under 100
+ * as itself where Date.UTC takes it as 19xx (first review pass, cold read).
  */
 export function isInstant(s: string): boolean {
   const m = INSTANT_RE.exec(s);
@@ -82,8 +103,9 @@ export function isInstant(s: string): boolean {
   const [, y, mo, d, h, mi, se, , oh, om] = m;
   if (Number(h) > 23 || Number(mi) > 59 || (se !== undefined && Number(se) > 59)) return false;
   if (oh !== undefined && (Number(oh) > 23 || Number(om) > 59)) return false;
-  const t = Date.UTC(Number(y), Number(mo) - 1, Number(d));
-  return new Date(t).toISOString().slice(0, 10) === `${y}-${mo}-${d}`;
+  const dt = new Date(0);
+  dt.setUTCFullYear(Number(y), Number(mo) - 1, Number(d));
+  return dt.toISOString().slice(0, 10) === `${y}-${mo}-${d}`;
 }
 
 /**
@@ -101,11 +123,38 @@ export function unstorable(s: string): string | null {
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isString = (v: unknown): v is string => typeof v === "string";
 
-/** Every string inside a JSON value with the path to it, for the storability check over facets and the rest. */
-function* strings(v: unknown, path: string): Generator<[string, string]> {
-  if (isString(v)) yield [path, v];
-  else if (Array.isArray(v)) for (let i = 0; i < v.length; i++) yield* strings(v[i], `${path}[${i}]`);
-  else if (isObject(v)) for (const [k, x] of Object.entries(v)) { yield [`${path}.${k}`, k]; yield* strings(x, `${path}.${k}`); }
+/**
+ * Every string inside a JSON value with the path to it, for the storability
+ * check over facets and the rest. Iterative, with its own stack: a value
+ * nested two hundred thousand deep is a line to refuse, not a RangeError to
+ * die of (first review pass, run-it).
+ */
+function* strings(root: unknown, rootPath: string): Generator<[string, string]> {
+  const stack: [unknown, string][] = [[root, rootPath]];
+  while (stack.length) {
+    const [v, path] = stack.pop()!;
+    if (isString(v)) yield [path, v];
+    else if (Array.isArray(v)) for (let i = v.length - 1; i >= 0; i--) stack.push([v[i], `${path}[${i}]`]);
+    else if (isObject(v)) {
+      const entries = Object.entries(v);
+      for (let i = entries.length - 1; i >= 0; i--) { const [k, x] = entries[i]; stack.push([x, `${path}.${k}`]); stack.push([k, `${path}.${k}`]); }
+    }
+  }
+}
+
+/** How deep a line's value may nest. PostgreSQL's jsonb reader is recursive and stops at its stack limit — a few thousand levels — with an error at the cast; no facet nests past a handful, so the bound is small and the refusal is this module's, with the line (first review pass, run-it). */
+export const DEPTH_MAX = 64;
+
+/** Whether a JSON value nests past `max` levels — iterative, so the question itself cannot overflow. */
+function tooDeep(root: unknown, max: number): boolean {
+  const stack: [unknown, number][] = [[root, 0]];
+  while (stack.length) {
+    const [v, depth] = stack.pop()!;
+    if (typeof v !== "object" || v === null) continue;
+    if (depth >= max) return true;
+    for (const x of Array.isArray(v) ? v : Object.values(v)) stack.push([x, depth + 1]);
+  }
+  return false;
 }
 
 /** What one parsed line yields: the item, and the links normaliseLinks set aside (self, duplicate, empty target). */
@@ -120,6 +169,7 @@ export type ParsedItem = { item: Ingested; linksDropped: number };
 export function parseItem(value: unknown, line: number, label: string = "--items"): ParsedItem {
   const refuse = (field: string, reason: string): never => { throw new ItemsRefusal(label, line, field, reason); };
   if (!isObject(value)) return refuse("(line)", `a line is one JSON object, not ${value === null ? "null" : Array.isArray(value) ? "an array" : `a ${typeof value}`}`);
+  if (tooDeep(value, DEPTH_MAX)) return refuse("(line)", `nested too deeply (past ${DEPTH_MAX} levels) — a jsonb value has a depth bound too, met at the cast; flatten the facets`);
   for (const k of Object.keys(value)) {
     if (!(ITEM_KEYS as readonly string[]).includes(k)) return refuse(k, k === "derived" ? "a part that is a thought of its own is a line of its own; `derived` is not taken from a file" : `not a key of an item — the keys are ${ITEM_KEYS.join(", ")}`);
   }
@@ -131,12 +181,16 @@ export function parseItem(value: unknown, line: number, label: string = "--items
   for (const k of Object.keys(identity)) if (k !== "system" && k !== "key") return refuse(`identity.${k}`, "not a key of an identity — {system, key}");
   const { system, key } = identity;
   if (!isString(system) || !SYSTEM_RE.test(system)) return refuse("identity.system", `one lower-case word matching ${SYSTEM_RE} — as thought_sources.system spells it`);
-  if ((RESERVED_SYSTEMS as readonly string[]).includes(system)) return refuse("identity.system", `"${system}" is one of the pipeline's own record sources (${RESERVED_SYSTEMS.join(", ")}); a file names the system it was parsed from`);
+  if ((RESERVED_SYSTEMS as readonly string[]).includes(system)) return refuse("identity.system", `"${system}" is one of the pipeline's own sources (${RESERVED_SYSTEMS.join(", ")}), which it reads itself; a file names the system it was parsed from`);
   if (!isString(key) || key.trim() === "") return refuse("identity.key", "a non-empty string — what survives a rename on the source side");
+  if (key !== key.trim()) return refuse("identity.key", "leading or trailing whitespace — a link's target is trimmed (normaliseLinks), so a row under this key could never be linked");
   if (key.length > IDENTITY_MAX) return refuse("identity.key", `${key.length} characters; thought_sources.identity holds ${IDENTITY_MAX}`);
 
   // scope
-  if (!isString(value.scope) || value.scope.trim() === "") return refuse("scope", "a non-empty string — the unit --allow clears (an export, a vault, a workspace)");
+  const scope = value.scope;
+  if (!isString(scope) || scope.trim() === "") return refuse("scope", "a non-empty string — the unit --allow clears (an export, a vault, a workspace)");
+  if (scope !== scope.trim()) return refuse("scope", "surrounding whitespace — --allow trims its entries, so this scope could never be cleared");
+  if (scope.includes("/")) return refuse("scope", "holds a `/`, which --allow reads as a path (the markdown vault's scope) and resolves, so this scope could never be cleared; spell it with `:` (chatgpt:export)");
 
   // canonical
   const canonical = value.canonical;
@@ -177,19 +231,20 @@ export function parseItem(value: unknown, line: number, label: string = "--items
   // facets
   if (!isObject(value.facets)) return refuse("facets", "an object — the row's metadata (tags, a title, dates); {} when the item has none");
 
-  // createdAt
-  if ("createdAt" in value && (!isString(value.createdAt) || !isInstant(value.createdAt))) return refuse("createdAt", "an ISO-8601 instant with an offset (2026-09-25T10:00:00Z) — a calendar date that exists; a bare date or a rolled-over one is not taken");
+  // createdAt — `null` is absent, as a Python emitter spells None.
+  const createdAt = value.createdAt ?? undefined;
+  if (createdAt !== undefined && (!isString(createdAt) || !isInstant(createdAt))) return refuse("createdAt", "an ISO-8601 instant with an offset (2026-09-25T10:00:00Z) — a calendar date that exists; a bare date or a rolled-over one is not taken; omit the key (or write null) when the source has none");
 
-  // watermark
+  // watermark — `null` is absent too.
   let watermark: Ingested["watermark"];
-  if ("watermark" in value) {
-    const w = value.watermark;
-    if (!isObject(w)) return refuse("watermark", "an object {key, value, asOf?} — the source's clock for the item, as one of the facets");
+  const w = value.watermark ?? undefined;
+  if (w !== undefined) {
+    if (!isObject(w)) return refuse("watermark", "an object {key, value, asOf?} — the source's clock for the item, as one of the facets; omit the key (or write null) when the source has none");
     for (const k of Object.keys(w)) if (k !== "key" && k !== "value" && k !== "asOf") return refuse(`watermark.${k}`, "not a key of a watermark — {key, value, asOf?}");
     if (!isString(w.key) || w.key.trim() === "") return refuse("watermark.key", "a non-empty string — the facet the clock is written under");
     if ((PIPELINE_META_KEYS as readonly string[]).includes(w.key)) return refuse("watermark.key", `"${w.key}" is the pipeline's own metadata key; the clock would be overwritten and the guard inert`);
-    if (!isString(w.value) || w.value === "") return refuse("watermark.value", "a non-empty string that sorts as it orders — an ISO-8601 instant in UTC");
-    if ("asOf" in w && (!isString(w.asOf) || !isInstant(w.asOf))) return refuse("watermark.asOf", "an ISO-8601 instant with an offset — when this view of the source was taken");
+    if (!isString(w.value) || w.value === "") return refuse("watermark.value", "a non-empty string that sorts as it orders — the values compare as text, so an ISO-8601 instant in UTC is the usual form");
+    if (w.asOf != null && (!isString(w.asOf) || !isInstant(w.asOf))) return refuse("watermark.asOf", "an ISO-8601 instant with an offset — when this view of the source was taken");
     watermark = { key: w.key, value: w.value, ...(isString(w.asOf) ? { asOf: w.asOf } : {}) };
   }
 
@@ -204,13 +259,13 @@ export function parseItem(value: unknown, line: number, label: string = "--items
   const norm = normaliseLinks(links, key);
   const item: Ingested = {
     identity: { system, key },
-    scope: value.scope,
+    scope,
     canonical: { form: canonical.form, mediaType: canonical.mediaType },
     text: value.text,
     links: norm.links,
     mentions: normaliseMentions(mentions),
     facets: { ...(value.facets as Record<string, unknown>) },
-    ...(isString(value.createdAt) ? { createdAt: value.createdAt } : {}),
+    ...(isString(createdAt) ? { createdAt } : {}),
     ...(watermark ? { watermark } : {}),
   };
   return { item, linksDropped: norm.dropped };
@@ -220,26 +275,62 @@ export function parseItem(value: unknown, line: number, label: string = "--items
 export type ParsedItems = { items: Ingested[]; lines: number[]; linksDropped: number; systems: Record<string, number> };
 
 /**
- * A JSONL text as items. Line numbers are the file's — a blank line is
- * skipped (a trailing newline is the common case) and still counted, so the
- * number a refusal names is the line an editor shows. The first malformed
- * line refuses the whole text; two lines of one identity refuse it too,
- * naming both.
+ * A file's lines as text, line by line. Given BYTES (what the CLI reads —
+ * `readFileSync` with an encoding would replace a byte that is not UTF-8 with
+ * U+FFFD and the canonical would no longer be the source's; first review
+ * pass, run-it), each line is decoded strictly and a line that is not UTF-8
+ * or holds a NUL byte is the refusal, with its number. A `\r` before the
+ * newline is dropped (a CRLF file); a byte-order mark before the first line
+ * is dropped too (what a Windows redirection writes).
  */
-export function parseItems(text: string, label: string = "--items"): ParsedItems {
+function linesOf(input: string | Uint8Array, label: string): string[] {
+  let lines: string[];
+  if (isString(input)) lines = input.split(/\r?\n/);
+  else {
+    lines = [];
+    let start = 0;
+    for (let i = 0; i <= input.length; i++) {
+      if (i < input.length && input[i] !== 0x0a) continue;
+      const end = i > start && input[i - 1] === 0x0d ? i - 1 : i;
+      const decoded = decodeUtf8Strict(input.subarray(start, end));
+      if (!decoded.ok) throw new ItemsRefusal(label, lines.length + 1, "(line)", decoded.reason);
+      lines.push(decoded.text);
+      start = i + 1;
+    }
+  }
+  if (lines.length && lines[0].startsWith(BOM)) lines[0] = lines[0].slice(BOM.length);
+  return lines;
+}
+
+/**
+ * A JSONL text — or its bytes — as items. Line numbers are the file's: a
+ * blank line is skipped (a trailing newline is the common case) and still
+ * counted, so the number a refusal names is the line an editor shows. The
+ * first malformed line refuses the whole text; two lines of one identity
+ * refuse it too, naming both.
+ */
+export function parseItems(input: string | Uint8Array, label: string = "--items"): ParsedItems {
   const items: Ingested[] = [];
   const lines: number[] = [];
   const systems: Record<string, number> = {};
   const holders = new Map<string, number>();
   let linksDropped = 0;
-  const raw = text.split(/\r?\n/);
+  const raw = linesOf(input, label);
   for (let i = 0; i < raw.length; i++) {
     const line = i + 1;
     if (raw[i].trim() === "") continue;
-    let value: unknown;
-    try { value = JSON.parse(raw[i]); }
-    catch (e) { throw new ItemsRefusal(label, line, "(line)", `not JSON — ${(e as Error).message}; one object per line, no trailing comma, no wrapping array`); }
-    const { item, linksDropped: dropped } = parseItem(value, line, label);
+    let parsed: ParsedItem;
+    try {
+      const value: unknown = JSON.parse(raw[i]);
+      parsed = parseItem(value, line, label);
+    } catch (e) {
+      if (e instanceof ItemsRefusal) throw e;
+      if (e instanceof SyntaxError) throw new ItemsRefusal(label, line, "(line)", `not JSON — ${e.message}; one object per line, no trailing comma, no wrapping array`);
+      // A value nested past JSON.parse's own stack is a line to refuse, not a trace to die of.
+      if (e instanceof RangeError) throw new ItemsRefusal(label, line, "(line)", `nested too deeply to read (past ${DEPTH_MAX} levels) — a jsonb value has a depth bound too; flatten the facets`);
+      throw e;
+    }
+    const { item, linksDropped: dropped } = parsed;
     const idKey = `${item.identity.system}\u0000${item.identity.key}`;
     const holder = holders.get(idKey);
     if (holder !== undefined) throw new ItemsRefusal(label, line, "identity", `${item.identity.system} ${JSON.stringify(item.identity.key)} is line ${holder}'s too — two items of one identity would land on one row, the second over the first; one line per item`);
@@ -272,6 +363,8 @@ export const SAMPLE_ITEM = {
 
 /** One line of a file, as an emitter prints it. */
 export const SAMPLE_LINE = JSON.stringify(SAMPLE_ITEM);
+/** Another item of the same system, for a first line the malformed fixtures follow — a distinct identity, so a mutated rule fails on its own field and never as a duplicate (first review pass, run-it). */
+const OTHER_LINE = JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "chatgpt", key: "conv-0000" }, text: "Another conversation's summary." });
 
 /** The malformed kinds, each a patch of SAMPLE_ITEM, the field the refusal names and a word of the reason. */
 export const MALFORMED: readonly [label: string, line: string, field: string, reason: RegExp][] = [
@@ -283,10 +376,16 @@ export const MALFORMED: readonly [label: string, line: string, field: string, re
   ["a missing required key", JSON.stringify(Object.fromEntries(Object.entries(SAMPLE_ITEM).filter(([k]) => k !== "scope"))), "scope", /missing/],
   ["identity not an object", JSON.stringify({ ...SAMPLE_ITEM, identity: "chatgpt:x" }), "identity", /\{system, key\}/],
   ["a system with a capital", JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "ChatGPT", key: "k" } }), "identity.system", /lower-case word/],
-  ["a reserved system", JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "memory", key: "k" } }), "identity.system", /pipeline's own record sources/],
+  ["a reserved system: memory", JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "memory", key: "k" } }), "identity.system", /pipeline's own sources/],
+  ["a reserved system: linear (the sync's id space)", JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "linear", key: "SMD-1" } }), "identity.system", /pipeline's own sources/],
+  ["a reserved system: items (the flag, not a system)", JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "items", key: "k" } }), "identity.system", /pipeline's own sources/],
   ["an empty key", JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "chatgpt", key: " " } }), "identity.key", /non-empty/],
+  ["a padded key", JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "chatgpt", key: " k " } }), "identity.key", /whitespace/],
   ["a key past IDENTITY_MAX", JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "chatgpt", key: "k".repeat(IDENTITY_MAX + 1) } }), "identity.key", new RegExp(`${IDENTITY_MAX + 1} characters`)],
   ["an empty scope", JSON.stringify({ ...SAMPLE_ITEM, scope: "" }), "scope", /non-empty/],
+  ["a whitespace scope", JSON.stringify({ ...SAMPLE_ITEM, scope: "  " }), "scope", /non-empty/],
+  ["a padded scope", JSON.stringify({ ...SAMPLE_ITEM, scope: " chatgpt:export " }), "scope", /surrounding whitespace/],
+  ["a scope with a slash", JSON.stringify({ ...SAMPLE_ITEM, scope: "chatgpt/export" }), "scope", /reads as a path/],
   ["canonical not an object", JSON.stringify({ ...SAMPLE_ITEM, canonical: "{}" }), "canonical", /\{form, mediaType\}/],
   ["a form that is not a string", JSON.stringify({ ...SAMPLE_ITEM, canonical: { form: { id: 1 }, mediaType: "application/json" } }), "canonical.form", /a string/],
   ["a mediaType that is not one", JSON.stringify({ ...SAMPLE_ITEM, canonical: { form: "{}", mediaType: "json" } }), "canonical.mediaType", /type\/subtype/],
@@ -305,14 +404,17 @@ export const MALFORMED: readonly [label: string, line: string, field: string, re
   ["createdAt a bare date", JSON.stringify({ ...SAMPLE_ITEM, createdAt: "2026-09-01" }), "createdAt", /ISO-8601 instant/],
   ["createdAt a rolled-over date", JSON.stringify({ ...SAMPLE_ITEM, createdAt: "2026-02-30T00:00:00Z" }), "createdAt", /ISO-8601 instant/],
   ["createdAt with no offset", JSON.stringify({ ...SAMPLE_ITEM, createdAt: "2026-09-01T10:00:00" }), "createdAt", /ISO-8601 instant/],
+  ["createdAt a number", JSON.stringify({ ...SAMPLE_ITEM, createdAt: 1700000000 }), "createdAt", /ISO-8601 instant/],
   ["watermark not an object", JSON.stringify({ ...SAMPLE_ITEM, watermark: "2026" }), "watermark", /\{key, value, asOf\?\}/],
-  ["a watermark with no value", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: "k" } }), "watermark.value", /non-empty/],
+  ["a watermark with no value", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: "k" } }), "watermark.value", /sorts as it orders/],
   ["a watermark under the pipeline's key", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: "source", value: "v" } }), "watermark.key", /pipeline's own metadata key/],
   ["a watermark asOf that is not an instant", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: "k", value: "v", asOf: "yesterday" } }), "watermark.asOf", /ISO-8601 instant/],
   ["a NUL in the text", JSON.stringify({ ...SAMPLE_ITEM, text: "a\u0000b" }), "text", /NUL/],
   ["a NUL in the form", JSON.stringify({ ...SAMPLE_ITEM, canonical: { form: "a\u0000b", mediaType: "text/plain" } }), "canonical.form", /NUL/],
   ["a lone surrogate in a facet", "{" + SAMPLE_LINE.slice(1).replace("\"title\":\"Postgres pooling\"", "\"title\":\"\\ud800 pooling\""), "facets.title", /lone surrogate/],
   ["a NUL in a facet key", JSON.stringify({ ...SAMPLE_ITEM, facets: { "a\u0000b": 1 } }), "facets.a\u0000b", /NUL/],
+  ["a facet nested past any stack", `{"identity":{"system":"chatgpt","key":"deep"},"scope":"s:x","canonical":{"form":"f","mediaType":"text/plain"},"text":"t","links":[],"mentions":[],"facets":{"a":${"[".repeat(200000)}${"]".repeat(200000)}}}`, "(line)", /nested too deeply/],
+  ["a facet nested past the bound", `{"identity":{"system":"chatgpt","key":"deep"},"scope":"s:x","canonical":{"form":"f","mediaType":"text/plain"},"text":"t","links":[],"mentions":[],"facets":{"a":${"[".repeat(DEPTH_MAX)}${"]".repeat(DEPTH_MAX)}}}`, "(line)", /past 64 levels/],
 ];
 
 export function selfCheck(): number {
@@ -330,16 +432,24 @@ export function selfCheck(): number {
   ok((it as Record<string, unknown>).derived === undefined && !("asOf" in (it.watermark ?? {})), "no key invented");
   const minimal = parseItem({ identity: { system: "s", key: "k" }, scope: "s", canonical: { form: "f", mediaType: "text/plain" }, text: "t", links: [], mentions: [], facets: {} }, 1).item;
   ok(minimal.createdAt === undefined && minimal.watermark === undefined && minimal.links.length === 0, "the optional keys absent stay absent — the pipeline leaves created_at to now()");
+  const nulls = parseItem({ ...SAMPLE_ITEM, createdAt: null, watermark: null }, 1).item;
+  ok(nulls.createdAt === undefined && nulls.watermark === undefined && !("createdAt" in nulls) && !("watermark" in nulls), "createdAt: null and watermark: null are absent — what a Python emitter writes for None");
+  ok(parseItem({ ...SAMPLE_ITEM, watermark: { key: "k", value: "v", asOf: null } }, 1).item.watermark?.asOf === undefined, "…and asOf: null too");
   const norm = parseItem({ ...SAMPLE_ITEM, links: [{ relation: "references", target: "conv-8f3a" }, { relation: "references", target: "b" }, { relation: "references", target: "b" }, { relation: "blocks", target: " " }] }, 1);
   ok(norm.item.links.length === 1 && norm.linksDropped === 3, `normaliseLinks: the self link, the duplicate and the empty target are set aside and counted (${norm.linksDropped})`);
   ok(parseItem({ ...SAMPLE_ITEM, mentions: [{ name: " PostgreSQL ", type: "tool" }, { name: "postgresql", type: "tool" }] }, 1).item.mentions.length === 1, "normaliseMentions: trimmed, one per (type, name) folded by case");
   ok(parseItem({ ...SAMPLE_ITEM, watermark: { key: "k", value: "v", asOf: "2026-09-03T00:00:00+02:00" } }, 1).item.watermark?.asOf === "2026-09-03T00:00:00+02:00", "an asOf with an offset is an instant");
   ok(parseItem({ ...SAMPLE_ITEM, facets: { source: "elsewhere" } }, 1).item.facets.source === "elsewhere", "a facets.source is carried as given — the pipeline overwrites it with the system (ingest-contract.ts)");
+  ok(parseItem({ ...SAMPLE_ITEM, scope: "chatgpt:export:2026/09".replace("/", "-") }, 1).item.scope === "chatgpt:export:2026-09", "a scope spelled with colons and dashes passes");
+  const deepOk = { ...SAMPLE_ITEM, facets: JSON.parse(`{"a":${"[".repeat(DEPTH_MAX - 2)}1${"]".repeat(DEPTH_MAX - 2)}}`) };
+  ok(parseItem(deepOk, 1).item.facets !== undefined, `a facet nested to ${DEPTH_MAX - 1} levels passes; the bound is ${DEPTH_MAX}`);
 
-  // Each malformed kind: refused, on the line given, naming the field.
+  // Each malformed kind: refused, on the line given, naming the field. The
+  // first line is another identity, so a rule mutated away fails on ITS
+  // field, never as a duplicate of line 1.
   for (const [label, line, field, reason] of MALFORMED) {
     let got: ItemsRefusal | null = null;
-    try { parseItems(`${SAMPLE_LINE}\n${line}\n`, "x.jsonl"); }
+    try { parseItems(`${OTHER_LINE}\n${line}\n`, "x.jsonl"); }
     catch (e) { if (e instanceof ItemsRefusal) got = e; else throw e; }
     ok(got !== null && got.line === 2 && got.field === field && reason.test(got.reason) && got.message.startsWith(`x.jsonl: line 2: ${field}: `), `${label}: refused on line 2 naming ${JSON.stringify(field)} (${got ? `${got.line} ${JSON.stringify(got.field)}: ${got.reason.slice(0, 60)}` : "not refused"})`);
   }
@@ -347,19 +457,33 @@ export function selfCheck(): number {
   // The file: order kept, blank lines skipped without shifting numbers, the systems counted, duplicates refused together.
   const two = parseItems(`\n${SAMPLE_LINE}\n\n${JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "readwise", key: "h-1" } })}\n`, "x.jsonl");
   ok(two.items.length === 2 && two.lines.join(",") === "2,4" && two.systems.chatgpt === 1 && two.systems.readwise === 1, `two items on lines 2 and 4 (blank lines skipped, numbers the file's), one per system (${two.lines.join(",")})`);
-  ok(parseItems("").items.length === 0 && parseItems("\n\n").items.length === 0, "an empty file is zero items, not a refusal");
+  ok(parseItems("").items.length === 0 && parseItems("\n\n").items.length === 0 && parseItems(new Uint8Array(0)).items.length === 0, "an empty file is zero items, not a refusal — as text or as bytes");
+  const crlf = parseItems(`${SAMPLE_LINE}\r\n${OTHER_LINE}\r\n`, "x.jsonl");
+  ok(crlf.items.length === 2 && crlf.lines.join(",") === "1,2" && crlf.items[1].text === "Another conversation's summary.", "CRLF line endings are lines, the \\r not part of the line (as text)");
+  const crlfBytes = parseItems(new TextEncoder().encode(`${SAMPLE_LINE}\r\n${OTHER_LINE}\r\n`), "x.jsonl");
+  ok(crlfBytes.items.length === 2 && crlfBytes.lines.join(",") === "1,2" && crlfBytes.items[0].canonical.form === SAMPLE_ITEM.canonical.form, "…and as bytes, the canonical byte for byte");
+  ok(parseItems(`${BOM}${SAMPLE_LINE}\n`).items.length === 1 && parseItems(new TextEncoder().encode(`${BOM}${SAMPLE_LINE}\n`)).items.length === 1, "a byte-order mark before the first line is dropped, as text or as bytes");
   let dup: ItemsRefusal | null = null;
   try { parseItems(`${SAMPLE_LINE}\n${JSON.stringify({ ...SAMPLE_ITEM, text: "another text" })}\n`, "x.jsonl"); }
   catch (e) { if (e instanceof ItemsRefusal) dup = e; else throw e; }
   ok(dup?.line === 2 && dup.field === "identity" && /line 1's too/.test(dup.reason), `two lines of one identity are refused, the second naming the first (${dup?.reason.slice(0, 50)})`);
   ok(parseItems(`${SAMPLE_LINE}\n${JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "other", key: "conv-8f3a" } })}\n`).items.length === 2, "…the same key under another system is another identity");
+  ok(parseItems(`${JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "ab", key: "c" } })}\n${JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "a", key: "bc" } })}\n`).items.length === 2, "…and (ab, c) is not (a, bc): the identity key has a separator");
   let third: ItemsRefusal | null = null;
   try { parseItems(`${SAMPLE_LINE}\n${JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "chatgpt", key: "k2" } })}\n{oops\n`, "--items x.jsonl"); }
   catch (e) { if (e instanceof ItemsRefusal) third = e; else throw e; }
   ok(third?.line === 3 && third.message === "--items x.jsonl: line 3: (line): " + third.reason, `a bad third line refuses the file naming line 3, in the flag's own words (${third?.message.slice(0, 40)})`);
+  // Bytes that are not UTF-8, or a NUL byte: refused with the line, never repaired to U+FFFD.
+  const badBytes = new Uint8Array([...new TextEncoder().encode(`${SAMPLE_LINE}\n`), 0x7b, 0x22, 0xff, 0x22, 0x7d, 0x0a]);
+  let notUtf8: ItemsRefusal | null = null;
+  try { parseItems(badBytes, "x.jsonl"); } catch (e) { if (e instanceof ItemsRefusal) notUtf8 = e; else throw e; }
+  ok(notUtf8?.line === 2 && notUtf8.field === "(line)" && /not valid UTF-8/.test(notUtf8.reason), `a byte that is not UTF-8 refuses its line rather than becoming U+FFFD (${notUtf8?.reason.slice(0, 40)})`);
+  let nulByte: ItemsRefusal | null = null;
+  try { parseItems(new TextEncoder().encode(`${SAMPLE_LINE}\n{"a":"b\u0000c"}\n`), "x.jsonl"); } catch (e) { if (e instanceof ItemsRefusal) nulByte = e; else throw e; }
+  ok(nulByte?.line === 2 && /NUL/.test(nulByte.reason), "a raw NUL byte refuses its line");
 
   // The instant rule.
-  ok(isInstant("2026-09-25T10:00:00Z") && isInstant("2026-09-25T10:00Z") && isInstant("2026-09-25T10:00:00.123456789+05:30") && isInstant("2026-02-28T23:59:59-00:00"), "instants: seconds and fraction optional, Z or ±hh:mm");
+  ok(isInstant("2026-09-25T10:00:00Z") && isInstant("2026-09-25T10:00Z") && isInstant("2026-09-25T10:00:00.123456789+05:30") && isInstant("2026-02-28T23:59:59-00:00") && isInstant("0042-01-01T00:00:00Z"), "instants: seconds and fraction optional, Z or ±hh:mm, a year under 100 as itself");
   ok(!isInstant("2026-09-25") && !isInstant("2026-09-25T10:00:00") && !isInstant("2026-02-30T00:00:00Z") && !isInstant("2026-13-01T00:00:00Z") && !isInstant("2026-09-25T24:00:00Z") && !isInstant("2026-09-25T10:60:00Z") && !isInstant("2026-09-25T10:00:00+24:00") && !isInstant(" 2026-09-25T10:00:00Z"), "not instants: a bare date, no offset, February the 30th, month 13, hour 24, minute 60, offset 24, a leading space");
   ok(unstorable("plain") === null && /NUL/.test(unstorable("a\u0000b") ?? "") && /surrogate/.test(unstorable("a\ud800") ?? "") && unstorable("😀") === null, "unstorable: NUL and a lone surrogate, and a paired surrogate is fine");
 

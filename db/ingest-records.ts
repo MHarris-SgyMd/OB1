@@ -90,7 +90,7 @@ import { headingOf, ticketsOf } from "../scripts/fork-index.ts";
 import { AdapterRefusal, allowlistFrom, scopeRefusal, type Allowlist, type Identity, type Ingested } from "./ingest-contract.ts";
 import { LINEAR_SYSTEM, linearAdapter, renderIssue, SAMPLE_ISSUE, WATERMARK_KEY } from "./ingest-linear.ts";
 import { markdownAdapter, markdownFiles, MARKDOWN_SYSTEM } from "./ingest-markdown.ts";
-import { ItemsRefusal, parseItems, SAMPLE_ITEM, SAMPLE_LINE } from "./ingest-items.ts";
+import { ItemsRefusal, parseItems, RESERVED_SYSTEMS, SAMPLE_ITEM, SAMPLE_LINE } from "./ingest-items.ts";
 import { IdentityHeld, recordStructure, runName as structureRunName, type Structure, type StructureResult } from "./ingest-structure.ts";
 
 // The structure writer lives in ingest-structure.ts so db/sync-linear.ts can
@@ -354,9 +354,9 @@ export function markdownDocs(root: string): { docs: Doc[]; refused: { path: stri
   return { docs, refused };
 }
 
-/** What a file of items yields as Docs: one per line, on `recordId(system, key)`, labelled with the item's system; the systems counted; the links normaliseLinks set aside. Throws ItemsRefusal for a malformed line — the file whole. */
-export function itemDocs(text: string, label: string): { docs: Doc[]; systems: Record<string, number>; linksDropped: number } {
-  const parsed = parseItems(text, label);
+/** What a file of items yields as Docs: one per line, on `recordId(system, key)`, labelled with the item's system; the systems counted; the links normaliseLinks set aside. Throws ItemsRefusal for a malformed line — the file whole. Given the file's BYTES, a line that is not UTF-8 is refused rather than repaired. */
+export function itemDocs(input: string | Uint8Array, label: string): { docs: Doc[]; systems: Record<string, number>; linksDropped: number } {
+  const parsed = parseItems(input, label);
   return { docs: parsed.items.map(docOf), systems: parsed.systems, linksDropped: parsed.linksDropped };
 }
 
@@ -602,16 +602,17 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()):
  * (stronger) content_fingerprint ever saw it. Returns the kept docs and the
  * count dropped.
  */
-export function dedupeByContent(docs: Doc[]): { docs: Doc[]; dropped: number } {
-  const seen = new Set<string>();
+export function dedupeByContent(docs: Doc[]): { docs: Doc[]; dropped: number; duplicates: { doc: Doc; of: Doc }[] } {
+  const seen = new Map<string, Doc>();
   const kept: Doc[] = [];
-  let dropped = 0;
+  const duplicates: { doc: Doc; of: Doc }[] = [];
   for (const d of docs) {
-    if (seen.has(d.content)) { dropped++; continue; }
-    seen.add(d.content);
+    const holder = seen.get(d.content);
+    if (holder) { duplicates.push({ doc: d, of: holder }); continue; }
+    seen.set(d.content, d);
     kept.push(d);
   }
-  return { docs: kept, dropped };
+  return { docs: kept, dropped: duplicates.length, duplicates };
 }
 
 /** Record the tier's identity and this ingest's time in ob1_config — what preflight's `tier` check reads back. */
@@ -654,12 +655,12 @@ function selfCheck(): number {
   ok(recordId("linear", "SMD-1806") === linearThoughtId("SMD-1806"), "linear ids match the eval space");
   ok(/^[0-9a-f]{8}-0000-4000-8000-[0-9a-f]{12}$/.test(recordId("memory", "x")), "recordId is a valid-looking uuid");
 
-  const { docs: deduped, dropped } = dedupeByContent([
+  const { docs: deduped, dropped, duplicates } = dedupeByContent([
     { id: "a", content: "same", source: "fork", meta: {} },
     { id: "b", content: "same", source: "commit", meta: {} },
     { id: "c", content: "other", source: "fork", meta: {} },
   ]);
-  ok(deduped.length === 2 && dropped === 1, "identical content across records is de-duped, first kept");
+  ok(deduped.length === 2 && dropped === 1 && duplicates.length === 1 && duplicates[0].doc.id === "b" && duplicates[0].of.id === "a", "identical content across records is de-duped, first kept, the dropped record named with the one that holds its text");
 
   // The contract's pipeline (SMD-1867) and the one renderer (SMD-1958): a
   // corpus record is its `issue` through the Linear adapter — the text the
@@ -695,6 +696,7 @@ function selfCheck(): number {
   ok(/disagree/.test(refusal), "a record whose id and issue identifier disagree is refused");
 
   // Items from a file (SMD-2136): a line is a Doc on its system's id space, labelled with the system, structure and scope carried; a malformed line refuses the file in the flag's words.
+  ok(JSON.stringify([...RESERVED_SYSTEMS].sort()) === JSON.stringify([...SOURCES].sort()), `the systems a file may not claim are exactly the pipeline's own sources (${RESERVED_SYSTEMS.join(",")} vs ${SOURCES.join(",")})`);
   const fromFile = itemDocs(`${SAMPLE_LINE}\n${JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "readwise", key: "h-1" }, scope: "readwise:export", text: "a highlight" })}\n`, "--items out.jsonl");
   ok(fromFile.docs.length === 2 && fromFile.docs[0].id === recordId("chatgpt", "conv-8f3a") && fromFile.docs[0].source === "chatgpt" && fromFile.docs[1].source === "readwise" && fromFile.systems.chatgpt === 1 && fromFile.systems.readwise === 1, "an item is a Doc on recordId(system, key), labelled with its own system, the systems counted");
   ok(fromFile.docs[0].content === SAMPLE_ITEM.text && fromFile.docs[0].structure?.canonical.form === SAMPLE_ITEM.canonical.form && fromFile.docs[0].structure.links.length === 1 && fromFile.docs[0].structure.mentions.length === 1 && fromFile.docs[0].scope === SAMPLE_ITEM.scope && fromFile.docs[0].createdAt === SAMPLE_ITEM.createdAt, "…its text, canonical, links, mentions, scope and createdAt carried into the Doc");
@@ -831,13 +833,19 @@ async function main(): Promise<void> {
   // them by id, since `d.source` names the system, not this source.
   const itemIds = new Set<string>();
   let itemSystems: Record<string, number> = {};
+  if (itemsPath && !wanted.has("items")) note("items", `--items given but items is not in --source ${sourceArg}; the file was not read`);
   if (wanted.has("items")) {
     if (!itemsPath) note("items", "skipped — pass --items <file.jsonl> (one ingestion-contract item per line; `-` reads stdin)");
     else {
-      let text: string;
-      if (itemsPath === "-") text = await Bun.stdin.text();
+      // The BYTES, not a decoded string: a byte that is not UTF-8 is a line
+      // to refuse, where an encoding here would have repaired it to U+FFFD
+      // and the canonical would no longer be the source's (SMD-2136, first
+      // review pass, run-it).
+      let text: Uint8Array;
+      if (itemsPath === "-") text = await Bun.stdin.bytes();
       else if (!existsSync(itemsPath)) { console.error(`--items: no such file: ${itemsPath}`); process.exit(2); }
-      else text = readFileSync(itemsPath, "utf8");
+      else if (!statSync(itemsPath).isFile()) { console.error(`--items: not a file: ${itemsPath}`); process.exit(2); }
+      else text = readFileSync(itemsPath);
       // A malformed line is a wrong input, as a missing file is: exit 2 with the
       // line and the field, the file refused WHOLE, before any write — the
       // gather precedes every write, so no row of a refused file is ever half
@@ -865,7 +873,14 @@ async function main(): Promise<void> {
   const refusedPerSource: Record<string, number> = {};
   for (const d of gate.refused) { const s = itemIds.has(d.id) ? "items" : d.source; refusedPerSource[s] = (refusedPerSource[s] ?? 0) + 1; }
 
-  const { docs, dropped } = dedupeByContent(gate.docs);
+  const { docs, dropped, duplicates } = dedupeByContent(gate.docs);
+  // An emitter cannot see which of its lines fell to another's text: named,
+  // one per dropped item, with the record that holds the text.
+  for (const { doc, of } of duplicates) {
+    if (!itemIds.has(doc.id)) continue;
+    const name = (d: Doc) => d.structure ? `${d.structure.identity.system} ${JSON.stringify(d.structure.identity.key)}` : `${d.source} ${d.id}`;
+    note("items", `${name(doc)} dropped — its text is byte-identical to ${name(of)}'s, which holds it; one text is one row (no canonical, links or mentions are written for the dropped item)`);
+  }
   const printCounts = () => {
     for (const s of SOURCES) {
       if (perSource[s] === undefined) continue;

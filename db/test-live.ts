@@ -4316,13 +4316,15 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
     assert(mentionsA.length === 1 && mentionsA[0].k === `source:${sys}` && mentionsA[0].name === "zqfiletopic", `one mention under source:<system> (${JSON.stringify(mentionsA)})`);
     const again = cli("--items", goodPath, "--allow", scope);
     assert(again.code === 0 && /inserted 0 {2}updated 0 {2}patched 0 {2}unchanged 2/.test(again.out) && (await rowsOf()) === 2, `the same file again writes nothing — two unchanged (${oneLine(again.out)})`);
-    // A bad third line: the file refused whole, before any write — the new
-    // identity has no row, and the two rows stand as they were.
+    // A bad third line: the file refused whole, before any write. The tooth
+    // is line 2, a VALID item not yet written: a writer that wrote each line
+    // as it parsed would have written it before reaching line 3 (first review
+    // pass, cold read — a-1 and a-2 alone could not tell the two apart).
     const badPath = join(dir, "bad.jsonl");
-    writeFileSync(badPath, `${good}${line("a-3", "Item C: never written.").replace('"mediaType":"application/json"', '"mediaType":"json"')}\n`);
+    writeFileSync(badPath, `${line("a-1", textA)}\n${line("a-5", "Item E: valid, and never written — its file is refused.")}\n${line("a-3", "Item C: never written.").replace('"mediaType":"application/json"', '"mediaType":"json"')}\n`);
     const bad = cli("--items", badPath, "--allow", scope);
     assert(bad.code === 2 && /line 3: canonical\.mediaType: /.test(bad.err) && /refused whole/.test(bad.err) && bad.out === "", `a malformed third line exits 2 naming line 3 and the field, nothing on stdout (exit ${bad.code}: ${oneLine(bad.err).slice(0, 140)})`);
-    assert((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${recordId(sys, "a-3")}::uuid`)[0].c === 0 && (await rowsOf()) === 2, "…and zero rows for it: the file is refused before any write");
+    assert((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id IN (${recordId(sys, "a-5")}::uuid, ${recordId(sys, "a-3")}::uuid)`)[0].c === 0 && (await rowsOf()) === 2, "…and zero rows for the valid line before it as for the bad one: the file is refused before any write, not line by line");
     // A scope not cleared: counted as refused under items, said once with the knob, not written.
     const gatedPath = join(dir, "gated.jsonl");
     writeFileSync(gatedPath, `${line("a-4", "Item D: not cleared.", [], [], { scope: "zqitems:other" })}\n`);

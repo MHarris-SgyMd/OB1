@@ -1723,7 +1723,8 @@ parent's identity, whichever writer's it is.
 `ingest-items.ts` reads a file of items already mapped — one JSON object per
 line, the keys `Ingested` names (`identity {system, key}`, `scope`,
 `canonical {form, mediaType}`, `text`, `links`, `mentions`, `facets`, and
-optionally `createdAt` and `watermark {key, value, asOf?}`) — so a parser in
+optionally `createdAt` and `watermark {key, value, asOf?}`; `null` for either
+is absent, what a Python emitter writes for `None`) — so a parser in
 any language emits the contract and the pipeline writes it: no database client
 in the recipe, no rewrite under `db/` (SMD-2126 routes four import recipes
 here, three of them Python). The row is labelled with the item's own system
@@ -1732,18 +1733,31 @@ the deterministic id for `(system, key)`, and gets everything an adapter's
 record gets: the canonical byte for byte (the round trip holds by construction
 — the canonical IS the line's `form`), the links as a set, the mentions under
 `source:<system>`, the merge, the watermark, the vector left for `reembed.ts`.
-Each line passes the contract's own rules — `SYSTEM_RE` (and not one of the
-pipeline's own record sources, `fork` / `commit` / `memory`), `IDENTITY_MAX`,
-the six relations, the six entity types, `normaliseLinks` / `normaliseMentions`
-— and what no column holds: a NUL or a lone surrogate anywhere in the line, a
-`createdAt` that is not an instant a `timestamptz` cast accepts (February the
-30th is refused, not rolled to March as `Date.parse` would). A malformed line
+Each line passes the contract's own rules — `SYSTEM_RE`, and not one of the
+pipeline's own six sources (`fork`, `commit`, `linear`, `memory`, `markdown`,
+`items`: a file's row on the board sync's id for a ticket would overwrite the
+sync's row with no `held` to say so); `IDENTITY_MAX`; the six relations; the
+six entity types; `normaliseLinks` / `normaliseMentions` — and what no column
+holds: a byte that is not UTF-8 (the file is read as bytes and each line
+decoded strictly, never repaired to U+FFFD), a NUL or a lone surrogate
+anywhere in the line, a value nested past 64 levels, a `createdAt` or `asOf`
+that is not an instant a `timestamptz` cast accepts (February the 30th is
+refused, not rolled to March as `Date.parse` would). And what the pipeline's
+own knobs could not act on: a `scope` with a `/` (`--allow` reads an entry
+with one as a path — spell a scope `chatgpt:export`) or with surrounding
+whitespace, a `key` with surrounding whitespace (a link's target is trimmed,
+so the row could never be linked). A malformed line
 refuses the **whole file** with its line number and the field, exit 2, before
 any write — a file half written is one the emitter cannot re-run cleanly, a
 file refused is fixed and run again — and two lines of one identity are refused
 together, since they would land on one row. `derived` is not taken from a
-file: a part that is a thought of its own is a line of its own. The emitter an
-import recipe copies, its own parser kept:
+file: a part that is a thought of its own is a line of its own. A `watermark`'s
+`value` is any string that sorts as it orders (the values compare as text; an
+ISO-8601 instant in UTC is the usual). Two items whose `text` is byte-identical
+are one row — the pipeline's rule for every source — and the run names the
+dropped item and the one that holds its text on stderr, since an emitter
+cannot see which of its lines fell. The emitter an
+import recipe copies, its own parser kept (`conv.created_at` may be `None`):
 
 ```python
 import json, sys
