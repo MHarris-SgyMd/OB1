@@ -1691,11 +1691,29 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "ob1_config",             privileges: Object.freeze(["INSERT", "UPDATE"]),                     since: "006" }),
     Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),          since: "029" }),
   ]),
-  // The entity-extraction worker, additionally, writes the entity graph.
+  // The entity-extraction worker, additionally, writes the entity graph — and
+  // so does a structured pass (`source:` mentions). UPDATE on the mention and
+  // edge rows was missing until SMD-2216: 016's merge_entities re-points
+  // mentions with one, and since 053 record_thought_entities UPSERTs both
+  // tables (INSERT … ON CONFLICT DO UPDATE, the structured-wins rule), which
+  // Postgres checks UPDATE for when it plans the statement, conflict or none —
+  // so every call failed under a --grant role — and 056's
+  // apply_entity_type_gate() re-points mentions as merge_entities does.
   extraction: Object.freeze([
     Object.freeze({ table: "ob1_entities",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "016" }),
-    Object.freeze({ table: "thought_entities", privileges: Object.freeze(["SELECT", "INSERT", "DELETE"]),           since: "016" }),
-    Object.freeze({ table: "ob1_entity_edges", privileges: Object.freeze(["SELECT", "INSERT", "DELETE"]),           since: "016" }),
+    Object.freeze({ table: "thought_entities", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "016" }),
+    Object.freeze({ table: "ob1_entity_edges", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "053" }),
+  ]),
+  // A structured pass — sync-linear.ts, the ingest adapters' structure step
+  // (ingest-structure.ts) — additionally records the thought's source row and
+  // its links (053): record_thought_source upserts `thought_sources` and, on a
+  // take, deletes the old holder's row and closes its links; record_source_links
+  // inserts `link` facets (capture's SELECT, UPDATE on thought_facets cover the
+  // reads and the closing). It records its mentions through
+  // record_thought_entities, so it needs `extraction` as well (SMD-2216).
+  structure: Object.freeze([
+    Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "053" }),
+    Object.freeze({ table: "thought_facets",  privileges: Object.freeze(["INSERT"]),                               since: "053" }),
   ]),
   // The opt-in query log (034, SMD-1295): the server writes one row per search
   // and one per follow-up touch, but ONLY when OB1_QUERY_LOG=on. INSERT is all
@@ -1757,11 +1775,12 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ function: "append_thought_evidence(uuid, jsonb)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/smart-ingest" }),
     // schemas/entity-extraction (upstream's `entities`/`edges`, not 016's ob1_* tables; three bigserial ids;
     // `thought_entities` is the one name the two share — on a migrated brain the file's IF NOT EXISTS
-    // leaves 016's table, so this row is `extraction`'s privileges exactly, not upstream's GRANT ALL:
-    // a row issued on every migrated brain must not widen what 016's own group grants)
+    // leaves 016's table, so this row is `extraction`'s privileges exactly — a row issued on every
+    // migrated brain must not widen what 016's own group grants; since SMD-2216 gave `extraction` UPDATE,
+    // that is also upstream's GRANT ALL)
     Object.freeze({ table: "entities",                privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/entity-extraction" }),
     Object.freeze({ table: "edges",                   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/entity-extraction" }),
-    Object.freeze({ table: "thought_entities",        privileges: Object.freeze(["SELECT", "INSERT", "DELETE"]),           since: "schemas/entity-extraction" }),
+    Object.freeze({ table: "thought_entities",        privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/entity-extraction" }),
     Object.freeze({ table: "entity_extraction_queue", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/entity-extraction" }),
     Object.freeze({ table: "consolidation_log",       privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/entity-extraction" }),
     Object.freeze({ sequence: "entities_id_seq",          privileges: Object.freeze(["USAGE", "SELECT"]), since: "schemas/entity-extraction" }),
@@ -1884,7 +1903,7 @@ export const ROLE_GRANTS = Object.freeze({
 });
 
 /** The order groups are issued and documented in. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "querylog", "community", "extensions", "recipes"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "community", "extensions", "recipes"]);
 
 /**
  * The (table, privilege) pairs the core capture/edit/search path needs
