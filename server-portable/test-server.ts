@@ -223,6 +223,17 @@ console.log("\n[5b] A refused NOTIFICATION (no id) gets no JSON-RPC body — 202
   const nullId = await fetch(BASE, { method: "POST", headers: H, body: JSON.stringify({ jsonrpc: "2.0", id: null, method: "tools/list", params: {} }) });
   const nullBody = await nullId.json();
   assert(nullId.status === 200 && nullBody?.error?.code === -32001 && nullBody?.id === null, "a request with id: null keeps the 200 envelope, echoing null");
+
+  // Not positively notification-only → keep the 200 envelope, never a bodyless
+  // 202: a non-string `method` (not a genuine notification) and an empty batch
+  // (an Invalid Request that expects one error reply) each stay the envelope.
+  const badMethod = await fetch(BASE, { method: "POST", headers: H, body: JSON.stringify({ jsonrpc: "2.0", method: 123 }) });
+  assert(badMethod.status === 200 && (await badMethod.json())?.error?.code === -32001, "a body with a non-string method (no id) keeps the 200 envelope, not a 202");
+  const emptyBatch = await fetch(BASE, { method: "POST", headers: H, body: "[]" });
+  assert(emptyBatch.status === 200 && (await emptyBatch.json())?.error?.code === -32001, "an empty batch [] keeps the 200 envelope, not a bodyless 202");
+  // Retry-After is not CORS-safelisted, so it is exposed for browser clients to
+  // read off the busy refusal (SMD-2106); corsHeaders carries it on every answer.
+  assert((badMethod.headers.get("access-control-expose-headers") ?? "").includes("Retry-After"), "responses expose Retry-After so a browser client can read it");
 }
 
 console.log("\n[6] Auth via ?key= — the documented connector path");

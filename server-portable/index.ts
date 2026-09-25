@@ -2172,6 +2172,12 @@ const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key, x-access-key, accept, mcp-session-id, mcp-protocol-version, last-event-id",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
+  // Retry-After is not a CORS-safelisted response header, so a browser-hosted
+  // client (claude.ai, the Claude Desktop connector) cannot read it off a fetch
+  // without this. It is the one header the fork means such a client to read —
+  // the busy refusal's retry delay (SMD-2106) — so it is exposed; on a response
+  // that carries no Retry-After this says nothing.
+  "Access-Control-Expose-Headers": "Retry-After",
 };
 
 // The two 405 header sets, built once; the refusal path spreads nothing per request.

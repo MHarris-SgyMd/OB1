@@ -1269,8 +1269,9 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
       assert(revokedNotif.status === 202 && (await revokedNotif.text()) === "" && !revokedNotif.headers.has("retry-after"),
         `a revoked key's notification → 202 with no body and no Retry-After (${revokedNotif.status})`);
       const busyNotif = await fetch(BASE, { method: "POST", headers: { ...H, "x-brain-key": "op-raw" }, body: NOTIF });
-      assert(busyNotif.status === 503 && (await busyNotif.text()) === "" && busyNotif.headers.get("retry-after") === "2",
-        `a busy key's notification → 503 with no body and Retry-After (${busyNotif.status}, retry-after ${busyNotif.headers.get("retry-after")})`);
+      assert(busyNotif.status === 503 && (await busyNotif.text()) === "" && busyNotif.headers.get("retry-after") === "2"
+        && (busyNotif.headers.get("access-control-expose-headers") ?? "").includes("Retry-After"),
+        `a busy key's notification → 503 with no body, Retry-After, and it exposed for a browser to read (${busyNotif.status}, retry-after ${busyNotif.headers.get("retry-after")})`);
     } finally {
       await unlock();
     }
