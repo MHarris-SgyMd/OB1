@@ -6033,10 +6033,18 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
       && (await topEntities(run, openDecay)).byMentions.find((e) => e.name === "Kafka")!.mentions === 1.25
       && (await topEntities(run, { ...wide, startable: true })).byMentions.find((e) => e.name === "Open Brain")!.degree! < (await topEntities(run, { ...wide, decayBlocked: true })).byMentions.find((e) => e.name === "Open Brain")!.degree!,
     `degree under --decay-blocked is degree without it, entity by entity — Kafka keeps the edge the blocked tQ evidences, at support 0.25 — and Kafka's mentions under --status open are the weighted sum of tP, tQ, tPsec, tV and tX (1.25); --startable drops the edge (${JSON.stringify(kafkaD)})`);
+  // The subject path reads the same weights and columns (first review pass:
+  // only the whole-graph path was exercised).
+  const subj = await graphReport(run, "Open Brain", openDecay);
+  const subjP = subj.thoughts.find((t) => t.id === tP);
+  const kafkaN = subj.neighbours!.find((n) => n.name === "Kafka");
+  assert(JSON.stringify(subjP?.blockers) === '["SMD-7002"]' && subjP?.weight === 0.25 && kafkaN?.co_mentions === 1.25 && kafkaN?.support === 0.25
+      && render(subj).includes("ranked by neighbours mentioned + subject edges evidenced, times the weight:") && /status +blocked by +thought/.test(render(subj)),
+    `around a subject under --status open --decay-blocked: tP is listed at 0.25 with its blocker, Kafka's co_mentions are the five blocked thoughts at 0.25 each and its support tQ's quarter, and the thought table has the column and the weight heading (${JSON.stringify(kafkaN)})`);
   const rBlocked = render(await graphReport(run, null, openDecay));
   const tPline = rBlocked.split("\n").find((l) => l.includes(tP)) ?? "";
   assert(rBlocked.includes("lifecycle open, blocked ×0.25;") && /weight +status +blocked by +thought/.test(rBlocked) && /0\.25 +Backlog +SMD-7002 +/.test(tPline) && rBlocked.includes("in-scope edges evidenced, times the weight:")
-      && rBlocked.includes(". --decay-blocked: 5 thoughts with an open blocker weigh 0.25 of their lifecycle weight in every count (pre-registered, one weight) and are listed with their blockers; degree counts neighbours, not evidence, and is unchanged; a completed or canceled ticket is settled, not blocked,")
+      && rBlocked.includes(". --decay-blocked: 5 thoughts with an open blocker weigh 0.25 of their lifecycle weight in every count (pre-registered, one weight), and a listed one names its blockers; degree counts neighbours, not evidence, and is unchanged; a completed or canceled ticket is settled, not blocked,")
       && rBlocked.includes("1 blocker of the down-weighted thoughts is unsettled") && rBlocked.includes("plus every thought without a lifecycle — it passes every filter; those with an open blocker at 0.25)")
       && render(await graphReport(run, null, { ...wide, decayBlocked: true })).includes("By its lifecycle every thought weighs 1: a Done ticket counts as a live one (--status open|active|done filters; --decay-done down-weights).\n"),
     `the report under the decay: the header names it, the thought table has the weight and a blocked by column (tP's row: ${JSON.stringify(tPline)}), and the dependency and lifecycle lines say what the decay did`);
@@ -6047,9 +6055,9 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
     `a thought held by two blockers lists both, sorted, whichever side stated each — an array in the JSON, "a, b" in the table (${JSON.stringify(tVline)})`);
   await links(tV, []);
   assert(render(await graphReport(run, null, openStart)).includes("--startable: 5 thoughts with an open blocker weigh 0 in this run; a completed") && !weightsSql({ status: "open", decayDone: false, startable: true }, []).includes("END AS blockers")
-      && weightsSql({ status: "open", decayDone: false, startable: true }, []) === weightsSql({ status: "open", decayDone: false, startable: true, decayBlocked: false }, [])
+      && weightsSql({ status: "open", decayDone: false, decayBlocked: true }, []).replace(/,\n +CASE WHEN [^\n]* THEN blockers END AS blockers/, "").replace("THEN 0.25 ELSE", "THEN 0 ELSE") === weightsSql({ status: "open", decayDone: false, startable: true }, [])
       && weightsSql({ status: "open", decayDone: false, decayBlocked: true }, []).includes("END AS blockers") && !("blockers" in (await topThoughts(run, openStart))[0]),
-    "--startable's line, SQL and rows are SMD-2061's: the blockers column is the decay's alone");
+    "--startable's line, SQL and rows are SMD-2061's: the decay's SQL is --startable's with the factor at 0.25 and the blockers column, and nothing else (first review pass: this compared weightsSql with itself)");
   const pb = parseArgs(["--decay-blocked"]);
   const pbs = parseArgs(["--decay-blocked", "--status", "open"]);
   const pbd = parseArgs(["--decay-done", "--decay-blocked"]);

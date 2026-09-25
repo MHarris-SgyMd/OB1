@@ -98,10 +98,11 @@
  * a relation the source dropped), and only `blocks` / `blocked_by`: a parent is
  * not blocked by its children (`child_of`), nor a ticket by what it relates to.
  * A thought whose ticket no dependency names counts as unblocked, and the
- * output states how many a dependency does name. Without the flag the
- * dependency read is not in the SQL at all, so every other mode renders
- * SMD-1994's report byte for byte (the JSON's `options` carries one more key,
- * `startable: false`) and a brain without 053 runs it. `dependencySql` is the
+ * output states how many a dependency does name. Without the flag (or
+ * `--decay-blocked`, below) the dependency read is not in the SQL at all, so
+ * every other mode renders SMD-1994's report byte for byte (the JSON's
+ * `options` carries two more keys, `startable` and `decayBlocked`, both false)
+ * and a brain without 053 runs it. `dependencySql` is the
  * seam, as `LIFECYCLE_CTE` is for the status: SMD-2074's node-state projection
  * replaces it, not its callers.
  *
@@ -110,10 +111,11 @@
  * trade `--status` makes and `--decay-done` does not. `--decay-blocked` is the
  * decay: the same read, the same rules, and a held thought weighs
  * `BLOCKED_WEIGHT` (0.25, pre-registered here before any number was read, one
- * weight, exact in binary) times its lifecycle weight instead of 0. It is
- * listed, with the blockers that hold it — its ticket's open blockers, sorted,
- * an unknown one included — in a `blocked by` column and the JSON's
- * `blockers`. The two are two answers to one question, so they are refused
+ * weight, exact in binary) times its lifecycle weight instead of 0. It stays
+ * in the ranking, and where it is listed it names the blockers that hold it —
+ * its ticket's open blockers, sorted, an unknown one included — in a `blocked
+ * by` column and the JSON's `blockers`. Like `--startable` it needs 053 (exit 2
+ * without it). The two are two answers to one question, so they are refused
  * together, as `--decay-done` is beside `--status`. The decays never meet on
  * one thought: a blocked thought is unsettled and `DONE_WEIGHT` weighs only
  * settled ones, so under both each thought weighs 1 or 0.25, never their
@@ -212,7 +214,7 @@ export type Options = Scope & {
   status: LifecycleFilter;
   /** With `all`: a completed or canceled thought weighs DONE_WEIGHT instead of 1. Refused with any other filter. */
   decayDone: boolean;
-  /** An unsettled thought whose ticket has an open blocker weighs 0; a completed or canceled one weighs what its lifecycle says. Off: no dependency is read. */
+  /** An unsettled thought whose ticket has an open blocker weighs 0; a completed or canceled one weighs what its lifecycle says. Off, with `decayBlocked` off too: no dependency is read. */
   startable: boolean;
   /** As `startable`, but such a thought weighs BLOCKED_WEIGHT of its lifecycle weight, and is listed with its blockers. Refused with `startable`. */
   decayBlocked: boolean;
@@ -319,7 +321,7 @@ export const LIFECYCLE_CTE = `heads AS (
 
 /**
  * Where a thought's open blockers come from — the second seam, read after
- * `lifecycle` and only under `--startable`. Today: 053's active `blocks` /
+ * `lifecycle` and only under `--startable` or `--decay-blocked`. Today: 053's active `blocks` /
  * `blocked_by` link facets, each resolved to the (system, blocked, blocker)
  * identities it states; a blocker whose lifecycle is completed or canceled
  * (the types in `$doneSlot`) is dropped. `dependency` is one row per thought
@@ -392,8 +394,8 @@ export function weightsSql(opts: Pick<Options, "status" | "decayDone"> & Partial
   // inline heads and lifecycle into it and scan `thoughts` once per candidate
   // row; materialised, the weights are computed once per statement whatever
   // the reference count (second review pass).
-  // Without --startable the text is SMD-1994's exactly: the flag adds the
-  // dependency CTEs, the factor, `held` and the join, and nothing else moves.
+  // Without either flag the text is SMD-1994's exactly: the dependency read
+  // adds the CTEs, the factor, `held` and the join, and nothing else moves.
   // Startability is a question about unsettled work: Linear keeps a relation
   // after a ticket completes, and a Done ticket whose blocker is still open is
   // settled, not blocked — so the factor passes a completed or canceled row
@@ -819,7 +821,7 @@ export function dependencyCaveat(c: Coverage, d: Dependencies, opts: Pick<Option
   // pass last looked — the line says which (first review pass).
   const weigh = `thought${d.held === 1 ? "" : "s"} with an open blocker weigh${d.held === 1 ? "s" : ""}`;
   const held = opts.decayBlocked
-    ? `--decay-blocked: ${d.held} ${weigh} ${BLOCKED_WEIGHT} of ${d.held === 1 ? "its" : "their"} lifecycle weight in every count (pre-registered, one weight) and ${d.held === 1 ? "is" : "are"} listed with ${d.held === 1 ? "its" : "their"} blockers; degree counts neighbours, not evidence, and is unchanged`
+    ? `--decay-blocked: ${d.held} ${weigh} ${BLOCKED_WEIGHT} of ${d.held === 1 ? "its" : "their"} lifecycle weight in every count (pre-registered, one weight), and a listed one names its blockers; degree counts neighbours, not evidence, and is unchanged`
     : `--startable: ${d.held} ${weigh} 0 in this run`;
   const moved = d.last_link_change ? `; the latest was written or closed ${d.last_link_change}` : "";
   const unknown = d.unknown_blockers
@@ -893,7 +895,9 @@ const T_COLS = (o: Options, entitiesHead: string): Col[] => [
   ...(o.edges ? [{ key: "edges", head: "edges", right: true }] : []),
   ...(o.decayDone || o.decayBlocked ? [{ key: "weight", head: "weight", right: true }] : []),
   { key: "status", head: "status", width: 14 },
-  ...(o.decayBlocked ? [{ key: "blockers", head: "blocked by", width: 30 }] : []),
+  // At the table's own cap: the column is the only place the text names what
+  // holds a thought, and four ids already pass 30 (first review pass).
+  ...(o.decayBlocked ? [{ key: "blockers", head: "blocked by" }] : []),
   { key: "id", head: "thought" },
   { key: "created_at", head: "captured", width: 24 },
   { key: "excerpt", head: "excerpt", width: 90 },
