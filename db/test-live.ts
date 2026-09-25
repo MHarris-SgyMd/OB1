@@ -2895,12 +2895,15 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   // runner that pauses the process for two seconds must not read as a lapse —
   // a beat is missed only when the process is, and the lease covers five — and
   // fifteen, not eight, because eight rows fit inside six seconds and the run
-  // would then pass with renewal a no-op (third review pass). Three workers
+  // would then pass with renewal a no-op (third review pass, which set
+  // sixteen for two workers). Three workers
   // over the 42 thoughts claim 15, 15 and 12 at once, one round (SMD-2135;
   // two workers of sixteen took two rounds, some sixteen seconds): the one
   // with twelve finishes near 7.3 s and claims again, and that claim reaps any
   // lease past its 6 s deadline — so a beat that renewed nothing would hand it
-  // the others' last rows on their second attempt. A fresh backfill key, so
+  // the others' last rows on their second attempt. Fifteen is the batch that
+  // does this for 42 thoughts: 14 ends all three together, 16 leaves ten rows
+  // that finish at 6.1 s, barely past the lease. A fresh backfill key, so
   // the pool is every thought; the recorded model is the configured one here.
   slowMs = 600;
   const SLOW_KEY = `reembed:stub-embed@${DIM}:slow`;
@@ -2926,9 +2929,11 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   // says the rows are still leased; --status names the thief. The stub is slow
   // only until the theft lands, and the rows after it run at full speed — at
   // 610 ms each, one worker's pass was some 25 s of the section (SMD-2135).
-  // The row in hand is released after the theft either way: already in the
-  // stub, it keeps the 600 ms it started with; not yet sent, its release is
-  // refused all the same, since release_thought matches the holder.
+  // Its release is refused because release_thought matches the holder; the
+  // 600 ms on the first batch is what makes the theft land inside it, a
+  // 100 ms poll against a 610 ms row. The stolen rows after it now meet their
+  // loss at release, not at a beat, so no run here reaches reembed.ts's
+  // lost-at-beat skip — which nothing asserted before either (SMD-2190).
   slowMs = 600;
   const THIEF_KEY = `reembed:stub-embed@${DIM}:thief`;
   const thiefRun = reembed("--job", THIEF_KEY, "--workers", "1", "--batch", "4", "--ttl", "6", "--heartbeat", "1");
