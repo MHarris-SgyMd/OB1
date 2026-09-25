@@ -90,7 +90,7 @@ import { headingOf, ticketsOf } from "../scripts/fork-index.ts";
 import { AdapterRefusal, allowlistFrom, scopeRefusal, type Allowlist, type Identity, type Ingested } from "./ingest-contract.ts";
 import { LINEAR_SYSTEM, linearAdapter, renderIssue, SAMPLE_ISSUE, WATERMARK_KEY } from "./ingest-linear.ts";
 import { markdownAdapter, markdownFiles, MARKDOWN_SYSTEM } from "./ingest-markdown.ts";
-import { ItemsRefusal, parseItems, RESERVED_SYSTEMS, SAMPLE_ITEM, SAMPLE_LINE } from "./ingest-items.ts";
+import { ItemsRefusal, parseItems, PIPELINE_META_KEYS, RESERVED_SYSTEMS, SAMPLE_ITEM, SAMPLE_LINE } from "./ingest-items.ts";
 import { IdentityHeld, recordStructure, runName as structureRunName, type Structure, type StructureResult } from "./ingest-structure.ts";
 
 // The structure writer lives in ingest-structure.ts so db/sync-linear.ts can
@@ -696,6 +696,7 @@ function selfCheck(): number {
   ok(/disagree/.test(refusal), "a record whose id and issue identifier disagree is refused");
 
   // Items from a file (SMD-2136): a line is a Doc on its system's id space, labelled with the system, structure and scope carried; a malformed line refuses the file in the flag's words.
+  ok(JSON.stringify([...PIPELINE_META_KEYS].sort()) === JSON.stringify(["source", ...ACTOR_KEYS].sort()), `the metadata keys a watermark may not use are exactly the pipeline's own (${PIPELINE_META_KEYS.join(",")})`);
   ok(JSON.stringify([...RESERVED_SYSTEMS].sort()) === JSON.stringify([...SOURCES].sort()), `the systems a file may not claim are exactly the pipeline's own sources (${RESERVED_SYSTEMS.join(",")} vs ${SOURCES.join(",")})`);
   const fromFile = itemDocs(`${SAMPLE_LINE}\n${JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "readwise", key: "h-1" }, scope: "readwise:export", text: "a highlight" })}\n`, "--items out.jsonl");
   ok(fromFile.docs.length === 2 && fromFile.docs[0].id === recordId("chatgpt", "conv-8f3a") && fromFile.docs[0].source === "chatgpt" && fromFile.docs[1].source === "readwise" && fromFile.systems.chatgpt === 1 && fromFile.systems.readwise === 1, "an item is a Doc on recordId(system, key), labelled with its own system, the systems counted");
@@ -769,7 +770,7 @@ async function main(): Promise<void> {
   }
   const wanted = sourceArg === "all" ? new Set<Source>(SOURCES) : new Set<Source>([sourceArg as Source]);
 
-  // Empty or whitespace is unset (the fork's string-knob rule), defaulting to stable.
+  // Whitespace is unset (the fork's string-knob rule), defaulting to stable; an empty value is refused above, as every one-value flag's is.
   const tier = ((flag("tier") ?? process.env.OB1_TIER)?.trim() || "stable") as Tier;
   if (!TIERS.includes(tier)) {
     console.error(`--tier / OB1_TIER must be one of ${TIERS.join(", ")}.`);

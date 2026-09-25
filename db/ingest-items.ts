@@ -312,7 +312,7 @@ function linesOf(input: string | Uint8Array, label: string): string[] {
       const end = i > start && input[i - 1] === 0x0d ? i - 1 : i;
       const segment = input.subarray(start, end);
       const decoded = decodeUtf8Strict(segment);
-      if (!decoded.ok) throw new ItemsRefusal(label, lines.length + 1, "(line)", lines.length === 0 && looksUtf16(segment) ? "looks like UTF-16 without a byte-order mark (every other byte is 0x00); write the file as UTF-8" : decoded.reason);
+      if (!decoded.ok) throw new ItemsRefusal(label, lines.length + 1, "(line)", lines.every((l) => l.trim() === "") && looksUtf16(segment) ? "looks like UTF-16 without a byte-order mark (every other byte is 0x00); write the file as UTF-8" : decoded.reason);
       lines.push(decoded.text);
       start = i + 1;
     }
@@ -344,7 +344,8 @@ function utf16Mark(input: string | Uint8Array): boolean {
 export function parseItems(input: string | Uint8Array, label: string = "--items"): ParsedItems {
   const items: Ingested[] = [];
   const lines: number[] = [];
-  const systems: Record<string, number> = {};
+  // No prototype: `constructor` passes SYSTEM_RE, and on a plain object `systems.constructor ?? 0` is Object's constructor, not 0 (fourth review pass, run-it).
+  const systems: Record<string, number> = Object.create(null);
   const holders = new Map<string, number>();
   let linksDropped = 0;
   if (utf16Mark(input)) throw new ItemsRefusal(label, 1, "(line)", "the file is UTF-16 (its first two bytes are a UTF-16 byte-order mark); write it as UTF-8");
@@ -445,7 +446,11 @@ export const MALFORMED: readonly [label: string, line: string, field: string, re
   ["createdAt a number", JSON.stringify({ ...SAMPLE_ITEM, createdAt: 1700000000 }), "createdAt", /ISO-8601 instant/],
   ["watermark not an object", JSON.stringify({ ...SAMPLE_ITEM, watermark: "2026" }), "watermark", /\{key, value, asOf\?\}/],
   ["a watermark with no value", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: "k" } }), "watermark.value", /sorts as it orders/],
-  ...PIPELINE_META_KEYS.map((k): [string, string, string, RegExp] => [`a watermark under the pipeline's key ${k}`, JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: k, value: "v" } }), "watermark.key", /pipeline's own metadata key/]),
+  ["a watermark under the pipeline's key source", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: "source", value: "v" } }), "watermark.key", /pipeline's own metadata key/],
+  ["a watermark under the pipeline's key actor_kind", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: "actor_kind", value: "v" } }), "watermark.key", /pipeline's own metadata key/],
+  ["a watermark under the pipeline's key actor_name", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: "actor_name", value: "v" } }), "watermark.key", /pipeline's own metadata key/],
+  ["a watermark key that is not a string", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: 1, value: "v" } }), "watermark.key", /non-empty string/],
+  ["an identity with an extra key", JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "chatgpt", key: "k", id: 1 } }), "identity.id", /not a key of an identity/],
   ["a watermark with an empty value", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: "k", value: "" } }), "watermark.value", /sorts as it orders/],
   ["a watermark asOf that is not an instant", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: "k", value: "v", asOf: "yesterday" } }), "watermark.asOf", /ISO-8601 instant/],
   ["a NUL in the text", JSON.stringify({ ...SAMPLE_ITEM, text: "a\u0000b" }), "text", /NUL/],
@@ -527,6 +532,11 @@ export function selfCheck(): number {
   ok(/UTF-16 without a byte-order mark/.test(utf16Of([0x7b, 0x00, 0x22, 0x00, 0x61, 0x00, 0x22, 0x00, 0x7d, 0x00, 0x0a, 0x00])) && /UTF-16 without a byte-order mark/.test(utf16Of([0x00, 0x7b, 0x00, 0x22, 0x00, 0x61, 0x00, 0x22, 0x00, 0x7d, 0x00, 0x0a])), "…and without its mark, in either byte order: every other byte is 0x00");
   ok(/NUL byte/.test(utf16Of([0x7b, 0x22, 0x61, 0x00, 0x62, 0x22, 0x7d, 0x0a])), "…while one NUL byte in UTF-8 is a NUL byte");
   ok(parseItem({ ...SAMPLE_ITEM, identity: { system: "chatgpt", key: "😀".repeat(300) }, mentions: [{ name: "😀".repeat(MENTION_NAME_MAX), type: "topic" }], links: [{ relation: "references", target: "😀".repeat(IDENTITY_MAX) }] }, 1).item.mentions.length === 1, "lengths are characters, as the column counts them: 300 emoji are 300, not 600");
+  const padded = parseItem({ ...SAMPLE_ITEM, mentions: [{ name: `  ${"n".repeat(MENTION_NAME_MAX)}  `, type: "topic" }], links: [{ relation: "references", target: `  ${"t".repeat(IDENTITY_MAX)}  ` }] }, 1).item;
+  ok(padded.mentions.length === 1 && padded.links.length === 1, "a target and a name are bounded after the trim the writers apply — 512 and 200 with spaces around them pass");
+  ok(parseItems(`${JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "constructor", key: "a" } })}\n${JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "constructor", key: "b" } })}\n`).systems[("constructor" as string)] === 2, "a system named `constructor` is tallied as 2, not as Object's constructor");
+  ok(/UTF-16 without a byte-order mark/.test(utf16Of([0x0a, 0x00, 0x7b, 0x00, 0x22, 0x00, 0x61, 0x00, 0x22, 0x00, 0x7d, 0x00, 0x0a, 0x00])), "…UTF-16 without its mark behind a blank first line is still named");
+  ok(/NUL byte/.test(utf16Of([0x61, 0x00, 0x0a])), "…and a two-byte line with one NUL is a NUL byte — the heuristic needs four");
   let dup: ItemsRefusal | null = null;
   try { parseItems(`${SAMPLE_LINE}\n${JSON.stringify({ ...SAMPLE_ITEM, text: "another text" })}\n`, "x.jsonl"); }
   catch (e) { if (e instanceof ItemsRefusal) dup = e; else throw e; }

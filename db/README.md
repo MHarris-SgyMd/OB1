@@ -1763,7 +1763,8 @@ ISO-8601 instant in UTC is the usual). Two items whose `text` is byte-identical
 are one row — the pipeline's rule for every source — and the run names the
 dropped item and the one that holds its text on stderr, since an emitter
 cannot see which of its lines fell. The emitter an
-import recipe copies, its own parser kept (`conv.created_at` may be `None`;
+import recipe copies, its own parser kept (`conv.created_at` is an ISO-8601
+string with an offset, or `None` — `json.dumps` refuses a `datetime`;
 `conv.raw` is the conversation as the export holds it, and the form is its
 JSON text, a string):
 
