@@ -1,0 +1,55 @@
+{
+  "displayName": "OB1 — linear_issue (MCP tool)",
+  "schemaVersion": null,
+  "notes": null,
+  "trigger": {
+    "name": "trigger",
+    "valid": true,
+    "displayName": "MCP tool: linear_issue",
+    "type": "PIECE_TRIGGER",
+    "settings": {
+      "pieceName": "@activepieces/piece-mcp",
+      "pieceVersion": "~0.0.21",
+      "triggerName": "mcp_tool",
+      "input": {
+        "toolName": "linear_issue",
+        "toolDescription": "Look up a Linear issue's live state — title, state, assignee, last update — by its identifier, e.g. SMD-1863.",
+        "inputSchema": [{ "name": "identifier", "type": "Text", "required": true, "description": "A Linear issue identifier such as SMD-1863" }],
+        "returnsResponse": true
+      },
+      "propertySettings": {}
+    },
+    "nextAction": {
+      "name": "step_1",
+      "valid": true,
+      "displayName": "Look up the issue",
+      "type": "PIECE",
+      "settings": {
+        "pieceName": "@activepieces/piece-linear",
+        "pieceVersion": "~0.6.1",
+        "actionName": "rawGraphqlQuery",
+        "input": {
+          "auth": "{{connections['linear']}}",
+          "query": "query($id: String!) { issue(id: $id) { identifier title url updatedAt state { name } assignee { name } } }",
+          "variables": { "id": "{{trigger.identifier}}" }
+        },
+        "propertySettings": {},
+        "errorHandlingOptions": { "continueOnFailure": { "value": false }, "retryOnFailure": { "value": false } }
+      },
+      "nextAction": {
+        "name": "step_2",
+        "valid": true,
+        "displayName": "Reply",
+        "type": "PIECE",
+        "settings": {
+          "pieceName": "@activepieces/piece-mcp",
+          "pieceVersion": "~0.0.21",
+          "actionName": "reply_to_mcp_client",
+          "input": { "mode": "simple", "response": { "response": { "issue": "{{step_1.data.issue}}" } }, "respond": "stop" },
+          "propertySettings": {},
+          "errorHandlingOptions": { "continueOnFailure": { "value": false }, "retryOnFailure": { "value": false } }
+        }
+      }
+    }
+  }
+}

@@ -11,7 +11,12 @@ re-embedding the world?") and the write functions can append the event first
 and project the row in the same transaction with an empty contributor delta
 (SMD-1999, § "Does the extension contract survive the move?"). This page is
 the decision, the shape it commits to, what it declines, and the path from
-053 to it in three additive steps (SMD-2115, SMD-2116, SMD-2117).
+053 to it in three additive steps (SMD-2115, SMD-2116, SMD-2117). Step 1
+is migration 055 (SMD-2115): the capture event carries
+the content and a backdating writer's `created_at`, the update event the
+key's move, the rules are functions, and the backfill filled every capture
+row on the dogfood log — the option of seeding a replay from the row store
+is declined on that measurement.
 
 The thesis the ticket filed under is **understanding is a fold, not a
 column**: what the brain believes is the projection of every event to date,
@@ -170,8 +175,8 @@ another row already holds, a decision a replay cannot re-derive from the
 content. The log grows by the corpus: 1.83 M characters of text beside a
 4.3 MB audit table (table and TOAST) on the dogfood brain at gate 1's
 census. 046 chose the partition key (`RANGE` on `created_at` by month) and
-did not apply it; SMD-1947 benches the log at a
-million rows.
+did not apply it; SMD-1697's bench decides when, and SMD-1947 benches
+055's census and backfill at a million rows.
 
 ### The three verbs, as a read
 
@@ -496,8 +501,8 @@ bounded fold into a tier that writes on (SMD-2118, Low, blocked by step 3).
 ## Not decided here
 
 - **The log's partitioning.** 046 chose `RANGE` on `created_at` by month and
-  did not apply it; SMD-1947 benches the census and the backfill at a million
-  rows and decides.
+  did not apply it; SMD-1697's bench decides when. (SMD-1947 benches 055's
+  census and backfill at a million rows — a question of its own.)
 - **The redaction amendment's exact shape** (which keys of `diff` blank, what
   the saying-so row carries) — SMD-1723, on the gate 046 built; what the
   projector does with a redacted thought is decided above.

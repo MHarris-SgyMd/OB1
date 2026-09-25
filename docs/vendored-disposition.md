@@ -143,7 +143,7 @@ capability the fork's core already owns.
 
 **The kinds.** An **import** (a capture from an export) becomes an adapter of the ingestion
 contract (`db/ingest-contract.ts`, SMD-1867): its parser emits `Ingested` items and
-`bun db/ingest-records.ts --items` (SMD-2136, the one new mechanism) writes them through the
+`bun db/ingest-records.ts --source items --items` (SMD-2136, the one new mechanism) writes them through the
 pipeline — its own insert, not `upsert_thought`: 003's `content_fingerprint_of`, the
 `ob1.actor` envelope for the audit, a deterministic id per item, `thought_sources`, 053's
 links, the watermark, `reembed.ts` for the vector — so a Python parser stays Python and needs

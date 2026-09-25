@@ -2435,9 +2435,18 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(Number(workers) === 2, `both workers took rows (${workers} distinct worker ids)`);
 
   // The audit log: nothing for a vector replaced by a vector, one row for a
-  // vector where there was none — 008's trigger diffs presence, not value.
+  // vector where there was none — 008's trigger diffs presence, not value —
+  // and, since 055 (SMD-2115), one for the legacy twin update_thought keyed
+  // as it passed (the first of the pair it reached takes 003's key, the other
+  // stays NULL under 018): the key's move is the third thing the event
+  // carries, and before 055 that fill left no trace.
   const [{ auditAfter }] = await sql`SELECT count(*)::int AS "auditAfter" FROM thought_audit`;
-  assert(Number(auditAfter) - Number(auditBefore) === 1, `the pass wrote one audit row, not thirty-seven (${Number(auditAfter) - Number(auditBefore)})`);
+  assert(Number(auditAfter) - Number(auditBefore) === 2, `the pass wrote two audit rows, not thirty-seven — the vector where there was none, and the key the first legacy twin gained (${Number(auditAfter) - Number(auditBefore)})`);
+  const keyRows = await sql`
+    SELECT a.actor_name, a.author_session_id, a.diff FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id
+    WHERE t.content IN (${twins[0]}, ${twins[1]}) AND a.action = 'update'`;
+  assert(keyRows.length === 1 && keyRows[0].actor_name === "reembed" && keyRows[0].author_session_id === REEMBED_JOB && Object.keys(keyRows[0].diff).join(",") === "content_fingerprint" && keyRows[0].diff.content_fingerprint.before === null && typeof keyRows[0].diff.content_fingerprint.after === "string",
+    `…one of them the twin that took the key: the move alone — before NULL, after 003's key — attributed to the pass (${JSON.stringify(keyRows.map((r: { diff: unknown }) => r.diff))})`);
   const [auditRow] = await sql`
     SELECT a.actor_name, a.author_session_id, a.diff FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id
     WHERE t.content = ${bare} AND a.action = 'update'`;
@@ -4228,7 +4237,7 @@ function syncHarness(unitIndex: number) {
   return { store, calls, writer, dbNow, sync };
 }
 
-console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled and idempotent, an edit moves one row, duplicate content is skipped (SMD-1806)");
+console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled and idempotent, an edit moves one row, duplicate content is skipped, and a file of items goes through the CLI end to end (SMD-1806, SMD-2136)");
 {
   const count = (s: string) => sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'source' = ${s}`.then((r) => r[0].c);
   const mk = (source: Doc["source"], key: string, content: string): Doc => ({ id: recordId(source, key), content, source, meta: {} });
@@ -4338,6 +4347,65 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   const held = await upsertRecord(sql, heldDoc, "test-live@4");
   assert(held.outcome === "held" && held.heldBy === syncRow, `an identity another thought holds is 'held', naming it (${JSON.stringify(held)})`);
   assert((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${heldDoc.id}::uuid`)[0].c === 0, "…and no second row for the ticket: the identity is asked about before any write");
+  // Items from a file (SMD-2136), through the CLI end to end against this
+  // server — the pipeline's write path is Bun SQL, which test-schema's PGlite
+  // cannot drive. A dry run counts and writes nothing; two items write two
+  // bare rows labelled with their system, two canonicals, one link and one
+  // mention; the same file again writes nothing; a file with a bad third
+  // line is refused whole, exit 2 naming the line and the field, zero rows;
+  // an item whose scope is not cleared is counted as refused and not written.
+  {
+    const dir = join(tmpdir(), `ob1-items-${process.pid}`);
+    mkdirSync(dir, { recursive: true });
+    const sys = "zqitems";
+    const scope = "zqitems:export";
+    const line = (key: string, text: string, links: unknown[] = [], mentions: unknown[] = [], extra: Record<string, unknown> = {}) =>
+      JSON.stringify({ identity: { system: sys, key }, scope, canonical: { form: JSON.stringify({ key, text }), mediaType: "application/json" }, text, links, mentions, facets: { kind: "probe" }, createdAt: "2026-09-01T10:00:00Z", ...extra });
+    const textA = "Item A: the first synthetic item from a file.";
+    const good = `${line("a-1", textA, [{ relation: "references", target: "a-2" }], [{ name: "zqfiletopic", type: "topic" }])}\n${line("a-2", "Item B: the second synthetic item from a file.")}\n`;
+    const goodPath = join(dir, "good.jsonl");
+    writeFileSync(goodPath, good);
+    const idA = recordId(sys, "a-1");
+    ids.push(idA, recordId(sys, "a-2"));
+    const cli = (...extra: string[]) => {
+      const p = Bun.spawnSync(["bun", join(HERE, "ingest-records.ts"), "--url", URL_!, "--source", "items", ...extra], { cwd: HERE, env: { ...process.env, OB1_INGEST_ALLOW: "" }, stdout: "pipe", stderr: "pipe" });
+      return { code: p.exitCode, out: p.stdout.toString(), err: p.stderr.toString() };
+    };
+    const oneLine = (s: string) => s.trim().split("\n").join(" | ");
+    const rowsOf = async () => (await sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'source' = ${sys}`)[0].c as number;
+    const asDir = cli("--items", dir, "--allow", scope, "--dry-run");
+    assert(asDir.code === 2 && /a directory, not a file/.test(asDir.err), `a directory as --items exits 2 by name (exit ${asDir.code}: ${oneLine(asDir.err).slice(0, 80)})`);
+    const dry = cli("--items", goodPath, "--allow", scope, "--dry-run");
+    assert(dry.code === 0 && /items: 2 record\(s\) \(zqitems 2\)/.test(dry.out) && /nothing written/.test(dry.out) && (await rowsOf()) === 0, `--items --dry-run counts the items by system and writes nothing (exit ${dry.code}: ${oneLine(dry.out)} ${oneLine(dry.err)})`);
+    const first = cli("--items", goodPath, "--allow", scope);
+    assert(first.code === 0 && /inserted 2 /.test(first.out) && /structure \(2 record\(s\)/.test(first.out) && (await rowsOf()) === 2, `two items write two rows and their structure (exit ${first.code}: ${oneLine(first.out)} ${oneLine(first.err)})`);
+    const [rowA] = await sql`SELECT content, metadata, embedding IS NULL AS bare, created_at::text AS c FROM thoughts WHERE id = ${idA}::uuid`;
+    assert(rowA?.content === textA && rowA.metadata.source === sys && rowA.metadata.kind === "probe" && rowA.metadata.actor_name === INGEST_ACTOR.name && rowA.bare === true && /^2026-09-01 /.test(rowA.c), `the row is the item's text, labelled with the item's system, bare, dated by its createdAt, under the ingester's envelope (${JSON.stringify(rowA)})`);
+    const srcs = await sql`SELECT identity, canonical, media_type AS m FROM thought_sources WHERE system = ${sys} ORDER BY identity`;
+    assert(srcs.length === 2 && srcs[0].identity === "a-1" && srcs[0].canonical === JSON.stringify({ key: "a-1", text: textA }) && srcs[0].m === "application/json", `two canonicals, each the line's form byte for byte (${srcs.length})`);
+    const linksA = await sql`SELECT payload AS p FROM thought_facets WHERE thought_id = ${idA}::uuid AND kind = 'link' AND valid_until IS NULL`;
+    assert(linksA.length === 1 && linksA[0].p.relation === "references" && linksA[0].p.target === "a-2" && linksA[0].p.system === sys, `one link, to the second item by identity within the system (${JSON.stringify(linksA.map((l: { p: unknown }) => l.p))})`);
+    const mentionsA = await sql`SELECT m.extraction_key AS k, en.name FROM thought_entities m JOIN ob1_entities en ON en.id = m.entity_id WHERE m.thought_id = ${idA}::uuid`;
+    assert(mentionsA.length === 1 && mentionsA[0].k === `source:${sys}` && mentionsA[0].name === "zqfiletopic", `one mention under source:<system> (${JSON.stringify(mentionsA)})`);
+    const again = cli("--items", goodPath, "--allow", scope);
+    assert(again.code === 0 && /inserted 0 {2}updated 0 {2}patched 0 {2}unchanged 2/.test(again.out) && (await rowsOf()) === 2, `the same file again writes nothing — two unchanged (${oneLine(again.out)})`);
+    // A bad third line: the file refused whole, before any write. The tooth
+    // is line 2, a VALID item not yet written: a writer that wrote each line
+    // as it parsed would have written it before reaching line 3 (first review
+    // pass, cold read — a-1 and a-2 alone could not tell the two apart).
+    const badPath = join(dir, "bad.jsonl");
+    writeFileSync(badPath, `${line("a-1", textA)}\n${line("a-5", "Item E: valid, and never written — its file is refused.")}\n${line("a-3", "Item C: never written.").replace('"mediaType":"application/json"', '"mediaType":"json"')}\n`);
+    const bad = cli("--items", badPath, "--allow", scope);
+    assert(bad.code === 2 && /line 3: canonical\.mediaType: /.test(bad.err) && /refused whole/.test(bad.err) && bad.out === "", `a malformed third line exits 2 naming line 3 and the field, nothing on stdout (exit ${bad.code}: ${oneLine(bad.err).slice(0, 140)})`);
+    assert((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id IN (${recordId(sys, "a-5")}::uuid, ${recordId(sys, "a-3")}::uuid)`)[0].c === 0 && (await rowsOf()) === 2, "…and zero rows for the valid line before it as for the bad one: the file is refused before any write, not line by line");
+    // A scope not cleared: counted as refused under items, said once with the knob, not written.
+    const gatedPath = join(dir, "gated.jsonl");
+    writeFileSync(gatedPath, `${line("a-4", "Item D: not cleared.", [], [], { scope: "zqitems:other" })}\n`);
+    const gated = cli("--items", gatedPath, "--allow", scope);
+    assert(gated.code === 0 && /items: 1 record\(s\) \(zqitems 1\) — 1 REFUSED by the allowlist/.test(gated.out) && /scope "zqitems:other" is not on the allowlist/.test(gated.err) && /--allow "zqitems:other"/.test(gated.err), `an item whose scope is not cleared is counted as refused under items, the knob named (${oneLine(gated.out)} / ${oneLine(gated.err).slice(0, 100)})`);
+    assert((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${recordId(sys, "a-4")}::uuid`)[0].c === 0, "…and not written");
+    rmSync(dir, { recursive: true, force: true });
+  }
   // Tier identity, for preflight's `tier` check.
   await stampTier(sql, "stable");
   const cfg = Object.fromEntries((await sql`SELECT key, value FROM ob1_config WHERE key IN ('tier','last_ingest')`).map((r: { key: string; value: string }) => [r.key, r.value]));
@@ -4996,9 +5064,129 @@ console.log("\n[24] resolve_agent under a held key row: a recently used key answ
 
 await sql.close();
 
+console.log("\n[25] Migration 055's payload backfill under two connections: a second pass beside a held one skips what the first filled and counts only its own; the derivation of a capture whose update was stamped before it by an older transaction reads that update (SMD-2115)");
+{
+  // PGlite is one connection, so test-schema [51] cannot hold what the
+  // header promises of two passes at once — the fill's re-read under the row
+  // lock (`NOT COALESCE(a.diff ? 'content', false)`) is what makes the second
+  // pass skip rather than trip the gate's "nothing is filled" (run-it, first
+  // review pass: the mutant that dropped it survived 1,658 assertions).
+  // Its own pool: the section before closes the shared one.
+  const sql = new SQL({ url: URL_, max: 4 });
+  await sql`DELETE FROM thoughts`;
+  const N = 300;
+  for (let i = 0; i < N; i++) {
+    await sql`INSERT INTO thoughts (content, metadata) VALUES (${`concurrent pass row ${i}`}, '{"source": "plant"}'::jsonb)`;
+  }
+  // 046's shape: a second capture row per thought, without content, older than the real one would be irrelevant — plant them as the thought's only capture by stripping 055's.
+  await sql.unsafe(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_immutable`);
+  await sql.unsafe(`UPDATE thought_audit SET diff = diff - 'content' - 'created_at' WHERE action = 'capture' AND diff->'metadata'->>'source' = 'plant'`);
+  await sql.unsafe(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_immutable`);
+  const waiting = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false) AND jsonb_typeof(COALESCE(diff, '{}'::jsonb)) = 'object'`)[0].c);
+  assert((await waiting()) === N, `${N} capture rows wait for their payload (${await waiting()})`);
+  type Bf = { rows: number; from_row: number; skipped: number; unrecoverable: number; awaiting: number };
+  const held = new SQL({ url: URL_, max: 1 });
+  await held`BEGIN`;
+  const first = (await held`SELECT backfill_thought_payloads() AS r`)[0].r as Bf;
+  // The second pass, while the first holds its rows: it waits on the row
+  // locks — seen waiting, not assumed after a sleep (cold read, second review
+  // pass) — re-reads each row as filled, and writes nothing.
+  const pending = sql`SELECT backfill_thought_payloads() AS r`.execute();
+  let waited = false;
+  // Under the pass's 10 s lock_timeout: a poll that outlasted it would see
+  // the waiting pass raise 55P03 in place of the `waited` assertion (sixth
+  // review pass).
+  for (let i = 0; i < 100 && !waited; i++) {
+    const [w] = await held`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'SELECT backfill_thought_payloads()%'`;
+    waited = Number(w.n) > 0;
+    if (!waited) await new Promise((r) => setTimeout(r, 50));
+  }
+  await held`COMMIT`;
+  await held.close();
+  const second = (await pending)[0].r as Bf;
+  assert(waited, "the second pass was seen waiting on the first's row locks before the first committed");
+  assert(first.rows === N && first.from_row === N && first.skipped === 0, `the held pass filled every row from the live rows (${JSON.stringify(first)})`);
+  assert(second.rows === 0 && second.from_row === 0 && second.skipped === N && second.awaiting === 0, `the second pass, beside it, filled nothing, counted every candidate as skipped — not as its own — and raised nothing (${JSON.stringify(second)})`);
+  assert((await waiting()) === 0 && Number((await sql`SELECT count(*)::int AS c FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE a.action = 'capture' AND a.diff->>'content' IS DISTINCT FROM t.content`)[0].c) === 0, "…and every capture row carries its row's text, once");
+
+  // Two connections, the older transaction's edit committed after the newer
+  // one's capture: the update event's created_at (the transaction's start)
+  // precedes the capture's, its seq follows. The derivation reads it — the
+  // text as captured — not the live text (run-it, first review pass).
+  const older = new SQL({ url: URL_, max: 1 });
+  await older`BEGIN`;
+  await older`SELECT now()`;  // the transaction's clock starts here
+  await new Promise((r) => setTimeout(r, 1100));
+  const [{ id: inverted }] = (await sql`INSERT INTO thoughts (content, metadata) VALUES ('inverted: the first text', '{"source": "inverted"}'::jsonb) RETURNING id`) as { id: string }[];
+  await older`UPDATE thoughts SET content = 'inverted: the second text' WHERE id = ${inverted}::uuid`;
+  await older`COMMIT`;
+  await older.close();
+  const events = (await sql`SELECT action, created_at, seq FROM thought_audit WHERE thought_id = ${inverted}::uuid ORDER BY seq`) as { action: string; created_at: Date; seq: string }[];
+  assert(events.length === 2 && events[0].action === "capture" && events[1].action === "update" && events[1].created_at < events[0].created_at, `the update is stamped before the capture and numbered after it (${JSON.stringify(events.map((e) => [e.action, e.created_at.toISOString(), e.seq]))})`);
+  await sql.unsafe(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_immutable`);
+  await sql`UPDATE thought_audit SET diff = diff - 'content' WHERE thought_id = ${inverted}::uuid AND action = 'capture'`;
+  await sql.unsafe(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_immutable`);
+  const [derived] = (await sql`SELECT p.content, p.source FROM thought_audit a CROSS JOIN LATERAL ob1_capture_payload(a.thought_id, a.created_at, a.seq) p WHERE a.thought_id = ${inverted}::uuid AND a.action = 'capture'`) as { content: string; source: string }[];
+  assert(derived.content === "inverted: the first text" && derived.source === "update", `the capture derives from the older-stamped update's before — the text as captured (${JSON.stringify(derived)})`);
+  const fill = (await sql`SELECT backfill_thought_payloads() AS r`)[0].r as Bf & { from_update: number };
+  assert(fill.rows === 1 && fill.from_update === 1 && fill.from_row === 0, `…and the pass writes that text, from the update (${JSON.stringify(fill)})`);
+
+  // A pass beside ordinary delete_thought calls (run-it, second review pass:
+  // one delete from a live server during the apply failed the whole
+  // migration — the gate, reading under a fresh snapshot, derived a deleted
+  // thought's created_at as gone and refused, and the statement was the
+  // pass). The pass catches the refusal, sets the moved rows aside and runs
+  // again; nothing it filled is lost, and the next pass fills the deleted
+  // thoughts' captures from their tombstones.
+  // Fourth review pass (run-it): forty deletes fired at once landed inside
+  // one or two attempts of a pass retried five times as one statement, and
+  // the arm passed; ten deletes SPREAD over half a second — one per attempt
+  // — exhausted the five and failed the apply. So the deleter runs for as
+  // long as the pass does. Fifth review pass (run-it): deletes spread over
+  // all eight batches landed about one refusal per batch against a budget of
+  // five per batch, so the arm returned with the budget rule removed as
+  // well. The victims are the FIRST batch's candidates, one deleted every
+  // 3 ms, so each attempt of that batch is refused and re-derived until the
+  // deleter stops: the budget spent by every refusal raises after some
+  // twenty deletes — the raise is what kills that mutant; spent by a
+  // fruitless one alone, the pass returns with the deleted rows set aside.
+  // The rows-set-aside assertion guards the vacuous run: a deleter that never
+  // landed would leave the mutant returning with nothing set aside (sixth
+  // review pass). Only a delete before the scan's snapshot is not set aside
+  // (it is filled from its tombstone in the same pass), so a slower runner
+  // sets more aside, not fewer.
+  await sql`DELETE FROM thoughts`;
+  const M = 8000;
+  await sql.unsafe(`INSERT INTO thoughts (content, metadata, created_at) SELECT 'racing pass row ' || g, '{"source": "race"}'::jsonb, now() - interval '1 day' FROM generate_series(1, ${M}) g`);
+  await sql.unsafe(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_immutable`);
+  await sql.unsafe(`UPDATE thought_audit SET diff = diff - 'content' - 'created_at' WHERE action = 'capture' AND diff->'metadata'->>'source' = 'race'`);
+  await sql.unsafe(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_immutable`);
+  assert((await waiting()) === M, `${M} capture rows wait, every one with a created_at the pass would fill (${await waiting()})`);
+  const victims = (await sql`SELECT t.id FROM thoughts t JOIN (SELECT thought_id, row_number() OVER (ORDER BY created_at, seq) AS n FROM thought_audit WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false) AND jsonb_typeof(COALESCE(diff, '{}'::jsonb)) = 'object') a ON a.thought_id = t.id WHERE a.n <= 300 ORDER BY a.n`).map((r: { id: string }) => r.id);
+  const deleter = new SQL({ url: URL_, max: 1 });
+  let passDone = false;
+  const racingPass = (async () => { try { return await sql`SELECT backfill_thought_payloads() AS r`.execute(); } finally { passDone = true; } })();
+  let deleted = 0;
+  for (const id of victims) {
+    if (passDone) break;
+    const [{ r }] = await deleter`SELECT delete_thought(${id}::uuid, NULL::jsonb, false) AS r`;
+    if ((r as { ok: boolean }).ok) deleted++;
+    await new Promise((r) => setTimeout(r, 3));
+  }
+  const raced = (await racingPass)[0].r as Bf & { unrecoverable: number };
+  await deleter.close();
+  assert(deleted > 5 && raced.skipped > 5, `more of the first batch's rows were deleted while the pass ran, and set aside by it, than the five refusals a budget spent by every refusal allows (${deleted} deleted, ${raced.skipped} set aside)`);
+  assert(raced.rows + raced.skipped + raced.unrecoverable === M && raced.unrecoverable === 0, `the pass beside ${deleted} deletes of its first batch's rows, one every 3 ms for as long as it ran, returned rather than raising, and accounts for every candidate — ${raced.rows} filled, ${raced.skipped} set aside (${JSON.stringify(raced)})`);
+  const after = (await sql`SELECT backfill_thought_payloads() AS r`)[0].r as Bf & { from_tombstone: number };
+  assert(after.rows === raced.skipped && after.from_tombstone === raced.skipped && after.awaiting === 0, `…and the next pass fills what was set aside, from the tombstones, leaving nothing waiting (${JSON.stringify(after)})`);
+  await sql`DELETE FROM thoughts`;
+  await sql.close();
+}
+
 // db/README.md's Testing block quotes this suite's assertion total. The count
 // is lower when a group is skipped (PostgreSQL 18, or JIT off), so only a full
 // run — as CI's pg16-with-JIT job is — is compared to the headline (SMD-1805).
+
 console.log("\n[doc] db/README.md states this suite's assertion total (full runs only)");
 {
   const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");
