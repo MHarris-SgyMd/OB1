@@ -4870,7 +4870,8 @@ checkWorkflowPins();
 // a count no line reaches fails as stale (the port landed on those lines —
 // lower the count, or remove the entry when none remains), a file that is
 // gone fails until its entry goes. So every child PR shrinks the table,
-// and the table's size is the class's remaining size.
+// and the table's size, plus the two lib-reached scripts, is the class's
+// remaining size.
 const POSTGREST_CODE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|sh)$/;
 /** The files whose comments start at `#`: Python and shell. */
 const HASH_COMMENT_FILE = /\.(py|sh)$/;

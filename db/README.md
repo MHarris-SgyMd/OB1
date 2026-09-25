@@ -680,9 +680,11 @@ and an extraction pass run at once, and a later re-embed to a third model is a
 fresh pool rather than a no-op against the first one's terminal rows.
 
 **No cloud key.** Nothing here needs one: `deploy/compose.yaml --profile
-local-models` runs an Ollama beside the server, a capture embeds through it
-(`OB1_LLM_BASE_URL`, declared local with `OB1_LLM_LOCAL=1` — `SETUP.md`), and the
-rows captured before that, or under another model, are what `reembed.ts` below
+local-models` runs an Ollama beside the server and a capture embeds through it
+(`OB1_LLM_BASE_URL`) — once you have declared it local with your own
+`OB1_LLM_LOCAL=1` in `deploy/.env`; the profile does not set that for you, and
+under the default every embedding is refused without it (`SETUP.md`). The rows
+captured before that, or under another model, are what `reembed.ts` below
 walks, 021's label per row telling which are at the target and which are not.
 The retired `recipes/local-ollama-embeddings` did the same by hand — an Ollama
 call per thought, then `upsert_thought` over a PostgREST this stack does not
