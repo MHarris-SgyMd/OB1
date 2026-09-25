@@ -62,6 +62,7 @@ import {
   grantedTables,
   grantedViews,
   ROLE_GRANT_GROUPS,
+  ROLE_GRANTS,
   stripSqlComments,
   supabaseIsmsIn,
   UPDATE_THOUGHT_SIGNATURE_9,
@@ -7743,14 +7744,19 @@ console.log("\n[53] A role migrate.ts --grant set up runs the entity writer (an 
   await db.exec(`SELECT prune_orphan_entities()`);
 
   // The class, not only this instance: every table the migrations create is
-  // named by one of the migrations' own groups (not the community, extension
-  // and recipe ones, whose names a migration table could share), so a table a
-  // migration adds without a grant row fails here, not under an operator's
-  // role. thought_sources was the one (053). OWNER_ONLY is what no role
-  // is granted on purpose: migrate.ts's ledger, absent from this suite's
-  // brain (it applies the files itself) and present on a migrated one.
+  // named by one of the migrations' own groups, so a table a migration adds
+  // without a grant row fails here, not under an operator's role.
+  // thought_sources was the one (053). A migrations' group is one whose rows
+  // are all dated by a migration number — not the community, extension and
+  // recipe groups (dated by their files), whose table names a migration table
+  // could share (`entities`). OWNER_ONLY is what no role is granted on
+  // purpose: migrate.ts's ledger, which this suite's brain lacks (it applies
+  // the files itself) and a migrated one has.
   const OWNER_ONLY = new Set(["schema_migrations"]);
-  const namedTables = new Set(grantedTables(ROLE_GRANT_GROUPS.filter((g) => !["community", "extensions", "recipes"].includes(g))));
+  const migrationGroups = ROLE_GRANT_GROUPS.filter((g) => ROLE_GRANTS[g].every((r) => /^\d{3}$/.test(r.since)));
+  const namedTables = new Set(grantedTables(migrationGroups));
+  assert(migrationGroups.includes("structure") && migrationGroups.includes("capture") && !migrationGroups.includes("community") && !namedTables.has("entities"),
+    `the migrations' groups are the ones dated by migration number (${migrationGroups.join(", ")}), so a community-only table (entities) is not counted as named`);
   const ungranted = (await q<{ t: string }>(`SELECT tablename AS t FROM pg_tables WHERE schemaname = 'public' ORDER BY 1`)).map((r) => r.t).filter((t) => !namedTables.has(t) && !OWNER_ONLY.has(t));
   assert(ungranted.length === 0, `every table in the migrated schema is named by one of the migrations' ROLE_GRANTS groups, migrate.ts's ledger aside (unnamed: ${ungranted.join(", ") || "none"})`);
   // The community row for 016's mention table is issued on every migrated
@@ -7824,8 +7830,13 @@ console.log("\n[53] A role migrate.ts --grant set up runs the entity writer (an 
     `apply_entity_type_gate() runs as the role and merges the place into the tool, its mention re-pointed (${gate.err || JSON.stringify(gate.r)})`);
 
   // Each privilege SMD-2216 added, taken away in turn: its path fails by that
-  // table's name — so the grant, not something else, is what let it run.
+  // table's name — so the grant, not something else, is what let it run. It
+  // is given back only if --grant had given it, so the harness never grants
+  // what ROLE_GRANTS omits; a privilege the role lacked answers "not held".
+  const holds = async (privilege: string, table: string) =>
+    (await one<{ h: boolean }>(`SELECT has_table_privilege($1, $2, $3) AS h`, [ROLE, table, privilege])).h;
   const without = async (privilege: string, table: string, run: () => Promise<{ r: J | null; err: string }>) => {
+    if (!(await holds(privilege, table))) return "not held";
     await db.exec(`REVOKE ${privilege} ON ${table} FROM ${ROLE}`);
     try { return (await run()).err; } finally { await db.exec(`GRANT ${privilege} ON ${table} TO ${ROLE}`); }
   };
