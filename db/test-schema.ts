@@ -5992,7 +5992,7 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   const covOrphan = await graphCoverage(run, openStart);
   assert(covOrphan.dependencies!.facets === 5 && covOrphan.dependencies!.held === 4 && (await listed(openStart)).has(tX),
     `a blocked_by whose holder has no source row is read by nothing: tX is startable, and the line counts five facets and four held, agreeing with the ranking (${JSON.stringify(covOrphan.dependencies)})`);
-  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-7007', 'x', 'text/markdown')`, [tX]);
+  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-7007', content, 'text/markdown') FROM thoughts WHERE id = $1`, [tX]);
   const kafka = (await topEntities(run, openStart)).byMentions;
   assert(!kafka.some((e) => e.name === "Kafka") && kafka.find((e) => e.name === "NATS")!.mentions === 3,
     "the whole graph under --startable is the one the startable thoughts build: every Kafka thought is blocked, so Kafka is not in the run; NATS has tR, tS and tW");

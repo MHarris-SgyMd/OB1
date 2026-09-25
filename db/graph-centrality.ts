@@ -89,13 +89,13 @@
  * says. A blocker is open unless its own lifecycle, read through the
  * `lifecycle` rows above via `source_thought()` (053's resolver), is completed
  * or canceled: a settled blocker is not a blocker. A blocker the brain does not
- * hold, or one with no status_type this file knows, still blocks — the source said "blocked" and
- * nothing here says it is settled — and the output counts such blockers rather
- * than hiding them. A row derived from a ticket (`ticket`) or carrying one
- * (`issue`) takes its ticket's blockers, as it takes its ticket's status.
- * Only an active link counts (`valid_until` unset — 053 closes a relation the
- * source dropped), and only `blocks` / `blocked_by`: a parent is not blocked
- * by its children (`child_of`), nor a ticket by what it relates to.
+ * hold, or one with no status_type this file knows, still blocks — the source
+ * said "blocked" and nothing here says it is settled — and the output counts
+ * such blockers rather than hiding them. A row derived from a ticket (`ticket`)
+ * or carrying one (`issue`) takes its ticket's blockers, as it takes its
+ * ticket's status. Only an active link counts (`valid_until` unset — 053 closes
+ * a relation the source dropped), and only `blocks` / `blocked_by`: a parent is
+ * not blocked by its children (`child_of`), nor a ticket by what it relates to.
  * A thought whose ticket no dependency names counts as unblocked, and the
  * output states how many a dependency does name. Without the flag the
  * dependency read is not in the SQL at all, so every other mode renders
@@ -425,18 +425,18 @@ export async function coverage(run: Runner, opts: Options): Promise<Coverage> {
   params.push(pgArray(LIFECYCLE_FILTERS.done));
   const doneSlot = params.length;
   // The dependency counts read the CTEs weightsSql emitted under --startable.
-  // `facets` counts rows, so a relation the sync stated on both sides is two.
-  // `in_dependencies` counts the thoughts whose ticket a dependency names on
-  // either side, from `deps` itself — a link of another relation (a section's
-  // own child_of, a relates_to) says nothing about blocking, and a ticket
-  // blocked only through another's `blocks` is named here though it holds no
-  // facet (first review pass: "any active link on the holder" counted every
-  // synced thought and missed that one). `held` is what the flag did in this
-  // run, not every thought with a blocker; `unknown_blockers` counts distinct
-  // blockers no known status settles or opens that hold back a thought in
-  // this run — one hanging off a Done ticket holds nothing and is not "in
-  // force". `facets` counts `dep_links`, the rows the ranking read, not a
-  // second scan with its own predicate (second review pass).
+  // `facets` counts `dep_links` — the rows the ranking read, not a second scan
+  // with its own predicate (second review pass) — so a relation the sync
+  // stated on both sides is two. `in_dependencies` counts the thoughts whose
+  // ticket a dependency names on either side, from `deps` itself — a link of
+  // another relation (a section's own child_of, a relates_to) says nothing
+  // about blocking, and a ticket blocked only through another's `blocks` is
+  // named here though it holds no facet (first review pass: "any active link
+  // on the holder" counted every synced thought and missed that one). `held`
+  // is what the flag did in this run, not every thought with a blocker;
+  // `unknown_blockers` counts the distinct blockers of held thoughts that no
+  // known status settles or opens — one hanging off a Done ticket blocks
+  // nothing and is not counted (second and third review passes).
   const dependencyCols = opts.startable
     ? `,
             (SELECT count(*) FROM dep_links)::int AS dep_facets,
