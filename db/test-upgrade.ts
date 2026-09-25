@@ -1937,7 +1937,7 @@ console.log("\n[20g] Migration 053 on a schema without 016, and on 016's tables 
   await sql.close();
 }
 
-console.log("\n[20i] Migration 055 onto a populated 053 — every capture row written before gains its payload from the log and the row at apply, the pass writes no event and moves no row, a second pass finds nothing; and on a schema without 046 or 050 the file is refused up front, naming the migration and --reapply (SMD-2115)");
+console.log("\n[20i] Migration 055 onto a populated brain at the file before it — every capture row written before gains its payload from the log and the row at apply, the pass writes no event and moves no row, a second pass finds nothing; and on a schema without 046 or 050 the file is refused up front, naming the migration and --reapply (SMD-2115)");
 {
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "055" });

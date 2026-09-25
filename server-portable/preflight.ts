@@ -1656,6 +1656,8 @@ if (configFailed) {
             const payloadFinding = payload > 0 && (overBound || recoverable > 0);
             const PAYLOAD_REMEDY = "As the owner (the pass amends thought_audit), SELECT backfill_thought_payloads(); fills them from the first content-moving update, the tombstone or the live row, and reports any row nothing derives for (db/README.md).";
             const PAYLOAD_REMEDY_THEN = "Then, as the owner (the pass amends thought_audit), SELECT backfill_thought_payloads(); fills the capture events written before 055 from the first content-moving update, the tombstone or the live row, and reports any row nothing derives for (db/README.md).";
+            const apply055 = ledgerRemedy("055", APPLY_055);
+            const THEN_APPLY_055 = ` Then, ${apply055.charAt(0).toLowerCase()}${apply055.slice(1)}`;
             if (unclassified > 0 || awaiting > 0) {
               const needsKinds = unclassified > 0 || Boolean(census.unnamed);
               // The payload census's finding — or the pre-055 body — rides the
@@ -1672,7 +1674,7 @@ if (configFailed) {
                     ? "For each name: SELECT set_agent_kind('<label>', '<operator | agent | ingested>'); then, as the owner (the pass amends thought_audit and locks ob1_agents), SELECT backfill_thought_audit_events(); fills the rows already written (db/README.md)."
                     : "As the owner (the pass amends thought_audit and locks ob1_agents), SELECT backfill_thought_audit_events(); fills them — every key they name is classified (db/README.md).")
                   + (/(^|, )agent [0-9a-f-]{36}/.test(String(census.unnamed ?? "")) ? " A name shaped `agent <uuid>` is an id the registry has no row for: set_agent_kind cannot reach those rows, and they stay unknown." : "")
-                  + (pre055 ? ` Then, ${ledgerRemedy("055", APPLY_055).charAt(0).toLowerCase()}${ledgerRemedy("055", APPLY_055).slice(1)}` : payloadFinding ? ` ${PAYLOAD_REMEDY_THEN}` : ""));
+                  + (pre055 ? THEN_APPLY_055 : payloadFinding ? ` ${PAYLOAD_REMEDY_THEN}` : ""));
             } else if (pre055) {
               add("audit events", "warn", `046's event shape present and every key classified, but ${PRE055}`, ledgerRemedy("055", APPLY_055));
             } else if (payloadFinding) {

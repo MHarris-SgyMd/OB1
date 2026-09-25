@@ -10,10 +10,10 @@
 --   046 made thought_audit the log of record and 008's capture row records the
 --   creating METADATA, not the content: the one thing a rebuild needs first is
 --   the one thing the log does not hold. SMD-1998 measured it on the dogfood
---   brain — the log alone reproduced the text of 217 of 440 live thoughts, and
---   only those whose text later moved (an update's `before`). SMD-1999 measured
---   what a projector needs beyond 046's event and found three things and
---   nothing else:
+--   brain — the log alone reproduced the text of 217 of 440 live thoughts,
+--   and only those whose text later moved (an update's `before`). SMD-1999
+--   measured what a projector needs beyond 046's event and found three things
+--   and nothing else:
 --
 --     * THE CONTENT on a capture. Without it a capture event projects to
 --       nothing (the prototype refuses one, SQLSTATE OB003).
@@ -110,23 +110,24 @@
 --      falls to the clock path, the ADR's default order, which cannot cross
 --      an incarnation: a brain baselined after 050 counts its rows between as
 --      before-050; a key pruned from ob1_config reads as 'infinity', every
---      row before it (third review pass — the first draft fell to '-infinity',
---      the identity path, the one that can). One set is mis-read the other
---      way and cannot be told from the log at 055: rows a writer committed
---      while 050's ALTER waited for its lock, stamped after the apply's start
---      yet numbered in heap order — narrow, and the verify mode's to name.
---      And the events read stop at the first later
+--      row before it (third review pass — the first draft fell to
+--      '-infinity', the identity path, the one that can). One set is mis-read
+--      the other way and cannot be told from the log at 055: rows a writer
+--      committed while 050's ALTER waited for its lock, stamped after the
+--      apply's start yet numbered in heap order — narrow, and the verify
+--      mode's to name. And the events read stop at the first later
 --      tombstone or capture, that row included: an id db/ingest-records.ts
 --      re-uses after a delete has a second incarnation whose edits are not
 --      this capture's. What the first two readings got wrong: "the first
 --      content-moving update" walked into the second incarnation (cold
---      read, pass 1); the (created_at, seq) comparison alone dropped an edit
---      from an older transaction, so the derivation fell to the live text
---      (run-it, pass 1, two connections); and admitting every row with a
---      larger seq admitted, on a brain with pre-050 history, a PRIOR
---      incarnation's rows whose heap seq happened to be larger, which then
---      sorted first by created_at and became the edge — the tombstone's text
---      onto a standing thought's capture (both readers, pass 2; the dogfood
+--      read, first review pass); the (created_at, seq) comparison alone
+--      dropped an edit from an older transaction, so the derivation fell to
+--      the live text (run-it, first review pass, two connections); and
+--      admitting every row with a larger seq admitted, on a brain with
+--      pre-050 history, a PRIOR incarnation's rows whose heap seq happened to
+--      be larger, which then sorted first by created_at and became the edge —
+--      the tombstone's text onto a standing thought's capture (both readers,
+--      second review pass; the dogfood
 --      log's 512 heap inversions all sit at seq <= 1097 and touch no capture,
 --      measured read-only). The boundary is what tells an older
 --      transaction's edit from a prior incarnation's row; the log alone
