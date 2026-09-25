@@ -1305,7 +1305,7 @@ else {
         (r: { l: string }[]) => ({ level: r[0].l, err: null }),
         (e: { errno?: string; message: string }) => ({ level: null, err: e }));
       await elsewhere.close();
-      if (got.err && /^(42501|3D000|28)/.test(got.err.errno ?? "")) skipRaw(onlyHere, `the role cannot connect to database postgres (${got.err.message})`);
+      if (got.err && /^(42501|3D000|55000|28)/.test(got.err.errno ?? "")) skipRaw(onlyHere, `the role cannot connect to database postgres (${got.err.message})`);
       else assert(got.level === "read committed", `${onlyHere}: one as the same role in postgres is at ${got.level ?? `— it failed: ${got.err?.message}`}`);
     }
   } finally {

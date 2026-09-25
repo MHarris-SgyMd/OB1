@@ -662,8 +662,9 @@ jobs:
       # log, both are waited on and printed (a passing one folded, a failing
       # one open), each has its own time limit (a hang ends as 124, or 137 when
       # TERM is ignored), and the two summary lines close the step. A leg that
-      # fails here and passes alone (db/with-postgres.sh) is a leak between
-      # the two: replay this run: block against one with-postgres.sh database.
+      # fails here and passes alone (db/with-postgres.sh) is load, or a leak
+      # between the two: replay this run: block against one with-postgres.sh
+      # database.
       - name: Incremental upgrade and preflight, side by side
         working-directory: db
         run: |

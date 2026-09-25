@@ -18,7 +18,8 @@
  * CI runs this suite beside test-preflight.ts, each in its own database of one
  * Postgres, as the same role (SMD-2219). What the cluster shares — a role and
  * its settings, pg_locks, pg_stat_activity — is scoped here to the current
- * database, or named for this suite (ob1_upgrade_*, ob1_notemp).
+ * database, or named for this suite (ob1_upgrade_*, ob1_notemp). [12] opens
+ * a session in `postgres` on purpose, to hold a lock its count must not see.
  *
  *   ./with-postgres.sh bun test-upgrade.ts
  */
@@ -65,8 +66,10 @@ const advisoryLocksHere = async (sql: SQL) =>
 /**
  * A session in another database, `postgres`, holding an advisory lock until
  * released — so a count that reads the cluster's locks fails here, not only
- * when a neighbour's capture happens to overlap it. Null when this suite's
- * database is `postgres` or the role may not connect there.
+ * when a neighbour's capture happens to overlap it. Tried, not waited for: a
+ * key some other session holds is a lock in another database all the same.
+ * Null when this suite's database is `postgres` or the role may not connect
+ * there; any other error fails the run.
  */
 async function neighbourAdvisoryLock(sql: SQL): Promise<{ release: () => Promise<void> } | null> {
   const [{ db }] = (await sql`SELECT current_database() AS db`) as { db: string }[];
@@ -75,12 +78,13 @@ async function neighbourAdvisoryLock(sql: SQL): Promise<{ release: () => Promise
   u.pathname = "/postgres";
   const other = new SQL({ url: u.toString(), max: 1 });
   try {
-    await other`SELECT pg_advisory_lock(2219)`;
-  } catch {
+    await other`SELECT pg_try_advisory_lock(2219)`;
+  } catch (e) {
     await other.close();
-    return null;
+    if (/^(42501|3D000|55000|28)/.test((e as { errno?: string }).errno ?? "")) return null;
+    throw e;
   }
-  return { release: async () => { await other`SELECT pg_advisory_unlock(2219)`; await other.close(); } };
+  return { release: async () => { try { await other`SELECT pg_advisory_unlock(2219)`; } finally { await other.close(); } } };
 }
 
 /**
@@ -1092,7 +1096,7 @@ console.log("\n[12] Migration 033 onto a populated 032 — both capture forms ta
   assert(attributed === "after", `…a capture through the 2-argument form resolves and is attributed (${attributed})`);
   const neighbour = await neighbourAdvisoryLock(sql);
   try {
-    assert((await advisoryLocksHere(sql)) === 0, "…and no advisory lock is held once the calls return");
+    assert((await advisoryLocksHere(sql)) === 0, `…and no advisory lock is held once the calls return (${neighbour ? "counted while another database holds one" : "no lock could be planted in another database"})`);
   } finally {
     await neighbour?.release();
   }
