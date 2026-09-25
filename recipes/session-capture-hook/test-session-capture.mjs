@@ -1806,6 +1806,10 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   const nc = loadConfig();
   for (const k of Object.keys(normEnv)) { if (restoreNorm[k] === undefined) delete process.env[k]; else process.env[k] = restoreNorm[k]; }
   assert(nc.modelUrl === "http://127.0.0.1:1/v1" && nc.modelTimeout === undefined, `a full /chat/completions URL is trimmed to its base and a negative timeout falls to the default (${nc.modelUrl}, ${nc.modelTimeout})`);
+  const savedT = process.env.OB1_SESSION_CAPTURE_MODEL_TIMEOUT; process.env.OB1_SESSION_CAPTURE_MODEL_TIMEOUT = "999999999999";
+  const bigT = loadConfig();
+  if (savedT === undefined) delete process.env.OB1_SESSION_CAPTURE_MODEL_TIMEOUT; else process.env.OB1_SESSION_CAPTURE_MODEL_TIMEOUT = savedT;
+  assert(bigT.modelTimeout === 2_147_483_647, `a model_timeout above the setTimeout ceiling is clamped, not truncated to a near-zero abort (${bigT.modelTimeout})`);
 
   // A joined excerpt over the cap keeps the recent TAIL, where decisions land,
   // not the head; and the per-episode window keeps the most recent messages,
@@ -1835,6 +1839,9 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   assert(modelSeen?.messages?.length === 2 && modelSeen.messages[0].role === "system" && /Derived summary:/.test(modelSeen.messages[1].content) && /assistant's messages/.test(modelSeen.messages[1].content),
     "…the model saw a system brief and the derived summary plus the assistant's messages");
   assert(!JSON.stringify(modelSeen).includes("tool_result") && !JSON.stringify(modelSeen).includes(uuid(1)), "…and neither tool results nor thought ids were sent to it");
+  // A runaway model output is capped to LIMITS.textChars, not stored unbounded (review pass 3 tooth).
+  modelReply = "decided and shipped. ".repeat(400);
+  assert((await modelSummary(modelCfg(), { ...basePayload }))?.text.length === LIMITS.textChars, `the model's own output is capped at LIMITS.textChars (${LIMITS.textChars})`);
 
   // Off, unconfigured, or a payload with no excerpt → the derived text (null).
   assert(await modelSummary({ ...modelCfg(), summary: "derived" }, { ...basePayload }) === null, "with the option off, modelSummary keeps the derived text");

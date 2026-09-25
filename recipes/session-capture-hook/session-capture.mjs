@@ -332,7 +332,10 @@ export function loadConfig() {
   // truthy but would abort the fetch at once and always fall back (first review
   // pass 2), and 0 or a non-number means "use the default" (SMD-2014).
   const modelTimeoutRaw = Number(env.OB1_SESSION_CAPTURE_MODEL_TIMEOUT || cfg.model_timeout || 0);
-  const modelTimeout = Number.isFinite(modelTimeoutRaw) && modelTimeoutRaw > 0 ? modelTimeoutRaw : undefined;
+  // Clamped to the 32-bit setTimeout ceiling: a value above it is truncated by
+  // the runtime to a near-zero delay that aborts every call at once, so a
+  // generous timeout would silently become the shortest one (review pass 3).
+  const modelTimeout = Number.isFinite(modelTimeoutRaw) && modelTimeoutRaw > 0 ? Math.min(modelTimeoutRaw, 2_147_483_647) : undefined;
   return {
     url: String(url).replace(/\/*$/, "/"), key: String(key),
     summary,
