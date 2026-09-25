@@ -292,7 +292,7 @@ else {
   // un-migrated public read as "exists but does not resolve" (SMD-2062's
   // review pass 1): the schema row still says to migrate.
   const otherTool = new SQL({ url: LIVE, max: 1 });
-  await otherTool.unsafe("CREATE SCHEMA pf_stray; CREATE TABLE pf_stray.thoughts (id int)");
+  await otherTool.unsafe("DROP SCHEMA IF EXISTS pf_stray CASCADE; CREATE SCHEMA pf_stray; CREATE TABLE pf_stray.thoughts (id int)");
   let before: { code: number; out: string };
   try {
     before = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
@@ -1890,7 +1890,7 @@ else {
                && /migration ledger\s+schema_migrations exists \(schema public\) but does not resolve for this role/.test(wide.out)
                && /schema version\s+could not verify: ob1_config exists \(schema public\) but does not resolve for this role/.test(wide.out),
              `…and every later direct row runs, the ledger and version rows in their own words (${row(wide.out, "chunk context")} | ${row(wide.out, "schema version")})`);
-      assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(public is not on its search_path\)\n\s+→ Put public on the server role's search_path/.test(wide.out)
+      assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(public is not on its search_path, which is nowhere\)\n\s+→ ALTER ROLE pf_reader SET search_path = nowhere, public;/.test(wide.out)
                && !/Apply the migrations: cd db/.test(wide.out),
              `…and the schema row names the path, not the migrate command (${row(wide.out, "schema")})`);
 
@@ -1905,8 +1905,10 @@ else {
                  && /!\s+chunk context\s+could not verify: permission denied for schema public/.test(bare.out)
                  && !/not checked — the direct connection failed before it/.test(bare.out),
                `a role with no USAGE on public: the qualified reads' rows warn, each alone, and every later row runs (${row(bare.out, "write privileges")} | ${row(bare.out, "tier")})`);
-        assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(no USAGE on schema public\)\n\s+→ GRANT USAGE ON SCHEMA public TO pf_reader;/.test(bare.out),
-               `…and the schema row names the missing USAGE, not the path (${row(bare.out, "schema")})`);
+        // The role's path is still `nowhere` from the leg above, so both
+        // causes hold, and the row names both (review pass 2).
+        assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(no USAGE on schema public; public is not on its search_path, which is nowhere\)\n\s+→ GRANT USAGE ON SCHEMA public TO pf_reader;  then ALTER ROLE pf_reader SET search_path = nowhere, public;/.test(bare.out),
+               `…and the schema row names the missing USAGE and the path, each with its statement (${row(bare.out, "schema")})`);
       } finally {
         if (publicUsage) await claims.unsafe("GRANT USAGE ON SCHEMA public TO PUBLIC");
       }

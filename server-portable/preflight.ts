@@ -754,13 +754,18 @@ if (configFailed) {
       // no connection string of its own — say what to hand it instead.
       const urlArg = conn ? `$${conn.from}` : "<the brain's postgres:// connection string — Supabase's direct connection, not the pooler>";
       // public.thoughts present but not resolving for this role — no USAGE
-      // on public, or public off its search_path — is not a brain to migrate
-      // (SMD-2062). public alone, as every direct check judges it: a thoughts
-      // in some other schema is another tool's, and an un-migrated public
-      // still wants the migrations (review pass 1). pg_class answers for any
-      // role, whatever its path; over PostgREST there is no catalog to ask,
-      // and a failed probe asks nothing.
-      let offPath: { usage: boolean; role: string } | null = null;
+      // on public, or public off its search_path, or both — is not a brain
+      // to migrate (SMD-2062). public alone, as every direct check judges
+      // it: a thoughts in some other schema is another tool's, and an
+      // un-migrated public still wants the migrations (review pass 1). Each
+      // cause is named, both when both hold, and the path's fix is a whole
+      // statement that keeps what the path already has (review pass 2: one
+      // cause named, a "…" to fill in). current_schemas() cannot answer "on
+      // the path": it leaves out a schema the role has no USAGE on, so the
+      // setting is read as written. pg_class answers for any role, whatever
+      // its path; over PostgREST there is no catalog to ask, and a failed
+      // probe asks nothing.
+      let offPath: { causes: string[]; fixes: string[] } | null = null;
       if (built.kind === "sql" && conn && /does not exist/i.test(msg)) {
         try {
           const { SQL } = await import("bun");
@@ -770,17 +775,29 @@ if (configFailed) {
               SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                               WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present,
                      has_schema_privilege('public', 'USAGE') AS usage,
-                     quote_ident(current_user::text) AS role`) as { present: boolean; usage: boolean; role: string }[];
-            if (r?.present) offPath = { usage: r.usage, role: r.role };
+                     current_setting('search_path') AS path,
+                     quote_ident(current_user::text) AS role`) as { present: boolean; usage: boolean; path: string; role: string }[];
+            const onPath = String(r?.path ?? "").split(",").map((p) => p.trim().replace(/^"(.*)"$/, "$1")).includes("public");
+            const causes: string[] = [];
+            const fixes: string[] = [];
+            if (r?.present && !r.usage) {
+              causes.push("no USAGE on schema public");
+              fixes.push(`GRANT USAGE ON SCHEMA public TO ${r.role};`);
+            }
+            if (r?.present && !onPath) {
+              causes.push(`public is not on its search_path, which is ${r.path ? r.path : "empty"}`);
+              fixes.push(`ALTER ROLE ${r.role} SET search_path = ${r.path ? `${r.path}, ` : ""}public;  — or wherever this role's path is set instead (ALTER ROLE … IN DATABASE, ALTER DATABASE, the connection string)`);
+            }
+            if (causes.length) offPath = { causes, fixes };
           } finally {
             await probe.close();
           }
         } catch { /* the remedy below stays the migrate command */ }
       }
       add("schema", "fail",
-          offPath ? `${msg} — public.thoughts exists but does not resolve for this role (${offPath.usage ? "public is not on its search_path" : "no USAGE on schema public"})` : msg,
+          offPath ? `${msg} — public.thoughts exists but does not resolve for this role (${offPath.causes.join("; ")})` : msg,
           offPath
-            ? `${offPath.usage ? `Put public on the server role's search_path (ALTER ROLE ${offPath.role} SET search_path …, keeping any schema already on it — pgvector's among them)` : `GRANT USAGE ON SCHEMA public TO ${offPath.role};`} — the table is there, so migrating would not make it resolve.`
+            ? `${offPath.fixes.join("  then ")}  The table is there, so migrating would not make it resolve.`
             : /does not exist|relation/i.test(msg)
             ? `Apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
             : "Check credentials and network reachability to the database.");
