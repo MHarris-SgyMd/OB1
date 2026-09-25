@@ -5541,7 +5541,7 @@ console.log("\n[43] Migration 046: the event shape at the write boundary — who
   await db.exec(`DELETE FROM ob1_agents`);
 }
 
-// ── 44. db/graph-centrality.ts — the counts, the ladder, the control, the lifecycle ──
+// ── 44. db/graph-centrality.ts — the counts, the ladder, the control, the lifecycle, startability ──
 //
 // The script's exported SQL builders run here under PGlite through a Runner, so
 // the text the CLI sends is the text asserted. A small graph whose every count
@@ -5551,8 +5551,11 @@ console.log("\n[43] Migration 046: the event shape at the write boundary — who
 // lifecycle board-sync stamps (SMD-1994): every count in the first half is read
 // with every weight 1, so the default run IS the drop-the-filter control, and
 // the lifecycle block reads the same graph under each filter and under decay.
+// The startability block adds tickets with 053's source rows and link facets
+// (SMD-2061) and reads them under --startable, the reports without the flag
+// compared byte for byte before and after the links are written.
 
-console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defined; the resolution ladder; numeric names out of every count; edges on vs off is the drop-the-graph control (SMD-1938); a thought's lifecycle is a weight — the filter, the decay, and the unstamped passing every filter (SMD-1994)");
+console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defined; the resolution ladder; numeric names out of every count; edges on vs off is the drop-the-graph control (SMD-1938); a thought's lifecycle is a weight — the filter, the decay, and the unstamped passing every filter (SMD-1994); --startable weighs a thought with an open blocker 0, a settled blocker none (SMD-2061)");
 {
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`);
@@ -5889,6 +5892,103 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   await db.query(`UPDATE thoughts SET supersedes = NULL, metadata = metadata - 'issue' WHERE id = $1`, [t1]);
   for (const id of [tSec, tDone, tPrev, tOrphan]) await drop(id);
   assert((await graphCoverage(run, on)).thoughts === 7 && (await graphCoverage(run, on)).entities === 4, "the ticket rows are gone again");
+
+  // ── Startability (SMD-2061). The board of 2026-09-24 as tickets: tP the ADR
+  // (backlog) blocked by its spike tQ (unstarted), itself blocked by spike tR
+  // (started); tS startable (unstarted, a child of tP — a parent is no
+  // blocker). Around them: tV, blocked by tR on tR's side alone (`blocks`,
+  // the one direction the sync stated); tW, whose blocked_by was closed (the
+  // source dropped it); tX, blocked by an item the brain does not hold; and
+  // tPsec, a section derived from tP (`ticket`). The dependency rows are
+  // 053's own: record_thought_source and record_source_links.
+  const ticket = async (content: string, issue: string, status: string, status_type: string, tool: string) => {
+    const id = await thought(content);
+    await record(id, [E("Open Brain", "project"), E(tool, "tool")]);
+    await db.query(`UPDATE thoughts SET metadata = metadata || $2::jsonb WHERE id = $1`, [id, JSON.stringify({ source: "linear", issue, status, status_type, linear_updated_at: SYNCED })]);
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
+    return id;
+  };
+  const links = (id: string, ls: [string, string][]) =>
+    db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [id, JSON.stringify(ls.map(([relation, target]) => ({ relation, target })))]);
+  const tP = await ticket("SMD-7001 — the ADR: Open Brain's log on Kafka.", "SMD-7001", "Backlog", "backlog", "Kafka");
+  const tQ = await ticket("SMD-7002 — spike 2: Open Brain writes through Kafka.", "SMD-7002", "Todo", "unstarted", "Kafka");
+  const tR = await ticket("SMD-7003 — spike 1: Open Brain replays from NATS.", "SMD-7003", "In Progress", "started", "NATS");
+  const tS = await ticket("SMD-7004 — Open Brain's REST search leaks, over NATS.", "SMD-7004", "Todo", "unstarted", "NATS");
+  const tV = await ticket("SMD-7005 — Open Brain's Kafka consumer, after spike 1.", "SMD-7005", "Backlog", "backlog", "Kafka");
+  const tW = await ticket("SMD-7006 — Open Brain's NATS bridge, once gated.", "SMD-7006", "Backlog", "backlog", "NATS");
+  const tX = await ticket("SMD-7007 — Open Brain's Kafka schema, waiting on another team.", "SMD-7007", "Backlog", "backlog", "Kafka");
+  const tPsec = await thought("SMD-7001 — the ADR · Update 2026-09-24\n\nOpen Brain keeps Kafka.");
+  await record(tPsec, [E("Open Brain", "project"), E("Kafka", "tool")]);
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"source": "linear", "ticket": "SMD-7001", "type": "observation"}'::jsonb WHERE id = $1`, [tPsec]);
+  const openStart: GraphOptions = { ...wide, status: "open", startable: true };
+  // The control's "before": every mode but --startable, rendered before a link exists.
+  const beforeAll = render(await graphReport(run, null, wide));
+  const beforeOpen = render(await graphReport(run, "Open Brain", { ...wide, status: "open" }));
+  const covNoLinks = await graphCoverage(run, openStart);
+  assert(covNoLinks.dependencies?.edges === 0 && covNoLinks.dependencies.blocked === 0 && covNoLinks.dependencies.with_links === 0 && covNoLinks.dependencies.last_link_change === null,
+    `before any link, --startable finds no dependency and blocks nothing (${JSON.stringify(covNoLinks.dependencies)})`);
+  await links(tP, [["blocked_by", "SMD-7002"]]);
+  await links(tQ, [["blocked_by", "SMD-7003"], ["child_of", "SMD-7001"]]);
+  await links(tR, [["blocks", "SMD-7002"], ["blocks", "SMD-7005"], ["child_of", "SMD-7001"]]);
+  await links(tS, [["child_of", "SMD-7001"]]);
+  await links(tW, [["blocked_by", "SMD-7003"]]);
+  await links(tW, []);
+  await links(tX, [["blocked_by", "SMD-7999"]]);
+
+  // The control: without the flag the dependency read is not in the SQL, and
+  // the reports are the ones rendered before the links, byte for byte.
+  assert(!weightsSql({ status: "open", decayDone: false }, []).includes("thought_facets") && weightsSql({ status: "open", decayDone: false }, []) === weightsSql({ status: "open", decayDone: false, startable: false }, [])
+      && weightsSql({ status: "open", decayDone: false, startable: true }, []).includes("thought_facets"),
+    "weightsSql without --startable reads no link facet — its text is SMD-1994's — and with it does");
+  assert(render(await graphReport(run, null, wide)) === beforeAll && render(await graphReport(run, "Open Brain", { ...wide, status: "open" })) === beforeOpen && !("dependencies" in (await graphCoverage(run, open))),
+    "the default and --status open reports are byte-identical before and after the links: the dependency read is additive, and its coverage is absent without the flag");
+
+  // The Verify case: --status open lists all the open tickets; --startable
+  // drops the ADR, its blocked spike and the section derived from the ADR, and
+  // keeps the started spike and the startable ticket.
+  const listed = async (o: GraphOptions) => new Set((await topThoughts(run, o)).map((t) => t.id));
+  const openIds = await listed({ ...wide, status: "open" });
+  const startIds = await listed(openStart);
+  assert([tP, tQ, tR, tS, tV, tW, tX, tPsec].every((id) => openIds.has(id)), "--status open lists every open ticket, blocked or not — the lifecycle says nothing about dependencies");
+  assert(!startIds.has(tP) && !startIds.has(tQ) && startIds.has(tR) && startIds.has(tS),
+    "--status open --startable drops tP (blocked by the open tQ) and tQ (blocked by the started tR) and keeps tR and tS — the 2026-09-24 hand analysis, with no hand join");
+  assert(!startIds.has(tPsec), "a section derived from a blocked ticket (`ticket`) is blocked with it — a row's blockers are its ticket's");
+  assert(!startIds.has(tV), "a `blocks` stated on the blocker's side alone blocks its target: both directions are read");
+  assert(startIds.has(tW), "a closed blocked_by (the source dropped it) blocks nothing: only an active link counts");
+  assert(startIds.has(tS), "a child_of link — tS under the open tP, and tQ and tR too — makes nobody a blocker: a parent does not gate its children, nor they it");
+  assert(!startIds.has(tX), "a blocker the brain does not hold still blocks: nothing says it is settled");
+  assert([t2, t3, t4, t6, t8].every((id) => startIds.has(id)), "a thought with no link facet — a ticket the relations never reached, or a hand capture — counts as unblocked");
+  const covS = await graphCoverage(run, openStart);
+  assert(JSON.stringify({ ...covS.dependencies, last_link_change: null }) === JSON.stringify({ edges: 5, with_links: 6, blocked: 5, unknown_blockers: 1, last_link_change: null }) && covS.dependencies!.last_link_change !== null && covS.weighed === 8,
+    `coverage: five active dependency facets (tP's, tQ's blocked_by, tR's two blocks, tX's; the closed one and the child_of links are not), six thoughts whose ticket's relations were read (tP, tPsec, tQ, tR, tS, tX), five blocked (tP, tPsec, tQ, tV, tX), one blocker nothing settles (SMD-7999), a link timestamp as the freshness; eight weigh in (${JSON.stringify(covS.dependencies)}, ${covS.weighed})`);
+  const kafka = (await topEntities(run, openStart)).byMentions;
+  assert(!kafka.some((e) => e.name === "Kafka") && kafka.find((e) => e.name === "NATS")!.mentions === 3,
+    "the whole graph under --startable is the one the startable thoughts build: every Kafka thought is blocked, so Kafka is not in the run; NATS has tR, tS and tW");
+  const rStart = render(await graphReport(run, null, openStart));
+  assert(rStart.includes("lifecycle open, startable;") && rStart.includes("5 active dependency facets; 6 of 15 thoughts belong to a ticket whose relations were read, and every other thought counts as unblocked. --startable: 5 thoughts with an open blocker weigh 0 in this run; a blocker completed or canceled does not block, and a parent is not blocked by its children. 1 blocker is in force only because nothing settles it: not in the brain, or carrying no lifecycle."),
+    "the report: the header names the flag, and the dependency line has the source, the counts, the rule for settled blockers and parents, and the unsettled count");
+  assert(!render(await graphReport(run, null, { ...wide, status: "open" })).includes("Dependencies are read"), "…a line printed under --startable alone");
+  assert(render(await graphReport(run, "Anita", { ...on, types: ["place"], status: "open", startable: true })).includes("shares a --status open startable thought"), "a subject with no neighbour under the flag is told the flag emptied it");
+
+  // A settled blocker is not a blocker: tR completes, so tQ and tV are free;
+  // tP stays blocked by the still-open tQ, and tX by the unknown SMD-7999.
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"status": "Done", "status_type": "completed"}'::jsonb WHERE id = $1`, [tR]);
+  const afterIds = await listed(openStart);
+  const covR = await graphCoverage(run, openStart);
+  assert(afterIds.has(tQ) && afterIds.has(tV) && !afterIds.has(tP) && !afterIds.has(tPsec) && !afterIds.has(tX) && !afterIds.has(tR) && covR.dependencies!.blocked === 3 && covR.dependencies!.edges === 5,
+    `once tR is completed its blocked_by and blocks edges — still active on the board — block nothing: tQ and tV are startable, tP and tPsec still wait on tQ, tX on SMD-7999; tR itself is settled, so --status open drops it (${covR.dependencies!.blocked} blocked)`);
+  // The flags compose: under --decay-done a blocked thought weighs 0 (0.25 × 0 for a settled one), a settled unblocked one 0.25.
+  const decayStart = await topThoughts(run, { ...wide, decayDone: true, startable: true });
+  assert(!decayStart.some((t) => t.id === tP) && decayStart.find((t) => t.id === t1)!.weight === 0.25 && decayStart.find((t) => t.id === tR)!.weight === 0.25 && decayStart.find((t) => t.id === tQ)!.weight === 1,
+    "--decay-done --startable multiplies: tP blocked at 0, the settled t1 and tR at 0.25, the freed tQ at 1");
+  const ps = parseArgs(["--startable", "--status", "open"]);
+  const psd = parseArgs(["--startable", "--decay-done"]);
+  const plain = parseArgs([]);
+  assert(!("error" in ps) && ps.opts.startable && ps.opts.status === "open" && !("error" in psd) && psd.opts.startable && psd.opts.decayDone && !("error" in plain) && !plain.opts.startable
+      && "error" in parseArgs(["--startable", "--startable"]),
+    "--startable lands beside --status and --decay-done, is off by default, and is refused twice");
+  for (const id of [tP, tQ, tR, tS, tV, tW, tX, tPsec]) await drop(id);
+  assert((await graphCoverage(run, on)).thoughts === 7 && (await graphCoverage(run, on)).entities === 4, "the startability tickets are gone again");
 
   // The default lists every in-scope entity, an orphan at 0 included — the
   // filter alone drops what no kept thought mentions (first review pass).
