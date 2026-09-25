@@ -2307,8 +2307,9 @@ function refusalTarget(bodyText: string | null): { expectsReply: boolean; id: st
  * Build a JSON-RPC 2.0 error envelope response for auth failures on a REQUEST.
  * Returns HTTP 200 — the JSON-RPC layer expresses the error so that
  * strict MCP clients keep the connection alive instead of treating
- * the failure as a transport-level fault. `retryAfter` adds the header on the
- * busy refusal (SMD-2106), for a request as for a notification.
+ * the failure as a transport-level fault. This is the REQUEST shape; a refused
+ * notification has no envelope (notificationRefusedResponse). `retryAfter` adds
+ * the header on the busy request, as its bodyless twin sets it too (SMD-2106).
  */
 function unauthorizedResponse(
   id: string | number | null,
