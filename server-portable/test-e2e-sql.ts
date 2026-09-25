@@ -837,6 +837,11 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   assert(steal.result?.isError === true && /only a thought it captured itself/.test(textOf(steal)) && sc(steal)?.code === "REFUSED_SUPERSEDES_OWNERSHIP" && sc(steal)?.retryable === false, `a capture key may not supersede another key's thought — refused, code and all (${sc(steal)?.code})`);
   const [[untouched]] = [await sql`SELECT count(*)::int AS n FROM thoughts WHERE content LIKE 'Session summary — a later ending%'`];
   assert(untouched?.n === 0, "…and nothing was written");
+  // A reader/write key naming a ghost supersedes reaches the write (it skips the
+  // ownership check), where the self-FK refuses it: REFUSED_SUPERSEDES_UNKNOWN,
+  // final — the fifth code pinned against the real server (SMD-1978).
+  const ghostSup = await rpcAs("e2e-key")("tools/call", { name: "capture_thought", arguments: { content: "a write key naming a ghost supersedes", supersedes: "00000000-0000-0000-0000-000000000000" } });
+  assert(ghostSup.result?.isError === true && /no thought with the id given as supersedes/.test(textOf(ghostSup)) && sc(ghostSup)?.code === "REFUSED_SUPERSEDES_UNKNOWN" && sc(ghostSup)?.retryable === false, `a supersedes naming no thought is REFUSED_SUPERSEDES_UNKNOWN, final (${sc(ghostSup)?.code})`);
   const own = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — claude-code — the same session, ended again", source: "claude-code", supersedes: id } });
   const ownId = idIn(textOf(own));
   assert(own.result?.isError !== true && ownId !== undefined, `…while superseding its own earlier summary is allowed (${textOf(own).split("\n")[0].slice(0, 70)})`);

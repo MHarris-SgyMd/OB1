@@ -1106,7 +1106,12 @@ const textOfResult = (result) => (result?.content ?? []).map((c) => c?.text ?? "
 export function verdictOf(result, text) {
   const sc = result?.structuredContent;
   if (sc && typeof sc.code === "string") {
-    const positions = Array.isArray(sc.positions) ? sc.positions.filter((n) => Number.isInteger(n)) : [];
+    // Valid indices only: a non-array, or a float, string or NEGATIVE element
+    // from a non-conforming server, is dropped — a negative would otherwise pass
+    // the retry loop's upper bound and drop nothing while burning a retry (review
+    // pass 2). An empty result falls to the drop-all salvage, as a capture key's
+    // position-less refusal does.
+    const positions = Array.isArray(sc.positions) ? sc.positions.filter((n) => Number.isInteger(n) && n >= 0) : [];
     const mend = sc.code === "DERIVED_FROM_MISSING" ? "derived"
       : (sc.code === "REFUSED_SUPERSEDES_UNKNOWN" || sc.code === "REFUSED_SUPERSEDES_OWNERSHIP") ? "supersedes"
         : null;

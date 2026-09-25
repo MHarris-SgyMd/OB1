@@ -1633,6 +1633,13 @@ console.log("\n[7] As a hook: JSON on stdin, exit codes, and what reaches the en
     assert(verdictOf({ isError: true }, "Refused: derived_from[1] (x) names no thought").mend === "derived" && verdictOf({ isError: true }, "Refused: derived_from[1] names no thought").positions.join() === "1", "…and from prose alone, a Refused naming a derived_from position mends by dropping it");
     assert(verdictOf({ isError: true }, "Error: this key's `supersedes` could not be checked against the target's capture record (x)").retryable === true && verdictOf({ isError: true }, "Error: this key's `supersedes` could not be attributed while the agent registry is unavailable").on === "supersedes", "…an Error the pointer could not be judged is a kept transient marking the pointer");
     assert(verdictOf({ isError: true }, "Refused: the content is not a thought this brain will hold").retryable === false && verdictOf({ isError: true }, "Error: Failed to connect").retryable === true, "…a Refused is final and an Error kept — the prose split the hook falls back to");
+    // A non-conforming server's malformed structuredContent is handled safely —
+    // nothing throws, and the verdict falls to the prose or drops the malformed
+    // parts (review pass 2: the guards are load-bearing but were unpinned).
+    assert(verdictOf({ isError: true, structuredContent: { code: 42, retryable: true } }, "Refused: x").retryable === false, "a non-string code is no verdict — the prose decides");
+    assert(verdictOf({ isError: true, structuredContent: { code: "DERIVED_FROM_MISSING", positions: "0" } }, "").positions.length === 0 && verdictOf({ isError: true, structuredContent: { code: "DERIVED_FROM_MISSING", positions: [1.5, "2", -1, 3] } }, "").positions.join() === "3", "a non-array or malformed positions is reduced to its valid non-negative integers");
+    assert(verdictOf({ isError: true, structuredContent: { code: "STORE_UNAVAILABLE", retryable: "true" } }, "").retryable === false, "a non-boolean retryable is fail-closed to final");
+    assert(verdictOf({ isError: true, structuredContent: null }, "Error: Failed to connect").retryable === true && verdictOf({ isError: true, structuredContent: [1, 2] }, "Refused: x").retryable === false, "a null or array structuredContent falls to the prose without throwing");
   }
   // A server answering with the code and one answering with prose alone reach the
   // SAME outcome (SMD-1978): the hook keys on the verdict, not the sentence.
