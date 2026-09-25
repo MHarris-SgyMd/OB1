@@ -1839,6 +1839,8 @@ console.log("\n[7] As a hook: JSON on stdin, exit codes, and what reaches the en
     assert(vT.retryable === true && vT.mend === null && vT.on === undefined, "…STORE_UNAVAILABLE is a kept transient with nothing to mend");
     const vM = vc({ code: "REFUSED_METADATA", retryable: false }, "Refused: `metadata.redactions` is set by the server, not the caller — drop it.");
     assert(vM.mend === "metadata", "…a coded metadata refusal a later server might send mends by dropping metadata, read from the prose beside the code (SMD-2168 review pass 1: the mend was prose-only, a gap in the structured path)");
+    const vMt = vc({ code: "STORE_UNAVAILABLE", retryable: true }, "Error: could not write the metadata column right now");
+    assert(vMt.mend === null, "…but a RETRYABLE transient whose prose merely mentions metadata is not a metadata mend — the structured fallback is gated on final, as the prose path is (SMD-2168 review pass 2)");
     // The prose fallback derives the same verdicts for a server from before the code.
     assert(vp("Refused: derived_from[1] (x) names no thought").mend === "derived" && vp("Refused: derived_from[1] names no thought").positions.join() === "1", "…and from prose alone, a Refused naming a derived_from position mends by dropping it");
     assert(vp("Error: this key's `supersedes` could not be checked against the target's capture record (x)").retryable === true && vp("Error: this key's `supersedes` could not be attributed while the agent registry is unavailable").on === "supersedes", "…an Error the pointer could not be judged is a kept transient marking the pointer");
