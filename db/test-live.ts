@@ -4969,7 +4969,10 @@ console.log("\n[25] Migration 055's payload backfill under two connections: a se
   // pass) — re-reads each row as filled, and writes nothing.
   const pending = sql`SELECT backfill_thought_payloads() AS r`.execute();
   let waited = false;
-  for (let i = 0; i < 200 && !waited; i++) {
+  // Under the pass's 10 s lock_timeout: a poll that outlasted it would see
+  // the waiting pass raise 55P03 in place of the `waited` assertion (sixth
+  // review pass).
+  for (let i = 0; i < 100 && !waited; i++) {
     const [w] = await held`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'SELECT backfill_thought_payloads()%'`;
     waited = Number(w.n) > 0;
     if (!waited) await new Promise((r) => setTimeout(r, 50));
@@ -5021,9 +5024,13 @@ console.log("\n[25] Migration 055's payload backfill under two connections: a se
   // well. The victims are the FIRST batch's candidates, one deleted every
   // 3 ms, so each attempt of that batch is refused and re-derived until the
   // deleter stops: the budget spent by every refusal raises after some
-  // fifteen deletes; spent by a fruitless one alone, the pass returns with
-  // the deleted rows set aside — which is what the arm asserts, not how many
-  // deletes were issued.
+  // twenty deletes — the raise is what kills that mutant; spent by a
+  // fruitless one alone, the pass returns with the deleted rows set aside.
+  // The rows-set-aside assertion guards the vacuous run: a deleter that never
+  // landed would leave the mutant returning with nothing set aside (sixth
+  // review pass). Only a delete before the scan's snapshot is not set aside
+  // (it is filled from its tombstone in the same pass), so a slower runner
+  // sets more aside, not fewer.
   await sql`DELETE FROM thoughts`;
   const M = 8000;
   await sql.unsafe(`INSERT INTO thoughts (content, metadata, created_at) SELECT 'racing pass row ' || g, '{"source": "race"}'::jsonb, now() - interval '1 day' FROM generate_series(1, ${M}) g`);
@@ -5031,7 +5038,7 @@ console.log("\n[25] Migration 055's payload backfill under two connections: a se
   await sql.unsafe(`UPDATE thought_audit SET diff = diff - 'content' - 'created_at' WHERE action = 'capture' AND diff->'metadata'->>'source' = 'race'`);
   await sql.unsafe(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_immutable`);
   assert((await waiting()) === M, `${M} capture rows wait, every one with a created_at the pass would fill (${await waiting()})`);
-  const victims = (await sql`SELECT t.id FROM thoughts t JOIN (SELECT thought_id, row_number() OVER (ORDER BY created_at, seq) AS n FROM thought_audit WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false)) a ON a.thought_id = t.id WHERE a.n <= 300 ORDER BY a.n`).map((r: { id: string }) => r.id);
+  const victims = (await sql`SELECT t.id FROM thoughts t JOIN (SELECT thought_id, row_number() OVER (ORDER BY created_at, seq) AS n FROM thought_audit WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false) AND jsonb_typeof(COALESCE(diff, '{}'::jsonb)) = 'object') a ON a.thought_id = t.id WHERE a.n <= 300 ORDER BY a.n`).map((r: { id: string }) => r.id);
   const deleter = new SQL({ url: URL_, max: 1 });
   let passDone = false;
   const racingPass = (async () => { try { return await sql`SELECT backfill_thought_payloads() AS r`.execute(); } finally { passDone = true; } })();

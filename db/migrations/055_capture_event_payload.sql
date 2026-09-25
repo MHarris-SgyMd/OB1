@@ -159,7 +159,8 @@
 --      index that holds exactly them — the capture rows without content
 --      whose diff is an object — so a bounded pass, the awaiting count and
 --      preflight's census read the index and not the heap, empty once the
---      pass has run (fifth review pass, both readers: with the type clause
+--      pass has run on a brain whose every capture derives — the rows nothing
+--      derives for stay in it, counted (fifth review pass, both readers: with the type clause
 --      on the queries alone and not the index, the planner left the index
 --      whenever some rows still waited, measured at 60,000 rows) —
 --      in (created_at, seq) order, each derived once, filled under the
@@ -223,7 +224,10 @@
 --      log: the dogfood corpus was 2.2 M characters of live text beside a
 --      6.0 MB audit table, so the log grows by about the corpus. 046 chose
 --      the log's partition key (RANGE on created_at by month) and did not
---      apply it; SMD-1947 benches the log at a million rows and decides.
+--      apply it; SMD-1697's bench decides when (046's own words; the table's
+--      COMMENT below says the same). SMD-1947 benches this file's census and
+--      backfill at a million rows and decides whether the census's bound
+--      (preflight's 2,000) is the right one.
 --
 --   5. NOT HERE, SAID SO. The write functions do not append before they
 --      write (step 2). No function passes a created_at: the three
@@ -875,7 +879,13 @@ AS $$
          -- Offered only as the gate can read it: the rendered form must have
          -- the timestamp's shape (a non-finite value renders "infinity", a
          -- five-digit year does not start with four digits) — else the
-         -- content fills alone (cold read, fifth review pass).
+         -- content fills alone (cold read, fifth review pass). to_jsonb renders
+         -- a timestamptz in ISO form whatever the DateStyle — only the
+         -- TimeZone moves it — and byte for byte as jsonb_build_object does in
+         -- the fill, so this test, the bytes written and the gate's test read
+         -- one string (sixth review pass, measured over every DateStyle and
+         -- ten zones; a regex of the year alone admits nothing more — an
+         -- equivalent mutant, recorded so no pass chases it).
          CASE WHEN (SELECT l.created_at FROM live l) IS DISTINCT FROM p_at
                AND (to_jsonb((SELECT l.created_at FROM live l)) #>> '{}') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}'
               THEN (SELECT l.created_at FROM live l) END AS row_created_at,
@@ -973,14 +983,20 @@ BEGIN
       v_why := 'a content once set is never changed';
     ELSIF v_old ? 'created_at' AND v_new->'created_at' IS DISTINCT FROM v_old->'created_at'
           AND (v_new->>'created_at' IS NULL OR v_new->>'created_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}'
-               OR v_old->>'created_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}'
-               OR (v_new->>'created_at')::timestamptz IS DISTINCT FROM (v_old->>'created_at')::timestamptz) THEN
+               OR v_old->>'created_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}') THEN
       -- Byte-equal is unchanged, whatever the bytes: a created_at set by hand
       -- to no timestamp is not this arm's to judge, and the pass, which never
       -- rewrites a set one, fills the content beside it (cold read, fourth
       -- review pass: the shape test ran on the unchanged value, so the fill
-      -- was refused five times and the apply failed). Otherwise as an
-      -- instant, not as bytes: a timestamptz in jsonb renders in the
+      -- was refused five times and the apply failed). Shape in its own arm,
+      -- the cast in the next: SQL's OR promises no order, and a cast that
+      -- ran first on a string that is no timestamp would raise its own error
+      -- in place of this sentence (sixth review pass; the fill arm below was
+      -- split the same way in the first).
+      v_why := 'a created_at once set is never changed';
+    ELSIF v_old ? 'created_at' AND v_new->'created_at' IS DISTINCT FROM v_old->'created_at'
+          AND (v_new->>'created_at')::timestamptz IS DISTINCT FROM (v_old->>'created_at')::timestamptz THEN
+      -- As an instant, not as bytes: a timestamptz in jsonb renders in the
       -- session's TimeZone, and a hand fill under another zone is the same time.
       v_why := 'a created_at once set is never changed';
     ELSIF (v_new ? 'content') = (v_old ? 'content') AND (v_new ? 'created_at') = (v_old ? 'created_at') THEN
@@ -1038,8 +1054,14 @@ $$;
 -- those defaults sent the awaiting count and preflight's census to the heap
 -- (both readers, fifth review pass, at 60,000 rows). Matching, the index
 -- holds exactly the candidates, the implied clauses drop, and the path is
--- costed on the index's own size.
-CREATE INDEX IF NOT EXISTS thought_audit_awaiting_payload_idx
+-- costed on the index's own size. Dropped first: CREATE INDEX IF NOT EXISTS
+-- keeps whatever predicate stands under the name, and a brain that applied
+-- an earlier revision of this file (the predicate moved in review) would
+-- keep it through --reapply with nothing to say so — a partial index over
+-- the rows still waiting is small, and a re-apply rebuilds it in the time
+-- it takes to read them (sixth review pass, both readers).
+DROP INDEX IF EXISTS thought_audit_awaiting_payload_idx;
+CREATE INDEX thought_audit_awaiting_payload_idx
   ON thought_audit (created_at, seq)
   WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false)
     AND jsonb_typeof(COALESCE(diff, '{}'::jsonb)) = 'object';
