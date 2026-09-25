@@ -1,0 +1,65 @@
+# `--with sealed`: the egress probe (SMD-2210). The profile's n8n with no route
+# out of the compose network, and a record of everything it tried to reach.
+#
+#   bun evals/eval-orchestration.ts --up n8n --with sealed
+#   bun evals/eval-orchestration.ts --verify n8n     # brain-side C1–C3, then E: the list
+#
+# - `sealed` is an `internal: true` network: no gateway, and no port
+#   published from it. n8n is on it and on nothing else. The brain's server
+#   joins it as well as the default network, which it needs for the model
+#   provider on the host.
+# - `egress-watch` owns the network namespace and n8n joins it
+#   (`network_mode: service:…`). The watcher starts first, so tcpdump is
+#   running before n8n sends its first packet. It records every DNS query
+#   and every TCP connection attempt: what n8n tried to reach, answered or
+#   not.
+# - `n8n-front` publishes the loopback port the driver and provisioning dial,
+#   and relays HTTP to n8n across `sealed`. It sits on both networks, so
+#   n8n's own egress still has no route out. An internal network publishes
+#   nothing itself.
+#
+# The Linear fetch cannot work in here, and that is the point. The verifier
+# runs the probe workflow instead (ten fixed captures), skips the act tool
+# and the schedule, and reports what the watcher saw.
+
+services:
+  server:
+    networks: [default, sealed]
+
+  egress-watch:
+    build:
+      context: ../evals/orchestration
+      dockerfile: egress-watch.Dockerfile
+    profiles: ["orchestration"]
+    networks: [sealed]
+    cap_add: [NET_RAW, NET_ADMIN]
+    # DNS queries, and TCP SYNs that carry no ACK: each one is an attempt,
+    # whether or not anything answered. Line-buffered so `compose logs`
+    # reads it live.
+    command: ["-l", "-n", "-i", "any", "-tttt", "udp port 53 or (tcp[tcpflags] & tcp-syn != 0 and tcp[tcpflags] & tcp-ack == 0)"]
+
+  n8n:
+    network_mode: "service:egress-watch"
+    ports: !reset []
+    depends_on:
+      egress-watch:
+        condition: service_started
+
+  n8n-front:
+    image: docker.io/oven/bun:1.4.0-alpine
+    profiles: ["orchestration"]
+    networks: [default, sealed]
+    ports:
+      - "127.0.0.1:5678:5678"
+    volumes:
+      - ../evals/orchestration/front.ts:/front.ts:ro
+    environment:
+      UPSTREAM: http://egress-watch:5678
+    command: ["bun", "/front.ts"]
+    depends_on:
+      n8n:
+        condition: service_started
+
+networks:
+  sealed:
+    internal: true

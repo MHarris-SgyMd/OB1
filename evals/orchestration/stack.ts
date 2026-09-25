@@ -6,13 +6,16 @@
  * from this directory, under the project name `ob1-orch-<tool>` so its volumes,
  * network and containers are its own and `--down` removes all of them. Nothing
  * here touches a running dogfood stack: another project name, another port.
+ * n8n's services are the base file's own under `--profile orchestration`
+ * (SMD-2210), with the `--with` overlays setLayout names.
  *
  * The secrets live in evals/orchestration/.env (gitignored — `.env` at any
  * depth), written once by `ensureEnv`: the database passwords, the candidate's
  * encryption key, and two brain keys minted the way keygen.ts mints them —
  * `orch-capture` (capture scope: the ingestion workflow's, can add, cannot
  * read) and `orch-read` (read scope: the retrieval tool's). Only their hashes
- * reach MCP_ACCESS_KEYS. LINEAR_API_KEY is not copied into it: the driver reads
+ * reach MCP_ACCESS_KEYS. The profile's keys sit there under deploy/.env's
+ * names (profileKeys). LINEAR_API_KEY is not copied into it: the driver reads
  * it from the usual search path (db/env.ts) and each adapter hands it to its
  * tool's credential store; compose never sees it.
  *
@@ -24,15 +27,16 @@
  * A knob for a run (ORCH_AP_PIECES_SYNC_MODE) goes in orchestration/.env.
  */
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "../../server-portable/auth.ts";
 import { parseEnv } from "../../db/env.ts";
+import { setEnvValue as setEnvFileValue } from "../../deploy/orchestration/provision.ts";
 
 export const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..", "..");
-const ENV_FILE = join(HERE, ".env");
+export const ENV_FILE = join(HERE, ".env");
 
 type Keys = { capture: string; read: string };
 
@@ -56,7 +60,7 @@ export function ensureEnv(): Record<string, string> {
     const env = parseEnv(readFileSync(ENV_FILE, "utf8"));
     // A value a later candidate needs is appended, never a rewrite: the
     // database passwords are the ones the volume was initialised with.
-    const later: Record<string, () => string> = { ORCH_MCP_KEY: () => hex(32), ORCH_KEY16: () => hex(16), ORCH_JWT_SECRET: () => hex(32) };
+    const later: Record<string, () => string> = { ORCH_MCP_KEY: () => hex(32), ORCH_KEY16: () => hex(16), ORCH_JWT_SECRET: () => hex(32), ...profileKeys(env) };
     const missing = Object.keys(later).filter((k) => !env[k]);
     if (missing.length) {
       writeFileSync(ENV_FILE, readFileSync(ENV_FILE, "utf8") + missing.map((k) => `${k}=${later[k]()}\n`).join(""), { mode: 0o600 });
@@ -86,6 +90,7 @@ export function ensureEnv(): Record<string, string> {
     "OB1_EMBEDDING_MODEL=qwen3-embedding:4b",
     "OB1_EMBEDDING_DIM=1024",
     "OB1_METADATA_MODEL=qwen2.5:7b",
+    ...Object.entries(profileKeys({ ORCH_BRAIN_CAPTURE_KEY: keys.capture })).map(([k, f]) => `${k}=${f()}`),
     "",
   ];
   writeFileSync(ENV_FILE, lines.join("\n"), { mode: 0o600 });
@@ -93,29 +98,50 @@ export function ensureEnv(): Record<string, string> {
 }
 
 /**
- * Set one value in orchestration/.env, replacing its line or appending one —
- * for a secret a candidate mints at provisioning (n8n's API key), which the
- * next process (`--verify`) must find.
+ * The `orchestration` profile's keys, named as deploy/.env names them
+ * (SMD-2210), so the kit's env file drives the shipped service unchanged.
+ * n8n's capture key is the kit's `orch-capture`, whose hash is already in
+ * MCP_ACCESS_KEYS.
  */
-export function setEnvValue(key: string, value: string): void {
-  const lines = readFileSync(ENV_FILE, "utf8").split("\n").filter((l) => !l.startsWith(`${key}=`));
-  if (lines.at(-1) === "") lines.pop();
-  // Written beside it and renamed over it: the file holds the database
-  // passwords every candidate's volume was made with, and a truncate-then-write
-  // cut short would lose them (review pass 3).
-  const tmp = `${ENV_FILE}.${process.pid}.tmp`;
-  writeFileSync(tmp, [...lines, `${key}=${value}`, ""].join("\n"), { mode: 0o600 });
-  renameSync(tmp, ENV_FILE);
+function profileKeys(env: Record<string, string>): Record<string, () => string> {
+  const hex = (n: number) => randomBytes(n).toString("hex");
+  return {
+    N8N_ENCRYPTION_KEY: () => hex(32),
+    // n8n wants a capital and a number in the owner's password.
+    N8N_OWNER_PASSWORD: () => `Ob1-${hex(12)}`,
+    N8N_MCP_KEY: () => hex(32),
+    N8N_WEBHOOK_KEY: () => hex(32),
+    N8N_BRAIN_CAPTURE_KEY: () => env.ORCH_BRAIN_CAPTURE_KEY,
+  };
 }
+
+/**
+ * Set one value in orchestration/.env, replacing its line or appending one —
+ * for what the next process (`--verify`) must find: the `--with` overlays an
+ * `--up` chose. The profile's provisioning writes n8n's API key here through
+ * the same function, written beside the file and renamed over it (review
+ * pass 3 of SMD-1863: the file holds the passwords every candidate's volume
+ * was made with, and a truncate-then-write cut short would lose them).
+ */
+export const setEnvValue = (key: string, value: string) => setEnvFileValue(ENV_FILE, key, value);
 
 const project = (tool: string) => `ob1-orch-${tool}`;
 
-/** `docker compose` with this candidate's project, env file and the two -f files. */
+/** Per tool, beyond the two -f files: the compose profile its services sit under, and the `--with` overlays in force. */
+const layouts: Record<string, { profile?: string; overlays: string[] }> = {};
+export function setLayout(tool: string, profile: string | undefined, overlays: string[]): void {
+  layouts[tool] = { profile, overlays };
+}
+
+/** `docker compose` with this candidate's project, env file, profile and -f files. */
 function composeArgs(tool: string): string[] {
+  const { profile, overlays } = layouts[tool] ?? { overlays: [] };
   return [
     "compose", "-p", project(tool), "--env-file", ENV_FILE,
+    ...(profile ? ["--profile", profile] : []),
     "-f", join(REPO, "deploy", "compose.yaml"),
     "-f", join(HERE, `compose.${tool}.yaml`),
+    ...overlays.flatMap((f) => ["-f", join(HERE, f)]),
   ];
 }
 

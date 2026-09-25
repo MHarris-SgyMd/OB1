@@ -63,7 +63,8 @@
  *      `include`) or onto the host without a port (`network_mode`), and
  *      PUBLISHES names which service publishes from which file, one mapping
  *      each, so a mapping that is gone or refused fails as missing:
- *      compose.yaml publishes the server alone; the database and Ollama
+ *      compose.yaml publishes the server, and n8n under its opt-in profile
+ *      (SMD-2210); the database and Ollama
  *      publish through compose.host-ports.yaml, a second -f. The files are
  *      parsed with Bun.YAML (SMD-1844); no exceptions
  *  14. every knob the server reads reaches the container: each `OB1_*` /
@@ -2052,7 +2053,8 @@ function checkSupabaseIsms() {
 // fix every published mapping is the short form `"${X_BIND:-127.0.0.1}:
 // ${X_PORT:-n}:n"` — the literal 127.0.0.1 unless the operator names an
 // address, in a knob deploy/.env.example documents — and the base file
-// publishes the server alone; the database and Ollama reach the host only
+// publishes the server alone (since SMD-2210, and n8n under the opt-in
+// `orchestration` profile); the database and Ollama reach the host only
 // through compose.host-ports.yaml, a second -f an operator adds for a tool run
 // from a checkout.
 //
@@ -2134,7 +2136,10 @@ function documentedEnvKnobs(pattern: RegExp) {
 
 /** compose file under deploy/ → the services that publish one mapping each from it. */
 const PUBLISHES: Record<string, string[]> = {
-  "compose.yaml": ["server"],
+  // The server; and n8n under `--profile orchestration` (SMD-2210): its
+  // editor, API, webhooks and MCP endpoint on loopback, for the provisioning
+  // step and an AI client on this host.
+  "compose.yaml": ["server", "n8n"],
   "compose.host-ports.yaml": ["postgres", "ollama", "jev"],
   // The three-brain pipeline (SMD-1806): each tier's server on its own loopback
   // port; the three Postgres services and the shared Ollama publish nothing.
@@ -2308,7 +2313,7 @@ function checkPublishedPorts() {
     }
     for (const service of new Set(published)) {
       const n = published.filter((s) => s === service).length;
-      if (!expected.includes(service) || n > 1) fail(rel, `service \`${service}\` publishes ${n} mapping${n === 1 ? "" : "s"} from this file and PUBLISHES in ${SELF} lists ${expected.includes(service) ? "one" : "none"} — ${name === "compose.yaml" ? "the base file publishes the server alone; the database and Ollama publish through compose.host-ports.yaml, a second -f, and " : ""}a new published port is named in PUBLISHES deliberately, with its row in deploy/README.md's "What is reachable from where" (SMD-1844)`);
+      if (!expected.includes(service) || n > 1) fail(rel, `service \`${service}\` publishes ${n} mapping${n === 1 ? "" : "s"} from this file and PUBLISHES in ${SELF} lists ${expected.includes(service) ? "one" : "none"} — ${name === "compose.yaml" ? "the base file publishes the server, and n8n under the orchestration profile; the database and Ollama publish through compose.host-ports.yaml, a second -f, and " : ""}a new published port is named in PUBLISHES deliberately, with its row in deploy/README.md's "What is reachable from where" (SMD-1844)`);
     }
   }
 }

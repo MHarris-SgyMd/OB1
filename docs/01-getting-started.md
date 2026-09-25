@@ -251,7 +251,7 @@ and your **MCP Connection URL** adds the key — save both in your tracker:
 http://127.0.0.1:8000/?key=your-access-key
 ```
 
-That URL works from this machine and nowhere else, on purpose: the server is the stack's only published port, and it listens on your machine's loopback address. Clients that run on this machine — Claude Code, Cursor, Codex — take it as is. Skip to Step 7 for those.
+That URL works from this machine and nowhere else, on purpose: the server is the only port the stack publishes by default, and it listens on your machine's loopback address. Clients that run on this machine — Claude Code, Cursor, Codex — take it as is. Skip to Step 7 for those.
 
 <details>
 <summary>🌐 <strong>6.1 — Reaching it from Claude Desktop, claude.ai or ChatGPT</strong> (click to expand)</summary>

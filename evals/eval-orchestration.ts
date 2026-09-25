@@ -3,7 +3,7 @@
  * orchestration candidate beside a throwaway brain, and the criteria posted on
  * the ticket before any of them ran.
  *
- *   bun eval-orchestration.ts --up <tool>        # brain + candidate, provisioned headlessly
+ *   bun eval-orchestration.ts --up <tool> [--with <variant>]…   # brain + candidate, provisioned headlessly
  *   bun eval-orchestration.ts --verify <tool> [--json] [--wait-schedule]
  *   bun eval-orchestration.ts --down <tool>      # removes the project's containers AND volumes
  *
@@ -13,6 +13,13 @@
  * candidate on its own loopback port. compose runs with an allowlisted
  * environment and orchestration/.env (stack.ts), so a dogfood deploy/.env on
  * the search path reaches neither.
+ *
+ * n8n is the shipped `orchestration` profile (SMD-2210): the driver passes
+ * `--profile orchestration`, and compose.n8n.yaml changes only the pruning
+ * cadence. `--with postgres` gives it a Postgres 17 of its own instead of
+ * SQLite. `--with sealed` is the egress probe: n8n with no route out, and a
+ * record of what it tried to reach (compose.n8n-sealed.yaml). `--verify`
+ * reads the variants `--up` chose, and `--down` removes them all.
  *
  * What --verify checks (the ticket's comment of 2026-09-25 has the wording):
  *   C1  it first deletes the thoughts `orch-capture` wrote (delete_thought),
@@ -39,28 +46,32 @@
  *       a session with no key and one whose key differs in its last character
  *       are each refused with HTTP 401 or 403.
  *   M1  memory per container at the start of --verify and after the runs, the
- *       image and its digest, the version.
+ *       image and its digest, the version, and the store's size where the
+ *       adapter reads it.
+ * A candidate adds its own checks after these (n8n's K, P and E: n8n.ts).
+ * Under a sealed variant, the ingestion is the probe workflow (ten fixed
+ * captures, nothing fetched). The act tool must FAIL, since reaching Linear
+ * would mean an escape, and --wait-schedule is refused, since the schedule
+ * fetches Linear.
  * C4 (no UI step) is --up's: it prints the steps it took. --up onto an existing
  * project skips what already exists; after editing a workflow file, --down first.
  * Needs LINEAR_API_KEY (the usual .env search path) and the host's Ollama.
  */
 import { loadEnv } from "./env.ts";
-import type { Adapter } from "./orchestration/adapter.ts";
+import type { Adapter, Check, Ctx } from "./orchestration/adapter.ts";
 import { callTool, listTools, refuses } from "./orchestration/mcp-client.ts";
 import { activepieces } from "./orchestration/activepieces.ts";
 import { n8n } from "./orchestration/n8n.ts";
 import { windmill } from "./orchestration/windmill.ts";
-import { brainSql, compose, ensureEnv, memoryByContainer, run, waitFor } from "./orchestration/stack.ts";
+import { brainSql, compose, ensureEnv, memoryByContainer, run, setEnvValue, setLayout, waitFor } from "./orchestration/stack.ts";
 
 const ADAPTERS: Record<string, Adapter> = { n8n, activepieces, windmill };
-/** The ingestion workflow's fixed issue set: ten SMD numbers (see each candidate's workflow). */
+/** The ingestion workflow's fixed item set: ten SMD issues, or the probe's ten fixed thoughts (see each candidate's workflow). */
 const EXPECTED_ISSUES = 10;
 const WRITER = "orch-capture";
 
-type Check = { id: string; pass: boolean; detail: string };
-
 function usage(msg: string): never {
-  console.error(`${msg}\nusage: bun eval-orchestration.ts --up|--verify|--down <${Object.keys(ADAPTERS).join("|")}> [--json] [--wait-schedule]`);
+  console.error(`${msg}\nusage: bun eval-orchestration.ts --up|--verify|--down <${Object.keys(ADAPTERS).join("|")}> [--with <variant>]… [--json] [--wait-schedule]`);
   process.exit(2);
 }
 
@@ -75,22 +86,48 @@ const SCHEDULE_WAIT_MS = 20 * 60_000;
 
 loadEnv();
 const env: Record<string, string> = { ...ensureEnv(), LINEAR_API_KEY: process.env.LINEAR_API_KEY ?? "" };
+
+// The variants: chosen by --up and kept in orchestration/.env, so --verify
+// runs against what is up rather than what its own flags say.
+const WITH_KEY = `ORCH_WITH_${tool.toUpperCase()}`;
+const asked = args.flatMap((a, i) => (a === "--with" ? [args[i + 1] ?? usage("--with needs a variant")] : []));
+for (const v of asked) if (!adapter.variants?.[v]) usage(`${tool} has no variant ${v}${adapter.variants ? ` (it has ${Object.keys(adapter.variants).join(", ")})` : ""}`);
+if (asked.length && mode !== "--up") usage("--with is --up's: --verify reads what --up chose, and --down removes every variant");
+const ctx: Ctx = { with: mode === "--up" ? asked : (env[WITH_KEY] ?? "").split(",").filter(Boolean) };
+const sealed = adapter.sealedVariant !== undefined && ctx.with.includes(adapter.sealedVariant);
+if (sealed && waitSchedule) usage("--wait-schedule under the sealed variant: the schedule fetches Linear, which the probe exists to make unreachable");
+const overlays = (names: string[]) => names.map((v) => adapter.variants![v].file);
+setLayout(tool, adapter.profile, overlays(mode === "--down" ? Object.keys(adapter.variants ?? {}) : ctx.with));
 const brainHealthy = async () => (await fetch("http://127.0.0.1:8012/health").catch(() => null))?.ok === true;
 
 async function up(): Promise<void> {
   if (!env.LINEAR_API_KEY) usage("LINEAR_API_KEY is not set (evals/.env, <repo>/.env or deploy/.env)");
-  const r = compose(tool, ["up", "-d", "--build", "postgres", "migrate", "server", ...adapter.services]);
+  // Kept before compose runs: a failed --up is followed by --down, which removes every variant anyway.
+  setEnvValue(WITH_KEY, ctx.with.join(","));
+  const variantServices = ctx.with.flatMap((v) => adapter.variants![v].services);
+  // The brain is built from this checkout, and --up proves it started what
+  // it built. The build is stamped with a value unique to this run, which
+  // the keyed /health must report back. On podman, a build loaded as
+  // `ob1-orch-n8n-server` sat beside a day-old `localhost/ob1-orch-n8n-server`,
+  // and compose started the old one: a brain two migrations behind the tree,
+  // with `--build` in the command (SMD-2210, measured).
+  const stamp = `${run(["git", "rev-parse", "--short=12", "HEAD"]).out.trim() || "nogit"}+orch${Date.now()}`;
+  const r = compose(tool, ["up", "-d", "--build", "postgres", "migrate", "server", ...adapter.services, ...variantServices], { OB1_GIT_SHA: stamp });
   if (r.code !== 0) throw new Error(`compose up failed:\n${r.err.slice(-2000)}`);
   await waitFor("the brain's /health", brainHealthy);
+  const reported = await fetch("http://127.0.0.1:8012/health", { headers: { "x-brain-key": env.ORCH_BRAIN_READ_KEY } }).then((h) => h.json()).then((j: any) => String(j.commit), () => "unreadable");
+  if (reported !== stamp) {
+    throw new Error(`the brain reports commit ${reported}, not this --up's build (${stamp}): compose started an image it did not just build. Remove the stale copies (docker image rm localhost/ob1-orch-${tool}-server localhost/ob1-orch-${tool}-migrate), then --down and --up again`);
+  }
   await waitFor(`${tool} to answer`, () => adapter.ready(env), 300_000);
-  const steps = await adapter.provision(env);
+  const steps = await adapter.provision(env, ctx);
   await waitFor(`${tool} after provisioning`, () => adapter.ready(env), 300_000);
-  console.log(`${tool} up and provisioned: ${steps.join(", ")}`);
+  console.log(`${tool}${ctx.with.length ? ` (with ${ctx.with.join(", ")})` : ""} up and provisioned: ${steps.join(", ")}`);
 }
 
-/** Rows `orch-capture` wrote, and how many distinct SMD identifiers they open with. */
+/** Rows `orch-capture` wrote, and how many distinct identifiers (SMD-1863, PROBE-3) they open with. */
 function written(): { rows: number; ids: number } {
-  const [rows, ids] = brainSql(tool, `SELECT count(*), count(DISTINCT substring(content from '^(SMD-[0-9]+)')) FROM thoughts WHERE metadata->>'actor_name' = '${WRITER}'`).split("|").map(Number);
+  const [rows, ids] = brainSql(tool, `SELECT count(*), count(DISTINCT substring(content from '^([A-Z]+-[0-9]+)')) FROM thoughts WHERE metadata->>'actor_name' = '${WRITER}'`).split("|").map(Number);
   return { rows, ids };
 }
 
@@ -117,7 +154,7 @@ const wrongKey = (headers: Record<string, string>) =>
 async function ingest(): Promise<{ answered: number; after: { rows: number; ids: number }; ms: number; error?: string }> {
   const t0 = performance.now();
   try {
-    const answered = await adapter.runIngestion(env);
+    const answered = await adapter.runIngestion(env, ctx);
     return { answered, after: written(), ms: Math.round(performance.now() - t0) };
   } catch (e) {
     return { answered: 0, after: written(), ms: Math.round(performance.now() - t0), error: (e instanceof Error ? e.message : String(e)).slice(0, 240) };
@@ -168,7 +205,7 @@ async function verify(): Promise<void> {
   const act = await call(adapter.tools.act, { identifier: "SMD-1863" });
   const anon = await refuses(url, {});
   const wrong = await refuses(url, wrongKey(headers));
-  const searchOk = !search.isError && /SMD-\d+/.test(search.text);
+  const searchOk = !search.isError && /\b(SMD|PROBE)-\d+/.test(search.text);
   // Values, not names: the request itself carries `updatedAt` (in the query)
   // and "SMD-1863" (in the variables), so an error echoing the request must
   // not pass. A timestamp and the identifier as a value come only from Linear.
@@ -181,10 +218,16 @@ async function verify(): Promise<void> {
     pass: adapter.nativeMcpClient && first.after.rows === EXPECTED_ISSUES && captureScoped && searchOk,
     detail: `capture: ${first.after.rows} rows by ${WRITER} (${captureScoped ? "a capture-scope record" : "NOT a capture-scope record"}) through ${adapter.mcpClient}${adapter.nativeMcpClient ? "" : " — not the tool's MCP client, which C2 as posted requires"}; read: brain search through orch-read ${searchOk ? "answered" : "FAILED"}`,
   });
+  // Sealed, the brain-side half must pass and the act tool must not: Linear
+  // answering means the seal leaked. The tool must still be listed, so a
+  // failure is a refused call, not a missing tool.
+  const actVerdict = sealed
+    ? (find(adapter.tools.act) && !actOk ? `failed, as sealed it must (${act.text.slice(0, 160)})` : actOk ? "ANSWERED — Linear reached from the sealed network" : "NOT LISTED")
+    : actOk ? "ok" : `FAIL ${act.text.slice(0, 160)}`;
   checks.push({
     id: "C3",
-    pass: searchOk && actOk && anon.refused && wrong.refused,
-    detail: `tools [${names.join(", ")}]${listed instanceof Error ? ` (${(listed as Error).message.slice(0, 120)})` : ""}; search ${searchOk ? "ok" : `FAIL ${search.text.slice(0, 160)}`}; act ${actOk ? "ok" : `FAIL ${act.text.slice(0, 160)}`}; no key → ${anon.refused ? "refused" : "NOT REFUSED"} (${anon.detail}); wrong key → ${wrong.refused ? "refused" : "NOT REFUSED"} (${wrong.detail})`,
+    pass: searchOk && (sealed ? Boolean(find(adapter.tools.act)) && !actOk : actOk) && anon.refused && wrong.refused,
+    detail: `tools [${names.join(", ")}]${listed instanceof Error ? ` (${(listed as Error).message.slice(0, 120)})` : ""}; search ${searchOk ? "ok" : `FAIL ${search.text.slice(0, 160)}`}; act ${actVerdict}; no key → ${anon.refused ? "refused" : "NOT REFUSED"} (${anon.detail}); wrong key → ${wrong.refused ? "refused" : "NOT REFUSED"} (${wrong.detail})`,
   });
 
   // C1's schedule half: the on-demand runs above say nothing about whether the
@@ -214,20 +257,26 @@ async function verify(): Promise<void> {
     });
   }
 
+  // The tool's own checks, after the shared ones: they may rotate a key or
+  // move a run's timestamps, which nothing above should see.
+  for (const c of (await adapter.extraChecks?.(env, ctx).catch((e: Error) => [{ id: "extra", pass: false, detail: `threw: ${e.message.slice(0, 240)}` }])) ?? []) checks.push(c);
+
   const busy = memoryByContainer(tool);
   const size = run(["docker", "image", "inspect", adapter.image, "--format", "{{.Size}}"]).out.trim();
   const digest = run(["docker", "image", "inspect", adapter.image, "--format", "{{index .RepoDigests 0}}"]).out.trim();
+  const store = adapter.storeFootprint?.(ctx);
   const report = {
-    tool, version: adapter.version(), image: adapter.image, digest, imageMiB: Math.round(Number(size) / 1048576),
+    tool, with: ctx.with, version: adapter.version(), image: adapter.image, digest, imageMiB: Math.round(Number(size) / 1048576), store,
     memoryMiB: { atStart: idle, afterRuns: busy }, checks, switches: adapter.switches, searchSample: search.text.slice(0, 400), actSample: act.text.slice(0, 400),
   };
   if (json) {
     console.log(JSON.stringify(report, null, 2));
   } else {
-    console.log(`${tool} ${report.version}  ${adapter.image}  ${report.imageMiB} MiB image`);
+    console.log(`${tool} ${report.version}${ctx.with.length ? ` (with ${ctx.with.join(", ")})` : ""}  ${adapter.image}  ${report.imageMiB} MiB image`);
     for (const c of checks) console.log(`  ${c.pass ? "PASS" : "FAIL"} ${c.id}  ${c.detail}`);
-    if (!waitSchedule) console.log("  ---- C1s  not checked: the schedule firing needs --wait-schedule (up to 20 min)");
+    if (!waitSchedule) console.log(`  ---- C1s  not checked: ${sealed ? "sealed, the schedule cannot reach Linear" : "the schedule firing needs --wait-schedule (up to 20 min)"}`);
     for (const [k, v] of Object.entries(busy)) console.log(`  M1   ${k} ${idle[k] ?? "?"} MiB at the start, ${v} MiB after the runs`);
+    if (store) console.log(`  M1   store: ${store}`);
   }
   if (checks.some((c) => !c.pass)) process.exitCode = 1;
 }
@@ -235,6 +284,7 @@ async function verify(): Promise<void> {
 function down(): void {
   const r = compose(tool, ["down", "-v", "--remove-orphans"]);
   if (r.code !== 0) throw new Error(`compose down failed: ${r.err.trim()}`);
+  setEnvValue(WITH_KEY, "");
   console.log(`${tool}: project ob1-orch-${tool} removed with its volumes`);
 }
 
