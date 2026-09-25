@@ -404,8 +404,9 @@ redirect is spelled `@>` now, which 016's GIN index serves. A writer call
 already running 053's body when the file commits writes by 053's rule: stop the
 extraction workers for the upgrade, or run `SELECT apply_entity_type_gate()`
 once they have finished (and again after a source stops stating a name the rule
-refuses), as the role that migrated — a `--grant` role lacks UPDATE on the
-mention tables (SMD-2216). Such a run's counts are its result; `ob1_config`
+refuses), as the role that migrated or a `--grant` role — one granted before
+SMD-2216 lacks UPDATE on the mention tables, which a merge needs, until
+`--grant` is run for it again. Such a run's counts are its result; `ob1_config`
 keeps only the file's. `server-portable/entity-gate.ts` is its JavaScript twin,
 for the capture-time `people` facet (`metadata.ts`), which never reaches the
 function and keeps only the names the rule keeps as a person; test-schema [52]
