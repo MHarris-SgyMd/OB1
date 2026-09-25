@@ -1,0 +1,118 @@
+# 160. rest-api sets the request's CORS headers once, on every response the main handler returns, and answers an unlisted origin with no allow-origin header — under an allowlist forty-five of its sixty-two answers said `Access-Control-Allow-Origin: null`, so a browser client could read the auth refusals, the preflight, the rate limit and `POST /search` and no other route, and the literal `null` matched an opaque origin's own (SMD-2079)
+
+**What changed.** `integrations/rest-api/index.ts`: the main handler is now
+`route`, and the exported `handler` is one line — `withCors(req, await
+route(req).catch(internalError))`. `withCors` copies the answer's headers,
+sets the CORS headers from `corsHeadersFor(req)` over them (a header of
+the same name is replaced) and returns a `Response` with the same body,
+status and status text. `json(data, status)` has no third argument: it sets
+`Content-Type` and nothing else, and its seventeen call sites that passed `req`
+(SMD-2054's four among them) pass it no longer, so `checkRateLimit`,
+`proxyFetchJson` and `handleExecuteJob` lose the `req` they threaded through
+to it; the preflight `204` is bare too. `corsHeadersFor` sets
+`Access-Control-Allow-Origin` to the request's `Origin` when the allowlist
+names it and `*` when there is no list, and otherwise sets no allow-origin
+header at all (review pass 1): the literal `null` it answered with is what
+an opaque origin — a sandboxed iframe, a `data:` or `file:` document — sends
+as its `Origin`, so such a document matched the allowlist it was meant to
+fail. It exposes `Retry-After`, so a browser can read the `429`'s wait.
+`internalError` is the `500` the routing `catch` built inline, now a
+function, and the `handler` applies it to what escapes `route`'s `try` —
+the preflight branch, the auth and rate-limit steps, `new URL(req.url)` and
+the path regexes stand before it, so a failure there was an unhandled
+rejection, Bun's bare `500` with no headers. `Content-Type` is `json()`'s
+alone. The README's CORS section says every response carries the headers
+and names what did not.
+
+**Why.** `json()` built the CORS headers from the request only when handed
+`req`; without it, it answered `*` when `CORS_ALLOWED_ORIGINS` was unset and
+`null` when it was set. Forty-five of the sixty-two `json(…)` sites passed
+none — every other handler's `200` and most of its errors — and the handler
+returned their answers untouched (SMD-2054's record says forty-seven, and
+this branch's first commit forty-seven, fourteen and five: a one-line grep's
+count, which missed two calls with `req` on a line of its own; the
+paren-balanced count is sixty-two, seventeen and forty-five, and `/search`'s
+four). So under an allowlist, the configuration the
+README's Security section tells production to use, a browser client could
+read the `401`, the `503`, the `OPTIONS`, the `429` and, since SMD-2054's
+third review pass, `POST /search`, and no page of `GET /recent`,
+`/thoughts`, `/stats` or any other route: the allowlist broke the clients it
+was set for. Found by SMD-2054's third review pass, which gave `req` to the
+`/search` answers it was touching and filed the rest. The ticket named
+the in-repo dashboard (`dashboards/open-brain-dashboard-next/lib/api.ts`)
+as a browser caller; it is not — that module is `server-only`, so its
+requests carry no `Origin` and read no CORS header. The defect stands for
+any browser client, which the README invites.
+
+**Held.** `extensions/test-writes.ts`, the rest-api block, under
+`CORS_ALLOWED_ORIGINS` set before the module loads. Five arms: with a
+listed `Origin`, a page from `GET /recent`, a page from `GET /thoughts` and
+the `404` for an unknown route echo the origin, and `GET /recent`'s `200` to
+an unlisted one carries no allow-origin header (main's file: the literal
+`null`) — one assertion, nine requests in flight at once, the `/search` arm
+SMD-2054 left among them; the preflight `204` and the `401`, which passed
+the request before and are the wrapper's now; the `429`, `/health` called
+until the default cap answers, carrying the headers beside `Retry-After`
+and its JSON content type, the set this change rebuilt, with `Retry-After`
+exposed; `POST /ingestion-jobs/:id/execute` through the suite's fetch stub,
+which answers smart-ingest's execute after 25 ms with the abort signal
+honoured, so the proxy's timeout must be a number for the `200` to arrive —
+an arm for the proxy and its headers, not the route, which on this fork
+builds its URL from `SUPABASE_URL`, the Postgres DSN, so a real `fetch`
+refuses the protocol and every deployment answers `502` (SMD-2110, review
+pass 2); and a second instance of the module loaded with no allowlist,
+answering `*` to a foreign origin — the shipped default, driven by nothing
+while the block ran under an allowlist (review pass 3). Against main's file
+the gateway arm fails, `200 null / 200 null / 404 null / 200 null`, and the
+preflight-and-`401` arm passes; against this branch's first commit the
+execute arm fails with a `504` (review pass 1, below). 342 assertions on a
+throwaway Postgres under `TZ=America/Chicago`; `extensions/test-auth.ts`,
+which dials this server's `/health`; check-fork PASS; the tip exported to a
+clean directory runs CI's commands green (review pass 3). Probed by hand
+under an allowlist, not in the suite: the SyntaxError `400` and the `500` a
+`null` body raises (SMD-2083) carry the headers too. The
+`.catch(internalError)` on the handler is driven by nothing: no request
+makes the auth or rate-limit step throw.
+
+**Review passes.**
+
+| Pass | Finding | Caught | Fix |
+| --- | --- | --- | --- |
+| 1 | dropping `req` from `proxyFetchJson(url, body, req, timeoutMs)` left `handleExecuteJob` passing `req` into the timeout's slot — a `NaN` timeout, `setTimeout`'s 1 ms, so every `POST /ingestion-jobs/:id/execute` aborted at once with a `504`; the regex that rewrote the `json(…, <status>, req)` sites could not see a call with no status, nothing typechecks the file (SMD-2080), and nothing drove the route | cold-read (own diff) + run-it | `req` gone from the handler; the stub answers execute after a pause with the signal honoured, and an arm drives the route |
+| 1 | the `429`, the `SyntaxError` `400`, the `null`-body `500` and the preflight were reshaped and driven by nothing | run-it | probed by hand under an allowlist; the `429` and the execute route are arms |
+| 1 | "forty-seven" answers and "fourteen" callers, in eight places, the ticket's title and SMD-2054's record: a one-line grep's count; a paren-balanced scan of the file gives sixty-two `json(…)` sites, seventeen with the request, forty-five without, and SMD-2054 gave `req` to four sites, not five | cold-read (second reviewer) | the counts, everywhere this branch writes; the ticket retitled |
+| 1 | `Access-Control-Allow-Origin: null` for an unlisted origin is what an opaque origin (a sandboxed iframe, a `data:` or `file:` document, a request redirected across origins) sends as its own `Origin`, so it matched — the allowlist kept such documents out of nothing; on main since the allowlist arrived, and this branch asserted the shape as right and documented it | cold-read (second reviewer) | no allow-origin header for an unlisted origin; the two arms assert the header absent |
+| 1 | the unlisted-origin clause proved nothing — main's file answered `null` to every origin — and read no status | cold-read (second reviewer) | with the header absent the clause is a tooth (main's file: `null`); the `200` is asserted |
+| 1 | the `429` loop's bound of 120 could run out if the limiter's window rolled over mid-loop; "about fifty requests" is about thirty | cold-read (second reviewer) | 250; the count |
+| 1 | "a `Response` a `fetch` returned has immutable headers" is the spec's rule; Bun does not enforce the guard | run-it (second reviewer) | the record says so; the copy stays, since the rule is the spec's |
+| 1 | `Retry-After` was exposed by no answer, so a browser could read the `429` and not its wait — pre-existing | cold-read (second reviewer) | `Access-Control-Expose-Headers: Retry-After`; the `429` arm reads it |
+| 2 | pass 1's execute arm said the route "reaches the upstream": on this fork `SUPABASE_URL` is the Postgres DSN, the route fetches `postgres://user:password@…/functions/v1/smart-ingest/execute`, `fetch` refuses the protocol, and every deployment answers `502` with the DSN handed to `fetch()` — the stub matched the URL by its path; pre-existing (SMD-1798/1800 repointed the variable), the claim new | cold-read (second reviewer) + run-it | the arm and the record say what is held (the proxy's timeout and its headers); SMD-2110 for the route and the README's Edge-Function residue |
+| 2 | "every route's `200` among them" — `/search`'s two `200`s carried the request, which the same sentence says; "forty-seven" survived in Not taken; "fourteen" and "five" were this branch's first commit's numbers, not SMD-2054's record's; "seventeen callers" are call sites | cold-read (second reviewer) | "every other route's"; the counts and the attribution |
+| 2 | pass 1 set `RATE_LIMIT_PER_MIN=80` before the module loads so the `429` arm could reach the cap, leaving every earlier arm of the block about fifty requests of headroom under a failure that would look nothing like its cause | cold-read (second reviewer) | the default cap; the loop sends what remains |
+| 2 | the stub's guard still said only the provider and Readwise were stubbed; `withCors` replaces a route's `Vary` | cold-read (second reviewer) | the message names execute; the docblock says `Vary` is the wrapper's |
+| 2 | the first commit's message carries forty-seven (its subject), fourteen and five | cold-read (second reviewer) | history; the pull request's title and body carry the corrected figures |
+| 3 | the suite's header described the rest-api block as SMD-2054 left it, "every answer of /search"; its "everything below the route boundary is real" sentence predates the execute stub | cold-read (third reviewer, maintainer lens) | a paragraph for this change; the stubs named |
+| 3 | the Changelog line said two of the four things a client sees; the preflight's lost `Content-Type` was said nowhere a client reads | cold-read (third reviewer, maintainer lens) | the line and the README say all four |
+| 3 | the `*` default — the README's backward-compatibility promise — was driven by nothing: the block runs under an allowlist | cold-read (third reviewer, maintainer lens) | a second instance of the module with no allowlist; one arm |
+| 3 | rest-api is the one gateway that reads the allowlist; its siblings answer `*` to every origin, unsaid anywhere the README's production advice is read | cold-read (third reviewer, maintainer lens) | the README says so; SMD-2113 |
+| 3 | the README's "CORS errors from browser" entry still sent readers to the Supabase project's Edge Function settings and did not say the symptom changed; "every response carries the headers" read alone contradicted the absent allow-origin header; the `.catch` covers more than the auth and rate-limit steps | cold-read (third reviewer, maintainer lens) | rewritten; "the request's CORS headers"; the record lists what stands before the `try` |
+| 4 | the merge review, the branch read as GitHub shows it beside the drafted pull-request body: Held said 341 assertions where the tree runs 342; the README's sibling list read as exhaustive; a mutant's count sat inside an assertion's failure message and was pass 1's five where the wrapper absent now fails six; the body's placeholders, its five, its missing SMD-2113 and two arms, "subject" for a message | cold-read (fourth reviewer, pull-request lens) + mutant | the counts; "among them"; the note moved to the comment; the body |
+| 5 | the seam four merges of main left: main's SMD-1802 rewrote this README citing SMD-2114 three times, a ticket closed as SMD-2110's duplicate the same afternoon; a pass-4 row sat above a pass-3 row here; Follow-ups still filed the README half of SMD-2110, which SMD-1802 landed; two Supabase-era comments in the server and one "cold starts" in the README survived main's sweep; the allowlist example stood alone where Step 1 sets variables on the `bun` line | cold-read (fifth reviewer, seam lens) | the citations retargeted; the row moved; Follow-ups trimmed; the words; the example |
+
+**Not taken.** Passing `req` on the forty-five sites: the shape that
+regresses at the next `return json(…)`. Setting the headers on the
+handler's `Response` in place: per the Fetch spec a `Response` a `fetch`
+returned has immutable headers — Bun does not enforce the guard, browsers
+and Deno do — and though no route returns one today, the copy costs four
+lines and holds on every runtime.
+A pin that `corsHeadersFor` is called from one place: nothing bypasses the
+exported handler.
+
+**Follow-ups.** SMD-2110 (the ingest proxy's URL is built from the DSN; its
+README half landed with SMD-1802, and SMD-2114, which main's README cited,
+is a duplicate of it — this branch retargets those citations); SMD-2113 (the
+other vendored servers read no allowlist).
+
+**Upstream status:** not sent — the fork dropped parity (SMD-1924).
+Upstream's `json()` has the same optional `req`, and its allowlist answers
+the same literal `null`.
