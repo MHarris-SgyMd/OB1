@@ -204,6 +204,27 @@ console.log("\n[5] Auth failure — missing key, and an unparseable body");
   assert((await r2.json())?.id === null, "unparseable body → id: null");
 }
 
+console.log("\n[5b] A refused NOTIFICATION (no id) gets no JSON-RPC body — 202, not a 200 envelope the client drops (SMD-2106)");
+{
+  const NOTIF = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" });
+  for (const [label, headers] of [["missing key", H], ["wrong key", { ...H, "x-brain-key": "wrong" }]] as [string, Record<string, string>][]) {
+    const r = await fetch(BASE, { method: "POST", headers, body: NOTIF });
+    const body = await r.text();
+    assert(r.status === 202 && body === "", `${label}: notification → 202 with no body (${r.status}, ${JSON.stringify(body.slice(0, 40))})`);
+    assert(corsOk(r) && !r.headers.has("retry-after"), `${label}: CORS present, no Retry-After — no key never changes on a retry`);
+  }
+  // A batch that is all notifications is answered the same.
+  const batch = await fetch(BASE, { method: "POST", headers: H, body: JSON.stringify([{ jsonrpc: "2.0", method: "notifications/initialized" }, { jsonrpc: "2.0", method: "notifications/cancelled", params: {} }]) });
+  assert(batch.status === 202 && (await batch.text()) === "", "an all-notifications batch → 202 with no body");
+  // A request in the batch keeps the 200 envelope; so does a lone request whose
+  // id is null (presence of `id`, not its value, makes it a request).
+  const mixed = await fetch(BASE, { method: "POST", headers: H, body: JSON.stringify([{ jsonrpc: "2.0", method: "notifications/initialized" }, { jsonrpc: "2.0", id: 9, method: "tools/list", params: {} }]) });
+  assert(mixed.status === 200 && (await mixed.json())?.error?.code === -32001, "a batch with a request keeps the 200 envelope");
+  const nullId = await fetch(BASE, { method: "POST", headers: H, body: JSON.stringify({ jsonrpc: "2.0", id: null, method: "tools/list", params: {} }) });
+  const nullBody = await nullId.json();
+  assert(nullId.status === 200 && nullBody?.error?.code === -32001 && nullBody?.id === null, "a request with id: null keeps the 200 envelope, echoing null");
+}
+
 console.log("\n[6] Auth via ?key= — the documented connector path");
 {
   const ok = await fetch(`${BASE}/?key=${KEY}`, { method: "POST", headers: H, body: INIT });

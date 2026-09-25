@@ -1259,6 +1259,18 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
       const r = await fetch(BASE, { method: "POST", headers: { ...H, "x-brain-key": "op-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id: "busy-7", method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "0" } } }) });
       const busyBody = await r.json() as { id?: unknown; error?: { code?: number; message?: string } };
       assert(r.status === 200 && busyBody.id === "busy-7" && BUSY.test(JSON.stringify(busyBody)), `…and asks the other to retry, with its own code, answering the request's id (${r.status}, ${JSON.stringify(busyBody).slice(0, 110)})`);
+      assert(r.headers.get("retry-after") === "2", `…and the busy REQUEST carries Retry-After, for a client that honours it (${r.headers.get("retry-after")}) (SMD-2106)`);
+      // A NOTIFICATION (no id) gets no JSON-RPC body (SMD-2106): the SDK cancels
+      // the body of a 200 that held no request, so the wrong answer was silently
+      // dropped. Revoked never changes on a retry → a bare 202; busy can → 503
+      // with Retry-After.
+      const NOTIF = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" });
+      const revokedNotif = await fetch(BASE, { method: "POST", headers: { ...H, "x-brain-key": "bot-raw" }, body: NOTIF });
+      assert(revokedNotif.status === 202 && (await revokedNotif.text()) === "" && !revokedNotif.headers.has("retry-after"),
+        `a revoked key's notification → 202 with no body and no Retry-After (${revokedNotif.status})`);
+      const busyNotif = await fetch(BASE, { method: "POST", headers: { ...H, "x-brain-key": "op-raw" }, body: NOTIF });
+      assert(busyNotif.status === 503 && (await busyNotif.text()) === "" && busyNotif.headers.get("retry-after") === "2",
+        `a busy key's notification → 503 with no body and Retry-After (${busyNotif.status}, retry-after ${busyNotif.headers.get("retry-after")})`);
     } finally {
       await unlock();
     }
