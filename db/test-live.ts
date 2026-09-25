@@ -78,25 +78,6 @@ await dropSchema(URL_);
 let sql = new SQL({ url: URL_, max: 4 });
 console.log(`  server: ${(await sql`SELECT version() AS v`)[0].v.split(" on ")[0]}\n`);
 
-/**
- * One session of the races in [6d], [6f] and [6g], whose first arms provoke a
- * deadlock on purpose and whose second arms show the shipped code does not —
- * both use it, so the arms differ only in the code under test and a deadlock
- * that comes back is found as fast as a provoked one. Postgres looks for a cycle only once a lock wait has lasted
- * deadlock_timeout, 1 s by default, so each provoked deadlock cost a second —
- * fifteen of them in one CI run of [6g]'s first arm (SMD-2135). At 50 ms a
- * cycle is found within 50 ms of closing. The setting changes when a wait is
- * checked, and so which side of a cycle is the victim, not which waits are
- * cycles: no assertion here names the victim of a cycle or reads how long a
- * wait took, and every bound on a wait (waitFor's 8–12 s, statement_timeout's
- * 8–15 s) is far above a second. It is superuser-only by default, sent as a
- * startup parameter so it holds for the session: CI's service and
- * with-postgres.sh connect as postgres, and any other role races at the
- * default, only slower.
- */
-const RACE_SETTINGS: Record<string, string> = (await sql`SELECT current_setting('is_superuser') = 'on' AS su`)[0].su ? { deadlock_timeout: "50ms" } : {};
-const racer = () => new SQL({ url: URL_!, max: 1, connection: RACE_SETTINGS });
-
 // ── 1. The runner ────────────────────────────────────────────────────────────
 
 console.log("[1] migrate.ts against a real server");
@@ -1188,6 +1169,28 @@ console.log("\n[6c] The backfill holds the table: a capture and an edit wait for
   await sql`DELETE FROM thoughts`;
 }
 
+/**
+ * The sessions of the races in [6d], [6f], [6g] and [6i]. Each section's
+ * deadlocking arm provokes a deadlock on purpose, and Postgres looks for a
+ * cycle only once a lock wait has lasted deadlock_timeout, 1 s by default, so
+ * every provoked deadlock cost a second — fifteen in one CI run of [6g]'s
+ * first arm (SMD-2135). At 50 ms a cycle is found within 50 ms of closing.
+ * The arms that must not deadlock use the same sessions, so the arms differ
+ * only in the code under test and a deadlock that comes back is found as fast.
+ *
+ * The setting moves when a wait is checked, and so which side of a cycle is
+ * the victim, which no assertion names. A wait that is not a cycle — [6i]'s
+ * 400 ms "still waiting" probes and arm 1's lower bound on the delete's wait —
+ * is untouched, and every other bound on a wait is 8 s or more. [6g]'s first
+ * arm deadlocks as often at 50 ms as at the default, both through
+ * with-postgres.sh and in CI-shaped containers. deadlock_timeout is
+ * superuser-only by default and goes as a startup parameter, so it holds for
+ * the session: CI's service and with-postgres.sh connect as postgres, and any
+ * other role races at the default, only slower.
+ */
+const RACE_SETTINGS: Record<string, string> = (await sql`SELECT current_setting('is_superuser') = 'on' AS su`)[0].su ? { deadlock_timeout: "50ms" } : {};
+const racer = () => new SQL({ url: URL_!, max: 1, connection: RACE_SETTINGS });
+
 console.log("\n[6d] An edit naming supersedes meets an edit of its target: FOR UPDATE on the target deadlocks with the FK's KEY SHARE, update_thought's FOR NO KEY UPDATE does not (migration 032)");
 {
   await sql`DELETE FROM thoughts`;
@@ -1527,10 +1530,12 @@ console.log("\n[6g] delete_thought joins the lock order: an accept racing a dele
   // not depend on where the review takes the advisory lock — so the count
   // varies run to run and the arm only asserts it happens at all.) This is the
   // one deliberately stochastic assertion in the suite: with the delete fully
-  // lockless the per-try cycle rate is roughly half, so P(0 deadlocks in 40) is
-  // on the order of 1e-15 — a spurious pass is not a practical risk. (That rate
-  // is CI's; a Mac measured 6%, which makes a spurious failure about one run in
-  // twelve — SMD-2155.)
+  // lockless the per-try cycle rate was roughly half on 033's pass (23 of 40),
+  // so P(0 deadlocks in 40) was on the order of 1e-15. CI's runner deadlocked
+  // 15 of 40 on main's run 36131497058, P(0) about 1e-8, and CI-shaped
+  // containers about 30%; runs through with-postgres.sh's published port
+  // deadlock 8–10%, which makes a spurious failure about one run in 30 to 70
+  // there (SMD-2155).
   {
     const connR = racer();
     const connD = racer();
@@ -1631,8 +1636,8 @@ console.log("\n[6i] A citation written while a delete of its source is in flight
     x: ((await sql`SELECT upsert_thought(${"an older version the note supersedes — " + tag}, '{"metadata":{}}'::jsonb, ${unit(2)}::vector) AS r`)[0].r as { id: string }).id,
   });
   type Env = { ok: boolean; error?: string; cited_by?: number };
-  const connW = new SQL({ url: URL_, max: 1 });
-  const connD = new SQL({ url: URL_, max: 1 });
+  const connW = racer();
+  const connD = racer();
   // A wait that never ends would hang the suite: cap both sides.
   await connW.unsafe("SET statement_timeout = '8s'");
   await connD.unsafe("SET statement_timeout = '8s'");
@@ -1967,7 +1972,9 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   // deadlines s seconds back is, to both functions, the same as waiting s
   // seconds, and it takes no time: the sleeps it replaces were 13 of the
   // section's 20 s on CI (SMD-2135). test-schema.ts [30] likewise puts a lease
-  // past its deadline by an UPDATE, not a wait.
+  // past its deadline by an UPDATE, not a wait. Only the named key's claimed
+  // leases move; every other key's stand still, so a step that needs another
+  // key's lease to lapse, or a Bun.sleep mixed in here, is not on this clock.
   const elapse = (job: string, s: number) =>
     sql`UPDATE thought_work_claims SET ttl_expires_at = ttl_expires_at - make_interval(secs => ${s}::float8) WHERE work_type = ${job} AND status = 'claimed'`;
 
