@@ -18,7 +18,11 @@
 # tier.ts unchanged (db/README.md has its verbs).
 #
 # Flags of this wrapper's own, all optional:
-#   --network NAME   the stack's network (default open-brain_default, deploy/compose.yaml's)
+#   --network NAME   the stack's network (default open-brain_default, deploy/compose.yaml's);
+#                    NAME,NAME joins more than one, for a --from and a --to that
+#                    share none (deploy/canary.sh's two projects, SMD-2038) —
+#                    address them by container name then, since each network
+#                    may have a `postgres` of its own
 #   --env-file PATH  the running stack's env file (default deploy/.env beside this
 #                    script — which a branch worktree does not have: it is gitignored)
 #   --runtime CLI    docker or podman (default: docker when on PATH, else podman)
@@ -109,11 +113,18 @@ fi
 
 # Before anything is built: a mistyped network (open-brain_default against
 # open-brain-tiers_default) is a usage error, not the runtime's 125 at the end.
-"$RUNTIME" network inspect "$NETWORK" >/dev/null 2>&1 || {
-  echo "no network $NETWORK — name the stack's with --network. The runtime has:" >&2
-  "$RUNTIME" network ls >&2 || true
-  exit 2
-}
+NETWORKS=()
+IFS=, read -r -a NETS <<< "$NETWORK"
+for net in ${NETS[@]+"${NETS[@]}"}; do
+  [ -n "$net" ] || { echo "--network has an empty name: $NETWORK" >&2; exit 2; }
+  "$RUNTIME" network inspect "$net" >/dev/null 2>&1 || {
+    echo "no network $net — name the stack's with --network. The runtime has:" >&2
+    "$RUNTIME" network ls >&2 || true
+    exit 2
+  }
+  NETWORKS+=(--network "$net")
+done
+[ ${#NETWORKS[@]} -gt 0 ] || { echo "--network names no network." >&2; exit 2; }
 
 TMP_ENV="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-env.XXXXXX")"
 COMPOSE_ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-compose.XXXXXX")" # mktemp creates both mode 600
@@ -210,7 +221,7 @@ if [ "$RUNTIME" = docker ] && docker buildx version >/dev/null 2>&1; then LOAD=(
 # files, and set -e hands on the run's status.
 # shellcheck disable=SC2016 # the container's sh expands them, not this one
 "$RUNTIME" run --rm --init \
-  --network "$NETWORK" \
+  "${NETWORKS[@]}" \
   --env-file "$TMP_ENV" \
   -v "$REPO:/repo:ro" \
   -w /tmp \

@@ -151,7 +151,10 @@ the repo root, with whatever `-f` files the stack was started with:
 
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes one
 server per tier, each on loopback by default; its three Postgres services and
-shared Ollama publish nothing, exactly as above.
+shared Ollama publish nothing, exactly as above. A canary stood beside this
+stack (`deploy/canary.sh`, "A canary beside the stack" below) is this file
+again under the project `open-brain-canary`: the same rows on its own network,
+its server on `127.0.0.1:8011` (`--port`).
 
 | Service | On the compose network | On the host | From another machine |
 | --- | --- | --- | --- |
@@ -323,10 +326,13 @@ service) as `open-brain-tier:latest`, and runs this checkout's `tier.ts`
 in it, mounted read-only, on the stack's network:
 
 ```bash
-# stable (this stack's postgres) into a canary on its own server beside it; from
-# a branch worktree, name the running stack's env file (deploy/.env is gitignored)
-deploy/tier.sh --env-file ~/OB1/deploy/.env --refresh --from postgres --to open-brain-canary-postgres --tier canary
-deploy/tier.sh --env-file ~/OB1/deploy/.env --diff    --from postgres --to open-brain-canary-postgres
+# stable (this stack's postgres) into a working copy on the same server; from a
+# branch worktree, name the running stack's env file (deploy/.env is gitignored)
+deploy/tier.sh --env-file ~/OB1/deploy/.env --refresh --from postgres --to postgres/openbrain_working --tier working
+# replay stable's logged searches on the canary deploy/canary.sh stood up — on
+# both projects' networks, so by container name (each has a `postgres`)
+deploy/tier.sh --env-file ~/OB1/deploy/.env --network open-brain_default,open-brain-canary_default \
+  --diff --from open-brain-postgres-1 --to open-brain-canary-postgres-1
 # the three-tier stack's own network and services
 deploy/tier.sh --refresh --from stable-postgres --to canary-postgres --network open-brain-tiers_default
 ```
@@ -424,8 +430,71 @@ Grants are not carried either (the restore runs with `--no-privileges`), so a
 server that connects to the copy as a role other than `postgres` needs
 `bun db/migrate.ts --url <copy> --grant <role>` first. Since migration 054 a
 key used recently on stable is not written on its next lookup, so a missing
-grant can surface minutes after a start that looked healthy. The
-canary-beside-the-dogfood standup is SMD-2038.
+grant can surface minutes after a start that looked healthy.
+
+## A canary beside the stack
+
+`compose.tiers.yaml` stands three new brains up from nothing. A stack that is
+already running holds a brain of its own, and SMD-1806 makes it stable, the
+record. `canary.sh` stands the canary beside it, and takes it down again
+(SMD-2038):
+
+```bash
+# from a branch worktree, name the running stack's env file (deploy/.env is gitignored)
+export OB1_SMOKE_KEY=…   # a raw key whose hash is in MCP_ACCESS_KEYS; the canary takes stable's keys
+deploy/canary.sh --env-file ~/OB1/deploy/.env up --connect
+deploy/canary.sh --env-file ~/OB1/deploy/.env down --volumes
+```
+
+The canary is `compose.yaml` again under the project `open-brain-canary`, with
+its own Postgres, volume, network and images, its server on `127.0.0.1:8011`
+(`--port`) and `OB1_TIER=canary`. It reads the stack's env file, so every knob
+reaches its server as it reaches stable's, and none is copied. Each tier has
+its own Postgres server, never a second database on stable's: a canary exists
+to absorb the risky migration, reembed or index rebuild, and a shared server
+would share its memory, its WAL and its crashes with the record. The canary's
+server is not on stable's network, so it cannot reach stable's database.
+
+`up` can be re-run, and re-running it is how the canary catches up after
+stable is redeployed:
+
+1. It finds stable's Postgres by its compose labels (`--stable-project`,
+   default `open-brain`) and stamps it `tier=stable` when it has no tier
+   stamp. It refuses one stamped `canary` or `working`, or carrying a
+   refresh's mark: that is a copy, not the record. When stable's server runs without `OB1_TIER=stable`, it says
+   so; set it in the env file and recreate that server.
+2. It starts the canary's Postgres, and refreshes it from stable through
+   `tier.sh` on both networks: the dump, the settings, a migration with this
+   checkout, the stamp and the mark ("Refreshing a tier", above).
+3. It builds the server from this checkout and recreates it, so the pool
+   opens on the refreshed database. `OB1_GIT_SHA` is the checkout's
+   `git describe`, unless the shell sets it.
+4. It smoke-tests the canary with `OB1_SMOKE_KEY`: the keyed `/health` must
+   say `tier` `canary`, `smoke.sh` must pass, and `search_thoughts` must find
+   a thought by its own text with a similarity. That last one covers the
+   vector arm, which `smoke.sh` leaves out and a `--diff` replays only with a
+   provider configured. `--no-smoke` skips the smoke and needs no key.
+5. With `--connect` it registers the Claude Code connector
+   `open-brain-canary` (`--name`) at user scope, under the same key; a new
+   session sees its tools. The URL is the canary's own port until SMD-1846
+   puts one origin in front of the stack.
+
+`up` refuses a port some other container publishes, which is what a canary
+stood up by hand leaves behind. Remove that container first; the new canary
+is refreshed from stable, so nothing is lost that stable does not hold.
+
+`down` removes the canary's containers and network, and deregisters the
+connector when `claude` has one by that name at the canary's port. A
+connector by that name at another URL is left alone, and `up --connect`
+refuses to replace it. `--volumes` also deletes the canary's database, and
+only once it says it is a canary (stamped, or marked by a refresh). Neither touches stable: `down` acts on the project
+`open-brain-canary` alone.
+
+On every PR, the deploy-stack CI job runs `up` twice beside its stack, then
+`down --volumes`. It checks the stamp, the probe thought on the canary and the
+vector search, and afterwards that the stack's Postgres container, its thought
+and its server are unchanged. The provider stub there embeds every text to the
+probe thought's vector.
 
 ## The typed-decision tier
 
