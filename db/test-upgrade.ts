@@ -15,6 +15,12 @@
  * existing rows "correctly read NULL". Nothing held that claim. This does, and
  * generalises it, so the next migration is covered before it is written.
  *
+ * CI runs this suite beside test-preflight.ts, each in its own database of one
+ * Postgres, as the same role (SMD-2219). What the cluster shares — a role and
+ * its settings, pg_locks, pg_stat_activity — is scoped here to the current
+ * database, or named for this suite (ob1_upgrade_*, ob1_notemp). [12] opens
+ * a session in `postgres` on purpose, to hold a lock its count must not see.
+ *
  *   ./with-postgres.sh bun test-upgrade.ts
  */
 
@@ -48,6 +54,38 @@ const LOCK_RE = new RegExp(`A lock was not granted within the run's ${LOCK_TIMEO
 
 /** A script's exit for an assertion label, with its output when it failed. */
 const shown = (x: { code: number; out: string }) => `(exit ${x.code})${x.code === 0 ? "" : `:\n${x.out}`}`;
+
+/**
+ * The advisory locks held in this database. pg_locks is the cluster's, and CI
+ * runs this suite beside test-preflight.ts, whose captures take the same locks
+ * in a database of its own (SMD-2219).
+ */
+const advisoryLocksHere = async (sql: SQL) =>
+  Number((await sql`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`)[0].c);
+
+/**
+ * A session in another database, `postgres`, holding an advisory lock until
+ * released — so a count that reads the cluster's locks fails here, not only
+ * when a neighbour's capture happens to overlap it. Tried, not waited for: a
+ * key some other session holds is a lock in another database all the same.
+ * Null when this suite's database is `postgres` or the role may not connect
+ * there; any other error fails the run.
+ */
+async function neighbourAdvisoryLock(sql: SQL): Promise<{ release: () => Promise<void> } | null> {
+  const [{ db }] = (await sql`SELECT current_database() AS db`) as { db: string }[];
+  if (db === "postgres") return null;
+  const u = new URL(URL_);
+  u.pathname = "/postgres";
+  const other = new SQL({ url: u.toString(), max: 1 });
+  try {
+    await other`SELECT pg_try_advisory_lock(2219)`;
+  } catch (e) {
+    await other.close();
+    if (/^(42501|3D000|55000|28)/.test((e as { errno?: string }).errno ?? "")) return null;
+    throw e;
+  }
+  return { release: async () => { try { await other`SELECT pg_advisory_unlock(2219)`; } finally { await other.close(); } } };
+}
 
 /**
  * The corpus every case of 021's evidence backfill reads (SMD-1193, SMD-1421):
@@ -523,7 +561,11 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
 
   // What the operator reads first. --status runs against any schema and says
   // what a run would refuse on; the ledgered remedy is the migrator's command.
-  const status = await runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_, "--status"], { env: MIGRATOR_ENV, cwd: HERE });
+  // Its colour codes stripped: a shell with FORCE_COLOR set (MIGRATOR_ENV
+  // keeps it) ends the refusal with a reset after --reapply, where the regex
+  // anchors the line's end (SMD-2219).
+  const statusRun = await runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_, "--status"], { env: MIGRATOR_ENV, cwd: HERE });
+  const status = { ...statusRun, out: statusRun.out.replace(/\x1b\[[0-9;]*m/g, "") };
   const recorded021 = async () => Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '021%'`)[0].c);
   const ledger = async () => JSON.stringify(await sql`SELECT name, sha256, applied_at::text AS a FROM schema_migrations ORDER BY 1`);
   assert(status.code === 0 && /a run would refuse: the schema predates migration 021/.test(status.out) &&
@@ -1047,14 +1089,20 @@ console.log("\n[12] Migration 033 onto a populated 032 — both capture forms ta
   // The mirror: the paths a brain uses the day after. A same-model
   // re-capture keeps the window (022's rule, unchanged); a re-capture naming
   // provenance the row already has leaves it (025, unchanged); the 2-argument
-  // form resolves and, since 033, attributes; and no lock outlives a call.
+  // form resolves and, since 033, attributes; and no lock outlives a call in
+  // this database, counted while another database holds one.
   await sql`SELECT upsert_thought(${TEXT}, ${{ metadata: { k: 1 }, embedding_model: OPTS.model, supersedes: id }}::jsonb, ${vec(3)}::vector)`;
   const [row] = await sql`SELECT supersedes AS s, (metadata->>'k')::int AS k FROM thoughts WHERE id = ${id}::uuid`;
   assert((await windows()) === 1 && row.s === older && row.k === 1, "after 033 a same-model re-capture keeps the window and the pointer it already had, merging the metadata");
   const [{ r: twoR }] = await sql`SELECT upsert_thought('a two-argument capture at 033', '{"metadata":{},"actor":{"name":"after","source":"test"}}'::jsonb) AS r`;
   const [{ a: attributed }] = await sql`SELECT actor_name AS a FROM thought_audit WHERE action = 'capture' AND thought_id = ${(twoR as { id: string }).id}::uuid`;
   assert(attributed === "after", `…a capture through the 2-argument form resolves and is attributed (${attributed})`);
-  assert(Number((await sql`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory'`)[0].c) === 0, "…and no advisory lock is held once the calls return");
+  const neighbour = await neighbourAdvisoryLock(sql);
+  try {
+    assert((await advisoryLocksHere(sql)) === 0, `…and no advisory lock is held once the calls return (${neighbour ? "counted while another database holds one" : "no lock could be planted in another database"})`);
+  } finally {
+    await neighbour?.release();
+  }
 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("033") });
   assert((await aclOf(THREE)) === acl && JSON.stringify(await shape(sql)) === JSON.stringify(after) && (await windows()) === 1, "re-applying 033 is a no-op: the ACL, the shape and the window as they were");
@@ -1127,7 +1175,7 @@ console.log("\n[13] Migration 035 onto a populated 033 — a re-capture no longe
   assert(cleared.ok === true && (await twoRowLoops()) === 0 && (await pointer(x.id)) === r.id, "…the loop written at 033 is cleared through update_thought's envelope, X → R kept");
   const again = (await sql`SELECT update_thought(${r.id}::uuid, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ${{ supersedes: x.id }}::jsonb) AS r`)[0].r as { ok: boolean; error?: string };
   assert(again.ok === false && again.error === "WOULD_CYCLE", `…and cannot be re-written by the one path left to it (${again.error})`);
-  assert(Number((await sql`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory'`)[0].c) === 0, "…and no advisory lock is held once the calls return");
+  assert((await advisoryLocksHere(sql)) === 0, "…and no advisory lock is held once the calls return");
 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("035") });
   assert((await aclOf(THREE)) === acl && JSON.stringify(await shape(sql)) === JSON.stringify(after) && (await bodyOf(THREE)) === three, "re-applying 035 is a no-op: the ACL, the shape and the body as they were");
@@ -2139,11 +2187,11 @@ console.log("\n[21] test-support's schema reset leaves nothing of the fork's in 
   for (const ddl of [`DROP TABLE ob1_probe_part`, `DROP FUNCTION ob1_probe_fn()`, `DROP TYPE ob1_probe_rowtype`, `DROP TYPE ob1_probe_enum`, `DROP DOMAIN ob1_probe_domain`]) await sql.unsafe(ddl);
   // A survivor is the fork's when some migration names it — then a line is
   // missing from test-support's lists and this section fails. One no migration
-  // names is another suite's: CI's data-layer job runs five server-portable
-  // suites before this one on one database, and a local run against a kept
-  // database meets whatever the last suite left. Those are reported in the
-  // label and do not fail the section, which is about the drop lists, not
-  // about the neighbours (fifth review pass).
+  // names is another suite's: a run against a kept database meets whatever
+  // the last suite left there (CI's data-layer job gives this suite a fresh
+  // database of its own, SMD-2219). Those are reported in the label and do
+  // not fail the section, which is about the drop lists, not about the
+  // neighbours (fifth review pass).
   const texts = await Promise.all(MIGRATIONS.map((f) => Bun.file(join(HERE, "migrations", f)).text()));
   const named = (name: string) => texts.some((t) => new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(t));
   const split = (all: string[], base: (x: string) => string) => {
