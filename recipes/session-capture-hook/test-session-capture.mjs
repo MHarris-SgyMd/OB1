@@ -337,6 +337,18 @@ let episodesLines;
   const backEp = segment([BR("me/smd-50-a"), CP, P("now smd-90"), BR("me/smd-90-b"), P("x"), BR("me/smd-50-a"), P("y"), BR("me/smd-70-c"), P("z")]).episodes;
   assert(backEp.map((e) => e.prompts.join("+")).join("|") === "now smd-90+x|y|z" && backEp.map((e) => e.branch).join("|") === "me/smd-90-b|me/smd-50-a|me/smd-70-c" && /^Session summary — SMD-90 \(me\/smd-90-b\)/.test(renderSummary(backEp[0])) && /^Session summary — SMD-50 \(me\/smd-50-a\)/.test(renderSummary(backEp[1])),
     `after an own move to smd-90 the episode's home is smd-90; a return to smd-50 opens a new episode, each head its own branch (${backEp.map((e) => e.prompts.length).join(",")})`);
+  // The pairing's HEAD guard on a REAL detached-HEAD line: a rebase writes cwd
+  // then gitBranch "HEAD" adjacent, the shape the pairing pairs, and it must
+  // not become a move (third review pass — the guard was untested on a paired line).
+  assert(segment([CWD("/r/.claude/worktrees/smd-50"), BR("me/smd-50-a"), P("a"), CWD("/r"), BR("HEAD"), P("b")]).episodes.length === 1 && segment([CWD("/r/.claude/worktrees/smd-50"), BR("me/smd-50-a"), P("a"), CWD("/r"), BR("HEAD"), P("b")]).episodes[0].branch === "me/smd-50-a",
+    "a cwd then HEAD, adjacent as a rebase writes them, is no move: the pairing skips HEAD and the episode keeps its branch");
+  // The unanchored branch of `began`: an episode on `main` (no home) split by a
+  // compaction, its ask naming a team-recognised key, is not "with" that key —
+  // the compaction ended it, not the key (third review pass — only the anchored
+  // branch of `began` was pinned).
+  const beganU = segment([BR("me/smd-11-a"), P("do smd-11"), BR("main"), P("refactor"), CP, P("now smd-500")]).episodes;
+  assert(beganU.map((e) => e.prompts.join("+")).join("|") === "do smd-11|refactor|now smd-500" && beganU[2].opened.kind === "compaction" && beganU[2].opened.ticket === undefined && beganU[2].about.size === 0 && !/with SMD-500/.test(renderSummary(beganU[2])) && /Episode 3 of the session, begun after a compaction\./.test(renderSummary(beganU[2])),
+    "an unanchored episode split by a compaction is not 'with' the key its ask names — the compaction ended it, and the key is unproven until a branch");
   assert(asks(CWD("/a"), P("one"), CWD("/b"), CWD("/a"), P("two")) === "one+two" && asks(BR("A"), P("one"), BR("B"), BR("A"), P("two")) === "one+two" && asks(BR("me/smd-1100-x"), P("do it"), BR("HEAD"), BR("me/smd-1100-x"), P("more")) === "do it+more" && asks(BR("me/smd-1100-x"), P("do it"), BR("HEAD"), P("more")) === "do it+more",
     "a move the session came back from before the next ask is no move, and a detached HEAD mid-rebase is no branch (first review pass)");
   assert(asks(CWD("/repo"), BR("main"), P("one"), CWD("/tmp"), P("two"), CWD("/repo"), P("three")) === "one+two+three" && segment([CWD("/repo"), BR("main"), P("one"), CWD("/tmp"), P("two")]).episodes[0].cwd === "/repo" && !segment([CWD("/repo"), BR("main"), P("one"), CWD("/tmp"), P("two")]).episodes[0].roots.has("/tmp"),
@@ -519,6 +531,25 @@ let episodesLines;
   while ((received.length < 4 || !readState("s-ep-detached#e4")) && Date.now() - t0 < 10_000) await sleep(50);
   assert(received.length === 4 && ["s-ep-detached", "s-ep-detached#e2", "s-ep-detached#e3", "s-ep-detached#e4"].every((c) => readState(c)?.thought_id) && /posting in pid \d+/.test(readFileSync(join(STATE, "log"), "utf8")) && readdirSync(join(STATE, "pending")).length === 0,
     `…and one child posted all four and recorded four states (${received.length} after ${Date.now() - t0} ms)`);
+}
+
+{
+  // A state file names its chain, so a session id that sanitises to another
+  // chain's file does not cross-read it (third review pass): `x#e2` and a
+  // session literally `x_e2` both name x_e2.json.
+  console.log("\n[3c] A chain's state file names its chain, so a colliding session id does not cross-read it (SMD-2013)");
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const collideCfg = { url: URL_, key: "cap-key" };
+  const cl = (role, text, branch, ts) => line({ type: role, sessionId: "x", timestamp: ts, cwd: "/r", gitBranch: branch, message: { role, content: role === "user" ? text : [{ type: "text", text }] }, origin: { kind: "human" } });
+  writeFileSync(join(TMP, "two-ep.jsonl"), [cl("user", "do smd-1000", "me/smd-1000-a", "2026-09-24T09:00:00.000Z"), cl("assistant", "one", "me/smd-1000-a", "2026-09-24T09:05:00.000Z"), cl("user", "now smd-2000", "me/smd-2000-b", "2026-09-24T09:10:00.000Z"), cl("assistant", "two", "me/smd-2000-b", "2026-09-24T09:15:00.000Z")].join("\n"));
+  const two = prepare({ session_id: "x", transcript_path: join(TMP, "two-ep.jsonl"), hook_event_name: "SessionEnd" });
+  await postPending(collideCfg, two.payloadPaths);
+  assert(existsSync(join(STATE, "x.json")) && existsSync(join(STATE, "x_e2.json")) && JSON.parse(readFileSync(join(STATE, "x_e2.json"), "utf8")).chain_id === "x#e2", "session x's episode 2 records its chain in x_e2.json");
+  const collide = prepare({ session_id: "x_e2", transcript_path: join(TMP, "two-ep.jsonl"), hook_event_name: "SessionEnd" });
+  assert(collide.payloadPaths.length === 2 && /^prepared: session x_e2, episodes 1, 2 of 2 —/.test(collide.message) && !/already captured/.test(collide.message) && JSON.parse(readFileSync(collide.payloadPaths[0], "utf8")).supersedes === undefined,
+    `a session literally named x_e2 does not read x's episode-2 state as its own: it prepares fresh, superseding nothing, not "already captured" (${collide.message.slice(0, 70)})`);
+  for (const p of collide.payloadPaths) unlinkSync(p);
 }
 
 // ── [4] Secret scan ──────────────────────────────────────────────────────────

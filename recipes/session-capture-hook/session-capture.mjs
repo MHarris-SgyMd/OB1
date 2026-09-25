@@ -259,7 +259,13 @@ function statePath(sessionId) {
   return join(STATE_DIR, `${String(sessionId).replace(/[^A-Za-z0-9_-]/g, "_")}.json`);
 }
 export function readState(sessionId) {
-  try { return JSON.parse(readFileSync(statePath(sessionId), "utf8")); } catch { return null; }
+  // The state file's name is `sessionId` sanitised, and `#` sanitises to `_`
+  // (SMD-2013), so a chain `<sid>#e2` and a session id literally ending `_e2`
+  // share one file. A state that records a DIFFERENT chain than the one asked
+  // for is not this one's — as the follow-up asks a payload whose it is (third
+  // review pass). A file from before episodes carries no `chain_id` and is its
+  // session's.
+  try { const j = JSON.parse(readFileSync(statePath(sessionId), "utf8")); return j && j.chain_id && j.chain_id !== sessionId ? null : j; } catch { return null; }
 }
 /**
  * Every file in the state directory: pretty JSON, a trailing newline,
@@ -1565,7 +1571,7 @@ export async function postPending(cfg, own) {
         const stateIsNewerNow = stateIsNewer || recordedAfter(readState(chain), payload.prepared_at);
         // summary_at never runs ahead of the clock that will read it back.
         const summaryAt = Number.isNaN(pastMs(payload.prepared_at)) ? new Date().toISOString() : payload.prepared_at;
-        if (!stateIsNewerNow) writeState(chain, { thought_id: id, fingerprint: payload.fingerprint, captured_at: new Date().toISOString(), summary_at: summaryAt, harness: payload.harness, prompts: payload.prompts, sources: (payload.derived_from ?? []).length });
+        if (!stateIsNewerNow) writeState(chain, { chain_id: chain, thought_id: id, fingerprint: payload.fingerprint, captured_at: new Date().toISOString(), summary_at: summaryAt, harness: payload.harness, prompts: payload.prompts, sources: (payload.derived_from ?? []).length });
         unlinkSync(here);
         log(`captured ${who} harness=${payload.harness}${payload.event && payload.event !== "SessionEnd" ? ` event=${payload.event}${payload.trigger ? ` trigger=${payload.trigger}` : ""}` : ""} id=${id} sources=${(payload.derived_from ?? []).length}${payload.supersedes ? ` supersedes=${payload.supersedes}` : ""}${note ? ` note="${note}"` : ""}`);
         outcomes.push({ file, ok: true, id, note });
