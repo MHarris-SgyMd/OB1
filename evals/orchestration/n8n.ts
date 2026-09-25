@@ -55,17 +55,31 @@ async function call(path: string, init: RequestInit, what: string): Promise<any>
 const api = (key: string, method: string, path: string, body?: unknown) =>
   call(`/api/v1${path}`, { method, headers: { "content-type": "application/json", "X-N8N-API-KEY": key }, body: body === undefined ? undefined : JSON.stringify(body) }, method);
 
-/** The stored key if n8n still honours it; otherwise the one-time bootstrap, and the new key stored. */
+/** Whether this process minted the key it uses — for the provisioning summary. */
+let mintedHere = false;
+
+/**
+ * The stored key if n8n still honours it; otherwise the one-time bootstrap, and
+ * the new key stored. Only a 401/403 means "not honoured": a 503 while n8n
+ * starts, or a 429, is an error, not a reason to mint a second key (review pass
+ * 3 — each mint leaves the one it replaces valid; n8n's keys do not expire here).
+ */
 async function apiKey(env: Record<string, string>): Promise<string> {
   const stored = env.ORCH_N8N_API_KEY;
-  if (stored && (await fetch(`${BASE}/api/v1/workflows?limit=1`, { headers: { "X-N8N-API-KEY": stored } })).ok) return stored;
+  if (stored) {
+    const probe = await fetch(`${BASE}/api/v1/workflows?limit=1`, { headers: { "X-N8N-API-KEY": stored } });
+    if (probe.ok) return stored;
+    if (probe.status !== 401 && probe.status !== 403) throw new Error(`n8n's API answered ${probe.status} to the stored key; not minting another`);
+  }
   const json = { "content-type": "application/json" };
   const password = env.ORCH_ADMIN_PASSWORD;
   // A fresh database has no owner; one that has an owner answers 400, and signing in follows either way.
   await fetch(`${BASE}/rest/owner/setup`, { method: "POST", headers: json, body: JSON.stringify({ ...OWNER, password }) });
   const login = await fetch(`${BASE}/rest/login`, { method: "POST", headers: json, body: JSON.stringify({ emailOrLdapLoginId: OWNER.email, password }) });
   const cookie = login.headers.get("set-cookie")?.split(";")[0];
-  if (!login.ok || !cookie) throw new Error(`n8n sign-in failed (${login.status})`);
+  if (!login.ok || !cookie) {
+    throw new Error(`n8n sign-in failed (${login.status}): ORCH_ADMIN_PASSWORD in orchestration/.env is not this volume's owner password — a .env regenerated against a kept volume; --down to start over`);
+  }
   const minted = await call("/rest/api-keys", {
     method: "POST", headers: { ...json, cookie },
     body: JSON.stringify({ label: `ob1-orchestration-${Date.now()}`, scopes: SCOPES, expiresAt: null }),
@@ -73,6 +87,7 @@ async function apiKey(env: Record<string, string>): Promise<string> {
   const key: string = minted.data.rawApiKey;
   setEnvValue("ORCH_N8N_API_KEY", key);
   env.ORCH_N8N_API_KEY = key;
+  mintedHere = true;
   return key;
 }
 
@@ -106,29 +121,44 @@ export const n8n: Adapter = {
     // placeholder id to the id n8n gave it.
     const existing = new Map(((await api(key, "GET", "/credentials?limit=100")).data as any[]).map((c) => [c.name as string, c.id as string]));
     const ids = new Map<string, string>();
+    const made = { credentials: 0, credentialsKept: 0, workflows: 0, workflowsKept: 0 };
     for (const c of JSON.parse(render(readFileSync(join(DIR, "credentials.template.json"), "utf8"), env))) {
-      const id = existing.get(c.name) ?? (await api(key, "POST", "/credentials", { name: c.name, type: c.type, data: c.data })).id;
-      ids.set(c.id, id);
+      let id = existing.get(c.name);
+      if (id) made.credentialsKept++;
+      else { id = (await api(key, "POST", "/credentials", { name: c.name, type: c.type, data: c.data })).id; made.credentials++; }
+      ids.set(c.id, id as string);
     }
     for (const f of WORKFLOW_FILES) {
       let text = readFileSync(join(DIR, f), "utf8");
       for (const [placeholder, id] of ids) text = text.replaceAll(`"${placeholder}"`, JSON.stringify(id));
       const w = JSON.parse(text);
-      const id = (await workflowId(key, w.name)) ?? (await api(key, "POST", "/workflows", { name: w.name, nodes: w.nodes, connections: w.connections, settings: w.settings })).id;
+      let id = await workflowId(key, w.name);
+      if (id) made.workflowsKept++;
+      else { id = (await api(key, "POST", "/workflows", { name: w.name, nodes: w.nodes, connections: w.connections, settings: w.settings })).id; made.workflows++; }
       await api(key, "POST", `/workflows/${id}/publish`, {});
     }
-    return ["owner + API key (internal /rest, once)", "POST /credentials (4)", "POST /workflows (2)", "POST /workflows/{id}/publish (2)"];
+    // What this --up did, not what a first --up does (review pass 3): a kept
+    // credential or workflow is the old one — --down to apply an edit.
+    const kept = made.credentialsKept + made.workflowsKept;
+    return [
+      mintedHere ? "owner + API key minted (internal /rest)" : "API key reused",
+      `POST /credentials (${made.credentials})`, `POST /workflows (${made.workflows})`, `POST /workflows/{id}/publish (${WORKFLOW_FILES.length})`,
+      ...(kept ? [`kept ${made.credentialsKept} credential(s) and ${made.workflowsKept} workflow(s) already there — --down to apply edits`] : []),
+    ];
   },
   async runIngestion(env) {
     const key = await apiKey(env);
     const id = await workflowId(key, INGEST);
     if (!id) throw new Error(`no workflow named "${INGEST}" — run --up first`);
-    const since = new Date(Date.now() - 1000).toISOString();
+    // The run the webhook starts is the first webhook execution with an id past
+    // the newest one before the call. Ids, not times: a time bound compares the
+    // host's clock with the podman VM's, and a VM behind by a second would hide
+    // the run (review pass 3).
+    const newest = Number((await api(key, "GET", `/executions?workflowId=${id}&limit=1`)).data?.[0]?.id ?? 0);
     await call("/webhook/ob1-ingest", { method: "POST", headers: { "x-orch-key": env.ORCH_MCP_KEY, "content-type": "application/json" }, body: "{}" }, "webhook");
-    // The run the webhook started: newest first, started after the call, mode webhook.
-    const page = await api(key, "GET", `/executions?workflowId=${id}&includeData=true&limit=20&startedAfter=${encodeURIComponent(since)}`);
-    const run = (page.data as any[]).find((e) => e.mode === "webhook");
-    if (!run) throw new Error("the webhook answered but no webhook execution is in the history");
+    const page = await api(key, "GET", `/executions?workflowId=${id}&includeData=true&limit=20`);
+    const run = (page.data as any[]).find((e) => e.mode === "webhook" && Number(e.id) > newest);
+    if (!run) throw new Error("the webhook answered but no new webhook execution is in the history");
     return answered(run);
   },
   async scheduledRuns(env, since) {
@@ -136,7 +166,8 @@ export const n8n: Adapter = {
     const id = await workflowId(key, INGEST);
     if (!id) return 0;
     const page = await api(key, "GET", `/executions?workflowId=${id}&status=success&limit=100&startedAfter=${encodeURIComponent(since)}`);
-    return (page.data as any[]).filter((e) => e.mode === "trigger").length;
+    // The time bound is also read here, not left to the query parameter alone.
+    return (page.data as any[]).filter((e) => e.mode === "trigger" && Date.parse(e.startedAt) >= Date.parse(since)).length;
   },
   async mcpServer(env) {
     return { url: `${BASE}/mcp/ob1`, headers: { "x-orch-key": env.ORCH_MCP_KEY } };

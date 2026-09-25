@@ -25,7 +25,7 @@
  *       (review pass 2: a skipped second run passed as a dedup's "+0"). A run
  *       that throws is a FAIL row, not an abort.
  *   C1s with --wait-schedule: those runs were on-demand, so the verifier then
- *       waits (up to 16 min, the schedule is every 15) for a run the SCHEDULE
+ *       waits (up to 20 min, the schedule is every 15) for a run the SCHEDULE
  *       started since the verify began to succeed, by the tool's run history.
  *   C2  capture: those rows' writer is `orch-capture`, a CAPTURE-scope record
  *       in MCP_ACCESS_KEYS, carried by the TOOL's own MCP client — as the
@@ -70,8 +70,8 @@ const tool = args[args.indexOf(mode) + 1] ?? usage("no tool");
 const adapter = ADAPTERS[tool] ?? usage(`unknown tool ${tool}`);
 const json = args.includes("--json");
 const waitSchedule = args.includes("--wait-schedule");
-/** A 15-minute schedule, and a minute for the run itself. */
-const SCHEDULE_WAIT_MS = 16 * 60_000;
+/** A 15-minute schedule, measured from after C3, and room for a slow run to finish (review pass 3: 16 left ~1 min). */
+const SCHEDULE_WAIT_MS = 20 * 60_000;
 
 loadEnv();
 const env: Record<string, string> = { ...ensureEnv(), LINEAR_API_KEY: process.env.LINEAR_API_KEY ?? "" };
@@ -147,8 +147,9 @@ async function verify(): Promise<void> {
 
   const captureScoped = (env.MCP_ACCESS_KEYS ?? "").split(/[,\n]/).some((r) => r.trim().startsWith(`${WRITER}:capture:`));
   const { url, headers } = await adapter.mcpServer(env);
-  // The endpoint can lag the candidate's health check after a restart (n8n
-  // registers the MCP webhook after /healthz answers): list until it answers.
+  // The endpoint can lag the candidate's own readiness (n8n registered its MCP
+  // webhook after /healthz answered, before the API moved to readiness): list
+  // until it answers.
   let listed: Awaited<ReturnType<typeof listTools>> | Error = new Error("not tried");
   await waitFor(`${tool}'s MCP endpoint`, async () => {
     listed = await listTools(url, headers).catch((e: Error) => e);
@@ -191,9 +192,26 @@ async function verify(): Promise<void> {
   // since this verify began to succeed, by the tool's own run history.
   if (waitSchedule) {
     let fired = 0;
+    let lastError = "";
     const t0 = Date.now();
-    await waitFor("a scheduled run", async () => (fired = await adapter.scheduledRuns(env, startedAt)) > 0, SCHEDULE_WAIT_MS, 30_000).catch(() => {});
-    checks.push({ id: "C1s", pass: fired > 0, detail: fired > 0 ? `${fired} scheduled run(s) succeeded since the verify began, the first seen after ${Math.round((Date.now() - t0) / 1000)} s of waiting` : `no scheduled run succeeded in ${SCHEDULE_WAIT_MS / 60_000} min` });
+    // An error reading the history is kept and reported: swallowed, a verifier
+    // fault read as "the schedule never fired" (review pass 3).
+    await waitFor("a scheduled run", async () => {
+      try {
+        fired = await adapter.scheduledRuns(env, startedAt);
+        lastError = "";
+      } catch (e) {
+        lastError = (e instanceof Error ? e.message : String(e)).slice(0, 200);
+      }
+      return fired > 0;
+    }, SCHEDULE_WAIT_MS, 30_000).catch(() => {});
+    checks.push({
+      id: "C1s",
+      pass: fired > 0,
+      detail: fired > 0
+        ? `${fired} scheduled run(s) succeeded since the verify began, the first seen after ${Math.round((Date.now() - t0) / 1000)} s of waiting`
+        : `no scheduled run succeeded in ${SCHEDULE_WAIT_MS / 60_000} min${lastError ? ` — the last read of the history failed: ${lastError}` : ""}`,
+    });
   }
 
   const busy = memoryByContainer(tool);
@@ -208,6 +226,7 @@ async function verify(): Promise<void> {
   } else {
     console.log(`${tool} ${report.version}  ${adapter.image}  ${report.imageMiB} MiB image`);
     for (const c of checks) console.log(`  ${c.pass ? "PASS" : "FAIL"} ${c.id}  ${c.detail}`);
+    if (!waitSchedule) console.log("  ---- C1s  not checked: the schedule firing needs --wait-schedule (up to 20 min)");
     for (const [k, v] of Object.entries(busy)) console.log(`  M1   ${k} ${idle[k] ?? "?"} MiB at the start, ${v} MiB after the runs`);
   }
   if (checks.some((c) => !c.pass)) process.exitCode = 1;

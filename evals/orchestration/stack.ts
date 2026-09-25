@@ -23,7 +23,7 @@
  * A knob for a run (ORCH_AP_PIECES_SYNC_MODE) goes in orchestration/.env.
  */
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "../../server-portable/auth.ts";
@@ -99,7 +99,12 @@ export function ensureEnv(): Record<string, string> {
 export function setEnvValue(key: string, value: string): void {
   const lines = readFileSync(ENV_FILE, "utf8").split("\n").filter((l) => !l.startsWith(`${key}=`));
   if (lines.at(-1) === "") lines.pop();
-  writeFileSync(ENV_FILE, [...lines, `${key}=${value}`, ""].join("\n"), { mode: 0o600 });
+  // Written beside it and renamed over it: the file holds the database
+  // passwords every candidate's volume was made with, and a truncate-then-write
+  // cut short would lose them (review pass 3).
+  const tmp = `${ENV_FILE}.${process.pid}.tmp`;
+  writeFileSync(tmp, [...lines, `${key}=${value}`, ""].join("\n"), { mode: 0o600 });
+  renameSync(tmp, ENV_FILE);
 }
 
 export const project = (tool: string) => `ob1-orch-${tool}`;

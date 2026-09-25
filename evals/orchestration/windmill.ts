@@ -104,7 +104,8 @@ export const windmill: Adapter = {
   async scheduledRuns(env, since) {
     const t = await login(env);
     const jobs = await api("GET", `/w/${WS}/jobs/completed/list?schedule_path=f/ob1/linear_ingest_every_15m&success=true&created_or_started_after=${encodeURIComponent(since)}&per_page=100`, undefined, t);
-    return Array.isArray(jobs) ? jobs.length : 0;
+    // The time bound is also read here, not left to the query parameter alone.
+    return Array.isArray(jobs) ? jobs.filter((j: any) => Date.parse(j.started_at ?? j.created_at) >= Date.parse(since)).length : 0;
   },
   async mcpServer(env) {
     const t = await login(env);

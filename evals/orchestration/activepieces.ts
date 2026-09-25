@@ -74,8 +74,8 @@ export const activepieces: Adapter = {
     // On first boot the piece catalogue arrives from Activepieces' cloud after
     // the API already answers — about 12,800 piece versions written to its
     // database in the background — and a connection for a piece the server does
-    // not yet know is refused (404 piece_metadata_not_found). Of ten fresh
-    // boots behind this wait, the pieces appeared within it once; nine times
+    // not yet know is refused (404 piece_metadata_not_found). Of eleven fresh
+    // boots behind this wait, the pieces appeared within it once; ten times
     // they stayed 404 (once watched for 300 s with the rows already in
     // piece_metadata) until a restart rebuilt the server's index from the
     // database. So: wait, and restart once if needed.
@@ -139,7 +139,7 @@ export const activepieces: Adapter = {
     const id = (await flowsByName(s)).get(INGEST);
     if (!id) return 0;
     const page = await api("GET", `/v1/flow-runs?projectId=${s.projectId}&flowId=${id}&status=SUCCEEDED&limit=100&createdAfter=${encodeURIComponent(since)}`, undefined, s.token);
-    return (page.data as any[]).filter((r) => r.environment === "PRODUCTION" && r.created >= since).length;
+    return (page.data as any[]).filter((r) => r.environment === "PRODUCTION" && Date.parse(r.created) >= Date.parse(since)).length;
   },
   async mcpServer(env) {
     return mcpEndpoint(await session(env));
