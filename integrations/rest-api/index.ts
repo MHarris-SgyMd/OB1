@@ -63,7 +63,7 @@
  *
  * Dependencies:
  *   - Enhanced thoughts schema (schemas/enhanced-thoughts)
- *   - Optional: Smart ingest tables (schemas/smart-ingest-tables) for /ingest routes
+ *   - Optional: Smart ingest tables (schemas/smart-ingest) for the /ingestion-jobs reads; a smart-ingest server at SMART_INGEST_URL for the two proxies
  *   - Optional: Knowledge graph schema (schemas/knowledge-graph) for /entities routes
  */
 
@@ -109,8 +109,8 @@ function httpTargetFrom(name: string): string | null {
   const value = process.env[name]?.trim();
   if (!value) return null;
   let url: URL;
-  try { url = new URL(value); } catch { throw new Error(`${name} must be an http(s) URL — it is not a URL`); }
-  if (!/^https?:$/.test(url.protocol)) throw new Error(`${name} must be an http(s) URL — it is a ${url.protocol}// URL`);
+  try { url = new URL(value); } catch { throw new Error(`${name} must be an http(s) URL — it is not a URL; write it as http://host:port`); }
+  if (!/^https?:$/.test(url.protocol)) throw new Error(`${name} must be an http(s) URL — it is a ${url.protocol}// URL; write it as http://host:port`);
   if (url.search || url.hash || url.username || url.password) throw new Error(`${name} must be a bare http(s) address — scheme, host, port and an optional path; no query, fragment or credentials`);
   return url.origin + url.pathname.replace(/\/+$/, "");
 }
@@ -1173,7 +1173,9 @@ async function handleIngest(req: Request): Promise<Response> {
 
 async function handleExecuteJob(jobId: string): Promise<Response> {
   if (!SMART_INGEST_URL) return smartIngestNotConfigured();
-  return await proxyFetchJson(`${SMART_INGEST_URL}/execute`, { job_id: jobId });
+  // A number: the route's pattern is \d+, and smart-ingest's execute took `typeof job_id === "number"` alone, so the string
+  // this proxy sent was a relayed 400 `job_id is required` for every job (SMD-2110, review pass 2).
+  return await proxyFetchJson(`${SMART_INGEST_URL}/execute`, { job_id: Number(jobId) });
 }
 
 async function handleListJobs(url: URL): Promise<Response> {

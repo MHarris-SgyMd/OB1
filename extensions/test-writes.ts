@@ -222,8 +222,9 @@ const INGEST = "http://smart-ingest.test";
 const WORKER = "http://extraction-worker.test";
 /** Every URL the stub was handed, suite long: none may begin postgres:// (SMD-2110; the tail asserts it). */
 const reached: string[] = [];
-/** The key each call to the worker's address carried. */
+/** The key each call to the worker's address carried, and each call to the smart-ingest server's. */
 const workerKeys: (string | null)[] = [];
+const ingestKeys: (string | null)[] = [];
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
   reached.push(url);
@@ -235,7 +236,11 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   if (url === INGEST || url === `${INGEST}/execute`) {
     await Bun.sleep(25);
     if (init?.signal?.aborted) throw Object.assign(new Error("the proxy aborted"), { name: "AbortError" });
+    ingestKeys.push(new Headers(init?.headers).get("x-brain-key"));
     const sent = JSON.parse(String(init?.body ?? "{}"));
+    // The server's own check on /execute, mirrored: a job_id that is not a number is a 400 — the string rest-api's proxy sent
+    // until review pass 2 (the route captures \d+ and passed it on as captured).
+    if (url !== INGEST && typeof sent.job_id !== "number") return Response.json({ error: "job_id is required" }, { status: 400 });
     return Response.json(url === INGEST ? { status: "dry_run_complete", dry_run: sent.dry_run, stub: true } : { job_id: sent.job_id, status: "executed", stub: true });
   }
   // The extraction worker at smart-ingest's ENTITY_EXTRACTION_WORKER_URL, POSTed to after a write with the key (SMD-2110).
@@ -1003,10 +1008,10 @@ try {
   const [exec, ingest] = await Promise.all([
     send(h, "POST", "/ingestion-jobs/7/execute", undefined, KEY, D),
     send(h, "POST", "/ingest", { text: "a note for the ingest server", dry_run: true }, KEY, D)]);
-  assert(exec.status === 200 && exec.json?.status === "executed" && exec.json?.job_id === "7" && allow(exec) === D,
-    `POST /ingestion-jobs/:id/execute reaches the smart-ingest server at SMART_INGEST_URL's /execute and answers its reply with the CORS headers — main's file fetched the DSN and answered 502; the proxy's timeout is the number it was given, not the request (${exec.status} ${JSON.stringify(exec.json).slice(0, 80)}; ${allow(exec)})`);
-  assert(ingest.status === 200 && ingest.json?.status === "dry_run_complete" && ingest.json?.dry_run === true && ingest.json?.stub === true && allow(ingest) === D,
-    `…and POST /ingest reaches its root with the body forwarded (${ingest.status} ${JSON.stringify(ingest.json).slice(0, 80)}; ${allow(ingest)})`);
+  assert(exec.status === 200 && exec.json?.status === "executed" && exec.json?.job_id === 7 && allow(exec) === D,
+    `POST /ingestion-jobs/:id/execute reaches the smart-ingest server at SMART_INGEST_URL's /execute with job_id as the number the server requires, and answers its reply with the CORS headers — main's file fetched the DSN and answered 502, the first commit sent "7" for a relayed 400; the proxy's timeout is the number it was given, not the request (${exec.status} ${JSON.stringify(exec.json).slice(0, 80)}; ${allow(exec)})`);
+  assert(ingest.status === 200 && ingest.json?.status === "dry_run_complete" && ingest.json?.dry_run === true && ingest.json?.stub === true && allow(ingest) === D && ingestKeys.length === 2 && ingestKeys.every((k) => k === KEY),
+    `…and POST /ingest reaches its root with the body forwarded, both hops carrying this gateway's key as x-brain-key — the README's "the two hold the same key" (${ingest.status} ${JSON.stringify(ingest.json).slice(0, 80)}; ${allow(ingest)}; keys ${ingestKeys.map((k) => (k === KEY ? "sent" : String(k))).join(",")})`);
   // The 429 rebuilt its header set (it spread the CORS headers itself before): Retry-After and the content type stay, the
   // CORS headers arrive from the wrapper, and Retry-After is exposed, which no answer was (review pass 1). The cap is the
   // default hundred a minute — the block has sent about thirty under KEY, this loop sends the rest, and its bound outlasts
@@ -1037,7 +1042,7 @@ try {
   process.env.SMART_INGEST_URL = URL_;
   const refused = await import(join(ROOT, F) + "?dsn-in-the-knob").then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
   process.env.SMART_INGEST_URL = INGEST;
-  assert(refused !== null && /^SMART_INGEST_URL must be an http\(s\) URL — it is a postgres(ql)?:\/\/ URL$/.test(refused) && !refused.includes(new URL(URL_).host),
+  assert(refused !== null && /^SMART_INGEST_URL must be an http\(s\) URL — it is a postgres(ql)?:\/\/ URL; write it as http:\/\/host:port$/.test(refused) && !refused.includes(new URL(URL_).host),
     `a postgres:// SMART_INGEST_URL is refused when the module loads, the message naming the variable and the scheme and not the value (${refused === null ? "loaded" : refused})`);
   // So is an address with a query: /execute is appended to it, and `?tenant=a/execute` is no path (review pass 1).
   process.env.SMART_INGEST_URL = `${INGEST}/si?tenant=a`;
@@ -1072,8 +1077,22 @@ try {
   // The item's row says so too: one statement set status and result_thought_id together before, and the fork's UUID in the
   // bigint column failed it whole, unread — the item stayed `ready` under a job marked complete (review pass 1). The
   // status lands, and the UUID rides in the item's metadata until SMD-2128 widens the column.
-  assert(items.length === 1 && items[0].status === "executed" && items[0].result_thought_id === null && items[0].result_thought_uuid === rows[0]?.id,
-    `…and the item's row is executed with the thought's UUID in its metadata — the bigint result column left null, not failed whole (${JSON.stringify(items).slice(0, 200)})`);
+  assert(items.length === 1 && items[0].action === "add" && items[0].reason === "no_semantic_match" && items[0].status === "executed" && items[0].result_thought_id === null && items[0].result_thought_uuid === rows[0]?.id,
+    `…and the item's row is an add for no semantic match (the stub's one-hot vectors make any collision with an earlier thought a duplicate, review pass 2), executed, with the thought's UUID in its metadata — the bigint result column left null, not failed whole (${JSON.stringify(items).slice(0, 200)})`);
+  // The other half of the pipeline, the one rest-api's execute route proxies: a dry run parks the item as `ready`, and
+  // POST /execute writes it — through recordItemResult's second call site, and with job_id as the STRING the proxy sent
+  // until review pass 2, which the server takes now beside the number it required (a proxied execute was a 400 for every
+  // job, and no arm drove this path).
+  const text2 = "A dry run parks its items as ready in ingestion_items, and the execute route is what rest-api proxies to.";
+  const dry = await send(h, "POST", "/", { text: text2, dry_run: true, skip_classification: true, source_label: "test-writes" });
+  const jobId = Number(dry.json?.job_id);
+  const mark3 = reached.length;
+  const ran = await send(h, "POST", "/execute", { job_id: String(jobId) });
+  const items2 = await sql`SELECT action, reason, status, result_thought_id, metadata->>'result_thought_uuid' AS result_thought_uuid FROM ingestion_items WHERE job_id = ${jobId || 0}`;
+  const rows2 = await sql`SELECT id FROM thoughts WHERE content = ${text2}`;
+  assert(dry.status === 200 && dry.json?.status === "dry_run_complete" && jobId > 0 && ran.status === 200 && ran.json?.status === "complete" && ran.json?.added_count === 1 && ran.json?.job_id === jobId
+    && items2.length === 1 && items2[0].status === "executed" && items2[0].result_thought_uuid === rows2[0]?.id && reached.slice(mark3).some((u) => u === `${WORKER}/?limit=1`),
+    `a dry run and then POST /execute with job_id as a numeric string: the job completes with one add, the item's row is executed with the thought's UUID in its metadata, and the worker is triggered once (${dry.status} ${dry.json?.status} #${jobId}; ${ran.status} ${JSON.stringify(ran.json).slice(0, 100)}; items ${JSON.stringify(items2).slice(0, 160)})`);
   assert(calls.filter((u) => u.startsWith(`${WORKER}/`)).join() === `${WORKER}/?limit=1` && workerKeys.at(-1) === KEY,
     `…and POSTs once to the extraction worker at ENTITY_EXTRACTION_WORKER_URL with the count as ?limit= and the server's key — the knob's address, not a path on the DSN (${calls.filter((u) => !/openrouter/.test(u)).join(" ") || "no call"}; key ${workerKeys.at(-1) === KEY ? "sent" : String(workerKeys.at(-1))})`);
   // Without the knob: the write lands and triggers nothing — no call to the worker, and no URL on the DSN either — and the
@@ -1091,7 +1110,7 @@ try {
   process.env.ENTITY_EXTRACTION_WORKER_URL = URL_;
   const refused = await import(join(ROOT, F) + "?dsn-in-the-knob").then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
   process.env.ENTITY_EXTRACTION_WORKER_URL = WORKER;
-  assert(refused !== null && /^ENTITY_EXTRACTION_WORKER_URL must be an http\(s\) URL — it is a postgres(ql)?:\/\/ URL$/.test(refused) && !refused.includes(new URL(URL_).host),
+  assert(refused !== null && /^ENTITY_EXTRACTION_WORKER_URL must be an http\(s\) URL — it is a postgres(ql)?:\/\/ URL; write it as http:\/\/host:port$/.test(refused) && !refused.includes(new URL(URL_).host),
     `a postgres:// ENTITY_EXTRACTION_WORKER_URL is refused when the module loads, the message naming the variable and the scheme and not the value (${refused === null ? "loaded" : refused})`);
 }
 

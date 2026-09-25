@@ -85,7 +85,7 @@ without human review.
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
 - **Enhanced thoughts schema** applied — install `schemas/enhanced-thoughts` first (adds type, importance, sensitivity columns and utility RPCs)
-- **Smart ingest tables** applied — install `schemas/smart-ingest-tables` to create the `ingestion_jobs` and `ingestion_items` tables plus the `append_thought_evidence` RPC
+- **Smart ingest tables** applied — install `schemas/smart-ingest` to create the `ingestion_jobs` and `ingestion_items` tables plus the `append_thought_evidence` RPC. On this fork an executed item's thought id rides in the item's `metadata.result_thought_uuid`: `result_thought_id` is a `bigint` column and `thoughts.id` a UUID here, so the column stays null and a dashboard's per-item "view thought" link stays dark until SMD-2128 widens it
 - At least one LLM API key for extraction: OpenRouter (recommended), OpenAI, or Anthropic
 - An embedding API key: OpenRouter or OpenAI (required for semantic deduplication)
 - [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/))
@@ -98,7 +98,7 @@ This server depends on these database functions:
 |-----|--------|---------|
 | `upsert_thought(text, jsonb)` | Core OB1 schema (`db/migrations/003`, `004`) | Creates or updates a thought with content and payload |
 | `match_thoughts(vector, float, int)` | Core OB1 schema | Semantic similarity search for deduplication |
-| `append_thought_evidence(bigint, jsonb)` | `schemas/smart-ingest-tables` | Appends corroborating evidence to an existing thought's metadata |
+| `append_thought_evidence(bigint, jsonb)` | `schemas/smart-ingest` | Appends corroborating evidence to an existing thought's metadata |
 
 ## Credential Tracker
 

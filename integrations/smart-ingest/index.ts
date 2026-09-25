@@ -32,8 +32,8 @@
  *   project_path, git_branch, import_key
  *
  * Dependencies:
- *   - Smart ingest tables (schemas/smart-ingest-tables): ingestion_jobs, ingestion_items
- *   - append_thought_evidence RPC (from smart-ingest-tables schema)
+ *   - Smart ingest tables (schemas/smart-ingest): ingestion_jobs, ingestion_items
+ *   - append_thought_evidence RPC (from the smart-ingest schema)
  *   - match_thoughts RPC (base OB1)
  *   - upsert_thought RPC (base OB1)
  *   - Enhanced thoughts columns (schemas/enhanced-thoughts)
@@ -81,8 +81,8 @@ function httpTargetFrom(name: string): string | null {
   const value = process.env[name]?.trim();
   if (!value) return null;
   let url: URL;
-  try { url = new URL(value); } catch { throw new Error(`${name} must be an http(s) URL — it is not a URL`); }
-  if (!/^https?:$/.test(url.protocol)) throw new Error(`${name} must be an http(s) URL — it is a ${url.protocol}// URL`);
+  try { url = new URL(value); } catch { throw new Error(`${name} must be an http(s) URL — it is not a URL; write it as http://host:port`); }
+  if (!/^https?:$/.test(url.protocol)) throw new Error(`${name} must be an http(s) URL — it is a ${url.protocol}// URL; write it as http://host:port`);
   if (url.search || url.hash || url.username || url.password) throw new Error(`${name} must be a bare http(s) address — scheme, host, port and an optional path; no query, fragment or credentials`);
   return url.origin + url.pathname.replace(/\/+$/, "");
 }
@@ -728,8 +728,12 @@ async function recordItemResult(itemDbId: number, resultThoughtId: number | stri
   const patch: Record<string, unknown> = { status: "executed" };
   if (typeof resultThoughtId === "number") patch.result_thought_id = resultThoughtId;
   if (typeof resultThoughtId === "string") {
-    const { data: row } = await supabase.from("ingestion_items").select("metadata").eq("id", itemDbId).maybeSingle();
-    patch.metadata = { ...((row?.metadata as Record<string, unknown> | null) ?? {}), result_thought_uuid: resultThoughtId };
+    // The row's metadata read first, and merged: written whole, a failed read would have replaced what persistItems put
+    // there (type, importance, tags, the snippet) with the id alone — so on a read error the status lands and the id is
+    // logged instead (review pass 2).
+    const { data: row, error: readError } = await supabase.from("ingestion_items").select("metadata").eq("id", itemDbId).maybeSingle();
+    if (readError) console.warn(`ingestion_items #${itemDbId}: metadata could not be read, so result_thought_uuid ${resultThoughtId} is not recorded — ${readError.message}`);
+    else patch.metadata = { ...((row?.metadata as Record<string, unknown> | null) ?? {}), result_thought_uuid: resultThoughtId };
   }
   const { error } = await supabase.from("ingestion_items").update(patch).eq("id", itemDbId);
   if (error) console.warn(`ingestion_items #${itemDbId}: the result update failed — ${error.message}`);
@@ -959,8 +963,10 @@ async function handleExecuteJob(req: Request): Promise<Response> {
   let body: Record<string, unknown>;
   try { body = await req.json(); } catch { return json({ error: "Invalid JSON body" }, 400); }
 
-  const jobId = typeof body.job_id === "number" ? body.job_id : 0;
-  if (!jobId) return json({ error: "job_id is required" }, 400);
+  // A number, or a numeric string — rest-api's proxy sent the route's captured `\d+` as a string until SMD-2110's second
+  // review pass, and every proxied execute was a 400 here.
+  const jobId = typeof body.job_id === "number" || typeof body.job_id === "string" ? Number(body.job_id) : 0;
+  if (!Number.isInteger(jobId) || jobId <= 0) return json({ error: "job_id is required" }, 400);
 
   const { data: job, error: jobErr } = await supabase
     .from("ingestion_jobs").select("*").eq("id", jobId).single();
