@@ -29,7 +29,7 @@
     }
   },
   "fetchers": {
-    "low-code-node": "a node of the orchestration tool SMD-1863 picks; the default for any vendor the tool exposes",
+    "low-code-node": "a node of n8n, the orchestration tool SMD-1863 picked; the default for any vendor the tool exposes",
     "native-driver": "a typed OB1 script or function that speaks the vendor's protocol itself; the fallback",
     "mcp-server": "the AI client's own connector — an MCP server or a channel plugin — calling the vendor on demand",
     "browser-extension": "a client in the user's browser that pushes what the user is looking at"

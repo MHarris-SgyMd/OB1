@@ -70,11 +70,12 @@ import { fileURLToPath } from "node:url";
 import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, CONTRIB_DIR, CONTRIB_SCHEMA_FILES, createAssert, FUNCTION_COMMENT_SQL, ISO_RE, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
 import {
-  DEFAULT_OPTIONS, DONE_WEIGHT, FUZZY_FLOOR, coverage as graphCoverage, lifecycleCaveat, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
+  BLOCKED_WEIGHT, DEFAULT_OPTIONS, DONE_WEIGHT, FUZZY_FLOOR, coverage as graphCoverage, lifecycleCaveat, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
   resolveSubject, subjectThoughts, topEntities, topThoughts, weightsSql, type Options as GraphOptions, type Runner,
 } from "./graph-centrality.ts";
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { ENTITY_TYPES, NUMERIC_NAME_RE, RELATIONS } from "../server-portable/entities.ts";
+import { ENTITY_VOCABULARY, entityTypeGate, IDENTIFIER_SHAPES, normalizeEntityName, TRIM_RE } from "../server-portable/entity-gate.ts";
 import { linearAdapter, SAMPLE_ISSUE } from "./ingest-linear.ts";
 import { LINK_RELATIONS } from "./ingest-contract.ts";
 
@@ -155,10 +156,30 @@ const functionsNamed = async (name: string) =>
   (await db.query<{ c: number }>(
     `SELECT count(*)::int AS c FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
      WHERE p.proname = $1 AND n.nspname = 'public'`, [name])).rows[0].c;
+/** Every function a migration file defines, by the same reading lastDefinerOf makes. */
+function definedIn(file: string): string[] {
+  return [...readFileSync(join(MIGRATIONS, file), "utf8").matchAll(/^\s*CREATE(?: OR REPLACE)? FUNCTION (?:public\.)?(\w+)\(/gm)].map((m) => m[1]);
+}
+/**
+ * Re-apply the last definer of each named function. A file re-applied for one
+ * function redefines EVERY function it holds, and some of those a later file
+ * last defines — 046 holds the audit trigger and the refusal trigger with
+ * 046's bodies while 055 is their last definer (SMD-2115) — so the closure is
+ * taken: for each file re-applied, the last definer of each function it
+ * defines is re-applied too, until nothing new joins, in file order. Before
+ * SMD-2115 every restore of upsert_thought or update_thought put 046's audit
+ * trigger back over 055's silently, and the sections after ran against a body
+ * the suite did not know it had.
+ */
 async function restoreShipped(...fns: string[]): Promise<string[]> {
-  const latest = [...new Set(fns.map(lastDefinerOf))].sort();
-  for (const f of latest) await db.exec(subst(readFileSync(join(MIGRATIONS, f), "utf8")));
-  return latest;
+  const latest = new Set(fns.map(lastDefinerOf));
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const f of [...latest]) for (const g of definedIn(f)) { const d = lastDefinerOf(g); if (!latest.has(d)) { latest.add(d); grew = true; } }
+  }
+  const files = [...latest].sort();
+  for (const f of files) await db.exec(subst(readFileSync(join(MIGRATIONS, f), "utf8")));
+  return files;
 }
 /** thoughts_embedding_idx as the migrations built it, read by the first withoutWalkIndex call. */
 let shippedWalkIndex: string | null = null;
@@ -2557,8 +2578,8 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   const up = (await db.query<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE oid = 'upsert_thought(text, jsonb, vector)'::regprocedure`)).rows[0].src;
   assert(/jsonb_typeof\(p_payload\) <> 'object'/.test(up) && /set_config\('ob1\.actor'/.test(up) && /p_payload->>'embedding_model'/.test(up), "the 3-argument upsert_thought carries 005's guard and 008's actor beside the label");
   assert((await functionsNamed("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
-  assert(lastDefinerOf("update_thought").startsWith("046") && lastDefinerOf("upsert_thought").startsWith("046") && lastDefinerOf("thoughts_write_audit").startsWith("046"),
-         `046 is the last definer of update_thought (033's body — 032's, 021's, the provenance envelope, the fingerprint lock before the row — under a 10-argument signature with the write event), of upsert_thought (035's bodies — 022's chunk rule, 021's label, 025's envelope, the fingerprint lock, provenance on a first capture only — with the event set beside the actor) and of the audit trigger (025's body — 010's id, the provenance diff — stamping the event and the key-derived columns) (${lastDefinerOf("update_thought")}, ${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
+  assert(lastDefinerOf("update_thought").startsWith("046") && lastDefinerOf("upsert_thought").startsWith("046") && lastDefinerOf("thoughts_write_audit").startsWith("055"),
+         `046 is the last definer of update_thought (033's body — 032's, 021's, the provenance envelope, the fingerprint lock before the row — under a 10-argument signature with the write event) and of upsert_thought (035's bodies — 022's chunk rule, 021's label, 025's envelope, the fingerprint lock, provenance on a first capture only — with the event set beside the actor); 055 of the audit trigger (046's body — 025's, 010's id, the provenance diff — stamping the event and the key-derived columns) (${lastDefinerOf("update_thought")}, ${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
 
   // The trap: 018 re-applied by hand puts the 7-argument form back BESIDE the
   // current one, and a 7-argument call is ambiguous. The last definer (032)
@@ -2758,7 +2779,10 @@ console.log("\n[24] Migration 023: every legacy singleton, and the oldest of eac
   assert((await fp(owned)) === null && (await fp(captured)) === (await fpOf("a fingerprinted note")), "a NULL row whose text a fingerprinted row already holds stays NULL, however old — the key is taken");
   assert((await fp(blocked)) === null && (await fp(holder)) === (await fpOf("held key text")), "a NULL row whose key a STALE holder carries stays NULL, and the stale key is not touched — 018's fingerprint_held_by case, not re-decided here");
   assert((await stamps()) === stampsBefore, "no row's updated_at moves — the fingerprint is not an edit");
-  assert((await audit()) === auditBefore, "…and no audit row is written: 008 diffs content, metadata and the vector's presence");
+  // 055 (SMD-2115): the key's move is the third addition to the event, so each
+  // row keyed leaves one update row carrying that key alone — before 055 the
+  // pass wrote none (008 diffed content, metadata and the vector's presence).
+  assert((await audit()) === auditBefore + 3, `…and one audit row per row keyed — the key's move, which the event carries since 055 (${(await audit()) - auditBefore})`);
   const [trg] = (await db.query<{ e: string }>(`SELECT tgenabled AS e FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_updated_at'`)).rows;
   assert(trg.e === "O", `…and the updated_at trigger is enabled again afterwards (${trg.e})`);
 
@@ -3508,7 +3532,10 @@ console.log("\n[31] A vendored schema applied to a migrated brain replaces no fu
   await reapply("005");
   assert(!/ob1:vector-replaces-chunks/.test(await srcOf(THREE)) && UPSERT_TWO_ARG_SHIPPED_RE.test(await srcOf(TWO)) && !/ob1:capture-takes-fingerprint-lock/.test(await srcOf(TWO)),
     "005 re-applied puts a pre-022 3-argument body back too (its file defines both forms) and a 2-argument body with the guard and no lock");
-  await restoreShipped("upsert_thought", "trace_provenance");
+  // 025 re-applied also put its audit trigger back over 055's (SMD-2115: 046
+  // restored it as a side effect while it was the last definer of both; it
+  // is not any more), so the trigger is restored by name.
+  await restoreShipped("upsert_thought", "trace_provenance", "thoughts_write_audit");
   assert(JSON.stringify(await bodies()) === JSON.stringify(shipped), "…and the last definers re-applied put every owned body back, byte for byte");
   await db.exec(`DELETE FROM thoughts`);
 }
@@ -3841,7 +3868,9 @@ console.log("\n[33] Migration 033: both capture forms take the fingerprint lock,
   // 025 re-applied also put its per-path trace_provenance back over 026's —
   // read from the catalog, not the files ([25]'s note): restored with the rest.
   assert(!/ob1:provenance-walk-bounded/.test(await srcOf("trace_provenance(uuid, int, int)")), "(025 re-applied put its unbounded trace_provenance back too — 026's sentinel is gone)");
-  await restoreShipped("upsert_thought", "trace_provenance");
+  assert(!/ob1:capture-event-carries-content/.test(await srcOf("thoughts_write_audit()")), "(and 025's audit trigger over 055's — the payload sentinel is gone; SMD-2115)");
+  await restoreShipped("upsert_thought", "trace_provenance", "thoughts_write_audit");
+  assert(/ob1:capture-event-carries-content/.test(await srcOf("thoughts_write_audit()")), "…055 re-applied: the audit trigger carries the payload again");
   assert(/ob1:capture-takes-fingerprint-lock/.test(await srcOf(TWO)) && /ob1:capture-takes-fingerprint-lock/.test(await srcOf(THREE)) && (await functionsNamed("upsert_thought")) === 3, "035 re-applied: both bodies locked again, three overloads");
   assert(/ob1:provenance-walk-bounded/.test(await srcOf("trace_provenance(uuid, int, int)")), "…and 026 re-applied: the bounded walk's sentinel is back");
   // 032 re-applied by hand puts 032's update_thought back — the row →
@@ -5044,7 +5073,8 @@ console.log("\n[41] Migration 042: a cited source is refused as a value and deta
   const again = await q<{ tgname: string }>(`SELECT tgname FROM pg_trigger WHERE NOT tgisinternal AND tgname IN ('thoughts_guard_citation_sources', 'thought_facets_validate')`);
   assert(again.length === 2 && (await functionsNamed("delete_thought")) === 1 && before > 0 && (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_facets`)).c === before, `042 re-applied twice leaves two triggers, one delete_thought and every facet row (${before})`);
   // 042's file put 042's validator back; the shipped one is 053's (the `link` kind) — restored for the sections after.
-  await restoreShipped("thought_facets_validate");
+  // 053's file also defines record_thought_entities, whose shipped body is 056's (SMD-1935), so both are named.
+  await restoreShipped("thought_facets_validate", "record_thought_entities");
   // A reset of the whole table: every citing thought goes with its source, so nothing survives and the statement is clean.
   await db.exec(`DELETE FROM thoughts`);
   assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_facets`)).c === 0, "DELETE FROM thoughts with citations among the rows is clean — nothing survives to rest on nothing — and the facets cascade");
@@ -5149,28 +5179,34 @@ console.log("\n[43] Migration 046: the event shape at the write boundary — who
   assert((await one<{ e: boolean }>(`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ob1_agents' AND column_name = 'kind') AS e`)).e, "ob1_agents gains kind");
   assert(/ob1_agents_kind_check/.test(await refused(`INSERT INTO ob1_agents (label, kind) VALUES ('robot-key', 'robot')`)), "…which the CHECK holds to operator, agent or ingested");
   const idx = await q<{ indexname: string; indexdef: string }>(`SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'thought_audit' AND indexname LIKE 'thought_audit_%' AND indexname NOT IN ('thought_audit_thought_id_idx', 'thought_audit_created_at_idx', 'thought_audit_actor_idx', 'thought_audit_session_idx', 'thought_audit_agent_idx', 'thought_audit_pkey')`);
-  assert(idx.length === 2 && idx.map((i) => i.indexname).sort().join(",") === "thought_audit_awaiting_door_idx,thought_audit_awaiting_kind_idx",
-    `two partial indexes and no more: the rows still waiting for a kind or a trust, by name, and for a door — the census, the backfill and the gate read them; none on actor_kind, trust or origin until a read exists (${idx.map((i) => i.indexname).join(", ")})`);
+  assert(idx.length === 3 && idx.map((i) => i.indexname).sort().join(",") === "thought_audit_awaiting_door_idx,thought_audit_awaiting_kind_idx,thought_audit_awaiting_payload_idx",
+    `three partial indexes and no more: the rows still waiting for a kind or a trust, by name, for a door, and (055) for their payload — the census, the backfills and the gate read them; none on actor_kind, trust or origin until a read exists (${idx.map((i) => i.indexname).join(", ")})`);
   assert(/INCLUDE \(canonical_agent_id, actor_kind\)/.test(idx.find((i) => i.indexname === "thought_audit_awaiting_kind_idx")?.indexdef ?? "") && /WHERE \(\(origin IS NULL\) AND \(actor_context \? 'via'::text\) AND \(ob1_door_of\(actor_context\) IS NOT NULL\)\)/.test(idx.find((i) => i.indexname === "thought_audit_awaiting_door_idx")?.indexdef ?? ""),
     `…the kind index carrying the agent id and the kind so the census filters and groups without the heap, the door index holding only rows whose via IS a door, by the one reading (seventh review pass; ${idx.map((i) => i.indexdef.replace(/.*USING btree /, "")).join(" | ")})`);
-  assert(lastDefinerOf("thoughts_write_audit").startsWith("046") && lastDefinerOf("thought_audit_refuse_mutation").startsWith("046") && lastDefinerOf("upsert_thought").startsWith("046") && lastDefinerOf("update_thought").startsWith("046") && lastDefinerOf("delete_thought").startsWith("042"),
-    `046 is the last definer of the audit trigger, the refusal trigger and both writers; delete_thought stays 042's — a tombstone declares nothing (${lastDefinerOf("delete_thought")})`);
+  assert(lastDefinerOf("thoughts_write_audit").startsWith("055") && lastDefinerOf("thought_audit_refuse_mutation").startsWith("055") && lastDefinerOf("upsert_thought").startsWith("046") && lastDefinerOf("update_thought").startsWith("046") && lastDefinerOf("delete_thought").startsWith("042"),
+    `046 is the last definer of both writers; 055 of the audit trigger and the refusal trigger (046's bodies with the rules as functions and the payload arm — [51]); delete_thought stays 042's — a tombstone declares nothing (${lastDefinerOf("delete_thought")})`);
   const tbl = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_audit"])).c ?? "";
   assert(/RANGE on created_at by month/.test(tbl) && /not applied/.test(tbl) && /SMD-1697/.test(tbl), "the table's comment states the partition key chosen and not applied, and what decides when");
   const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
   const trig = await src("thoughts_write_audit()");
-  assert(/ob1:audit-event-from-the-key/.test(trig) && /ob1_registry_kind\(v_agent, actor->>'name'\)/.test(trig) && /ob1_trust_ceiling\(v_kind, v_declared\)/.test(trig),
-    "the trigger carries 046's sentinel and reads the kind and the trust through the two shared rules — the registry by id then by label, the ceiling");
+  // 055 (SMD-2115) lifts 046's tail into ob1_append_thought_event; the rule
+  // and its sentinel stand there, and the trigger names the sentinel and
+  // calls the function — so the pins below read the function's source.
+  const tail = await src("ob1_append_thought_event(uuid, text, text, jsonb, jsonb)");
+  assert(/ob1:audit-event-from-the-key/.test(trig) && /PERFORM ob1_append_thought_event\(v_id, v_action, v_source, v_diff, event\)/.test(trig), "the trigger names 046's sentinel and appends through ob1_append_thought_event (055)");
+  assert(/ob1:audit-event-from-the-key/.test(tail) && /ob1_registry_kind\(v_agent, actor->>'name'\)/.test(tail) && /ob1_trust_ceiling\(v_kind, v_declared\)/.test(tail),
+    "the append carries 046's sentinel and reads the kind and the trust through the two shared rules — the registry by id then by label, the ceiling");
   const registry = await src("ob1_registry_kind(uuid, text)"), ceiling = await src("ob1_trust_ceiling(text, text)");
   assert(/canonical_agent_id = p_agent/.test(registry) && /label = p_label/.test(registry) && /array_position/.test(ceiling),
     "…which the amendment gate and the backfill call too, so the three cannot drift");
   assert(/ob1_registry_kind\(OLD\.canonical_agent_id, OLD\.actor_name\)/.test(await src("thought_audit_refuse_mutation()")) && /ob1_registry_kind\(w\.agent, w\.name\)/.test(await src("backfill_thought_audit_events(integer)")) && /kinds AS MATERIALIZED/.test(await src("backfill_thought_audit_events(integer)")),
     "(the gate and the backfill do call them — the backfill once per distinct writer, materialised, not once per row: eighth review pass)");
-  assert(!/actor->>'source'/.test(trig) && /- 'via'/.test(trig) && !/- 'source'/.test(trig), "…reads no actor source (the column is the row's own), strips via into origin and leaves an actor's source in the blob");
-  assert(/IF v_agent IS NOT NULL OR actor->>'name' IS NOT NULL THEN\s+v_kind := ob1_registry_kind/.test(trig), "…and probes the registry only when an envelope names an id or a name (a JSON null is neither) — a raw write with no actor set needs no SELECT on ob1_agents");
+  assert(!/actor->>'source'/.test(tail) && /- 'via'/.test(tail) && !/- 'source'/.test(tail), "…reads no actor source (the column is the row's own), strips via into origin and leaves an actor's source in the blob");
+  assert(/IF v_agent IS NOT NULL OR actor->>'name' IS NOT NULL THEN\s+v_kind := ob1_registry_kind/.test(tail), "…and probes the registry only when an envelope names an id or a name (a JSON null is neither) — a raw write with no actor set needs no SELECT on ob1_agents");
   assert(/Lost the race[\s\S]*?PERFORM set_config\('ob1\.event', '', true\);[\s\S]*?'STALE_READ'/.test(await src(UPDATE_THOUGHT_SIGNATURE)), "update_thought clears the event on the one refusal that follows its write of the setting — the UPDATE that matched no row");
-  for (const [re, what] of [[/jsonb_build_object\('metadata', NEW\.metadata\)/, "008's capture diff"], [/v_diff = '\{\}'::jsonb/, "008's no-op guard"], [/actor->>'agent_id'/, "010's agent id"], [/'previous_derived_from'/, "025's provenance in the delete row"]] as [RegExp, string][])
-    assert(re.test(trig), `…carrying ${what}`);
+  const diffRule = await src("ob1_thought_diff(text, text, text, jsonb, jsonb, boolean, boolean, uuid, uuid, jsonb, jsonb, text, text, timestamptz)");
+  for (const [re, body, what] of [[/jsonb_build_object\('content', p_new_content, 'metadata', p_new_metadata\)/, diffRule, "008's capture diff, with 055's content"], [/v_diff = '\{\}'::jsonb/, trig, "008's no-op guard"], [/actor->>'agent_id'/, tail, "010's agent id"], [/'previous_derived_from'/, diffRule, "025's provenance in the delete row"]] as [RegExp, string, string][])
+    assert(re.test(body), `…carrying ${what}`);
   assert(/ob1:audit-amend-fills-null-only/.test(await src("thought_audit_refuse_mutation()")), "the refusal trigger carries the amendment's sentinel");
   for (const sig of ["upsert_thought(text, jsonb)", "upsert_thought(text, jsonb, vector)", UPDATE_THOUGHT_SIGNATURE])
     assert(/validate_write_event\(/.test(await src(sig)) && /set_config\('ob1\.event'/.test(await src(sig)), `${sig} validates the event and sets it beside the actor`);
@@ -5541,7 +5577,7 @@ console.log("\n[43] Migration 046: the event shape at the write boundary — who
   await db.exec(`DELETE FROM ob1_agents`);
 }
 
-// ── 44. db/graph-centrality.ts — the counts, the ladder, the control, the lifecycle ──
+// ── 44. db/graph-centrality.ts — the counts, the ladder, the control, the lifecycle, startability ──
 //
 // The script's exported SQL builders run here under PGlite through a Runner, so
 // the text the CLI sends is the text asserted. A small graph whose every count
@@ -5551,12 +5587,19 @@ console.log("\n[43] Migration 046: the event shape at the write boundary — who
 // lifecycle board-sync stamps (SMD-1994): every count in the first half is read
 // with every weight 1, so the default run IS the drop-the-filter control, and
 // the lifecycle block reads the same graph under each filter and under decay.
+// The startability block adds tickets with 053's source rows and link facets
+// (SMD-2061) and reads them under --startable, the reports without the flag
+// compared byte for byte before and after the links are written.
 
-console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defined; the resolution ladder; numeric names out of every count; edges on vs off is the drop-the-graph control (SMD-1938); a thought's lifecycle is a weight — the filter, the decay, and the unstamped passing every filter (SMD-1994)");
+console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defined; the resolution ladder; numeric names out of every count; edges on vs off is the drop-the-graph control (SMD-1938); a thought's lifecycle is a weight — the filter, the decay, and the unstamped passing every filter (SMD-1994); --startable weighs a thought with an open blocker 0, a settled blocker none (SMD-2061); --decay-blocked weighs it BLOCKED_WEIGHT and names its blockers (SMD-2181)");
 {
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`);
   await db.exec(`SELECT prune_orphan_entities()`);
+  // The read-side numeric rule serves a brain from before 056, whose writer
+  // stored numeric names; 053's writer is that brain's, so the fixture below
+  // can hold one. 056's is restored at the end of the section (SMD-1935).
+  await reapply("053");
   const KEY = "extract:stub@p1";
   const run: Runner = async (text, params) => (await db.query<Record<string, unknown>>(text, params)).rows;
   const thought = async (content: string) =>
@@ -5890,6 +5933,218 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   for (const id of [tSec, tDone, tPrev, tOrphan]) await drop(id);
   assert((await graphCoverage(run, on)).thoughts === 7 && (await graphCoverage(run, on)).entities === 4, "the ticket rows are gone again");
 
+  // ── Startability (SMD-2061). The board of 2026-09-24 as tickets: tP the ADR
+  // (backlog) blocked by its spike tQ (unstarted), itself blocked by spike tR
+  // (started); tS startable (unstarted, a child of tP — a parent is no
+  // blocker). Around them: tV, blocked by tR on tR's side alone (`blocks`,
+  // the one direction the sync stated); tW, whose blocked_by was closed (the
+  // source dropped it); tX, blocked by an item the brain does not hold; and
+  // tPsec, a section derived from tP (`ticket`). The dependency rows are
+  // 053's own: record_thought_source and record_source_links.
+  const ticket = async (content: string, issue: string, status: string, status_type: string, tool: string) => {
+    const id = await thought(content);
+    await record(id, [E("Open Brain", "project"), E(tool, "tool")]);
+    await db.query(`UPDATE thoughts SET metadata = metadata || $2::jsonb WHERE id = $1`, [id, JSON.stringify({ source: "linear", issue, status, status_type, linear_updated_at: SYNCED })]);
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
+    return id;
+  };
+  const links = (id: string, ls: [string, string][]) =>
+    db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [id, JSON.stringify(ls.map(([relation, target]) => ({ relation, target })))]);
+  const tP = await ticket("SMD-7001 — the ADR: Open Brain's log on Kafka.", "SMD-7001", "Backlog", "backlog", "Kafka");
+  const tQ = await ticket("SMD-7002 — spike 2: Open Brain writes through Kafka.", "SMD-7002", "Todo", "unstarted", "Kafka");
+  const tR = await ticket("SMD-7003 — spike 1: Open Brain replays from NATS.", "SMD-7003", "In Progress", "started", "NATS");
+  const tS = await ticket("SMD-7004 — Open Brain's REST search leaks, over NATS.", "SMD-7004", "Todo", "unstarted", "NATS");
+  const tV = await ticket("SMD-7005 — Open Brain's Kafka consumer, after spike 1.", "SMD-7005", "Backlog", "backlog", "Kafka");
+  const tW = await ticket("SMD-7006 — Open Brain's NATS bridge, once gated.", "SMD-7006", "Backlog", "backlog", "NATS");
+  const tX = await ticket("SMD-7007 — Open Brain's Kafka schema, waiting on another team.", "SMD-7007", "Backlog", "backlog", "Kafka");
+  // tD is Done, and Linear kept its blocked_by to the still-open tQ: settled, not blocked (first review pass).
+  const tD = await ticket("SMD-7008 — Open Brain's Kafka retention, shipped around spike 2.", "SMD-7008", "Done", "completed", "Kafka");
+  const tPsec = await thought("SMD-7001 — the ADR · Update 2026-09-24\n\nOpen Brain keeps Kafka.");
+  await record(tPsec, [E("Open Brain", "project"), E("Kafka", "tool")]);
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"source": "linear", "ticket": "SMD-7001", "type": "observation"}'::jsonb WHERE id = $1`, [tPsec]);
+  const openStart: GraphOptions = { ...wide, status: "open", startable: true };
+  // The control's "before": every mode but --startable, rendered before a link exists.
+  const beforeAll = render(await graphReport(run, null, wide));
+  const beforeOpen = render(await graphReport(run, "Open Brain", { ...wide, status: "open" }));
+  const covNoLinks = await graphCoverage(run, openStart);
+  assert(covNoLinks.dependencies?.facets === 0 && covNoLinks.dependencies.held === 0 && covNoLinks.dependencies.in_dependencies === 0 && covNoLinks.dependencies.last_link_change === null,
+    `before any link, --startable finds no dependency and blocks nothing (${JSON.stringify(covNoLinks.dependencies)})`);
+  await links(tP, [["blocked_by", "SMD-7002"]]);
+  await links(tQ, [["blocked_by", "SMD-7003"], ["child_of", "SMD-7001"]]);
+  await links(tR, [["blocks", "SMD-7002"], ["blocks", "SMD-7005"], ["child_of", "SMD-7001"]]);
+  await links(tS, [["child_of", "SMD-7001"]]);
+  await links(tW, [["blocked_by", "SMD-7003"]]);
+  await links(tW, []);
+  await links(tX, [["blocked_by", "SMD-7999"]]);
+  await links(tD, [["blocked_by", "SMD-7002"]]);
+
+  // The control: without the flag the dependency read is not in the SQL, and
+  // the reports are the ones rendered before the links, byte for byte.
+  assert(!weightsSql({ status: "open", decayDone: false }, []).includes("thought_facets") && weightsSql({ status: "open", decayDone: false }, []) === weightsSql({ status: "open", decayDone: false, startable: false }, [])
+      && weightsSql({ status: "open", decayDone: false, startable: true }, []).includes("thought_facets"),
+    "weightsSql without --startable reads no link facet — its text is SMD-1994's — and with it does");
+  assert(render(await graphReport(run, null, wide)) === beforeAll && render(await graphReport(run, "Open Brain", { ...wide, status: "open" })) === beforeOpen && !("dependencies" in (await graphCoverage(run, open))),
+    "the default and --status open reports are byte-identical before and after the links: the dependency read is additive, and its coverage is absent without the flag");
+
+  // The Verify case: --status open lists all the open tickets; --startable
+  // drops the ADR, its blocked spike and the section derived from the ADR, and
+  // keeps the started spike and the startable ticket.
+  const listed = async (o: GraphOptions) => new Set((await topThoughts(run, o)).map((t) => t.id));
+  const openIds = await listed({ ...wide, status: "open" });
+  const startIds = await listed(openStart);
+  assert([tP, tQ, tR, tS, tV, tW, tX, tPsec].every((id) => openIds.has(id)), "--status open lists every open ticket, blocked or not — the lifecycle says nothing about dependencies");
+  assert(!startIds.has(tP) && !startIds.has(tQ) && startIds.has(tR) && startIds.has(tS),
+    "--status open --startable drops tP (blocked by the open tQ) and tQ (blocked by the started tR) and keeps tR and tS — the 2026-09-24 hand analysis, with no hand join");
+  assert(!startIds.has(tPsec), "a section derived from a blocked ticket (`ticket`) is blocked with it — a row's blockers are its ticket's");
+  assert(!startIds.has(tV), "a `blocks` stated on the blocker's side alone blocks its target: both directions are read");
+  assert(startIds.has(tW), "a closed blocked_by (the source dropped it) blocks nothing: only an active link counts");
+  assert(startIds.has(tS), "a child_of link — tS under the open tP, and tQ and tR too — makes nobody a blocker: a parent does not gate its children, nor they it");
+  assert(!startIds.has(tX), "a blocker the brain does not hold still blocks: nothing says it is settled");
+  assert([t2, t3, t4, t6, t8].every((id) => startIds.has(id)), "a thought no dependency names — a ticket the relations never reached, or a hand capture — counts as unblocked");
+  const covS = await graphCoverage(run, openStart);
+  assert(JSON.stringify({ ...covS.dependencies, last_link_change: null }) === JSON.stringify({ facets: 6, in_dependencies: 7, held: 5, unknown_blockers: 1, last_link_change: null }) && covS.dependencies!.last_link_change !== null && covS.weighed === 8,
+    `coverage: six active dependency facets (tP's, tQ's, tX's and tD's blocked_by, tR's two blocks; the closed one and the child_of links are not); seven thoughts whose ticket a dependency names on either side (tP, tPsec, tQ, tR, tV — named only by tR's blocks, holding no facet — tX, tD; not tS, whose one link is child_of); five held (tP, tPsec, tQ, tV, tX — not the Done tD, which already weighs 0); one blocker nothing settles (SMD-7999); a facet timestamp; eight weigh in (${JSON.stringify(covS.dependencies)}, ${covS.weighed})`);
+  // A settled ticket is settled, not blocked: tD passes --status done and the
+  // decay exactly as without the flag, and `held` counts only what the flag
+  // took from above 0 in the run — under active, tQ alone (tP, tV and tX are backlog, already 0).
+  assert((await listed({ ...wide, status: "done", startable: true })).has(tD) && (await graphCoverage(run, { ...wide, status: "done", startable: true })).dependencies!.held === 0
+      && (await graphCoverage(run, { ...wide, status: "done", startable: true })).weighed === (await graphCoverage(run, { ...wide, status: "done" })).weighed,
+    "--status done --startable lists the Done tD though its blocker is open, holds nothing back, and weighs in exactly what --status done does");
+  assert((await graphCoverage(run, { ...wide, status: "active", startable: true })).dependencies!.held === 1, "under --status active the flag holds back one thought, tQ — the line reports what it did in this run, not every thought with a blocker");
+  // coverage() reads the known types at the slot weightsSql bound last; under
+  // --startable weightsSql binds one more array first, so the lifecycle counts
+  // must be the same with and without the flag (third review pass).
+  const lc = (c: Awaited<ReturnType<typeof graphCoverage>>) => [c.with_lifecycle, c.unknown_status, c.done, c.last_sync].join();
+  assert(lc(covS) === lc(await graphCoverage(run, { ...wide, status: "open" })), `the lifecycle counts under --startable are the lifecycle counts without it — the slot arithmetic holds (${lc(covS)})`);
+  // An unknown blocker is counted where it holds a thought back: under done,
+  // tX (backlog) already weighs 0, so SMD-7999 holds nothing (second review pass).
+  assert((await graphCoverage(run, { ...wide, status: "done", startable: true })).dependencies!.unknown_blockers === 0 && covS.dependencies!.unknown_blockers === 1,
+    "unknown_blockers: SMD-7999 counts under open, where it holds tX back, and not under done, where tX weighs 0 whatever");
+  // The lifecycle line under --startable states the lifecycle's rule as the
+  // lifecycle's, and the run's weighed count carries both factors (second review pass).
+  const allStart = render(await graphReport(run, null, { ...wide, startable: true }));
+  assert(allStart.includes("By its lifecycle every thought weighs 1: a Done ticket counts as a live one") && allStart.includes("With --startable, 11 of 16 thoughts weigh more than 0 in this run.")
+      && render(await graphReport(run, null, openStart)).includes("plus every thought without a lifecycle — it passes every filter; less those --startable holds back)"),
+    "the lifecycle line beside --startable: 'by its lifecycle' every thought weighs 1, and 11 of 16 weigh in (the five held are out); under --status open the weighed count says the flag took its share");
+  // The facet count is the rows the ranking read: a facet whose holder lost
+  // its source row blocks nothing and is not counted (second review pass).
+  await db.query(`DELETE FROM thought_sources WHERE thought_id = $1`, [tX]);
+  const covOrphan = await graphCoverage(run, openStart);
+  assert(covOrphan.dependencies!.facets === 5 && covOrphan.dependencies!.held === 4 && (await listed(openStart)).has(tX),
+    `a blocked_by whose holder has no source row is read by nothing: tX is startable, and the line counts five facets and four held, agreeing with the ranking (${JSON.stringify(covOrphan.dependencies)})`);
+  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-7007', content, 'text/markdown') FROM thoughts WHERE id = $1`, [tX]);
+  const kafka = (await topEntities(run, openStart)).byMentions;
+  assert(!kafka.some((e) => e.name === "Kafka") && kafka.find((e) => e.name === "NATS")!.mentions === 3,
+    "the whole graph under --startable is the one the startable thoughts build: every Kafka thought is blocked, so Kafka is not in the run; NATS has tR, tS and tW");
+  const rStart = render(await graphReport(run, null, openStart));
+  assert(rStart.includes("lifecycle open, startable;") && rStart.includes("as current as board-sync's last passes over both tickets of each (a relation is read from either side, so one removed on the board blocks until both are re-read): 6 active dependency facets; the latest was written or closed ")
+      && rStart.includes(". 7 of 16 thoughts belong to a ticket a dependency names; every other thought has none recorded and counts as unblocked. --startable: 5 thoughts with an open blocker weigh 0 in this run; a completed or canceled ticket is settled, not blocked, a blocker completed or canceled does not block, and a parent is not blocked by its children. 1 blocker of the held thoughts is unsettled only for want of a known status: not in the brain, or with no status_type this tool knows."),
+    "the report: the header names the flag, and the dependency line has the source, when the dependencies last moved, the counts, the rules for settled tickets, settled blockers and parents, and the unsettled count");
+  assert(!render(await graphReport(run, null, { ...wide, status: "open" })).includes("Dependencies are read"), "…a line printed under --startable alone");
+  assert(render(await graphReport(run, "Anita", { ...on, types: ["place"], status: "open", startable: true })).includes("shares a --status open startable thought"), "a subject with no neighbour under the flag is told the flag emptied it");
+
+  // ── Blocked decay (SMD-2181): the same read, the held thoughts sunk to
+  // BLOCKED_WEIGHT instead of dropped, and listed with what holds them.
+  const openDecay: GraphOptions = { ...wide, status: "open", decayBlocked: true };
+  const byId = async (o: GraphOptions) => new Map((await topThoughts(run, o)).map((t) => [t.id, t]));
+  const od = await byId(openDecay);
+  const heldAs = (id: string) => `${od.get(id)?.weight}:${JSON.stringify(od.get(id)?.blockers)}`;
+  assert(BLOCKED_WEIGHT === 0.25 && [tP, tQ, tPsec, tV, tX].map(heldAs).join() === ["0.25:[\"SMD-7002\"]", "0.25:[\"SMD-7003\"]", "0.25:[\"SMD-7002\"]", "0.25:[\"SMD-7003\"]", "0.25:[\"SMD-7999\"]"].join()
+      && [tR, tS, tW].map(heldAs).join() === ["1:null", "1:null", "1:null"].join() && !od.has(tD),
+    `--status open --decay-blocked lists what --startable drops, at 0.25, each with its open blockers — the derived tPsec its ticket's, tX the unknown one — and the startable tR, tS and tW at 1 with none (${[tP, tQ, tPsec, tV, tX, tR, tS, tW].map(heldAs).join(" ")})`);
+  const allDecay = await byId({ ...wide, decayBlocked: true });
+  assert(allDecay.get(tD)?.weight === 1 && allDecay.get(tD)?.blockers === null,
+    "a Done ticket is settled under the decay as under the filter: tD weighs its lifecycle's 1 and names no blocker, though its blocked_by to the open tQ is active");
+  const bothDecays = await byId({ ...wide, decayDone: true, decayBlocked: true });
+  assert([t1, tD, tR, tP, tQ].map((id) => bothDecays.get(id)?.weight).join() === "0.25,0.25,1,0.25,0.25" && [...bothDecays.values()].every((t) => t.weight === 1 || t.weight === 0.25),
+    "--decay-done --decay-blocked multiplies, and the decays never meet: the settled t1 and tD at 0.25, the started tR at 1, the blocked tP and tQ at 0.25 — no thought at 0.0625");
+  const activeDecay = await byId({ ...wide, status: "active", decayBlocked: true });
+  assert(!activeDecay.has(tP) && activeDecay.get(tQ)?.weight === 0.25 && (await graphCoverage(run, { ...wide, status: "active", decayBlocked: true })).dependencies!.held === 1,
+    "under --status active the decay multiplies the filter: the backlog tP stays at 0, tQ sinks to 0.25, and one thought is counted down-weighted");
+  const covD = await graphCoverage(run, openDecay);
+  assert(JSON.stringify(covD.dependencies) === JSON.stringify(covS.dependencies) && covD.weighed === (await graphCoverage(run, { ...wide, status: "open" })).weighed && covD.weighed === 13 && lc(covD) === lc(covS),
+    `coverage under the decay: the dependency counts are --startable's (five down-weighted, one unknown blocker), thirteen weigh in — --startable's eight and the five it held — and the lifecycle counts are unmoved (${JSON.stringify(covD.dependencies)}, ${covD.weighed})`);
+  // Degree counts neighbours, not evidence: an edge a blocked thought alone
+  // evidences stays under the decay, at its weight's worth of support.
+  await record(tQ, [E("Open Brain", "project"), E("Kafka", "tool")], [R("Kafka", "Open Brain", "depends_on")]);
+  const degrees = async (o: GraphOptions) => (await topEntities(run, o)).byMentions.map((e) => `${e.name}:${e.degree}`).sort().join();
+  const kafkaD = (await topEntities(run, { ...wide, decayBlocked: true })).byMentions.find((e) => e.name === "Kafka")!;
+  assert((await degrees({ ...wide, decayBlocked: true })) === (await degrees(wide)) && kafkaD.degree === 1 && kafkaD.support === 0.25
+      && (await topEntities(run, openDecay)).byMentions.find((e) => e.name === "Kafka")!.mentions === 1.25
+      && (await topEntities(run, { ...wide, startable: true })).byMentions.find((e) => e.name === "Open Brain")!.degree! < (await topEntities(run, { ...wide, decayBlocked: true })).byMentions.find((e) => e.name === "Open Brain")!.degree!,
+    `degree under --decay-blocked is degree without it, entity by entity — Kafka keeps the edge the blocked tQ evidences, at support 0.25 — and Kafka's mentions under --status open are the weighted sum of tP, tQ, tPsec, tV and tX (1.25); --startable drops the edge (${JSON.stringify(kafkaD)})`);
+  // The subject path reads the same weights and columns (first review pass:
+  // only the whole-graph path was exercised).
+  const subj = await graphReport(run, "Open Brain", openDecay);
+  const subjP = subj.thoughts.find((t) => t.id === tP);
+  const kafkaN = subj.neighbours!.find((n) => n.name === "Kafka");
+  assert(JSON.stringify(subjP?.blockers) === '["SMD-7002"]' && subjP?.weight === 0.25 && kafkaN?.co_mentions === 1.25 && kafkaN?.support === 0.25
+      && render(subj).includes("ranked by neighbours mentioned + subject edges evidenced, times the weight:") && / excerpt +blocked by$/m.test(render(subj)),
+    `around a subject under --status open --decay-blocked: tP is listed at 0.25 with its blocker, Kafka's co_mentions are the five blocked thoughts at 0.25 each and its support tQ's quarter, and the thought table has the column and the weight heading (${JSON.stringify(kafkaN)})`);
+  await record(tQ, [E("Open Brain", "project"), E("Kafka", "tool")]);
+  const rBlocked = render(await graphReport(run, null, openDecay));
+  const tPline = rBlocked.split("\n").find((l) => l.includes(tP)) ?? "";
+  assert(rBlocked.includes("lifecycle open, blocked ×0.25;") && /weight +status +thought .* excerpt +blocked by$/m.test(rBlocked) && /0\.25 +Backlog .* SMD-7002$/.test(tPline) && rBlocked.includes("in-scope edges evidenced, times the weight:")
+      && rBlocked.includes(". --decay-blocked: 5 thoughts with an open blocker weigh 0.25 of their lifecycle weight in every count (pre-registered, one weight), and a listed one names its blockers; degree counts neighbours, not evidence, and is unchanged; a completed or canceled ticket is settled, not blocked,")
+      && rBlocked.includes("1 blocker of the down-weighted thoughts is unsettled") && rBlocked.includes("plus every thought without a lifecycle — it passes every filter; those with an open blocker at 0.25)")
+      && render(await graphReport(run, null, { ...wide, decayBlocked: true })).includes("By its lifecycle every thought weighs 1: a Done ticket counts as a live one (--status open|active|done filters; --decay-done down-weights).\n"),
+    `the report under the decay: the header names it, the thought table has the weight and a blocked by column (tP's row: ${JSON.stringify(tPline)}), and the dependency and lifecycle lines say what the decay did`);
+  // Two blockers, one from each direction: tR's `blocks` and tV's own
+  // blocked_by.
+  await links(tV, [["blocked_by", "SMD-7001"]]);
+  const tVline = render(await graphReport(run, null, openDecay)).split("\n").find((l) => l.includes(tV)) ?? "";
+  assert(JSON.stringify((await byId(openDecay)).get(tV)?.blockers) === JSON.stringify(["SMD-7001", "SMD-7003"]) && tVline.endsWith(" SMD-7001, SMD-7003"),
+    `a thought held by two blockers lists both, sorted, whichever side stated each — an array in the JSON, "a, b" in the table (${JSON.stringify(tVline)})`);
+  await links(tV, [["blocked_by", "SMD-7001"], ["blocked_by", "SMD\n7010"], ...[1, 2, 3, 4, 5, 6, 7].map((n): [string, string] => ["blocked_by", `SMD-710${n}`])]);
+  const tVrows = render(await graphReport(run, null, openDecay)).split("\n").filter((l) => l.includes(tV));
+  assert(tVrows.length === 1 && tVrows[0].includes("SMD 7010") && tVrows[0].includes("SMD-7107") && !tVrows[0].includes("…") && (await topEntities(run, wide)).byMentions.find((e) => e.name === "Kafka")!.degree === 0,
+    `a blocker identity carrying a newline (facet data, untrusted) renders on the row as one space, as every other cell's whitespace does, and ten blockers — nine of its own and tR's blocks — are named in full, the column uncapped (second review pass; third: ten, not nine); and tQ's edge is gone again (${JSON.stringify(tVrows)})`);
+  await links(tV, []);
+  // A link of another system (SMD-2136's --items writes any): its blocker is
+  // named with its system, a linear one bare (fourth review pass).
+  const tJ = await thought("PROJ-1 — Open Brain's Kafka export, in another tracker.");
+  await record(tJ, [E("Open Brain", "project"), E("Kafka", "tool")]);
+  await db.query(`SELECT record_thought_source($1::uuid, 'jira', 'PROJ-1', 'PROJ-1', 'text/markdown')`, [tJ]);
+  await db.query(`SELECT record_source_links($1::uuid, 'jira', '[{"relation": "blocked_by", "target": "PROJ-2"}]'::jsonb)`, [tJ]);
+  const jira = (await byId(openDecay)).get(tJ);
+  assert(JSON.stringify(jira?.blockers) === '["jira:PROJ-2"]' && jira?.weight === 0.25 && JSON.stringify((await byId(openDecay)).get(tP)?.blockers) === '["SMD-7002"]',
+    `a blocker of another system is named system:key — PROJ-2 could be anyone's — and a linear one stays bare (${JSON.stringify(jira)})`);
+  await drop(tJ);
+  assert(render(await graphReport(run, null, openStart)).includes("--startable: 5 thoughts with an open blocker weigh 0 in this run; a completed") && !weightsSql({ status: "open", decayDone: false, startable: true }, []).includes("END AS blockers")
+      && weightsSql({ status: "open", decayDone: false, decayBlocked: true }, []).replace(/,\n +CASE WHEN [^\n]* THEN blockers END AS blockers/, "").replace("THEN 0.25 ELSE", "THEN 0 ELSE") === weightsSql({ status: "open", decayDone: false, startable: true }, [])
+      && weightsSql({ status: "open", decayDone: false, decayBlocked: true }, []).includes("END AS blockers") && !("blockers" in (await topThoughts(run, openStart))[0]),
+    "--startable's line, SQL and rows are SMD-2061's: the decay's SQL is --startable's with the factor at 0.25 and the blockers column, and nothing else (first review pass: this compared weightsSql with itself)");
+  const pb = parseArgs(["--decay-blocked"]);
+  const pbs = parseArgs(["--decay-blocked", "--status", "open"]);
+  const pbd = parseArgs(["--decay-done", "--decay-blocked"]);
+  let threwB = "";
+  try { weightsSql({ status: "all", decayDone: false, startable: true, decayBlocked: true }, []); } catch (e) { threwB = (e as Error).message; }
+  assert(!("error" in pb) && pb.opts.decayBlocked && !pb.opts.startable && !("error" in pbs) && pbs.opts.status === "open" && !("error" in pbd) && pbd.opts.decayDone && pbd.opts.decayBlocked && !DEFAULT_OPTIONS.decayBlocked
+      && [["--startable", "--decay-blocked"], ["--decay-blocked", "--startable"]].every((a) => { const r = parseArgs(a); return "error" in r && r.error.includes("--startable already drops them — pass one or the other"); })
+      && "error" in parseArgs(["--decay-blocked", "--decay-blocked"]) && threwB.includes("pass one or the other"),
+    "--decay-blocked lands alone, beside --status and beside --decay-done, is off by default, is refused beside --startable in either order and twice, and weightsSql refuses the pair");
+
+  // A settled blocker is not a blocker: tR completes, so tQ and tV are free;
+  // tP stays blocked by the still-open tQ, and tX by the unknown SMD-7999.
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"status": "Done", "status_type": "completed"}'::jsonb WHERE id = $1`, [tR]);
+  const afterIds = await listed(openStart);
+  const covR = await graphCoverage(run, openStart);
+  assert(afterIds.has(tQ) && afterIds.has(tV) && !afterIds.has(tP) && !afterIds.has(tPsec) && !afterIds.has(tX) && !afterIds.has(tR) && covR.dependencies!.held === 3 && covR.dependencies!.facets === 6,
+    `once tR is completed its blocked_by and blocks edges — still active on the board — block nothing: tQ and tV are startable, tP and tPsec still wait on tQ, tX on SMD-7999; tR itself is settled, so --status open drops it (${covR.dependencies!.held} held)`);
+  // The flags compose: under --decay-done a blocked unsettled thought weighs 0,
+  // a settled one 0.25 whether or not an open blocker hangs off it.
+  const decayStart = await topThoughts(run, { ...wide, decayDone: true, startable: true });
+  assert(!decayStart.some((t) => t.id === tP) && decayStart.find((t) => t.id === t1)!.weight === 0.25 && decayStart.find((t) => t.id === tR)!.weight === 0.25 && decayStart.find((t) => t.id === tD)?.weight === 0.25 && decayStart.find((t) => t.id === tQ)!.weight === 1,
+    "--decay-done --startable multiplies: tP blocked at 0, the settled t1, tR and tD at 0.25 — tD's open blocker changes nothing — the freed tQ at 1");
+  const ps = parseArgs(["--startable", "--status", "open"]);
+  const psd = parseArgs(["--startable", "--decay-done"]);
+  const plain = parseArgs([]);
+  assert(!("error" in ps) && ps.opts.startable && ps.opts.status === "open" && !("error" in psd) && psd.opts.startable && psd.opts.decayDone && !("error" in plain) && !plain.opts.startable
+      && "error" in parseArgs(["--startable", "--startable"]),
+    "--startable lands beside --status and --decay-done, is off by default, and is refused twice");
+  for (const id of [tP, tQ, tR, tS, tV, tW, tX, tD, tPsec]) await drop(id);
+  assert((await graphCoverage(run, on)).thoughts === 7 && (await graphCoverage(run, on)).entities === 4, "the startability tickets are gone again");
+
   // The default lists every in-scope entity, an orphan at 0 included — the
   // filter alone drops what no kept thought mentions (first review pass).
   const tZed = await thought("Zed alone.");
@@ -5897,6 +6152,8 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   await db.query(`DELETE FROM thoughts WHERE id = $1`, [tZed]);
   assert((await graphCoverage(run, on)).entities === 5 && (await topEntities(run, on)).byMentions.some((e) => e.name === "Zed" && e.mentions === 0) && !(await topEntities(run, open)).byMentions.some((e) => e.name === "Zed"),
     "an entity whose thought was deleted and not yet pruned is in scope, listed at 0 by default as before, and absent under a filter");
+  assert((await topEntities(run, { ...on, decayBlocked: true })).byMentions.some((e) => e.name === "Zed" && e.mentions === 0) && !(await topEntities(run, { ...on, startable: true })).byMentions.some((e) => e.name === "Zed"),
+    "…listed at 0 under --decay-blocked too, a decay and not a filter, and absent under --startable, which is one");
   await db.exec(`SELECT prune_orphan_entities()`);
   assert((await graphCoverage(run, on)).entities === 4, "…and pruned away");
 
@@ -6042,6 +6299,8 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   assert((await resolveSubject(run, "twentyfirst", keep)).how === "alias", "…and kept, the alias rung finds it");
   await db.query(`DELETE FROM thoughts WHERE id = $1`, [t13]);
   await db.query(`UPDATE ob1_entities SET aliases = '{}' WHERE id = $1`, [NUM]);
+  // The shipped writer back for the sections after, and with it 056's pass over what this one wrote.
+  await restoreShipped("record_thought_entities");
 }
 
 console.log("\n[45] Migration 049: the agent registry records a capture-only key's scope, and the CHECK still refuses a scope the server does not mint (SMD-1298)");
@@ -6129,11 +6388,17 @@ console.log("\n[46] Migration 050: the actor on the row — who wrote the curren
   const trg = await one<{ tgtype: number }>(`SELECT tgtype FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_stamp_actor'`);
   assert(trg?.tgtype === 23, `thoughts_stamp_actor is a BEFORE INSERT OR UPDATE row trigger (tgtype ${trg?.tgtype}: row 1 + before 2 + insert 4 + update 16)`);
   const stamp = await src("ob1_stamp_actor()");
-  assert(/ob1:actor-on-the-row-from-the-key/.test(stamp) && /ob1_current_actor\(\)/.test(stamp) && /ob1_registry_kind\(v_agent, v_name\)/.test(stamp),
-    "the stamp carries 050's sentinel, reads the envelope through 008's reader and the kind through 046's one lookup — the three cannot drift");
-  assert(/IF v_agent IS NOT NULL OR v_name IS NOT NULL THEN\s+v_kind := ob1_registry_kind/.test(stamp), "…and probes the registry only when the envelope names an id or a name (a raw write needs no SELECT on ob1_agents)");
-  assert(lastDefinerOf("upsert_thought").startsWith("046") && lastDefinerOf("update_thought").startsWith("046") && lastDefinerOf("thoughts_write_audit").startsWith("046") && lastDefinerOf("ob1_stamp_actor").startsWith("050"),
-    "050 redefines no writer and not the audit trigger: the stamp is a trigger of its own beside them");
+  // 055 (SMD-2115) lifts the two arms into ob1_actor_stamp (a new text) and
+  // ob1_actor_stamp_kept (the same text); the trigger keeps the pass-through
+  // and the same-text detection and calls them, so the pins read the arm.
+  const arm = await src("ob1_actor_stamp(jsonb)");
+  assert(/ob1:actor-on-the-row-from-the-key/.test(arm) && /ob1_current_actor\(\)/.test(arm) && /ob1_registry_kind\(v_agent, v_name\)/.test(arm),
+    "the stamp's new-text arm carries 050's sentinel, reads the envelope through 008's reader and the kind through 046's one lookup — the three cannot drift");
+  assert(/IF v_agent IS NOT NULL OR v_name IS NOT NULL THEN\s+v_kind := ob1_registry_kind/.test(arm), "…and probes the registry only when the envelope names an id or a name (a raw write needs no SELECT on ob1_agents)");
+  assert(/NEW\.metadata := ob1_actor_stamp_kept\(NEW\.metadata, OLD\.metadata\)/.test(stamp) && /NEW\.metadata := ob1_actor_stamp\(NEW\.metadata\)/.test(stamp) && /content_fingerprint_of\(OLD\.content\)/.test(stamp),
+    "…the trigger calls the kept arm on the same text and the new-text arm otherwise, the two-hash detection still its own (055)");
+  assert(lastDefinerOf("upsert_thought").startsWith("046") && lastDefinerOf("update_thought").startsWith("046") && lastDefinerOf("thoughts_write_audit").startsWith("055") && lastDefinerOf("ob1_stamp_actor").startsWith("055"),
+    "050 redefined no writer and not the audit trigger — the stamp is a trigger of its own beside them; 055 is the last definer of both triggers, calling the rules as functions");
   const colc = (await one<{ c: string | null }>(COLUMN_COMMENT_SQL, ["thoughts", "metadata"])).c ?? "";
   assert(/actor_kind/.test(colc) && /actor_name/.test(colc) && /050/.test(colc) && /cannot set them/.test(colc), "thoughts.metadata's comment names the two keys the database writes and a caller cannot");
   const bfSrc = await src("backfill_thought_actors(integer)");
@@ -6438,6 +6703,10 @@ console.log("\n[47] Migration 052: thought_changes — one page of the log, olde
   // 050 (SMD-1726): the actor follows the content, so bob's edit of alice's
   // text moves the row's actor_kind and actor_name marks too — two more keys
   // the feed reports, beside the two the statement set; `type` stays unmoved.
+  // (055 records a key's move as a diff key beside these; bob's edit is a raw
+  // UPDATE of content, which leaves 003's key stale and so moves none — the
+  // log is faithful, not corrective. An edit through update_thought would
+  // list content_fingerprint here too; [51] holds that.)
   assert(editA.thought_id === A && editA.actor_name === "bob" && arr(editA.changed).join(",") === "content,metadata" && arr(editA.metadata_keys).join(",") === "actor_kind,actor_name,status,topics" && editA.head === "the first note, edited",
     `the edit: changed content and metadata, the keys that moved (050's two marks, status, topics — not type), the new text as the head (${arr(editA.changed).join("/")}; ${arr(editA.metadata_keys).join("/")})`);
   assert(handB.actor_name === null && handB.actor_kind === null && arr(handB.metadata_keys).join(",") === "hand" && handB.head === null,
@@ -6517,7 +6786,7 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   const idx = (await q<{ n: string }>(`SELECT indexname AS n FROM pg_indexes WHERE tablename = 'thought_facets' AND indexname LIKE 'thought_facets_link%' ORDER BY 1`)).map((x) => x.n);
   assert(idx.join(",") === "thought_facets_link_active_uniq,thought_facets_link_target_idx", `the active-link unique index and the target probe exist (${idx.join(",")})`);
   const rteSrc = await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)");
-  assert(lastDefinerOf("record_thought_entities").startsWith("053") && /ob1:structured-wins/.test(rteSrc), "053 is the last definer of record_thought_entities and its body carries the structured-wins sentinel");
+  assert(lastDefinerOf("record_thought_entities").startsWith("056") && /ob1:structured-wins/.test(rteSrc), "053's record_thought_entities carries the structured-wins sentinel, and 056, its last definer, keeps it ([52])");
   const validatorSrc = await src("thought_facets_validate()");
   assert(lastDefinerOf("thought_facets_validate").startsWith("053") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel");
   assert(/CASE WHEN v_structured THEN extraction_key = p_extraction_key ELSE extraction_key NOT LIKE 'source:%' END/.test(rteSrc) && (rteSrc.match(/WHERE (?:thought_entities|ob1_entity_edges)\.extraction_key NOT LIKE 'source:%'/g) ?? []).length === 2,
@@ -6663,7 +6932,7 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
 
   // Re-applying 053 lands the same shape and the rows stand.
   await reapply("053");
-  assert((await links(t1)).length === 3 && (await q(`SELECT 1 FROM thought_sources WHERE thought_id = $1::uuid`, [t1])).length === 1 && lastDefinerOf("record_thought_entities").startsWith("053"), "re-applying 053 keeps every row and every definition");
+  assert((await links(t1)).length === 3 && (await q(`SELECT 1 FROM thought_sources WHERE thought_id = $1::uuid`, [t1])).length === 1 && /ob1:structured-wins/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)")), "re-applying 053 keeps every row and every definition");
 
   // The takeover (first review pass): the board sync's head row for a ticket
   // moves when an older paste becomes the chain's head, so the identity must
@@ -6717,6 +6986,8 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   assert(((await one<{ r: J }>(`SELECT record_source_links($1::uuid, 'markdown', '[]'::jsonb) AS r`, [tC])).r).closed === 1, "…and the legitimate close still takes the shortcut");
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_entities`);
+  // The re-apply above put 053's writer back; the shipped one is 056's.
+  await restoreShipped("record_thought_entities");
 }
 
 console.log("\n[49] Migration 054: resolve_agent writes a key's row only when last_used_at is stale or the scope changed, and a revoked key is still refused (SMD-2090)");
@@ -6940,6 +7211,599 @@ console.log("\n[50] Every extension and recipe schema applies to a migrated brai
   const tableRead = await asRole(`SELECT 1 FROM thoughts LIMIT 0`);
   assert(viewRead.code === null && tableRead.code === "42501", `the role reads an ops view over thoughts (${viewRead.code ?? "allowed"}) without any grant on thoughts itself (${tableRead.code})`);
   await xdb.close();
+}
+
+// ── 51. Migration 055: the capture event carries the payload ─────────────────
+//
+// The three additions to 046's event (a capture's content and a backdating
+// writer's created_at, an update's key move) and nothing else — one scripted
+// set of writes under 046's trigger and under 055's compared on every column
+// outside the three keys; 046's rules as functions the triggers call; the
+// third amendment of the append-only table (the payload arm, key by key) and
+// the backfill that uses it, source by source (SMD-2115, step 1 of SMD-1997).
+console.log("\n[51] Migration 055: the capture event carries the payload — a capture's content and a backdating writer's created_at, an update's key move; 046's rules as functions the triggers call; the payload amendment and its backfill (SMD-2115)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const refused = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return ""; } catch (e) { return (e as Error).message; } };
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  type Diff = Record<string, unknown> & { content?: unknown; created_at?: string; metadata?: Record<string, unknown>; content_fingerprint?: { before: string | null; after: string | null } };
+  type Ev = { id: string; action: string; diff: Diff; source: string | null; actor_name: string | null; actor_kind: string | null; trust: string | null; origin: string | null;
+              stance: string | null; cites: string[] | null; valid_from: string | null; valid_until: string | null; actor_context: Record<string, unknown> | null; created_at: string; seq: number };
+  const EV = "id, action, diff, source, actor_name, actor_kind, trust, origin, stance, cites, valid_from::text AS valid_from, valid_until::text AS valid_until, actor_context, created_at::text AS created_at, seq";
+  const eventsOf = async (id: string) => q<Ev>(`SELECT ${EV} FROM thought_audit WHERE thought_id = $1::uuid ORDER BY created_at, seq`, [id]);
+  const audits = async () => (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit`)).c;
+  const cap = async (content: string, envelope: Record<string, unknown>, at: number) =>
+    (await one<{ r: { id: string; existed: boolean } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify(envelope), unit(at)])).r;
+  const edit = async (id: string, content: string | null, metadata: Record<string, unknown> | null, actor: Record<string, unknown>, vec: string | null = null) =>
+    (await one<{ r: { ok: boolean; error?: string; duplicate_of?: string; fingerprint_held_by?: string } }>(
+      `SELECT update_thought($1::uuid, $2::text, $3::jsonb, $5::vector, NULL, NULL, $4::jsonb, CASE WHEN $5::vector IS NULL THEN NULL ELSE 'stub-embed' END, NULL, NULL) AS r`,
+      [id, content, metadata === null ? null : JSON.stringify(metadata), JSON.stringify(actor), vec])).r;
+  // One transaction per attempt (the setting is transaction-local); a refusal
+  // rolls it back and its message is what the assertion reads.
+  const amend = async (setting: string, stmt: string) => { try { await db.transaction(async (tx) => { await tx.exec(`SELECT set_config('ob1.audit_amend', '${setting}', true)`); await tx.exec(stmt); }); return ""; } catch (err) { return (err as Error).message; } };
+  const DIFF_SIG = "ob1_thought_diff(text, text, text, jsonb, jsonb, boolean, boolean, uuid, uuid, jsonb, jsonb, text, text, timestamptz)";
+  const ACTOR = { name: "op-key", via: "test-door" };
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_agents`);
+  await db.exec(`SELECT set_agent_kind('op-key', 'operator')`);
+
+  // The shape: the rules as functions, the sentinels where the readers look,
+  // the index, the comments.
+  for (const fn of ["ob1_thought_diff", "ob1_append_thought_event", "ob1_actor_stamp", "ob1_actor_stamp_kept", "ob1_capture_payload", "backfill_thought_payloads"])
+    assert((await functionsNamed(fn)) === 1, `one ${fn}`);
+  const trig = await src("thoughts_write_audit()"), diffRule = await src(DIFF_SIG), refuse = await src("thought_audit_refuse_mutation()");
+  assert(/ob1:capture-event-carries-content/.test(trig) && /ob1:capture-event-carries-content/.test(diffRule), "the payload sentinel stands in the trigger and in the diff rule — what preflight's recogniser and this suite read");
+  assert(/ob1:audit-amend-fills-payload-only/.test(refuse) && /ob1:audit-amend-fills-null-only/.test(refuse), "the refusal trigger carries both amendments' sentinels");
+  assert(/CASE WHEN TG_OP = 'INSERT' AND NEW\.created_at IS DISTINCT FROM now\(\) THEN NEW\.created_at END/.test(trig), "the trigger passes the row's created_at only when it differs from the transaction's now() — a defaulted column says nothing the event's clock does not");
+  assert((await one<{ v: string }>(`SELECT provolatile AS v FROM pg_proc WHERE oid = $1::regprocedure`, [DIFF_SIG])).v === "s", "ob1_thought_diff is STABLE, not the prototype's IMMUTABLE — a timestamptz inside jsonb renders in the session's TimeZone");
+  const pidx = (await one<{ d: string }>(`SELECT indexdef AS d FROM pg_indexes WHERE indexname = 'thought_audit_awaiting_payload_idx'`))?.d ?? "";
+  assert(/\(created_at, seq\)/.test(pidx) && /WHERE \(\(action = 'capture'::text\) AND \(NOT COALESCE\(\(diff \? 'content'::text\), false\)\) AND \(jsonb_typeof\(COALESCE\(diff, '\{\}'::jsonb\)\) = 'object'::text\)\)/.test(pidx), `the payload index holds exactly the candidates — the capture rows without content whose diff is an object, a NULL diff among them — in (created_at, seq) order, the predicate the scan, the awaiting count and preflight's census carry clause for clause (fifth review pass) (${pidx})`);
+  const since = (await one<{ v: string | null }>(`SELECT value AS v FROM ob1_config WHERE key = 'audit_seq_exact_since'`))?.v ?? null;
+  assert(since !== null && new Date(since).getTime() <= Date.now() && /^\d{4}-\d{2}-\d{2}/.test(since), `055 records the boundary from which seq is exact insertion order — the apply's own time here, where no ledger names 050 (${since})`);
+  const sinceMs = new Date(since!).getTime();
+  const colc = (await one<{ c: string | null }>(COLUMN_COMMENT_SQL, ["thought_audit", "diff"])).c ?? "";
+  assert(/since 055, the content/.test(colc) && /content_fingerprint when the key moved/.test(colc) && /backfill_thought_payloads/.test(colc), "diff's comment states the three additions and the backfill that fills the rows from before");
+  assert(/two lawful amendments/.test((await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_audit"])).c ?? "") && /RANGE on created_at by month/.test((await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_audit"])).c ?? ""), "the table's comment counts two amendments and keeps the partition key it chose");
+
+  // The first addition: a capture carries the content (and no created_at for a
+  // row that took now()).
+  const a = await cap("055: a note the log can rebuild", { metadata: { source: "mcp" }, actor: ACTOR }, 1);
+  let ev = await eventsOf(a.id);
+  assert(ev.length === 1 && ev[0].action === "capture" && ev[0].diff.content === "055: a note the log can rebuild" && ev[0].diff.metadata?.source === "mcp" && ev[0].diff.metadata?.actor_kind === "operator" && !("created_at" in ev[0].diff),
+    `a capture's audit row carries the content beside the stamped metadata, and no created_at for a row that took now() (${JSON.stringify(ev[0]?.diff)})`);
+  assert(ev[0].actor_kind === "operator" && ev[0].trust === "operator" && ev[0].origin === "test-door" && ev[0].actor_context === null, "…the kind, the ceiling and the door as 046 wrote them, now through ob1_append_thought_event");
+  // The second: a raw insert with a backdated created_at carries it; one at now() does not.
+  const RAW_OLD = "54545454-0001-4000-8000-000000000001", RAW_NOW = "54545454-0001-4000-8000-000000000002";
+  await db.exec(`INSERT INTO thoughts (id, content, metadata, created_at) VALUES ('${RAW_OLD}', '055: a backdated raw load', '{"source": "load"}'::jsonb, '2024-01-02T03:04:05Z')`);
+  await db.exec(`INSERT INTO thoughts (id, content, metadata) VALUES ('${RAW_NOW}', '055: a raw load at now()', '{"source": "load"}'::jsonb)`);
+  ev = await eventsOf(RAW_OLD);
+  const carried = await one<{ same: boolean }>(`SELECT (a.diff->>'created_at')::timestamptz = t.created_at AS same FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE a.thought_id = $1::uuid AND a.action = 'capture'`, [RAW_OLD]);
+  assert(ev.length === 1 && ev[0].diff.content === "055: a backdated raw load" && carried.same === true && ev[0].actor_name === null, "a raw insert with a backdated created_at carries it in the diff, equal to the row's — db/ingest-records.ts's path, with no actor");
+  ev = await eventsOf(RAW_NOW);
+  assert(ev.length === 1 && ev[0].diff.content === "055: a raw load at now()" && !("created_at" in ev[0].diff), "…and one at now() carries the content and no created_at");
+  // The third: an update that moves the text carries the key's before/after;
+  // one that leaves the text carries none.
+  const fpA = await fpOf("055: a note the log can rebuild"), fpA2 = await fpOf("055: the note, rewritten");
+  let r = await edit(a.id, "055: the note, rewritten", null, ACTOR);
+  ev = await eventsOf(a.id);
+  assert(r.ok === true && ev.length === 2 && ev[1].action === "update" && (ev[1].diff.content as { after: string }).after === "055: the note, rewritten" && ev[1].diff.content_fingerprint?.before === fpA && ev[1].diff.content_fingerprint?.after === fpA2,
+    `an edit that moves the text carries the key's before/after beside the content (${JSON.stringify(ev[1]?.diff.content_fingerprint)})`);
+  r = await edit(a.id, null, { source: "mcp", note: 1 }, ACTOR);
+  ev = await eventsOf(a.id);
+  assert(r.ok === true && ev.length === 3 && "metadata" in ev[2].diff && !("content_fingerprint" in ev[2].diff) && !("content" in ev[2].diff), "a metadata-only edit carries no key and no content — the diff is still only what changed");
+  // A re-embed goes through update_thought with the text AND the vector
+  // (021: a vector is written with content, reembed.ts passes both). The
+  // rewrite above cleared the vector, so the first re-embed flips presence
+  // — 008's rule, recorded — and moves no key; the second changes nothing
+  // the event records and writes no row.
+  r = await edit(a.id, "055: the note, rewritten", null, ACTOR, unit(7));
+  ev = await eventsOf(a.id);
+  assert(r.ok === true && ev.length === 4 && ev[3].diff.embedding_present === true && !("content_fingerprint" in ev[3].diff) && !("content" in ev[3].diff),
+    `a re-embed of the same text records the vector's presence returning and no key move — the text did not change, so the key did not (${JSON.stringify(ev[3]?.diff)})`);
+  let n = await audits();
+  r = await edit(a.id, "055: the note, rewritten", null, ACTOR, unit(8));
+  assert(r.ok === true && (await audits()) === n, "a re-embed onto a row that has a vector writes no audit row, as 008 decided: the key did not move and the vector's presence did not flip");
+  // 018's NULL, included: a row whose stale key differs from its text, edited
+  // to a text another row holds — the function sets the key NULL, and the
+  // event says so (before the stale key, after NULL). A replay could not
+  // re-derive that from the content it lands.
+  const h = await cap("055: the text two rows will hold", { metadata: { source: "mcp" }, actor: ACTOR }, 2);
+  const b = await cap("055: a note about to be rewritten by hand", { metadata: { source: "mcp" }, actor: ACTOR }, 3);
+  const fpB = await fpOf("055: a note about to be rewritten by hand");
+  await db.exec(`UPDATE thoughts SET content = '055: the text two rows will hold' WHERE id = '${b.id}'`);
+  ev = await eventsOf(b.id);
+  assert(ev.length === 2 && "content" in ev[1].diff && !("content_fingerprint" in ev[1].diff), "a raw content edit that leaves the key stale records the text's move and no key move — the log is faithful, not corrective");
+  r = await edit(b.id, "055: the text  two rows will hold", null, ACTOR);
+  ev = await eventsOf(b.id);
+  const bKey = (await one<{ fp: string | null }>(`SELECT content_fingerprint AS fp FROM thoughts WHERE id = $1::uuid`, [b.id])).fp;
+  assert(r.ok === true && r.duplicate_of === h.id && bKey === null && ev.length === 3 && ev[2].diff.content_fingerprint?.before === fpB && ev[2].diff.content_fingerprint?.after === null,
+    `018's unchanged edit onto a text another row holds sets the key NULL, and the event carries the move — before the stale key, after NULL (${JSON.stringify(ev[2]?.diff.content_fingerprint)}; ${JSON.stringify(r)})`);
+  // An identical re-capture writes nothing new (008's guard stands: the diff
+  // rule moves no key for the same text).
+  n = await audits();
+  const again = await cap("055: the note, rewritten", { metadata: { source: "mcp" }, actor: ACTOR }, 1);
+  const lastA = (await eventsOf(a.id)).at(-1);
+  assert(again.existed === true && again.id === a.id && (await audits()) === n, `an identical re-capture writes no audit row: the key did not move, the diff is empty, 008's guard holds (${JSON.stringify(again)}; ${(await audits()) - n} row(s); last ${lastA?.action} ${JSON.stringify(lastA?.diff)})`);
+  // 023's fill is a key move, and the log says so now (before 055 it wrote no
+  // row: 008 diffed content, metadata and the vector's presence — [24]).
+  const LEGACY = "54545454-0001-4000-8000-000000000003";
+  await db.exec(`INSERT INTO thoughts (id, content, metadata, content_fingerprint) VALUES ('${LEGACY}', '055: a legacy row without a key', '{"source": "legacy"}'::jsonb, NULL)`);
+  const filled = (await one<{ n: number }>(`SELECT backfill_content_fingerprints() AS n`)).n;
+  ev = await eventsOf(LEGACY);
+  assert(filled === 3 && ev.length === 2 && ev[1].action === "update" && Object.keys(ev[1].diff).join(",") === "content_fingerprint" && ev[1].diff.content_fingerprint?.before === null && ev[1].diff.content_fingerprint?.after === (await fpOf("055: a legacy row without a key")),
+    `023's fingerprint fill (three rows: this one and the two raw loads above, none keyed by a raw INSERT) records each key's move as an update event carrying that key alone (${filled}; ${JSON.stringify(ev[1]?.diff)})`);
+
+  // The differential against 046's trigger: one scripted set of writes under
+  // 055's trigger and under 046's, every audit column outside the three keys
+  // equal (SMD-1999's comparableEvent is the rule). 046 re-applied by hand
+  // puts its trigger and its refusal trigger back — the state preflight warns
+  // about — and restoreShipped puts 055's back after.
+  type Shape = Omit<Ev, "id" | "created_at" | "seq"> & { thought: string };
+  const comparable = (rows: (Ev & { thought_id: string })[], names: Map<string, string>): Shape[] => rows.map(({ id: _id, created_at: _c, seq: _s, thought_id, ...e }) => {
+    const diff: Diff = { ...e.diff };
+    if (e.action === "capture") { delete diff.content; delete diff.created_at; }
+    if (e.action === "update") delete diff.content_fingerprint;
+    return { ...e, diff, thought: names.get(thought_id) ?? "?" };
+  });
+  const script = async (tag: string): Promise<{ events: Shape[]; captureDiff: Diff }> => {
+    const names = new Map<string, string>();
+    // The log is append-only and the raw id is reused, so this run's events
+    // are the rows the identity numbers after this point — the sequence's next
+    // value, not max(seq): [46] plants rows with explicit seq values beyond it
+    // (OVERRIDING SYSTEM VALUE), which max(seq) would read as the bound.
+    const since = Number((await one<{ s: string }>(`SELECT nextval(pg_get_serial_sequence('thought_audit', 'seq'))::text AS s`)).s);
+    // The same texts and the same raw id both times: the run deletes its two
+    // thoughts at the end, so the fingerprints and the id are free again.
+    const c1 = await cap("055 differential: a cited page", { metadata: { source: "web" }, actor: ACTOR, event: { stance: "retrieved", cites: [h.id], valid_from: "2026-01-01T00:00:00Z", valid_until: "2026-06-01T00:00:00Z", trust: "ingested" } }, 4);
+    names.set(c1.id, "c1");
+    const RAW = "54545454-0002-4000-8000-000000000001";
+    await db.exec(`INSERT INTO thoughts (id, content, metadata, created_at) VALUES ('${RAW}', '055 differential: a backdated record', '{"source": "load"}'::jsonb, '2024-03-04T05:06:07Z')`);
+    names.set(RAW, "raw");
+    await edit(c1.id, "055 differential: the page, restated", null, ACTOR);
+    await edit(c1.id, null, { source: "web", reviewed: true }, ACTOR);
+    await edit(c1.id, null, null, { name: "op-key", via: "test-door", claimed: { trust: "operator" } });
+    await db.exec(`UPDATE thoughts SET metadata = metadata || '{"hand": true}'::jsonb WHERE id = '${RAW}'`);  // a raw metadata touch: an update event with no content
+    await db.query(`SELECT delete_thought($1::uuid, $2::jsonb, false)`, [c1.id, JSON.stringify(ACTOR)]);
+    await db.query(`SELECT delete_thought($1::uuid, $2::jsonb, false)`, [RAW, JSON.stringify(ACTOR)]);
+    const rows = await q<Ev & { thought_id: string }>(`SELECT thought_id, ${EV} FROM thought_audit WHERE thought_id IN ($1::uuid, $2::uuid) AND seq > $3::bigint ORDER BY created_at, seq`, [c1.id, RAW, since]);
+    return { events: comparable(rows, names), captureDiff: rows[0]?.diff ?? {} };
+  };
+  const under054 = await script("under 055");
+  assert(under054.events.length === 7 && "content" in under054.captureDiff, `the scripted set writes seven events under 055's trigger, the capture carrying its content (${under054.events.length})`);
+  const files046 = await reapply("046");
+  assert(!/ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && lastDefinerOf("thoughts_write_audit").startsWith("055"), `${files046} re-applied by hand puts 046's trigger back — the state preflight's audit events check warns about — while 055 stays the last definer`);
+  const under046 = await script("under 046");
+  assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
+  const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
+  assert(restored.length === 1 && restored[0].startsWith("055") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")), `…and the last definer re-applied (${restored.join(", ")}) puts 055's trigger back`);
+  const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
+  assert(under046.events.length === 7 && mismatches.length === 0,
+    `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
+
+  // The payload amendment: a capture row from before 055 — planted in 046's
+  // shape for a thought that stands (L), one whose text later moved (M), one
+  // deleted (D), one with no row and no later event (U), and one whose id was
+  // re-captured after a delete (R) — and the gate that admits exactly the fill
+  // the backfill would make.
+  // The run under 046's trigger wrote two content-less captures whose
+  // thoughts are since deleted — and restoreShipped re-applied 055, whose
+  // apply-time call filled them (the raw row's from its tombstone): the state
+  // a brain reaches when 046 is re-applied by hand and 055 after it. What
+  // still waits is earlier sections' planted capture rows (046's shape,
+  // thoughts that never existed): the log is append-only, so one pass here
+  // reports them as nothing to derive from, and every count below is
+  // relative to them.
+  const rawCaptures = await q<{ c: string | null }>(`SELECT diff->>'content' AS c FROM thought_audit WHERE thought_id = '54545454-0002-4000-8000-000000000001'::uuid AND action = 'capture' ORDER BY created_at, seq`);
+  assert(rawCaptures.length === 2 && rawCaptures.every((r) => r.c === "055 differential: a backdated record"), `re-applying 055 ran its backfill: the content-less capture the 046 run wrote for the raw row carries the text now, from its tombstone (${JSON.stringify(rawCaptures)})`);
+  type Bf = { ok: boolean; rows: number; from_update: number; from_tombstone: number; from_row: number; with_created_at: number; unrecoverable: number; skipped: number; awaiting: number };
+  const settle = (await one<{ r: Bf }>(`SELECT backfill_thought_payloads() AS r`)).r;
+  const strangers = settle.awaiting;
+  assert(settle.rows === 0 && settle.awaiting === settle.unrecoverable, `what still waits is earlier sections' planted rows, which nothing derives for (${JSON.stringify(settle)})`);
+  const plantRow = async (id: string, content: string, createdAt: string) => {
+    await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit`);
+    await db.exec(`INSERT INTO thoughts (id, content, metadata, created_at) VALUES ('${id}', '${content}', '{"source": "plant"}'::jsonb, '${createdAt}')`);
+    await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit`);
+  };
+  const plantCapture = async (id: string, createdAt: string) =>
+    (await one<{ id: string }>(`INSERT INTO thought_audit (thought_id, action, source, actor_name, diff, created_at) VALUES ($1::uuid, 'capture', 'plant', 'op-key', '{"metadata": {"source": "plant"}}'::jsonb, $2::timestamptz) RETURNING id`, [id, createdAt])).id;
+  const L = "54545454-0003-4000-8000-00000000000a", M = "54545454-0003-4000-8000-00000000000b", D = "54545454-0003-4000-8000-00000000000c", U = "54545454-0003-4000-8000-00000000000d", R = "54545454-0003-4000-8000-00000000000e";
+  await plantRow(L, "055: planted, still standing", "2024-05-01T00:00:00Z");
+  const lRow = await plantCapture(L, "2024-05-01T00:00:01Z");  // the event a second after the row: a backdating writer's shape
+  await plantRow(M, "055: planted, then moved", "2024-05-02T00:00:00Z");
+  const mRow = await plantCapture(M, "2024-05-02T00:00:00Z");  // the event at the row's own time: nothing to fill for created_at
+  await plantRow(D, "055: planted, then deleted", "2024-05-03T00:00:00Z");
+  const dRow = await plantCapture(D, "2024-05-03T00:00:00Z");
+  const uRow = await plantCapture(U, "2024-05-04T00:00:00Z");
+  await plantRow(R, "055: planted, deleted, re-captured — the first text", "2024-05-05T00:00:00Z");
+  const rRow = await plantCapture(R, "2024-05-05T00:00:00Z");
+  // V: an edit whose transaction began before the capture's and committed
+  // after it — created_at is the transaction's start, so the update event is
+  // stamped EARLIER than the capture while its seq is later (run-it, first
+  // review pass: reproduced with two connections on Postgres; planted here).
+  // Planted since the boundary — stamped from the boundary the suite read
+  // above, not from the wall clock (third review pass: a fast run could have
+  // reached this section inside the plants' 25 s and put V's update before
+  // the boundary, onto the clock path) — so seq decides the order and an
+  // older transaction's stamp cannot mislead it.
+  const past = (ms: number) => new Date(sinceMs + ms).toISOString();
+  const V = "54545454-0003-4000-8000-00000000000f";
+  const tV = past(10_000);
+  await plantRow(V, "055: planted, edited by an older transaction — the second text", tV);
+  const vRow = await plantCapture(V, tV);
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES ('${V}', 'update', '{"content": {"before": "055: planted, edited by an older transaction — the first text", "after": "055: planted, edited by an older transaction — the second text"}}'::jsonb, '${past(5_000)}')`);
+  // W: two edits after the capture, the SECOND one stamped before them all —
+  // a transaction that began before the capture's and committed after the
+  // first edit. Ordered by the clock it would read first and hand the first
+  // edit's after-text to the capture (cold read, second review pass); by seq
+  // it is second, and the capture derives the text as captured.
+  const W = "54545454-0003-4000-8000-000000000011";
+  const tW = past(10_000);
+  await plantRow(W, "055: planted, edited twice — the third text", tW);
+  const wRow = await plantCapture(W, tW);
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES ('${W}', 'update', '{"content": {"before": "055: planted, edited twice — the first text", "after": "055: planted, edited twice — the second text"}}'::jsonb, '${past(11_000)}')`);
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES ('${W}', 'update', '{"content": {"before": "055: planted, edited twice — the second text", "after": "055: planted, edited twice — the third text"}}'::jsonb, '${past(1_000)}')`);
+  // P: a brain with pre-050 history — rows before the boundary, whose seq is
+  // heap order: a PRIOR incarnation of the id (captured, then deleted) whose
+  // tombstone took a seq far above the standing capture's at 050's ALTER.
+  // Admitting rows by seq alone read that tombstone as this capture's edge
+  // and wrote the old incarnation's text onto a standing thought (both
+  // readers, second review pass); before the boundary the clock rules.
+  const P = "54545454-0003-4000-8000-000000000012";
+  const pPrevRow = await plantCapture(P, "2024-05-08T00:00:00Z");
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, diff, created_at, seq) OVERRIDING SYSTEM VALUE VALUES ('${P}', 'delete', '{"previous_content": "055: planted, a prior incarnation long deleted", "previous_metadata": {}}'::jsonb, '2024-05-08T01:00:00Z', 900000000)`);
+  await plantRow(P, "055: planted, the standing text after a prior incarnation", "2024-05-08T02:00:00Z");
+  const pRow = await plantCapture(P, "2024-05-08T02:00:00Z");
+  // N: a capture row whose diff is NULL — a hand INSERT's shape; every
+  // writer's is an object — filled by hand below; N2 the same, filled by the pass.
+  const N = "54545454-0003-4000-8000-000000000010";
+  await plantRow(N, "055: planted with a NULL diff", "2024-05-07T00:00:00Z");
+  const nRow = (await one<{ id: string }>(`INSERT INTO thought_audit (thought_id, action, created_at) VALUES ($1::uuid, 'capture', '2024-05-07T00:00:01Z') RETURNING id`, [N])).id;
+  const N2 = "54545454-0003-4000-8000-000000000013";
+  await plantRow(N2, "055: planted with a NULL diff, filled by the pass", "2024-05-09T00:00:00Z");
+  const n2Row = (await one<{ id: string }>(`INSERT INTO thought_audit (thought_id, action, created_at) VALUES ($1::uuid, 'capture', '2024-05-09T00:00:01Z') RETURNING id`, [N2])).id;
+  r = await edit(M, "055: planted, then moved — the second text", null, ACTOR);
+  assert(r.ok === true, "M's text moves through update_thought (the event's before is the text as captured)");
+  await db.query(`SELECT delete_thought($1::uuid, $2::jsonb, false)`, [D, JSON.stringify(ACTOR)]);
+  await db.query(`SELECT delete_thought($1::uuid, $2::jsonb, false)`, [R, JSON.stringify(ACTOR)]);
+  await db.exec(`INSERT INTO thoughts (id, content, metadata) VALUES ('${R}', '055: planted, deleted, re-captured — the second text', '{"source": "load"}'::jsonb)`);
+  // X: a capture row whose diff is an ARRAY — a hand INSERT's; no writer's —
+  // is no candidate: not counted as waiting, not reached by the pass, refused
+  // by name when a hand fills onto it (cold read, fourth review pass: it was
+  // a candidate the fill could not complete, and the apply failed on it).
+  const X = "54545454-0003-4000-8000-000000000014";
+  await plantRow(X, "055: planted with an array for a diff", "2024-05-10T00:00:00Z");
+  const xRow = (await one<{ id: string }>(`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES ($1::uuid, 'capture', '[]'::jsonb, '2024-05-10T00:00:01Z') RETURNING id`, [X])).id;
+  // Y: a created_at set by hand to no timestamp, no content: the pass fills
+  // the content beside it and leaves it as it is — unchanged bytes are
+  // unchanged, whatever they are (cold read, fourth review pass: the shape
+  // test ran on the unchanged value and refused every fill).
+  const Y = "54545454-0003-4000-8000-000000000015";
+  await plantRow(Y, "055: planted beside a created_at that is no timestamp", "2024-05-11T00:00:00Z");
+  const yRow = (await one<{ id: string }>(`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES ($1::uuid, 'capture', '{"created_at": "not-a-date"}'::jsonb, '2024-05-11T00:00:01Z') RETURNING id`, [Y])).id;
+  // Z: captured, deleted (a tombstone), and a row standing under the id
+  // again with no capture event (a load with the trigger off): the content
+  // is the tombstone's and the created_at is nobody's — the row after the
+  // edge is another incarnation's (cold read, fourth review pass: the live
+  // row was excluded only after a later CAPTURE, so the tombstone's text went
+  // out beside the second row's time).
+  const Z = "54545454-0003-4000-8000-000000000016";
+  await plantRow(Z, "055: planted, deleted, standing again without a capture", "2024-05-12T00:00:00Z");
+  const zRow = await plantCapture(Z, "2024-05-12T00:00:00Z");
+  await db.query(`SELECT delete_thought($1::uuid, $2::jsonb, false)`, [Z, JSON.stringify(ACTOR)]);
+  await plantRow(Z, "055: planted, deleted, standing again without a capture — the second row", "2024-05-12T06:00:00Z");
+  // E: the first update after the capture carries a content key whose
+  // `before` is JSON null (no writer's is; a planted row's) and a second
+  // update follows — nothing derives, not the second update's `before`, which
+  // is the text after the first edit (run-it, fourth review pass).
+  const E = "54545454-0003-4000-8000-000000000017";
+  await plantRow(E, "055: planted, the first edit lost its before — the third text", "2024-05-13T00:00:00Z");
+  const eRow = await plantCapture(E, "2024-05-13T00:00:00Z");
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES ('${E}', 'update', '{"content": {"before": null, "after": "055: planted, the first edit lost its before — the second text"}}'::jsonb, '2024-05-13T01:00:00Z')`);
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES ('${E}', 'update', '{"content": {"before": "055: planted, the first edit lost its before — the second text", "after": "055: planted, the first edit lost its before — the third text"}}'::jsonb, '2024-05-13T02:00:00Z')`);
+  // F: a live row whose created_at is 'infinity' — a bare timestamptz, and
+  // ingest-records writes a record's own string — renders as a value the
+  // gate's shape test refuses; offered, the pass could never complete on it
+  // (cold read, fifth review pass). Not offered: the content fills alone.
+  const F = "54545454-0003-4000-8000-000000000018";
+  await plantRow(F, "055: planted with a created_at of infinity", "infinity");
+  const fRow = await plantCapture(F, "2024-05-14T00:00:00Z");
+  const waiting = async () => (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false) AND jsonb_typeof(COALESCE(diff, '{}'::jsonb)) = 'object'`)).c;
+  assert((await waiting()) === strangers + 15, `fifteen planted capture rows wait for their payload beside the ${strangers} stranger(s) — the two NULL diffs among them, the array not (${await waiting()})`);
+  assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE id = $1::uuid AND NOT COALESCE(diff ? 'content', false)`, [xRow])).c === 1, "…the array-diff capture is without content and is not counted");
+  // What each derives to — the one reading the gate and the backfill share.
+  type Pay = { content: string | null; row_created_at: string | null; source: string };
+  const derive = async (id: string, rowId: string) => one<Pay>(`SELECT p.content, p.row_created_at::text AS row_created_at, p.source FROM thought_audit a CROSS JOIN LATERAL ob1_capture_payload(a.thought_id, a.created_at, a.seq) p WHERE a.id = $1::uuid`, [rowId]);
+  let d = await derive(L, lRow);
+  assert(d.content === "055: planted, still standing" && d.source === "row" && d.row_created_at !== null && /2024-05-01/.test(d.row_created_at), `L derives from the live row, with the row's own created_at since it differs from the event's (${JSON.stringify(d)})`);
+  d = await derive(M, mRow);
+  assert(d.content === "055: planted, then moved" && d.source === "update" && d.row_created_at === null, `M derives from the first content-moving update's before — the text as captured, not the text that stands — and no created_at, the row's equal to the event's (${JSON.stringify(d)})`);
+  d = await derive(D, dRow);
+  assert(d.content === "055: planted, then deleted" && d.source === "delete" && d.row_created_at === null, `D derives from the tombstone's previous_content; its created_at is gone with the row (${JSON.stringify(d)})`);
+  d = await derive(U, uRow);
+  assert(d.content === null && d.source === "none", `U derives to nothing: no later event, no row (${JSON.stringify(d)})`);
+  r = await edit(R, "055: planted, deleted, re-captured — the second text, edited", null, ACTOR);
+  assert(r.ok === true, "R's second incarnation is edited through update_thought — an update event with a `before` that is not the first capture's text");
+  d = await derive(R, rRow);
+  assert(d.content === "055: planted, deleted, re-captured — the first text" && d.source === "delete", `R's first capture derives from its own tombstone — the events stop at the first later tombstone or capture, so the second incarnation's edit is not read (cold read, first review pass: the first draft derived the second text) — and never from the live row a later capture re-took the id with (${JSON.stringify(d)})`);
+  d = await derive(V, vRow);
+  assert(d.content === "055: planted, edited by an older transaction — the first text" && d.source === "update", `an update written after the capture but stamped before it (the transaction's start) is still this capture's — since the boundary, seq decides (run-it, first review pass) (${JSON.stringify(d)})`);
+  d = await derive(W, wRow);
+  assert(d.content === "055: planted, edited twice — the first text" && d.source === "update", `two edits, the second stamped before them all: the FIRST by seq gives the text as captured — the clock would have read the second and handed the first edit's after-text to the capture (cold read, second review pass) (${JSON.stringify(d)})`);
+  d = await derive(P, pRow);
+  assert(d.content === "055: planted, the standing text after a prior incarnation" && d.source === "row", `before the boundary the clock rules: a prior incarnation's tombstone with a heap seq far above this capture's is not this capture's, and the standing text derives from the live row (both readers, second review pass — seq alone wrote the old incarnation's text here) (${JSON.stringify(d)})`);
+  d = await derive(P, pPrevRow);
+  assert(d.content === "055: planted, a prior incarnation long deleted" && d.source === "delete", `…and the prior incarnation's own capture derives from its tombstone, which is its edge (${JSON.stringify(d)})`);
+  d = await derive(N, nRow);
+  assert(d.content === "055: planted with a NULL diff" && d.source === "row" && d.row_created_at !== null, `a capture row with a NULL diff derives like any other (${JSON.stringify(d)})`);
+  d = await derive(Z, zRow);
+  assert(d.content === "055: planted, deleted, standing again without a capture" && d.source === "delete" && d.row_created_at === null, `a capture with a later tombstone derives its text from the tombstone and NO created_at, though a row stands under the id — that row is after the edge, another incarnation's (cold read, fourth review pass: its time went out beside the tombstone's text) (${JSON.stringify(d)})`);
+  d = await derive(E, eRow);
+  assert(d.content === null && d.source === "none", `the first update carrying a content key is the evidence: a JSON-null before derives to nothing, not to the second update's before — the text after the first edit (run-it, fourth review pass) (${JSON.stringify(d)})`);
+  d = await derive(Y, yRow);
+  assert(d.content === "055: planted beside a created_at that is no timestamp" && d.source === "row" && d.row_created_at !== null, `Y derives from its live row like any other (${JSON.stringify(d)})`);
+  d = await derive(F, fRow);
+  assert(d.content === "055: planted with a created_at of infinity" && d.source === "row" && d.row_created_at === null, `a live row whose created_at is infinity lends its content and NOT its time — the gate could never read it, so it is not offered (cold read, fifth review pass: offered, the apply failed on it) (${JSON.stringify(d)})`);
+  assert(/here diff must be an object before and after/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '[{"content": "x"}]'::jsonb WHERE id = '${xRow}'`)), "a fill onto an array diff is refused by name (cold read, fourth review pass)");
+  assert(/here nothing is filled/.test(await amend("payload", `UPDATE thought_audit SET diff = diff WHERE id = '${n2Row}'`)), "…and a write that leaves a NULL diff NULL fills nothing (run-it, second review pass: it read as a shape complaint)");
+  // The gate, condition by condition.
+  assert(/append-only: UPDATE/.test(await refused(`UPDATE thought_audit SET diff = diff || '{"content": "055: planted, still standing"}'::jsonb WHERE id = $1::uuid`, [lRow])), "without the setting an UPDATE of diff is refused, as 008 refused it");
+  assert(/here a column other than actor_kind, trust, origin and backfilled_at changes/.test(await amend("backfill", `UPDATE thought_audit SET diff = diff || '{"content": "055: planted, still standing"}'::jsonb WHERE id = '${lRow}'`)), "under 046's value an UPDATE of diff stays refused — the payload is not that amendment's");
+  assert(/here content must be the text the log and the row derive to \(from the row\)/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": "something else"}'::jsonb WHERE id = '${lRow}'`)), "under the payload value a content that is not what the row derives to is refused, the source named");
+  assert(/here a column other than diff changes/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": "055: planted, still standing"}'::jsonb, actor_kind = 'agent' WHERE id = '${lRow}'`)), "…a fill beside another column is refused: diff is the fifth column removed from the byte-equal compare under this value alone");
+  assert(/here a key of diff other than content and created_at changes/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": "055: planted, still standing", "metadata": {"source": "x"}}'::jsonb WHERE id = '${lRow}'`)), "…a fill that touches another key of diff is refused");
+  assert(/here created_at must be the live row's own/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": "055: planted, still standing", "created_at": "2020-01-01T00:00:00Z"}'::jsonb WHERE id = '${lRow}'`)), "…a created_at that is not the live row's is refused");
+  assert(/here content must be a string/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": null}'::jsonb WHERE id = '${lRow}'`)), "…a JSON-null content is refused as a type, not as the wrong text (run-it, first review pass)");
+  assert(/here created_at must be a timestamp/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": "055: planted, still standing", "created_at": "not-a-date"}'::jsonb WHERE id = '${lRow}'`)), "…a created_at that is no timestamp is refused by name, not by the cast's own error (run-it, first review pass)");
+  assert(/here created_at must be a timestamp/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": "055: planted, still standing", "created_at": "2024-13-45T99:00:00Z"}'::jsonb WHERE id = '${lRow}'`)), "…and one shaped like a timestamp that is none — a thirteenth month — is refused by name too, not by the cast's own error (cold read, seventh review pass)");
+  assert(/here only a capture row takes a payload/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": "x"}'::jsonb WHERE thought_id = '${M}' AND action = 'update'`)), "…an update row takes no payload");
+  assert(/here no content derives for this row/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": "invented"}'::jsonb WHERE id = '${uRow}'`)), "…a row nothing derives for cannot be filled with an invented text");
+  assert(/here no created_at derives for this row/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || jsonb_build_object('created_at', (SELECT created_at FROM thoughts WHERE id = '${M}')) WHERE id = '${mRow}'`)), "…a created_at equal to the event's is not a fill: nothing derives");
+  assert(/here nothing is filled/.test(await amend("payload", `UPDATE thought_audit SET diff = diff WHERE id = '${lRow}'`)), "…and a write that fills nothing is refused");
+  assert((await amend("payload", `UPDATE thought_audit SET diff = COALESCE(diff, '{}'::jsonb) || '{"content": "055: planted with a NULL diff"}'::jsonb WHERE id = '${nRow}'`)) === "", "the lawful fill by hand — the derived content, onto a NULL diff read as empty — goes through");
+  assert((await amend("payload", `UPDATE thought_audit SET diff = diff || jsonb_build_object('created_at', (SELECT created_at FROM thoughts WHERE id = '${L}')) WHERE id = '${lRow}'`)) === "", "…and a created_at alone, before the content, from the live row");
+  assert(/here nothing is filled/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"content": "055: planted with a NULL diff"}'::jsonb WHERE id = '${nRow}'`)), "…the same fill again fills nothing");
+  assert(/here a content once set is never changed/.test(await amend("payload", `UPDATE thought_audit SET diff = jsonb_set(diff, '{content}', '"another text"') WHERE id = '${nRow}'`)), "…and a content once set is never changed");
+  assert(/here a created_at is filled with the content or before it/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || jsonb_build_object('created_at', (SELECT created_at FROM thoughts WHERE id = '${N}')) WHERE id = '${nRow}'`)), "…a row that carries its content gains no created_at after the fact (run-it, first review pass)");
+  await db.exec(`UPDATE thoughts SET created_at = '2001-02-03T04:05:06Z' WHERE id = '${a.id}'`);
+  const aRow = (await one<{ id: string }>(`SELECT id FROM thought_audit WHERE thought_id = $1::uuid AND action = 'capture'`, [a.id])).id;
+  assert(/here a created_at is filled with the content or before it/.test(await amend("payload", `UPDATE thought_audit SET diff = diff || '{"created_at": "2001-02-03T04:05:06+00:00"}'::jsonb WHERE id = '${aRow}'`)), "…nor does a complete 055 capture whose row's created_at was moved by hand later — no time it never had");
+  assert(/append-only: DELETE/.test(await amend("payload", `DELETE FROM thought_audit WHERE id = '${lRow}'`)) && /append-only: TRUNCATE/.test(await amend("payload", `TRUNCATE thought_audit`)), "…DELETE and TRUNCATE are refused under the setting as without it");
+  // The backfill: bounded, by source, idempotent, its report exact.
+  assert(/p_limit must be at least 1/.test(await refused(`SELECT backfill_thought_payloads(0)`)), "backfill_thought_payloads(0) is refused as a value");
+  let bf = (await one<{ r: Bf }>(`SELECT backfill_thought_payloads(1) AS r`)).r;
+  assert(bf.ok && bf.rows === 1 && bf.from_row === 1 && bf.with_created_at === 0 && bf.skipped === 0 && bf.awaiting === strangers + 13,
+    `p_limit bounds a pass to the oldest waiting row — L's (the planted rows predate the strangers), from the live row, its hand-filled created_at kept and not counted as this pass's (${JSON.stringify(bf)})`);
+  const lDiff = (await one<{ d: Diff }>(`SELECT diff AS d FROM thought_audit WHERE id = $1::uuid`, [lRow])).d;
+  const lSame = await one<{ same: boolean }>(`SELECT (a.diff->>'created_at')::timestamptz = t.created_at AS same FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE a.id = $1::uuid`, [lRow]);
+  assert(lDiff.content === "055: planted, still standing" && lSame.same === true && lDiff.metadata?.source === "plant", "L's row now carries the content beside the created_at the hand fill set, its other keys untouched — the pass did not re-write the time (cold read, first review pass)");
+  bf = (await one<{ r: Bf }>(`SELECT backfill_thought_payloads(1) AS r`)).r;
+  assert(bf.rows === 1 && bf.from_update === 1 && bf.awaiting === strangers + 12, `…the next bounded pass takes M's, from the update (${JSON.stringify(bf)})`);
+  bf = (await one<{ r: Bf }>(`SELECT backfill_thought_payloads() AS r`)).r;
+  assert(bf.rows === 10 && bf.from_tombstone === 4 && bf.from_update === 2 && bf.from_row === 4 && bf.unrecoverable === strangers + 2 && bf.skipped === 0 && bf.awaiting === strangers + 2 && bf.with_created_at === 1,
+    `the pass fills D's, R's first, P's prior and Z's capture from their tombstones, V's and W's from the right update, P's standing, N2's NULL-diff, Y's and F's capture from the live row (N2's with the row's created_at; Y's beside the time it carries; F's with none), reports U and E (and the strangers) as unrecoverable and leaves them waiting (${JSON.stringify(bf)})`);
+  const fDiff = (await one<{ d: Diff }>(`SELECT diff AS d FROM thought_audit WHERE id = $1::uuid`, [fRow])).d;
+  assert(fDiff.content === "055: planted with a created_at of infinity" && !("created_at" in fDiff), `F's row carries the content and no created_at — the pass did not fail on the time it could not write (${JSON.stringify(fDiff)})`);
+  const yDiff = (await one<{ d: Diff }>(`SELECT diff AS d FROM thought_audit WHERE id = $1::uuid`, [yRow])).d;
+  assert(yDiff.content === "055: planted beside a created_at that is no timestamp" && (yDiff as { created_at?: string }).created_at === "not-a-date", `Y's row carries the content beside the created_at as it was set, unchanged bytes being unchanged — the pass did not fail on it (cold read, fourth review pass) (${JSON.stringify(yDiff)})`);
+  const zDiff = (await one<{ d: Diff }>(`SELECT diff AS d FROM thought_audit WHERE id = $1::uuid`, [zRow])).d;
+  assert(zDiff.content === "055: planted, deleted, standing again without a capture" && !("created_at" in zDiff), `Z's row carries the tombstone's text and no created_at (${JSON.stringify(zDiff)})`);
+  const texts = await q<{ thought_id: string; c: string | null; k: string }>(`SELECT thought_id, diff->>'content' AS c, COALESCE(diff ? 'created_at', false)::text AS k FROM thought_audit WHERE thought_id IN ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7::uuid) AND action = 'capture' ORDER BY created_at, seq`, [M, D, U, R, V, W, P]);
+  assert(texts.find((t) => t.thought_id === M)?.c === "055: planted, then moved" && texts.find((t) => t.thought_id === D)?.c === "055: planted, then deleted" && texts.find((t) => t.thought_id === U)?.c === null
+    && texts.find((t) => t.thought_id === V)?.c === "055: planted, edited by an older transaction — the first text"
+    && texts.find((t) => t.thought_id === W)?.c === "055: planted, edited twice — the first text"
+    && texts.filter((t) => t.thought_id === P).map((t) => t.c).join(" | ") === "055: planted, a prior incarnation long deleted | 055: planted, the standing text after a prior incarnation"
+    && texts.filter((t) => t.thought_id === R).map((t) => t.c).join(" | ") === "055: planted, deleted, re-captured — the first text | 055: planted, deleted, re-captured — the second text" && texts.every((t) => t.k === "false"),
+    `each capture row holds the text as it was captured — M's first text, D's, R's first and second, V's first, W's first, P's prior and standing, U's none — and none gained a created_at (${JSON.stringify(texts.map((t) => t.c))})`);
+  const n2Diff = (await one<{ d: Diff; same: boolean }>(`SELECT a.diff AS d, (a.diff->>'created_at')::timestamptz = t.created_at AS same FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE a.id = $1::uuid`, [n2Row]));
+  assert(n2Diff.d !== null && n2Diff.d.content === "055: planted with a NULL diff, filled by the pass" && n2Diff.same === true && Object.keys(n2Diff.d).sort().join(",") === "content,created_at",
+    `the pass filled the NULL-diff capture onto an empty object — the content and the row's created_at, nothing else (cold read and run-it, second review pass: the mutant that dropped the COALESCE survived) (${JSON.stringify(n2Diff.d)})`);
+  bf = (await one<{ r: Bf }>(`SELECT backfill_thought_payloads() AS r`)).r;
+  assert(bf.rows === 0 && bf.unrecoverable === strangers + 2 && bf.skipped === 0 && bf.awaiting === strangers + 2, `a second pass fills nothing and still names the rows nothing derives for (${JSON.stringify(bf)})`);
+  assert((await one<{ s: string | null }>(`SELECT current_setting('ob1.audit_amend', true) AS s`)).s === "" || (await one<{ s: string | null }>(`SELECT current_setting('ob1.audit_amend', true) AS s`)).s === null, "…and leaves the amendment setting as it found it");
+  // Re-applying 055 is a no-op: the same bodies, no row moved, the pass finds nothing.
+  n = await audits();
+  const bodiesBefore = JSON.stringify(await q<{ f: string; s: string }>(`SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS f, p.prosrc AS s FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace WHERE ns.nspname = 'public' AND p.proname IN ('thoughts_write_audit', 'thought_audit_refuse_mutation', 'ob1_stamp_actor', 'ob1_thought_diff', 'ob1_append_thought_event', 'ob1_actor_stamp', 'ob1_actor_stamp_kept', 'ob1_capture_payload', 'backfill_thought_payloads') ORDER BY 1`));
+  // An index under the name with an earlier revision's predicate — pass 4's,
+  // two clauses — is what the re-apply replaces (sixth review pass's drop,
+  // the seventh's test); one already carrying this file's is left standing.
+  await db.exec(`DROP INDEX thought_audit_awaiting_payload_idx`);
+  await db.exec(`CREATE INDEX thought_audit_awaiting_payload_idx ON thought_audit (created_at, seq) WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false)`);
+  await reapply("055");
+  const pidxAfter = (await one<{ d: string }>(`SELECT indexdef AS d FROM pg_indexes WHERE indexname = 'thought_audit_awaiting_payload_idx'`))?.d ?? "";
+  assert(/jsonb_typeof\(COALESCE\(diff, '\{\}'::jsonb\)\) = 'object'::text/.test(pidxAfter) && /\(created_at, seq\)/.test(pidxAfter), `re-applying 055 over an index carrying an earlier revision's two-clause predicate replaces it with this file's three-clause one, and the index stands after (${pidxAfter})`);
+  assert(JSON.stringify(await q<{ f: string; s: string }>(`SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS f, p.prosrc AS s FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace WHERE ns.nspname = 'public' AND p.proname IN ('thoughts_write_audit', 'thought_audit_refuse_mutation', 'ob1_stamp_actor', 'ob1_thought_diff', 'ob1_append_thought_event', 'ob1_actor_stamp', 'ob1_actor_stamp_kept', 'ob1_capture_payload', 'backfill_thought_payloads') ORDER BY 1`)) === bodiesBefore
+    && (await audits()) === n && (await waiting()) === strangers + 2, "re-applying 055 keeps every body byte for byte, writes no audit row, and its own backfill call finds nothing to fill");
+  // More candidates than one batch holds: the fill runs in batches of 1,000
+  // (fourth review pass), and a pass over 1,050 fills every one and counts
+  // them once.
+  await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit`);
+  await db.exec(`INSERT INTO thoughts (id, content, metadata, created_at) SELECT ('54545454-0004-4000-8000-' || lpad(to_hex(g), 12, '0'))::uuid, '055: batch row ' || g, '{"source": "batch"}'::jsonb, '2024-07-01T00:00:00Z'::timestamptz + (g || ' seconds')::interval FROM generate_series(1, 1050) g`);
+  await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit`);
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, source, diff, created_at) SELECT id, 'capture', 'plant', '{"metadata": {"source": "batch"}}'::jsonb, created_at FROM thoughts WHERE metadata->>'source' = 'batch'`);
+  assert((await waiting()) === strangers + 2 + 1050, `1,050 more capture rows wait (${await waiting()})`);
+  bf = (await one<{ r: Bf }>(`SELECT backfill_thought_payloads() AS r`)).r;
+  assert(bf.rows === 1050 && bf.from_row === 1050 && bf.skipped === 0 && bf.unrecoverable === strangers + 2 && bf.awaiting === strangers + 2, `a pass over more candidates than one batch fills every one, from the live rows, and counts each once (${JSON.stringify(bf)})`);
+  assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE t.metadata->>'source' = 'batch' AND a.action = 'capture' AND a.diff->>'content' = t.content`)).c === 1050, "…each batch row's capture carries its row's text");
+
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_agents`);
+}
+
+console.log("\n[52] Migration 056: the entity name gate — a number or a type word is refused and an identifier-shaped person or place retyped, at the writer for every extraction and over the rows written before it, and the JavaScript twin answers alike (SMD-1935)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  type J = Record<string, unknown>;
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT prune_orphan_entities()`);
+  const put = async (content: string) => (await one<{ id: string }>(`INSERT INTO thoughts (content, metadata, content_fingerprint) VALUES ($1, '{}'::jsonb, content_fingerprint_of($1)) RETURNING id`, [content])).id;
+  const rte = async (id: string, key: string, ents: unknown[], rels: unknown[] = []) =>
+    (await one<{ r: J }>(`SELECT record_thought_entities($1::uuid, $2, $3::jsonb, $4::jsonb, NULL, NULL) AS r`, [id, key, JSON.stringify(ents), JSON.stringify(rels)])).r;
+  const E = (name: string, type: string, confidence = 0.9, aliases?: string[]) => ({ name, type, confidence, ...(aliases ? { aliases } : {}) });
+  const R = (from: string, to: string, relation: string) => ({ from, to, relation, confidence: 0.9 });
+  const entities = async () => (await q<{ t: string; n: string }>(`SELECT entity_type AS t, name AS n FROM ob1_entities ORDER BY 1, 2`)).map((e) => `${e.t}:${e.n}`);
+  const idOf = async (type: string, nname: string) => (await one<{ id: string }>(`SELECT id FROM ob1_entities WHERE entity_type = $1 AND normalized_name = $2`, [type, nname]))?.id;
+  const mentionsOf = async (id: string) => (await q<{ t: string }>(`SELECT thought_id AS t FROM thought_entities WHERE entity_id = $1::uuid ORDER BY 1`, [id])).map((m) => m.t);
+
+  // The rule, and its twin: one answer over every probe. The unit cases are
+  // test-thoughts [10]'s; these add the spellings normalisation decides.
+  const probes: [string, string][] = [
+    ["021", "person"], ["  021  ", "tool"], ["\"021\"", "topic"], ["021.", "place"], ["#021", "project"], ["10/8", "place"], ["023/030", "person"], ["127.0.0.1:11434", "place"], ["１２３", "tool"], ["1-2", "topic"], ["10 000", "person"],
+    ["person", "topic"], ["People", "tool"], ["organisations", "project"], ["Entity", "place"], ["the person", "person"],
+    ["SMD-1804", "person"], ["SMD-1804", "place"], ["SMD-1804", "topic"], ["ＳＭＤ-１８０４", "person"], ["http://127.0.0.1:65536/v1", "place"], ["@hono/mcp", "person"], ["hono/mcp", "person"], ["siggymd/**", "place"], ["siggymd/test-*", "place"],
+    ["host.containers.internal", "place"], ["openrouter.ai", "place"], ["open-brain_default", "place"], ["localhost:11434", "place"], ["localhost.", "place"], ["a.b", "person"],
+    ["Anita", "person"], ["Nate B. Jones", "person"], ["claude-code", "person"], ["Mac mini M4 Pro", "place"], ["pg16", "tool"], ["migration 021", "topic"], ["v1.2", "tool"], ["db/README.md", "topic"], ["ob1_entities", "tool"], ["Linear", "organization"], ["x", "vegetable"],
+    // Whitespace other than the space (first review pass: btrim() and \S parted the two on seven of these;
+    // `a b_c`, `open_brai n`, `021\f` and `\t021\r\n` are controls).
+    ["SMD-1804\n", "person"], ["SMD-1804\t", "person"], ["SMD-1804\v", "person"], ["\u3000SMD-1804", "person"], ["hono/mcp\t", "person"], ["x:80\f", "place"], ["a b_c", "person"], ["open_brai n", "place"], ["a\u00a0b_c", "place"], ["021\f", "tool"], ["\t021\r\n", "person"],
+    // A leading form feed or vertical tab survives 016's strip (second review pass), and a handle's shape retypes a place, not a person.
+    ["\f021", "person"], ["\vperson", "topic"], ["john.smith", "person"], ["mary_jane", "person"], ["St.Louis", "place"], ["open_brain:5432", "person"], ["open_brain:5432", "place"],
+  ];
+  const parted: string[] = [];
+  for (const [name, type] of probes) {
+    const got = await one<{ g: string | null; n: string | null }>(`SELECT entity_type_gate($1, $2) AS g, normalize_entity_name($1) AS n`, [name, type]);
+    if (got.g !== entityTypeGate(name, type)) parted.push(`${JSON.stringify(name)} as ${type}: SQL ${got.g}, JS ${entityTypeGate(name, type)}`);
+    if (got.n !== normalizeEntityName(name)) parted.push(`normalise ${JSON.stringify(name)}: SQL ${got.n}, JS ${normalizeEntityName(name)}`);
+  }
+  assert(parted.length === 0, `entity_type_gate and entity-gate.ts answer alike, and so do the two normalisers, over ${probes.length} probes (${parted.join("; ") || "no parting"})`);
+  assert((await one<{ g: string | null }>(`SELECT entity_type_gate('021', 'person') AS g`)).g === null && (await one<{ g: string }>(`SELECT entity_type_gate('SMD-1804', 'person') AS g`)).g === "project" && (await one<{ g: string }>(`SELECT entity_type_gate('hono/mcp', 'place') AS g`)).g === "tool" && (await one<{ g: string }>(`SELECT entity_type_gate('SMD-1804', 'topic') AS g`)).g === "topic",
+    "…and the answers are the rule's: a number refused, a ticket-id person a project, a path place a tool, a topic left alone");
+  // The twin is held to the text too, so a pattern edited on one side fails
+  // even where no probe reaches the difference.
+  const gateSrc = await src("entity_type_gate(text, text)");
+  assert(IDENTIFIER_SHAPES.every((s) => gateSrc.includes(`'${s.pattern}'`)) && ENTITY_VOCABULARY.every((w) => gateSrc.includes(`'${w}'`)) && gateSrc.includes(`'${NUMERIC_NAME_RE}'`) && gateSrc.includes(`'${TRIM_RE}'`) && (gateSrc.match(/'[^']*'/g) ?? []).filter((l) => l.startsWith("'^")).length === IDENTIFIER_SHAPES.length + 2 &&
+    (/s\.n IN \(([^)]*)\)/.exec(gateSrc)?.[1].match(/'[^']*'/g) ?? []).length === ENTITY_VOCABULARY.length &&
+    IDENTIFIER_SHAPES.every((x) => (gateSrc.indexOf(`'${x.pattern}'`) > gateSrc.indexOf("p_type = 'place' AND (")) === !x.person),
+    "the SQL rule spells every shape, every vocabulary word (no more), the numeric pattern and the trim entity-gate.ts does, no pattern beside them, and reads the two handle shapes for a place only");
+  const fn = await one<{ v: string; s: boolean }>(`SELECT provolatile AS v, proisstrict AS s FROM pg_proc WHERE oid = 'entity_type_gate(text, text)'::regprocedure`);
+  assert(fn.v === "i" && fn.s === true, "entity_type_gate is IMMUTABLE and STRICT");
+  assert(lastDefinerOf("record_thought_entities").startsWith("056") && /ob1:name-gate/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)")) && /ob1:structured-wins/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)")),
+    "056 is the last definer of record_thought_entities, and its live body carries the name-gate sentinel beside 053's");
+  assert(/en\.merged_from @> ARRAY\[i\.nname\]/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)")) && !/= ANY\(en\.merged_from\)/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)")),
+    "…and resolves a merged name with `@>`, which 016's GIN index serves, not `= ANY`");
+  const passSrc = await src("apply_entity_type_gate()");
+  assert(/en\.merged_from @> ARRAY\[r\.normalized_name\]/.test(passSrc) && !/= ANY\(en\.merged_from\)/.test(passSrc), "…and so does the pass's target lookup");
+  const comments = await Promise.all(["entity_type_gate(text, text)", "record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)", "apply_entity_type_gate()"].map(async (sig) => (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? ""));
+  assert(comments.every((c) => /SMD-1935/.test(c)) && /refused_entities, retyped_entities/.test(comments[1]) && /Idempotent/.test(comments[2]), "each function's comment names the ticket; the writer's lists the two new counts, the pass says it is idempotent");
+
+  // The writer. One extraction naming a migration number, a type word, a
+  // package typed as a person beside itself as a tool, a ticket id as a
+  // person, a host:port as a place and one real person.
+  const t1 = await put("Migration 021 moved hono/mcp; Anita tracked SMD-1804 on host.containers.internal:11434.");
+  // 021 and SMD-1804 twice: the counts are one per (type, name), as the insert keeps them.
+  const answer = [E("021", "person"), E("021", "person", 0.7), E("person", "topic"), E("hono/mcp", "person", 0.8), E("hono/mcp", "tool", 0.95), E("SMD-1804", "person"), E("SMD-1804", "person", 0.6), E("Anita", "person"), E("host.containers.internal:11434", "place")];
+  const relations = [R("021", "Anita", "works_on"), R("Anita", "SMD-1804", "works_on"), R("Anita", "hono/mcp", "uses")];
+  const w1 = await rte(t1, "extract:m@p2", answer, relations);
+  const after1 = await entities();
+  assert(w1.ok === true && w1.refused_entities === 2 && w1.retyped_entities === 3 && w1.entities === 4 && w1.mentions === 4 && w1.edges === 2 && w1.dropped_relations === 1,
+    `the writer refuses 021 and "person", retypes three, writes four, and drops the relation naming 021 (${JSON.stringify(w1)})`);
+  assert(JSON.stringify(after1) === JSON.stringify(["person:Anita", "project:SMD-1804", "tool:hono/mcp", "tool:host.containers.internal:11434"]),
+    `…under the gate's types: the retyped person hono/mcp is the tool, one entity (${after1.join(", ")})`);
+  const w2 = await rte(t1, "extract:m@p2", answer, relations);
+  assert(w2.ok === true && w2.new_entities === 0 && w2.refused_entities === 2 && JSON.stringify(await entities()) === JSON.stringify(after1), "the same answer again mints nothing and re-mints no fragment: re-extraction is idempotent");
+  assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM ob1_entities WHERE normalized_name ~ $1`, [NUMERIC_NAME_RE])).c === 0, "no entity has a numeric name");
+  // A structured pass is not gated: the source states its names (first review pass).
+  const t2 = await put("SMD-1805, served from 127.0.0.1, label 2024.");
+  const w3 = await rte(t2, "source:test", [E("127.0.0.1", "place", 1), E("SMD-1805", "person", 1), E("2024", "topic", 1)]);
+  const structured = ["place:127.0.0.1", "person:SMD-1805", "topic:2024"];
+  assert(w3.ok === true && w3.refused_entities === 0 && w3.retyped_entities === 0 && w3.entities === 3 && (await entities()).filter((e) => structured.includes(e)).length === 3,
+    `a source: pass writes what the source stated, under the type it stated (${JSON.stringify(w3)})`);
+
+  // The rows from before the gate: 053's writer stores what 056's refuses,
+  // then apply_entity_type_gate() takes them in. hono/mcp the person merges
+  // into the tool t1 wrote; x/y the person moves to tool, and x/y the place,
+  // later, merges into that.
+  await reapply("053");
+  const t3 = await put("pre-gate: 021 and hono/mcp on Bun, x/y too");
+  const t4 = await put("pre-gate: x/y and hono/mcp, both ways");
+  const p3 = await rte(t3, "extract:m@p2", [E("021", "person"), E("hono/mcp", "person", 0.9, ["@hono/mcp"]), E("Bun", "tool"), E("x/y", "person"), E("places", "topic")],
+    [R("021", "Bun", "uses"), R("hono/mcp", "Bun", "related_to"), R("Bun", "hono/mcp", "depends_on"), R("x/y", "Bun", "uses")]);
+  const p4 = await rte(t4, "extract:m@p2", [E("x/y", "place"), E("hono/mcp", "person"), E("hono/mcp", "tool")]);
+  assert(p3.ok === true && p3.entities === 5 && p3.edges === 4 && p4.ok === true && p4.entities === 3 && !("refused_entities" in p3), `053's writer stores what the gate would refuse (${JSON.stringify(p3)})`);
+  const personHono = await idOf("person", "hono mcp");
+  const toolHono = await idOf("tool", "hono mcp");
+  await db.query(`UPDATE ob1_entities SET first_seen_at = '2020-01-01', last_seen_at = '2030-01-01' WHERE id = $1::uuid`, [personHono]);
+  // Two a human curated, a name merged into each: a place office.hq with
+  // `main office`, a person 777 with `lucky sevens`. The pass leaves both as
+  // they stand — retyped or refused, the names merged in would come back as
+  // entities of their own, split from them (third review pass).
+  const [OFFICE, SEVENS] = ["44444444-0000-4000-8000-000000000000", "55555555-0000-4000-8000-000000000000"];
+  await db.query(`INSERT INTO ob1_entities (id, entity_type, name, normalized_name, merged_from) VALUES ($1::uuid, 'place', 'office.hq', 'office.hq', '{"main office"}'), ($2::uuid, 'person', '777', '777', '{"lucky sevens"}')`, [OFFICE, SEVENS]);
+  // A self-edge once merged: the person joined to the tool on t4, which no writer would state.
+  const [lo, hi] = [personHono, toolHono].sort();
+  await db.query(`INSERT INTO ob1_entity_edges (thought_id, from_entity_id, to_entity_id, relation, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, $3::uuid, 'related_to', 0.9, 'extract:m@p2')`, [t4, lo, hi]);
+  // A symmetric edge whose order the merge must flip, on ids chosen so it
+  // does: Zed–place p.q stored (Zed, p.q); p.q the place merges into the
+  // tool p.q, whose id sorts before Zed's.
+  const [TOOL_PQ, ZED, PLACE_PQ] = ["00000000-0000-4000-8000-000000000001", "88888888-0000-4000-8000-000000000000", "ffffffff-0000-4000-8000-000000000000"];
+  await db.query(`INSERT INTO ob1_entities (id, entity_type, name, normalized_name) VALUES ($1::uuid, 'tool', 'p.q', 'p.q'), ($2::uuid, 'tool', 'Zed', 'zed'), ($3::uuid, 'place', 'p.q', 'p.q')`, [TOOL_PQ, ZED, PLACE_PQ]);
+  await db.query(`INSERT INTO ob1_entity_edges (thought_id, from_entity_id, to_entity_id, relation, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, $3::uuid, 'related_to', 0.9, 'extract:m@p2')`, [t4, ZED, PLACE_PQ]);
+  // The target the writer would pick: a place q.r, where a human merged
+  // `q.r` into the tool Zeta and a tool q.r also stands, goes to Zeta, as
+  // the writer's merged_from rule sends the name (second review pass). The
+  // tool q.r's id sorts first, so no tiebreak picks Zeta by accident (third
+  // review pass).
+  const [TOOL_QR, ZETA, PLACE_QR] = ["11111111-0000-4000-8000-000000000000", "22222222-0000-4000-8000-000000000000", "33333333-0000-4000-8000-000000000000"];
+  await db.query(`INSERT INTO ob1_entities (id, entity_type, name, normalized_name, merged_from) VALUES ($1::uuid, 'tool', 'Zeta', 'zeta', '{q.r}'), ($2::uuid, 'tool', 'q.r', 'q.r', '{}'), ($3::uuid, 'place', 'q.r', 'q.r', '{}')`, [ZETA, TOOL_QR, PLACE_QR]);
+  await db.query(`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, 0.9, 'extract:m@p2')`, [t4, PLACE_QR]);
+
+  // The pass as the file runs it: 056 applied over these rows, its record
+  // cleared first so this run's is the one kept (fourth review pass: a
+  // record written on an empty graph proved only that a row exists).
+  const recorded = async () => (await q<{ v: string }>(`SELECT value AS v FROM ob1_config WHERE key = 'entity_name_gate_056'`))[0]?.v;
+  await db.exec(`DELETE FROM ob1_config WHERE key = 'entity_name_gate_056'`);
+  await reapply("056");
+  const firstRecord = await recorded();
+  const pass = { r: JSON.parse(firstRecord ?? "{}") as J };
+  assert(pass.r.ok === true && pass.r.refused_entities === 2 && pass.r.dropped_mentions === 2 && pass.r.dropped_edges === 1 && pass.r.moved_entities === 1 && pass.r.merged_entities === 4,
+    `the file's pass refuses 021 and "places" (their two mentions, 021's edge), moves the person x/y and merges four, and ob1_config keeps exactly that (${JSON.stringify(pass.r)})`);
+  const after2 = await entities();
+  assert(!after2.some((e) => /^person:(021|hono\/mcp|x\/y)$|^topic:places$|^place:(x\/y|p\.q|q\.r)$/.test(e)) && after2.includes("tool:x/y") && after2.includes("tool:hono/mcp"), `…leaving no refused name and no identifier-shaped person or place (${after2.join(", ")})`);
+  assert(JSON.stringify(await mentionsOf(toolHono)) === JSON.stringify([t1, t3, t4].sort()), "the tool hono/mcp now holds t1's mention, the person's t3, and one t4 — the person's duplicate there dropped");
+  const toolXy = await idOf("tool", "x y");
+  assert(JSON.stringify(await mentionsOf(toolXy)) === JSON.stringify([t3, t4].sort()), "the tool x/y holds the moved person's t3 and the merged place's t4");
+  assert(JSON.stringify(await mentionsOf(ZETA)) === JSON.stringify([t4]) && (await mentionsOf(TOOL_QR)).length === 0, "the place q.r merged into Zeta, where a human merged its name, not into the tool of that name");
+  const e3 = await q<{ relation: string; f: string; t: string }>(`SELECT relation, from_entity_id AS f, to_entity_id AS t FROM ob1_entity_edges WHERE thought_id = $1::uuid ORDER BY relation`, [t3]);
+  const bun = await idOf("tool", "bun");
+  assert(e3.length === 3 && e3.every((e) => e.f !== personHono && e.t !== personHono) && e3.some((e) => e.relation === "depends_on" && e.f === bun && e.t === toolHono) && e3.some((e) => e.relation === "uses" && e.f === toolXy && e.t === bun),
+    `t3's edges point at the survivors (${e3.map((e) => e.relation).join(",")})`);
+  const sym = e3.find((e) => e.relation === "related_to");
+  assert(sym !== undefined && sym.f < sym.t && [sym.f, sym.t].sort().join() === [bun, toolHono].sort().join(), "…a symmetric relation re-pointed in the writer's order");
+  const e4 = await q<{ f: string; t: string }>(`SELECT from_entity_id AS f, to_entity_id AS t FROM ob1_entity_edges WHERE thought_id = $1::uuid`, [t4]);
+  assert(e4.length === 1 && e4[0].f === TOOL_PQ && e4[0].t === ZED, `on t4 the person-to-tool edge, a self-edge once merged, is dropped, and Zed–p.q is flipped to (p.q, Zed) as the survivor's id sorts first (${JSON.stringify(e4)})`);
+  const hono = await one<{ aliases: string[]; f: string; l: string }>(`SELECT aliases, first_seen_at::date::text AS f, last_seen_at::date::text AS l FROM ob1_entities WHERE id = $1::uuid`, [toolHono]);
+  assert(hono.aliases.includes("@hono/mcp") && !hono.aliases.includes("hono/mcp") && hono.f === "2020-01-01" && hono.l === "2030-01-01", `the survivor keeps the merged row's aliases (its own name is no alias) and the earlier first and later last sighting (${JSON.stringify(hono)})`);
+  const curated = await q<{ id: string; t: string; m: string[] }>(`SELECT id, entity_type AS t, merged_from AS m FROM ob1_entities WHERE id IN ($1::uuid, $2::uuid) ORDER BY id`, [OFFICE, SEVENS]);
+  assert(curated.length === 2 && curated[0].t === "place" && curated[0].m.join() === "main office" && curated[1].t === "person" && curated[1].m.join() === "lucky sevens",
+    `the entities a human curated stand, type and merge kept — the place office.hq, the person 777 (${JSON.stringify(curated)})`);
+  assert((await entities()).filter((e) => structured.includes(e)).length === 3, "the entities a structured pass names are left as they stand: 127.0.0.1, the person SMD-1805, the label 2024");
+  const again = await one<{ r: J }>(`SELECT apply_entity_type_gate() AS r`);
+  assert(again.r.refused_entities === 0 && again.r.moved_entities === 0 && again.r.merged_entities === 0 && again.r.dropped_edges === 0, `the pass is idempotent (${JSON.stringify(again.r)})`);
+
+  // Re-applying 056 lands the gated writer again, and its own run finds nothing.
+  const before = await entities();
+  await reapply("056");
+  assert(/ob1:name-gate/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)")) && JSON.stringify(await entities()) === JSON.stringify(before), "re-applying 056 restores the gated writer and changes no row");
+  const t5 = await put("The main office moved.");
+  const w5 = await rte(t5, "extract:m@p2", [E("Main Office", "place")]);
+  assert(w5.ok === true && w5.new_entities === 0 && JSON.stringify(await mentionsOf(OFFICE)) === JSON.stringify([t5]), `a name a human merged into the curated place still lands there, through the writer's merged_from redirect (${JSON.stringify(w5)})`);
+  assert((await recorded()) === firstRecord, `a re-apply, which finds nothing, keeps the first run's record (${await recorded()})`);
+
+  // The guard: a schema without 053 is refused by name, not left to fail later.
+  await db.exec(`ALTER TABLE thought_sources RENAME TO thought_sources_gone`);
+  let noSources = "";
+  try { await reapply("056"); } catch (e) { noSources = (e as Error).message; }
+  await db.exec(`ALTER TABLE thought_sources_gone RENAME TO thought_sources`);
+  assert(/migration 056 needs 053 \(thought_sources, and its record_thought_entities body\); this schema lacks it/.test(noSources), `056 on a schema without 053 refuses by name (${noSources.slice(0, 90)})`);
+  await db.exec(`ALTER TABLE ob1_entity_edges RENAME TO ob1_entity_edges_gone`);
+  let noEdges = "";
+  try { await reapply("056"); } catch (e) { noEdges = (e as Error).message; }
+  await db.exec(`ALTER TABLE ob1_entity_edges_gone RENAME TO ob1_entity_edges`);
+  assert(/migration 056 needs 016 \(ob1_entity_edges\); this schema lacks it/.test(noEdges), `…and without 016 (${noEdges.slice(0, 90)})`);
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT prune_orphan_entities()`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

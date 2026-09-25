@@ -5009,6 +5009,13 @@ running — is named.
 
 ### Results, 2026-09-24 (PostgreSQL 16.15, pgvector 0.8.6, width 8; the program's output, verbatim)
 
+(The run below is the run at 053, as it was. Since migration 055 — SMD-2115,
+step 1 of the decision — the shipped capture event carries the content, the
+baseline passes C1 and the recorded matrix in `evals/writable-projection.ts`
+says so; the prototype SQL calls the shipped diff rule, append and stamp arms
+rather than defining them, and CI's `--check` holds the live run to the
+matrix as recorded now, not to this block.)
+
 ```
 Writable projection — SMD-1999 (Spike 2 of SMD-1997), PostgreSQL 16.15 (Debian 16.15-1.pgdg12+2)
 
@@ -5260,7 +5267,8 @@ OB1_JEV_BASE_URL=http://127.0.0.1:8020 OB1_JEV_LOCAL=1 \
 It warms and uses the host's Ollama, so it slows a brain sharing it for the
 few seconds it runs, and longer if the warm-up has a model to load.
 
-**SMD-1937's gate, end to end** — `eval-jev-gate.ts`. Candidates from a brain's
+**SMD-1937's gate, end to end** — `eval-jev-gate.ts` as it stood at 2635eb7d
+(SMD-1937 has since rebuilt it on graded mentions: the next section). Candidates from a brain's
 own entity graph in one read-only transaction — `bad` (names `^[0-9.:]+$`,
 SMD-1935's rule: a strong label), `positive` (tools, projects, organizations in
 ≥ 5 thoughts: a weak label) and the `person`/`place` layer (no label) — each
@@ -5298,8 +5306,527 @@ calibration and which model (SemIf, SMD-2052) is SMD-1937's measurement to make
 on this harness. What the run shows is the Verify bullet: the spike ran against
 the tier with no serving code of its own.
 
+## The entity gate on the cases a regex cannot judge (SMD-1937)
+
+SMD-1937 asked whether a typed-decision model after the extractor earns a place
+in the extraction path. The bar was a margin over the deterministic gate on
+the **ambiguous** cases, not the numeric ones SMD-1935's regex already catches.
+`eval-jev-gate.ts` measures that against the tier (Verdict v1.4, the only model
+it serves; SemIf is SMD-2052). It writes nothing to the brain and puts nothing
+in the path.
+
+**Pre-registered** in the commit before the grades (793b1158):
+- the baselines: B0 = `NUMERIC_NAME_RE`; B1 = SMD-1935's whole gate, which is B0,
+  the type vocabulary as a name, and an identifier's shape typed `person` or
+  `place`;
+- the sample;
+- the split: dev/test by md5 of the thought;
+- the arms;
+- the margins: the arm chosen on dev beats B1 by 10 points of balanced
+  accuracy on test, with the paired bootstrap's 95% interval above 0; and the
+  per-type gates beat the extractor's own type by 10 points on the valid
+  mentions.
+
+The grading rubric (v1, below) was fixed before any tier call. Its rule that a
+code identifier is never an entity was settled at adjudication, not in the
+pre-registration commit.
+
+**The graded set** is `fixtures/entity-gate-grades.json` (ids and numbers only):
+- 201 dogfood mentions whose name passes B0: every `person`, `place` and
+  `organization`, and 50 each of `tool`, `topic` and `project`;
+- two blind Claude graders worked from the name and a window of the thought,
+  without the extractor's type or any tier output;
+- they agree on validity for 91% (kappa 0.82), and on the type for 75 of the
+  78 mentions both call valid (kappa 0.94);
+- 81 of 201 are valid under this rubric, which is strict in three ways:
+  - it grades the first thought's mention, not the entity;
+  - a role word is never a person;
+  - a code identifier (table, function, environment variable, file, branch) is
+    never an entity.
+
+  Each of the three is a definition, not a finding, and rubric v2 below
+  revisits them.
+
+```sh
+mkdir -p "$HOME/.cache/ob1"   # podman does not create a missing bind source
+podman run --rm --network open-brain_default --env-file deploy/.env \
+  -e OB1_JEV_BASE_URL=http://host.containers.internal:8020 -e OB1_JEV_LOCAL=1 \
+  -v "$PWD":/repo:ro -v "$HOME/.cache/ob1":/cache -w /repo/evals oven/bun:1.4.0-alpine sh -c \
+  'export DATABASE_URL="postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/openbrain"; exec bun eval-jev-gate.ts --cache /cache/jev-gate.json'
+```
+
+`--cache` keeps the tier's answers on the host, as probabilities and logits
+only. They are keyed by the model's provenance and by what was asked, so a
+re-analysis asks the tier only for `/info` and the timed thoughts
+(`--cost-thoughts 0` skips those), and another model is asked afresh. The
+file is replaced whole, and written on an interrupt too.
+`--dump-sample` writes the grading sample, which is the brain's text, so write
+it outside the tree. `--grades fixtures/entity-gate-grades-v2.json` (with or
+without `--strict-code`) runs the report under rubric v2, and `--diagnose`
+runs the probes of why the tier fails. Both are below.
+
+On the test split under rubric v1 (90 mentions, 52 invalid), with the threshold, temperature
+and Platt refit taken from dev. The Brier skill is measured against a constant
+at the test split's base rate, scored on the same rows:
+
+| arm | AUROC | served p: mean (range) | ECE served | Brier / skill / ECE, Platt | balanced accuracy | rejects invalid | keeps valid |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| B1 (SMD-1935's gate) | — | — | — | — | 0.545 | 11.5% | 97.4% |
+| v1: SMD-2050's validity framing | 0.586 | 0.54 (0.35–0.66) | 0.114 | 0.242 / 1.0% / 0.052 | 0.562 | 51.9% | 60.5% |
+| **v2**: validity in the prompt's words | **0.658** | 0.55 (0.29–0.67) | 0.136 | 0.229 / 6.2% / 0.118 | **0.645** | 71.2% | 57.9% |
+| claim: "X is <the extractor's type>" | 0.559 | 0.57 (0.41–0.72) | 0.156 | 0.244 / −0.1% / 0.035 | 0.503 | 5.8% | 94.7% |
+| pertype: six binaries, the max | 0.547 | 0.60 (0.45–0.72) | 0.191 | 0.242 / 0.8% / 0.035 | 0.529 | 5.8% | 100.0% |
+| choice: types + number + generic | 0.516 | 0.75 (0.34–0.96) | 0.366 | 0.245 / −0.5% / 0.049 | 0.515 | 34.6% | 68.4% |
+| the extractor's stored confidence | 0.487 | 1.00 (0.90–1.00) | 0.577 | 0.246 / −0.7% / 0.030 | 0.500 | 0.0% | 100.0% |
+
+- **The margin is not met.** v2 was chosen on dev, by a hair: its dev balanced
+  accuracy is 0.637, against 0.635 for the choice.
+
+  | on test, over 10,000 paired resamples in fixture order | difference in balanced accuracy, points | 95% interval |
+  | --- | --- | --- |
+  | v2 − B1 | +10.1 | −1.0 to +21.0 |
+  | B1 then v2 (the order a deployment would use) − B1 | +8.8 | −1.6 to +18.9 |
+  | v2 − B1, without the 4 test windows that lack the name | +10.7 | −0.6 to +21.8 |
+  | grader A's labels alone, the whole procedure refit on dev (chooses v2) | +7.9 | −3.3 to +19.0 |
+  | grader B's labels alone, refit on dev (chooses the choice) | **−6.1** | −17.1 to +4.8 |
+
+  In 9 of the 201 windows the name does not appear: the extractor named what
+  the text does not spell (`OpenBrain`), so the window is the thought's head.
+  7 of those 9 are graded invalid.
+- **The signal is real but weak.** Across 1,000 permutations of v2's scores,
+  chance sits at AUROC 0.501, and 4 reach 0.658 (p = 0.005, with the observed
+  order counted as one). On SMD-1982's 29 hand-graded mentions (another grader,
+  the same definition; 4 of them are also in this set), the tier arms' AUROC is
+  0.55–0.68. B1's balanced accuracy there is 0.75, above v2's 0.575: that set
+  holds numbers and vocabulary words, which B1 catches.
+- **Calibration.**
+  - The served probabilities lean valid while 42% of the test mentions are:
+    the binary arms average 0.54–0.60 and the choice 0.75.
+  - A temperature alone cannot move them. The fit flattens every arm toward a
+    coin (Brier 0.250), and for claim, pertype and the choice it sits at the
+    search's floor.
+  - Platt's offset brings the ECE to 0.03–0.12, and every arm then sits at the
+    base-rate constant's Brier score. v2 beats it by 6.2%; the rest are within
+    about 1% of it, on either side.
+- **Typing is worse than the extractor's.** On the 38 valid test mentions:
+
+  | typer | right type |
+  | --- | --- |
+  | the extractor | 71% |
+  | always `project`, the commonest graded type on these rows | 58% |
+  | the choice (no type when it abstains or picks number or generic) | 53% |
+  | pertype (argmax) | 21% |
+
+  pertype − extractor = −50 points (−66 to −32), so the pre-registered typing
+  margin is not met either. The per-type binaries call 23 of the 38 a tool.
+- **A stored confidence (SMD-1925).** The extractor's column carries no signal:
+  it is 1.00 on 89 of the 90 test mentions (41.6% valid) and 0.90 on one;
+  AUROC 0.487. v2's P after Platt trades precision for recall, but barely:
+
+  | keep at | kept | precision | recall |
+  | --- | --- | --- | --- |
+  | 0.3 | 72 | 44.4% | 84.2% |
+  | 0.4 | 38 | 60.5% | 60.5% |
+  | 0.5 | 8 | 87.5% | 18.4% |
+
+  At 0.2 and below it keeps 88 to 90 of the 90, and at 0.6 and above none.
+- **Cost.** A thought holds 13 mentions at p50, 34 at p95 and 64 at most. I
+  timed 40 whole thoughts drawn by md5 (candidates: 11 at p50, 28 at p90, 42 at
+  most), each thought's list in one call, container to host. The client packs a
+  call into requests of at most 64 decisions, sent in turn.
+
+  | shape | p50 | p90 | max | requests a call |
+  | --- | --- | --- | --- | --- |
+  | one binary a candidate (v2) | 0.88 s | 2.3 s | 3.2 s | 1 |
+  | six binaries a candidate (pertype) | 4.7 s | 12.6 s | 17.2 s | 1 to 4 (p50 2) |
+
+  The reference is SMD-1879's measurement of a 3,000-token thought: one
+  9-second extraction call ("Entity extraction in windows", above). Against
+  that, one binary a candidate is about a tenth of the call, and six are about
+  half at p50 and more than the call at p90.
+- **It cannot replace B0.** Of the 60 most-mentioned numeric names, v2 rejects
+  65% and pertype 5%; B0 rejects all of them.
+- **Post hoc, not in the verdict.** B1's shapes read for every type reject 40%
+  of the invalid mentions and 40% of the valid ones (a ticket id is a valid
+  project), balanced accuracy 0.505. No shape rule separates the code
+  identifiers either: under rubric v1 they are invalid, and under the
+  maintainer's decision below they are entities.
+- **What the self-check holds.** `--self-check` is a fork-checks step.
+  - The gate is a post-filter with no other path to the graph. Off, it keeps
+    every candidate with the extractor's type: today's graph. That is
+    `gate()`'s identity, held by the self-check, not a live measurement.
+  - It holds the rules and the arithmetic, each with a mutant: the bootstrap's
+    pairing and percentiles, the permutation p, the threshold's tie, the
+    pinned split, the window, each arm's reading, each grades-file rule, and
+    the refits.
+  - Among the refits, a clamped log loss let the temperature walk to its bound
+    on the extractor's column, which the first live run showed.
+
+**Rubric v2, after the result.** Not pre-registered: the maintainer asked
+whether the junk was junk, and three definitions of rubric v1 were revisited.
+`fixtures/entity-gate-grades-v2.json` regrades the same 201 mentions with two
+fresh blind graders:
+- **At the entity level:** up to three windows from different thoughts, and the
+  mention count, not the first thought alone.
+- **Roles:** a role or handle that points at one specific person counts as that
+  person (`the maintainer`, meaning the author). Generic roles do not
+  (`worker`, a process; `principal`, an object in code).
+- **Categories:** each mention gets one, of seven: named, role → person, code
+  artifact, URL or path only, number or hash, generic, not held.
+
+The graders agree on validity for 98.5% (kappa 0.96), and on the category for
+196 of 201. 64 mentions flip from invalid to valid: 59 code artifacts, 3 roles
+pointing at a person, and 2 names judged across their mentions. One flips
+back. `--grades fixtures/entity-gate-grades-v2.json` runs the whole report
+under it, and `--strict-code` reads code artifacts as junk.
+
+| rubric | valid of 201 | junk in the graph, weighted by type (of 2,420) | v2 − B1 on test (the report) | tier's 7-way labels vs B1 then the extractor's type (`--diagnose`, D5) |
+| --- | --- | --- | --- | --- |
+| v1 (the verdict's) | 81 | ~1,620 (67%) | +10.1 (−1.0 to +21.0) | 23.9% vs 33.8% |
+| v2, code artifacts junk | 85 | ~1,610 (67%) | +8.9 (−2.2 to +19.7) | 22.4% vs 35.8% |
+| v2, code artifacts count | 144 | ~690 (28%) | +10.5 (−1.4 to +22.2) | 26.4% vs 48.8% |
+
+- **The margin fails under every rubric.**
+- **The junk share is one definition:** whether a code artifact is an entity.
+  The entity level and the roles barely move it.
+- **Some URL-only junk is a type split, not garbage.** `Linear` typed
+  organization has 2 mentions, both in URLs, while the Linear the notes discuss
+  is a separate tool entity with 160 (SMD-1913's under-merging).
+- **Three windows can miss a real use:** `Siggymd`, with 34 mentions, was graded
+  URL-only from its three.
+
+**Why it fails: the labels' default decides, and the name barely moves it.** Not pre-registered.
+JevBench's easy and standard tiers are where Verdict scores 88% and 69%. There
+it decides about a short text (48–70 characters at p50; the model was trained
+on contexts under 71 tokens) whose answer the text states: "Where is my
+package?" is `track_order`. This gate asks what a name inside a long note is.
+`--diagnose` separates the causes, against rubric v2 with code artifacts
+counted, on the 192 mentions whose window holds the name (50 junk):
+
+| framing | label right (7-way) | junk precision | what it answers |
+| --- | --- | --- | --- |
+| abstract labels, the name in the question, the ~800-character window | 26.6% | 28.6% | project 176 of 192 |
+| … the name's sentence alone (about 158 characters) | 25.0% | 38.5% | project 133 |
+| … the name alone as the text | 26.6% | 1 of 1 | project 174 |
+| concrete labels with examples from outside the brain, the name alone | 33.3% | 25.0% | junk 132 |
+| … the name then its sentence | 32.8% | 29.4% | junk 126 |
+| the extractor's own type (never junk) | 47.9% | — | spread over the six |
+
+- **It barely reads the name.** The same window, asked about the entity, `021`
+  and `banana`, gets one answer for all three on 56 of 60, and the largest move
+  in any option's probability is 0.034 at p50.
+  - This is one framing: abstract labels, with the name in the question.
+  - The sample is the first 60 held mentions in fixture order: 22
+    organizations, 18 persons, 11 places, 9 projects, and no tools or topics.
+- **Length is not the cause.** The sentence alone scores the same as the
+  window.
+- **The labels' wording is its default.** Abstract labels pull everything to
+  the vaguest one, `project` ("a named piece of work"), even for the name alone.
+  Concrete labels move the default to `junk`, and its junk calls are right a
+  quarter of the time, at the base rate.
+- **A trap for the next spike.** A probe outside the harness (`--diagnose` runs
+  only the clean examples) wrote label examples of which 11 of 22 were graded
+  names. It scored 48%, equal to the extractor; with examples from outside the
+  brain, 33%. The two probes also differ in wording, so not all of that gap is
+  string matching. Draw a label's examples from outside the set it is scored
+  on.
+- **The whole graph under the first framing:** `project` for 2,268 of 2,420
+  entities, and 2.6% junk. That includes 3 of the 67 numeric names, where B0
+  catches all 67.
+
+**Our reading, which no probe measures directly:** the cause is the task, not
+the framing. A JevBench answer is written in its text, while an entity's type
+rarely is: nothing near `thought_audit` says it is a table. So the task takes
+knowledge of names, which a 151M model tuned on banking intents is unlikely to
+have. SemIf (SMD-2052) is the test of that reading.
+
+**What it settles.**
+- **Verdict v1.4 stays out of the extraction path,** as a validity gate and as a
+  typer, under every rubric and every framing tried.
+- **SMD-1935's deterministic gate ships first,** with its identifier-shape rule
+  turned into a retype (below).
+- **The next model should know names.** SemIf (SMD-2052), the same contract over
+  Qwen3.5-4B, is the one untried lever on this harness.
+- **Code artifacts are entities: the maintainer's decision (2026-09-24).**
+  Files, scripts, tables, functions, environment variables, branches and CI jobs
+  belong in this brain's graph, as tools (or as projects, for a directory of
+  work). So rubric v2 counting them is the brain's working definition, and the
+  recorded verdict stays on rubric v1, fixed before any tier call. Under it:
+  - **The junk is about 28% of the graph** (~690 of 2,420). In the graded
+    sample it is 57 of 201: 31 generic words or roles, 10 names no window
+    holds, 9 minted from URLs or paths alone, and 7 numbers or hashes.
+  - **Topics are the noisiest type** (54% junk), then organizations (36%),
+    persons (33%) and places (18%). Tools (16%) and projects (12%) are mostly
+    sound once code artifacts count.
+  - **SMD-1935's gate should retype an identifier, not reject it.** Over the
+    201 graded mentions, B1's vocabulary rule rejects 3 junk mentions
+    (`person`, `place`, `organization`) and nothing valid. Its number rule does
+    not fire here, since the sample was drawn past B0; its evidence is the 67
+    numeric names in D4. Its
+    identifier-shape rule, which bars a person or place with an identifier's
+    shape, rejects 1 junk mention (`host.containers.internal`) and 7 valid ones.
+    Five of those are code artifacts the extractor typed as a place
+    (`michaelharris/**`, `open-brain_default` and the like); the other two are
+    `hono/mcp` and `openrouter.ai`. So under this definition B1 scores 0.474
+    balanced accuracy on test, below keeping everything. On test that figure is
+    the shape rule alone, since the three vocabulary words fall in dev. The fix is to keep the
+    number and vocabulary rules and turn the shape rule into a retype, to tool.
+    The post-hoc every-type shape rule above is worse: it would reject real
+    entities of every type.
+  - **The targets are the rest, as measured:**
+    - generic words and roles (31 of the 57 junk);
+    - names no window holds (10);
+    - names minted from URLs or paths (9);
+    - numbers and hashes (7).
+
+    Some URL-only junk is one thing split over two types (`Linear` as
+    organization and as tool; SMD-1913).
+- **A free signal is untested:** the notes write code artifacts in backticks,
+  which a deterministic rule on the source text could read to type them as
+  tools rather than drop them.
+- **The confidence column stays uninformative** until something earns the place.
+
+## Which orchestration tool? The same two workflows on n8n, Activepieces and Windmill (SMD-1863)
+
+SMD-1863 asks which self-hosted workflow tool — n8n, Activepieces or Windmill —
+should own the fork's ingestion and sync (vendor auth, schedules, triggers,
+retries) instead of one hand-rolled recipe per service, and whether to adopt one
+at all. The decision is `../docs/orchestration-tool.md` (n8n); this is the
+evidence it reads. The criteria, the bar and the prior were posted on
+the ticket before any candidate ran (2026-09-25).
+
+**The setup.** `eval-orchestration.ts` runs each candidate as its own compose
+project, `ob1-orch-<tool>`: `deploy/compose.yaml` as shipped — a throwaway
+brain built from this checkout, embeddings and metadata from the host's Ollama —
+plus `orchestration/compose.<tool>.yaml`, the candidate beside it as the opt-in
+sidecar the ticket proposes, its state in a database of its own
+(`orchestration`) on the brain's Postgres server under a login role of its own
+(`orch`: no superuser, no CONNECT on `openbrain`). Everything is loopback. The
+brain gets two keys: `orch-capture` (capture scope — can add a thought, cannot
+read one) and `orch-read` (read scope). Each candidate is provisioned with no UI
+step, its credentials in its own encrypted store, and gets the same work:
+
+- **Ingestion** — every 15 minutes (and on demand): ten SMD issues from Linear's
+  GraphQL API with the Linear key the tool holds, one thought each, captured
+  through the candidate's MCP client with the capture key.
+- **MCP server** — the candidate's own MCP endpoint offers two tools an AI
+  client can call: `brain_search` (the brain's `search_thoughts`, through the
+  tool's MCP client with the read key — remember) and `linear_issue` (a live
+  Linear lookup with the tool's Linear key — act).
+
+```sh
+cd evals
+bun eval-orchestration.ts --up n8n        # or activepieces | windmill
+bun eval-orchestration.ts --verify n8n [--json] [--wait-schedule]
+bun eval-orchestration.ts --down n8n      # removes the project and its volumes
+```
+
+It needs `LINEAR_API_KEY` on the usual search path and the host's Ollama; it
+writes `orchestration/.env` (gitignored) once and reuses it. compose runs with
+that file and an allowlisted environment — never the driver's, which
+`loadEnv()` fills from `deploy/.env`, so a dogfood stack's port and keys cannot
+reach the throwaway brain; a knob for one run (`ORCH_AP_PIECES_SYNC_MODE`) goes
+in `orchestration/.env`. `--up` onto an existing project skips what already
+exists: after editing a workflow file, `--down` first.
+
+**The result — n8n and Activepieces pass the POC; Windmill passes C1, C1s, C3
+and C4 but not C2**, because the criteria posted before the run ask for the capture to
+go through the tool's own MCP client and Windmill has none outside an AI-agent
+step (below). One clean cycle each, 2026-09-25, on the dogfood Mac: the podman
+VM, 8 vCPU, 14.9 GiB; the host's Ollama serving nothing else during the runs
+recorded:
+
+| candidate | C1: run 1 / run 2 (answered by the tool, rows added) | C1s: the schedule fired | C2: what carried the capture | C3: the endpoint's tools | C3: no key / wrong key |
+| --- | --- | --- | --- | --- | --- |
+| n8n 2.40.6 | PASS: 10, +10 (10 issues) in 23.5 s / 10, +0 | PASS: seen after 692 s | PASS: n8n's MCP Client node | `linear_issue`, `brain_search_thoughts` | PASS: 403 / 403 |
+| activepieces 0.91.3 | PASS: 10, +10 (10 issues) in 26.4 s / 10, +0 | PASS: seen after 875 s | PASS: the MCP Client piece's call-tool action | `linear_issue_jfez_e9ew2a_mcp`, `brain_search_3t8i_n1iq4r_mcp` + 42 `ap_*` | PASS: 401 / 401 |
+| windmill CE v1.817.0 | PASS: 10, +10 (10 issues) in 22.4 s / 10, +0 | PASS: seen after 811 s | FAIL: a script of ours importing the MCP SDK (Windmill has no MCP-client step) | `s-f_ob1_brain__search`, `s-f_ob1_linear__issue`, `runScriptByPath` | PASS: 401 / 401 |
+
+C1: `--verify` first deletes what `orch-capture` wrote (`delete_thought`), then
+runs the ingestion twice. Each run must report ten `capture_thought` calls
+answered in the tool's own run record (n8n's run data, Activepieces' flow run,
+Windmill's job result) — a skipped run cannot pass as a dedup's "+0" — and the
+brain must hold ten rows, ten distinct issues, after the first and none more
+after the second. That "none more" is the brain's content-fingerprint dedup, not
+per-issue idempotency: the workflows keep no cursor, and an issue edited between
+the runs lands a second thought (a real sync writes one per edit). The time is
+one run's wall clock, n=1, and is mostly the brain's own embedding and metadata
+calls to Ollama, with each tool's own start-up in front (an n8n API lookup of the run, an
+Activepieces sign-in and MCP session, a Windmill job pickup) — it does not rank
+the tools. C1s: those runs were on-demand, so `--wait-schedule` then waits (up to
+20 minutes) for a run the schedule started to succeed — without the flag the
+verifier prints C1s as not checked and does not count it — by the tool's own
+history — n8n's executions whose mode is `trigger`, Activepieces' PRODUCTION
+flow runs (`ap_test_flow`'s are TESTING), Windmill's jobs under the schedule's
+path. C2: the capture's writer is a capture-scope key and the read's the
+read key, and the capture must go through the tool's own MCP client; the column
+says what carried it. C3: the endpoint lists both tools, `brain_search` returns
+SMD thoughts, `linear_issue` returns SMD-1863 and an `updatedAt` timestamp as
+values (the request carries both as text, so an echoed error cannot pass), and a
+session with no key and one whose key differs in its last character are each
+refused with 401 or 403 (any other error counts as not refused). C4: every
+step below was an API or CLI call.
+
+Memory is `docker stats`' usage per container — the cgroup's, page cache
+included, not a resident set — read when `--verify` starts (after `--up`, and
+after any scheduled run that fired in between) and again at its end — after the
+two ingestion runs, the MCP calls and, in these runs, the schedule wait (692
+to 875 s), so the second reading includes a scheduled run and minutes of
+idling (Windmill's shared Postgres grew over it: its queue lives there). The shared Postgres column is the whole
+container: the candidate's database and the brain's own work together, with no
+brain-only baseline beside it, so it bounds what hosting the candidate costs
+the brain's server rather than isolating it. Image sizes are as podman reports
+them.
+
+| candidate | image | candidate: start → after runs | shared Postgres: start → after runs | brain server after |
+| --- | --- | --- | --- | --- |
+| n8n | `docker.io/n8nio/n8n@sha256:9c7871d5cc4fc2565bb905e4df5bf7d6a5a4bf2f4313fb99a2b3fa380f331d7c` (1103 MiB) | 575 → 361 MiB | 67 → 90 MiB | 47 MiB |
+| activepieces | `ghcr.io/activepieces/activepieces@sha256:71184b412cde4cc22fca1dd683744588e68b2d198e21ed3316806d549e31f7a6` (1217 MiB) | 1224 → 1176 MiB | 113 → 187 MiB | 45 MiB |
+| windmill | `ghcr.io/windmill-labs/windmill@sha256:8e54fce496ee000eb99489dc022aadec320c8e726ea7387c674adeea7730f86f` (3795 MiB) | 578 → 235 MiB | 188 → 664 MiB | 37 MiB |
+
+**On a busy model server.** A cycle run while another job had the host's Ollama
+swapping a 27B model in and out failed on two of the three: Windmill's script
+got an error back from `capture_thought` for one issue, and Activepieces' run
+failed at 60.7 s, consistent with the MCP SDK's 60 s default request timeout —
+its MCP Client piece's `call-tool` has no timeout property to raise it. n8n's MCP Client node has a timeout option (the workflow sets
+120 s); the verifier and the Windmill scripts now allow 120–300 s. Neither
+failure is the tool's defect, but a sidecar sharing the brain's model server
+inherits every capture's latency, and only n8n let the workflow say so.
+
+**What each needed, and what it did that the survey did not say.**
+
+- **n8n 2.40.6** — its public REST API (`/api/v1`: an OpenAPI spec of 92
+  paths ships in the image, versioned, an `X-N8N-API-KEY` header), with one
+  step outside it: a fresh instance has no owner and the public API cannot mint
+  its own key, so the adapter sets the owner up, signs in and mints a key
+  through the internal endpoints the editor uses (`/rest/owner/setup`,
+  `/rest/login`, `/rest/api-keys`) — once, with the eight scopes it calls of
+  the ~90 offered, kept in `orchestration/.env`, re-minted only when n8n answers
+  401/403 to it. Eight scopes is still most of the owner's power over
+  workflows: with `workflow:create` and `workflow:activate` a holder can publish
+  a workflow that sends any credential not pinned to a domain anywhere, and the
+  key does not expire (`expiresAt: null`), so it is a secret on a par with the
+  owner's password. n8n enforces the scopes — a call outside them (`GET /users`,
+  `DELETE /executions/{id}`) answered 403 — although n8n's docs say keys on a
+  non-Enterprise instance have full access; and a re-mint leaves the key it
+  replaced valid (both measured in the third review pass). Then `POST /credentials`
+  (into the encrypted store; n8n chooses each id, which replaces the
+  placeholder the workflow files reference), `POST /workflows`, and `POST
+  /workflows/{id}/publish` (v1's "activate", now deprecated), which registers
+  the schedule, the webhook and the MCP endpoint without a restart. The public
+  API has no "run now": its `test-runs` paths are the evaluations feature, so
+  an on-demand run is the workflow's own Webhook trigger (header auth,
+  answering when the last node finishes) and what it did is read back from
+  `GET /executions` — the same history `--wait-schedule` reads for a run whose
+  mode is `trigger`. The Linear credential carries n8n's per-credential domain
+  allowlist (`allowedHttpRequestDomains: domains`, `api.linear.app`): pinned to
+  `example.com` instead, the fetch and the lookup both failed with "Domain not
+  allowed: This credential is restricted from accessing api.linear.app"
+  (measured) — so the Linear key cannot be sent to another host by editing a
+  workflow. The three brain and inbound header credentials are not pinned (the
+  kit sets the allowlist on the Linear one only). The on-demand webhook refuses a
+  missing, a wrong and an empty key with 403 and starts no execution (measured;
+  the verifier checks refusal on the MCP endpoint only), and it shares its key
+  with the MCP endpoint — a client given that endpoint can also start an
+  ingestion. The MCP Client node is a normal workflow step
+  (Streamable HTTP, a header credential); the MCP Server Trigger exposes exactly
+  the tool nodes wired to it, behind a static header the operator chooses — so
+  an AI client connects with a URL and a header, the OB1 pattern. A toolkit's
+  tools are prefixed with the node's name (`brain_search_thoughts`). The Linear
+  node lists issues with no filter, only a limit, so the fetch is the HTTP
+  Request node with n8n's stored `linearApi` credential — the tool still holds
+  the key. n8n says of the brain's Postgres 16: "outside the supported range and
+  receives compatibility support only. Upgrade to Postgres 17 or newer." 918
+  node types ship in the image, and the POC used no community node, so nothing
+  it ran needed a package fetched at run time. (The first version of this
+  adapter used n8n's CLI — `import:credentials`, `import:workflow`, `execute`
+  with its printout parsed; the maintainer asked for the API after review pass
+  2, and the CLI had already renamed `update:workflow` to `publish:workflow`.)
+- **Activepieces 0.91.3** — REST only: the first sign-up becomes the platform
+  admin (sign-up is invitation-only after it), three app connections, each flow
+  created, `IMPORT_FLOW`ed and `LOCK_AND_PUBLISH`ed. One trigger per flow, so
+  three flows. Its container must listen on the port its `AP_FRONTEND_URL`
+  names: the worker fetches piece bundles from that URL, and on the image's
+  default port every connection's validation failed with "fetch failed". The
+  pieces are not in the image (five piece directories ship); the catalogue comes
+  from Activepieces' cloud at boot (12,765 piece versions, written to its
+  database in the background) and each piece's code from the npm registry at
+  first use. On a fresh boot the server can go on refusing a piece whose rows the
+  sync has already written — 404 `piece_metadata_not_found` for 300 s with
+  11,300 of the rows in place, until a restart rebuilt its index from the
+  database: ten of eleven fresh boots here, so the adapter waits 120 s and
+  restarts once (its `--up` line says when). Measured: with `AP_PIECES_SYNC_MODE=NONE`
+  on a fresh stack the catalogue stays empty and provisioning cannot start (every
+  piece lookup 404s for 300 s); set after provisioning, the published flows keep
+  running. The MCP endpoint takes an OAuth access token only — the project's
+  stored token is refused (401) — and a signed-in user can mint a short-lived one
+  over REST; an AI client goes through OAuth consent. Beside the two flow tools
+  (named `brain_search_<id>_mcp`, a suffix that changes with each provisioning)
+  it hands the client 42 of Activepieces' own tools — create, edit, publish and
+  delete flows, run any piece action, read and write tables — unless each is
+  listed in the project's `disabledTools`.
+- **Windmill CE 1.817.0** — REST only: the seeded superadmin
+  (`admin@windmill.dev` / `changeme`) signs in and its password is replaced,
+  telemetry is turned off in the instance settings (no environment variable
+  exists), a workspace, a folder, three secret variables, three Bun scripts
+  (their npm imports are unpinned in the source; Windmill resolves the versions
+  current at deploy into a lockfile stored with each script) and a
+  schedule. There is no Linear trigger and no MCP-client step: the scripts are
+  the connectors, each importing the MCP SDK itself. Windmill's MCP client is
+  an AI-agent flow step, where a model chooses the call; the POC's capture is a
+  fixed call, so it was not tried. Its migrations need two
+  cluster-wide roles a superuser must create first — `windmill_user` and
+  `windmill_admin WITH BYPASSRLS` — which then exist on the brain's Postgres
+  server. The worker's process isolation (`unshare`) is unavailable in an
+  unprivileged container and it runs jobs without it. The MCP token can be scoped
+  to named scripts (`mcp:scripts:f/ob1/brain_search,f/ob1/linear_issue`); the
+  endpoint then lists those two (`s-f_ob1_brain__search` — `/` to `_`, `_`
+  doubled) and `runScriptByPath`, which refused a script outside the scope
+  ("not in token scope", measured).
+
+**The licenses, from the files.** n8n: the Sustainable Use License — "You may use
+or modify the software only for your own internal business purposes or for
+non-commercial or personal use", distribution only "free of charge for
+non-commercial purposes"; `.ee.` files excluded. Activepieces: MIT outside
+`packages/ee/` and `packages/server/api/src/app/ee` — every piece, the MCP server
+and everything the POC used are outside them. Windmill: AGPLv3 for the source,
+the clients and the OpenAPI spec Apache 2.0, and the published CE image carries
+proprietary code under "a right to distribute the community edition as is but
+not to sell, resell, serve as a managed service, modify or wrap under any form
+without an explicit agreement" — the ticket's "Apache 2.0" was wrong. What the
+licenses mean for a profile OB1 ships is the ADR's to decide.
+
+**The live AI-client check (n8n).** The verifier is the MCP SDK's client; the
+ticket asked for the AI client itself. A headless Claude Code session (Opus
+5.5; Claude Code 2.1.282, the version installed that day) was given n8n's MCP
+endpoint and nothing else — `claude -p <prompt> --mcp-config <file>
+--strict-mcp-config --allowedTools
+mcp__ob1-n8n__brain_search_thoughts,mcp__ob1-n8n__linear_issue --output-format
+json`, the file a
+throwaway holding the endpoint's URL and header, so no user or project
+configuration was touched — and asked to call both tools and report. In four
+turns it listed `brain_search_thoughts` and `linear_issue`, searched the brain
+(top hit SMD-1863) and returned SMD-1863's live Linear state ("In Progress")
+and `updatedAt`. Run once, by hand; the kit does not re-run it.
+
+**What this does not measure.** Gmail: self-hosted OAuth needs the operator's own
+Google Cloud client on every candidate (n8n: "Managed OAuth2 isn't available for
+self-hosted n8n users"), so the ingestion source is Linear with an API key, and
+OAuth custody is untested. Egress: the
+overlays set each tool's documented telemetry switches, and nothing probed
+what the containers dial — the egress measurements are Activepieces' sync mode
+and n8n's credential domain pin, both above. The schedule is checked only with `--wait-schedule` (C1s: up to
+20 minutes for a schedule-started run to succeed, by the tool's own history —
+its status, not its ten captures, which C1 checks for the on-demand runs);
+a scheduled run overlapping a verify was tried (a per-minute schedule, six
+verifies, no flake — its captures dedup), and one committing between the
+reset and the count would read as a FAIL, never a PASS. Load: ten issues, one
+run at a time. Upgrades, backups and the reference multi-container shapes
+(Redis and separate workers for Activepieces, three workers for Windmill).
+
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform
 - `../docs/event-log-as-truth.md` — the decision the two gate sections above (SMD-1998, SMD-1999) opened: the event log as the source of truth, the `thoughts` row its projection (SMD-1997)
+- `../docs/orchestration-tool.md` — the decision the orchestration section above informs: n8n, as an opt-in sidecar, with the licence and egress gates (SMD-1863)
 - `../db/config.mjs` — `KNOWN_MODEL_DIMS`, so a model/width mismatch is caught

@@ -154,9 +154,11 @@ statements. It sets a 10 s lock timeout for everything it does — for the
 session, and again inside every transaction — so a held lock fails the run
 rather than freezing it and every reader behind it. 001 and 003
 take ACCESS EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if
-`OB1_TRGM_INDEX` is on and the index is absent; 023's call runs again and takes
-its lock (`OB1_BACKFILL_LIMIT` bounds it, as on a first apply; it writes nothing
-when no row is waiting); 025 re-validates its constraints over the table. 021's
+`OB1_TRGM_INDEX` is on and the index is absent; 023's and 050's backfill calls
+run again and take `thoughts` EXCLUSIVE (`OB1_BACKFILL_LIMIT` bounds each, as on
+a first apply; they write nothing when no row is waiting); 055's locks the audit
+rows it fills and then builds its partial index over `thought_audit` (SHARE,
+tens of milliseconds); 025 re-validates its constraints over the table. 021's
 evidence backfill runs as written, the acceptances out of its sight (above);
 030, reached after it in the same transaction, finds nothing of 021's to take
 back and corrects the own-key labels an earlier paste of the body left
@@ -164,8 +166,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1625 assertions: 1625 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports fifty-four (54) migrations applied, and
+`bun test-schema.ts` prints `1794 assertions: 1794 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports fifty-six (56) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -204,7 +206,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
-051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090).
+051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -221,9 +223,10 @@ The decision that `thought_audit` is the write-side source of truth and the
 `thoughts` row its projection — the write functions appending the event first
 and one projector writing the row, the audit trigger becoming the check, the
 table kept for the community's DDL — is `../docs/event-log-as-truth.md`
-(SMD-1997). Its three steps are filed (SMD-2115, SMD-2116, SMD-2117) and none
-has landed: at 053 the row is still written first and the trigger derives the
-event from it, as the paragraphs below describe.
+(SMD-1997). Its three steps are filed (SMD-2115, SMD-2116, SMD-2117) and the
+first has landed as migration 055 (below); at 055 the row is still written
+first and the trigger derives the event from it, as the paragraphs below
+describe — what 055 changes is what the event carries.
 
 Migration 046 makes `thought_audit` the log of record (SMD-1730): eight columns
 beside 008's and 010's — `actor_kind` and `trust` (who holds the key, and the
@@ -330,6 +333,83 @@ default either write fails 40001 instead, which the server retries. Same
 signature and grants, no data change; a role missing UPDATE on
 `ob1_agent_keys` now fails only a lookup that writes (a stale key, a scope
 change, a registration) rather than every known-key lookup.
+
+Migration 055 makes the capture event carry the payload (SMD-2115, step 1 of
+`../docs/event-log-as-truth.md`): a capture's `diff` carries the **content**
+and, when the writer set the row's own time (`db/ingest-records.ts` backdates
+a record), its **`created_at`**; an update's `diff` carries the key's move
+(`content_fingerprint` before/after — 018's NULL for a text another row
+holds, 023's fill, an edit's recomputation) — the three things SMD-1999
+measured a projector needs beyond 046's event, and nothing else. 046's diff
+rule, its append and 050's two stamp arms become functions the triggers call
+(`ob1_thought_diff`, `ob1_append_thought_event`, `ob1_actor_stamp`,
+`ob1_actor_stamp_kept`), one copy each for the write functions to call before
+the row exists at step 2. Rows already written: `SELECT
+backfill_thought_payloads();` fills `diff.content` (and `created_at`) on every
+capture row from before 055 — from the first content-moving update's `before`,
+else the tombstone's `previous_content`, else the live row — under
+`ob1.audit_amend = 'payload'`, the payload amendment the append-only trigger
+allows — the second it allows, the third named (a capture row's `diff.content` and `diff.created_at` where absent, with
+what the log and the row derive to, and nothing else; under 046's `'backfill'`
+an UPDATE of `diff` stays refused). The file calls it once (`OB1_BACKFILL_LIMIT`
+bounds the batch, as for 023 and 050); preflight's `audit events` counts the
+capture rows still without content and names the pass. On the dogfood brain
+every one of 632 rows derived (239 from an update, 1 from a tombstone, 392
+from the live row; 222 gained a `created_at`). The events read for a capture
+are the thought's rows written after it — since `ob1_config.audit_seq_exact_since`
+(050's `applied_at`, recorded at apply) a row is later when its `seq` is
+larger and rows order by `seq`, the identity being exact insertion order; before
+it a row is later when `(created_at, seq)` is larger and rows order so, the
+pre-050 `seq` being heap order — and no further than the first later tombstone
+or capture: an id `ingest-records.ts` re-uses after a delete has a second
+incarnation whose edits are not the first capture's, and a prior incarnation's
+rows are not the second's. `created_at` is the transaction's start, so an edit
+from an older transaction can be stamped before the capture it follows; the
+boundary is what tells it from a prior incarnation's row. A thought deleted
+while the pass runs makes the gate refuse that row; the fill runs in batches of
+1,000, catches the refusal, sets the row aside as `skipped` and runs the batch
+again (a refusal that sets nothing aside is raised after five), and the next
+pass fills it from the tombstone. A capture row whose `diff` is no object is no
+candidate and is not counted as waiting; run one pass at a time.
+Additive, no signature moves, no return changes, no row written differently.
+What a reader sees change: `thought_changes` lists `content_fingerprint` in
+`changed` when a text moves; and two passes that wrote no audit row before
+write one per row they key, since a key's move is an event — 023's
+`backfill_content_fingerprints()` and `reembed.ts`'s edit of a legacy twin.
+
+Migration 056 gates the entity graph's names (SMD-1935). `entity_type_gate(name,
+type)` is the rule: a name that normalises to digits, dots, colons and spaces (a
+migration number, a port, an address, a CIDR) or to the type vocabulary itself
+(`person`, `tools`, `entity`) is refused, and a `person` or `place` with an
+identifier's shape is retyped — a ticket id to `project`; a URL, package, path
+or host:port to `tool`; and for a place only (a person's handle takes these), a
+host, domain, file, snake_case name or glob to `tool` — since code artifacts are
+entities and refusing them dropped real ones (SMD-1937's measurement).
+`record_thought_entities` applies it to every extraction and returns
+`refused_entities` and `retyped_entities`, one per answered (type, name); a
+relation naming a refused entity is dropped and counted as any unlisted one is.
+A `source:` pass states its names on the source's authority and is not gated, so
+a numeric name a source states (a Linear label `2024`) can remain.
+`apply_entity_type_gate()` applies the rule to the rows written before it, each
+entity judged on its name, leaving any a structured pass names or a human
+curated (a name merged into it; its own name, answered again, lands on an entity
+of the new type, since the writer's redirect is per type) — a refused entity's
+edges, mentions and row deleted; a retyped one merged by `merge_entities`' steps
+into the entity of its new type the writer would resolve it to, or moved when
+there is none — and the file runs it once, keeping the first run's counts in
+`ob1_config` under `entity_name_gate_056` (`SELECT value FROM ob1_config WHERE
+key = 'entity_name_gate_056'`): on the dogfood brain at 053, 116 refused, 8
+moved and 4 merged of 3,384. Idempotent; no ACL. The writer's `merged_from`
+redirect is spelled `@>` now, which 016's GIN index serves. A writer call
+already running 053's body when the file commits writes by 053's rule: stop the
+extraction workers for the upgrade, or run `SELECT apply_entity_type_gate()`
+once they have finished (and again after a source stops stating a name the rule
+refuses), as the role that migrated — a `--grant` role lacks UPDATE on the
+mention tables (SMD-2216). Such a run's counts are its result; `ob1_config`
+keeps only the file's. `server-portable/entity-gate.ts` is its JavaScript twin,
+for the capture-time `people` facet (`metadata.ts`), which never reaches the
+function and keeps only the names the rule keeps as a person; test-schema [52]
+holds the two to one answer.
 
 ## What changed relative to the guide
 
@@ -1039,6 +1119,8 @@ bun graph-centrality.ts --url … "Open Brain" --no-edges        # the control: 
 bun graph-centrality.ts --url … --types project,tool --json    # a typed subgraph, as data
 bun graph-centrality.ts --url … "Open Brain" --status open     # as the live tickets build it: no Done or Canceled evidence
 bun graph-centrality.ts --url … --decay-done                   # a settled ticket weighs 0.25 in every count
+bun graph-centrality.ts --url … --status open --startable      # what you could start now: no ticket with an open blocker
+bun graph-centrality.ts --url … --status open --decay-blocked  # a blocked ticket sinks to 0.25 instead, naming its blockers where listed
 ```
 
 The subject resolves by 016's own rule, one rung at a time — exact
@@ -1062,10 +1144,11 @@ recency: the same rows give the same order every run.
 with its own numbers: edges are unweighted (SMD-1925 — on real runs every edge
 carries confidence 1.00, so support is an edge's only weight); entity typing is
 noisy (SMD-1935 — names that are only digits, dots, colons and spaces are out
-of scope by default, `--keep-numeric` admits them, `--types` narrows further,
-and the scope IS the graph: an entity outside it is in no list and no count,
-the subject the one exception, so `--types tool "Open Brain"` is the tools
-around a project); hubs and clusters inflate each other; ticket status is read
+of scope by default — a brain from before 056 holds them, and so can a name a
+structured source states or an entity a human curated — `--keep-numeric` admits
+them, `--types` narrows further, and the scope IS the graph: an entity outside
+it is in no list and no count, the subject the one exception, so `--types tool
+"Open Brain"` is the tools around a project); hubs and clusters inflate each other; ticket status is read
 from synced metadata and by default not acted on (below); and only extracted
 thoughts are in the graph, which the coverage line counts.
 
@@ -1099,12 +1182,58 @@ thoughts carry a status, how many are settled, the latest `linear_updated_at`
 (the status is as fresh as the last sync pass), and under a filter how many
 thoughts weighed in. `LIFECYCLE_CTE` is the one place the status comes from;
 when SMD-2074 folds `thought_audit`'s transitions into a node-state
-projection, that CTE reads it and nothing downstream changes. Exit 0 when ranked, 1 when no
+projection, that CTE reads it and nothing downstream changes.
+
+**Startability** (SMD-2061). The lifecycle says a ticket is open, not that it
+can be started. Migration 053 (SMD-1867) stores the board's relations as `link`
+facets on the row holding a ticket's identity, `blocks` on the blocker and
+`blocked_by` on the blocked, and `--startable` reads both directions (an edge
+stated on one side only still counts). It multiplies a second factor into the
+same weight: an **unsettled** thought whose ticket has an **open blocker**
+weighs 0. Unsettled, because Linear keeps a relation after a ticket completes: a
+Done ticket whose blocker is still open is settled, not blocked, and weighs what
+its lifecycle says. A blocker is open unless its own lifecycle, resolved through
+`source_thought()` and read by the ticket-head rule above, is completed or
+canceled, so a settled blocker is not a blocker. A blocker the brain does not
+hold, or one with no status_type this tool knows, still blocks, and the output
+counts those. A row derived from a ticket takes its ticket's blockers as it
+takes its status. Only an active link counts (053 closes a relation the source
+dropped), and only `blocks` / `blocked_by`: `child_of` makes nobody a blocker. A
+thought whose ticket no dependency names counts as unblocked. The dependency
+caveat line (`coverage.dependencies` in the JSON) gives the active dependency
+facets and when the latest was written or closed, how many thoughts belong to a
+ticket a dependency names on either side, how many the flag held back in the run
+(took from a weight above 0 to 0), and how many of the held thoughts' blockers
+are unsettled only for want of a known status. The edges are as current as
+board-sync's last passes over both tickets of a relation: it is read from either
+side, so one removed on the board blocks until both are re-read. The flag
+composes with `--status` and `--decay-done` (the weights multiply). Without it
+(or `--decay-blocked`, below) the dependency read is not in the SQL, so every
+other mode renders byte for byte what it did (the JSON's `options` carries two
+more keys, `startable` and `decayBlocked`, both false) and a brain without 053
+runs them. With either, a brain without 053 is exit 2.
+`dependencySql` is the seam SMD-2074's node-state projection replaces.
+
+**Blocked decay** (SMD-2181). `--startable` is a filter, so a blocked hub
+vanishes rather than sinks. `--decay-blocked` reads the same dependencies by the
+same rules and weighs a held thought `BLOCKED_WEIGHT` (0.25, pre-registered, one
+weight) times its lifecycle weight instead of 0. It stays in the ranking, and
+where it is listed it names its ticket's open blockers in a `blocked by` column
+(`blockers` in the JSON rows; a Linear key bare, another system's as
+`system:key`); the dependency line counts every down-weighted thought in the
+run, listed or not. The filter and the decay are two answers to one question, so
+the two flags are refused together, as `--decay-done` is beside `--status`. The
+decay composes with `--status` and `--decay-done` by multiplying, though the two
+decays never meet on one thought: a blocked thought is unsettled and
+`DONE_WEIGHT` weighs only settled ones. Degree counts neighbours, not evidence,
+and is unchanged by it. The JSON's `options` gains `decayBlocked: false`.
+
+Exit 0 when ranked, 1 when no
 entity resolves (a near-miss whose only guesses the numeric rule hid is still
 no entity: exit 1, and the line counts the hidden guesses), 3 when the subject
 IS an entity — by id, name, alias or merged-in name — that the numeric rule
 excluded (`--keep-numeric` would rank it), 2 for a usage error, a brain
-without 016 or a query that failed — never 1 for a failure or an exclusion. `test-schema.ts` [44] runs the
+without 016 (or, under `--startable` or `--decay-blocked`, without 053) or a query that failed — never 1 for a failure or an exclusion. `test-schema.ts` [44] runs the
 script's own SQL under PGlite over a graph whose every count is known by
 construction, and its edges-on and edges-off orders differ at every position.
 
@@ -1639,7 +1768,7 @@ bun ingest-records.ts --url postgres://… \
 bun reembed.ts --url postgres://…
 ```
 
-`ingest-records.ts` reads five sources, each a record becoming one thought row
+`ingest-records.ts` reads six sources, each a record becoming one thought row
 with a deterministic id and a `metadata.source` label (SMD-1806 rule 5 — an
 agent-written capture is one source among several):
 
@@ -1650,6 +1779,7 @@ agent-written capture is one source among several):
 | `linear` | a corpus dump built by `evals/build-linear-corpus.ts` — each record's `issue`, through the Linear adapter: the row the board sync writes (SMD-1958) | `--linear <dump.json>` and `--allow linear:corpus` |
 | `memory` | the `*.md` memory files (`MEMORY.md`, the index, excluded) | `--memory-dir <path>` or `OB1_MEMORY_DIR` |
 | `markdown` | a Markdown / Obsidian vault, through the Markdown adapter | `--markdown <root>` or `OB1_MARKDOWN_DIR`, and `--allow <root>` |
+| `items` | ingestion-contract items from a file, one JSON object per line, emitted by a parser in any language — the import recipes' seam (SMD-2136); each row labelled with the item's own system | `--items <file.jsonl>` (`-` reads stdin) and `--allow <scope>`; `--source items` takes the file alone |
 
 `--source all` (the default) ingests every source it has an input for and says on
 stderr which it skipped; `--source <one>` restricts it; `--dry-run` counts per
@@ -1718,11 +1848,91 @@ own identity, canonical, text, links and facets, written after the parent
 under its scope and watermark with `derived_from` the row that holds the
 parent's identity, whichever writer's it is.
 
-**The allowlist (SMD-1813).** The two adapter sources are external content —
+**Items from a file (SMD-2136).** The third adapter is not a map but a seam:
+`ingest-items.ts` reads a file of items already mapped — one JSON object per
+line, the keys `Ingested` names (`identity {system, key}`, `scope`,
+`canonical {form, mediaType}`, `text`, `links`, `mentions`, `facets`, and
+optionally `createdAt` and `watermark {key, value, asOf?}`; `null` for either
+is absent, what a Python emitter writes for `None`) — so a parser in
+any language emits the contract and the pipeline writes it: no database client
+in the recipe, no rewrite under `db/` (SMD-2126 routes four import recipes
+here, three of them Python). The row is labelled with the item's own system
+(`metadata.source` — a `chatgpt` row is `chatgpt`'s, not `items`'), lands on
+the deterministic id for `(system, key)`, and gets everything an adapter's
+record gets: the canonical byte for byte (the round trip holds by construction
+— the canonical IS the line's `form`), the links as a set, the mentions under
+`source:<system>`, the merge, the watermark, the vector left for `reembed.ts`.
+Each line passes the contract's own rules — `SYSTEM_RE`, and not one of the
+pipeline's own six sources (`fork`, `commit`, `linear`, `memory`, `markdown`,
+`items`: a file's row on the board sync's id for a ticket would overwrite the
+sync's row with no `held` to say so); `IDENTITY_MAX`; the six relations; the
+six entity types; `normaliseLinks` / `normaliseMentions` — and what no column
+holds: a byte that is not UTF-8 (the file is read as bytes and each line
+decoded strictly, never repaired to U+FFFD; a UTF-16 file is named as such,
+with or without its byte-order mark), a NUL or a lone surrogate
+anywhere in the line, an object or array at level 64 or deeper (the line's
+object is level 0, its `facets` level 1), a `createdAt` or `asOf` that is not
+an instant a `timestamptz` cast accepts unrounded (February the 30th is
+refused, not rolled to March as `Date.parse` would; year 0 and an offset past
+`+15:59`, which PostgreSQL has no room for, are refused; a fraction stops at
+six digits, the microsecond the column holds). Lengths count characters as
+the column does — a key or a link target within 512, a mention name within
+200. And what the pipeline's own knobs
+could not act on: a `scope` with a `/` (`--allow` reads an entry with one as
+a path) or a `,` (its separator) — spell a scope `chatgpt:export` — or with
+surrounding whitespace, a `key` with surrounding whitespace (a link's target
+is trimmed, so the row could never be linked). A malformed line
+refuses the **whole file** with its line number and the field, exit 2, before
+any write — a file half written is one the emitter cannot re-run cleanly, a
+file refused is fixed and run again — and two lines of one identity are refused
+together, since they would land on one row. `derived` is not taken from a
+file: a part that is a thought of its own is a line of its own. A `watermark`'s
+`value` is any string that sorts as it orders (the values compare as text; an
+ISO-8601 instant in UTC is the usual). Two items whose `text` is byte-identical
+are one row — the pipeline's rule for every source — and the run names the
+dropped item and the one that holds its text on stderr, since an emitter
+cannot see which of its lines fell; an item `skipped` (a row of another run
+holds its text), `stale` (its `watermark` is judged as every record's is —
+the row's value newer, or the same and written after `asOf`) or `held`
+(another thought is this identity) is named the same way. A facet under
+`actor_kind` or `actor_name` is refused — those are 050's trigger's, stamped
+from the ingester's envelope — and a `facets.source` is overwritten with the
+system. A facet integer at or past 2^53, or a magnitude JSON cannot hold, is
+refused rather than stored as its neighbour or as `null`: write it as a
+string (a Python emitter's `json.dumps` writes a snowflake id exactly;
+`JSON.parse` does not read it so). The emitter an
+import recipe copies, its own parser kept (`conv.created_at` is an ISO-8601
+string with an offset, or `None` — `json.dumps` refuses a `datetime`;
+`conv.raw` is the conversation as the export holds it, and the form is its
+JSON text, a string):
+
+```python
+import json, sys
+for conv in parse(sys.argv[1]):  # the recipe's own parser, unchanged
+    print(json.dumps({"identity": {"system": "chatgpt", "key": conv.id}, "scope": "chatgpt:export",
+                      "canonical": {"form": json.dumps(conv.raw, ensure_ascii=False), "mediaType": "application/json"}, "text": conv.summary,
+                      "links": [], "mentions": [{"name": t, "type": "topic"} for t in conv.tags],
+                      "facets": {"title": conv.title}, "createdAt": conv.created_at}))
+```
+
+```bash
+python3 import-chatgpt.py export.zip > items.jsonl
+bun ingest-records.ts --url postgres://… --source items --items items.jsonl --allow chatgpt:export --dry-run  # counts; a bad line is refused here
+# or straight from the emitter, no file: python3 import-chatgpt.py export.zip | bun ingest-records.ts --url … --source items --items - --allow chatgpt:export
+bun ingest-records.ts --url postgres://… --source items --items items.jsonl --allow chatgpt:export            # the rows
+bun reembed.ts --url postgres://…                                                                              # the vectors
+```
+
+`bun ingest-items.ts --self-check` runs the rules over a good line and every
+malformed kind, naming the line and field each is refused on; `test-live.ts`
+[19] drives the flag end to end through the CLI against a real server.
+
+**The allowlist (SMD-1813).** The adapter sources — `linear`, `markdown`, `items` — are external content —
 stored un-isolated, embedded, sent to a model provider — and are ingested only
 for a **scope** the operator cleared: `--allow <scope,scope>` or
 `OB1_INGEST_ALLOW`, an exact match on the scope each record names (the corpus:
-`linear:corpus`; a vault: its resolved root path), never a prefix and never "the
+`linear:corpus`; a vault: its resolved root path; an item: the `scope` its
+emitter wrote, an export or a workspace), never a prefix and never "the
 whole workspace". The default is nothing; a record refused is counted per source
 and the refusal names the knob that clears it. The fork's own records (`fork`,
 `commit`, `memory`) are not external and are not gated.
@@ -2056,8 +2266,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1625 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 703 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1794 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 728 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

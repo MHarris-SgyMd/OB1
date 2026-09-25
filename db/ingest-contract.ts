@@ -183,7 +183,8 @@ export function normaliseMentions(mentions: readonly Mention[]): Mention[] {
   const out: Mention[] = [];
   for (const m of mentions) {
     const name = m.name.trim();
-    if (!name || name.length > 200 || !ENTITY_TYPES.includes(m.type)) continue;
+    // Characters, as the column counts them — `name.length` is UTF-16 code units, and 200 emoji would be dropped as 400 (SMD-2136, third review pass).
+    if (!name || [...name].length > 200 || !ENTITY_TYPES.includes(m.type)) continue;
     const k = `${m.type}\u0000${name.toLowerCase()}`;
     if (seen.has(k)) continue;
     seen.add(k);

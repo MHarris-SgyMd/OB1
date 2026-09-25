@@ -37,7 +37,8 @@ delete process.env.OB1_CAPTURE_KEY;
 
 const {
   stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, provenanceOf,
-  scanForSecrets, scanSummary, SECRET_PATTERNS, redactSecrets, redactEpisode, cleanEpisode, secretMode, SECRET_MODES, redactionMarker, describeRedactions, parseRpcBody, postCapture, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX,
+  scanForSecrets, scanSummary, SECRET_PATTERNS, redactSecrets, redactEpisode, cleanEpisode, secretMode, SECRET_MODES, redactionMarker, describeRedactions, parseRpcBody, postCapture, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX, verdictOf,
+  loadConfig, modelSummary, egressRefusalForModel, modelStatusLine, assistantExcerpt,
 } = await import(SCRIPT);
 
 let passed = 0, failed = 0;
@@ -75,6 +76,10 @@ const runHook = (input, env = {}, args = [], raw = false) => spawnScript(args, {
 //   [[slow]]             the answer takes 2.5 s — a synchronous post would bust the SessionEnd budget
 const received = [];
 let refusedOnce = new Set();
+// The machine-readable verdict the real server carries in structuredContent
+// (SMD-1978); a test flips it off to prove a prose-only server is handled
+// identically (the fallback path).
+let scOn = true;
 const READ = ["fetch", "list_supersession_proposals", "list_thoughts", "search", "search_thoughts", "search_thoughts_keyword", "thought_changes", "thought_stats"]; // main's read surface as of SMD-1296; the capture rule does not depend on its length
 const fake = Bun.serve({
   port: 0,
@@ -101,30 +106,32 @@ const fake = Bun.serve({
       if (!surface.includes(name)) return sse({ result: { isError: true, content: [{ type: "text", text: `MCP error -32602: Tool ${name} not found` }] } });
       const n = received.push({ key, args }); // the id is the post's ordinal at the moment it ARRIVES, so two posts in flight at once never share one (SMD-2035's suite)
       const content = String(args.content);
+      // A refusal with its prose AND (when scOn) its machine-readable verdict, as the real server answers since SMD-1978.
+      const err = (text, sc) => sse({ result: { isError: true, content: [{ type: "text", text }], ...(scOn && sc ? { structuredContent: sc } : {}) } });
       if (/\[\[refuse-derived\]\]/.test(content) && args.derived_from && !refusedOnce.has(content)) {
         refusedOnce.add(content);
-        return sse({ result: { isError: true, content: [{ type: "text", text: `Refused: derived_from[0] names no thought. Each entry must be an existing thought id (the ID: line of a search result).` }] } });
+        return err(`Refused: derived_from[0] names no thought. Each entry must be an existing thought id (the ID: line of a search result).`, { code: "DERIVED_FROM_MISSING", retryable: false, positions: [0] });
       }
       if (/\[\[refuse-derived-old\]\]/.test(content) && args.derived_from && !refusedOnce.has(content)) {
-        refusedOnce.add(content); // a server from before this pass names the whole list
-        return sse({ result: { isError: true, content: [{ type: "text", text: "Refused: a `derived_from` id names no thought — (in [\"…\"]). Each must be an existing thought id (the ID: line of a search result)." }] } });
+        refusedOnce.add(content); // names no position — the code with no positions, as a capture key's refusal is (existence-oracle rule)
+        return err("Refused: a `derived_from` id names no thought — (in [\"…\"]). Each must be an existing thought id (the ID: line of a search result).", { code: "DERIVED_FROM_MISSING", retryable: false });
       }
       if (/\[\[refuse-supersedes\]\]/.test(content) && args.supersedes) {
-        return sse({ result: { isError: true, content: [{ type: "text", text: "Refused: no thought with the id given as supersedes. Pass the id of an existing thought — the ID: line of a search result." }] } });
+        return err("Refused: no thought with the id given as supersedes. Pass the id of an existing thought — the ID: line of a search result.", { code: "REFUSED_SUPERSEDES_UNKNOWN", retryable: false });
       }
-      if (/\[\[store-down\]\]/.test(content)) return sse({ result: { isError: true, content: [{ type: "text", text: "Error: Failed to connect" }] } });
-      if (/\[\[store-401\]\]/.test(content)) return sse({ result: { isError: true, content: [{ type: "text", text: "Error: PostgREST answered 401 Unauthorized: JWT expired" }] } });
+      if (/\[\[store-down\]\]/.test(content)) return err("Error: Failed to connect", { code: "STORE_UNAVAILABLE", retryable: true });
+      if (/\[\[store-401\]\]/.test(content)) return err("Error: PostgREST answered 401 Unauthorized: JWT expired", { code: "STORE_UNAVAILABLE", retryable: true });
       if (/\[\[state-moves\]\]/.test(content)) writeFileSync(join(STATE, "s-raced.json"), JSON.stringify({ thought_id: uuid(82), fingerprint: "sib", captured_at: new Date().toISOString(), summary_at: new Date().toISOString() }));
-      if (/\[\[grant-missing\]\]/.test(content) && args.supersedes) return sse({ result: { isError: true, content: [{ type: "text", text: "Error: this key's `supersedes` could not be checked against the target's capture record (permission denied for table thought_audit) — the server role needs SELECT on thought_audit: cd db && bun migrate.ts --grant <role> --url $DATABASE_URL." }] } });
-      if (/\[\[registry-away\]\]/.test(content) && args.supersedes) return sse({ result: { isError: true, content: [{ type: "text", text: "Error: this key's `supersedes` could not be attributed while the agent registry is unavailable — retry when resolve_agent answers." }] } });
-      if (/\[\[refuse-hard\]\]/.test(content)) return sse({ result: { isError: true, content: [{ type: "text", text: "Refused: the content is not a thought this brain will hold." }] } });
-      if (/\[\[fn-missing\]\]/.test(content)) return sse({ result: { isError: true, content: [{ type: "text", text: "Error: function upsert_thought(text, jsonb, vector) not found; a function must be defined before it is called" }] } });
+      if (/\[\[grant-missing\]\]/.test(content) && args.supersedes) return err("Error: this key's `supersedes` could not be checked against the target's capture record (permission denied for table thought_audit) — the server role needs SELECT on thought_audit: cd db && bun migrate.ts --grant <role> --url $DATABASE_URL.", { code: "SUPERSEDES_UNJUDGED", retryable: true });
+      if (/\[\[registry-away\]\]/.test(content) && args.supersedes) return err("Error: this key's `supersedes` could not be attributed while the agent registry is unavailable — retry when resolve_agent answers.", { code: "SUPERSEDES_UNJUDGED", retryable: true });
+      if (/\[\[refuse-hard\]\]/.test(content)) return err("Refused: the content is not a thought this brain will hold."); // a Refused the server did not code: the hook falls back to the prose rule
+      if (/\[\[fn-missing\]\]/.test(content)) return err("Error: function upsert_thought(text, jsonb, vector) not found; a function must be defined before it is called", { code: "STORE_UNAVAILABLE", retryable: true });
       const at = /\[\[refuse-derived-at:(\d+)\]\]/.exec(content);
       if (at && args.derived_from && !refusedOnce.has(content)) {
         refusedOnce.add(content);
-        return sse({ result: { isError: true, content: [{ type: "text", text: `Refused: derived_from[${at[1]}] names no thought. Each entry must be an existing thought id (the ID: line of a search result).` }] } });
+        return err(`Refused: derived_from[${at[1]}] names no thought. Each entry must be an existing thought id (the ID: line of a search result).`, { code: "DERIVED_FROM_MISSING", retryable: false, positions: [Number(at[1])] });
       }
-      if (/\[\[slow-down\]\]/.test(content)) { await sleep(2500); return sse({ result: { isError: true, content: [{ type: "text", text: "Error: Failed to connect" }] } }); }
+      if (/\[\[slow-down\]\]/.test(content)) { await sleep(2500); return err("Error: Failed to connect", { code: "STORE_UNAVAILABLE", retryable: true }); }
       if (/\[\[slow\]\]/.test(content)) await sleep(2500);
       const id = uuid(1000 + n);
       if (/\[\[embedding-failed\]\]/.test(content)) return sse({ result: { isError: true, content: [{ type: "text", text: `Thought saved (id ${id}) but its embedding failed to attach: stub. It will NOT appear in semantic search until re-captured.` }] } });
@@ -1793,19 +1800,45 @@ console.log("\n[7] As a hook: JSON on stdin, exit codes, and what reaches the en
   assert(n.code === 1 && /not the hook's JSON/.test(n.err), "malformed stdin: exit 1");
   const hb = await runHook({ session_id: "s-h", transcript_path: CLAUDE_T, hook_event_name: "SessionEnd" }, {}, ["--harness", "Codex"]);
   assert(hb.code === 1 && /--harness takes claude-code or codex/.test(hb.err), "a --harness that is neither is refused with usage and exit 1 — never 2, which would block a Stop (seventh review pass)");
-  // The fake server's sentences are the real server's: the hook tells a refusal from an error and a position from a list by the server's PROSE, so the shapes it reads must be the ones index.ts writes (tenth review pass: nothing linked the two).
+  // The hook keys on the server's machine-readable verdict, not its prose
+  // (SMD-1978): verdictOf reads structuredContent, and for a server from before
+  // it derives the SAME verdict from the prose — so a reworded sentence in
+  // index.ts changes no hook behaviour, and the source-text tooth that pinned
+  // the exact prose (tenth review pass) is retired.
   {
-    const serverSrc = readFileSync(join(HERE, "..", "..", "server-portable", "index.ts"), "utf8").replace(/\\`/g, "`"); // the sentences sit in template literals, their backticks escaped
-    for (const sentence of [
-      "Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself",
-      "Refused: no thought with the id given as supersedes",
-      "this key's `supersedes` could not be checked against the target's capture record",
-      "this key's `supersedes` could not be attributed while the agent registry is unavailable",
-      "derived_from[${i}] (${sent[i]})",
-      " no thought. Each entry must be an existing thought id (the ID: line of a search result).", // the verb is built, the rest is literal
-    ]) assert(serverSrc.includes(sentence), `index.ts still says: ${sentence.slice(0, 60)}`);
-    assert(REFUSAL_RE.test("Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself") && !REFUSAL_RE.test("Error: this key's `supersedes` could not be checked against the target's capture record (x)"),
-      "…and the hook's refusal rule reads the server's Refused: and not its Error:");
+    // vc: a verdict on a structured result; vp: on a prose-only one (a server from before the code).
+    const vc = (structuredContent, text = "") => verdictOf({ isError: true, structuredContent }, text);
+    const vp = (text) => verdictOf({ isError: true }, text);
+    const vD = vc({ code: "DERIVED_FROM_MISSING", retryable: false, positions: [2] }, "any prose at all");
+    assert(vD.mend === "derived" && vD.retryable === false && vD.positions.join() === "2", "verdictOf reads DERIVED_FROM_MISSING and its positions from the code, whatever the prose");
+    const vU = vc({ code: "SUPERSEDES_UNJUDGED", retryable: true });
+    assert(vU.retryable === true && vU.on === "supersedes" && vU.mend === null, "…SUPERSEDES_UNJUDGED is a kept transient marking the pointer, mending nothing");
+    const vS = vc({ code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false });
+    assert(vS.retryable === false && vS.mend === "supersedes", "…a supersedes refusal is final and mends by dropping the pointer");
+    const vT = vc({ code: "STORE_UNAVAILABLE", retryable: true });
+    assert(vT.retryable === true && vT.mend === null && vT.on === undefined, "…STORE_UNAVAILABLE is a kept transient with nothing to mend");
+    // The prose fallback derives the same verdicts for a server from before the code.
+    assert(vp("Refused: derived_from[1] (x) names no thought").mend === "derived" && vp("Refused: derived_from[1] names no thought").positions.join() === "1", "…and from prose alone, a Refused naming a derived_from position mends by dropping it");
+    assert(vp("Error: this key's `supersedes` could not be checked against the target's capture record (x)").retryable === true && vp("Error: this key's `supersedes` could not be attributed while the agent registry is unavailable").on === "supersedes", "…an Error the pointer could not be judged is a kept transient marking the pointer");
+    assert(vp("Refused: the content is not a thought this brain will hold").retryable === false && vp("Error: Failed to connect").retryable === true, "…a Refused is final and an Error kept — the prose split the hook falls back to");
+    // A non-conforming server's malformed structuredContent is handled safely —
+    // nothing throws, and the verdict falls to the prose or drops the malformed
+    // parts (review pass 2: the guards are load-bearing but were unpinned).
+    assert(vc({ code: 42, retryable: true }, "Refused: x").retryable === false, "a non-string code is no verdict — the prose decides");
+    assert(vc({ code: "DERIVED_FROM_MISSING", positions: "0" }).positions.length === 0 && vc({ code: "DERIVED_FROM_MISSING", positions: [1.5, "2", -1, 3] }).positions.join() === "3", "a non-array or malformed positions is reduced to its valid non-negative integers");
+    assert(vc({ code: "STORE_UNAVAILABLE", retryable: "true" }).retryable === false, "a non-boolean retryable is fail-closed to final");
+    assert(vc(null, "Error: Failed to connect").retryable === true && vc([1, 2], "Refused: x").retryable === false, "a null or array structuredContent falls to the prose without throwing");
+  }
+  // A server answering with the code and one answering with prose alone reach the
+  // SAME outcome (SMD-1978): the hook keys on the verdict, not the sentence.
+  {
+    const cfg = { url: URL_, key: "cap-key" };
+    scOn = true;
+    const withCode = await postCapture(cfg, { text: "[[refuse-derived]] a summary with a code", harness: "codex", derived_from: [uuid(60)] });
+    scOn = false;
+    const withProse = await postCapture(cfg, { text: "[[refuse-derived]] a summary with prose alone", harness: "codex", derived_from: [uuid(61)] });
+    scOn = true;
+    assert(withCode.id && withProse.id && /1 source id\(s\) dropped/.test(withCode.note) && /1 source id\(s\) dropped/.test(withProse.note), "a code-carrying server and a prose-only one drop the same source and succeed alike");
   }
   const evOnHook = await runHook({ session_id: "s-ev-flag", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" }, ["--event", "PreCompact"]);
   const trOnHook = await runHook({ session_id: "s-tr-flag", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" }, { OB1_SESSION_CAPTURE_SYNC: "1" }, ["--trigger=manual"]);
@@ -1979,6 +2012,164 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const miNoStop = await run(["--print-hook", "claude-code", "--min-interval", "30"]);
   assert(miNoStop.code === 2 && /--min-interval applies to --event Stop alone/.test(miNoStop.err) && !miNoStop.out.trim(), "--min-interval with no Stop event is refused, not validated and dropped");
   assert((await run(["--print-hook", "claude-code", "--event", "PreCompact", "--min-interval", "30"])).code === 2, "…under PreCompact too");
+}
+
+console.log("\n[3d] The opt-in model summary (SMD-2014)");
+{
+  // egressRefusalForModel — "local" is DECLARED, never guessed; deny/allow/off.
+  assert(egressRefusalForModel({ egress: "deny", modelLocal: true }) === null && egressRefusalForModel({ egress: "off", modelLocal: false }) === null && egressRefusalForModel({ egress: "allow", modelLocal: false }) === null,
+    "egress permits a declared-local endpoint under deny, and any endpoint under allow or off");
+  assert(/not declared local/.test(egressRefusalForModel({ egress: "deny", modelLocal: false }) ?? ""), "…and refuses a non-local endpoint under deny (the default), the model URL never guessed local from its address");
+
+  // loadConfig reads the model knobs from the environment (the config file's
+  // path is frozen at import, so these drive the env): withEnv sets the vars,
+  // runs loadConfig, and restores them whatever happens.
+  const withEnv = (o, fn) => { const r = {}; for (const [k, v] of Object.entries(o)) { r[k] = process.env[k]; process.env[k] = v; } try { return fn(); } finally { for (const k of Object.keys(o)) { if (r[k] === undefined) delete process.env[k]; else process.env[k] = r[k]; } } };
+  const mc = withEnv({ OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_SESSION_CAPTURE_MODEL_URL: "http://127.0.0.1:1/v1/", OB1_SESSION_CAPTURE_MODEL: "llama3.1:8b", OB1_CHAT_LOCAL: "1", OB1_EGRESS_POLICY: "sideways" }, loadConfig);
+  assert(mc.summary === "model" && mc.modelUrl === "http://127.0.0.1:1/v1" && mc.model === "llama3.1:8b" && mc.modelLocal === true, `loadConfig reads the model knobs and strips the URL's trailing slash (${JSON.stringify({ s: mc.summary, u: mc.modelUrl, m: mc.model, l: mc.modelLocal })})`);
+  assert(mc.egress === "deny", "an unknown egress value fails closed to deny, as the server's gate does");
+  // A full endpoint URL a user pasted is trimmed to its base, and a negative
+  // timeout falls to the default rather than aborting at once (review pass 2).
+  const nc = withEnv({ OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_SESSION_CAPTURE_MODEL_URL: "http://127.0.0.1:1/v1/chat/completions/", OB1_SESSION_CAPTURE_MODEL: "m", OB1_SESSION_CAPTURE_MODEL_TIMEOUT: "-5" }, loadConfig);
+  assert(nc.modelUrl === "http://127.0.0.1:1/v1" && nc.modelTimeout === undefined, `a full /chat/completions URL is trimmed to its base and a negative timeout falls to the default (${nc.modelUrl}, ${nc.modelTimeout})`);
+  const bigT = withEnv({ OB1_SESSION_CAPTURE_MODEL_TIMEOUT: "999999999999" }, loadConfig);
+  assert(bigT.modelTimeout === 330_000, `a model_timeout is clamped so the model call plus the worst-case post fit one 15-min claim window, not truncated to a near-zero abort (${bigT.modelTimeout})`);
+  // The server's LLM key is never paired with a hook-overridden URL, but pairs
+  // with the server's own URL (review pass 4).
+  const pc = withEnv({ OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_SESSION_CAPTURE_MODEL_URL: "http://remote/v1", OB1_SESSION_CAPTURE_MODEL: "m", OB1_LLM_API_KEY: "server-llm-key" }, loadConfig);
+  assert(pc.modelUrl === "http://remote/v1" && pc.modelKey === undefined, `a hook-specific model_url does not borrow the server's LLM key (${pc.modelUrl}, key ${pc.modelKey})`);
+  const sc = withEnv({ OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_LLM_BASE_URL: "http://server/v1", OB1_LLM_API_KEY: "server-llm-key" }, loadConfig);
+  assert(sc.modelUrl === "http://server/v1" && sc.modelKey === "server-llm-key", "…while the server's own URL and key pair together");
+
+  // A joined excerpt over the cap keeps the recent TAIL, where decisions land,
+  // not the head; and the per-episode window keeps the most recent messages,
+  // bounding memory during the parse (review pass 2 teeth).
+  const longExc = assistantExcerpt({ assistant: ["HEAD_MARK" + "a".repeat(LIMITS.modelInputChars), "TAIL_MARK"] });
+  assert(longExc.length <= LIMITS.modelInputChars && longExc.includes("TAIL_MARK") && !longExc.includes("HEAD_MARK"), "assistantExcerpt keeps the recent tail when the joined excerpt exceeds the cap");
+  const windowed = segment([{ t: "prompt", text: "do it" }, ...Array.from({ length: LIMITS.modelMsgs + 5 }, (_, i) => ({ t: "outcome", text: `m${i}` }))]);
+  assert(windowed.episodes[0].assistant.length === LIMITS.modelMsgs && windowed.episodes[0].assistant.at(-1) === `m${LIMITS.modelMsgs + 4}` && windowed.episodes[0].assistant[0] === "m5", "the assistant window keeps the most recent LIMITS.modelMsgs messages per episode");
+  assert(/summary: model at .*llama3\.1:8b/.test(modelStatusLine(mc)) && /no model_url\/model/.test(modelStatusLine({ summary: "model" })), "the status line names a configured model, and says so when model mode is on but unconfigured");
+
+  // A fake OpenAI /chat/completions endpoint the child and modelSummary call.
+  let modelReply = "DECIDED: ship it. OPEN: nothing. CHANGED: one file.";
+  let modelSeen = null, modelCalls = 0;
+  const modelSrv = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
+    modelCalls++; modelSeen = await req.json();
+    if (typeof modelReply === "number") return new Response("upstream", { status: modelReply });
+    if (modelReply && typeof modelReply === "object") return Response.json(modelReply.json, { status: modelReply.status ?? 200 }); // an error STATUS with a valid-looking body
+    return Response.json({ choices: [{ message: { content: modelReply } }] });
+  } });
+  const MODEL_URL = `http://127.0.0.1:${modelSrv.port}`;
+  const modelCfg = (over = {}) => ({ summary: "model", modelUrl: MODEL_URL, model: "test-model", modelLocal: true, egress: "deny", ...over });
+
+  const ep = summariseTranscript(CLAUDE_T);
+  const basePayload = { chain_id: "s-model", text: renderSummary(ep), assistant: assistantExcerpt(ep) };
+  const good = await modelSummary(modelCfg(), { ...basePayload });
+  assert(good?.text === modelReply && good.model === "test-model", `modelSummary returns the model's text and the model that wrote it (${JSON.stringify(good).slice(0, 60)})`);
+  assert(modelSeen?.messages?.length === 2 && modelSeen.messages[0].role === "system" && /Derived summary:/.test(modelSeen.messages[1].content) && /assistant's messages/.test(modelSeen.messages[1].content),
+    "…the model saw a system brief and the derived summary plus the assistant's messages");
+  assert(!JSON.stringify(modelSeen).includes("tool_result") && !JSON.stringify(modelSeen).includes(uuid(1)), "…and neither tool results nor thought ids were sent to it");
+  // A runaway model output is capped to LIMITS.textChars, not stored unbounded (review pass 3 tooth).
+  modelReply = "decided and shipped. ".repeat(400);
+  assert((await modelSummary(modelCfg(), { ...basePayload }))?.text.length === LIMITS.textChars, `the model's own output is capped at LIMITS.textChars (${LIMITS.textChars})`);
+
+  // Off, unconfigured, or a payload with no excerpt → the derived text (null).
+  assert(await modelSummary({ ...modelCfg(), summary: "derived" }, { ...basePayload }) === null, "with the option off, modelSummary keeps the derived text");
+  assert(await modelSummary(modelCfg(), { chain_id: "x", text: "t" }) === null, "…as for a payload prepared before the option was on (no assistant excerpt)");
+  assert(await modelSummary(modelCfg({ modelUrl: undefined }), { ...basePayload }) === null, "…and when no model_url is configured");
+
+  // Egress refuses a non-local endpoint under deny — before the model is called.
+  const beforeEgress = modelCalls;
+  assert(await modelSummary(modelCfg({ modelLocal: false }), { ...basePayload }) === null && modelCalls === beforeEgress, "egress deny + a non-local endpoint falls back to derived BEFORE anything is sent");
+
+  // A secret in the model's OWN words, an empty answer, an HTTP error → derived.
+  modelReply = "We rotated the key to sk-ant-api03-abcdefabcdefabcdefabcdefabcdefabcdefabcdef and shipped.";
+  assert(await modelSummary(modelCfg(), { ...basePayload }) === null, "a secret in the model's output falls back to the derived summary (the scan runs on it too)");
+  modelReply = "   ";
+  assert(await modelSummary(modelCfg(), { ...basePayload }) === null, "…as does an empty model answer");
+  modelReply = 503;
+  assert(await modelSummary(modelCfg(), { ...basePayload }) === null, "…and an HTTP error from the endpoint");
+  // A 5xx whose BODY looks like a valid answer is refused by status, not trusted
+  // as the summary — the !r.ok branch pinned apart from the JSON-parse guard.
+  modelReply = { status: 500, json: { choices: [{ message: { content: "an error page shaped like an answer" } }] } };
+  assert(await modelSummary(modelCfg(), { ...basePayload }) === null, "a 5xx with a valid-looking body is refused by status, not returned as the summary");
+
+  // A model slower than the timeout falls back.
+  const slowSrv = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch() { await sleep(300); return Response.json({ choices: [{ message: { content: "too late" } }] }); } });
+  assert(await modelSummary(modelCfg({ modelUrl: `http://127.0.0.1:${slowSrv.port}`, modelTimeout: 50 }), { ...basePayload }) === null, "a model slower than the timeout falls back to derived");
+  slowSrv.stop(true);
+
+  // A running checkpoint (PreCompact/Stop) keeps its derived summary — the
+  // Checkpoint line would be lost in a rewrite; read from the event table, not
+  // the rendered text. The durable end (SessionEnd, or a closed episode with no
+  // event) is the model's.
+  modelReply = "the durable summary.";
+  const beforeCp = modelCalls;
+  assert(await modelSummary(modelCfg(), { chain_id: "s-cp", event: "PreCompact", trigger: "auto", text: renderSummary(ep), assistant: assistantExcerpt(ep) }) === null && modelCalls === beforeCp,
+    "a running checkpoint keeps its derived summary — the model is not called");
+  assert((await modelSummary(modelCfg(), { chain_id: "s-end", event: "SessionEnd", text: renderSummary(ep), assistant: assistantExcerpt(ep) }))?.text === "the durable summary.",
+    "…while the durable end-of-episode summary is written by the model");
+
+  // A secret in the assistant messages themselves — a message that is not the
+  // last outcome, so the derived text never carried it — keeps the derived
+  // summary and sends nothing to the model (first review pass).
+  const beforeLeak = modelCalls;
+  assert(await modelSummary(modelCfg(), { chain_id: "s-leak", event: "SessionEnd", text: "a clean derived summary", assistant: "earlier we set the token to sk-ant-api03-abcdefabcdefabcdefabcdefabcdefabcdefabcdef and moved on" }) === null && modelCalls === beforeLeak,
+    "a secret in the assistant messages keeps the derived summary — nothing is sent to the model");
+
+  // prepare attaches the excerpt only in model mode — off is byte-identical.
+  const onPrep = prepare({ session_id: "s-prep-on", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { summary: "model" });
+  const onPayload = JSON.parse(readFileSync(onPrep.payloadPath, "utf8"));
+  assert(typeof onPayload.assistant === "string" && onPayload.assistant.length > 0, "prepare in model mode writes the assistant excerpt onto the payload");
+  const offPrep = prepare({ session_id: "s-prep-off", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const offPayload = JSON.parse(readFileSync(offPrep.payloadPath, "utf8"));
+  assert(!("assistant" in offPayload), "…and off, the payload carries no assistant key — byte-identical to before the option existed");
+  // A running-checkpoint payload carries no excerpt at rest (review pass 2): the
+  // model will keep its derived text, so nothing durable needs the messages.
+  const cpPrep = prepare({ session_id: "s-prep-cp", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" }, { summary: "model" });
+  const cpPayload = JSON.parse(readFileSync(cpPrep.payloadPath, "utf8"));
+  assert(cpPayload.event === "PreCompact" && !("assistant" in cpPayload), "a running-checkpoint payload carries no assistant excerpt at rest — only durable payloads do");
+  unlinkSync(onPrep.payloadPath); unlinkSync(offPrep.payloadPath); unlinkSync(cpPrep.payloadPath); // not posted here: keep them out of the drain below
+
+  // End to end through the detached child, run synchronously: the posted content
+  // is the model's, metadata.summary_model rides along, source stays the harness.
+  modelReply = "back to good.";
+  received.length = 0;
+  const e2e = await runHook({ session_id: "s-model-e2e", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" },
+    { OB1_SESSION_CAPTURE_SYNC: "1", OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_SESSION_CAPTURE_MODEL_URL: MODEL_URL, OB1_SESSION_CAPTURE_MODEL: "test-model", OB1_CHAT_LOCAL: "1" });
+  assert(e2e.code === 0 && received.length === 1 && received[0].args.content === "back to good." && received[0].args.metadata?.summary_model === "test-model" && received[0].args.source === "claude-code",
+    `the child posted the model's text with metadata.summary_model, source still the harness (${JSON.stringify(received[0]?.args?.metadata)}, content ${JSON.stringify(received[0]?.args?.content)})`);
+
+  // Off, the same shape is the DERIVED summary with no metadata.
+  received.length = 0;
+  const e2eOff = await runHook({ session_id: "s-model-off", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" });
+  assert(e2eOff.code === 0 && received.length === 1 && /^Session summary/.test(received[0].args.content) && received[0].args.metadata === undefined, "with the option off, the derived summary is sent with no metadata");
+
+  // A payload a model already wrote (summary_model set, persisted by a failed
+  // post) is NOT re-modelled on a later drain — the stored model text is posted
+  // as-is, the model not called again (postPending's summary_model guard).
+  received.length = 0;
+  modelReply = "freshly re-modelled — must not appear";
+  const beforeReuse = modelCalls;
+  mkdirSync(join(STATE, "pending"), { recursive: true });
+  const reusePath = join(STATE, "pending", `${Date.now()}-9999-reuse0-s-reuse.json`);
+  writeFileSync(reusePath, JSON.stringify({ session_id: "s-reuse", chain_id: "s-reuse", episode: 1, harness: "claude-code", event: "SessionEnd", text: "already the model's text", fingerprint: "fp-reuse", derived_from: [], assistant: "some assistant text", summary_model: "test-model", prompts: 1, prepared_at: new Date().toISOString(), attempts: 0 }));
+  await postPending({ url: URL_, key: "cap-key", summary: "model", modelUrl: MODEL_URL, model: "test-model", modelLocal: true, egress: "deny" }, reusePath);
+  assert(modelCalls === beforeReuse && received.length === 1 && received[0].args.content === "already the model's text" && received[0].args.metadata?.summary_model === "test-model",
+    "a payload a model already wrote is posted as-is on a retry — the model is not called again");
+
+  // A payload that already LANDED (captured_id set, a bookkeeping retry) does not
+  // call the model — its result would be discarded, so the call would be wasted
+  // egress (review pass 4).
+  received.length = 0;
+  modelReply = "must not be called";
+  const beforeLanded = modelCalls;
+  const landedPath = join(STATE, "pending", `${Date.now()}-9998-landed0-s-landed.json`);
+  writeFileSync(landedPath, JSON.stringify({ session_id: "s-landed", chain_id: "s-landed", episode: 1, harness: "claude-code", event: "SessionEnd", text: "derived text", fingerprint: "fp-landed", derived_from: [], assistant: "some assistant text", captured_id: uuid(700), prompts: 1, prepared_at: new Date().toISOString(), attempts: 0 }));
+  await postPending({ url: URL_, key: "cap-key", summary: "model", modelUrl: MODEL_URL, model: "test-model", modelLocal: true, egress: "deny" }, landedPath);
+  assert(modelCalls === beforeLanded && received.length === 0, "a payload that already landed does not call the model again — nothing is re-posted");
+
+  modelSrv.stop(true);
 }
 
 fake.stop(true);
