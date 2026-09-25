@@ -844,7 +844,10 @@ async function main(): Promise<void> {
       let text: Uint8Array;
       if (itemsPath === "-") text = await Bun.stdin.bytes();
       else if (!existsSync(itemsPath)) { console.error(`--items: no such file: ${itemsPath}`); process.exit(2); }
-      else if (!statSync(itemsPath).isFile()) { console.error(`--items: not a file: ${itemsPath}`); process.exit(2); }
+      // A directory is refused by name (readFileSync would die with EISDIR); a
+      // pipe — `<(python3 emit.py)`, a FIFO — reads to its end as a file does
+      // (second review pass: the first pass refused everything but a plain file).
+      else if (statSync(itemsPath).isDirectory()) { console.error(`--items: a directory, not a file: ${itemsPath}`); process.exit(2); }
       else text = readFileSync(itemsPath);
       // A malformed line is a wrong input, as a missing file is: exit 2 with the
       // line and the field, the file refused WHOLE, before any write — the

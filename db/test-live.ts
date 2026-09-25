@@ -4302,6 +4302,8 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
     };
     const oneLine = (s: string) => s.trim().split("\n").join(" | ");
     const rowsOf = async () => (await sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'source' = ${sys}`)[0].c as number;
+    const asDir = cli("--items", dir, "--allow", scope, "--dry-run");
+    assert(asDir.code === 2 && /a directory, not a file/.test(asDir.err), `a directory as --items exits 2 by name (exit ${asDir.code}: ${oneLine(asDir.err).slice(0, 80)})`);
     const dry = cli("--items", goodPath, "--allow", scope, "--dry-run");
     assert(dry.code === 0 && /items: 2 record\(s\) \(zqitems 2\)/.test(dry.out) && /nothing written/.test(dry.out) && (await rowsOf()) === 0, `--items --dry-run counts the items by system and writes nothing (exit ${dry.code}: ${oneLine(dry.out)} ${oneLine(dry.err)})`);
     const first = cli("--items", goodPath, "--allow", scope);

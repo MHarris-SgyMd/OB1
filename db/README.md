@@ -1740,13 +1740,15 @@ sync's row with no `held` to say so); `IDENTITY_MAX`; the six relations; the
 six entity types; `normaliseLinks` / `normaliseMentions` — and what no column
 holds: a byte that is not UTF-8 (the file is read as bytes and each line
 decoded strictly, never repaired to U+FFFD), a NUL or a lone surrogate
-anywhere in the line, a value nested past 64 levels, a `createdAt` or `asOf`
-that is not an instant a `timestamptz` cast accepts (February the 30th is
-refused, not rolled to March as `Date.parse` would). And what the pipeline's
-own knobs could not act on: a `scope` with a `/` (`--allow` reads an entry
-with one as a path — spell a scope `chatgpt:export`) or with surrounding
-whitespace, a `key` with surrounding whitespace (a link's target is trimmed,
-so the row could never be linked). A malformed line
+anywhere in the line, a value at level 64 or deeper (the line's object is
+level 0, its `facets` level 1), a `createdAt` or `asOf` that is not an instant
+a `timestamptz` cast accepts (February the 30th is refused, not rolled to
+March as `Date.parse` would; year 0 and an offset past `+15:59`, which
+PostgreSQL has no room for, are refused). And what the pipeline's own knobs
+could not act on: a `scope` with a `/` (`--allow` reads an entry with one as
+a path) or a `,` (its separator) — spell a scope `chatgpt:export` — or with
+surrounding whitespace, a `key` with surrounding whitespace (a link's target
+is trimmed, so the row could never be linked). A malformed line
 refuses the **whole file** with its line number and the field, exit 2, before
 any write — a file half written is one the emitter cannot re-run cleanly, a
 file refused is fixed and run again — and two lines of one identity are refused
@@ -1757,13 +1759,15 @@ ISO-8601 instant in UTC is the usual). Two items whose `text` is byte-identical
 are one row — the pipeline's rule for every source — and the run names the
 dropped item and the one that holds its text on stderr, since an emitter
 cannot see which of its lines fell. The emitter an
-import recipe copies, its own parser kept (`conv.created_at` may be `None`):
+import recipe copies, its own parser kept (`conv.created_at` may be `None`;
+`conv.raw` is the conversation as the export holds it, and the form is its
+JSON text, a string):
 
 ```python
 import json, sys
 for conv in parse(sys.argv[1]):  # the recipe's own parser, unchanged
     print(json.dumps({"identity": {"system": "chatgpt", "key": conv.id}, "scope": "chatgpt:export",
-                      "canonical": {"form": conv.raw, "mediaType": "application/json"}, "text": conv.summary,
+                      "canonical": {"form": json.dumps(conv.raw, ensure_ascii=False), "mediaType": "application/json"}, "text": conv.summary,
                       "links": [], "mentions": [{"name": t, "type": "topic"} for t in conv.tags],
                       "facets": {"title": conv.title}, "createdAt": conv.created_at}))
 ```
@@ -1771,6 +1775,7 @@ for conv in parse(sys.argv[1]):  # the recipe's own parser, unchanged
 ```bash
 python3 import-chatgpt.py export.zip > items.jsonl
 bun ingest-records.ts --url postgres://… --source items --items items.jsonl --allow chatgpt:export --dry-run  # counts; a bad line is refused here
+# or straight from the emitter, no file: python3 import-chatgpt.py export.zip | bun ingest-records.ts --url … --source items --items - --allow chatgpt:export
 bun ingest-records.ts --url postgres://… --source items --items items.jsonl --allow chatgpt:export            # the rows
 bun reembed.ts --url postgres://…                                                                              # the vectors
 ```
@@ -2119,7 +2124,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1625 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 714 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+./with-postgres.sh bun test-live.ts         # 715 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
