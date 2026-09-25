@@ -288,9 +288,22 @@ else {
   // observe the un-migrated state, which is the thing this section tests.
   await dropSchema(LIVE);
 
-  const before = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  // Another tool's thoughts, in a schema of its own, does not make an
+  // un-migrated public read as "exists but does not resolve" (SMD-2062's
+  // review pass 1): the schema row still says to migrate.
+  const otherTool = new SQL({ url: LIVE, max: 1 });
+  await otherTool.unsafe("CREATE SCHEMA pf_stray; CREATE TABLE pf_stray.thoughts (id int)");
+  let before: { code: number; out: string };
+  try {
+    before = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  } finally {
+    await otherTool.unsafe("DROP SCHEMA pf_stray CASCADE");
+    await otherTool.close();
+  }
   assert(before.code === 1, "an un-migrated database exits 1");
   assert(/bun migrate\.ts/.test(before.out), "…and tells you to run the migrations");
+  assert(/✗\s+schema\s+relation "thoughts" does not exist\n\s+→ Apply the migrations: cd db && bun migrate\.ts/.test(before.out),
+         `…from the schema row too, with another schema's thoughts beside an empty public (${before.out.split("\n").find((l) => /\bschema\b/.test(l))?.trim()})`);
 
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
 
@@ -1877,7 +1890,7 @@ else {
                && /migration ledger\s+schema_migrations exists \(schema public\) but does not resolve for this role/.test(wide.out)
                && /schema version\s+could not verify: ob1_config exists \(schema public\) but does not resolve for this role/.test(wide.out),
              `…and every later direct row runs, the ledger and version rows in their own words (${row(wide.out, "chunk context")} | ${row(wide.out, "schema version")})`);
-      assert(/✗\s+schema\s+relation "thoughts" does not exist — thoughts exists \(schema public\) but does not resolve for this role\n\s+→ Put public on the server role's search_path/.test(wide.out)
+      assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(public is not on its search_path\)\n\s+→ Put public on the server role's search_path/.test(wide.out)
                && !/Apply the migrations: cd db/.test(wide.out),
              `…and the schema row names the path, not the migrate command (${row(wide.out, "schema")})`);
 
@@ -1892,6 +1905,8 @@ else {
                  && /!\s+chunk context\s+could not verify: permission denied for schema public/.test(bare.out)
                  && !/not checked — the direct connection failed before it/.test(bare.out),
                `a role with no USAGE on public: the qualified reads' rows warn, each alone, and every later row runs (${row(bare.out, "write privileges")} | ${row(bare.out, "tier")})`);
+        assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(no USAGE on schema public\)\n\s+→ GRANT USAGE ON SCHEMA public TO pf_reader;/.test(bare.out),
+               `…and the schema row names the missing USAGE, not the path (${row(bare.out, "schema")})`);
       } finally {
         if (publicUsage) await claims.unsafe("GRANT USAGE ON SCHEMA public TO PUBLIC");
       }

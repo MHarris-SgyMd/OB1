@@ -753,29 +753,34 @@ if (configFailed) {
       // that holds it here (the alias included), and for PostgREST — which has
       // no connection string of its own — say what to hand it instead.
       const urlArg = conn ? `$${conn.from}` : "<the brain's postgres:// connection string — Supabase's direct connection, not the pooler>";
-      // A thoughts table that exists but does not resolve for this role — off
-      // its search_path, or no USAGE on its schema — is not a brain to migrate
-      // (SMD-2062). pg_class answers for any role, whatever its path; over
-      // PostgREST there is no catalog to ask, and a failed probe asks nothing.
-      let elsewhere: string | null = null;
+      // public.thoughts present but not resolving for this role — no USAGE
+      // on public, or public off its search_path — is not a brain to migrate
+      // (SMD-2062). public alone, as every direct check judges it: a thoughts
+      // in some other schema is another tool's, and an un-migrated public
+      // still wants the migrations (review pass 1). pg_class answers for any
+      // role, whatever its path; over PostgREST there is no catalog to ask,
+      // and a failed probe asks nothing.
+      let offPath: { usage: boolean; role: string } | null = null;
       if (built.kind === "sql" && conn && /does not exist/i.test(msg)) {
         try {
           const { SQL } = await import("bun");
           const probe = new SQL({ url: conn.url, max: 1 });
           try {
             const [r] = (await probe`
-              SELECT string_agg(n.nspname::text, ', ' ORDER BY n.nspname) AS schemas
-                FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-               WHERE c.relname = 'thoughts' AND c.relkind IN ('r', 'p')`) as { schemas: string | null }[];
-            elsewhere = r?.schemas ?? null;
+              SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                              WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present,
+                     has_schema_privilege('public', 'USAGE') AS usage,
+                     quote_ident(current_user::text) AS role`) as { present: boolean; usage: boolean; role: string }[];
+            if (r?.present) offPath = { usage: r.usage, role: r.role };
           } finally {
             await probe.close();
           }
         } catch { /* the remedy below stays the migrate command */ }
       }
-      add("schema", "fail", elsewhere ? `${msg} — thoughts exists (schema ${elsewhere}) but does not resolve for this role` : msg,
-          elsewhere
-            ? `Put ${elsewhere} on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it — the table is there, so migrating would not make it resolve.`
+      add("schema", "fail",
+          offPath ? `${msg} — public.thoughts exists but does not resolve for this role (${offPath.usage ? "public is not on its search_path" : "no USAGE on schema public"})` : msg,
+          offPath
+            ? `${offPath.usage ? `Put public on the server role's search_path (ALTER ROLE ${offPath.role} SET search_path …, keeping any schema already on it — pgvector's among them)` : `GRANT USAGE ON SCHEMA public TO ${offPath.role};`} — the table is there, so migrating would not make it resolve.`
             : /does not exist|relation/i.test(msg)
             ? `Apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
             : "Check credentials and network reachability to the database.");
@@ -1303,12 +1308,13 @@ if (configFailed) {
         // section. Schema-qualified and gated on presence: the text form of
         // has_table_privilege RAISES for a relation it cannot see, so a table
         // absent before its migration is skipped, not failed. Its own
-        // boundary all the same (SMD-2062): a read here that raises anyway —
+        // boundary all the same (SMD-2062), as the other rows that read a
+        // table rather than the catalog have: a read here that raises anyway —
         // to_regclass('public.…') does for a role with no USAGE on public —
         // is this row's warning, not every later check's skip. The role's
-        // name is read outside it: the isolation check's remedy names it.
-        const [{ role, ident }] = (await sql`
-          SELECT current_user::text AS role, quote_ident(current_user::text) AS ident`) as { role: string; ident: string }[];
+        // name is the vector probe's, outside it: the isolation check's
+        // remedy names it too (review pass 1: it was read a second time).
+        const { role, role_ident: ident } = vec as { role: string; role_ident: string };
         const { CAPTURE_WRITES, EXTRACTION_TRIGGER_WRITES } = await import("../db/config.mjs");
         try {
           // 016's enqueue trigger fires AFTER INSERT OR UPDATE OF content on
