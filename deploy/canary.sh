@@ -38,7 +38,8 @@
 #      search_thoughts, given a thought's own text with its literals (SMD
 #      keys, dates, paths) taken out so only the vector arm can match, must
 #      return that thought first at 50% or more, for one of up to five
-#      candidates;
+#      candidates. A canary with no thought to probe is not checked, unless
+#      stable had one: then its vectors were emptied, and the smoke fails;
 #   6. with --connect, registers the Claude Code connector (user scope) under
 #      the same key.
 #

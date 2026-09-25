@@ -428,9 +428,10 @@ ALTER DATABASE openbrain RESET ob1.refresh_target;
 
 The container runs with `--init`, so Ctrl-C stops a refresh, and `tier.sh`
 then exits with the container's status (130), so a script calling it stops
-too. It publishes nothing. The client's major has to be at least the source server's, and
-`refreshToolsReady` refuses the refresh otherwise, so a Postgres bump in the
-compose files means bumping the package in `db/tier.Dockerfile` with it. On
+too. It publishes nothing. The client's major has to be at least the source
+server's, and `refreshToolsReady` refuses the refresh otherwise, so a
+Postgres bump in the compose files means bumping the package in
+`db/tier.Dockerfile` with it. On
 every PR, the deploy-stack CI job seeds one thought and one logged search, then
 runs through this script: a refresh, a `--replay`, a `--diff`, a retry over a
 copy left stamped `stable` (as a refresh that died after its restore leaves
@@ -472,9 +473,8 @@ The canary is `compose.yaml` again under the project `open-brain-canary`, with
 its own Postgres, volume, network and images, and `OB1_TIER=canary`. It needs
 Docker Compose v2 (`config --format json`, `up --wait`), which is what
 `docker compose` is and what `podman compose` runs when it is installed; the
-Python podman-compose is not enough. Its
-server listens on `127.0.0.1:8011` (`--port`), on loopback whatever
-`SERVER_BIND` says for stable. It reads the stack's env file, so the canary's
+Python podman-compose is not enough. Its server listens on `127.0.0.1:8011`
+(`--port`), on loopback whatever `SERVER_BIND` says for stable. It reads the stack's env file, so the canary's
 server gets stable's knobs and none is copied. Four things are the canary's
 own: the port, the address, the tier, and the compose profiles (none). Each
 tier has its own Postgres server, never a second database on stable's: a
@@ -519,8 +519,8 @@ stable is redeployed:
 3. It builds the server from this checkout and recreates it, so the pool
    opens on the refreshed database. A standing canary's server is stopped
    before the refresh, so nothing serves the copy mid-restore through the
-   connector, or writes rows the restore then collides with. `OB1_GIT_SHA` is the checkout's
-   `git describe`, unless the shell sets it.
+   connector, or writes rows the restore then collides with. `OB1_GIT_SHA` is
+   the checkout's `git describe`, unless the shell sets it.
 4. It smoke-tests the canary with `OB1_SMOKE_KEY`. The keyed `/health` must
    say `tier` `canary`, and `smoke.sh` must pass. Then the vector arm, which
    `smoke.sh` leaves out and a `--diff` replays only with a provider
@@ -544,6 +544,9 @@ stable is redeployed:
      index fails all five.
    - Candidates are the newest thoughts embedded with the brain's model
      whose opening, digits aside, no other thought shares.
+   - A canary with no such thought is not checked, and says so, unless stable
+     had one before the refresh: then a migration emptied the vectors, or the
+     model changed without a reembed, and the smoke fails.
 
    `--no-smoke` skips the smoke and needs no key.
 5. With `--connect` it registers the Claude Code connector
@@ -554,8 +557,9 @@ stable is redeployed:
 `down` removes the canary's containers and network. It deregisters the
 connector only when `claude` has it at user scope and at the canary's port
 (any path or `?key=` after it). The port is read from the canary's server
-container, running or stopped (after a reboot podman leaves it stopped, and Docker restarts the server but not its Postgres); once that is
-gone, pass the `--port` it was stood up with. `claude mcp get` shows the
+container, running or stopped (after a reboot podman leaves it stopped, and
+Docker restarts the server but not its Postgres); once that is gone, pass the
+`--port` it was stood up with. `claude mcp get` shows the
 entry that wins for the current directory, so a local entry by the name
 hides a user one behind it. One by that name anywhere else, or in local or
 project scope, is left alone with a line saying so, and `up --connect`
