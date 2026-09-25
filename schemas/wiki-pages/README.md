@@ -83,11 +83,7 @@ OB1's canonical `public.thoughts.id` is a `UUID`, and every id here is UUID-alig
    WHERE p.slug = 'getting-started';
    ```
 
-Or, if you keep migrations in `supabase/migrations/`, apply via the CLI:
-
-```bash
-supabase db push
-```
+Or, if your Postgres is Supabase's, paste the file into its SQL Editor and Run.
 
 ## Worked example: the regen guard end to end
 

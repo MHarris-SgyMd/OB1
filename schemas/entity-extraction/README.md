@@ -22,8 +22,8 @@ The two schemas are independent — you can install either, both, or neither. Th
 ## Prerequisites
 
 - Working Open Brain setup (see [`docs/01-getting-started.md`](../../docs/01-getting-started.md))
-- Supabase project with the `thoughts` table, `match_thoughts`, and `upsert_thought`
-- The `content_fingerprint` column on `thoughts` (from Step 2.6 of getting-started)
+- A Postgres with the `thoughts` table, `match_thoughts` and `upsert_thought` — the fork's stack, or a Supabase project
+- The `content_fingerprint` column on `thoughts` (`db/migrations/003`, applied by the core setup)
 - **Optional but recommended:** [`schemas/enhanced-thoughts/`](../enhanced-thoughts/) for the `type` / `sensitivity_tier` / `source_type` columns the extraction worker uses for gating
 
 ## Credential Tracker
@@ -113,7 +113,7 @@ Solution: The trigger fires `AFTER INSERT OR UPDATE OF content, metadata` on the
 Solution: The trigger only fires on new inserts or updates. For pre-existing thoughts, run the optional backfill query at the bottom of `schema.sql`. This safely inserts with `ON CONFLICT DO NOTHING`.
 
 **Issue: "column content_fingerprint does not exist" error in trigger**
-Solution: The trigger function reads `NEW.content_fingerprint` from the thoughts table. This column is created during Step 2.6 of the getting-started guide. If missing, apply that step first, then re-run this migration.
+Solution: The trigger function reads `NEW.content_fingerprint` from the thoughts table. This column is `db/migrations/003`'s, applied by the core setup. If missing, run the core migrations (`bun db/migrate.ts`) first, then re-run this migration.
 
 **Issue: entities table has duplicate entries**
 Solution: The `UNIQUE (entity_type, normalized_name)` constraint prevents exact duplicates. If you see near-duplicates (e.g., "JavaScript" and "javascript"), these have different canonical names but the same normalized name should be caught. The extraction worker is responsible for consistent normalization.

@@ -48,7 +48,7 @@ Every contribution lives in its own subfolder under the right category (e.g., `r
 
 - **`README.md`** — What it does, prerequisites, step-by-step setup, expected outcome, troubleshooting
 - **`metadata.json`** — Structured metadata (see template below)
-- **Your actual code** — SQL files, edge function code, frontend code, config files, whatever it takes
+- **Your actual code** — SQL files, server code, frontend code, config files, whatever it takes
 - **NO credentials, API keys, or secrets.** The automated review will reject them. Use environment variables and document what the user needs to set.
 
 ## README Standards
@@ -103,21 +103,21 @@ These patterns are required for **extensions** and strongly recommended for all 
 **Numbered commands** — When a step has 2+ commands that must run in order, number them with bold labels:
 
 ```markdown
-**1. Create the function folder:**
+**1. Apply the schema:**
 \```bash
-supabase functions new my-function
+psql "$DATABASE_URL" -f recipes/my-recipe/schema.sql
 \```
 
-**2. Download the server code:**
+**2. Run the server:**
 \```bash
-curl -o supabase/functions/my-function/index.ts https://...
+PORT=8787 SUPABASE_URL='postgres://…' MCP_ACCESS_KEYS='…' bun recipes/my-recipe/index.ts
 \```
 ```
 
-**GRANT step** — Every extension that creates tables MUST include a GRANT step. Supabase no longer auto-grants CRUD permissions to `service_role` on new projects:
+**GRANT step** — Every extension that creates tables MUST say how a role other than the tables' owner is granted them, because nothing grants the connecting role anything by default (`db/README.md`, "Grants for a capturing role"). The extensions in this tree list their tables in `ROLE_GRANTS.extensions` (`db/config.mjs`) and the file in `CONTRIB_SCHEMA_FILES` (`db/test-support.ts`), so `bun db/migrate.ts --grant <role>` issues them with the core tables (SMD-1810); a contribution that cannot do that gives the lines by hand:
 
 ```sql
-grant select, insert, update, delete on table public.your_table to service_role;
+grant select, insert, update, delete on table public.your_table to your_role;
 ```
 
 ### Extension-Specific Requirements
@@ -129,7 +129,7 @@ grant select, insert, update, delete on table public.your_table to service_role;
 - **"Next Steps"** linking to the next extension
 - **Tool audit link** — Any extension or integration that exposes MCP tools must link to the [MCP Tool Audit & Optimization Guide](docs/05-tool-audit.md) in its "Next Steps" or closing section. This helps users manage their tool surface area as they add extensions. The link is checked by the automated review.
 - **MCP tool annotations** — Any extension or integration that exposes MCP tools must mark read-only tools with `annotations: { readOnlyHint: true }` and write tools with `annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false }` unless the tool really can touch arbitrary external resources or destroy data. ChatGPT uses this metadata to distinguish read tools from write actions.
-- **Remote MCP setup** — MCP servers must be deployed as Supabase Edge Functions and connected via custom connectors (URL-based). Do NOT use local Node.js servers or `claude_desktop_config.json`. See the [extension template](extensions/_template/) for the correct pattern.
+- **Remote MCP setup** — An MCP server is one HTTP process that runs under `bun <file>` and is connected by URL — the key as `?key=` on it, or in an `x-brain-key` header. Do NOT write a stdio server, a `claude_desktop_config.json` entry, or a server a client spawns. Its tests import it: add the server to `SERVERS` in `extensions/test-auth.ts` (the comment above it lists the entry's fields; `LIVE` derives from it for a server on the shim) — the suite refuses a shim-importing server it does not start — and drive its tools in `extensions/test-tools.ts` or `test-writes.ts`. See the [extension template](extensions/_template/) and [Run a Remote MCP Server](primitives/deploy-remote-mcp/) for the pattern.
 
 **Primitives** additionally require:
 - **"Extensions That Use This"** section listing which extensions reference this primitive
@@ -194,7 +194,7 @@ Example for an extension:
 ```json
 {
   "name": "Meal Planning",
-  "description": "Recipes, weekly meal plans, and shared shopping lists with RLS and a dedicated shared MCP server.",
+  "description": "Recipes, weekly meal plans, and shared shopping lists with a dedicated shared MCP server.",
   "category": "extensions",
   "author": {
     "name": "Nate B. Jones",
@@ -379,6 +379,6 @@ Every PR is checked against these rules. All must pass before human review.
 11. **LLM clarity review** — *(Planned for v2)* Automated check that instructions are clear and complete
 12. **Scope check** — All changes are within the contribution folder(s)
 13. **Internal links** — All relative links in READMEs resolve to existing files
-14. **Remote MCP pattern** — Extensions and integrations must use remote MCP via Supabase Edge Functions. No `claude_desktop_config.json`, no local Node.js stdio servers. See the [Getting Started guide](docs/01-getting-started.md) for the correct pattern
+14. **Remote MCP pattern** — Every extension and integration server is one HTTP process that runs under `bun <file>` and is reached by URL; its tests import it (an entry in `extensions/test-auth.ts`'s `SERVERS` list — the suite refuses a server it does not start). No `claude_desktop_config.json`, no stdio servers, no `Deno` (check 11). See [Run a Remote MCP Server](primitives/deploy-remote-mcp/) for the pattern
 15. **Tool audit link** — Extensions and integrations must link to the [MCP Tool Audit & Optimization Guide](docs/05-tool-audit.md) in their README. This ensures users are aware of tool surface area management as they add capabilities
 16. **MCP tool annotations** — Read-only tools include `readOnlyHint: true`; write tools include `readOnlyHint: false`, `openWorldHint`, and `destructiveHint`

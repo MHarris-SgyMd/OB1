@@ -10,12 +10,13 @@
  * secret scan catches each shape it names and leaves the summary's own ids,
  * shas and file names alone; a hit refuses with exit 1 and writes nothing; the
  * foreground half finishes inside the SessionEnd budget and the detached half
- * posts; a second ending supersedes the first; a provenance refusal is retried
+ * posts; a second ending supersedes the first, and one prepared while the
+ * checkpoint before it is still posting steps aside for it (SMD-2035); a provenance refusal is retried
  * without provenance; a dead endpoint keeps the payload for a later run; the
  * printed hook carries no key; --check tells a capture key from a wider one.
  */
 
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync, mkdirSync, unlinkSync, utimesSync, renameSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync, mkdirSync, unlinkSync, utimesSync, renameSync, symlinkSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
@@ -33,7 +34,7 @@ delete process.env.OB1_CAPTURE_KEY;
 
 const {
   stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, provenanceOf,
-  scanForSecrets, scanSummary, SECRET_PATTERNS, parseRpcBody, postCapture, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS,
+  scanForSecrets, scanSummary, SECRET_PATTERNS, parseRpcBody, postCapture, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX,
 } = await import(SCRIPT);
 
 let passed = 0, failed = 0;
@@ -74,6 +75,7 @@ let refusedOnce = new Set();
 const READ = ["fetch", "list_supersession_proposals", "list_thoughts", "search", "search_thoughts", "search_thoughts_keyword", "thought_changes", "thought_stats"]; // main's read surface as of SMD-1296; the capture rule does not depend on its length
 const fake = Bun.serve({
   port: 0,
+  hostname: "127.0.0.1", // the address the suite posts to: an ephemeral port chosen on localhost's other address could be one another app holds on this one (eleventh review pass: Notion answered 401 to a run)
   async fetch(req) {
     const key = req.headers.get("x-brain-key");
     if (new URL(req.url).pathname === "/not-the-endpoint") return new Response("Method Not Allowed", { status: 405 });
@@ -94,7 +96,7 @@ const fake = Bun.serve({
       const { name, arguments: args } = body.params;
       // The pinned SDK answers an unknown tool as a RESULT with isError, not a JSON-RPC error (thirteenth review pass: the fake modelled the wrong shape).
       if (!surface.includes(name)) return sse({ result: { isError: true, content: [{ type: "text", text: `MCP error -32602: Tool ${name} not found` }] } });
-      received.push({ key, args });
+      const n = received.push({ key, args }); // the id is the post's ordinal at the moment it ARRIVES, so two posts in flight at once never share one (SMD-2035's suite)
       const content = String(args.content);
       if (/\[\[refuse-derived\]\]/.test(content) && args.derived_from && !refusedOnce.has(content)) {
         refusedOnce.add(content);
@@ -119,8 +121,9 @@ const fake = Bun.serve({
         refusedOnce.add(content);
         return sse({ result: { isError: true, content: [{ type: "text", text: `Refused: derived_from[${at[1]}] names no thought. Each entry must be an existing thought id (the ID: line of a search result).` }] } });
       }
+      if (/\[\[slow-down\]\]/.test(content)) { await sleep(2500); return sse({ result: { isError: true, content: [{ type: "text", text: "Error: Failed to connect" }] } }); }
       if (/\[\[slow\]\]/.test(content)) await sleep(2500);
-      const id = uuid(1000 + received.length);
+      const id = uuid(1000 + n);
       if (/\[\[embedding-failed\]\]/.test(content)) return sse({ result: { isError: true, content: [{ type: "text", text: `Thought saved (id ${id}) but its embedding failed to attach: stub. It will NOT appear in semantic search until re-captured.` }] } });
       return sse({ result: { content: [{ type: "text", text: `Captured as observation — id ${id} — topics` }] } });
     }
@@ -151,7 +154,6 @@ function claudeTranscript() {
     user("a subagent's prompt", { isSidechain: true, origin: { kind: "human" } }),
     user("/compact", { origin: { kind: "human" } }),
     user("/code-review high", { origin: { kind: "human" } }), // a slash command WITH arguments is an ask (twelfth review pass)
-    user("This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion.", { origin: { kind: "human" } }),
     assistant([toolUse("t1", "mcp__open-brain__search_thoughts", { query: "hook" }), toolUse("t2", "WebSearch", { query: "codex hooks" }), toolUse("t3", "mcp__other__web_search", { q: "x" })]),
     user([toolResult("t1", `1. [2026-09-01] (idea) a thought\n   ID: ${uuid(1)}\n2. [2026-09-02] (task) another\n   ID: ${uuid(2)}`), toolResult("t2", `a page mentioning ID: ${uuid(77)} which is not ours`), toolResult("t3", `ID: ${uuid(78)}`)]),
     assistant([toolUse("t4", "Edit", { file_path: "/repo/proj/src/a.ts", old_string: "x", new_string: "y" }), toolUse("t5", "Write", { file_path: "/repo/proj/README.md", content: "…" }), toolUse("t6", "Bash", { command: "cd /repo/proj && git commit -q -F msg.txt" }), toolUse("t9", "Write", { file_path: "/Users/someone/.claude/projects/-Users-someone-Proj/memory/note-1234.md", content: "…" })]),
@@ -160,6 +162,7 @@ function claudeTranscript() {
     user([toolResult("t7", `Captured as idea — id ${uuid(3)} — hooks`)]),
     user("now push and open the PR", { origin: { kind: "human" } }),
     user("now push and open the PR", { origin: { kind: "human" } }), // a retried prompt collapses
+    user("This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion.", { origin: { kind: "human" } }), // a compaction after the last ask: a boundary armed, never opened (SMD-2013) — the work after it is the last ask's
     assistant([toolUse("t8", "Bash", { command: "git push -u origin feat/x && gh pr create" })]),
     user([toolResult("t8", "https://github.com/o/r/pull/7")]),
     line({ type: "pr-link", sessionId: SID, prNumber: 7, prUrl: "https://github.com/o/r/pull/7", prRepository: "o/r", timestamp: "2026-09-22T13:30:00.000Z" }),
@@ -278,6 +281,275 @@ console.log("\n[3] The summary is deterministic, capped, and says what it carrie
   assert(provenanceOf(many).length === LIMITS.derived, `derived_from is capped at ${LIMITS.derived}`);
   const empty = renderSummary(summariseTranscript(join(TMP, "empty.jsonl"), (writeFileSync(join(TMP, "empty.jsonl"), "{}\n"), "claude-code")));
   assert(/Brain: no thoughts read or written this session\./.test(empty), "a session that never touched the brain says so");
+}
+
+// ── [3b] Episodes ────────────────────────────────────────────────────────────
+console.log("\n[3b] A long session is several episodes, one summary each, on its own chain (SMD-2013)");
+const E_SID = "s-ep";
+const EPISODES_T = join(TMP, "episodes.jsonl");
+let episodesLines;
+{
+  // The rules alone, on events.
+  const P = (text) => ({ t: "prompt", text }), CWD = (v) => ({ t: "cwd", v }), BR = (v) => ({ t: "branch", v }), CP = { t: "compaction" };
+  const asks = (...ev) => segment(ev).episodes.map((e) => e.prompts.join("+")).join("|");
+  assert(ticketsIn("implement smd-2013 and SMD-2013; sha-256, utf-8, RFC-2119, CVE-2024-1234, PR-154, ubuntu-2604, x-1, ID: 8de5e1e1-c72c-4b7f").join() === "SMD-2013" && ticketsIn("michaelharris/smd-1917-fork-md-token-sink").join() === "SMD-1917" && ticketsIn("").length === 0 && ticketsIn(undefined).length === 0,
+    "a ticket key is two to five letters, a dash and two to six digits, upper-cased and said once; a digest's name, an encoding, an RFC, a CVE, a PR number, a uuid are not");
+  assert(asks(CWD("/a"), P("one"), CWD("/a/sub"), P("two"), CWD("/a"), P("three"), CWD("/a/sub/deeper"), P("four")) === "one+two+three+four", "a cd into a subdirectory of the checkout and back is no move: the harness records the shell's directory per command");
+  const dir = segment([CWD("/a"), P("one"), CWD("/b"), P("two")]).episodes;
+  assert(dir.map((e) => e.prompts.join()).join("|") === "one|two" && dir[1].opened.kind === "directory" && dir[1].opened.to === "b" && dir[0].closed === dir[1].opened && dir[1].cwd === "/b" && [...dir[1].roots].join() === "/b",
+    "a move to another directory ends the episode at the next ask; the next says where it went and runs there");
+  assert(asks(BR("main"), P("fix the cors thing"), BR("me/smd-2079-cors"), P("review")) === "fix the cors thing+review", "a branch that names a ticket, made under an episode that names none, gives the work its name — no boundary");
+  assert(asks(BR("me/smd-1844-a"), P("do smd-1844"), BR("me/smd-1843-b"), P("review")) === "do smd-1844|review" && asks(BR("me/smd-1844-a"), P("do it"), BR("main"), P("review")) === "do it|review", "…while a move to a branch naming another ticket, or none, ends it");
+  assert(asks(BR("main"), P("help with x"), P("now implement SMD-2013")) === "help with x|now implement SMD-2013" && asks(BR("me/smd-2035-x"), P("do smd-2035"), P("also see smd-1297, and file smd-2050")) === "do smd-2035+also see smd-1297, and file smd-2050",
+    "an ask naming a new ticket ends an episode with no home; on a branch that names the episode's ticket, a mention does not");
+  assert(asks(BR("main"), P("tidy the readme"), P("bump to node-22 and smd-2013")) === "tidy the readme+bump to node-22 and smd-2013" && asks(BR("me/smd-1000-a"), P("tidy"), P("bump to node-22")) === "tidy+bump to node-22" && asks(BR("main"), P("tidy the readme"), P("bump to NODE-22")) === "tidy the readme|bump to NODE-22",
+    "a lower-case key in an ask counts only for a team the session's branches name — node-22 on main is no ticket, smd-2013 under an smd- branch is — while before any team is known an upper-case key counts (first review pass)");
+  assert(asks(BR("main"), P("tidy the readme"), P("switch the hash to AES-256, RSA-2048")) === "tidy the readme+switch the hash to AES-256, RSA-2048" && asks(BR("me/smd-1000-a"), P("tidy"), P("see XYZ-2013"), P("more")) === "tidy+see XYZ-2013+more" && asks(BR("main"), P("tidy"), P("see XYZ-2013")) === "tidy|see XYZ-2013",
+    "a cipher's name is no key, and once a team is known another team's upper-case key is not one either (second review pass)");
+  const stamped = segment([BR("me/smd-1000-a"), P("do smd-1000"), BR("main"), P("also SMD-1000 and SMD-2000 review")]).episodes;
+  assert(stamped.length === 2 && stamped[1].opened.kind === "branch" && stamped[1].opened.ticket === undefined && !stamped[1].about.has("SMD-2000") && /begun on the move to branch main\.\n/.test(renderSummary(stamped[1])) && segment([BR("me/smd-2035-x"), P("do smd-2035"), { t: "compaction" }, P("create a branch for smd-2013"), BR("me/smd-2013-y"), P("review")]).episodes[1].opened.ticket === "SMD-2013",
+    "an episode opened by a move is not 'with' a key its first ask merely names, nor about it; one opened at a compaction whose ask names the key the session then moves to is (second review pass)");
+  assert(ticketsIn("smd-2013 and NODE-22 and pg-16", new Set(["SMD"])).join() === "SMD-2013" && ticketsIn("smd-2013 and pg-16", new Set()).length === 0 && ticketsIn("smd-2013 and pg-16").join() === "SMD-2013,PG-16", "…ticketsIn with a non-empty team set keeps only those teams' keys, in any case; an empty set keeps upper-case keys alone; no set — a branch name — every key (second review pass)");
+  // The teams are those named SO FAR: a keyed branch made later must not make an earlier mention a key and move a boundary already captured (second review pass — the set was built from the whole transcript up front, and a prefix segmented otherwise than the whole).
+  const early = [CWD("/repo"), BR("main"), P("help with x"), P("now smd-2013 please"), P("more")];
+  assert(asks(...early) === "help with x+now smd-2013 please+more" && asks(...early, BR("me/smd-2099-later"), P("review")) === "help with x+now smd-2013 please+more+review" && asks(...early, BR("me/smd-2099-later"), P("now smd-2013 for real"), BR("me/smd-2013-z"), P("go")) === "help with x+now smd-2013 please+more|now smd-2013 for real+go",
+    "a lower-case key counts from the first keyed branch on, not before it: the earlier episode stands as it was captured, and the branch made under it names its work");
+  // The place an episode runs is its own: a move applies to the episode the next ask opens, never to the one it ends (first review pass).
+  const moved = segment([CWD("/wt/smd-1844"), BR("me/smd-1844-a"), P("start work"), BR("me/smd-1843-b"), CWD("/wt/smd-1843"), P("review")]).episodes;
+  assert(moved.length === 2 && moved[0].branch === "me/smd-1844-a" && moved[0].cwd === "/wt/smd-1844" && [...moved[0].roots].join() === "/wt/smd-1844" && /^Session summary — SMD-1844 — [^\n]*\(me\/smd-1844-a\)/.test(renderSummary(moved[0])) && moved[0].closed.kind === "branch" && moved[0].closed.to === "me/smd-1843-b" && moved[1].branch === "me/smd-1843-b" && moved[1].cwd === "/wt/smd-1843" && /^Session summary — SMD-1843 — /.test(renderSummary(moved[1])),
+    `an ended episode keeps its branch, directory and ticket; the move is the next episode's (${renderSummary(moved[0]).split("\n")[0]})`);
+  assert(asks(CWD("/repo"), P("one"), CWD("/repo/db"), CWD("/repo/scripts"), P("two"), CWD("/repo"), P("three")) === "one+two+three" && segment([CWD("/repo"), P("one"), CWD("/repo/db"), P("two")]).episodes[0].cwd === "/repo" && asks(CWD("/repo/db"), BR("main"), P("one"), CWD("/repo"), P("two")) === "one+two" && segment([CWD("/repo/db"), BR("main"), P("one"), CWD("/repo"), P("two")]).episodes[0].cwd === "/repo/db",
+    "a cd between two subdirectories of one checkout is no move, and the episode's first directory names the project (first review pass: db/ to scripts/ split)");
+  // An ancestor of the checkout is not inside it (second review pass): with no branch to go by a move up and over is a move; on a branch, the shell's.
+  const up = segment([CWD("/Users/me/Projects/OB1"), P("one"), CWD("/Users/me"), CWD("/Users/me/Projects/other"), P("two")]).episodes;
+  assert(up.map((e) => e.prompts.join()).join("|") === "one|two" && up[0].cwd === "/Users/me/Projects/OB1" && !up[0].roots.has("/Users/me") && up[1].cwd === "/Users/me/Projects/other" && segment([CWD("/Users/me/Projects/OB1"), BR("main"), P("one"), CWD("/Users/me"), P("two")]).episodes.length === 1,
+    "a cd to HOME and on to another checkout is a move, and HOME never becomes the episode's directory or a root");
+  // A line writes cwd then branch, so the two are one move: a cwd-first return
+  // from a nested worktree to the repo root must not settle onto the episode it
+  // ends before its branch arrives (second review pass — the closed episode's
+  // text changed as the transcript grew).
+  const wt = [CWD("/r"), BR("me/smd-10-a"), P("start"), CWD("/r/.claude/worktrees/smd-20"), BR("me/smd-20-b"), P("next"), { t: "file", path: "/r/.claude/worktrees/smd-20/x.ts" }];
+  const wtEp2 = segment(wt).episodes[1], wtEp2Whole = segment([...wt, CWD("/r"), BR("main")]).episodes[1];
+  assert(wtEp2.cwd === "/r/.claude/worktrees/smd-20" && [...wtEp2.roots].join() === "/r/.claude/worktrees/smd-20" && [...segment(wt).episodes[0].roots].join() === "/r" && /^Session summary — SMD-20 — smd-20 \(me\/smd-20-b\)/.test(renderSummary(wtEp2)) && renderSummary(wtEp2) === renderSummary(wtEp2Whole),
+    `a return to the repo root from a worktree, cwd before branch, is the next episode's; the worktree episode keeps its place and its text stands as the transcript grows (${renderSummary(wtEp2).split("\n")[0]})`);
+  // An episode's home is read live: once it has moved on, a move back to the
+  // branch it began on is a new piece of work, not its own (second review pass).
+  const backEp = segment([BR("me/smd-50-a"), CP, P("now smd-90"), BR("me/smd-90-b"), P("x"), BR("me/smd-50-a"), P("y"), BR("me/smd-70-c"), P("z")]).episodes;
+  assert(backEp.map((e) => e.prompts.join("+")).join("|") === "now smd-90+x|y|z" && backEp.map((e) => e.branch).join("|") === "me/smd-90-b|me/smd-50-a|me/smd-70-c" && /^Session summary — SMD-90 \(me\/smd-90-b\)/.test(renderSummary(backEp[0])) && /^Session summary — SMD-50 \(me\/smd-50-a\)/.test(renderSummary(backEp[1])),
+    `after an own move to smd-90 the episode's home is smd-90; a return to smd-50 opens a new episode, each head its own branch (${backEp.map((e) => e.prompts.length).join(",")})`);
+  // The pairing's HEAD guard on a REAL detached-HEAD line: a rebase writes cwd
+  // then gitBranch "HEAD" adjacent, the shape the pairing pairs, and it must
+  // not become a move (third review pass — the guard was untested on a paired line).
+  assert(segment([CWD("/r/.claude/worktrees/smd-50"), BR("me/smd-50-a"), P("a"), CWD("/r"), BR("HEAD"), P("b")]).episodes.length === 1 && segment([CWD("/r/.claude/worktrees/smd-50"), BR("me/smd-50-a"), P("a"), CWD("/r"), BR("HEAD"), P("b")]).episodes[0].branch === "me/smd-50-a",
+    "a cwd then HEAD, adjacent as a rebase writes them, is no move: the pairing skips HEAD and the episode keeps its branch");
+  // The unanchored branch of `began`: an episode on `main` (no home) split by a
+  // compaction, its ask naming a team-recognised key, is not "with" that key —
+  // the compaction ended it, not the key (third review pass — only the anchored
+  // branch of `began` was pinned).
+  const beganU = segment([BR("me/smd-11-a"), P("do smd-11"), BR("main"), P("refactor"), CP, P("now smd-500")]).episodes;
+  assert(beganU.map((e) => e.prompts.join("+")).join("|") === "do smd-11|refactor|now smd-500" && beganU[2].opened.kind === "compaction" && beganU[2].opened.ticket === undefined && beganU[2].about.size === 0 && !/with SMD-500/.test(renderSummary(beganU[2])) && /Episode 3 of the session, begun after a compaction\./.test(renderSummary(beganU[2])),
+    "an unanchored episode split by a compaction is not 'with' the key its ask names — the compaction ended it, and the key is unproven until a branch");
+  assert(asks(CWD("/a"), P("one"), CWD("/b"), CWD("/a"), P("two")) === "one+two" && asks(BR("A"), P("one"), BR("B"), BR("A"), P("two")) === "one+two" && asks(BR("me/smd-1100-x"), P("do it"), BR("HEAD"), BR("me/smd-1100-x"), P("more")) === "do it+more" && asks(BR("me/smd-1100-x"), P("do it"), BR("HEAD"), P("more")) === "do it+more",
+    "a move the session came back from before the next ask is no move, and a detached HEAD mid-rebase is no branch (first review pass)");
+  assert(asks(CWD("/repo"), BR("main"), P("one"), CWD("/tmp"), P("two"), CWD("/repo"), P("three")) === "one+two+three" && segment([CWD("/repo"), BR("main"), P("one"), CWD("/tmp"), P("two")]).episodes[0].cwd === "/repo" && !segment([CWD("/repo"), BR("main"), P("one"), CWD("/tmp"), P("two")]).episodes[0].roots.has("/tmp"),
+    "a cd out of the checkout with the branch unchanged is the shell's, not the session's: no move, and the episode's place stands");
+  const both = segment([BR("main"), P("one"), CP, BR("feat/x"), P("two")]).episodes;
+  assert(both.length === 2 && both[1].opened.kind === "compaction" && both[1].opened.moved?.kind === "branch" && both[1].opened.to === "feat/x" && /Episode 2 of the session, begun after a compaction and on the move to branch feat\/x\./.test(renderSummary(both[1])) && /Episode 1 of the session, ended at a compaction and when the session moved to branch feat\/x\./.test(renderSummary(both[0])) && segment([BR("main"), P("one"), BR("feat/x"), CP, P("two")]).episodes[1].opened.moved?.kind === "branch",
+    "a compaction and a move between two asks are both recorded, in either order (first review pass: the later overwrote the earlier)");
+  assert(asks(BR("me/smd-2035-x"), P("do smd-2035"), P("now plan smd-2013"), P("looks good, implement it"), BR("me/smd-2013-y"), P("review"), P("ship it")) === "do smd-2035+now plan smd-2013+looks good, implement it|review+ship it",
+    "a ticket an ask merely mentioned makes no later move its own: the move to its branch ends the anchored episode at the next ask (first review pass: plan, approve, implement made one episode)");
+  assert(asks(BR("me/smd-1100-x"), P("do smd-1100"), P("look at smd-2200"), P("more"), BR("me/smd-2200-y"), P("review")) === "do smd-1100+look at smd-2200+more|review", "…and the look-ahead for the move stops at the next ask");
+  assert(asks(CWD("/wt/smd-1843-x"), BR("me/smd-1000-z"), P("do it"), BR("me/smd-1843-y"), P("next")) === "do it+next" && asks(CWD("/wt/smd-1843-x"), BR("main"), P("do it"), P("also smd-2050"), P("more")) === "do it+also smd-2050+more",
+    "the directory's ticket counts as the episode's home too: a move to its branch is its own, and a mention under it does not split");
+  assert(asks(BR("main"), P("do SMD-1001"), P("SMD-1001 and SMD-1002"), P("more")) === "do SMD-1001+SMD-1001 and SMD-1002+more" && asks(CWD("/a"), CWD("/b"), P("one"), P("two")) === "one+two", "an ask naming a known ticket beside a new one is no turn; moves before the first ask begin nothing");
+  const titled = segment([P("one"), CP, P("two"), { t: "title", text: "the session's title" }]).episodes;
+  assert(titled[0].title === "the session's title" && titled[1].title === "", "the harness's title is the first episode's, whenever the line falls");
+  assert(asks(BR("me/smd-2035-x"), P("do smd-2035"), P("now smd-2013"), BR("me/smd-2013-y"), P("review")) === "do smd-2035|now smd-2013+review" && segment([BR("me/smd-2035-x"), P("do smd-2035"), P("now smd-2013"), BR("me/smd-2013-y"), P("review")]).episodes[1].opened.kind === "ticket",
+    "…unless the session then moves to the new ticket's branch before the next ask: the ask began that work, and the move is its own");
+  assert(asks(P("one"), CP, CP, P("two"), CP) === "one|two" && segment([CP, P("one")]).episodes[0].opened.kind === "compaction" && segment([P("one"), CP]).episodes.length === 1 && !segment([P("one"), CP]).episodes[0].closed,
+    "two compactions in a row open one episode; one before the first ask begins the first; one after the last ask ends nothing yet");
+  assert(segment([]).episodes.length === 0 && segment([CWD("/a"), BR("main"), CP]).episodes.length === 0 && segment([P("one")]).episodes[0].n === 1 && segment([P("one")]).n === 0, "no ask, no episode; the first is 1, the session itself 0");
+  assert(episodeChain("sid", 1) === "sid" && episodeChain("sid", 2) === "sid#e2", "the first episode chains under the session's own id — a session of one is captured as before — later ones under it");
+
+  // The ticket's fixture: two compactions, a branch change, three ticket ids.
+  const ln = (type, content, { cwd = "/repo/main-wt", branch = "main", ts = "2026-09-24T09:00:00.000Z", ...extra } = {}) => line({ type, sessionId: E_SID, timestamp: ts, cwd, gitBranch: branch, message: { role: type, content }, ...extra });
+  const ask = (text, o) => ln("user", text, { origin: { kind: "human" }, ...o });
+  const say = (text, o) => ln("assistant", [{ type: "text", text }], o);
+  const search = (ids, tid, o) => [ln("assistant", [toolUse(tid, "mcp__open-brain__search_thoughts", { query: "q" })], o), ln("user", [toolResult(tid, ids.map((id, i) => `${i + 1}. [2026-09-01] (idea) x\n   ID: ${uuid(id)}`).join("\n"))], o)];
+  const tool = (tid, name, input, out, o) => [ln("assistant", [toolUse(tid, name, input)], o), ln("user", [toolResult(tid, out)], o)];
+  const A = { cwd: "/repo/main-wt", branch: "michaelharris/smd-1844-loopback" };
+  const B = { cwd: "/repo/wt/smd-1843-env", branch: "michaelharris/smd-1843-env" };
+  const C = { cwd: "/repo/wt/smd-1917-fork-md", branch: "michaelharris/smd-1917-fork-md" };
+  const t = (h, m) => `2026-09-24T${h}:${m}:00.000Z`;
+  const compaction = (o) => ask("This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion.", { ...o, isCompactSummary: true });
+  episodesLines = [
+    ask("create a new branch to plan and implement smd-1844", { ts: t("09", "00") }),
+    ...search([11], "e1", { ts: t("09", "05") }),
+    ...tool("e2", "Edit", { file_path: "/repo/main-wt/deploy/compose.yaml", old_string: "a", new_string: "b" }, "ok", { ...A, ts: t("09", "10") }), // the branch changes to one naming the ticket: no boundary
+    ...tool("e3", "Bash", { command: "git commit -q -F msg" }, "[x 123] done", { ...A, cwd: "/repo/main-wt/deploy", ts: t("09", "12") }), // a cd into a subdirectory: no boundary
+    ask("review for issues", { ...A, ts: t("09", "20") }),
+    say("Pass one: two findings fixed.", { ...A, ts: t("09", "30") }),
+    compaction({ ...A, ts: t("09", "35") }),
+    say("Merged as abc.", { ...A, ts: t("09", "40") }), // after the compaction, before any ask: the first episode's outcome
+    ask("create a new branch to plan and implement smd-1843", { ...A, ts: t("10", "00") }), // opens episode 2 after the compaction, typed on the OLD branch
+    ...search([12, 13], "e4", { ...B, ts: t("10", "05") }), // the move to the new worktree and branch, both naming the ticket: no boundary
+    ...tool("e5", "Edit", { file_path: "/repo/wt/smd-1843-env/deploy/compose.yaml", old_string: "a", new_string: "b" }, "ok", { ...B, ts: t("10", "08") }),
+    ...tool("e6", "mcp__open-brain__capture_thought", { content: "d" }, `Captured as idea — id ${uuid(14)} — x`, { ...B, ts: t("10", "09") }),
+    ask("also note SMD-1844's compose fix is merged already", { ...B, ts: t("10", "20") }), // a mention while anchored: no boundary
+    say("Noted; the forwards are in.", { ...B, ts: t("10", "30") }),
+    ask("now smd-1917: split FORK.md into one file per change", { ...B, ts: t("10", "40") }), // a new ticket, and the session then moves to its branch: episode 3 opens HERE
+    ...tool("e7", "Edit", { file_path: "/repo/wt/smd-1917-fork-md/scripts/fork-index.ts", old_string: "a", new_string: "b" }, "ok", { ...C, ts: t("10", "50") }),
+    say("Split done.", { ...C, ts: t("11", "00") }),
+    compaction({ ...C, ts: t("11", "05") }),
+    say("Pushed.", { ...C, ts: t("11", "06") }),
+    ask("review for issues", { ...C, ts: t("11", "10") }), // episode 4: after a compaction, no ticket in the ask — the branch names it
+    ...search([15], "e8", { ...C, ts: t("11", "15") }),
+    say("Clean.", { ...C, ts: t("11", "20") }),
+  ];
+  writeFileSync(EPISODES_T, episodesLines.join("\n"));
+  // The harness's flag is a boundary on its own: a compaction summary worded another way still ends the episode (a mutant that read the sentence alone survived).
+  writeFileSync(join(TMP, "flag.jsonl"), [ask("one", { ts: t("09", "00") }), ask("Earlier in this conversation, before compaction, we did X.", { ts: t("09", "10"), isCompactSummary: true }), ask("two", { ts: t("09", "20") })].join("\n"));
+  assert(summariseTranscript(join(TMP, "flag.jsonl")).episodes.map((e) => e.prompts.join()).join("|") === "one|two" && summariseTranscript(join(TMP, "flag.jsonl")).prompts.join() === "one,two", "a line the harness flags as its compaction summary is a boundary and not an ask, whatever its first sentence");
+  writeFileSync(join(TMP, "flag-origin.jsonl"), [ask("one", { ts: t("09", "00") }), ln("user", "Earlier in this conversation we did X.", { ts: t("09", "10"), isCompactSummary: true, origin: { kind: "system" } }), ask("two", { ts: t("09", "20") })].join("\n"));
+  assert(summariseTranscript(join(TMP, "flag-origin.jsonl")).episodes.map((e) => e.prompts.join()).join("|") === "one|two", "…whoever the harness says the line is from: the flag is read before the origin gate (first review pass)");
+  const s = summariseTranscript(EPISODES_T);
+  const eps = s.episodes;
+  assert(eps.length === 4 && eps.map((e) => e.n).join() === "1,2,3,4" && s.prompts.length === 6 && s.n === 0 && s.retrieved.size === 4, `four episodes; the session's own summary still holds everything (${eps.length}: ${eps.map((e) => e.prompts[0].slice(0, 30)).join(" | ")})`);
+  const [e1, e2, e3, e4] = eps;
+  assert(e1.prompts.join("|") === "create a new branch to plan and implement smd-1844|review for issues" && e1.outcome === "Merged as abc." && [...e1.retrieved].join() === uuid(11) && e1.commits === 1 && [...e1.files].join() === "/repo/main-wt/deploy/compose.yaml" && e1.branch === "michaelharris/smd-1844-loopback" && e1.closed?.kind === "compaction" && e1.opened === undefined && e1.first === t("09", "00") && e1.last === t("09", "40"),
+    "episode 1: its two asks, the outcome the assistant gave after the compaction and before the next ask, its own search, commit and file; the branch made after its first ask is its own; it ended at the compaction");
+  assert(e2.prompts.length === 2 && /smd-1843/.test(e2.prompts[0]) && /SMD-1844's/.test(e2.prompts[1]) && e2.opened.kind === "compaction" && e2.opened.ticket === "SMD-1843" && [...e2.retrieved].join() === [uuid(12), uuid(13)].join() && [...e2.captured].join() === uuid(14) && e2.cwd === "/repo/wt/smd-1843-env" && [...e2.roots].join() === "/repo/main-wt,/repo/wt/smd-1843-env" && e2.closed.kind === "ticket" && e2.closed.ticket === "SMD-1917" && e2.first === t("10", "00") && e2.last === t("10", "30"),
+    "episode 2: begun after the compaction with SMD-1843, the move to its worktree and branch its own; a mention of the earlier ticket while on its branch does not end it; ended when SMD-1917 was taken up, its span its content's");
+  assert(e3.prompts.length === 1 && /^now smd-1917/.test(e3.prompts[0]) && e3.opened.kind === "ticket" && e3.opened.ticket === "SMD-1917" && e3.branch === "michaelharris/smd-1917-fork-md" && e3.outcome === "Pushed." && [...e3.files].join() === "/repo/wt/smd-1917-fork-md/scripts/fork-index.ts" && e3.retrieved.size === 0 && e3.closed.kind === "compaction" && e3.last === t("11", "06"),
+    "episode 3: opened AT the ask naming the new ticket — typed on the old branch, the session moved to the ticket's branch before the next ask — with the file and the outcome that followed; ended at the second compaction");
+  assert(e4.prompts.join() === "review for issues" && e4.opened.kind === "compaction" && e4.opened.ticket === undefined && [...e4.retrieved].join() === uuid(15) && !e4.closed && e4.first === t("11", "10") && e4.last === t("11", "20") && e4.sessionId === E_SID && e4.harness === "claude-code",
+    "episode 4: begun after the second compaction, asked without a ticket, still open");
+  assert(eps.map((e) => provenanceOf(e).join()).join("|") === [uuid(11), [uuid(12), uuid(13), uuid(14)].join(), "", uuid(15)].join("|"), "derived_from is split per episode: the ids retrieved and captured inside it, not the session's union");
+  const [x1, x2, x3, x4] = eps.map(renderSummary);
+  assert(/^Session summary — SMD-1844 — claude-code — main-wt \(michaelharris\/smd-1844-loopback\) — 2026-09-24\n/.test(x1) && /\n\nChanged: 1 file — deploy\/compose\.yaml; 1 commit\.\n\nBrain: retrieved 1 thought \(recorded as this summary's provenance\)\.\n\nEpisode 1 of the session, ended at a compaction\.\n\nSession s-ep, 2026-09-24 09:00 → 2026-09-24 09:40\.$/.test(x1),
+    `episode 1's text: the ticket first, its own files and brain line, its episode line before its span (${x1.split("\n").slice(-3).join(" | ")})`);
+  assert(/^Session summary — SMD-1843, SMD-1844 — claude-code — smd-1843-env \(michaelharris\/smd-1843-env\) — 2026-09-24\n\nTitle: create a new branch to plan and implement smd-1843\n/.test(x2) && /\n\nBrain: retrieved 2 thoughts, captured 1 \(recorded/.test(x2) && /\n\nEpisode 2 of the session, begun after a compaction with SMD-1843, ended when SMD-1917 was taken up\.\n\nSession s-ep, 2026-09-24 10:00 → 2026-09-24 10:30\.$/.test(x2),
+    "episode 2's text names the tickets its asks named, the first first, is titled by its first ask, and says how it began and ended");
+  assert(/^Session summary — SMD-1917 — claude-code — smd-1917-fork-md \(michaelharris\/smd-1917-fork-md\)/.test(x3) && /\n\nEpisode 3 of the session, begun with SMD-1917, ended at a compaction\./.test(x3) && /^Session summary — SMD-1917 — claude-code — smd-1917-fork-md/.test(x4) && /\n\nEpisode 4 of the session, begun after a compaction\.\n\nSession s-ep, 2026-09-24 11:10 → 2026-09-24 11:20\.$/.test(x4),
+    "episode 3 begun with its ticket; episode 4, asked without one, is named by its branch's, and open — no ended clause");
+  assert(!/Episode/.test(renderSummary(s)) && /^Session summary — SMD-1844, SMD-1843, SMD-1917 — claude-code — smd-1917-fork-md/.test(renderSummary(s)) && !/Episode/.test(renderSummary(summariseTranscript(CLAUDE_T))) && !/Episode/.test(renderSummary(summariseTranscript(CLAUDE_T).episodes[0])),
+    "the session's own summary and a session of one episode carry no episode line: a session of one episode reads as before");
+  // Stability under append: every prefix of the transcript segments into a prefix of the whole's episodes, its closed ones word for word.
+  {
+    let stable = true;
+    for (let k = 1; k <= episodesLines.length; k++) {
+      writeFileSync(join(TMP, "prefix.jsonl"), episodesLines.slice(0, k).join("\n"));
+      for (const ep of summariseTranscript(join(TMP, "prefix.jsonl")).episodes) {
+        const whole = eps[ep.n - 1];
+        // An open episode's LAST ask may be one the whole gives to the next episode: an ask naming a new ticket, its move not yet written (the one boundary decided by what follows).
+        const settled = ep.closed ? ep.prompts : ep.prompts.slice(0, -1);
+        if (!whole || (ep.opened?.kind ?? "-") !== (whole.opened?.kind ?? "-") || settled.some((p, i) => whole.prompts[i] !== p) || (ep.closed && renderSummary(ep) !== renderSummary(whole))) stable = false;
+      }
+    }
+    assert(stable, "appending to the transcript never moves an earlier boundary: every prefix's closed episodes render word for word as the whole's, and its open one is a prefix of its counterpart but for an ask whose move is not yet written");
+    writeFileSync(join(TMP, "prefix.jsonl"), episodesLines.slice(0, episodesLines.indexOf(episodesLines.find((l) => /now smd-1917/.test(l))) + 1).join("\n"));
+    const undecided = summariseTranscript(join(TMP, "prefix.jsonl")).episodes;
+    assert(undecided.length === 2 && undecided[1].prompts.length === 3 && /^now smd-1917/.test(undecided[1].prompts[2]), "…that ask, with nothing yet after it, is the earlier episode's: the boundary is decided by the move that follows");
+  }
+
+  // prepare(): one payload per episode, on its own chain.
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const cfg = { url: URL_, key: "cap-key" };
+  const pe = prepare({ session_id: E_SID, transcript_path: EPISODES_T, cwd: "/repo/wt/smd-1917-fork-md", hook_event_name: "SessionEnd" });
+  assert(pe.code === 0 && pe.payloadPaths.length === 4 && pe.payloadPath === pe.payloadPaths[3] && pe.payload.episode === 4 && /^prepared: session s-ep, episodes 1, 2, 3, 4 of 4 — 1: 2 prompt\(s\), 1 source id\(s\); 2: 2 prompt\(s\), 3 source id\(s\); 3: 1 prompt\(s\), 0 source id\(s\); 4: 1 prompt\(s\), 1 source id\(s\)$/.test(pe.message),
+    `one payload per episode, the newest the run's own, the message naming each (${pe.message})`);
+  const bodies = pe.payloadPaths.map((p) => JSON.parse(readFileSync(p, "utf8")));
+  assert(bodies.map((b) => b.chain_id).join() === "s-ep,s-ep#e2,s-ep#e3,s-ep#e4" && bodies.every((b) => b.session_id === E_SID) && bodies.map((b) => b.episode).join() === "1,2,3,4" && pe.payloadPaths.map((p) => basename(p).split("-").slice(3).join("-")).join() === "s-ep.json,s-ep_e2.json,s-ep_e3.json,s-ep_e4.json",
+    "each payload carries its session and its chain — the first the session's own id, the rest keyed under it — and is named for its chain");
+  assert(bodies.every((b) => b.supersedes === undefined) && bodies[0].derived_from.join() === uuid(11) && bodies[1].derived_from.join() === [uuid(12), uuid(13), uuid(14)].join() && bodies[2].text === x3, "no episode has a predecessor yet; each carries its own provenance and text");
+  assert(/^Session summary — SMD-1844 — claude-code — main-wt \(/.test(bodies[0].text) && /^Session summary — SMD-1917 — claude-code — smd-1917-fork-md \(/.test(bodies[3].text), "the hook's cwd is the open episode's place, not a closed one's");
+  const twin = prepare({ session_id: E_SID, transcript_path: EPISODES_T, cwd: "/repo/wt/smd-1917-fork-md", hook_event_name: "SessionEnd" });
+  assert(twin.payloadPaths.length === 0 && /^skip: session s-ep's 4 episodes are already captured or queued \(the newest as a pending payload\)$/.test(twin.message) && readdirSync(join(STATE, "pending")).length === 4,
+    `the same ending again before anything posts writes no twin: every episode is deduped against its own queue (${twin.message})`);
+  const outs = await postPending(cfg, pe.payloadPaths);
+  assert(outs.length === 4 && outs.every((o) => o.ok) && received.length === 4 && received.map((r) => r.args.derived_from?.length ?? 0).join() === "1,3,0,1" && ["s-ep", "s-ep_e2", "s-ep_e3", "s-ep_e4"].every((f) => existsSync(join(STATE, `${f}.json`))) && readdirSync(join(STATE, "pending")).length === 0,
+    `the run posts every episode, oldest first, each with its own provenance, and records four states (${received.map((r) => r.args.content.split("\n")[0].slice(18, 40)).join(" | ")})`);
+  const ids = ["s-ep", "s-ep#e2", "s-ep#e3", "s-ep#e4"].map((c) => readState(c).thought_id);
+  // A re-ending with one more ask: only the last episode changes, and supersedes its own.
+  episodesLines.push(ask("one more look", { ...C, ts: t("11", "30") }), say("Still clean.", { ...C, ts: t("11", "31") }));
+  writeFileSync(EPISODES_T, episodesLines.join("\n"));
+  const again = prepare({ session_id: E_SID, transcript_path: EPISODES_T, hook_event_name: "SessionEnd" });
+  assert(again.payloadPaths.length === 1 && again.payload.episode === 4 && again.payload.supersedes === ids[3] && /^prepared: session s-ep, episode 4 of 4 \(3 unchanged\) — 4: 2 prompt\(s\), 1 source id\(s\), supersedes 00001004-/.test(again.message),
+    `after one more ask only the last episode is prepared, superseding its own earlier summary (${again.message})`);
+  await postPending(cfg, again.payloadPaths);
+  assert(received.length === 5 && received[4].args.supersedes === ids[3] && ["s-ep", "s-ep#e2", "s-ep#e3"].every((c, i) => readState(c).thought_id === ids[i]) && readState("s-ep#e4").thought_id === uuid(1005),
+    "…and posts it alone: the earlier episodes' thoughts and states are untouched");
+  assert(/^skip: session s-ep's 4 episodes are already captured \(the newest as 00001005-/.test(prepare({ session_id: E_SID, transcript_path: EPISODES_T, hook_event_name: "SessionEnd" }).message), "the same transcript again: every episode is a skip, said once");
+  // A new episode inside the Stop interval is not a reason to capture: the gate reads the session's last attempt across its chains (first review pass).
+  const D = { cwd: "/repo/wt/smd-2014-model", branch: "michaelharris/smd-2014-model" };
+  writeFileSync(join(TMP, "episodes-five.jsonl"), [...episodesLines, ask("now smd-2014: the opt-in model summary", { ...C, ts: t("12", "00") }), say("Planned.", { ...D, ts: t("12", "05") })].join("\n"));
+  const gated = prepare({ session_id: E_SID, transcript_path: join(TMP, "episodes-five.jsonl"), hook_event_name: "Stop" }, { minIntervalMin: 20 });
+  const ungated = prepare({ session_id: E_SID, transcript_path: join(TMP, "episodes-five.jsonl"), hook_event_name: "Stop" });
+  assert(/^skip: last capture 0 min ago, interval 20$/.test(gated.message) && ungated.payloadPaths.length === 2 && ungated.payload.episode === 5 && /Episode 4 of the session, begun after a compaction, ended when SMD-2014 was taken up\./.test(JSON.parse(readFileSync(ungated.payloadPaths[0], "utf8")).text),
+    `a Stop inside the interval skips though a fifth episode has opened; without the interval it prepares the closed fourth and the new fifth (${gated.message} | ${ungated.message.slice(0, 60)})`);
+  for (const p of ungated.payloadPaths) unlinkSync(p);
+  // A checkpoint is the open episode's alone.
+  const cpE = prepare({ session_id: "s-ep-cp", transcript_path: EPISODES_T, hook_event_name: "PreCompact", trigger: "auto" });
+  const cpBodies = cpE.payloadPaths.map((p) => JSON.parse(readFileSync(p, "utf8")));
+  assert(cpBodies.length === 4 && cpBodies.slice(0, 3).every((b) => !/Checkpoint:/.test(b.text) && b.event === "" && b.trigger === undefined) && /\n\nEpisode 4 of the session, begun after a compaction\.\n\nCheckpoint: compacted at 2026-09-24 11:31 \(auto\), continuing/.test(cpBodies[3].text) && cpBodies[3].event === "PreCompact" && cpBodies[3].trigger === "auto" && /^prepared: session s-ep-cp \(PreCompact auto\), episodes 1, 2, 3, 4 of 4/.test(cpE.message),
+    "at a compaction, the closed episodes' summaries name no checkpoint — they are over, and their payloads carry no event — and the open one's does, after its episode line");
+  // A secret in one episode refuses that episode alone.
+  writeFileSync(join(TMP, "episodes-secret.jsonl"), episodesLines.map((l) => l.replace("also note SMD-1844's compose fix is merged already", "also note SMD-1844's fix is merged; MCP_ACCESS_KEY=abcdefghijklmnopqrstuvwxyz012345 was the key")).join("\n"));
+  const sec = prepare({ session_id: "s-ep-sec", transcript_path: join(TMP, "episodes-secret.jsonl"), hook_event_name: "SessionEnd" });
+  assert(sec.code === 1 && sec.payloadPaths.length === 3 && /^refused — episode 2 of session s-ep-sec carries what looks like a secret \(episode 2: credential assignment[^)]*\); that episode is not sent, the other 3 episodes post\. Remove it from the conversation before ending the session, or capture by hand\. \| prepared: session s-ep-sec, episodes 1, 3, 4 of 4 — 1: /.test(sec.message) && !/abcdefghijklmnop/.test(sec.message) && sec.payloadPaths.every((p) => !/_e2\.json$/.test(p)),
+    `a secret in one episode refuses that episode alone, exit 1, the others prepared (${sec.message.slice(0, 140)})`);
+  writeFileSync(join(TMP, "one-secret.jsonl"), [ask("MCP_ACCESS_KEY=abcdefghijklmnopqrstuvwxyz012345 please"), say("no")].join("\n"));
+  assert(/^refused — the summary for session s-one-sec carries what looks like a secret \(credential assignment[^)]*\); nothing sent\./.test(prepare({ session_id: "s-one-sec", transcript_path: join(TMP, "one-secret.jsonl"), hook_event_name: "SessionEnd" }).message), "…while a session of one episode is refused in the words it always was");
+  // The cap: the run's child takes the newest five; older episodes wait for a later run.
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const many = [];
+  for (let i = 1; i <= 7; i++) { const o = { cwd: `/repo/wt/smd-${3000 + i}`, branch: `me/smd-${3000 + i}-x`, ts: t("12", String(i).padStart(2, "0")) }; many.push(ask(`work on smd-${3000 + i}`, o), say(`done ${i}`, o)); }
+  writeFileSync(join(TMP, "seven.jsonl"), many.join("\n"));
+  const seven = prepare({ session_id: "s-seven", transcript_path: join(TMP, "seven.jsonl"), hook_event_name: "SessionEnd" });
+  assert(seven.payloadPaths.length === 7 && readdirSync(join(STATE, "pending")).length === 7 && /^prepared: session s-seven, episodes 1, 2, 3, 4, 5, 6, 7 of 7 — /.test(seven.message), `seven episodes: seven payloads written, every one handed to the run's child — the five per run bound what waited from before, not the run's own (${seven.message.slice(0, 60)})`);
+  prepare({ session_id: "s-stranded-seven", transcript_path: CODEX_T, hook_event_name: "SessionEnd" }); // one from before, waiting
+  const sevenRun = await postPending(cfg, seven.payloadPaths);
+  assert(sevenRun.length === 7 && sevenRun.every((o) => o.ok) && readdirSync(join(STATE, "pending")).length === 1 && received.length === 7 && RUN_MAX === 5, "the child posts its seven and nothing else: with more own than the five, no room is left for what waited (second review pass: the run's own two oldest waited for a run that might never come)");
+  assert((await postPending(cfg)).length === 1 && readdirSync(join(STATE, "pending")).length === 0 && readdirSync(STATE).filter((f) => /^s-seven.*\.json$/.test(f)).length === 7, "…and the next run takes the one that waited");
+  // As a hook, synchronous and detached.
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const he = await runHook({ session_id: "s-ep-hook", transcript_path: EPISODES_T, cwd: "/repo/wt/smd-1917-fork-md", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" });
+  assert(he.code === 0 && (he.err.match(/session-capture: captured 0000/g) ?? []).length === 4 && received.length === 4, `as a hook, synchronous: four captures, four lines on stderr (exit ${he.code}: ${he.err.trim().split("\n").length} line(s))`);
+  const epLog = readFileSync(join(STATE, "log"), "utf8");
+  assert(/captured session=s-ep-hook harness=claude-code id=/.test(epLog) && /captured session=s-ep-hook episode=2 harness=claude-code id=/.test(epLog) && /captured session=s-ep-hook episode=4 harness=claude-code id=/.test(epLog), "the log names the episode after the first");
+  const hs = await runHook({ session_id: "s-ep-hook-sec", transcript_path: join(TMP, "episodes-secret.jsonl"), cwd: "/repo/wt/smd-1917-fork-md", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" });
+  assert(hs.code === 1 && /refused — episode 2 of session s-ep-hook-sec/.test(hs.err) && (hs.err.match(/session-capture: captured 0000/g) ?? []).length === 3 && received.length === 7 && !readState("s-ep-hook-sec#e2") && readState("s-ep-hook-sec#e3")?.thought_id,
+    `a secret in one episode: exit 1 naming it, the other three captured (${hs.err.trim().split("\n").length} line(s))`);
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const hd = await runHook({ session_id: "s-ep-detached", transcript_path: EPISODES_T, cwd: "/repo/wt/smd-1917-fork-md", hook_event_name: "SessionEnd" });
+  assert(hd.code === 0 && hd.ms < 1500, `detached: the foreground exits 0 in ${hd.ms} ms with four payloads to post`);
+  const t0 = Date.now();
+  while ((received.length < 4 || !readState("s-ep-detached#e4")) && Date.now() - t0 < 10_000) await sleep(50);
+  assert(received.length === 4 && ["s-ep-detached", "s-ep-detached#e2", "s-ep-detached#e3", "s-ep-detached#e4"].every((c) => readState(c)?.thought_id) && /posting in pid \d+/.test(readFileSync(join(STATE, "log"), "utf8")) && readdirSync(join(STATE, "pending")).length === 0,
+    `…and one child posted all four and recorded four states (${received.length} after ${Date.now() - t0} ms)`);
+}
+
+{
+  // A state file names its chain, so a session id that sanitises to another
+  // chain's file does not cross-read it (third review pass): `x#e2` and a
+  // session literally `x_e2` both name x_e2.json.
+  console.log("\n[3c] A chain's state file names its chain, so a colliding session id does not cross-read it (SMD-2013)");
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const collideCfg = { url: URL_, key: "cap-key" };
+  const cl = (role, text, branch, ts) => line({ type: role, sessionId: "x", timestamp: ts, cwd: "/r", gitBranch: branch, message: { role, content: role === "user" ? text : [{ type: "text", text }] }, origin: { kind: "human" } });
+  writeFileSync(join(TMP, "two-ep.jsonl"), [cl("user", "do smd-1000", "me/smd-1000-a", "2026-09-24T09:00:00.000Z"), cl("assistant", "one", "me/smd-1000-a", "2026-09-24T09:05:00.000Z"), cl("user", "now smd-2000", "me/smd-2000-b", "2026-09-24T09:10:00.000Z"), cl("assistant", "two", "me/smd-2000-b", "2026-09-24T09:15:00.000Z")].join("\n"));
+  const two = prepare({ session_id: "x", transcript_path: join(TMP, "two-ep.jsonl"), hook_event_name: "SessionEnd" });
+  await postPending(collideCfg, two.payloadPaths);
+  assert(existsSync(join(STATE, "x.json")) && existsSync(join(STATE, "x_e2.json")) && JSON.parse(readFileSync(join(STATE, "x_e2.json"), "utf8")).chain_id === "x#e2", "session x's episode 2 records its chain in x_e2.json");
+  const collide = prepare({ session_id: "x_e2", transcript_path: join(TMP, "two-ep.jsonl"), hook_event_name: "SessionEnd" });
+  assert(collide.payloadPaths.length === 2 && /^prepared: session x_e2, episodes 1, 2 of 2 —/.test(collide.message) && !/already captured/.test(collide.message) && JSON.parse(readFileSync(collide.payloadPaths[0], "utf8")).supersedes === undefined,
+    `a session literally named x_e2 does not read x's episode-2 state as its own: it prepares fresh, superseding nothing, not "already captured" (${collide.message.slice(0, 70)})`);
+  for (const p of collide.payloadPaths) unlinkSync(p);
 }
 
 // ── [4] Secret scan ──────────────────────────────────────────────────────────
@@ -455,7 +727,7 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
     const dup2 = prepare({ ...base, session_id: "s-dup" });
     assert(dup1.payloadPath && /already queued/.test(dup2.message) && dup2.payloadPath === undefined, `a pending payload with this fingerprint makes the next ending a skip (${dup2.message})`);
     // Another session's pending payload with this fingerprint is not this session's (the session is in the name, compared whole).
-    writeFileSync(join(STATE, "pending", `${Date.now()}-0000-abcdef-s-other-dup.json`), JSON.stringify({ ...dup1.payload, session_id: "s-other-dup" }));
+    writeFileSync(join(STATE, "pending", `${Date.now()}-0000-abcdef-s-other-dup.json`), JSON.stringify({ ...dup1.payload, session_id: "s-other-dup", chain_id: "s-other-dup" }));
     unlinkSync(dup1.payloadPath);
     const dup3 = prepare({ ...base, session_id: "s-dup" });
     assert(dup3.payloadPath !== undefined, `another session's payload with the same fingerprint does not make this one "already queued" (${dup3.message})`);
@@ -823,6 +1095,499 @@ console.log("\n[6b] Two children draining one queue post each payload once; a de
   assert(aged.some((o) => o.ok && basename(o.file) === basename(stuck.payloadPath)) && !existsSync(reused), "…and swept back and posted once it is older than any run can last");
 }
 
+// ── [6c] Two children of ONE session ─────────────────────────────────────────
+console.log("\n[6c] A checkpoint's child still posting when the session's end posts: the end steps aside and supersedes it (SMD-2035)");
+{
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const cfg = { url: URL_, key: "cap-key" };
+  const claimOf = (p) => { try { return readdirSync(join(STATE, "inflight")).some((pid) => existsSync(join(STATE, "inflight", pid, basename(p)))); } catch { return false; } };
+  const logText = () => { try { return readFileSync(join(STATE, "log"), "utf8"); } catch { return ""; } }; // empty before the first line is written
+  const postOf = (sid, kind) => received.find((r) => new RegExp(`Session ${sid}[,.]`).test(r.args.content) && /Checkpoint:/.test(r.args.content) === (kind === "checkpoint"));
+  const iso = (ms) => new Date(ms).toISOString();
+  const named = (ms, sid) => `${ms}-0-aaaa-${sid}.json`;
+  const claimJson = (sid) => JSON.stringify({ session_id: sid }); // a planted claim says whose it is, as every real payload does (seventh review pass: the readers ask the file)
+  const holder = join(STATE, "inflight", String(process.ppid)); // a claim under a pid that is alive and never clears: the suite's own parent
+  const gone0 = await new Promise((res) => { const c = spawn(process.execPath, ["-e", "0"]); c.on("close", () => res(c.pid)); }); // a pid proven dead
+  const DEFERRED = /^deferred: the session's earlier post is in flight \(pid \d+\); kept under pending\/ for the run that lands it$/;
+  // The compaction's payload answers slowly (2.5 s); the end's, prepared while
+  // that child is in flight, would otherwise land first with no pointer, and
+  // the checkpoint after it as a second current thought saying "continuing".
+  const slowT = join(TMP, "slow-chain.jsonl");
+  writeFileSync(slowT, [user("[[slow]] keep going", { origin: { kind: "human" } }), assistant([{ type: "text", text: "on it" }])].join("\n"));
+  const cp = prepare({ session_id: "s-chain", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" });
+  assert(cp.payloadPath && cp.payload.supersedes === undefined, "a compaction's payload, nothing to supersede yet");
+  await sleep(2);
+  const beside = prepare({ session_id: "s-beside", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "manual" });
+  const childA = spawnScript(["--post", cp.payloadPath]);
+  const t0 = Date.now();
+  while (!(claimOf(cp.payloadPath) && claimOf(beside.payloadPath)) && Date.now() - t0 < 5000) await sleep(20);
+  assert(claimOf(cp.payloadPath) && claimOf(beside.payloadPath) && readdirSync(join(STATE, "inflight")).length === 1, "the checkpoints' child holds its claims while the endpoint is slow");
+  const end = prepare({ session_id: "s-chain", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd", reason: "exit" });
+  await sleep(2);
+  const besideEnd = prepare({ session_id: "s-beside", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd", reason: "exit" });
+  assert(end.payloadPath && end.payload.supersedes === undefined && besideEnd.payloadPath, "both ends' payloads, prepared before their checkpoints have landed, name no pointer");
+  // The ends' run: each is behind a checkpoint another live child holds, so
+  // each steps aside AT ONCE — back under pending/, no wait — for the child
+  // that lands its checkpoint to follow up with (fourth review pass: the first
+  // cut waited on a budget, and every pass found its defects there).
+  const t1 = Date.now();
+  const outs = await postPending(cfg, end.payloadPath);
+  const endMs = Date.now() - t1;
+  const o = outs.find((x) => x.file === end.payloadPath), ob = outs.find((x) => x.file === besideEnd.payloadPath);
+  assert(o?.deferred && ob?.deferred && endMs < 1000 && existsSync(end.payloadPath) && existsSync(besideEnd.payloadPath) && claimOf(cp.payloadPath) && received.length === 1,
+    `both ends step aside at once (${endMs} ms) while their checkpoints' claims stand, and wait under pending/ (${o?.error})`);
+  assert(DEFERRED.test(o?.error ?? "") && /deferred session=s-chain — the session's earlier post is in flight \(pid \d+\); kept under pending\/ for the run that lands it/.test(logText()), "…the outcome and the log name the pid holding the claim");
+  // Three later ends of s-beside reach pending/ too (a resume ending again),
+  // under fixed names a hash-ordered directory reads out of name order — 1,
+  // 3, 2 on APFS — so without the sort the wrong one would post.
+  for (const [i, tag] of [["1", "aaaa"], ["2", "bbbb"], ["3", "cccc"]]) writeFileSync(join(STATE, "pending", `999999999999${i}-${i}-${tag}-s-beside.json`), JSON.stringify({ ...besideEnd.payload, fingerprint: `later-${i}`, text: besideEnd.payload.text.replace(/\n\nSession s-beside/, `\n\nLater ${i}.\n\nSession s-beside`) }));
+  const a = await childA;
+  assert(a.code === 0 && received.length === 4 && readdirSync(join(STATE, "pending")).length === 0 && readdirSync(join(STATE, "inflight")).length === 0 && readdirSync(join(STATE, "dead")).length === 3 && readdirSync(join(STATE, "dead")).includes(basename(besideEnd.payloadPath)),
+    `the child lands its two, then follows up with the five ends behind them: the newest of each session posted, the three older obsolete (${received.length} posts; exit ${a.code}; dead: ${readdirSync(join(STATE, "dead")).length})`);
+  const endPost = postOf("s-chain", "end"), besideEndPost = postOf("s-beside", "end");
+  assert(endPost?.args.supersedes === uuid(1001) && readState("s-chain")?.thought_id === uuid(1003) && readState("s-chain")?.summary_at === end.payload.prepared_at, `the end supersedes the id the checkpoint landed (${endPost?.args.supersedes}) and the state names the end's: one current thought`);
+  assert(besideEndPost?.args.supersedes === uuid(1002) && /\n\nLater 3\./.test(besideEndPost?.args.content ?? "") && readState("s-beside")?.thought_id === uuid(1004) && /following up: 5 payload\(s\) of s-chain, s-beside waited under pending\/ behind a claim this run cleared/.test(logText()),
+    `the latest end of the other session supersedes its checkpoint (${besideEndPost?.args.supersedes}); the log has the follow-up`);
+  // The predecessor lands but its bookkeeping fails (the state path a directory):
+  // its payload goes back to pending/ carrying captured_id and the state names
+  // nothing — the follow-up's pointer is read from the payload (first review pass).
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  mkdirSync(join(STATE, "s-unbooked.json"), { recursive: true });
+  const cp2 = prepare({ session_id: "s-unbooked", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "manual" });
+  const childA2 = spawnScript(["--post", cp2.payloadPath]);
+  const t3 = Date.now();
+  while (!claimOf(cp2.payloadPath) && Date.now() - t3 < 5000) await sleep(20);
+  const end2 = prepare({ session_id: "s-unbooked", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const outs2 = await postPending(cfg, end2.payloadPath);
+  const a2 = await childA2;
+  assert(outs2.filter((x) => x.file === end2.payloadPath).length === 1 && outs2[0]?.deferred && a2.code === 0 && received.length === 2 && received[1].args.supersedes === uuid(1001) && (logText().match(/bookkeeping failed/g) ?? []).length === 2 && readState("s-unbooked") === null,
+    `the end steps aside, the checkpoint's child follows up with it and it supersedes the checkpoint the state never named — read from the landed payload under pending/ (${received[1]?.args.supersedes})`);
+  rmSync(join(STATE, "s-unbooked.json"), { recursive: true, force: true });
+  const settled = await postPending(cfg);
+  assert(settled.length === 2 && settled.every((x) => x.ok) && received.length === 2 && readState("s-unbooked")?.thought_id === uuid(1002) && readdirSync(join(STATE, "pending")).length === 0, "the next run finishes both bookkeepings without posting again; the state names the end");
+  assert(readdirSync(STATE).filter((f) => f.endsWith(".tmp")).length === 0, "the state writes that failed on the directory left no temp file behind (seventh review pass: one per run)");
+  // A temp file a writer left under the state directory or pending/ is pruned once older than any run lasts; a fresh one may still be mid-write.
+  const staleTmp = join(STATE, "s-old.json.4242.tmp"), freshTmp = join(STATE, "pending", `${Date.now()}-0-aaaa-s-fresh.json.4243.tmp`);
+  writeFileSync(staleTmp, "{"); writeFileSync(freshTmp, "{");
+  const aged = new Date(Date.now() - 20 * 60_000); utimesSync(staleTmp, aged, aged);
+  await postPending(cfg);
+  assert(!existsSync(staleTmp) && existsSync(freshTmp), "a stale temp file under the state directory is pruned; a fresh one under pending/ is left to its writer");
+  unlinkSync(freshTmp);
+  // A run whose own landing's bookkeeping fails does not follow up with the
+  // payload it has itself just returned (fourth review pass: one outcome).
+  mkdirSync(join(STATE, "s-ok.json"), { recursive: true });
+  const okP = prepare({ session_id: "s-ok", transcript_path: CODEX_T, hook_event_name: "SessionEnd" });
+  const okRun = await postPending(cfg, okP.payloadPath);
+  assert(okRun.length === 1 && okRun[0].ok && /bookkeeping deferred/.test(okRun[0].note) && !/following up/.test(logText().split("bookkeeping failed").at(-1)) && existsSync(okP.payloadPath), "a landing owed its bookkeeping is one outcome; the run does not follow up with its own return");
+  rmSync(join(STATE, "s-ok.json"), { recursive: true, force: true });
+  // The pointer by the rule alone — pointerFor over the state and the owed
+  // payloads under pending/ and other claims: the NEWEST by prepared time.
+  rmSync(STATE, { recursive: true, force: true });
+  const S = "s-point", now = Date.now(), older = iso(now - 600_000), newer = iso(now - 300_000);
+  const lair = join(STATE, "inflight", "424242");
+  mkdirSync(join(STATE, "pending"), { recursive: true }); mkdirSync(lair, { recursive: true });
+  writeFileSync(join(STATE, "pending", named(now - 3000, S)), JSON.stringify({ session_id: S, captured_id: uuid(77), prepared_at: newer }));
+  writeFileSync(join(lair, named(now - 4000, S)), JSON.stringify({ session_id: S, captured_id: uuid(76), prepared_at: older }));
+  writeFileSync(join(STATE, "pending", named(now - 2000, S)), JSON.stringify({ session_id: S, prepared_at: newer, text: "never posted" }));
+  const me = named(now - 1000, S);
+  assert(landedBefore(S, me)?.id === uuid(77) && landedBefore(S, named(now - 3500, S))?.id === uuid(76) && landedBefore(S, named(now - 5000, S)) === undefined,
+    "landedBefore: the newest LANDED payload older than the name, wherever it lies and whatever order the directories are read in — not one still owed its post, none when nothing older has landed");
+  assert(landedAfter(S, named(now - 3500, S)) === true && landedAfter(S, me) === false && landedAfter("s-none", me) === false, "landedAfter: whether a landed payload NEWER than the name exists — the never-posted one does not count");
+  assert(pointerFor(S, me, { thought_id: uuid(78), summary_at: iso(now - 100_000) }) === uuid(78) && pointerFor(S, me, { thought_id: uuid(78), summary_at: older }) === uuid(77), "pointerFor: the newest by time — the state's thought when it is the later, the owed payload's when it is");
+  assert(pointerFor(S, me, { thought_id: uuid(78), summary_at: older, captured_at: iso(now) }) === uuid(77) && pointerFor(S, me, { thought_id: uuid(78), captured_at: iso(now - 100_000) }) === uuid(78), "…the state by summary_at, its prepare time, not captured_at, its post time — which serves only a state from before summary_at");
+  assert(pointerFor(S, me, { thought_id: uuid(78), summary_at: iso(now + 600_000) }) === uuid(78) && pointerFor(S, me, { thought_id: uuid(78), summary_at: "garbage" }) === uuid(78), "…a state time in the future, or none, leaves the state standing: the normal source is not outranked on a clock that was wrong (fourth review pass)");
+  assert(pointerFor(S, me, null) === uuid(77) && pointerFor("s-none", me, null) === undefined && pointerFor("s-none", me, { thought_id: uuid(78), summary_at: older }) === uuid(78), "…no state: the owed payload; nothing landed: the state alone, or no pointer");
+  writeFileSync(join(STATE, "pending", named(now - 1500, S)), JSON.stringify({ session_id: S, captured_id: uuid(79) }));
+  assert(pointerFor(S, me, { thought_id: uuid(78), summary_at: iso(now - 100_000) }) === uuid(79), "…a landed payload with no prepared_at ranks by the millisecond in its name");
+  assert(pointerFor(S, me, { thought_id: uuid(78), summary_at: iso(now - 100_000) }, { id: uuid(70), ms: now - 200_000 }) === uuid(79) && pointerFor(S, me, { thought_id: uuid(78), summary_at: iso(now - 100_000) }, { id: uuid(70), ms: now - 1000 }) === uuid(70) && pointerFor("s-none", me, null, { id: uuid(70), ms: now - 1000 }) === uuid(70),
+    "…what the run itself landed ranks by its time like the rest — the last resort when nothing else knows, not a trump (eighth review pass)");
+  writeFileSync(join(STATE, "pending", named(now + 3_600_000, S)), JSON.stringify({ session_id: S, captured_id: uuid(80), prepared_at: iso(now + 3_600_000) }));
+  assert(pointerFor(S, named(now + 3_700_000, S), { thought_id: uuid(78), summary_at: iso(now - 100_000) }) === uuid(78), "…a payload written by a clock an hour ahead — prepared_at and name alike — ranks last and does not outrank the state (fifth review pass)");
+  // An older checkpoint of a session whose END has landed in another child's
+  // hands, its bookkeeping owed — or whose end is in another live child's
+  // hands, not yet posted — is obsolete: posting it would stand a fresh
+  // "continuing" thought after the end (second and fourth review passes).
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const oldCp = prepare({ session_id: "s-late", transcript_path: CODEX_T, hook_event_name: "PreCompact", trigger: "auto" });
+  await sleep(2);
+  const lateEnd = prepare({ session_id: "s-late", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  mkdirSync(holder, { recursive: true });
+  writeFileSync(join(holder, basename(lateEnd.payloadPath)), JSON.stringify({ ...lateEnd.payload, captured_id: uuid(88) }));
+  unlinkSync(lateEnd.payloadPath);
+  const lo = (await postPending(cfg, oldCp.payloadPath)).find((x) => x.file === oldCp.payloadPath);
+  assert(lo?.obsolete && received.length === 0 && readdirSync(join(STATE, "dead")).length === 1, `an older checkpoint whose session's end has landed elsewhere, owed its bookkeeping, is obsolete and not posted (${lo?.error})`);
+  const oldCp2 = prepare({ session_id: "s-swept", transcript_path: CODEX_T, hook_event_name: "PreCompact", trigger: "auto" });
+  await sleep(2);
+  const sweptEnd = prepare({ session_id: "s-swept", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  renameSync(sweptEnd.payloadPath, join(holder, basename(sweptEnd.payloadPath)));
+  assert(newerInFlight("s-swept", basename(oldCp2.payloadPath)) === true && newerInFlight("s-swept", basename(sweptEnd.payloadPath)) === false && aheadOf("s-swept", basename(sweptEnd.payloadPath)).length === 0, "newerInFlight: a newer payload of the session in another live child's hands; not itself, and nothing is ahead of the newest");
+  const so = (await postPending(cfg, oldCp2.payloadPath)).find((x) => x.file === oldCp2.payloadPath);
+  assert(so?.obsolete && received.length === 0 && /following up/.test(logText()) === false && readdirSync(join(STATE, "dead")).length === 2, `…and an older checkpoint whose end is in another live child's hands, not yet posted, is obsolete too — the end covers it (${so?.error})`);
+  rmSync(holder, { recursive: true, force: true });
+  // The follow-up leaves alone what this run has itself just returned to
+  // pending/: a session cleared through an owed bookkeeping whose newest
+  // payload then fails to post, or steps aside, would otherwise be taken up
+  // at once — attempts counted twice, two outcomes for one file (third and
+  // fourth review passes).
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const downT = join(TMP, "down-own.jsonl");
+  writeFileSync(downT, [user("[[store-down]] wrap up", { origin: { kind: "human" } }), assistant([{ type: "text", text: "done" }])].join("\n"));
+  const owed = prepare({ session_id: "s-own", transcript_path: CODEX_T, hook_event_name: "SessionEnd" });
+  writeFileSync(owed.payloadPath, JSON.stringify({ ...owed.payload, captured_id: uuid(70) }));
+  await sleep(2);
+  const failing = prepare({ session_id: "s-own", transcript_path: downT, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  mkdirSync(holder, { recursive: true });
+  writeFileSync(join(holder, named(Date.now() - 5000, "s-own2")), claimJson("s-own2"));
+  const owed2 = prepare({ session_id: "s-own2", transcript_path: CODEX_T, hook_event_name: "SessionEnd" });
+  writeFileSync(owed2.payloadPath, JSON.stringify({ ...owed2.payload, captured_id: uuid(71) }));
+  await sleep(2);
+  const stepping = prepare({ session_id: "s-own2", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const ownRun = await postPending(cfg);
+  assert(ownRun.length === 4 && ownRun.filter((x) => x.file === failing.payloadPath).length === 1 && !ownRun.find((x) => x.file === failing.payloadPath).ok && received.length === 1 && JSON.parse(readFileSync(failing.payloadPath, "utf8")).attempts === 1,
+    `a payload the run itself returned to pending/ after a failed post is not followed up: one outcome, one post, one attempt (${ownRun.length} outcomes, ${received.length} post(s))`);
+  assert(ownRun.filter((x) => x.file === stepping.payloadPath).length === 1 && ownRun.find((x) => x.file === stepping.payloadPath).deferred && ownRun.find((x) => x.file === owed2.payloadPath).deferred && (logText().match(/deferred session=s-own2/g) ?? []).length === 2 && !/following up/.test(logText()),
+    "…nor one that stepped aside: one deferred outcome each, one deferred line each, no follow-up while the claim stands — the owed one beside a newer sibling steps aside for the older claim too, its state write after that one's (eleventh review pass)");
+  rmSync(holder, { recursive: true, force: true });
+  // The follow-up runs for a session whose claim this run cleared by DROPPING
+  // a payload, not only by landing one: the child holding the newer payload
+  // may have stepped aside for the older one this run has just dropped, and
+  // its payload then waits under pending/ for whoever clears the way (fourth
+  // review pass). Staged: the newer payload's claim clears mid-run, and the
+  // stepped-aside payload appears under pending/ before the follow-up.
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  mkdirSync(holder, { recursive: true });
+  const dropped = prepare({ session_id: "s-drop", transcript_path: CODEX_T, hook_event_name: "PreCompact", trigger: "auto" }); await sleep(2);
+  const heldNewer = join(holder, named(Date.now(), "s-drop")); writeFileSync(heldNewer, claimJson("s-drop")); await sleep(2);
+  const slowOther = prepare({ session_id: "s-drop-beside", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const stepped = prepare({ session_id: "s-drop", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const steppedHome = stepped.payloadPath, steppedAside = join(TMP, basename(stepped.payloadPath));
+  renameSync(steppedHome, steppedAside); // not yet under pending/: it is still in the other child's hands
+  const dropRun = postPending(cfg);
+  await sleep(600); // the older one is dropped at once; the slow payload of the other session is posting
+  unlinkSync(heldNewer); renameSync(steppedAside, steppedHome); // the other child steps aside: its claim clears, its payload reaches pending/
+  const dropped_ = await dropRun;
+  assert(dropped_.find((x) => x.file === dropped.payloadPath)?.obsolete && dropped_.find((x) => x.file === slowOther.payloadPath)?.ok && dropped_.find((x) => x.file === steppedHome)?.ok && received.length === 2 && /following up: 1 payload\(s\) of s-drop waited under pending\/ behind a claim this run cleared/.test(logText()) && readdirSync(join(STATE, "pending")).length === 0,
+    `a run that dropped a session's older payload for a newer one in another child's hands follows up with that session's payload once it waits under pending/ (${dropped_.map((x) => x.ok ? "ok" : x.obsolete ? "obsolete" : x.error).join(", ")})`);
+  rmSync(holder, { recursive: true, force: true });
+  // A failed post clears a claim too: an end that stepped aside for a
+  // checkpoint whose post then fails must not wait for an unrelated run — the
+  // run that failed follows up with it (fifth review pass). Staged: the
+  // checkpoint fails at once, the run goes on with another session's slow
+  // payload, and the end reaches pending/ meanwhile.
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const downCp = prepare({ session_id: "s-fail", transcript_path: downT, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" }); await sleep(2);
+  const slowBeside = prepare({ session_id: "s-fail-beside", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" }); await sleep(2);
+  const failEnd = prepare({ session_id: "s-fail", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const failEndAside = join(TMP, basename(failEnd.payloadPath));
+  renameSync(failEnd.payloadPath, failEndAside);
+  const failRun = postPending(cfg);
+  await sleep(600);
+  renameSync(failEndAside, failEnd.payloadPath);
+  const failed_ = await failRun;
+  assert(!failed_.find((x) => x.file === downCp.payloadPath)?.ok && failed_.find((x) => x.file === slowBeside.payloadPath)?.ok && failed_.find((x) => x.file === failEnd.payloadPath)?.ok && received.filter((r) => /Session s-fail[,.]/.test(r.args.content)).length === 2 && /following up: 1 payload\(s\) of s-fail waited/.test(logText()) && existsSync(downCp.payloadPath),
+    `a run whose checkpoint post failed follows up with the end that stepped aside for it (${failed_.map((x) => x.ok ? "ok" : x.obsolete ? "obsolete" : x.error.slice(0, 40)).join(" | ")})`);
+  // A chained compaction: the end steps aside behind a checkpoint the child
+  // is itself FOLLOWING UP with, so the follow-up goes round again (fifth
+  // review pass: one round left the end under pending/ for an unrelated run).
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const cpA = prepare({ session_id: "s-link", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" });
+  const childLinkA = spawnScript(["--post", cpA.payloadPath]);
+  const tL = Date.now();
+  while (!claimOf(cpA.payloadPath) && Date.now() - tL < 5000) await sleep(20);
+  const slow2T = join(TMP, "slow-link.jsonl");
+  writeFileSync(slow2T, [user("[[slow]] keep going", { origin: { kind: "human" } }), user("and more", { origin: { kind: "human" } }), assistant([{ type: "text", text: "on it" }])].join("\n"));
+  const cpB = prepare({ session_id: "s-link", transcript_path: slow2T, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "manual" }); // after the first child's claim: a second compaction while the first is still posting
+  const childLinkB = await spawnScript(["--post", cpB.payloadPath]);
+  assert(childLinkB.code === 0 && existsSync(cpB.payloadPath) && claimOf(cpA.payloadPath), "the second compaction's child steps aside behind the first's and exits 0");
+  const tL2 = Date.now();
+  while (!claimOf(cpB.payloadPath) && Date.now() - tL2 < 10_000) await sleep(20); // the first child lands its checkpoint and follows up with the second
+  const linkEnd = prepare({ session_id: "s-link", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const linkOut = (await postPending(cfg, linkEnd.payloadPath)).find((x) => x.file === linkEnd.payloadPath);
+  const linkA = await childLinkA;
+  // Two interleavings are right (eleventh review pass): the child judges the
+  // second checkpoint before the end looks — it posts it, and its second round
+  // posts the end superseding it; or the end's claim is in the child's sight
+  // when it judges the second checkpoint, which is then obsolete beside it,
+  // and the end's second look finds the claim cleared and takes itself back.
+  const rounds = (logText().match(/following up/g) ?? []).length;
+  const chained = rounds === 2 && linkOut?.deferred && received.length === 3 && received[2].args.supersedes === uuid(1002) && !/Checkpoint:/.test(received[2].args.content) && readState("s-link")?.thought_id === uuid(1003);
+  const retook = rounds === 1 && linkOut?.ok && received.length === 2 && received[1].args.supersedes === uuid(1001) && !/Checkpoint:/.test(received[1].args.content) && readdirSync(join(STATE, "dead")).includes(basename(cpB.payloadPath)) && readState("s-link")?.thought_id === uuid(1002);
+  assert(linkA.code === 0 && (chained || retook) && readdirSync(join(STATE, "pending")).length === 0 && readdirSync(join(STATE, "inflight")).length === 0,
+    `the end steps aside behind the checkpoint being followed up and the child's second round posts it, or the checkpoint is obsolete beside the end and the end takes itself back — one current thought either way (${received.length} posts; rounds: ${rounds}; ${chained ? "chained" : retook ? "retook" : linkOut?.error ?? "?"})`);
+  // Under the cap the follow-up takes a session's NEWEST payloads: six ends of
+  // one session behind a cleared claim, five taken, the newest posted, the
+  // oldest left under pending/ for the next run to drop (fifth review pass: the
+  // oldest five were taken and a stale one posted).
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const capOwed = prepare({ session_id: "s-cap", transcript_path: CODEX_T, hook_event_name: "SessionEnd" });
+  writeFileSync(capOwed.payloadPath, JSON.stringify({ ...capOwed.payload, captured_id: uuid(60) })); await sleep(2);
+  const capSlow = prepare({ session_id: "s-cap-beside", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const capEnd = prepare({ session_id: "s-cap", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const capBody = JSON.parse(readFileSync(capEnd.payloadPath, "utf8")); unlinkSync(capEnd.payloadPath);
+  // A second cleared session with two ends: the room is shared in rounds —
+  // every session's newest before any session's second (sixth review pass:
+  // the first session's obsolete older ends took the room the second's
+  // newest needed).
+  const capOwed2 = prepare({ session_id: "s-cap2", transcript_path: CODEX_T, hook_event_name: "SessionEnd" });
+  writeFileSync(capOwed2.payloadPath, JSON.stringify({ ...capOwed2.payload, captured_id: uuid(61) }));
+  const capRunning = postPending(cfg);
+  await sleep(600); // the owed bookkeepings are done, the other session's slow payload is posting: the ends reach pending/ now, for the follow-up alone
+  for (let i = 1; i <= 6; i++) writeFileSync(join(STATE, "pending", `99999999999${i}-${i}-cap${i}-s-cap.json`), JSON.stringify({ ...capBody, fingerprint: `cap-${i}`, prepared_at: iso(Date.parse(capBody.prepared_at) + i), text: capBody.text.replace(/\n\nSession s-cap/, `\n\nLater ${i}.\n\nSession s-cap`) }));
+  for (let i = 1; i <= 2; i++) writeFileSync(join(STATE, "pending", `99999999999${i}-${i}-cap${i}-s-cap2.json`), JSON.stringify({ ...capBody, session_id: "s-cap2", chain_id: "s-cap2", fingerprint: `cap2-${i}`, prepared_at: iso(Date.parse(capBody.prepared_at) + i), text: capBody.text.replace(/\n\nSession s-cap/, `\n\nSecond ${i}.\n\nSession s-cap2`) }));
+  const capRun = await capRunning;
+  const posted = received.slice(1).map((r) => (/\n\n(Later \d|Second \d)\./.exec(r.args.content) ?? [])[1]).sort().join(",");
+  assert(capRun.length === 11 && posted === "Later 6,Second 2" && readdirSync(join(STATE, "pending")).length === 0 && readdirSync(join(STATE, "dead")).length === 6 && /following up: 5 payload\(s\) of (?:s-cap, s-cap2|s-cap2, s-cap) waited/.test(logText()) && (logText().match(/following up/g) ?? []).length === 2,
+    `the follow-up shares its room in rounds across the two sessions: each session's newest posts, the six older ones are obsolete — the drops spend no room, so a second round finishes them (posted: ${posted}; dead: ${readdirSync(join(STATE, "dead")).length}; rounds: ${(logText().match(/following up/g) ?? []).length})`);
+  assert((await postPending(cfg)).length === 0, "…and the next run has nothing of them left to drop");
+  void capSlow;
+  // Three cleared sessions of three ends each under the cap of five: the
+  // first round takes every session's newest, the second round two more and
+  // stops mid-round (seventh review pass: the inner room check had no tooth).
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const threeOwed = ["s-t1", "s-t2", "s-t3"].map((sid) => { const o = prepare({ session_id: sid, transcript_path: CODEX_T, hook_event_name: "SessionEnd" }); writeFileSync(o.payloadPath, JSON.stringify({ ...o.payload, captured_id: uuid(66) })); return o; });
+  const threeSlow = prepare({ session_id: "s-t-beside", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const threeRunning = postPending(cfg);
+  await sleep(600);
+  for (const sid of ["s-t1", "s-t2", "s-t3"]) for (let i = 1; i <= 3; i++) writeFileSync(join(STATE, "pending", `99999999999${i}-${i}-t${i}-${sid}.json`), JSON.stringify({ ...capBody, session_id: sid, chain_id: sid, fingerprint: `${sid}-${i}`, prepared_at: iso(Date.now() + i), text: capBody.text.replace(/\n\nSession s-cap/, `\n\nThird ${i}.\n\nSession ${sid}`) }));
+  const threeRun = await threeRunning;
+  assert(threeRun.length === 13 && received.length === 4 && ["s-t1", "s-t2", "s-t3"].every((sid) => /\n\nThird 3\./.test(received.find((r) => new RegExp(`Session ${sid}[,.]`).test(r.args.content))?.args.content ?? "")) && readdirSync(join(STATE, "pending")).length === 0 && readdirSync(join(STATE, "dead")).length === 6 && /following up: 5 payload\(s\)/.test(logText()),
+    `three sessions of three: the first round takes every session's newest and two more, later rounds the rest — three posted, six obsolete, none left (${received.length} posts; pending: ${readdirSync(join(STATE, "pending")).length}; rounds: ${(logText().match(/following up/g) ?? []).length})`);
+  void threeOwed; void threeSlow;
+  // The cap counts what the follow-up posts or defers, not what it drops: five
+  // stale ends of one cleared session, four obsolete beside the newest, must
+  // not spend the room a second session's end, deferred meanwhile, needs
+  // (eleventh review pass: the round's five claims were the five).
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const owedT = prepare({ session_id: "s-capT", transcript_path: CODEX_T, hook_event_name: "SessionEnd" }); writeFileSync(owedT.payloadPath, JSON.stringify({ ...owedT.payload, captured_id: uuid(58) })); await sleep(2);
+  const owedS = prepare({ session_id: "s-capS", transcript_path: CODEX_T, hook_event_name: "SessionEnd" }); writeFileSync(owedS.payloadPath, JSON.stringify({ ...owedS.payload, captured_id: uuid(59) })); await sleep(2);
+  const capX = prepare({ session_id: "s-capX", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const capT = postPending(cfg);
+  await sleep(600); // the owed bookkeepings are done; the slow payload posts: T's five ends arrive, the newest slow too
+  for (let i = 1; i <= 5; i++) writeFileSync(join(STATE, "pending", `99999999999${i}-${i}-t${i}-s-capT.json`), JSON.stringify({ ...capBody, session_id: "s-capT", chain_id: "s-capT", fingerprint: `T-${i}`, prepared_at: iso(Date.now() + i), text: capBody.text.replace(/\n\nSession s-cap/, `\n\n${i === 5 ? "[[slow]] " : ""}Tail ${i}.\n\nSession s-capT`) }));
+  await sleep(3000); // round 1 posts T's newest, slowly: S's end steps in meanwhile
+  writeFileSync(join(STATE, "pending", `999999999996-6-s1-s-capS.json`), JSON.stringify({ ...capBody, session_id: "s-capS", chain_id: "s-capS", fingerprint: "S-1", prepared_at: iso(Date.now()), text: capBody.text.replace(/\n\nSession s-cap/, "\n\nEnd of S.\n\nSession s-capS") }));
+  const capTRun = await capT;
+  assert(capTRun.length === 9 && received.length === 3 && /Tail 5\./.test(received[1].args.content) && /End of S\./.test(received[2].args.content) && readdirSync(join(STATE, "pending")).length === 0 && readdirSync(join(STATE, "dead")).length === 4 && (logText().match(/following up/g) ?? []).length === 2,
+    `the follow-up's five drops of T's stale ends do not spend the room: S's end, deferred meanwhile, is followed up in the second round (${received.length} posts; rounds: ${(logText().match(/following up/g) ?? []).length}; outcomes: ${capTRun.length})`);
+  // A pending file that parses to no object — a literal null — is a dead letter, not a crash that leaves every claim in the run's hands.
+  writeFileSync(join(STATE, "pending", `${Date.now()}-0-aaaa-s-null.json`), "null");
+  const nullRun = await postPending(cfg);
+  assert(nullRun.length === 0 && readdirSync(join(STATE, "pending")).length === 0 && readdirSync(join(STATE, "dead")).some((f) => f.endsWith("-s-null.json")) && readdirSync(join(STATE, "inflight")).length === 0, "a payload that is JSON but no object is a dead letter; the run goes on");
+  // A payload of another session whose id sanitises to the same file tail
+  // ("s.dot" and "s_dot" both name s_dot.json) is not this run's to follow
+  // up: it goes back where it was, not to dead/ as obsolete (sixth review pass).
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const dotOwed = prepare({ session_id: "s.dot", transcript_path: CODEX_T, hook_event_name: "SessionEnd" });
+  writeFileSync(dotOwed.payloadPath, JSON.stringify({ ...dotOwed.payload, captured_id: uuid(62) })); await sleep(2);
+  const dotSlow = prepare({ session_id: "s-dot-beside", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const underscore = prepare({ session_id: "s_dot", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const underscoreAside = join(TMP, basename(underscore.payloadPath));
+  renameSync(underscore.payloadPath, underscoreAside);
+  const dotRunning = postPending(cfg);
+  await sleep(600);
+  renameSync(underscoreAside, underscore.payloadPath);
+  const dotRun = await dotRunning;
+  assert(dotRun.length === 2 && dotRun.find((x) => x.file === dotSlow.payloadPath)?.ok && existsSync(underscore.payloadPath) && readdirSync(join(STATE, "dead")).length === 0 && !/following up/.test(logText()),
+    `the other session's payload under the shared tail is left under pending/, unjudged (${dotRun.length} outcomes; dead: ${readdirSync(join(STATE, "dead")).length})`);
+  // …and every other reader says whose a file is by reading it (seventh review pass: one of five had): the stranger's landed payload is no pointer and no reason to drop; in a live child's hands it is neither ahead nor newer in flight.
+  writeFileSync(underscore.payloadPath, JSON.stringify({ ...underscore.payload, captured_id: uuid(65) }));
+  const dotMine = `${Date.now() - 1000}-0-aaaa-s_dot.json`;
+  assert(landedBefore("s.dot", `${Date.now() + 1000}-0-aaaa-s_dot.json`) === undefined && landedAfter("s.dot", dotMine) === false && landedBefore("s_dot", `${Date.now() + 1000}-0-aaaa-s_dot.json`)?.id === uuid(65), "a landed payload under the shared tail counts for its own session alone");
+  mkdirSync(holder, { recursive: true });
+  renameSync(underscore.payloadPath, join(holder, basename(underscore.payloadPath)));
+  writeFileSync(join(holder, `${Date.now() - 6000}-0-aaaa-s_dot.json`), "{"); // unreadable, older
+  writeFileSync(join(holder, `${Date.now() - 5000}-0-aaaa-s_dot.json`), JSON.stringify({ session_id: "s_dot" })); // the stranger's, older
+  writeFileSync(join(holder, `${Date.now() + 5000}-0-aaaa-s_dot.json`), JSON.stringify({ session_id: "s_dot" })); // the stranger's, newer
+  writeFileSync(join(holder, `${Date.now() + 6000}-0-aaaa-s_dot.json`), "{"); // unreadable, newer
+  symlinkSync(join(holder, "nowhere"), join(holder, `${Date.now() - 7000}-0-aaaa-s_dot.json`)); // listed, gone on the read: a claim that has just cleared (ninth review pass)
+  assert(aheadOf("s.dot", dotMine).length === 1 && aheadOf("s_dot", dotMine).length === 3 && landedBefore("s_dot", dotMine)?.id === uuid(65) && newerInFlight("s.dot", dotMine) === false && newerInFlight("s_dot", dotMine) === true,
+    "in a live child's hands the stranger's older payloads are not ahead of this session — the unreadable one is, the safe side; one gone on the read is not — and its newer one is not newer in flight, nor is the unreadable one, the safe side; for their own session the older ones are ahead, landed or not (a landed one is still writing its state, and a post past it would race that write), all but the unreadable count as newer");
+  rmSync(holder, { recursive: true, force: true });
+  // Two children finishing one session's owed bookkeepings at once write the
+  // state together: each writes beside under its own pid and renames, so
+  // neither's rename finds the other's file gone (sixth review pass: one
+  // shared temp name, and one child's bookkeeping "failed" every time).
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const raceA = prepare({ session_id: "s-race", transcript_path: CODEX_T, hook_event_name: "SessionEnd" }); await sleep(2);
+  const raceB = prepare({ session_id: "s-race", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  writeFileSync(raceA.payloadPath, JSON.stringify({ ...raceA.payload, captured_id: uuid(63) }));
+  writeFileSync(raceB.payloadPath, JSON.stringify({ ...raceB.payload, captured_id: uuid(64) }));
+  mkdirSync(join(STATE, "s-race.json.tmp"), { recursive: true }); // a stranger's temp name standing in the way: a write under one shared name would fail on it, a write under this process's own never meets it
+  const [ra, rb] = await Promise.all([spawnScript(["--post", raceA.payloadPath]), spawnScript(["--post", raceB.payloadPath])]);
+  assert(ra.code === 0 && rb.code === 0 && !/bookkeeping failed/.test(logText()) && readState("s-race")?.thought_id === uuid(64) && readdirSync(join(STATE, "pending")).length === 0 && readdirSync(STATE).filter((f) => f.endsWith(".tmp") && f !== "s-race.json.tmp").length === 0,
+    `two children finish one session's owed bookkeepings together without a failed rename, each under its own temp name; the state names the newer (${(logText().match(/bookkeeping failed/g) ?? []).length} failure(s))`);
+  rmSync(join(STATE, "s-race.json.tmp"), { recursive: true, force: true });
+  // The landed payload's own id write fails — the temp path taken, as a full
+  // disk would fail it — so it goes back under pending/ without its id and
+  // the state is never written: the end that stepped aside for it, followed
+  // up in the same run, still supersedes what the run landed, and the next
+  // run drops the id-less payload as obsolete instead of posting it again
+  // (eighth review pass; the seventh had declined this as unreachable).
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const idO = prepare({ session_id: "s-idless", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" }); await sleep(2);
+  const idSlow = prepare({ session_id: "s-idless-beside", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" }); await sleep(2);
+  const idEnd = prepare({ session_id: "s-idless", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const idEndAside = join(TMP, basename(idEnd.payloadPath));
+  renameSync(idEnd.payloadPath, idEndAside);
+  mkdirSync(join(STATE, "inflight", String(process.pid), `${basename(idO.payloadPath)}.${process.pid}.tmp`), { recursive: true }); // the temp path, taken
+  writeFileSync(join(STATE, "s-idless.json"), JSON.stringify({ thought_id: uuid(50), fingerprint: "old", captured_at: iso(Date.now() - 3_600_000), summary_at: iso(Date.now() - 3_600_000) })); // an end an hour ago: the run's landing is the newer, by its time (ninth review pass: the moment had no tooth)
+  writeFileSync(idO.payloadPath, JSON.stringify({ ...idO.payload, prepared_at: "garbage" })); // …and by its NAME when its prepare time is unusable, as a file's is (tenth review pass)
+  const idRunning = postPending(cfg);
+  await sleep(600);
+  renameSync(idEndAside, idEnd.payloadPath); // the end reaches pending/ while the run posts the slow one
+  const idRun = await idRunning;
+  const idO_ = idRun.find((x) => x.file === idO.payloadPath), idEnd_ = idRun.find((x) => x.file === idEnd.payloadPath);
+  assert(idO_?.ok && /bookkeeping deferred/.test(idO_.note) && JSON.parse(readFileSync(idO.payloadPath, "utf8")).captured_id === undefined && idEnd_?.ok && received.length === 3 && received[2].args.supersedes === uuid(1001) && readState("s-idless")?.thought_id === uuid(1003),
+    `the end followed up supersedes what the run landed though the landed payload carries no id (${received[2]?.args.supersedes}; ${idO_?.note})`);
+  rmSync(join(STATE, "inflight", String(process.pid)), { recursive: true, force: true });
+  writeFileSync(idO.payloadPath, JSON.stringify({ ...JSON.parse(readFileSync(idO.payloadPath, "utf8")), prepared_at: idO.payload.prepared_at })); // the hand-made unusable time restored: the next run judges obsolescence by it, and an unusable one decides nothing
+  const idNext = await postPending(cfg);
+  assert(idNext.find((x) => x.file === idO.payloadPath)?.obsolete && received.length === 3 && readdirSync(join(STATE, "pending")).length === 0, "…and the next run drops the id-less payload as obsolete beside the state, not posting it again");
+  void idSlow;
+  // …and it is a last resort, not a trump: a sibling landing a newer summary
+  // of the session meanwhile writes the state, and the state's thought — later
+  // than what this run landed, earlier than the end — is the pointer.
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const id2O = prepare({ session_id: "s-idless2", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" }); await sleep(3);
+  const id2Slow = prepare({ session_id: "s-idless2-beside", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" }); await sleep(3);
+  const id2End = prepare({ session_id: "s-idless2", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const id2EndAside = join(TMP, basename(id2End.payloadPath));
+  renameSync(id2End.payloadPath, id2EndAside);
+  mkdirSync(join(STATE, "inflight", String(process.pid), `${basename(id2O.payloadPath)}.${process.pid}.tmp`), { recursive: true });
+  const id2Running = postPending(cfg);
+  await sleep(600);
+  writeFileSync(join(STATE, "s-idless2.json"), JSON.stringify({ thought_id: uuid(88), fingerprint: "sib", captured_at: iso(Date.now()), summary_at: iso(Date.parse(id2O.payload.prepared_at) + 1) }));
+  renameSync(id2EndAside, id2End.payloadPath);
+  const id2Run = await id2Running;
+  assert(id2Run.find((x) => x.file === id2End.payloadPath)?.ok && received.length === 3 && received[2].args.supersedes === uuid(88),
+    `a sibling's newer state outranks what the run landed: the end supersedes the state's thought (${received[2]?.args.supersedes})`);
+  rmSync(join(STATE, "inflight", String(process.pid)), { recursive: true, force: true });
+  void id2Slow;
+  // A temp file a child left mid-write in its claim directory is no payload:
+  // the sweep unlinks it rather than moving it under pending/ for ever.
+  const deadDir = join(STATE, "inflight", String(gone0));
+  mkdirSync(deadDir, { recursive: true });
+  writeFileSync(join(deadDir, `${Date.now()}-0-aaaa-s-tmp.json.${gone0}.tmp`), "{");
+  const junk = join(STATE, "pending", `${Date.now()}-0-aaaa-s-junk.json`);
+  writeFileSync(junk, "{"); // a payload that will not parse
+  await postPending(cfg);
+  assert(!existsSync(deadDir) && readdirSync(join(STATE, "pending")).length === 0, "a dead child's half-written temp file is unlinked by the sweep, not swept into pending/");
+  assert(!existsSync(junk) && readdirSync(join(STATE, "dead")).includes(basename(junk)) && /dead \S+-s-junk\.json — not a payload this run can read/.test(logText()), "a payload that will not parse is a dead letter, and the log says why (tenth review pass: it had no tooth and no line)");
+  // The follow-up's "newest" of a session never regresses across rounds: the
+  // newest, taken in the main claim, posts slowly and fails; an older payload
+  // reaching pending/ meanwhile is followed up — and is obsolete beside it,
+  // not the session's newest (ninth review pass: a fresh set per round named
+  // it newest and it posted).
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const slowDownT = join(TMP, "slow-down.jsonl");
+  writeFileSync(slowDownT, [user("[[slow-down]] wrap up", { origin: { kind: "human" } }), assistant([{ type: "text", text: "done" }])].join("\n"));
+  const rgC = prepare({ session_id: "s-regress", transcript_path: downT, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" }); await sleep(3);
+  const rgM = prepare({ session_id: "s-regress", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "manual" }); await sleep(3);
+  const rgE = prepare({ session_id: "s-regress", transcript_path: slowDownT, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const rgMAside = join(TMP, basename(rgM.payloadPath));
+  renameSync(rgM.payloadPath, rgMAside);
+  const rgRunning = postPending(cfg);
+  await sleep(600); // the checkpoint is obsolete beside the end; the end is posting, slowly, and will fail
+  renameSync(rgMAside, rgM.payloadPath);
+  const rgRun = await rgRunning;
+  assert(rgRun.find((x) => x.file === rgC.payloadPath)?.obsolete && !rgRun.find((x) => x.file === rgE.payloadPath)?.ok && rgRun.find((x) => x.file === rgM.payloadPath)?.obsolete && received.length === 1 && existsSync(rgE.payloadPath) && !existsSync(rgM.payloadPath),
+    `the middle payload followed up is obsolete beside the failed newest, not posted as the newest (${rgRun.map((x) => x.ok ? "ok" : x.obsolete ? "obsolete" : "failed").join(", ")}; ${received.length} post(s))`);
+  // A payload that steps aside goes back under pending/ AT ONCE, not at the
+  // run's end: while this run goes on posting another session's slow payload,
+  // the landing child's follow-up must be able to see it, and a newer payload
+  // of its session in a third child must not step aside for it (third review pass).
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  mkdirSync(holder, { recursive: true });
+  writeFileSync(join(holder, named(Date.now() - 5000, "s-d1")), claimJson("s-d1"));
+  const d1 = prepare({ session_id: "s-d1", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }); await sleep(2);
+  const d2 = prepare({ session_id: "s-d2", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const running = postPending(cfg);
+  await sleep(700);
+  const midway = { d1Pending: existsSync(d1.payloadPath), d2Held: claimOf(d2.payloadPath) };
+  const ran = await running;
+  assert(midway.d1Pending && midway.d2Held && ran.find((x) => x.file === d1.payloadPath)?.deferred && ran.find((x) => x.file === d2.payloadPath)?.ok, `the payload that stepped aside is under pending/ while the run still posts the slow one it holds (${JSON.stringify(midway)})`);
+  // A checkpoint between an older one still posting and the session's END that
+  // has landed owed its bookkeeping — both in another child's hands — is
+  // obsolete, and steps aside for nothing: the question asked before stepping
+  // aside is the one asked before posting (third review pass).
+  rmSync(STATE, { recursive: true, force: true });
+  mkdirSync(holder, { recursive: true });
+  const c0 = prepare({ session_id: "s-mid", transcript_path: CODEX_T, hook_event_name: "PreCompact", trigger: "auto" }); await sleep(2);
+  const c1 = prepare({ session_id: "s-mid", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" }); await sleep(2);
+  const midEnd = prepare({ session_id: "s-mid", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  renameSync(c0.payloadPath, join(holder, basename(c0.payloadPath)));
+  writeFileSync(join(holder, basename(midEnd.payloadPath)), JSON.stringify({ ...midEnd.payload, captured_id: uuid(66) })); unlinkSync(midEnd.payloadPath);
+  const mid = (await postPending(cfg, c1.payloadPath)).find((x) => x.file === c1.payloadPath);
+  assert(mid?.obsolete && !/deferred session=/.test(logText()), `a checkpoint the session's landed end outdates is obsolete, not deferred behind the older one (${mid?.error})`);
+  // …and the same with the end UNPOSTED in that child's hands: the newer-in-flight rule at the step-aside gate, alone (fifth review pass: it had a tooth only at the posting gate).
+  const c0b = prepare({ session_id: "s-mid2", transcript_path: CODEX_T, hook_event_name: "PreCompact", trigger: "auto" }); await sleep(2);
+  const c1b = prepare({ session_id: "s-mid2", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" }); await sleep(2);
+  const midEnd2 = prepare({ session_id: "s-mid2", transcript_path: slowT, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  renameSync(c0b.payloadPath, join(holder, basename(c0b.payloadPath))); renameSync(midEnd2.payloadPath, join(holder, basename(midEnd2.payloadPath)));
+  const mid2 = (await postPending(cfg, c1b.payloadPath)).find((x) => x.file === c1b.payloadPath);
+  assert(mid2?.obsolete && !/deferred session=/.test(logText()), `a checkpoint whose session's end is in another child's hands, unposted, is obsolete before it would step aside for the older one (${mid2?.error})`);
+  rmSync(holder, { recursive: true, force: true });
+  // One run over five payloads against claims that never clear: the older
+  // sibling and the one the state outdates obsolete, the landed one finished,
+  // the two behind a claim stepping aside — at once, both back under pending/.
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  mkdirSync(holder, { recursive: true });
+  for (const sid of ["s-b1", "s-b2", "s-b3", "s-b4"]) writeFileSync(join(holder, named(Date.now() - 5000, sid)), claimJson(sid));
+  const b1old = prepare({ session_id: "s-b1", transcript_path: CODEX_T, hook_event_name: "SessionEnd" }); await sleep(2);
+  const b1 = prepare({ session_id: "s-b1", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }); await sleep(2);
+  const b2 = prepare({ session_id: "s-b2", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }); await sleep(2);
+  const b3 = prepare({ session_id: "s-b3", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }); await sleep(2);
+  writeFileSync(b3.payloadPath, JSON.stringify({ ...b3.payload, captured_id: uuid(90) }));
+  const b4 = prepare({ session_id: "s-b4", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  await sleep(2); // the state must be LATER than the payload, not in its millisecond
+  writeFileSync(join(STATE, "s-b4.json"), JSON.stringify({ thought_id: uuid(91), fingerprint: "y", captured_at: iso(Date.now()), summary_at: iso(Date.now()) }));
+  const t4 = Date.now();
+  const five = await postPending(cfg);
+  const by = (p) => five.find((x) => x.file === p.payloadPath);
+  assert(Date.now() - t4 < 1000 && five.length === 5 && by(b1old)?.obsolete && by(b3)?.deferred && by(b4)?.obsolete && by(b1)?.deferred && by(b2)?.deferred && DEFERRED.test(by(b1).error),
+    `one run, five payloads, at once (${Date.now() - t4} ms): the older sibling and the outdated one obsolete, the three behind a claim deferred — the landed one too, whose state write must follow the older's (tenth review pass)`);
+  assert(readdirSync(join(STATE, "pending")).sort().join() === [basename(b1.payloadPath), basename(b2.payloadPath), basename(b3.payloadPath)].sort().join() && received.length === 0 && (logText().match(/deferred session=/g) ?? []).length === 3,
+    "the three deferred payloads are back under pending/, nothing posted, one deferred line each");
+  rmSync(holder, { recursive: true, force: true });
+  // The rule alone: only an OLDER payload of the SAME session under a LIVE
+  // other pid is ahead.
+  const gone = await new Promise((res) => { const c = spawn(process.execPath, ["-e", "0"]); c.on("close", () => res(c.pid)); }); // a pid proven dead, not a number assumed so (first review pass)
+  const mine = named(Date.now(), "s-chain");
+  const live = join(STATE, "inflight", String(process.ppid)), dead = join(STATE, "inflight", String(gone));
+  mkdirSync(live, { recursive: true }); mkdirSync(dead, { recursive: true });
+  writeFileSync(join(live, named(Date.now() + 1000, "s-chain")), claimJson("s-chain"));
+  writeFileSync(join(live, named(Date.now() - 1000, "s-chained")), claimJson("s-chained"));
+  writeFileSync(join(dead, named(Date.now() - 1000, "s-chain")), claimJson("s-chain"));
+  const unheld = join(STATE, "pending", named(Date.now() - 1000, "s-chain")), own = join(STATE, "inflight", String(process.pid));
+  writeFileSync(unheld, claimJson("s-chain"));
+  mkdirSync(own, { recursive: true }); writeFileSync(join(own, named(Date.now() - 1000, "s-chain")), claimJson("s-chain"));
+  assert(aheadOf("s-chain", mine).length === 0, "a NEWER payload of the session in a live child's hands is not ahead (only the newer of two steps aside, so two children never wait on each other); nor an older one of another session, nor one under a pid that is gone, nor one under pending/ that no child holds, nor one in this run's own hands");
+  writeFileSync(join(dead, named(Date.now() + 3000, "s-chain")), claimJson("s-chain")); writeFileSync(join(own, named(Date.now() + 3000, "s-chain")), claimJson("s-chain"));
+  assert(newerInFlight("s-chain", mine) === true && newerInFlight("s-chain", named(Date.now() + 2000, "s-chain")) === false && newerInFlight("s-chained", named(Date.now() - 2000, "s-chained")) === true && newerInFlight("s-chain", named(Date.now() + 1500, "s-chain")) === false,
+    "…while that newer one in a live child's hands outdates this one — by session, by name, by liveness: a newer one under a pid that is gone, or in this run's own hands, outdates nothing");
+  unlinkSync(unheld); rmSync(own, { recursive: true, force: true });
+  writeFileSync(join(live, named(Date.now() - 1000, "s-chain")), claimJson("s-chain"));
+  assert(aheadOf("s-chain", mine).length === 1 && aheadOf("s-chain", mine)[0].pid === process.ppid, "an older one under a live pid is ahead, named by its pid");
+  rmSync(live, { recursive: true, force: true }); rmSync(dead, { recursive: true, force: true });
+}
+
 // ── [7] The hook end to end, synchronous ─────────────────────────────────────
 console.log("\n[7] As a hook: JSON on stdin, exit codes, and what reaches the endpoint");
 {
@@ -977,6 +1742,14 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   // The `=` form (third review pass: unseen, so `--trigger=auto` previewed no trigger and `--min-interval=45` printed 20).
   const eqForm = await run(["--dry-run", CLAUDE_T, "--event=PreCompact", "--trigger=auto"]);
   assert(eqForm.code === 0 && /Checkpoint: compacted at 2026-09-22 13:20 \(auto\), continuing/.test(eqForm.out), `--event=PreCompact --trigger=auto reads as the space form does (${eqForm.err.trim().slice(0, 60)})`);
+  // The segmentation, for an operator (SMD-2013): one line per episode, then each text.
+  const dryEp = await run(["--dry-run", EPISODES_T]);
+  assert(dryEp.code === 0 && /^--- 4 episodes — one thought each, on its own supersedes chain:\n    1\. SMD-1844 — \(michaelharris\/smd-1844-loopback\) — 2 prompt\(s\) — 2026-09-24 09:00 → 2026-09-24 09:40 — from the start — ended at a compaction\n    2\. SMD-1843, SMD-1844 — \(michaelharris\/smd-1843-env\) — 2 prompt\(s\) — 2026-09-24 10:00 → 2026-09-24 10:30 — begun after a compaction with SMD-1843 — ended when SMD-1917 was taken up\n    3\. SMD-1917 — [^\n]*— begun with SMD-1917 — ended at a compaction\n    4\. SMD-1917 — \(michaelharris\/smd-1917-fork-md\) — 2 prompt\(s\) — 2026-09-24 11:10 → 2026-09-24 11:31 — begun after a compaction — still open\n\n=== episode 1 ===\nSession summary — SMD-1844/.test(dryEp.out) && (dryEp.out.match(/^=== episode \d ===$/gm) ?? []).length === 4 && (dryEp.out.match(/^--- would send \(episode \d\): source=claude-code, derived_from=/gm) ?? []).length === 4 && (dryEp.out.match(/secret scan: clean/g) ?? []).length === 4,
+    `--dry-run prints the segmentation — one line per episode with its tickets, branch, asks, span and bounds — then each episode's text and what it would send (${dryEp.out.split("\n")[1]})`);
+  const dryEpCp = await run(["--dry-run", EPISODES_T, "--event", "PreCompact", "--trigger", "manual"]);
+  assert((dryEpCp.out.match(/Checkpoint: compacted/g) ?? []).length === 1 && /=== episode 4 ===[^]*Checkpoint: compacted at 2026-09-24 11:31 \(manual\)/.test(dryEpCp.out), "…with --event, the checkpoint line previews on the open episode alone");
+  const dryEpSec = await run(["--dry-run", join(TMP, "episodes-secret.jsonl")]);
+  assert(dryEpSec.code === 1 && /^--- would REFUSE episode 2: credential assignment/m.test(dryEpSec.out) && (dryEpSec.out.match(/secret scan: clean/g) ?? []).length === 3, `…and a secret in one episode is refused by episode, the others clean — the dry run shows the text, as it does for one episode, so an operator sees the offset (exit ${dryEpSec.code}: ${dryEpSec.out.split("\n").filter((l) => /^--- (?:would REFUSE|secret)/.test(l)).join(" | ").slice(0, 300)})`);
   const lastWins = await run(["--dry-run", CLAUDE_T, "--event=PreCompact", "--event", "Stop"]);
   assert(lastWins.code === 0 && /Checkpoint: turn ended at /.test(lastWins.out) && Object.keys(JSON.parse((await run(["--print-hook=codex", "--print-hook", "claude-code"])).out).hooks).join() === "SessionEnd,PreCompact",
     "a repeated flag: the last mention wins in either form (fourth review pass: the = form won over a later correction)");

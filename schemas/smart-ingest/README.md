@@ -17,7 +17,7 @@ This schema adds two tables and one RPC function that together support a structu
 ## Prerequisites
 
 - Working Open Brain setup (see the getting-started guide in `docs/01-getting-started.md`)
-- Supabase project with the core `thoughts` table created (the SQL only reads and writes `thoughts.id` and `thoughts.metadata`, so no additional schema extensions are required)
+- A Postgres with the core `thoughts` table created — the fork's stack, or a Supabase project (the SQL only reads and writes `thoughts.id` and `thoughts.metadata`, so no additional schema extensions are required)
 
 ## Credential Tracker
 
@@ -59,7 +59,7 @@ After running the migration:
 
 ## Job Claim Semantics
 
-This schema intentionally does **not** ship a SQL-side `claim_next_ingestion_job()` RPC. Job claiming and item claiming live in the companion Edge Function under `integrations/smart-ingest/`, which reads and mutates `ingestion_jobs` / `ingestion_items` directly using the service role key.
+This schema intentionally does **not** ship a SQL-side `claim_next_ingestion_job()` RPC. Job claiming and item claiming live in the companion server under `integrations/smart-ingest/`, which reads and mutates `ingestion_jobs` / `ingestion_items` directly as the role its connection string names.
 
 Any worker that claims a job or an item **must** use `FOR UPDATE SKIP LOCKED` semantics so two concurrent workers cannot grab the same row. The recommended pattern is a single `UPDATE ... RETURNING *` statement against a sub-select that does the locking:
 

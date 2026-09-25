@@ -17,11 +17,11 @@ You ran into someone at a conference six months ago. They mentioned they were lo
 
 ## What It Does
 
-A professional contact management system with interaction logging, opportunity tracking, and follow-up reminders. RLS-protected so your professional network stays private. This extension introduces multi-level relationships (contacts → interactions → opportunities) and cross-extension integration with your core Open Brain thoughts table.
+A professional contact management system with interaction logging, opportunity tracking, and follow-up reminders. Scoped to your `DEFAULT_USER_ID` so your professional network stays private. This extension introduces multi-level relationships (contacts → interactions → opportunities) and cross-extension integration with your core Open Brain thoughts table.
 
 ## What You'll Learn
 
-- Applying RLS patterns (practiced in Extension 4)
+- Reusing Extension 4's table shape (a `user_id` the server fills)
 - Multi-level relationships across three tables
 - Pipeline/opportunity tracking with stage management
 - Auto-updating timestamps (last_contacted)
@@ -31,24 +31,22 @@ A professional contact management system with interaction logging, opportunity t
 ## Prerequisites
 
 - Working Open Brain setup
-- Extensions 1-4 recommended (RLS concepts from Extension 4 are required knowledge)
-- [Bun](https://bun.sh) 1.4+ and a Postgres carrying the Open Brain schema ([`SETUP.md`](../../SETUP.md)) — this server runs under Bun, not as a Supabase Edge Function (FORK.md change 74)
-- **Required reading:** [Row Level Security](../../primitives/rls/) primitive
+- Extensions 1-4 recommended
+- [Bun](https://bun.sh) 1.4+ and a Postgres carrying the Open Brain schema ([`SETUP.md`](../../SETUP.md)) — this server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/); FORK.md change 74)
+- **Background reading:** [Row Level Security](../../primitives/rls/) primitive — the per-user policies upstream's `schema.sql` carried; this fork's carries none (SMD-1810), the server scopes rows by `DEFAULT_USER_ID`
 
 ## Credential Tracker
 
 You'll reference these values during setup. Copy this block into a text editor and fill it in as you go.
 
-> **Already have your Supabase credentials from the [Setup Guide](../../docs/01-getting-started.md)?** You just need the same Project URL, Secret key, and MCP Access Key — reuse the key from your core setup.
+> **Your brain's connection string** is the one value this server needs from your setup — with the compose stack, [Run a Remote MCP Server, Step 1](../../primitives/deploy-remote-mcp/README.md#step-1-apply-the-extensions-schema) says how the database reaches the host and what the URL looks like, plus an access key — reuse one from your core setup or mint one for this server.
 
 ```text
 PROFESSIONAL CRM -- CREDENTIAL TRACKER
 --------------------------------------
 
-SUPABASE (from your Open Brain setup)
-  Project ref:           ____________
+DATABASE (from your Open Brain setup)
   Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
-  Secret key:            ____________
 
 MCP SERVER (you'll create these)
   Default User ID:       ____________
@@ -63,16 +61,9 @@ MCP SERVER (you'll create these)
 
 ### 1. Set Up the Database Schema
 
-Run the SQL in `schema.sql` against your Open Brain database, as the role the server will connect with. Its row-level-security policies call Supabase's `auth.uid()`, which a plain Postgres does not have, so give it that function first — the server connects as one role and scopes rows by `DEFAULT_USER_ID` itself, and the table owner is not subject to the policies. **On a Supabase database skip the first command**: it has both functions, and replacing them would break row-level security across the project (the plain `CREATE` below refuses with "already exists" rather than replacing):
+Run the SQL in `schema.sql` against your Open Brain database, as the role the server will connect with — `psql "$DATABASE_URL" -f extensions/professional-crm/schema.sql`, or paste it into the SQL client you use. This creates three tables with foreign keys (`professional_contacts`, `contact_interactions`, `opportunities`), each with a `user_id` column the server fills from `DEFAULT_USER_ID`.
 
-```bash
-psql "$DATABASE_URL" -c "CREATE SCHEMA IF NOT EXISTS auth;
-  CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS 'SELECT NULL::uuid';
-  CREATE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT ''{}''::jsonb';"
-psql "$DATABASE_URL" -f extensions/professional-crm/schema.sql
-```
-
-(Or paste `schema.sql` alone into the Supabase SQL Editor, if that is where your database lives.) This creates three RLS-enabled tables with proper foreign key relationships.
+Nothing is needed first. Upstream's file enabled row-level security on Supabase's `auth.uid()`, and this README used to give two stub functions to create before it; this fork removed the policies (SMD-1810) — one operator's brain on plain Postgres, the server scoping rows itself (SMD-1716). The role that applies the file owns the tables and needs no grant; any other role is granted them by `bun db/migrate.ts --grant <role>` (`db/README.md`, "Grants for a capturing role", the **extensions** group).
 
 ### 2. Generate Your User ID
 
@@ -91,7 +82,7 @@ Pass it to the server as `DEFAULT_USER_ID` when you start it in Step 3.
 
 ### 3. Run the MCP Server
 
-This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — so it is not a Supabase Edge Function and `supabase functions deploy` does not apply (FORK.md change 74). From a checkout of this repository:
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — one HTTP process, as every server here is ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks it; FORK.md change 74). From a checkout of this repository:
 
 ```bash
 (cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports
@@ -101,7 +92,7 @@ DEFAULT_USER_ID='your-generated-uuid-here' \
 PORT=8787 bun extensions/professional-crm/index.ts
 ```
 
-`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). Bun prints its start line, `Started development server: http://localhost:8787` (`Started server:` under `NODE_ENV=production`; `PORT` unset, it listens on 8000 — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI. Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request; five extension servers beside the core server are sixty of Postgres's default hundred before any load, so set it lower where several share one database.
+`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). Bun prints its start line, `Started development server: http://localhost:8787` (`Started server:` under `NODE_ENV=production`; `PORT` unset, it listens on 8000 — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI. Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request; five extension servers beside the core server are sixty of Postgres's default hundred before any load, so set it lower where several share one database.
 
 > **Every tool of this server runs on the fork.** `extensions/test-tools.ts` drives all ten against a real Postgres carrying this `schema.sql` in CI — `tags` into `TEXT[]` (as `[]` too), full-text search with a tag filter through the `text[]` argument, the follow-up window with `.not()`, the stale-contact query, a thought linked through the fork's own `upsert_thought` (FORK.md change 77, SMD-1588; change 74's review had found two of the ten failing on the shim, and the tag filters were a third path nobody had driven).
 
@@ -211,7 +202,7 @@ For common issues (connection errors, 401s, deployment problems), see [Common Tr
 
 ## Next Steps
 
-**Extension 6: Job Hunt Pipeline** — The most complex build in the learning path. You'll create a complete job search management system with 5 RLS-protected tables (companies, postings, applications, interviews, contacts) and bridge it back to this CRM. You'll learn advanced pipeline tracking, conversion rate analysis, and cross-extension integration at scale.
+**Extension 6: Job Hunt Pipeline** — The most complex build in the learning path. You'll create a complete job search management system with 5 tables (companies, postings, applications, interviews, contacts) and bridge it back to this CRM. You'll learn advanced pipeline tracking, conversion rate analysis, and cross-extension integration at scale.
 
 [Continue to Extension 6 →](../job-hunt/README.md)
 

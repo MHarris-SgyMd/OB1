@@ -9,10 +9,10 @@
   "version": "1.0.0",
   "requires": {
     "open_brain": true,
-    "services": ["OpenRouter or OpenAI (embeddings + extraction)", "Supabase"],
-    "tools": ["Supabase CLI", "Deno"]
+    "services": ["OpenRouter or OpenAI (embeddings + extraction)"],
+    "tools": ["Bun 1.4+"]
   },
-  "tags": ["ingestion", "extraction", "llm", "deduplication", "edge-function"],
+  "tags": ["ingestion", "extraction", "llm", "deduplication"],
   "difficulty": "intermediate",
   "estimated_time": "30 minutes"
 }

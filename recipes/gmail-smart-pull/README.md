@@ -55,7 +55,7 @@ GENERATED DURING SETUP
 ```
 
 > [!NOTE]
-> This recipe does **not** need your Supabase service-role key. The puller emits a pack file; only your downstream ingest pipeline needs the service-role key, and it should read it from environment variables or a secret manager — never from a plaintext tracker.
+> This recipe does **not** need your brain's database credentials. The puller emits a pack file; only your downstream ingest pipeline needs them, and it should read them from environment variables or a secret manager — never from a plaintext tracker.
 
 ## Steps
 
@@ -176,7 +176,7 @@ The pack record carries `sensitivity: <tier>` and `sensitiveReasons: [...]`. **T
 - **Tag-and-store.** Everything lands in one store but `sensitivity` is indexed so queries can filter.
 
 > [!CAUTION]
-> OB1's default deployment is cloud-first (remote Edge Functions + Supabase). "Restricted stays local" is not automatic — you have to wire it up. If you intend to treat restricted content as off-cloud, write the policy into your ingest pipeline before you run this recipe on a large mailbox.
+> On this fork the default deployment keeps every thought on your box (local models, the egress gate's `deny` default — `SETUP.md`, "What may leave the box"), but this recipe's atomizer sends every long email to Anthropic or OpenRouter (`--atomize-provider`), and the pack is embedded wherever your ingest pipeline runs — so "restricted stays local" is not automatic here; you have to wire it up. If you intend to treat restricted content as off-cloud, write the policy into your ingest pipeline before you run this recipe on a large mailbox.
 
 The patterns are intentionally conservative. If you find false positives (e.g., a specific API-key pattern matches your own account IDs), fork `sensitivity.mjs` and tune the two arrays to taste.
 

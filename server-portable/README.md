@@ -2,8 +2,7 @@
 
 A runtime-neutral build of the Open Brain MCP server. Same tools, same wire
 behaviour as upstream's Edge Function build (`server/index.ts`, in this fork
-until SMD-1800), with no dependency on Deno or on Supabase Edge Functions as a
-host.
+until SMD-1800), with no dependency on Deno or on Supabase's function host.
 
 This exists so the runtime decision in the Supabase migration can be made last,
 and changed later. One file targets four runtimes.
@@ -11,8 +10,8 @@ and changed later. One file targets four runtimes.
 ## Prerequisites
 
 - [Bun](https://bun.sh) 1.4+ (used for tests and the container image)
-- A Postgres with pgvector and the core Open Brain schema — see
-  [the getting-started guide](../docs/01-getting-started.md)
+- A Postgres with pgvector and the core Open Brain schema — `db/migrations/`
+  applies it; [`SETUP.md`](../SETUP.md) brings up the whole stack
 - For the Cloudflare target: a Cloudflare account and `wrangler` (a dev dependency here)
 
 ## What differs from upstream's Edge Function build
@@ -358,9 +357,24 @@ that does not answer is named in `unread` with its reason (`refused`,
 are kept, and a database whose catalog has not answered by then is
 `database.error`. Concurrent probes share one read, and requests of one key share
 one agent-registry lookup (at /health and the MCP route alike), so a burst during
-a migration holds one connection for the read and one per distinct key — the
-registry's lock wait itself is unbounded (SMD-2072). Without a key, with a wrong
-or capture-only key, or with a revoked one — or while the agent registry has
+a migration holds one connection for the read and one per distinct key. On
+the SQL store each of the lookup's lock waits is capped at 250 ms (a ceiling;
+a table lock ends the lookup at its first wait), and a lookup that times out
+is retried for up to 2 s, 250 ms apart with no connection held — a brief
+migration lock is waited out, as before the cap — after which the key is
+**busy**: the MCP route refuses it with JSON-RPC error `-32003` ("retry in a
+few seconds"), since the registry could still say revoked. More cold keys
+than the pool holds queue for it, in rounds of about the cap. On Workers the
+cap is the PostgREST role's `statement_timeout`, where it has one. A
+revocation this process has already read stands through any failure until
+the registry answers that the key is not revoked (SMD-2072). Since migration
+054 a key used in the last five minutes and presenting its recorded scope
+writes nothing, so a transaction holding its row no longer makes it wait,
+and a serialization failure (40001, under a REPEATABLE READ or SERIALIZABLE
+default) is retried like a lock timeout (SMD-2090). A lock on
+`ob1_agents` stalls every write regardless: 046's audit trigger reads a
+writer's kind there. Without a key, with a wrong
+or capture-only key, with a revoked one or a busy one — or while the agent registry has
 not answered by the deadline, since it could still say revoked — the body is
 the literal `ok`, so nothing about the deployment reaches an unauthenticated
 probe; a `HEAD`, keyed or not, is the bodiless `ok` and reads nothing. Point a
@@ -485,6 +499,6 @@ stored in the same write").
 
 ## Related
 
-- `../server/` — the original Deno / Supabase Edge Function build, still deployable
+- `../deploy/` — the compose stack this server is the published port of
 - `../FORK.md` — what this fork changes and why
 - `../integrations/kubernetes-deployment/` — a raw-SQL port that drops PostgREST too

@@ -10,9 +10,9 @@
   "requires": {
     "open_brain": true,
     "services": [],
-    "tools": ["Supabase CLI"]
+    "tools": ["Bun 1.4+"]
   },
-  "requires_primitives": ["deploy-edge-function", "remote-mcp"],
+  "requires_primitives": ["deploy-remote-mcp", "remote-mcp"],
   "learning_order": 1,
   "tags": ["tag1", "tag2"],
   "difficulty": "beginner",

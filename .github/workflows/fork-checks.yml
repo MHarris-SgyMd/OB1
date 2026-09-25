@@ -29,6 +29,15 @@ defaults:
   run:
     shell: bash
 
+# Every job names its runner image (ubuntu-24.04, not ubuntu-latest, which
+# GitHub moves to a new release on its own date), and every `uses:` names a
+# full commit SHA with the tag it was in a trailing comment; Dependabot
+# (.github/dependabot.yml) moves the pins by PR, and check-fork-consistency
+# check 23 refuses a tag or a -latest runner (SMD-2093). Every checkout sets
+# persist-credentials: false: no step talks to the remote after it (a job that
+# reads history takes it at checkout, fetch-depth: 0), so the token has no
+# reason to stay in the workspace.
+
 concurrency:
   group: fork-checks-${{ github.ref }}
   cancel-in-progress: true
@@ -36,15 +45,16 @@ concurrency:
 jobs:
   repo-consistency:
     name: Repo consistency
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # The landing check below diffs the event's range — a PR's base and
           # head, or the merge group's — so it needs the history, not one tree.
           fetch-depth: 0
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
 
@@ -75,9 +85,9 @@ jobs:
       # directories a PR happens to touch. The upstream gate only validates
       # changed dirs, so pre-existing violations never surface there. A Bun
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
-      # and every developer here uses, and checks 13, 14, 18 and 20 parse YAML with
+      # and every developer here uses, and checks 13, 14, 18, 20 and 23 parse YAML with
       # Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, and runtime supabase-js imports
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, and the workflows' runner and action pins
         run: bun scripts/check-fork-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -94,7 +104,7 @@ jobs:
         working-directory: scripts
         run: bunx tsc --noEmit
 
-      # The session capture hook (SMD-1298, SMD-2012): both transcript parsers, the
+      # The session capture hook (SMD-1298, SMD-2012, SMD-2035, SMD-2013): both transcript parsers, the segmenter, the
       # summary's shape, every secret pattern's probe, the refusal, the detached
       # hand-off and the MCP post — against synthetic transcripts and a fake
       # endpoint on localhost. Bun only, no database, so it runs here.
@@ -103,11 +113,13 @@ jobs:
 
   portable-server:
     name: Portable server (Bun + Workers)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
 
@@ -218,6 +230,18 @@ jobs:
         working-directory: evals
         run: bun eval-projection-replay.ts --self-check
 
+      # The writable-projection spike's rules (SMD-1999): the four options and
+      # fourteen criteria, the judgement of probes, the pre-registered verdict
+      # (GO only when every contract criterion PASSes and every behaviour
+      # holds), the recommendation's tie-break, the differential's
+      # normalisation, the replay rule and its one tolerated kind of difference, the
+      # recorded matrix and the drift from it, the report — probed with
+      # hand-known observations. No database; the prototype runs in the
+      # data-layer job.
+      - name: Writable-projection rules
+        working-directory: evals
+        run: bun eval-writable-projection.ts --self-check
+
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
       - name: Cloudflare Workers build
@@ -251,29 +275,82 @@ jobs:
 
   db-schema:
     name: Schema migrations
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
 
       - name: Install
+        id: install
         working-directory: db
         run: bun install --frozen-lockfile
 
       # PGlite is real PostgreSQL 17 + pgvector in WASM, so this needs no service
       # container: the migrations are applied and asserted against a real planner.
-      - name: Apply migrations and assert the schema
+      # The embedding width is configurable and must hold at more than one value,
+      # so the suite runs twice — the default width and 768 — side by side
+      # (SMD-2092): each run is one single-threaded process whose PGlite databases
+      # live in memory, and neither writes a file, opens a port or spawns
+      # anything; a public repository's runner has four cores. Run in series they
+      # were the critical path of most runs. Each run writes its own log, stdout
+      # and stderr together (a failed assertion goes to stderr); both are waited
+      # on, both logs printed — a passing one folded, a failing one open — and the
+      # step fails when either run does. Nothing prints until both have exited,
+      # so each run has its own time limit: a hung run ends as a failure (exit
+      # 124, or 137 when it ignores TERM and is killed 10 s later) with its log
+      # printed, whereas without it a hang would run to GitHub's six-hour job
+      # limit and print nothing (a cancel still prints nothing). The two summary
+      # lines close the step; they read the report line db/test-support.ts prints
+      # (`N assertions: …`).
+      - name: Apply migrations and assert the schema, at the default width and at 768
         working-directory: db
-        run: bun test-schema.ts
+        run: |
+          limit=15m
+          timeout --kill-after=10s "$limit" bun test-schema.ts > "$RUNNER_TEMP/schema-default.log" 2>&1 &
+          default_pid=$!
+          OB1_EMBEDDING_DIM=768 OB1_EMBEDDING_MODEL=nomic-embed-text \
+            timeout --kill-after=10s "$limit" bun test-schema.ts > "$RUNNER_TEMP/schema-768.log" 2>&1 &
+          narrow_pid=$!
+          # `|| rc=$?`, not a bare wait: the step runs under -e, and a bare wait
+          # on a failed run would end the step before either log is printed.
+          default_rc=0; wait "$default_pid" || default_rc=$?
+          narrow_rc=0; wait "$narrow_pid" || narrow_rc=$?
+          summaries=""
+          for leg in "default:$default_rc" "768:$narrow_rc"; do
+            width=${leg%%:*}
+            rc=${leg#*:}
+            log="$RUNNER_TEMP/schema-$width.log"
+            case $rc in
+              124) rc="124, over the $limit limit" ;;
+              137) rc="137, killed: over the $limit limit with TERM ignored, or out of memory" ;;
+            esac
+            if [ "$rc" = 0 ]; then
+              echo "::group::test-schema.ts at the $width width — passed"
+              cat "$log"
+              echo "::endgroup::"
+            else
+              echo "::error title=Schema migrations::test-schema.ts at the $width width failed (exit $rc) — its log follows"
+              cat "$log"
+            fi
+            summary=$(grep -aE '^[0-9]+ assertions: ' "$log" | tail -n 1 || true)
+            summaries+="  $width width: ${summary:-no summary line — the run stopped before its report} (exit $rc)"$'\n'
+          done
+          printf '\ntest-schema.ts\n%s' "$summaries"
+          [ "$default_rc" -eq 0 ] && [ "$narrow_rc" -eq 0 ]
 
       # The board sync's pure rules and write decisions — the rendering the
       # hand captures are recognised by, the plan from a census, which call
       # each state of the brain gets — against a recording store. No network,
-      # no database, no provider (SMD-1954).
+      # no database, no provider (SMD-1954). This and the next step run when an
+      # earlier step of theirs has failed too (the schema step, or this one for
+      # the next), so one broken width does not hide them.
       - name: Board sync rules
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         working-directory: db
         run: bun sync-linear.ts --self-check
 
@@ -283,24 +360,19 @@ jobs:
       # lossy cases enumerated, two inputs refused) and the ingester's pure
       # rules (the corpus path, the allowlist). No network, no database.
       - name: Ingestion adapters
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         working-directory: db
         run: bun ingest-linear.ts --self-check && bun ingest-markdown.ts --self-check && bun ingest-records.ts --self-check
 
-      # The embedding width is configurable and must hold at more than one value.
-      - name: Schema builds at a non-default embedding width
-        working-directory: db
-        run: bun test-schema.ts
-        env:
-          OB1_EMBEDDING_DIM: "768"
-          OB1_EMBEDDING_MODEL: nomic-embed-text
-
   replay-gate:
     name: Retrieval replay gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
 
@@ -318,7 +390,7 @@ jobs:
 
   db-live:
     name: Schema against real Postgres
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     # A service container, not with-postgres.sh — the runner provides the database
     # and Actions handles readiness. The local script exists for developers, who
@@ -338,9 +410,11 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
 
@@ -369,7 +443,7 @@ jobs:
 
   data-layer:
     name: SQL data layer against real Postgres
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     services:
       postgres:
@@ -386,9 +460,11 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
 
@@ -454,6 +530,28 @@ jobs:
       - name: Projection-replay fixture
         working-directory: evals
         run: bun eval-projection-replay.ts --fixture-check
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+          OB1_FIXTURE_RESET: "1"
+
+      # The writable-projection spike's prototype (SMD-1999): the schema reset
+      # to 053 four times — as it stands, with option 2's functions (append
+      # the event, project the row), with a view named thoughts over a renamed
+      # table and 053's functions, with the view and option 2's functions —
+      # and the same scripted writes run against each: the vendored capture as
+      # readwise sends it, the 2- and 4-argument forms, the server's and the
+      # integrations' update_thought calls, delete_thought plain and refused,
+      # a raw INSERT, ingest-records' statement, the community DDL verbatim,
+      # the three concurrency behaviours, the trigger counts, read-your-writes
+      # with the drop-the-projector control, the replay of the whole log.
+      # --check holds the run to the matrix the spike recorded, so a Postgres
+      # or prototype change that moves a cell is named. No provider (vectors at
+      # width 8). It DROPS the schema and refuses a database holding thoughts
+      # unless told; this one is a throwaway. Runs after the fixture above,
+      # which leaves its rows; every suite after this resets for itself.
+      - name: Writable-projection prototype
+        working-directory: evals
+        run: bun eval-writable-projection.ts --check
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
           OB1_FIXTURE_RESET: "1"
@@ -570,9 +668,11 @@ jobs:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
           TZ: America/Chicago
 
-      # Every tool of the five extension servers on the SQL shim, called through
-      # tools/call against the extensions' own schema.sql files (applied after
-      # the READMEs' two auth.* stubs, dropped again at the end) — each read's
+      # Every tool of the eight servers on the SQL shim, called through
+      # tools/call against the extensions' own schema.sql files (applied as
+      # they are — no auth.* stub and no Supabase role, since SMD-1810, which
+      # also stopped test-writes.ts above creating the three roles on this
+      # shared database — and dropped again at the end) — each read's
       # filters, each write's row, the embedded relation, the trigger's effect,
       # the message a failure carries (change 77, SMD-1588). A shim gap fails a
       # named assertion here rather than a user's first call; a tool added to a
@@ -586,13 +686,15 @@ jobs:
 
   deploy-stack:
     name: Full stack, no Supabase
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # For the three dashboards at the end of this job (SMD-1801): Bun installs
       # and builds them, and drives the SvelteKit one against the stack.
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
 
@@ -854,7 +956,7 @@ jobs:
 
   compat-shim:
     name: supabase-js compatibility shim
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     services:
       postgres:
@@ -871,9 +973,11 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
 
@@ -924,15 +1028,16 @@ jobs:
   # Added as reporting jobs; making them required is SMD-1805's ruleset work.
   commit-lint:
     name: Commit messages
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Nothing to lint on a plain push; a PR's own commits — or the queued PR's —
     # are the range, and commitlint ignores the merge commit the queue creates.
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
       - name: commitlint the pushed range against the house grammar
@@ -949,15 +1054,17 @@ jobs:
 
   workflow-lint:
     name: Workflow lint (actionlint + shellcheck)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: actionlint (pinned) over the workflows, shellcheck on run bodies
         env:
           ACTIONLINT_VERSION: "1.7.7"
           ACTIONLINT_SHA256: "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757"
         run: |
-          # Pinned by version and checksum; ubuntu-latest ships shellcheck, which
+          # Pinned by version and checksum; ubuntu-24.04 ships shellcheck, which
           # actionlint invokes on every run: body.
           url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
           curl -fsSL -o actionlint.tar.gz "$url"

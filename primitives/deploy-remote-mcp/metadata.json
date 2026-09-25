@@ -1,0 +1,20 @@
+{
+  "name": "Run a Remote MCP Server",
+  "description": "How to run any Open Brain extension server under Bun against your Postgres and reach it over HTTPS from any AI client — schema, packages, an access key, the run line, TLS in front.",
+  "category": "primitives",
+  "author": {
+    "name": "Nate B. Jones",
+    "github": "NateBJones"
+  },
+  "version": "2.0.0",
+  "requires": {
+    "open_brain": true,
+    "services": [],
+    "tools": ["Bun 1.4+"]
+  },
+  "tags": ["deployment", "remote-mcp", "bun", "mcp", "access-keys"],
+  "difficulty": "beginner",
+  "estimated_time": "10 minutes",
+  "created": "2026-03-13",
+  "updated": "2026-09-24"
+}
