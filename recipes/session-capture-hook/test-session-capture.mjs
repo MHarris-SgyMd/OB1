@@ -668,12 +668,12 @@ console.log("\n[4] The secret scan catches every shape it names and leaves the s
   assert(v.length === 3 && v.every((x) => x.at === 19 && x.end === 51) && v.map((x) => x.reason).join() === "linear key,credential assignment,high-entropy token",
     `the live shape — a linear key assigned — is three rules on ONE span, the value's, named rules first (${JSON.stringify(v.map((x) => [x.reason, x.at, x.end]))})`);
   const lr = redactSecrets(live);
-  assert(lr.text === "set LINEAR_API_KEY=[redacted:linear key, credential assignment, high-entropy token] now" && lr.spans.length === 1 && lr.spans[0].at === 19 && lr.spans[0].end === 51,
+  assert(lr.text === "set LINEAR_API_KEY=[redacted:linear key, credential assignment, high-entropy token] now" && lr.spans.length === 1 && lr.spans[0].at === 19 && lr.spans[0].end === 19 + "[redacted:linear key, credential assignment, high-entropy token]".length,
     `…and one redaction, the name kept, the marker naming the three (${lr.text})`);
   assert(redactionMarker(["a", "b"]) === "[redacted:a, b]", "the marker's shape");
   const two = redactSecrets("first sk-ant-api03-" + "Ab1".repeat(12) + " then POSTGRES_PASSWORD=hunter2 end");
-  assert(two.text === "first [redacted:anthropic key] then POSTGRES_PASSWORD=[redacted:password assignment] end" && two.spans.map((s) => `${s.at}-${s.end}`).join() === "6-55,79-86",
-    `two secrets of different lengths: each its own marker, the second's offsets true after the first's marker changed the length — replaced right to left (${two.text})`);
+  assert(two.text === "first [redacted:anthropic key] then POSTGRES_PASSWORD=[redacted:password assignment] end" && two.spans.map((s) => `${s.at}-${s.end}`).join() === "6-30,54-84" && two.spans.every((s) => /^\[redacted:[^\]]+\]$/.test(two.text.slice(s.at, s.end))),
+    `two secrets of different lengths: each its own marker, the second's offsets true after the first's marker changed the length — replaced right to left; the spans returned are the markers' places in the blanked text (${two.text})`);
   const twice = redactSecrets("the key is sk-ant-api03-" + "Ab1".repeat(12) + " and again sk-ant-api03-" + "Ab1".repeat(12));
   assert(twice.spans.length === 2 && !/Ab1Ab1/.test(twice.text) && scanForSecrets(twice.text).length === 0, "the same key twice is blanked twice: every match of a pattern, where the report reads the first");
   assert(scanForSecrets("a sk-ant-api03-" + "Ab1".repeat(12) + " b sk-ant-api03-" + "Ab1".repeat(12)).length === 1 && scanForSecrets("a sk-ant-api03-" + "Ab1".repeat(12) + " b sk-ant-api03-" + "Ab1".repeat(12), { every: true }).length === 2, "…the report's scan stays one finding per pattern; `every` is the redaction's");
@@ -692,13 +692,27 @@ console.log("\n[4] The secret scan catches every shape it names and leaves the s
   assert(redactSecrets("nothing here but prose and a uuid " + uuid(4)).text === "nothing here but prose and a uuid " + uuid(4), "a clean text is returned as it was");
   // First review pass: the token's span is the WHOLE bare secret — base64 carries `/`, which the class leaves out for paths; a body's own `=` is no name — and a value's trailing punctuation is the sentence's.
   const b64 = "L4HmvD0hgfx/z2Ov9zukFDtJufEIt41DZORiSBylHXw=";
-  assert(redactSecrets(`the value ${b64} for the run`).text === "the value [redacted:high-entropy token] for the run" && scanForSecrets(`the value ${b64} for the run`)[0].at === 10, `a base64 token with a slash is blanked whole, not from the slash on (${redactSecrets(`the value ${b64} for the run`).text})`);
+  assert(redactSecrets(`the value ${b64} for the run`).text === "the value [redacted:high-entropy token] for the run" && scanForSecrets(`the value ${b64} for the run`)[0]?.at === 10, `a base64 token with a slash is blanked whole, not from the slash on (${redactSecrets(`the value ${b64} for the run`).text})`);
   assert(redactSecrets("x dGVzdGtleQ==bm90aGVyc2VjcmV0MTIzNDU2Nzg5MA== y").text === "x [redacted:high-entropy token] y" && redactSecrets("x QUJDREVGR0hJSktMTU5PUFFSU1Q1=MTIzNDU2Nzg5MEFCQ0RFRjEyMw== y").text === "x [redacted:high-entropy token] y",
     "a token whose own body carries `=` keeps no head: only a snake-case NAME= — an underscore in it — is a name");
   assert(redactSecrets(`FOO_BAR=${highEntropy}`).text === "FOO_BAR=[redacted:high-entropy token]" && redactSecrets(`see Projects/x/${highEntropy}/y.txt now`).text === "see Projects/x/[redacted:high-entropy token]/y.txt now" && redactSecrets(`see /Users/me/Projects/${highEntropy} now`).text === "see /Users/me/Projects/[redacted:high-entropy token] now",
     "…a snake-case name stays before the marker, and a path's word-shaped segments beside a token stay");
   assert(redactSecrets("(POSTGRES_PASSWORD=hunter2) and then POSTGRES_PASSWORD=hunter2. Also --api-key abcdefghijklmnopqrstuv7).").text === "(POSTGRES_PASSWORD=[redacted:password assignment]) and then POSTGRES_PASSWORD=[redacted:password assignment]. Also --api-key [redacted:credential flag]).",
     `a closing bracket or a full stop after a value stays in the text (${redactSecrets("(POSTGRES_PASSWORD=hunter2) x").text})`);
+  // Second review pass: a quoted value runs to its closing quote — the class stopped at the first space and the tail of a multi-word password was sent; an unquoted value keeps its stop; the trim is two characters at most and knows the backtick.
+  const quoted = redactSecrets('password: "correct horse battery" and PGPASSWORD=\'letmein please now\' and MY_API_KEY = "abcdef1234567890 and the rest" and --api-key "abcdef1234567890 more here" then x-brain-key: "abcdef1234567890 tail words" end');
+  assert(quoted.text === 'password: "[redacted:password assignment]" and PGPASSWORD=\'[redacted:password assignment]\' and MY_API_KEY = "[redacted:credential assignment]" and --api-key "[redacted:credential flag]" then x-brain-key: "[redacted:credential assignment]" end' && scanForSecrets(quoted.text).length === 0,
+    `a quoted value is blanked to its closing quote, spaces and all, under every value rule (${quoted.text.slice(0, 80)})`);
+  assert(redactSecrets('password: "correct horse\nbattery"').text === 'password: "[redacted:password assignment] horse\nbattery"' && redactSecrets("psql --password hunter2 then more").text === "psql --password [redacted:password flag] then more",
+    "…a quote not closed on its line, or no quote, keeps the class's stop at the first space");
+  assert(redactSecrets("run `MY_API_KEY=abcdef1234567890ABCDEF` please").text === "run `MY_API_KEY=[redacted:credential assignment, high-entropy token]` please" && redactSecrets("--password hunter2)). x").text === "--password [redacted:password flag]). x" && redactSecrets("PASSWORD=;;;;;;").text === "PASSWORD=[redacted:password assignment];;",
+    "a closing backtick stays; the trim takes two characters at most — a longer run of punctuation is the value's own");
+  // …and the token's widening reaches across a base64 body's own short run to the run beyond, while a hyphenated id or a word in capitals beside a token stays.
+  assert(redactSecrets("the value 2a5e5/wha/KOs5531C25uckbnMrqZfeys5t1Q9bMYOg= for the run").text === "the value [redacted:high-entropy token] for the run", "a base64 body's short lowercase run between two longer ones joins the span");
+  assert(redactSecrets(`SMD-2127/${highEntropy} and ${highEntropy}/README.md and ${highEntropy}/HEAD here`).text === "SMD-2127/[redacted:high-entropy token] and [redacted:high-entropy token]/README.md and [redacted:high-entropy token]/HEAD here",
+    "a ticket id, a file name in capitals and HEAD beside a token stay — the summaries are searched by ticket");
+  const tk = redactSecrets("a sk-ant-api03-" + "Ab1".repeat(12) + " b sk-ant-api03-" + "Ab1".repeat(12));
+  assert(tk.spans.length === 2 && tk.spans.every((s) => tk.text.slice(s.at, s.end) === "[redacted:anthropic key]"), "the spans returned sit where the markers sit in the blanked text, the second moved by the first");
   const many = describeRedactions([...Array.from({ length: 30 }, () => ({ reason: "password assignment", at: 26, in: "prompt 1" })), { reason: "anthropic key", at: 4, in: "the outcome" }]);
   assert(many === "password assignment at chars 26, 26, 26 and 27 more in prompt 1; anthropic key at char 4 in the outcome", `the message groups a reason and source, listing three offsets and counting the rest (${many})`);
   assert(/; and 2 more$/.test(describeRedactions(Array.from({ length: 10 }, (_, i) => ({ reason: `r${i}`, at: i, in: "prompt 1" })))) && describeRedactions([{ reason: "access key in a URL", at: 3, in: "prompt 2" }]) === "access key in a URL at char 3 in prompt 2", "…eight entries then a count; a reason with ` in ` in it survives the grouping");
@@ -826,7 +840,7 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   const pastClipT = join(TMP, "past-clip.jsonl");
   writeFileSync(pastClipT, [user("please rotate the hook's key " + "word ".repeat(45) + "MCP_ACCESS_KEY=" + "3f9a".repeat(16), { origin: { kind: "human" } }), assistant([{ type: "text", text: "rotated" }])].join("\n"));
   const pc = summariseTranscript(pastClipT);
-  assert(scanForSecrets(renderSummary(pc)).length === 0 && scanSummary(pc, renderSummary(pc)).some((f) => /in a prompt/.test(f.reason)),
+  assert(scanForSecrets(renderSummary(pc)).length === 0 && scanSummary(pc, renderSummary(pc)).some((f) => /in prompt 1$/.test(f.reason)),
     "the rendered text is clean (the clip cut the key) but the full prompt is not, and the finding says where");
   const twiceT = join(TMP, "twice.jsonl");
   writeFileSync(twiceT, [user("the key is sk-ant-api03-" + "Ab1".repeat(12), { origin: { kind: "human" } }), assistant([{ type: "text", text: "you pasted sk-ant-api03-" + "Ab1".repeat(12) }])].join("\n"));
@@ -834,7 +848,7 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   const twf = scanSummary(tw, renderSummary(tw));
   assert(twf.filter((f) => /^anthropic key/.test(f.reason)).length === 1, `one secret in two places is one finding, not three (${twf.map((f) => f.reason).join("; ")})`);
   const pcr = prepare({ ...base, session_id: "s-past-clip", transcript_path: pastClipT }, { onSecret: "refuse" });
-  assert(pcr.code === 1 && /refused/.test(pcr.message) && /in a prompt/.test(pcr.message), `…so the capture is refused under refuse (${pcr.message.slice(0, 80)})`);
+  assert(pcr.code === 1 && /refused/.test(pcr.message) && /in prompt 1 at char/.test(pcr.message), `…so the capture is refused under refuse, the prompt numbered (${pcr.message.slice(0, 80)})`);
   // Under redact (the default), the prompt is blanked BEFORE the clip: the key past it is gone from the source, the text carries no marker (the clip took it), and the count says one (SMD-2127).
   const pcRed = prepare({ ...base, session_id: "s-past-clip-red", transcript_path: pastClipT });
   assert(pcRed.code === 0 && pcRed.payload?.redactions?.length === 1 && pcRed.payload.redactions[0]?.in === "prompt 1" && /^credential assignment, 64-hex token/.test(pcRed.payload.redactions[0]?.reason ?? "") && !/3f9a3f9a/.test(pcRed.payload.text) && !/\[redacted/.test(pcRed.payload.text) && scanSummary(cleanEpisode(summariseTranscript(pastClipT).episodes[0], "redact").ep, pcRed.payload.text).length === 0,
@@ -880,14 +894,20 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   assert(same.code === 0 && same.payload.prompts === 1 && /\nAsked \(1 prompt\):\n- use \[redacted:anthropic key\]\n/.test(same.payload.text) && same.payload.redactions.length === 2 && /redacted: anthropic key at char 4 in prompt 1; anthropic key at char 4 in prompt 2$/.test(same.message),
     `the count is the blanked text's (${same.message.slice(0, 120)})`);
   if (same.payloadPath) unlinkSync(same.payloadPath);
+  // …a secret in the thirteenth of thirteen asks is named as past the twelve the text lists (second review pass).
+  writeFileSync(join(TMP, "thirteen.jsonl"), [...Array.from({ length: 12 }, (_, i) => [user(`ask number ${i + 1}`, { origin: { kind: "human" } }), assistant([{ type: "text", text: "ok" }])]).flat(), user("and last: sk-ant-api03-" + "Ab1".repeat(12), { origin: { kind: "human" } }), assistant([{ type: "text", text: "ok" }])].join("\n"));
+  const thirteen = prepare({ ...base, session_id: "s-thirteen", transcript_path: join(TMP, "thirteen.jsonl") });
+  assert(thirteen.code === 0 && thirteen.payload.redactions?.[0]?.in === "prompt 13 (past the 12 the text lists)" && /- … and 1 more\n/.test(thirteen.payload.text) && !/Ab1Ab1/.test(JSON.stringify(thirteen.payload)),
+    `a redaction in an ask the text does not list says so (${thirteen.payload?.redactions?.[0]?.in})`);
+  if (thirteen.payloadPath) unlinkSync(thirteen.payloadPath);
   // The backstop: a blanking the scan still finds something after is refused as every hit was — the net under the redaction. A URL's password blanked, the URL no longer reads as one, and the digest in its path reads as a bare key.
   writeFileSync(join(TMP, "backstop.jsonl"), [user("pull https://u:p4ssw0rd@h/blobs/" + "3f9a".repeat(16) + " now", { origin: { kind: "human" } }), assistant([{ type: "text", text: "pulled" }])].join("\n"));
   const bs = prepare({ ...base, session_id: "s-backstop", transcript_path: join(TMP, "backstop.jsonl") });
-  assert(bs.code === 1 && /^refused — the summary for session s-backstop carries what looks like a secret \(64-hex token \(a raw key, or a digest out of its context\) in a prompt at char \d+ after 3 redactions\); nothing sent\. Remove it from the conversation before ending the session, or capture by hand\.$/.test(bs.message) && !/3f9a3f9a|p4ssw0rd/.test(bs.message) && bs.payloadPaths.length === 0 && !existsSync(join(STATE, "s-backstop.json")),
+  assert(bs.code === 1 && /^refused — the summary for session s-backstop carries what looks like a secret \(64-hex token \(a raw key, or a digest out of its context\) in prompt 1 at char \d+ after 3 redactions\); nothing sent\. Remove it from the conversation before ending the session, or capture by hand\.$/.test(bs.message) && !/3f9a3f9a|p4ssw0rd/.test(bs.message) && bs.payloadPaths.length === 0 && !existsSync(join(STATE, "s-backstop.json")),
     `a summary the blanking leaves a hit in is refused as every hit was, the message naming the hit, its source and the redactions tried, nothing written (${bs.message.slice(0, 160)})`);
   const bsDry = cleanEpisode(summariseTranscript(join(TMP, "backstop.jsonl")).episodes[0], "redact");
   const bsAgain = scanSummary(bsDry.ep, bsDry.text);
-  assert(bsDry.redactions.map((r) => r.in).join() === "prompt 1,the text,the text" && /https:\/\/u:\[redacted:url with a password\]@h\/blobs\/\[redacted:64-hex token/.test(bsDry.text) && !/3f9a3f9a/.test(bsDry.text) && bsAgain.length === 1 && /^64-hex token .* in a prompt$/.test(bsAgain[0].reason),
+  assert(bsDry.redactions.map((r) => r.in).join() === "prompt 1,the text,the text" && /https:\/\/u:\[redacted:url with a password\]@h\/blobs\/\[redacted:64-hex token/.test(bsDry.text) && !/3f9a3f9a/.test(bsDry.text) && bsAgain.length === 1 && /^64-hex token .* in prompt 1$/.test(bsAgain[0].reason),
     `…the source round took the password, the text round the digest the un-URL'd path then showed (title and ask); the prompt, read whole and unclipped, still carries it, and that is the hit (${bsDry.redactions.map((r) => r.in).join()})`);
 }
 
@@ -1878,7 +1898,7 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   assert(dryEpRed.code === 0 && /^--- secret scan: 1 redaction — credential assignment, high-entropy token at char \d+ in prompt 2; the text above is what would be sent$/m.test(dryEpRed.out) && (dryEpRed.out.match(/secret scan: clean/g) ?? []).length === 3 && /MCP_ACCESS_KEY=\[redacted:credential assignment, high-entropy token\] was the key/.test(dryEpRed.out) && !/abcdefghijklmnop/.test(dryEpRed.out) && !/would REFUSE/.test(dryEpRed.out),
     `under redact the dry run exits 0, prints the blanked text and names the redaction (${dryEpRed.out.split("\n").filter((l) => /^--- secret/.test(l)).join(" | ").slice(0, 200)})`);
   const dryBackstop = await run(["--dry-run", join(TMP, "backstop.jsonl")]);
-  assert(dryBackstop.code === 1 && /^--- would REFUSE: 64-hex token \(a raw key, or a digest out of its context\) in a prompt at char \d+ after 3 redactions$/m.test(dryBackstop.out) && /\[redacted:url with a password\]@h\/blobs\/\[redacted:64-hex token/.test(dryBackstop.out) && !/3f9a3f9a|p4ssw0rd/.test(dryBackstop.out), `…and a summary the blanking leaves a hit in is shown blanked and refused, the redactions tried named (${dryBackstop.out.split("\n").filter((l) => /^--- would/.test(l)).join(" | ").slice(0, 200)})`);
+  assert(dryBackstop.code === 1 && /^--- would REFUSE: 64-hex token \(a raw key, or a digest out of its context\) in prompt 1 at char \d+ after 3 redactions$/m.test(dryBackstop.out) && /\[redacted:url with a password\]@h\/blobs\/\[redacted:64-hex token/.test(dryBackstop.out) && !/3f9a3f9a|p4ssw0rd/.test(dryBackstop.out), `…and a summary the blanking leaves a hit in is shown blanked and refused, the redactions tried named (${dryBackstop.out.split("\n").filter((l) => /^--- would/.test(l)).join(" | ").slice(0, 200)})`);
   const dryTypo = await spawnScript(["--dry-run", join(TMP, "episodes-secret.jsonl")], { env: { OB1_CAPTURE_ON_SECRET: "redcat" } });
   assert(dryTypo.code === 2 && /OB1_CAPTURE_ON_SECRET takes redact or refuse, not "redcat"/.test(dryTypo.err) && !dryTypo.out.trim(), "a misspelt mode is refused before the transcript is read, exit 2 as the by-hand forms do, nothing printed");
   const lastWins = await run(["--dry-run", CLAUDE_T, "--event=PreCompact", "--event", "Stop"]);

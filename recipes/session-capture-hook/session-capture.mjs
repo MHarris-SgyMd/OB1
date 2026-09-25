@@ -738,6 +738,11 @@ function distinctPrompts(prompts) {
   return out;
 }
 
+/** How a redaction or a refusal names a prompt: its place in the distinct list the text shows, and a word when it lies past the listed ones (second review pass of SMD-2127). */
+function promptLabel(i) {
+  return `prompt ${i + 1}${i >= LIMITS.prompts ? ` (past the ${LIMITS.prompts} the text lists)` : ""}`;
+}
+
 /** An ISO timestamp as the summary shows it: the day and the minute. */
 const when = (iso) => iso.slice(0, 16).replace("T", " ");
 
@@ -834,9 +839,9 @@ export function scanSummary(s, text) {
   // one prompt at a time, so a hit that existed only across the join —
   // `--password` ending one prompt, its value opening the next — was a refusal
   // no redaction could clear, at an offset into a join nobody sees.
-  const sources = [...s.prompts.map((p) => ["a prompt", p]), ["the outcome", s.outcome ?? ""], ["the title", s.title ?? ""]];
+  const sources = [...distinctPrompts(s.prompts).map((p, i) => [promptLabel(i), p]), ["the outcome", s.outcome ?? ""], ["the title", s.title ?? ""]];
   for (const [where, full] of sources) {
-    for (const f of scanForSecrets(full)) if (!found.some((g) => g.reason.replace(/ in (?:a prompt|the outcome|the title)$/, "") === f.reason)) found.push({ ...f, reason: `${f.reason} in ${where}` });
+    for (const f of scanForSecrets(full)) if (!found.some((g) => g.reason.replace(/ in (?:prompt \d+(?: \(past the \d+ the text lists\))?|the outcome|the title)$/, "") === f.reason)) found.push({ ...f, reason: `${f.reason} in ${where}` });
   }
   return found;
 }
@@ -871,18 +876,28 @@ function entropyBits(token) {
  */
 function tokenSpan(text, at, end) {
   const RUN = /[A-Za-z0-9+_=-]/;
-  const tokenish = (run) => run.length >= 4 && /[A-Z0-9]/.test(run) && (run.match(/[a-z]{3,}/g) ?? []).join("").length / run.length < 0.6;
-  while (text[at - 1] === "/") {
-    let i = at - 1;
-    while (i > 0 && RUN.test(text[i - 1])) i--;
-    if (!tokenish(text.slice(i, at - 1))) break;
-    at = i;
+  // A run reads as more of the token when it is four or more, carries a digit
+  // or both cases, has no hyphen (`SMD-2127`) and is not word-shaped —
+  // `HEAD`, `README` are words, not base64 (second review pass).
+  const tokenish = (run) => run.length >= 4 && !run.includes("-") && (/[0-9]/.test(run) || (/[a-z]/.test(run) && /[A-Z]/.test(run))) && (run.match(/[a-z]{3,}/g) ?? []).join("").length / run.length < 0.6;
+  const leftRun = (slash) => { let i = slash; while (i > 0 && RUN.test(text[i - 1])) i--; return i; };
+  const rightRun = (slash) => { let i = slash + 1; while (i < text.length && RUN.test(text[i])) i++; return i; };
+  // A run that does not read as token joins too when the run beyond it does:
+  // a base64 body's own short or lowercase run sits between two longer ones,
+  // and stopping at it left a fragment (second review pass: 2% of random keys).
+  for (;;) {
+    if (text[at - 1] !== "/") break;
+    const i = leftRun(at - 1);
+    if (tokenish(text.slice(i, at - 1))) { at = i; continue; }
+    if (text[i - 1] === "/") { const j = leftRun(i - 1); if (tokenish(text.slice(j, i - 1))) { at = j; continue; } }
+    break;
   }
-  while (text[end] === "/") {
-    let i = end + 1;
-    while (i < text.length && RUN.test(text[i])) i++;
-    if (!tokenish(text.slice(end + 1, i))) break;
-    end = i;
+  for (;;) {
+    if (text[end] !== "/") break;
+    const i = rightRun(end);
+    if (tokenish(text.slice(end + 1, i))) { end = i; continue; }
+    if (text[i] === "/") { const j = rightRun(i); if (tokenish(text.slice(i + 1, j))) { end = j; continue; } }
+    break;
   }
   const t = text.slice(at, end);
   const eq = t.indexOf("=");
@@ -932,16 +947,16 @@ export const SECRET_PATTERNS = [
   // name — `your-api-key-goes-here`, `REPLACE_WITH_YOUR_KEY`, `********`,
   // `get_random_secret_key()` — each refused a whole session (thirteenth); a
   // real key without a digit is rare, and the entropy rule reads one of 32+.
-  ["credential assignment", /(?<![A-Za-z0-9])(?:x-brain-key|MCP_ACCESS_KEY|OB1_[A-Z_]*KEY|OB1_SMOKE_KEY|(?:[A-Z0-9]+_)*(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret(?:[_-]?(?:access[_-]?)?key)?(?:[_-]?base)?)|(?:[A-Z0-9]+_)+token|bearer)\b["']?\s*[:=]\s*["']?(?<v>(?!\$|<|%|\{|\[|process\.env\b|os\.environ\b|Deno\.env\b|import\.meta\.env\b|[A-Za-z_]\w*(?:\.\w+)+[,;)]?(?:\s|$))(?=[^\s"']*\d)[^\s"']{16,})/di],
+  ["credential assignment", /(?<![A-Za-z0-9])(?:x-brain-key|MCP_ACCESS_KEY|OB1_[A-Z_]*KEY|OB1_SMOKE_KEY|(?:[A-Z0-9]+_)*(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret(?:[_-]?(?:access[_-]?)?key)?(?:[_-]?base)?)|(?:[A-Z0-9]+_)+token|bearer)\b["']?\s*[:=]\s*(?<q>["'])?(?<v>(?!\$|<|%|\{|\[|process\.env\b|os\.environ\b|Deno\.env\b|import\.meta\.env\b|[A-Za-z_]\w*(?:\.\w+)+[,;)]?(?:\s|$))(?=[^\s"']*\d)[^\s"']{16,})/di],
   // A credential handed to a command by flag: `--api-key <value>` has no `=`
   // (twelfth review pass). Hyphenated compounds (`--client-secret`,
   // `--refresh-token`), `=` as well as a space; not a path, a `%VAR%`, or
   // docker's `--secret id=…,src=…` spec, and the value carries a digit
   // (thirteenth). A password's floor is six, as in the assignment rule.
-  ["credential flag", /(?<![\w-])--(?:[a-z]+-)*(?:api-?key|access-?token|auth-?token|client-?secret|refresh-?token|token|secret(?:-?key)?)(?:\s+|=)["']?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)(?=[^\s"']*\d)[^\s"']{16,})/di],
-  ["password flag", /(?<![\w-])--(?:[a-z]+-)*password(?:\s+|=)["']?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)[^\s"']{6,})/di],
+  ["credential flag", /(?<![\w-])--(?:[a-z]+-)*(?:api-?key|access-?token|auth-?token|client-?secret|refresh-?token|token|secret(?:-?key)?)(?:\s+|=)(?<q>["'])?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)(?=[^\s"']*\d)[^\s"']{16,})/di],
+  ["password flag", /(?<![\w-])--(?:[a-z]+-)*password(?:\s+|=)(?<q>["'])?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)[^\s"']{6,})/di],
   // A password can be short — `POSTGRES_PASSWORD=hunter2` reached the brain under the 16-character floor (first review pass).
-  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*["']?(?<v>(?!\[)[^\s"']{6,})/di],
+  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*(?<q>["'])?(?<v>(?!\[)[^\s"']{6,})/di],
   // This fork's own access keys are 64 hex characters (keygen.ts), as are their
   // digests — told apart only by where they sit: a digest follows `name:scope:`
   // in MCP_ACCESS_KEYS or `sha256:`; a bare 64-hex run is a key until proven
@@ -987,10 +1002,20 @@ export function scanForSecrets(text, { every = false } = {}) {
     for (const m of (URL_BLIND.has(name) ? blanked : text).matchAll(globalOf(re))) {
       // The span: the `v` group's indices where the rule names a value, else the match.
       let [at, end] = m.indices?.groups?.v ?? [m.index, m.index + m[0].length];
-      // A value class of `[^\s"']` runs to the next space: a closing bracket or
-      // a full stop after the value is the sentence's, not the secret's, and
-      // stays in the text (first review pass).
-      if (m.indices?.groups?.v) while (end > at + 1 && /[.,;:)\]}]/.test(m.input[end - 1])) end--;
+      if (m.groups?.q) {
+        // The rule consumed an OPENING quote, so the value runs to its close,
+        // spaces included — `password: "correct horse battery"` — where the
+        // class stopped at the first space and the tail was sent (second
+        // review pass). No close on the line: the class's stop stands.
+        const close = m.input.indexOf(m.groups.q, end), line = m.input.indexOf("\n", end);
+        if (close !== -1 && (line === -1 || close < line)) end = close;
+      } else if (m.indices?.groups?.v) {
+        // A value class of `[^\s"']` runs to the next space: a closing bracket,
+        // backtick or full stop after the value is the sentence's, not the
+        // secret's, and stays in the text — two characters at most, `x).`; a
+        // longer run is the value's own (first and second review passes).
+        for (let n = 0; n < 2 && end > at + 1 && /[.,;:)\]}`>]/.test(m.input[end - 1]); n++) end--;
+      }
       findings.push({ reason: name, at, end });
       if (!every) break;
     }
@@ -1033,7 +1058,7 @@ export const redactionMarker = (reasons) => `[redacted:${reasons.join(", ")}]`;
  * high-entropy token at one site — sorted by start and replaced RIGHT TO LEFT,
  * so an earlier offset stays true after a later span has changed the length.
  * Returns the text and the spans taken, each its reasons and its offsets in
- * the text given; nothing of the match.
+ * the text returned — where its marker sits; nothing of the match.
  */
 export function redactSecrets(text) {
   const spans = [];
@@ -1044,6 +1069,11 @@ export function redactSecrets(text) {
   }
   let out = text;
   for (let i = spans.length - 1; i >= 0; i--) out = out.slice(0, spans[i].at) + redactionMarker(spans[i].reasons) + out.slice(spans[i].end);
+  // The spans as they sit in the text RETURNED — each marker's place, where a
+  // reader of the blanked text looks — an earlier marker having moved every
+  // later one (second review pass: the offsets were the input's).
+  let delta = 0;
+  for (const s of spans) { const taken = s.end - s.at; s.at += delta; s.end = s.at + redactionMarker(s.reasons).length; delta += s.end - s.at - taken; }
   return { text: out, spans };
 }
 /**
@@ -1065,7 +1095,7 @@ export function redactEpisode(ep) {
   };
   // The DISTINCT prompts, as the summary lists them: a retried prompt is one
   // line in the text and one redaction in the count.
-  const redacted = { ...ep, prompts: distinctPrompts(ep.prompts).map((p, i) => take(p, `prompt ${i + 1}`)), outcome: take(ep.outcome, "the outcome"), title: take(ep.title, "the title") };
+  const redacted = { ...ep, prompts: distinctPrompts(ep.prompts).map((p, i) => take(p, promptLabel(i))), outcome: take(ep.outcome, "the outcome"), title: take(ep.title, "the title") };
   const text = take(renderSummary(redacted), "the text");
   return { ep: redacted, text, redactions };
 }
