@@ -231,6 +231,12 @@ console.log("\n[5b] A refused NOTIFICATION (no id) gets no JSON-RPC body — 202
   assert(badMethod.status === 200 && (await badMethod.json())?.error?.code === -32001, "a body with a non-string method (no id) keeps the 200 envelope, not a 202");
   const emptyBatch = await fetch(BASE, { method: "POST", headers: H, body: "[]" });
   assert(emptyBatch.status === 200 && (await emptyBatch.json())?.error?.code === -32001, "an empty batch [] keeps the 200 envelope, not a bodyless 202");
+  // A JSON `null` body, and a null batch element, must not throw: the null-guard
+  // in isNotification keeps them at the 200 envelope, not a 500 (SMD-2106).
+  const nullResp = await fetch(BASE, { method: "POST", headers: H, body: "null" });
+  assert(nullResp.status === 200 && (await nullResp.json())?.error?.code === -32001, "a JSON null body keeps the 200 envelope, not a throw");
+  const nullElem = await fetch(BASE, { method: "POST", headers: H, body: "[null]" });
+  assert(nullElem.status === 200 && (await nullElem.json())?.error?.code === -32001, "a [null] batch element keeps the 200 envelope, not a throw");
   // Retry-After is not CORS-safelisted, so it is exposed for browser clients to
   // read off the busy refusal (SMD-2106); corsHeaders carries it on every answer.
   assert((badMethod.headers.get("access-control-expose-headers") ?? "").includes("Retry-After"), "responses expose Retry-After so a browser client can read it");
