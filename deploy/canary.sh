@@ -35,7 +35,8 @@
 #      /health must report tier canary, deploy/smoke.sh must pass, and
 #      search_thoughts, given a thought's own text with its literals (SMD
 #      keys, dates, paths) taken out so only the vector arm can match, must
-#      return that thought first at 50% or more;
+#      return that thought first at 50% or more, for one of up to five
+#      candidates;
 #   6. with --connect, registers the Claude Code connector (user scope) under
 #      the same key.
 #
@@ -353,50 +354,45 @@ if [ $SMOKE = 1 ]; then
 
   # The vector arm, which smoke.sh leaves out (it runs with no provider). A
   # thought's own text, with every literal that search matches exactly taken
-  # out, is searched for, and that thought must be Result 1 at a similarity a
-  # thought's own text scores. Taking the literals out matters: search_thoughts
-  # is hybrid, and a keyword hit is scored by cosine too, so a probe holding an
-  # SMD key, a date or a path was found by the keyword arm at 0.2% under a
-  # provider answering random vectors (review pass 2). Result 1, because only
-  # the first header comes before any thought's content, which is printed raw.
-  #
-  # The probe is the newest thought with a vector whose opening 300 characters,
-  # digits aside, no other thought shares — so a template, a session summary's
-  # header stamped with another date, cannot outrank it — and with 20 letters
-  # or more left once its literals are out.
+  # out, is searched for, and must come back as Result 1 at 50% or more, a
+  # similarity a thought scores against its own text (78–94% on the dogfood's
+  # brain; about 0 from a provider answering random vectors or another model).
+  # - Taking the literals out matters: search_thoughts is hybrid and scores a
+  #   keyword hit by cosine too, so a probe holding an SMD key, a date or a
+  #   path was found by the keyword arm at 0.2% under random vectors (review
+  #   pass 2). With none left, only match_thoughts can find it.
+  # - Result 1, because only the first header comes before any thought's
+  #   content, which is printed raw.
+  # - Up to five candidates, the first that passes deciding: the vector arm
+  #   rightly ranks a sibling first when the literals were all that told two
+  #   thoughts apart (two session summaries of one template, say), which one
+  #   candidate in three hit on the dogfood's brain (review pass 3). A broken
+  #   provider or index fails every candidate.
+  # Candidates are the newest thoughts embedded with the brain's model whose
+  # opening 300 characters, digits aside, no other thought shares, with 20
+  # letters or more left once their literals are out.
   #
   # needle_free TEXT: TEXT less the database's own extract_search_needles (as
-  # search_thoughts reads a query) and the quote marks around a span; up to
-  # three rounds, and nothing when literals remain.
+  # search_thoughts reads a query, eight at a time) and the quote marks around
+  # a span, until none is left, over up to six rounds; nothing if some remain.
   needle_free() {
     local q="$1" n
-    for _ in 1 2 3; do
+    for _ in 1 2 3 4 5 6; do
       n="$(printf '%s\n' "SELECT coalesce(array_to_json(extract_search_needles(:'q'))::text, '[]')" \
         | "$RUNTIME" exec -i "$CANARY_PG" psql -U postgres -d openbrain -tAq -v q="$q")"
       [ "$n" != "[]" ] || { printf '%s' "$q"; return 0; }
       q="$(python3 -c $'import json, sys\nq = sys.argv[1]\nfor x in json.loads(sys.argv[2]):\n    q = q.replace(x, " ")\nprint(q.replace(chr(34), " "))' "$q" "$n")"
     done
   }
+  # probe_verdict ID QUERY: `ok <similarity>` when search_thoughts returns ID
+  # first at FLOOR or more, `no <why>` otherwise. Never fails itself.
   FLOOR=50
-  probe=""
-  query=""
-  for id in $(psql_in "$CANARY_PG" "WITH once AS (SELECT md5(regexp_replace(left(content, 300), '[0-9]', '', 'g')) AS h FROM thoughts GROUP BY 1 HAVING count(*) = 1)
-    SELECT t.id FROM thoughts t JOIN once ON once.h = md5(regexp_replace(left(t.content, 300), '[0-9]', '', 'g'))
-    WHERE t.embedding IS NOT NULL ORDER BY t.created_at DESC NULLS LAST LIMIT 10"); do
-    q="$(needle_free "$(psql_in "$CANARY_PG" "SELECT left(content, 1000) FROM thoughts WHERE id = '$id'")")"
-    letters="${q//[^[:alpha:]]/}"
-    if [ "${#letters}" -ge 20 ]; then probe="$id"; query="$q"; break; fi
-  done
-  if [ -z "$probe" ]; then
-    say "vector search not checked: no recent thought has a vector, an opening of its own, and text left once its literals are out"
-  else
-    body="$(python3 -c 'import sys, json; print(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "search_thoughts", "arguments": {"query": sys.argv[1], "limit": 5, "threshold": 0}}}))' "$query")"
+  probe_verdict() {
+    local body reply
+    body="$(python3 -c 'import sys, json; print(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "search_thoughts", "arguments": {"query": sys.argv[1], "limit": 5, "threshold": 0}}}))' "$2")"
     reply="$(curl -s --max-time 120 -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
       -H "x-brain-key: $KEY" -d "$body" "$BASE/" || true)"
-    # The reply's last JSON frame (raw, or an SSE `data:` line), its text,
-    # and its first result: `ok <similarity>`, or `no <why>`. Never fails
-    # itself, so every outcome is said.
-    verdict="$(python3 -c '
+    python3 -c '
 import json, re, sys
 probe, floor, raw = sys.argv[1], float(sys.argv[2]), sys.stdin.read()
 try:
@@ -410,24 +406,47 @@ try:
     text = "\n".join(c.get("text", "") for c in (r.get("result") or {}).get("content", []))
     m = re.search(r"(?m)^--- Result (\d+) \(([^)\n]*)\) ---\nID: (\S+)", text)
     if not m:
-        sys.exit(print("no no result: " + text[:200].replace("\n", " ")))
+        sys.exit(print("no no result: " + text[:160].replace("\n", " ")))
     if m.group(3) != probe:
-        sys.exit(print(f"no Result {m.group(1)} is {m.group(3)} ({m.group(2)}), not the probe"))
+        sys.exit(print(f"no Result {m.group(1)} is {m.group(3)} ({m.group(2)})"))
     sim = re.match(r"([0-9.]+)% match", m.group(2))
     if not sim:
         sys.exit(print(f"no Result 1 has no similarity: {m.group(2)}"))
     if float(sim.group(1)) < floor:
-        sys.exit(print(f"no Result 1 at {sim.group(1)}%, under the {floor:g}% a thought scores against its own text (a provider serving another model?)"))
+        sys.exit(print(f"no Result 1 at {sim.group(1)}%, under {floor:g}%"))
     print(f"ok {sim.group(1)}%")
 except Exception as e:
-    print(f"no the reply did not parse ({type(e).__name__}: {e}): " + raw[:200].replace("\n", " "))
-' "$probe" "$FLOOR" <<<"$reply")"
-    if [ "${verdict%% *}" = ok ]; then
-      echo "  ✓  search_thoughts, given thought $probe's own text less its literals, returns it first at ${verdict#ok } — the vector arm answers"
-    else
-      echo "  ✗  search_thoughts, given thought $probe's own text less its literals, did not return it first at ${FLOOR}% or more: ${verdict#no }" >&2
-      exit 1
-    fi
+    print(f"no the reply did not parse ({type(e).__name__}: {e}): " + raw[:160].replace("\n", " "))
+' "$1" "$FLOOR" <<<"$reply"
+  }
+  # An assignment, so a failing query ends the script here rather than
+  # reading as "no candidates".
+  candidates="$(psql_in "$CANARY_PG" "WITH once AS (SELECT md5(regexp_replace(left(content, 300), '[0-9]', '', 'g')) AS h FROM thoughts GROUP BY 1 HAVING count(*) = 1)
+    SELECT t.id FROM thoughts t JOIN once ON once.h = md5(regexp_replace(left(t.content, 300), '[0-9]', '', 'g'))
+    WHERE t.embedding IS NOT NULL
+      AND coalesce(t.embedding_model = (SELECT value FROM ob1_config WHERE key = 'embedding_model'), true)
+    ORDER BY t.created_at DESC NULLS LAST LIMIT 20")"
+  tried=0
+  passed=""
+  misses=""
+  for id in $candidates; do
+    q="$(needle_free "$(psql_in "$CANARY_PG" "SELECT left(content, 1000) FROM thoughts WHERE id = '$id'")")"
+    letters="${q//[^[:alpha:]]/}"
+    [ "${#letters}" -ge 20 ] || continue
+    tried=$((tried + 1))
+    verdict="$(probe_verdict "$id" "$q")"
+    if [ "${verdict%% *}" = ok ]; then passed="$id at ${verdict#ok }"; break; fi
+    misses="$misses
+       $id: ${verdict#no }"
+    [ "$tried" -lt 5 ] || break
+  done
+  if [ "$tried" = 0 ]; then
+    say "vector search not checked: no recent thought has a vector from the brain's model, an opening of its own, and text left once its literals are out"
+  elif [ -n "$passed" ]; then
+    echo "  ✓  search_thoughts, given a thought's own text less its literals, returns it first: $passed (candidate $tried of up to 5) — the vector arm answers"
+  else
+    echo "  ✗  search_thoughts returned none of $tried candidates first at ${FLOOR}% or more, given each one's own text less its literals:$misses" >&2
+    exit 1
   fi
 fi
 

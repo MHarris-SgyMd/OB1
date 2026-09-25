@@ -495,19 +495,26 @@ stable is redeployed:
 4. It smoke-tests the canary with `OB1_SMOKE_KEY`. The keyed `/health` must
    say `tier` `canary`, and `smoke.sh` must pass. Then the vector arm, which
    `smoke.sh` leaves out and a `--diff` replays only with a provider
-   configured. A probe thought is searched for by its own text, with every
-   literal that search matches exactly taken out: SMD keys, dates, paths and
-   identifiers, as `extract_search_needles` finds them. It must come back as
-   Result 1, at 50% or more.
+   configured. A candidate thought is searched for by its own text, with
+   every literal that search matches exactly taken out: SMD keys, dates,
+   paths and identifiers, as `extract_search_needles` finds them. It must
+   come back as Result 1, at 50% or more. Up to five candidates are tried,
+   and the first that passes decides.
    - Taking the literals out matters. `search_thoughts` is hybrid, and it
      scores a keyword hit by cosine too, so a probe holding an identifier was
      found by the keyword arm at 0.2% under a provider answering random
      vectors.
    - The floor is what a thought scores against its own text. On the
-     dogfood's brain that was 79–97%, and 0–4% under that random provider.
-   - The probe is the newest thought with a vector whose opening, digits
-     aside, no other thought shares, so a template like a session summary's
-     header cannot outrank it.
+     dogfood's brain that was 78–94%, and about 0 under the random provider
+     or another model.
+   - Five candidates, because with the literals out two session summaries of
+     one template are nearly one text, and the vector arm rightly ranks a
+     sibling first. On the dogfood's brain that happened to 10 of the 30 newest
+     candidates, with at most two misses in a row. From any of the 26
+     starting points the first five held a pass, and a broken provider or
+     index fails all five.
+   - Candidates are the newest thoughts embedded with the brain's model
+     whose opening, digits aside, no other thought shares.
 
    `--no-smoke` skips the smoke and needs no key.
 5. With `--connect` it registers the Claude Code connector

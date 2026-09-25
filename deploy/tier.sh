@@ -133,6 +133,10 @@ TMP_ENV="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-env.XXXXXX")"
 COMPOSE_ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-compose.XXXXXX")" # mktemp creates both mode 600
 CID=""
 trap 'rm -f "$TMP_ENV" "$COMPOSE_ERR_FILE"; [ -z "$CID" ] || "$RUNTIME" rm -f "$CID" >/dev/null 2>&1 || true' EXIT
+# A Ctrl-C is a stop, wherever it lands: bash lets a script run on after a
+# child that did not die of the signal (the buildx probe below, say), and a
+# caller must not read an interrupted run as done.
+trap 'exit 130' INT
 
 # The environment as compose builds it for the stack: an empty project, the
 # file, the shell. stderr apart, since a delegating `podman compose` prints a
@@ -244,10 +248,12 @@ for net in "${NETS[@]:1}"; do "$RUNTIME" network connect "$net" "$CID" >/dev/nul
 start_rc=0
 "$RUNTIME" start -a "$CID" || start_rc=$?
 case "$("$RUNTIME" inspect -f '{{.State.Status}}' "$CID" 2>/dev/null || echo gone)" in
-  # never ran: start's own failure (a network removed since the check, say)
-  created|gone) exit $(( start_rc ? start_rc : 1 )) ;;
+  exited|stopped) status="$("$RUNTIME" inspect -f '{{.State.ExitCode}}' "$CID")" ;;
   # the CLI came back first (a Ctrl-C): the container's own end decides
-  running) status="$("$RUNTIME" wait "$CID")" ;;
-  *) status="$("$RUNTIME" inspect -f '{{.State.ExitCode}}' "$CID")" ;;
+  running|stopping) status="$("$RUNTIME" wait "$CID")" ;;
+  # never ran (docker's created, podman's configured: start's own failure,
+  # a network removed since the check), or a state this does not know
+  # (dead, paused): not done, whatever start said
+  *) exit $(( start_rc ? start_rc : 1 )) ;;
 esac
 exit "$status"

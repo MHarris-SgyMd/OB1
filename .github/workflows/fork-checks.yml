@@ -743,9 +743,11 @@ jobs:
           # (SMD-2038): a bag of words hashed into the stack's 1024 dimensions,
           # the model's query instruction left off as the model reads it, so a
           # text is near itself and far from another. The probe thoughts are
-          # seeded with the stub's own vectors for their text.
+          # seeded with the stub's own vectors for their text. While
+          # /tmp/provider-stub-random exists it answers random vectors, a
+          # provider serving the wrong model.
           nohup python3 - <<'PY' > /tmp/provider-stub.log 2>&1 &
-          import json, math, re, zlib
+          import json, math, os, random, re, zlib
           from http.server import BaseHTTPRequestHandler, HTTPServer
           def embed(text):
               text = (text or "").split("\nQuery: ", 1)[-1]
@@ -764,7 +766,8 @@ jobs:
                   if not self.path.endswith("/embeddings"):
                       self.send_error(404); return
                   inputs = req.get("input"); inputs = inputs if isinstance(inputs, list) else [inputs]
-                  data = [{"object": "embedding", "index": i, "embedding": embed(t)} for i, t in enumerate(inputs)]
+                  rnd = os.path.exists("/tmp/provider-stub-random")
+                  data = [{"object": "embedding", "index": i, "embedding": [random.random() - 0.5 for _ in range(1024)] if rnd else embed(t)} for i, t in enumerate(inputs)]
                   self.reply(json.dumps({"object": "list", "data": data, "model": req.get("model")}).encode())
           HTTPServer(("0.0.0.0", 11434), H).serve_forever()
           PY
@@ -949,6 +952,10 @@ jobs:
       # mark) is deleted; with no volume left there is nothing to delete, and a
       # local-scope entry is left too; a last `down` removes its own. The first
       # `up` runs under SERVER_BIND=0.0.0.0, and the canary stays on loopback.
+      # A host process on the port is refused too; the second `up` probes a
+      # thought holding literals; one `up` against the stub answering random
+      # vectors fails its smoke; and a volume by the canary's name that compose
+      # did not make, holding a table, is refused with nothing left running.
       # The stack is the one it was: the same Postgres container, its
       # thoughts, its server answering.
       - name: A canary stands beside the stack from deploy/canary.sh
@@ -979,6 +986,11 @@ jobs:
           docker run -d --name ob1-port-squat -p 127.0.0.1:8011:8080 busybox:1.36 httpd -f -p 8080
           refused 'port 8011 is published by ob1-port-squat' up
           docker rm -f ob1-port-squat
+          python3 -m http.server 8011 --bind 127.0.0.1 > /dev/null 2>&1 &
+          SQUAT=$!
+          sleep 1
+          refused 'already listens on 127.0.0.1:8011' up
+          kill "$SQUAT"
           q "INSERT INTO ob1_config (key, value) VALUES ('tier', 'working')"
           refused "is stamped tier 'working'" up
           q "DELETE FROM ob1_config WHERE key = 'tier'"
@@ -1001,8 +1013,17 @@ jobs:
           [ "$(cq "SELECT count(*) FROM thoughts WHERE content LIKE '%quokka ledger%'")" = 1 ] || { echo "the canary did not get the probe thought" >&2; exit 1; }
           vec() { curl -s http://127.0.0.1:11434/v1/embeddings -d "{\"input\": \"$1\"}" | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)["data"][0]["embedding"], separators=(",", ":")))'; }
           q "SELECT upsert_thought('canary re-sync probe: the numbat almanac', '{\"metadata\": {\"source\": \"ci-tier\"}}'::jsonb, '$(vec 'canary re-sync probe: the numbat almanac')'::vector)"
+          LITERAL='canary literal probe SMD-4242 in deploy/probe_file.ts: the wombat register of burrows'
+          q "SELECT upsert_thought('$LITERAL', '{\"metadata\": {\"source\": \"ci-tier\"}}'::jsonb, '$(vec "$LITERAL")'::vector)"
           ./canary.sh up | tee /tmp/canary-reup.out
           grep -F 'canary up: http://127.0.0.1:8011' /tmp/canary-reup.out
+          grep -F 'the vector arm answers' /tmp/canary-reup.out
+          # A provider serving the wrong model: every candidate misses, and up fails.
+          touch /tmp/provider-stub-random
+          rc=0; ./canary.sh up > /tmp/canary-random.out 2>&1 || rc=$?
+          rm -f /tmp/provider-stub-random
+          [ "$rc" = 1 ] || { cat /tmp/canary-random.out >&2; echo "up passed its smoke under a provider answering random vectors (exit $rc)" >&2; exit 1; }
+          grep -F 'returned none of' /tmp/canary-random.out
           [ "$(cq "SELECT count(*) FROM thoughts WHERE content LIKE '%numbat almanac%'")" = 1 ] || { echo "the second up did not bring stable's new thought" >&2; exit 1; }
           cq "UPDATE ob1_config SET value = 'working' WHERE key = 'tier'"
           cq "ALTER DATABASE openbrain RESET ob1.refresh_target"
@@ -1023,6 +1044,17 @@ jobs:
           grep -F 'mcp remove --scope user open-brain-canary' /tmp/fake-claude.log
           [ -z "$(canary_left)" ] || { echo "canary containers remain" >&2; exit 1; }
           [ -z "$(docker volume ls -q --filter label=com.docker.compose.project=open-brain-canary)" ] || { echo "the canary's volume remains" >&2; exit 1; }
+          # A volume by the canary's name that compose did not make, holding
+          # a table: gated by name, refused, and put back with nothing running.
+          docker volume create open-brain-canary_pgdata
+          docker run -d --name ob1-volume-squat -e POSTGRES_PASSWORD=squat -e POSTGRES_DB=openbrain -v open-brain-canary_pgdata:/var/lib/postgresql/data pgvector/pgvector:0.8.6-pg16
+          for _ in $(seq 1 60); do docker exec -e PGPASSWORD=squat ob1-volume-squat psql -h 127.0.0.1 -U postgres -d openbrain -tAc 'SELECT 1' > /dev/null 2>&1 && break; sleep 1; done
+          docker exec -e PGPASSWORD=squat ob1-volume-squat psql -h 127.0.0.1 -U postgres -d openbrain -c 'CREATE TABLE precious (id int)'
+          docker rm -f ob1-volume-squat
+          refused 'refusing to delete its volume' down --volumes
+          [ -z "$(canary_left)" ] || { echo "the refused down left canary containers" >&2; exit 1; }
+          docker volume inspect open-brain-canary_pgdata > /dev/null
+          docker volume rm open-brain-canary_pgdata
           [ "$(docker compose -f compose.yaml ps -q postgres)" = "$BEFORE" ] || { echo "stable's Postgres container changed" >&2; exit 1; }
           [ "$(q "SELECT count(*) FROM thoughts WHERE content LIKE '%quokka ledger%' OR content LIKE '%numbat almanac%'")" = 2 ] || { echo "the brain lost a thought" >&2; exit 1; }
           [ "$(curl -s --max-time 5 http://127.0.0.1:8010/health)" = ok ] || { echo "stable's server stopped answering" >&2; exit 1; }
