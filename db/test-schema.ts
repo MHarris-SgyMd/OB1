@@ -6952,7 +6952,7 @@ console.log("\n[50] Every extension and recipe schema applies to a migrated brai
   await xdb.close();
 }
 
-console.log("\n[51] Migration 056: the entity name gate — a number or a type word is refused and an identifier-shaped person or place retyped, at the writer for every pass and over the rows written before it, and the JavaScript twin answers alike (SMD-1935)");
+console.log("\n[51] Migration 056: the entity name gate — a number or a type word is refused and an identifier-shaped person or place retyped, at the writer for every extraction and over the rows written before it, and the JavaScript twin answers alike (SMD-1935)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -6978,7 +6978,10 @@ console.log("\n[51] Migration 056: the entity name gate — a number or a type w
     ["host.containers.internal", "place"], ["openrouter.ai", "place"], ["open-brain_default", "place"], ["localhost:11434", "place"], ["localhost.", "place"], ["a.b", "person"],
     ["Anita", "person"], ["Nate B. Jones", "person"], ["claude-code", "person"], ["Mac mini M4 Pro", "place"], ["pg16", "tool"], ["migration 021", "topic"], ["v1.2", "tool"], ["db/README.md", "topic"], ["ob1_entities", "tool"], ["Linear", "organization"], ["x", "vegetable"],
     // Whitespace other than the space (first review pass: btrim() and \S parted the two on every one of these).
-    ["SMD-1804\n", "person"], ["SMD-1804\t", "person"], ["SMD-1804\v", "person"], ["\u3000SMD-1804", "person"], ["hono/mcp\t", "person"], ["x:80\f", "place"], ["a b_c", "person"], ["open_brai n", "place"], ["a\u00a0b_c", "person"], ["021\f", "tool"], ["\t021\r\n", "person"],
+    // Seven parted the two before; `a b_c`, `open_brai n`, `021\f` and `\t021\r\n` are controls.
+    ["SMD-1804\n", "person"], ["SMD-1804\t", "person"], ["SMD-1804\v", "person"], ["\u3000SMD-1804", "person"], ["hono/mcp\t", "person"], ["x:80\f", "place"], ["a b_c", "person"], ["open_brai n", "place"], ["a\u00a0b_c", "place"], ["021\f", "tool"], ["\t021\r\n", "person"],
+    // A leading form feed or vertical tab survives 016's strip (second review pass), and a handle's shape retypes a place, not a person.
+    ["\f021", "person"], ["\vperson", "topic"], ["john.smith", "person"], ["mary_jane", "person"], ["St.Louis", "place"], ["open_brain:5432", "person"], ["open_brain:5432", "place"],
   ];
   const parted: string[] = [];
   for (const [name, type] of probes) {
@@ -6992,8 +6995,10 @@ console.log("\n[51] Migration 056: the entity name gate — a number or a type w
   // The twin is held to the text too, so a pattern edited on one side fails
   // even where no probe reaches the difference.
   const gateSrc = await src("entity_type_gate(text, text)");
-  assert(IDENTIFIER_SHAPES.every((s) => gateSrc.includes(`'${s.pattern}'`)) && ENTITY_VOCABULARY.every((w) => gateSrc.includes(`'${w}'`)) && gateSrc.includes(`'${NUMERIC_NAME_RE}'`) && gateSrc.includes(`'${TRIM_RE}'`) && (gateSrc.match(/'[^']*'/g) ?? []).filter((l) => l.startsWith("'^")).length === IDENTIFIER_SHAPES.length + 2,
-    "the SQL rule spells every shape, every vocabulary word, the numeric pattern and the trim entity-gate.ts does, and no pattern beside them");
+  assert(IDENTIFIER_SHAPES.every((s) => gateSrc.includes(`'${s.pattern}'`)) && ENTITY_VOCABULARY.every((w) => gateSrc.includes(`'${w}'`)) && gateSrc.includes(`'${NUMERIC_NAME_RE}'`) && gateSrc.includes(`'${TRIM_RE}'`) && (gateSrc.match(/'[^']*'/g) ?? []).filter((l) => l.startsWith("'^")).length === IDENTIFIER_SHAPES.length + 2 &&
+    (/s\.n IN \(([^)]*)\)/.exec(gateSrc)?.[1].match(/'[^']*'/g) ?? []).length === ENTITY_VOCABULARY.length &&
+    IDENTIFIER_SHAPES.every((x) => (gateSrc.indexOf(`'${x.pattern}'`) > gateSrc.indexOf("p_type = 'place' AND (")) === !x.person),
+    "the SQL rule spells every shape, every vocabulary word (no more), the numeric pattern and the trim entity-gate.ts does, no pattern beside them, and reads the two handle shapes for a place only");
   const fn = await one<{ v: string; s: boolean }>(`SELECT provolatile AS v, proisstrict AS s FROM pg_proc WHERE oid = 'entity_type_gate(text, text)'::regprocedure`);
   assert(fn.v === "i" && fn.s === true, "entity_type_gate is IMMUTABLE and STRICT");
   assert(lastDefinerOf("record_thought_entities").startsWith("056") && /ob1:name-gate/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)")) && /ob1:structured-wins/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)")),
@@ -7026,45 +7031,53 @@ console.log("\n[51] Migration 056: the entity name gate — a number or a type w
 
   // The rows from before the gate: 053's writer stores what 056's refuses,
   // then apply_entity_type_gate() takes them in. hono/mcp the person merges
-  // into the tool t1 wrote; a.b the person moves to tool, and a.b the place,
+  // into the tool t1 wrote; x/y the person moves to tool, and x/y the place,
   // later, merges into that.
   await reapply("053");
-  const t3 = await put("pre-gate: 021 and hono/mcp on Bun, a.b too");
-  const t4 = await put("pre-gate: a.b and hono/mcp, both ways");
-  const p3 = await rte(t3, "extract:m@p2", [E("021", "person"), E("hono/mcp", "person", 0.9, ["@hono/mcp"]), E("Bun", "tool"), E("a.b", "person"), E("places", "topic")],
-    [R("021", "Bun", "uses"), R("hono/mcp", "Bun", "related_to"), R("Bun", "hono/mcp", "depends_on"), R("a.b", "Bun", "uses")]);
-  const p4 = await rte(t4, "extract:m@p2", [E("a.b", "place"), E("hono/mcp", "person"), E("hono/mcp", "tool")]);
+  const t3 = await put("pre-gate: 021 and hono/mcp on Bun, x/y too");
+  const t4 = await put("pre-gate: x/y and hono/mcp, both ways");
+  const p3 = await rte(t3, "extract:m@p2", [E("021", "person"), E("hono/mcp", "person", 0.9, ["@hono/mcp"]), E("Bun", "tool"), E("x/y", "person"), E("places", "topic")],
+    [R("021", "Bun", "uses"), R("hono/mcp", "Bun", "related_to"), R("Bun", "hono/mcp", "depends_on"), R("x/y", "Bun", "uses")]);
+  const p4 = await rte(t4, "extract:m@p2", [E("x/y", "place"), E("hono/mcp", "person"), E("hono/mcp", "tool")]);
   assert(p3.ok === true && p3.entities === 5 && p3.edges === 4 && p4.ok === true && p4.entities === 3 && !("refused_entities" in p3), `053's writer stores what the gate would refuse (${JSON.stringify(p3)})`);
   const personHono = await idOf("person", "hono mcp");
   const toolHono = await idOf("tool", "hono mcp");
   // A human merged `hono` and `mcp server` into the person; a tool `Hono`
-  // exists apart. Carried into the tool, `hono` would take that tool's
-  // mentions; `mcp server`, which no tool holds, may go with it.
+  // exists apart. A merge within `person` is no decision about `tool`: it
+  // does not cross, or the next extraction of the tool Hono would land on
+  // hono/mcp and prune Hono (first and second review passes).
   await db.query(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', 'Hono', 'hono')`);
   await db.query(`UPDATE ob1_entities SET first_seen_at = '2020-01-01', last_seen_at = '2030-01-01', merged_from = '{hono,"mcp server"}' WHERE id = $1::uuid`, [personHono]);
-  // …and into the person a.b, which moves: the same rule.
-  await db.query(`UPDATE ob1_entities SET merged_from = '{hono,ab-old}' WHERE entity_type = 'person' AND normalized_name = 'a.b'`);
+  // …nor into the moved person x/y's new type.
+  await db.query(`UPDATE ob1_entities SET merged_from = '{hono,xy-old}' WHERE entity_type = 'person' AND normalized_name = 'x y'`);
   // A self-edge once merged: the person joined to the tool on t4, which no writer would state.
   const [lo, hi] = [personHono, toolHono].sort();
   await db.query(`INSERT INTO ob1_entity_edges (thought_id, from_entity_id, to_entity_id, relation, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, $3::uuid, 'related_to', 0.9, 'extract:m@p2')`, [t4, lo, hi]);
   // A symmetric edge whose order the merge must flip, on ids chosen so it
-  // does: Zed–person p.q stored (Zed, p.q); p.q the person merges into the
+  // does: Zed–place p.q stored (Zed, p.q); p.q the place merges into the
   // tool p.q, whose id sorts before Zed's.
-  const [TOOL_PQ, ZED, PERSON_PQ] = ["00000000-0000-4000-8000-000000000001", "88888888-0000-4000-8000-000000000000", "ffffffff-0000-4000-8000-000000000000"];
-  await db.query(`INSERT INTO ob1_entities (id, entity_type, name, normalized_name) VALUES ($1::uuid, 'tool', 'p.q', 'p.q'), ($2::uuid, 'tool', 'Zed', 'zed'), ($3::uuid, 'person', 'p.q', 'p.q')`, [TOOL_PQ, ZED, PERSON_PQ]);
-  await db.query(`INSERT INTO ob1_entity_edges (thought_id, from_entity_id, to_entity_id, relation, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, $3::uuid, 'related_to', 0.9, 'extract:m@p2')`, [t4, ZED, PERSON_PQ]);
+  const [TOOL_PQ, ZED, PLACE_PQ] = ["00000000-0000-4000-8000-000000000001", "88888888-0000-4000-8000-000000000000", "ffffffff-0000-4000-8000-000000000000"];
+  await db.query(`INSERT INTO ob1_entities (id, entity_type, name, normalized_name) VALUES ($1::uuid, 'tool', 'p.q', 'p.q'), ($2::uuid, 'tool', 'Zed', 'zed'), ($3::uuid, 'place', 'p.q', 'p.q')`, [TOOL_PQ, ZED, PLACE_PQ]);
+  await db.query(`INSERT INTO ob1_entity_edges (thought_id, from_entity_id, to_entity_id, relation, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, $3::uuid, 'related_to', 0.9, 'extract:m@p2')`, [t4, ZED, PLACE_PQ]);
+  // The target the writer would pick: a place q.r, where a human merged
+  // `q.r` into the tool Zeta and a tool q.r also stands, goes to Zeta, as
+  // the writer's merged_from rule sends the name (second review pass).
+  const [ZETA, TOOL_QR, PLACE_QR] = ["11111111-0000-4000-8000-000000000000", "22222222-0000-4000-8000-000000000000", "33333333-0000-4000-8000-000000000000"];
+  await db.query(`INSERT INTO ob1_entities (id, entity_type, name, normalized_name, merged_from) VALUES ($1::uuid, 'tool', 'Zeta', 'zeta', '{q.r}'), ($2::uuid, 'tool', 'q.r', 'q.r', '{}'), ($3::uuid, 'place', 'q.r', 'q.r', '{}')`, [ZETA, TOOL_QR, PLACE_QR]);
+  await db.query(`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, 0.9, 'extract:m@p2')`, [t4, PLACE_QR]);
 
   const pass = await one<{ r: J }>(`SELECT apply_entity_type_gate() AS r`);
-  assert(pass.r.ok === true && pass.r.refused_entities === 2 && pass.r.dropped_mentions === 2 && pass.r.dropped_edges === 1 && pass.r.retyped_entities === 1 && pass.r.merged_entities === 3,
-    `the pass refuses 021 and "places" (their two mentions, 021's edge), moves the person a.b and merges three (${JSON.stringify(pass.r)})`);
+  assert(pass.r.ok === true && pass.r.refused_entities === 2 && pass.r.dropped_mentions === 2 && pass.r.dropped_edges === 1 && pass.r.moved_entities === 1 && pass.r.merged_entities === 4,
+    `the pass refuses 021 and "places" (their two mentions, 021's edge), moves the person x/y and merges four (${JSON.stringify(pass.r)})`);
   const after2 = await entities();
-  assert(!after2.some((e) => /^person:(021|hono\/mcp|a\.b)$|^topic:places$|^place:a\.b$/.test(e)) && after2.includes("tool:a.b") && after2.includes("tool:hono/mcp"), `…leaving no refused name and no identifier-shaped person or place (${after2.join(", ")})`);
+  assert(!after2.some((e) => /^person:(021|hono\/mcp|x\/y)$|^topic:places$|^place:(x\/y|p\.q|q\.r)$/.test(e)) && after2.includes("tool:x/y") && after2.includes("tool:hono/mcp"), `…leaving no refused name and no identifier-shaped person or place (${after2.join(", ")})`);
   assert(JSON.stringify(await mentionsOf(toolHono)) === JSON.stringify([t1, t3, t4].sort()), "the tool hono/mcp now holds t1's mention, the person's t3, and one t4 — the person's duplicate there dropped");
-  const toolAb = await idOf("tool", "a.b");
-  assert(JSON.stringify(await mentionsOf(toolAb)) === JSON.stringify([t3, t4].sort()), "the tool a.b holds the moved person's t3 and the merged place's t4");
+  const toolXy = await idOf("tool", "x y");
+  assert(JSON.stringify(await mentionsOf(toolXy)) === JSON.stringify([t3, t4].sort()), "the tool x/y holds the moved person's t3 and the merged place's t4");
+  assert(JSON.stringify(await mentionsOf(ZETA)) === JSON.stringify([t4]) && (await mentionsOf(TOOL_QR)).length === 0, "the place q.r merged into Zeta, where a human merged its name, not into the tool of that name");
   const e3 = await q<{ relation: string; f: string; t: string }>(`SELECT relation, from_entity_id AS f, to_entity_id AS t FROM ob1_entity_edges WHERE thought_id = $1::uuid ORDER BY relation`, [t3]);
   const bun = await idOf("tool", "bun");
-  assert(e3.length === 3 && e3.every((e) => e.f !== personHono && e.t !== personHono) && e3.some((e) => e.relation === "depends_on" && e.f === bun && e.t === toolHono) && e3.some((e) => e.relation === "uses" && e.f === toolAb && e.t === bun),
+  assert(e3.length === 3 && e3.every((e) => e.f !== personHono && e.t !== personHono) && e3.some((e) => e.relation === "depends_on" && e.f === bun && e.t === toolHono) && e3.some((e) => e.relation === "uses" && e.f === toolXy && e.t === bun),
     `t3's edges point at the survivors (${e3.map((e) => e.relation).join(",")})`);
   const sym = e3.find((e) => e.relation === "related_to");
   assert(sym !== undefined && sym.f < sym.t && [sym.f, sym.t].sort().join() === [bun, toolHono].sort().join(), "…a symmetric relation re-pointed in the writer's order");
@@ -7072,17 +7085,19 @@ console.log("\n[51] Migration 056: the entity name gate — a number or a type w
   assert(e4.length === 1 && e4[0].f === TOOL_PQ && e4[0].t === ZED, `on t4 the person-to-tool edge, a self-edge once merged, is dropped, and Zed–p.q is flipped to (p.q, Zed) as the survivor's id sorts first (${JSON.stringify(e4)})`);
   const hono = await one<{ aliases: string[]; f: string; l: string; m: string[] }>(`SELECT aliases, first_seen_at::date::text AS f, last_seen_at::date::text AS l, merged_from AS m FROM ob1_entities WHERE id = $1::uuid`, [toolHono]);
   assert(hono.aliases.includes("@hono/mcp") && !hono.aliases.includes("hono/mcp") && hono.f === "2020-01-01" && hono.l === "2030-01-01", `the survivor keeps the merged row's aliases (its own name is no alias) and the earlier first and later last sighting (${JSON.stringify(hono)})`);
-  const abMerged = (await one<{ m: string[] }>(`SELECT merged_from AS m FROM ob1_entities WHERE id = $1::uuid`, [toolAb])).m;
-  assert(JSON.stringify(hono.m) === JSON.stringify(["mcp server"]) && JSON.stringify(abMerged) === JSON.stringify(["ab-old"]),
-    `a human's merge crosses into the new type less the name a tool already holds — merged or moved (${JSON.stringify(hono.m)}, ${JSON.stringify(abMerged)})`);
+  const xyMerged = (await one<{ m: string[] }>(`SELECT merged_from AS m FROM ob1_entities WHERE id = $1::uuid`, [toolXy])).m;
+  assert(hono.m.length === 0 && xyMerged.length === 0, `a human's merge within the old type crosses into the new one neither by a merge nor by a move (${JSON.stringify(hono.m)}, ${JSON.stringify(xyMerged)})`);
   assert((await entities()).filter((e) => structured.includes(e)).length === 3, "the entities a structured pass names are left as they stand: 127.0.0.1, the person SMD-1805, the label 2024");
   const again = await one<{ r: J }>(`SELECT apply_entity_type_gate() AS r`);
-  assert(again.r.refused_entities === 0 && again.r.retyped_entities === 0 && again.r.merged_entities === 0 && again.r.dropped_edges === 0, `the pass is idempotent (${JSON.stringify(again.r)})`);
+  assert(again.r.refused_entities === 0 && again.r.moved_entities === 0 && again.r.merged_entities === 0 && again.r.dropped_edges === 0, `the pass is idempotent (${JSON.stringify(again.r)})`);
 
   // Re-applying 056 lands the gated writer again, and its own run finds nothing.
   const before = await entities();
   await reapply("056");
   assert(/ob1:name-gate/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)")) && JSON.stringify(await entities()) === JSON.stringify(before), "re-applying 056 restores the gated writer and changes no row");
+  const t5 = await put("Hono, the framework.");
+  const w5 = await rte(t5, "extract:m@p2", [E("Hono", "tool")]);
+  assert(w5.ok === true && w5.pruned_entities === 0 && JSON.stringify(await mentionsOf(await idOf("tool", "hono"))) === JSON.stringify([t5]), `the tool Hono's next mention lands on Hono, not on the tool the person's merge would have redirected it to (${JSON.stringify(w5)})`);
 
   // The guard: a schema without 053 is refused by name, not left to fail later.
   await db.exec(`ALTER TABLE thought_sources RENAME TO thought_sources_gone`);

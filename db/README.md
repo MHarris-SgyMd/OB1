@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1653 assertions: 1653 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1655 assertions: 1655 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-five (55) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -335,26 +335,29 @@ Migration 056 gates the entity graph's names (SMD-1935). `entity_type_gate(name,
 type)` is the rule: a name that normalises to digits, dots, colons and spaces (a
 migration number, a port, an address, a CIDR) or to the type vocabulary itself
 (`person`, `tools`, `entity`) is refused, and a `person` or `place` with an
-identifier's shape is retyped — a ticket id to `project`; a URL, package, path,
-host, domain, file, snake_case name, glob or host:port to `tool` — since code
-artifacts are entities and refusing them dropped real ones (SMD-1937's
-measurement). `record_thought_entities` applies it to every extraction — a
-`source:` pass states its names on the source's authority and is not gated — and
-returns `refused_entities` and `retyped_entities`, one per (type, name); a
-relation naming a refused entity is dropped and counted as any unlisted one is.
-`apply_entity_type_gate()` applies it to the rows written before it, each entity
-judged on its name and none a structured pass names — a refused entity's edges,
-mentions and row deleted; a retyped one moved, or merged by `merge_entities`'
-steps into the entity already holding its new (type, name), its `merged_from`
-less any name that type holds — and the file runs it once, reporting the counts
-as a NOTICE: on the dogfood brain at 053, 116 refused, 8 moved and 4 merged of
-3,384. Idempotent; no ACL. A writer call already running 053's body when the
-file commits writes by 053's rule: stop the extraction workers for the upgrade,
-or run `SELECT apply_entity_type_gate()` once they have finished.
+identifier's shape is retyped — a ticket id to `project`; a URL, package, path or
+host:port to `tool`; and for a place only (a person's handle takes these), a host,
+domain, file, snake_case name or glob to `tool` — since code artifacts are
+entities and refusing them dropped real ones (SMD-1937's measurement).
+`record_thought_entities` applies it to every extraction and returns
+`refused_entities` and `retyped_entities`, one per answered (type, name); a
+relation naming a refused entity is dropped and counted as any unlisted one is. A
+`source:` pass states its names on the source's authority and is not gated, so a
+numeric name a source states (a Linear label `2024`) can remain.
+`apply_entity_type_gate()` applies the rule to the rows written before it, each
+entity judged on its name and none a structured pass names — a refused entity's
+edges, mentions and row deleted; a retyped one merged by `merge_entities`' steps
+into the entity of its new type the writer would resolve it to, or moved when
+there is none, its `merged_from` dropped — and the file runs it once, reporting
+the counts as a NOTICE: on the dogfood brain at 053, 116 refused, 8 moved and 4
+merged of 3,384. Idempotent; no ACL. A writer call already running 053's body
+when the file commits writes by 053's rule: stop the extraction workers for the
+upgrade, or run `SELECT apply_entity_type_gate()` once they have finished (and
+again after a source stops stating a name the rule refuses).
 `server-portable/entity-gate.ts` is its JavaScript twin, for the capture-time
-`people` facet (`metadata.ts`), which never reaches the function and drops only
-the shapes a person's handle cannot take (a ticket id, a URL, a package, a
-host:port); test-schema [51] holds the two to one answer.
+`people` facet (`metadata.ts`), which never reaches the function and keeps only
+the names the rule keeps as a person; test-schema [51] holds the two to one
+answer.
 
 ## What changed relative to the guide
 
@@ -1087,8 +1090,8 @@ recency: the same rows give the same order every run.
 with its own numbers: edges are unweighted (SMD-1925 — on real runs every edge
 carries confidence 1.00, so support is an edge's only weight); entity typing is
 noisy (SMD-1935 — names that are only digits, dots, colons and spaces are out
-of scope by default — a brain from before 056 holds them, 056's writer refuses
-them — `--keep-numeric` admits them, `--types` narrows further,
+of scope by default — a brain from before 056 holds them, and a name a
+structured source states can be one — `--keep-numeric` admits them, `--types` narrows further,
 and the scope IS the graph: an entity outside it is in no list and no count,
 the subject the one exception, so `--types tool "Open Brain"` is the tools
 around a project); hubs and clusters inflate each other; ticket status is read
@@ -2082,7 +2085,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1653 assertions, PGlite, no container
+bun test-schema.ts                          # 1655 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 703 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

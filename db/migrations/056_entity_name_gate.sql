@@ -10,7 +10,7 @@
 --   them by guess. On the dogfood brain at 053 (3,384 entities): 107 names are
 --   only digits, dots, colons and spaces — migration numbers lifted out of
 --   "migration 021", the Ollama port, loopback addresses, CIDRs — spread over
---   every type (17 of the 58 `person` rows); 9 are the type vocabulary itself
+--   every type (17 of the 50 `person` rows); 9 are the type vocabulary itself
 --   (`person`, `place`); and 12 persons and places are identifiers: `hono/mcp`
 --   and `SMD-1804` as people; three hosts, a domain, a Docker network, a URL
 --   and four path globs as places. Every reader that trusts a type (facets, the
@@ -26,44 +26,48 @@
 -- WHAT
 --   1. entity_type_gate(name, type) — IMMUTABLE, STRICT — the type the graph
 --      stores a name under, or NULL to refuse it:
---        * refused: a name whose normalize_entity_name() is digits, then any
---          run of digits, dots, colons and spaces (entities.ts's
+--        * refused: a name whose normalize_entity_name(), trimmed, is digits,
+--          then any run of digits, dots, colons and spaces (entity-gate.ts's
 --          NUMERIC_NAME_RE; `10/8` and `127.0.0.1:11434` fold into it), or
 --          a type-vocabulary word (`person`, `people`, `tools`, `entity` …);
---        * retyped, for a `person` or `place` only: a ticket id
---          (`SMD-1804`) to `project`; a URL, a package or path, a host,
---          domain or file, a snake_case name or glob, or a host:port to
---          `tool`. Read on the name as written, trimmed of ASCII
---          whitespace, with every class spelled out (never \w or \S, which
---          Postgres reads by locale);
+--        * retyped: a person or place with a ticket id's shape (`SMD-1804`)
+--          to `project`; with a URL's, a package's or path's, or a
+--          host:port's to `tool`; a place (not a person — a handle takes
+--          these: `john.smith`, `@john_doe`) with a host's, domain's or
+--          file's, or a snake_case name's or glob's to `tool`. Read on the
+--          name as written, trimmed of ASCII whitespace, every class spelled
+--          out (never \w or \S, which Postgres reads by locale);
 --        * otherwise the type given.
 --      server-portable/entity-gate.ts is its JavaScript twin, for the
---      `people` metadata facet that never reaches this function; test-schema
---      holds the two to one answer over a probe list.
+--      `people` metadata facet that never reaches this function (a name the
+--      gate does not keep as a person is dropped there); test-schema holds
+--      the two to one answer over a probe list.
 --
 --   2. record_thought_entities redefined on 053's body, same signature: each
 --      entity's type is the gate's answer, a refused one is not written (and
 --      a relation naming it is dropped and counted, as a relation to an
 --      unlisted entity always was), and the result gains `refused_entities`
---      and `retyped_entities`, one per (type, name). An extraction is gated;
---      a `source:` pass is not — it states its names on the source's
---      authority, and a Linear label `2024` or `Tools` is a label (first
---      review pass). The body carries the `ob1:name-gate` sentinel.
+--      and `retyped_entities`, one per answered (type, name). An extraction
+--      is gated; a `source:` pass is not — it states its names on the
+--      source's authority, and a Linear label `2024` or `Tools` is a label
+--      (first review pass). So a numeric name a source states can remain.
+--      The body carries the `ob1:name-gate` sentinel.
 --
 --   3. apply_entity_type_gate() — the same rule over the rows already
 --      written, each entity judged on its name (its first-seen spelling),
---      and none a structured pass names: a refused entity's edges, mentions
---      and row are deleted; a
---      retyped one is moved to its new type, or MERGED into the entity of that
---      type and name when one exists (hono/mcp the person into hono/mcp the
---      tool) by merge_entities' steps, which 016's function will not take
+--      and none a structured pass names (such an entity, and its extracted
+--      mentions, stand; once the source stops naming it, a later run of this
+--      takes it). A refused entity's edges, mentions and row are deleted. A
+--      retyped one is MERGED into the entity of the new type the writer
+--      would resolve its name to — the one a human merged the name into,
+--      else the one of that name (hono/mcp the person into hono/mcp the
+--      tool) — by merge_entities' steps, which 016's function will not take
 --      across types: the mentions the target lacks move, its edges are
 --      re-pointed (a symmetric relation re-ordered, a duplicate or self-edge
---      dropped), and its name, aliases and merged_from fold into the target's,
---      the earlier first_seen_at and later last_seen_at kept. merged_from, a
---      human's merge within the old type, loses any name an entity of the new
---      type holds, moved or merged, so it cannot redirect that entity's
---      mentions. Returns the counts.
+--      dropped), its name and aliases fold into the target's, the earlier
+--      first_seen_at and later last_seen_at kept. With no such entity it is
+--      moved. Its merged_from goes either way: a human's merge within the
+--      old type is no decision about the new one. Returns the counts.
 --      This file runs it once and reports the counts as a NOTICE; it is
 --      idempotent, so --reapply finds nothing.
 --
@@ -111,7 +115,7 @@ LANGUAGE sql
 IMMUTABLE STRICT
 AS $$
   SELECT CASE
-    WHEN s.n IS NULL THEN NULL
+    WHEN s.n IS NULL OR s.n = '' THEN NULL
     WHEN s.n ~ '^[0-9][0-9 .:]*$' THEN NULL
     WHEN s.n IN ('person', 'persons', 'people', 'organization', 'organizations', 'organisation', 'organisations',
                  'project', 'projects', 'tool', 'tools', 'topic', 'topics', 'place', 'places', 'entity', 'entities') THEN NULL
@@ -119,20 +123,25 @@ AS $$
     WHEN s.r ~ '^[A-Za-z]+-[0-9]+$' THEN 'project'
     WHEN s.r ~ '^[A-Za-z][A-Za-z0-9+.-]*://'
       OR s.r ~ '^@?[A-Za-z0-9_.-]+/[A-Za-z0-9_.*/-]*$'
-      OR s.r ~ '^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+$'
-      OR s.r ~ '^[^ \t\n\r\f\v]*[_*][^ \t\n\r\f\v]*$'
       OR s.r ~ '^[^ \t\n\r\f\v]+:[0-9]+$' THEN 'tool'
+    -- The handle of a person takes these two shapes (john.smith, @john_doe),
+    -- so they retype a place only (second review pass).
+    WHEN p_type = 'place' AND (s.r ~ '^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+$'
+                            OR s.r ~ '^[^ \t\n\r\f\v]*[_*][^ \t\n\r\f\v]*$') THEN 'tool'
     ELSE p_type
   END
   -- The shapes read the name trimmed of ASCII whitespace, and spell that
   -- class out, never \S: Postgres reads \s by locale and btrim() strips
   -- spaces alone, so `SMD-1804` and a trailing tab parted from the twin
-  -- (first review pass).
-  FROM (SELECT normalize_entity_name(p_name) AS n, regexp_replace(p_name, '^[ \t\n\r\f\v]+|[ \t\n\r\f\v]+$', '', 'g') AS r) s
+  -- (first review pass). The normalised name is trimmed of spaces too: the
+  -- outer strip of 016 knows no form feed, so `\f021` normalises to ` 021`
+  -- (second review pass). No apostrophe in these comments: test-schema [51]
+  -- reads the quoted literals of this body.
+  FROM (SELECT btrim(normalize_entity_name(p_name)) AS n, regexp_replace(p_name, '^[ \t\n\r\f\v]+|[ \t\n\r\f\v]+$', '', 'g') AS r) s
 $$;
 
 COMMENT ON FUNCTION entity_type_gate(text, text) IS
-  'The entity name gate (056): the type the graph stores a name under, or NULL to refuse it. Refused: a name that normalises to digits, dots, colons and spaces (a migration number, port, address, CIDR) or to a type-vocabulary word. Retyped, for a person or place only: a ticket id to project; a URL, package, path, host, domain, file, snake_case name, glob or host:port to tool. Otherwise the type given. server-portable/entity-gate.ts is its twin. SMD-1935.';
+  'The entity name gate (056): the type the graph stores a name under, or NULL to refuse it. Refused: a name that normalises to digits, dots, colons and spaces (a migration number, port, address, CIDR) or to a type-vocabulary word. Retyped: a person or place with a ticket id''s shape to project; with a URL''s, a package''s, a path''s or a host:port''s to tool; a place (not a person, whose handle takes these) with a host''s, domain''s, file''s, snake_case name''s or glob''s to tool. Otherwise the type given. server-portable/entity-gate.ts is its twin. SMD-1935.';
 
 -- ---------------------------------------------------------------------------
 -- record_thought_entities — 053's writer with the gate
@@ -192,7 +201,8 @@ BEGIN
   DELETE FROM _rte_in WHERE true;
   -- ob1:name-gate (056): what the gate refuses and retypes, over the entities
   -- the insert below would otherwise have written — the same four
-  -- conditions, one per (type, name) as that insert keeps them. An
+  -- conditions, one per answered (type, name): `hono/mcp` answered as a
+  -- person and as a place is two retypes onto one tool. An
   -- extraction only: a structured pass states its names on the source's
   -- authority (a Linear label `2024` is a label) and is not gated.
   IF NOT v_structured THEN
@@ -396,7 +406,7 @@ DECLARE
   v_refused  int := 0;
   v_mentions int := 0;
   v_edges    int := 0;
-  v_retyped  int := 0;
+  v_moved    int := 0;
   v_merged   int := 0;
   v_target   uuid;
   r          record;
@@ -435,25 +445,29 @@ BEGIN
     RETURNING 1)
   SELECT count(*) INTO v_refused FROM gone;
 
-  -- Retyped, oldest first: moved when its new (type, name) is free, merged
-  -- into the entity holding it when not. Two rows bound for one target meet
-  -- here too — the first moves, the second merges into it. merged_from is a
-  -- human's merge WITHIN a type; carried into the new type it would redirect
-  -- that type's own entity of the name, so a name an entity of the new type
-  -- holds is dropped from it (first review pass).
+  -- Retyped, oldest first: merged into the entity of the new type the writer
+  -- would resolve its name to — the one a human merged the name into, else
+  -- the one of that name — and moved when there is none. Two rows bound for
+  -- one target meet here too: the first moves, the second merges into it.
+  -- A retyped row's merged_from goes: a human's merge within the old type is
+  -- no decision about the new one, and carried there it redirected that
+  -- type's own entities (first and second review passes — filtering it
+  -- against a snapshot missed the rows this loop moves).
   FOR r IN
-    SELECT e.id, e.name, e.normalized_name, e.aliases, e.first_seen_at, e.last_seen_at, a.to_type,
-           ARRAY(SELECT m FROM unnest(e.merged_from) m
-                  WHERE NOT EXISTS (SELECT 1 FROM ob1_entities o WHERE o.entity_type = a.to_type AND o.normalized_name = m)
-                  ORDER BY m) AS merged_from
+    SELECT e.id, e.name, e.normalized_name, e.aliases, e.first_seen_at, e.last_seen_at, a.to_type
       FROM _aetg a JOIN ob1_entities e ON e.id = a.id
      WHERE a.to_type IS NOT NULL
      ORDER BY e.first_seen_at, e.id
   LOOP
-    SELECT en.id INTO v_target FROM ob1_entities en WHERE en.entity_type = r.to_type AND en.normalized_name = r.normalized_name;
+    v_target := NULL;
+    SELECT en.id INTO v_target FROM ob1_entities en
+     WHERE en.entity_type = r.to_type AND en.id <> r.id
+       AND (r.normalized_name = ANY(en.merged_from) OR en.normalized_name = r.normalized_name)
+     ORDER BY (r.normalized_name = ANY(en.merged_from)) DESC, en.first_seen_at, en.id
+     LIMIT 1;
     IF v_target IS NULL THEN
-      UPDATE ob1_entities SET entity_type = r.to_type, merged_from = r.merged_from WHERE id = r.id;
-      v_retyped := v_retyped + 1;
+      UPDATE ob1_entities SET entity_type = r.to_type, merged_from = '{}' WHERE id = r.id;
+      v_moved := v_moved + 1;
       CONTINUE;
     END IF;
 
@@ -486,7 +500,6 @@ BEGIN
 
     UPDATE ob1_entities en
        SET aliases       = ARRAY(SELECT DISTINCT a FROM unnest(en.aliases || r.aliases || ARRAY[r.name]) a WHERE a <> en.name ORDER BY a),
-           merged_from   = ARRAY(SELECT DISTINCT a FROM unnest(en.merged_from || r.merged_from) a ORDER BY a),
            first_seen_at = LEAST(en.first_seen_at, r.first_seen_at),
            last_seen_at  = GREATEST(en.last_seen_at, r.last_seen_at)
      WHERE en.id = v_target;
@@ -495,12 +508,12 @@ BEGIN
   END LOOP;
 
   RETURN jsonb_build_object('ok', true, 'refused_entities', v_refused, 'dropped_mentions', v_mentions, 'dropped_edges', v_edges,
-                            'retyped_entities', v_retyped, 'merged_entities', v_merged);
+                            'moved_entities', v_moved, 'merged_entities', v_merged);
 END;
 $$;
 
 COMMENT ON FUNCTION apply_entity_type_gate() IS
-  'Applies entity_type_gate() to the entities already written (056), each judged on its name and none a structured pass names: a refused entity''s edges, mentions and row are deleted; a retyped one moves to its new type, or merges into the entity already holding that (type, name) by merge_entities'' steps — the mentions it lacks moved, edges re-pointed, aliases and seen-at folded, merged_from less any name the new type holds. Idempotent. Returns {ok, refused_entities, dropped_mentions, dropped_edges, retyped_entities, merged_entities}. SMD-1935.';
+  'Applies entity_type_gate() to the entities already written (056), each judged on its name and none a structured pass names: a refused entity''s edges, mentions and row are deleted; a retyped one moves to its new type, or merges into the entity already holding that (type, name) by merge_entities'' steps — the mentions it lacks moved, edges re-pointed, aliases and seen-at folded; a retyped row''s merged_from, a human''s merge within the old type, does not cross. Idempotent. Returns {ok, refused_entities, dropped_mentions, dropped_edges, moved_entities, merged_entities}. SMD-1935.';
 
 -- The rows written before the gate, once. What it did is the NOTICE.
 DO $run$
