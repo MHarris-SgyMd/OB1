@@ -1448,10 +1448,22 @@ export async function modelSummary(cfg, payload, fetchImpl = fetch) {
   // A running checkpoint keeps its DERIVED summary: its `Checkpoint: …
   // continuing` line is the signal a sibling session reads and search marks
   // superseded, and a free rewrite would drop it. The model writes the durable
-  // summary at the episode's end (a compaction that CLOSES the episode, or the
-  // session's end), which supersedes the checkpoint's derived text (SMD-2014).
-  if (/\n\nCheckpoint: /.test(payload.text)) return null;
+  // summary at the episode's end (a compaction that CLOSES the episode, so its
+  // payload carries no event, or the session's end), which supersedes the
+  // checkpoint's derived text (SMD-2014). Read from the event table that
+  // renderSummary's Checkpoint line derives from, not the rendered text (first
+  // review pass: matching the rendered wording was fragile and untested).
+  if (eventSpec(payload.event)?.checkpoint) return null;
   if (!cfg.modelUrl || !cfg.model) { log(`model summary skipped for ${chain}: summary=model but no model_url/model configured — derived summary sent`); return null; }
+  // The assistant messages are scanned before they leave the box, as the
+  // derived text was at prepare and the model's own output is below: a key in a
+  // message that is not the last outcome is absent from the derived summary, so
+  // prepare's scan never saw it, and this is the only gate before it would
+  // reach the model — a remote one under egress allow/off (first review pass:
+  // both reviewers found the excerpt left the box unscanned). A hit keeps the
+  // derived summary; nothing is sent to the model.
+  const leak = scanForSecrets(payload.assistant);
+  if (leak.length) { log(`model summary refused for ${chain}: ${leak[0].reason} at char ${leak[0].at} in the assistant messages — nothing sent to the model, derived summary sent`); return null; }
   const refusal = egressRefusalForModel(cfg);
   if (refusal) { log(`model summary refused for ${chain}: ${refusal} — derived summary sent`); return null; }
   const ac = new AbortController();

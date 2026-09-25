@@ -1806,6 +1806,7 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   const modelSrv = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
     modelCalls++; modelSeen = await req.json();
     if (typeof modelReply === "number") return new Response("upstream", { status: modelReply });
+    if (modelReply && typeof modelReply === "object") return Response.json(modelReply.json, { status: modelReply.status ?? 200 }); // an error STATUS with a valid-looking body
     return Response.json({ choices: [{ message: { content: modelReply } }] });
   } });
   const MODEL_URL = `http://127.0.0.1:${modelSrv.port}`;
@@ -1835,17 +1836,33 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   assert(await modelSummary(modelCfg(), { ...basePayload }) === null, "…as does an empty model answer");
   modelReply = 503;
   assert(await modelSummary(modelCfg(), { ...basePayload }) === null, "…and an HTTP error from the endpoint");
+  // A 5xx whose BODY looks like a valid answer is refused by status, not trusted
+  // as the summary — the !r.ok branch pinned apart from the JSON-parse guard.
+  modelReply = { status: 500, json: { choices: [{ message: { content: "an error page shaped like an answer" } }] } };
+  assert(await modelSummary(modelCfg(), { ...basePayload }) === null, "a 5xx with a valid-looking body is refused by status, not returned as the summary");
 
   // A model slower than the timeout falls back.
   const slowSrv = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch() { await sleep(300); return Response.json({ choices: [{ message: { content: "too late" } }] }); } });
   assert(await modelSummary(modelCfg({ modelUrl: `http://127.0.0.1:${slowSrv.port}`, modelTimeout: 50 }), { ...basePayload }) === null, "a model slower than the timeout falls back to derived");
   slowSrv.stop(true);
 
-  // A running checkpoint keeps its derived summary (the model would drop the
-  // Checkpoint line); the model writes the durable end-of-episode one.
-  const cpText = renderSummary({ ...ep, checkpoint: { kind: "compacted", trigger: "auto" } });
-  assert(/\n\nCheckpoint: /.test(cpText) && await modelSummary(modelCfg(), { chain_id: "s-cp", text: cpText, assistant: assistantExcerpt(ep) }) === null,
-    "a running checkpoint keeps its derived summary — the model writes the durable one at the episode's end");
+  // A running checkpoint (PreCompact/Stop) keeps its derived summary — the
+  // Checkpoint line would be lost in a rewrite; read from the event table, not
+  // the rendered text. The durable end (SessionEnd, or a closed episode with no
+  // event) is the model's.
+  modelReply = "the durable summary.";
+  const beforeCp = modelCalls;
+  assert(await modelSummary(modelCfg(), { chain_id: "s-cp", event: "PreCompact", trigger: "auto", text: renderSummary(ep), assistant: assistantExcerpt(ep) }) === null && modelCalls === beforeCp,
+    "a running checkpoint keeps its derived summary — the model is not called");
+  assert((await modelSummary(modelCfg(), { chain_id: "s-end", event: "SessionEnd", text: renderSummary(ep), assistant: assistantExcerpt(ep) }))?.text === "the durable summary.",
+    "…while the durable end-of-episode summary is written by the model");
+
+  // A secret in the assistant messages themselves — a message that is not the
+  // last outcome, so the derived text never carried it — keeps the derived
+  // summary and sends nothing to the model (first review pass).
+  const beforeLeak = modelCalls;
+  assert(await modelSummary(modelCfg(), { chain_id: "s-leak", event: "SessionEnd", text: "a clean derived summary", assistant: "earlier we set the token to sk-ant-api03-abcdefabcdefabcdefabcdefabcdefabcdefabcdef and moved on" }) === null && modelCalls === beforeLeak,
+    "a secret in the assistant messages keeps the derived summary — nothing is sent to the model");
 
   // prepare attaches the excerpt only in model mode — off is byte-identical.
   const onPrep = prepare({ session_id: "s-prep-on", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { summary: "model" });
@@ -1869,6 +1886,19 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   received.length = 0;
   const e2eOff = await runHook({ session_id: "s-model-off", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" });
   assert(e2eOff.code === 0 && received.length === 1 && /^Session summary/.test(received[0].args.content) && received[0].args.metadata === undefined, "with the option off, the derived summary is sent with no metadata");
+
+  // A payload a model already wrote (summary_model set, persisted by a failed
+  // post) is NOT re-modelled on a later drain — the stored model text is posted
+  // as-is, the model not called again (postPending's summary_model guard).
+  received.length = 0;
+  modelReply = "freshly re-modelled — must not appear";
+  const beforeReuse = modelCalls;
+  mkdirSync(join(STATE, "pending"), { recursive: true });
+  const reusePath = join(STATE, "pending", `${Date.now()}-9999-reuse0-s-reuse.json`);
+  writeFileSync(reusePath, JSON.stringify({ session_id: "s-reuse", chain_id: "s-reuse", episode: 1, harness: "claude-code", event: "SessionEnd", text: "already the model's text", fingerprint: "fp-reuse", derived_from: [], assistant: "some assistant text", summary_model: "test-model", prompts: 1, prepared_at: new Date().toISOString(), attempts: 0 }));
+  await postPending({ url: URL_, key: "cap-key", summary: "model", modelUrl: MODEL_URL, model: "test-model", modelLocal: true, egress: "deny" }, reusePath);
+  assert(modelCalls === beforeReuse && received.length === 1 && received[0].args.content === "already the model's text" && received[0].args.metadata?.summary_model === "test-model",
+    "a payload a model already wrote is posted as-is on a retry — the model is not called again");
 
   modelSrv.stop(true);
 }
