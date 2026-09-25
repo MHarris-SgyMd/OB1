@@ -142,6 +142,16 @@ console.log("\n[3] The rules: every unit under deny and allow, with the reason n
     assert(inverse.allowed === !hits && (hits ? inverse.rule === "deny-term" && inverse.reason.includes(`OB1_EGRESS_DENY ${term}`) : inverse.rule === "no-deny-term"),
            `allow + OB1_EGRESS_DENY=${term}: ${hits ? "refused by the term" : "allowed"}`);
   }
+  // `source` gates on whatever subject CARRIES the label, of any kind — the
+  // value is the row's own, written by the server (SMD-1941). db/sync-linear.ts
+  // writes an authoritative `source` on its CAPTURE of a Linear issue, so a
+  // source: term gates that capture; the gate does not branch on kind.
+  assert(termMatches({ unit: "source", value: "linear" }, { kind: "capture", actor: "linear-sync", metadata: { source: "linear" }, content: "an issue" }) === true,
+         "a capture subject that CARRIES a source (db/sync-linear.ts's, authoritative) is gated by a source: term — the gate does not branch on kind");
+  // capture_thought keeps its caller-CLAIMED source OFF the subject (index.ts),
+  // so no source: term can match it — the dodge is closed at the call site.
+  assert(termMatches({ unit: "source", value: "linear" }, { kind: "capture", actor: "mcp-key", content: "a thought" }) === false,
+         "a capture subject with NO source is matched by no source: term — capture_thought omits the caller's claim (SMD-1941)");
   assert(termMatches({ unit: "topic", value: "x" }, { kind: "capture", metadata: { topics: "x" } }) === false, "a topics value that is not an array matches no topic term");
   assert(termMatches({ unit: "actor", value: "a" }, { kind: "query" }) === false && termMatches({ unit: "marker", value: "a" }, { kind: "query" }) === false, "an absent unit matches nothing");
   const off = mayLeaveBox(subject, remote, resolveEgressPolicy({ OB1_EGRESS_POLICY: "off" }));
@@ -257,10 +267,16 @@ process.env.OB1_EMBEDDING_MODEL = EMB_MODEL;
 process.env.OB1_EMBEDDING_DIM = String(DIM);
 process.env.OB1_METADATA_MODEL = META_MODEL;
 process.env.MCP_ACCESS_KEYS = `gated:write:${hashKey(GATED_KEY)},open:write:${hashKey(OPEN_KEY)}`;
-// One key allowed by name, and one type — which only a row already tagged can
-// carry, so it reaches an EDIT of such a row and never a first capture; the
-// policy itself is the default.
-process.env.OB1_EGRESS_ALLOW = "actor:open,type:idea";
+// The frozen policy (deny mode) names three allow terms, each for a reason:
+// actor:open lets the open key's capture leave; type:idea — a type only a row
+// already tagged can carry — reaches an EDIT of such a row and never a first
+// capture (the type is extracted, not the caller's); and source:claude-code
+// lets [7] prove capture_thought drops its caller's `source` claim: a gated
+// capture NAMING source:claude-code must still be refused, since the handler
+// omits the claim and the term matches nothing. The policy is set HERE, at
+// module load: env() snapshots process.env once at the first request (initEnv's
+// `if (ENV) return`), so a write after that first request is dead.
+process.env.OB1_EGRESS_ALLOW = "actor:open,type:idea,source:claude-code";
 for (const k of ["OB1_LLM_LOCAL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_DENY", "OPENROUTER_API_KEY", "OB1_LLM_API_KEY", "OB1_CHAT_BASE_URL", "OB1_CHAT_API_KEY", "MCP_ACCESS_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "OB1_EMBEDDING_DIMENSIONS", "OB1_CHUNK_CONTEXT"]) delete process.env[k];
 
 const worker = (await import("./index.ts")).default as { fetch: (r: Request) => Response | Promise<Response> };
@@ -286,7 +302,7 @@ console.log("\n[6] The server under deny: a refused capture lands without a vect
   const before = seen.length;
   const cap = await call(GATED_KEY, "capture_thought", { content: "gated-thought-marker: a note that must not leave" });
   assert(!cap.isError && /Captured as thought — id [0-9a-f-]{36}/.test(cap.text), `the capture succeeds, typed as nothing (${cap.text.split("\n")[0]})`);
-  assert(/Note: saved WITHOUT a vector — OB1_EGRESS_POLICY=deny \(the default\) and no OB1_EGRESS_ALLOW term matches this capture \(actor:open, type:idea\) — the text was not sent to 127\.0\.0\.1:\d+\./.test(cap.text),
+  assert(/Note: saved WITHOUT a vector — OB1_EGRESS_POLICY=deny \(the default\) and no OB1_EGRESS_ALLOW term matches this capture \(actor:open, type:idea, source:claude-code\) — the text was not sent to 127\.0\.0\.1:\d+\./.test(cap.text),
          "…the reply says the vector is missing, names the rule, the terms and the host");
   assert(/findable by exact text \(search_thoughts_keyword\)/.test(cap.text) && /re-embed pass/.test(cap.text), "…and the two ways it is still reachable");
   assert(/Note: no topics, people or type were extracted — OB1_EGRESS_POLICY=deny/.test(cap.text), "…and that no tags were extracted, under the same rule");
@@ -364,6 +380,27 @@ console.log("\n[6] The server under deny: a refused capture lands without a vect
          `an edit of a row a type: term names is allowed on the row's metadata — one embeddings request (${seen.length - m})`);
   const untypedEdit = await call(GATED_KEY, "update_thought", { id, content: "gated-thought-marker: edited again, still must not leave" });
   assert(!untypedEdit.isError && /content saved without a vector/.test(untypedEdit.text) && seen.length === m + 1, "…while an edit of the untyped row is still refused at zero requests");
+}
+
+console.log("\n[7] capture_thought keeps its caller-CLAIMED source OFF the egress subject: the frozen policy's source:claude-code term does not admit a capture that names that source (SMD-1941)");
+{
+  // The frozen allow list carries source:claude-code (set at module load above,
+  // before env() snapshotted it). A gated capture that NAMES source:claude-code
+  // must STILL be refused at zero requests: the handler drops the caller's claim,
+  // so the subject carries no source and the term matches nothing — actor:open
+  // and type:idea do not match it either. This is the end-to-end pin of the
+  // pass-1 boundary: re-adding `metadata: { source: origin }` to the capture
+  // subject would let source:claude-code match and the capture would leave,
+  // failing the zero-requests assertion. The row still RECORDS the label
+  // (SMD-1297's per-source weight reads it); it just does not open the gate.
+  const n0 = seen.length;
+  const claimed = await call(GATED_KEY, "capture_thought", { content: "claims-claude-code: a gated note naming its own source", source: "claude-code" });
+  assert(!claimed.isError && /Captured as thought/.test(claimed.text) && /saved WITHOUT a vector/.test(claimed.text) && seen.length === n0,
+         `a gated capture naming source:claude-code, with source:claude-code in the allow list, is still refused at zero requests — the claim does not gate (${seen.length - n0})`);
+  const cid = /id ([0-9a-f-]{36})/.exec(claimed.text)![1];
+  const [crow] = await sql`SELECT metadata, embedding IS NULL AS no_vector FROM thoughts WHERE id = ${cid}::uuid`;
+  assert(crow.no_vector === true && crow.metadata.source === "claude-code",
+         `…and the row RECORDS source:claude-code all the same — the label is stored, it just does not open the gate (${JSON.stringify(crow.metadata)})`);
 }
 
 await sql.close();

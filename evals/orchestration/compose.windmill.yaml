@@ -1,0 +1,66 @@
+# Windmill beside a throwaway brain (SMD-1863). An overlay on deploy/compose.yaml:
+#
+#   bun evals/eval-orchestration.ts --up windmill
+#
+# Paths are relative to deploy/ (the first -f file). The candidate's state is a
+# database of its own on the brain's Postgres server, owned by a login role of
+# its own, as for the other two — but Windmill also needs two CLUSTER-wide
+# roles, windmill_user and windmill_admin, the second WITH BYPASSRLS, which only
+# a superuser can create (its init-db-as-superuser.sql, applied below to the
+# orchestration database). Those roles exist on the brain's server for as long
+# as the candidate does; orch holds no CONNECT on `openbrain`, so BYPASSRLS
+# reaches no brain table. One container, MODE=standalone (server + worker),
+# the smallest shape; the reference compose runs a server and three workers.
+
+services:
+  orch-db:
+    image: pgvector/pgvector:0.8.6-pg16
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      ORCH_DB_PASSWORD: ${ORCH_DB_PASSWORD}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        psql -v ON_ERROR_STOP=1 -d openbrain <<'SQL'
+        \getenv pw ORCH_DB_PASSWORD
+        SELECT format('CREATE ROLE orch LOGIN PASSWORD %L', :'pw') WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'orch') \gexec
+        SELECT 'CREATE DATABASE orchestration OWNER orch' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'orchestration') \gexec
+        REVOKE CONNECT ON DATABASE openbrain FROM PUBLIC;
+        SELECT 'CREATE ROLE windmill_user' WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'windmill_user') \gexec
+        SELECT 'CREATE ROLE windmill_admin WITH BYPASSRLS' WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'windmill_admin') \gexec
+        GRANT windmill_user TO windmill_admin;
+        GRANT windmill_admin TO orch;
+        GRANT windmill_user TO orch;
+        SQL
+        psql -v ON_ERROR_STOP=1 -d orchestration <<'SQL'
+        GRANT USAGE ON SCHEMA public TO windmill_user, windmill_admin;
+        ALTER DEFAULT PRIVILEGES FOR ROLE orch IN SCHEMA public GRANT ALL ON TABLES TO windmill_user;
+        ALTER DEFAULT PRIVILEGES FOR ROLE orch IN SCHEMA public GRANT ALL ON SEQUENCES TO windmill_user;
+        SQL
+    restart: "no"
+
+  windmill:
+    image: ghcr.io/windmill-labs/windmill:1.817.0
+    depends_on:
+      orch-db:
+        condition: service_completed_successfully
+      server:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8090:8000"
+    environment:
+      DATABASE_URL: postgres://orch:${ORCH_DB_PASSWORD}@postgres:5432/orchestration?sslmode=disable
+      BASE_URL: http://127.0.0.1:8090
+      MODE: standalone
+      RUST_LOG: info
+    volumes:
+      - windmill-cache:/tmp/windmill/cache
+
+volumes:
+  windmill-cache:

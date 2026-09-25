@@ -741,24 +741,55 @@ jobs:
           CAPTURE_HASH=$(printf '%s' "$CAPTURE_KEY" | shasum -a 256 | cut -d' ' -f1)
           echo "OB1_SMOKE_CAPTURE_KEY=$CAPTURE_KEY" >> "$GITHUB_ENV"
           # No OPENROUTER_API_KEY: the provider is a local endpoint, which
-          # needs no credential (preflight decides). Preflight dials it once
-          # (GET /models, SMD-1875) and nothing else in this job does —
-          # smoke.sh captures nothing and preflight runs without --deep — so
-          # a listener on the runner that answers GET is the whole provider:
-          # the runner is the container's host.docker.internal (compose.yaml's
-          # extra_hosts host-gateway), and the listener binds every interface
-          # because host-gateway is the bridge address, not loopback. The
-          # address is neither the code's default nor the compose fallback,
-          # so the log line below can only come from this file (SMD-1843);
-          # the query log likewise. OB1_LLM_LOCAL declares the endpoint to the
-          # egress gate (SMD-1903), which reads the flag and never the
-          # address; the log line below holds the forward.
+          # needs no credential (preflight decides). Preflight dials it
+          # (GET /models, SMD-1875), and the canary step below embeds through
+          # it (POST /v1/embeddings); smoke.sh captures nothing and preflight
+          # runs without --deep, so a listener on the runner answering those
+          # two is the whole provider: the runner is the container's
+          # host.docker.internal (compose.yaml's extra_hosts host-gateway), and
+          # the listener binds every interface because host-gateway is the
+          # bridge address, not loopback. The address is neither the code's
+          # default nor the compose fallback, so the log line below can only
+          # come from this file (SMD-1843); the query log likewise.
+          # OB1_LLM_LOCAL declares the endpoint to the egress gate (SMD-1903),
+          # which reads the flag and never the address; the log line below
+          # holds the forward. The embeddings (SMD-2038) are a bag of words
+          # hashed into dimensions 1–1023 of the stack's 1024, the model's
+          # query instruction left off as the model reads it, so a text is
+          # near itself and far from another; the probe thoughts are seeded
+          # with the stub's own vectors for their text. While
+          # /tmp/provider-stub-wrong exists it is a provider serving another
+          # model: each vector turned mostly onto dimension 0, which no word
+          # reaches, so a text still ranks its own thought first but at about
+          # 30%, under the canary smoke's 50% floor, on every run.
           nohup python3 - <<'PY' > /tmp/provider-stub.log 2>&1 &
+          import json, math, os, re, zlib
           from http.server import BaseHTTPRequestHandler, HTTPServer
+          def embed(text):
+              text = (text or "").split("\nQuery: ", 1)[-1]
+              v = [0.0] * 1024
+              for w in re.findall(r"[a-z]+", text.lower()):
+                  v[1 + zlib.crc32(w.encode()) % 1023] += 1.0
+              n = math.sqrt(sum(x * x for x in v))
+              return [x / n for x in v] if n else [0.0, 1.0] + [0.0] * 1022
+          def wrong(text):
+              v = [0.3 * x for x in embed(text)]
+              v[0] = 0.95
+              n = math.sqrt(sum(x * x for x in v))
+              return [x / n for x in v]
           class H(BaseHTTPRequestHandler):
-              def do_GET(self):
-                  body = b'{"object":"list","data":[]}'
+              def reply(self, body):
                   self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+              def do_GET(self):
+                  self.reply(b'{"object":"list","data":[]}')
+              def do_POST(self):
+                  req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                  if not self.path.endswith("/embeddings"):
+                      self.send_error(404); return
+                  inputs = req.get("input"); inputs = inputs if isinstance(inputs, list) else [inputs]
+                  f = wrong if os.path.exists("/tmp/provider-stub-wrong") else embed
+                  data = [{"object": "embedding", "index": i, "embedding": f(t)} for i, t in enumerate(inputs)]
+                  self.reply(json.dumps({"object": "list", "data": data, "model": req.get("model")}).encode())
           HTTPServer(("0.0.0.0", 11434), H).serve_forever()
           PY
           # OB1_GIT_SHA reaches the image as compose's build arg (SMD-2041),
@@ -878,7 +909,8 @@ jobs:
         working-directory: deploy
         run: |
           q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d "$1" -tAc "$2"; }
-          q openbrain "SELECT upsert_thought('tier refresh probe: the quokka ledger', '{\"metadata\": {\"source\": \"ci-tier\"}}'::jsonb, ('[' || array_to_string(array_fill(0.03125::float8, ARRAY[1024]), ',') || ']')::vector)"
+          vec() { curl -s http://127.0.0.1:11434/v1/embeddings -d "{\"input\": \"$1\"}" | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)["data"][0]["embedding"], separators=(",", ":")))'; }
+          q openbrain "SELECT upsert_thought('tier refresh probe: the quokka ledger', '{\"metadata\": {\"source\": \"ci-tier\"}}'::jsonb, '$(vec 'tier refresh probe: the quokka ledger')'::vector)"
           curl -s --max-time 20 -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_thoughts_keyword","arguments":{"query":"quokka"}}}' \
             http://127.0.0.1:8010/ | grep -F 'quokka ledger'
@@ -891,6 +923,14 @@ jobs:
           [ "$STABLE" = "$COPY" ] || { echo "the refreshed copy differs from stable" >&2; exit 1; }
           [ "$(q ob1_tier_ci "SELECT count(embedding) FROM thoughts WHERE content LIKE '%quokka ledger%'")" = 1 ] || { echo "the probe thought or its vector did not arrive" >&2; exit 1; }
           [ "$(q ob1_tier_ci "SELECT value FROM ob1_config WHERE key = 'tier'")" = working ] || { echo "the copy is not stamped tier=working" >&2; exit 1; }
+          # SMD-2037: the dump carries no database-level settings; the refresh
+          # copies them, so the copy walks HNSW under 014's bounds as stable does.
+          SETTINGS="SELECT coalesce(string_agg(c, ',' ORDER BY c), '') FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase, unnest(s.setconfig) c WHERE d.datname = current_database() AND s.setrole = 0 AND c NOT LIKE 'ob1.refresh_target=%'"
+          STABLE_SET="$(q openbrain "$SETTINGS")"
+          COPY_SET="$(q ob1_tier_ci "$SETTINGS")"
+          echo "database settings: stable $STABLE_SET, refreshed $COPY_SET"
+          grep -q 'hnsw.max_scan_tuples=' <<<"$STABLE_SET" || { echo "stable has no HNSW bound to copy (014 seeds one)" >&2; exit 1; }
+          [ "$STABLE_SET" = "$COPY_SET" ] || { echo "the refreshed copy's database settings differ from stable's" >&2; exit 1; }
           ./tier.sh --replay --since 1970-01-01T00:00:00Z --from postgres --to postgres/ob1_tier_ci | tee /tmp/tier-replay.out
           grep -E '^replayed [1-9][0-9]* of ' /tmp/tier-replay.out
           ./tier.sh --diff --since 1970-01-01T00:00:00Z --from postgres --to postgres/ob1_tier_ci | tee /tmp/tier-diff.out
@@ -912,6 +952,140 @@ jobs:
           refused postgres open-brain-postgres-1 'name the same database'
           refused postgres/ob1_tier_ci postgres 'holds thoughts and no tier stamp'
           [ "$(q openbrain "SELECT count(*) FROM thoughts WHERE content LIKE '%quokka ledger%'")" = 1 ] || { echo "the brain lost its thought" >&2; exit 1; }
+
+      # SMD-2038. deploy/canary.sh stands a canary beside this stack and takes
+      # it down again; this step is its refusals, each with exit 2 and nothing
+      # started, stamped or registered: a port a container holds, one a host
+      # process listens on, a stable stamped or marked as a copy, a provider
+      # only stable's network has, and another connector under the name. A
+      # stand-in `claude` on PATH answers `mcp get` (FAKE_URL at FAKE_SCOPE,
+      # user by default) and logs every other call, the key cut; the next
+      # step uses it too.
+      - name: The canary's refusals, from deploy/canary.sh
+        working-directory: deploy
+        run: |
+          q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -tAc "$1"; }
+          mkdir -p /tmp/fake-bin
+          cat > /tmp/fake-bin/claude <<'SH'
+          #!/bin/sh
+          if [ "$1 $2" = "mcp get" ]; then
+            [ -n "$FAKE_URL" ] || exit 1
+            printf '%s:\n  Scope: %s\n  Status: connected\n  Type: http\n  URL: %s\n' "$3" "${FAKE_SCOPE:-User config (available in all your projects)}" "$FAKE_URL"
+            exit 0
+          fi
+          echo "$*" | sed 's/x-brain-key: [^ ]*/x-brain-key: <key>/' >> /tmp/fake-claude.log
+          SH
+          chmod +x /tmp/fake-bin/claude
+          export PATH="/tmp/fake-bin:$PATH" FAKE_URL=""
+          : > /tmp/fake-claude.log
+          refused() {
+            rc=0; ./canary.sh "${@:2}" > /tmp/canary-refused.out 2>&1 || rc=$?
+            [ "$rc" = 2 ] || { cat /tmp/canary-refused.out >&2; echo "canary.sh ${*:2}: expected a refusal (exit 2), got $rc" >&2; exit 1; }
+            grep -F "$1" /tmp/canary-refused.out || { cat /tmp/canary-refused.out >&2; exit 1; }
+          }
+          # The image the stack already pulled holds the port as well as any.
+          docker run -d --name ob1-port-squat -p 127.0.0.1:8011:5432 -e POSTGRES_PASSWORD=squat pgvector/pgvector:0.8.6-pg16
+          refused 'port 8011 is published by ob1-port-squat' up
+          docker rm -f ob1-port-squat
+          python3 -m http.server 8011 --bind 127.0.0.1 > /dev/null 2>&1 &
+          SQUAT=$!
+          for _ in $(seq 1 40); do (exec 3<>/dev/tcp/127.0.0.1/8011) 2>/dev/null && break; sleep 0.25; done
+          refused 'already listens on 127.0.0.1:8011' up
+          kill "$SQUAT"
+          q "INSERT INTO ob1_config (key, value) VALUES ('tier', 'working')"
+          refused "is stamped tier 'working'" up
+          q "DELETE FROM ob1_config WHERE key = 'tier'"
+          q "ALTER DATABASE openbrain SET ob1.refresh_target = 'canary'"
+          refused "carries the refresh mark 'canary'" up
+          q "ALTER DATABASE openbrain RESET ob1.refresh_target"
+          OB1_LLM_BASE_URL=http://ollama:11434/v1 refused "a bare name" up
+          FAKE_URL=http://127.0.0.1:9999/ refused "is not this canary's at user scope" up --connect
+          [ -z "$(docker ps -aq --filter label=com.docker.compose.project=open-brain-canary)" ] || { echo "a refusal started canary containers" >&2; exit 1; }
+          [ -z "$(q "SELECT value FROM ob1_config WHERE key = 'tier'")" ] || { echo "a refusal stamped stable" >&2; exit 1; }
+          [ ! -s /tmp/fake-claude.log ] || { cat /tmp/fake-claude.log >&2; echo "a refusal touched the connector" >&2; exit 1; }
+
+      # SMD-2038. The canary's life beside this stack, in two `up`s. canary.sh
+      # runs compose.yaml again as the project open-brain-canary: its
+      # Postgres, a refresh from this stack's through tier.sh on both
+      # networks, its server on 8011 built from this checkout, then the smoke.
+      # The first `up --connect` runs over a stable carrying the protective
+      # mark `stable` (not a refresh's) and under SERVER_BIND=0.0.0.0; it
+      # stamps stable, stays on loopback, registers the connector, and its
+      # vector probe must pass on the thought whose text holds literals (SMD
+      # key, path), searched for without them. The second `up` runs with the
+      # stub serving another model: the thought put on stable just before it
+      # reaches the canary, and the smoke fails on the 50% floor. Then
+      # teardown: `down --volumes` refused on a canary stamped working; an
+      # empty canary deleted; with no volume, nothing to delete and a
+      # local-scope connector left alone; a volume by the canary's name that
+      # compose did not make, holding a table, refused with nothing left
+      # running; a last `down` removing its own connector. The stack is the
+      # one it was: the same Postgres container, its thoughts, its server.
+      - name: A canary stands beside the stack from deploy/canary.sh
+        working-directory: deploy
+        run: |
+          q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -tAc "$1"; }
+          cq() { docker exec "$(docker compose -p open-brain-canary -f compose.yaml ps -q postgres)" psql -U postgres -d openbrain -tAc "$1"; }
+          canary_left() { docker ps -aq --filter label=com.docker.compose.project=open-brain-canary; }
+          vec() { curl -s http://127.0.0.1:11434/v1/embeddings -d "{\"input\": \"$1\"}" | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)["data"][0]["embedding"], separators=(",", ":")))'; }
+          seed() { q "SELECT upsert_thought('$1', '{\"metadata\": {\"source\": \"ci-tier\"}}'::jsonb, '$(vec "$1")'::vector)" > /dev/null; q "SELECT id FROM thoughts WHERE content = '$1'"; }
+          export PATH="/tmp/fake-bin:$PATH" FAKE_URL=""
+          : > /tmp/fake-claude.log
+          refused() {
+            rc=0; ./canary.sh "${@:2}" > /tmp/canary-refused.out 2>&1 || rc=$?
+            [ "$rc" = 2 ] || { cat /tmp/canary-refused.out >&2; echo "canary.sh ${*:2}: expected a refusal (exit 2), got $rc" >&2; exit 1; }
+            grep -F "$1" /tmp/canary-refused.out || { cat /tmp/canary-refused.out >&2; exit 1; }
+          }
+          BEFORE="$(docker compose -f compose.yaml ps -q postgres)"
+          LITERAL_ID="$(seed 'canary literal probe SMD-4242 in deploy/probe_file.ts: the wombat register of burrows')"
+          q "ALTER DATABASE openbrain SET ob1.refresh_target = 'stable'"
+          SERVER_BIND=0.0.0.0 ./canary.sh up --connect | tee /tmp/canary-up.out
+          q "ALTER DATABASE openbrain RESET ob1.refresh_target"
+          grep -F 'stamped open-brain-postgres-1 tier=stable' /tmp/canary-up.out
+          grep -F "returns it first: $LITERAL_ID at" /tmp/canary-up.out
+          grep -F 'mcp add --transport http --scope user open-brain-canary http://127.0.0.1:8011/' /tmp/fake-claude.log
+          [ "$(docker compose -p open-brain-canary -f compose.yaml port server 8000)" = 127.0.0.1:8011 ] || { echo "the canary is not on loopback only" >&2; exit 1; }
+          [ "$(q "SELECT value FROM ob1_config WHERE key = 'tier'")" = stable ] || { echo "stable is not stamped tier=stable" >&2; exit 1; }
+          [ "$(cq "SELECT count(*) FROM thoughts WHERE content LIKE '%quokka ledger%'")" = 1 ] || { echo "the canary did not get the tier step's thought" >&2; exit 1; }
+          seed 'canary re-sync probe: the numbat almanac' > /dev/null
+          touch /tmp/provider-stub-wrong
+          rc=0; ./canary.sh up > /tmp/canary-wrong.out 2>&1 || rc=$?
+          rm -f /tmp/provider-stub-wrong
+          [ "$rc" = 1 ] || { cat /tmp/canary-wrong.out >&2; echo "up passed its smoke under a provider serving another model (exit $rc)" >&2; exit 1; }
+          grep -F 'returned none of' /tmp/canary-wrong.out
+          grep -F 'canary server stopped for the refresh' /tmp/canary-wrong.out
+          [ "$(cq "SELECT count(*) FROM thoughts WHERE content LIKE '%numbat almanac%'")" = 1 ] || { echo "the second up did not bring stable's new thought" >&2; exit 1; }
+          cq "UPDATE ob1_config SET value = 'working' WHERE key = 'tier'"
+          cq "ALTER DATABASE openbrain RESET ob1.refresh_target"
+          refused 'refusing to delete its volume' down --volumes
+          [ -n "$(canary_left)" ] || { echo "the refused down took the canary down" >&2; exit 1; }
+          cq "UPDATE ob1_config SET value = 'canary' WHERE key = 'tier'"
+          FAKE_URL=http://127.0.0.1:9999/ ./canary.sh down --volumes | tee /tmp/canary-down.out
+          grep -F 'left as it is' /tmp/canary-down.out
+          ! grep -F 'mcp remove' /tmp/fake-claude.log || { echo "down removed another connector" >&2; exit 1; }
+          docker compose -p open-brain-canary -f compose.yaml up -d --wait postgres
+          ./canary.sh down --volumes | tee /tmp/canary-down-empty.out
+          grep -F 'canary down, its database deleted' /tmp/canary-down-empty.out
+          FAKE_SCOPE="Local config (private to you in this project)" FAKE_URL=http://127.0.0.1:8011/ ./canary.sh down --volumes | tee /tmp/canary-down2.out
+          grep -F 'nothing to delete' /tmp/canary-down2.out
+          grep -F 'is in local scope, not user — left as it is' /tmp/canary-down2.out
+          ! grep -F 'mcp remove' /tmp/fake-claude.log || { echo "down removed a local-scope connector" >&2; exit 1; }
+          docker volume create open-brain-canary_pgdata
+          docker run -d --name ob1-volume-squat -e POSTGRES_PASSWORD=squat -e POSTGRES_DB=openbrain -v open-brain-canary_pgdata:/var/lib/postgresql/data pgvector/pgvector:0.8.6-pg16
+          for _ in $(seq 1 60); do docker exec -e PGPASSWORD=squat ob1-volume-squat psql -h 127.0.0.1 -U postgres -d openbrain -tAc 'SELECT 1' > /dev/null 2>&1 && break; sleep 1; done
+          docker exec -e PGPASSWORD=squat ob1-volume-squat psql -h 127.0.0.1 -U postgres -d openbrain -c 'CREATE TABLE precious (id int)' || { echo "the volume squat's Postgres never came up" >&2; exit 1; }
+          docker rm -f ob1-volume-squat
+          refused 'refusing to delete its volume' down --volumes
+          [ -z "$(canary_left)" ] || { echo "the refused down left canary containers" >&2; exit 1; }
+          docker volume inspect open-brain-canary_pgdata > /dev/null
+          docker volume rm open-brain-canary_pgdata
+          FAKE_URL=http://127.0.0.1:8011/ ./canary.sh down
+          grep -F 'mcp remove --scope user open-brain-canary' /tmp/fake-claude.log
+          [ -z "$(canary_left)" ] || { echo "canary containers remain" >&2; exit 1; }
+          [ -z "$(docker volume ls -q --filter label=com.docker.compose.project=open-brain-canary)" ] || { echo "the canary's volume remains" >&2; exit 1; }
+          [ "$(docker compose -f compose.yaml ps -q postgres)" = "$BEFORE" ] || { echo "stable's Postgres container changed" >&2; exit 1; }
+          [ "$(q "SELECT count(*) FROM thoughts WHERE content LIKE '%quokka ledger%' OR content LIKE '%numbat almanac%' OR content LIKE '%wombat register%'")" = 3 ] || { echo "the brain lost a thought" >&2; exit 1; }
+          [ "$(curl -s --max-time 5 http://127.0.0.1:8010/health)" = ok ] || { echo "stable's server stopped answering" >&2; exit 1; }
 
       - name: Confirm no Supabase CLI anywhere in the stack
         working-directory: deploy
@@ -960,6 +1134,8 @@ jobs:
         working-directory: deploy
         run: |
           docker compose -f compose.yaml logs --tail 60
+          echo "--- canary (deploy/canary.sh's project, if it is still up) ---"
+          docker compose -p open-brain-canary -f compose.yaml logs --tail 60 || true
           echo "--- provider stub (the runner's listener on :11434) ---"
           cat /tmp/provider-stub.log 2>/dev/null || echo "(no stub log)"
 
