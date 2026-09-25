@@ -586,7 +586,8 @@ type Ask = (c: Candidate, ds: JevDecision[]) => Promise<JevResult[]>;
  * The tier's answers through the cache, for the report and the diagnosis: a
  * question this model was already asked is answered from `cached`, any other
  * is asked (under the candidate's own thought's metadata, so an egress term
- * applies row by row) and kept. The cache key names the model and what was
+ * applies row by row) and kept. A refusal is the caller's: the report counts
+ * it and goes on, and the diagnosis stops on it (the cache is still written). The cache key names the model and what was
  * asked, the window included, so another model or window is asked afresh.
  * `run` goes between a SIGINT/SIGTERM handler and a `finally`, both of which
  * write the cache: a signal does not run `finally`, and an interrupted
@@ -827,7 +828,7 @@ export const JUNK = "junk";
 const sevenWay = (descriptions: Record<EntityType, string>, junk: string) => [...ENTITY_TYPES.map((t) => ({ id: t, description: descriptions[t] })), { id: JUNK, description: junk }];
 /** The type definitions the arms use, and junk in the same register. */
 export const ABSTRACT_OPTIONS = sevenWay(DEFINITION, "not a specific named entity: a number, version, port or address; or a generic word or role");
-/** Concrete labels, each with examples from OUTSIDE the brain: an example that is a graded name turns the task into string matching (measured: 48% right with in-set examples, 33% without). */
+/** Concrete labels, each with examples from OUTSIDE the brain. A probe outside the harness whose examples included 11 graded names scored 48%, against 33% with these; its wording differed too, so not all of that gap is string matching. */
 export const CONCRETE_OPTIONS = sevenWay({
   person: "a person's name, like Ada Lovelace or Grace Hopper",
   organization: "a company or organization, like Mozilla or the Red Cross",
@@ -942,6 +943,7 @@ async function diagnose(url: string, cachePath: string | undefined) {
 function selfCheck() {
   let failed = 0;
   const ok = (cond: boolean, what: string) => { console.log(`${cond ? "ok  " : "FAIL"} ${what}`); if (!cond) failed++; };
+  const refuses = (f: () => unknown) => { try { f(); return ""; } catch (e) { return (e as Error).message; } };
 
   // B0 and B1, on the shapes SMD-1935 names and the ones it must keep.
   ok(["021", "11434", "127.0.0.1", "10 000"].every(b0Rejects) && !["pg16", "smd 1938", "Edge0"].some(b0Rejects), "B0 rejects a migration number, a port, an address and a spaced number, and keeps a name with a letter");
@@ -1023,9 +1025,10 @@ function selfCheck() {
 
   const A = "10000000-0000-4000-8000-000000000001", B = "10000000-0000-4000-8000-000000000002";
   // The diagnosis's framings.
-  ok(sentenceAround("First one. Then Bun ran here. After.", "bun") === "Then Bun ran here." && sentenceAround(`${"x".repeat(300)} Bun ${"y".repeat(300)}`, "bun") === `${"x".repeat(119)} Bun ${"y".repeat(119)}` && sentenceAround("line one\nuses Bun\nline three", "bun") === "uses Bun" && sentenceAround("no name", "bun") === null, "the sentence around a name: bounded by a full stop or a line break, at most 120 characters either side, null when the text lacks it");
+  ok(sentenceAround("First one. Then Bun ran here. After.", "bun") === "Then Bun ran here." && sentenceAround(`${"x".repeat(300)} Bun ${"y".repeat(300)}`, "bun") === `${"x".repeat(119)} Bun ${"y".repeat(119)}` && sentenceAround("line one\nuses Bun\nline three", "bun") === "uses Bun" && sentenceAround("One. Two. Then Bun ran.", "bun") === "Then Bun ran." && sentenceAround("no name", "bun") === null, "the sentence around a name: bounded by a full stop or a line break, at most 120 characters either side, null when the text lacks it");
   const about = sevenWayAbout("Bun", "ctx", ABSTRACT_OPTIONS), of = sevenWayOf("Bun", CONCRETE_OPTIONS);
   ok(about.kind === "choice" && about.question.includes('"Bun"') && about.context === "ctx" && of.kind === "choice" && !of.question.includes("Bun") && of.context === "Bun" && [ABSTRACT_OPTIONS, CONCRETE_OPTIONS].every((o) => o.length === 7 && o[6].id === JUNK && ENTITY_TYPES.every((t, i) => o[i].id === t)), "the name goes in the question (about a note) or is the text itself (of a name); both option sets are the six types then junk");
+  ok([ABSTRACT_OPTIONS, CONCRETE_OPTIONS].every((o) => new Set(o.map((x) => x.description)).size === 7 && o.every((x) => x.description.length > 10)) && ABSTRACT_OPTIONS[6].description !== CONCRETE_OPTIONS[6].description, "each option set's seven descriptions are distinct and written out, and the two junk descriptions differ");
   ok(sevenWayLabel({ ...choice, selected: INSUFFICIENT_EVIDENCE }) === JUNK && sevenWayLabel(choice) === "tool", "a seven-way abstention reads as junk");
 
   // The dev procedure: the refit, the threshold and the arm, under the labels given.
@@ -1051,7 +1054,10 @@ function selfCheck() {
   writeFileSync(bad1, "{\"a\": [1]"); writeFileSync(bad2, "{\"a\": 1}");
   const refusal = (path: string) => { try { readCache(path); return ""; } catch (e) { return (e as Error).message; } };
   ok(refusal(bad1).includes(bad1) && refusal(bad1).includes("not JSON") && refusal(bad2).includes("not an object of answer lists") && Object.keys(readCache(join(tmpDir, "absent-gate-cache.json"))).length === 0, "a cache that is not JSON, or not an object of answer lists, is refused by name; an absent one is empty");
-  rmSync(bad1); rmSync(bad2);
+  const badGrades = join(tmpDir, `gate-grades-${process.pid}.json`);
+  writeFileSync(badGrades, JSON.stringify({ generated: "g", origin: "o", note: "n", mentions: [{ thought: "x" }] }));
+  ok(refuses(() => readGateGrades(badGrades)).startsWith(badGrades), "a grades file that fails validation is refused naming its path");
+  rmSync(bad1); rmSync(bad2); rmSync(badGrades);
 
   // The grades: the shape, and the committed file when it is there.
   const good = { generated: "g", origin: "o", note: "n", mentions: [{ thought: A, entity: B, valid: 1, type: 3, grader_a: [1, 3], grader_b: [1, 2] }] };
@@ -1069,18 +1075,22 @@ function selfCheck() {
   // Rubric v2: the categories agree with validity, all three or none; --strict-code turns a code artifact into junk.
   const v2row = { ...row, category: 2, category_a: 2, category_b: 5, grader_b: [0, -1] };
   ok(validateGateGrades({ ...good, mentions: [v2row] }).length === 0, "a rubric-v2 row, a code artifact one grader called generic, validates");
-  const v2bad = validateGateGrades({ ...good, mentions: [{ ...v2row, category: 4 }, { ...v2row, entity: C, category_b: 2 }, { ...v2row, entity: A, category: 7 }, (({ category_a, ...r }) => ({ ...r, thought: C }))(v2row)] });
-  const v2expect = ["mentions[0]: category 4 with valid 1", "mentions[1]: category_b 2 with grader_b 0", "mentions[2]: category 7 is not a category", "mentions[3]: category_a undefined is not a category"];
+  const v2bad = validateGateGrades({ ...good, mentions: [{ ...v2row, category: 4 }, { ...v2row, entity: C, category_b: 2 }, { ...v2row, entity: A, category: 7 }, (({ category_a, ...r }) => ({ ...r, thought: C }))(v2row), { ...v2row, thought: C, entity: C, category: 1.5 }] });
+  const v2expect = ["mentions[0]: category 4 with valid 1", "mentions[1]: category_b 2 with grader_b 0", "mentions[2]: category 7 is not a category", "mentions[3]: category_a undefined is not a category", "mentions[4]: category 1.5 is not a category"];
   const v2unmet = v2expect.filter((e) => !v2bad.some((p) => p.includes(e)));
   ok(v2unmet.length === 0, `a category that disagrees with its validity, one off the list, or one missing beside the others is refused by name (unmet: ${v2unmet.join("; ") || "none"})`);
   const strict = strictCode({ ...v2row, valid: 1, type: 3, grader_a: [1, 3], grader_b: [0, -1] } as GradedMention);
   ok(strict.valid === 0 && strict.type === -1 && strict.grader_a[0] === 0 && strict.grader_b[0] === 0 && strictCode({ ...v2row, category: 0, category_a: 0 } as GradedMention).valid === 1, "--strict-code reads a code artifact as junk, for the adjudication and each grader, and leaves a named entity valid");
+  const split = strictCode({ ...v2row, category: 2, category_a: 0, category_b: 2, grader_a: [1, 3], grader_b: [1, 3] } as GradedMention);
+  const splitB = strictCode({ ...v2row, category: 0, category_a: 0, category_b: 2, grader_a: [1, 3], grader_b: [1, 3] } as GradedMention);
+  ok(split.valid === 0 && split.grader_a[0] === 1 && split.grader_b[0] === 0 && splitB.valid === 1 && splitB.grader_a[0] === 1 && splitB.grader_b[0] === 0, "--strict-code reads each grader by that grader's own category, not the adjudication's");
+  ok(refuses(() => readGateGrades(GATE_GRADES_PATH, { strictCode: true })).includes("needs rubric v2's categories"), "--strict-code on grades without categories is refused, not read as all-named");
   ok(splitOf(A) === "test" && splitOf("10000000-0000-4000-8000-000000000003") === "dev", "the split is pinned: md5's first hex digit below 8 is dev");
   const wtext = `${"x".repeat(500)}The Name${"y".repeat(500)}`;
   const win = (t: string, n: string) => windowAround(t, n);
   ok(win(wtext, "the name").context === `${"x".repeat(400)}The Name${"y".repeat(400)}` && win(wtext, "the name").inWindow && win("short The Name text", "the name").context === "short The Name text" && win(wtext, "absent").context === wtext.slice(0, 800) && !win(wtext, "absent").inWindow, "the window: 400 characters either side of the first place the name appears, found without case, clipped at the ends; the head, and not in the window, when the text lacks the name");
   const dotted = `${"İ".repeat(500)} see Bun here`;
-  ok(win(dotted, "bun").inWindow && win(dotted, "bun").context.includes("Bun") && win("a+b (c) and more", "(c)").inWindow && win("a+b (c) and more", "a+b").inWindow && win("x [y z", "[y").inWindow, "the name is found on the text itself: a character whose lower case is longer (İ) does not misplace the window, and a name's regex characters are literal");
+  ok(win(dotted, "bun").inWindow && win(dotted, "bun").context.includes("Bun") && win("a+b (c) and more", "(c)").inWindow && win("a+b (c) and more", "a+b").inWindow && win("x [y z", "[y").inWindow && win(`Bun first${"-".repeat(900)}bun again`, "BUN").context.startsWith("Bun first"), "the name is found on the text itself: a character whose lower case is longer (İ) does not misplace the window, and a name's regex characters are literal");
   if (existsSync(GATE_GRADES_PATH)) {
     const g = readGateGrades();
     const n = g.mentions.length, dev = g.mentions.filter((m) => splitOf(m.thought) === "dev").length;

@@ -5482,7 +5482,7 @@ under it, and `--strict-code` reads code artifacts as junk.
 - **Three windows can miss a real use:** `Siggymd`, with 34 mentions, was graded
   URL-only from its three.
 
-**Why it fails: the model reads the text, not the name.** Not pre-registered.
+**Why it fails: the labels' default decides, and the name barely moves it.** Not pre-registered.
 JevBench's easy and standard tiers are where Verdict scores 88% and 69%. There
 it decides about a short text (48–70 characters at p50; the model was trained
 on contexts under 71 tokens) whose answer the text states: "Where is my
@@ -5499,26 +5499,33 @@ counted, on the 192 mentions whose window holds the name (50 junk):
 | … the name then its sentence | 32.8% | 29.4% | junk 126 |
 | the extractor's own type (never junk) | 47.9% | — | spread over the six |
 
-- **It does not read the name.** The same window asked about the entity, `021`
-  and `banana` gets one answer for all three on 56 of 60, and the largest move
+- **It barely reads the name.** The same window, asked about the entity, `021`
+  and `banana`, gets one answer for all three on 56 of 60, and the largest move
   in any option's probability is 0.034 at p50.
+  - This is one framing: abstract labels, with the name in the question.
+  - The sample is the first 60 held mentions in fixture order: 22
+    organizations, 18 persons, 11 places, 9 projects, and no tools or topics.
 - **Length is not the cause.** The sentence alone scores the same as the
   window.
 - **The labels' wording is its default.** Abstract labels pull everything to
   the vaguest one, `project` ("a named piece of work"), even for the name alone.
   Concrete labels move the default to `junk`, and its junk calls are right a
   quarter of the time, at the base rate.
-- **A trap for the next spike.** With examples taken from the graded names, the
-  concrete labels scored 48%, equal to the extractor. That was string matching
-  on the examples, not a gain.
+- **A trap for the next spike.** A probe outside the harness (`--diagnose` runs
+  only the clean examples) wrote label examples of which 11 of 22 were graded
+  names. It scored 48%, equal to the extractor; with examples from outside the
+  brain, 33%. The two probes also differ in wording, so not all of that gap is
+  string matching. Draw a label's examples from outside the set it is scored
+  on.
 - **The whole graph under the first framing:** `project` for 2,268 of 2,420
   entities, and 2.6% junk. That includes 3 of the 67 numeric names, where B0
   catches all 67.
 
-The cause is the task, not the framing. A JevBench answer is written in its
-text, while an entity's type rarely is: nothing near `thought_audit` says it is
-a table. The task takes knowledge of names, which a 151M model tuned on banking
-intents does not have.
+**Our reading, which no probe measures directly:** the cause is the task, not
+the framing. A JevBench answer is written in its text, while an entity's type
+rarely is: nothing near `thought_audit` says it is a table. So the task takes
+knowledge of names, which a 151M model tuned on banking intents is unlikely to
+have. SemIf (SMD-2052) is the test of that reading.
 
 **What it settles.**
 - **Verdict v1.4 stays out of the extraction path,** as a validity gate and as a
@@ -5534,12 +5541,21 @@ intents does not have.
   - **The junk is about 28% of the graph** (~690 of 2,420). In the graded
     sample it is 57 of 201: 31 generic words or roles, 10 names no window
     holds, 9 minted from URLs or paths alone, and 7 numbers or hashes.
-  - **Topics are the noisiest type** (54% junk), then organizations (36%) and
-    persons (33%). Tools (16%) and projects (12%) are mostly sound once code
-    artifacts count.
-  - **SMD-1935's gate must not reject code artifacts.** B1 bars an identifier's
-    shape only as a person or a place, which fits. The post-hoc
-    every-type shape rule above would reject real entities.
+  - **Topics are the noisiest type** (54% junk), then organizations (36%),
+    persons (33%) and places (18%). Tools (16%) and projects (12%) are mostly
+    sound once code artifacts count.
+  - **SMD-1935's gate should retype an identifier, not reject it.** Over the
+    201 graded mentions, B1's number and vocabulary rules reject 3 junk
+    mentions (`person`, `place`, `organization`) and nothing valid. Its
+    identifier-shape rule, which bars a person or place with an identifier's
+    shape, rejects 1 junk mention (`host.containers.internal`) and 7 valid ones.
+    Five of those are code artifacts the extractor typed as a place
+    (`michaelharris/**`, `open-brain_default` and the like); the other two are
+    `hono/mcp` and `openrouter.ai`. So under this definition B1 scores 0.474
+    balanced accuracy on test, below keeping everything. The fix is to keep the
+    number and vocabulary rules and turn the shape rule into a retype, to tool.
+    The post-hoc every-type shape rule above is worse: it would reject real
+    entities of every type.
   - **The targets are the rest:** generic words, URL fragments, numbers and
     hashes, and the extractor splitting one thing over two types (`Linear` as
     organization and as tool; SMD-1913).
