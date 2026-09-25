@@ -90,7 +90,7 @@ Pull your digital life into Open Brain. Each recipe handles a specific data sour
 | ------ | ------------ | ----------- |
 | [ChatGPT Import](recipes/chatgpt-conversation-import/) | Parse ChatGPT data exports, filter trivial conversations, summarize via LLM | [@matthallett1](https://github.com/matthallett1) |
 | [Perplexity Import](recipes/perplexity-conversation-import/) | Import Perplexity AI search history and memory entries | [@demarant](https://github.com/demarant) |
-| [Obsidian Vault Import](recipes/obsidian-vault-import/) | Parse and import Obsidian vault notes with full metadata | [@snapsynapse](https://github.com/snapsynapse) |
+| [Obsidian Vault Import](db/README.md#the-stable-tier--a-brain-rebuilt-from-the-records-smd-1806) | Retired (SMD-2137) — on this fork the import is core, the `markdown` row of `db/README.md`'s source table: `bun db/ingest-records.ts --url postgres://… --source markdown --markdown /path/to/vault --allow /path/to/vault`, then `bun db/reembed.ts --url postgres://…` with the embedding model declared as the server has it (`OB1_LLM_LOCAL=1` — the egress gate refuses a run that declares nothing — and the model variables, `SETUP.md`) | — |
 | [X/Twitter Import](recipes/x-twitter-import/) | Import tweets, DMs, and Grok chats from X data exports | [@alanshurafa](https://github.com/alanshurafa) |
 | [Instagram Import](recipes/instagram-import/) | Import DMs, comments, and captions from Instagram exports | [@alanshurafa](https://github.com/alanshurafa) |
 | [Google Activity Import](recipes/google-activity-import/) | Import Google Search, Gmail, Maps, YouTube, Chrome history from Takeout | [@alanshurafa](https://github.com/alanshurafa) |
