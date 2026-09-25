@@ -69,6 +69,8 @@ fixture carries them; only the synthetic gate fixture is content-free). A self-h
 | `openai/text-embedding-3-small` | 1536 | Hosted. Cheap, and still unmeasured here — see [`evals/`](evals/README.md). |
 | `bge-m3` | 1024 | Ties `embeddinggemma` on retrieval; pick it if your notes are multilingual. |
 | `nomic-embed-text` | 768 | The obvious small default, and measurably worse — 5th of 10. |
+| `mxbai-embed-large` | 1024 | Unmeasured here. The retired `recipes/local-ollama-embeddings` measured it upstream's way — four text pairs, similar-minus-unrelated cosine gap 0.587 against `nomic-embed-text`'s 0.222 — and called it the best of its three (SMD-2138). |
+| `rjmalagon/gte-qwen2-1.5b-instruct-embed-f16` | 1536 | Unmeasured here; community-published, not an official Ollama model. The same upstream measurement gave it a 0.492 gap at 1.9 s a call; its width matches upstream's `vector(1536)` schema, which is not a consideration on this fork — the brain is built at whatever width `OB1_EMBEDDING_MODEL` implies (SMD-2138). |
 | `qwen3-embedding:4b` | 2560 → **1024** | **Best measured on real data** (0.903 MRR vs `embeddinggemma`'s 0.873 over 441 full-length issues). Too wide to index natively — needs `OB1_EMBEDDING_DIMENSIONS=on`, below. Costs ~5x the embedding time. |
 | `openai/text-embedding-3-large` | 3072 | **Exceeds pgvector's HNSW limit of 2000.** The column works, but no index can be built, so every search becomes a full table scan. Truncatable to 1536 with `OB1_EMBEDDING_DIMENSIONS=on`. |
 
