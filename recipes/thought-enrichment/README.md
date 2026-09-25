@@ -1,5 +1,7 @@
 # Thought Enrichment Pipeline
 
+> **On this fork (SMD-2126).** `enrich-thoughts.mjs`, `backfill-type.mjs` and `backfill-sensitivity.mjs` reach the brain as PostgREST clients — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and this fork's stack runs no PostgREST (SETUP.md), so it fails at its first request, `--dry-run` included (it reads the brain first). The port onto `compat/supabase-sql` under `bun` (`SUPABASE_URL` a `postgres://` string; the `node` commands below become `bun`) is SMD-2139; the decision for the class is in `docs/vendored-disposition.md`.
+
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
 
 **Created by [@alanshurafa](https://github.com/alanshurafa)**

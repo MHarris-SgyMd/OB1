@@ -1,5 +1,7 @@
 # OB-Graph: Knowledge Graph Layer for Open Brain
 
+> **On this fork (SMD-2126).** The server (`index.ts`) reaches the brain through `compat/supabase-sql` since SMD-1798. The smoke script, `smoke-graph-rpcs.mjs`, still reaches it as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and this fork's stack runs no PostgREST (SETUP.md), so it fails at its first request; it moves onto the shim or into `extensions/test-tools.ts`, which already drives these tools, in SMD-2146. The decision for the class is in `docs/vendored-disposition.md`.
+
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
 
 **Created by [@alanshurafa](https://github.com/alanshurafa)**

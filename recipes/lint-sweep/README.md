@@ -1,5 +1,7 @@
 # Lint Sweep
 
+> **On this fork (SMD-2126).** `lint-sweep.js` reaches the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and this fork's stack runs no PostgREST (SETUP.md), so the live mode fails at its first request. The port onto `compat/supabase-sql` under `bun` (`SUPABASE_URL` a `postgres://` string; the `node` commands below become `bun`) is SMD-2144; the decision for the class is in `docs/vendored-disposition.md`.
+
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
 
 **Created by [@alanshurafa](https://github.com/alanshurafa)**
