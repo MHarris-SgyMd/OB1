@@ -44,7 +44,7 @@ import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, syncIssue, t
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
-import { applyDatabaseSettings, databaseSettings, promote, refresh, refreshToolsReady, replayAndDiff, targetRefusal } from "./tier.ts";
+import { applyDatabaseSettings, databaseSettings, promote, refresh, refreshToolsReady, replayAndDiff, targetRefusal, where } from "./tier.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -4527,6 +4527,12 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     const deadFrom = await tierCli(["--refresh", "--from", "postgres://postgres:s3cret-2182@ob1-no-such-host.invalid:5432/openbrain", "--to", canaryUrl], { OB1_ALLOW_REMOTE_DB: "1" });
     assert(deadFrom.code === 1 && deadFrom.err.includes("could not connect to --from at ob1-no-such-host.invalid:5432/openbrain") && !deadFrom.err.includes("s3cret"),
       `--refresh's names --from and its host (exit ${deadFrom.code}: ${deadFrom.err.trim()})`);
+    // A password that is not percent-encoded and holds / # or ? is split into
+    // the host, port or path, and Bun still tries that host. where() shows no
+    // part of such a URL; an encoded one is shown as host:port/db.
+    const unencoded = ["1234/s3cret", "/s3cret", "12#s3cret", "12?s3cret"].map((pw) => where(`postgres://postgres:${pw}@127.0.0.1:5432/openbrain`));
+    assert(unencoded.every((w) => w === "a URL whose password is not percent-encoded"), `where() shows nothing of a URL whose password was not encoded (got: ${JSON.stringify(unencoded)})`);
+    assert(where("postgres://postgres:1234%2Fs3cret@db.internal:6543/openbrain") === "db.internal:6543/openbrain", "where() shows an encoded URL as host:port/db, without its password");
 
     // Perturb the canary: drop one "zqcanary" row. Now that query — and only that
     // query — moves, and the diff names the dropped id. The gate has teeth.

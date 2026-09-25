@@ -239,10 +239,17 @@ function isLoopback(url: string): boolean {
   }
 }
 
-/** Where a URL points, for a message: host:port/database, never its user or password. */
-function where(url: string): string {
+/**
+ * Where a URL points, for a message: host:port/database, never its user or
+ * password. An `@` after the host means the userinfo was not percent-encoded
+ * and the parse split it early: a password holding `/`, `#` or `?` becomes
+ * the host, port or path (`postgres:1234/secret@db` — host `postgres`, port
+ * 1234), and Bun still tries that host. So no part of such a URL is shown.
+ */
+export function where(url: string): string {
   try {
     const u = new URL(url);
+    if (`${u.pathname}${u.search}${u.hash}`.includes("@")) return "a URL whose password is not percent-encoded";
     return `${u.hostname || "localhost"}:${u.port || "5432"}${u.pathname.length > 1 ? u.pathname : ""}`;
   } catch {
     return "a URL that does not parse";
