@@ -7,9 +7,10 @@
 -- runs on past an error, alike. One exception in kind, not in effect: section 2b
 -- retypes two columns on a table created before it, once — an ALTER TABLE that
 -- rewrites the table under ACCESS EXCLUSIVE, so on a brain with a large
--- ingestion_items stop the ingest server for it — and refuses, naming the
--- column and the object, while a view, rule, trigger, policy or generated
--- column of yours depends on either column.
+-- ingestion_items stop the ingest server for it — and refuses, relaying
+-- Postgres's own words and the object's name, while anything of yours reads
+-- either column or fixes its type (a view, trigger, policy, constraint, index
+-- predicate, default, foreign key).
 
 BEGIN;
 
@@ -107,9 +108,11 @@ ALTER TABLE public.ingestion_items
 --     metadata.<column>_bigint rather than dropped; result_thought_id is
 --     filled from SMD-2110's metadata key. Guarded on the column's type, so
 --     a re-run finds uuid and does nothing. Postgres will not retype a column
---     a view, rule, trigger, policy or generated column depends on (one
---     SQLSTATE, 0A000, for all five): the error is re-raised naming the file,
---     the column, the object (the error's DETAIL) and what to do, and the
+--     something reads or something fixes the type of — a view, rule, trigger,
+--     policy or generated column (SQLSTATE 0A000), a CHECK or a partial
+--     index's predicate (42883), a default (42804), a foreign key (42830) —
+--     so whatever the ALTER raises is re-raised naming the file, the column,
+--     Postgres's words, the object (the error's DETAIL) and what to do; the
 --     transaction rolls back whole, so the function stays the bigint form
 --     beside the bigint columns until the file is applied again.
 -- ============================================================
@@ -129,9 +132,9 @@ BEGIN
                        CASE WHEN v_col = 'result_thought_id'
                             THEN 'CASE WHEN metadata->>''result_thought_uuid'' ~* ''^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'' THEN (metadata->>''result_thought_uuid'')::uuid END'
                             ELSE 'NULL' END);
-      EXCEPTION WHEN feature_not_supported THEN
+      EXCEPTION WHEN OTHERS THEN
         GET STACKED DIAGNOSTICS v_detail = PG_EXCEPTION_DETAIL;
-        RAISE EXCEPTION 'schemas/smart-ingest: ingestion_items.% is bigint and cannot be retyped to uuid while a view, rule, trigger, policy or generated column depends on it (%: %). Drop or disable that object, apply this file again, then recreate it over the uuid column.', v_col, SQLERRM, coalesce(v_detail, 'no detail');
+        RAISE EXCEPTION 'schemas/smart-ingest: ingestion_items.% is bigint and Postgres refused to retype it to uuid — % (%). Something of yours reads the column or fixes its type: a view, rule, trigger, policy, generated column, constraint, index predicate, default or foreign key. Remove it, apply this file again, then recreate it over the uuid column.', v_col, SQLERRM, coalesce(v_detail, 'no detail');
       END;
     END IF;
   END LOOP;

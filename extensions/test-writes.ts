@@ -232,19 +232,32 @@ const PRIOR_UUID = crypto.randomUUID();
   // error, leaves nothing half done either — rolls back whole (review pass 1: the raw error left the file stopped mid-way
   // with no word on why). On a connection of its own: the refused transaction is open until it is rolled back here, and a
   // pooled query after it would meet "current transaction is aborted".
-  const own = await sql.reserve();
-  const refused = await own.unsafe(SMART_INGEST_SQL).then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
-  await own.unsafe("ROLLBACK").catch(() => {});
-  own.release();
+  const refusal = async () => {
+    const own = await sql.reserve();
+    try { return await own.unsafe(SMART_INGEST_SQL).then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e))); }
+    finally { await own.unsafe("ROLLBACK").catch(() => {}); own.release(); }
+  };
+  const refused = await refusal();
   const [still] = await sql`SELECT format_type(atttypid, atttypmod) AS type FROM pg_attribute WHERE attrelid = 'public.ingestion_items'::regclass AND attname = 'matched_thought_id'`;
   const [untouched] = await sql`SELECT metadata FROM ingestion_items WHERE extracted_content = 'an item executed under upstream''s shape'`;
   // …and the statements after the block did not run either — the bigint function stands, not the uuid one — so "apply
   // this file again" meets the shape the message describes (review pass 2).
   const fnsAfterRefusal = await sql`SELECT pg_get_function_identity_arguments(oid) AS args FROM pg_proc WHERE proname = 'append_thought_evidence'`;
-  assert(refused !== null && /^schemas\/smart-ingest: ingestion_items\.matched_thought_id is bigint and cannot be retyped to uuid while a view, rule, trigger, policy or generated column depends on it \(.*: .*view prior_shape_items.*\)\. Drop or disable that object, apply this file again, then recreate it over the uuid column\.$/.test(refused)
+  const REFUSAL = /^schemas\/smart-ingest: ingestion_items\.matched_thought_id is bigint and Postgres refused to retype it to uuid — (.*) \((.*)\)\. Something of yours reads the column or fixes its type: .*\. Remove it, apply this file again, then recreate it over the uuid column\.$/;
+  const [, cause = "", detail = ""] = refused?.match(REFUSAL) ?? [];
+  assert(refused !== null && /^cannot alter type of a column used by a view or rule$/.test(cause) && /view prior_shape_items/.test(detail)
     && still?.type === "bigint" && untouched?.metadata?.matched_thought_id_bigint === undefined && fnsAfterRefusal.length === 1 && fnsAfterRefusal[0].args === "p_thought_id bigint, p_evidence jsonb",
-    `with a view over the old column, schemas/smart-ingest refuses by name — the column, the cause, the view by name from the error's DETAIL, what to do — and nothing after runs: the column bigint, its metadata untouched, the bigint function alone (${refused ?? "applied"}; ${still?.type}; ${JSON.stringify(untouched?.metadata)}; ${JSON.stringify(fnsAfterRefusal)})`);
+    `with a view over the old column, schemas/smart-ingest refuses by name — the column, Postgres's words, the view by name from the error's DETAIL, what to do — and nothing after runs: the column bigint, its metadata untouched, the bigint function alone (${refused ?? "applied"}; ${still?.type}; ${JSON.stringify(untouched?.metadata)}; ${JSON.stringify(fnsAfterRefusal)})`);
   await sql`DROP VIEW public.prior_shape_items`;
+  // A CHECK on the column is another refusal under another SQLSTATE (the predicate's `>` has no uuid form; 42883, not the
+  // view's 0A000) — pass 2 caught the one code and let this through raw; the handler relays whatever the ALTER raises
+  // (review pass 3).
+  await sql`ALTER TABLE public.ingestion_items ADD CONSTRAINT prior_shape_positive CHECK (matched_thought_id > 0)`;
+  const refusedCheck = await refusal();
+  const [, causeCheck = ""] = refusedCheck?.match(REFUSAL) ?? [];
+  assert(refusedCheck !== null && /^operator does not exist: uuid > integer/.test(causeCheck),
+    `with a CHECK on the old column, the same refusal by name carries Postgres's own words for that case — not the view's, and not a raw error (${refusedCheck ?? "applied"})`);
+  await sql`ALTER TABLE public.ingestion_items DROP CONSTRAINT prior_shape_positive`;
 }
 for (const file of SIDECARS) await sql.unsafe(readFileSync(join(ROOT, file), "utf8"));
 {
