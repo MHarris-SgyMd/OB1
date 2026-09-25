@@ -267,14 +267,15 @@ process.env.OB1_EMBEDDING_MODEL = EMB_MODEL;
 process.env.OB1_EMBEDDING_DIM = String(DIM);
 process.env.OB1_METADATA_MODEL = META_MODEL;
 process.env.MCP_ACCESS_KEYS = `gated:write:${hashKey(GATED_KEY)},open:write:${hashKey(OPEN_KEY)}`;
-// One key allowed by name, and one type — which only a row already tagged can
-// carry, so it reaches an EDIT of such a row and never a first capture; the
-// policy itself is the default.
-// A source: term in the FROZEN policy so [7] can prove capture_thought drops
-// its caller's `source` claim: env() snapshots process.env once at the first
-// request (initEnv's `if (ENV) return`), so the term must be here at module
-// load, not set later. A gated capture NAMING source:claude-code must still be
-// refused — the handler omits the claim, so the term matches nothing.
+// The frozen policy (deny mode) names three allow terms, each for a reason:
+// actor:open lets the open key's capture leave; type:idea — a type only a row
+// already tagged can carry — reaches an EDIT of such a row and never a first
+// capture (the type is extracted, not the caller's); and source:claude-code
+// lets [7] prove capture_thought drops its caller's `source` claim: a gated
+// capture NAMING source:claude-code must still be refused, since the handler
+// omits the claim and the term matches nothing. The policy is set HERE, at
+// module load: env() snapshots process.env once at the first request (initEnv's
+// `if (ENV) return`), so a write after that first request is dead.
 process.env.OB1_EGRESS_ALLOW = "actor:open,type:idea,source:claude-code";
 for (const k of ["OB1_LLM_LOCAL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_DENY", "OPENROUTER_API_KEY", "OB1_LLM_API_KEY", "OB1_CHAT_BASE_URL", "OB1_CHAT_API_KEY", "MCP_ACCESS_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "OB1_EMBEDDING_DIMENSIONS", "OB1_CHUNK_CONTEXT"]) delete process.env[k];
 
