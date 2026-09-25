@@ -329,7 +329,7 @@ in it, mounted read-only, on the stack's network:
 # stable (this stack's postgres) into a working copy, a scratch database on the
 # same server, created first; from a branch worktree, name the running stack's
 # env file (deploy/.env is gitignored)
-docker compose -f deploy/compose.yaml exec postgres createdb -U postgres openbrain_working
+docker compose --env-file ~/OB1/deploy/.env -f deploy/compose.yaml exec postgres createdb -U postgres openbrain_working
 deploy/tier.sh --env-file ~/OB1/deploy/.env --refresh --from postgres --to postgres/openbrain_working --tier working
 # replay stable's logged searches on the canary deploy/canary.sh stood up — on
 # both projects' networks, so by container name (each has a `postgres`)
@@ -469,7 +469,10 @@ deploy/canary.sh --env-file ~/OB1/deploy/.env down --volumes
 ```
 
 The canary is `compose.yaml` again under the project `open-brain-canary`, with
-its own Postgres, volume, network and images, and `OB1_TIER=canary`. Its
+its own Postgres, volume, network and images, and `OB1_TIER=canary`. It needs
+Docker Compose v2 (`config --format json`, `up --wait`), which is what
+`docker compose` is and what `podman compose` runs when it is installed; the
+Python podman-compose is not enough. Its
 server listens on `127.0.0.1:8011` (`--port`), on loopback whatever
 `SERVER_BIND` says for stable. It reads the stack's env file, so the canary's
 server gets stable's knobs and none is copied. Four things are the canary's
@@ -551,7 +554,7 @@ stable is redeployed:
 `down` removes the canary's containers and network. It deregisters the
 connector only when `claude` has it at user scope and at the canary's port
 (any path or `?key=` after it). The port is read from the canary's server
-container, running or stopped (a reboot leaves it stopped); once that is
+container, running or stopped (after a reboot podman leaves it stopped, and Docker restarts the server but not its Postgres); once that is
 gone, pass the `--port` it was stood up with. `claude mcp get` shows the
 entry that wins for the current directory, so a local entry by the name
 hides a user one behind it. One by that name anywhere else, or in local or

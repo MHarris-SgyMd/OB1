@@ -65,10 +65,15 @@
 #
 # The server image is built from this checkout, as compose.yaml builds stable's,
 # and OB1_GIT_SHA is this checkout's `git describe` unless the shell sets it.
-# Exit status: 0 done; 1 a step failed; 2 a usage error, or a refusal before
-# anything changed; 130 a Ctrl-C (tier.sh's, passed on).
+# Exit status: 0 done; 1 a step failed (a refresh's own usage error
+# included); 2 a usage error, or a refusal before anything changed; 130 a
+# Ctrl-C, wherever it lands.
 set -euo pipefail
 unset CDPATH
+# A Ctrl-C is a stop wherever it lands: bash runs on after a child that did
+# not die of the signal (a docker CLI mid-startup exits 125), and a caller must
+# not read an interrupted run as anything but interrupted.
+trap 'exit 130' INT
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
@@ -196,7 +201,8 @@ read_connector() {
   [ -n "$CONN_SCOPE" ] || [ -z "$CONN_URL" ] || CONN_SCOPE=unknown
 }
 # The host port the canary's server container is bound to, running or stopped
-# (a reboot leaves it stopped: nothing here restarts it), or nothing.
+# (after a reboot podman leaves it stopped; Docker restarts the server but
+# not its Postgres), or nothing.
 server_port() {
   local id
   id="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=server" | head -n 1)"
@@ -210,6 +216,9 @@ canary_ports() {
   printf '%s\n' "$PORT"
   server_port
 }
+# A connector URL as printed: without its query, where the documented form
+# carries the key (`?key=`).
+shown() { case "$1" in *\?*) printf '%s?…' "${1%%\?*}" ;; *) printf '%s' "$1" ;; esac; }
 # Whether a connector URL is this canary's: http, this host, one of its ports,
 # any path or query (`?key=` is the documented form) after it.
 ours() {
@@ -250,19 +259,26 @@ if [ "$CMD" = down ]; then
       exit 2
     }
   fi
-  read_connector
-  if [ -n "$CONN_URL" ] && ours "$CONN_URL" && [ "$CONN_SCOPE" = user ]; then
-    if claude mcp remove --scope user "$NAME" >/dev/null 2>&1; then say "connector $NAME removed"
-    else say "connector $NAME: \`claude mcp remove --scope user $NAME\` failed — remove it by hand"
-    fi
-  elif [ -n "$CONN_URL" ] && ours "$CONN_URL"; then
-    say "connector $NAME is in $CONN_SCOPE scope, not user — left as it is (claude mcp remove -s $CONN_SCOPE $NAME)"
-  elif [ -n "$CONN_SCOPE" ]; then
-    say "connector $NAME points at ${CONN_URL:-no URL (a stdio entry)}, not this canary's port $PORT — left as it is (if it is this canary's, pass the --port it was stood up with)"
-  fi
   VOLS=()
   [ $VOLUMES = 0 ] || VOLS=(--volumes)
+  # The connector is judged now, while the server container still says the
+  # canary's port, and removed after the compose down, so a down that fails
+  # leaves it registered.
+  read_connector
+  CONN_ACTION=""
+  if [ -n "$CONN_URL" ] && ours "$CONN_URL" && [ "$CONN_SCOPE" = user ]; then CONN_ACTION=remove
+  elif [ -n "$CONN_URL" ] && ours "$CONN_URL"; then CONN_ACTION=other-scope
+  elif [ -n "$CONN_SCOPE" ]; then CONN_ACTION=foreign
+  fi
   canary_compose down --remove-orphans ${VOLS[@]+"${VOLS[@]}"}
+  case "$CONN_ACTION" in
+    remove)
+      if claude mcp remove --scope user "$NAME" >/dev/null 2>&1; then say "connector $NAME removed"
+      else say "connector $NAME: \`claude mcp remove --scope user $NAME\` failed — remove it by hand"
+      fi ;;
+    other-scope) say "connector $NAME is in $CONN_SCOPE scope, not user — left as it is (claude mcp remove -s $CONN_SCOPE $NAME)" ;;
+    foreign) say "connector $NAME points at $(shown "${CONN_URL:-no URL (a stdio entry)}"), not this canary's port $PORT — left as it is (if it is this canary's, pass the --port it was stood up with)" ;;
+  esac
   if [ $VOLUMES = 0 ]; then say "canary down; $STABLE untouched"
   elif [ -n "$HAS_VOLUME" ]; then say "canary down, its database deleted; $STABLE untouched"
   else say "canary down; no canary volume ($VOLUME), nothing to delete; $STABLE untouched"
@@ -304,7 +320,15 @@ taken="$("$RUNTIME" ps --format '{{.Names}}|{{.Ports}}|{{.Label "com.docker.comp
 [ -z "$taken" ] || { echo "port $PORT is published by $taken, outside project $CANARY — pick another --port (or, if $taken is a canary stood up by hand, remove it: the new one is refreshed from stable)." >&2; exit 2; }
 # … or a process on the host, which no container list shows: a connection to
 # the port succeeds while the canary's own server does not publish it.
-own="$({ canary_compose port server 8000 2>/dev/null || true; } | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')"
+# Its own server's port is read from the container while it runs or is still
+# stopping (podman finishes a stop a Ctrl-C interrupted, answering meanwhile).
+own=""
+own_id="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=server" | head -n 1)"
+if [ -n "$own_id" ]; then
+  case "$("$RUNTIME" inspect -f '{{.State.Status}}' "$own_id" 2>/dev/null || true)" in
+    running|stopping|restarting) own="$(server_port)" ;;
+  esac
+fi
 if [ "$own" != "$PORT" ] && (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
   echo "something on this host already listens on 127.0.0.1:$PORT — stop it, or pick another --port." >&2
   exit 2
@@ -314,7 +338,7 @@ if [ $CONNECT = 1 ]; then
   command -v claude >/dev/null 2>&1 || { echo "--connect needs the claude CLI on PATH." >&2; exit 2; }
   read_connector
   if [ -n "$CONN_SCOPE" ] && { [ -z "$CONN_URL" ] || ! ours "$CONN_URL" || [ "$CONN_SCOPE" != user ]; }; then
-    echo "a connector named $NAME is already registered ($CONN_SCOPE scope, ${CONN_URL:-no URL}), and is not this canary's at user scope — left as it is. Remove it, or pass --name." >&2
+    echo "a connector named $NAME is already registered ($CONN_SCOPE scope, $(shown "${CONN_URL:-no URL}")), and is not this canary's at user scope — left as it is. Remove it, or pass --name." >&2
     exit 2
   fi
 fi
@@ -344,13 +368,28 @@ CANARY_PG="$(container_of "$CANARY" postgres)"
 # registered connector, stamped stable by the restore until the refresh
 # stamps it), and write rows the restore then collides with; it is recreated
 # below either way.
+STOPPED_SERVER=""
 if [ -n "$(container_of "$CANARY" server)" ]; then
   say "canary server stopped for the refresh"
   canary_compose stop server >/dev/null
+  STOPPED_SERVER=1
 fi
+# Whether stable holds a thought the probe could use (a vector from the
+# brain's model), read before the refresh: a canary with none after it is a
+# migration that emptied them or a model switch, not an empty brain.
+stable_vectors="$(psql_in "$STABLE_PG" "SELECT count(*) FROM (SELECT 1 FROM thoughts WHERE embedding IS NOT NULL
+  AND coalesce(embedding_model = (SELECT value FROM ob1_config WHERE key = 'embedding_model'), true) LIMIT 1) t")"
 say "refresh $STABLE_PG → $CANARY_PG"
+refresh_rc=0
 "$HERE/tier.sh" --runtime "$RUNTIME" --env-file "$ENV_FILE" --network "${STABLE}_default,${CANARY}_default" \
-  --refresh --from "$STABLE_PG" --to "$CANARY_PG" --tier canary
+  --refresh --from "$STABLE_PG" --to "$CANARY_PG" --tier canary || refresh_rc=$?
+if [ "$refresh_rc" != 0 ]; then
+  # tier.sh's own usage errors exit 2, which from here would read as "refused
+  # before anything changed" — stable may be stamped by now, a server stopped.
+  [ -z "$STOPPED_SERVER" ] || echo "the canary's server is stopped (for the refresh), so a connector registered for it answers nothing until \`up\` succeeds." >&2
+  echo "the refresh failed (tier.sh exit $refresh_rc). Re-run up once that is fixed: the canary carries the refresh mark, so the retry resets it." >&2
+  exit 1
+fi
 
 say "canary server on 127.0.0.1:$PORT (commit $GIT_SHA)"
 canary_compose up -d --build --no-deps --force-recreate server
@@ -360,8 +399,12 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 if [ "$(curl -s --max-time 2 "$BASE/health" || true)" != ok ]; then
-  echo "the canary server did not answer /health within 120 s. Its log:" >&2
+  echo "the canary server did not answer /health in 60 tries (2 to 4 minutes). Its log:" >&2
   canary_compose logs --no-color --tail 40 server >&2 || true
+  # restart: unless-stopped would otherwise restart it without end (hundreds
+  # of times a minute under podman), and a registered connector points at it.
+  canary_compose stop server >/dev/null 2>&1 || true
+  echo "the canary server is stopped; fix the cause above and re-run up." >&2
   exit 1
 fi
 
@@ -460,7 +503,12 @@ except Exception as e:
        $id: ${verdict#no }"
     [ "$tried" -lt 5 ] || break
   done
-  if [ "$tried" = 0 ]; then
+  canary_vectors="$(psql_in "$CANARY_PG" "SELECT count(*) FROM (SELECT 1 FROM thoughts WHERE embedding IS NOT NULL
+    AND coalesce(embedding_model = (SELECT value FROM ob1_config WHERE key = 'embedding_model'), true) LIMIT 1) t")"
+  if [ "$tried" = 0 ] && [ "$stable_vectors" = 1 ] && [ "$canary_vectors" = 0 ]; then
+    echo "  ✗  stable holds thoughts with vectors from the brain's model and the canary none after the refresh: a migration emptied them, or the model changed without a reembed" >&2
+    exit 1
+  elif [ "$tried" = 0 ]; then
     say "vector search not checked: no recent thought has a vector from the brain's model, an opening of its own, and text left once its literals are out"
   elif [ -n "$passed" ]; then
     echo "  ✓  search_thoughts, given a thought's own text less its literals, returns it first: $passed (candidate $tried of up to 5) — the vector arm answers"
