@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1645 assertions: 1645 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1647 assertions: 1647 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-four (54) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -1107,23 +1107,28 @@ can be started. Migration 053 (SMD-1867) stores the board's relations as `link`
 facets on the row holding a ticket's identity, `blocks` on the blocker and
 `blocked_by` on the blocked, and `--startable` reads both directions (an edge
 stated on one side only still counts). It multiplies a second factor into the
-same weight: a thought whose ticket has an **open blocker** weighs 0. A blocker
-is open unless its own lifecycle, resolved through `source_thought()` and read
-by the ticket-head rule above, is completed or canceled, so a settled blocker is
-not a blocker. A blocker the brain does not hold, or one with no lifecycle,
-still blocks, and the output counts those. A row derived from a ticket takes
-its ticket's blockers as it takes its status. Only an active link counts (053
-closes a relation the source dropped), and only `blocks` / `blocked_by`:
-`child_of` makes nobody a blocker. A thought with no link facet counts as
-unblocked. The dependency caveat line gives the number of active dependency
-facets, how many thoughts belong to a ticket whose relations were read, how
-many weighed 0, how many blockers are unsettled only for want of a lifecycle,
-and the latest link written or closed. The edges are as fresh as board-sync's
-last pass. The flag composes with `--status` and `--decay-done` (the weights
-multiply). Without it the dependency read is not in the SQL, so every other
-mode's output is byte for byte what it was and a brain without 053 runs them.
-With it, a brain without 053 is exit 2. `DEPENDENCY_CTE` (`dependencySql`) is
-the seam SMD-2074's node-state projection replaces.
+same weight: an **unsettled** thought whose ticket has an **open blocker**
+weighs 0. Unsettled, because Linear keeps a relation after a ticket completes:
+a Done ticket whose blocker is still open is settled, not blocked, and weighs
+what its lifecycle says. A blocker is open unless its own lifecycle, resolved
+through `source_thought()` and read by the ticket-head rule above, is completed
+or canceled, so a settled blocker is not a blocker. A blocker the brain does
+not hold, or one with no status_type this tool knows, still blocks, and the
+output counts those. A row derived from a ticket takes its ticket's blockers as
+it takes its status. Only an active link counts (053 closes a relation the
+source dropped), and only `blocks` / `blocked_by`: `child_of` makes nobody a
+blocker. A thought whose ticket no dependency names counts as unblocked. The
+dependency caveat line (`coverage.dependencies` in the JSON) gives the active
+dependency facets and when the latest was written or closed, how many thoughts
+belong to a ticket a dependency names on either side, how many the flag held
+back in the run (took from a weight above 0 to 0), and how many blockers are in
+force only for want of a known status. The edges are as current as
+board-sync's last pass over each ticket. The flag composes with `--status` and
+`--decay-done` (the weights multiply). Without it the dependency read is not in
+the SQL, so every other mode renders byte for byte what it did (the JSON's
+`options` carries one more key, `startable: false`) and a brain without 053
+runs them. With it, a brain without 053 is exit 2. `dependencySql` is the seam
+SMD-2074's node-state projection replaces.
 
 Exit 0 when ranked, 1 when no
 entity resolves (a near-miss whose only guesses the numeric rule hid is still
@@ -2082,7 +2087,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1645 assertions, PGlite, no container
+bun test-schema.ts                          # 1647 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 703 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

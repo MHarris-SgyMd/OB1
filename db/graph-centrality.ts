@@ -82,23 +82,27 @@
  * (`thought_sources`), and the Linear mapping writes `blocks` on the blocker
  * and `blocked_by` on the blocked. `--startable` reads both directions — an
  * edge the sync stated on one side only still counts — and multiplies a second
- * factor into the same weight: a thought whose ticket has an OPEN blocker
- * weighs 0. A blocker is open unless its own lifecycle, read through the
+ * factor into the same weight: an UNSETTLED thought whose ticket has an OPEN
+ * blocker weighs 0. Unsettled: startability is a question about open work, and
+ * Linear keeps a relation after a ticket completes — a Done ticket whose
+ * blocker is still open is settled, not blocked, and weighs what its lifecycle
+ * says. A blocker is open unless its own lifecycle, read through the
  * `lifecycle` rows above via `source_thought()` (053's resolver), is completed
  * or canceled: a settled blocker is not a blocker. A blocker the brain does not
- * hold, or one with no lifecycle, still blocks — the source said "blocked" and
+ * hold, or one with no status_type this file knows, still blocks — the source said "blocked" and
  * nothing here says it is settled — and the output counts such blockers rather
  * than hiding them. A row derived from a ticket (`ticket`) or carrying one
  * (`issue`) takes its ticket's blockers, as it takes its ticket's status.
  * Only an active link counts (`valid_until` unset — 053 closes a relation the
  * source dropped), and only `blocks` / `blocked_by`: a parent is not blocked
  * by its children (`child_of`), nor a ticket by what it relates to.
- * A thought with no link facet counts as unblocked, and the output states how
- * many carry one. Without the flag the dependency read is not in the SQL at
- * all, so the default is SMD-1994's output byte for byte and a brain without
- * 053 runs every other mode. `DEPENDENCY_CTE` is the seam, as `LIFECYCLE_CTE`
- * is for the status: SMD-2074's node-state projection replaces it, not its
- * callers.
+ * A thought whose ticket no dependency names counts as unblocked, and the
+ * output states how many a dependency does name. Without the flag the
+ * dependency read is not in the SQL at all, so every other mode renders
+ * SMD-1994's report byte for byte (the JSON's `options` carries one more key,
+ * `startable: false`) and a brain without 053 runs it. `dependencySql` is the
+ * seam, as `LIFECYCLE_CTE` is for the status: SMD-2074's node-state projection
+ * replaces it, not its callers.
  *
  * The subject resolves by 016's own rule, one rung at a time: an exact
  * `normalized_name` match (`normalize_entity_name`, so "Open-Brain" finds
@@ -134,9 +138,10 @@
  *     fresh as the last pass, on the synced rows alone, and by default every
  *     thought weighs 1 — a Done ticket counts as a live one until `--status`
  *     or `--decay-done` says otherwise. The lifecycle line gives the numbers.
- *   • Dependencies (`--startable`) are the board's link facets, as fresh as
- *     the same last pass: a ticket unblocked since then still weighs 0 until
- *     the sync closes the link. The dependency line gives the numbers.
+ *   • Dependencies (`--startable`) are the board's link facets, as current as
+ *     board-sync's last pass over each ticket: a relation removed on the board
+ *     since then stays active here until a pass re-reads the ticket holding it.
+ *     The dependency line gives the numbers.
  *   • Only what has been extracted is in the graph: the coverage line says how
  *     many thoughts db/extract-entities.ts has reached.
  *
@@ -188,7 +193,7 @@ export type Options = Scope & {
   status: LifecycleFilter;
   /** With `all`: a completed or canceled thought weighs DONE_WEIGHT instead of 1. Refused with any other filter. */
   decayDone: boolean;
-  /** A thought whose ticket has an open blocker weighs 0, whatever its lifecycle weighs. Off: no dependency is read. */
+  /** An unsettled thought whose ticket has an open blocker weighs 0; a completed or canceled one weighs what its lifecycle says. Off: no dependency is read. */
   startable: boolean;
 };
 export const DEFAULT_OPTIONS: Options = { types: ENTITY_TYPES, excludeNumeric: true, limit: DEFAULT_LIMIT, edges: true, status: "all", decayDone: false, startable: false };
@@ -223,15 +228,15 @@ export type Coverage = {
   dependencies?: Dependencies;
 };
 export type Dependencies = {
-  /** Active `blocks` / `blocked_by` link facets — each side of a relation the sync stated on both is one. */
-  edges: number;
-  /** Thoughts whose ticket holds an active link facet of any relation: the board's relations were read for them. The rest count as unblocked. */
-  with_links: number;
-  /** Thoughts whose ticket has an open blocker: they weigh 0 this run. */
-  blocked: number;
-  /** Blockers still in force because nothing says they are settled — not in the brain, or with no lifecycle. */
+  /** Active `blocks` / `blocked_by` link facets — facet rows, not relations: one the sync stated on both sides is two. */
+  facets: number;
+  /** Thoughts whose ticket an active dependency names, on either side — blocked, blocking, or both. Every other thought has no dependency recorded and counts as unblocked. */
+  in_dependencies: number;
+  /** Thoughts the flag took from a weight above 0 to 0 in this run: unsettled, weighed in by the lifecycle, and with an open blocker. */
+  held: number;
+  /** Blockers still in force because nothing settles them — not in the brain, or with no status_type this tool knows. */
   unknown_blockers: number;
-  /** The latest link facet written or closed. Null when the brain holds none. */
+  /** The latest dependency facet written or closed. Null when the brain holds none. */
   last_link_change: string | null;
 };
 
@@ -330,7 +335,8 @@ export const dependencySql = (doneSlot: number) => `ticket_of AS (
  * The per-thought weight, as the header defines it, with `lifecycle` before
  * it: a kept status 1; another known status 0, or DONE_WEIGHT under decay; no
  * status, or one this file does not know, 1 — and under `--startable`, times 0
- * when the thought's ticket has an open blocker. Returns the CTE text
+ * when the thought is not completed or canceled and its ticket has an open
+ * blocker (`held` marks the rows that took from above 0). Returns the CTE text
  * (lifecycle, the dependency CTEs under `--startable`, and weights, no leading
  * comma) with its array parameters appended to `params` — under `--startable`
  * the done types first, then always the kept types and the known types, so the
@@ -341,9 +347,11 @@ export function weightsSql(opts: Pick<Options, "status" | "decayDone"> & Partial
   // own Options: decay and a filter are two answers to one question.
   if (opts.decayDone && opts.status !== "all") throw new Error(`weightsSql: --decay-done with --status ${opts.status}; pass one or the other`);
   let dependency = "";
+  let doneSlot = 0;
   if (opts.startable) {
     params.push(pgArray(LIFECYCLE_FILTERS.done));
-    dependency = `,\n          ${dependencySql(params.length)}`;
+    doneSlot = params.length;
+    dependency = `,\n          ${dependencySql(doneSlot)}`;
   }
   params.push(pgArray(opts.decayDone ? LIFECYCLE_FILTERS.open : LIFECYCLE_FILTERS[opts.status]));
   const kept = params.length;
@@ -359,12 +367,21 @@ export function weightsSql(opts: Pick<Options, "status" | "decayDone"> & Partial
   // row; materialised, the weights are computed once per statement whatever
   // the reference count (second review pass).
   // Without --startable the text is SMD-1994's exactly: the flag adds the
-  // dependency CTEs, the factor and the join, and nothing else moves.
+  // dependency CTEs, the factor, `held` and the join, and nothing else moves.
+  // Startability is a question about unsettled work: Linear keeps a relation
+  // after a ticket completes, and a Done ticket whose blocker is still open is
+  // settled, not blocked — so the factor passes a completed or canceled row
+  // untouched, and `--status done` or the decay read it as without the flag
+  // (first review pass). `held` marks the rows the factor took from weight
+  // above 0 to 0 — what the flag did in this run, which coverage counts.
+  const base = `CASE WHEN status_type = ANY($${kept}::text[]) THEN 1.0
+                                   WHEN status_type = ANY($${known}::text[]) THEN ${opts.decayDone ? DONE_WEIGHT : 0}
+                                   ELSE 1.0 END`;
+  const blocked = `(blockers IS NOT NULL AND NOT coalesce(status_type = ANY($${doneSlot}::text[]), false))`;
   return `${LIFECYCLE_CTE}${dependency},
           weights AS MATERIALIZED (SELECT thought_id, CASE WHEN status_type = ANY($${known}::text[]) THEN status END AS status, status_type,
-                             (CASE WHEN status_type = ANY($${kept}::text[]) THEN 1.0
-                                   WHEN status_type = ANY($${known}::text[]) THEN ${opts.decayDone ? DONE_WEIGHT : 0}
-                                   ELSE 1.0 END${opts.startable ? " * CASE WHEN blockers IS NULL THEN 1.0 ELSE 0 END" : ""})::float8 AS w
+                             (${base}${opts.startable ? ` * CASE WHEN ${blocked} THEN 0 ELSE 1.0 END` : ""})::float8 AS w${opts.startable ? `,
+                             (${blocked} AND ${base} > 0) AS held` : ""}
                         FROM lifecycle${opts.startable ? " LEFT JOIN dependency USING (thought_id)" : ""})`;
 }
 
@@ -400,19 +417,23 @@ export async function coverage(run: Runner, opts: Options): Promise<Coverage> {
   params.push(pgArray(LIFECYCLE_FILTERS.done));
   const doneSlot = params.length;
   // The dependency counts read the CTEs weightsSql emitted under --startable.
-  // An edge is a facet row, so a relation the sync stated on both sides is
-  // two; `with_links` asks whether the ticket's holder has any active link at
-  // all — its relations were read — and `unknown_blockers` counts distinct
-  // blockers in force that no lifecycle settles or opens.
+  // `facets` counts rows, so a relation the sync stated on both sides is two.
+  // `in_dependencies` counts the thoughts whose ticket a dependency names on
+  // either side, from `deps` itself — a link of another relation (a section's
+  // own child_of, a relates_to) says nothing about blocking, and a ticket
+  // blocked only through another's `blocks` is named here though it holds no
+  // facet (first review pass: "any active link on the holder" counted every
+  // synced thought and missed that one). `held` is what the flag did in this
+  // run, not every thought with a blocker; `unknown_blockers` counts distinct
+  // blockers in force that no known status settles or opens.
   const dependencyCols = opts.startable
     ? `,
-            (SELECT count(*) FROM thought_facets WHERE kind = 'link' AND valid_until IS NULL AND payload->>'relation' IN ('blocks', 'blocked_by'))::int AS dep_edges,
+            (SELECT count(*) FROM thought_facets WHERE kind = 'link' AND valid_until IS NULL AND payload->>'relation' IN ('blocks', 'blocked_by'))::int AS dep_facets,
             (SELECT count(DISTINCT k.thought_id) FROM ticket_of k
-              WHERE EXISTS (SELECT 1 FROM thought_facets f JOIN thought_sources s ON s.thought_id = f.thought_id AND s.system = f.payload->>'system'
-                             WHERE f.kind = 'link' AND f.valid_until IS NULL AND s.system = k.system AND s.identity = k.identity))::int AS dep_with_links,
-            (SELECT count(*) FROM dependency)::int AS dep_blocked,
+              WHERE EXISTS (SELECT 1 FROM deps d WHERE d.system = k.system AND (d.blocked = k.identity OR d.blocker = k.identity)))::int AS dep_named,
+            (SELECT count(*) FROM weights WHERE held)::int AS dep_held,
             (SELECT count(*) FROM (SELECT DISTINCT system, blocker FROM blockers WHERE blocker_status IS NULL OR NOT blocker_status = ANY($${knownSlot}::text[])) u)::int AS dep_unknown,
-            (SELECT max(greatest(created_at, valid_until)) FROM thought_facets WHERE kind = 'link') AS dep_last_change`
+            (SELECT max(greatest(created_at, valid_until)) FROM thought_facets WHERE kind = 'link' AND payload->>'relation' IN ('blocks', 'blocked_by')) AS dep_last_change`
     : "";
   const [r] = await run(
     `WITH ${weights}
@@ -430,10 +451,10 @@ export async function coverage(run: Runner, opts: Options): Promise<Coverage> {
             (SELECT max(synced_at) FROM lifecycle WHERE status_type = ANY($${knownSlot}::text[])) AS last_sync${dependencyCols}`,
     params);
   if (!opts.startable) return r as Coverage;
-  const { dep_edges, dep_with_links, dep_blocked, dep_unknown, dep_last_change, ...base } = r;
+  const { dep_facets, dep_named, dep_held, dep_unknown, dep_last_change, ...base } = r;
   return {
     ...(base as Coverage),
-    dependencies: { edges: Number(dep_edges), with_links: Number(dep_with_links), blocked: Number(dep_blocked), unknown_blockers: Number(dep_unknown), last_link_change: isoTimestampOrNull(dep_last_change) },
+    dependencies: { facets: Number(dep_facets), in_dependencies: Number(dep_named), held: Number(dep_held), unknown_blockers: Number(dep_unknown), last_link_change: isoTimestampOrNull(dep_last_change) },
   };
 }
 
@@ -735,16 +756,19 @@ export function lifecycleCaveat(c: Coverage, opts: Options): string {
 
 /**
  * The dependency line, under `--startable` alone: where the edges come from
- * and how fresh they are, how many thoughts the board's relations reach (the
- * rest count as unblocked), how many weigh 0 for an open blocker, and how many
- * blockers are in force only because nothing says they are settled.
+ * and how current they can be, how many thoughts a dependency names (the rest
+ * count as unblocked), how many the flag held back in this run, and how many
+ * blockers are in force only because nothing settles them.
  */
 export function dependencyCaveat(c: Coverage, d: Dependencies): string {
-  const fresh = d.last_link_change ? ` — latest link written or closed ${d.last_link_change}` : " — none is recorded here";
+  // A pass that changes no relation writes no facet (053's set semantics), so
+  // the latest facet change is when the dependencies last MOVED, not when a
+  // pass last looked — the line says which (first review pass).
+  const moved = d.last_link_change ? `; the latest was written or closed ${d.last_link_change}` : "";
   const unknown = d.unknown_blockers
-    ? ` ${d.unknown_blockers} blocker${d.unknown_blockers === 1 ? " is" : "s are"} in force only because nothing settles ${d.unknown_blockers === 1 ? "it" : "them"}: not in the brain, or carrying no lifecycle.`
+    ? ` ${d.unknown_blockers} blocker${d.unknown_blockers === 1 ? " is" : "s are"} in force only because nothing settles ${d.unknown_blockers === 1 ? "it" : "them"}: not in the brain, or with no status_type this tool knows.`
     : "";
-  return `Dependencies are read from the board's blocks / blocked_by link facets (SMD-1867), as fresh as board-sync's last pass${fresh}: ${d.edges} active dependency facet${d.edges === 1 ? "" : "s"}; ${d.with_links} of ${c.thoughts} thoughts belong to a ticket whose relations were read, and every other thought counts as unblocked. --startable: ${d.blocked} thought${d.blocked === 1 ? "" : "s"} with an open blocker weigh${d.blocked === 1 ? "s" : ""} 0 in this run; a blocker completed or canceled does not block, and a parent is not blocked by its children.${unknown}`;
+  return `Dependencies are read from the board's blocks / blocked_by link facets (SMD-1867), as current as board-sync's last pass over each ticket: ${d.facets} active dependency facet${d.facets === 1 ? "" : "s"}${moved}. ${d.in_dependencies} of ${c.thoughts} thoughts belong to a ticket a dependency names; every other thought has none recorded and counts as unblocked. --startable: ${d.held} thought${d.held === 1 ? "" : "s"} with an open blocker weigh${d.held === 1 ? "s" : ""} 0 in this run; a completed or canceled ticket is settled, not blocked, a blocker completed or canceled does not block, and a parent is not blocked by its children.${unknown}`;
 }
 
 export type Report = {
