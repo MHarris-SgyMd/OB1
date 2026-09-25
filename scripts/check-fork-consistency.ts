@@ -47,12 +47,15 @@
  *      (DENO_EXCEPTIONS counts per file; none today); and a file that imports the SQL shim (Bun's client)
  *      imports no specifier Bun cannot resolve (`jsr:`, `npm:`, a URL), itself
  *      or through the files it imports (SMD-1480)
- *  12. a .sql file under schemas/ or db/ runs nothing that needs Supabase — no
- *      `service_role`, `authenticated` or `anon`, no `auth.uid()`, `auth.role()`
- *      or `auth.users`, no `supabase_`-prefixed name, no RLS or policy —
- *      comments excepted by a literal-aware strip, string literals included
- *      (SMD-1796); the rules are db/config.mjs's SUPABASE_SQL_RULES, which
- *      test-schema [10] and [40] apply from inside the suite; no exceptions
+ *  12. a .sql file under db/ or any of the seven category directories runs
+ *      nothing that needs Supabase — no `service_role`, `authenticated` or
+ *      `anon`, no `auth.uid()`, `auth.role()` or `auth.users`, no
+ *      `supabase_`-prefixed name, no RLS or policy — comments excepted by a
+ *      literal-aware strip, string literals included (SMD-1796; widened from
+ *      schemas/ and db/ to db/ and the seven category directories by
+ *      SMD-1810); the rules are
+ *      db/config.mjs's SUPABASE_SQL_RULES, which test-schema [10], [40] and
+ *      [50] apply from inside the suite; no exceptions
  *  13. every port a compose file under deploy/ publishes names its host address
  *      as a knob that defaults to the literal 127.0.0.1 — the short form
  *      `"${X_BIND:-127.0.0.1}:${X_PORT:-n}:n"`, each `X_BIND` documented in
@@ -1996,18 +1999,28 @@ function checkBunNative() {
 // is literal-aware (a `--` inside a string no longer hides the rest of its
 // line — SMD-1316's ask) and scans string literals, since `EXECUTE 'GRANT … TO
 // service_role'` runs the grant as surely as the bare statement. Every .sql
-// under schemas/ and db/ whole; no exceptions. The extension and recipe
-// directories carry thirteen more such files, with per-user `auth.uid() =
-// user_id` policies that need a design of their own — their ticket is the
-// umbrella SMD-1795's.
+// under db/ and the seven category directories, whole; no exceptions. Until
+// SMD-1810 the walk covered schemas/ and db/ alone, and the extension and
+// recipe directories carried fourteen more such files — per-user `auth.uid()
+// = user_id` policies on most, GRANTs TO service_role or authenticated, one
+// `REFERENCES auth.users`, and `EXECUTE 'GRANT … TO service_role'` strings
+// inside ops-views.sql's DO blocks (the case the literal-aware scan exists
+// for). Those were cut on that ticket under SMD-1716's single-operator model
+// (the server scopes rows by DEFAULT_USER_ID; the policies were the same fact
+// in GoTrue's schema), their tables became `--grant`'s `extensions` and
+// `recipes` groups, and the walk widened to db/ and the seven category
+// directories (SQL_RULE_DIRS — evals/ keeps its own SQL out of it) so the
+// next new recipe is held to the rule the day it lands.
+
+const SQL_RULE_DIRS = ["db", "extensions", "primitives", "recipes", "schemas", "dashboards", "integrations", "skills"];
 
 function checkSupabaseIsms() {
-  for (const dir of ["schemas", "db"]) {
+  for (const dir of SQL_RULE_DIRS) {
     const base = join(ROOT, dir);
     if (!existsSync(base)) continue;
     for (const file of walk(base, [], /\.sql$/)) {
       const rel = relOf(file);
-      for (const h of supabaseIsmsIn(readFileSync(file, "utf8"))) fail(`${rel}:${h.line}`, `${h.msg} (SMD-1796)`);
+      for (const h of supabaseIsmsIn(readFileSync(file, "utf8"))) fail(`${rel}:${h.line}`, `${h.msg} (SMD-1796, SMD-1810)`);
     }
   }
 }

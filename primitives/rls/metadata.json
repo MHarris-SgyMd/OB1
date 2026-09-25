@@ -1,6 +1,6 @@
 {
   "name": "Row Level Security (RLS)",
-  "description": "Reusable guide to PostgreSQL Row Level Security — the foundation for multi-user and shared-access extensions.",
+  "description": "Concept guide to PostgreSQL Row Level Security — what upstream's extensions enforced with it; this fork's schemas ship no policies (SMD-1810).",
   "category": "primitives",
   "author": {
     "name": "Nate B. Jones",

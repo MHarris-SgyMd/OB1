@@ -211,8 +211,9 @@ if (Number(tables) < 4) {
  * So the key must be in MCP_ACCESS_KEYS — a key the server would refuse is not
  * an identity here either — and the record's own name and scope are what get
  * registered, not a guessed label and a hardcoded 'write' that the server's
- * next request would flip back. Resolution writes (first sight registers, every
- * call touches last_used_at), so --status and --dry-run do not resolve.
+ * next request would flip back. Resolution writes (first sight registers, and
+ * since 054 a stale last_used_at or a changed scope is written), so --status
+ * and --dry-run do not resolve.
  */
 let agentId: string | null = null;
 /** The worker key's name, for the egress gate's `actor:` unit (SMD-1903); undefined without a key. */
