@@ -1,5 +1,7 @@
 # Atomizer
 
+> **On this fork (SMD-2126).** `audit-gmail-pipeline.mjs`, `re-atomize-gmail-thought.mjs` and `lib/entity-resolver.mjs` (`backfill-gmail-correspondents.mjs` through it) reach the brain as PostgREST clients — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and this fork's stack runs no PostgREST (SETUP.md), so the live mode fails at its first request. The port onto `compat/supabase-sql` under `bun` (`SUPABASE_URL` a `postgres://` string; the `node` commands below become `bun`), its thought writes through `upsert_thought` and `delete_thought` is SMD-2140; the decision for the class is in `docs/vendored-disposition.md`.
+
 > Split compound multi-topic thoughts into atomic single-topic thoughts, plus Gmail-specific repair tooling for email ingestion pipelines.
 
 ## What It Does

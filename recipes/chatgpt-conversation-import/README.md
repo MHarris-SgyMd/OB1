@@ -1,5 +1,7 @@
 # ChatGPT Conversation Import
 
+> **On this fork (SMD-2126).** `import-chatgpt.py` reaches the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and embeds each item itself; this fork's stack runs no PostgREST (SETUP.md), so the import fails at its first request (`--dry-run` runs). It becomes an adapter of the ingestion contract — the parser emits items for `bun db/ingest-records.ts --items`, which writes them through `upsert_thought` — in SMD-2147 (after SMD-2136); the decision for the class is in `docs/vendored-disposition.md`.
+
 > Import your ChatGPT history into Open Brain as curated, searchable thoughts — not raw transcripts.
 
 ## What It Does

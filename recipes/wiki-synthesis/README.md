@@ -1,5 +1,7 @@
 # Wiki Synthesis
 
+> **On this fork (SMD-2126).** `scripts/synthesize-wiki.mjs` and `scripts/backfill-gmail-wikis.mjs` reach the brain as PostgREST clients — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and this fork's stack runs no PostgREST (SETUP.md), so the live mode fails at its first request (`--dry-run` runs). The port onto `compat/supabase-sql` under `bun` (`SUPABASE_URL` a `postgres://` string; the `node` commands below become `bun`), its page deletes through `delete_thought` is SMD-2143; the decision for the class is in `docs/vendored-disposition.md`.
+
 > Synthesize topic-scoped wiki articles and per-thread email wikis from atomic thoughts, using any OpenAI-compatible LLM.
 
 ## What It Does

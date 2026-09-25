@@ -1,5 +1,7 @@
 # Authorship Edges
 
+> **On this fork (SMD-2126).** `lib/author-edges.mjs` (`backfill-authorship.mjs` through it) reaches the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and this fork's stack runs no PostgREST (SETUP.md), so the live mode fails at its first request (`--dry-run` runs). The port onto `compat/supabase-sql` under `bun` (`SUPABASE_URL` a `postgres://` string; the `node` commands below become `bun`) is SMD-2141; the decision for the class is in `docs/vendored-disposition.md`.
+
 > **Tell apart what *you* said from what a *machine* generated — across any source.** A deterministic speaker classifier labels every captured thought `self` / `other` / `mixed` / `machine` / `unknown`, links the ones you spoke to a canonical self-entity via `thought_entities` author edges, and gives you a query layer for "my own words" vs. "the device's summary."
 
 ---
