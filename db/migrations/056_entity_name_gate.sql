@@ -51,13 +51,18 @@
 --      is gated; a `source:` pass is not — it states its names on the
 --      source's authority, and a Linear label `2024` or `Tools` is a label
 --      (first review pass). So a numeric name a source states can remain.
---      The body carries the `ob1:name-gate` sentinel.
+--      The merged_from redirect is spelled `@>`, which 016's GIN index
+--      serves (third review pass). The body carries the `ob1:name-gate`
+--      sentinel.
 --
 --   3. apply_entity_type_gate() — the same rule over the rows already
---      written, each entity judged on its name (its first-seen spelling),
---      and none a structured pass names (such an entity, and its extracted
---      mentions, stand; once the source stops naming it, a later run of this
---      takes it). A refused entity's edges, mentions and row are deleted. A
+--      written, each entity judged on its name (its first-seen spelling).
+--      Two kinds of entity stand, with their extracted mentions: one a
+--      structured pass names (once the source stops naming it, a later run
+--      of this takes it), and one a human curated — a name merged into it
+--      with merge_entities() — since retyping it would bring the names merged
+--      into it back as entities of the old type (third review pass). A
+--      refused entity's edges, mentions and row are deleted. A
 --      retyped one is MERGED into the entity of the new type the writer
 --      would resolve its name to — the one a human merged the name into,
 --      else the one of that name (hono/mcp the person into hono/mcp the
@@ -66,10 +71,12 @@
 --      re-pointed (a symmetric relation re-ordered, a duplicate or self-edge
 --      dropped), its name and aliases fold into the target's, the earlier
 --      first_seen_at and later last_seen_at kept. With no such entity it is
---      moved. Its merged_from goes either way: a human's merge within the
---      old type is no decision about the new one. Returns the counts.
---      This file runs it once and reports the counts as a NOTICE; it is
---      idempotent, so --reapply finds nothing.
+--      moved. A retyped row carries no merged_from (a curated one stands), so
+--      no human merge crosses into another type. Returns the counts.
+--      This file runs it once and keeps what the first run did in ob1_config
+--      under `entity_name_gate_056` — a NOTICE would reach no one, the
+--      migrator's client surfacing none. It is idempotent, so --reapply finds
+--      nothing (and keeps the first run's record).
 --
 -- SAFETY
 --   A data change: MINOR under the version rules. What it deletes is what the
@@ -146,9 +153,11 @@ COMMENT ON FUNCTION entity_type_gate(text, text) IS
 -- ---------------------------------------------------------------------------
 -- record_thought_entities — 053's writer with the gate
 --
--- The body is 053's with one change: the type an entity is written under is
--- entity_type_gate()'s answer, a refused entity is not written, and the two
--- counts are returned.
+-- The body is 053's with two changes: the type an extraction's entity is
+-- written under is entity_type_gate()'s answer, a refused entity is not
+-- written, and the two counts are returned; and the merged_from redirect
+-- reads `merged_from @> ARRAY[name]`, which 016's GIN index serves, where
+-- `name = ANY(merged_from)` scanned every entity of the type on every call.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION record_thought_entities(
   p_thought_id          uuid,
@@ -243,7 +252,7 @@ BEGIN
          aliases = ARRAY(SELECT DISTINCT a FROM unnest(i.aliases || ARRAY[i.name]) a WHERE a <> en.name ORDER BY a),
          name    = en.name
     FROM ob1_entities en
-   WHERE en.entity_type = i.ntype AND i.nname = ANY(en.merged_from);
+   WHERE en.entity_type = i.ntype AND en.merged_from @> ARRAY[i.nname];
   DELETE FROM _rte_in a USING _rte_in b
    WHERE a.ntype = b.ntype AND a.nname = b.nname
      AND (a.confidence < b.confidence OR (a.confidence = b.confidence AND a.ctid > b.ctid));
@@ -417,17 +426,22 @@ BEGIN
   -- workers that were running have finished (it is idempotent).
   LOCK TABLE ob1_entities IN SHARE ROW EXCLUSIVE MODE;
 
-  -- Each entity's verdict, once: NULL refused, a type retyped. An entity a
-  -- structured pass names is the source's, not the model's guess, and is
-  -- left as it stands (a Linear label `2024`). Judged on the entity's name,
-  -- its first-seen spelling, as the writer judges each answer's.
+  -- Each entity's verdict, once: NULL refused, a type retyped. Two kinds of
+  -- entity are left as they stand: one a structured pass names — the
+  -- source's, not the model's guess (a Linear label `2024`) — and one a human
+  -- curated, a name merged into it with merge_entities(): retyped, the
+  -- names merged into it would come back as entities of the old type, split
+  -- from it (third review pass). Judged on the entity's name, its first-seen
+  -- spelling, as the writer judges each answer's.
   CREATE TEMP TABLE IF NOT EXISTS _aetg (id uuid, to_type text) ON COMMIT DROP;
   DELETE FROM _aetg WHERE true;
+  WITH v AS MATERIALIZED (
+    SELECT e.id, e.entity_type, entity_type_gate(e.name, e.entity_type) AS to_type
+      FROM ob1_entities e
+     WHERE cardinality(e.merged_from) = 0
+       AND NOT EXISTS (SELECT 1 FROM thought_entities s WHERE s.entity_id = e.id AND s.extraction_key LIKE 'source:%'))
   INSERT INTO _aetg (id, to_type)
-  SELECT e.id, entity_type_gate(e.name, e.entity_type)
-    FROM ob1_entities e
-   WHERE entity_type_gate(e.name, e.entity_type) IS DISTINCT FROM e.entity_type
-     AND NOT EXISTS (SELECT 1 FROM thought_entities s WHERE s.entity_id = e.id AND s.extraction_key LIKE 'source:%');
+  SELECT v.id, v.to_type FROM v WHERE v.to_type IS DISTINCT FROM v.entity_type;
 
   -- Refused: the edges on either end, the mentions, the row.
   WITH gone AS (
@@ -449,10 +463,11 @@ BEGIN
   -- would resolve its name to — the one a human merged the name into, else
   -- the one of that name — and moved when there is none. Two rows bound for
   -- one target meet here too: the first moves, the second merges into it.
-  -- A retyped row's merged_from goes: a human's merge within the old type is
-  -- no decision about the new one, and carried there it redirected that
-  -- type's own entities (first and second review passes — filtering it
-  -- against a snapshot missed the rows this loop moves).
+  -- A retyped row has no merged_from (a curated one is left above), so none
+  -- crosses into the new type. Two index probes, not one OR: 016's GIN index
+  -- serves `@>` and the unique key serves the name, where `= ANY(...) OR`
+  -- scanned every entity of the type once per retyped row (third review
+  -- pass: ~2 ms a row at 80,000 entities).
   FOR r IN
     SELECT e.id, e.name, e.normalized_name, e.aliases, e.first_seen_at, e.last_seen_at, a.to_type
       FROM _aetg a JOIN ob1_entities e ON e.id = a.id
@@ -461,12 +476,15 @@ BEGIN
   LOOP
     v_target := NULL;
     SELECT en.id INTO v_target FROM ob1_entities en
-     WHERE en.entity_type = r.to_type AND en.id <> r.id
-       AND (r.normalized_name = ANY(en.merged_from) OR en.normalized_name = r.normalized_name)
-     ORDER BY (r.normalized_name = ANY(en.merged_from)) DESC, en.first_seen_at, en.id
+     WHERE en.entity_type = r.to_type AND en.merged_from @> ARRAY[r.normalized_name]
+     ORDER BY en.first_seen_at, en.id
      LIMIT 1;
     IF v_target IS NULL THEN
-      UPDATE ob1_entities SET entity_type = r.to_type, merged_from = '{}' WHERE id = r.id;
+      SELECT en.id INTO v_target FROM ob1_entities en
+       WHERE en.entity_type = r.to_type AND en.normalized_name = r.normalized_name;
+    END IF;
+    IF v_target IS NULL THEN
+      UPDATE ob1_entities SET entity_type = r.to_type WHERE id = r.id;
       v_moved := v_moved + 1;
       CONTINUE;
     END IF;
@@ -513,11 +531,13 @@ END;
 $$;
 
 COMMENT ON FUNCTION apply_entity_type_gate() IS
-  'Applies entity_type_gate() to the entities already written (056), each judged on its name and none a structured pass names: a refused entity''s edges, mentions and row are deleted; a retyped one moves to its new type, or merges into the entity already holding that (type, name) by merge_entities'' steps — the mentions it lacks moved, edges re-pointed, aliases and seen-at folded; a retyped row''s merged_from, a human''s merge within the old type, does not cross. Idempotent. Returns {ok, refused_entities, dropped_mentions, dropped_edges, moved_entities, merged_entities}. SMD-1935.';
+  'Applies entity_type_gate() to the entities already written (056), each judged on its name; an entity a structured pass names or a human curated (a non-empty merged_from) is left as it stands. A refused entity''s edges, mentions and row are deleted; a retyped one merges into the entity of its new type the writer would resolve its name to (the one a human merged the name into, else the one of that name) by merge_entities'' steps — the mentions it lacks moved, edges re-pointed, aliases and seen-at folded — or moves when there is none. Idempotent. Returns {ok, refused_entities, dropped_mentions, dropped_edges, moved_entities, merged_entities}; the first run''s is kept in ob1_config under entity_name_gate_056. SMD-1935.';
 
--- The rows written before the gate, once. What it did is the NOTICE.
-DO $run$
-BEGIN
-  RAISE NOTICE 'migration 056: %', apply_entity_type_gate();
-END
-$run$;
+-- The rows written before the gate, once. What the first run did is kept in
+-- ob1_config: a NOTICE reaches no one (the migrator's client does not surface
+-- notices, and the server logs from WARNING), and a second run finds nothing,
+-- so the count of rows deleted would otherwise be nowhere (third review
+-- pass). ON CONFLICT DO NOTHING: --reapply keeps the first run's.
+INSERT INTO ob1_config (key, value)
+VALUES ('entity_name_gate_056', apply_entity_type_gate()::text)
+ON CONFLICT (key) DO NOTHING;
