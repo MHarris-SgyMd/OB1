@@ -537,8 +537,14 @@ passing run's log is folded under its width; a failing one is printed open
 under an error annotation naming the width. The two lines at the end of the
 step, each run's `N assertions: …` line, are the first thing to read. "No
 summary line" means the run died before its report, and its log says where;
-exit 124 means it hung past its 15-minute limit. The self-checks after it run
-whether it passes or fails.
+exit 124 means it hung past its 15-minute limit (137, that it ignored the stop
+and was killed, or ran out of memory). The self-checks after it run whether it
+passes or fails. To reproduce a 768-only failure locally (`db/ci-parity.sh`
+runs the default width only):
+
+```bash
+cd db && OB1_EMBEDDING_DIM=768 OB1_EMBEDDING_MODEL=nomic-embed-text bun test-schema.ts
+```
 
 ## Detached from the fork network
 

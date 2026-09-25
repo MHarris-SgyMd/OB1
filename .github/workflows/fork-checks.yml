@@ -302,9 +302,11 @@ jobs:
       # on, both logs printed — a passing one folded, a failing one open — and the
       # step fails when either run does. Nothing prints until both have exited,
       # so each run has its own time limit: a hung run ends as a failure (exit
-      # 124) with its log printed, where a step killed at the job's limit, or
-      # cancelled, prints neither. The two summary lines close the step; they read the
-      # report line db/test-support.ts prints (`N assertions: …`).
+      # 124, or 137 when it ignores TERM and is killed 10 s later) with its log
+      # printed, whereas without it a hang would run to GitHub's six-hour job
+      # limit and print nothing (a cancel still prints nothing). The two summary
+      # lines close the step; they read the report line db/test-support.ts prints
+      # (`N assertions: …`).
       - name: Apply migrations and assert the schema, at the default width and at 768
         working-directory: db
         run: |
@@ -323,7 +325,10 @@ jobs:
             width=${leg%%:*}
             rc=${leg#*:}
             log="$RUNNER_TEMP/schema-$width.log"
-            if [ "$rc" -eq 124 ]; then rc="124, over the $limit limit"; fi
+            case $rc in
+              124) rc="124, over the $limit limit" ;;
+              137) rc="137, killed: over the $limit limit with TERM ignored, or out of memory" ;;
+            esac
             if [ "$rc" = 0 ]; then
               echo "::group::test-schema.ts at the $width width — passed"
               cat "$log"
