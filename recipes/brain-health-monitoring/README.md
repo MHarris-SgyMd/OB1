@@ -37,7 +37,7 @@ Views 1-5 work with the base enhanced thoughts schema. Views 6-8 are wrapped in 
 ## Steps
 
 1. Review which monitoring views apply to your installed schemas.
-2. Run `ops-views.sql` in the Supabase SQL Editor.
+2. Run `ops-views.sql` against your brain's database — `psql "$DATABASE_URL" -f recipes/brain-health-monitoring/ops-views.sql` (or Supabase's SQL Editor, if that is where it lives).
 3. Verify the `ops_*` views were created successfully.
 4. Query the views to establish a baseline health check.
 
@@ -53,7 +53,7 @@ You do not need to comment anything out. Views 6-8 are wrapped in `to_regclass` 
 
 ### 2. Run the SQL
 
-In the Supabase SQL Editor, paste the contents of `ops-views.sql` and execute. All statements use `CREATE OR REPLACE VIEW`, so running multiple times is safe.
+Run `ops-views.sql` against your brain's database with `psql -f` (or paste it into the SQL client you use). All statements use `CREATE OR REPLACE VIEW`, so running multiple times is safe.
 
 ```bash
 # Or via psql:
@@ -131,4 +131,4 @@ The `entity_extraction_queue` table isn't installed, so views 7-8 were skipped. 
 This is normal for a fresh install with no thoughts. Capture a few thoughts first, then query the views.
 
 **Permission denied on a view**
-Ensure the GRANT statements at the end of the SQL file executed successfully. Re-run them if needed.
+The file grants nothing (this fork, SMD-1810 — upstream's `GRANT … TO service_role` lines are gone): the role that applied it owns the views, and a role other than the tables' owner is granted them by `bun db/migrate.ts --grant <role>` (`db/README.md`, "Grants for a capturing role", the **recipes** group).

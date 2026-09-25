@@ -210,7 +210,7 @@ When enabled, each processed conversation is also stored in a `chatgpt_conversat
 
 ### How to set it up
 
-1. Open the Supabase SQL Editor in your project dashboard
+1. Open a SQL session on your brain's database (`psql "$DATABASE_URL"`, or Supabase's SQL Editor if that is where it lives)
 2. Paste and run the contents of `schema.sql` from this recipe folder
 3. Pass `--store-conversations` when running the import:
 
@@ -343,4 +343,4 @@ Solution: Just run the script again pointing at your new export. The sync log (`
 Solution: Check that your OpenRouter API key is valid and has credits. Go to openrouter.ai/credits to verify your balance. The embedding model (text-embedding-3-small) costs $0.02 per million tokens — even a large import costs pennies.
 
 **Issue: How to use `--store-conversations`**
-Solution: You need to create the `chatgpt_conversations` table first. Open the Supabase SQL Editor, paste the contents of `schema.sql` from this recipe folder, and run it. Then pass `--store-conversations` on your next import run. The table stores conversation-level summaries and metadata — it is optional and the core thought import works without it.
+Solution: You need to create the `chatgpt_conversations` table first. Run `schema.sql` from this recipe folder against your brain's database — `psql "$DATABASE_URL" -f recipes/chatgpt-conversation-import/schema.sql`. Then pass `--store-conversations` on your next import run. The table stores conversation-level summaries and metadata — it is optional and the core thought import works without it.

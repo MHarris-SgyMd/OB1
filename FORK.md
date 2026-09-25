@@ -530,6 +530,22 @@ anything move the `services:` images (pgvector). The rehearsal still runs with
 the release's write token on a PR that touches what it builds from, a
 Dependabot one included (SMD-2111).
 
+**"Schema migrations" runs `test-schema.ts` twice at once (SMD-2092).** One
+step runs the suite at the default width and at 768 in the background, each to
+its own log, and waits on both; nothing prints until both have exited. A
+passing run's log is folded under its width; a failing one is printed open
+under an error annotation naming the width. The two lines at the end of the
+step, each run's `N assertions: …` line, are the first thing to read. "No
+summary line" means the run died before its report, and its log says where;
+exit 124 means it hung past its 15-minute limit (137, that it ignored the stop
+and was killed, or ran out of memory). The self-checks after it run whether it
+passes or fails. To reproduce a 768-only failure locally (`db/ci-parity.sh`
+runs the default width only):
+
+```bash
+cd db && OB1_EMBEDDING_DIM=768 OB1_EMBEDDING_MODEL=nomic-embed-text bun test-schema.ts
+```
+
 ## Detached from the fork network
 
 This repository was forked from `NateBJones-Projects/OB1` and then detached, for

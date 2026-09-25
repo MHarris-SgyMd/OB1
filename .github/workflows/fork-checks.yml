@@ -104,7 +104,7 @@ jobs:
         working-directory: scripts
         run: bunx tsc --noEmit
 
-      # The session capture hook (SMD-1298, SMD-2012, SMD-2035): both transcript parsers, the
+      # The session capture hook (SMD-1298, SMD-2012, SMD-2035, SMD-2013): both transcript parsers, the segmenter, the
       # summary's shape, every secret pattern's probe, the refusal, the detached
       # hand-off and the MCP post — against synthetic transcripts and a fake
       # endpoint on localhost. Bun only, no database, so it runs here.
@@ -286,20 +286,71 @@ jobs:
           bun-version: "1.4.0"
 
       - name: Install
+        id: install
         working-directory: db
         run: bun install --frozen-lockfile
 
       # PGlite is real PostgreSQL 17 + pgvector in WASM, so this needs no service
       # container: the migrations are applied and asserted against a real planner.
-      - name: Apply migrations and assert the schema
+      # The embedding width is configurable and must hold at more than one value,
+      # so the suite runs twice — the default width and 768 — side by side
+      # (SMD-2092): each run is one single-threaded process whose PGlite databases
+      # live in memory, and neither writes a file, opens a port or spawns
+      # anything; a public repository's runner has four cores. Run in series they
+      # were the critical path of most runs. Each run writes its own log, stdout
+      # and stderr together (a failed assertion goes to stderr); both are waited
+      # on, both logs printed — a passing one folded, a failing one open — and the
+      # step fails when either run does. Nothing prints until both have exited,
+      # so each run has its own time limit: a hung run ends as a failure (exit
+      # 124, or 137 when it ignores TERM and is killed 10 s later) with its log
+      # printed, whereas without it a hang would run to GitHub's six-hour job
+      # limit and print nothing (a cancel still prints nothing). The two summary
+      # lines close the step; they read the report line db/test-support.ts prints
+      # (`N assertions: …`).
+      - name: Apply migrations and assert the schema, at the default width and at 768
         working-directory: db
-        run: bun test-schema.ts
+        run: |
+          limit=15m
+          timeout --kill-after=10s "$limit" bun test-schema.ts > "$RUNNER_TEMP/schema-default.log" 2>&1 &
+          default_pid=$!
+          OB1_EMBEDDING_DIM=768 OB1_EMBEDDING_MODEL=nomic-embed-text \
+            timeout --kill-after=10s "$limit" bun test-schema.ts > "$RUNNER_TEMP/schema-768.log" 2>&1 &
+          narrow_pid=$!
+          # `|| rc=$?`, not a bare wait: the step runs under -e, and a bare wait
+          # on a failed run would end the step before either log is printed.
+          default_rc=0; wait "$default_pid" || default_rc=$?
+          narrow_rc=0; wait "$narrow_pid" || narrow_rc=$?
+          summaries=""
+          for leg in "default:$default_rc" "768:$narrow_rc"; do
+            width=${leg%%:*}
+            rc=${leg#*:}
+            log="$RUNNER_TEMP/schema-$width.log"
+            case $rc in
+              124) rc="124, over the $limit limit" ;;
+              137) rc="137, killed: over the $limit limit with TERM ignored, or out of memory" ;;
+            esac
+            if [ "$rc" = 0 ]; then
+              echo "::group::test-schema.ts at the $width width — passed"
+              cat "$log"
+              echo "::endgroup::"
+            else
+              echo "::error title=Schema migrations::test-schema.ts at the $width width failed (exit $rc) — its log follows"
+              cat "$log"
+            fi
+            summary=$(grep -aE '^[0-9]+ assertions: ' "$log" | tail -n 1 || true)
+            summaries+="  $width width: ${summary:-no summary line — the run stopped before its report} (exit $rc)"$'\n'
+          done
+          printf '\ntest-schema.ts\n%s' "$summaries"
+          [ "$default_rc" -eq 0 ] && [ "$narrow_rc" -eq 0 ]
 
       # The board sync's pure rules and write decisions — the rendering the
       # hand captures are recognised by, the plan from a census, which call
       # each state of the brain gets — against a recording store. No network,
-      # no database, no provider (SMD-1954).
+      # no database, no provider (SMD-1954). This and the next step run when an
+      # earlier step of theirs has failed too (the schema step, or this one for
+      # the next), so one broken width does not hide them.
       - name: Board sync rules
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         working-directory: db
         run: bun sync-linear.ts --self-check
 
@@ -309,16 +360,9 @@ jobs:
       # lossy cases enumerated, two inputs refused) and the ingester's pure
       # rules (the corpus path, the allowlist). No network, no database.
       - name: Ingestion adapters
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         working-directory: db
         run: bun ingest-linear.ts --self-check && bun ingest-markdown.ts --self-check && bun ingest-records.ts --self-check
-
-      # The embedding width is configurable and must hold at more than one value.
-      - name: Schema builds at a non-default embedding width
-        working-directory: db
-        run: bun test-schema.ts
-        env:
-          OB1_EMBEDDING_DIM: "768"
-          OB1_EMBEDDING_MODEL: nomic-embed-text
 
   replay-gate:
     name: Retrieval replay gate
@@ -624,9 +668,11 @@ jobs:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
           TZ: America/Chicago
 
-      # Every tool of the five extension servers on the SQL shim, called through
-      # tools/call against the extensions' own schema.sql files (applied after
-      # the READMEs' two auth.* stubs, dropped again at the end) — each read's
+      # Every tool of the eight servers on the SQL shim, called through
+      # tools/call against the extensions' own schema.sql files (applied as
+      # they are — no auth.* stub and no Supabase role, since SMD-1810, which
+      # also stopped test-writes.ts above creating the three roles on this
+      # shared database — and dropped again at the end) — each read's
       # filters, each write's row, the embedded relation, the trigger's effect,
       # the message a failure carries (change 77, SMD-1588). A shim gap fails a
       # named assertion here rather than a user's first call; a tool added to a

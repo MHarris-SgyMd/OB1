@@ -23,7 +23,7 @@ Two kids, two parents, overlapping schedules. Soccer practice conflicts with the
 - Nullable foreign keys (activities can belong to one person or the whole family)
 - Querying across date ranges
 
-> **Note:** This extension doesn't use Row Level Security. RLS is introduced in Extension 4 (Meal Planning), where shared household access makes it necessary. Extensions 1-3 are single-user systems.
+> **Note:** No extension in this fork uses Row Level Security — every server scopes rows by `DEFAULT_USER_ID` (SMD-1810; the [RLS primitive](../../primitives/rls/) explains what upstream's Extension 4 enforced with it). Extension 4 (Meal Planning) is where a second person first gets access, through a shared server with its own key list.
 
 ## What It Does
 
@@ -175,11 +175,10 @@ For common issues (connection errors, 401s, deployment problems), see [Common Tr
 
 ## Next Steps
 
-**Extension 4: Meal Planning** — This is where things get interesting. You'll combine what you've learned about scheduling with Row Level Security and a shared MCP server. Your spouse will be able to view meal plans and check off grocery items without accessing your full Open Brain.
+**Extension 4: Meal Planning** — This is where things get interesting. You'll combine what you've learned about scheduling with a shared MCP server. Your spouse will be able to view meal plans and check off grocery items without accessing your full Open Brain.
 
 **Key concepts in Extension 4:**
-- Row Level Security (first introduction to multi-user access)
-- Shared MCP server (separate server with limited, scoped access)
+- Shared MCP server (separate server with limited, scoped access — the first time a second person gets in)
 - JSONB for complex data (ingredients, instructions)
 - Auto-generating derivative data (shopping lists from meal plans)
 - Cross-extension queries (checking who's home this week from the family calendar)

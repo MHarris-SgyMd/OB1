@@ -46,7 +46,7 @@ export type Projection = {
 export const PROJECTIONS: readonly Projection[] = [
   {
     name: "embedding", table: "thoughts.embedding",
-    derived: "(content_fingerprint_of(content), embedding_model); the prompt template and the requested width ride on the model name by convention (embed.ts, EMBEDDING_PROMPTS) — code, not data, so a template change under one name invalidates every vector with the key unmoved, and the cosine bar below is the check for that",
+    derived: "(content_fingerprint_of(content), embedding_model); the prompt template and the requested width ride on the model name by convention (db/config.mjs's EMBEDDING_PROMPTS, applied by server-portable/embed.ts) — code, not data, so a template change under one name invalidates every vector with the key unmoved, and the cosine bar below is the check for that",
     recorded: "content_fingerprint (003/023), embedding_model (021)", verdict: "recorded",
   },
   { name: "chunks", table: "thought_chunks", derived: "the parent's key + the window recipe (chunk tokens, overlap, chunk_context, the blurb model)", recorded: "the parent's label vouches for the rows (022); no recipe", verdict: "recipe not recorded" },
