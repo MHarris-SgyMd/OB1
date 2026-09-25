@@ -1,0 +1,75 @@
+{
+  "displayName": "OB1 — Linear issues into the brain",
+  "schemaVersion": null,
+  "notes": null,
+  "trigger": {
+    "name": "trigger",
+    "valid": true,
+    "displayName": "Every 15 minutes",
+    "type": "PIECE_TRIGGER",
+    "settings": {
+      "pieceName": "@activepieces/piece-schedule",
+      "pieceVersion": "~0.1.22",
+      "triggerName": "every_x_minutes",
+      "input": { "minutes": 15 },
+      "propertySettings": {}
+    },
+    "nextAction": {
+      "name": "step_1",
+      "valid": true,
+      "displayName": "Fetch the issues",
+      "type": "PIECE",
+      "settings": {
+        "pieceName": "@activepieces/piece-linear",
+        "pieceVersion": "~0.6.1",
+        "actionName": "rawGraphqlQuery",
+        "input": {
+          "auth": "{{connections['linear']}}",
+          "query": "query { issues(first: 10, filter: { team: { key: { eq: \"SMD\" } }, number: { in: [949, 1813, 1814, 1815, 1816, 1817, 1818, 1863, 1933, 1954] } }) { nodes { identifier title url description state { name } project { name } } } }",
+          "variables": {}
+        },
+        "propertySettings": {},
+        "errorHandlingOptions": { "continueOnFailure": { "value": false }, "retryOnFailure": { "value": false } }
+      },
+      "nextAction": {
+        "name": "step_2",
+        "valid": true,
+        "displayName": "One thought per issue",
+        "type": "CODE",
+        "settings": {
+          "input": { "issues": "{{step_1.data.issues.nodes}}" },
+          "sourceCode": {
+            "packageJson": "{}",
+            "code": "export const code = async (inputs) => inputs.issues.map((i) => ({ content: [\n  `${i.identifier} — ${i.title}`,\n  `State: ${i.state?.name ?? ''} · Project: ${i.project?.name ?? ''}`,\n  i.url,\n  '',\n  i.description ?? '',\n].join('\\n').trim() }));"
+          },
+          "errorHandlingOptions": { "continueOnFailure": { "value": false }, "retryOnFailure": { "value": false } }
+        },
+        "nextAction": {
+          "name": "step_3",
+          "valid": true,
+          "displayName": "For each issue",
+          "type": "LOOP_ON_ITEMS",
+          "settings": { "items": "{{step_2}}" },
+          "firstLoopAction": {
+            "name": "step_4",
+            "valid": true,
+            "displayName": "Capture into the brain",
+            "type": "PIECE",
+            "settings": {
+              "pieceName": "@activepieces/piece-mcp-client",
+              "pieceVersion": "~0.0.3",
+              "actionName": "call-tool",
+              "input": {
+                "auth": "{{connections['brain-capture']}}",
+                "tool": "capture_thought",
+                "args": { "content": "{{step_3.item.content}}" }
+              },
+              "propertySettings": {},
+              "errorHandlingOptions": { "continueOnFailure": { "value": false }, "retryOnFailure": { "value": false } }
+            }
+          }
+        }
+      }
+    }
+  }
+}

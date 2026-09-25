@@ -21,10 +21,17 @@
  *
  * Before anything leaves the machine the summary is scanned for secrets — the
  * common key prefixes, credential assignments, a URL carrying a password, and
- * high-entropy tokens. A hit refuses the whole capture: the reason is printed
- * (never the match), the exit code is 1, and the session ends as it would have.
- * Exit 2 is the one code a Stop hook may block with; as a hook this script
- * never uses it (the by-hand forms — --print-hook, --dry-run — exit 2 on misuse).
+ * high-entropy tokens. A secret on ONE line is REDACTED (SMD-2127): the span
+ * becomes `[redacted:<reason>]` in the prompts, the outcome and the title
+ * before the text is rendered, the text is scanned again, and only a text that
+ * second scan finds clean is sent. A MULTI-LINE key blob — a pasted PEM or PGP
+ * block, a wrapped base64 key — is REFUSED, not redacted: blanking a block
+ * precisely proved leaky, and losing one summary beats sending a line of a key.
+ * A refusal prints the reason (never the match), exits 1, and the session ends
+ * as it would have. OB1_CAPTURE_ON_SECRET=refuse refuses on every hit, blob or
+ * not. Exit 2 is the one code a Stop hook may block with; as a hook
+ * this script never uses it (the by-hand forms — --print-hook, --dry-run — exit
+ * 2 on misuse).
  *
  * Time budget: Claude Code gives SessionEnd hooks 1.5 s by default (raised to the
  * hook's `timeout`, at most 60), Codex 1 s (at most 3); PreCompact shares no
@@ -790,6 +797,11 @@ function distinctPrompts(prompts) {
   return out;
 }
 
+/** How a redaction or a refusal names a prompt: its place in the distinct list the text shows, and a word when it lies past the listed ones (second review pass of SMD-2127). */
+function promptLabel(i) {
+  return `prompt ${i + 1}${i >= LIMITS.prompts ? ` (past the ${LIMITS.prompts} the text lists)` : ""}`;
+}
+
 /** An ISO timestamp as the summary shows it: the day and the minute. */
 const when = (iso) => iso.slice(0, 16).replace("T", " ");
 
@@ -882,9 +894,13 @@ export function renderSummary(s) {
  */
 export function scanSummary(s, text) {
   const found = scanForSecrets(text);
-  const sources = [["a prompt", s.prompts.join("\n")], ["the outcome", s.outcome ?? ""], ["the title", s.title ?? ""]];
+  // Each prompt on its own (SMD-2127's first review pass): the redaction blanks
+  // one prompt at a time, so a hit that existed only across the join —
+  // `--password` ending one prompt, its value opening the next — was a refusal
+  // no redaction could clear, at an offset into a join nobody sees.
+  const sources = [...distinctPrompts(s.prompts).map((p, i) => [promptLabel(i), p]), ["the outcome", s.outcome ?? ""], ["the title", s.title ?? ""]];
   for (const [where, full] of sources) {
-    for (const f of scanForSecrets(full)) if (!found.some((g) => g.reason.replace(/ in (?:a prompt|the outcome|the title)$/, "") === f.reason)) found.push({ reason: `${f.reason} in ${where}`, at: f.at });
+    for (const f of scanForSecrets(full)) if (!found.some((g) => g.reason.replace(/ in (?:prompt \d+(?: \(past the \d+ the text lists\))?|the outcome|the title)$/, "") === f.reason)) found.push({ ...f, reason: `${f.reason} in ${where}` });
   }
   return found;
 }
@@ -915,10 +931,54 @@ function entropyBits(token) {
   return h;
 }
 
+/**
+ * The span a high-entropy token's redaction takes (SMD-2127; its first review
+ * pass found the token a proper subset of the secret, so a fragment was sent
+ * where the episode used to be refused). The token is widened over `/`-joined
+ * runs that read as more of it — base64 carries `/`, which the token class
+ * leaves out so a path splits into segments — a run of four or more with a
+ * digit or a capital and not word-shaped, so a path's `Projects/x/` beside a
+ * token stays. Then, `=` and `_` being in the class, `LINEAR_API_KEY=lin_api_…`
+ * is ONE token: the span starts after a snake-case `NAME=` — an underscore
+ * required, since a base64 body carries `=` too and never `_` — so the marker
+ * keeps the name, as the assignment rule's does. The judgement is the token's
+ * as matched; only the span moves.
+ */
+function tokenSpan(text, at, end) {
+  const RUN = /[A-Za-z0-9+_=-]/;
+  // A run reads as more of the token when it is four or more, carries a digit
+  // or both cases, has no hyphen (`SMD-2127`) and is not word-shaped —
+  // `HEAD`, `README` are words, not base64 (second review pass).
+  const tokenish = (run) => run.length >= 4 && !run.includes("-") && (/[0-9]/.test(run) || (/[a-z]/.test(run) && /[A-Z]/.test(run))) && (run.match(/[a-z]{3,}/g) ?? []).join("").length / run.length < 0.6;
+  const leftRun = (slash) => { let i = slash; while (i > 0 && RUN.test(text[i - 1])) i--; return i; };
+  const rightRun = (slash) => { let i = slash + 1; while (i < text.length && RUN.test(text[i])) i++; return i; };
+  // A run that does not read as token joins too when the run beyond it does:
+  // a base64 body's own short or lowercase run sits between two longer ones,
+  // and stopping at it left a fragment (second review pass: 2% of random keys).
+  for (;;) {
+    if (text[at - 1] !== "/") break;
+    const i = leftRun(at - 1);
+    if (tokenish(text.slice(i, at - 1))) { at = i; continue; }
+    if (text[i - 1] === "/") { const j = leftRun(i - 1); if (tokenish(text.slice(j, i - 1))) { at = j; continue; } }
+    break;
+  }
+  for (;;) {
+    if (text[end] !== "/") break;
+    const i = rightRun(end);
+    if (tokenish(text.slice(end + 1, i))) { end = i; continue; }
+    if (text[i] === "/") { const j = rightRun(i); if (tokenish(text.slice(i + 1, j))) { end = j; continue; } }
+    break;
+  }
+  const t = text.slice(at, end);
+  const eq = t.indexOf("=");
+  if (eq > 0 && t.length - eq - 1 >= 16 && /^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+$/.test(t.slice(0, eq))) at += eq + 1;
+  return [at, end];
+}
+
 /** The patterns, named so a refusal can say WHAT kind of thing it saw without showing it. */
 export const SECRET_PATTERNS = [
   ["anthropic key", /\bsk-ant-[A-Za-z0-9_-]{20,}/],
-  ["openai key", /\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,}/],
+  ["openai key", /\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,}/], // not an anthropic key, which the rule above names — a marker naming both would say what was not there (SMD-2127)
   ["aws access key id", /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/],
   ["github token", /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})/],
   ["slack token", /\bxox[aboprs]-[A-Za-z0-9-]{10,}/],
@@ -928,14 +988,21 @@ export const SECRET_PATTERNS = [
   ["linear key", /\blin_api_[A-Za-z0-9]{20,}/],
   ["hugging face token", /\bhf_[A-Za-z0-9]{30,}/],
   ["npm token", /\bnpm_[A-Za-z0-9]{36}\b/],
-  ["jwt", /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/],
-  ["private key block", /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
-  ["url with a password", /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/]{4,}@/i],
+  ["jwt", /\beyJ[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]{10,}){2,4}/], // three segments, or a JWE's five — the tail went out with three (third review pass)
+  // The whole block when its footer is there, so a redaction takes the body
+  // with the header (SMD-2127); the header alone is still a hit.
+  ["private key block", /-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----)?/], // PGP's armor says BLOCK (third review pass)
+  // A rule with a `v` group names the VALUE as the span a redaction takes and
+  // the offset a refusal prints — `LINEAR_API_KEY=[redacted:…]` keeps the name;
+  // the `d` flag records the group's indices (SMD-2127). A value that begins
+  // with `[` is a placeholder — `[YOUR_API_KEY]`, `[redacted]`, this script's
+  // own marker — not a value: the marker must not be a hit on the second scan.
+  ["url with a password", /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:(?<v>(?!\[)[^\s/]{4,})@/di],
   ["slack webhook url", /https:\/\/hooks\.slack\.com\/services\/T[A-Z0-9]+\/B[A-Z0-9]+\/[A-Za-z0-9]{16,}/],
   // The connector form SETUP.md documents, `…/?key=<raw key>`: URLs are blanked
   // before the hex rule runs, so this one reads the full text (fourth review pass).
-  ["access key in a URL", /[?&](?:key|api[_-]?key|access[_-]?token|token|secret|sig|signature|x-amz-signature)=[A-Za-z0-9._~%+/=-]{16,}/i],
-  ["bearer token", /\b[Bb]earer\s+[A-Za-z0-9._~+/=-]{20,}/],
+  ["access key in a URL", /[?&](?:key|api[_-]?key|access[_-]?token|token|secret|sig|signature|x-amz-signature)=(?<v>[A-Za-z0-9._~%+/=-]{16,})/di],
+  ["bearer token", /\b[Bb]earer\s+(?<v>[A-Za-z0-9._~+/=-]{20,})/d],
   // A credential ASSIGNED: `x-brain-key: <hex>`, `MCP_ACCESS_KEY=…`, `api_key = "…"`. Not DATABASE_URL:
   // a URL without a password is an address, and one with is caught above.
   // Not MCP_ACCESS_KEYS (plural): that value holds name:scope:DIGEST records by construction (keygen.ts), and a session quoting deploy/.env's line is not leaking a key (third review pass).
@@ -950,16 +1017,16 @@ export const SECRET_PATTERNS = [
   // name — `your-api-key-goes-here`, `REPLACE_WITH_YOUR_KEY`, `********`,
   // `get_random_secret_key()` — each refused a whole session (thirteenth); a
   // real key without a digit is rare, and the entropy rule reads one of 32+.
-  ["credential assignment", /(?<![A-Za-z0-9])(?:x-brain-key|MCP_ACCESS_KEY|OB1_[A-Z_]*KEY|OB1_SMOKE_KEY|(?:[A-Z0-9]+_)*(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret(?:[_-]?(?:access[_-]?)?key)?(?:[_-]?base)?)|(?:[A-Z0-9]+_)+token|bearer)\b["']?\s*[:=]\s*["']?(?!\$|<|%|\{|process\.env\b|os\.environ\b|Deno\.env\b|import\.meta\.env\b|[A-Za-z_]\w*(?:\.\w+)+[,;)]?(?:\s|$))(?=[^\s"']*\d)[^\s"']{16,}/i],
+  ["credential assignment", /(?<![A-Za-z0-9])(?:x-brain-key|MCP_ACCESS_KEY|OB1_[A-Z_]*KEY|OB1_SMOKE_KEY|(?:[A-Z0-9]+_)*(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret(?:[_-]?(?:access[_-]?)?key)?(?:[_-]?base)?)|(?:[A-Z0-9]+_)+token|bearer)\b["']?\s*[:=]\s*(?<q>["'`‘“«])?(?<v>(?!\$|<|%|\{|\[|process\.env\b|os\.environ\b|Deno\.env\b|import\.meta\.env\b|[A-Za-z_]\w*(?:\.\w+)+[,;)]?(?:\s|$))(?=[^\s"'`‘’“”«»]*\d)[^\s"'`‘’“”«»]{16,})/di],
   // A credential handed to a command by flag: `--api-key <value>` has no `=`
   // (twelfth review pass). Hyphenated compounds (`--client-secret`,
   // `--refresh-token`), `=` as well as a space; not a path, a `%VAR%`, or
   // docker's `--secret id=…,src=…` spec, and the value carries a digit
   // (thirteenth). A password's floor is six, as in the assignment rule.
-  ["credential flag", /(?<![\w-])--(?:[a-z]+-)*(?:api-?key|access-?token|auth-?token|client-?secret|refresh-?token|token|secret(?:-?key)?)(?:\s+|=)["']?(?!\$|<|%|[\/~.]|\w+=)(?=[^\s"']*\d)[^\s"']{16,}/i],
-  ["password flag", /(?<![\w-])--(?:[a-z]+-)*password(?:\s+|=)["']?(?!\$|<|%|[\/~.]|\w+=)[^\s"']{6,}/i],
+  ["credential flag", /(?<![\w-])--(?:[a-z]+-)*(?:api-?key|access-?token|auth-?token|client-?secret|refresh-?token|token|secret(?:-?key)?)(?:\s+|=)(?<q>["'`‘“«])?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)(?=[^\s"'`‘’“”«»]*\d)[^\s"'`‘’“”«»]{16,})/di],
+  ["password flag", /(?<![\w-])--(?:[a-z]+-)*password(?:\s+|=)(?<q>["'`‘“«])?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)[^\s"'`‘’“”«»]{6,})/di],
   // A password can be short — `POSTGRES_PASSWORD=hunter2` reached the brain under the 16-character floor (first review pass).
-  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*["']?[^\s"']{6,}/i],
+  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*(?<q>["'`‘“«])?(?<v>(?!\[)[^\s"'`‘’“”«»]{6,})/di],
   // This fork's own access keys are 64 hex characters (keygen.ts), as are their
   // digests — told apart only by where they sit: a digest follows `name:scope:`
   // in MCP_ACCESS_KEYS or `sha256:`; a bare 64-hex run is a key until proven
@@ -973,7 +1040,9 @@ export const SECRET_PATTERNS = [
 
 /**
  * Scan a text. Returns [] when clean, else one entry per finding: the pattern's
- * name and where (a 0-based character offset), never the matched text. Besides
+ * name and where — `at`, a 0-based character offset, to `end` — never the
+ * matched text; the FIRST match of each pattern, or every match with
+ * `{ every: true }`, which a redaction needs (SMD-2127). Besides
  * the patterns: a 32+ character token of mixed case and digits with high
  * entropy — a key or token by shape. What is NOT a token: hex (a sha, a digest, a uuid —
  * no mixed case), a path (split at its slashes), a URL's path or query (a
@@ -985,8 +1054,11 @@ export const SECRET_PATTERNS = [
  */
 /** The patterns that read the URL-blanked text: shapes, not prefixes. */
 const URL_BLIND = new Set(["64-hex token (a raw key, or a digest out of its context)"]);
+/** Each pattern once more with the `g` flag, for matchAll — the table's own objects stay stateless for exec. */
+const GLOBAL = new Map();
+const globalOf = (re) => { let g = GLOBAL.get(re); if (!g) { g = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`); GLOBAL.set(re, g); } return g; };
 
-export function scanForSecrets(text) {
+export function scanForSecrets(text, { every = false } = {}) {
   const findings = [];
   // URLs and base64 payloads blanked in place (offsets kept) for the shape
   // rules — the 64-hex rule and the token scan: a hex id in a URL's path (a
@@ -997,8 +1069,26 @@ export function scanForSecrets(text) {
     .replace(/\bhttps?:\/\/[^\s)>\]"']+/gi, (u) => " ".repeat(u.length))
     .replace(/\bbase64,[A-Za-z0-9+/=]+/g, (b) => " ".repeat(b.length));
   for (const [name, re] of SECRET_PATTERNS) {
-    const m = re.exec(URL_BLIND.has(name) ? blanked : text);
-    if (m) findings.push({ reason: name, at: m.index });
+    for (const m of (URL_BLIND.has(name) ? blanked : text).matchAll(globalOf(re))) {
+      // The span: the `v` group's indices where the rule names a value, else the match.
+      let [at, end] = m.indices?.groups?.v ?? [m.index, m.index + m[0].length];
+      if (m.groups?.q) {
+        // The rule consumed an OPENING quote, so the value runs to its close,
+        // spaces included — `password: "correct horse battery"` — where the
+        // class stopped at the first space and the tail was sent (second
+        // review pass). No close on the line: the class's stop stands.
+        const close = m.input.indexOf(QUOTE_CLOSE[m.groups.q] ?? m.groups.q, end), line = m.input.indexOf("\n", end);
+        if (close !== -1 && (line === -1 || close < line)) end = close;
+      } else if (m.indices?.groups?.v) {
+        // A value class of `[^\s"']` runs to the next space: a closing bracket,
+        // backtick or full stop after the value is the sentence's, not the
+        // secret's, and stays in the text — two characters at most, `x).`; a
+        // longer run is the value's own (first and second review passes).
+        for (let n = 0; n < 2 && end > at + 1 && /[.,;:)\]}`>]/.test(m.input[end - 1]); n++) end--;
+      }
+      findings.push({ reason: name, at, end });
+      if (!every) break;
+    }
   }
   for (const m of blanked.matchAll(/[A-Za-z0-9+_=-]{32,}/g)) {
     const t = m[0];
@@ -1006,10 +1096,203 @@ export function scanForSecrets(text) {
     if (/^[\w.-]+\.(?:md|ts|mjs|js|json|sql|yml|yaml|txt|sh)$/.test(t)) continue; // a file name
     const wordish = (t.match(/[a-z]{3,}/g) ?? []).join("").length / t.length;
     if (wordish >= 0.6) continue; // an identifier, not a key
-    if (entropyBits(t) >= (t.length >= 48 ? 4.2 : 4.5)) findings.push({ reason: "high-entropy token", at: m.index });
+    if (entropyBits(t) < (t.length >= 48 ? 4.2 : 4.5)) continue;
+    const [at, end] = tokenSpan(blanked, m.index, m.index + t.length); // the span, the token widened and its name dropped (SMD-2127)
+    findings.push({ reason: "high-entropy token", at, end });
   }
-  return findings.sort((a, b) => a.at - b.at);
+  return findings.sort((a, b) => a.at - b.at || a.end - b.end);
 }
+
+// ── Redaction (SMD-2127) ─────────────────────────────────────────────────────
+
+/** How a hit is met: `redact` (the default) blanks the span and sends the rest; `refuse` drops the episode, as every hit was met before SMD-2127. */
+export const SECRET_MODES = ["redact", "refuse"];
+/**
+ * OB1_CAPTURE_ON_SECRET as a mode, or an error naming what it takes — read once
+ * by main() for the hook path, --dry-run and --check: a misspelling takes
+ * neither mode in silence (a hook that took `refuse` for a typo would drop
+ * sessions its operator meant to keep; one that took `redact` would send what
+ * its operator meant to hold back).
+ */
+export function secretMode(env = process.env) {
+  const raw = env.OB1_CAPTURE_ON_SECRET;
+  if (raw === undefined || raw === "") return { mode: "redact" };
+  if (SECRET_MODES.includes(raw)) return { mode: raw };
+  return { error: `OB1_CAPTURE_ON_SECRET takes ${SECRET_MODES.join(" or ")}, not "${raw}"` };
+}
+/** A typographic quote or a guillemet closes with its partner; the straight quotes and the backtick with themselves (third review pass: pass 2's extension knew `"` and `'`, and a value in curly quotes still sent its tail). */
+const QUOTE_CLOSE = { "‘": "’", "“": "”", "«": "»" };
+/** The reasons whose span is KEY MATERIAL — what a block of base64 lines is made of. */
+const KEY_MATERIAL = new Set(["high-entropy token", "private key block", "64-hex token (a raw key, or a digest out of its context)"]);
+/**
+ * A whitespace-delimited run that reads as a line of a key block: base64
+ * characters alone, thirty-two or more (or four or more ending in `=`, a
+ * block's padded last line), with a digit or both cases, and not word-shaped
+ * — a long word or a camel-case identifier beside a token is not key material.
+ */
+const blockLine = (run) => /^[A-Za-z0-9+/=]+$/.test(run) && (run.length >= 32 || (run.length >= 4 && run.endsWith("="))) && (/[0-9]/.test(run) || (/[a-z]/.test(run) && /[A-Z]/.test(run))) && (run.match(/[a-z]{3,}/g) ?? []).join("").length / run.length < 0.6;
+/**
+ * A run that is contiguous key material — base64 characters alone, four or
+ * more, with a digit or both cases. NO word-shape guard (fifth review pass): a
+ * real key line can read word-shaped by chance, and a run adjacent to a
+ * CONFIRMED block line is key material whatever its shape — contiguity beats
+ * the per-run heuristic, and the coarse backstop must not share the detector's
+ * word-shape blind spot. Taken only once a full block line is in hand, so a
+ * lone word is never absorbed.
+ */
+const contiguousKey = (run) => run.length >= 4 && /^[A-Za-z0-9+/=]+$/.test(run) && (/[0-9]/.test(run) || (/[a-z]/.test(run) && /[A-Z]/.test(run)));
+/**
+ * A key-material span grown over the block it sits in. The hit's own
+ * whitespace-run is re-taken when it reads as a block line — the `/tail`
+ * `tokenSpan` left out of a bare token to spare a path — then the runs on
+ * either side that read as block lines, and one short base64 run at each end.
+ * A block of base64 — a PEM body, PGP armor, a wrapped blob — was blanked run
+ * by run, and a `/` at the span's edge (base64 carries `/`, which the token
+ * class leaves out) stopped the growth, so an interior line with no run of
+ * thirty-two, or a short trailing line, went out verbatim, the second scan
+ * clean, where the episode used to be refused (third and fourth review
+ * passes). A run that is not a block line — a token in a path or a sentence, a
+ * `NAME=value` — keeps its tight span; a block split by such a run leaves key
+ * material the growth cannot reach; a span that ends up crossing a newline is
+ * a multi-line blob the caller REFUSES (SMD-2127 scope call), so the block need
+ * not be blanked precisely — only detected.
+ */
+function growBlock(text, at, end) {
+  const runStart = (i) => { let j = i; while (j > 0 && !/\s/.test(text[j - 1])) j--; return j; };
+  const runEnd = (i) => { let j = i; while (j < text.length && !/\s/.test(text[j])) j++; return j; };
+  let anchored = false;
+  {
+    // The hit's own LINE, snapped to only when it is a single block-shaped run
+    // — a wrapped blob's line, its `/tail` included — never a path or a
+    // sentence, which carry spaces or short word segments (fourth review pass:
+    // a run-boundary snap swallowed `/Users/.../` and a trailing `/HEAD`).
+    const ls = text.lastIndexOf("\n", at - 1) + 1;
+    let le = text.indexOf("\n", end); if (le === -1) le = text.length;
+    const line = text.slice(ls, le), trimmed = line.trim();
+    if (trimmed && !/\s/.test(trimmed) && blockLine(trimmed)) { at = ls + (line.length - line.trimStart().length); end = at + trimmed.length; anchored = true; }
+  }
+  const grow = (up) => {
+    let full = anchored;
+    for (;;) {
+      const ws = up ? /\s+$/.exec(text.slice(0, at)) : /^\s+/.exec(text.slice(end));
+      if (!ws) break;
+      const s = up ? runStart(at - ws[0].length) : end + ws[0].length;
+      const e = up ? at - ws[0].length : runEnd(end + ws[0].length);
+      const run = text.slice(s, e);
+      if (blockLine(run)) { if (up) at = s; else end = e; full = true; continue; }
+      if (full && contiguousKey(run)) { if (up) at = s; else end = e; continue; }
+      break;
+    }
+  };
+  grow(true); grow(false);
+  return [at, end];
+}
+/** The marker a span becomes: what kind of thing was there — never how long, never what. */
+export const redactionMarker = (reasons) => `[redacted:${reasons.join(", ")}]`;
+/**
+ * Every span the scan finds, blanked in place. Overlapping and adjacent spans
+ * are ONE — the live case was a credential assignment, a linear key and a
+ * high-entropy token at one site — sorted by start and replaced RIGHT TO LEFT,
+ * so an earlier offset stays true after a later span has changed the length.
+ * Returns { text, spans, blocks }: `spans` are the single-line redactions taken,
+ * each its reasons and its offset in the text returned (where its marker sits);
+ * `blocks` are the spans that cross a newline — a multi-line key blob the caller
+ * refuses rather than trust a precise blanking (SMD-2127). Nothing of the match.
+ */
+export function redactSecrets(text) {
+  const spans = [];
+  // Key material grown over its block first (third review pass). Growth never
+  // reorders: findings come sorted by start; a key-material span grows left
+  // only over base64 block lines, and any earlier finding in that block is key
+  // material too and grows to the same block start, while a named hit's
+  // `name=value` run is not a block line and stops the growth — so the array
+  // stays sorted for the coalescing below.
+  const found = scanForSecrets(text, { every: true }).map((f) => { if (!KEY_MATERIAL.has(f.reason)) return f; const [at, end] = growBlock(text, f.at, f.end); return { ...f, at, end }; });
+  for (const f of found) {
+    const last = spans[spans.length - 1];
+    if (last && f.at <= last.end) { last.end = Math.max(last.end, f.end); if (!last.reasons.includes(f.reason)) last.reasons.push(f.reason); continue; }
+    spans.push({ reasons: [f.reason], at: f.at, end: f.end });
+  }
+  // A span crossing a newline is MULTI-LINE key material — a pasted key block.
+  // The scope call (SMD-2127): a blob is REFUSED, not redacted, since a precise
+  // blanking of a block leaked over four review passes (a fragment the second
+  // scan could not see); only a secret confined to one line is blanked and
+  // sent. Marked before the offsets shift; the span is blanked here too (so the
+  // text a bug might still send is best-effort clean), but a block makes the
+  // caller refuse.
+  for (const span of spans) span.multiline = text.slice(span.at, span.end).includes("\n");
+  let out = text;
+  for (let i = spans.length - 1; i >= 0; i--) out = out.slice(0, spans[i].at) + redactionMarker(spans[i].reasons) + out.slice(spans[i].end);
+  // The spans as they sit in the text RETURNED — each marker's place, where a
+  // reader of the blanked text looks — an earlier marker having moved every
+  // later one (second review pass: the offsets were the input's).
+  let delta = 0;
+  for (const span of spans) { const taken = span.end - span.at; span.at += delta; span.end = span.at + redactionMarker(span.reasons).length; delta += span.end - span.at - taken; }
+  return { text: out, spans: spans.filter((x) => !x.multiline), blocks: spans.filter((x) => x.multiline) };
+}
+/**
+ * An episode with its secrets blanked and its summary rendered from the
+ * blanked sources — the prompts one by one, the outcome and the title, the
+ * sources scanSummary reads whole — so a key a clip would cut in half is
+ * blanked before the clip; then the rendered text once more, for what reaches
+ * it from elsewhere (a path, a link). The episode given is not changed.
+ * `redactions` names each span taken — its reasons, its offset in the source
+ * it sat in — for the payload, the message and the log.
+ */
+export function redactEpisode(ep) {
+  const redactions = [];
+  const blocks = [];
+  // A pasted key blob is found on the RAW sources: the summary flattens a
+  // prompt's newlines (oneLine), so a multi-line block must be seen before that
+  // — a key-material span crossing a newline is a blob the caller refuses
+  // (SMD-2127 scope call). The blanking below runs on the flattened summary.
+  const addBlocks = (raw, place) => { if (typeof raw === "string" && raw) for (const b of redactSecrets(raw).blocks) blocks.push({ reason: b.reasons.join(", "), in: place }); };
+  for (const p of ep.prompts) addBlocks(p, "a prompt");
+  addBlocks(ep.outcome, "the outcome");
+  addBlocks(ep.title, "the title");
+  const take = (text, place) => {
+    if (typeof text !== "string" || !text) return text;
+    const r = redactSecrets(text);
+    for (const sp of r.spans) redactions.push({ reason: sp.reasons.join(", "), at: sp.at, in: place });
+    return r.text;
+  };
+  // The DISTINCT prompts, as the summary lists them: a retried prompt is one
+  // line in the text and one redaction in the count.
+  const redacted = { ...ep, prompts: distinctPrompts(ep.prompts).map((p, i) => take(p, promptLabel(i))), outcome: take(ep.outcome, "the outcome"), title: take(ep.title, "the title") };
+  const text = take(renderSummary(redacted), "the text");
+  return { ep: redacted, text, redactions, blocks };
+}
+/** The episode's summary as it would be sent under a mode: blanked and re-rendered, or as rendered. */
+export function cleanEpisode(ep, onSecret) {
+  return onSecret === "redact" ? redactEpisode(ep) : { ep, text: renderSummary(ep), redactions: [], blocks: [] };
+}
+/**
+ * The gate over a cleaned episode, whatever the mode: any MULTI-LINE key block
+ * — a pasted key blob the scope call refuses rather than redacts (SMD-2127) —
+ * and the single-line secrets the scan still sees in the blanked sources and
+ * the text (the net under the redaction). Returns a phrase per finding for the
+ * refusal message; empty means the summary may be sent.
+ */
+export function gateFindings(cleaned, text) {
+  const where = (cleaned.blocks ?? []).map((b) => `a multi-line key block (${b.reason}) in ${b.in}`);
+  for (const f of scanSummary(cleaned.ep, text)) where.push(`${f.reason} at char ${f.at}`);
+  return where;
+}
+/**
+ * `<reason> at char N in <source>` per span, for the message, the log and the
+ * dry run — one entry per reason and source, its offsets listed to three and
+ * counted past that, eight entries then a count (first review pass: a password
+ * in each of thirty prompts was thirty identical entries and a 1.4 KB line).
+ * The offset is into the prompt, the outcome or the title named — `--dry-run`
+ * prints each — or into the text as rendered.
+ */
+export function describeRedactions(rs) {
+  const groups = new Map();
+  for (const r of rs) { const k = `${r.reason}\u0000${r.in}`; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r.at); }
+  const entries = [...groups].map(([k, ats]) => { const [reason, place] = k.split("\u0000"); return `${reason} at char${ats.length === 1 ? "" : "s"} ${ats.slice(0, 3).join(", ")}${ats.length > 3 ? ` and ${ats.length - 3} more` : ""} in ${place}`; });
+  return entries.slice(0, 8).join("; ") + (entries.length > 8 ? `; and ${entries.length - 8} more` : "");
+}
+const countRedactions = (n) => `${n} redaction${n === 1 ? "" : "s"}`;
 
 // ── Posting over MCP ─────────────────────────────────────────────────────────
 
@@ -1258,7 +1541,8 @@ export const RUN_MAX = 5;
  * prints the message and exits with the code; `payloadPaths` are the payloads
  * the run's child posts, one per episode written, `payloadPath` the newest. One payload per episode whose summary changed
  * (SMD-2013): an episode captured and unchanged is skipped by fingerprint, one
- * whose summary carries a secret is refused alone — the others still post.
+ * whose summary carries a secret has it blanked (`opts.onSecret` `redact`, the
+ * default) or is refused alone (`refuse`) — the others still post (SMD-2127).
  */
 let payloadSeq = 0;
 export function prepare(hook, opts = {}) {
@@ -1297,9 +1581,13 @@ export function prepare(hook, opts = {}) {
   if (typeof hook.cwd === "string" && hook.cwd) { for (const x of [s, last]) { x.cwd = hook.cwd; x.roots.add(hook.cwd); } }
   last.checkpoint = checkpointOf(hook); // a checkpoint is the open episode's; a closed one is over
   const written = [], skipped = [], refused = [];
+  const onSecret = opts.onSecret ?? "redact";
   for (const ep of episodes) {
     const chain = chainFor(ep);
-    const text = renderSummary(ep);
+    // Blanked BEFORE the fingerprint (SMD-2127): the fingerprint is of the text
+    // sent, so the same transcript is the same summary, however it was cleaned.
+    const cleaned = cleanEpisode(ep, onSecret);
+    const { text, redactions } = cleaned;
     const fingerprint = sha256(text);
     const state = states.get(chain);
     if (state.fingerprint === fingerprint) { skipped.push({ ep, as: state.thought_id }); continue; }
@@ -1307,12 +1595,16 @@ export function prepare(hook, opts = {}) {
     // again with no new turn would queue the same summary twice, and the run
     // that drains them would dead-letter the first as "obsolete" (eleventh review pass).
     if (sessionPayloads(chain, {}, listing).some((p) => payloadOf(p)?.fingerprint === fingerprint)) { skipped.push({ ep, queued: true }); continue; }
-    const findings = scanSummary(ep, text);
-    if (findings.length) { refused.push({ ep, where: findings.map((f) => `${f.reason} at char ${f.at}`).join(", ") }); continue; }
+    // The gate, whatever the mode: a multi-line key block is refused, and under
+    // `redact` the blanked sources and text are re-scanned — the net under the
+    // redaction, so no single-line secret the scan can see is sent (SMD-2127).
+    const where = gateFindings(cleaned, text);
+    if (where.length) { refused.push({ ep, where: `${where.join(", ")}${redactions.length ? ` after ${countRedactions(redactions.length)}` : ""}` }); continue; }
     const payload = {
       session_id: sessionId, chain_id: chain, episode: ep.n, harness: s.harness, event: ep === last ? event : "", trigger: ep === last ? last.checkpoint?.trigger : undefined, text, fingerprint, // a closed episode's summary is final whatever event the run is: it carries no event, so the log says none (second review pass)
       derived_from: provenanceOf(ep), supersedes: state.thought_id || undefined,
-      prompts: distinctPrompts(ep.prompts).length, prepared_at: new Date().toISOString(), attempts: 0,
+      prompts: distinctPrompts(cleaned.ep.prompts).length, prepared_at: new Date().toISOString(), attempts: 0, // as the text counts them: two asks that differed in a secret alone are one line once blanked (first review pass)
+      ...(redactions.length ? { redactions } : {}), // what was blanked, where — the log's and the message's; absent when nothing was
     };
     // The model's input rides the payload only when the option is on AND the
     // payload is a durable one the model will actually write — not a running
@@ -1334,7 +1626,7 @@ export function prepare(hook, opts = {}) {
   }
   const one = episodes.length === 1;
   const who = `session ${sessionId}${last.checkpoint ? ` (${event}${last.checkpoint.trigger ? ` ${last.checkpoint.trigger}` : ""})` : ""}`;
-  const describe = (p) => `${p.prompts} prompt(s), ${p.derived_from.length} source id(s)${p.supersedes ? `, supersedes ${p.supersedes}` : ""}`;
+  const describe = (p) => `${p.prompts} prompt(s), ${p.derived_from.length} source id(s)${p.supersedes ? `, supersedes ${p.supersedes}` : ""}${p.redactions?.length ? `, redacted: ${describeRedactions(p.redactions)}` : ""}`;
   const sentences = [];
   if (refused.length) {
     const carrier = one ? `the summary for session ${sessionId}` : `${refused.length === 1 ? `episode ${refused[0].ep.n}` : `episodes ${refused.map((r) => r.ep.n).join(", ")}`} of session ${sessionId}`;
@@ -1813,7 +2105,7 @@ export async function postPending(cfg, own) {
         const summaryAt = Number.isNaN(pastMs(payload.prepared_at)) ? new Date().toISOString() : payload.prepared_at;
         if (!stateIsNewerNow) writeState(chain, { chain_id: chain, thought_id: id, fingerprint: payload.fingerprint, captured_at: new Date().toISOString(), summary_at: summaryAt, harness: payload.harness, prompts: payload.prompts, sources: (payload.derived_from ?? []).length });
         unlinkSync(here);
-        log(`captured ${who} harness=${payload.harness}${payload.event && payload.event !== "SessionEnd" ? ` event=${payload.event}${payload.trigger ? ` trigger=${payload.trigger}` : ""}` : ""} id=${id} sources=${(payload.derived_from ?? []).length}${payload.supersedes ? ` supersedes=${payload.supersedes}` : ""}${note ? ` note="${note}"` : ""}`);
+        log(`captured ${who} harness=${payload.harness}${payload.event && payload.event !== "SessionEnd" ? ` event=${payload.event}${payload.trigger ? ` trigger=${payload.trigger}` : ""}` : ""} id=${id} sources=${(payload.derived_from ?? []).length}${payload.supersedes ? ` supersedes=${payload.supersedes}` : ""}${payload.redactions?.length ? ` redactions=${payload.redactions.length}` : ""}${note ? ` note="${note}"` : ""}`);
         outcomes.push({ file, ok: true, id, note });
       } catch (e) {
         moveTo(here, PENDING_DIR());
@@ -1957,7 +2249,9 @@ export async function main(argv) {
   const harness = flag(args, "--harness");
   // Exit 1, not 2: on a Stop hook 2 would block the assistant's turn over a typo in the command line (seventh review pass).
   if (harness !== undefined && !HARNESSES.includes(harness)) { console.error(`--harness takes ${HARNESSES.join(" or ")}, not "${harness}" (omit it: the transcript's first line says which)`); return 1; }
+  const { mode: onSecret, error: modeError } = secretMode(); // judged where it is read: --check, --dry-run, the hook (SMD-2127)
   if (has(args, "--print-hook")) {
+    if (modeError) { console.error(modeError); return 2; } // a by-hand form, exit 2 as on a bad flag (first review pass: the one path that let a typo by)
     const h = flag(args, "--print-hook") || "claude-code";
     if (!HARNESSES.includes(h)) { console.error(`--print-hook takes ${HARNESSES.join(" or ")}, not "${h}"`); return 2; }
     const { event, error } = eventFlag(args); // absent: the harness's default events
@@ -1981,13 +2275,14 @@ export async function main(argv) {
   }
   if (has(args, "--check")) {
     let cfg;
+    if (modeError) { console.error(`session-capture: ${modeError}`); return 1; } // before the config: a missing config must not hide the typo (first review pass)
     try { cfg = loadConfig(); } catch (e) { console.error(`session-capture: ${e.message}`); return 2; }
     let tools;
     try { tools = ((await rpc(cfg, "tools/list", {}, 15_000)).tools ?? []).map((t) => t.name).sort(); } catch (e) { console.error(`session-capture: ${cfg.url} did not answer tools/list — ${e.message}`); return 1; }
     // The summary mode, and whether a configured model would run — read from the
     // config, the model endpoint not called (SMD-2014).
     if (cfg.summary === "model") console.log(modelStatusLine(cfg));
-    if (tools.join() === "capture_thought") { console.log(`ok: ${cfg.url} answers, and the key sees capture_thought alone (capture scope). State: ${STATE_DIR}`); return 0; }
+    if (tools.join() === "capture_thought") { console.log(`ok: ${cfg.url} answers, and the key sees capture_thought alone (capture scope). On a secret: ${onSecret}. State: ${STATE_DIR}`); return 0; }
     if (!tools.includes("capture_thought")) { console.error(`session-capture: the key cannot capture — its surface is [${tools.join(", ")}]. Mint one with: bun server-portable/keygen.ts --name session-hook --scope capture`); return 1; }
     console.error(`warning: the key can capture, and it can also ${tools.filter((t) => t !== "capture_thought").join(", ")} — a leak of this file reads your brain. Prefer a capture-scoped key: bun server-portable/keygen.ts --name session-hook --scope capture`);
     return 0;
@@ -2006,6 +2301,7 @@ export async function main(argv) {
     const { trigger, error: triggerError } = triggerFlag(args, ev);
     if (triggerError) { console.error(triggerError); return 2; }
     if (has(args, "--min-interval")) { console.error("--min-interval is --print-hook's, for a Stop hook; a dry run has no interval"); return 2; }
+    if (modeError) { console.error(modeError); return 2; }
     // With the model summary on, say so and that a dry run does NOT call it: the
     // texts below are the DERIVED summaries — what the model is given, and what
     // is sent if the call is refused, slow or unconfigured (SMD-2014). Tolerant
@@ -2030,13 +2326,16 @@ export async function main(argv) {
     }
     let code = 0;
     for (const ep of s.episodes) {
-      const text = renderSummary(ep);
-      const findings = scanSummary(ep, text);
+      const cleaned = cleanEpisode(ep, onSecret);
+      const { text, redactions } = cleaned;
+      const where = gateFindings(cleaned, text);
       const ids = provenanceOf(ep);
       if (several) console.log(`\n=== episode ${ep.n} ===`);
       console.log(text);
       console.log(`\n--- would send${several ? ` (episode ${ep.n})` : ""}: source=${s.harness}, derived_from=${ids.length} id(s)${ids.length ? ` [${ids.slice(0, 5).join(", ")}${ids.length > 5 ? ", …" : ""}]` : ""}`);
-      if (findings.length) { console.log(`--- would REFUSE${several ? ` episode ${ep.n}` : ""}: ${findings.map((f) => `${f.reason} at char ${f.at}`).join(", ")}`); code = 1; } else console.log("--- secret scan: clean");
+      if (where.length) { console.log(`--- would REFUSE${several ? ` episode ${ep.n}` : ""}: ${where.join(", ")}${redactions.length ? ` after ${countRedactions(redactions.length)}` : ""}`); code = 1; }
+      else if (redactions.length) console.log(`--- secret scan: ${countRedactions(redactions.length)} — ${describeRedactions(redactions)}; the text above is what would be sent`);
+      else console.log("--- secret scan: clean");
     }
     return code;
   }
@@ -2072,6 +2371,8 @@ export async function main(argv) {
   }
   const { minInterval: hookInterval, error: intervalError, raw: intervalRaw } = intervalFlag(args, { aboveZero: false });
   if (intervalError) { log(`error: --min-interval "${intervalRaw}" is not a number of minutes`); console.error(`session-capture: ${intervalError}; nothing captured`); return 1; }
+  // Exit 1, as the flags above: a typo in the environment blocks nothing and captures nothing (SMD-2127).
+  if (modeError) { log(`error: ${modeError}`); console.error(`session-capture: ${modeError}; nothing captured`); return 1; }
   const minIntervalMin = hookInterval ?? 0;
   // The config is checked FIRST, before a payload exists: a hook pasted before
   // the config is written would otherwise queue one payload per session end
@@ -2080,7 +2381,7 @@ export async function main(argv) {
   let cfg;
   try { cfg = loadConfig(); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 1; }
   let prepared;
-  try { prepared = prepare(hook, { minIntervalMin, harness, summary: cfg.summary }); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 1; }
+  try { prepared = prepare(hook, { minIntervalMin, harness, onSecret, summary: cfg.summary }); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 1; }
   // A refused episode exits 1 once the others are on their way (SMD-2013): the
   // secret's episode is not sent, the rest of the session still is.
   const paths = prepared.payloadPaths ?? [];

@@ -19,7 +19,10 @@
  * Resolution — deciding whether two names are one entity — is NOT here. It is
  * `normalize_entity_name()` in migration 016, applied by
  * `record_thought_entities`, so the database is the one definition and this
- * module passes names through as the model gave them.
+ * module passes names through as the model gave them. So is the name gate
+ * (SMD-1935): migration 056's `entity_type_gate()` refuses a number or a type
+ * word and retypes an identifier-shaped person or place when the answer is
+ * written; entity-gate.ts is its twin for the writers that never reach it.
  *
  * ── Long thoughts are extracted in windows (SMD-1879) ───────────────────────
  * Until SMD-1879 a thought went to the model in ONE call, cut at 8,000
@@ -63,14 +66,11 @@ export const ENTITY_TYPES = ["person", "organization", "project", "tool", "topic
 export type EntityType = (typeof ENTITY_TYPES)[number];
 
 /**
- * SMD-1935's noise, as a POSIX pattern over `normalized_name`: the extractor
- * mints bare migration and port numbers as `person`/`tool`/`project` rows.
- * Digits, then any run of digits, dots, colons and spaces — "021", "11434",
- * "127.0.0.1", "10 000"; "pg16" and "smd 1938" have letters and stay. A
- * read-side rule every reader of the graph can share (db/graph-centrality.ts
- * first) until that ticket refuses such names at record_thought_entities.
+ * SMD-1935's numeric rule, defined in entity-gate.ts beside the rest of the
+ * gate migration 056 applies at record_thought_entities; re-exported for the
+ * readers that imported it from here.
  */
-export const NUMERIC_NAME_RE = "^[0-9][0-9 .:]*$";
+export { NUMERIC_NAME_RE } from "./entity-gate.ts";
 
 export const RELATIONS = ["works_on", "uses", "member_of", "located_in", "depends_on", "related_to", "co_occurs_with"] as const;
 export type Relation = (typeof RELATIONS)[number];

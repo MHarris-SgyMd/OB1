@@ -1,0 +1,73 @@
+# n8n beside a throwaway brain (SMD-1863). An overlay on deploy/compose.yaml:
+#
+#   bun evals/eval-orchestration.ts --up n8n     # writes .env, starts, provisions over the public API
+#
+# Paths below are relative to deploy/, the first -f file's directory, as
+# compose resolves every file's paths. The candidate's state lives in its own
+# database on the brain's Postgres server, owned by its own login role — not a
+# superuser, no grant on `openbrain` — which is the share-a-server shape the
+# ADR weighs against a server of its own.
+
+services:
+  orch-db:
+    image: pgvector/pgvector:0.8.6-pg16
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      ORCH_DB_PASSWORD: ${ORCH_DB_PASSWORD}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        psql -v ON_ERROR_STOP=1 -d openbrain <<'SQL'
+        \getenv pw ORCH_DB_PASSWORD
+        SELECT format('CREATE ROLE orch LOGIN PASSWORD %L', :'pw') WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'orch') \gexec
+        SELECT 'CREATE DATABASE orchestration OWNER orch' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'orchestration') \gexec
+        REVOKE CONNECT ON DATABASE openbrain FROM PUBLIC;
+        SQL
+    restart: "no"
+
+  n8n:
+    image: docker.io/n8nio/n8n:2.40.6
+    depends_on:
+      orch-db:
+        condition: service_completed_successfully
+      server:
+        condition: service_started
+    ports:
+      - "127.0.0.1:5678:5678"
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_DATABASE: orchestration
+      DB_POSTGRESDB_USER: orch
+      DB_POSTGRESDB_PASSWORD: ${ORCH_DB_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${ORCH_ENCRYPTION_KEY}
+      # Loopback over plain HTTP: the session cookie cannot be Secure here.
+      N8N_SECURE_COOKIE: "false"
+      N8N_HOST: 127.0.0.1
+      WEBHOOK_URL: http://127.0.0.1:5678/
+      GENERIC_TIMEZONE: UTC
+      # n8n's documented switches for usage diagnostics, the version check, the
+      # template gallery and the onboarding survey, each off. Set, not probed:
+      # nothing here watched what the container dials.
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_TEMPLATES_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      N8N_DIAGNOSTICS_CONFIG_FRONTEND: ""
+      N8N_DIAGNOSTICS_CONFIG_BACKEND: ""
+      # No secret in this block: the Linear key and the brain's two keys reach
+      # n8n's own encrypted credential store through the public API's
+      # POST /credentials at provisioning, and a workflow reads none of them
+      # from $env.
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"
+    volumes:
+      - n8n-data:/home/node/.n8n
+
+volumes:
+  n8n-data:

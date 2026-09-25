@@ -44,7 +44,7 @@ import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, syncIssue, t
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
-import { promote, refresh, refreshToolsReady, replayAndDiff, targetRefusal } from "./tier.ts";
+import { applyDatabaseSettings, databaseSettings, promote, refresh, refreshToolsReady, replayAndDiff, targetRefusal } from "./tier.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -2155,7 +2155,9 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   // While set, every embedding request but the run's provider probe hangs, so
   // a run can be killed between recording the model and its first write.
   let frozen = false;
-  // While set, every embedding takes this long: the heartbeat run at the end.
+  // While set, every embedding but the run's provider probe takes this long:
+  // the heartbeat and thief runs at the end. Read when a request starts, so a
+  // request already asleep keeps its delay when it is cleared.
   let slowMs = 0;
   const modelsSeen = new Set<string>();
   const axisFor = (text: string) => {
@@ -2191,7 +2193,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
         tarpitOpen = false;
         await neverAnswers();
       }
-      if (slowMs > 0) await Bun.sleep(slowMs);
+      if (slowMs > 0 && input !== "reembed.ts provider probe") await Bun.sleep(slowMs);
       await Bun.sleep(10);
       const v = new Array(DIM).fill(0);
       v[axisFor(input)] = 1;
@@ -2204,6 +2206,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     return v.indexOf(1);
   };
 
+  // 42 thoughts in all, which the heartbeat run's --batch 15 is sized to.
   const shorts = Array.from({ length: 30 }, (_, i) => `short thought ${i} about topic ${i}`);
   for (const s of shorts) await sql`SELECT upsert_thought(${s}, ${{ metadata: {} }}::jsonb, ${unit(0)}::vector)`;
   await sql`SELECT upsert_thought(${long}, ${{ metadata: {} }}::jsonb, ${unit(0)}::vector)`;
@@ -2894,27 +2897,33 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   await sql`DELETE FROM thought_work_claims WHERE work_type = ${CTX_KEY}`;
 
   // The heartbeat end to end (migration 031): a batch whose work outlasts the
-  // lease, under workers that beat. Every embedding takes 600 ms, sixteen per
-  // claim, a 6 s lease with a 1 s heartbeat: a batch runs near ten seconds,
-  // and until 031 its lease expired mid-way — the rows went to the other
+  // lease, under workers that beat. Every embedding takes 600 ms, fifteen per
+  // claim, a 6 s lease with a 1 s heartbeat: a batch runs near nine seconds,
+  // and until 031 its lease expired mid-way — the rows went to another
   // worker on their second attempt, the first's releases returned false, and
   // three such batches marked rows failed. Six seconds, not three, because a
   // runner that pauses the process for two seconds must not read as a lapse —
-  // a beat is missed only when the process is, and the lease covers five — and
-  // sixteen, not eight, because eight rows fit inside six seconds and the run
-  // would then pass with renewal a no-op (third review pass). A fresh backfill
-  // key, so the pool is every thought; the recorded model is the configured
-  // one here.
+  // a beat is missed only when the process is, and the lease covers five.
+  // Three workers over the 42 thoughts claim 15, 15 and 12 at once, one round
+  // (SMD-2135; two workers of sixteen, SMD-1023's third review pass, took two
+  // rounds, some sixteen seconds). The fifteens outlast the lease — eight rows
+  // would fit inside it, and the run would pass with renewal a no-op — and the
+  // twelve finishes at about 7.4 s and claims again, reaping any lease past its
+  // 6 s deadline, so a beat that renewed nothing hands it the others' last
+  // rows on their second attempt. Fifteen is the batch with margin both ways
+  // for 42 thoughts: 14 ends all three together, 16 leaves ten rows that end
+  // at 6.1 s. A fresh backfill key, so the pool is every thought; the recorded
+  // model is the configured one here.
   slowMs = 600;
   const SLOW_KEY = `reembed:stub-embed@${DIM}:slow`;
-  const slow = await reembed("--job", SLOW_KEY, "--workers", "2", "--batch", "16", "--ttl", "6", "--heartbeat", "1");
+  const slow = await reembed("--job", SLOW_KEY, "--workers", "3", "--batch", "15", "--ttl", "6", "--heartbeat", "1");
   slowMs = 0;
-  assert(slow.code === 0 && /42 re-embedded, 0 failed/.test(slow.out) && /16 per claim, 6 s leases renewed every 1 s/.test(slow.out),
-    `two workers re-embed every thought in batches that outlast the lease, and nothing is repeated (exit ${slow.code}: ${slow.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
+  assert(slow.code === 0 && /42 re-embedded, 0 failed/.test(slow.out) && /15 per claim, 6 s leases renewed every 1 s/.test(slow.out),
+    `three workers re-embed every thought in batches that outlast the lease, and nothing is repeated (exit ${slow.code}: ${slow.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
   assert(!/attempt 2/.test(slow.out) && !/no longer this worker's at release/.test(slow.out) && !/no longer this worker's/.test(slow.out) && !/heartbeat failed/.test(slow.out),
     "…no row reached a second worker, no release found its lease gone, none was lost, every beat answered");
   const slowBeats = Number(/, (\d+) heartbeat\(s\)/.exec(slow.out)?.[1] ?? 0);
-  assert(slowBeats >= 10, `…and the summary counts the beats that kept them — two workers, one a second, over some fifteen seconds (${slowBeats})`);
+  assert(slowBeats >= 10, `…and the summary counts the beats that kept them — three workers, one a second, over some nine seconds (${slowBeats})`);
   const slowRows = (await sql`SELECT status, attempt_count::int AS attempts FROM thought_work_claims WHERE work_type = ${SLOW_KEY}`) as { status: string; attempts: number }[];
   assert(slowRows.length === 42 && slowRows.every((r) => r.status === "succeeded" && r.attempts === 1),
     `…and every claim row succeeded on its first attempt (${slowRows.filter((r) => r.attempts !== 1 || r.status !== "succeeded").length} otherwise)`);
@@ -2922,11 +2931,17 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
 
   // A lease taken from under a running worker: the batch a one-worker run
   // holds is re-assigned by hand to a holder whose lease is far ahead — what
-  // another worker's claim after a reap does to it. The row in hand learns it at
-  // release; the rest at a beat or at their release (which, depends on the
-  // 1 s beat against 610 ms rows, and is not asserted). Every stolen row is
-  // counted lost and none finished, the worker finishes the rest, and the run
-  // says the rows are still leased; --status names the thief.
+  // another worker's claim after a reap does to it. Every stolen row is counted
+  // lost and none finished, the worker finishes the rest, and the run says the
+  // rows are still leased; --status names the thief. The stub is slow only
+  // until the theft lands, and the rows after it run at full speed — at 610 ms
+  // each, one worker's pass was some 25 s of the section (SMD-2135). The slow
+  // first batch is what makes the theft land inside it, a 100 ms poll against
+  // a 610 ms row. The row in hand's release is refused because release_thought
+  // matches the holder, and the other stolen rows, fast now, are all released
+  // before the worker's first 1 s beat — so every one learns it at release,
+  // and no run here reaches reembed.ts's lost-at-beat skip, which nothing
+  // asserted before either (SMD-2190).
   slowMs = 600;
   const THIEF_KEY = `reembed:stub-embed@${DIM}:thief`;
   const thiefRun = reembed("--job", THIEF_KEY, "--workers", "1", "--batch", "4", "--ttl", "6", "--heartbeat", "1");
@@ -2937,8 +2952,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     // next claim would reap the rows back after 6 s and finish them itself.
     stolen = (await sql`UPDATE thought_work_claims SET worker_id = 'thief', ttl_expires_at = now() + interval '10 minutes' WHERE work_type = ${THIEF_KEY} AND status = 'claimed' RETURNING thought_id`) as { thought_id: string }[];
   }
-  const theft = await thiefRun;
   slowMs = 0;
+  const theft = await thiefRun;
   assert(stolen.length >= 1 && stolen.length <= 4, `the thief takes the batch a running worker holds (${stolen.length} rows)`);
   assert(theft.code === 1 && new RegExp(`${42 - stolen.length} re-embedded, 0 failed, 0 deleted mid-pass, ${stolen.length} no longer this worker's when checked`).test(theft.out) && new RegExp(`${stolen.length} row\\(s\\) are still leased`).test(theft.out),
     `…the worker finishes the rest, counts exactly the stolen rows as no longer its own, none as finished, and exits 1 naming them as still leased (exit ${theft.code}: ${theft.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
@@ -4579,6 +4594,52 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
       process.env.PATH = savedPath;
       rmSync(shimDir, { recursive: true, force: true });
       await sql.unsafe(`DROP DATABASE IF EXISTS ${shimDb} WITH (FORCE)`);
+    }
+
+    // The settings a refresh copies (SMD-2037): pg_dump leaves out what
+    // ALTER DATABASE … SET put on the source (014's HNSW bounds), so refresh
+    // writes them onto --to itself. Two scratch databases: the source with
+    // 014's two bounds, a list setting with quoting to survive, a value with a
+    // quote in it, an empty list, and a mark of its own; the target with a
+    // setting the source lacks and its own mark.
+    const setSrc = "ob1_tier_settings_src", setDst = "ob1_tier_settings_dst";
+    const urlOf = (db: string) => { const u = new URL(URL_!); u.pathname = `/${db}`; return u.toString(); };
+    for (const db of [setSrc, setDst]) { await sql.unsafe(`DROP DATABASE IF EXISTS ${db}`); await sql.unsafe(`CREATE DATABASE ${db}`); }
+    try {
+      for (const db of [setSrc, setDst]) {
+        const s = new SQL({ url: urlOf(db), max: 1 });
+        try { await s`CREATE EXTENSION IF NOT EXISTS vector`; } finally { await s.close(); }
+      }
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET hnsw.max_scan_tuples = 100000`);
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET hnsw.scan_mem_multiplier = 8`);
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET search_path = "$user", public, "Odd ""Schema"", with comma"`);
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET statement_timeout = '5min'`);
+      // A value with a quote in it, and a list setting set to the empty list.
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET application_name = 'o''brien'`);
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET temp_tablespaces = ''`);
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET ob1.refresh_target = 'canary'`);
+      await sql.unsafe(`ALTER DATABASE ${setDst} SET work_mem = '7MB'`);
+      await sql.unsafe(`ALTER DATABASE ${setDst} SET ob1.refresh_target = 'working'`);
+      const rawOf = async (db: string) => { const s = new SQL({ url: urlOf(db), max: 1 }); try { return parseSetConfig((await s.unsafe(DB_LEVEL_SETTINGS_SQL))[0]?.cfg); } finally { await s.close(); } };
+      const srcSql = new SQL({ url: urlOf(setSrc), max: 1 }), dstSql = new SQL({ url: urlOf(setDst), max: 1 });
+      try {
+        const copied = await databaseSettings(srcSql);
+        assert(!("ob1.refresh_target" in copied) && copied["hnsw.max_scan_tuples"] === "100000", `the source's settings are read without its mark (${JSON.stringify(copied)})`);
+        await applyDatabaseSettings(dstSql, copied);
+      } finally { await srcSql.close(); await dstSql.close(); }
+      const [src, dst] = [await rawOf(setSrc), await rawOf(setDst)];
+      const { ["ob1.refresh_target"]: srcMark, ...srcRest } = src;
+      const { ["ob1.refresh_target"]: dstMark, ...dstRest } = dst;
+      assert(JSON.stringify(Object.entries(dstRest).sort()) === JSON.stringify(Object.entries(srcRest).sort()), `the target's database settings now equal the source's, byte for byte — the list setting's quoting included (source ${JSON.stringify(srcRest)}, target ${JSON.stringify(dstRest)})`);
+      assert(!("work_mem" in dst), "a setting the target had and the source lacks is reset");
+      assert(srcMark === "canary" && dstMark === "working", `each keeps its own refresh mark — the source's does not travel (source ${srcMark}, target ${dstMark})`);
+      const fresh = new SQL({ url: urlOf(setDst), max: 1 });
+      try {
+        const [{ tuples }] = await fresh<{ tuples: string }[]>`SELECT current_setting('hnsw.max_scan_tuples') AS tuples FROM (SELECT '[1]'::vector) v`;
+        assert(tuples === "100000", `a new session on the target runs with the source's HNSW bound (got ${tuples})`);
+      } finally { await fresh.close(); }
+    } finally {
+      for (const db of [setSrc, setDst]) await sql.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
     }
 
     // promote's mirror of the same-database guard, the URL respelled.
