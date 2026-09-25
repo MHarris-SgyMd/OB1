@@ -133,6 +133,9 @@ const FUNCTIONS = [
   "record_thought_source(uuid, text, text, text, text, text, boolean)",
   "source_thought(text, text)",
   "record_source_links(uuid, text, jsonb)",
+  // 056 (SMD-1935); record_thought_entities is 016's name.
+  "entity_type_gate(text, text)",
+  "apply_entity_type_gate()",
   "consolidation_pool(text)",
   "stale_entities(interval, int)",
   // 032 (SMD-1323)

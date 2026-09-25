@@ -75,6 +75,7 @@ import {
 } from "./graph-centrality.ts";
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { ENTITY_TYPES, NUMERIC_NAME_RE, RELATIONS } from "../server-portable/entities.ts";
+import { ENTITY_VOCABULARY, entityTypeGate, IDENTIFIER_SHAPES, normalizeEntityName } from "../server-portable/entity-gate.ts";
 import { linearAdapter, SAMPLE_ISSUE } from "./ingest-linear.ts";
 import { LINK_RELATIONS } from "./ingest-contract.ts";
 
@@ -5044,7 +5045,8 @@ console.log("\n[41] Migration 042: a cited source is refused as a value and deta
   const again = await q<{ tgname: string }>(`SELECT tgname FROM pg_trigger WHERE NOT tgisinternal AND tgname IN ('thoughts_guard_citation_sources', 'thought_facets_validate')`);
   assert(again.length === 2 && (await functionsNamed("delete_thought")) === 1 && before > 0 && (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_facets`)).c === before, `042 re-applied twice leaves two triggers, one delete_thought and every facet row (${before})`);
   // 042's file put 042's validator back; the shipped one is 053's (the `link` kind) — restored for the sections after.
-  await restoreShipped("thought_facets_validate");
+  // 053's file also defines record_thought_entities, whose shipped body is 056's (SMD-1935), so both are named.
+  await restoreShipped("thought_facets_validate", "record_thought_entities");
   // A reset of the whole table: every citing thought goes with its source, so nothing survives and the statement is clean.
   await db.exec(`DELETE FROM thoughts`);
   assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_facets`)).c === 0, "DELETE FROM thoughts with citations among the rows is clean — nothing survives to rest on nothing — and the facets cascade");
@@ -5557,6 +5559,10 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`);
   await db.exec(`SELECT prune_orphan_entities()`);
+  // The read-side numeric rule serves a brain from before 056, whose writer
+  // stored numeric names; 053's writer is that brain's, so the fixture below
+  // can hold one. 056's is restored at the end of the section (SMD-1935).
+  await reapply("053");
   const KEY = "extract:stub@p1";
   const run: Runner = async (text, params) => (await db.query<Record<string, unknown>>(text, params)).rows;
   const thought = async (content: string) =>
@@ -6042,6 +6048,8 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   assert((await resolveSubject(run, "twentyfirst", keep)).how === "alias", "…and kept, the alias rung finds it");
   await db.query(`DELETE FROM thoughts WHERE id = $1`, [t13]);
   await db.query(`UPDATE ob1_entities SET aliases = '{}' WHERE id = $1`, [NUM]);
+  // The shipped writer back for the sections after, and with it 056's pass over what this one wrote.
+  await restoreShipped("record_thought_entities");
 }
 
 console.log("\n[45] Migration 049: the agent registry records a capture-only key's scope, and the CHECK still refuses a scope the server does not mint (SMD-1298)");
@@ -6517,7 +6525,7 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   const idx = (await q<{ n: string }>(`SELECT indexname AS n FROM pg_indexes WHERE tablename = 'thought_facets' AND indexname LIKE 'thought_facets_link%' ORDER BY 1`)).map((x) => x.n);
   assert(idx.join(",") === "thought_facets_link_active_uniq,thought_facets_link_target_idx", `the active-link unique index and the target probe exist (${idx.join(",")})`);
   const rteSrc = await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)");
-  assert(lastDefinerOf("record_thought_entities").startsWith("053") && /ob1:structured-wins/.test(rteSrc), "053 is the last definer of record_thought_entities and its body carries the structured-wins sentinel");
+  assert(lastDefinerOf("record_thought_entities").startsWith("056") && /ob1:structured-wins/.test(rteSrc), "053's record_thought_entities carries the structured-wins sentinel, and 056, its last definer, keeps it ([51])");
   const validatorSrc = await src("thought_facets_validate()");
   assert(lastDefinerOf("thought_facets_validate").startsWith("053") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel");
   assert(/CASE WHEN v_structured THEN extraction_key = p_extraction_key ELSE extraction_key NOT LIKE 'source:%' END/.test(rteSrc) && (rteSrc.match(/WHERE (?:thought_entities|ob1_entity_edges)\.extraction_key NOT LIKE 'source:%'/g) ?? []).length === 2,
@@ -6663,7 +6671,7 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
 
   // Re-applying 053 lands the same shape and the rows stand.
   await reapply("053");
-  assert((await links(t1)).length === 3 && (await q(`SELECT 1 FROM thought_sources WHERE thought_id = $1::uuid`, [t1])).length === 1 && lastDefinerOf("record_thought_entities").startsWith("053"), "re-applying 053 keeps every row and every definition");
+  assert((await links(t1)).length === 3 && (await q(`SELECT 1 FROM thought_sources WHERE thought_id = $1::uuid`, [t1])).length === 1 && /ob1:structured-wins/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)")), "re-applying 053 keeps every row and every definition");
 
   // The takeover (first review pass): the board sync's head row for a ticket
   // moves when an older paste becomes the chain's head, so the identity must
@@ -6717,6 +6725,8 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   assert(((await one<{ r: J }>(`SELECT record_source_links($1::uuid, 'markdown', '[]'::jsonb) AS r`, [tC])).r).closed === 1, "…and the legitimate close still takes the shortcut");
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_entities`);
+  // The re-apply above put 053's writer back; the shipped one is 056's.
+  await restoreShipped("record_thought_entities");
 }
 
 console.log("\n[49] Migration 054: resolve_agent writes a key's row only when last_used_at is stale or the scope changed, and a revoked key is still refused (SMD-2090)");
@@ -6940,6 +6950,138 @@ console.log("\n[50] Every extension and recipe schema applies to a migrated brai
   const tableRead = await asRole(`SELECT 1 FROM thoughts LIMIT 0`);
   assert(viewRead.code === null && tableRead.code === "42501", `the role reads an ops view over thoughts (${viewRead.code ?? "allowed"}) without any grant on thoughts itself (${tableRead.code})`);
   await xdb.close();
+}
+
+console.log("\n[51] Migration 056: the entity name gate — a number or a type word is refused and an identifier-shaped person or place retyped, at the writer for every pass and over the rows written before it, and the JavaScript twin answers alike (SMD-1935)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  type J = Record<string, unknown>;
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT prune_orphan_entities()`);
+  const put = async (content: string) => (await one<{ id: string }>(`INSERT INTO thoughts (content, metadata, content_fingerprint) VALUES ($1, '{}'::jsonb, content_fingerprint_of($1)) RETURNING id`, [content])).id;
+  const rte = async (id: string, key: string, ents: unknown[], rels: unknown[] = []) =>
+    (await one<{ r: J }>(`SELECT record_thought_entities($1::uuid, $2, $3::jsonb, $4::jsonb, NULL, NULL) AS r`, [id, key, JSON.stringify(ents), JSON.stringify(rels)])).r;
+  const E = (name: string, type: string, confidence = 0.9, aliases?: string[]) => ({ name, type, confidence, ...(aliases ? { aliases } : {}) });
+  const R = (from: string, to: string, relation: string) => ({ from, to, relation, confidence: 0.9 });
+  const entities = async () => (await q<{ t: string; n: string }>(`SELECT entity_type AS t, name AS n FROM ob1_entities ORDER BY 1, 2`)).map((e) => `${e.t}:${e.n}`);
+  const idOf = async (type: string, nname: string) => (await one<{ id: string }>(`SELECT id FROM ob1_entities WHERE entity_type = $1 AND normalized_name = $2`, [type, nname]))?.id;
+  const mentionsOf = async (id: string) => (await q<{ t: string }>(`SELECT thought_id AS t FROM thought_entities WHERE entity_id = $1::uuid ORDER BY 1`, [id])).map((m) => m.t);
+
+  // The rule, and its twin: one answer over every probe. The unit cases are
+  // test-thoughts [10]'s; these add the spellings normalisation decides.
+  const probes: [string, string][] = [
+    ["021", "person"], ["  021  ", "tool"], ["\"021\"", "topic"], ["021.", "place"], ["#021", "project"], ["10/8", "place"], ["023/030", "person"], ["127.0.0.1:11434", "place"], ["１２３", "tool"], ["1-2", "topic"], ["10 000", "person"],
+    ["person", "topic"], ["People", "tool"], ["organisations", "project"], ["Entity", "place"], ["the person", "person"],
+    ["SMD-1804", "person"], ["SMD-1804", "place"], ["SMD-1804", "topic"], ["ＳＭＤ-１８０４", "person"], ["http://127.0.0.1:65536/v1", "place"], ["@hono/mcp", "person"], ["hono/mcp", "person"], ["siggymd/**", "place"], ["siggymd/test-*", "place"],
+    ["host.containers.internal", "place"], ["openrouter.ai", "place"], ["open-brain_default", "place"], ["localhost:11434", "place"], ["localhost.", "place"], ["a.b", "person"],
+    ["Anita", "person"], ["Nate B. Jones", "person"], ["claude-code", "person"], ["Mac mini M4 Pro", "place"], ["pg16", "tool"], ["migration 021", "topic"], ["v1.2", "tool"], ["db/README.md", "topic"], ["ob1_entities", "tool"], ["Linear", "organization"], ["x", "vegetable"],
+  ];
+  const parted: string[] = [];
+  for (const [name, type] of probes) {
+    const got = await one<{ g: string | null; n: string | null }>(`SELECT entity_type_gate($1, $2) AS g, normalize_entity_name($1) AS n`, [name, type]);
+    if (got.g !== entityTypeGate(name, type)) parted.push(`${JSON.stringify(name)} as ${type}: SQL ${got.g}, JS ${entityTypeGate(name, type)}`);
+    if (got.n !== normalizeEntityName(name)) parted.push(`normalise ${JSON.stringify(name)}: SQL ${got.n}, JS ${normalizeEntityName(name)}`);
+  }
+  assert(parted.length === 0, `entity_type_gate and entity-gate.ts answer alike, and so do the two normalisers, over ${probes.length} probes (${parted.join("; ") || "no parting"})`);
+  assert((await one<{ g: string | null }>(`SELECT entity_type_gate('021', 'person') AS g`)).g === null && (await one<{ g: string }>(`SELECT entity_type_gate('SMD-1804', 'person') AS g`)).g === "project" && (await one<{ g: string }>(`SELECT entity_type_gate('hono/mcp', 'place') AS g`)).g === "tool" && (await one<{ g: string }>(`SELECT entity_type_gate('SMD-1804', 'topic') AS g`)).g === "topic",
+    "…and the answers are the rule's: a number refused, a ticket-id person a project, a path place a tool, a topic left alone");
+  // The twin is held to the text too, so a pattern edited on one side fails
+  // even where no probe reaches the difference.
+  const gateSrc = await src("entity_type_gate(text, text)");
+  assert(IDENTIFIER_SHAPES.every((s) => gateSrc.includes(`'${s.pattern}'`)) && ENTITY_VOCABULARY.every((w) => gateSrc.includes(`'${w}'`)) && gateSrc.includes(`'${NUMERIC_NAME_RE}'`) && (gateSrc.match(/'[^']*'/g) ?? []).filter((l) => l.startsWith("'^")).length === IDENTIFIER_SHAPES.length + 1,
+    "the SQL rule spells every shape, every vocabulary word and the numeric pattern entity-gate.ts does, and no pattern beside them");
+  const fn = await one<{ v: string; s: boolean }>(`SELECT provolatile AS v, proisstrict AS s FROM pg_proc WHERE oid = 'entity_type_gate(text, text)'::regprocedure`);
+  assert(fn.v === "i" && fn.s === true, "entity_type_gate is IMMUTABLE and STRICT");
+  assert(lastDefinerOf("record_thought_entities").startsWith("056") && /ob1:name-gate/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)")) && /ob1:structured-wins/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)")),
+    "056 is the last definer of record_thought_entities, and its live body carries the name-gate sentinel beside 053's");
+  const comments = await Promise.all(["entity_type_gate(text, text)", "record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)", "apply_entity_type_gate()"].map(async (sig) => (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? ""));
+  assert(comments.every((c) => /SMD-1935/.test(c)) && /refused_entities, retyped_entities/.test(comments[1]) && /Idempotent/.test(comments[2]), "each function's comment names the ticket; the writer's lists the two new counts, the pass says it is idempotent");
+
+  // The writer. One extraction naming a migration number, a type word, a
+  // package typed as a person beside itself as a tool, a ticket id as a
+  // person, a host:port as a place and one real person.
+  const t1 = await put("Migration 021 moved hono/mcp; Anita tracked SMD-1804 on host.containers.internal:11434.");
+  const answer = [E("021", "person"), E("person", "topic"), E("hono/mcp", "person", 0.8), E("hono/mcp", "tool", 0.95), E("SMD-1804", "person"), E("Anita", "person"), E("host.containers.internal:11434", "place")];
+  const relations = [R("021", "Anita", "works_on"), R("Anita", "SMD-1804", "works_on"), R("Anita", "hono/mcp", "uses")];
+  const w1 = await rte(t1, "extract:m@p2", answer, relations);
+  const after1 = await entities();
+  assert(w1.ok === true && w1.refused_entities === 2 && w1.retyped_entities === 3 && w1.entities === 4 && w1.mentions === 4 && w1.edges === 2 && w1.dropped_relations === 1,
+    `the writer refuses 021 and "person", retypes three, writes four, and drops the relation naming 021 (${JSON.stringify(w1)})`);
+  assert(JSON.stringify(after1) === JSON.stringify(["person:Anita", "project:SMD-1804", "tool:hono/mcp", "tool:host.containers.internal:11434"]),
+    `…under the gate's types: the retyped person hono/mcp is the tool, one entity (${after1.join(", ")})`);
+  const w2 = await rte(t1, "extract:m@p2", answer, relations);
+  assert(w2.ok === true && w2.new_entities === 0 && w2.refused_entities === 2 && JSON.stringify(await entities()) === JSON.stringify(after1), "the same answer again mints nothing and re-mints no fragment: re-extraction is idempotent");
+  // A structured pass is gated as an extraction is.
+  const t2 = await put("SMD-1805, served from 127.0.0.1.");
+  const w3 = await rte(t2, "source:test", [E("127.0.0.1", "place", 1), E("SMD-1805", "person", 1)]);
+  assert(w3.ok === true && w3.refused_entities === 1 && w3.retyped_entities === 1 && (await entities()).includes("project:SMD-1805"), `a source: pass is gated too (${JSON.stringify(w3)})`);
+  assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM ob1_entities WHERE normalized_name ~ $1`, [NUMERIC_NAME_RE])).c === 0, "no entity has a numeric name");
+
+  // The rows from before the gate: 053's writer stores what 056's refuses,
+  // then apply_entity_type_gate() takes them in. hono/mcp the person merges
+  // into the tool t1 wrote; a.b the person moves to tool, and a.b the place,
+  // later, merges into that.
+  await reapply("053");
+  const t3 = await put("pre-gate: 021 and hono/mcp on Bun, a.b too");
+  const t4 = await put("pre-gate: a.b and hono/mcp, both ways");
+  const p3 = await rte(t3, "extract:m@p2", [E("021", "person"), E("hono/mcp", "person", 0.9, ["@hono/mcp"]), E("Bun", "tool"), E("a.b", "person"), E("places", "topic")],
+    [R("021", "Bun", "uses"), R("hono/mcp", "Bun", "related_to"), R("Bun", "hono/mcp", "depends_on"), R("a.b", "Bun", "uses")]);
+  const p4 = await rte(t4, "extract:m@p2", [E("a.b", "place"), E("hono/mcp", "person"), E("hono/mcp", "tool")]);
+  assert(p3.ok === true && p3.entities === 5 && p3.edges === 4 && p4.ok === true && p4.entities === 3 && !("refused_entities" in p3), `053's writer stores what the gate would refuse (${JSON.stringify(p3)})`);
+  const personHono = await idOf("person", "hono mcp");
+  const toolHono = await idOf("tool", "hono mcp");
+  await db.query(`UPDATE ob1_entities SET first_seen_at = '2020-01-01', last_seen_at = '2030-01-01' WHERE id = $1::uuid`, [personHono]);
+  // A self-edge once merged: the person joined to the tool on t4, which no writer would state.
+  const [lo, hi] = [personHono, toolHono].sort();
+  await db.query(`INSERT INTO ob1_entity_edges (thought_id, from_entity_id, to_entity_id, relation, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, $3::uuid, 'related_to', 0.9, 'extract:m@p2')`, [t4, lo, hi]);
+  // A symmetric edge whose order the merge must flip, on ids chosen so it
+  // does: Zed–person p.q stored (Zed, p.q); p.q the person merges into the
+  // tool p.q, whose id sorts before Zed's.
+  const [TOOL_PQ, ZED, PERSON_PQ] = ["00000000-0000-4000-8000-000000000001", "88888888-0000-4000-8000-000000000000", "ffffffff-0000-4000-8000-000000000000"];
+  await db.query(`INSERT INTO ob1_entities (id, entity_type, name, normalized_name) VALUES ($1::uuid, 'tool', 'p.q', 'p.q'), ($2::uuid, 'tool', 'Zed', 'zed'), ($3::uuid, 'person', 'p.q', 'p.q')`, [TOOL_PQ, ZED, PERSON_PQ]);
+  await db.query(`INSERT INTO ob1_entity_edges (thought_id, from_entity_id, to_entity_id, relation, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, $3::uuid, 'related_to', 0.9, 'extract:m@p2')`, [t4, ZED, PERSON_PQ]);
+
+  const pass = await one<{ r: J }>(`SELECT apply_entity_type_gate() AS r`);
+  assert(pass.r.ok === true && pass.r.refused_entities === 2 && pass.r.dropped_mentions === 2 && pass.r.dropped_edges === 1 && pass.r.retyped_entities === 1 && pass.r.merged_entities === 3,
+    `the pass refuses 021 and "places" (their two mentions, 021's edge), moves the person a.b and merges three (${JSON.stringify(pass.r)})`);
+  const after2 = await entities();
+  assert(!after2.some((e) => /^person:(021|hono\/mcp|a\.b)$|^topic:places$|^place:a\.b$/.test(e)) && after2.includes("tool:a.b") && after2.includes("tool:hono/mcp"), `…leaving no refused name and no identifier-shaped person or place (${after2.join(", ")})`);
+  assert(JSON.stringify(await mentionsOf(toolHono)) === JSON.stringify([t1, t3, t4].sort()), "the tool hono/mcp now holds t1's mention, the person's t3, and one t4 — the person's duplicate there dropped");
+  const toolAb = await idOf("tool", "a.b");
+  assert(JSON.stringify(await mentionsOf(toolAb)) === JSON.stringify([t3, t4].sort()), "the tool a.b holds the moved person's t3 and the merged place's t4");
+  const e3 = await q<{ relation: string; f: string; t: string }>(`SELECT relation, from_entity_id AS f, to_entity_id AS t FROM ob1_entity_edges WHERE thought_id = $1::uuid ORDER BY relation`, [t3]);
+  const bun = await idOf("tool", "bun");
+  assert(e3.length === 3 && e3.every((e) => e.f !== personHono && e.t !== personHono) && e3.some((e) => e.relation === "depends_on" && e.f === bun && e.t === toolHono) && e3.some((e) => e.relation === "uses" && e.f === toolAb && e.t === bun),
+    `t3's edges point at the survivors (${e3.map((e) => e.relation).join(",")})`);
+  const sym = e3.find((e) => e.relation === "related_to");
+  assert(sym !== undefined && sym.f < sym.t && [sym.f, sym.t].sort().join() === [bun, toolHono].sort().join(), "…a symmetric relation re-pointed in the writer's order");
+  const e4 = await q<{ f: string; t: string }>(`SELECT from_entity_id AS f, to_entity_id AS t FROM ob1_entity_edges WHERE thought_id = $1::uuid`, [t4]);
+  assert(e4.length === 1 && e4[0].f === TOOL_PQ && e4[0].t === ZED, `on t4 the person-to-tool edge, a self-edge once merged, is dropped, and Zed–p.q is flipped to (p.q, Zed) as the survivor's id sorts first (${JSON.stringify(e4)})`);
+  const hono = await one<{ aliases: string[]; f: string; l: string }>(`SELECT aliases, first_seen_at::date::text AS f, last_seen_at::date::text AS l FROM ob1_entities WHERE id = $1::uuid`, [toolHono]);
+  assert(hono.aliases.includes("@hono/mcp") && !hono.aliases.includes("hono/mcp") && hono.f === "2020-01-01" && hono.l === "2030-01-01", `the survivor keeps the merged row's aliases (its own name is no alias) and the earlier first and later last sighting (${JSON.stringify(hono)})`);
+  const again = await one<{ r: J }>(`SELECT apply_entity_type_gate() AS r`);
+  assert(again.r.refused_entities === 0 && again.r.retyped_entities === 0 && again.r.merged_entities === 0 && again.r.dropped_edges === 0, `the pass is idempotent (${JSON.stringify(again.r)})`);
+
+  // Re-applying 056 lands the gated writer again, and its own run finds nothing.
+  const before = await entities();
+  await reapply("056");
+  assert(/ob1:name-gate/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)")) && JSON.stringify(await entities()) === JSON.stringify(before), "re-applying 056 restores the gated writer and changes no row");
+
+  // The guard: a schema without 053 is refused by name, not left to fail later.
+  await db.exec(`ALTER TABLE thought_sources RENAME TO thought_sources_gone`);
+  let noSources = "";
+  try { await reapply("056"); } catch (e) { noSources = (e as Error).message; }
+  await db.exec(`ALTER TABLE thought_sources_gone RENAME TO thought_sources`);
+  assert(/migration 056 needs 053 \(thought_sources, and its record_thought_entities body\); this schema lacks it/.test(noSources), `056 on a schema without 053 refuses by name (${noSources.slice(0, 90)})`);
+  await db.exec(`ALTER TABLE ob1_entity_edges RENAME TO ob1_entity_edges_gone`);
+  let noEdges = "";
+  try { await reapply("056"); } catch (e) { noEdges = (e as Error).message; }
+  await db.exec(`ALTER TABLE ob1_entity_edges_gone RENAME TO ob1_entity_edges`);
+  assert(/migration 056 needs 016 \(ob1_entity_edges\); this schema lacks it/.test(noEdges), `…and without 016 (${noEdges.slice(0, 90)})`);
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT prune_orphan_entities()`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

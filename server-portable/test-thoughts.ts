@@ -8,7 +8,7 @@
  * JSON-RPC — per alias. Nobody was going to write seven of those, so nobody wrote
  * any, and the alias table has been shipping unverified since it was added.
  *
- * Needs no database and no provider.
+ * Needs no database and no provider ([10]'s is an in-process stub).
  *
  *   bun test-thoughts.ts
  */
@@ -21,6 +21,8 @@ import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
 import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VERSION, parseJudgement, wrapSide } from "./consolidate.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
+import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
+import { extractMetadata } from "./metadata.ts";
 
 const { assert, report } = createAssert();
 
@@ -579,6 +581,40 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   // ESC goes and the sequence's printable tail stays as text — "[2A" moves nothing without it.
   assert(cleanForDisplay("a\u001b[2A\u0000b\tc\nd\re") === "a[2Ab\tc\nd\re", "cleanForDisplay strips C0 and ESC (leaving a sequence's tail as text) and keeps tab, newline and return");
   assert(cleanForDisplay(undefined) === "" && cleanForDisplay(42) === "", "…and renders a non-string as nothing");
+}
+
+console.log("\n[10] The entity name gate (SMD-1935): a number or a type word is refused, an identifier-shaped person or place retyped, and the people facet keeps only people");
+{
+  // The rule's JavaScript twin. test-schema [51] asks Postgres the same
+  // probes and holds the two to one answer; here each rule is read alone.
+  for (const [name, type, want] of [
+    ["021", "person", null], ["11434", "place", null], ["127.0.0.1:11434", "place", null], ["10/8", "place", null], ["#42", "tool", null], ["023/030", "person", null],
+    ["person", "topic", null], ["Places", "organization", null], ["entity", "tool", null],
+    ["SMD-1804", "person", "project"], ["http://127.0.0.1:65536/v1", "place", "tool"], ["@hono/mcp", "person", "tool"], ["siggymd/**", "place", "tool"],
+    ["host.containers.internal", "place", "tool"], ["open-brain_default", "place", "tool"], ["localhost:11434", "place", "tool"],
+    ["SMD-1804", "project", "project"], ["db/README.md", "topic", "topic"], ["ob1_entities", "tool", "tool"],
+    ["Anita", "person", "person"], ["Nate B. Jones", "person", "person"], ["claude-code", "person", "person"], ["Mac mini M4 Pro", "place", "place"],
+    ["pg16", "tool", "tool"], ["migration 021", "topic", "topic"], ["  ", "person", null],
+  ] as [string, string, string | null][])
+    assert(entityTypeGate(name, type) === want, `${JSON.stringify(name)} as ${type} → ${want ?? "refused"} (${entityTypeGate(name, type)})`);
+  assert(refusalOf("021") === "a number" && refusalOf("Tools") === "a type-vocabulary word" && refusalOf("") === "an empty name" && refusalOf("SMD-1804") === null, "refusalOf names the rule, and a shape is no refusal");
+  // The shape is read as written; the number and the vocabulary after normalisation.
+  assert(normalizeEntityName("  Siggymd/Infrastructure ") === "siggymd infrastructure" && normalizeEntityName("\"PostgreSQL.\"") === "postgresql" && normalizeEntityName("a  __  b") === "a b" && normalizeEntityName("...") === null && normalizeEntityName("ｐｇ１６") === "pg16",
+    "normalizeEntityName is 016's rule: NFKC, lower case, separators to spaces, the outer strip, whitespace collapsed, null for nothing left");
+  assert(IDENTIFIER_SHAPES[0].type === "project" && IDENTIFIER_SHAPES.slice(1).every((s) => s.type === "tool") && ENTITY_VOCABULARY.includes("people"), "a ticket id is the one shape that becomes a project");
+
+  assert(JSON.stringify(gatePeople(["Anita", "@hono/mcp", "SMD-1497", "021", 21, "person", "Nate B. Jones", null])) === JSON.stringify(["Anita", "Nate B. Jones"]), "the people facet keeps the names the gate keeps as a person, as written and in order");
+  assert(gatePeople("Anita") === "Anita" && gatePeople(undefined) === undefined, "…and a facet that is not an array is left as it came");
+
+  // …and extractMetadata applies it: the capture path's own call, against a stub provider.
+  const stub = Bun.serve({ port: 0, fetch: () => Response.json({ choices: [{ message: { content: JSON.stringify({ people: ["Anita", "@hono/mcp", "SMD-1607"], topics: ["t"], type: "idea" }) } }] }) });
+  try {
+    const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1" });
+    const meta = await extractMetadata("Anita wired @hono/mcp in SMD-1607.", { kind: "capture" }, cfg);
+    assert(JSON.stringify(meta.people) === JSON.stringify(["Anita"]) && meta.type === "idea", `a capture's people facet is gated where it is extracted (${JSON.stringify(meta.people)})`);
+  } finally {
+    stub.stop(true);
+  }
 }
 
 report();

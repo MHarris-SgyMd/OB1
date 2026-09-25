@@ -20,6 +20,7 @@
 import { providerCall, ProviderError, type EmbedConfig } from "./embed.ts";
 import type { EgressSubject } from "./egress.ts";
 import { normaliseType } from "./thoughts.ts";
+import { gatePeople } from "./entity-gate.ts";
 
 /**
  * What a capture records when the egress gate did not let its text reach the
@@ -129,6 +130,9 @@ Only extract what's explicitly there.`,
     }
 
     const out = parsed as Record<string, unknown>;
+    // The entity graph's name gate (SMD-1935): a package, a ticket id or a
+    // number is never a person, here as at record_thought_entities.
+    if ("people" in out) out.people = gatePeople(out.people);
     const { type, raw } = normaliseType(out.type);
     out.type = type;
     if (raw) out.type_raw = raw;
