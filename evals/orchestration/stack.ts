@@ -13,7 +13,8 @@
  * `orch-capture` (capture scope: the ingestion workflow's, can add, cannot
  * read) and `orch-read` (read scope: the retrieval tool's). Only their hashes
  * reach MCP_ACCESS_KEYS. LINEAR_API_KEY is not copied into it: the driver reads
- * it from the usual search path (db/env.ts) and hands it to compose explicitly.
+ * it from the usual search path (db/env.ts) and each adapter hands it to its
+ * tool's credential store; compose never sees it.
  *
  * compose and docker run with an ALLOWLISTED environment, never the driver's
  * whole one. loadEnv() fills process.env from deploy/.env and <repo>/.env —
@@ -30,10 +31,10 @@ import { hashKey } from "../../server-portable/auth.ts";
 import { parseEnv } from "../../db/env.ts";
 
 export const HERE = dirname(fileURLToPath(import.meta.url));
-export const REPO = resolve(HERE, "..", "..");
-export const ENV_FILE = join(HERE, ".env");
+const REPO = resolve(HERE, "..", "..");
+const ENV_FILE = join(HERE, ".env");
 
-export type Keys = { capture: string; read: string };
+type Keys = { capture: string; read: string };
 
 /** What docker and compose need from the caller's environment to reach the engine — and nothing else. */
 const PASS_THROUGH = [
@@ -107,10 +108,10 @@ export function setEnvValue(key: string, value: string): void {
   renameSync(tmp, ENV_FILE);
 }
 
-export const project = (tool: string) => `ob1-orch-${tool}`;
+const project = (tool: string) => `ob1-orch-${tool}`;
 
 /** `docker compose` with this candidate's project, env file and the two -f files. */
-export function composeArgs(tool: string): string[] {
+function composeArgs(tool: string): string[] {
   return [
     "compose", "-p", project(tool), "--env-file", ENV_FILE,
     "-f", join(REPO, "deploy", "compose.yaml"),
@@ -159,7 +160,7 @@ export function memoryByContainer(tool: string): Record<string, number> {
   return out;
 }
 
-export function toMiB(s: string): number {
+function toMiB(s: string): number {
   const m = /^([\d.]+)\s*([KMGT]?i?B)$/i.exec(s.trim());
   if (!m) return NaN;
   const n = Number(m[1]);

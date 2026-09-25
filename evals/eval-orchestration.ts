@@ -79,7 +79,7 @@ const brainHealthy = async () => (await fetch("http://127.0.0.1:8012/health").ca
 
 async function up(): Promise<void> {
   if (!env.LINEAR_API_KEY) usage("LINEAR_API_KEY is not set (evals/.env, <repo>/.env or deploy/.env)");
-  const r = compose(tool, ["up", "-d", "--build", "postgres", "migrate", "server", ...adapter.services], { LINEAR_API_KEY: env.LINEAR_API_KEY });
+  const r = compose(tool, ["up", "-d", "--build", "postgres", "migrate", "server", ...adapter.services]);
   if (r.code !== 0) throw new Error(`compose up failed:\n${r.err.slice(-2000)}`);
   await waitFor("the brain's /health", brainHealthy);
   await waitFor(`${tool} to answer`, () => adapter.ready(env), 300_000);

@@ -15,6 +15,8 @@ import { HERE, waitFor } from "./stack.ts";
 import type { Adapter } from "./adapter.ts";
 
 const DIR = join(HERE, "windmill");
+/** The pinned release: the image and the version the report prints, from one value. */
+const TAG = "1.817.0";
 const BASE = "http://127.0.0.1:8090";
 const WS = "ob1";
 const SEED = { email: "admin@windmill.dev", password: "changeme" };
@@ -59,7 +61,7 @@ async function orIgnoreExisting(p: Promise<unknown>): Promise<void> {
 export const windmill: Adapter = {
   tool: "windmill",
   services: ["orch-db", "windmill"],
-  image: "ghcr.io/windmill-labs/windmill:1.817.0",
+  image: `ghcr.io/windmill-labs/windmill:${TAG}`,
   async ready() {
     const r = await fetch(`${BASE}/api/version`).catch(() => null);
     return r?.ok === true;
@@ -122,7 +124,7 @@ export const windmill: Adapter = {
   nativeMcpClient: false,
   tools: { search: "s-f_ob1_brain__search", act: "s-f_ob1_linear__issue" },
   version() {
-    return "CE v1.817.0";
+    return `CE v${TAG}`;
   },
   switches: {
     telemetry: ["instance setting disable_stats=true through the API (no environment variable exists)"],

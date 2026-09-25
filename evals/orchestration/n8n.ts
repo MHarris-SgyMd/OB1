@@ -33,7 +33,7 @@ const WORKFLOW_FILES = ["linear-ingest.json", "brain-tools.json"];
 const SCOPES = ["credential:create", "credential:list", "workflow:create", "workflow:list", "workflow:read", "workflow:activate", "execution:list", "execution:read"];
 
 /** The committed template with `${NAME}` filled from the env — the rendered text never touches disk. */
-export function render(template: string, env: Record<string, string>): string {
+function render(template: string, env: Record<string, string>): string {
   return template.replace(/\$\{([A-Z0-9_]+)\}/g, (_, k: string) => {
     const v = env[k];
     if (!v) throw new Error(`credentials template names ${k}, which the environment does not set`);
@@ -97,7 +97,7 @@ async function workflowId(key: string, name: string): Promise<string | undefined
 }
 
 /** The capture node's last run in an execution's data: one output item per answered call, if it succeeded. */
-export function answered(execution: any): number {
+function answered(execution: any): number {
   if (execution?.status !== "success") return 0;
   const capture = execution.data?.resultData?.runData?.["Capture into the brain"]?.at(-1);
   if (!capture || capture.executionStatus !== "success") return 0;

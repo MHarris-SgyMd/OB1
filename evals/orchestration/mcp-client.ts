@@ -11,7 +11,7 @@ export type Tool = { name: string; description?: string };
 export type CallResult = { isError: boolean; text: string };
 
 /** One session: connect, run `use`, close whatever happened. */
-export async function withMcp<T>(url: string, headers: Record<string, string>, use: (c: Client) => Promise<T>): Promise<T> {
+async function withMcp<T>(url: string, headers: Record<string, string>, use: (c: Client) => Promise<T>): Promise<T> {
   const client = new Client({ name: "ob1-orchestration-verify", version: "1" });
   const transport = new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers } });
   await client.connect(transport);

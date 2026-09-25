@@ -18,6 +18,8 @@ import type { Adapter } from "./adapter.ts";
 import { callTool } from "./mcp-client.ts";
 
 const DIR = join(HERE, "activepieces");
+/** The pinned release: the image and the version the report prints, from one value. */
+const TAG = "0.91.3";
 const BASE = "http://127.0.0.1:8080";
 const FLOWS = ["linear-ingest.json", "brain-search.json", "linear-issue.json"];
 const INGEST = "OB1 — Linear issues into the brain";
@@ -63,7 +65,7 @@ async function mcpEndpoint(s: Session): Promise<{ url: string; headers: Record<s
 export const activepieces: Adapter = {
   tool: "activepieces",
   services: ["orch-db", "activepieces"],
-  image: "ghcr.io/activepieces/activepieces:0.91.3",
+  image: `ghcr.io/activepieces/activepieces:${TAG}`,
   async ready() {
     const r = await fetch(`${BASE}/api/v1/flags`).catch(() => null);
     return r?.ok === true;
@@ -148,7 +150,7 @@ export const activepieces: Adapter = {
   nativeMcpClient: true,
   tools: { search: "brain_search", act: "linear_issue" },
   version() {
-    return "0.91.3";
+    return TAG;
   },
   switches: {
     telemetry: ["AP_TELEMETRY_ENABLED=false (the starting value only; the UI can re-enable)", "AP_CLOUD_AUTH_ENABLED=false (no Activepieces-hosted OAuth apps)"],
