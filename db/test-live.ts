@@ -29,7 +29,7 @@
  */
 
 import { SQL } from "bun";
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,7 +44,7 @@ import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, syncIssue, t
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
-import { promote, refresh, refreshToolsReady, replayAndDiff } from "./tier.ts";
+import { promote, refresh, refreshToolsReady, replayAndDiff, targetRefusal } from "./tier.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -4290,9 +4290,11 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
   // it returned; the canary, refreshed from stable, replays that search and its
   // ids are diffed against stable's. This drives the ENGINE (readLoggedSearches →
   // replayOne → diffResult) end to end over the KEYWORD arm, which needs no model
-  // — the arm CI can run. The pg_dump-based refresh() and the hybrid arm need
-  // client tools / a provider CI does not have; they are exercised by the compose
-  // stack and documented, the same split as eval-replay.ts vs test-replay.ts.
+  // — the arm CI can run. A real pg_dump refresh needs client tools this job
+  // does not have: the deploy-stack job runs one through deploy/tier.sh
+  // (SMD-2036), and below, stand-in tools drive refresh() to its restore and
+  // the guards run before any tool is looked for. The hybrid arm needs a
+  // provider, the same split as eval-replay.ts vs test-replay.ts.
   await sql`DELETE FROM query_log`; // scope the replay window to this section's rows
   const put = (s: SQL, id: string, content: string) =>
     s`INSERT INTO thoughts (id, content, metadata, content_fingerprint)
@@ -4358,6 +4360,119 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     assert(canaryVer != null && version === canaryVer, "promote reads the canary's schema_version (migration 044), not an absent 'version' key");
     const stableCfg = Object.fromEntries((await sql`SELECT key, value FROM ob1_config WHERE key IN ('tier','promoted_schema_version','promoted_at')`).map((r: { key: string; value: string }) => [r.key, r.value]));
     assert(stableCfg.tier === "stable" && stableCfg.promoted_schema_version === canaryVer && /^\d{4}-\d\d-\d\dT/.test(stableCfg.promoted_at ?? ""), "promote stamps stable: tier=stable, promoted_schema_version and a promoted_at time");
+
+    // --from and --to the wrong way round (SMD-2036): the canary into stable is two
+    // distinct databases, so the same-database guard passes it, and the target is
+    // the record. Refused on the stamp, before the client tools are looked for.
+    let refusedStable: string | null = null;
+    try { await refresh(canaryUrl, URL_!, "canary"); }
+    catch (e) { refusedStable = (e as Error).message; }
+    assert(/stamped tier=stable/.test(refusedStable ?? ""), `refresh refuses a --to stamped tier=stable — --from and --to swapped (got: ${refusedStable ?? "no refusal"})`);
+    // And a --to that is a brain with no tier stamp — the shape of an untiered
+    // stable. This canary was migrated and loaded here, never refreshed, so it
+    // carries rows and no ob1_config.tier.
+    let refusedBrain: string | null = null;
+    try { await refresh(URL_!, canaryUrl, "canary"); }
+    catch (e) { refusedBrain = (e as Error).message; }
+    assert(/holds thoughts and no tier stamp/.test(refusedBrain ?? ""), `refresh refuses a --to holding thoughts under no tier stamp (got: ${refusedBrain ?? "no refusal"})`);
+
+    // targetRefusal's cells, read directly (no pg_dump needed). Each read is a new
+    // session, since a database-level setting reaches only sessions opened after it.
+    const refusalAt = async (url: string) => { const s = new SQL({ url, max: 1 }); try { return await targetRefusal(s); } finally { await s.close(); } };
+    const setMark = (db: string, v: string | null) => sql.unsafe(v === null ? `ALTER DATABASE ${db} RESET ob1.refresh_target` : `ALTER DATABASE ${db} SET ob1.refresh_target = '${v}'`);
+    // A refresh that died after its restore: the target holds the source's rows and
+    // its tier=stable, and carries the mark the refresh set before the reset.
+    await canarySql`INSERT INTO ob1_config (key, value) VALUES ('tier', 'stable') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+    assert(/stamped tier=stable/.test((await refusalAt(canaryUrl)) ?? ""), "unmarked, stamped tier=stable and holding rows: refused");
+    // Only the database's own setting is a mark: the same name set for a role in
+    // this database (or for a role, the server, a connection option) is not.
+    await sql.unsafe(`ALTER ROLE CURRENT_USER IN DATABASE ${canaryDb} SET ob1.refresh_target = 'canary'`);
+    try {
+      assert(/stamped tier=stable/.test((await refusalAt(canaryUrl)) ?? ""), "a role-level ob1.refresh_target is not the database's mark: still refused");
+    } finally {
+      await sql.unsafe(`ALTER ROLE CURRENT_USER IN DATABASE ${canaryDb} RESET ob1.refresh_target`);
+    }
+    // Only a value a refresh writes is a mark: `stable` set by hand to protect a
+    // database does not arm its reset.
+    await setMark(canaryDb, "stable");
+    assert(/stamped tier=stable/.test((await refusalAt(canaryUrl)) ?? ""), "ob1.refresh_target='stable' (not a value a refresh writes) is no mark: still refused");
+    await setMark(canaryDb, "canary");
+    assert((await refusalAt(canaryUrl)) === null, "marked by a refresh, the same target is allowed whatever its restored ob1_config says — a failed refresh can be retried");
+    let refusedPromote: string | null = null;
+    try { await promote(URL_!, canaryUrl); }
+    catch (e) { refusedPromote = (e as Error).message; }
+    assert(/is a tier \(refresh mark canary\)/.test(refusedPromote ?? ""), `promote refuses a --to that carries the refresh mark — --from and --to swapped (got: ${refusedPromote ?? "no refusal"})`);
+    await setMark(canaryDb, null);
+    await canarySql`UPDATE ob1_config SET value = 'canary' WHERE key = 'tier'`;
+    assert((await refusalAt(canaryUrl)) === null, "unmarked but stamped tier=canary (a canary refreshed before the mark existed): allowed");
+    await canarySql`DELETE FROM ob1_config WHERE key = 'tier'`;
+    for (const c of corpus) await canarySql`DELETE FROM thoughts WHERE id = ${c.id}::uuid`;
+    assert((await refusalAt(canaryUrl)) === null, "an Open Brain schema holding no thoughts (a tier stack's database after `up`): allowed");
+    // Another application's database, one name away from a tier.
+    const foreignDb = "ob1_tier_foreign";
+    const foreignUrl = (() => { const u = new URL(URL_!); u.pathname = `/${foreignDb}`; return u.toString(); })();
+    await sql.unsafe(`DROP DATABASE IF EXISTS ${foreignDb}`);
+    await sql.unsafe(`CREATE DATABASE ${foreignDb}`);
+    try {
+      assert((await refusalAt(foreignUrl)) === null, "a new database with nothing in its public schema: allowed");
+      // What a template's extensions bring is not "tables": pg_stat_statements'
+      // views (extension members) and tablefunc's row types (composite relkind,
+      // no 'e' dependency of their own).
+      const withExtensions = new SQL({ url: foreignUrl, max: 1 });
+      try { await withExtensions`CREATE EXTENSION IF NOT EXISTS pg_stat_statements`; await withExtensions`CREATE EXTENSION IF NOT EXISTS tablefunc`; } finally { await withExtensions.close(); }
+      assert((await refusalAt(foreignUrl)) === null, "the same with pg_stat_statements and tablefunc installed in public (what a template may carry): allowed");
+      const foreign = new SQL({ url: foreignUrl, max: 1 });
+      try { await foreign`CREATE TABLE invoices (id int)`; } finally { await foreign.close(); }
+      assert(/not an Open Brain schema/.test((await refusalAt(foreignUrl)) ?? ""), "a database whose public schema holds another application's tables: refused");
+      const railsLike = new SQL({ url: foreignUrl, max: 1 });
+      try { await railsLike`CREATE TABLE schema_migrations (version varchar PRIMARY KEY)`; } finally { await railsLike.close(); }
+      assert(/not an Open Brain schema/.test((await refusalAt(foreignUrl)) ?? ""), "the same with a schema_migrations table (Rails', Ecto's, dbmate's name too) and no thoughts: still refused");
+    } finally {
+      await sql.unsafe(`DROP DATABASE IF EXISTS ${foreignDb}`);
+    }
+
+    // The mark goes on BEFORE the reset, so a refresh that dies after it — here
+    // a pg_restore that fails — leaves a target the next refresh recognises. Two
+    // stand-in tools on PATH, reporting the server's major so refreshToolsReady
+    // passes: the dump writes nothing, the restore fails.
+    const shimDb = "ob1_tier_shim";
+    const shimUrl = (() => { const u = new URL(URL_!); u.pathname = `/${shimDb}`; return u.toString(); })();
+    const shimDir = join(tmpdir(), `ob1-tier-shim-${process.pid}`);
+    const savedPath = process.env.PATH;
+    await sql.unsafe(`DROP DATABASE IF EXISTS ${shimDb}`);
+    await sql.unsafe(`CREATE DATABASE ${shimDb}`);
+    try {
+      const [{ n }] = await sql<{ n: string }[]>`SELECT current_setting('server_version_num') AS n`;
+      const major = Math.floor(Number(n) / 10000);
+      mkdirSync(shimDir, { recursive: true });
+      const shim = (name: string, rest: string) => {
+        writeFileSync(join(shimDir, name), `#!/bin/sh\nif [ "$1" = --version ]; then echo "${name} (PostgreSQL) ${major}.0"; exit 0; fi\n${rest}\n`);
+        chmodSync(join(shimDir, name), 0o755);
+      };
+      shim("pg_dump", `while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; shift; done; exit 0`);
+      shim("pg_restore", "exit 1");
+      process.env.PATH = `${shimDir}:${savedPath}`;
+      let failed: string | null = null;
+      try { await refresh(URL_!, shimUrl, "working"); }
+      catch (e) { failed = (e as Error).message; }
+      assert(/did not produce the thoughts table/.test(failed ?? ""), `a refresh whose restore fails stops there (got: ${failed ?? "no failure"})`);
+      const shimSql = new SQL({ url: shimUrl, max: 1 });
+      let mark: string | undefined;
+      try { mark = parseSetConfig((await shimSql.unsafe(DB_LEVEL_SETTINGS_SQL))[0]?.cfg)["ob1.refresh_target"]; } finally { await shimSql.close(); }
+      assert(mark === "working", `…and leaves its target marked (ob1.refresh_target=working), set before the restore (got: ${mark ?? "no mark"})`);
+    } finally {
+      process.env.PATH = savedPath;
+      rmSync(shimDir, { recursive: true, force: true });
+      await sql.unsafe(`DROP DATABASE IF EXISTS ${shimDb} WITH (FORCE)`);
+    }
+
+    // promote's mirror of the same-database guard, the URL respelled.
+    const samePromote = new URL(URL_!);
+    samePromote.searchParams.set("application_name", "tier-same-db-promote");
+    let refusedSamePromote: string | null = null;
+    try { await promote(URL_!, samePromote.toString()); }
+    catch (e) { refusedSamePromote = (e as Error).message; }
+    assert(/name the same database/.test(refusedSamePromote ?? ""), `promote refuses a --to that is the --from database spelled another way (got: ${refusedSamePromote ?? "no refusal"})`);
     await sql`DELETE FROM ob1_config WHERE key IN ('promoted_schema_version','promoted_at')`;
   } finally {
     if (canarySql) await canarySql.close();
@@ -4375,6 +4490,17 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
   catch { refusedRemote = true; }
   finally { if (savedAllow !== undefined) process.env.OB1_ALLOW_REMOTE_DB = savedAllow; }
   assert(refusedRemote, "refresh refuses a non-loopback target unless OB1_ALLOW_REMOTE_DB=1 (it drops the target's schema)");
+  // And a --to that is the --from database under another spelling (SMD-2036):
+  // deploy/tier.sh sets OB1_ALLOW_REMOTE_DB, so this is the guard it runs
+  // under. The second URL differs as a string (a parameter only), so string
+  // equality would let it through; the server's identity does not. It refuses
+  // before the client tools are looked for, so no pg_dump is needed here.
+  const respelled = new URL(URL_!);
+  respelled.searchParams.set("application_name", "tier-same-db-guard");
+  let refusedSame: string | null = null;
+  try { await refresh(URL_!, respelled.toString(), "canary"); }
+  catch (e) { refusedSame = (e as Error).message; }
+  assert(/name the same database/.test(refusedSame ?? ""), `refresh refuses a --to that is the --from database spelled another way (got: ${refusedSame ?? "no refusal"})`);
 
   for (const c of corpus) await sql`DELETE FROM thoughts WHERE id = ${c.id}::uuid`;
   await sql`DELETE FROM query_log`;

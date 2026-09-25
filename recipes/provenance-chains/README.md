@@ -1,5 +1,7 @@
 # Provenance Chains Pipeline
 
+> **On this fork (SMD-2126).** `backfill.mjs` and `eval.mjs` reach the brain as PostgREST clients — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and this fork's stack runs no PostgREST (SETUP.md), so it fails at its first request, `--dry-run` included (it reads the brain first). The port onto `compat/supabase-sql` under `bun` (`SUPABASE_URL` a `postgres://` string; the `node` commands below become `bun`) (`mcp-tools.ts` takes an injected client and is driven there by test-writes) is SMD-2142; the decision for the class is in `docs/vendored-disposition.md`.
+
 > Backfill, evaluate, and query the derivation relationships added by the Provenance Chains schema — so Open Brain can answer "show me why I believe X" and "what downstream artifacts cite this atomic thought?"
 
 ## What It Does
