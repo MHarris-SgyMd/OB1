@@ -654,17 +654,20 @@ jobs:
       # HTTP liveness probe, and fails only when a user captures their first
       # thought; its time is its preflight runs, a subprocess each. In series
       # they were the job's two longest steps, and the job was the run's
-      # critical path. What the cluster shares is scoped in the suites:
-      # preflight's repeatable-read default is set on its own database, not
-      # on the role both connect as, and test-upgrade counts advisory locks in
-      # its own. The rest is SMD-2092's step for the schema legs: each run
-      # writes its own log, both are waited on and printed (a passing one
-      # folded, a failing one open), each has its own time limit (a hang ends
-      # as 124, or 137 when TERM is ignored), and the two summary lines close
-      # the step.
+      # critical path. Both connect as one role to one cluster, so what the
+      # cluster shares — a role and its settings, pg_locks, pg_stat_activity —
+      # is scoped in each suite to its own database, or named for the suite;
+      # both headers say so, and a fixture added to either keeps to it. The
+      # rest is SMD-2092's step for the schema legs: each run writes its own
+      # log, both are waited on and printed (a passing one folded, a failing
+      # one open), each has its own time limit (a hang ends as 124, or 137 when
+      # TERM is ignored), and the two summary lines close the step. A leg that
+      # fails here and passes alone (db/with-postgres.sh) is a leak between
+      # the two: replay this run: block against one with-postgres.sh database.
       - name: Incremental upgrade and preflight, side by side
         working-directory: db
         run: |
+          # test-upgrade's database; the service creates only ob1test.
           bun --eval 'const s = new Bun.SQL(process.env.DATABASE_URL); await s.unsafe("CREATE DATABASE ob1upgrade"); await s.close()'
           limit=10m
           DATABASE_URL=$UPGRADE_DATABASE_URL \

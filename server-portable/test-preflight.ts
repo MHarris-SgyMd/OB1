@@ -9,6 +9,11 @@
  *
  * Runs preflight as a subprocess so real exit codes are observed. The connectivity
  * cases need DATABASE_URL; without one they are skipped, not silently passed.
+ *
+ * CI runs this suite beside db/test-upgrade.ts, each in its own database of one
+ * Postgres, as the same role (SMD-2219). What the cluster shares — a role and
+ * its settings, pg_locks, pg_stat_activity — is scoped here to the current
+ * database, or named for this suite (ob1_pf_capture, pf_reader).
  */
 
 import { join, dirname } from "node:path";
@@ -1275,12 +1280,9 @@ else {
   // The isolation level every lock-order argument assumes, read from the
   // connection's default: ok at read committed, a warning naming the guarantees
   // at any other, with the ALTER ROLE that puts it back. Set on the database,
-  // so a fresh session (preflight's) inherits it; reset after. Not on the role:
-  // the role is the cluster's, and CI runs test-upgrade.ts beside this suite in
-  // another database as the same role, whose sessions would start at
-  // repeatable read too. Not on the role IN this database either: that setting
-  // outranks the role's, so the ALTER ROLE the warning names would not undo it
-  // — a database's setting it does (SMD-2219).
+  // so a fresh session (preflight's) inherits it; reset after. Not on the role,
+  // which test-upgrade.ts shares beside this suite (the header), nor on the
+  // role in this database, which would outrank the ALTER ROLE the warning names.
   assert(/transaction isolation\s+default_transaction_isolation is read committed/.test((await run(SQL_ENV)).out), "the connection's default isolation is read committed, and the check says which guarantees rest on it");
   const onThisDatabase = (setting: string) => claims.unsafe(`DO $i$ BEGIN EXECUTE format('ALTER DATABASE %I ${setting}', current_database()); END $i$`);
   await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
@@ -1288,13 +1290,10 @@ else {
     const rr = await run(SQL_ENV);
     assert(rr.code === 0 && /transaction isolation\s+default_transaction_isolation is repeatable read: the writers' lock order \(018\/033\/036\) and the citation guard \(042\) are argued under read committed/.test(rr.out) && /ALTER ROLE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
            `a connection defaulting to repeatable read starts with a warning naming the guarantees that rest on read committed and the ALTER ROLE that restores it (exit ${rr.code})`);
-    // …and nowhere else: a session as the same role in another database is
-    // still at read committed, so the fixture reaches no neighbour — set on
-    // the role instead, it passed the assertion above and crashed test-upgrade
-    // beside it only when a session of [20b]'s opened inside this window.
-    // The other database is `postgres`; the suite's own is asked of the
-    // server, since a URL without a path lands there too. A role that may
-    // not connect there skips; any other error fails.
+    // …and nowhere else: a session as the same role in `postgres` is still at
+    // read committed. The suite's own database is asked of the server, not
+    // read from the URL; a role that may not connect there skips, and any
+    // other error fails.
     const onlyHere = "…and only this database's sessions start at repeatable read";
     const [{ db }] = (await claims`SELECT current_database() AS db`) as { db: string }[];
     if (db === "postgres") skipRaw(onlyHere, "the suite's own database is postgres, the one it would read as another");
