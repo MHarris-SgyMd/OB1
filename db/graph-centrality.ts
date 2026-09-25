@@ -128,7 +128,9 @@
  * read them. A blocker is settled by its row's lifecycle, and a row of another
  * system states one only if its source said so (an `--items` file, in
  * `facets.status_type`, one of the six types above). So a system GATES only
- * when some row of it states a status_type this file knows: under that rule
+ * when some source row of it states, on its own metadata, a status_type this
+ * file knows — a status a row borrows through a Linear ticket claim does not
+ * count (first review pass): under that rule
  * its links are read exactly as the board's, an unknown blocker blocking. A
  * system that states none cannot say a blocker is settled, and rather than
  * block its tickets forever its links gate nothing — they block no thought and
@@ -274,7 +276,7 @@ export type Coverage = {
 export type Dependencies = {
   /** Active `blocks` / `blocked_by` link facets — facet rows, not relations: one the sync stated on both sides is two. */
   facets: number;
-  /** Thoughts whose ticket an active dependency names, on either side — blocked, blocking, or both. Every other thought has no dependency recorded and counts as unblocked. */
+  /** Thoughts whose ticket an active dependency of a gating system names, on either side — blocked, blocking, or both. Every other thought has no gating dependency and counts as unblocked. */
   in_dependencies: number;
   /** Thoughts the flag took from a weight above 0 to 0 in this run — to BLOCKED_WEIGHT of it under `--decay-blocked`: unsettled, weighed in by the lifecycle, and with an open blocker. */
   held: number;
@@ -350,10 +352,13 @@ export const LIFECYCLE_CTE = `heads AS (
  * a `linear` one bare, as the ticket claim is, and another system's as
  * `system:key`, since SMD-2136's `--items` writes links for any system and a
  * bare key would not say whose it is (fourth review pass). Only a GATING
- * system's links reach `deps`: one with a row whose lifecycle names a status
- * this file knows (the types in `$knownSlot`). A system that states no
- * lifecycle anywhere cannot say a blocker is settled, so its links gate nothing
- * rather than block forever, and coverage counts them (SMD-2218). When
+ * system's links reach `deps`: one with a source row of its own that states,
+ * in its own metadata, a status this file knows (the types in `$knownSlot`) —
+ * not `lifecycle`, which a row claiming a Linear ticket borrows from the
+ * ticket's head, so one cross-reference would make its whole system gate. A
+ * system that states no lifecycle anywhere cannot say a blocker is settled, so
+ * its links gate nothing rather than block forever, and coverage counts them
+ * (SMD-2218; first review pass: the own row). When
  * SMD-2074's node-state projection holds startability, this reads that
  * instead.
  */
@@ -377,8 +382,8 @@ export const dependencySql = (doneSlot: number, knownSlot: number) => `ticket_of
              WHERE f.kind = 'link' AND f.valid_until IS NULL AND f.payload->>'relation' IN ('blocks', 'blocked_by')),
           gating AS MATERIALIZED (
             SELECT s.system FROM (SELECT DISTINCT system FROM dep_links) s
-             WHERE EXISTS (SELECT 1 FROM ticket_of k JOIN lifecycle l ON l.thought_id = k.thought_id
-                            WHERE k.system = s.system AND l.status_type = ANY($${knownSlot}::text[]))),
+             WHERE EXISTS (SELECT 1 FROM thought_sources o JOIN thoughts t ON t.id = o.thought_id
+                            WHERE o.system = s.system AND t.metadata->>'status_type' = ANY($${knownSlot}::text[]))),
           deps AS MATERIALIZED (SELECT DISTINCT system, blocked, blocker FROM dep_links WHERE system IN (SELECT system FROM gating)),
           blockers AS MATERIALIZED (
             SELECT d.system, d.blocked, d.blocker, bl.status_type AS blocker_status,
@@ -876,12 +881,18 @@ export function dependencyCaveat(c: Coverage, d: Dependencies, opts: Pick<Option
   const boardOnly = d.systems.every((s) => s.system === "linear" && s.gates);
   const source = boardOnly
     ? "the board's blocks / blocked_by link facets (SMD-1867), as current as board-sync's last passes over both tickets of each (a relation is read from either side, so one removed on the board blocks until both are re-read)"
-    : `the blocks / blocked_by link facets their sources state (SMD-1867) — ${d.systems.map((s) => `${s.system} ${s.facets}`).join(", ")} —, each as current as its source's last passes over both ends of each (a relation is read from either side, so one removed at the source blocks until both are re-read)`;
+    : `the blocks / blocked_by link facets their sources state (SMD-1867; ${d.systems.map((s) => `${s.system} ${s.facets}`).join(", ")}), each as current as its source's last passes over both ends of each (a relation is read from either side, so one removed at the source counts until both are re-read)`;
+  // One clause for every ungated system; the items hint only where an items
+  // file could be the source — `linear` is a system it may not claim (first
+  // review pass).
   const ungated = d.systems.filter((s) => !s.gates);
+  const one = ungated.length === 1;
+  const n = ungated.reduce((sum, s) => sum + s.facets, 0);
+  const who = one ? ungated[0]?.system : `${ungated.slice(0, -1).map((s) => s.system).join(", ")} and ${ungated.at(-1)?.system}`;
   const gate = ungated.length
-    ? ` ${ungated.map((s) => `${s.system} states no lifecycle on any row, so its ${s.facets} facet${s.facets === 1 ? " gates" : "s gate"} nothing`).join("; ")}: a source that states no status_type this tool knows cannot say a blocker is settled (an --items file states it in facets.status_type).`
+    ? ` ${who} state${one ? "s" : ""} no lifecycle on any row of ${one ? "its" : "their"} own, so ${one ? "its" : "their"} ${n} facet${n === 1 ? " gates" : "s gate"} nothing: a source that states no status_type this tool knows cannot say a blocker is settled${ungated.some((s) => s.system !== "linear") ? " (an --items file states it in facets.status_type, and the status's name in facets.status)" : ""}.`
     : "";
-  return `Dependencies are read from ${source}: ${d.facets} active dependency facet${d.facets === 1 ? "" : "s"}${moved}.${gate} ${d.in_dependencies} of ${c.thoughts} thoughts belong to a ticket a ${boardOnly ? "" : "gating "}dependency names; every other thought has none recorded and counts as unblocked. ${held}; a completed or canceled ticket is settled, not blocked, a blocker completed or canceled does not block, and a parent is not blocked by its children.${unknown}`;
+  return `Dependencies are read from ${source}: ${d.facets} active dependency facet${d.facets === 1 ? "" : "s"}${moved}.${gate} ${d.in_dependencies} of ${c.thoughts} thoughts belong to a ticket a ${boardOnly ? "" : "gating "}dependency names; every other thought has ${boardOnly ? "none recorded" : "no gating dependency"} and counts as unblocked. ${held}; a completed or canceled ticket is settled, not blocked, a blocker completed or canceled does not block, and a parent is not blocked by its children.${unknown}`;
 }
 
 export type Report = {
@@ -1127,7 +1138,7 @@ if (import.meta.main) {
     } else if (readsDependencies(parsed.opts) && !(await run(`SELECT (to_regclass('thought_sources') IS NOT NULL AND to_regprocedure('source_thought(text, text)') IS NOT NULL) AS ok`, []))[0].ok) {
       // The dependency read is 053's link facets and resolver; every other
       // mode runs without them.
-      console.error(`${parsed.opts.startable ? "--startable" : "--decay-blocked"} reads the board's link facets: migration 053 is not applied. Run db/migrate.ts, or leave the flag out.`);
+      console.error(`${parsed.opts.startable ? "--startable" : "--decay-blocked"} reads the dependency link facets: migration 053 is not applied. Run db/migrate.ts, or leave the flag out.`);
       code = 2;
     } else {
       const r = await report(run, parsed.subject, parsed.opts);
