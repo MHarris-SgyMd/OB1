@@ -268,7 +268,7 @@ export function derivedSections(issue: LinearIssue): Derived[] {
   const texts = new Set<string>();
   for (const s of issueSections(issue)) {
     const key = sectionKey(issue.identifier, s.slug);
-    if (key.length > IDENTITY_MAX) continue; // unreachable with the slug bound; the contract's limit stated where it would bite
+    if ([...key].length > IDENTITY_MAX) continue; // unreachable with the slug bound; the contract's limit stated where it would bite, in characters
     const body = plainText(s.body).trim();
     const text = `${issue.identifier} — ${issue.title.trim()} · ${s.heading}${body ? `\n\n${body}` : ""}`;
     if (texts.has(text)) continue;

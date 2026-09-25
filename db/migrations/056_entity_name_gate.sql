@@ -90,7 +90,7 @@
 -- =============================================================================
 
 -- Each prerequisite named on its own, as 053 names its two. Driven by
--- test-upgrade.ts [20i].
+-- test-upgrade.ts [20j].
 DO $g$
 BEGIN
   IF to_regclass('ob1_entity_edges') IS NULL THEN
@@ -135,7 +135,7 @@ AS $$
   -- spaces alone, so `SMD-1804` and a trailing tab parted from the twin
   -- (first review pass). The normalised name is trimmed of spaces too: the
   -- outer strip of 016 knows no form feed, so `\f021` normalises to ` 021`
-  -- (second review pass). No apostrophe in these comments: test-schema [51]
+  -- (second review pass). No apostrophe in these comments: test-schema [52]
   -- reads the quoted literals of this body.
   FROM (SELECT btrim(normalize_entity_name(p_name)) AS n, regexp_replace(p_name, '^[ \t\n\r\f\v]+|[ \t\n\r\f\v]+$', '', 'g') AS r) s
 $$;

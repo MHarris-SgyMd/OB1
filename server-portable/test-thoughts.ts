@@ -585,7 +585,7 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
 
 console.log("\n[10] The entity name gate (SMD-1935): a number or a type word is refused, an identifier-shaped person or place retyped, and the people facet keeps only people");
 {
-  // The rule's JavaScript twin. test-schema [51] asks Postgres the same
+  // The rule's JavaScript twin. test-schema [52] asks Postgres the same
   // probes and holds the two to one answer; here each rule is read alone.
   for (const [name, type, want] of [
     ["021", "person", null], ["11434", "place", null], ["127.0.0.1:11434", "place", null], ["10/8", "place", null], ["#42", "tool", null], ["023/030", "person", null],
