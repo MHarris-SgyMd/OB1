@@ -1729,7 +1729,7 @@ destructive to `--to`, so it guards the target three ways.
     restore touches. A refresh that died after its restore therefore retries,
     even though the restore left the source's `tier=stable` in `ob1_config`;
   - it is stamped `canary` or `working`;
-  - its public schema is empty;
+  - its public schema holds nothing but what extensions own;
   - it is an Open Brain schema with no thoughts.
 
   Anything else is refused, and the refusal names no override: the record
@@ -1740,9 +1740,11 @@ destructive to `--to`, so it guards the target three ways.
   stamped `canary`/`working`.
 
   The mark is read from the database's own setting only, never a role's or the
-  server's. It needs a superuser to set, as restoring pgvector does, and it
-  lasts until `ALTER DATABASE … RESET ob1.refresh_target`. `deploy/README.md`,
-  "Refreshing a tier", has both statements.
+  server's, and only `canary` or `working` counts. Setting it needs a superuser,
+  or `GRANT SET ON PARAMETER ob1.refresh_target` (PG15+); restoring pgvector
+  needs a superuser in the default install anyway. It lasts until
+  `ALTER DATABASE … RESET ob1.refresh_target`. `deploy/README.md`, "Refreshing
+  a tier", has both statements.
 - **It is loopback,** unless `OB1_ALLOW_REMOTE_DB=1`.
 
 It needs Bun
@@ -2011,7 +2013,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1590 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 690 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+./with-postgres.sh bun test-live.ts         # 692 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

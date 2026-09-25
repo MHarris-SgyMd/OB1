@@ -4375,6 +4375,10 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     } finally {
       await sql.unsafe(`ALTER ROLE CURRENT_USER IN DATABASE ${canaryDb} RESET ob1.refresh_target`);
     }
+    // Only a value a refresh writes is a mark: `stable` set by hand to protect a
+    // database does not arm its reset.
+    await setMark(canaryDb, "stable");
+    assert(/stamped tier=stable/.test((await refusalAt(canaryUrl)) ?? ""), "ob1.refresh_target='stable' (not a value a refresh writes) is no mark: still refused");
     await setMark(canaryDb, "canary");
     assert((await refusalAt(canaryUrl)) === null, "marked by a refresh, the same target is allowed whatever its restored ob1_config says — a failed refresh can be retried");
     let refusedPromote: string | null = null;
@@ -4394,6 +4398,12 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     await sql.unsafe(`CREATE DATABASE ${foreignDb}`);
     try {
       assert((await refusalAt(foreignUrl)) === null, "a new database with nothing in its public schema: allowed");
+      // What a template's extensions bring is not "tables": pg_stat_statements'
+      // views (extension members) and tablefunc's row types (composite relkind,
+      // no 'e' dependency of their own).
+      const withExtensions = new SQL({ url: foreignUrl, max: 1 });
+      try { await withExtensions`CREATE EXTENSION IF NOT EXISTS pg_stat_statements`; await withExtensions`CREATE EXTENSION IF NOT EXISTS tablefunc`; } finally { await withExtensions.close(); }
+      assert((await refusalAt(foreignUrl)) === null, "the same with pg_stat_statements and tablefunc installed in public (what a template may carry): allowed");
       const foreign = new SQL({ url: foreignUrl, max: 1 });
       try { await foreign`CREATE TABLE invoices (id int)`; } finally { await foreign.close(); }
       assert(/not an Open Brain schema/.test((await refusalAt(foreignUrl)) ?? ""), "a database whose public schema holds another application's tables: refused");
@@ -4429,14 +4439,14 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
       try { await refresh(URL_!, shimUrl, "working"); }
       catch (e) { failed = (e as Error).message; }
       assert(/did not produce the thoughts table/.test(failed ?? ""), `a refresh whose restore fails stops there (got: ${failed ?? "no failure"})`);
-      const [marked] = await sql<{ c: string }[]>`
-        SELECT c FROM pg_db_role_setting s, unnest(s.setconfig) c
-        WHERE s.setdatabase = (SELECT oid FROM pg_database WHERE datname = ${shimDb}) AND s.setrole = 0 AND c LIKE 'ob1.refresh%'`;
-      assert(marked?.c === "ob1.refresh_target=working", `…and leaves its target marked (ob1.refresh_target=working), set before the reset (got: ${marked?.c ?? "no mark"})`);
+      const shimSql = new SQL({ url: shimUrl, max: 1 });
+      let mark: string | undefined;
+      try { mark = parseSetConfig((await shimSql.unsafe(DB_LEVEL_SETTINGS_SQL))[0]?.cfg)["ob1.refresh_target"]; } finally { await shimSql.close(); }
+      assert(mark === "working", `…and leaves its target marked (ob1.refresh_target=working), set before the restore (got: ${mark ?? "no mark"})`);
     } finally {
       process.env.PATH = savedPath;
       rmSync(shimDir, { recursive: true, force: true });
-      await sql.unsafe(`DROP DATABASE IF EXISTS ${shimDb}`);
+      await sql.unsafe(`DROP DATABASE IF EXISTS ${shimDb} WITH (FORCE)`);
     }
 
     // promote's mirror of the same-database guard, the URL respelled.

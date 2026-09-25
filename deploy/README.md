@@ -340,14 +340,23 @@ as given. `--network` defaults to `open-brain_default`, and `--runtime` is
 
 The env file (`--env-file`, default `deploy/.env`) is read by compose itself,
 through `compose config --environment`. So a quoted value, an inline comment,
-an `export` line or CRLF line endings read here as they do for the stack, and
-a variable set in the shell wins over the file, as it does there. Each name the
-file sets is handed to the container with the value compose resolved:
-`migrate.ts` reads the `OB1_EMBEDDING_*` knobs from it on a refresh. The values
-travel in a temporary env file (mode 600, removed on exit), so they are not on
-the wrapper's command line or the runtime's. Inside the container the URLs are
-on the argument lists of bun, `pg_dump`, `pg_restore` and `migrate.ts`, and a
-Linux host's `ps` shows those.
+an `export` line, CRLF line endings or a byte-order mark read here as they do
+for the stack. A variable set in the shell wins over the file, as it does
+there. Only what `tier.ts` and `migrate.ts` read is handed to the container:
+- the `OB1_*` knobs (`migrate.ts` reads `OB1_EMBEDDING_*` on a refresh);
+- `POSTGRES_PASSWORD`;
+- the provider settings the replay's embed reads (`OPENROUTER_API_KEY`,
+  `OLLAMA_BASE`).
+
+Access keys and `LINEAR_API_KEY` stay behind. The values travel in a temporary
+env file (mode 600, removed on exit), so they are not on the wrapper's command
+line or the runtime's. They are in the container's environment, which
+`inspect` shows while it runs, and the URLs are on the argument lists of bun,
+`pg_dump`, `pg_restore` and `migrate.ts` inside it, which a Linux host's `ps`
+shows (SMD-2119). The checkout's own `.env` files are mounted with the code and
+switched off: `OB1_ENV_FILES=off` stops `db/env.ts` reading them, and
+`bun --no-env-file`, run from a working directory outside the checkout, stops
+Bun's auto-load. So only the stack's environment reaches `tier.ts`.
 
 From a container every database is remote, so a short-form `--to` gets
 `OB1_ALLOW_REMOTE_DB=1`. A `--to` given as a URL does not, so export
@@ -376,9 +385,11 @@ loopback check, `tier.ts` guards `--to` two ways:
   disarms the guard for it for good.
 
 **The mark.** The mark is only ever read from the database's own setting (in
-`pg_db_role_setting`). A value set for a role, for the server or on a
-connection does not count. Setting it needs a superuser. So does restoring
-pgvector, so a refresh needs one on `--to` anyway, and one that cannot set the
+`pg_db_role_setting`), and only `canary` or `working` counts. A value set for
+a role, for the server or on a connection does not count, and neither does a
+`stable` or `off` set there by hand. Setting it needs a superuser, or
+`GRANT SET ON PARAMETER ob1.refresh_target` (PG15+). Restoring pgvector needs
+a superuser in the default install anyway, and a refresh that cannot set the
 mark stops before touching anything. The mark lasts until it is cleared, and a
 database restored from a canary's dump with `--create` brings it along:
 
@@ -396,8 +407,12 @@ nothing. The client's major has to be at least the source server's, and
 `refreshToolsReady` refuses the refresh otherwise, so a Postgres bump in the
 compose files means bumping the package in `db/tier.Dockerfile` with it. On
 every PR, the deploy-stack CI job seeds one thought and one logged search, then
-runs through this script: a refresh, a `--replay`, a `--diff`, and both
-refusals.
+runs through this script: a refresh, a `--replay`, a `--diff`, a retry over a
+copy left stamped `stable` (as a refresh that died after its restore leaves
+it), and both refusals. On a host with SELinux enforcing (Fedora and RHEL,
+where podman labels by default), the container can read the mounted checkout
+only once it is relabelled: `chcon -Rt container_file_t <checkout>`. The
+script does not relabel it for you.
 
 A refresh does not carry the per-database HNSW settings over (SMD-2037), and a
 server already running on the refreshed database keeps its old pool until it

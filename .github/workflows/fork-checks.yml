@@ -743,7 +743,8 @@ jobs:
       # pg_restore, which no image in the stack carries together, so the
       # snapshot half of the tier pipeline ran nowhere in CI (db-live's runner
       # has a pg14 client, which refuses a pg16 server; test-live [20] drives the
-      # replay engine and the guards). deploy/tier.sh builds db/tier.Dockerfile
+      # replay engine, the guards, and a refresh whose stand-in pg_restore
+      # fails, never a real one). deploy/tier.sh builds db/tier.Dockerfile
       # and runs this checkout's tier.ts on the stack's network. The brain is
       # given something to carry first: smoke.sh captures nothing, so one thought
       # with a vector goes in through upsert_thought, and one keyword search that
@@ -752,8 +753,9 @@ jobs:
       # an && list does not trip set -e: a schema-only copy passed that way in
       # review), the tier stamp, a --replay that replays that search and a --diff
       # that finds it unmoved, and a retry over a copy left stamped stable, as a
-      # refresh that died after its restore leaves it. Then the two guards the wrapper runs under, since
-      # from its container every database is remote: the brain under its service
+      # refresh that died after its restore leaves it. Then the two guards the
+      # wrapper runs under, since from its container every database is remote:
+      # the brain under its service
       # name and its container name is one database, and a refresh the wrong way
       # round lands on a brain with no tier stamp. Both are refused, and the
       # brain still holds its thought.

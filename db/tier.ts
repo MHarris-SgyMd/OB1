@@ -34,12 +34,12 @@
  * pg_dump / pg_restore whose major version is at least the source server's, AND
  * Bun: no image the stack runs has both, so deploy/tier.sh runs this file in one
  * that does (db/tier.Dockerfile, SMD-2036); a host that runs it directly needs
- * postgresql-client >= the server. It is destructive to --to: it refuses a --to
- * that is the --from database, is stamped tier=stable, or holds thoughts under
- * no canary/working stamp, or is some other application's schema, unless an
- * earlier refresh marked it (targetRefusal); and a non-loopback
- * target unless OB1_ALLOW_REMOTE_DB=1, the same guard test-support's dropSchema
- * uses.
+ * postgresql-client >= the server. It is destructive to --to, so it refuses a
+ * --to that is the --from database (sameDatabase, whatever else is true); a
+ * --to stamped tier=stable, holding thoughts under no canary/working stamp, or
+ * holding some other application's schema, unless an earlier refresh marked it
+ * (targetRefusal); and a non-loopback --to unless OB1_ALLOW_REMOTE_DB=1, the
+ * same guard test-support's dropSchema uses.
  *
  * The replay is the LIVE half of the replay gate (SMD-1295, whose db/test-replay.ts
  * is the offline, model-free, fixture-vector half in CI). For each search row
@@ -59,6 +59,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DB_LEVEL_SETTINGS_SQL, parseSetConfig } from "./config.mjs";
 import { stampTier, TIERS, type Tier } from "./ingest-records.ts";
 import { parsePgUuidArray } from "../evals/query-log.ts";
 import { embed } from "../evals/lib.ts";
@@ -285,19 +286,18 @@ async function sameDatabase(a: SQL, b: SQL): Promise<boolean> {
  * and pg_restore does not overwrite it — unlike ob1_config.tier, which the
  * restore copies from the SOURCE (stable's `stable`) before the final stamp,
  * so a refresh that failed after its restore would otherwise read as stable.
- * Read from the database's own row in pg_db_role_setting (setrole 0), not
- * current_setting: a session's value also comes from ALTER ROLE, ALTER SYSTEM
- * or a connection option, any of which would make every database it reaches
- * read as marked — a stable brain included. It lasts until
- * `ALTER DATABASE … RESET ob1.refresh_target`.
+ * Read from the database's own row in pg_db_role_setting (setrole 0), through
+ * config.mjs's DB_LEVEL_SETTINGS_SQL — not current_setting, since a session's
+ * value also comes from ALTER ROLE, ALTER SYSTEM or a connection option, any of
+ * which would make every database it reaches read as marked, a stable brain
+ * included. Only a value a refresh writes (canary, working) is a mark: an
+ * operator who sets it to `stable` or `off` to protect a database has not
+ * armed its reset. It lasts until `ALTER DATABASE … RESET ob1.refresh_target`.
  */
 async function refreshMark(sql: SQL): Promise<string | null> {
-  const rows = await sql<{ mark: string }[]>`
-    SELECT substr(c, length('ob1.refresh_target=') + 1) AS mark
-    FROM pg_db_role_setting s, unnest(s.setconfig) c
-    WHERE s.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
-      AND s.setrole = 0 AND c LIKE 'ob1.refresh\\_target=%'`;
-  return rows.length && rows[0].mark !== "" ? rows[0].mark : null;
+  const [row] = await sql.unsafe(DB_LEVEL_SETTINGS_SQL);
+  const mark = parseSetConfig(row?.cfg)["ob1.refresh_target"];
+  return mark === "canary" || mark === "working" ? mark : null;
 }
 
 /**
@@ -325,6 +325,10 @@ export async function targetRefusal(target: SQL): Promise<string | null> {
     SELECT current_database() AS db,
            (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE n.nspname = 'public'
+              -- relations a schema is made of; an index, a composite type or a
+              -- TOAST table follows its owner, and an extension's own (a PostGIS
+              -- primary key, tablefunc's row types) carry no 'e' dependency
+              AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
               AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')) AS relations,
            to_regclass('public.schema_migrations') IS NOT NULL AS migrations,
            to_regclass('public.ob1_config') IS NOT NULL AS config,
@@ -415,9 +419,10 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
         await dst.unsafe(`DO $mark$ BEGIN EXECUTE format('ALTER DATABASE %I SET ob1.refresh_target = %L', current_database(), '${tier}'); END $mark$`);
       } catch (e) {
         // Nothing is reset yet. A database-level setting of a custom name needs a
-        // superuser (PG15+), as does restoring pgvector (CREATE EXTENSION vector),
-        // so a refresh that cannot mark could not have finished either.
-        throw new Error(`--refresh marks --to before resetting it (ALTER DATABASE … SET ob1.refresh_target) and could not: ${(e as Error).message}. A refresh needs a superuser on --to — pg_restore of pgvector's extension does too. --to is untouched.`);
+        // superuser, or on PG15+ a role granted SET on the parameter; restoring
+        // pgvector into a public schema the reset emptied needs a superuser in
+        // the default install too, so a role that cannot mark could rarely finish.
+        throw new Error(`--refresh marks --to before resetting it (ALTER DATABASE … SET ob1.refresh_target) and could not: ${(e as Error).message}. That needs a superuser on --to, or GRANT SET ON PARAMETER ob1.refresh_target (PG15+); restoring pgvector needs a superuser in the default install anyway. --to is untouched.`);
       }
       await dst`DROP SCHEMA IF EXISTS public CASCADE`;
       await dst`CREATE SCHEMA public`;

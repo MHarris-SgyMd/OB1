@@ -23,31 +23,45 @@
 #                    script — which a branch worktree does not have: it is gitignored)
 #   --runtime CLI    docker or podman (default: docker when on PATH, else podman)
 #
-# The env file is read by compose itself (`compose config --environment`), so a
-# quoted value, an inline comment, an `export` line or CRLF reads here as it
-# does for the stack, and the environment wins over the file as it does there.
-# Each name the file sets is handed to the container with that resolved value:
-# migrate.ts reads the OB1_EMBEDDING_* knobs on a refresh, and POSTGRES_PASSWORD
-# builds the URLs. The values travel in a mode-600 temporary env file, so they
-# are not on this command line or the runtime's. They are on the argument lists
-# inside the container (bun's, pg_dump's, pg_restore's, migrate.ts's), which a
-# Linux host's `ps` shows.
+# The environment is compose's: `compose config --environment` reads the env
+# file as the stack does (quotes, inline comments, `export`, CRLF, a BOM) under
+# the shell's own variables, which win there too. Of that, only what tier.ts and
+# migrate.ts read is handed on — the OB1_* knobs (migrate.ts's OB1_EMBEDDING_*
+# on a refresh; the replay's OB1_EVAL_* and OB1_LLM_*), POSTGRES_PASSWORD, which
+# builds the URLs, and the provider settings the replay's embed reads
+# (OPENROUTER_API_KEY, OLLAMA_BASE). Access keys, LINEAR_API_KEY and the rest
+# stay behind. The values travel in a mode-600 temporary env file, so they are
+# not on this command line or the runtime's; they are in the container's
+# environment (`inspect` shows it while it runs), and the URLs are on the
+# argument lists inside it (bun's, pg_dump's, pg_restore's, migrate.ts's), which
+# a Linux host's `ps` shows (SMD-2119).
 #
-# A short-form --to is set OB1_ALLOW_REMOTE_DB=1: tier.ts refuses to reset a
+# Nothing else reaches the container's environment: the checkout is mounted, and
+# its own .env files (evals/.env, .env, deploy/.env, which db/env.ts would read,
+# and whatever Bun auto-loads from a working directory) are switched off —
+# OB1_ENV_FILES=off, `bun --no-env-file`, and a working directory outside it.
+#
+# A short-form --to gets OB1_ALLOW_REMOTE_DB=1: tier.ts refuses to reset a
 # non-loopback --to without it, and from a container every other container is
 # non-loopback. What guards --to in its place is tier.ts: it refuses a --to that
-# is the --from database, and resets only a target a refresh marked before
-# (ob1.refresh_target on the database), a canary/working stamp, an empty public
-# schema, or an Open Brain schema with no thoughts. A --to given as a URL gets
-# no such opt-in: export OB1_ALLOW_REMOTE_DB=1 to reset one, as with tier.ts.
+# is the --from database, and resets only a target an earlier refresh marked
+# (ob1.refresh_target on the database), one stamped canary or working, one whose
+# public schema holds nothing but what extensions own, or an Open Brain schema
+# (schema_migrations, ob1_config and thoughts) with no thoughts. A --to given as
+# a URL gets no such opt-in: export OB1_ALLOW_REMOTE_DB=1 to reset one, as with
+# tier.ts.
 #
 # The client major, 16, must be at least the source server's: refreshToolsReady
 # refuses the refresh otherwise, and bumping the stack's Postgres means bumping
-# the package in db/tier.Dockerfile with it.
+# the package in db/tier.Dockerfile with it. On a host with SELinux enforcing
+# (Fedora, RHEL — podman's default there), the read-only mount of the checkout
+# needs a label the container may read; relabel the checkout once (`chcon -Rt
+# container_file_t <checkout>`) — this script does not relabel it for you.
 #
 # Exit status is tier.ts's (--diff exits 1 when a ranking moved); 2 for a usage
-# error here.
+# error here, a network that does not exist included.
 set -euo pipefail
+unset CDPATH # a cd that prints the directory would put two lines in HERE
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
@@ -93,42 +107,46 @@ if [ -z "$RUNTIME" ]; then
   fi
 fi
 
-# The names the file sets. Compose resolves their values below; this only says
-# which of compose's interpolation environment (the file over the shell's) to
-# hand on. The wrapper's own variables are left out. POSTGRES_PASSWORD is named
-# whether or not the file sets it, so the shell's counts when the file has none,
-# as it does for the stack.
-NAMES=" POSTGRES_PASSWORD $(tr -d '\r' < "$ENV_FILE" \
-  | sed -nE 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=.*/\2/p' \
-  | { grep -vxE 'OB1_ALLOW_REMOTE_DB|TIER_FROM_URL|TIER_TO_URL|POSTGRES_PASSWORD' || true; } | sort -u | tr '\n' ' ')"
+# Before anything is built: a mistyped network (open-brain_default against
+# open-brain-tiers_default) is a usage error, not the runtime's 125 at the end.
+"$RUNTIME" network inspect "$NETWORK" >/dev/null 2>&1 || {
+  echo "no network $NETWORK — name the stack's with --network. The runtime has:" >&2
+  "$RUNTIME" network ls >&2 || true
+  exit 2
+}
 
-# The file as compose reads it: an empty project, the file, its interpolation
-# environment. The runtime's compose first, then the other's.
+TMP_ENV="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-env.XXXXXX")"
+COMPOSE_ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-compose.XXXXXX")"
+chmod 600 "$TMP_ENV"
+trap 'rm -f "$TMP_ENV" "$COMPOSE_ERR_FILE"' EXIT
+
+# The environment as compose builds it for the stack: an empty project, the
+# file, the shell. stderr apart, since a delegating `podman compose` prints a
+# banner there even when it succeeds. The runtime's compose first, then the
+# other's; the first failure is the one reported.
 RESOLVED=""
 COMPOSE_ERR=""
 for c in "$RUNTIME" docker podman; do
   command -v "$c" >/dev/null 2>&1 || continue
-  if RESOLVED="$(printf 'services: {}\n' | "$c" compose -p open-brain-tier-env --env-file "$ENV_FILE" -f - config --environment 2>&1)"; then break; fi
-  # The first failure is kept — the runtime's own compose, tried first — so a
-  # file compose cannot parse is reported as that, not as a missing compose.
-  [ -n "$COMPOSE_ERR" ] || COMPOSE_ERR="$c compose said: $RESOLVED"
+  if RESOLVED="$(printf 'services: {}\n' | "$c" compose -p open-brain-tier-env --env-file "$ENV_FILE" -f - config --environment 2>"$COMPOSE_ERR_FILE")"; then break; fi
+  [ -n "$COMPOSE_ERR" ] || COMPOSE_ERR="$c compose said: $(cat "$COMPOSE_ERR_FILE")"
   RESOLVED=""
 done
 [ -n "$RESOLVED" ] || { printf 'could not read %s through compose — tier.sh needs docker compose (or podman compose) with "config --environment".\n%s\n' "$ENV_FILE" "$COMPOSE_ERR" >&2; exit 2; }
 
-TMP_ENV="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-env.XXXXXX")"
-chmod 600 "$TMP_ENV"
-trap 'rm -f "$TMP_ENV"' EXIT
-
-# One NAME=value line per name the file sets, value as compose resolved it; a
-# runtime's --env-file takes such a line literally. A quoted value spanning
-# lines is not supported: compose prints its lines raw, so the first is carried
-# cut short and a later one shaped NAME=… reads as that name (none of the
-# stack's knobs is multi-line).
+# What is handed on, one NAME=value line each, value as compose resolved it (a
+# runtime's --env-file takes such a line literally). The wrapper's own variables
+# are its to set, below. A quoted value spanning lines is not supported: compose
+# prints its lines raw, so the first is carried cut short and a later one shaped
+# like an allowed NAME=… reads as that name (none of the stack's knobs is one).
 POSTGRES_PASSWORD=""
 while IFS= read -r line; do
   name="${line%%=*}"
-  case "$NAMES" in *" $name "*) ;; *) continue ;; esac
+  case "$name" in
+    OB1_ALLOW_REMOTE_DB|OB1_ENV_FILE|OB1_ENV_FILES) continue ;;
+    OB1_*|POSTGRES_PASSWORD|OPENROUTER_API_KEY|OLLAMA_BASE) ;;
+    *) continue ;;
+  esac
   printf '%s\n' "$line" >> "$TMP_ENV"
   [ "$name" = POSTGRES_PASSWORD ] && POSTGRES_PASSWORD="${line#*=}"
 done <<< "$RESOLVED"
@@ -151,7 +169,8 @@ urlencode() {
 
 is_url() { case "$1" in postgres://*|postgresql://*) return 0 ;; esac; return 1; }
 
-# HOST[:PORT][/DB] → postgres://postgres:…@HOST:PORT/DB; a URL as given.
+# HOST[:PORT][/DB] → postgres://postgres:…@HOST:PORT/DB; a URL as given. Called
+# as an assignment, so its exit 2 ends the script under set -e.
 to_url() {
   if is_url "$1"; then printf '%s' "$1"; return; fi
   [ -n "$POSTGRES_PASSWORD" ] || { echo "POSTGRES_PASSWORD is not set in $ENV_FILE or the environment — needed to build the URL for $1." >&2; exit 2; }
@@ -162,9 +181,12 @@ to_url() {
   printf 'postgres://postgres:%s@%s/%s' "$(urlencode "$POSTGRES_PASSWORD")" "$hostport" "$db"
 }
 
+FROM_URL="$(to_url "$FROM")"
+TO_URL="$(to_url "$TO")"
 {
-  printf 'TIER_FROM_URL=%s\n' "$(to_url "$FROM")"
-  printf 'TIER_TO_URL=%s\n' "$(to_url "$TO")"
+  printf 'TIER_FROM_URL=%s\n' "$FROM_URL"
+  printf 'TIER_TO_URL=%s\n' "$TO_URL"
+  echo OB1_ENV_FILES=off
   if ! is_url "$TO"; then echo OB1_ALLOW_REMOTE_DB=1
   elif [ -n "${OB1_ALLOW_REMOTE_DB:-}" ]; then printf 'OB1_ALLOW_REMOTE_DB=%s\n' "$OB1_ALLOW_REMOTE_DB"
   fi
@@ -172,22 +194,26 @@ to_url() {
 
 # Cached after the first build; rebuilt when db/tier.Dockerfile changes. Its
 # output goes to stderr, so a --diff's report is the only thing on stdout.
-# --load for docker: under a docker-container buildx builder (this Mac's docker
-# CLI over podman is one) a build without it stays in the builder's cache and
-# `run` then looks the tag up in a registry; the default builder takes it too.
+# --load for docker with buildx: under a docker-container builder (this Mac's
+# docker CLI over podman is one) a build without it stays in the builder's
+# cache and `run` then looks the tag up in a registry. A docker with no buildx
+# plugin (the legacy builder, Debian's docker.io) has no such flag and loads
+# anyway.
 LOAD=()
-[ "$RUNTIME" = docker ] && LOAD=(--load)
+if [ "$RUNTIME" = docker ] && docker buildx version >/dev/null 2>&1; then LOAD=(--load); fi
 "$RUNTIME" build -q ${LOAD[@]+"${LOAD[@]}"} -t "$IMAGE" - < "$REPO/db/tier.Dockerfile" >&2
 
 # --init: bun would otherwise be PID 1, which ignores SIGINT, and Ctrl-C would
-# leave a refresh running. The quoted script appends the URLs to the arguments
-# it was given, so tier.ts's own parser sees the one --from and --to. Not
-# `exec`: the EXIT trap removes the temporary env file, and set -e hands on the
-# run's status.
+# leave a refresh running. -w /tmp: Bun auto-loads .env files from the working
+# directory (so does the migrate.ts it spawns), and /tmp has none. The quoted
+# script appends the URLs to the arguments it was given, so tier.ts's own parser
+# sees the one --from and --to. Not `exec`: the EXIT trap removes the temporary
+# files, and set -e hands on the run's status.
 # shellcheck disable=SC2016 # the container's sh expands them, not this one
 "$RUNTIME" run --rm --init \
   --network "$NETWORK" \
   --env-file "$TMP_ENV" \
   -v "$REPO:/repo:ro" \
+  -w /tmp \
   "$IMAGE" \
-  sh -c 'exec bun tier.ts "$@" --from "$TIER_FROM_URL" --to "$TIER_TO_URL"' tier ${PASS[@]+"${PASS[@]}"}
+  sh -c 'exec bun --no-env-file /repo/db/tier.ts "$@" --from "$TIER_FROM_URL" --to "$TIER_TO_URL"' tier ${PASS[@]+"${PASS[@]}"}
