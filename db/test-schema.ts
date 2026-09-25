@@ -5971,6 +5971,11 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
       && (await graphCoverage(run, { ...wide, status: "done", startable: true })).weighed === (await graphCoverage(run, { ...wide, status: "done" })).weighed,
     "--status done --startable lists the Done tD though its blocker is open, holds nothing back, and weighs in exactly what --status done does");
   assert((await graphCoverage(run, { ...wide, status: "active", startable: true })).dependencies!.held === 1, "under --status active the flag holds back one thought, tQ — the line reports what it did in this run, not every thought with a blocker");
+  // coverage() reads the known types at the slot weightsSql bound last; under
+  // --startable weightsSql binds one more array first, so the lifecycle counts
+  // must be the same with and without the flag (third review pass).
+  const lc = (c: Awaited<ReturnType<typeof graphCoverage>>) => [c.with_lifecycle, c.unknown_status, c.done, c.last_sync].join();
+  assert(lc(covS) === lc(await graphCoverage(run, { ...wide, status: "open" })), `the lifecycle counts under --startable are the lifecycle counts without it — the slot arithmetic holds (${lc(covS)})`);
   // An unknown blocker is counted where it holds a thought back: under done,
   // tX (backlog) already weighs 0, so SMD-7999 holds nothing (second review pass).
   assert((await graphCoverage(run, { ...wide, status: "done", startable: true })).dependencies!.unknown_blockers === 0 && covS.dependencies!.unknown_blockers === 1,
@@ -5993,7 +5998,7 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
     "the whole graph under --startable is the one the startable thoughts build: every Kafka thought is blocked, so Kafka is not in the run; NATS has tR, tS and tW");
   const rStart = render(await graphReport(run, null, openStart));
   assert(rStart.includes("lifecycle open, startable;") && rStart.includes("as current as board-sync's last passes over both tickets of each (a relation is read from either side, so one removed on the board blocks until both are re-read): 6 active dependency facets; the latest was written or closed ")
-      && rStart.includes(". 7 of 16 thoughts belong to a ticket a dependency names; every other thought has none recorded and counts as unblocked. --startable: 5 thoughts with an open blocker weigh 0 in this run; a completed or canceled ticket is settled, not blocked, a blocker completed or canceled does not block, and a parent is not blocked by its children. 1 blocker is holding a thought back only because nothing settles it: not in the brain, or with no status_type this tool knows."),
+      && rStart.includes(". 7 of 16 thoughts belong to a ticket a dependency names; every other thought has none recorded and counts as unblocked. --startable: 5 thoughts with an open blocker weigh 0 in this run; a completed or canceled ticket is settled, not blocked, a blocker completed or canceled does not block, and a parent is not blocked by its children. 1 blocker of the held thoughts is unsettled only for want of a known status: not in the brain, or with no status_type this tool knows."),
     "the report: the header names the flag, and the dependency line has the source, when the dependencies last moved, the counts, the rules for settled tickets, settled blockers and parents, and the unsettled count");
   assert(!render(await graphReport(run, null, { ...wide, status: "open" })).includes("Dependencies are read"), "…a line printed under --startable alone");
   assert(render(await graphReport(run, "Anita", { ...on, types: ["place"], status: "open", startable: true })).includes("shares a --status open startable thought"), "a subject with no neighbour under the flag is told the flag emptied it");

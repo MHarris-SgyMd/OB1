@@ -236,7 +236,7 @@ export type Dependencies = {
   in_dependencies: number;
   /** Thoughts the flag took from a weight above 0 to 0 in this run: unsettled, weighed in by the lifecycle, and with an open blocker. */
   held: number;
-  /** Blockers that hold back a thought in this run only because nothing settles them — not in the brain, or with no status_type this tool knows. */
+  /** Distinct blockers of the thoughts held in this run that nothing settles — not in the brain, or with no status_type this tool knows. A held thought may have a known-open blocker beside one. */
   unknown_blockers: number;
   /** The latest dependency facet written or closed. Null when the brain holds none. */
   last_link_change: string | null;
@@ -447,7 +447,8 @@ export async function coverage(run: Runner, opts: Options): Promise<Coverage> {
                                      JOIN ticket_of k ON k.system = b.system AND k.identity = b.blocked
                                      JOIN weights w ON w.thought_id = k.thought_id AND w.held
                                     WHERE b.blocker_status IS NULL OR NOT b.blocker_status = ANY($${knownSlot}::text[])) u)::int AS dep_unknown,
-            (SELECT max(greatest(created_at, valid_until)) FROM thought_facets WHERE kind = 'link' AND payload->>'relation' IN ('blocks', 'blocked_by')) AS dep_last_change`
+            (SELECT max(greatest(f.created_at, f.valid_until)) FROM thought_facets f JOIN thought_sources s ON s.thought_id = f.thought_id AND s.system = f.payload->>'system'
+              WHERE f.kind = 'link' AND f.payload->>'relation' IN ('blocks', 'blocked_by')) AS dep_last_change`
     : "";
   const [r] = await run(
     `WITH ${weights}
@@ -777,7 +778,9 @@ export function lifecycleCaveat(c: Coverage, opts: Options): string {
  * The dependency line, under `--startable` alone: where the edges come from
  * and how current they can be, how many thoughts a dependency names (the rest
  * count as unblocked), how many the flag held back in this run, and how many
- * blockers hold a thought back only because nothing settles them.
+ * of the held thoughts' blockers are unsettled only for want of a known status
+ * (such a blocker may share its thought with a known-open one: it is counted,
+ * not blamed — third review pass).
  */
 export function dependencyCaveat(c: Coverage, d: Dependencies): string {
   // A pass that changes no relation writes no facet (053's set semantics), so
@@ -785,7 +788,7 @@ export function dependencyCaveat(c: Coverage, d: Dependencies): string {
   // pass last looked — the line says which (first review pass).
   const moved = d.last_link_change ? `; the latest was written or closed ${d.last_link_change}` : "";
   const unknown = d.unknown_blockers
-    ? ` ${d.unknown_blockers} blocker${d.unknown_blockers === 1 ? " is" : "s are"} holding a thought back only because nothing settles ${d.unknown_blockers === 1 ? "it" : "them"}: not in the brain, or with no status_type this tool knows.`
+    ? ` ${d.unknown_blockers} blocker${d.unknown_blockers === 1 ? "" : "s"} of the held thoughts ${d.unknown_blockers === 1 ? "is" : "are"} unsettled only for want of a known status: not in the brain, or with no status_type this tool knows.`
     : "";
   return `Dependencies are read from the board's blocks / blocked_by link facets (SMD-1867), as current as board-sync's last passes over both tickets of each (a relation is read from either side, so one removed on the board blocks until both are re-read): ${d.facets} active dependency facet${d.facets === 1 ? "" : "s"}${moved}. ${d.in_dependencies} of ${c.thoughts} thoughts belong to a ticket a dependency names; every other thought has none recorded and counts as unblocked. --startable: ${d.held} thought${d.held === 1 ? "" : "s"} with an open blocker weigh${d.held === 1 ? "s" : ""} 0 in this run; a completed or canceled ticket is settled, not blocked, a blocker completed or canceled does not block, and a parent is not blocked by its children.${unknown}`;
 }

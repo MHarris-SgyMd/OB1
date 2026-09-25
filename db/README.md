@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1650 assertions: 1650 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1651 assertions: 1651 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-four (54) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -1121,8 +1121,8 @@ blocker. A thought whose ticket no dependency names counts as unblocked. The
 dependency caveat line (`coverage.dependencies` in the JSON) gives the active
 dependency facets and when the latest was written or closed, how many thoughts
 belong to a ticket a dependency names on either side, how many the flag held
-back in the run (took from a weight above 0 to 0), and how many blockers hold a
-thought back only for want of a known status. The edges are as current as
+back in the run (took from a weight above 0 to 0), and how many of the held
+thoughts' blockers are unsettled only for want of a known status. The edges are as current as
 board-sync's last passes over both tickets of a relation: it is read from either
 side, so one removed on the board blocks until both are re-read. The flag composes with `--status` and
 `--decay-done` (the weights multiply). Without it the dependency read is not in
@@ -2088,7 +2088,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1650 assertions, PGlite, no container
+bun test-schema.ts                          # 1651 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 703 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
