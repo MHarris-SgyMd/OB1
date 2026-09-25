@@ -70,9 +70,10 @@
 --      diff rule and the trigger, and is what preflight and test-schema read
 --      to tell this trigger from 046's.
 --
---   3. THE PAYLOAD FOR ROWS ALREADY WRITTEN — the THIRD NAMED AMENDMENT of
---      the append-only table, after 046's kind-fill and before SMD-1723's
---      redaction. Under ob1.audit_amend = 'payload' an UPDATE of a CAPTURE
+--   3. THE PAYLOAD FOR ROWS ALREADY WRITTEN — the second amendment the
+--      append-only table allows and the third named: 046's kind-fill landed
+--      first; SMD-1723's redaction, named before this one, has not landed.
+--      Under ob1.audit_amend = 'payload' an UPDATE of a CAPTURE
 --      row may fill diff.content and diff.created_at where absent, and
 --      nothing else: every other column byte-equal (to_jsonb(OLD) against
 --      to_jsonb(NEW) with `diff` removed — the fifth column, under this
@@ -96,7 +97,9 @@
 --      column; db/ingest-records.ts writes a record's own string), is a value
 --      the gate could never accept, so it is not offered and the content
 --      fills alone (cold read, fifth review pass: offered, it failed the
---      apply as the array diff had). A deleted
+--      apply as the array diff had); a NULL one (001's column has no NOT
+--      NULL; the trigger's own event drops the key for it) offers nothing.
+--      A deleted
 --      thought's is gone with the row and the fold falls back to the event's
 --      clock, as it does for a row captured at now(). A created_at is filled
 --      with the content or before it, never onto a row that already carries
@@ -158,11 +161,17 @@
 --      table per call, dropped at commit), candidates read through a partial
 --      index that holds exactly them — the capture rows without content
 --      whose diff is an object — so a bounded pass, the awaiting count and
---      preflight's census read the index and not the heap, empty once the
---      pass has run on a brain whose every capture derives — the rows nothing
---      derives for stay in it, counted (fifth review pass, both readers: with the type clause
---      on the queries alone and not the index, the planner left the index
---      whenever some rows still waited, measured at 60,000 rows) —
+--      preflight's census read the index and not the heap (fifth review
+--      pass, both readers: with the type clause on the queries alone and
+--      not the index, the planner left the index whenever some rows still
+--      waited, measured at 60,000 rows), empty once the pass has run on a
+--      brain whose every capture derives — the rows nothing derives for
+--      stay in it, counted. The index is built AFTER this file's own pass:
+--      built before it, in the same transaction, its lock held every
+--      capture of a live server for the pass's length, some three seconds
+--      at 60,000 rows, where the build alone holds them for ten
+--      milliseconds; the first pass reads the heap, the right plan when
+--      every row is a candidate (run-it, seventh review pass) —
 --      in (created_at, seq) order, each derived once, filled under the
 --      setting, the setting restored. Returns {ok, rows, from_update,
 --      from_tombstone, from_row, with_created_at, unrecoverable, skipped,
@@ -242,9 +251,15 @@
 --      with its ticket.
 --
 -- SAFETY
---   Additive: thoughts is untouched; thought_audit gains one partial index;
---   every function is CREATE OR REPLACE; no signature moves, no row is
---   written differently, no return changes. Existing capture rows read as
+--   Additive: thoughts is untouched; thought_audit gains one partial index,
+--   built after the file's own pass so a live server's captures wait on the
+--   build alone — ten milliseconds — and not on the pass (run-it, seventh
+--   review pass: before, the pass's length, some three seconds at 60,000
+--   rows); the pass itself locks the capture rows it fills and no capture
+--   waits on those. An index under the name with an earlier revision's
+--   predicate is dropped first — ACCESS EXCLUSIVE on the table, that brain
+--   alone. Every function is CREATE OR REPLACE; no signature moves, no row
+--   is written differently, no return changes. Existing capture rows read as
 --   before until the pass fills them; the file's own call fills every row
 --   waiting (or one batch under OB1_BACKFILL_LIMIT, 023's knob — the rest by
 --   hand). Idempotent: a second run adds nothing, the pass finds nothing.
@@ -983,16 +998,20 @@ BEGIN
       v_why := 'a content once set is never changed';
     ELSIF v_old ? 'created_at' AND v_new->'created_at' IS DISTINCT FROM v_old->'created_at'
           AND (v_new->>'created_at' IS NULL OR v_new->>'created_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}'
-               OR v_old->>'created_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}') THEN
+               OR v_old->>'created_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}'
+               OR NOT pg_input_is_valid(v_new->>'created_at', 'timestamptz')
+               OR NOT pg_input_is_valid(v_old->>'created_at', 'timestamptz')) THEN
       -- Byte-equal is unchanged, whatever the bytes: a created_at set by hand
       -- to no timestamp is not this arm's to judge, and the pass, which never
       -- rewrites a set one, fills the content beside it (cold read, fourth
       -- review pass: the shape test ran on the unchanged value, so the fill
-      -- was refused five times and the apply failed). Shape in its own arm,
-      -- the cast in the next: SQL's OR promises no order, and a cast that
-      -- ran first on a string that is no timestamp would raise its own error
-      -- in place of this sentence (sixth review pass; the fill arm below was
-      -- split the same way in the first).
+      -- was refused five times and the apply failed). Shape and validity in
+      -- their own arm, the cast in the next: SQL's OR promises no order, and
+      -- a cast that ran first on a string that is no timestamp would raise
+      -- its own error in place of this sentence (sixth review pass; the fill
+      -- arm below was split the same way in the first). The shape alone
+      -- admits "2024-13-45T99:00:00", which the cast still rejects, so
+      -- pg_input_is_valid judges the value too (cold read, seventh).
       v_why := 'a created_at once set is never changed';
     ELSIF v_old ? 'created_at' AND v_new->'created_at' IS DISTINCT FROM v_old->'created_at'
           AND (v_new->>'created_at')::timestamptz IS DISTINCT FROM (v_old->>'created_at')::timestamptz THEN
@@ -1015,9 +1034,11 @@ BEGIN
         v_why := CASE WHEN v_content IS NULL THEN 'no content derives for this row (no later content-moving update, no tombstone, no live row)'
                       ELSE format('content must be the text the log and the row derive to (from the %s)', v_source) END;
       ELSIF (v_new ? 'created_at') AND NOT (v_old ? 'created_at')
-         AND (v_new->>'created_at' IS NULL OR v_new->>'created_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}') THEN
-        -- Shape first, so a string that is no timestamp is refused by name
-        -- rather than by the cast's own error (run-it, first review pass).
+         AND (v_new->>'created_at' IS NULL OR v_new->>'created_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}'
+              OR NOT pg_input_is_valid(v_new->>'created_at', 'timestamptz')) THEN
+        -- Shape and validity first, so a string that is no timestamp — by
+        -- shape, or by a month of 13 — is refused by name rather than by the
+        -- cast's own error (run-it, first review pass; cold read, seventh).
         v_why := 'created_at must be a timestamp';
       ELSIF (v_new ? 'created_at') AND NOT (v_old ? 'created_at')
          AND (v_created IS NULL OR (v_new->>'created_at')::timestamptz IS DISTINCT FROM v_created) THEN
@@ -1043,31 +1064,7 @@ END;
 $$;
 
 -- ---------------------------------------------------------------------------
--- 8. The rows still waiting for their payload — the backfill's candidates and
---    preflight's census, by index rather than by heap. Empty once the pass has
---    run on a brain whose every capture derives, so it costs nothing after.
--- ---------------------------------------------------------------------------
--- The predicate is the candidate predicate, clause for clause: a query whose
--- WHERE merely implies an index's predicate may use it, but its remaining
--- clauses are costed on the planner's defaults (0.5 for the `?` test, 0.005
--- for the type test), and with some rows still waiting after a bounded pass
--- those defaults sent the awaiting count and preflight's census to the heap
--- (both readers, fifth review pass, at 60,000 rows). Matching, the index
--- holds exactly the candidates, the implied clauses drop, and the path is
--- costed on the index's own size. Dropped first: CREATE INDEX IF NOT EXISTS
--- keeps whatever predicate stands under the name, and a brain that applied
--- an earlier revision of this file (the predicate moved in review) would
--- keep it through --reapply with nothing to say so — a partial index over
--- the rows still waiting is small, and a re-apply rebuilds it in the time
--- it takes to read them (sixth review pass, both readers).
-DROP INDEX IF EXISTS thought_audit_awaiting_payload_idx;
-CREATE INDEX thought_audit_awaiting_payload_idx
-  ON thought_audit (created_at, seq)
-  WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false)
-    AND jsonb_typeof(COALESCE(diff, '{}'::jsonb)) = 'object';
-
--- ---------------------------------------------------------------------------
--- 9. The backfill: the payload onto every capture row written before this
+-- 8. The backfill: the payload onto every capture row written before this
 --    file, from the log first and the row second.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION backfill_thought_payloads(p_limit integer DEFAULT NULL)
@@ -1219,7 +1216,9 @@ BEGIN
 
   -- What still waits: the capture rows without content — those a bounded
   -- pass did not reach, and those nothing derives for. The predicate is the
-  -- index's, clause for clause, so the count is the index's (section 8; the
+  -- index's, clause for clause, so the count is the index's (section 10,
+  -- built after this file's own pass, whose count therefore reads the heap
+  -- once; the
   -- fourth review pass's claim that the type clause alone kept it there was
   -- measured false by the fifth, in the state a bounded pass leaves).
   SELECT count(*)::int INTO v_awaiting
@@ -1241,10 +1240,10 @@ END;
 $$;
 
 COMMENT ON FUNCTION backfill_thought_payloads(integer) IS
-  'Fill diff.content — and diff.created_at where the live row''s differs from the event''s — on capture rows written before 055, from the first content-moving update''s `before`, else the tombstone''s previous_content, else the live row (ob1_capture_payload): the third amendment thought_audit_immutable allows, under ob1.audit_amend = ''payload''. Idempotent; p_limit bounds a pass (each call its own transaction); the fill runs in batches of 1,000; a refusal by the gate for a thought deleted while the pass ran is caught, the moved rows set aside, the batch retried (a refusal that moves nothing is raised after five). A capture row whose diff is no object is no candidate. Returns {ok, rows, from_update, from_tombstone, from_row, with_created_at, unrecoverable, skipped, awaiting}: rows and the by-source counts are what THIS pass wrote; with_created_at those of them that gained a created_at; unrecoverable the candidates nothing derives for (left as they are); skipped the candidates another pass filled meanwhile or whose derivation moved while this one ran (whatever they derived to at the scan); awaiting the capture rows still without content. Migration 055 / SMD-2115.';
+  'Fill diff.content — and diff.created_at where the live row''s differs from the event''s — on capture rows written before 055, from the first content-moving update''s `before`, else the tombstone''s previous_content, else the live row (ob1_capture_payload): the payload amendment thought_audit_immutable allows under ob1.audit_amend = ''payload'' — the second it allows, the third named (SMD-1723''s redaction, named before it, has not landed). Idempotent; p_limit bounds a pass (each call its own transaction); the fill runs in batches of 1,000; a refusal by the gate for a thought deleted while the pass ran is caught, the moved rows set aside, the batch retried (a refusal that moves nothing is raised after five). A capture row whose diff is no object is no candidate. Returns {ok, rows, from_update, from_tombstone, from_row, with_created_at, unrecoverable, skipped, awaiting}: rows and the by-source counts are what THIS pass wrote; with_created_at those of them that gained a created_at; unrecoverable the candidates nothing derives for (left as they are); skipped the candidates another pass filled meanwhile or whose derivation moved while this one ran (whatever they derived to at the scan); awaiting the capture rows still without content. Migration 055 / SMD-2115.';
 
 -- ---------------------------------------------------------------------------
--- 10. What the columns and the table say now.
+-- 9. What the columns and the table say now.
 -- ---------------------------------------------------------------------------
 COMMENT ON COLUMN thought_audit.diff IS
   'capture: the creating metadata and, since 055, the content — and created_at when the writer set the row''s own time (a backdating ingester''s; absent when the row took now()); derived_from and supersedes when set. update: before/after of each changed field — content, metadata, supersedes, derived_from and, since 055, content_fingerprint when the key moved — and embedding_present when the vector''s presence flipped. delete: previous_content, previous_metadata, previous_derived_from and previous_supersedes, in full, for recovery. On a capture row from before 055 the content and created_at are filled after the fact by backfill_thought_payloads, the one change the payload amendment allows. Migration 008 / 025 / 046 / 055 (SMD-2115).';
@@ -1256,3 +1255,44 @@ COMMENT ON TABLE thought_audit IS
 -- from the log and the row — or one batch of OB1_BACKFILL_LIMIT rows, the
 -- rest by hand (023's knob; the migrator says which). A re-apply finds nothing.
 SELECT backfill_thought_payloads({{BACKFILL_LIMIT}});
+
+-- ---------------------------------------------------------------------------
+-- 10. The rows still waiting for their payload — the backfill's candidates
+--     and preflight's census, by index rather than by heap. Empty once the
+--     pass has run on a brain whose every capture derives, so it costs
+--     nothing after. Built LAST, after the file's own pass above: in one
+--     transaction an index statement's lock on thought_audit — SHARE for the
+--     build, and CREATE INDEX IF NOT EXISTS takes it even when the index
+--     stands — is held to commit, so built before the pass it held every
+--     capture of a live server for the pass's length, some three seconds at
+--     60,000 rows, where the build alone holds them for ten milliseconds
+--     (run-it, seventh review pass). The first pass reads the heap, the
+--     right plan when every row is a candidate.
+-- ---------------------------------------------------------------------------
+-- The predicate is the candidate predicate, clause for clause: a query whose
+-- WHERE merely implies an index's predicate may use it, but its remaining
+-- clauses are costed on the planner's defaults (0.5 for the `?` test, 0.005
+-- for the type test), and with some rows still waiting after a bounded pass
+-- those defaults sent the awaiting count and preflight's census to the heap
+-- (both readers, fifth review pass, at 60,000 rows). Matching, the index
+-- holds exactly the candidates, the implied clauses drop, and the path is
+-- costed on the index's own size.
+--
+-- An index under the name with an earlier revision's predicate — a brain that
+-- applied this file while the predicate moved in review — is dropped first,
+-- that brain alone: DROP INDEX takes ACCESS EXCLUSIVE on the table to commit,
+-- which an ordinary apply or re-apply has no cause to (sixth review pass's
+-- drop, the seventh's condition; test-schema plants the earlier predicate).
+DO $ix$
+DECLARE
+  v_def text := pg_get_indexdef(to_regclass('thought_audit_awaiting_payload_idx')::oid);
+BEGIN
+  IF v_def IS NOT NULL AND v_def NOT LIKE '%jsonb_typeof(COALESCE(diff, ''{}''::jsonb)) = ''object''::text%' THEN
+    EXECUTE 'DROP INDEX thought_audit_awaiting_payload_idx';
+  END IF;
+END
+$ix$;
+CREATE INDEX IF NOT EXISTS thought_audit_awaiting_payload_idx
+  ON thought_audit (created_at, seq)
+  WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false)
+    AND jsonb_typeof(COALESCE(diff, '{}'::jsonb)) = 'object';

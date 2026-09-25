@@ -154,9 +154,11 @@ statements. It sets a 10 s lock timeout for everything it does — for the
 session, and again inside every transaction — so a held lock fails the run
 rather than freezing it and every reader behind it. 001 and 003
 take ACCESS EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if
-`OB1_TRGM_INDEX` is on and the index is absent; 023's call runs again and takes
-its lock (`OB1_BACKFILL_LIMIT` bounds it, as on a first apply; it writes nothing
-when no row is waiting); 025 re-validates its constraints over the table. 021's
+`OB1_TRGM_INDEX` is on and the index is absent; 023's and 050's backfill calls
+run again and take `thoughts` EXCLUSIVE (`OB1_BACKFILL_LIMIT` bounds each, as on
+a first apply; they write nothing when no row is waiting); 055's locks the audit
+rows it fills and then builds its partial index over `thought_audit` (SHARE,
+tens of milliseconds); 025 re-validates its constraints over the table. 021's
 evidence backfill runs as written, the acceptances out of its sight (above);
 030, reached after it in the same transaction, finds nothing of 021's to take
 back and corrects the own-key labels an earlier paste of the body left
@@ -164,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1719 assertions: 1719 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1721 assertions: 1721 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-five (55) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -346,8 +348,8 @@ the row exists at step 2. Rows already written: `SELECT
 backfill_thought_payloads();` fills `diff.content` (and `created_at`) on every
 capture row from before 055 — from the first content-moving update's `before`,
 else the tombstone's `previous_content`, else the live row — under
-`ob1.audit_amend = 'payload'`, the third amendment the append-only trigger
-allows (a capture row's `diff.content` and `diff.created_at` where absent, with
+`ob1.audit_amend = 'payload'`, the payload amendment the append-only trigger
+allows — the second it allows, the third named (a capture row's `diff.content` and `diff.created_at` where absent, with
 what the log and the row derive to, and nothing else; under 046's `'backfill'`
 an UPDATE of `diff` stays refused). The file calls it once (`OB1_BACKFILL_LIMIT`
 bounds the batch, as for 023 and 050); preflight's `audit events` counts the
@@ -2100,7 +2102,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1719 assertions, PGlite, no container
+bun test-schema.ts                          # 1721 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 716 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

@@ -766,7 +766,7 @@ if (reapply) {
       "  recorded rows stay as they are, pending ones are recorded. Stop the server and any re-embed or extraction worker first:\n" +
       "  001 and 003 take ACCESS EXCLUSIVE locks on thoughts, 011 builds the trigram index if OB1_TRGM_INDEX is on and it is absent,\n" +
       "  023's and 050's backfill calls take thoughts EXCLUSIVE, 055's locks the audit rows it fills (OB1_BACKFILL_LIMIT bounds each, as on a first apply),\n" +
-      "  025 re-validates its constraints, 055 builds a partial index on thought_audit."
+      "  025 re-validates its constraints, 055 builds its partial index on thought_audit after its pass (SHARE, tens of milliseconds)."
   );
 }
 

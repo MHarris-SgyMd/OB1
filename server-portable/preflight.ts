@@ -1625,7 +1625,8 @@ if (configFailed) {
                                     WHERE ob1_registry_kind(NULL, d.actor_name) IS NOT NULL))${pre055 ? "" : `,
               -- 055's payload (SMD-2115): the capture rows still without
               -- content, read through 055's partial index on exactly them —
-              -- empty on a brain whose pass has run — bounded, ordered as the
+              -- empty on a brain whose pass has run and whose every capture
+              -- derives — bounded, ordered as the
               -- index is so the planner takes it with stale statistics too
               -- (run-it, first review pass: a seq scan the first start after
               -- the migration), and each one derived as the backfill derives
