@@ -1418,9 +1418,10 @@ export function verdictOf(result, text) {
  * capture_thought over MCP. Returns { id, note } on success. A refusal of a
  * pointer — a derived_from id the server does not know (a thought since
  * deleted, a result this parser misread), or a supersedes the server refuses
- * (the earlier summary deleted; a key that may not replace it) — drops that
- * pointer and tries again, and the note says so: a summary with no sources, or
- * a fresh one beside the old, beats no summary. (First review pass: only
+ * (the earlier summary deleted; a key that may not replace it) — or of the
+ * `metadata` (SMD-2168) drops what was refused and tries again, and the note
+ * says so: a summary with no sources, a fresh one beside the old, or one
+ * without its redaction count, beats no summary. (First review pass: only
  * derived_from was retried, and a dead supersedes refused every later ending of
  * the session forever, since the state kept naming it.)
  */
