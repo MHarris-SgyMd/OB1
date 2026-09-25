@@ -2111,9 +2111,9 @@ console.log("\n[21] test-support's schema reset leaves nothing of the fork's in 
   for (const ddl of [`DROP TABLE ob1_probe_part`, `DROP FUNCTION ob1_probe_fn()`, `DROP TYPE ob1_probe_rowtype`, `DROP TYPE ob1_probe_enum`, `DROP DOMAIN ob1_probe_domain`]) await sql.unsafe(ddl);
   // A survivor is the fork's when some migration names it — then a line is
   // missing from test-support's lists and this section fails. One no migration
-  // names is another suite's: CI's data-layer job runs five server-portable
-  // suites before this one on one database, and a local run against a kept
-  // database meets whatever the last suite left. Those are reported in the
+  // names is another suite's: a run against a kept database meets whatever
+  // the last suite left there (CI's data-layer job gives this suite a fresh
+  // database of its own, SMD-2219). Those are reported in the
   // label and do not fail the section, which is about the drop lists, not
   // about the neighbours (fifth review pass).
   const texts = await Promise.all(MIGRATIONS.map((f) => Bun.file(join(HERE, "migrations", f)).text()));

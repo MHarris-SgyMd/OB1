@@ -1274,20 +1274,22 @@ else {
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("042") });
   // The isolation level every lock-order argument assumes, read from the
   // connection's default: ok at read committed, a warning naming the guarantees
-  // at any other, with the ALTER ROLE that puts it back. Set on the role, so a
-  // fresh session (preflight's) inherits it; reset after. On the role IN this
-  // database: the role is the cluster's, and CI runs test-upgrade.ts beside
-  // this suite in another database, whose sessions would start at repeatable
-  // read too (SMD-2219).
+  // at any other, with the ALTER ROLE that puts it back. Set on the database,
+  // so a fresh session (preflight's) inherits it; reset after. Not on the role:
+  // the role is the cluster's, and CI runs test-upgrade.ts beside this suite in
+  // another database as the same role, whose sessions would start at
+  // repeatable read too. Not on the role IN this database either: that setting
+  // outranks the role's, so the ALTER ROLE the warning names would not undo it
+  // — a database's setting it does (SMD-2219).
   assert(/transaction isolation\s+default_transaction_isolation is read committed/.test((await run(SQL_ENV)).out), "the connection's default isolation is read committed, and the check says which guarantees rest on it");
-  const inThisDatabase = (setting: string) => claims.unsafe(`DO $i$ BEGIN EXECUTE format('ALTER ROLE %I IN DATABASE %I ${setting}', current_user, current_database()); END $i$`);
-  await inThisDatabase("SET default_transaction_isolation = ''repeatable read''");
+  const onThisDatabase = (setting: string) => claims.unsafe(`DO $i$ BEGIN EXECUTE format('ALTER DATABASE %I ${setting}', current_database()); END $i$`);
+  await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
   try {
     const rr = await run(SQL_ENV);
     assert(rr.code === 0 && /transaction isolation\s+default_transaction_isolation is repeatable read: the writers' lock order \(018\/033\/036\) and the citation guard \(042\) are argued under read committed/.test(rr.out) && /ALTER ROLE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
-           `a role defaulting to repeatable read starts with a warning naming the guarantees that rest on read committed and the ALTER ROLE that restores it (exit ${rr.code})`);
+           `a connection defaulting to repeatable read starts with a warning naming the guarantees that rest on read committed and the ALTER ROLE that restores it (exit ${rr.code})`);
   } finally {
-    await inThisDatabase("RESET default_transaction_isolation");
+    await onThisDatabase("RESET default_transaction_isolation");
   }
   // …and 021's CREATE OR REPLACE put its 3-argument upsert_thought back over
   // 035's: a chunkless re-capture would leave the previous vector's windows
