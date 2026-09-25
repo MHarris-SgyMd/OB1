@@ -1063,11 +1063,15 @@ const KEY_MATERIAL = new Set(["high-entropy token", "private key block", "64-hex
  */
 const blockLine = (run) => /^[A-Za-z0-9+/=]+$/.test(run) && (run.length >= 32 || (run.length >= 4 && run.endsWith("="))) && (/[0-9]/.test(run) || (/[a-z]/.test(run) && /[A-Z]/.test(run))) && (run.match(/[a-z]{3,}/g) ?? []).join("").length / run.length < 0.6;
 /**
- * A base64-shaped run shorter than a full block line — a key's final line of
- * fewer than thirty-two characters, no `=` padding (a DER length divisible by
- * three) — taken only at a block's edge, after a full line, never on its own.
+ * A run that is contiguous key material — base64 characters alone, four or
+ * more, with a digit or both cases. NO word-shape guard (fifth review pass): a
+ * real key line can read word-shaped by chance, and a run adjacent to a
+ * CONFIRMED block line is key material whatever its shape — contiguity beats
+ * the per-run heuristic, and the coarse backstop must not share the detector's
+ * word-shape blind spot. Taken only once a full block line is in hand, so a
+ * lone word is never absorbed.
  */
-const shortKeyRun = (run) => run.length >= 4 && run.length < 32 && /^[A-Za-z0-9+/=]+$/.test(run) && (/[0-9]/.test(run) || (/[a-z]/.test(run) && /[A-Z]/.test(run))) && (run.match(/[a-z]{3,}/g) ?? []).join("").length / run.length < 0.6;
+const contiguousKey = (run) => run.length >= 4 && /^[A-Za-z0-9+/=]+$/.test(run) && (/[0-9]/.test(run) || (/[a-z]/.test(run) && /[A-Z]/.test(run)));
 /**
  * A key-material span grown over the block it sits in. The hit's own
  * whitespace-run is re-taken when it reads as a block line — the `/tail`
@@ -1105,7 +1109,7 @@ function growBlock(text, at, end) {
       const e = up ? at - ws[0].length : runEnd(end + ws[0].length);
       const run = text.slice(s, e);
       if (blockLine(run)) { if (up) at = s; else end = e; full = true; continue; }
-      if (full && shortKeyRun(run)) { if (up) at = s; else end = e; }
+      if (full && contiguousKey(run)) { if (up) at = s; else end = e; continue; }
       break;
     }
   };
@@ -1134,7 +1138,7 @@ export function residualKeyMaterial(text) {
       for (const m of lines[i].matchAll(/[A-Za-z0-9+/=]{20,}/g)) {
         const run = m[0];
         if (!/[A-Z]/.test(run) && !/[+/]/.test(run)) continue; // a base64 signal, so a lower-case hex sha is not one
-        if ((run.match(/[a-z]{3,}/g) ?? []).join("").length / run.length >= 0.6) continue; // word-shaped
+        if (!run.endsWith("=") && (run.match(/[a-z]{3,}/g) ?? []).join("").length / run.length >= 0.6) continue; // word-shaped, and not a `=`-padded key tail (fifth review pass: a real key line reads word-shaped, but `=` padding is never a word or a path)
         if (lines[i].slice(0, m.index).endsWith("base64,")) continue; // a data URI's payload
         findings.push({ reason: "key material beside a redaction", at: pos + m.index, end: pos + m.index + run.length });
       }

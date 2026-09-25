@@ -751,6 +751,15 @@ console.log("\n[4] The secret scan catches every shape it names and leaves the s
   assert(residualKeyMaterial("MCP_ACCESS_KEY=[redacted:credential assignment, high-entropy token] and a sha 8541cec9f2a1b3c4d5e6f7a8b9c0d1e2f3a4b5c6 here").length === 0, "…a lower-case hex sha beside a marker is not key material");
   assert(residualKeyMaterial("img [redacted:high-entropy token] data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ").length === 0, "…nor a data URI's payload beside a marker");
   assert(residualKeyMaterial(`clean [redacted:high-entropy token]\n${SEEDLESS}\nend`).length === 1, "…but an orphaned base64 line on the next line is");
+  // Fifth review pass: a real key line can read WORD-SHAPED (lowercase-3+-run share >= 0.6) — the token scan, the block test and the backstop all shared that blind spot, so such a line escaped every one. WORDISH is a base64 line of key material at 0.659, with `=` padding; WORDISH_NP the same without it.
+  const WORDISH = "vExVngytkbgo5TegmX+J7ulqDCkyimrbudns6yghqtY=";
+  const WORDISH_NP = "vExVngytkbgo5TegmX0J7ulqDCkyimrbudns6yghqtY";
+  assert((WORDISH.match(/[a-z]{3,}/g) ?? []).join("").length / WORDISH.length >= 0.6 && scanForSecrets(WORDISH).length === 0, "the fixture reads word-shaped and is no token hit on its own — the exact escape");
+  assert(redactSecrets(`${SEEDED}\n${WORDISH}\nmore`).text === "[redacted:high-entropy token]\nmore" && redactSecrets(`${SEEDED}\n${WORDISH_NP}\nmore`).text === "[redacted:high-entropy token]\nmore",
+    "a word-shaped key line contiguous to a confirmed block line is absorbed whatever its shape — with `=` padding or without");
+  assert(residualKeyMaterial(`clean [redacted:high-entropy token]\n${WORDISH}\nend`).length === 1, "…and beside a marker with no block to grow, the `=`-padded run is caught by the backstop");
+  assert(residualKeyMaterial(`[redacted:high-entropy token]\ngetUserAccountBalanceByIdV3LegacyQuickJumps2026Version here`).length === 0 && residualKeyMaterial(`[redacted:high-entropy token]\n${WORDISH_NP} tail`).length === 0,
+    "…while a long camel-case identifier, or a word-shaped run without `=` padding, beside a marker is NOT refused — the backstop stays discriminating");
   assert(redactSecrets("t eyJhbGciOiJSU0EtT0FFUCJ9.abcdefghij1234.abcdefghij5678.abcdefghij9012.FuKgOY7Ph6CX1oIDbrkvrA t").text === "t [redacted:jwt] t", "a five-segment JWE is blanked whole, not to its third segment");
   const many = describeRedactions([...Array.from({ length: 30 }, () => ({ reason: "password assignment", at: 26, in: "prompt 1" })), { reason: "anthropic key", at: 4, in: "the outcome" }]);
   assert(many === "password assignment at chars 26, 26, 26 and 27 more in prompt 1; anthropic key at char 4 in the outcome", `the message groups a reason and source, listing three offsets and counting the rest (${many})`);
