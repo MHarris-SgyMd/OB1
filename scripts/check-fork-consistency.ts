@@ -4862,8 +4862,9 @@ checkWorkflowPins();
 // that says it posts to `/rest/v1/rpc/…` is making a claim about itself), a
 // `rest/v1` path in any string, a supabase-py import or `create_client(`
 // (Python and shell alone), or a `@supabase/postgrest-js` specifier is a hit.
-// POSTGREST_EXCEPTIONS counts the twenty-eight files with a call site (two
-// more reach the gateway through a lib) with the ticket that ports or retires
+// POSTGREST_EXCEPTIONS counts the twenty-seven files with a call site (two
+// more reach the gateway through a lib; twenty-eight until obsidian-vault-import
+// retired, SMD-2137) with the ticket that ports or retires
 // each: a line past the count fails (a new call beside the documented ones),
 // a count no line reaches fails as stale (the port landed on those lines —
 // lower the count, or remove the entry when none remains), a file that is

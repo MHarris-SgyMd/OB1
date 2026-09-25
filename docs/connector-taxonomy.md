@@ -205,7 +205,7 @@ not in the node).
   any capability uses it. The check refuses a capability naming an undeclared
   family, and refuses `notification-target` until its `reserved` flag is dropped
   — which is the spec change the ticket names, made on purpose.
-- **A second direction for an existing vendor** (Gmail was one: the imports
+- **A second direction for an existing vendor** (Gmail is one: the imports
   pull, the digest's draft is the sink). Add the capability; the connector's
   declared direction must move to `bidirectional` in the same edit or the check
   names the disagreement. A vendor whose last artifact retired left the table
