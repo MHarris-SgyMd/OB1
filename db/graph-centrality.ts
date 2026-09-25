@@ -89,22 +89,22 @@
  * blocker is still open is settled, not blocked, and weighs what its lifecycle
  * says. A blocker is open unless its own lifecycle, read through the
  * `lifecycle` rows above via `source_thought()` (053's resolver), is completed
- * or canceled: a settled blocker is not a blocker. A blocker the brain does not
- * hold, or one with no status_type this file knows, still blocks — the source
- * said "blocked" and nothing here says it is settled — and the output counts
- * such blockers rather than hiding them. A row derived from a ticket (`ticket`)
- * or carrying one (`issue`) takes its ticket's blockers, as it takes its
- * ticket's status. Only an active link counts (`valid_until` unset — 053 closes
- * a relation the source dropped), and only `blocks` / `blocked_by`: a parent is
- * not blocked by its children (`child_of`), nor a ticket by what it relates to.
- * A thought whose ticket no dependency names counts as unblocked, and the
- * output states how many a dependency does name. Without the flag (or
- * `--decay-blocked`, below) the dependency read is not in the SQL at all, so
- * every other mode renders SMD-1994's report byte for byte (the JSON's
- * `options` carries two more keys, `startable` and `decayBlocked`, both false)
- * and a brain without 053 runs it. `dependencySql` is the
- * seam, as `LIFECYCLE_CTE` is for the status: SMD-2074's node-state projection
- * replaces it, not its callers.
+ * or canceled: a settled blocker is not a blocker. Within a system that gates
+ * (below: the board does), a blocker the brain does not hold, or one with no
+ * status_type this file knows, still blocks — the source said "blocked" and
+ * nothing here says it is settled — and the output counts such blockers rather
+ * than hiding them. A row derived from a ticket (`ticket`) or carrying one
+ * (`issue`) takes its ticket's blockers, as it takes its ticket's status. Only
+ * an active link counts (`valid_until` unset — 053 closes a relation the source
+ * dropped), and only `blocks` / `blocked_by`: a parent is not blocked by its
+ * children (`child_of`), nor a ticket by what it relates to. A thought whose
+ * ticket no gating dependency names counts as unblocked, and the output states
+ * how many one does name. Without the flag (or `--decay-blocked`, below) the
+ * dependency read is not in the SQL at all, so every other mode renders
+ * SMD-1994's report byte for byte (the JSON's `options` carries two more keys,
+ * `startable` and `decayBlocked`, both false) and a brain without 053 runs it.
+ * `dependencySql` is the seam, as `LIFECYCLE_CTE` is for the status: SMD-2074's
+ * node-state projection replaces it, not its callers.
  *
  * ── Blocked decay (SMD-2181) ────────────────────────────────────────────────
  * `--startable` is a filter: a blocked hub vanishes rather than sinks, the
@@ -178,10 +178,10 @@
  *   • Dependencies (`--startable`, `--decay-blocked`) are the sources' link
  *     facets, as current as each source's last passes over both ends of a
  *     relation: the relation is read from either side, so one removed at the
- *     source keeps blocking until a pass has re-read both — the price of
- *     catching one a source has so far stated on one side only. A system that
- *     states no lifecycle gates nothing. The dependency line gives the
- *     numbers.
+ *     source keeps its effect — blocking, where its system gates — until a pass
+ *     has re-read both, the price of catching one a source has so far stated
+ *     on one side only. A system that states no lifecycle gates nothing. The
+ *     dependency line gives the numbers.
  *   • Only what has been extracted is in the graph: the coverage line says how
  *     many thoughts db/extract-entities.ts has reached.
  *
@@ -499,9 +499,10 @@ export async function coverage(run: Runner, opts: Options): Promise<Coverage> {
   params.push(pgArray(LIFECYCLE_FILTERS.done));
   const doneSlot = params.length;
   // The dependency counts read the CTEs weightsSql emitted under either flag.
-  // `facets` counts `dep_links` — the rows the ranking read, not a second scan
-  // with its own predicate (second review pass) — so a relation the sync
-  // stated on both sides is two. `in_dependencies` counts the thoughts whose
+  // `facets` counts `dep_links` — every link the read took in, the ungated
+  // systems' among them (the ranking reads the gating ones, through `deps`),
+  // not a second scan with its own predicate (second review pass) — so a
+  // relation the sync stated on both sides is two. `in_dependencies` counts the thoughts whose
   // ticket a dependency names on either side, from `deps` itself — a link of
   // another relation (a section's own child_of, a relates_to) says nothing
   // about blocking, and a ticket blocked only through another's `blocks` is

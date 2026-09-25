@@ -1194,26 +1194,27 @@ weighs 0. Unsettled, because Linear keeps a relation after a ticket completes: a
 Done ticket whose blocker is still open is settled, not blocked, and weighs what
 its lifecycle says. A blocker is open unless its own lifecycle, resolved through
 `source_thought()` and read by the ticket-head rule above, is completed or
-canceled, so a settled blocker is not a blocker. A blocker the brain does not
-hold, or one with no status_type this tool knows, still blocks, and the output
-counts those. A row derived from a ticket takes its ticket's blockers as it
-takes its status. Only an active link counts (053 closes a relation the source
-dropped), and only `blocks` / `blocked_by`: `child_of` makes nobody a blocker. A
-thought whose ticket no dependency names counts as unblocked. The dependency
-caveat line (`coverage.dependencies` in the JSON) gives the active dependency
-facets and when the latest was written or closed, how many thoughts belong to a
-ticket a (gating, below) dependency names on either side, how many the flag held
-back in the run (took from a weight above 0 to 0), and how many of the held
-thoughts' blockers are unsettled only for want of a known status. The edges are
-as current as their source's last passes over both ends of a relation
-(board-sync's, for the board): it is read from either side, so one removed at
-the source blocks until both are re-read. The flag composes with `--status` and
-`--decay-done` (the weights multiply). Without it (or `--decay-blocked`, below)
-the dependency read is not in the SQL, so every other mode renders byte for byte
-what it did (the JSON's `options` carries two more keys, `startable` and
-`decayBlocked`, both false) and a brain without 053 runs them. With either, a
-brain without 053 is exit 2. `dependencySql` is the seam SMD-2074's node-state
-projection replaces.
+canceled, so a settled blocker is not a blocker. Within a system that gates
+(Sources, below: the board does), a blocker the brain does not hold, or one with
+no status_type this tool knows, still blocks, and the output counts those. A row
+derived from a ticket takes its ticket's blockers as it takes its status. Only
+an active link counts (053 closes a relation the source dropped), and only
+`blocks` / `blocked_by`: `child_of` makes nobody a blocker. A thought whose
+ticket no gating dependency names counts as unblocked. The dependency caveat
+line (`coverage.dependencies` in the JSON) gives the active dependency facets
+and when the latest was written or closed, how many thoughts belong to a ticket
+a (gating, below) dependency names on either side, how many the flag held back
+in the run (took from a weight above 0 to 0), and how many of the held thoughts'
+blockers are unsettled only for want of a known status. The edges are as current
+as their source's last passes over both ends of a relation (board-sync's, for
+the board): it is read from either side, so one removed at the source keeps its
+effect, blocking where its system gates, until both are re-read. The flag
+composes with `--status` and `--decay-done` (the weights multiply). Without it
+(or `--decay-blocked`, below) the dependency read is not in the SQL, so every
+other mode renders byte for byte what it did (the JSON's `options` carries two
+more keys, `startable` and `decayBlocked`, both false) and a brain without 053
+runs them. With either, a brain without 053 is exit 2. `dependencySql` is the
+seam SMD-2074's node-state projection replaces.
 
 **Blocked decay** (SMD-2181). `--startable` is a filter, so a blocked hub
 vanishes rather than sinks. `--decay-blocked` reads the same dependencies by the
