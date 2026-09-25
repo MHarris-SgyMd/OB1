@@ -4957,7 +4957,7 @@ const POSTGREST_PROBES: [string, string, boolean][] = [
 ];
 /** A helper for the table: the file's kind and its ticket. */
 const POSTGREST = (what: string, ticket: string, lines: number): CountedException => ({ why: `${what} — ${ticket}`, lines });
-const IMPORT = "an import that embeds the text itself and POSTs the row raw; it emits ingestion-contract items for `bun db/ingest-records.ts --items` (SMD-2136)";
+const IMPORT = "an import that embeds the text itself and POSTs the row raw; it emits ingestion-contract items for `bun db/ingest-records.ts --source items --items` (SMD-2136)";
 const SHIM = "a maintenance script; it moves onto compat/supabase-sql under bun";
 /**
  * file → the ticket that ports or retires it, and the exact count of lines that speak PostgREST. Thirty files in
@@ -5026,7 +5026,7 @@ function checkPostgrestClients() {
   if (twice.length !== 1 || twice[0] !== 1) fail(SELF, `check 24 reports lines ${twice.join(",")} for a hit beside a comment, not line 1 once (its own probe)`);
   const files = textFilesUnder(SCANNED_ROOTS).filter((f) => POSTGREST_CODE_FILE.test(f));
   if (files.length === 0) fail(SELF, "check 24 found no code file under the seven category directories and docs/ — the listing is broken, not the tree clean");
-  const MSG = "speaks PostgREST — a `rest/v1` path, a supabase-py client or postgrest-js reaches a brain only through Supabase's PostgREST, which this fork's stack does not run (SETUP.md), so the script's live mode fails at its first request; the class decision is docs/vendored-disposition.md's \"PostgREST-speaking scripts\" (SMD-2126): an import emits ingestion-contract items for `bun db/ingest-records.ts --items` (SMD-2136), a maintenance script reaches Postgres through compat/supabase-sql under bun (`SUPABASE_URL` a postgres:// string), or the file is listed in POSTGREST_EXCEPTIONS with its line count and the ticket that ports or retires it";
+  const MSG = "speaks PostgREST — a `rest/v1` path, a supabase-py client or postgrest-js reaches a brain only through Supabase's PostgREST, which this fork's stack does not run (SETUP.md), so the script's live mode fails at its first request; the class decision is docs/vendored-disposition.md's \"PostgREST-speaking scripts\" (SMD-2126): an import emits ingestion-contract items for `bun db/ingest-records.ts --source items --items` (SMD-2136), a maintenance script reaches Postgres through compat/supabase-sql under bun (`SUPABASE_URL` a postgres:// string), or the file is listed in POSTGREST_EXCEPTIONS with its line count and the ticket that ports or retires it";
   const seen = new Set<string>();
   for (const file of files) {
     const rel = relOf(file);
