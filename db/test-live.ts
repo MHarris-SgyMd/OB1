@@ -1183,9 +1183,7 @@ console.log("\n[6c] The backfill holds the table: a capture and an edit wait for
  * broken; every deadlocking arm accepts either side. A wait probed before any
  * cycle closes — [6i]'s 400 ms "still waiting" probes and arm 1's lower bound
  * on the delete's wait — is untouched, since no cycle is there to find, and
- * every other bound on a wait is 8 s or more. [6g]'s first
- * arm deadlocks as often at 50 ms as at the default, both through
- * with-postgres.sh and in CI-shaped containers. deadlock_timeout is
+ * every other bound on a wait is 8 s or more. deadlock_timeout is
  * superuser-only by default and goes as a startup parameter, so it holds for
  * the session: CI's service and with-postgres.sh connect as postgres, and any
  * other role races at the default, only slower.
@@ -1536,7 +1534,7 @@ console.log("\n[6g] delete_thought joins the lock order: an accept racing a dele
   // deadlocks in 40) was on the order of 1e-15. CI's runner deadlocked
   // 15 of 40 on main's run 36131497058, P(0) about 1e-8, and CI-shaped
   // containers about 30%; runs through with-postgres.sh's published port
-  // deadlock 8–13%, which makes a spurious failure about one run in 35 to 250
+  // deadlock 9–13%, which makes a spurious failure about one run in 35 to 260
   // there (SMD-2155).
   {
     const connR = racer();
@@ -1673,9 +1671,10 @@ console.log("\n[6i] A citation written while a delete of its source is in flight
     const wrote = ((await connW`SELECT record_citation(${c}::uuid, ${s}::uuid, 'rests on it', 'retrieved') AS r`) as { r: Env }[])[0].r;
     const del = startDelete(s);
     assert(wrote.ok === true && (await stillWaiting(del)), "the citation is written under the advisory lock and the delete waits on that lock");
-    // Caught, as arm 3's is: on racer()'s 50 ms timer the session that closes a
-    // cycle is its victim, so a regression that let this write close one raises
-    // here — uncaught, it would end the suite instead of failing the assertion.
+    // Caught, as arm 3's is: the delete has waited through the 400 ms probe, so
+    // its one 50 ms check on racer()'s timer is past, and a cycle this write
+    // closed would make this write the victim — uncaught, a regression would
+    // end the suite here instead of failing the assertion.
     let upd: Env, updThrew = false;
     try { upd = ((await connW`SELECT update_thought(${c}::uuid, p_provenance => jsonb_build_object('supersedes', ${x}::uuid)) AS r`) as { r: Env }[])[0].r; }
     catch (e) { upd = { ok: false, error: (e as Error).message }; updThrew = true; }
@@ -1981,9 +1980,10 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   // section's 20 s on CI (SMD-2135). test-schema.ts [30] likewise puts a lease
   // past its deadline by an UPDATE, not a wait. Only the named key's claimed
   // leases move; every other key's stand still, so a step that needs another
-  // key's lease to lapse, or a Bun.sleep mixed in here, is not on this clock.
-  const elapse = (job: string, s: number) =>
-    sql`UPDATE thought_work_claims SET ttl_expires_at = ttl_expires_at - make_interval(secs => ${s}::float8) WHERE work_type = ${job} AND status = 'claimed'`;
+  // key's lease to lapse needs an elapse of its own, and a Bun.sleep here adds
+  // real time on top, for every key.
+  const elapse = (key: string, s: number) =>
+    sql`UPDATE thought_work_claims SET ttl_expires_at = ttl_expires_at - make_interval(secs => ${s}::float8) WHERE work_type = ${key} AND status = 'claimed'`;
 
   // (c) A worker dies holding leases; the TTL returns them; a second worker completes them.
   const JOB2 = "test:crash";
