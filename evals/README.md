@@ -4747,7 +4747,7 @@ log: 441 capture / 1659 update / 1 delete rows (4.3 MB table and TOAST); 288 upd
 graph: 5878 model mentions (a source: pass's rows apart), 5211 edges; 17 thought(s) with 275 mention rows extracted before their fingerprint last moved — under the recorded key extract:qwen2.5:7b@p2: 11 queued for a re-read, 5 failed (terminal until --retry-failed), 1 succeeded before the move (re-enqueued under another key), 0 succeeded after it with the rows still older, 0 succeeded with no stamp to place, 0 never asked; 6 of the unqueued pending under another key, which refreshes nothing here; 24 proposals
 
 the snapshot key per projection (the contract):
-  thoughts.embedding                        recorded             derived (content_fingerprint_of(content), embedding_model); the prompt template and the requested width ride on the model name by convention (embed.ts, EMBEDDING_PROMPTS) — code, not data, so a template change under one name invalidates every vector with the key unmoved, and the cosine bar below is the check for that; recorded: content_fingerprint (003/023), embedding_model (021)
+  thoughts.embedding                        recorded             derived (content_fingerprint_of(content), embedding_model); the prompt template and the requested width ride on the model name by convention (db/config.mjs's EMBEDDING_PROMPTS, applied by server-portable/embed.ts) — code, not data, so a template change under one name invalidates every vector with the key unmoved, and the cosine bar below is the check for that; recorded: content_fingerprint (003/023), embedding_model (021)
   thought_chunks                            recipe not recorded  derived the parent's key + the window recipe (chunk tokens, overlap, chunk_context, the blurb model); recorded: the parent's label vouches for the rows (022); no recipe
   thought_entities / ob1_entity_edges       half recorded        derived (content_fingerprint, extraction_key); recorded: extraction_key, extracted_at; no fingerprint — staleness after an edit is read from the audit and the claim pool
   supersession_proposals                    recorded             derived (older_fingerprint, newer_fingerprint, judge_key); recorded: all three when the caller passed them (nullable, 029); consolidate.ts does
@@ -5582,4 +5582,5 @@ have. SemIf (SMD-2052) is the test of that reading.
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform
+- `../docs/event-log-as-truth.md` — the decision the two gate sections above (SMD-1998, SMD-1999) opened: the event log as the source of truth, the `thoughts` row its projection (SMD-1997)
 - `../db/config.mjs` — `KNOWN_MODEL_DIMS`, so a model/width mismatch is caught

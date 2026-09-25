@@ -14,12 +14,12 @@ This isn't a notes app. It's a database with vector search and an open protocol 
 
 Never built an Open Brain? Start here:
 
-1. **[Setup Guide](docs/01-getting-started.md)** — Build the full system (database, AI gateway, Slack capture, MCP server) in about 45 minutes. No coding experience needed. Or watch the [video walkthrough](https://vimeo.com/1174979042/f883f6489a) (~27 min).
+1. **[Setup Guide](docs/01-getting-started.md)** — Bring up the full system (Postgres with pgvector, the local models, the MCP server) on your own machine in about 30 minutes, and connect your AI clients. No coding experience needed, nothing to sign up for. [`SETUP.md`](SETUP.md) is the same stack as an operator's reference — the model choice, the vector width, what leaves the box.
 2. **[AI-Assisted Setup](docs/04-ai-assisted-setup.md)** — Prefer building with Cursor, Claude Code, or another AI coding tool? Point it at this repo and go. Same system, different workflow.
 3. **[Companion Prompts](docs/02-companion-prompts.md)** — Five prompts that help you migrate your memories, discover use cases, and build the capture habit.
 4. **Then pick Extension 1** and start building.
 
-**If you hit a wall:** We built a [FAQ](docs/03-faq.md) that covers the most common questions and gotchas. And if you need real-time help, we created dedicated AI assistants that know this system inside and out: a [Claude Skill](https://www.notion.so/product-templates/Open-Brain-Companion-Claude-Skill-31a5a2ccb526802797caeb37df3ba3cb?source=copy_link), a [ChatGPT Custom GPT](https://chatgpt.com/g/g-69a892b6a7708191b00e48ff655d5597-nate-jones-open-brain-assistant), and a [Gemini GEM](https://gemini.google.com/gem/1fDsAENjhdku-3RufY7ystbS1Md8MtDCg?usp=sharing). Use whichever one matches the AI tool you already use.
+**If you hit a wall:** We built a [FAQ](docs/03-faq.md) that covers the most common questions and gotchas. And if you need real-time help, upstream created dedicated AI assistants that know the system inside and out — they answer for upstream's Supabase deployment, so where they say "Edge Function" or "Supabase secrets", read "the server" and `deploy/.env`: a [Claude Skill](https://www.notion.so/product-templates/Open-Brain-Companion-Claude-Skill-31a5a2ccb526802797caeb37df3ba3cb?source=copy_link), a [ChatGPT Custom GPT](https://chatgpt.com/g/g-69a892b6a7708191b00e48ff655d5597-nate-jones-open-brain-assistant), and a [Gemini GEM](https://gemini.google.com/gem/1fDsAENjhdku-3RufY7ystbS1Md8MtDCg?usp=sharing). Use whichever one matches the AI tool you already use.
 
 ## Recent Contributions
 
@@ -72,10 +72,10 @@ Some concepts show up in multiple extensions. Learn them once, apply them everyw
 
 | Primitive | What It Teaches | Used By |
 | --------- | --------------- | ------- |
-| [Deploy an Edge Function](primitives/deploy-edge-function/) | Deploying any extension as a Supabase Edge Function | All extensions |
+| [Run a Remote MCP Server](primitives/deploy-remote-mcp/) | Running any extension server under Bun, behind HTTPS | All extensions |
 | [Remote MCP Connection](primitives/remote-mcp/) | Connecting to Claude Desktop, ChatGPT, Claude Code, Cursor, and other clients | All extensions |
 | [Common Troubleshooting](primitives/troubleshooting/) | Solutions for connection, deployment, and database issues | All extensions |
-| [Row Level Security](primitives/rls/) | PostgreSQL policies for multi-user data isolation | Extensions 4, 5, 6 |
+| [Row Level Security](primitives/rls/) | PostgreSQL policies for multi-user data isolation — background; no fork schema ships them (SMD-1810) | Extensions 4, 5, 6, as background |
 | [Shared MCP Server](primitives/shared-mcp/) | Giving others scoped access to parts of your brain | Extension 4 |
 
 ## Community Contributions
@@ -173,7 +173,7 @@ Tables and sidecars that extend the base `thoughts` model without replacing it.
 1. Browse the category tables above or the folders in the repo
 2. Open the contribution's folder and read the README
 3. Every README has prerequisites, step-by-step instructions, expected outcomes, and troubleshooting
-4. Most contributions involve running SQL, deploying an edge function, or hosting frontend code — the README tells you exactly what to do
+4. Most contributions involve running SQL, running a server under Bun, or hosting frontend code — the README tells you exactly what to do
 
 ## Contributing
 

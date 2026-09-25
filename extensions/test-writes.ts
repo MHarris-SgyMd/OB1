@@ -89,20 +89,65 @@
  * are held identical to the character (the text pins at the end); and every
  * answer of /search carries the request's CORS headers under an allowlist.
  *
+ * SMD-2079 widens that last arm to the gateway: json() built the CORS headers
+ * from the request only when handed `req`, and forty-five of the file's
+ * sixty-two answers were not, so under an allowlist a browser could read
+ * /search and no other route's page. The headers are set once now, on the way
+ * out of the main handler, and an unlisted origin gets no allow-origin header
+ * (the literal `null` matched an opaque origin's own). The block drives a page
+ * from /recent and /thoughts, a 404, an unlisted origin, the preflight 204, the
+ * 401, the 429 (Retry-After exposed), the default `*` through a second instance
+ * of the module loaded with no allowlist, and the ingest proxy's timeout
+ * through the fetch stub.
+ *
+ * SMD-2110: rest-api's ingest proxy and smart-ingest's extraction trigger
+ * built their upstream URL from SUPABASE_URL — the Postgres DSN here — so
+ * every call handed fetch() the database credentials and failed. Each takes
+ * its own http(s) knob now (SMART_INGEST_URL, ENTITY_EXTRACTION_WORKER_URL),
+ * set here before the modules load: the rest-api block drives both proxy
+ * routes to the stub at the knob's address (the key on both hops, job_id a
+ * number), the 503 naming the variable through an instance loaded without
+ * it, and the boot refusal of a DSN or a query in it; the smart-ingest block
+ * drives one write whose trigger reaches the stub at ITS knob's address with
+ * the key, a dry run then /execute through the server's own execute path, an
+ * instance without the knob that writes and triggers nothing, and the same
+ * boot refusal; and the tail asserts no URL the stub was handed, all suite
+ * long, began postgres:// or carried /functions/v1/.
+ *
+ * SMD-2128: smart-ingest's write path is the fork's — the 3-argument
+ * upsert_thought with the vector as p_embedding, its model's label and the
+ * actor in the envelope, the enhanced columns by an update on a fresh row —
+ * where upstream's 2-argument call put the vector inside the payload, which
+ * the fork's function ignores, so every thought the server wrote had no
+ * vector; and the item columns that hold a thought id are uuid, where the
+ * fork's UUID into upstream's bigint failed every item of a job with a match
+ * and recorded no result. The smart-ingest block asserts the row's vector at
+ * the stub's axis, its label, its enhanced columns and 008's row; the item's
+ * result_thought_id; the same text again as a skip by fingerprint naming the
+ * first thought; and, through a stub vector 0.88 from the first thought's,
+ * the two branches between the thresholds — append_thought_evidence(uuid,
+ * jsonb) on the richer existing thought, and a revision whose `supersedes`
+ * is the thought it revises. The sidecar's retype of a table created under
+ * upstream's shape is driven before the sidecars are applied.
+ *
  * The files are imported as modules — each exports Bun's entry shape, and its
  * default export's `fetch` is the handler driven here (SMD-1799) — under the
  * loader extensions/test-auth.ts uses for Deno's specifiers; every server
  * imports compat/supabase-sql itself since SMD-1798 (the loader resolved a
  * supabase-js import to it for the two that did not, until then). The model provider is
  * stubbed — a unit vector keyed off the text, so the vector a writer stored is
- * recognisable — and everything below the tool or route boundary is real;
- * test-auth.ts is where the servers start under bun for real.
+ * recognisable — as are Readwise's book lookup, the smart-ingest server rest-api
+ * proxies to (SMD-2079/2110) and the extraction worker smart-ingest triggers
+ * (SMD-2110), and everything below the tool or
+ * route boundary is real; test-auth.ts is where the servers start under bun
+ * for real.
  *
- * The database is the fork's migrations plus three vendored sidecars the
+ * The database is the fork's migrations plus four vendored sidecars the
  * writers assume: schemas/enhanced-thoughts (the columns the APIs write
  * beside the function — type, importance, sensitivity_tier …),
- * schemas/agent-memory (the write-back's own tables) and schemas/readwise-books
- * (the receiver's book cache and its counter) — and the bio worker's log
+ * schemas/agent-memory (the write-back's own tables), schemas/readwise-books
+ * (the receiver's book cache and its counter) and schemas/smart-ingest (the
+ * ingest server's job tables, SMD-2110) — and the bio worker's log
  * table, `consolidation_log`, from `schemas/entity-extraction/schema.sql`'s
  * definition alone (that sidecar's other tables include a `thought_entities`
  * migration 016 owns). Their tables and
@@ -151,11 +196,10 @@ const MODEL = "openai/text-embedding-3-small";
 await resetSchema(URL_, { dim: DIM, model: MODEL });
 const sql = new SQL({ url: URL_, max: 2 });
 
-const SIDECARS = ["schemas/enhanced-thoughts/schema.sql", "schemas/agent-memory/schema.sql", "schemas/readwise-books/schema.sql"];
-// All three GRANT to Supabase's roles, which plain Postgres lacks; the sidecars' own headers say to create them.
-for (const role of ["authenticated", "service_role", "anon"]) {
-  await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN CREATE ROLE ${role} NOLOGIN; END IF; END $r$`);
-}
+const SIDECARS = ["schemas/enhanced-thoughts/schema.sql", "schemas/agent-memory/schema.sql", "schemas/readwise-books/schema.sql", "schemas/smart-ingest/schema.sql"];
+// The sidecars grant to no Supabase role since change 93 (SMD-1796), so none is created first — until SMD-1810 this
+// suite still created the three, and since CI runs it before test-tools.ts on one Postgres, test-tools' "no
+// Supabase role" probe met them on every run.
 /** What the sidecars create and the shared reset does not know: dropped before they are applied and at the end. */
 async function dropSidecars() {
   for (const file of SIDECARS) {
@@ -166,7 +210,69 @@ async function dropSidecars() {
   await sql.unsafe("DROP TABLE IF EXISTS public.consolidation_log CASCADE");
 }
 await dropSidecars(); // an earlier run that aborted left its tables (CREATE TABLE IF NOT EXISTS keeps their rows)
+// A brain that applied schemas/smart-ingest before SMD-2128 has upstream's shape: the two thought-id columns bigint, the
+// evidence function taking one. Re-applied, the sidecar retypes them in place — driven here by creating that shape from the
+// file's own CREATE TABLEs with the two columns turned back (its IF NOT EXISTS then keeps them), with one item the way
+// SMD-2110 left an executed one — the written thought's UUID in metadata.result_thought_uuid, the column null — and an
+// integer in the other column, which could name no thought here and must survive in the row's metadata.
+const SMART_INGEST_SQL = readFileSync(join(ROOT, "schemas/smart-ingest/schema.sql"), "utf8");
+const PRIOR_UUID = crypto.randomUUID();
+{
+  const table = (name: string) => SMART_INGEST_SQL.match(new RegExp(`CREATE TABLE IF NOT EXISTS public\\.${name} \\([\\s\\S]*?\\);`))?.[0];
+  const jobs = table("ingestion_jobs"), items = table("ingestion_items");
+  if (!jobs || !items || !/(matched|result)_thought_id uuid/.test(items)) throw new Error("test-writes.ts: schemas/smart-ingest/schema.sql no longer defines the two tables with uuid thought-id columns");
+  await sql.unsafe(`${jobs}\n${items.replace(/(matched_thought_id|result_thought_id) uuid/g, "$1 bigint")}
+    CREATE FUNCTION public.append_thought_evidence(p_thought_id bigint, p_evidence jsonb) RETURNS jsonb LANGUAGE sql AS $$ SELECT '{}'::jsonb $$;
+    INSERT INTO public.ingestion_jobs (input_hash, status) VALUES ('prior-shape', 'complete');
+    INSERT INTO public.ingestion_items (job_id, extracted_content, action, status, matched_thought_id, metadata)
+      SELECT id, 'an item executed under upstream''s shape', 'add', 'executed', 42, '{"type":"idea","result_thought_uuid":"${PRIOR_UUID}"}' FROM public.ingestion_jobs WHERE input_hash = 'prior-shape';
+    CREATE VIEW public.prior_shape_items AS SELECT id, matched_thought_id FROM public.ingestion_items;`);
+  // Postgres will not retype a column a view reads: the file refuses, naming itself, the column, the object (the error's
+  // DETAIL) and what to do, and the file — one transaction since review pass 2, so plain `psql -f`, which runs on past an
+  // error, leaves nothing half done either — rolls back whole (review pass 1: the raw error left the file stopped mid-way
+  // with no word on why). On a connection of its own: the refused transaction is open until it is rolled back here, and a
+  // pooled query after it would meet "current transaction is aborted".
+  const refusal = async () => {
+    const own = await sql.reserve();
+    try { return await own.unsafe(SMART_INGEST_SQL).then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e))); }
+    finally { await own.unsafe("ROLLBACK").catch(() => {}); own.release(); }
+  };
+  const refused = await refusal();
+  const [still] = await sql`SELECT format_type(atttypid, atttypmod) AS type FROM pg_attribute WHERE attrelid = 'public.ingestion_items'::regclass AND attname = 'matched_thought_id'`;
+  const [untouched] = await sql`SELECT metadata FROM ingestion_items WHERE extracted_content = 'an item executed under upstream''s shape'`;
+  // …and the statements after the block did not run either — the bigint function stands, not the uuid one — so "apply
+  // this file again" meets the shape the message describes (review pass 2).
+  const fnsAfterRefusal = await sql`SELECT pg_get_function_identity_arguments(oid) AS args FROM pg_proc WHERE proname = 'append_thought_evidence'`;
+  const REFUSAL = /^schemas\/smart-ingest: ingestion_items\.matched_thought_id is bigint and Postgres refused to retype it to uuid — (.*) \((.*)\)\. Something of yours reads the column or fixes its type: .*\. Remove it, apply this file again, then recreate it over the uuid column\.$/;
+  const [, cause = "", detail = ""] = refused?.match(REFUSAL) ?? [];
+  assert(refused !== null && /^cannot alter type of a column used by a view or rule$/.test(cause) && /view prior_shape_items/.test(detail)
+    && still?.type === "bigint" && untouched?.metadata?.matched_thought_id_bigint === undefined && fnsAfterRefusal.length === 1 && fnsAfterRefusal[0].args === "p_thought_id bigint, p_evidence jsonb",
+    `with a view over the old column, schemas/smart-ingest refuses by name — the column, Postgres's words, the view by name from the error's DETAIL, what to do — and nothing after runs: the column bigint, its metadata untouched, the bigint function alone (${refused ?? "applied"}; ${still?.type}; ${JSON.stringify(untouched?.metadata)}; ${JSON.stringify(fnsAfterRefusal)})`);
+  await sql`DROP VIEW public.prior_shape_items`;
+  // A CHECK on the column is another refusal under another SQLSTATE (the predicate's `>` has no uuid form; 42883, not the
+  // view's 0A000) — pass 2 caught the one code and let this through raw; the handler relays whatever the ALTER raises
+  // (review pass 3).
+  await sql`ALTER TABLE public.ingestion_items ADD CONSTRAINT prior_shape_positive CHECK (matched_thought_id > 0)`;
+  const refusedCheck = await refusal();
+  const [, causeCheck = ""] = refusedCheck?.match(REFUSAL) ?? [];
+  assert(refusedCheck !== null && /^operator does not exist: uuid > integer/.test(causeCheck),
+    `with a CHECK on the old column, the same refusal by name carries Postgres's own words for that case — not the view's, and not a raw error (${refusedCheck ?? "applied"})`);
+  await sql`ALTER TABLE public.ingestion_items DROP CONSTRAINT prior_shape_positive`;
+}
 for (const file of SIDECARS) await sql.unsafe(readFileSync(join(ROOT, file), "utf8"));
+{
+  const cols = await sql`SELECT attname, format_type(atttypid, atttypmod) AS type FROM pg_attribute WHERE attrelid = 'public.ingestion_items'::regclass AND attname IN ('matched_thought_id', 'result_thought_id') ORDER BY attname`;
+  const [prior] = await sql`SELECT matched_thought_id, result_thought_id, metadata FROM ingestion_items WHERE extracted_content = 'an item executed under upstream''s shape'`;
+  const fns = await sql`SELECT pg_get_function_identity_arguments(oid) AS args FROM pg_proc WHERE proname = 'append_thought_evidence'`;
+  assert(cols.length === 2 && cols.every((c) => c.type === "uuid") && prior?.matched_thought_id === null && prior?.result_thought_id === PRIOR_UUID
+    && prior?.metadata?.matched_thought_id_bigint === 42 && prior?.metadata?.result_thought_uuid === PRIOR_UUID && prior?.metadata?.type === "idea"
+    && fns.length === 1 && fns[0].args === "p_thought_id uuid, p_evidence jsonb",
+    `schemas/smart-ingest re-applied to upstream's shape retypes the two thought-id columns to uuid, keeps the integer in the row's metadata, fills result_thought_id from SMD-2110's metadata key, and leaves one append_thought_evidence, taking a uuid (SMD-2128; ${JSON.stringify(cols)} ${JSON.stringify(prior)} ${JSON.stringify(fns)})`);
+  // And applied once more, on the shape it made: nothing to do, nothing refused.
+  const twice = await sql.unsafe(SMART_INGEST_SQL).then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
+  assert(twice === null, `…and the file applies again on its own shape (${twice ?? "ok"})`);
+  await sql`DELETE FROM ingestion_jobs WHERE input_hash = 'prior-shape'`; // the enhanced-mcp block reads "no job yet"
+}
 // The bio worker logs each run to consolidation_log (non-fatally, so a missing table would hide nothing but the log): the
 // table from the entity-extraction sidecar's own definition, alone.
 const LOG_TABLE = readFileSync(join(ROOT, "schemas/entity-extraction/schema.sql"), "utf8").match(/CREATE TABLE IF NOT EXISTS public\.consolidation_log \([\s\S]*?\);/)?.[0];
@@ -185,23 +291,67 @@ const vec = (v: number[]) => `[${v.join(",")}]`;
 const STUB_METADATA = { type: "idea", summary: "stubbed", topics: ["stubbed"], tags: [], people: [], action_items: [], dates_mentioned: [], confidence: 0.9 };
 /** When set, the embeddings endpoint answers 500 — the provider outage a writer must survive visibly. */
 let embeddingsDown = false;
+/**
+ * Texts whose stub vector is 0.88 from another text's — inside smart-ingest's append-or-revise band (0.85–0.92), where a
+ * one-hot vector alone is 0 or 1 from every other (SMD-2128): 0.88 of the base text's axis and 0.475 of the text's own,
+ * a unit vector to four places.
+ */
+const nearOf = new Map<string, string>();
+const near = (base: string, text: string) => { const own = unit(text); return unit(base).map((x, i) => 0.88 * x + 0.475 * own[i]); };
 /** The user message of each bio prompt the stub answered — what the worker's filters gathered. */
 const bioPrompts: string[] = [];
 /** The book Readwise's API answers for any book id — the receiver's write-through cache reads it once. */
 const BOOK = { id: 42, title: "Meditations", author: "Marcus Aurelius", category: "books", source: "kindle", source_url: null, cover_image_url: null, num_highlights: 3, last_highlight_at: null, tags: [] };
+/** The smart-ingest server's address rest-api proxies to, and the extraction worker's smart-ingest triggers: the two knobs
+ * SMD-2110 gave the servers, set below before the modules load, where each built the URL on the Postgres DSN before. */
+const INGEST = "http://smart-ingest.test";
+const WORKER = "http://extraction-worker.test";
+/** Every URL the stub was handed, suite long: none may begin postgres:// (SMD-2110; the tail asserts it). */
+const reached: string[] = [];
+/** The key each call to the worker's address carried, and each call to the smart-ingest server's. */
+const workerKeys: (string | null)[] = [];
+const ingestKeys: (string | null)[] = [];
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
+  reached.push(url);
   if (/readwise\.io\/api\/v2\/books\//.test(url)) return Response.json(BOOK);
-  if (!/openrouter\.ai|api\.openai\.com/.test(url)) throw new Error(`test-writes.ts: a writer reached ${url}; only the model provider and Readwise's book lookup are stubbed`);
+  // The smart-ingest server at rest-api's SMART_INGEST_URL — its root for POST /ingest, /execute for the job route —
+  // answered after a pause with the signal honoured, so a proxy whose timeout is not a number — a Request in the slot,
+  // the defect SMD-2079's first review pass holds — aborts here instead. Matched whole at the knob's address: main's file
+  // fetched the same paths on the DSN, which this stub refuses below like any URL it does not know (SMD-2110).
+  if (url === INGEST || url === `${INGEST}/execute`) {
+    await Bun.sleep(25);
+    if (init?.signal?.aborted) throw Object.assign(new Error("the proxy aborted"), { name: "AbortError" });
+    ingestKeys.push(new Headers(init?.headers).get("x-brain-key"));
+    const sent = JSON.parse(String(init?.body ?? "{}"));
+    // The server's own check on /execute, mirrored: a job_id that is not a number is a 400 — the string rest-api's proxy sent
+    // until review pass 2 (the route captures \d+ and passed it on as captured).
+    if (url !== INGEST && typeof sent.job_id !== "number") return Response.json({ error: "job_id is required" }, { status: 400 });
+    return Response.json(url === INGEST ? { status: "dry_run_complete", dry_run: sent.dry_run, stub: true } : { job_id: sent.job_id, status: "executed", stub: true });
+  }
+  // The extraction worker at smart-ingest's ENTITY_EXTRACTION_WORKER_URL, POSTed to after a write with the key (SMD-2110).
+  if (url.startsWith(`${WORKER}/`)) {
+    workerKeys.push(new Headers(init?.headers).get("x-brain-key"));
+    return Response.json({ processed: 0, succeeded: 0, failed: 0, entities_created: 0, edges_created: 0, dry_run: false, stub: true });
+  }
+  if (!/openrouter\.ai|api\.openai\.com/.test(url)) throw new Error(`test-writes.ts: a writer reached ${url}; only the model provider, Readwise's book lookup, the smart-ingest server and the extraction worker are stubbed`);
   const body = JSON.parse(String(init?.body ?? "{}"));
   if (url.endsWith("/embeddings")) {
     if (embeddingsDown) return new Response("stub: embeddings down", { status: 500 });
-    return Response.json({ data: [{ embedding: unit(String(body.input)) }] });
+    const input = String(body.input);
+    const base = nearOf.get(input);
+    return Response.json({ data: [{ embedding: base ? near(base, input) : unit(input) }] });
   }
   // The bio worker's prompt is answered with a profile — text, not metadata — naming its run, so each run's text is new.
   if (/synthesizing a biographical profile/.test(String(body.messages?.[0]?.content ?? ""))) {
     bioPrompts.push(String(body.messages?.[1]?.content ?? ""));
     return Response.json({ choices: [{ message: { content: `Canonical Profile: Test is a reader of the Stoics (run ${bioPrompts.length}).` } }] });
+  }
+  // smart-ingest's extraction prompt is answered with one thought, in the {"thoughts": [...]} wrapper it asks for: the
+  // document's text whole, so the thought written is the text sent (SMD-2110).
+  if (/Return STRICT JSON array/.test(String(body.messages?.[0]?.content ?? ""))) {
+    const document = String(body.messages?.[1]?.content ?? "").replace(/^<document>\s*|\s*<\/document>$/g, "");
+    return Response.json({ choices: [{ message: { content: JSON.stringify({ thoughts: [{ content: document, importance: 4, type: "idea", tags: ["stub"], source_snippet: document.slice(0, 40) }] }) } }] });
   }
   // The metadata worker's classifier is answered with a confident, material reclassification (SMD-1798).
   if (/classifier for personal thoughts/.test(String(body.messages?.[0]?.content ?? ""))) {
@@ -246,6 +396,9 @@ process.env.SUPABASE_SERVICE_ROLE_KEY = "stub";
 process.env.MCP_ACCESS_KEY = KEY;
 process.env.MCP_ACCESS_KEYS = `${NAMED}:write:${createHash("sha256").update(NAMED_KEY, "utf8").digest("hex")}`;
 process.env.OPENROUTER_API_KEY = "stub-openrouter-key"; // the writers' first-choice provider; its model name is the label
+// The two servers' upstream addresses (SMD-2110), read at import: the stub answers at them, and refuses the DSN's paths.
+process.env.SMART_INGEST_URL = INGEST;
+process.env.ENTITY_EXTRACTION_WORKER_URL = WORKER;
 for (const name of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_EMBEDDING_MODEL", "OPENAI_EMBEDDING_MODEL"]) delete process.env[name];
 // The receiver's secret and token, and the auditor's key and Slack settings (read at import; Slack is never reached).
 const READWISE_SECRET = "a-secret-readwise-minted";
@@ -611,7 +764,8 @@ try {
   assert(!stats.isError && typeof stats.structured?.total === "number" && stats.structured.total >= 2 && Array.isArray(stats.structured?.top_types),
     `brain_thought_stats reads brain_stats_aggregate, a jsonb scalar (${stats.toolText.slice(0, 60)})`);
   const ops = await call(h, "ops_capture_status", {});
-  assert(!ops.isError && ops.structured?.available === false, `ops_capture_status says smart-ingest is not installed — tableExists through the shim's head count (${ops.toolText.slice(0, 60)})`);
+  // The smart-ingest sidecar is applied here since SMD-2110 (its block below writes a job), so the tool finds the table.
+  assert(!ops.isError && ops.structured?.available === true && ops.structured?.total_jobs === 0, `ops_capture_status says smart-ingest is installed with no job yet — tableExists through the shim's head count, the sidecar this suite applies (${ops.toolText.slice(0, 60).replace(/\n/g, " ")})`);
   const graph = await call(h, "graph_search", { query: "ada" });
   assert(!graph.isError && graph.structured?.available === false, `graph_search degrades without schemas/knowledge-graph (${graph.toolText.slice(0, 60)})`);
   const entity = await call(h, "entity_detail", { entity_id: "11111111-1111-4111-8111-111111111111" });
@@ -788,7 +942,7 @@ try {
 {
   const F = "integrations/rest-api/index.ts";
   console.log(`\n[${F}]`);
-  process.env.CORS_ALLOWED_ORIGINS = "https://dash.test"; // read at module load, for the CORS arm at the block's end (review pass 3)
+  process.env.CORS_ALLOWED_ORIGINS = "https://dash.test"; // read at module load, for the CORS arms at the block's end (SMD-2054 review pass 3, SMD-2079)
   const h = await load(F);
   const captured = "a fresh thought captured through rest-api";
   const c = await send(h, "POST", "/capture", { content: captured });
@@ -908,18 +1062,217 @@ try {
   const recentOpen = await send(h, "GET", "/recent?limit=50&exclude_restricted=false");
   assert(recent.status === 200 && ids(recent).includes(cid) && !ids(recent).includes(rid) && ids(recentOpen).includes(rid) && ids(recentOpen).includes(cid),
     `GET /recent hides the restricted twin by default and shows it under exclude_restricted=false, as its siblings do — it filtered nothing before (${recent.status}: ${ids(recent).length} rows${ids(recent).includes(rid) ? ", the twin among them" : ""}; open: ${ids(recentOpen).length})`);
-  // Every answer of /search carries the request's CORS headers (review pass 3): the second pass passed `req` on the
-  // 400s and said the 200s did the same — they did not, so under an allowlist a browser could read the refusal and
-  // not the page. The allowlist was set before the module loaded (above); send() carries the Origin and returns the
-  // headers. The file's other routes still answer null under an allowlist — SMD-2079.
-  const [okCors, refusedCors, strangerCors] = await Promise.all([
-    send(h, "POST", "/search", { query: captured, min_similarity: 0.5 }, KEY, "https://dash.test"),
-    send(h, "POST", "/search", { query: captured, end_date: "yesterday" }, KEY, "https://dash.test"),
-    send(h, "POST", "/search", { query: captured, min_similarity: 0.5 }, KEY, "https://elsewhere.test")]);
+  // Every answer of the gateway carries the request's CORS headers (SMD-2079): json() built them only when handed `req`,
+  // and forty-five of the file's sixty-two answers were not, so under an allowlist a browser could read /search (SMD-2054)
+  // and no other route's page. Set once now, on the way out of the main handler; an unlisted origin gets NO allow-origin
+  // header, since the literal `null` is an opaque origin's own (review pass 1). The allowlist was set before the module
+  // loaded (above); send() carries the Origin and returns the headers.
+  const D = "https://dash.test";
+  const [okCors, refusedCors, strangerCors, recentCors, browseCors, lostCors, strangerRecent, preflight, unauthorized] = await Promise.all([
+    send(h, "POST", "/search", { query: captured, min_similarity: 0.5 }, KEY, D),
+    send(h, "POST", "/search", { query: captured, end_date: "yesterday" }, KEY, D),
+    send(h, "POST", "/search", { query: captured, min_similarity: 0.5 }, KEY, "https://elsewhere.test"),
+    send(h, "GET", "/recent?limit=1", undefined, KEY, D),
+    send(h, "GET", "/thoughts", undefined, KEY, D),
+    send(h, "GET", "/no-such-route", undefined, KEY, D),
+    send(h, "GET", "/recent?limit=1", undefined, KEY, "https://elsewhere.test"),
+    send(h, "OPTIONS", "/recent", undefined, KEY, D),
+    send(h, "GET", "/recent?limit=1", undefined, "not-the-key", D)]);
   const allow = (r: Reply) => r.headers.get("access-control-allow-origin");
-  assert(okCors.status === 200 && allow(okCors) === "https://dash.test" && refusedCors.status === 400 && allow(refusedCors) === "https://dash.test" && strangerCors.status === 200 && allow(strangerCors) === "null",
-    `every answer of POST /search carries the request's CORS headers under an allowlist — the 200 and the 400 echo a listed origin, an unlisted one gets null (${allow(okCors)} / ${allow(refusedCors)} / ${allow(strangerCors)})`);
+  assert(okCors.status === 200 && allow(okCors) === D && refusedCors.status === 400 && allow(refusedCors) === D && strangerCors.status === 200 && allow(strangerCors) === null,
+    `every answer of POST /search carries the request's CORS headers under an allowlist — the 200 and the 400 echo a listed origin, an unlisted one gets no allow-origin header (${allow(okCors)} / ${allow(refusedCors)} / ${allow(strangerCors)})`);
+  assert(recentCors.status === 200 && allow(recentCors) === D && browseCors.status === 200 && allow(browseCors) === D && lostCors.status === 404 && allow(lostCors) === D && strangerRecent.status === 200 && allow(strangerRecent) === null,
+    `…and so does every other answer of the gateway (SMD-2079): a page from GET /recent and from GET /thoughts and the 404 for an unknown route echo a listed origin, and GET /recent's page to an unlisted one carries no allow-origin header — main's file answered the literal null (${recentCors.status} ${allow(recentCors)} / ${browseCors.status} ${allow(browseCors)} / ${lostCors.status} ${allow(lostCors)} / ${strangerRecent.status} ${allow(strangerRecent)})`);
+  // The preflight and the 401 passed the request before and are the wrapper's now, so the wrapper-absent mutant fails
+  // this arm with the others (six of them, review pass 4).
+  assert(preflight.status === 204 && allow(preflight) === D && /x-brain-key/.test(String(preflight.headers.get("access-control-allow-headers"))) && unauthorized.status === 401 && allow(unauthorized) === D,
+    `the preflight 204 and the 401 keep theirs — they passed the request before, and are the wrapper's now like every answer (${preflight.status} ${allow(preflight)} / ${unauthorized.status} ${allow(unauthorized)})`);
+  // The two proxy routes reach the smart-ingest server at SMART_INGEST_URL, set before the module loaded — /execute for the
+  // job route, the root for /ingest — and answer its reply (SMD-2110): main's file built the URL from SUPABASE_URL, the
+  // Postgres DSN, so a real fetch refused the scheme and every deployment answered 502 with the credentials in the URL it
+  // was handed; the stub here refuses that URL the same way. It answers after 25 ms honouring the signal, so the proxy's
+  // timeout must be the number it was given — dropping `req` from proxyFetchJson's parameters left handleExecuteJob
+  // passing it into the timeout's slot, NaN, an immediate 504 (SMD-2079 review pass 1; nothing typechecks the file, SMD-2080).
+  const [exec, ingest] = await Promise.all([
+    send(h, "POST", "/ingestion-jobs/7/execute", undefined, KEY, D),
+    send(h, "POST", "/ingest", { text: "a note for the ingest server", dry_run: true }, KEY, D)]);
+  assert(exec.status === 200 && exec.json?.status === "executed" && exec.json?.job_id === 7 && allow(exec) === D,
+    `POST /ingestion-jobs/:id/execute reaches the smart-ingest server at SMART_INGEST_URL's /execute with job_id as the number the server requires, and answers its reply with the CORS headers — main's file fetched the DSN and answered 502, the first commit sent "7" for a relayed 400; the proxy's timeout is the number it was given, not the request (${exec.status} ${JSON.stringify(exec.json).slice(0, 80)}; ${allow(exec)})`);
+  assert(ingest.status === 200 && ingest.json?.status === "dry_run_complete" && ingest.json?.dry_run === true && ingest.json?.stub === true && allow(ingest) === D && ingestKeys.length === 2 && ingestKeys.every((k) => k === KEY),
+    `…and POST /ingest reaches its root with the body forwarded, both hops carrying this gateway's key as x-brain-key — the README's "the two hold the same key" (${ingest.status} ${JSON.stringify(ingest.json).slice(0, 80)}; ${allow(ingest)}; keys ${ingestKeys.map((k) => (k === KEY ? "sent" : String(k))).join(",")})`);
+  // The 429 rebuilt its header set (it spread the CORS headers itself before): Retry-After and the content type stay, the
+  // CORS headers arrive from the wrapper, and Retry-After is exposed, which no answer was (review pass 1). The cap is the
+  // default hundred a minute — the block has sent about thirty under KEY, this loop sends the rest, and its bound outlasts
+  // a window that rolls over mid-loop; a lower cap set before load would starve the earlier arms (review pass 2).
+  let limited: Reply | null = null;
+  for (let i = 0; i < 250 && !limited; i++) { const r = await send(h, "GET", "/health", undefined, KEY, D); if (r.status === 429) limited = r; }
+  assert(limited !== null && allow(limited) === D && /^\d+$/.test(String(limited.headers.get("retry-after"))) && String(limited.headers.get("content-type")).startsWith("application/json") && limited.json?.error === "rate_limited"
+    && /\bRetry-After\b/.test(String(limited.headers.get("access-control-expose-headers"))),
+    `the 429 carries the request's CORS headers beside Retry-After and its JSON content type, and exposes Retry-After to the browser (${limited?.status} ${limited ? allow(limited) : "-"} / ${limited?.headers.get("retry-after")} / ${limited?.headers.get("content-type")} / ${limited?.headers.get("access-control-expose-headers")})`);
   delete process.env.CORS_ALLOWED_ORIGINS;
+  delete process.env.SMART_INGEST_URL;
+  // The defaults: no allowlist — `*` to any origin, the README's backward-compatibility promise, which nothing drove while
+  // the block ran under an allowlist (SMD-2079 review pass 3) — and no SMART_INGEST_URL, where the two proxy routes answer
+  // 503 naming the variable (SMD-2110). A second instance of the module, loaded with both variables unset; the query string
+  // keeps Bun's module cache from handing back the first. Its rate-limit bucket is its own, so the 429 loop above is no bar.
+  const open = (await import(join(ROOT, F) + "?defaults")).default!.fetch! as Handler;
+  const [star, unconfigured, unconfiguredIngest] = await Promise.all([
+    send(open, "GET", "/health", undefined, KEY, "https://elsewhere.test"),
+    send(open, "POST", "/ingestion-jobs/7/execute", undefined, KEY, D),
+    send(open, "POST", "/ingest", { text: "a note for the ingest server" }, KEY, D)]);
+  assert(star.status === 200 && allow(star) === "*",
+    `with no allowlist the gateway answers Access-Control-Allow-Origin: * to any origin — the README's default (${star.status} ${allow(star)})`);
+  assert(unconfigured.status === 503 && unconfigured.json?.error === "smart_ingest_not_configured" && unconfigured.json?.variable === "SMART_INGEST_URL" && allow(unconfigured) === "*"
+    && unconfiguredIngest.status === 503 && unconfiguredIngest.json?.variable === "SMART_INGEST_URL",
+    `with SMART_INGEST_URL unset, POST /ingestion-jobs/:id/execute and POST /ingest answer 503 naming the variable, CORS headers on — main's file fetched the DSN's path and answered 502 upstream_unreachable (${unconfigured.status} ${JSON.stringify(unconfigured.json).slice(0, 80)}; ${unconfiguredIngest.status} ${unconfiguredIngest.json?.variable})`);
+  // The DSN in the knob — the URL main's file built, handed over as configuration — is refused at boot: the module does not
+  // load, and the message names the variable and the scheme and none of the value, whose userinfo is the database password.
+  process.env.SMART_INGEST_URL = URL_;
+  const refused = await import(join(ROOT, F) + "?dsn-in-the-knob").then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
+  process.env.SMART_INGEST_URL = INGEST;
+  assert(refused !== null && /^SMART_INGEST_URL must be an http\(s\) URL — it is a postgres(ql)?:\/\/ URL; write it as http:\/\/host:port$/.test(refused) && !refused.includes(new URL(URL_).host),
+    `a postgres:// SMART_INGEST_URL is refused when the module loads, the message naming the variable and the scheme and not the value (${refused === null ? "loaded" : refused})`);
+  // So is an address with a query: /execute is appended to it, and `?tenant=a/execute` is no path (review pass 1).
+  process.env.SMART_INGEST_URL = `${INGEST}/si?tenant=a`;
+  const refusedQuery = await import(join(ROOT, F) + "?query-in-the-knob").then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
+  process.env.SMART_INGEST_URL = INGEST;
+  assert(refusedQuery !== null && /^SMART_INGEST_URL must be a bare http\(s\) address/.test(refusedQuery),
+    `…and one with a query string, which a path is appended to, is refused as not bare (${refusedQuery === null ? "loaded" : refusedQuery})`);
+}
+
+// ── integrations/smart-ingest (SMD-2110 / SMD-2128) ──────────────────────────
+
+{
+  const F = "integrations/smart-ingest/index.ts";
+  console.log(`\n[${F}]`);
+  const h = await load(F);
+  // One ingest, executed at once: the stubbed model extracts the text as one thought, the server writes it through
+  // upsert_thought, and the write POSTs to the extraction worker at ENTITY_EXTRACTION_WORKER_URL — set before the module
+  // loaded — with its key and the count as ?limit=. Main's file built that URL from SUPABASE_URL, the Postgres DSN, so every
+  // trigger handed fetch() the credentials and failed inside its timeout — and fired never, on this fork: upsert_thought
+  // answers a UUID id, which the file read as no id, so every add was reported failed (SMD-2110). The row is the fork's
+  // capture (SMD-2128): the 3-argument form, so the vector is stored at the stub's axis under the model's label, the
+  // enhanced columns set beside it and 008's row naming the key and this server — upstream's 2-argument call put the
+  // vector inside the payload, where the fork's function does not look, and every thought this server wrote had none.
+  const text = "The shim binds a vector by its column's declared type, so a raw write with a number array reaches Postgres as JSON text.";
+  const mark = reached.length;
+  const ingested = await send(h, "POST", "/", { text, dry_run: false, skip_classification: true, source_label: "test-writes" });
+  const calls = reached.slice(mark);
+  const jobItems = (jobId: number) => sql`SELECT action, reason, status, error_message, matched_thought_id, result_thought_id, similarity_score::float AS similarity FROM ingestion_items WHERE job_id = ${jobId || 0} ORDER BY id`;
+  const items = await jobItems(Number(ingested.json?.job_id));
+  assert(ingested.status === 200 && ingested.json?.status === "complete" && ingested.json?.added_count === 1 && Number(ingested.json?.job_id) > 0,
+    `POST / extracts one thought through the stubbed model, records the job and writes the thought (${ingested.status} ${JSON.stringify(ingested.json).slice(0, 160)}; items ${JSON.stringify(items).slice(0, 300)})`);
+  const rows = await sql`SELECT id, embedding IS NOT NULL AS has_vec, embedding = ${vec(unit(text))}::vector AS at_axis, embedding_model, type, importance, quality_score, source_type, sensitivity_tier, metadata FROM thoughts WHERE content = ${text} AND content_fingerprint IS NOT NULL`;
+  const row = rows[0];
+  assert(rows.length === 1 && row.has_vec === true && row.at_axis === true && row.embedding_model === MODEL,
+    `…the row through the 3-argument upsert_thought: the stub's vector at its axis, labelled with the model that made it (021) — the 2-argument form left the text alone, no vector (${JSON.stringify({ n: rows.length, has_vec: row?.has_vec, at_axis: row?.at_axis, label: row?.embedding_model })})`);
+  // Asserted at values the sidecar's column defaults cannot supply — type and source_type default NULL, importance 3,
+  // quality_score 50 (the server's is round(0.55 × 70 + 20) = 59 with classification skipped); the tier's default IS
+  // `standard`, the value here, so it proves nothing about the update and is not claimed (review pass 1).
+  assert(row?.type === "idea" && row?.importance === 4 && row?.source_type === "smart_ingest" && Number(row?.quality_score) === 59 && row?.metadata?.source_label === "test-writes" && (row?.metadata?.tags ?? []).includes("stub"),
+    `…with the enhanced columns the function does not know set by the update beside it — the extractor's type and importance, source_type smart_ingest, the computed quality score, none of them the column's default — and the item's metadata on the row (${JSON.stringify({ type: row?.type, importance: row?.importance, source_type: row?.source_type, quality: row?.quality_score, label: row?.metadata?.source_label, tags: row?.metadata?.tags })})`);
+  judgeActor("smart-ingest add", await auditRow(row?.id, "capture"), "smart-ingest");
+  // The item's row: executed, and result_thought_id IS the thought — a uuid column now (SMD-2128), where the bigint one took
+  // nothing and SMD-2110 parked the id in the item's metadata.
+  assert(items.length === 1 && items[0].action === "add" && items[0].reason === "no_semantic_match" && items[0].status === "executed" && items[0].result_thought_id === row?.id && items[0].matched_thought_id === null,
+    `…and the item's row is an add for no semantic match, executed, its result_thought_id the thought's UUID (${JSON.stringify(items).slice(0, 200)})`);
+  // The same text again (reprocess, or the job's input hash answers "existing"): the fingerprint the server computes is the
+  // one the function wrote — the two normalise alike — so the item is a skip by fingerprint naming the first thought as
+  // matched_thought_id. On main the INSERT of that item failed whole, a UUID into a bigint column, and no item of a job
+  // with any match was ever persisted: the job said complete over an empty item list.
+  const again = await send(h, "POST", "/", { text, dry_run: false, skip_classification: true, source_label: "test-writes", reprocess: true });
+  const skipped = await jobItems(Number(again.json?.job_id));
+  const [{ n: rowsOfText }] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE content = ${text}`;
+  assert(again.status === 200 && again.json?.skipped_count === 1 && again.json?.added_count === 0 && skipped.length === 1 && skipped[0].action === "skip" && skipped[0].reason === "fingerprint_match" && skipped[0].matched_thought_id === row?.id && skipped[0].status === "executed" && skipped[0].result_thought_id === row?.id && rowsOfText === 1,
+    `the same text ingested again is one item skipped by fingerprint, persisted with the first thought's UUID as matched_thought_id and as its result, executed, and no second row — main's bigint column refused the item and the job completed over none (${again.status} ${JSON.stringify(again.json).slice(0, 120)}; items ${JSON.stringify(skipped).slice(0, 200)}; rows ${rowsOfText})`);
+  // The same through a dry run and /execute: that path stepped over a skipped item — `ready` for ever under a complete
+  // job, and in the pending index a custom worker claims from — a row that could not exist while the bigint column refused
+  // every item with a match (review pass 1).
+  const dryDup = await send(h, "POST", "/", { text, dry_run: true, skip_classification: true, source_label: "test-writes", reprocess: true });
+  const dupJob = Number(dryDup.json?.job_id);
+  // Beside it, an item the way a reconciliation error is persisted — the skip action under a `failed` status: /execute's
+  // skip branch flipped it to executed and counted it skipped (review pass 2); it stays failed, counted as such.
+  await sql`INSERT INTO ingestion_items (job_id, extracted_content, action, status, reason, error_message) VALUES (${dupJob || 0}, 'a reconciliation that failed at the dry run', 'skip', 'failed', 'reconciliation_error: stub', 'stub')`;
+  const ranDup = await send(h, "POST", "/execute", { job_id: dupJob });
+  const dupItems = await jobItems(dupJob);
+  assert(dryDup.json?.status === "dry_run_complete" && dupJob > 0 && ranDup.status === 200 && ranDup.json?.status === "complete" && ranDup.json?.skipped_count === 1 && ranDup.json?.added_count === 0 && ranDup.json?.failed_count === 1
+    && dupItems.length === 2 && dupItems[0].action === "skip" && dupItems[0].status === "executed" && dupItems[0].result_thought_id === row?.id && dupItems[1].status === "failed" && dupItems[1].result_thought_id === null,
+    `a dry run of the same text parks the skip as ready, and /execute marks it executed with the matched thought as its result — the path left it ready under a complete job — while an item persisted failed stays failed, counted in failed_count and not in skipped_count (${dryDup.json?.status} #${dupJob}; ${ranDup.status} ${JSON.stringify(ranDup.json).slice(0, 120)}; items ${JSON.stringify(dupItems).slice(0, 220)})`);
+  // The two actions between the thresholds, driven by a stub vector 0.88 from the first thought's (the band is 0.85–0.92;
+  // one-hot vectors alone are 0 or 1 apart, so no arm drove either branch before): a shorter text appends evidence to the
+  // richer existing thought through append_thought_evidence — its p_thought_id uuid now; the bigint form refused the call —
+  // and a longer one is a revision: a new row whose `supersedes` is the thought it revises, the pointer 025 made the one
+  // mechanism for supersession (upstream wrote the id into metadata.supersedes, a second place for the fact).
+  const axisOf = (t: string) => unit(t).indexOf(1);
+  let shorter = "The shim binds a vector by its column's type.";
+  while (axisOf(shorter) === axisOf(text)) shorter += " Yes.";
+  let longer = `${text} The shim reads the catalog for that type, so a vector column is bound as a vector and never as JSON text.`;
+  while (axisOf(longer) === axisOf(text)) longer += " Yes.";
+  nearOf.set(shorter, text); nearOf.set(longer, text);
+  const appended = await send(h, "POST", "/", { text: shorter, dry_run: false, skip_classification: true, source_label: "test-writes" });
+  const appendedItems = await jobItems(Number(appended.json?.job_id));
+  const [evidence] = await sql`SELECT metadata->'evidence' AS list FROM thoughts WHERE id = ${row?.id}`;
+  assert(appended.status === 200 && appended.json?.appended_count === 1 && appendedItems.length === 1 && appendedItems[0].action === "append_evidence" && appendedItems[0].reason === "existing_is_richer" && appendedItems[0].status === "executed"
+    && appendedItems[0].matched_thought_id === row?.id && appendedItems[0].result_thought_id === row?.id && appendedItems[0].similarity > 0.85 && appendedItems[0].similarity < 0.92
+    && Array.isArray(evidence?.list) && evidence.list.length === 1 && evidence.list[0].source_label === "test-writes" && evidence.list[0].source === "smart_ingest",
+    `a shorter text 0.88 from the first thought appends evidence to it: the item an append_evidence for existing_is_richer with the thought as matched and result, and the thought's metadata.evidence one entry from this source — append_thought_evidence(uuid, jsonb) (${appended.status} ${JSON.stringify(appended.json).slice(0, 120)}; items ${JSON.stringify(appendedItems).slice(0, 220)}; evidence ${JSON.stringify(evidence?.list).slice(0, 120)})`);
+  const revised = await send(h, "POST", "/", { text: longer, dry_run: false, skip_classification: true, source_label: "test-writes" });
+  const revisedItems = await jobItems(Number(revised.json?.job_id));
+  const revision = (await sql`SELECT id, embedding IS NOT NULL AS has_vec, embedding_model, supersedes, type, metadata->>'supersedes' AS meta_supersedes FROM thoughts WHERE content = ${longer}`)[0];
+  assert(revised.status === 200 && revised.json?.revised_count === 1 && revisedItems.length === 1 && revisedItems[0].action === "create_revision" && revisedItems[0].reason === "new_has_more_info" && revisedItems[0].status === "executed"
+    && revisedItems[0].matched_thought_id === row?.id && revision !== undefined && revisedItems[0].result_thought_id === revision.id && revision.supersedes === row?.id && revision.has_vec === true && revision.embedding_model === MODEL && revision.type === "idea" && revision.meta_supersedes === null,
+    `a longer text 0.88 from the first thought is a revision: a new row with its vector and label whose supersedes is the first thought (025's pointer, not metadata.supersedes), the item a create_revision with the first as matched and the new row as result (${revised.status} ${JSON.stringify(revised.json).slice(0, 120)}; items ${JSON.stringify(revisedItems).slice(0, 220)}; row ${JSON.stringify(revision).slice(0, 200)})`);
+  judgeActor("smart-ingest revision", await auditRow(revision?.id, "capture"), "smart-ingest");
+  // A revision parked by a dry run whose text is captured meanwhile: the function writes `supersedes` on a fresh row only
+  // and keeps the existing row's provenance (035), so the pointer is not written — the item fails saying so, where it was
+  // counted revised with nothing to show (review pass 2).
+  let meanwhile = `${text} A near copy of the first thought, longer, parked by a dry run and captured through the function before the job runs.`;
+  while (axisOf(meanwhile) === axisOf(text)) meanwhile += " Yes.";
+  nearOf.set(meanwhile, text);
+  const dryRev = await send(h, "POST", "/", { text: meanwhile, dry_run: true, skip_classification: true, source_label: "test-writes" });
+  const revJob = Number(dryRev.json?.job_id);
+  const parked = await jobItems(revJob);
+  await sql`SELECT upsert_thought(${meanwhile}, '{}'::jsonb)`;
+  const ranRev = await send(h, "POST", "/execute", { job_id: revJob });
+  const revItems = await jobItems(revJob);
+  const [captured] = await sql`SELECT id, supersedes FROM thoughts WHERE content = ${meanwhile}`;
+  assert(dryRev.json?.status === "dry_run_complete" && parked.length === 1 && parked[0].action === "create_revision" && parked[0].status === "ready"
+    && ranRev.status === 200 && ranRev.json?.status === "complete" && ranRev.json?.revised_count === 0 && ranRev.json?.failed_count === 1
+    && revItems.length === 1 && revItems[0].status === "failed" && /the text is already thought/.test(revItems[0].error_message ?? "") && captured !== undefined && captured.supersedes === null,
+    `a revision parked ready by a dry run, whose text is captured meanwhile, fails on /execute saying the text is already a thought — not counted revised, the captured row's supersedes unset (${dryRev.json?.status} ${JSON.stringify(parked).slice(0, 80)}; ${ranRev.status} ${JSON.stringify(ranRev.json).slice(0, 120)}; items ${JSON.stringify(revItems).slice(0, 200)}; row ${JSON.stringify(captured)})`);
+  // The other half of the pipeline, the one rest-api's execute route proxies: a dry run parks the item as `ready`, and
+  // POST /execute writes it — through recordItemResult's second call site, and with job_id as the STRING the proxy sent
+  // until review pass 2, which the server takes now beside the number it required (a proxied execute was a 400 for every
+  // job, and no arm drove this path).
+  const text2 = "A dry run parks its items as ready in ingestion_items, and the execute route is what rest-api proxies to.";
+  const dry = await send(h, "POST", "/", { text: text2, dry_run: true, skip_classification: true, source_label: "test-writes" });
+  const jobId = Number(dry.json?.job_id);
+  const mark3 = reached.length;
+  const ran = await send(h, "POST", "/execute", { job_id: String(jobId) });
+  const items2 = await jobItems(jobId);
+  const rows2 = await sql`SELECT id, embedding IS NOT NULL AS has_vec FROM thoughts WHERE content = ${text2}`;
+  assert(dry.status === 200 && dry.json?.status === "dry_run_complete" && jobId > 0 && ran.status === 200 && ran.json?.status === "complete" && ran.json?.added_count === 1 && ran.json?.job_id === jobId
+    && items2.length === 1 && items2[0].status === "executed" && items2[0].result_thought_id === rows2[0]?.id && rows2[0]?.has_vec === true && reached.slice(mark3).some((u) => u === `${WORKER}/?limit=1`),
+    `a dry run and then POST /execute with job_id as a numeric string: the job completes with one add, the item's row is executed with the thought's UUID as its result, the row has its vector (the execute path embeds again), and the worker is triggered once (${dry.status} ${dry.json?.status} #${jobId}; ${ran.status} ${JSON.stringify(ran.json).slice(0, 100)}; items ${JSON.stringify(items2).slice(0, 160)})`);
+  assert(calls.filter((u) => u.startsWith(`${WORKER}/`)).join() === `${WORKER}/?limit=1` && workerKeys.at(-1) === KEY,
+    `…and POSTs once to the extraction worker at ENTITY_EXTRACTION_WORKER_URL with the count as ?limit= and the server's key — the knob's address, not a path on the DSN (${calls.filter((u) => !/openrouter/.test(u)).join(" ") || "no call"}; key ${workerKeys.at(-1) === KEY ? "sent" : String(workerKeys.at(-1))})`);
+  // Without the knob: the write lands and triggers nothing — no call to the worker, and no URL on the DSN either — and the
+  // module says so once at load (silenced here). A second instance, loaded with the variable unset.
+  delete process.env.ENTITY_EXTRACTION_WORKER_URL;
+  const warn = console.warn; console.warn = () => {};
+  let quiet: Handler;
+  try { quiet = (await import(join(ROOT, F) + "?no-worker")).default!.fetch! as Handler; } finally { console.warn = warn; }
+  const mark2 = reached.length;
+  const second = await send(quiet, "POST", "/", { text: `${text} (a second note)`, dry_run: false, skip_classification: true });
+  const calls2 = reached.slice(mark2);
+  assert(second.status === 200 && second.json?.added_count === 1 && calls2.length > 0 && calls2.every((u) => /openrouter\.ai/.test(u)),
+    `with ENTITY_EXTRACTION_WORKER_URL unset the write lands and reaches nothing but the model — no worker call, no URL on the DSN (${second.status} ${second.json?.added_count}; ${calls2.filter((u) => !/openrouter/.test(u)).join(" ") || "nothing else"})`);
+  // The DSN in the knob is refused at boot, as rest-api refuses its own.
+  process.env.ENTITY_EXTRACTION_WORKER_URL = URL_;
+  const refused = await import(join(ROOT, F) + "?dsn-in-the-knob").then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
+  process.env.ENTITY_EXTRACTION_WORKER_URL = WORKER;
+  assert(refused !== null && /^ENTITY_EXTRACTION_WORKER_URL must be an http\(s\) URL — it is a postgres(ql)?:\/\/ URL; write it as http:\/\/host:port$/.test(refused) && !refused.includes(new URL(URL_).host),
+    `a postgres:// ENTITY_EXTRACTION_WORKER_URL is refused when the module loads, the message naming the variable and the scheme and not the value (${refused === null ? "loaded" : refused})`);
 }
 
 // ── recipes/repo-learning-coach ──────────────────────────────────────────────
@@ -1166,14 +1519,15 @@ for (const [file, readme] of [["integrations/kubernetes-deployment/index.ts", "i
 // Every runnable file the three changes touched is driven above, or read: the headers name them.
 const BIO = "integrations/consolidation-workers/bio/index.ts";
 const DRIVEN = ["integrations/update-thought-mcp/index.ts", "integrations/enhanced-mcp/index.ts", "integrations/agent-memory-api/index.ts",
-  "integrations/open-brain-rest/index.ts", "integrations/rest-api/index.ts", "recipes/repo-learning-coach/server/brain.ts", BIO];
+  "integrations/open-brain-rest/index.ts", "integrations/rest-api/index.ts", "recipes/repo-learning-coach/server/brain.ts", BIO,
+  "integrations/smart-ingest/index.ts"]; // smart-ingest joined the 3-argument form's callers with SMD-2128
 const TEXT_ONLY = ["recipes/provenance-chains/mcp-tools.ts"];
 const DRIVEN_1524 = ["integrations/readwise-capture/index.ts", "recipes/editorial-policy/auditor/index.ts", BIO];
 const TEXT_ONLY_1524 = ["recipes/adaptive-capture-classification/capture-with-gating.ts"];
 const BYPASS_1524 = ["integrations/kubernetes-deployment/index.ts", "recipes/vercel-neon-telegram/src/lib/db.ts", "recipes/schema-aware-routing/index.ts"];
 const DRIVEN_1544 = [BIO];
 const DRIVEN_1541 = ["integrations/update-thought-mcp/index.ts", "integrations/enhanced-mcp/index.ts", "integrations/agent-memory-api/index.ts",
-  "integrations/open-brain-rest/index.ts", "integrations/rest-api/index.ts"]; // change 69's five servers: the ones that hold a key
+  "integrations/open-brain-rest/index.ts", "integrations/rest-api/index.ts", "integrations/smart-ingest/index.ts"]; // change 69's five servers, the ones that hold a key — and smart-ingest, which passes the actor since SMD-2128
 // Every vendored .ts, read once; each ticket's rule tests the same texts.
 const HEADED = [...new Bun.Glob("{recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
   .filter((f) => !f.includes("node_modules")).map((f) => [f, readFileSync(join(ROOT, f), "utf8")] as const);
@@ -1184,6 +1538,36 @@ for (const [ticket, files] of [["SMD-1228", [...DRIVEN, ...TEXT_ONLY]], ["SMD-15
 {
   assert(existsSync(join(ROOT, "scripts/check-fork-consistency.ts")) && /function thoughtWritesAroundIn\(/.test(readFileSync(join(ROOT, "scripts/check-fork-consistency.ts"), "utf8")),
     "scripts/check-fork-consistency.ts check 10 holds the text of every file: no raw write of content or vector on thoughts");
+}
+// SMD-2110: an HTTP target comes from its own variable, never from SUPABASE_URL — the connection string on this fork. Every
+// URL the stub was handed, by every writer this suite drove, and the two files' text: no URL built on that variable.
+assert(reached.length > 0 && !reached.some((u) => /^postgres(ql)?:/.test(u) || u.includes("/functions/v1/")),
+  `no writer handed fetch() a postgres:// URL or a /functions/v1/ path, suite long (${reached.length} calls; ${reached.filter((u) => /^postgres(ql)?:/.test(u) || u.includes("/functions/v1/")).slice(0, 3).map((u) => u.replace(/\/\/[^/@]*@/, "//…@")).join(" ")})`); // userinfo redacted: it is the password
+// The literal forms — a template `${SUPABASE_URL}/…` or a concatenation `SUPABASE_URL + "/…"` — in the two files' text; an
+// alias or a `new URL(path, SUPABASE_URL)` would pass this and fail the arm above at run time.
+for (const f of ["integrations/rest-api/index.ts", "integrations/smart-ingest/index.ts"]) spells(f, /^(?![\s\S]*(?:\$\{SUPABASE_URL\}\/|SUPABASE_URL\s*\+\s*["'`]\/))/, " writes no `${SUPABASE_URL}/…` template and no `SUPABASE_URL + \"/…\"` concatenation");
+// SMD-2128: smart-ingest's text — one upsert_thought call site, the 3-argument form with the vector as p_embedding and the
+// actor in the envelope, and no `embedding` key inside the payload (upstream's shape, which the fork's function ignores).
+{
+  const F = "integrations/smart-ingest/index.ts";
+  assert((readFileSync(join(ROOT, F), "utf8").match(/rpc\("upsert_thought"/g) ?? []).length === 1, `${F} calls upsert_thought from one place, writeThought`);
+  spells(F, /rpc\("upsert_thought",\s*\{\s*p_content:[^}]*p_payload:\s*\{[\s\S]{0,300}?actor: ACTOR[\s\S]{0,200}?p_embedding: vector/, "passes the actor in upsert_thought's envelope and the vector as p_embedding — the 3-argument form");
+  // The payload block read whole, braces balanced — the label's spread is a `{ … }` inside it, and a regex over the block
+  // either stopped at that spread's closing brace (an `embedding:` after it passed: the 2-argument mutant was killed by the
+  // run-time arms while this guard stayed green) or swallowed the spread whole (a key inside it passed) — review pass 1.
+  const text = readFileSync(join(ROOT, F), "utf8");
+  const at = text.indexOf("p_payload: {");
+  let depth = 0, end = -1;
+  for (let i = at; at >= 0 && i < text.length && end < 0; i++) { if (text[i] === "{") depth++; else if (text[i] === "}" && --depth === 0) end = i; }
+  const payload = at >= 0 && end > at ? text.slice(at, end + 1) : "";
+  assert(payload.length > 0 && !/(?:^|[^\w])["'`]?embedding["'`]?\s*:/.test(payload), `${F} puts no \`embedding\` key inside upsert_thought's payload — the 2-argument form's shape, which the fork's function does not read (${payload.replace(/\s+/g, " ").slice(0, 160)})`);
+}
+// The two servers each carry httpTargetFrom (they deploy alone and share only their own _shared/): held identical to the
+// character, comment lines aside, as the date helpers are above.
+{
+  const helper = (rel: string) => (readFileSync(join(ROOT, rel), "utf8").match(/^function httpTargetFrom[\s\S]*?^}$/m)?.[0] ?? "").split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+  const [ours, theirs] = [helper("integrations/rest-api/index.ts"), helper("integrations/smart-ingest/index.ts")];
+  assert(ours.length > 300 && ours === theirs, `integrations/rest-api/index.ts's httpTargetFrom is integrations/smart-ingest/index.ts's to the character (${ours.length} vs ${theirs.length} chars)`);
 }
 
 } catch (e) {

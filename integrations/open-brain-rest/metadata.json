@@ -1,6 +1,6 @@
 {
   "name": "open-brain-rest",
-  "description": "Supabase Edge Function REST gateway for the OB1 dashboard thoughts, workflow, search, audit, and duplicate-review surfaces.",
+  "description": "REST gateway (one HTTP process under Bun) for the OB1 dashboard thoughts, workflow, search, audit, and duplicate-review surfaces.",
   "category": "integrations",
   "author": {
     "name": "Jonathan Edwards",
@@ -9,12 +9,9 @@
   "version": "0.1.0",
   "requires": {
     "open_brain": true,
-    "services": [
-      "Supabase"
-    ],
+    "services": [],
     "tools": [
-      "Supabase CLI",
-      "Node.js 18+"
+      "Bun 1.4+"
     ]
   },
   "status": "experimental",
@@ -22,7 +19,6 @@
     "rest",
     "api",
     "gateway",
-    "edge-function",
     "dashboard"
   ],
   "difficulty": "intermediate",

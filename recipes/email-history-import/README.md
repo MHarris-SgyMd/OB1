@@ -1,5 +1,7 @@
 # Email History Import
 
+> **On this fork (SMD-2126).** `pull-gmail.ts` reaches the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and embeds each item itself; this fork's stack runs no PostgREST (SETUP.md), so the import fails at its first request (`--dry-run` runs). It becomes an adapter of the ingestion contract — the parser emits items for `bun db/ingest-records.ts --items`, which inserts each row itself with 003's fingerprint function, the audit actor and its `thought_sources` identity (`bun db/reembed.ts` embeds it) — in SMD-2021 (after SMD-2136); the decision for the class is in `docs/vendored-disposition.md`.
+
 > Import your Gmail email history into Open Brain as searchable, embedded thoughts.
 
 Your email is full of decisions, commitments, and context that your AI has never seen. This recipe connects to Gmail, pulls the emails that matter (filtering out receipts, auto-replies, and noise), and loads them into your Open Brain. Once imported, your AI can recall what you said to someone three months ago, find that pricing discussion from last quarter, or surface commitments you forgot about.
@@ -90,7 +92,7 @@ bun pull-gmail.ts --list-labels
 
 **Default (Supabase direct insert)** — The script generates embeddings and extracts metadata via OpenRouter, then inserts directly into Supabase with content fingerprint dedup. Requires `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `OPENROUTER_API_KEY`. This matches the pattern used by the ChatGPT import and MCP server.
 
-**`--ingest-endpoint`** — POSTs to a custom Edge Function endpoint that handles embedding and metadata server-side. Requires `INGEST_URL` and `INGEST_KEY`. Use this if you have a custom ingest-thought function deployed.
+**`--ingest-endpoint`** — POSTs `{ content, source, content_fingerprint, extra_metadata }` with an `x-ingest-key` header to a capture endpoint of your own that embeds and stores server-side. Requires `INGEST_URL` and `INGEST_KEY`. Nothing in this repository serves that shape today; use it if you run one.
 
 ## How It Works
 

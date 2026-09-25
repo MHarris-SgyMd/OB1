@@ -1,5 +1,7 @@
 # Entity Wiki Pages
 
+> **On this fork (SMD-2126).** `generate-wiki.mjs` reaches the brain as a PostgREST client — `${OPEN_BRAIN_URL}/rest/v1/…` with a service-role key — and this fork's stack runs no PostgREST (SETUP.md), so it fails at its first request, `--dry-run` included (it reads the brain first). The port onto `compat/supabase-sql` under `bun` (`OPEN_BRAIN_URL` a `postgres://` string; the `node` commands below become `bun`) is SMD-2143; the decision for the class is in `docs/vendored-disposition.md`. On a fork brain `thought_entities` is migration 016's table (a uuid `entity_id` to `ob1_entities`, no `mention_role`), not the schema's, so the port reads 016's shape and writes mentions through the fork's `record_thought_entities`; the decision says how.
+
 > ⚠️ **Requires the entity-extraction companion PRs — not yet merged into OB1 `main`.** This recipe reads `public.entities`, `public.thought_entities`, and `public.edges`. Those tables are introduced by the in-flight entity-extraction schema + worker PRs (tracking: [#197](https://github.com/NateBJones-Projects/OB1/pull/197) schema, [#199](https://github.com/NateBJones-Projects/OB1/pull/199) worker). On the current `main` branch those tables do not exist and every query in `generate-wiki.mjs` will fail with `relation "public.entities" does not exist`. Do not try to install this recipe until both companion PRs are merged. See [Prerequisites](#prerequisites) for details.
 > Auto-generate per-entity markdown wiki pages by aggregating every thought linked to a person, project, topic, organization, tool, or place — then synthesizing a structured narrative with an LLM.
 
@@ -273,7 +275,7 @@ LANGUAGE sql STABLE AS $$
   LIMIT lim;
 $$;
 
-GRANT EXECUTE ON FUNCTION public.entities_with_min_links(int, int) TO service_role;
+-- EXECUTE is PUBLIC's by default on plain Postgres; no grant is needed (upstream granted it to Supabase's service_role here)
 ```
 
 </details>

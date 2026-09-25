@@ -10,7 +10,7 @@
   "requires": {
     "open_brain": true,
     "services": ["OpenRouter", "Slack (optional, for posting critical findings)"],
-    "tools": ["Supabase CLI", "Deno (via Supabase Edge Functions)"]
+    "tools": ["Bun 1.4+", "cron, or pg_cron + pg_net"]
   },
   "requires_skills": [],
   "tags": [

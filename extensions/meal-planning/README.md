@@ -17,7 +17,7 @@ Your agent can reason across five datasets — what you've cooked before, what's
 
 ## What You'll Learn
 
-- Row Level Security (first introduction to multi-user access)
+- Scoping rows without Row Level Security — what upstream's policies did and why this fork's schema leaves them out (the [RLS primitive](../../primitives/rls/), as background)
 - Shared MCP server (separate server with limited, scoped access)
 - JSONB for complex data (ingredients, instructions)
 - Auto-generating derivative data (shopping lists from meal plans)
@@ -50,24 +50,22 @@ A complete meal planning system with recipes, weekly meal plans, and auto-genera
 
 - Working Open Brain setup
 - Extensions 1-3 recommended (Extension 3's family_members table is referenced for cross-extension integration)
-- [Bun](https://bun.sh) 1.4+ and a Postgres carrying the Open Brain schema ([`SETUP.md`](../../SETUP.md)) — this server runs under Bun, not as a Supabase Edge Function (FORK.md change 74)
-- **Required reading:** [Row Level Security](../../primitives/rls/) primitive
+- [Bun](https://bun.sh) 1.4+ and a Postgres carrying the Open Brain schema ([`SETUP.md`](../../SETUP.md)) — this server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/); FORK.md change 74)
+- **Background reading:** [Row Level Security](../../primitives/rls/) primitive — the per-user policies upstream's `schema.sql` carried; this fork's carries none (SMD-1810), the server scopes rows by `DEFAULT_USER_ID`
 - **Required reading:** [Shared MCP Server](../../primitives/shared-mcp/) primitive
 
 ## Credential Tracker
 
 You'll reference these values during setup. Copy this block into a text editor and fill it in as you go.
 
-> **Already have your Supabase credentials from the [Setup Guide](../../docs/01-getting-started.md)?** You just need the same Project URL and Secret key.
+> **Your brain's connection string** is the one value this server needs from your setup — with the compose stack, [Run a Remote MCP Server, Step 1](../../primitives/deploy-remote-mcp/README.md#step-1-apply-the-extensions-schema) says how the database reaches the host and what the URL looks like.
 
 ```text
 MEAL PLANNING -- CREDENTIAL TRACKER
 --------------------------------------
 
-SUPABASE (from your Open Brain setup)
+DATABASE (from your Open Brain setup)
   Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
-  Secret key:            ____________
-  Project ref:           ____________
 
 GENERATED DURING SETUP
   Default User ID:             ____________
@@ -77,13 +75,13 @@ GENERATED DURING SETUP
 
 FOR SHARED SERVER
   Household Access Key:        ____________
-  Household Key (Supabase):    ____________
+  Household access key:        ____________  (minted for the shared server alone)
   Shared Server URL:           ____________
   Shared Connection URL:       ____________
 
-NOTE: This extension uses TWO Edge Functions:
-  1. Primary (meal-planning-mcp) — your full access
-  2. Shared (meal-planning-shared-mcp) — household read + shopping list
+NOTE: This extension runs TWO servers, each on its own port with its own keys:
+  1. Primary (index.ts) — your full access
+  2. Shared (shared-server.ts) — household read + shopping list
 
 --------------------------------------
 ```
@@ -94,16 +92,11 @@ NOTE: This extension uses TWO Edge Functions:
 
 ### 1. Create the Database Schema
 
-Run the SQL in `schema.sql` against your Open Brain database, as the role the servers will connect with. Its row-level-security policies call Supabase's `auth.uid()` and `auth.jwt()`, which a plain Postgres does not have, so give it both first (the servers connect as one role and scope rows by `DEFAULT_USER_ID` themselves; the table owner is not subject to the policies) — **on a Supabase database skip this first command**, which has both and whose row-level security would break if they were replaced (the plain `CREATE` refuses with "already exists"): `psql "$DATABASE_URL" -c "CREATE SCHEMA IF NOT EXISTS auth; CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS 'SELECT NULL::uuid'; CREATE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT ''{}''::jsonb';"` and then `psql "$DATABASE_URL" -f extensions/meal-planning/schema.sql` — or paste `schema.sql` alone into the Supabase SQL Editor, if that is where it lives. This creates three RLS-enabled tables:
+Run the SQL in `schema.sql` against your Open Brain database, as the role the servers will connect with — `psql "$DATABASE_URL" -f extensions/meal-planning/schema.sql`, or paste it into the SQL client you use. This creates three tables (`recipes`, `meal_plans`, `shopping_lists`), each with a `user_id` column both servers fill from `DEFAULT_USER_ID`.
 
-```bash
-# Using Supabase SQL Editor (recommended)
-# 1. Open https://supabase.com/dashboard/project/YOUR_PROJECT_ID/sql/new
-# 2. Paste the contents of schema.sql
-# 3. Click "Run"
-```
+Nothing is needed first. Upstream's file enabled row-level security on Supabase's `auth.uid()`, and this README used to give two stub functions to create before it; this fork removed the policies (SMD-1810) — one operator's brain on plain Postgres, the server scoping rows itself (SMD-1716). The role that applies the file owns the tables and needs no grant; any other role is granted them by `bun db/migrate.ts --grant <role>` (`db/README.md`, "Grants for a capturing role", the **extensions** group).
 
-**Important:** The schema includes Row Level Security policies. Make sure you understand what RLS does before proceeding (see the [RLS primitive](../../primitives/rls/)).
+**What changed for the shared server:** upstream's policies also let a `household_member` role, read from Supabase's JWT, see recipes and meal plans and edit shopping lists. Here the shared server's scope is the tool set it registers and its own key list ("Decide the Household Member's Scope", below) — the same rows, a narrower set of verbs — not a row policy.
 
 ### 2. Generate Your User ID
 
@@ -122,7 +115,7 @@ Pass it to the server as `DEFAULT_USER_ID` when you start it in Step 3.
 
 ### 3. Run the Primary MCP Server
 
-This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — so it is not a Supabase Edge Function and `supabase functions deploy` does not apply (FORK.md change 74). From a checkout of this repository:
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — one HTTP process, as every server here is ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks it; FORK.md change 74). From a checkout of this repository:
 
 ```bash
 (cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports
@@ -132,7 +125,7 @@ DEFAULT_USER_ID='your-generated-uuid-here' \
 PORT=8787 bun extensions/meal-planning/index.ts
 ```
 
-`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). Bun prints its start line, `Started development server: http://localhost:8787` (`Started server:` under `NODE_ENV=production`; `PORT` unset, it listens on 8000 — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI. Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request; five extension servers beside the core server are sixty of Postgres's default hundred before any load, so set it lower where several share one database.
+`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). Bun prints its start line, `Started development server: http://localhost:8787` (`Started server:` under `NODE_ENV=production`; `PORT` unset, it listens on 8000 — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI. Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request; five extension servers beside the core server are sixty of Postgres's default hundred before any load, so set it lower where several share one database.
 
 > **Every tool of this server runs on the fork.** `extensions/test-tools.ts` drives all six against a real Postgres carrying this `schema.sql` in CI — `tags` into `TEXT[]` beside `ingredients` into `JSONB` in one insert, the tag and ingredient filters, the recipe embedded on each meal (`recipes:recipe_id (…)`), the shopping list aggregated from it, and `update_recipe`'s error path carrying the database's message (FORK.md change 77, SMD-1588; change 74's review had found two of the six failing on the shim).
 
@@ -161,31 +154,9 @@ Generate a shopping list for the week of March 17.
 
 The shared server gives household members limited access — they can view meal plans, browse recipes, and manage the shopping list without accessing your full Open Brain.
 
-### 1. Create a Household Member Role in Supabase
+### 1. Decide the Household Member's Scope
 
-The RLS policies check for `auth.jwt() ->> 'role' = 'household_member'`. You need to create a JWT with this claim:
-
-**Option A: Create a separate Supabase user for your spouse**
-1. Go to Supabase Dashboard → Authentication → Users
-2. Create a new user with your spouse's email
-3. In the SQL Editor, grant the household_member role:
-
-```sql
--- Create a custom claim for this user
-UPDATE auth.users
-SET raw_app_meta_data = jsonb_set(
-  COALESCE(raw_app_meta_data, '{}'),
-  '{role}',
-  '"household_member"'
-)
-WHERE email = 'spouse@example.com';
-```
-
-**Option B: Use a shared service account**
-1. Create a new Supabase API key in Settings → API with limited permissions
-2. This is simpler but less granular than per-user authentication
-
-For this guide, we'll use Option B (shared service account).
+The boundary is the shared server's own key list. Mint the household member a key of their own (Step 3 of [Run a Remote MCP Server](../../primitives/deploy-remote-mcp/)) — `read` unless they should check items off the shopping list — and put its hash in `MCP_HOUSEHOLD_ACCESS_KEYS`, never in the primary server's `MCP_ACCESS_KEYS`. The shared server registers only its four tools, so even a write key there cannot reach your recipes' edits or your meal plans' changes. Upstream's schema carried `auth.jwt() ->> 'role' = 'household_member'` policies as a Supabase-side line; this fork's carries none (SMD-1810) — the servers connect as one Postgres role — so the key list is the line that holds (to have the database hold one too, give the shared server a `SUPABASE_URL` whose role has only the household member's privileges).
 
 ### 2. Run the Shared Server
 
@@ -197,17 +168,11 @@ MCP_HOUSEHOLD_ACCESS_KEYS='spouse:write:paste-the-hash-here' \
 PORT=8788 bun extensions/meal-planning/shared-server.ts
 ```
 
-`SUPABASE_HOUSEHOLD_KEY`, the restricted Supabase key the Edge Function version read, may be left unset: with the shim the credentials live in the connection string, so give this server a `SUPABASE_URL` whose Postgres role has only the household member's privileges if you want the database to hold that line too. Its **MCP Connection URL** is `http://your-host:8788/mcp?key=the-household-key`.
+`SUPABASE_HOUSEHOLD_KEY`, the restricted key upstream's Edge Function read, may be left unset: with the shim the credentials live in the connection string, so give this server a `SUPABASE_URL` whose Postgres role has only the household member's privileges if you want the database to hold that line too. Its **MCP Connection URL** is `http://your-host:8788/mcp?key=the-household-key`.
 
 > **Every tool of the shared server runs on the fork.** `extensions/test-tools.ts` drives all four in CI on the rows the primary server's tools planted — the embedded recipe on `view_meal_plan`, the tag filter on `view_recipes`, `view_shopping_list`'s error path carrying the database's message (FORK.md change 77, SMD-1588).
 
 Mint the household member's key with scope `read` unless they should check items off the shopping list — `mark_item_purchased` is the shared server's one tool that writes, and a read-scoped key is not given it.
-
-You'll also need to set the household Supabase key:
-
-```bash
-supabase secrets set SUPABASE_HOUSEHOLD_KEY=household-scoped-api-key
-```
 
 ### 3. Connect Your Household Member
 
@@ -244,7 +209,7 @@ Who's home for dinner this week? Adjust the meal plan servings accordingly.
 Cross-reference pantry inventory: "Do we have the ingredients for chicken stir-fry?" queries both the recipe's ingredients and your knowledge base entries about pantry stock.
 
 **Pattern reuse:**
-The RLS patterns you learn here apply directly to Extensions 5 (Professional CRM) and 6 (Job Hunt Pipeline). The shared MCP server pattern is reusable for any future extension where you want to give someone else partial access.
+The table shape you build here — a `user_id` the server fills — is the one Extensions 5 (Professional CRM) and 6 (Job Hunt Pipeline) reuse. The shared MCP server pattern is reusable for any future extension where you want to give someone else partial access.
 
 ## Expected Outcome
 
@@ -263,11 +228,6 @@ For common issues (connection errors, 401s, deployment problems), see [Common Tr
 
 **Extension-specific issues:**
 
-**RLS policies blocking queries on the shared server**
-- Verify your user has the `household_member` role set in `raw_app_meta_data`
-- Check the RLS policies match the schema.sql
-- Test with service role key first to confirm it's not an RLS issue
-
 **JSONB ingredient search not working**
 - The `search_recipes` tool uses `.cs.` (contains) operator for JSONB — ingredient names must match exactly (case-insensitive)
 - For more flexible search, consider adding a GIN index on the ingredients JSONB column
@@ -276,19 +236,18 @@ For common issues (connection errors, 401s, deployment problems), see [Common Tr
 - The current implementation does simple string concatenation for quantities (e.g., "1 cup + 2 cups")
 - For production use, you'd want smarter quantity aggregation
 
-**Shared server can see all data**
-- Double-check that RLS policies are enabled (`ALTER TABLE ... ENABLE ROW LEVEL SECURITY`)
-- Verify the `household_member` role is set correctly in the JWT claims
-- Test by trying to insert/delete from the shared server (should fail)
+**Shared server can see or change more than it should**
+- Its scope is the tool set it registers and its own key list ("Decide the Household Member's Scope"); there is no row policy behind it on this fork (SMD-1810). Check which server the connector points at and which key it carries — a household member's key must be on the shared server's list only
+- Test by trying to add or delete a recipe through the shared server: it registers no tool for that
 
 ## Next Steps
 
-**Extension 5: Professional CRM** — You'll apply the RLS skills you just learned to protect professional contact data. The shared server pattern isn't needed here (your work contacts are private), but the multi-entity relationship (contacts → interactions) is the same pattern you used in Extension 3 (family members → activities).
+**Extension 5: Professional CRM** — You'll reuse the table shape you just built — a `user_id` the server fills — for professional contact data. The shared server pattern isn't needed here (your work contacts are private), but the multi-entity relationship (contacts → interactions) is the same pattern you used in Extension 3 (family members → activities).
 
 **Key concepts in Extension 5:**
 - Contact management with interaction history
 - Relationship tracking and follow-up reminders
-- RLS for sensitive professional data
+- A `user_id` the server fills, for sensitive professional data
 - Integration with calendar (Extension 3) for scheduling follow-ups
 
 Continue to [Extension 5: Professional CRM](../professional-crm/)

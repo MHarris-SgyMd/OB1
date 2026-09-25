@@ -62,7 +62,7 @@ openclaw --profile ob1-agent-memory plugins install . --link
     entries: {
       "nbj-ob1-agent-memory": {
         config: {
-          endpoint: "https://YOUR_PROJECT_REF.supabase.co/functions/v1/agent-memory-api",
+          endpoint: "https://your-host/agent-memory-api",   // the Agent Memory API behind your TLS proxy; http://127.0.0.1:8787/agent-memory-api on the same machine
           accessKey: {
             source: "file",
             provider: "ob1_agent_memory",

@@ -171,13 +171,11 @@ create trigger repo_learning_lesson_progress_touch_updated_at
 before update on public.repo_learning_lesson_progress
 for each row execute function public.repo_learning_touch_updated_at();
 
-grant select, insert, update, delete on table public.repo_learning_projects to service_role;
-grant select, insert, update, delete on table public.repo_learning_research_documents to service_role;
-grant select, insert, update, delete on table public.repo_learning_tracks to service_role;
-grant select, insert, update, delete on table public.repo_learning_lessons to service_role;
-grant select, insert, update, delete on table public.repo_learning_quizzes to service_role;
-grant select, insert, update, delete on table public.repo_learning_quiz_questions to service_role;
-grant select, insert, update, delete on table public.repo_learning_lesson_progress to service_role;
-grant select, insert, update, delete on table public.repo_learning_quiz_attempts to service_role;
-grant select, insert, update, delete on table public.repo_learning_quiz_responses to service_role;
-grant select, insert, update, delete on table public.repo_learning_lesson_comments to service_role;
+-- This fork (SMD-1810): upstream's file ended here with a grant on each of
+-- the ten tables to service_role. Supabase's role; on plain Postgres the
+-- first stopped the file (`role "service_role" does not exist`). Removed.
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `recipes` group, which covers this file's
+-- ten tables (SELECT, INSERT, UPDATE, DELETE); a role that owns the tables
+-- needs nothing. Row-level security on this fork: SMD-1716.

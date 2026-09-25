@@ -24,7 +24,7 @@ BEGIN
   ) THEN
     RAISE EXCEPTION
       'entity-extraction requires the content_fingerprint column on public.thoughts. '
-      'Run docs/01-getting-started.md Step 2.6 first, then re-apply this schema.';
+      'Run the core migrations first (bun db/migrate.ts; migration 003 adds it), then re-apply this schema.';
   END IF;
 END $$;
 

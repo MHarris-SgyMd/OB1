@@ -48,7 +48,7 @@ than at the first query.
 
 ### 3. Run a migrated server under Bun
 
-A migrated server was written as a Supabase Edge Function — `Deno.env.get` for its
+A migrated server was written for upstream's Edge Function host — `Deno.env.get` for its
 environment, `Deno.serve` at the end — and the shim imports `bun`, so until
 SMD-1799 such a file also took `compat/deno-on-bun.ts`, a polyfill for those two
 members, as its first import (SMD-1480, FORK.md change 74). The servers are
@@ -92,9 +92,9 @@ an install of their own. The other variables are the ones the file's README has
 its Supabase deploy set as secrets, passed as environment instead; each README's
 callout gives its own line. `SUPABASE_SERVICE_ROLE_KEY` is read and ignored by
 every server but `work-operating-model-activation`, which refuses to start
-without it — set it to any value there. An extension's `schema.sql` carries
-Supabase RLS policies on `auth.uid()`; its README's Step 1 gives the two stub
-functions a plain Postgres needs before the file runs. Check 11 of `scripts/check-fork-consistency.ts` holds
+without it — set it to any value there. An extension's `schema.sql` applies to
+a plain Postgres as it is: the RLS policies on `auth.uid()` upstream's carried
+are gone (SMD-1810), so no stub function precedes it. Check 11 of `scripts/check-fork-consistency.ts` holds
 every code file under the category directories and docs/ to no `Deno` (the seven Edge Function files it excepted left with SMD-1800), and every shim-importing file to no
 `jsr:`/`npm:`/URL specifier, through the files it imports — and
 `extensions/test-auth.ts` starts each one under `bun` and answers it over its port

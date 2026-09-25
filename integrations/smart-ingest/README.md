@@ -37,7 +37,7 @@ Below 0.85, the thought is treated as entirely new (`add`).
 ## Cost & Limits
 
 Smart Ingest talks to paid LLM APIs and writes to your primary thoughts table,
-so the Edge Function ships with hard ceilings that you should tune before
+so the server ships with hard ceilings that you should tune before
 production use. All ceilings are environment-controlled; `0` disables a cap.
 
 | Env var | Default | What it caps |
@@ -45,7 +45,7 @@ production use. All ceilings are environment-controlled; `0` disables a cap.
 | `SMART_INGEST_MAX_INPUT_CHARS` | `100000` | Hard 413 reject above this size |
 | `SMART_INGEST_MAX_CHUNKS` | `10` | Abort if text splits into more chunks |
 | `SMART_INGEST_MAX_CALLS` | `10000` | Abort after N LLM calls in one request |
-| `SMART_INGEST_BUDGET_MS` | `140000` | Stop before Supabase's 150s kill |
+| `SMART_INGEST_BUDGET_MS` | `140000` | Stop a request here (upstream's host killed it at 150 s; a process has no such limit, so this is the cap) |
 | `FETCH_TIMEOUT_MS` | `60000` | Per-fetch timeout for chat calls |
 | `EMBEDDING_TIMEOUT_MS` | `30000` | Per-fetch timeout for embedding calls |
 
@@ -85,20 +85,20 @@ without human review.
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
 - **Enhanced thoughts schema** applied — install `schemas/enhanced-thoughts` first (adds type, importance, sensitivity columns and utility RPCs)
-- **Smart ingest tables** applied — install `schemas/smart-ingest-tables` to create the `ingestion_jobs` and `ingestion_items` tables plus the `append_thought_evidence` RPC
+- **Smart ingest tables** applied — install `schemas/smart-ingest` to create the `ingestion_jobs` and `ingestion_items` tables plus the `append_thought_evidence` RPC. On this fork the two item columns that hold a thought id (`matched_thought_id`, `result_thought_id`) are `uuid`, as `thoughts.id` is here (SMD-2128): an executed item records the thought it wrote or matched, and re-applying the file to a brain that had upstream's `bigint` columns retypes them in place (its header says what is kept, and that the rewrite locks the table). A dashboard's per-item "view thought" link carries that UUID to `open-brain-dashboard-pro`'s thought page, which takes one since SMD-2128 (its `Thought.id: number` typing is SMD-2152's)
 - At least one LLM API key for extraction: OpenRouter (recommended), OpenAI, or Anthropic
 - An embedding API key: OpenRouter or OpenAI (required for semantic deduplication)
-- Supabase CLI installed for deployment
+- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/))
 
 ### Required RPCs
 
-This Edge Function depends on these database functions:
+This server depends on these database functions:
 
 | RPC | Source | Purpose |
 |-----|--------|---------|
-| `upsert_thought(text, jsonb)` | Core OB1 schema (Step 2.6) | Creates or updates a thought with content and payload |
+| `upsert_thought(text, jsonb, vector)` | Core OB1 schema (`db/migrations/004`, last redefined by `046`) | Creates a thought — content, envelope and vector in one statement, the fork's 3-argument form (SMD-1228): the vector's model label, the actor and a revision's `supersedes` ride in the envelope; the enhanced columns (`type`, `importance`, `quality_score`, `source_type`, `sensitivity_tier`) follow by an update on a fresh row. Until SMD-2128 this server called the 2-argument form with the vector inside the payload, which the fork's function ignores, so its thoughts had no vector and default columns; `bun db/reembed.ts` embeds such rows (it takes a thought whose vector is NULL) |
 | `match_thoughts(vector, float, int)` | Core OB1 schema | Semantic similarity search for deduplication |
-| `append_thought_evidence(bigint, jsonb)` | `schemas/smart-ingest-tables` | Appends corroborating evidence to an existing thought's metadata |
+| `append_thought_evidence(uuid, jsonb)` | `schemas/smart-ingest` | Appends corroborating evidence to an existing thought's metadata (`bigint` upstream; the fork's thought id is a UUID — SMD-2128) |
 
 ## Credential Tracker
 
@@ -109,8 +109,7 @@ SMART INGEST -- CREDENTIAL TRACKER
 ------------------------------------
 
 FROM YOUR OPEN BRAIN SETUP
-  Project URL:           ____________
-  Service role key:      ____________
+  Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
   MCP access key:        ____________
 
 LLM EXTRACTION (at least one required)
@@ -127,38 +126,26 @@ EMBEDDING (at least one required)
 
 ## Steps
 
-> **Runs under Bun, not as an Edge Function.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — so `supabase functions deploy` cannot bundle it; from a checkout of this repository it serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
->
-> ```bash
-> PORT=8787 SUPABASE_URL='postgres://user:password@host:5432/openbrain' MCP_ACCESS_KEY='your-key' OPENROUTER_API_KEY='…' bun integrations/smart-ingest/index.ts
-> ```
->
-> `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset), and the other variables are the secrets the steps below set, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI. The Supabase steps below apply to the file after `bun scripts/migrate-to-sql-shim.ts --revert integrations/smart-ingest/index.ts`, which puts it back on supabase-js.
+### 1. Run the server
 
-### 1. Deploy the Edge Function
-
-Copy the `integrations/smart-ingest/` folder into your Supabase project's `supabase/functions/` directory, then deploy:
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and its own `_shared/` helpers, and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — one HTTP process, as every server here is. From a checkout of this repository ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps):
 
 ```bash
-supabase functions deploy smart-ingest --no-verify-jwt
+PORT=8787 \
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+MCP_ACCESS_KEY='your-access-key' \
+OPENROUTER_API_KEY='your-openrouter-key' \
+bun integrations/smart-ingest/index.ts
 ```
 
-### 2. Set Environment Variables
+`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the core server holds — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). Beside the [rest-api gateway](../rest-api/) on 8787, give this server a port of its own (`PORT=8788`) and point the gateway's `SMART_INGEST_URL` at it (`http://127.0.0.1:8788`); the gateway forwards its `MCP_ACCESS_KEY`, so the two hold the same key (SMD-2110). `extensions/test-auth.ts` starts it this way in CI. A caller on another machine reaches it through the same TLS proxy as the core server ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
 
-Add your secrets to the deployed function:
+### 2. Set the environment
 
-```bash
-supabase secrets set \
-  MCP_ACCESS_KEY="your-access-key" \
-  OPENROUTER_API_KEY="your-openrouter-key"
-```
-
-Optional multi-provider fallback:
+`MCP_ACCESS_KEY` is the one key this server holds — the raw key, compared constant-time (this server predates the hashed `MCP_ACCESS_KEYS` list, change 67) — sent as `x-brain-key`. `ENTITY_EXTRACTION_WORKER_URL`, optional, is the entity-extraction worker's http(s) address (`integrations/entity-extraction-worker`): after a write that adds or revises a thought, this server POSTs to it with its key and `?limit=` the count, so extraction runs at once; unset, the server says so when it starts and the queue waits for whatever runs the worker on a schedule, and any scheme but `http`/`https` is refused at start (SMD-2110 — until it the address was built from `SUPABASE_URL`, the Postgres connection string here, so every trigger failed). Optional multi-provider fallback, in the same environment:
 
 ```bash
-supabase secrets set \
-  OPENAI_API_KEY="your-openai-key" \
-  ANTHROPIC_API_KEY="your-anthropic-key"
+OPENAI_API_KEY="your-openai-key" ANTHROPIC_API_KEY="your-anthropic-key"
 ```
 
 ### 3. Test with a Dry Run
@@ -166,7 +153,7 @@ supabase secrets set \
 Send a test document with `dry_run: true` to preview what would be extracted without writing anything:
 
 ```bash
-curl -X POST "https://<your-project-ref>.supabase.co/functions/v1/smart-ingest" \
+curl -X POST "http://127.0.0.1:8787/" \
   -H "Content-Type: application/json" \
   -H "x-brain-key: your-access-key" \
   -d '{
@@ -194,7 +181,7 @@ You should get a response showing extracted thoughts and their reconciliation ac
 Once you're satisfied with the dry-run results, commit them to the database:
 
 ```bash
-curl -X POST "https://<your-project-ref>.supabase.co/functions/v1/smart-ingest/execute" \
+curl -X POST "http://127.0.0.1:8787/execute" \
   -H "Content-Type: application/json" \
   -H "x-brain-key: your-access-key" \
   -d '{ "job_id": 1 }'
@@ -252,7 +239,7 @@ Execute a previously dry-run job.
 
 **Today's user-facing surfaces:**
 
-- **Browser (dashboard):** The Next.js dashboard at `dashboards/open-brain-dashboard-next` includes an "Add to Brain" page that POSTs to this Edge Function and auto-decides between single-thought capture and multi-thought extraction. Install the dashboard separately if you want a non-CLI capture surface.
+- **Browser (dashboard):** The Next.js dashboard at `dashboards/open-brain-dashboard-next` includes an "Add to Brain" page that POSTs to this server and auto-decides between single-thought capture and multi-thought extraction. Install the dashboard separately if you want a non-CLI capture surface.
 - **CLI / scripts / webhooks:** The HTTP API documented above. Suitable for batch imports, custom capture pipelines, or terminal workflows.
 - **CLI agents:** Claude Code, Codex, Cursor, and similar tools can call the HTTP endpoint directly through their shell.
 
@@ -269,13 +256,13 @@ After completing setup, you should be able to:
 1. Send raw text to the `/smart-ingest` endpoint and receive extracted thoughts
 2. Use dry-run mode to preview extractions before committing
 3. Execute dry-run jobs to write thoughts to the database
-4. See new thoughts in your brain with `source_type = 'smart_ingest'`
+4. See new thoughts in your brain with `source_type = 'smart_ingest'`, each with its vector and `embedding_model`, and a `create_revision` item's thought pointing at the one it revises through `supersedes`; every item of a finished job is `executed` — its `result_thought_id` the thought it wrote or matched, where there was one — or `failed`, with its `error_message` (SMD-2128). The vectors this server makes are `openai/text-embedding-3-small`'s, 1536 wide, so the brain must be built at that model and width (`OB1_EMBEDDING_MODEL=openai/text-embedding-3-small`, `OB1_EMBEDDING_DIM=1536`); on this fork's default, `qwen3-embedding:4b` at 1024, `match_thoughts` refuses the vector and every item is skipped as `semantic_check_failed_skipped`
 5. Observe deduplication in action — re-sending the same text returns the existing job instead of creating duplicates
 
 ## Troubleshooting
 
 **"No LLM API key configured"**
-You need at least one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY` set as a Supabase secret. OpenRouter is recommended as the primary provider.
+You need at least one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY` in the server's environment. OpenRouter is recommended as the primary provider.
 
 **"Input contains restricted content"**
 The function runs a pre-flight sensitivity check and blocks content matching restricted patterns (SSN, credit card, API keys, passwords). This is a safety feature — process sensitive content locally instead.

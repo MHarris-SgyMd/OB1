@@ -4,20 +4,20 @@
 
 **Created by [@txcfi-scott](https://github.com/txcfi-scott)**
 
-> Standalone MCP Edge Function that adds a `delete_thought` tool — hard-deletes a thought by UUID with a pre-flight fetch and a clear confirmation response.
+> Standalone MCP server that adds a `delete_thought` tool — hard-deletes a thought by UUID with a pre-flight fetch and a clear confirmation response.
 
 ## What It Does
 
-The core Open Brain MCP server exposes capture/search/list/stats tools but has no delete path. As a result, thoughts accumulate forever — there is no way for an AI client to remove a test entry, a duplicate, or something captured in error without dropping into the Supabase SQL editor.
+The core Open Brain MCP server exposes capture/search/list/stats tools but has no delete path. As a result, thoughts accumulate forever — there is no way for an AI client to remove a test entry, a duplicate, or something captured in error without dropping into psql.
 
-This integration deploys a second Edge Function that exposes exactly one tool, `delete_thought(id)`. It is a hard delete (the row is removed), with a pre-flight existence check so the caller sees a distinct "not found" outcome rather than a silent success.
+This integration runs a second MCP server that exposes exactly one tool, `delete_thought(id)`. It is a hard delete (the row is removed), with a pre-flight existence check so the caller sees a distinct "not found" outcome rather than a silent success.
 
-**Recovery:** this is a hard delete, not a soft delete. Recovery depends on your Supabase project's database backups (daily backups are available on paid tiers; Point-in-Time Recovery on higher tiers). If you need recoverable deletes, install the companion `schemas/thought-audit` schema and extend this function to write an audit row with the prior content before the delete — see the "Audit hook" section below.
+**Recovery:** this is a hard delete, not a soft delete. Recovery depends on your database's backups (`pg_dump` from the reference stack: `deploy/README.md`, "What is reachable from where"). If you need recoverable deletes, install the companion `schemas/thought-audit` schema and extend this function to write an audit row with the prior content before the delete — see the "Audit hook" section below.
 
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- Supabase CLI installed
+- [Bun](https://bun.sh) 1.4+ and a checkout of this repository ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/))
 
 ## Credential Tracker
 
@@ -28,12 +28,11 @@ DELETE THOUGHT MCP -- CREDENTIAL TRACKER
 --------------------------------------
 
 FROM YOUR OPEN BRAIN SETUP
-  Project URL:              ____________
-  Service role key:         ____________
+  Postgres URL:             ____________  (SUPABASE_URL — the shim's name for it)
   MCP access key:           ____________
 
 GENERATED DURING SETUP
-  Delete Thought URL:       https://<project>.supabase.co/functions/v1/delete-thought-mcp
+  Delete Thought URL:       http://your-host:8787/mcp  (behind HTTPS for a hosted client)
   Custom connector name:    Open Brain — Delete
 
 --------------------------------------
@@ -41,59 +40,37 @@ GENERATED DURING SETUP
 
 ## Steps
 
-> **Runs under Bun, not as an Edge Function.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — so `supabase functions deploy` cannot bundle it; from a checkout of this repository it serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
->
-> ```bash
-> PORT=8787 NODE_PATH=extensions/node_modules SUPABASE_URL='postgres://user:password@host:5432/openbrain' MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' bun integrations/delete-thought-mcp/index.ts
-> ```
->
-> `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset), and the other variables are the secret Step 3 sets, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI. The Supabase steps below apply to the file after `bun scripts/migrate-to-sql-shim.ts --revert integrations/delete-thought-mcp/index.ts`, which puts it back on supabase-js.
+### 1. Run the server
 
-### 1. Create the Edge Function
-
-From the root of your local Open Brain repo:
-
-**1. Create the function folder:**
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and the access-key module from `../_shared/auth.ts` beside it (the core server's — the same file every server on this fork shares), and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — one HTTP process, as every server here is. From a checkout of this repository ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks every step):
 
 ```bash
-supabase functions new delete-thought-mcp
+(cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK
+PORT=8787 NODE_PATH=extensions/node_modules \
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
+bun integrations/delete-thought-mcp/index.ts
 ```
 
-**2. Copy the integration code:**
+`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the core server holds — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI.
 
-```bash
-curl -o supabase/functions/delete-thought-mcp/index.ts \
-  https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/integrations/delete-thought-mcp/index.ts
-mkdir -p supabase/functions/_shared
-curl -o supabase/functions/_shared/auth.ts \
-  https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/integrations/_shared/auth.ts
-```
+### 2. Set the access key
 
-The third file is the access-key module the function imports from `../_shared/auth.ts` — the core server's, copied so Supabase bundles it (`supabase/functions/_shared/` ships with every function; if you already have it from another server on this fork, it is the same file).
+`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per client — the hash, never the key; mint one as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. The list is this server's own environment: reuse the core server's lines or give this server its own. Use a `write` key: `delete_thought` is registered only for one, so a `read` key connects to a server with no tools at all.
 
-### 2. Set environment variables
+### 3. Put it behind HTTPS
 
-```bash
-supabase secrets set MCP_ACCESS_KEYS="laptop:write:<sha256-of-your-key>"
-```
-
-`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per client — the hash, never the key; mint one as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. The secret is project-wide — one `MCP_ACCESS_KEYS` for every function in the project — so set the whole list, your existing entries plus this one, comma-separated. Use a `write` key: `delete_thought` is registered only for one, so a `read` key connects to a server with no tools at all.
-
-`SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are injected automatically by the Supabase platform.
-
-### 3. Deploy
-
-```bash
-supabase functions deploy delete-thought-mcp --no-verify-jwt
-```
+Your **MCP Server URL** is `http://your-host:8787/mcp`. A client on this machine (Claude Code) takes it as is; a hosted connector (Claude Desktop, ChatGPT) dials from the vendor's side and needs the HTTPS form — the same TLS proxy or tunnel that fronts the core server ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
 
 ### 4. Register the connector
 
 In Claude Desktop: **Settings → Connectors → Add custom connector**, paste:
 
 ```
-https://<project>.supabase.co/functions/v1/delete-thought-mcp?key=<your-key>
+https://your-host/mcp?key=<your-key>
 ```
+
+(For Claude Code on this machine: `claude mcp add --transport http open-brain-delete http://127.0.0.1:8787/mcp --header "x-brain-key: <your-key>"`.)
 
 Use a distinct connector name (e.g. `Open Brain — Delete`) so the tool is easy to spot in your tool list.
 
@@ -106,11 +83,11 @@ Run through this short verification sequence:
 1. Capture a throwaway thought and copy its id from the response.
 2. Call `delete_thought` with that id — you should see `Deleted thought <id> (prior content length: N chars).`
 3. Call `delete_thought` with the same id again — you should see `Thought not found: <id>` with `isError: true`.
-4. Confirm in the Supabase Table Editor that the row is gone (reload the Table Editor if it still appears cached).
+4. Confirm the row is gone: `select count(*) from thoughts where id = '<id>';` answers 0.
 
 ## Expected Outcome
 
-- A new Edge Function at `https://<project>.supabase.co/functions/v1/delete-thought-mcp`.
+- A second MCP server at `http://your-host:8787/mcp` — behind HTTPS for a hosted client.
 - A custom connector in your AI client that exposes exactly one tool, `delete_thought`.
 - Invoking the tool with a valid UUID removes that row from the `thoughts` table and returns a confirmation.
 - Invoking with a non-existent UUID returns a clear `Thought not found: <id>` error.
@@ -142,10 +119,10 @@ Left out of the base integration to keep its dependencies to a single table.
 Solution: Confirm the `?key=` in your custom connector URL is the **key** whose hash sits in the `MCP_ACCESS_KEYS` secret (the URL carries the key, the secret its hash). If you rotate the key, update the secret's entry and the connector URL. A `read`-scoped key authenticates but is given no tool — the connector shows nothing to call.
 
 **Issue: `delete_thought error: permission denied for table thoughts`**
-Solution: Ensure your service role has DELETE permission on `public.thoughts`. The getting-started guide grants this in Step 2.5 — re-run `grant select, insert, update, delete on table public.thoughts to service_role;` in the SQL editor if it was missed.
+Solution: Ensure the role `SUPABASE_URL` names has DELETE permission on `public.thoughts` — `bun db/migrate.ts --grant <role>` grants the core tables (`db/README.md`, "Grants for a capturing role"); a role that owns the tables needs nothing.
 
-**Issue: Tool succeeds but the row is still visible in the Table Editor**
-Solution: The Table Editor caches results. Reload the page, or run `select id from thoughts where id = '<uuid>'` directly in the SQL Editor to confirm the row is gone.
+**Issue: Tool succeeds but the row still shows in your SQL client or dashboard**
+Solution: The view may be cached. Re-run `select id from thoughts where id = '<uuid>'` to confirm the row is gone.
 
 ## Attribution
 

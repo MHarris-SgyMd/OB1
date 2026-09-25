@@ -1,5 +1,7 @@
 # Lint Sweep
 
+> **On this fork (SMD-2126).** `lint-sweep.js` reaches the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and this fork's stack runs no PostgREST (SETUP.md), so the live mode fails at its first request. The port onto `compat/supabase-sql` under `bun` (`SUPABASE_URL` a `postgres://` string; the `node` commands below become `bun`) is SMD-2144; the decision for the class is in `docs/vendored-disposition.md`.
+
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
 
 **Created by [@alanshurafa](https://github.com/alanshurafa)**
@@ -77,11 +79,11 @@ OPTIONAL (TIER 3 ONLY)
    <!-- -->
 
    > [!WARNING]
-   > The service role key bypasses Row Level Security. Keep `.env.local` out of version control and restrict its file permissions.
+   > The connection string carries a role that reads every thought. Keep `.env.local` out of version control and restrict its file permissions.
 
-3. (Optional) Apply the SQL views if you want to run Tier 1 checks directly in Supabase Studio without the Node script:
+3. (Optional) Apply the SQL views if you want to run Tier 1 checks directly in psql without the Node script:
 
-   Open Supabase → SQL Editor → paste the contents of [`views.sql`](./views.sql) → Run. This creates read-only views (`lint_orphans_by_tag`, `lint_exact_duplicates`, `lint_high_importance_isolated`, etc.) you can query any time.
+   Run [`views.sql`](./views.sql) against your brain's database as the role that owns `thoughts` — `psql "$DATABASE_URL" -f recipes/lint-sweep/views.sql` — and grant any other role the views with `bun db/migrate.ts --grant <role>` (the **recipes** group). This creates read-only views (`lint_orphans_by_tag`, `lint_exact_duplicates`, `lint_high_importance_isolated`, etc.) you can query any time.
 
 4. Verify the script runs:
 

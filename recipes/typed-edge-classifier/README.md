@@ -1,5 +1,7 @@
 # Typed Edge Classifier
 
+> **On this fork (SMD-2126).** `classify-edges.mjs` reaches the brain as a PostgREST client — `${OPEN_BRAIN_URL}/rest/v1/…` with a service-role key — and this fork's stack runs no PostgREST (SETUP.md), so it fails at its first request, `--dry-run` included (it reads the brain first). The port onto `compat/supabase-sql` under `bun` (`OPEN_BRAIN_URL` a `postgres://` string; the `node` commands below become `bun`) is SMD-2141; the decision for the class is in `docs/vendored-disposition.md`. On a fork brain `thought_entities` is migration 016's table (a uuid `entity_id` to `ob1_entities`, no `mention_role`), not the schema's, so the port reads 016's shape and writes mentions through the fork's `record_thought_entities`; the decision says how.
+
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
 
 **Created by [@sahwan11](https://github.com/sahwan11)**

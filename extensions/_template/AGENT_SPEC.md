@@ -10,7 +10,7 @@ Every extension produces exactly four files in `extensions/{extension-slug}/`:
 |------|---------|
 | `README.md` | Human-readable setup guide (follows template below) |
 | `metadata.json` | Machine-readable metadata (follows schema below) |
-| `schema.sql` | PostgreSQL tables, indexes, RLS policies |
+| `schema.sql` | PostgreSQL tables, indexes, triggers — no RLS, no GRANT (rule 4 below) |
 | `index.ts` | The MCP server — Bun-native, `bun index.ts` serves it (SMD-1799) |
 
 ---
@@ -38,9 +38,9 @@ Must validate against `/.github/metadata.schema.json`. Required fields:
   "requires": {
     "open_brain": true,
     "services": [],
-    "tools": ["Supabase CLI"]
+    "tools": ["Bun 1.4+"]
   },
-  "requires_primitives": ["deploy-edge-function", "remote-mcp"],
+  "requires_primitives": ["deploy-remote-mcp", "remote-mcp"],
   "learning_order": null,
   "tags": ["at-least-one-tag"],
   "difficulty": "beginner | intermediate | advanced",
@@ -49,36 +49,27 @@ Must validate against `/.github/metadata.schema.json`. Required fields:
 ```
 
 Rules:
-- `requires_primitives` always includes `deploy-edge-function` (its Step 3 mints the access key; the server itself runs under Bun, not as an Edge Function) and `remote-mcp`. Add others (e.g., `rls`, `shared-mcp`) only if the extension teaches those concepts.
+- `requires_primitives` always includes `deploy-remote-mcp` (the run line, and its Step 3 mints the access key) and `remote-mcp`. Add others (e.g., `rls`, `shared-mcp`) only if the extension teaches those concepts.
 - `learning_order` is only set for curated learning path extensions (1-6). Community extensions omit it.
-- `services` lists external APIs beyond Supabase/OpenRouter (e.g., `["Gmail API"]`).
+- `services` lists external APIs beyond the brain's own Postgres and model provider (e.g., `["Gmail API"]`); `tools` names the runtime, `Bun 1.4+`.
 - `tags` should include the extension's domain and difficulty-related terms.
 
 ---
 
 ## File 3: schema.sql
 
-PostgreSQL DDL that runs in the Supabase SQL Editor. Must follow these rules:
+PostgreSQL DDL that runs against the brain's database with `psql -f`. Must follow these rules:
 
 1. **Every table must have:**
    - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
-   - `user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL`
+   - `user_id UUID NOT NULL` — a plain column the server fills from `DEFAULT_USER_ID`; no `REFERENCES auth.users` (Supabase's table, absent here — SMD-1810)
    - `created_at TIMESTAMPTZ DEFAULT now() NOT NULL`
 
 2. **Use `CREATE TABLE IF NOT EXISTS`** — safe to re-run.
 
 3. **Include indexes** for columns that will be queried frequently (user_id + any filter columns).
 
-4. **Include Row Level Security:**
-
-   ```sql
-   ALTER TABLE table_name ENABLE ROW LEVEL SECURITY;
-
-   CREATE POLICY table_name_user_policy ON table_name
-       FOR ALL
-       USING (auth.uid() = user_id)
-       WITH CHECK (auth.uid() = user_id);
-   ```
+4. **No row-level security, no `GRANT`, nothing from Supabase's `auth` schema.** Upstream's template enabled RLS with a policy on `auth.uid()`; this fork runs one operator's brain on plain Postgres (SMD-1716), the server scopes rows by `DEFAULT_USER_ID`, and `scripts/check-fork-consistency.ts` check 12 refuses `auth.*`, `service_role`, `authenticated`, `anon`, `ENABLE ROW LEVEL SECURITY` and `CREATE POLICY` in any `.sql` under the category directories (SMD-1810). A role other than the tables' owner is granted by `bun db/migrate.ts --grant`: add one row per table to `ROLE_GRANTS.extensions` in `db/config.mjs`, the matching rows to `db/README.md`'s grants table (the checker holds the two equal), and the file to `CONTRIB_SCHEMA_FILES` in `db/test-support.ts` so test-schema [50] applies it.
 
 5. **Never modify the core `thoughts` table.** Adding new tables is fine. Referencing `thoughts` via foreign key is fine. Altering or dropping `thoughts` columns is not.
 
@@ -112,7 +103,8 @@ import { z } from "zod";
 import { createClient } from "../../compat/supabase-sql/index.ts"; // Bun's Postgres client in supabase-js's shape
 // The core server's access keys: named, scoped, SHA-256-hashed entries in
 // MCP_ACCESS_KEYS, compared timing-safe, each revocable on its own. _shared/
-// auth.ts is server-portable/auth.ts, copied so Supabase bundles it. Never
+// auth.ts is server-portable/auth.ts, copied beside the extensions and held
+// identical by extensions/test-auth.ts. Never
 // compare a key with `!==` yourself (the fork's consistency check refuses it).
 import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
 
@@ -218,7 +210,7 @@ server.registerTool(
 4. **Use Zod for input validation.** Every parameter needs `.describe()` for the AI to understand it.
 5. **Every tool must include MCP annotations.** Use `readOnlyHint: true` for retrieval/search/reporting tools. For write tools, use `readOnlyHint: false`, `openWorldHint: false` when the write is scoped to your own tables, and `destructiveHint: false` unless the tool deletes, overwrites, or performs irreversible actions. ChatGPT uses this metadata to distinguish read tools from write actions.
 6. **Minimum tools per extension:** one for adding data, one for retrieving/searching data.
-7. **The service role key bypasses RLS.** If the extension uses RLS and needs user-scoped queries, the tool must accept a `user_id` parameter or derive it from context.
+7. **Every query is scoped by `user_id` in the tool, not by the database.** There is no row policy behind the tables (schema rule 4), so a tool that reads or writes them filters on `DEFAULT_USER_ID` (or a `user_id` argument) itself.
 
 ### Extensions That Need OpenRouter
 
@@ -238,16 +230,15 @@ Must follow the template at `extensions/_template/README.md`. Key sections:
 
 ### The Bun Run (CRITICAL)
 
-The README's "Run the MCP Server" step is the run every extension README has (`extensions/household-knowledge/README.md` is the model): `PORT=8787 bun extensions/{extension-slug}/index.ts` with `SUPABASE_URL` (a `postgres://` connection string) and `MCP_ACCESS_KEYS` set, the key minted as the [Deploy an Edge Function](../../primitives/deploy-edge-function/) primitive's Step 3 shows. There is no function to deploy: the fork's servers are Bun-native (SMD-1799), and `extensions/test-auth.ts` starts every one under `bun` in CI. The path in the command must match the extension's actual directory name.
+The README's "Run the MCP Server" step is the run every extension README has (`extensions/household-knowledge/README.md` is the model): `PORT=8787 bun extensions/{extension-slug}/index.ts` with `SUPABASE_URL` (a `postgres://` connection string) and `MCP_ACCESS_KEYS` set, the key minted as the [Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) primitive's Step 3 shows, and behind HTTPS for a hosted client as its Step 5 shows. There is nothing else to deploy: the fork's servers are Bun-native (SMD-1799), and `extensions/test-auth.ts` starts every one under `bun` in CI. The path in the command must match the extension's actual directory name.
 
 ### SQL Setup
 
-Point users to the Supabase SQL Editor, not the CLI:
+Point users at their database, with the connection string the server will use:
 
 ```markdown
-Run the SQL in `schema.sql` in your Supabase SQL Editor
-(`https://supabase.com/dashboard/project/YOUR_PROJECT_ID/sql/new`).
-Copy, paste, click Run.
+Run `schema.sql` against your Open Brain database:
+`psql "$DATABASE_URL" -f extensions/{extension-slug}/schema.sql`.
 ```
 
 ### Test Prompts
@@ -261,7 +252,6 @@ Include 3-5 example prompts a user can try immediately after setup. These should
 | Thing | Pattern | Example |
 |-------|---------|---------|
 | Directory | `extensions/{kebab-case-name}/` | `extensions/household-knowledge/` |
-| Function name | `{kebab-case-name}-mcp` | `household-knowledge-mcp` |
 | MCP server name | `{kebab-case-name}` | `household-knowledge` |
 | Table names | `{snake_case}` | `household_items`, `household_vendors` |
 | Tool names | `{snake_case}` | `add_household_item`, `search_items` |
@@ -275,7 +265,7 @@ Before submitting, verify:
 
 - [ ] `index.ts` imports only `hono`, `zod`, `@hono/mcp`, `@modelcontextprotocol/sdk` (from `extensions/package.json`), the SQL shim and `../_shared/auth.ts` — no supabase-js, no `deno.json`
 - [ ] `metadata.json` validates against `/.github/metadata.schema.json`
-- [ ] `schema.sql` uses `IF NOT EXISTS`, includes RLS, includes indexes
+- [ ] `schema.sql` uses `IF NOT EXISTS`, includes indexes, carries no RLS, no `auth.*` call and no `GRANT` to a Supabase role (check 12), and its tables are in `ROLE_GRANTS.extensions` and `CONTRIB_SCHEMA_FILES`
 - [ ] `schema.sql` does NOT modify the `thoughts` table
 - [ ] `index.ts` follows the exact server structure (imports, auth, Hono app)
 - [ ] `index.ts` tools return `{ content: [{ type: "text" as const, text }] }` format

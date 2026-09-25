@@ -279,4 +279,4 @@ Do not enable `OB1_DEMO_AUTH_BYPASS` in shared previews or production. It exists
 
 4. **Search returns no results** — Ensure your thoughts have embeddings. Semantic search requires the `embedding` column to be populated. Run an embedding backfill if needed.
 
-5. **Ingest page shows "extracting" forever** — Check that the `smart-ingest` Edge Function is deployed. The ingest feature depends on a separate Edge Function for document extraction.
+5. **Ingest page shows "extracting" forever** — the `open-brain-rest` gateway's `/ingest` captures the text as one thought with no extraction stage, and its `/ingestion-jobs` routes are stubs; there is no separate extraction server in its path to check. A page that waits on job status is waiting on a stub. The `rest-api` gateway (`integrations/rest-api`) is the one that proxies to smart-ingest, through its `SMART_INGEST_URL` (SMD-2110).

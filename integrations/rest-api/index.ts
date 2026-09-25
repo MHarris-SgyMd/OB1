@@ -21,6 +21,14 @@
 // sensitivity_tier COLUMN and reads its date bounds as instants, in both
 // modes, and GET /recent takes the tier filter its siblings had — the note
 // above columnsOf() says what leaked, what answered nothing, and why.
+// ob1-fork (SMD-2079): every response carries the request's CORS headers, set
+// once on the way out of the main handler (withCors) — json() built them from
+// the request only when handed `req`, and forty-five answers were not.
+// ob1-fork (SMD-2110): the ingest proxy's upstream is SMART_INGEST_URL, an
+// http(s) address of its own, refused at boot under any other scheme; unset,
+// POST /ingest and POST /ingestion-jobs/:id/execute answer 503 naming it. Both
+// built the URL from SUPABASE_URL — the Postgres DSN here — so every call
+// handed fetch() the database credentials and answered 502.
 /**
  * rest-api — REST API gateway for Open Brain.
  *
@@ -39,7 +47,7 @@
  *   GET  /thought/:id/connections — related thoughts
  *   GET  /count               — count thoughts with filters
  *   GET  /stats               — brain stats summary
- *   POST /ingest              — proxy to smart-ingest function
+ *   POST /ingest              — proxy to the smart-ingest server (SMART_INGEST_URL)
  *   GET  /ingestion-jobs      — list ingestion jobs
  *   GET  /ingestion-jobs/:id  — get job detail
  *   POST /ingestion-jobs/:id/execute — execute a dry-run job
@@ -51,11 +59,11 @@
  *
  * Auth: x-brain-key header or Authorization: Bearer <key>.
  * Header-only by design — the key is never read from the URL query string,
- * which would leak it into CDN/proxy/Supabase access logs.
+ * which would leak it into CDN/proxy/server access logs.
  *
  * Dependencies:
  *   - Enhanced thoughts schema (schemas/enhanced-thoughts)
- *   - Optional: Smart ingest tables (schemas/smart-ingest-tables) for /ingest routes
+ *   - Optional: Smart ingest tables (schemas/smart-ingest) for the /ingestion-jobs reads; a smart-ingest server at SMART_INGEST_URL for the two proxies
  *   - Optional: Knowledge graph schema (schemas/knowledge-graph) for /entities routes
  */
 
@@ -88,6 +96,27 @@ const MCP_ACCESS_KEY = process.env.MCP_ACCESS_KEY ?? "";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+/**
+ * An HTTP target read from its own variable, or null when unset: never derived from SUPABASE_URL, which on this fork is the
+ * Postgres connection string — a URL built on it carries the database credentials into fetch() and fails there
+ * (SMD-2110). Parsed at boot and refused unless it is a bare http(s) address — scheme, host, port, an optional path
+ * prefix; no query, fragment or credentials, since a path is appended to it — and the message names the variable and
+ * the scheme, never the value (a connection string's userinfo is the password; Bun's own "Invalid URL" error quotes the
+ * value whole, so it is caught and not rethrown). Trailing slashes are dropped. The same text as in the sibling server
+ * that reads a knob this way; extensions/test-writes.ts holds the two copies identical.
+ */
+function httpTargetFrom(name: string): string | null {
+  const value = process.env[name]?.trim();
+  if (!value) return null;
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error(`${name} must be an http(s) URL — it is not a URL; write it as http://host:port`); }
+  if (!/^https?:$/.test(url.protocol)) throw new Error(`${name} must be an http(s) URL — it is a ${url.protocol}// URL; write it as http://host:port`);
+  if (url.search || url.hash || url.username || url.password) throw new Error(`${name} must be a bare http(s) address — scheme, host, port and an optional path; no query, fragment or credentials`);
+  return url.origin + url.pathname.replace(/\/+$/, "");
+}
+/** The smart-ingest server's address (integrations/smart-ingest), the proxy routes' upstream; unset, they answer 503. */
+const SMART_INGEST_URL = httpTargetFrom("SMART_INGEST_URL");
+
 // ob1-fork (SMD-1541): the name 008's audit row records for a write through
 // this server. It holds one key, MCP_ACCESS_KEY, compared in place (change 67
 // left it off _shared/auth.ts), so the name is the variable's — the name
@@ -118,35 +147,41 @@ const CORS_ALLOWED_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS ?? "")
   .map((s) => s.trim())
   .filter(Boolean);
 
+/**
+ * The CORS headers for one request. Access-Control-Allow-Origin is the request's Origin when the allowlist names it,
+ * `*` with no list, and absent otherwise: the literal `null` is an opaque origin's own (a sandboxed iframe, a `data:`
+ * document), so answering it matched what the list was meant to fail (SMD-2079). Retry-After is exposed for the 429.
+ */
 function corsHeadersFor(req: Request): Record<string, string> {
   const origin = req.headers.get("origin") ?? "";
-  let allow: string;
-  if (CORS_ALLOWED_ORIGINS.length === 0) {
-    // Legacy default: permissive. README warns against this for writes.
-    allow = "*";
-  } else if (origin && CORS_ALLOWED_ORIGINS.includes(origin)) {
-    allow = origin;
-  } else {
-    allow = "null";
-  }
-  return {
-    "Access-Control-Allow-Origin": allow,
+  const headers: Record<string, string> = {
     "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, x-brain-key",
+    "Access-Control-Expose-Headers": "Retry-After",
     "Vary": "Origin",
-    "Content-Type": "application/json",
   };
+  if (CORS_ALLOWED_ORIGINS.length === 0) {
+    headers["Access-Control-Allow-Origin"] = "*"; // Legacy default: permissive. README warns against this for writes.
+  } else if (origin && CORS_ALLOWED_ORIGINS.includes(origin)) {
+    headers["Access-Control-Allow-Origin"] = origin;
+  }
+  return headers;
 }
 
-function json(data: unknown, status = 200, req?: Request): Response {
-  const headers = req ? corsHeadersFor(req) : {
-    "Access-Control-Allow-Origin": CORS_ALLOWED_ORIGINS.length === 0 ? "*" : "null",
-    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-brain-key",
-    "Vary": "Origin",
-    "Content-Type": "application/json",
-  };
-  return new Response(JSON.stringify(data, null, 2), { status, headers });
+/**
+ * The answer with the request's CORS headers over its own, set once here for every response the exported handler
+ * returns — a page, a refusal, the preflight, the 404, the 500 (SMD-2079; the note at the top of the file says what
+ * answered without them). A header the route set under the same name is replaced, `Vary` among them: a route that
+ * needs another `Vary` token adds it here, not to its answer.
+ */
+function withCors(req: Request, res: Response): Response {
+  const headers = new Headers(res.headers);
+  for (const [name, value] of Object.entries(corsHeadersFor(req))) headers.set(name, value);
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+}
+
+function json(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data, null, 2), { status, headers: { "Content-Type": "application/json" } });
 }
 
 // ── Rate Limiting ───────────────────────────────────────────────────────────
@@ -154,7 +189,7 @@ function json(data: unknown, status = 200, req?: Request): Response {
 /**
  * Simple in-memory per-key rate limiter. Window is 60 seconds; cap from
  * RATE_LIMIT_PER_MIN env var (default 100). State is process-local so it
- * resets on Edge Function cold start — good enough to block naive burn
+ * resets on restart — good enough to block naive burn
  * attacks against a leaked key, not a replacement for a durable limiter.
  */
 const RATE_LIMIT_PER_MIN = (() => {
@@ -174,7 +209,7 @@ async function hashKey(key: string): Promise<string> {
 }
 
 /** Returns null if under limit, or a Response (429) if the key is over. */
-async function checkRateLimit(key: string, req: Request): Promise<Response | null> {
+async function checkRateLimit(key: string): Promise<Response | null> {
   const hashed = await hashKey(key);
   const now = Date.now();
   const bucket = rateBuckets.get(hashed);
@@ -186,13 +221,7 @@ async function checkRateLimit(key: string, req: Request): Promise<Response | nul
     const retryAfter = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
     return new Response(
       JSON.stringify({ error: "rate_limited", retry_after_seconds: retryAfter }, null, 2),
-      {
-        status: 429,
-        headers: {
-          ...corsHeadersFor(req),
-          "Retry-After": String(retryAfter),
-        },
-      },
+      { status: 429, headers: { "Content-Type": "application/json", "Retry-After": String(retryAfter) } },
     );
   }
   bucket.count++;
@@ -305,24 +334,22 @@ function parseAggregateCounts(
 
 // ── Main Handler ────────────────────────────────────────────────────────────
 
-const handler = async (req: Request) => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeadersFor(req) });
-  }
+const route = async (req: Request): Promise<Response> => {
+  if (req.method === "OPTIONS") return new Response(null, { status: 204 });
 
   if (!MCP_ACCESS_KEY) {
     console.warn("MCP_ACCESS_KEY is not set — all requests will be rejected.");
-    return json({ error: "Service misconfigured: auth key not set" }, 503, req);
+    return json({ error: "Service misconfigured: auth key not set" }, 503);
   }
   if (!isAuthorized(req)) {
-    return json({ error: "Unauthorized" }, 401, req);
+    return json({ error: "Unauthorized" }, 401);
   }
 
   // Per-key rate limit (applied after auth so unauthenticated probes
   // don't compete for buckets with legitimate traffic).
   const key = presentedKey(req);
   if (key) {
-    const limited = await checkRateLimit(key, req);
+    const limited = await checkRateLimit(key);
     if (limited) return limited;
   }
 
@@ -375,7 +402,7 @@ const handler = async (req: Request) => {
     if (executeMatch && req.method === "POST") {
       const execJobId = validateId(executeMatch[1]);
       if (!execJobId) return json({ error: "Invalid job ID" }, 400);
-      return await handleExecuteJob(execJobId, req);
+      return await handleExecuteJob(execJobId);
     }
 
     const jobDetailMatch = path.match(/^\/ingestion-jobs\/(\d+)$/);
@@ -406,16 +433,23 @@ const handler = async (req: Request) => {
         "/stats", "/entities", "/entities/:id", "/health"],
     }, 404);
   } catch (error) {
-    if (error instanceof SyntaxError) return json({ error: "Invalid JSON in request body" }, 400, req);
-    // Never return the raw error string to the caller: PostgREST errors
-    // include table, column, and constraint names — and constraint errors
-    // under service-role access include data values. Correlate via
-    // error_id in Supabase function logs.
-    const errorId = crypto.randomUUID();
-    console.error(`rest-api error [${errorId}]`, error);
-    return json({ error: "internal_error", code: "GENERIC", error_id: errorId }, 500, req);
+    if (error instanceof SyntaxError) return json({ error: "Invalid JSON in request body" }, 400);
+    return internalError(error);
   }
 };
+
+/**
+ * A 500 that names nothing of the error: PostgREST errors include table, column and constraint names, and under
+ * service-role access a constraint error includes data values. Correlate by error_id in the function's logs.
+ */
+function internalError(error: unknown): Response {
+  const errorId = crypto.randomUUID();
+  console.error(`rest-api error [${errorId}]`, error);
+  return json({ error: "internal_error", code: "GENERIC", error_id: errorId }, 500);
+}
+
+/** Every answer carries the request's CORS headers (withCors, SMD-2079): route's, or the 500 for what escaped its try — the preflight, auth, the rate limit and the URL stand before it. */
+const handler = async (req: Request): Promise<Response> => withCors(req, await route(req).catch(internalError));
 
 export default {
   port: Number(process.env.PORT || 8000),
@@ -528,12 +562,9 @@ async function handleSearch(req: Request): Promise<Response> {
   const startDate = body.start_date ? String(body.start_date).trim() : null;
   const endDate = body.end_date ? String(body.end_date).trim() : null;
 
-  // Every answer of this route carries the request's CORS headers (review passes 2 and 3): without `req`, json()
-  // answers `Access-Control-Allow-Origin: null` under an allowlist, and a browser client can read neither a page nor
-  // a refusal. The file's other routes still answer that way — SMD-2079.
-  if (query.length < 2) return json({ error: "query must be at least 2 characters" }, 400, req);
+  if (query.length < 2) return json({ error: "query must be at least 2 characters" }, 400);
   const window = dateWindow(startDate, endDate);
-  if ("error" in window) return json({ error: window.error }, 400, req);
+  if ("error" in window) return json({ error: window.error }, 400);
 
   if (mode === "text") {
     // p_filter is a metadata containment (the note above columnsOf): none here. The function ranks and pages BEFORE
@@ -557,7 +588,7 @@ async function handleSearch(req: Request): Promise<Response> {
       }));
 
     return json({ results, count: results.length, total: totalCount, page, per_page: limit,
-      total_pages: Math.ceil(totalCount / limit), mode: "text" }, 200, req);
+      total_pages: Math.ceil(totalCount / limit), mode: "text" }, 200);
   }
 
   // Semantic search (default): match_thoughts returns the top-N by similarity; the tier and the date bounds are
@@ -588,7 +619,7 @@ async function handleSearch(req: Request): Promise<Response> {
     };
   });
 
-  return json({ results, count: results.length, total: results.length, page: 1, per_page: limit, total_pages: 1, mode: "semantic" }, 200, req);
+  return json({ results, count: results.length, total: results.length, page: 1, per_page: limit, total_pages: 1, mode: "semantic" }, 200);
 }
 
 // ── Capture ─────────────────────────────────────────────────────────────────
@@ -1053,21 +1084,21 @@ async function readJsonWithCap(
 ): Promise<{ ok: true; body: Record<string, unknown> } | { ok: false; resp: Response }> {
   const declared = Number(req.headers.get("content-length") ?? "0");
   if (Number.isFinite(declared) && declared > PROXY_BODY_MAX_BYTES) {
-    return { ok: false, resp: json({ error: "payload_too_large", max_bytes: PROXY_BODY_MAX_BYTES }, 413, req) };
+    return { ok: false, resp: json({ error: "payload_too_large", max_bytes: PROXY_BODY_MAX_BYTES }, 413) };
   }
   const text = await req.text();
   if (text.length > PROXY_BODY_MAX_BYTES) {
-    return { ok: false, resp: json({ error: "payload_too_large", max_bytes: PROXY_BODY_MAX_BYTES }, 413, req) };
+    return { ok: false, resp: json({ error: "payload_too_large", max_bytes: PROXY_BODY_MAX_BYTES }, 413) };
   }
   if (!text.trim()) return { ok: true, body: {} };
   try {
     const parsed = JSON.parse(text);
     if (!isRecord(parsed)) {
-      return { ok: false, resp: json({ error: "Body must be a JSON object" }, 400, req) };
+      return { ok: false, resp: json({ error: "Body must be a JSON object" }, 400) };
     }
     return { ok: true, body: parsed };
   } catch {
-    return { ok: false, resp: json({ error: "Invalid JSON in request body" }, 400, req) };
+    return { ok: false, resp: json({ error: "Invalid JSON in request body" }, 400) };
   }
 }
 
@@ -1080,7 +1111,6 @@ async function readJsonWithCap(
 async function proxyFetchJson(
   url: string,
   body: unknown,
-  req: Request,
   timeoutMs = PROXY_TIMEOUT_MS,
 ): Promise<Response> {
   const controller = new AbortController();
@@ -1096,12 +1126,11 @@ async function proxyFetchJson(
     const contentType = upstream.headers.get("content-type") ?? "";
     if (contentType.includes("application/json") && text.trim()) {
       try {
-        return json(JSON.parse(text), upstream.status, req);
+        return json(JSON.parse(text), upstream.status);
       } catch {
         return json(
           { error: "upstream_invalid_json", upstream_status: upstream.status, raw: text.slice(0, 2000) },
           502,
-          req,
         );
       }
     }
@@ -1113,32 +1142,40 @@ async function proxyFetchJson(
         raw: text.slice(0, 2000),
       },
       upstream.ok ? 502 : upstream.status,
-      req,
     );
   } catch (err) {
     if ((err as Error).name === "AbortError") {
-      return json({ error: "upstream_timeout", timeout_ms: timeoutMs }, 504, req);
+      return json({ error: "upstream_timeout", timeout_ms: timeoutMs }, 504);
     }
-    return json({ error: "upstream_unreachable" }, 502, req);
+    return json({ error: "upstream_unreachable" }, 502);
   } finally {
     clearTimeout(timer);
   }
 }
 
+/** The two proxy routes' answer with no upstream configured: a 503 naming the variable, not a 502 from a dead fetch. */
+function smartIngestNotConfigured(): Response {
+  return json({
+    error: "smart_ingest_not_configured",
+    variable: "SMART_INGEST_URL",
+    hint: "Set SMART_INGEST_URL to the smart-ingest server's http(s) address (integrations/smart-ingest) and restart.",
+  }, 503);
+}
+
 async function handleIngest(req: Request): Promise<Response> {
+  if (!SMART_INGEST_URL) return smartIngestNotConfigured();
   const read = await readJsonWithCap(req);
   if (!read.ok) return read.resp;
   const body = read.body;
   if (body.auto_execute) { body.dry_run = false; delete body.auto_execute; }
-  return await proxyFetchJson(`${SUPABASE_URL}/functions/v1/smart-ingest`, body, req);
+  return await proxyFetchJson(SMART_INGEST_URL, body);
 }
 
-async function handleExecuteJob(jobId: string, req: Request): Promise<Response> {
-  return await proxyFetchJson(
-    `${SUPABASE_URL}/functions/v1/smart-ingest/execute`,
-    { job_id: jobId },
-    req,
-  );
+async function handleExecuteJob(jobId: string): Promise<Response> {
+  if (!SMART_INGEST_URL) return smartIngestNotConfigured();
+  // A number: the route's pattern is \d+, and smart-ingest's execute took `typeof job_id === "number"` alone, so the string
+  // this proxy sent was a relayed 400 `job_id is required` for every job (SMD-2110, review pass 2).
+  return await proxyFetchJson(`${SMART_INGEST_URL}/execute`, { job_id: Number(jobId) });
 }
 
 async function handleListJobs(url: URL): Promise<Response> {

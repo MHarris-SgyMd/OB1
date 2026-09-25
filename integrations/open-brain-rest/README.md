@@ -1,6 +1,6 @@
 # Open Brain REST Gateway
 
-`open-brain-rest` is the Supabase Edge Function used by the Next.js dashboard for the non-Agent-Memory OB1 surfaces:
+`open-brain-rest` is the REST gateway the Next.js dashboard uses for the non-Agent-Memory OB1 surfaces — one HTTP process under Bun:
 
 - Dashboard stats and recent thoughts
 - Thoughts browse/detail/edit/delete
@@ -12,16 +12,16 @@
 
 Agent Memory stays in `integrations/agent-memory-api`. This gateway only handles the base `thoughts` operational surface.
 
-## Required Secrets
+## Required Environment
 
-Set these as Supabase function secrets:
+Set these in the server's environment (the `bun` command under "Deploy"):
 
 | Secret | Use |
 | --- | --- |
-| `MCP_ACCESS_KEYS` | Dashboard/API access keys as `name:scope:sha256` entries — the hash, never the key; mint one as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows. Sent as `x-brain-key`, `x-access-key`, `?key=` or a bearer token. The routes that write (`PUT`/`DELETE /thought/:id`, `POST /capture`, `POST /thought/:id/reflection`, `POST /ingest`) answer 403 to a `read` key. The older single `MCP_ACCESS_KEY` still works, compared by digest. |
+| `MCP_ACCESS_KEYS` | Dashboard/API access keys as `name:scope:sha256` entries — the hash, never the key; mint one as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows. Sent as `x-brain-key`, `x-access-key`, `?key=` or a bearer token. The routes that write (`PUT`/`DELETE /thought/:id`, `POST /capture`, `POST /thought/:id/reflection`, `POST /ingest`) answer 403 to a `read` key. The older single `MCP_ACCESS_KEY` still works, compared by digest. |
 | `OPENROUTER_API_KEY` | Embeddings and metadata extraction |
-| `SUPABASE_URL` | Provided automatically by Supabase |
-| `SUPABASE_SERVICE_ROLE_KEY` | Provided automatically by Supabase |
+| `SUPABASE_URL` | The Postgres connection string — the SQL shim keeps supabase-js's variable name |
+| `SUPABASE_SERVICE_ROLE_KEY` | May be left unset; the shim ignores it |
 
 ## Required Database Shape
 
@@ -52,32 +52,27 @@ The function expects `thoughts.id` to be a UUID. The dashboard now treats though
 
 ## Deploy
 
-> **Runs under Bun, not as an Edge Function.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — so `supabase functions deploy` cannot bundle it; from a checkout of this repository it serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
->
-> ```bash
-> PORT=8787 NODE_PATH=extensions/node_modules SUPABASE_URL='postgres://user:password@host:5432/openbrain' MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' OPENROUTER_API_KEY='…' bun --no-install integrations/open-brain-rest/index.ts
-> ```
->
-> `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset), and the other variables are the secrets the steps below set, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it under the same environment in CI (without `--no-install`: that suite also starts servers that import the MCP SDK, whose subpaths Bun resolves by fetching on first start — SMD-1991), and `extensions/test-writes.ts` drives its writes against Postgres. The Supabase steps below apply to the file after `bun scripts/migrate-to-sql-shim.ts --revert integrations/open-brain-rest/index.ts`, which puts it back on supabase-js.
-
-From a Supabase workdir, copy or symlink this folder to `supabase/functions/open-brain-rest` and `integrations/_shared/auth.ts` to `supabase/functions/_shared/auth.ts` — the function imports the access-key module from `../_shared/auth.ts` (the same file every server on this fork shares). Then deploy:
+This gateway runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and the access-key module from `../_shared/auth.ts` beside it (the same file every server on this fork shares), and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — one HTTP process, as every server here is. From a checkout of this repository ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps for an MCP server):
 
 ```bash
-supabase functions deploy open-brain-rest --no-verify-jwt --use-api --project-ref YOUR_PROJECT_REF
+(cd extensions && bun install)   # once: the pinned hono and zod
+PORT=8787 NODE_PATH=extensions/node_modules \
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
+OPENROUTER_API_KEY='…' \
+bun --no-install integrations/open-brain-rest/index.ts
 ```
 
-The dashboard should point `NEXT_PUBLIC_API_URL` at:
+`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the core server holds — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it under the same environment in CI (without `--no-install`: that suite also starts servers that import the MCP SDK, whose subpaths Bun resolves by fetching on first start — SMD-1991), and `extensions/test-writes.ts` drives its writes against Postgres.
 
-```text
-https://YOUR_PROJECT_REF.supabase.co/functions/v1/open-brain-rest
-```
+The dashboard points `NEXT_PUBLIC_API_URL` at the gateway's root — `http://127.0.0.1:8787` on this machine (its `.env.example` says so), or the HTTPS URL of the proxy in front of it when the dashboard is hosted ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)). The routes are served at that root, and at `/open-brain-rest/…` too, the prefix upstream's deploy gave them.
 
 ## Smoke Test
 
-Run the live smoke harness against a deployed function:
+Run the live smoke harness against a running gateway:
 
 ```bash
-OB1_REST_URL="https://YOUR_PROJECT_REF.supabase.co/functions/v1/open-brain-rest" \
+OB1_REST_URL="http://127.0.0.1:8787" \
 OB1_REST_KEY="YOUR_MCP_ACCESS_KEY" \
 node integrations/open-brain-rest/smoke/live-smoke.mjs
 ```
@@ -89,7 +84,7 @@ The smoke creates three temporary rows, verifies health, capture, browse, stats,
 To seed the same data story used by the screenshot/PDF/video walkthrough:
 
 ```bash
-OB1_REST_URL="https://YOUR_PROJECT_REF.supabase.co/functions/v1/open-brain-rest" \
+OB1_REST_URL="http://127.0.0.1:8787" \
 OB1_REST_KEY="YOUR_MCP_ACCESS_KEY" \
 node integrations/open-brain-rest/smoke/seed-dashboard-demo.mjs --apply
 ```

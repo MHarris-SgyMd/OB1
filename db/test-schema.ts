@@ -21,7 +21,7 @@ import { vector } from "@electric-sql/pglite/vector";
 // separate bundles that have to be handed in at construction — without this the
 // migration does not merely skip the index, it raises and [1] fails.
 import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import {
   DEFAULT_TRGM_INDEX,
   EMBEDDING_DIM,
@@ -67,7 +67,7 @@ import {
 } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, createAssert, FUNCTION_COMMENT_SQL, ISO_RE, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
+import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, CONTRIB_DIR, CONTRIB_SCHEMA_FILES, createAssert, FUNCTION_COMMENT_SQL, ISO_RE, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
 import {
   DEFAULT_OPTIONS, DONE_WEIGHT, FUZZY_FLOOR, coverage as graphCoverage, lifecycleCaveat, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
@@ -159,6 +159,27 @@ async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = [...new Set(fns.map(lastDefinerOf))].sort();
   for (const f of latest) await db.exec(subst(readFileSync(join(MIGRATIONS, f), "utf8")));
   return latest;
+}
+/** thoughts_embedding_idx as the migrations built it, read by the first withoutWalkIndex call. */
+let shippedWalkIndex: string | null = null;
+/**
+ * Run `body` with the walk's HNSW index dropped, then build it again from its
+ * own definition. Grown a row at a time the graph was most of [8c]–[8e]'s run
+ * time, and a VACUUM under it repaired it at length (SMD-2097: 28.6 s to load
+ * [8c] with it, 1.2 s without, 4.8 s to build it after). No behavioural
+ * assertion of those sections needs the index today — with no ANALYZE the
+ * walk is a GIN bitmap and a sort (SMD-2151) — so the rebuild keeps the
+ * shipped state, which [8e] reads back against the first definition read here.
+ */
+async function withoutWalkIndex(body: () => Promise<void>): Promise<void> {
+  const def = (await db.query<{ def: string }>(`SELECT pg_get_indexdef('thoughts_embedding_idx'::regclass) AS def`)).rows[0].def;
+  shippedWalkIndex ??= def;
+  await db.exec(`DROP INDEX thoughts_embedding_idx`);
+  try {
+    await body();
+  } finally {
+    await db.exec(def);
+  }
 }
 
 // ── 1. Migrations apply, in order ────────────────────────────────────────────
@@ -638,16 +659,19 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
 
 console.log("\n[8c] above the exact threshold, the walk branch agrees with an exact scan");
 {
-  await db.exec(`DELETE FROM thoughts`);
   const { unitVector } = seededRandom(968);
   const N = 1200;
-  for (let i = 0; i < N; i += 100) {
-    const values = Array.from({ length: 100 }, (_, k) => `('walk ${i + k}', '{"kind":"c"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
-    await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
-  }
-  // Two that must not be found: a different kind, nearest to the query.
-  const q = unitVector(EMBEDDING_DIM);
-  await db.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ('near but d', '{"kind":"d"}'::jsonb, $1::vector)`, [`[${q.join(",")}]`]);
+  let q: number[] = [];
+  await withoutWalkIndex(async () => {
+    await db.exec(`DELETE FROM thoughts`);
+    for (let i = 0; i < N; i += 100) {
+      const values = Array.from({ length: 100 }, (_, k) => `('walk ${i + k}', '{"kind":"c"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
+      await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+    }
+    // One that must not be found: a different kind, nearest to the query.
+    q = unitVector(EMBEDDING_DIM);
+    await db.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ('near but d', '{"kind":"d"}'::jsonb, $1::vector)`, [`[${q.join(",")}]`]);
+  });
   const matches = await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts WHERE metadata @> '{"kind":"c"}'`);
   assert(matches.rows[0].c > 1000, `${matches.rows[0].c} matching rows, above the 1,000-row exact threshold — the walk branch`);
 
@@ -687,22 +711,24 @@ console.log("\n[8c] above the exact threshold, the walk branch agrees with an ex
 
 console.log("\n[8d] rows without a vector or chunks do not count towards the walk threshold");
 {
-  await db.exec(`DELETE FROM thoughts`);
   const { unitVector } = seededRandom(1018);
-  // Enough indexed rows of another kind that a bounded walk cannot stumble on
-  // the wanted ones by luck.
-  for (let i = 0; i < 300; i += 100) {
-    const values = Array.from({ length: 100 }, (_, k) => `('other ${i + k}', '{"kind":"o"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
-    await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
-  }
-  // 1,200 kind "u" rows with no vector (the fallback's shape), plus five with one.
-  for (let i = 0; i < 1200; i += 200) {
-    const values = Array.from({ length: 200 }, (_, k) => `('unscoreable ${i + k}', '{"kind":"u"}'::jsonb, NULL)`).join(",");
-    await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
-  }
-  for (let i = 0; i < 5; i++) {
-    await db.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ($1, '{"kind":"u"}'::jsonb, $2::vector)`, [`scoreable ${i}`, `[${unitVector(EMBEDDING_DIM).join(",")}]`]);
-  }
+  await withoutWalkIndex(async () => {
+    await db.exec(`DELETE FROM thoughts`);
+    // Enough indexed rows of another kind that a bounded walk cannot stumble on
+    // the wanted ones by luck.
+    for (let i = 0; i < 300; i += 100) {
+      const values = Array.from({ length: 100 }, (_, k) => `('other ${i + k}', '{"kind":"o"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
+      await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+    }
+    // 1,200 kind "u" rows with no vector (the fallback's shape), plus five with one.
+    for (let i = 0; i < 1200; i += 200) {
+      const values = Array.from({ length: 200 }, (_, k) => `('unscoreable ${i + k}', '{"kind":"u"}'::jsonb, NULL)`).join(",");
+      await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+    }
+    for (let i = 0; i < 5; i++) {
+      await db.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ($1, '{"kind":"u"}'::jsonb, $2::vector)`, [`scoreable ${i}`, `[${unitVector(EMBEDDING_DIM).join(",")}]`]);
+    }
+  });
   const matching = await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts WHERE metadata @> '{"kind":"u"}'`);
   assert(matching.rows[0].c === 1205, `1,205 rows match the filter, 1,200 of them unscoreable (got ${matching.rows[0].c})`);
   await db.exec(`SET hnsw.max_scan_tuples = 1`);
@@ -767,13 +793,15 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
   // first 38 pages were already empty — the "emptied band" below was then
   // mostly pre-empty and the probe passed on an incidental layout (review
   // pass 2). Compacted, 1,000 rows are some sixteen pages, every one live.
-  await db.exec(`DELETE FROM thoughts`);
-  await db.exec(`VACUUM thoughts`);
   const { unitVector } = seededRandom(1463);
-  for (let i = 0; i < 1000; i += 100) {
-    const values = Array.from({ length: 100 }, (_, k) => `('gate ${i + k}', '{"kind":"${(i + k) % 100 === 0 ? "thin" : "broad"}"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
-    await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
-  }
+  await withoutWalkIndex(async () => {
+    await db.exec(`DELETE FROM thoughts`);
+    await db.exec(`VACUUM thoughts`);
+    for (let i = 0; i < 1000; i += 100) {
+      const values = Array.from({ length: 100 }, (_, k) => `('gate ${i + k}', '{"kind":"${(i + k) % 100 === 0 ? "thin" : "broad"}"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
+      await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+    }
+  });
   const exactTop = async (qv: string, filter: string) => {
     await db.exec(`SET enable_indexscan = off`);
     await db.exec(`SET enable_bitmapscan = off`);
@@ -797,8 +825,10 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
     assert(ok === 6, `${label}: the 990-row and the 10-row filter — both under the threshold — return the exact top-10 on 3 random queries (${ok}/6 agree)`);
   };
   // Under the shipped floor: this heap is a few dozen pages, and the sample never runs.
-  const [{ pages }] = (await db.query<{ pages: number }>(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages`)).rows;
-  assert(pages > 0 && pages < ROUTE_ESTIMATE_MIN_PAGES, `the fixture's heap is ${pages} pages, under the floor of ${ROUTE_ESTIMATE_MIN_PAGES}: the sample does not run and the call is 020's`);
+  // The row count rides along: without the DELETE above, every earlier
+  // section's rows would sit in this heap.
+  const [{ pages, rows }] = (await db.query<{ pages: number; rows: number }>(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages, (SELECT count(*)::int FROM thoughts) AS rows`)).rows;
+  assert(rows === 1000 && pages > 0 && pages < ROUTE_ESTIMATE_MIN_PAGES, `the fixture's heap is its ${rows} rows on ${pages} pages, under the floor of ${ROUTE_ESTIMATE_MIN_PAGES}: the sample does not run and the call is 020's`);
   await agree("under the floor");
   // The floor lowered to zero: the gate runs on every filtered call. It cannot
   // skip — condition 1 needs the table at ten times the threshold, and 1,000
@@ -899,43 +929,60 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
       `SELECT count(*) FILTER (WHERE ctid >= ('(' || ${hi} || ',0)')::tid)::int AS beyond,
               count(*) FILTER (WHERE ctid >= ('(' || ${lo} || ',0)')::tid AND ctid < ('(' || ${hi} || ',0)')::tid)::int AS inside
        FROM thoughts`)).rows;
-    assert(inside > 0 && beyond > 0, `the band [${lo}, ${hi}) holds ${inside} live rows and ${beyond} live rows lie beyond it, so emptying it leaves the heap its size (the fixture's ${pages} pages need to be at least ${ROUTE_SAMPLE_PAGES + 3} with the last one live — a narrower EMBEDDING_DIM packs more rows a page)`);
-    const deleted = (await db.query(`DELETE FROM thoughts WHERE ctid >= ('(' || ${lo} || ',0)')::tid AND ctid < ('(' || ${hi} || ',0)')::tid`)).affectedRows ?? -1;
-    await db.exec(`VACUUM thoughts`);
-    const [{ live_pages, heap_pages }] = (await db.query<{ live_pages: number; heap_pages: number }>(
-      `SELECT count(DISTINCT (ctid::text::point)[0])::int AS live_pages, (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS heap_pages FROM thoughts`)).rows;
-    assert(deleted === inside && heap_pages === pages && live_pages <= pages - ROUTE_SAMPLE_PAGES,
-      `the band's ${deleted} rows deleted and the heap vacuumed: still ${heap_pages} pages, ${live_pages} of them with a live row`);
-    const empties = Array.from({ length: ROUTE_SAMPLE_PAGES }, (_, i) => lo + i);
-    const pinnedText = deployedSample(BROAD, pages, empties);
-    const pinned = await runText(pinnedText);
-    assert(pinned !== null && pinned.hits === 0 && pinned.hit_pages === 0 && pinned.pages_seen === ROUTE_SAMPLE_PAGES,
-      `the body's probe pinned to the ${ROUTE_SAMPLE_PAGES} emptied blocks [${lo}, ${hi}) draws ${pinned?.pages_seen} pages and answers ${pinned?.hits} hits on ${pinned?.hit_pages} — the pages drawn are counted, not the pages that answered`);
-    // The scan node's own Buffers line (its total across the eight loops), not
-    // the top node's: the top node's is cumulative over the whole tree, and
-    // the DISTINCT draw's subtree reads catalog buffers when the syscache is
-    // cold (measured: 5 at the top on a first run, 2 at the scan) — the count
-    // would then hold only because the same statement ran just before
-    // (review pass 3). buffersOf reads one node's line when given the node.
-    const buffers = pinnedText === null ? "" : (await db.query<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, BUFFERS) ${pinnedText}`)).rows.map((r) => r["QUERY PLAN"]).join("\n");
-    const touched = buffersOf(buffers, /Tid Range Scan on thoughts/);
-    assert(touched === ROUTE_SAMPLE_PAGES,
-      `…and the probe touches ${touched} buffers doing it — one page per block, ${ROUTE_SAMPLE_PAGES} in all, on the Tid Range Scan's own line`);
-    // And the random draw over the heap with its band emptied: it still
-    // reaches its pages and the rule still says "collect".
-    const sparse: string[] = [];
-    let stillSound = 0;
-    for (let i = 0; i < 5; i++) {
-      const r = (await drawOnce(BROAD, pages))!;
-      sparse.push(`${r.hits}/${r.hit_pages}/${r.pages_seen}`);
-      if (sound(r) && !skips(r, pages)) stillSound++;
-    }
-    assert(stillSound === 5,
-      `on the heap with ${ROUTE_SAMPLE_PAGES} of ${pages} pages emptied every random draw still reaches 2 to ${ROUTE_SAMPLE_PAGES} pages and the rule still says "collect" (hits/hit pages/pages drawn: ${sparse.join(", ")})`);
+    assert(inside > 0 && beyond > 0, `the band [${lo}, ${hi}) holds ${inside} live rows and ${beyond} live rows lie beyond it, so emptying it leaves the heap its size (the fixture's ${pages} pages need to be at least ${ROUTE_SAMPLE_PAGES + 3} with the last one live — from about 512 dims the vector is stored out of line, so every such width gives this heap, and a narrower one, kept in the row, a larger one)`);
+    // The band and everything after it run with the walk's index dropped: the
+    // VACUUM took 6.8 s repairing the HNSW graph around the band's dead rows
+    // (SMD-2097), and from here on the section reads the heap alone — the pinned
+    // probe, its buffers and the random draws.
+    await withoutWalkIndex(async () => {
+      const deleted = (await db.query(`DELETE FROM thoughts WHERE ctid >= ('(' || ${lo} || ',0)')::tid AND ctid < ('(' || ${hi} || ',0)')::tid`)).affectedRows ?? -1;
+      await db.exec(`VACUUM thoughts`);
+      const [{ live_pages, heap_pages }] = (await db.query<{ live_pages: number; heap_pages: number }>(
+        `SELECT count(DISTINCT (ctid::text::point)[0])::int AS live_pages, (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS heap_pages FROM thoughts`)).rows;
+      assert(deleted === inside && heap_pages === pages && live_pages <= pages - ROUTE_SAMPLE_PAGES,
+        `the band's ${deleted} rows deleted and the heap vacuumed: still ${heap_pages} pages, ${live_pages} of them with a live row`);
+      const empties = Array.from({ length: ROUTE_SAMPLE_PAGES }, (_, i) => lo + i);
+      const pinnedText = deployedSample(BROAD, pages, empties);
+      const pinned = await runText(pinnedText);
+      assert(pinned !== null && pinned.hits === 0 && pinned.hit_pages === 0 && pinned.pages_seen === ROUTE_SAMPLE_PAGES,
+        `the body's probe pinned to the ${ROUTE_SAMPLE_PAGES} emptied blocks [${lo}, ${hi}) draws ${pinned?.pages_seen} pages and answers ${pinned?.hits} hits on ${pinned?.hit_pages} — the pages drawn are counted, not the pages that answered`);
+      // The scan node's own Buffers line (its total across the eight loops), not
+      // the top node's: the top node's is cumulative over the whole tree, and
+      // the DISTINCT draw's subtree reads catalog buffers when the syscache is
+      // cold (measured: 5 at the top on a first run, 2 at the scan) — the count
+      // would then hold only because the same statement ran just before
+      // (review pass 3). buffersOf reads one node's line when given the node.
+      const buffers = pinnedText === null ? "" : (await db.query<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, BUFFERS) ${pinnedText}`)).rows.map((r) => r["QUERY PLAN"]).join("\n");
+      const touched = buffersOf(buffers, /Tid Range Scan on thoughts/);
+      assert(touched === ROUTE_SAMPLE_PAGES,
+        `…and the probe touches ${touched} buffers doing it — one page per block, ${ROUTE_SAMPLE_PAGES} in all, on the Tid Range Scan's own line`);
+      // And the random draw over the heap with its band emptied: it still
+      // reaches its pages and the rule still says "collect".
+      const sparse: string[] = [];
+      let stillSound = 0;
+      for (let i = 0; i < 5; i++) {
+        const r = (await drawOnce(BROAD, pages))!;
+        sparse.push(`${r.hits}/${r.hit_pages}/${r.pages_seen}`);
+        if (sound(r) && !skips(r, pages)) stillSound++;
+      }
+      assert(stillSound === 5,
+        `on the heap with ${ROUTE_SAMPLE_PAGES} of ${pages} pages emptied every random draw still reaches 2 to ${ROUTE_SAMPLE_PAGES} pages and the rule still says "collect" (hits/hit pages/pages drawn: ${sparse.join(", ")})`);
+      // The rows out, which [9] would delete anyway, so the build is over nothing.
+      await db.exec(`DELETE FROM thoughts`);
+    });
   }
   const restored = await restoreShipped("match_thoughts");
-  assert(restored.length === 1 && restored[0].startsWith("041") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped()),
-    "…and the shipped floor is back for the sections after");
+  // The index is read back, not assumed: without it the sections up to the
+  // next re-apply of 039, whose swap block builds it silently, would run with
+  // no walk index and nothing would say (review pass 1). Compared whole, not by
+  // pattern — a regex passed an index rebuilt WITH other build parameters
+  // (review pass 2) — and with the definition read before [8c] dropped it, not
+  // the one this section's load read: that was [8d]'s rebuild, so a helper that
+  // rebuilt wrongly every time compared equal (review pass 3).
+  const indexBack = (await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('thoughts_embedding_idx')) AS d`)).rows[0].d ?? "";
+  assert(restored.length === 1 && restored[0].startsWith("041") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped())
+      && indexBack === shippedWalkIndex,
+    `…and the shipped floor and the walk's index are back for the sections after${indexBack === shippedWalkIndex ? "" : ` (index: ${indexBack || "none"})`}`);
 }
 
 console.log("\n[9] updated_at trigger fires on update, created_at does not move");
@@ -6670,6 +6717,229 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   assert(((await one<{ r: J }>(`SELECT record_source_links($1::uuid, 'markdown', '[]'::jsonb) AS r`, [tC])).r).closed === 1, "…and the legitimate close still takes the shortcut");
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_entities`);
+}
+
+console.log("\n[49] Migration 054: resolve_agent writes a key's row only when last_used_at is stale or the scope changed, and a revoked key is still refused (SMD-2090)");
+{
+  // The sequential half: which lookups write the row. A write is seen by the
+  // row's xmin moving (every UPDATE makes a new row version), not only by
+  // last_used_at, so a write of the same value still counts. The concurrent
+  // half — a held row, a revocation committing mid-wait — needs two sessions
+  // and is db/test-live.ts [24].
+  type R = { ok: boolean; error?: string; agent_id?: string; created?: boolean };
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows[0];
+  const look = async (hash: string, label: string, scope: string | null) =>
+    (await one<{ r: R }>(`SELECT resolve_agent($1, $2, $3) AS r`, [hash, label, scope])).r;
+  const row = async (hash: string) =>
+    one<{ x: string; used: string | null; scope: string | null }>(`SELECT xmin::text AS x, last_used_at::text AS used, scope FROM ob1_agent_keys WHERE key_hash = $1`, [hash]);
+  const age = (hash: string, interval: string | null) =>
+    db.query(`UPDATE ob1_agent_keys SET last_used_at = ${interval === null ? "NULL" : `now() - $2::interval`} WHERE key_hash = $1`, interval === null ? [hash] : [hash, interval]);
+
+  const src = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'resolve_agent(text, text, text)'::regprocedure`)).s);
+  assert(lastDefinerOf("resolve_agent").startsWith("054") && /ob1:stale-only-touch/.test(src), "054 is the last definer of resolve_agent and its body carries the stale-only-touch sentinel");
+
+  const K = "a1".repeat(32);
+  const first = await look(K, "touch-key", "write");
+  assert(first.ok === true && first.created === true, `a first sight registers the key, as 010 did (${JSON.stringify(first)})`);
+  const r0 = await row(K);
+  const again = await look(K, "touch-key", "write");
+  const r1 = await row(K);
+  assert(again.ok === true && again.agent_id === first.agent_id && r1.x === r0.x && r1.used === r0.used,
+    `a lookup of a key used moments ago, presenting the recorded scope, answers ok and writes nothing (xmin ${r0.x} → ${r1.x})`);
+  assert((await look(K, "touch-key", null)).ok === true && (await row(K)).x === r0.x, "…nor does one presenting no scope");
+
+  await age(K, "4 minutes");
+  const r2 = await row(K);
+  await look(K, "touch-key", "write");
+  assert((await row(K)).x === r2.x, "a last use four minutes ago is fresh: no write");
+  await age(K, "6 minutes");
+  const r3 = await row(K);
+  await look(K, "touch-key", "write");
+  const r4 = await row(K);
+  const moved = (await one<{ fresh: boolean }>(`SELECT last_used_at > now() - interval '1 minute' AS fresh FROM ob1_agent_keys WHERE key_hash = $1`, [K])).fresh;
+  assert(r4.x !== r3.x && moved, `one six minutes ago is stale: the lookup writes last_used_at again (${r3.used} → ${r4.used})`);
+  await age(K, null);
+  const r5 = await row(K);
+  await look(K, "touch-key", "write");
+  assert((await row(K)).x !== r5.x && (await row(K)).used !== null, "a NULL last_used_at is written");
+  // A use recorded in the future — a clock stepped back, a skewed restore — would never go stale; it is written.
+  await db.query(`UPDATE ob1_agent_keys SET last_used_at = now() + interval '1 hour' WHERE key_hash = $1`, [K]);
+  const rF = await row(K);
+  await look(K, "touch-key", "write");
+  const futureNow = (await one<{ ok: boolean }>(`SELECT last_used_at <= now() AS ok FROM ob1_agent_keys WHERE key_hash = $1`, [K])).ok;
+  assert((await row(K)).x !== rF.x && futureNow, `a last_used_at an hour in the future is written back to now (${rF.used} → ${(await row(K)).used})`);
+
+  // A scope change is written however fresh the use: the column shows a privilege change (010, 049).
+  const r6 = await row(K);
+  await look(K, "touch-key", "read");
+  const r7 = await row(K);
+  assert(r7.x !== r6.x && r7.scope === "read", `a key presenting another scope is written at once, fresh or not (${r6.scope} → ${r7.scope})`);
+  assert((await look(K, "touch-key", "read")).ok === true && (await row(K)).x === r7.x, "…and the next lookup with that scope writes nothing");
+
+  // A rename is still followed on a fresh key: the label lives on ob1_agents, not in the skipped write.
+  const renamed = (await one<{ r: R & { label?: string } }>(`SELECT resolve_agent($1, 'touch-key-renamed', 'read') AS r`, [K])).r;
+  assert(renamed.ok === true && renamed.label === "touch-key-renamed" && renamed.agent_id === first.agent_id && (await row(K)).x === r7.x,
+    `a rename on a fresh key moves the label and keeps the agent, and writes no key row (${JSON.stringify(renamed)})`);
+
+  await db.query(`SELECT revoke_agent_key($1, 'SMD-2090 schema')`, [K]);
+  const revoked = await look(K, "touch-key-renamed", "read");
+  assert(revoked.ok === false && revoked.error === "REVOKED" && revoked.agent_id === first.agent_id, `a revoked key is refused, its agent id attached (${JSON.stringify(revoked)})`);
+
+  const fnComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["resolve_agent(text, text, text)"])).c ?? "";
+  const colComment = (await one<{ c: string | null }>(COLUMN_COMMENT_SQL, ["ob1_agent_keys", "last_used_at"])).c ?? "";
+  assert(/five minutes/.test(fnComment) && /SMD-2090/.test(fnComment) && /REVOKED/.test(fnComment) && /to within five minutes/.test(colComment) && /SMD-2090/.test(colComment),
+    "the function's comment states the stale-only write and the revocation answer, and last_used_at's states its new meaning");
+
+  // The guard: a registry without the column the body now reads is refused by name, not left to fail at the first lookup.
+  await db.query(`ALTER TABLE ob1_agent_keys RENAME COLUMN last_used_at TO last_used_gone`);
+  let noColumn = "";
+  try { await reapply("054"); } catch (e) { noColumn = (e as Error).message; }
+  assert(/migration 054 needs 010 \(ob1_agent_keys\.last_used_at, revoked_at, scope\); this schema lacks it/.test(noColumn), `054 on a registry without last_used_at refuses by name (${noColumn.slice(0, 90)})`);
+  await db.query(`ALTER TABLE ob1_agent_keys RENAME COLUMN last_used_gone TO last_used_at`);
+  // …and without scope, which the body now reads beside it (review pass 1: the guard counted revoked_at, which 010's body already read).
+  await db.query(`ALTER TABLE ob1_agent_keys RENAME COLUMN scope TO scope_gone`);
+  let noScope = "";
+  try { await reapply("054"); } catch (e) { noScope = (e as Error).message; }
+  assert(/migration 054 needs 010 \(ob1_agent_keys\.last_used_at, revoked_at, scope\)/.test(noScope), `…and one without scope (${noScope.slice(0, 90)})`);
+  await db.query(`ALTER TABLE ob1_agent_keys RENAME COLUMN scope_gone TO scope`);
+  await reapply("054");
+  assert(/ob1:stale-only-touch/.test(String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'resolve_agent(text, text, text)'::regprocedure`)).s)), "…and applies again once the column is back, landing the same body");
+  await db.query(`DELETE FROM ob1_agent_keys WHERE key_hash = $1`, [K]);
+  await db.query(`DELETE FROM ob1_agents WHERE label = 'touch-key-renamed'`);
+}
+
+console.log("\n[50] Every extension and recipe schema applies to a migrated brain carrying the community schemas, with no Supabase role and no auth schema present, and --grant's extensions and recipes groups are what make them usable (SMD-1810)");
+{
+  // [40]'s model on the files check 12 reaches since SMD-1810: the fourteen
+  // under extensions/ and recipes/ that carried per-user policies on
+  // auth.uid(), GRANTs TO service_role or authenticated, one REFERENCES
+  // auth.users and three `EXECUTE 'GRANT …'` strings. A third PGlite:
+  // ops-views.sql reads columns enhanced-thoughts adds to `thoughts`, and its
+  // three guarded views exist only over smart-ingest's and entity-extraction's
+  // tables, so the community files go first and all eight views are measured.
+  const contribFiles = CONTRIB_SCHEMA_FILES;
+  const extensionSchemas = readdirSync(join(CONTRIB_DIR, "extensions"), { withFileTypes: true })
+    .filter((d) => d.isDirectory() && existsSync(join(CONTRIB_DIR, "extensions", d.name, "schema.sql"))).map((d) => `extensions/${d.name}/schema.sql`).sort();
+  assert(extensionSchemas.length === 6 && extensionSchemas.every((f) => contribFiles.includes(f)) && contribFiles.every((f) => existsSync(join(CONTRIB_DIR, f))),
+    `every extensions/*/schema.sql is in CONTRIB_SCHEMA_FILES and every listed file exists (${extensionSchemas.length} extension schemas; ${contribFiles.length} files listed)`);
+  // The rule, from inside the suite, over the whole of both trees as check 12
+  // walks them — not the listed files alone, since the two directories also
+  // hold SQL no brain applies as a schema, and a Supabase-ism there is as
+  // much a stop for the reader who runs it.
+  const walkSql = (dir: string, out: string[] = []): string[] => {
+    for (const name of readdirSync(dir)) {
+      if (name === "node_modules" || name.startsWith(".")) continue;
+      const p = join(dir, name);
+      if (statSync(p).isDirectory()) walkSql(p, out); else if (name.endsWith(".sql")) out.push(p);
+    }
+    return out;
+  };
+  const treeSql = [...walkSql(join(CONTRIB_DIR, "extensions")), ...walkSql(join(CONTRIB_DIR, "recipes"))].map((p) => p.slice(CONTRIB_DIR.length + 1));
+  const treeIsms = treeSql.flatMap((f) => supabaseIsmsIn(readFileSync(join(CONTRIB_DIR, f), "utf8")).map((h) => `${f}:${h.line} ${h.rule}`));
+  const unlistedSql = treeSql.filter((f) => !contribFiles.includes(f));
+  assert(contribFiles.every((f) => treeSql.includes(f)) && unlistedSql.every((f) => f.startsWith("recipes/")) && treeIsms.length === 0,
+    `no .sql under extensions/ or recipes/ runs a Supabase-ism — the ${contribFiles.length} listed files and the ${unlistedSql.length} a brain does not apply as a schema, all of those under recipes/ (${treeIsms.length}: ${treeIsms.slice(0, 4).join("; ") || "none"})`);
+
+  const xdb = new PGlite({ extensions: { vector, pg_trgm } });
+  for (const f of files) await xdb.exec(subst(readFileSync(join(MIGRATIONS, f), "utf8")));
+  const { roles: xRoles, authSchema } = (await xdb.query<{ roles: number; authSchema: boolean }>(
+    `SELECT (SELECT count(*)::int FROM pg_roles WHERE rolname IN ('authenticated', 'anon', 'service_role')) AS roles, to_regnamespace('auth') IS NOT NULL AS "authSchema"`)).rows[0];
+  assert(xRoles === 0 && authSchema === false, "no Supabase role and no auth schema exist in this database — the stubs the READMEs used to give are not created");
+  const tablesNow = async () => new Set((await xdb.query<{ n: string }>(`SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public'`)).rows.map((r) => r.n));
+  const viewsNow = async () => new Set((await xdb.query<{ n: string }>(`SELECT viewname AS n FROM pg_views WHERE schemaname = 'public'`)).rows.map((r) => r.n));
+  const seqsNow = async () => new Set((await xdb.query<{ n: string }>(`SELECT c.relname AS n FROM pg_class c WHERE c.relkind = 'S' AND c.relnamespace = 'public'::regnamespace`)).rows.map((r) => r.n));
+  const lockedFnsNow = async () => new Set((await xdb.query<{ sig: string }>(
+    `SELECT p.oid::regprocedure::text AS sig FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND NOT has_function_privilege('ob1_contrib', p.oid, 'EXECUTE')`)).rows.map((r) => r.sig));
+  await xdb.exec(`CREATE ROLE ob1_contrib NOLOGIN`);
+  for (const f of communitySchemaFiles()) await xdb.exec(readFileSync(join(SCHEMAS_DIR, f), "utf8"));
+  const [baseTables, baseViews, baseSeqs, baseLocked] = [await tablesNow(), await viewsNow(), await seqsNow(), await lockedFnsNow()];
+  const failed: string[] = [];
+  for (const f of contribFiles) {
+    try {
+      await xdb.exec(readFileSync(join(CONTRIB_DIR, f), "utf8"));
+    } catch (e) {
+      failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`);
+      try { await xdb.exec("ROLLBACK"); } catch { /* the file opened no transaction */ }
+    }
+  }
+  assert(failed.length === 0, `every listed file applies after the community schemas, in that order (${failed.length} failed: ${failed.join(" | ") || "none"})`);
+
+  // The two groups name exactly what the files created that a grant can
+  // reach: every new table and every new view, no sequence (every id is a uuid
+  // or text — measured, not recalled, as [40] measured the six bigserials) and
+  // no function (none is REVOKEd FROM PUBLIC now that ob-graph's three
+  // REVOKEs are gone with the roles they named).
+  const GROUPS = ["extensions", "recipes"] as const;
+  const objects = grantedObjects([...GROUPS]);
+  const presence = (await xdb.query<{ kind: string; name: string; present: boolean }>(grantPresenceSql(objects))).rows;
+  const absent = presence.filter((r) => !r.present).map((r) => `${r.kind} ${r.name}`);
+  assert(presence.length === objects.length && objects.length === 63 && absent.length === 0, `every object the two groups name exists once the files are applied (${objects.length}; absent: ${absent.join(", ") || "none"})`);
+  const listedTables = new Set(grantedTables([...GROUPS]));
+  const listedViews = new Set(grantedViews([...GROUPS]));
+  const newTables = [...(await tablesNow())].filter((t) => !baseTables.has(t)).sort();
+  const newViews = [...(await viewsNow())].filter((v) => !baseViews.has(v)).sort();
+  assert(newTables.length === 48 && listedTables.size === 48 && newTables.every((t) => listedTables.has(t)),
+    `the files created exactly the 48 tables the two groups list — 18 in extensions, 30 in recipes (created: ${newTables.length}; unlisted: ${newTables.filter((t) => !listedTables.has(t)).join(", ") || "none"})`);
+  assert(grantedTables(["extensions"]).length === 18 && grantedTables(["recipes"]).length === 30 && newTables.every((t) => !grantedTables(["community"]).includes(t)),
+    "…18 and 30, and none of them a community table under another name");
+  const opsViews = newViews.filter((v) => v.startsWith("ops_")), lintViews = newViews.filter((v) => v.startsWith("lint_"));
+  assert(newViews.length === 15 && listedViews.size === 15 && newViews.every((v) => listedViews.has(v)) && opsViews.length === 8 && lintViews.length === 7,
+    `…and exactly the fifteen views — eight ops_* and seven lint_*, the guarded ones included since their tables and column are present (${newViews.join(", ")})`);
+  const newSeqs = [...(await seqsNow())].filter((s) => !baseSeqs.has(s));
+  const newLocked = [...(await lockedFnsNow())].filter((f) => !baseLocked.has(f));
+  assert(newSeqs.length === 0 && grantedSequences([...GROUPS]).length === 0, `no sequence was created (every id is a uuid or text), so the groups list none (${newSeqs.join(", ") || "none"})`);
+  assert(newLocked.length === 0 && grantedFunctions([...GROUPS]).length === 0, `no new function is REVOKEd FROM PUBLIC — ob-graph's three keep PUBLIC's EXECUTE — so the groups list none (${newLocked.join(", ") || "none"})`);
+  const graphFns = (await xdb.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('traverse_graph', 'find_shortest_path', 'reconstruct_bfs_path', 'merge_thought_metadata', 'operating_model_save_layer') AND has_function_privilege('ob1_contrib', p.oid, 'EXECUTE')`)).rows[0].n;
+  assert(graphFns === 4, `ob-graph's three functions and work-operating-model's saver are callable by an ungranted role (${graphFns} of 4; gmail-smart-pull's merge is not applied here)`);
+
+  // The role: nothing but USAGE on the schema, then [40]'s probe — an INSERT
+  // of DEFAULT VALUES answers 42501 until the table is granted and some other
+  // code or success after. Every listed table and view is refused first (the
+  // drop-the-mechanism mutant), none after the two groups' statements.
+  await xdb.exec(`GRANT USAGE ON SCHEMA public TO ob1_contrib`);
+  const asRole = async (sql: string): Promise<{ code: string | null; message: string }> => {
+    try {
+      await xdb.exec(`BEGIN; SET ROLE ob1_contrib; ${sql}; ROLLBACK;`);
+      return { code: null, message: "" };
+    } catch (e) {
+      try { await xdb.exec("ROLLBACK"); } catch { /* already rolled back */ }
+      return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] };
+    }
+  };
+  const codes = async () => {
+    const out = new Map<string, string | null>();
+    for (const t of listedTables) out.set(t, (await asRole(`INSERT INTO ${t} DEFAULT VALUES`)).code);
+    for (const v of listedViews) out.set(v, (await asRole(`SELECT 1 FROM ${v} LIMIT 0`)).code);
+    return out;
+  };
+  const before = [...(await codes())].filter(([, c]) => c !== "42501").map(([n, c]) => `${n}=${c}`);
+  assert(before.length === 0, `ungranted, the role's INSERT into every listed table and SELECT from every listed view is refused with 42501 (${listedTables.size + listedViews.size} objects; exceptions: ${before.join(", ") || "none"})`);
+  const present = new Set(presence.map((r) => r.name));
+  const statements = grantStatements("ob1_contrib", { groups: [...GROUPS], present });
+  assert(statements.length === 63 && statements.every((s) => /^GRANT (SELECT|SELECT, INSERT, UPDATE(, DELETE)?) ON \w+ TO "ob1_contrib";$/.test(s)) &&
+         statements.includes(`GRANT SELECT ON ops_graph_coverage TO "ob1_contrib";`) && statements.includes(`GRANT SELECT ON lint_exact_duplicates TO "ob1_contrib";`) && statements.includes(`GRANT SELECT, INSERT, UPDATE ON capture_thresholds TO "ob1_contrib";`),
+    `--grant's statements for the two groups: one per table and view (${statements.length}), no sequence or function among them, the views granted as tables are, adaptive-capture's three verbs`);
+  for (const s of statements) await xdb.exec(s);
+  const after = [...(await codes())].filter(([, c]) => c === "42501").map(([n]) => n);
+  assert(after.length === 0, `granted both groups, no listed table refuses the role's INSERT and no view its SELECT (still refused: ${after.join(", ") || "none"})`);
+  const verify = (await xdb.query<{ held: boolean; privilege: string; name: string }>(grantVerifySql("ob1_contrib", mergedGrants([...GROUPS], present)))).rows;
+  // One row per privilege plus the schema's USAGE: 18 + 26 four-verb tables, adaptive-capture's four at three, and one SELECT per view.
+  const fourVerb = listedTables.size - 4;
+  assert(fourVerb === 44 && verify.length === 1 + fourVerb * 4 + 4 * 3 + listedViews.size && verify.every((r) => r.held),
+    `grantVerifySql holds every privilege of both groups (${verify.length} rows; not held: ${verify.filter((r) => !r.held).map((r) => `${r.privilege} on ${r.name}`).join(", ") || "none"})`);
+  // Upstream's privileges, kept where they were narrower: adaptive-capture's
+  // API role could not DELETE, so the granted role cannot either — the row
+  // that would be widened by a copy-paste of the four DML verbs.
+  const narrow = await asRole(`DELETE FROM capture_thresholds WHERE false`);
+  const wide = await asRole(`DELETE FROM graph_nodes WHERE false`);
+  assert(narrow.code === "42501" && wide.code === null, `the role cannot DELETE from adaptive-capture's tables (${narrow.code}) and can from a four-verb table (${wide.code ?? "allowed"})`);
+  // And a read that only the role's own SELECT on the view could allow: the
+  // ops views are over `thoughts`, which the role was never granted — a view
+  // runs with its owner's privileges, so the grant on the view alone suffices.
+  const viewRead = await asRole(`SELECT * FROM ops_type_distribution`);
+  const tableRead = await asRole(`SELECT 1 FROM thoughts LIMIT 0`);
+  assert(viewRead.code === null && tableRead.code === "42501", `the role reads an ops view over thoughts (${viewRead.code ?? "allowed"}) without any grant on thoughts itself (${tableRead.code})`);
+  await xdb.close();
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

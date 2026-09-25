@@ -87,7 +87,7 @@ compiled-wiki/ + compile-manifest.json
 - The merged graph/wiki stack on `main`
 - Node.js 18+
 - A valid `.env.local` or shell env for the underlying recipes
-- A deployed `entity-extraction-worker` Edge Function if you want the wrapper to trigger extraction automatically
+- A running `entity-extraction-worker` server (`integrations/entity-extraction-worker`) if you want the wrapper to trigger extraction automatically
 
 ### Required environment
 
@@ -105,7 +105,7 @@ Additional environment varies by phase:
 - `ANTHROPIC_API_KEY` for typed-edge classification
 - `EMBEDDING_API_KEY` if you want semantic expansion or thought-mode entity dossiers
 - `MCP_ACCESS_KEY` or `ENTITY_EXTRACTION_MCP_ACCESS_KEY` if you want this wrapper to trigger the entity extraction worker automatically
-- `ENTITY_EXTRACTION_WORKER_URL` if you do not want the wrapper to derive it from `OPEN_BRAIN_URL`
+- `ENTITY_EXTRACTION_WORKER_URL`, the running worker's address, for the same trigger — the wrapper no longer derives it from `OPEN_BRAIN_URL` (that was upstream's `/functions/v1/` path; SMD-2110)
 
 ## Install
 
@@ -261,7 +261,7 @@ At that point you can browse the compiled layer like a wiki while keeping SQL as
 ## Troubleshooting
 
 **Issue: entity extraction phase skips itself**
-Solution: set `ENTITY_EXTRACTION_WORKER_URL` plus `ENTITY_EXTRACTION_MCP_ACCESS_KEY`, or define `OPEN_BRAIN_URL` plus `MCP_ACCESS_KEY` so the wrapper can derive the worker endpoint.
+Solution: set `ENTITY_EXTRACTION_WORKER_URL` to the running `entity-extraction-worker` server's address plus `ENTITY_EXTRACTION_MCP_ACCESS_KEY` (or `MCP_ACCESS_KEY`). The wrapper does not derive the address from `OPEN_BRAIN_URL` (SMD-2110).
 
 **Issue: typed-edge classification fails**
 Solution: confirm `ANTHROPIC_API_KEY` is available and that the `typed-reasoning-edges` schema is installed on the target brain.

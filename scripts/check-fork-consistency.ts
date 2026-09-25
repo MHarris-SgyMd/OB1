@@ -47,12 +47,15 @@
  *      (DENO_EXCEPTIONS counts per file; none today); and a file that imports the SQL shim (Bun's client)
  *      imports no specifier Bun cannot resolve (`jsr:`, `npm:`, a URL), itself
  *      or through the files it imports (SMD-1480)
- *  12. a .sql file under schemas/ or db/ runs nothing that needs Supabase — no
- *      `service_role`, `authenticated` or `anon`, no `auth.uid()`, `auth.role()`
- *      or `auth.users`, no `supabase_`-prefixed name, no RLS or policy —
- *      comments excepted by a literal-aware strip, string literals included
- *      (SMD-1796); the rules are db/config.mjs's SUPABASE_SQL_RULES, which
- *      test-schema [10] and [40] apply from inside the suite; no exceptions
+ *  12. a .sql file under db/ or any of the seven category directories runs
+ *      nothing that needs Supabase — no `service_role`, `authenticated` or
+ *      `anon`, no `auth.uid()`, `auth.role()` or `auth.users`, no
+ *      `supabase_`-prefixed name, no RLS or policy — comments excepted by a
+ *      literal-aware strip, string literals included (SMD-1796; widened from
+ *      schemas/ and db/ to db/ and the seven category directories by
+ *      SMD-1810); the rules are
+ *      db/config.mjs's SUPABASE_SQL_RULES, which test-schema [10], [40] and
+ *      [50] apply from inside the suite; no exceptions
  *  13. every port a compose file under deploy/ publishes names its host address
  *      as a knob that defaults to the literal 127.0.0.1 — the short form
  *      `"${X_BIND:-127.0.0.1}:${X_PORT:-n}:n"`, each `X_BIND` documented in
@@ -210,9 +213,34 @@
  *      build that also held it, left with SMD-1800); counted per-file
  *      exceptions as 7's — the dashboard's type-only import (SMD-1801's)
  *      (SMD-1798)
+ *  23. every workflow under .github/workflows/ names its runner image — no
+ *      `-latest` label in any case or size, no expression — and pins every
+ *      `uses:` (a step's, or a job's reusable workflow) to a full commit SHA
+ *      with its tag in a trailing `# vX.Y.Z` comment, a local `./` path, or a
+ *      `docker://` image by sha256 digest; .github/dependabot.yml is a
+ *      `version: 2` file, every entry on a schedule Dependabot accepts, with a
+ *      `github-actions` update over `/` that can open a PR, so the pins move.
+ *      The structure is read with Bun.YAML, the tag comment from the value's
+ *      own line, block scalars skipped; the rules are workflowPinProblems
+ *      and dependabotProblems, pure functions their probes run on in-memory
+ *      text (SMD-2093); no exceptions
+ *  24. no vendored script speaks PostgREST — a `rest/v1` path in any string,
+ *      a supabase-py import or `create_client(` (Python and shell), or a
+ *      `@supabase/postgrest-js` specifier, comments blanked (the JS scanner;
+ *      a `#` outside a string for .py, one at a word's start for .sh), in
+ *      every code file under the
+ *      seven category directories and docs/: the fork's stack runs no
+ *      PostgREST, so such a script's live mode fails at its first request;
+ *      the class decision is docs/vendored-disposition.md's "PostgREST-
+ *      speaking scripts" (an import emits ingestion-contract items, a
+ *      maintenance script moves onto compat/supabase-sql, three retire), and
+ *      POSTGREST_EXCEPTIONS counts the twenty-eight files with a call site
+ *      (two more reach the gateway through a lib) with the ticket that ports
+ *      or retires each — a landed port fails until its entry goes, so the
+ *      table's size is the class's remaining size (SMD-2126)
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18 and 20 parse YAML with Bun.YAML)
+ * beside its run (SMD-1870); checks 13, 14, 18, 20 and 23 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
@@ -832,13 +860,12 @@ const COLUMN_COMMENT_NON_PROBES = [
   "COMMENT ON COLUMN thought_work_claims.ttl_expires_at IS 'x';",
   "-- COMMENT ON COLUMN thoughts.derived_from IS what 025 runs",
 ];
-// Files that create a brain from the getting-started shape, not sidecars that
-// add to one. Exactly this many lines, for exactly these functions.
-const GUIDE = "the guide migrations 001-003 were extracted from, creating the brain; SETUP.md sends this fork's readers past it";
+// Files that create a brain from upstream's getting-started shape, not sidecars
+// that add to one. Exactly this many lines, for exactly these functions. (The
+// guide itself carries no SQL since SMD-1802: it brings up the compose stack.)
 const NEON = "creates the recipe's own Neon database from the guide's shape; never run against a migrated brain";
 const one = (why: string): CountedException => ({ why, lines: 1 });
 const CORE_FUNCTION_EXCEPTIONS = new Map<string, Record<string, CountedException>>([
-  ["docs/01-getting-started.md", { update_updated_at: one(GUIDE), match_thoughts: one(GUIDE), upsert_thought: one(GUIDE) }],
   ["recipes/content-fingerprint-dedup/README.md", {
     upsert_thought: one("the recipe migration 003 was extracted from, kept as its record; the note above its Step 2 says a migrated brain must not paste it"),
   }],
@@ -1590,8 +1617,7 @@ const THOUGHT_WRITE_NON_PROBES = [
 ];
 const OWN_DATABASE = (what: string): CountedException => ({ why: `${what} — the fork's functions are not in it, so the capture is a raw row with no fingerprint, no label and no audit actor; the README says so`, lines: 1 });
 const THOUGHT_WRITE_EXCEPTIONS = new Map([
-  // The guides that show upstream's upsert_thought body: the INSERT is the function's own (check 7 excepts the same lines).
-  ["docs/01-getting-started.md", { why: "the INSERT inside upstream's upsert_thought definition, the function itself, shown as the guide's; SETUP.md sends this fork's readers past it", lines: 1 }],
+  // The guide that shows upstream's upsert_thought body: the INSERT is the function's own (check 7 excepts the same lines).
   ["recipes/content-fingerprint-dedup/README.md", { why: "the INSERT inside the upsert_thought definition migration 003 was extracted from, kept as its record", lines: 1 }],
   // Two deployments whose database is their own, built from the guide's shape.
   ["integrations/kubernetes-deployment/index.ts", OWN_DATABASE("its own Postgres in the cluster, built by k8s/init.sql")],
@@ -1987,18 +2013,28 @@ function checkBunNative() {
 // is literal-aware (a `--` inside a string no longer hides the rest of its
 // line — SMD-1316's ask) and scans string literals, since `EXECUTE 'GRANT … TO
 // service_role'` runs the grant as surely as the bare statement. Every .sql
-// under schemas/ and db/ whole; no exceptions. The extension and recipe
-// directories carry thirteen more such files, with per-user `auth.uid() =
-// user_id` policies that need a design of their own — their ticket is the
-// umbrella SMD-1795's.
+// under db/ and the seven category directories, whole; no exceptions. Until
+// SMD-1810 the walk covered schemas/ and db/ alone, and the extension and
+// recipe directories carried fourteen more such files — per-user `auth.uid()
+// = user_id` policies on most, GRANTs TO service_role or authenticated, one
+// `REFERENCES auth.users`, and `EXECUTE 'GRANT … TO service_role'` strings
+// inside ops-views.sql's DO blocks (the case the literal-aware scan exists
+// for). Those were cut on that ticket under SMD-1716's single-operator model
+// (the server scopes rows by DEFAULT_USER_ID; the policies were the same fact
+// in GoTrue's schema), their tables became `--grant`'s `extensions` and
+// `recipes` groups, and the walk widened to db/ and the seven category
+// directories (SQL_RULE_DIRS — evals/ keeps its own SQL out of it) so the
+// next new recipe is held to the rule the day it lands.
+
+const SQL_RULE_DIRS = ["db", "extensions", "primitives", "recipes", "schemas", "dashboards", "integrations", "skills"];
 
 function checkSupabaseIsms() {
-  for (const dir of ["schemas", "db"]) {
+  for (const dir of SQL_RULE_DIRS) {
     const base = join(ROOT, dir);
     if (!existsSync(base)) continue;
     for (const file of walk(base, [], /\.sql$/)) {
       const rel = relOf(file);
-      for (const h of supabaseIsmsIn(readFileSync(file, "utf8"))) fail(`${rel}:${h.line}`, `${h.msg} (SMD-1796)`);
+      for (const h of supabaseIsmsIn(readFileSync(file, "utf8"))) fail(`${rel}:${h.line}`, `${h.msg} (SMD-1796, SMD-1810)`);
     }
   }
 }
@@ -4515,6 +4551,497 @@ function checkSupabaseJsImports() {
   for (const rel of SUPABASE_JS_EXCEPTIONS.keys()) if (!seen.has(rel)) fail(rel, "check 22's exception names a file the scan does not reach — stale, or the file is gone");
 }
 checkSupabaseJsImports();
+
+// ── 23: a workflow names its runner image and pins every action to a commit (SMD-2093) ──
+/**
+ * Both workflows ran on `ubuntu-latest`, which GitHub moves to a new Ubuntu on
+ * a date of its own (26 from 2026-10-19), so the switch would have landed on
+ * whichever PR ran first after it, as an unrelated red. And every `uses:` named
+ * a tag its owner can move, which the release job runs with `packages: write`.
+ * So every job's `runs-on` names an image: no `-latest` label in any case or
+ * size (`macos-latest-large` moves as `ubuntu-latest` does), and no
+ * expression this check cannot read; a runner group names no image and is
+ * held by its labels alone. Every `uses:` — a step's, or a job's reusable
+ * workflow — is one of three things: a full 40-hex commit SHA with the tag it
+ * was in a trailing comment that opens with a version number (`# v7.0.1`, or
+ * `# 7.0.1` for an action whose tags carry no `v`; Dependabot rewrites the two
+ * together, and a reader needs the tag), a local `./` path, or a `docker://`
+ * image by sha256 digest. And .github/dependabot.yml is a `version: 2` file,
+ * every entry on a schedule Dependabot accepts, with a `github-actions` entry
+ * over `/` that can open a PR, so the pins move by PR rather than rot — a
+ * heuristic for the ways a file stops the pins moving, not a validator of
+ * Dependabot's schema (an ignore of `actions/*` passes). The structure is
+ * read from the parsed document. The comment, which a YAML parser drops, is
+ * read from the value's line: the first unclaimed line carrying the value,
+ * block scalars (`run: |`, `run: |- # note`, `- |`, an anchored or tagged
+ * `&a |`) skipped, since a `uses:` line there is text, not a step. A
+ * SHA-pinned `uses:` with no line of its own (flow style, a folded value, or
+ * steps reused by YAML alias, which actionlint 1.7.7 refuses too) is refused,
+ * since its tag cannot be read; and every SHA-pinned line the reader does find
+ * carries its tag whether a step claimed it or not, so text the reader cannot
+ * tell from a step (a quoted scalar across lines, an input named `uses`)
+ * cannot lend its tag to a bare step below it. Check 23
+ * holds a pin's shape, not its truth: a comment that names another tag, or a
+ * commit only a fork of the action holds, is zizmor's to find (run once for
+ * SMD-2093, not in CI); actionlint cannot check a SHA-pinned action's inputs,
+ * so a Dependabot major is read against the new action.yml by hand; and an
+ * image an action starts by an input (release.yml's binfmt and BuildKit
+ * images) or a job's `container:`/`services:` image is not a `uses:` and is
+ * not read. Nor are a local action's own steps (.github/actions/, none
+ * today). The rules are workflowPinProblems and dependabotProblems, pure
+ * functions their probes run on in-memory text; no exceptions.
+ */
+const WORKFLOWS_DIR = ".github/workflows";
+const DEPENDABOT = ".github/dependabot.yml";
+/** The `schedule.interval` values Dependabot's options reference accepts; `cron` wants a `cronjob` beside it. */
+const DEPENDABOT_INTERVALS = ["daily", "weekly", "monthly", "quarterly", "semiannually", "yearly", "cron"];
+const FULL_SHA = /^[0-9a-f]{40}$/;
+/** The trailing comment a SHA pin carries: a version number, `# v7`, `# v7.0.1` or `# 7.0.1`, then a space or the line's end (a date or a prerelease suffix is refused). */
+const TAG_COMMENT = /^#\s*v?\d+(?:\.\d+)*(?:\s|$)/;
+/** A runner label GitHub moves to a new image on its own date: `-latest`, alone or before a size, in any case. */
+const MOVING_LABEL = /-latest(?:-|$)/i;
+/**
+ * A line that opens a block scalar: `run: |`, `script: >-`, a list item `- |`
+ * (nested, `- - |`, too), an anchor or tag before the indicator (`run: &a |`,
+ * `run: !!str |`). Group 1 is the indent, group 2 the items' dashes, group 3
+ * the key; the body is every line indented past the key's column, or past the
+ * first dash's for a keyless item.
+ */
+const BLOCK_SCALAR_KEY = /^(\s*)((?:-\s+)*)(?:([^\s#][^#]*?):\s+)?(?:[&!]\S*\s+)*[|>][-+0-9]*\s*(?:#.*)?$/;
+type UsesLine = { value: string; comment: string; line: number };
+/** Every line outside a block scalar that reads as `uses: <value> [# comment]`: a `- ` list item or not, the key anchored or not, the value quoted or not. */
+function usesLinesOf(text: string): UsesLine[] {
+  const out: UsesLine[] = [];
+  let blockColumn = -1; // inside a block scalar, the column its body must be indented past; -1 outside one
+  text.split(/\r?\n/).forEach((raw, i) => {
+    if (blockColumn >= 0) {
+      if (raw.trim() === "" || raw.length - raw.trimStart().length > blockColumn) return;
+      blockColumn = -1;
+    }
+    const block = raw.match(BLOCK_SCALAR_KEY);
+    if (block) { blockColumn = block[3] !== undefined ? block[1].length + block[2].length : block[1].length; return; }
+    const m = raw.match(/^\s*(?:-\s+)?(?:&\S+\s+)?uses:\s*(["']?)([^"'\s#]+)\1\s*(#.*)?$/);
+    if (m) out.push({ value: m[2], comment: (m[3] ?? "").trim(), line: i + 1 });
+  });
+  return out;
+}
+function workflowPinProblems(file: string, text: string): [string, string][] {
+  const problems: [string, string][] = [];
+  let doc: unknown;
+  try { doc = Bun.YAML.parse(text); } catch (e) { return [[file, `does not parse: ${(e as Error).message} — check 23 cannot read its runners or its actions (SMD-2093)`]]; }
+  const jobs = doc && typeof doc === "object" && !Array.isArray(doc) ? (doc as { jobs?: unknown }).jobs : null;
+  if (!jobs || typeof jobs !== "object" || Array.isArray(jobs)) return [[file, "has no `jobs:` map check 23 can read (SMD-2093)"]];
+  const lines = usesLinesOf(text);
+  const taken = new Set<number>();
+  const holdUses = (key: string, value: unknown) => {
+    if (typeof value !== "string") { problems.push([file, `job ${key} has a \`uses:\` that is not a string (${JSON.stringify(value)}) (SMD-2093)`]); return; }
+    // The first unclaimed line carrying this value is its line: two steps using one pin claim one line each.
+    const i = lines.findIndex((l, n) => !taken.has(n) && l.value === value);
+    if (i >= 0) taken.add(i);
+    const where = i >= 0 ? `${file}:${lines[i].line}` : file;
+    if (value.startsWith("./")) return; // a local action: pinned by the commit this workflow runs at
+    if (value.startsWith("docker://")) {
+      if (!/@sha256:[0-9a-f]{64}$/.test(value)) problems.push([where, `uses ${value}, an image by tag — name it by its sha256 digest (\`docker://<image>@sha256:<digest>\`) so the step runs the image that was read (SMD-2093)`]);
+      return;
+    }
+    const at = value.lastIndexOf("@");
+    const ref = at < 0 ? "" : value.slice(at + 1);
+    if (!FULL_SHA.test(ref)) {
+      problems.push([where, `uses ${value}, ${ref ? `a tag or branch (${ref})` : "no ref at all"} its owner can move — pin the full 40-character commit SHA with the tag in a trailing comment, \`${at < 0 ? value : value.slice(0, at)}@<sha> # ${/^v?\d/.test(ref) ? ref : "vX.Y.Z"}\`, and let Dependabot move it (SMD-2093)`]);
+      return;
+    }
+    if (i < 0) { problems.push([file, `job ${key} uses ${value} on no line of its own check 23 can read (flow style, a folded or literal value, or an alias of another step) — the tag comment beside a SHA cannot be read; write the step as \`uses: ${value} # vX.Y.Z\` (SMD-2093)`]); return; }
+    if (!TAG_COMMENT.test(lines[i].comment)) problems.push([where, `pins ${value} with no \`# vX.Y.Z\` comment naming the tag — Dependabot rewrites the SHA and the comment together, and a reader cannot tell what a bare SHA is (SMD-2093)`]);
+  };
+  for (const [key, job] of Object.entries(jobs as Record<string, unknown>)) {
+    if (!job || typeof job !== "object") continue;
+    const j = job as { "runs-on"?: unknown; uses?: unknown; steps?: unknown };
+    if (j["runs-on"] !== undefined) {
+      const runsOn = j["runs-on"];
+      // A string, a list of labels, or `{ group, labels }` — a group alone names no image, only its labels do.
+      const group = runsOn && typeof runsOn === "object" && !Array.isArray(runsOn) ? (runsOn as { group?: unknown; labels?: unknown }) : null;
+      const labels: unknown[] = typeof runsOn === "string" ? [runsOn] : Array.isArray(runsOn) ? runsOn : group && "labels" in group ? [group.labels].flat() : group && "group" in group ? [] : [runsOn];
+      for (const label of labels) {
+        if (typeof label !== "string") problems.push([file, `job ${key}'s runs-on ${JSON.stringify(runsOn)} carries a label check 23 cannot read (SMD-2093)`]);
+        else if (label.includes("${{")) problems.push([file, `job ${key} picks its runner by an expression (${label}) — check 23 cannot tell whether it resolves to a -latest image; name the image (SMD-2093)`]);
+        else if (MOVING_LABEL.test(label)) problems.push([file, `job ${key} runs on ${label}, which GitHub moves to a new image on its own date — name the image (ubuntu-24.04, macos-15, windows-2025), and move to the next one in a PR of its own (SMD-2093)`]);
+      }
+    }
+    if (j.uses !== undefined) holdUses(key, j.uses);
+    if (Array.isArray(j.steps)) for (const step of j.steps) if (step && typeof step === "object" && "uses" in step) holdUses(key, (step as { uses: unknown }).uses);
+  }
+  // A line no step claimed is text the reader cannot tell from a step (a quoted scalar across lines, an input named
+  // `uses`) — or a bare step whose value an earlier such line was read for. Either way a SHA pin on it carries its tag,
+  // so whichever line a step's tag is read from, no pinned line in the file is bare.
+  lines.forEach((l, n) => {
+    if (taken.has(n)) return;
+    const at = l.value.lastIndexOf("@");
+    if (at >= 0 && FULL_SHA.test(l.value.slice(at + 1)) && !TAG_COMMENT.test(l.comment)) problems.push([`${file}:${l.line}`, `pins ${l.value} with no \`# vX.Y.Z\` comment on a \`uses:\` line no step's tag was read from — if it is a step, an earlier line carrying the same pin was read in its place; every pinned line carries its tag (SMD-2093)`]);
+  });
+  return problems;
+}
+/** .github/dependabot.yml, as text or null when absent: a `version: 2` file, every entry on a schedule Dependabot accepts, with a `github-actions` update over `/` that can open a PR. */
+function dependabotProblems(text: string | null): [string, string][] {
+  if (text === null) return [[DEPENDABOT, "missing — nothing moves the workflows' SHA pins, so they stay on the commit they were pinned at; add a `github-actions` update over `/` (SMD-2093)"]];
+  let doc: unknown;
+  try { doc = Bun.YAML.parse(text); } catch (e) { return [[DEPENDABOT, `does not parse: ${(e as Error).message} (SMD-2093)`]]; }
+  // Dependabot refuses the whole file for a wrong version or an entry with no schedule, and then moves nothing.
+  if (!doc || typeof doc !== "object" || (doc as { version?: unknown }).version !== 2) return [[DEPENDABOT, "is not a `version: 2` file — Dependabot refuses the whole file, and nothing moves the workflows' SHA pins (SMD-2093)"]];
+  const updates = (doc as { updates?: unknown }).updates;
+  type Update = { "package-ecosystem"?: unknown; directory?: unknown; directories?: unknown; "open-pull-requests-limit"?: unknown; ignore?: unknown };
+  const covers = (u: unknown): u is Update => {
+    if (!u || typeof u !== "object") return false;
+    const e = u as Update;
+    return e["package-ecosystem"] === "github-actions" && (e.directory === "/" || (Array.isArray(e.directories) && e.directories.includes("/")));
+  };
+  const entries = Array.isArray(updates) ? updates.filter(covers) : [];
+  if (!entries.length) return [[DEPENDABOT, "has no `github-actions` update over `/` — nothing moves the workflows' SHA pins, so they stay on the commit they were pinned at (SMD-2093)"]];
+  // Every entry, not only the covering one: one unschedulable entry and Dependabot refuses the file whole. An entry in
+  // a multi-ecosystem group takes the group's schedule instead of its own.
+  const validSchedule = (s: unknown) => {
+    if (!s || typeof s !== "object") return false;
+    const { interval, cronjob } = s as { interval?: unknown; cronjob?: unknown };
+    return typeof interval === "string" && DEPENDABOT_INTERVALS.includes(interval) && (interval !== "cron" || typeof cronjob === "string");
+  };
+  const groups = (doc as { "multi-ecosystem-groups"?: unknown })["multi-ecosystem-groups"];
+  const scheduled = (e: unknown) => {
+    if (!e || typeof e !== "object") return false;
+    const { schedule, "multi-ecosystem-group": group } = e as { schedule?: unknown; "multi-ecosystem-group"?: unknown };
+    if (typeof group === "string" && groups && typeof groups === "object" && !Array.isArray(groups)) return validSchedule((groups as Record<string, { schedule?: unknown } | null>)[group]?.schedule) || validSchedule(schedule);
+    return validSchedule(schedule);
+  };
+  if (!(updates as unknown[]).every(scheduled)) return [[DEPENDABOT, `has an update with no schedule Dependabot accepts (\`schedule.interval\` one of ${DEPENDABOT_INTERVALS.join(", ")}, and a \`cronjob\` for cron — its own, or its \`multi-ecosystem-group\`'s) — Dependabot refuses the whole file, and nothing moves the pins (SMD-2093)`]];
+  // An entry that can open no PR is no entry: a limit of 0, or an ignore of every dependency at every version — a `*`
+  // rule with `update-types` or `versions` holds back only those (no majors, say), and the rest still open PRs.
+  const ignoresAll = (r: unknown) => !!r && typeof r === "object" && (r as { "dependency-name"?: unknown })["dependency-name"] === "*" && !("update-types" in r) && !("versions" in r);
+  const opens = (e: Update) => e["open-pull-requests-limit"] !== 0 && !(Array.isArray(e.ignore) && e.ignore.some(ignoresAll));
+  if (!entries.some(opens)) return [[DEPENDABOT, "has a `github-actions` update over `/` that can open no PR (`open-pull-requests-limit: 0`, or an ignore of `*` at every version) — the pins stay where they are (SMD-2093)"]];
+  return [];
+}
+const PIN_SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1";
+/** A one-job workflow whose runner and first step a probe replaces; the step text sits at a list item's indent (6), a continuation line at 8. */
+const PIN_PROBE = (runsOn: string, step: string) => `name: probe\non: push\njobs:\n  a:\n    runs-on: ${runsOn}\n    steps:\n      ${step}\n      - uses: ./.github/actions/local\n      - run: echo hi\n`;
+const PIN_STEP = `- uses: actions/checkout@${PIN_SHA} # v7.0.1`;
+/** Workflows check 23 accepts: [why, text]. */
+const PIN_ACCEPTED: [string, string][] = [
+  // A pin as it is written: quoted, after a name, after a folded name, under an anchored key, twice, by digest, CRLF.
+  ["a named image and a SHA pin with its tag", PIN_PROBE("ubuntu-24.04", PIN_STEP)],
+  ["a quoted SHA pin", PIN_PROBE("ubuntu-24.04", `- uses: "actions/checkout@${PIN_SHA}" # v7`)],
+  ["a SHA pin on the line after the step's name", PIN_PROBE("ubuntu-24.04", `- name: Check out\n        uses: actions/checkout@${PIN_SHA} # v7.0.1`)],
+  ["a step whose folded `name: >-` precedes its `uses:`", PIN_PROBE("ubuntu-24.04", `- name: >-\n          Check out\n        uses: actions/checkout@${PIN_SHA} # v7.0.1`)],
+  ["a `uses:` key with an anchor", PIN_PROBE("ubuntu-24.04", `- &checkout uses: actions/checkout@${PIN_SHA} # v7.0.1`)],
+  ["two steps on one pin", PIN_PROBE("ubuntu-24.04", `${PIN_STEP}\n      ${PIN_STEP}`)],
+  ["a tag comment with no v, as an action whose tags carry none", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA} # 7.0.1`)],
+  ["a docker image by digest", PIN_PROBE("ubuntu-24.04", `- uses: docker://alpine@sha256:${"a".repeat(64)}`)],
+  ["a workflow with CRLF line ends", PIN_PROBE("ubuntu-24.04", PIN_STEP).replace(/\n/g, "\r\n")],
+  // Runners that name their image.
+  ["a runner label list with no -latest", PIN_PROBE("[self-hosted, linux]", PIN_STEP)],
+  ["a runner group alone, which names no image", PIN_PROBE("{ group: big-runners }", PIN_STEP)],
+  ["a runner group with a named image", PIN_PROBE("{ group: big-runners, labels: [ubuntu-24.04] }", PIN_STEP)],
+  // Block scalars are text: a bare copy of the pin in one takes no step's line.
+  ["a `uses:` line inside a run body, which is text", PIN_PROBE("ubuntu-24.04", `${PIN_STEP}\n      - run: |\n          uses: actions/checkout@v4`)],
+  ["a bare copy of the pin in an earlier run body, which does not take the commented step's line", PIN_PROBE("ubuntu-24.04", `- run: |\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+  ["a bare copy of the pin after a blank line in an earlier run body", PIN_PROBE("ubuntu-24.04", `- run: |\n          echo one\n\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+  ["a bare copy of the pin in an earlier `run: |-` body, a chomping indicator after the `|`", PIN_PROBE("ubuntu-24.04", `- run: |-\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+  ["a bare copy of the pin in an earlier `run: | # note` body, a comment after the `|`", PIN_PROBE("ubuntu-24.04", `- run: | # note\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+  ["a bare copy of the pin in an earlier tagged run body", PIN_PROBE("ubuntu-24.04", `- run: !!str |\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+  ["a bare copy of the pin in an earlier `- |` item, skipped as a block too", PIN_PROBE("ubuntu-24.04", `- uses: ./.github/actions/local\n        with:\n          args:\n            - |\n              uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+  ["a bare copy of the pin in an earlier nested `- - |` item", PIN_PROBE("ubuntu-24.04", `- uses: ./.github/actions/local\n        with:\n          args:\n            - - |\n                uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+];
+/** Workflows check 23 refuses with exactly one problem: [why, text, a phrase the problem carries]. */
+const PIN_MUTANTS: [string, string, string][] = [
+  // Runners GitHub moves, or that this check cannot read.
+  ["runs-on ubuntu-latest", PIN_PROBE("ubuntu-latest", PIN_STEP), "moves to a new image"],
+  ["a -latest label in a list", PIN_PROBE("[self-hosted, macos-latest]", PIN_STEP), "moves to a new image"],
+  ["a -latest label with a size", PIN_PROBE("macos-latest-large", PIN_STEP), "moves to a new image"],
+  ["a -latest label in another case", PIN_PROBE("Ubuntu-Latest", PIN_STEP), "moves to a new image"],
+  ["a runner group whose label is -latest", PIN_PROBE("{ group: big-runners, labels: [ubuntu-latest] }", PIN_STEP), "moves to a new image"],
+  ["a runner picked by an expression", PIN_PROBE("${{ matrix.os }}", PIN_STEP), "by an expression"],
+  ["a runner label that is not a string", PIN_PROBE("[ubuntu-24.04, 3]", PIN_STEP), "cannot read"],
+  // Refs an owner can move, and images by tag.
+  ["an action by major tag", PIN_PROBE("ubuntu-24.04", "- uses: actions/checkout@v4"), "can move"],
+  ["an action by branch", PIN_PROBE("ubuntu-24.04", "- uses: actions/checkout@main"), "can move"],
+  ["an action by short SHA", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA.slice(0, 7)} # v7.0.1`), "can move"],
+  ["a 41-character ref", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA}0 # v7.0.1`), "can move"],
+  ["an action with no ref", PIN_PROBE("ubuntu-24.04", "- uses: actions/checkout"), "no ref at all"],
+  ["a reusable workflow by tag", "name: probe\non: push\njobs:\n  b:\n    uses: org/repo/.github/workflows/x.yml@v1\n", "can move"],
+  ["a docker image by tag", PIN_PROBE("ubuntu-24.04", "- uses: docker://alpine:3"), "by its sha256 digest"],
+  ["a docker digest with text after it", PIN_PROBE("ubuntu-24.04", `- uses: docker://alpine@sha256:${"a".repeat(64)}x`), "by its sha256 digest"],
+  // A SHA with no tag. Each step claims its own line: without the claim, both steps of "the first bare" read line
+  // one, and it is reported twice.
+  ["a SHA pin with no comment", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA}`), "no `# vX.Y.Z` comment"],
+  ["a SHA pin whose comment names no tag", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA} # pinned`), "no `# vX.Y.Z` comment"],
+  ["a SHA pin whose comment is a date", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA} # 2026-09-24`), "comment naming the tag"],
+  ["two steps on one pin, the second bare", PIN_PROBE("ubuntu-24.04", `${PIN_STEP}\n      - uses: actions/checkout@${PIN_SHA}`), "no `# vX.Y.Z` comment"],
+  ["two steps on one pin, the first bare", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`), "comment naming the tag"],
+  // A pin with no line of its own, whose tag cannot be read.
+  ["a SHA pin in flow style", PIN_PROBE("ubuntu-24.04", `- { uses: "actions/checkout@${PIN_SHA}" }`), "on no line"],
+  ["steps reused by alias, which have no line of their own", `name: probe\non: push\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: &s\n      ${PIN_STEP}\n  b:\n    runs-on: ubuntu-24.04\n    steps: *s\n`, "an alias of another step"],
+  // A commented copy of the pin above a bare step lends it nothing: in a block scalar the bare step claims its own
+  // line; in text the reader cannot tell from a step, the bare line goes unclaimed, and every pinned line carries its tag.
+  ["a bare step under a run body carrying the commented pin", PIN_PROBE("ubuntu-24.04", `- run: |\n          uses: actions/checkout@${PIN_SHA} # v7.0.1\n      - uses: actions/checkout@${PIN_SHA}`), "no `# vX.Y.Z` comment"],
+  ["a bare step under a `- |` item carrying the commented pin", PIN_PROBE("ubuntu-24.04", `- uses: ./.github/actions/local\n        with:\n          args:\n            - |\n              uses: actions/checkout@${PIN_SHA} # v7.0.1\n      - uses: actions/checkout@${PIN_SHA}`), "comment naming the tag"],
+  ["a bare step under an anchored run body carrying the commented pin", PIN_PROBE("ubuntu-24.04", `- run: &body |\n          uses: actions/checkout@${PIN_SHA} # v7.0.1\n      - uses: actions/checkout@${PIN_SHA}`), "comment naming the tag"],
+  ["a bare step under a quoted run across lines carrying the commented pin", PIN_PROBE("ubuntu-24.04", `- run: "echo one\n          uses: actions/checkout@${PIN_SHA} # v7.0.1 \n          echo two"\n      - uses: actions/checkout@${PIN_SHA}`), "no step's tag was read from"],
+  ["a bare step under an input named uses carrying the commented pin", PIN_PROBE("ubuntu-24.04", `- uses: ./.github/actions/local\n        with:\n          uses: actions/checkout@${PIN_SHA} # v7.0.1\n      - uses: actions/checkout@${PIN_SHA}`), "no step's tag was read from"],
+  // Shapes the check cannot read at all.
+  ["no jobs at all", "name: probe\non: push\n", "no `jobs:` map"],
+  ["a `uses:` that is not a string", PIN_PROBE("ubuntu-24.04", "- uses: 3"), "not a string"],
+];
+function checkWorkflowPins() {
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
+    fail(SELF, `check 23 parses ${WORKFLOWS_DIR}/ with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-2093)`);
+    return;
+  }
+  for (const [why, text] of PIN_ACCEPTED) {
+    const got = workflowPinProblems("probe.yml", text);
+    if (got.length) fail(SELF, `check 23 refuses ${why} (its own probe): ${got.map((p) => p[1]).join("; ")}`);
+  }
+  for (const [why, text, says] of PIN_MUTANTS) {
+    const got = workflowPinProblems("probe.yml", text);
+    if (got.length !== 1 || !got[0][1].includes(says)) fail(SELF, `check 23 reports ${JSON.stringify(got)} for ${why}, not one problem saying "${says}" (its own probe)`);
+  }
+  const DEPENDABOT_OK = "version: 2\nupdates:\n  - package-ecosystem: github-actions\n    directory: /\n    schedule:\n      interval: weekly\n";
+  for (const [why, text] of [
+    ["a github-actions update over /", DEPENDABOT_OK],
+    ["a github-actions update over a directories list naming /", DEPENDABOT_OK.replace("directory: /", "directories: [/]")],
+    ["an ignore of every action's majors alone, which still opens PRs", `${DEPENDABOT_OK}    ignore:\n      - dependency-name: "*"\n        update-types: ["version-update:semver-major"]\n`],
+    ["a cron schedule with its cronjob", DEPENDABOT_OK.replace("interval: weekly", "interval: cron\n      cronjob: \"0 6 * * 1\"")],
+    ["an ignore of every action at some versions alone, which still opens PRs", `${DEPENDABOT_OK}    ignore:\n      - dependency-name: "*"\n        versions: [">= 8"]\n`],
+    ["an entry in a multi-ecosystem group whose own schedule stands where the group names none", `${DEPENDABOT_OK}  - package-ecosystem: npm\n    directory: /scripts\n    multi-ecosystem-group: infra\n    schedule:\n      interval: weekly\nmulti-ecosystem-groups:\n  infra: {}\n`],
+    ["an entry scheduled by its multi-ecosystem group", `${DEPENDABOT_OK}  - package-ecosystem: npm\n    directory: /scripts\n    multi-ecosystem-group: infra\nmulti-ecosystem-groups:\n  infra:\n    schedule:\n      interval: weekly\n`],
+  ] as const) if (dependabotProblems(text).length) fail(SELF, `check 23 refuses ${why} (its own probe)`);
+  for (const [why, text, says] of [
+    ["no file", null, "missing"],
+    ["an npm update alone", DEPENDABOT_OK.replace("github-actions", "npm"), "has no `github-actions` update"],
+    ["a github-actions update over another directory", DEPENDABOT_OK.replace("directory: /", "directory: /deploy"), "has no `github-actions` update"],
+    ["a github-actions update limited to no PRs", `${DEPENDABOT_OK}    open-pull-requests-limit: 0\n`, "can open no PR"],
+    ["a github-actions update that ignores every action", `${DEPENDABOT_OK}    ignore:\n      - dependency-name: "*"\n`, "can open no PR"],
+    ["version 1, which Dependabot refuses whole", DEPENDABOT_OK.replace("version: 2", "version: 1"), "`version: 2`"],
+    ["a github-actions update with no schedule, which Dependabot refuses whole", DEPENDABOT_OK.replace("    schedule:\n      interval: weekly\n", ""), "no schedule Dependabot accepts"],
+    ["an interval Dependabot does not know", DEPENDABOT_OK.replace("interval: weekly", "interval: fortnightly"), "no schedule Dependabot accepts"],
+    ["a cron interval with no cronjob", DEPENDABOT_OK.replace("interval: weekly", "interval: cron"), "no schedule Dependabot accepts"],
+    ["a second, unscheduled entry beside a good one", `${DEPENDABOT_OK}  - package-ecosystem: npm\n    directory: /scripts\n`, "no schedule Dependabot accepts"],
+    ["multi-ecosystem groups written as a list, not a map", `${DEPENDABOT_OK}  - package-ecosystem: npm\n    directory: /scripts\n    multi-ecosystem-group: "0"\nmulti-ecosystem-groups:\n  - schedule:\n      interval: weekly\n`, "no schedule Dependabot accepts"],
+  ] as const) {
+    const got = dependabotProblems(text);
+    if (got.length !== 1 || !got[0][1].includes(says)) fail(SELF, `check 23 reports ${JSON.stringify(got)} for a dependabot.yml with ${why}, not one problem saying "${says}" (its own probe)`);
+  }
+  const files = readdirSync(join(ROOT, WORKFLOWS_DIR)).filter((n) => /\.ya?ml$/.test(n)).sort();
+  if (files.length === 0) fail(WORKFLOWS_DIR, "holds no workflow — the listing is broken, not the tree clean (check 23)");
+  for (const name of files) {
+    const rel = `${WORKFLOWS_DIR}/${name}`;
+    for (const [where, msg] of workflowPinProblems(rel, readFileSync(join(ROOT, rel), "utf8"))) fail(where, msg);
+  }
+  const depPath = join(ROOT, DEPENDABOT);
+  for (const [where, msg] of dependabotProblems(existsSync(depPath) ? readFileSync(depPath, "utf8") : null)) fail(where, msg);
+}
+checkWorkflowPins();
+
+// ── 24: no vendored script speaks PostgREST (SMD-2126) ──────────────────────
+//
+// Thirty scripts in twenty-one recipes reached the brain as PostgREST clients:
+// `${SUPABASE_URL}/rest/v1/<table>` and `/rest/v1/rpc/<fn>` with a service-role
+// key from a `.mjs`/`.js`/`.ts` fetch, or supabase-py's `create_client` from a
+// `.py`. The fork's stack runs no PostgREST (SETUP.md), so each one's live mode
+// failed at its first request, and neither check 10 (a URL string is not
+// `.insert(`) nor check 22 (no supabase-js import) saw them. The class decision
+// is docs/vendored-disposition.md's "PostgREST-speaking scripts" section: an
+// import emits ingestion-contract items for db/ingest-records.ts (SMD-1867,
+// SMD-2136), a maintenance script reaches Postgres through compat/supabase-sql
+// under bun, three whose capability the core already owns retire — one ticket
+// each, filed under SMD-2126. This holds the class where it stands and stops it
+// growing back: in every code file (.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs, .py,
+// .sh) under the seven category directories and docs/, comments blanked (the
+// JS scanner for JS; a `#` outside a string for Python, and for shell one at
+// a word's start (after one of bash's metacharacters, whitespace, `;`, `(`,
+// `)`, `|`, `&`, `<`, `>`, or the text's start) — `$#`, `${#a[@]}` and `a#b`
+// are not comments, so a hit after
+// one on the same line is read; a docstring is a string and is read: a file
+// that says it posts to `/rest/v1/rpc/…` is making a claim about itself), a
+// `rest/v1` path in any string, a supabase-py import or `create_client(`
+// (Python and shell alone), or a `@supabase/postgrest-js` specifier is a hit.
+// POSTGREST_EXCEPTIONS counts the twenty-eight files with a call site (two
+// more reach the gateway through a lib) with the ticket that ports or retires
+// each: a line past the count fails (a new call beside the documented ones),
+// a count no line reaches fails as stale (the port landed on those lines —
+// lower the count, or remove the entry when none remains), a file that is
+// gone fails until its entry goes. So every child PR shrinks the table,
+// and the table's size is the class's remaining size.
+const POSTGREST_CODE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|sh)$/;
+/** The files whose comments start at `#`: Python and shell. */
+const HASH_COMMENT_FILE = /\.(py|sh)$/;
+/** The shell files among them: a `#` opens their comments at a word's start alone (hashCommentsBlanked's `shell`). */
+const SHELL_FILE = /\.sh$/;
+/** A PostgREST path in any string: `…/rest/v1/thoughts`, `/rest/v1/rpc/f`, a bare "rest/v1" joined later; `v10` and `arrest/v1` are not it. */
+const POSTGREST_PATH = /\brest\/v1\b/g;
+/** supabase-py: the import in either spelling, and the client constructor (Python and shell files alone — `create_client` is a plain name elsewhere). */
+const SUPABASE_PY_FORMS = [/^\s*from\s+supabase(?:\.[\w.]+)?\s+import\b/gm, /^\s*import\s+supabase\b/gm, /\bcreate_client\s*\(/g];
+/** postgrest-js, in every specifier shape check 22 reads for supabase-js. */
+const POSTGREST_JS_SPECIFIER = /(["'])(?:npm:|jsr:|https?:\/\/[^"'\s]*\/)?@supabase\/postgrest-js(?:@[^"'/]*)?(?:\/[^"']*)?\1/g;
+/**
+ * `text` with `#` comments blanked: a `#` outside a string, to the line's end,
+ * every blanked character a space so offsets and line numbers hold — in
+ * Python anywhere, in shell (`shell`) only at a word's start (the text's
+ * start, or after one of bash's metacharacters: whitespace, `;`, `(`, `)`,
+ * `|`, `&`, `<`, `>` — the second review pass measured `)#c`, `>#c` and `<#c`
+ * as comment starts in bash, dash and zsh), since `$#`, `${#a[@]}` and
+ * `a#b` are not comments and a hit after one on the same line must be read
+ * (the first review pass). Strings — `'…'`, `"…"`, `'''…'''`, `"""…"""` — are
+ * kept whole, an escape inside one honoured, so a `#` in a string is text and
+ * a quote in a comment is blanked. Not a parser: an unterminated quote in a
+ * shell word (`don't`) leaves the rest of the file read as a string, which
+ * can only add hits — visible, and answered by quoting the word.
+ */
+function hashCommentsBlanked(text: string, shell = false): string {
+  let out = "";
+  let quote: string | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quote) {
+      if (c === "\\") { out += c + (text[i + 1] ?? ""); i++; continue; }
+      if (text.startsWith(quote, i)) { out += quote; i += quote.length - 1; quote = null; continue; }
+      out += c;
+      continue;
+    }
+    if (c === "'" || c === '"') { quote = text.startsWith(c + c + c, i) ? c + c + c : c; out += quote; i += quote.length - 1; continue; }
+    if (c === "#" && (!shell || i === 0 || /[\s;(|&)<>]/.test(text[i - 1]))) { let j = i; while (j < text.length && text[j] !== "\n") j++; out += " ".repeat(j - i); i = j - 1; continue; }
+    out += c;
+  }
+  return out;
+}
+/** The 1-based lines of `text` holding a PostgREST form, ascending — comments blanked by the file's kind, strings read. */
+function postgrestIn(text: string, rel: string): number[] {
+  const hash = HASH_COMMENT_FILE.test(rel);
+  const code = hash ? hashCommentsBlanked(text, SHELL_FILE.test(rel)) : blanked(text, false);
+  const lineOf = lineIndexer(code);
+  const lines = new Set<number>();
+  for (const re of hash ? [POSTGREST_PATH, ...SUPABASE_PY_FORMS] : [POSTGREST_PATH, POSTGREST_JS_SPECIFIER]) for (const m of code.matchAll(re)) lines.add(lineOf(m.index!));
+  return [...lines].sort((a, b) => a - b);
+}
+/** [text, file name (its kind), whether it is a hit] — the thirty files' shapes, and the neighbours the rule must not reach. */
+const POSTGREST_PROBES: [string, string, boolean][] = [
+  ["const res = await fetch(`${SUPABASE_URL}/rest/v1/thoughts?select=id`, { headers });", "x.mjs", true],
+  ['fetch(SUPABASE_URL + "/rest/v1/rpc/match_thoughts", { method: "POST", headers, body });', "x.ts", true],
+  ["const BASE = `${url}/rest/v1`;\nconst r = await fetch(`${BASE}/${pathQuery}&limit=1`);", "x.js", true],
+  ['resp = requests.post(f"{SUPABASE_URL}/rest/v1/thoughts", headers=h, json=body, timeout=120)', "x.py", true],
+  ["from supabase import create_client, Client", "x.py", true],
+  ["supabase: Client = create_client(url, key)", "x.py", true],
+  ['import { PostgrestClient } from "@supabase/postgrest-js";', "x.ts", true],
+  ['"""Posts each row to /rest/v1/rpc/upsert_thought, the 3-argument form."""\nimport sys', "x.py", true],
+  ['curl -s "$SUPABASE_URL/rest/v1/thoughts?select=id" -H "apikey: $KEY"', "x.sh", true],
+  ["const url = `${SUPABASE_URL}/rest/v1/thoughts`; // the same in a comment: /rest/v1/thoughts", "x.mjs", true],
+  ["echo '# not a comment: /rest/v1 inside quotes is a hit though'", "x.sh", true],
+  // Not hits: a comment in either grammar, the shim's import, the key alone, a regex literal, other paths, a longer name.
+  ["// the old path: ${SUPABASE_URL}/rest/v1/thoughts\nconst x = 1;", "x.mjs", false],
+  ["/* POST /rest/v1/thoughts */\nconst x = 1;", "x.ts", false],
+  ["# posts to /rest/v1/rpc/upsert_thought\nresp = requests.post(url, json=body)", "x.py", false],
+  ["url = base  # was /rest/v1/thoughts", "x.py", false],
+  ["x = \"it's\"  # /rest/v1/thoughts after an apostrophe in a string", "x.py", false],
+  ['import { createClient } from "../../compat/supabase-sql/index.ts";', "x.ts", false],
+  ["const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;", "x.mjs", false],
+  ["const re = /rest\\/v1/;", "x.ts", false],
+  ['const v = "/api/v1/thoughts";', "x.ts", false],
+  ["const u = `${base}/functions/v1/smart-ingest`;", "x.ts", false],
+  ['const p = "/api/rest/v10/x"; const q = "/arrest/v1/y";', "x.ts", false],
+  ["name = create_client_name(x)", "x.py", false],
+  ["const c = create_client(url);", "x.ts", false],
+  // Shell: `#` inside a word is not a comment, so the hit after it is read; Python: it is, anywhere.
+  ['n=${#arr[@]}; curl -s "$U/rest/v1/thoughts"', "x.sh", true],
+  ["x = 1#c /rest/v1/thoughts", "x.py", false],
+  ["import supabase\nsb = supabase.Client(url, key)", "x.py", true],
+  ["from supabase.client import Client", "x.py", true],
+  ["A=1;#c /rest/v1/thoughts", "x.sh", false],
+  ["(true)#c /rest/v1/thoughts", "x.sh", false],
+  ["# /rest/v1/thoughts\nx=1", "x.sh", false],
+];
+/** A helper for the table: the file's kind and its ticket. */
+const POSTGREST = (what: string, ticket: string, lines: number): CountedException => ({ why: `${what} — ${ticket}`, lines });
+const IMPORT = "an import that embeds the text itself and POSTs the row raw; it emits ingestion-contract items for `bun db/ingest-records.ts --items` (SMD-2136)";
+const SHIM = "a maintenance script; it moves onto compat/supabase-sql under bun";
+/**
+ * file → the ticket that ports or retires it, and the exact count of lines that speak PostgREST. Thirty files in
+ * twenty-one recipes (SMD-2126's survey of f7693c4c, re-measured on d8e3de60); two more of the thirty —
+ * atomizer's backfill-gmail-correspondents.mjs and authorship-edges' backfill-authorship.mjs — reach the
+ * gateway through their `lib/` file alone and have no line of their own.
+ */
+const POSTGREST_EXCEPTIONS = new Map<string, CountedException>([
+  // Imports → the ingestion contract (after SMD-2136).
+  ["recipes/chatgpt-conversation-import/import-chatgpt.py", POSTGREST(`${IMPORT}; SMD-2147 decides its match_thoughts dedup and chatgpt_conversations sidecar`, "SMD-2147", 3)],
+  ["recipes/perplexity-conversation-import/import-perplexity.py", POSTGREST(IMPORT, "SMD-2148", 1)],
+  ["recipes/readwise-import/import-readwise.py", POSTGREST("an import on supabase-py that already captures through upsert_thought (SMD-1524) over a transport the fork lacks; it emits contract items", "SMD-2149", 2)],
+  ["recipes/google-activity-import/import-google-activity.mjs", POSTGREST(IMPORT, "SMD-2150", 1)],
+  ["recipes/email-history-import/pull-gmail.ts", POSTGREST(IMPORT, "SMD-2021", 2)],
+  // Retire: the fork's core owns the capability.
+  ["recipes/obsidian-vault-import/import-obsidian.py", POSTGREST("superseded by db/ingest-markdown.ts (ingest-records.ts --markdown); the recipe retires", "SMD-2137", 3)],
+  ["recipes/local-ollama-embeddings/embed-local.py", POSTGREST("superseded by the server's local embedding (OB1_LLM_BASE_URL) and db/reembed.ts; the recipe retires", "SMD-2138", 2)],
+  ["recipes/fingerprint-dedup-backfill/backfill-fingerprints.mjs", POSTGREST("superseded by migration 023; the file is removed", "SMD-2145", 1)],
+  // Maintenance scripts → the shim under bun.
+  ["recipes/fingerprint-dedup-backfill/delete-duplicates.mjs", POSTGREST(`${SHIM}, its deletes through delete_thought`, "SMD-2145", 1)],
+  ["recipes/thought-enrichment/enrich-thoughts.mjs", POSTGREST(SHIM, "SMD-2139", 4)],
+  ["recipes/thought-enrichment/backfill-type.mjs", POSTGREST(SHIM, "SMD-2139", 1)],
+  ["recipes/thought-enrichment/backfill-sensitivity.mjs", POSTGREST(SHIM, "SMD-2139", 1)],
+  ["recipes/atomizer/audit-gmail-pipeline.mjs", POSTGREST(SHIM, "SMD-2140", 2)],
+  ["recipes/atomizer/lib/entity-resolver.mjs", POSTGREST(`${SHIM} (backfill-gmail-correspondents.mjs reaches the gateway through it)`, "SMD-2140", 2)],
+  ["recipes/atomizer/re-atomize-gmail-thought.mjs", POSTGREST(`${SHIM}, its thought writes through upsert_thought and delete_thought`, "SMD-2140", 2)],
+  ["recipes/authorship-edges/lib/author-edges.mjs", POSTGREST(`${SHIM} (backfill-authorship.mjs reaches the gateway through it)`, "SMD-2141", 2)],
+  ["recipes/typed-edge-classifier/classify-edges.mjs", POSTGREST(SHIM, "SMD-2141", 1)],
+  ["recipes/provenance-chains/backfill.mjs", POSTGREST(SHIM, "SMD-2142", 1)],
+  ["recipes/provenance-chains/eval.mjs", POSTGREST(SHIM, "SMD-2142", 1)],
+  ["recipes/wiki-synthesis/scripts/synthesize-wiki.mjs", POSTGREST(SHIM, "SMD-2143", 1)],
+  ["recipes/wiki-synthesis/scripts/backfill-gmail-wikis.mjs", POSTGREST(`${SHIM}, its page deletes through delete_thought`, "SMD-2143", 1)],
+  ["recipes/entity-wiki/generate-wiki.mjs", POSTGREST(SHIM, "SMD-2143", 1)],
+  ["recipes/weekly-digest/weekly-digest.mjs", POSTGREST(`${SHIM}; read-only`, "SMD-2144", 1)],
+  ["recipes/brain-backup/backup-brain.mjs", POSTGREST(`${SHIM}; read-only`, "SMD-2144", 1)],
+  ["recipes/lint-sweep/lint-sweep.js", POSTGREST(`${SHIM}; read-only`, "SMD-2144", 1)],
+  ["recipes/source-filtering/backfill-metadata.ts", POSTGREST(SHIM, "SMD-2021", 2)],
+  // Smoke harnesses, each with its own ticket.
+  ["recipes/brain-smoke-test/smoke-all.js", POSTGREST("the smoke harness takes the fork's shape or deploy/smoke.sh absorbs it", "SMD-2103", 1)],
+  ["recipes/ob-graph/smoke-graph-rpcs.mjs", POSTGREST("the smoke moves onto the shim or into extensions/test-tools.ts", "SMD-2146", 1)],
+]);
+function checkPostgrestClients() {
+  for (const name of ["x.ts", "x.tsx", "x.mts", "x.cts", "x.js", "x.jsx", "x.mjs", "x.cjs", "x.py", "x.sh"]) if (!POSTGREST_CODE_FILE.test(name)) fail(SELF, `check 24's POSTGREST_CODE_FILE no longer reads ${name} (its own probe)`);
+  for (const name of ["x.md", "x.sql", "x.json", "x.html", "x.yaml", "x.pyc"]) if (POSTGREST_CODE_FILE.test(name)) fail(SELF, `check 24's POSTGREST_CODE_FILE reads ${name}, which it should not (its own probe)`);
+  for (const name of ["x.py", "x.sh"]) if (!HASH_COMMENT_FILE.test(name)) fail(SELF, `check 24's HASH_COMMENT_FILE no longer treats ${name} as #-commented (its own probe)`);
+  if (HASH_COMMENT_FILE.test("x.mjs")) fail(SELF, "check 24's HASH_COMMENT_FILE treats x.mjs as #-commented (its own probe)");
+  if (!SHELL_FILE.test("x.sh") || SHELL_FILE.test("x.py")) fail(SELF, "check 24's SHELL_FILE no longer names x.sh alone (its own probe)");
+  // The blanker on its own: a `#` in each string kind kept, one after each closed string blanked, offsets and newlines held.
+  const blankerProbe = "a = 'x#y' # c1\nb = \"p#q\" # c2\nc = '''m#n\n#o''' # c3\nd = \"\"\"s\\\"#t\"\"\" # c4\ne = 1 # c5\n";
+  const blankerWant = "a = 'x#y'     \nb = \"p#q\"     \nc = '''m#n\n#o'''     \nd = \"\"\"s\\\"#t\"\"\"     \ne = 1     \n";
+  if (hashCommentsBlanked(blankerProbe) !== blankerWant) fail(SELF, `check 24's hashCommentsBlanked no longer blanks exactly the comments of its probe: ${JSON.stringify(hashCommentsBlanked(blankerProbe))}`);
+  // Every way a shell comment opens — the text's start, whitespace, `;`, `|`, `&`, `(`, `)`, `>`, `<` — and the three
+  // ways a `#` is not one (`$#`, `${#a[@]}`, `a#b`); the second review pass found the class asserted and unprobed.
+  const shellProbe = "#c0\nn=$# ; m=${#a[@]} ;a#b # c1\n#c2\n x=1 #c3\na;#c4\nb|#c5\nc&#c6\n(#c7\n)#c8\nd>#c9\ne<#c10\n";
+  const shellWant = "   \nn=$# ; m=${#a[@]} ;a#b     \n   \n x=1    \na;   \nb|   \nc&   \n(   \n)   \nd>   \ne<    \n";
+  if (hashCommentsBlanked(shellProbe, true) !== shellWant) fail(SELF, `check 24's hashCommentsBlanked (shell) no longer blanks exactly the comments of its probe: ${JSON.stringify(hashCommentsBlanked(shellProbe, true))}`);
+  for (const [probe, name, hit] of POSTGREST_PROBES) {
+    const n = postgrestIn(probe, name).length;
+    if (hit && n === 0) fail(SELF, `check 24 no longer catches its probe: ${JSON.stringify(probe)} (its own probe)`);
+    if (!hit && n > 0) fail(SELF, `check 24 catches a non-probe: ${JSON.stringify(probe)} (its own probe)`);
+  }
+  // The line is the string's, once, for the probe whose hit and comment share a line: line 1 alone.
+  const beside = POSTGREST_PROBES.find(([text]) => text.includes("// the same in a comment"));
+  if (!beside) fail(SELF, "check 24's hit-beside-a-comment probe is gone (its own probe)");
+  const twice = beside ? postgrestIn(beside[0], beside[1]) : [1];
+  if (twice.length !== 1 || twice[0] !== 1) fail(SELF, `check 24 reports lines ${twice.join(",")} for a hit beside a comment, not line 1 once (its own probe)`);
+  const files = textFilesUnder(SCANNED_ROOTS).filter((f) => POSTGREST_CODE_FILE.test(f));
+  if (files.length === 0) fail(SELF, "check 24 found no code file under the seven category directories and docs/ — the listing is broken, not the tree clean");
+  const MSG = "speaks PostgREST — a `rest/v1` path, a supabase-py client or postgrest-js reaches a brain only through Supabase's PostgREST, which this fork's stack does not run (SETUP.md), so the script's live mode fails at its first request; the class decision is docs/vendored-disposition.md's \"PostgREST-speaking scripts\" (SMD-2126): an import emits ingestion-contract items for `bun db/ingest-records.ts --items` (SMD-2136), a maintenance script reaches Postgres through compat/supabase-sql under bun (`SUPABASE_URL` a postgres:// string), or the file is listed in POSTGREST_EXCEPTIONS with its line count and the ticket that ports or retires it";
+  const seen = new Set<string>();
+  for (const file of files) {
+    const rel = relOf(file);
+    const lines = postgrestIn(readFileSync(file, "utf8"), rel);
+    const excepted = POSTGREST_EXCEPTIONS.get(rel);
+    if (excepted) {
+      seen.add(rel);
+      if (lines.length !== excepted.lines) fail(rel, `check 24's exception covers ${excepted.lines} line(s) that speak PostgREST and the file has ${lines.length} (${lines.join(", ") || "none"}) — ${lines.length > excepted.lines ? "a new call beside the documented ones" : "the port landed on those lines, so the exception is stale: lower the count, or remove the entry when no line remains"} (${excepted.why})`);
+      continue;
+    }
+    for (const line of lines) fail(`${rel}:${line}`, MSG);
+  }
+  for (const rel of POSTGREST_EXCEPTIONS.keys()) if (!seen.has(rel)) fail(rel, "check 24's exception names a file the scan does not reach — stale, or the file is gone: remove the entry");
+}
+checkPostgrestClients();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so

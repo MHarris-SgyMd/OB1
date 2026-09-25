@@ -29,12 +29,12 @@
  */
 
 import { SQL } from "bun";
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 import { consolidateKey } from "../server-portable/consolidate.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
@@ -44,7 +44,7 @@ import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, syncIssue, t
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
-import { promote, refresh, refreshToolsReady, replayAndDiff } from "./tier.ts";
+import { promote, refresh, refreshToolsReady, replayAndDiff, targetRefusal } from "./tier.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -3969,9 +3969,9 @@ console.log("\n[17] Over near-equidistant vectors the HNSW walk misses live rows
 
 // ── 18. The community schemas over TCP ───────────────────────────────────────
 
-console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role present, and migrate.ts --grant makes a LOGIN role able to use them (SMD-1796)");
+console.log("\n[18] Every schemas/*.sql, then every extension and recipe schema, applies over TCP with no Supabase role present, and migrate.ts --grant makes a LOGIN role able to use them (SMD-1796, SMD-1810)");
 {
-  // test-schema [40] is the PGlite half of this; here is what PGlite cannot do:
+  // test-schema [40] and [50] are the PGlite halves of this; here is what PGlite cannot do:
   // the migrator's --grant over TCP — its presence probe against a real
   // server's to_regclass/to_regprocedure, its "not yet present, skipped" list
   // before the files are applied and its full list after — and a role that
@@ -4003,6 +4003,11 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
   };
   const SCHEMAS = SCHEMAS_DIR;
   const schemaFiles = communitySchemaFiles();
+  // The extension and recipe schemas (SMD-1810), after the community files —
+  // ops-views.sql reads enhanced-thoughts' columns and its guarded views need
+  // smart-ingest's and entity-extraction's tables. Same drop in the finally.
+  const contribFiles = CONTRIB_SCHEMA_FILES;
+  const ALL_GROUPS = ["community", "extensions", "recipes"] as const;
   const [{ c: supabaseRoles }] = (await sql`SELECT count(*)::int AS c FROM pg_roles WHERE rolname IN ('authenticated', 'anon', 'service_role')`) as { c: number }[];
   assert(supabaseRoles === 0, "no Supabase role exists on this server");
 
@@ -4029,17 +4034,27 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
       const dry = await migrate("--grant", ROLE, "--dry-run");
       const skippedLine = dry.out.split("\n").find((l) => /not yet present, skipped/.test(l)) ?? "";
       const communityTables = grantedTables(["community"]).filter((t) => t !== "thought_audit" && t !== "thought_entities");
-      assert(dry.code === 0 && communityTables.every((t) => skippedLine.includes(t)) && grantedViews(["community"]).every((v) => skippedLine.includes(v)) && grantedSequences(["community"]).every((s) => skippedLine.includes(s)) && grantedFunctions(["community"]).every((f) => skippedLine.includes(f)),
-             `before the files are applied, --grant --dry-run names every community table, view, sequence and function as not yet present (exit ${dry.code}; ${skippedLine.length} chars of skipped list)`);
+      const contribObjects = [...grantedTables(["extensions", "recipes"]), ...grantedViews(["extensions", "recipes"])];
+      assert(dry.code === 0 && communityTables.every((t) => skippedLine.includes(t)) && grantedViews(["community"]).every((v) => skippedLine.includes(v)) && grantedSequences(["community"]).every((s) => skippedLine.includes(s)) && grantedFunctions(["community"]).every((f) => skippedLine.includes(f)) && contribObjects.every((o) => skippedLine.includes(o)),
+             `before the files are applied, --grant --dry-run names every community table, view, sequence and function, and every extension and recipe table and view, as not yet present (exit ${dry.code}; ${skippedLine.length} chars of skipped list)`);
       assert(!/ON SEQUENCE|ON FUNCTION|agent_memories/.test(dry.out.replace(skippedLine, "")) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
              "…grants nothing of the community group, and grants the migrations' tables");
 
       const failed: string[] = [];
+      // A file that opens a transaction (BEGIN … COMMIT — agent-memory, per-agent-identity, typed-reasoning-edges,
+      // smart-ingest) and fails leaves it aborted on this pool's one connection: rolled back, as [40] and [50] do, or every
+      // statement after it answers "current transaction is aborted" (SMD-2128, review pass 3).
       for (const f of schemaFiles) {
         try { await sql.unsafe(readFileSync(join(SCHEMAS, f), "utf8")); }
-        catch (e) { failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); }
+        catch (e) { failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); await sql.unsafe("ROLLBACK").catch(() => {}); }
       }
       assert(schemaFiles.length >= 14 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files; failed: ${failed.join(" | ") || "none"})`);
+      const contribFailed: string[] = [];
+      for (const f of contribFiles) {
+        try { await sql.unsafe(readFileSync(join(CONTRIB_DIR, f), "utf8")); }
+        catch (e) { contribFailed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); await sql.unsafe("ROLLBACK").catch(() => {}); }
+      }
+      assert(contribFiles.length === 15 && contribFailed.length === 0, `…and so does every listed extension and recipe schema after them, with no auth schema either (${contribFiles.length} files; failed: ${contribFailed.join(" | ") || "none"})`);
 
       // After: --grant issues the whole community group, over TCP, in one
       // transaction — views as tables, sequences and functions spelled as GRANT
@@ -4056,16 +4071,16 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
       // error, or success, means it is not.
       asRole = new SQL({ url: ROLE_URL, max: 1 });
       const denied: string[] = [];
-      for (const t of grantedTables(["community"])) {
+      for (const t of grantedTables([...ALL_GROUPS])) {
         try { await asRole.unsafe(`INSERT INTO ${t} DEFAULT VALUES`); }
         catch (e) { if (/permission denied/.test((e as Error).message)) denied.push(`${t}: ${(e as Error).message.split("\n")[0]}`); }
       }
-      assert(denied.length === 0, `the role's INSERT into every community table gets past privileges (${grantedTables(["community"]).length} tables; denied: ${denied.join("; ") || "none"})`);
+      assert(denied.length === 0, `the role's INSERT into every community, extension and recipe table gets past privileges (${grantedTables([...ALL_GROUPS]).length} tables; denied: ${denied.join("; ") || "none"})`);
       let viewDenied = "";
-      for (const v of grantedViews(["community"])) {
+      for (const v of grantedViews([...ALL_GROUPS])) {
         try { await asRole.unsafe(`SELECT 1 FROM ${v} LIMIT 0`); } catch (e) { viewDenied += `${v}: ${(e as Error).message.split("\n")[0]}; `; }
       }
-      assert(viewDenied === "", `…and reads the community view through its own SELECT grant (denied: ${viewDenied || "none"})`);
+      assert(viewDenied === "", `…and reads the community view, the eight ops views and lint-sweep's seven through its own SELECT grants (${grantedViews([...ALL_GROUPS]).length} views; denied: ${viewDenied || "none"})`);
       const seqDenied: string[] = [];
       for (const s of grantedSequences(["community"])) {
         try { await asRole.unsafe(`SELECT nextval('${s}')`); } catch (e) { seqDenied.push(s); }
@@ -4275,9 +4290,11 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
   // it returned; the canary, refreshed from stable, replays that search and its
   // ids are diffed against stable's. This drives the ENGINE (readLoggedSearches →
   // replayOne → diffResult) end to end over the KEYWORD arm, which needs no model
-  // — the arm CI can run. The pg_dump-based refresh() and the hybrid arm need
-  // client tools / a provider CI does not have; they are exercised by the compose
-  // stack and documented, the same split as eval-replay.ts vs test-replay.ts.
+  // — the arm CI can run. A real pg_dump refresh needs client tools this job
+  // does not have: the deploy-stack job runs one through deploy/tier.sh
+  // (SMD-2036), and below, stand-in tools drive refresh() to its restore and
+  // the guards run before any tool is looked for. The hybrid arm needs a
+  // provider, the same split as eval-replay.ts vs test-replay.ts.
   await sql`DELETE FROM query_log`; // scope the replay window to this section's rows
   const put = (s: SQL, id: string, content: string) =>
     s`INSERT INTO thoughts (id, content, metadata, content_fingerprint)
@@ -4343,6 +4360,119 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     assert(canaryVer != null && version === canaryVer, "promote reads the canary's schema_version (migration 044), not an absent 'version' key");
     const stableCfg = Object.fromEntries((await sql`SELECT key, value FROM ob1_config WHERE key IN ('tier','promoted_schema_version','promoted_at')`).map((r: { key: string; value: string }) => [r.key, r.value]));
     assert(stableCfg.tier === "stable" && stableCfg.promoted_schema_version === canaryVer && /^\d{4}-\d\d-\d\dT/.test(stableCfg.promoted_at ?? ""), "promote stamps stable: tier=stable, promoted_schema_version and a promoted_at time");
+
+    // --from and --to the wrong way round (SMD-2036): the canary into stable is two
+    // distinct databases, so the same-database guard passes it, and the target is
+    // the record. Refused on the stamp, before the client tools are looked for.
+    let refusedStable: string | null = null;
+    try { await refresh(canaryUrl, URL_!, "canary"); }
+    catch (e) { refusedStable = (e as Error).message; }
+    assert(/stamped tier=stable/.test(refusedStable ?? ""), `refresh refuses a --to stamped tier=stable — --from and --to swapped (got: ${refusedStable ?? "no refusal"})`);
+    // And a --to that is a brain with no tier stamp — the shape of an untiered
+    // stable. This canary was migrated and loaded here, never refreshed, so it
+    // carries rows and no ob1_config.tier.
+    let refusedBrain: string | null = null;
+    try { await refresh(URL_!, canaryUrl, "canary"); }
+    catch (e) { refusedBrain = (e as Error).message; }
+    assert(/holds thoughts and no tier stamp/.test(refusedBrain ?? ""), `refresh refuses a --to holding thoughts under no tier stamp (got: ${refusedBrain ?? "no refusal"})`);
+
+    // targetRefusal's cells, read directly (no pg_dump needed). Each read is a new
+    // session, since a database-level setting reaches only sessions opened after it.
+    const refusalAt = async (url: string) => { const s = new SQL({ url, max: 1 }); try { return await targetRefusal(s); } finally { await s.close(); } };
+    const setMark = (db: string, v: string | null) => sql.unsafe(v === null ? `ALTER DATABASE ${db} RESET ob1.refresh_target` : `ALTER DATABASE ${db} SET ob1.refresh_target = '${v}'`);
+    // A refresh that died after its restore: the target holds the source's rows and
+    // its tier=stable, and carries the mark the refresh set before the reset.
+    await canarySql`INSERT INTO ob1_config (key, value) VALUES ('tier', 'stable') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+    assert(/stamped tier=stable/.test((await refusalAt(canaryUrl)) ?? ""), "unmarked, stamped tier=stable and holding rows: refused");
+    // Only the database's own setting is a mark: the same name set for a role in
+    // this database (or for a role, the server, a connection option) is not.
+    await sql.unsafe(`ALTER ROLE CURRENT_USER IN DATABASE ${canaryDb} SET ob1.refresh_target = 'canary'`);
+    try {
+      assert(/stamped tier=stable/.test((await refusalAt(canaryUrl)) ?? ""), "a role-level ob1.refresh_target is not the database's mark: still refused");
+    } finally {
+      await sql.unsafe(`ALTER ROLE CURRENT_USER IN DATABASE ${canaryDb} RESET ob1.refresh_target`);
+    }
+    // Only a value a refresh writes is a mark: `stable` set by hand to protect a
+    // database does not arm its reset.
+    await setMark(canaryDb, "stable");
+    assert(/stamped tier=stable/.test((await refusalAt(canaryUrl)) ?? ""), "ob1.refresh_target='stable' (not a value a refresh writes) is no mark: still refused");
+    await setMark(canaryDb, "canary");
+    assert((await refusalAt(canaryUrl)) === null, "marked by a refresh, the same target is allowed whatever its restored ob1_config says — a failed refresh can be retried");
+    let refusedPromote: string | null = null;
+    try { await promote(URL_!, canaryUrl); }
+    catch (e) { refusedPromote = (e as Error).message; }
+    assert(/is a tier \(refresh mark canary\)/.test(refusedPromote ?? ""), `promote refuses a --to that carries the refresh mark — --from and --to swapped (got: ${refusedPromote ?? "no refusal"})`);
+    await setMark(canaryDb, null);
+    await canarySql`UPDATE ob1_config SET value = 'canary' WHERE key = 'tier'`;
+    assert((await refusalAt(canaryUrl)) === null, "unmarked but stamped tier=canary (a canary refreshed before the mark existed): allowed");
+    await canarySql`DELETE FROM ob1_config WHERE key = 'tier'`;
+    for (const c of corpus) await canarySql`DELETE FROM thoughts WHERE id = ${c.id}::uuid`;
+    assert((await refusalAt(canaryUrl)) === null, "an Open Brain schema holding no thoughts (a tier stack's database after `up`): allowed");
+    // Another application's database, one name away from a tier.
+    const foreignDb = "ob1_tier_foreign";
+    const foreignUrl = (() => { const u = new URL(URL_!); u.pathname = `/${foreignDb}`; return u.toString(); })();
+    await sql.unsafe(`DROP DATABASE IF EXISTS ${foreignDb}`);
+    await sql.unsafe(`CREATE DATABASE ${foreignDb}`);
+    try {
+      assert((await refusalAt(foreignUrl)) === null, "a new database with nothing in its public schema: allowed");
+      // What a template's extensions bring is not "tables": pg_stat_statements'
+      // views (extension members) and tablefunc's row types (composite relkind,
+      // no 'e' dependency of their own).
+      const withExtensions = new SQL({ url: foreignUrl, max: 1 });
+      try { await withExtensions`CREATE EXTENSION IF NOT EXISTS pg_stat_statements`; await withExtensions`CREATE EXTENSION IF NOT EXISTS tablefunc`; } finally { await withExtensions.close(); }
+      assert((await refusalAt(foreignUrl)) === null, "the same with pg_stat_statements and tablefunc installed in public (what a template may carry): allowed");
+      const foreign = new SQL({ url: foreignUrl, max: 1 });
+      try { await foreign`CREATE TABLE invoices (id int)`; } finally { await foreign.close(); }
+      assert(/not an Open Brain schema/.test((await refusalAt(foreignUrl)) ?? ""), "a database whose public schema holds another application's tables: refused");
+      const railsLike = new SQL({ url: foreignUrl, max: 1 });
+      try { await railsLike`CREATE TABLE schema_migrations (version varchar PRIMARY KEY)`; } finally { await railsLike.close(); }
+      assert(/not an Open Brain schema/.test((await refusalAt(foreignUrl)) ?? ""), "the same with a schema_migrations table (Rails', Ecto's, dbmate's name too) and no thoughts: still refused");
+    } finally {
+      await sql.unsafe(`DROP DATABASE IF EXISTS ${foreignDb}`);
+    }
+
+    // The mark goes on BEFORE the reset, so a refresh that dies after it — here
+    // a pg_restore that fails — leaves a target the next refresh recognises. Two
+    // stand-in tools on PATH, reporting the server's major so refreshToolsReady
+    // passes: the dump writes nothing, the restore fails.
+    const shimDb = "ob1_tier_shim";
+    const shimUrl = (() => { const u = new URL(URL_!); u.pathname = `/${shimDb}`; return u.toString(); })();
+    const shimDir = join(tmpdir(), `ob1-tier-shim-${process.pid}`);
+    const savedPath = process.env.PATH;
+    await sql.unsafe(`DROP DATABASE IF EXISTS ${shimDb}`);
+    await sql.unsafe(`CREATE DATABASE ${shimDb}`);
+    try {
+      const [{ n }] = await sql<{ n: string }[]>`SELECT current_setting('server_version_num') AS n`;
+      const major = Math.floor(Number(n) / 10000);
+      mkdirSync(shimDir, { recursive: true });
+      const shim = (name: string, rest: string) => {
+        writeFileSync(join(shimDir, name), `#!/bin/sh\nif [ "$1" = --version ]; then echo "${name} (PostgreSQL) ${major}.0"; exit 0; fi\n${rest}\n`);
+        chmodSync(join(shimDir, name), 0o755);
+      };
+      shim("pg_dump", `while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; shift; done; exit 0`);
+      shim("pg_restore", "exit 1");
+      process.env.PATH = `${shimDir}:${savedPath}`;
+      let failed: string | null = null;
+      try { await refresh(URL_!, shimUrl, "working"); }
+      catch (e) { failed = (e as Error).message; }
+      assert(/did not produce the thoughts table/.test(failed ?? ""), `a refresh whose restore fails stops there (got: ${failed ?? "no failure"})`);
+      const shimSql = new SQL({ url: shimUrl, max: 1 });
+      let mark: string | undefined;
+      try { mark = parseSetConfig((await shimSql.unsafe(DB_LEVEL_SETTINGS_SQL))[0]?.cfg)["ob1.refresh_target"]; } finally { await shimSql.close(); }
+      assert(mark === "working", `…and leaves its target marked (ob1.refresh_target=working), set before the restore (got: ${mark ?? "no mark"})`);
+    } finally {
+      process.env.PATH = savedPath;
+      rmSync(shimDir, { recursive: true, force: true });
+      await sql.unsafe(`DROP DATABASE IF EXISTS ${shimDb} WITH (FORCE)`);
+    }
+
+    // promote's mirror of the same-database guard, the URL respelled.
+    const samePromote = new URL(URL_!);
+    samePromote.searchParams.set("application_name", "tier-same-db-promote");
+    let refusedSamePromote: string | null = null;
+    try { await promote(URL_!, samePromote.toString()); }
+    catch (e) { refusedSamePromote = (e as Error).message; }
+    assert(/name the same database/.test(refusedSamePromote ?? ""), `promote refuses a --to that is the --from database spelled another way (got: ${refusedSamePromote ?? "no refusal"})`);
     await sql`DELETE FROM ob1_config WHERE key IN ('promoted_schema_version','promoted_at')`;
   } finally {
     if (canarySql) await canarySql.close();
@@ -4360,6 +4490,17 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
   catch { refusedRemote = true; }
   finally { if (savedAllow !== undefined) process.env.OB1_ALLOW_REMOTE_DB = savedAllow; }
   assert(refusedRemote, "refresh refuses a non-loopback target unless OB1_ALLOW_REMOTE_DB=1 (it drops the target's schema)");
+  // And a --to that is the --from database under another spelling (SMD-2036):
+  // deploy/tier.sh sets OB1_ALLOW_REMOTE_DB, so this is the guard it runs
+  // under. The second URL differs as a string (a parameter only), so string
+  // equality would let it through; the server's identity does not. It refuses
+  // before the client tools are looked for, so no pg_dump is needed here.
+  const respelled = new URL(URL_!);
+  respelled.searchParams.set("application_name", "tier-same-db-guard");
+  let refusedSame: string | null = null;
+  try { await refresh(URL_!, respelled.toString(), "canary"); }
+  catch (e) { refusedSame = (e as Error).message; }
+  assert(/name the same database/.test(refusedSame ?? ""), `refresh refuses a --to that is the --from database spelled another way (got: ${refusedSame ?? "no refusal"})`);
 
   for (const c of corpus) await sql`DELETE FROM thoughts WHERE id = ${c.id}::uuid`;
   await sql`DELETE FROM query_log`;
@@ -4539,6 +4680,256 @@ console.log("\n[23] a ticket's dated sections are thoughts of their own — deri
 
   await store.close();
   for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
+}
+
+// ── 24. Migration 054 — resolve_agent under a held key row ──────────────────
+//
+// db/test-schema.ts [49] holds the sequential half: which lookups write the
+// row. This is the concurrent half, which PGlite's single session cannot run.
+// Each lookup runs on its own connection under a lock_timeout, as the server's
+// store runs it (250 ms, SMD-2072); a case that must wait for a commit sets it
+// to 5 s, which also bounds a lock that never released. The holder is a second
+// connection with a transaction held open.
+
+console.log("\n[24] resolve_agent under a held key row: a recently used key answers without waiting, a stale one waits, and a revocation or a delete that commits during the wait is what the lookup answers (migration 054, SMD-2090)");
+{
+  type R = { ok: boolean; error?: string; agent_id?: string; created?: boolean; rotated?: boolean };
+  const keys = { fresh: "b1".repeat(32), stale: "b2".repeat(32), race: "b3".repeat(32), gone: "b4".repeat(32), early: "b5".repeat(32), store: "b6".repeat(32), rr: "b8".repeat(32) };
+  const labelOf = (k: keyof typeof keys) => `live-2090-${k}`;
+  const agentOf: Record<string, string> = {};
+  for (const k of Object.keys(keys) as (keyof typeof keys)[]) {
+    agentOf[k] = ((await sql`SELECT resolve_agent(${keys[k]}, ${labelOf(k)}, 'write') AS r`)[0].r as R).agent_id!;
+  }
+  await sql`UPDATE ob1_agent_keys SET last_used_at = now() - interval '1 hour' WHERE key_hash IN (${keys.stale}, ${keys.race}, ${keys.gone}, ${keys.store}, ${keys.rr})`;
+
+  const looker = new SQL({ url: URL_, max: 1 });
+  const lookerPid = Number((await looker`SELECT pg_backend_pid() AS pid`)[0].pid);
+  /** One lookup, its answer or its SQLSTATE, and how long it took. */
+  const lookup = async (k: keyof typeof keys, scope = "write", capMs = 250) => {
+    const t0 = performance.now();
+    try {
+      const [row] = await looker.begin(async (tx: SQL) => {
+        await tx`SELECT set_config('lock_timeout', ${`${capMs}ms`}, true)`;
+        return tx`SELECT resolve_agent(${keys[k]}, ${labelOf(k)}, ${scope}) AS r`;
+      });
+      return { r: row.r as R, code: "", ms: performance.now() - t0 };
+    } catch (e) {
+      return { r: undefined, code: String((e as { errno?: string }).errno ?? (e as Error).message), ms: performance.now() - t0 };
+    }
+  };
+  /**
+   * A transaction on a connection of its own, held open after `work` until
+   * released. A `work` that throws, or a connection that fails, throws here
+   * rather than leaving the suite waiting on a transaction that never began;
+   * a `work` that itself meets a lock gives up after 5 s.
+   */
+  const hold = async (work: (tx: SQL) => Promise<unknown>) => {
+    const conn = new SQL({ url: URL_, max: 1 });
+    let release: () => void = () => {};
+    const released = new Promise<void>((r) => { release = r; });
+    let ready: () => void = () => {};
+    const isReady = new Promise<void>((r) => { ready = r; });
+    let failed: unknown;
+    const done = conn.begin(async (tx: SQL) => {
+      try { await tx`SELECT set_config('lock_timeout', '5000ms', true)`; await work(tx); } catch (e) { failed = e; throw e; } finally { ready(); }
+      await released;
+    }).catch((e) => { failed ??= e; ready(); }).finally(() => conn.close());
+    await isReady;
+    if (failed) throw failed;
+    return { commit: async () => { release(); await done; } };
+  };
+  /** Until a backend — the looker's, or any other running resolve_agent — waits on a lock, for at most 3 s. */
+  const lookerWaits = async (pid: number | null = lookerPid, everyMs = 20) => {
+    for (let i = 0; i < 3000 / everyMs; i++) {
+      const [w] = pid === null
+        ? await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE '%resolve_agent%'`
+        : await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = ${pid} AND wait_event_type = 'Lock'`;
+      if (w.n > 0) return true;
+      await Bun.sleep(everyMs);
+    }
+    return false;
+  };
+
+  // The rows held, as an operator's SELECT … FOR UPDATE holds them.
+  {
+    const held = await hold((tx) => tx`SELECT 1 FROM ob1_agent_keys WHERE key_hash IN (${keys.fresh}, ${keys.stale}) FOR UPDATE`);
+    try {
+      const fresh = await lookup("fresh");
+      // The row is held for the whole lookup under a 250 ms cap, so a lookup
+      // that waited would raise 55P03: ok alone is the proof, and the time is
+      // for the reader (review pass 2: a bound only added a way to flake).
+      assert(fresh.r?.ok === true && fresh.r.agent_id === agentOf.fresh, `with its row held, a key used moments ago answers ok without waiting (${fresh.code || "ok"}, ${Math.round(fresh.ms)} ms)`);
+      const stale = await lookup("stale");
+      assert(stale.code === "55P03" && stale.ms >= 240, `…a key last used an hour ago writes its row, so it waits and meets the cap (${stale.code || JSON.stringify(stale.r)}, ${Math.round(stale.ms)} ms)`);
+      const scope = await lookup("fresh", "read");
+      assert(scope.code === "55P03", `…and so does a fresh key presenting another scope, since a scope change is written (${scope.code || JSON.stringify(scope.r)})`);
+    } finally {
+      await held.commit();
+    }
+  }
+
+  // A revocation not yet committed, of a key the lookup must write: the
+  // lookup reads the key as active, its UPDATE waits on the revoker, and once
+  // the revoker commits the lookup answers REVOKED (010's body answered ok,
+  // and the server cached it for its TTL).
+  {
+    const revoker = await hold((tx) => tx`SELECT revoke_agent_key(${keys.race}, 'SMD-2090 live')`);
+    let pending: ReturnType<typeof lookup> | undefined;
+    let waited = false;
+    try {
+      pending = lookup("race", "write", 5000);
+      waited = await lookerWaits();
+    } finally {
+      await revoker.commit();
+    }
+    const race = await pending!;
+    assert(waited && race.r?.ok === false && race.r.error === "REVOKED" && race.r.agent_id === agentOf.race,
+      `a lookup waiting on an uncommitted revocation answers REVOKED once it commits, the agent id attached (waited: ${waited}; ${race.code || JSON.stringify(race.r)})`);
+  }
+  // The same race through the server's own statement — SqlStore.resolveAgent,
+  // resolve_agent run from the CTE that sets the 250 ms cap — whose re-read
+  // must see the commit as the bare call's does (review pass 1: only measured).
+  // The revoker commits as soon as the lookup is seen waiting, well inside the cap.
+  {
+    const store = new SqlStore(URL_!, { max: 1 });
+    let pending: Promise<unknown> | undefined;
+    let waited = false;
+    try {
+      const revoker = await hold((tx) => tx`SELECT revoke_agent_key(${keys.store}, 'SMD-2090 live, store')`);
+      try {
+        pending = store.resolveAgent({ keyHash: keys.store, label: labelOf("store"), scope: "write" }).catch((e) => e);
+        waited = await lookerWaits(null, 5);
+      } finally {
+        await revoker.commit();
+      }
+    } finally {
+      await pending;
+      await store.close();
+    }
+    const out = await pending! as { ok?: boolean; error?: string; agentId?: string; errno?: string };
+    assert(waited && out.ok === false && out.error === "REVOKED" && out.agentId === agentOf.store,
+      `…and through SqlStore.resolveAgent, the server's capped statement, it answers REVOKED too (waited: ${waited}; ${out.errno ?? JSON.stringify(out)})`);
+  }
+  // The same, of a key the lookup need not write: it answers from what was
+  // committed when it read — ok, at once, as a lookup a moment earlier would —
+  // and the next lookup, after the commit, is refused.
+  {
+    const revoker = await hold((tx) => tx`SELECT revoke_agent_key(${keys.early}, 'SMD-2090 live')`);
+    let early;
+    try {
+      early = await lookup("early");
+    } finally {
+      await revoker.commit();
+    }
+    const after = await lookup("early");
+    assert(early.r?.ok === true && after.r?.error === "REVOKED",
+      `a fresh key read before its revocation commits answers ok without waiting, and the lookup after the commit is REVOKED (${Math.round(early.ms)} ms; then ${after.r?.error ?? after.code})`);
+  }
+  // A key row deleted by hand while the lookup waited: the key is one never
+  // seen, registered again under its agent — the rotation branch, since the
+  // agent's label is still there.
+  {
+    const deleter = await hold((tx) => tx`DELETE FROM ob1_agent_keys WHERE key_hash = ${keys.gone}`);
+    let pending: ReturnType<typeof lookup> | undefined;
+    let waited = false;
+    try {
+      pending = lookup("gone", "write", 5000);
+      waited = await lookerWaits();
+    } finally {
+      await deleter.commit();
+    }
+    const gone = await pending!;
+    const [back] = await sql`SELECT canonical_agent_id::text AS a FROM ob1_agent_keys WHERE key_hash = ${keys.gone}`;
+    assert(waited && gone.r?.ok === true && gone.r.rotated === true && gone.r.agent_id === agentOf.gone && back?.a === agentOf.gone,
+      `a lookup whose row was deleted while it waited registers the key again under its agent (waited: ${waited}; ${gone.code || JSON.stringify(gone.r)})`);
+  }
+  // A key never seen whose row another transaction is inserting, revoked, as
+  // the lookup registers it: the lookup's INSERT waits on that row, and once it
+  // commits the ON CONFLICT writes nothing over a revoked row and the lookup
+  // answers REVOKED (010's DO UPDATE wrote over it and answered ok — the path
+  // a row deleted during a wait now reaches too; review pass 1).
+  {
+    const unseen = "b7".repeat(32);
+    const inserter = await hold((tx) => tx`
+      INSERT INTO ob1_agent_keys (key_hash, canonical_agent_id, scope, last_used_at, revoked_at, revoked_reason)
+      VALUES (${unseen}, ${agentOf.fresh}::uuid, 'write', now(), now(), 'SMD-2090 live, registration')`);
+    let pending: Promise<{ r?: R; code: string }> | undefined;
+    let waited = false;
+    try {
+      pending = looker.begin(async (tx: SQL) => {
+        await tx`SELECT set_config('lock_timeout', '5000ms', true)`;
+        return tx`SELECT resolve_agent(${unseen}, 'live-2090-unseen', 'write') AS r`;
+      }).then((rows) => ({ r: (rows as { r: R }[])[0].r, code: "" }), (e) => ({ code: String((e as { errno?: string }).errno ?? (e as Error).message) }));
+      waited = await lookerWaits();
+    } finally {
+      await inserter.commit();
+    }
+    try {
+      const reg = await pending!;
+      assert(waited && reg.r?.ok === false && reg.r.error === "REVOKED" && reg.r.agent_id === agentOf.fresh,
+        `a registration meeting a revoked row another transaction inserted answers REVOKED with that row's agent, not ok (waited: ${waited}; ${reg.code || JSON.stringify(reg.r)})`);
+    } finally {
+      await sql`DELETE FROM ob1_agent_keys WHERE key_hash = ${unseen}`;
+    }
+  }
+  // Its other half: the row another transaction is inserting is NOT revoked —
+  // the loser of two first sights, or a rotation meeting one. The lookup's
+  // INSERT waits, the ON CONFLICT writes over the unrevoked row, and the
+  // lookup answers ok, a rotation onto the label's agent (review pass 3: an
+  // inverted re-check, or DO NOTHING, refused every such key as revoked and
+  // no suite saw it).
+  {
+    const loser = "b9".repeat(32);
+    const inserter = await hold((tx) => tx`
+      INSERT INTO ob1_agent_keys (key_hash, canonical_agent_id, scope, last_used_at)
+      VALUES (${loser}, ${agentOf.fresh}::uuid, 'write', now())`);
+    let pending: Promise<{ r?: R; code: string }> | undefined;
+    let waited = false;
+    try {
+      pending = looker.begin(async (tx: SQL) => {
+        await tx`SELECT set_config('lock_timeout', '5000ms', true)`;
+        return tx`SELECT resolve_agent(${loser}, ${labelOf("fresh")}, 'write') AS r`;
+      }).then((rows) => ({ r: (rows as { r: R }[])[0].r, code: "" }), (e) => ({ code: String((e as { errno?: string }).errno ?? (e as Error).message) }));
+      waited = await lookerWaits();
+    } finally {
+      await inserter.commit();
+    }
+    try {
+      const won = await pending!;
+      assert(waited && won.r?.ok === true && won.r.rotated === true && won.r.agent_id === agentOf.fresh,
+        `…and one meeting an unrevoked row another transaction inserted answers ok, a rotation onto the label's agent (waited: ${waited}; ${won.code || JSON.stringify(won.r)})`);
+    } finally {
+      await sql`DELETE FROM ob1_agent_keys WHERE key_hash = ${loser}`;
+    }
+  }
+  // Under REPEATABLE READ — a database or role whose default isolation is not
+  // READ COMMITTED — the waiting UPDATE cannot re-read the committed row:
+  // Postgres fails it 40001, the SQLSTATE agents.ts retries, and a fresh
+  // attempt reads the revocation (review pass 2: the retry was tested only
+  // against a fake store).
+  {
+    const revoker = await hold((tx) => tx`SELECT revoke_agent_key(${keys.rr}, 'SMD-2090 live, repeatable read')`);
+    let pending: Promise<{ r?: R; code: string }> | undefined;
+    let waited = false;
+    try {
+      pending = looker.begin(async (tx: SQL) => {
+        await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`;
+        await tx`SELECT set_config('lock_timeout', '5000ms', true)`;
+        return tx`SELECT resolve_agent(${keys.rr}, ${labelOf("rr")}, 'write') AS r`;
+      }).then((rows) => ({ r: (rows as { r: R }[])[0].r, code: "" }), (e) => ({ code: String((e as { errno?: string }).errno ?? (e as Error).message) }));
+      waited = await lookerWaits();
+    } finally {
+      await revoker.commit();
+    }
+    const rr = await pending!;
+    const retry = await lookup("rr");
+    assert(waited && rr.code === "40001" && retry.r?.error === "REVOKED",
+      `under REPEATABLE READ the waiting write fails 40001, and the retry answers REVOKED (waited: ${waited}; ${rr.code || JSON.stringify(rr.r)}, then ${retry.r?.error ?? retry.code})`);
+  }
+
+  await looker.close();
+  await sql`DELETE FROM ob1_agent_keys WHERE key_hash IN (${keys.fresh}, ${keys.stale}, ${keys.race}, ${keys.gone}, ${keys.early}, ${keys.store}, ${keys.rr})`;
+  await sql`DELETE FROM ob1_agents WHERE label LIKE 'live-2090-%'`;
 }
 
 await sql.close();
