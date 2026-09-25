@@ -894,12 +894,14 @@ const T_COLS = (o: Options, entitiesHead: string): Col[] => [
   ...(o.edges ? [{ key: "edges", head: "edges", right: true }] : []),
   ...(o.decayDone || o.decayBlocked ? [{ key: "weight", head: "weight", right: true }] : []),
   { key: "status", head: "status", width: 14 },
-  // Uncapped: the column is the only place the text names what holds a
-  // thought (first review pass: 30 cut four ids; second: 80 cut eight).
-  ...(o.decayBlocked ? [{ key: "blockers", head: "blocked by", width: Infinity }] : []),
   { key: "id", head: "thought" },
   { key: "created_at", head: "captured", width: 24 },
   { key: "excerpt", head: "excerpt", width: 90 },
+  // Uncapped, and last so a long cell widens no other column and an empty one
+  // is trimmed away: the column is the only place the text names what holds a
+  // thought (review passes: 30 cut four ids, 80 cut eight; third: mid-table,
+  // one long cell padded every row).
+  ...(o.decayBlocked ? [{ key: "blockers", head: "blocked by", width: Infinity }] : []),
 ];
 /** How many of the listed thoughts carry a lifecycle — stated under every thought table (the coverage line has the brain's count). */
 const listedLifecycles = (rows: ThoughtRow[]): string => {

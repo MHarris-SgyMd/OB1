@@ -6039,12 +6039,12 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   const subjP = subj.thoughts.find((t) => t.id === tP);
   const kafkaN = subj.neighbours!.find((n) => n.name === "Kafka");
   assert(JSON.stringify(subjP?.blockers) === '["SMD-7002"]' && subjP?.weight === 0.25 && kafkaN?.co_mentions === 1.25 && kafkaN?.support === 0.25
-      && render(subj).includes("ranked by neighbours mentioned + subject edges evidenced, times the weight:") && /status +blocked by +thought/.test(render(subj)),
+      && render(subj).includes("ranked by neighbours mentioned + subject edges evidenced, times the weight:") && / excerpt +blocked by$/m.test(render(subj)),
     `around a subject under --status open --decay-blocked: tP is listed at 0.25 with its blocker, Kafka's co_mentions are the five blocked thoughts at 0.25 each and its support tQ's quarter, and the thought table has the column and the weight heading (${JSON.stringify(kafkaN)})`);
   await record(tQ, [E("Open Brain", "project"), E("Kafka", "tool")]);
   const rBlocked = render(await graphReport(run, null, openDecay));
   const tPline = rBlocked.split("\n").find((l) => l.includes(tP)) ?? "";
-  assert(rBlocked.includes("lifecycle open, blocked ×0.25;") && /weight +status +blocked by +thought/.test(rBlocked) && /0\.25 +Backlog +SMD-7002 +/.test(tPline) && rBlocked.includes("in-scope edges evidenced, times the weight:")
+  assert(rBlocked.includes("lifecycle open, blocked ×0.25;") && /weight +status +thought .* excerpt +blocked by$/m.test(rBlocked) && /0\.25 +Backlog .* SMD-7002$/.test(tPline) && rBlocked.includes("in-scope edges evidenced, times the weight:")
       && rBlocked.includes(". --decay-blocked: 5 thoughts with an open blocker weigh 0.25 of their lifecycle weight in every count (pre-registered, one weight), and a listed one names its blockers; degree counts neighbours, not evidence, and is unchanged; a completed or canceled ticket is settled, not blocked,")
       && rBlocked.includes("1 blocker of the down-weighted thoughts is unsettled") && rBlocked.includes("plus every thought without a lifecycle — it passes every filter; those with an open blocker at 0.25)")
       && render(await graphReport(run, null, { ...wide, decayBlocked: true })).includes("By its lifecycle every thought weighs 1: a Done ticket counts as a live one (--status open|active|done filters; --decay-done down-weights).\n"),
@@ -6052,12 +6052,12 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   // Two blockers, one from each direction: tR's `blocks` and tV's own blocked_by.
   await links(tV, [["blocked_by", "SMD-7001"]]);
   const tVline = render(await graphReport(run, null, openDecay)).split("\n").find((l) => l.includes(tV)) ?? "";
-  assert(JSON.stringify((await byId(openDecay)).get(tV)?.blockers) === JSON.stringify(["SMD-7001", "SMD-7003"]) && tVline.includes(" SMD-7001, SMD-7003 "),
+  assert(JSON.stringify((await byId(openDecay)).get(tV)?.blockers) === JSON.stringify(["SMD-7001", "SMD-7003"]) && tVline.endsWith(" SMD-7001, SMD-7003"),
     `a thought held by two blockers lists both, sorted, whichever side stated each — an array in the JSON, "a, b" in the table (${JSON.stringify(tVline)})`);
   await links(tV, [["blocked_by", "SMD-7001"], ["blocked_by", "SMD\n7010"], ...[1, 2, 3, 4, 5, 6, 7].map((n): [string, string] => ["blocked_by", `SMD-710${n}`])]);
   const tVrows = render(await graphReport(run, null, openDecay)).split("\n").filter((l) => l.includes(tV));
   assert(tVrows.length === 1 && tVrows[0].includes("SMD 7010") && tVrows[0].includes("SMD-7107") && !tVrows[0].includes("…") && (await topEntities(run, wide)).byMentions.find((e) => e.name === "Kafka")!.degree === 0,
-    `a blocker identity carrying a newline (facet data, untrusted) renders on the row as one space, as every other cell's whitespace does, and nine blockers are named in full, the column uncapped (second review pass); and tQ's edge is gone again (${JSON.stringify(tVrows)})`);
+    `a blocker identity carrying a newline (facet data, untrusted) renders on the row as one space, as every other cell's whitespace does, and ten blockers — nine of its own and tR's blocks — are named in full, the column uncapped (second review pass; third: ten, not nine); and tQ's edge is gone again (${JSON.stringify(tVrows)})`);
   await links(tV, []);
   assert(render(await graphReport(run, null, openStart)).includes("--startable: 5 thoughts with an open blocker weigh 0 in this run; a completed") && !weightsSql({ status: "open", decayDone: false, startable: true }, []).includes("END AS blockers")
       && weightsSql({ status: "open", decayDone: false, decayBlocked: true }, []).replace(/,\n +CASE WHEN [^\n]* THEN blockers END AS blockers/, "").replace("THEN 0.25 ELSE", "THEN 0 ELSE") === weightsSql({ status: "open", decayDone: false, startable: true }, [])
