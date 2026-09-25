@@ -4965,7 +4965,7 @@ const SHIM = "a maintenance script; it moves onto compat/supabase-sql under bun"
  */
 const POSTGREST_EXCEPTIONS = new Map<string, CountedException>([
   // Imports → the ingestion contract (after SMD-2136).
-  ["recipes/chatgpt-conversation-import/import-chatgpt.py", POSTGREST(`${IMPORT}; its match_thoughts dedup and chatgpt_conversations sidecar go with the transport`, "SMD-2147", 3)],
+  ["recipes/chatgpt-conversation-import/import-chatgpt.py", POSTGREST(`${IMPORT}; SMD-2147 decides its match_thoughts dedup and chatgpt_conversations sidecar`, "SMD-2147", 3)],
   ["recipes/perplexity-conversation-import/import-perplexity.py", POSTGREST(IMPORT, "SMD-2148", 1)],
   ["recipes/readwise-import/import-readwise.py", POSTGREST("an import on supabase-py that already captures through upsert_thought (SMD-1524) over a transport the fork lacks; it emits contract items", "SMD-2149", 2)],
   ["recipes/google-activity-import/import-google-activity.mjs", POSTGREST(IMPORT, "SMD-2150", 1)],

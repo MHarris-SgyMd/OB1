@@ -1,6 +1,6 @@
 # Google Activity Import
 
-> **On this fork (SMD-2126).** `import-google-activity.mjs` reaches the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and embeds each item itself; this fork's stack runs no PostgREST (SETUP.md), so the import fails at its first request (`--dry-run` runs). It becomes an adapter of the ingestion contract — the parser emits items for `bun db/ingest-records.ts --items`, which writes them through `upsert_thought` — in SMD-2150 (after SMD-2136); the decision for the class is in `docs/vendored-disposition.md`.
+> **On this fork (SMD-2126).** `import-google-activity.mjs` reaches the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and embeds each item itself; this fork's stack runs no PostgREST (SETUP.md), so the import fails at its first request (`--dry-run` runs). It becomes an adapter of the ingestion contract — the parser emits items for `bun db/ingest-records.ts --items`, which inserts each row itself with 003's fingerprint function, the audit actor and its `thought_sources` identity (`bun db/reembed.ts` embeds it) — in SMD-2150 (after SMD-2136); the decision for the class is in `docs/vendored-disposition.md`.
 
 <div align="center">
 

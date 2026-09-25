@@ -70,7 +70,8 @@ exactly one disposition.
   fingerprint server-side (SMD-2126 → SMD-2145).
 - **PostgREST-speaking scripts (SMD-2126, decided 2026-09-24): 30 files in 21 recipes**, one
   fate each — an import onto the ingestion contract, a maintenance script onto the shim, the
-  three above retire — in the section below; check 24 holds the class.
+  two smoke harnesses to their own tickets, the three above retire — in the section below;
+  check 24 holds the class.
 - **fold-in SMD-1867 (capture-source adapters): 5 integrations** — `chrome-capture-extension`,
   `discord-capture`, `slack-capture`, `telegram-capture`, `readwise-capture`. Plus **~11
   import recipes** flagged as candidate adapters (`chatgpt` / `email-history` / `gmail-smart-pull`
@@ -119,8 +120,9 @@ Thirty scripts in twenty-one recipes reach the brain as PostgREST clients —
 from a `.mjs` / `.js` / `.ts` `fetch`, or supabase-py's `create_client` from a `.py` — and
 none imports `compat/supabase-sql`. The fork's stack (SETUP.md) runs no PostgREST, so on
 this fork not one of their live modes reaches a brain — and an import's `--dry-run` runs
-because it never reaches the URL, where a maintenance script's reads the brain first and fails
-the same way. SMD-1802 left their READMEs' data-path prose alone for one decision for the class
+because it never reaches the URL (readwise's excepted: it asks `thoughts` which highlights it
+holds before its guard), where a maintenance script's reads the brain first and fails the same
+way. SMD-1802 left their READMEs' data-path prose alone for one decision for the class
 rather than twenty-one rewrites. This is that decision; the count is the survey of
 `main` at f7693c4c, re-measured on d8e3de60 (`grep -rlE "rest/v1|from supabase import|create_client\(|SUPABASE_SERVICE_ROLE_KEY" recipes --include=*.mjs --include=*.js --include=*.py --include=*.ts`,
 the ten files already on the shim set aside).
@@ -131,16 +133,21 @@ PostgREST profile* — `postgrest/postgrest` in `deploy/compose.yaml` behind a J
 the scripts run unchanged: one service and zero porting, but it brings back the surface
 SMD-1795 retired (its title: "no Supabase account, PostgREST or Deno anywhere in the tree"), and every raw insert
 SMD-1524 closed for the servers stays open for these scripts — five of them embed the text
-themselves and POST content and vector as a row, with no fingerprint, no model label and no
-audit actor, and five more call `upsert_thought` over `/rest/v1/rpc/`, the right function
-over the wrong transport. Declined. (3) *Port by kind* — taken, with (1)'s verdict for the three whose
+themselves and POST content and vector as a row — no model label, no audit actor, three with
+no fingerprint and two with one computed client-side, a copy of 003's rule that drifts with it
+— and five more call `upsert_thought` over `/rest/v1/rpc/`, the right function over the wrong
+transport. (SMD-1524's rule is for vendored code; the fork's own writers in `db/` — the
+ingester below among them — insert rows themselves by design, with the same fingerprint
+function and the audit actor set.) Declined. (3) *Port by kind* — taken, with (1)'s verdict for the three whose
 capability the fork's core already owns.
 
 **The kinds.** An **import** (a capture from an export) becomes an adapter of the ingestion
 contract (`db/ingest-contract.ts`, SMD-1867): its parser emits `Ingested` items and
 `bun db/ingest-records.ts --items` (SMD-2136, the one new mechanism) writes them through the
-pipeline — `upsert_thought`'s fingerprint, `thought_sources`, 053's links, the watermark,
-`reembed.ts` for the vector — so a Python parser stays Python and needs no database client.
+pipeline — its own insert, not `upsert_thought`: 003's `content_fingerprint_of`, the
+`ob1.actor` envelope for the audit, a deterministic id per item, `thought_sources`, 053's
+links, the watermark, `reembed.ts` for the vector — so a Python parser stays Python and needs
+no database client.
 Not the REST gateway the ticket named as the `.py` target: `integrations/open-brain-rest`'s
 `POST /capture` embeds at `openai/text-embedding-3-small` (1536), which the fork's default
 brain (`qwen3-embedding:4b`, 1024) refuses, and a request per row is the wrong shape for a
@@ -149,9 +156,22 @@ sidecar table) moves onto `compat/supabase-sql` under `bun`, its brain URL varia
 `postgres://` string — `SUPABASE_URL` for most; `OPEN_BRAIN_URL` for entity-wiki,
 typed-edge-classifier and wiki-synthesis; lint-sweep, weekly-digest and provenance-chains
 read either — the shape SMD-1798 gave the servers; the REST idioms map one to one
-(`Prefer: count=exact` → `{ count: "exact", head: true }`, `resolution=ignore-duplicates` →
-`upsert(…, { ignoreDuplicates })`, `/rpc/f` → `.rpc("f")`), and a thought a script deletes
-goes through `delete_thought`. A **smoke harness** has its own ticket. A script whose
+(`Prefer: count=exact` → `{ count: "exact" }`, with `head: true` only where the request was
+HEAD or `Range: 0-0` — a counted PATCH is the update's `.select()` and `data.length`;
+`resolution=ignore-duplicates` → `upsert(…, { ignoreDuplicates })`; `/rpc/f` → `.rpc("f")`),
+and a thought a script deletes goes through `.rpc("delete_thought", { p_id, p_actor })` — the
+actor a JSON object naming the script; a `CITED` answer arrives as `data.ok === false`, not in
+`error`, and each ticket says whether a cited row stays or `p_detach` goes. The key variable
+(`SUPABASE_SERVICE_ROLE_KEY`, `OPEN_BRAIN_SERVICE_KEY`) is read and ignored by the shim, so a
+script may stop requiring it. Four scripts — atomizer's, authorship-edges', entity-wiki's,
+typed-edge-classifier's — assume upstream's `schemas/entity-extraction` tables; on a fork
+brain `thought_entities` is migration 016's (a uuid `entity_id` to `ob1_entities`, no
+`mention_role`), so the schema's `CREATE TABLE IF NOT EXISTS` is a no-op there and a write of
+`mention_role` fails with 42703 whatever the transport (change 093 recorded the shared name
+for grants; the third review pass measured the write). Each port reads 016's shape and writes
+mentions through the fork's `record_thought_entities`, or its ticket says why not;
+`thought_edges` (`schemas/typed-reasoning-edges`) is its own name and applies. A **smoke
+harness** has its own ticket. A script whose
 capability is **in core** retires: `obsidian-vault-import` (the Markdown adapter,
 `ingest-records.ts --markdown`, is the import; the recipe's heading split with LLM
 distillation of long sections, its `--min-words` / `--skip-folders` / `--after` filters, its
@@ -169,13 +189,13 @@ cannot grow back. The table's size is the class's remaining size.
 
 | Recipe | Scripts (lines that speak PostgREST) | Touches | Fate | Ticket |
 |---|---|---|---|---|
-| `atomizer` | `audit-gmail-pipeline.mjs` (2), `lib/entity-resolver.mjs` (2), `re-atomize-gmail-thought.mjs` (2); `backfill-gmail-correspondents.mjs` through the lib | `thoughts`, `entities`, `thought_entities`, `thought_edges` | port onto the shim; thought writes through `upsert_thought` / `delete_thought` | SMD-2140 |
-| `authorship-edges` | `lib/author-edges.mjs` (2); `backfill-authorship.mjs` through the lib | `thoughts`, `entities`, `thought_entities` | port onto the shim | SMD-2141 |
+| `atomizer` | `audit-gmail-pipeline.mjs` (2), `lib/entity-resolver.mjs` (2), `re-atomize-gmail-thought.mjs` (2); `backfill-gmail-correspondents.mjs` through the lib | `thoughts`, `entities`, `thought_entities` (016's on a fork brain — above), `thought_edges` | port onto the shim; thought writes through `upsert_thought` / `delete_thought` | SMD-2140 |
+| `authorship-edges` | `lib/author-edges.mjs` (2); `backfill-authorship.mjs` through the lib | `thoughts`, `entities`, `thought_entities` (016's on a fork brain — above) | port onto the shim | SMD-2141 |
 | `brain-backup` | `backup-brain.mjs` (1) | `thoughts` (read) | port onto the shim; read-only | SMD-2144 |
 | `brain-smoke-test` | `smoke-all.js` (1) | `thoughts`, `graph_*`, `ingestion_jobs`, four RPCs | its own ticket: the harness takes the fork's shape or `deploy/smoke.sh` absorbs it | SMD-2103 |
-| `chatgpt-conversation-import` | `import-chatgpt.py` (3) | `thoughts` (raw POST with a vector), `match_thoughts`, `chatgpt_conversations` | port onto the ingestion contract | SMD-2147 |
+| `chatgpt-conversation-import` | `import-chatgpt.py` (3) | `thoughts` (raw POST with a vector), `match_thoughts`, `chatgpt_conversations` | port onto the ingestion contract; SMD-2147 decides its `match_thoughts` dedup and `chatgpt_conversations` sidecar | SMD-2147 |
 | `email-history-import` | `pull-gmail.ts` (2) | `thoughts` (raw POST with a vector) | port onto the ingestion contract | SMD-2021 |
-| `entity-wiki` | `generate-wiki.mjs` (1) | `thoughts`, `entities`, `thought_entities`, `edges`; `match_thoughts`, `upsert_thought` (reads `OPEN_BRAIN_URL`) | port onto the shim | SMD-2143 |
+| `entity-wiki` | `generate-wiki.mjs` (1) | `thoughts`, `entities`, `thought_entities` (016's on a fork brain — above), `edges`; `match_thoughts`, `upsert_thought` (reads `OPEN_BRAIN_URL`) | port onto the shim | SMD-2143 |
 | `fingerprint-dedup-backfill` | `delete-duplicates.mjs` (1), `backfill-fingerprints.mjs` (1) | `thoughts` (PATCH, DELETE) | `delete-duplicates.mjs` onto the shim, its deletes through `delete_thought`; `backfill-fingerprints.mjs` removed (migration 023) | SMD-2145 |
 | `google-activity-import` | `import-google-activity.mjs` (1) | `thoughts` (raw POST with a vector) | port onto the ingestion contract | SMD-2150 |
 | `lint-sweep` | `lint-sweep.js` (1) | `thoughts`, the entity tables, the seven `lint_*` views (read; either URL name) | port onto the shim; read-only | SMD-2144 |
@@ -187,7 +207,7 @@ cannot grow back. The table's size is the class's remaining size.
 | `readwise-import` | `import-readwise.py` (2, supabase-py) | `upsert_thought`, `readwise_books`, `thoughts` (UPDATE of two columns) | port onto the ingestion contract | SMD-2149 |
 | `source-filtering` | `backfill-metadata.ts` (2) | `thoughts` (PATCH of metadata) | port onto the shim | SMD-2021 |
 | `thought-enrichment` | `enrich-thoughts.mjs` (4), `backfill-type.mjs` (1), `backfill-sensitivity.mjs` (1) | `thoughts` (PATCH of metadata, `type`, `sensitivity_tier`) | port onto the shim | SMD-2139 |
-| `typed-edge-classifier` | `classify-edges.mjs` (1) | `thoughts`, `thought_entities`, `thought_edges`; `thought_edges_upsert` (reads `OPEN_BRAIN_URL`) | port onto the shim | SMD-2141 |
+| `typed-edge-classifier` | `classify-edges.mjs` (1) | `thoughts`, `thought_entities` (016's on a fork brain — above), `thought_edges`; `thought_edges_upsert` (reads `OPEN_BRAIN_URL`) | port onto the shim | SMD-2141 |
 | `weekly-digest` | `weekly-digest.mjs` (1) | `thoughts` (read; either URL name) | port onto the shim; read-only | SMD-2144 |
 | `wiki-synthesis` | `scripts/synthesize-wiki.mjs` (1), `scripts/backfill-gmail-wikis.mjs` (1) | `synthesize-wiki.mjs` reads `thoughts` and writes files; `backfill-gmail-wikis.mjs` reads `thoughts` and `thought_edges`, captures through `upsert_thought` — a raw `POST /thoughts` when the function is absent — and DELETEs pages (both read `OPEN_BRAIN_URL`) | port onto the shim; page deletes through `delete_thought` | SMD-2143 |
 
