@@ -60,13 +60,16 @@ export const DEFAULT_EGRESS_MODE: EgressMode = "deny";
  * one unit the key proves; `source`, `type` and `topic` read the row's
  * metadata, so they decide for the passes and the re-embed over rows already
  * tagged and are unknown at a first capture (the tags come FROM the call being
- * gated) — and `source` is the row's label at every step, the caller's at a
- * capture (capture_thought's `source`, `mcp` when it gave none; SMD-1298), so
- * one policy decides the same for a row at its capture and at the passes that
- * read it back; a caller's label is a claim, so a term about WHO wrote names
- * `actor`, which the key proves (SMD-1941 is binding a label to the key).
- * `marker` is a literal the text contains —
- * `#public`, `[phi]` — the one unit a writer controls per thought.
+ * gated). `source` is the row's own label at every step where it is judged —
+ * an edit, the re-embed, the consolidation passes — all reading the value the
+ * server wrote. A CAPTURE's `source` is different: it is the caller's claim
+ * (capture_thought's `source`, `mcp` when it gave none; SMD-1298), so a
+ * `source:` term does NOT gate a capture (`termMatches` refuses it for the
+ * `capture` kind) — it would be dodged by naming another label or none. To
+ * gate WHO may send a capture, name `actor`, which the key proves; keep
+ * `source:` for what a row's stored label says, at the passes that read it
+ * back (SMD-1941). `marker` is a literal the text contains — `#public`,
+ * `[phi]` — the one unit a writer controls per thought.
  */
 export const EGRESS_UNITS = ["actor", "source", "type", "topic", "marker"] as const;
 export type EgressUnit = (typeof EGRESS_UNITS)[number];
@@ -199,7 +202,14 @@ export function termMatches(term: EgressTerm, subject: EgressSubject): boolean {
     case "actor":
       return lower(subject.actor) === want;
     case "source":
-      return lower(subject.metadata?.source) === want;
+      // A capture's `source` is the caller's claim (capture_thought takes it,
+      // `mcp` when omitted; SMD-1298), so a `source:` term MUST NOT gate a
+      // capture — it would be dodged by naming another label or none (SMD-1941).
+      // At every other step the value is the row's own, written by the server,
+      // so it gates: an edit reads the stored row, the re-embed and the
+      // consolidation passes read it back. Who may capture is `actor:`, which
+      // the key proves.
+      return subject.kind === "capture" ? false : lower(subject.metadata?.source) === want;
     case "type":
       return lower(subject.metadata?.type) === want;
     case "topic": {

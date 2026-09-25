@@ -1711,14 +1711,16 @@ function buildServer(principal: Principal): McpServer {
         // and lands all the same, without the vector or the tags the refused
         // call would have produced, with the decision on its audit row.
         const cfg = embedConfig();
-        // The gate judges the label the ROW will carry — one value for the
-        // row's lifetime, so a `source:` term decides the same at the capture
-        // and at the re-embed and consolidation passes that read the row
-        // (fourth review pass: judging `mcp` here and the label there let one
-        // policy allow and refuse the same row). The label is the caller's, so
-        // a term about WHO wrote names `actor`, which the key proves; SMD-1941
-        // binds a label to the key.
-        const subject: EgressSubject = { kind: "capture", actor: principal.name, metadata: { source: origin }, content };
+        // The capture is gated on `actor` (the key, proven) and `marker` (the
+        // text) — not `source`. A capture's `source` is the caller's claim
+        // (`origin` above, recorded on the row below), so a `source:` term does
+        // NOT gate it: it would be dodged by naming another label or none, and
+        // `termMatches` refuses the unit for the `capture` kind (SMD-1941). The
+        // row still CARRIES the label, and the re-embed and consolidation passes
+        // that read the row back gate on it there, where it is the server's; to
+        // gate WHO may capture, an operator names `actor:<key>`. So the subject
+        // carries no `source` — nothing here is judged on it.
+        const subject: EgressSubject = { kind: "capture", actor: principal.name, content };
         const gate = decideCalls(subject, cfg, cfg.egress);
         // Independent of each other, so they overlap.
         const [embedded, metadata] = await Promise.all([
@@ -2042,6 +2044,10 @@ function buildServer(principal: Principal): McpServer {
         // moves (first review pass: an edit judged under the capture's bare
         // {source: "mcp"} let a row a type: or source: term names slip past).
         // A row that is not there is judged as bare and refused by the write.
+        // Here a `source:` term DOES gate: the label is the row's, written by
+        // the server at its capture, not a claim on this call — the opposite of
+        // the capture path, where `source` is the caller's and does not gate
+        // (SMD-1941). The `kind` tells the gate which it is.
         const cfg = embedConfig();
         const existing = content !== undefined ? await (await db()).getThought(id) : null;
         const subject: EgressSubject = { kind: "edit", actor: principal.name, metadata: existing?.metadata ?? { source: "mcp" }, content };

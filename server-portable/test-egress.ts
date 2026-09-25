@@ -133,7 +133,7 @@ console.log("\n[3] The rules: every unit under deny and allow, with the reason n
   const refused = mayLeaveBox(subject, remote, deny);
   assert(!refused.allowed && refused.rule === "no-allow-term" && /OB1_EGRESS_POLICY=deny \(the default\) and no OB1_EGRESS_ALLOW term matches this capture \(none set\) — the text was not sent to openrouter\.ai/.test(refused.reason),
          `deny with no terms refuses, naming the default and the host (${refused.reason})`);
-  for (const [term, hits] of [["actor:chatgpt", true], ["actor:other", false], ["source:MCP", true], ["source:linear", false], ["type:reference", true], ["type:task", false], ["topic:public", true], ["topic:private", false], ["marker:#PUBLIC", true], ["marker:#phi", false]] as [string, boolean][]) {
+  for (const [term, hits] of [["actor:chatgpt", true], ["actor:other", false], ["type:reference", true], ["type:task", false], ["topic:public", true], ["topic:private", false], ["marker:#PUBLIC", true], ["marker:#phi", false]] as [string, boolean][]) {
     const policy = resolveEgressPolicy({ OB1_EGRESS_ALLOW: term });
     const d = mayLeaveBox(subject, remote, policy);
     assert(d.allowed === hits && (hits ? d.rule === "allow-term" && d.reason.includes(`OB1_EGRESS_ALLOW ${term}`) : d.rule === "no-allow-term"),
@@ -142,6 +142,23 @@ console.log("\n[3] The rules: every unit under deny and allow, with the reason n
     assert(inverse.allowed === !hits && (hits ? inverse.rule === "deny-term" && inverse.reason.includes(`OB1_EGRESS_DENY ${term}`) : inverse.rule === "no-deny-term"),
            `allow + OB1_EGRESS_DENY=${term}: ${hits ? "refused by the term" : "allowed"}`);
   }
+  // `source` is the one unit whose gating depends on the kind (SMD-1941): a
+  // capture's source is the caller's claim, so a `source:` term never gates a
+  // capture — even one that DOES carry the label (`subject` above carries
+  // source "mcp"). At every other step the value is the row's own, so it gates.
+  const capAllow = mayLeaveBox(subject, remote, resolveEgressPolicy({ OB1_EGRESS_ALLOW: "source:mcp" }));
+  assert(!capAllow.allowed && capAllow.rule === "no-allow-term", "deny + OB1_EGRESS_ALLOW=source:mcp does NOT let a capture through — its source is the caller's claim (SMD-1941)");
+  const capDeny = mayLeaveBox(subject, remote, resolveEgressPolicy({ OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "source:mcp" }));
+  assert(capDeny.allowed && capDeny.rule === "no-deny-term", "allow + OB1_EGRESS_DENY=source:mcp does NOT hold a capture back — a source: term cannot gate a capture");
+  for (const kind of ["re-embed", "edit", "judge"] as const) {
+    const row: EgressSubject = { kind, metadata: { source: "mcp" } };
+    const rowAllow = mayLeaveBox(row, remote, resolveEgressPolicy({ OB1_EGRESS_ALLOW: "source:mcp" }));
+    assert(rowAllow.allowed && rowAllow.rule === "allow-term" && rowAllow.reason.includes("OB1_EGRESS_ALLOW source:mcp"), `deny + OB1_EGRESS_ALLOW=source:mcp lets a ${kind} of a row labelled mcp through — the row's own label gates`);
+    const rowDeny = mayLeaveBox(row, remote, resolveEgressPolicy({ OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "source:mcp" }));
+    assert(!rowDeny.allowed && rowDeny.rule === "deny-term", `allow + OB1_EGRESS_DENY=source:mcp holds a ${kind} of a row labelled mcp back`);
+    assert(termMatches({ unit: "source", value: "mcp" }, row) === true, `termMatches: source:mcp matches a ${kind} subject carrying that label`);
+  }
+  assert(termMatches({ unit: "source", value: "mcp" }, { kind: "capture", metadata: { source: "mcp" } }) === false, "termMatches: source:mcp never matches a capture subject, even one carrying the label (SMD-1941)");
   assert(termMatches({ unit: "topic", value: "x" }, { kind: "capture", metadata: { topics: "x" } }) === false, "a topics value that is not an array matches no topic term");
   assert(termMatches({ unit: "actor", value: "a" }, { kind: "query" }) === false && termMatches({ unit: "marker", value: "a" }, { kind: "query" }) === false, "an absent unit matches nothing");
   const off = mayLeaveBox(subject, remote, resolveEgressPolicy({ OB1_EGRESS_POLICY: "off" }));

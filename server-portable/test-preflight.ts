@@ -2064,8 +2064,8 @@ console.log("\n[8] The egress gate is reported: the mode, and per endpoint what 
   // says deny is the default; the endpoint row warns with the one-line fix.
   const undeclared = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL });
   const sourceTerm = await run({ ...BASE_OK, ...GATE, OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "source:mcp,type:idea" });
-  assert(/!\s+egress policy\s+1 source: term\(s\) \(source:mcp\) gate a label the caller supplies/.test(sourceTerm.out) && /actor:<key name>/.test(sourceTerm.out),
-         "a source: term is warned about — the label is the caller's since capture_thought takes it (ninth review pass)");
+  assert(/!\s+egress policy\s+1 source: term\(s\) \(source:mcp\) do NOT gate a capture/.test(sourceTerm.out) && /actor:<key name>/.test(sourceTerm.out),
+         "a source: term is warned about — it does not gate a capture, whose source is the caller's claim (SMD-1941)");
   assert(/✓\s+egress policy\s+deny \(the default\) — a thought's text reaches an endpoint not declared local only under an OB1_EGRESS_ALLOW term; no terms/.test(undeclared.out),
          "unset: the policy row says deny, the default, no terms");
   assert(new RegExp(String.raw`!\s+embeddings egress\s+${rx(LOCAL)} looks local but is not declared so — the gate treats it as remote, and under deny with no allow term every embeddings and chat call is refused: captures land without a vector`).test(undeclared.out),
