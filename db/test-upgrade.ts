@@ -503,11 +503,11 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // SMD-1726), 051 (the second release's schema_version, 1.1.0), 052
   // (thought_changes, the read over the audit log, SMD-1296), 053
   // (thought_sources, the link facet kind and the structured-wins rule,
-  // SMD-1867), 054 (resolve_agent's stale-only write, SMD-2090) and 055 (the
+  // SMD-1867), 054 (resolve_agent's stale-only write, SMD-2090), 055 (the
   // capture event carries the payload — the content, a backdating writer's
   // created_at, an update's key move — 046's rules as functions, the payload
-  // amendment and its backfill, SMD-2115) stay
-  // recorded and are never tried. 030 is the right one to make pending because its
+  // amendment and its backfill, SMD-2115) and 056 (the entity name gate,
+  // SMD-1935) stay recorded and are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
   // embedding_model column — are
   // exactly what a through-020 schema lacks, so it fails by name rather than
@@ -539,11 +539,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // ([20h]) or its last_used_at or scope (test-schema [49]); 055 redefines
   // 046's audit trigger, 046's refusal trigger and 050's stamp trigger on
   // their own bodies, adds functions and one partial index on 008's table,
-  // refusing by name without 008, 046 or 050 ([20i]) — all recorded by
+  // refusing by name without 008, 046 or 050 ([20i]); 056 adds two functions
+  // over 016's tables and redefines 053's record_thought_entities on its own
+  // body, refusing by name without 016 or 053 ([20j]); 057 upserts
+  // ob1_config.schema_version for the 1.2.0 cut, needing only 006's table — all recorded by
   // the baseline with their prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 26, `030 is among the last twenty-six migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 28, `030 is among the last twenty-eight migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -2095,6 +2098,37 @@ console.log("\n[20i] Migration 055 onto a populated brain at the file before it 
   const present = (await sql2`SELECT to_regprocedure('backfill_thought_payloads(integer)') IS NOT NULL AS f, to_regclass('thought_audit_awaiting_payload_idx') IS NOT NULL AS i`)[0] as { f: boolean; i: boolean };
   assert(full.code === 0 && present.f === true && present.i === true, `…and applied once both are there: the backfill and the index are present (exit ${full.code})`);
   await sql2.close();
+}
+
+console.log("\n[20j] Migration 056 on a schema without 016, and on 016's tables without 053's — refused up front, naming the missing migration and --reapply, and applied once both are there (SMD-1935)");
+{
+  // 056's guard is 053's ([20g]): without it a schema stopping before 016
+  // would fail at entity_type_gate's SQL body — validated at CREATE — with a
+  // bare "function normalize_entity_name(text) does not exist", and one with
+  // 016's tables but not 053's would apply, installing 053's writer body — the
+  // structured-wins rule — without the table and facet kind 053 ships beside it.
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "016" });
+  const baselined = await migrate("--baseline");
+  assert(baselined.code === 0, `--baseline records every migration over the pre-016 schema (exit ${baselined.code})`);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the056 = MIGRATIONS.find((f) => f.startsWith("056_"))!;
+  await sql`DELETE FROM schema_migrations WHERE name = ${the056}`;
+  const plain = await migrate();
+  const ok = plain.code === 1 &&
+    /056_entity_name_gate\.sql\s+FAILED: migration 056 needs 016 \(ob1_entity_edges\); this schema lacks it/.test(plain.out) &&
+    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+  assert(ok, `a plain run fails at 056 naming 016 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the056}`)[0].c) === 0, "…056 records nothing");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "016" && f < "053" });
+  const half = await migrate();
+  assert(half.code === 1 && /056_entity_name_gate\.sql\s+FAILED: migration 056 needs 053 \(thought_sources, and its record_thought_entities body\); this schema lacks it/.test(half.out),
+    `…and with 016's tables but not 053's it names 053 (exit ${half.code})${half.code === 1 ? "" : `:\n${half.out}`}`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "053" });
+  // An apply that did not throw is not the function present ([20c]'s lesson): read 056's sentinel off the live body.
+  const [body] = await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure('record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)')`;
+  assert(/ob1:name-gate/.test(String(body?.s ?? "")) && (await sql`SELECT to_regprocedure('apply_entity_type_gate()') IS NOT NULL AS p`)[0].p === true, "…and applied once both are there: the live writer is 056's and the pass is present");
+  await sql.close();
 }
 
 console.log("\n[21] test-support's schema reset leaves nothing of the fork's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");

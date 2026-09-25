@@ -386,7 +386,7 @@ let retried = 0;
 /** Thoughts a runaway was aborted on the stream for, before its budget (SMD-1960). */
 let aborted = 0;
 let calls = 0;
-const totals = { entities: 0, newEntities: 0, mentions: 0, edges: 0, dropped: 0, ambiguous: 0 };
+const totals = { entities: 0, newEntities: 0, mentions: 0, edges: 0, dropped: 0, ambiguous: 0, refused: 0, retyped: 0, gated: false };
 const activeWorkers = new Set<string>();
 const started = Date.now();
 let total = 0;
@@ -464,7 +464,7 @@ async function processRow(row: Row): Promise<Outcome> {
       ${extraction.entities}::jsonb, ${extraction.relations}::jsonb,
       ${row.fingerprint}::text, ${agentId}::uuid
     ) AS r`;
-  const res = r.r as { ok: boolean; stale?: boolean; error?: string; entities?: number; new_entities?: number; mentions?: number; edges?: number; dropped_relations?: number; ambiguous_relations?: number };
+  const res = r.r as { ok: boolean; stale?: boolean; error?: string; entities?: number; new_entities?: number; mentions?: number; edges?: number; dropped_relations?: number; ambiguous_relations?: number; refused_entities?: number; retyped_entities?: number };
   if (res.ok) {
     totals.entities += res.mentions ?? 0;
     totals.newEntities += res.new_entities ?? 0;
@@ -472,6 +472,10 @@ async function processRow(row: Row): Promise<Outcome> {
     totals.edges += res.edges ?? 0;
     totals.dropped += res.dropped_relations ?? 0;
     totals.ambiguous += res.ambiguous_relations ?? 0;
+    // A brain before 056 returns no gate counts: say nothing rather than a gate's zeros (third review pass).
+    if (res.refused_entities !== undefined) totals.gated = true;
+    totals.refused += res.refused_entities ?? 0;
+    totals.retyped += res.retyped_entities ?? 0;
     return { outcome: "succeeded" };
   }
   if (res.error === "NOT_FOUND") return { outcome: "vanished" };
@@ -762,7 +766,8 @@ console.log(
 );
 console.log(
   `  wrote ${totals.mentions} mentions of ${totals.newEntities} new entities, ${totals.edges} edges; ` +
-    `dropped ${totals.dropped} relation(s) naming an unlisted entity; ${totals.ambiguous} attached to a name listed under two types`
+    `dropped ${totals.dropped} relation(s) naming an unlisted entity; ${totals.ambiguous} attached to a name listed under two types` +
+    (totals.gated ? `; the name gate (056) refused ${totals.refused} entity name(s) and retyped ${totals.retyped}` : "")
 );
 if (malformed > 0) console.error(`  ${malformed} answer(s) were not JSON of the expected shape — recorded failed`);
 printCounts(after, "after");
