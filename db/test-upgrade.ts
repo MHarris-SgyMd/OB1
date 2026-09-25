@@ -465,7 +465,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // SMD-1726), 051 (the second release's schema_version, 1.1.0), 052
   // (thought_changes, the read over the audit log, SMD-1296) and 053
   // (thought_sources, the link facet kind and the structured-wins rule,
-  // SMD-1867) and 054 (the capture event carries the payload — the content,
+  // SMD-1867) and 055 (the capture event carries the payload — the content,
   // a backdating writer's created_at, an update's key move — 046's rules as
   // functions, the payload amendment and its backfill, SMD-2115) stay
   // recorded and are never tried. 030 is the right one to make pending because its
@@ -495,10 +495,10 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // name without either ([20f]); 053 adds a table on 001's thoughts, two
   // indexes on 042's thought_facets and redefines 016's
   // record_thought_entities and 042's thought_facets_validate on their own
-  // bodies, refusing by name without 016 or 042 ([20g]); 054 redefines 046's
+  // bodies, refusing by name without 016 or 042 ([20g]); 055 redefines 046's
   // audit trigger, 046's refusal trigger and 050's stamp trigger on their own
   // bodies, adds functions and one partial index on 008's table, refusing by
-  // name without 008, 046 or 050 ([20h]) — all recorded by
+  // name without 008, 046 or 050 ([20i]) — all recorded by
   // the baseline with their prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
@@ -1937,10 +1937,10 @@ console.log("\n[20g] Migration 053 on a schema without 016, and on 016's tables 
   await sql.close();
 }
 
-console.log("\n[20h] Migration 054 onto a populated 053 — every capture row written before gains its payload from the log and the row at apply, the pass writes no event and moves no row, a second pass finds nothing; and on a schema without 046 or 050 the file is refused up front, naming the migration and --reapply (SMD-2115)");
+console.log("\n[20i] Migration 055 onto a populated 053 — every capture row written before gains its payload from the log and the row at apply, the pass writes no event and moves no row, a second pass finds nothing; and on a schema without 046 or 050 the file is refused up front, naming the migration and --reapply (SMD-2115)");
 {
   await dropSchema(URL_);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "054" });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "055" });
   const sql = new SQL({ url: URL_, max: 1 });
   const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
   await sql`SELECT set_agent_kind('laptop', 'operator')`;
@@ -1948,13 +1948,13 @@ console.log("\n[20h] Migration 054 onto a populated 053 — every capture row wr
   const actor = { name: "laptop", agent_id: laptop.agent_id, via: "open-brain" };
   // A corpus at 053, in 046's shape: a thought whose text later moved, one
   // deleted, one standing, and a backdated raw record (ingest-records' shape).
-  const moved = (await sql`SELECT upsert_thought('upgrade 054: the first text', ${{ metadata: { source: "mcp" }, actor }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
-  await sql`SELECT update_thought(${moved.id}::uuid, 'upgrade 054: the second text', NULL, NULL, NULL, NULL, ${actor}::jsonb, NULL, NULL, NULL)`;
-  const gone = (await sql`SELECT upsert_thought('upgrade 054: deleted before 054', ${{ metadata: { source: "mcp" }, actor }}::jsonb, ${vec(1)}::vector) AS r`)[0].r as { id: string };
+  const moved = (await sql`SELECT upsert_thought('upgrade 055: the first text', ${{ metadata: { source: "mcp" }, actor }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
+  await sql`SELECT update_thought(${moved.id}::uuid, 'upgrade 055: the second text', NULL, NULL, NULL, NULL, ${actor}::jsonb, NULL, NULL, NULL)`;
+  const gone = (await sql`SELECT upsert_thought('upgrade 055: deleted before 055', ${{ metadata: { source: "mcp" }, actor }}::jsonb, ${vec(1)}::vector) AS r`)[0].r as { id: string };
   await sql`SELECT delete_thought(${gone.id}::uuid, ${actor}::jsonb, false)`;
-  const still = (await sql`SELECT upsert_thought('upgrade 054: still standing', ${{ metadata: { source: "mcp" }, actor }}::jsonb, ${vec(2)}::vector) AS r`)[0].r as { id: string };
+  const still = (await sql`SELECT upsert_thought('upgrade 055: still standing', ${{ metadata: { source: "mcp" }, actor }}::jsonb, ${vec(2)}::vector) AS r`)[0].r as { id: string };
   const RAW = "54545454-2054-4054-8054-000000000001";
-  await sql.unsafe(`INSERT INTO thoughts (id, content, metadata, embedding, created_at) VALUES ('${RAW}', 'upgrade 054: a backdated record', '{"source": "load"}'::jsonb, '${vec(3)}'::vector, '2024-02-03T04:05:06Z')`);
+  await sql.unsafe(`INSERT INTO thoughts (id, content, metadata, embedding, created_at) VALUES ('${RAW}', 'upgrade 055: a backdated record', '{"source": "load"}'::jsonb, '${vec(3)}'::vector, '2024-02-03T04:05:06Z')`);
   const waiting = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit WHERE action = 'capture' AND NOT (diff ? 'content')`)[0].c);
   const captureOf = async (id: string) => (await sql`SELECT diff FROM thought_audit WHERE thought_id = ${id}::uuid AND action = 'capture' ORDER BY created_at, seq LIMIT 1`)[0]?.diff as Record<string, unknown> | undefined;
   assert((await waiting()) === 4 && !("content" in (await captureOf(moved.id))!) && !("created_at" in (await captureOf(RAW))!), "at 053 four capture rows carry no content, and the backdated record's event no created_at — the log alone cannot rebuild them");
@@ -1963,57 +1963,57 @@ console.log("\n[20h] Migration 054 onto a populated 053 — every capture row wr
   const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
   const shapeBefore = await shape(sql);
 
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("054") });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("055") });
 
   assert((await waiting()) === 0, `the file's own backfill call fills every waiting capture row (${await waiting()} left)`);
-  assert((await captureOf(moved.id))?.content === "upgrade 054: the first text", "…the moved thought's capture holds the text AS CAPTURED, from the update's before — not the text that stands");
-  assert((await captureOf(gone.id))?.content === "upgrade 054: deleted before 054", "…the deleted thought's from its tombstone");
-  assert((await captureOf(still.id))?.content === "upgrade 054: still standing" && !("created_at" in (await captureOf(still.id))!), "…the standing thought's from its row, and no created_at for a row that took now()");
+  assert((await captureOf(moved.id))?.content === "upgrade 055: the first text", "…the moved thought's capture holds the text AS CAPTURED, from the update's before — not the text that stands");
+  assert((await captureOf(gone.id))?.content === "upgrade 055: deleted before 055", "…the deleted thought's from its tombstone");
+  assert((await captureOf(still.id))?.content === "upgrade 055: still standing" && !("created_at" in (await captureOf(still.id))!), "…the standing thought's from its row, and no created_at for a row that took now()");
   const raw = (await sql`SELECT (a.diff->>'created_at')::timestamptz = t.created_at AS same, a.diff->>'content' AS c FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE a.thought_id = ${RAW}::uuid AND a.action = 'capture'`)[0] as { same: boolean; c: string };
-  assert(raw.same === true && raw.c === "upgrade 054: a backdated record", "…and the backdated record's from its row, with the row's own created_at since it differs from the event's");
+  assert(raw.same === true && raw.c === "upgrade 055: a backdated record", "…and the backdated record's from its row, with the row's own created_at since it differs from the event's");
   const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
   assert(Number(auditAfter) === Number(auditBefore) && (await stamps()) === before, "the pass is an amendment, not an event: no audit row written, no thought's content, key or updated_at moved");
   let bf = (await sql`SELECT backfill_thought_payloads() AS r`)[0].r as { rows: number; unrecoverable: number; awaiting: number };
   assert(bf.rows === 0 && bf.unrecoverable === 0 && bf.awaiting === 0, `a second pass fills nothing (${JSON.stringify(bf)})`);
   // The mirror: the day after, a capture carries its content as it lands and
   // a backdated raw insert its created_at; an edit carries the key's move.
-  const fresh = (await sql`SELECT upsert_thought('upgrade 054: captured after', ${{ metadata: { source: "mcp" }, actor }}::jsonb, ${vec(4)}::vector) AS r`)[0].r as { id: string };
-  assert((await captureOf(fresh.id))?.content === "upgrade 054: captured after", "after 054 a capture's event carries the content as it lands");
+  const fresh = (await sql`SELECT upsert_thought('upgrade 055: captured after', ${{ metadata: { source: "mcp" }, actor }}::jsonb, ${vec(4)}::vector) AS r`)[0].r as { id: string };
+  assert((await captureOf(fresh.id))?.content === "upgrade 055: captured after", "after 055 a capture's event carries the content as it lands");
   const RAW2 = "54545454-2054-4054-8054-000000000002";
-  await sql.unsafe(`INSERT INTO thoughts (id, content, metadata, created_at) VALUES ('${RAW2}', 'upgrade 054: backdated after', '{"source": "load"}'::jsonb, '2024-02-03T04:05:07Z')`);
+  await sql.unsafe(`INSERT INTO thoughts (id, content, metadata, created_at) VALUES ('${RAW2}', 'upgrade 055: backdated after', '{"source": "load"}'::jsonb, '2024-02-03T04:05:07Z')`);
   const raw2 = (await sql`SELECT (a.diff->>'created_at')::timestamptz = t.created_at AS same FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE a.thought_id = ${RAW2}::uuid AND a.action = 'capture'`)[0] as { same: boolean };
   assert(raw2.same === true, "…a backdated raw insert its created_at");
-  await sql`SELECT update_thought(${fresh.id}::uuid, 'upgrade 054: edited after', NULL, NULL, NULL, NULL, ${actor}::jsonb, NULL, NULL, NULL)`;
+  await sql`SELECT update_thought(${fresh.id}::uuid, 'upgrade 055: edited after', NULL, NULL, NULL, NULL, ${actor}::jsonb, NULL, NULL, NULL)`;
   const move = (await sql`SELECT diff->'content_fingerprint' AS k FROM thought_audit WHERE thought_id = ${fresh.id}::uuid AND action = 'update'`)[0]?.k as { before: string | null; after: string | null } | null;
   assert(typeof move?.before === "string" && typeof move?.after === "string" && move.before !== move.after, `…and an edit the key's move (${JSON.stringify(move)})`);
   // Re-apply: a no-op.
   const shapeAfter = await shape(sql), again = await stamps();
   const [{ c: auditAgain }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("054") });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("055") });
   assert(JSON.stringify(await shape(sql)) === JSON.stringify(shapeAfter) && (await stamps()) === again && Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === Number(auditAgain) && JSON.stringify(shapeAfter) !== JSON.stringify(shapeBefore),
-    "re-applying 054 is a no-op: the shape as it left it (six functions and an index more than 053), no row moved, no audit row added, nothing to fill");
+    "re-applying 055 is a no-op: the shape as it left it (six functions and an index more than 053), no row moved, no audit row added, nothing to fill");
   await sql.close();
 
   // The guard, driven ([20g]'s shape): a brain baselined at a ledger through
-  // 054 whose schema stops before 046, then before 050.
+  // 055 whose schema stops before 046, then before 050.
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "046" });
   const baselined = await migrate("--baseline");
   assert(baselined.code === 0, `--baseline records every migration over the pre-046 schema (exit ${baselined.code})`);
   const sql2 = new SQL({ url: URL_, max: 1 });
-  const the054 = MIGRATIONS.find((f) => f.startsWith("054_"))!;
-  await sql2`DELETE FROM schema_migrations WHERE name = ${the054}`;
+  const the055 = MIGRATIONS.find((f) => f.startsWith("055_"))!;
+  await sql2`DELETE FROM schema_migrations WHERE name = ${the055}`;
   const plain = await migrate();
   const ok = plain.code === 1 &&
-    /054_capture_event_payload\.sql\s+FAILED: migration 054 needs 046 \(thought_audit\.actor_kind, ob1_registry_kind\); this schema lacks it/.test(plain.out) &&
+    /055_capture_event_payload\.sql\s+FAILED: migration 055 needs 046 \(thought_audit\.actor_kind, ob1_registry_kind\); this schema lacks it/.test(plain.out) &&
     /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
-  assert(ok, `a plain run fails at 054 naming 046 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
-  assert(Number((await sql2`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the054}`)[0].c) === 0, "…054 records nothing");
+  assert(ok, `a plain run fails at 055 naming 046 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql2`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the055}`)[0].c) === 0, "…055 records nothing");
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "046" && f < "050" });
   const half = await migrate();
-  assert(half.code === 1 && /054_capture_event_payload\.sql\s+FAILED: migration 054 needs 050 \(thought_audit\.seq, ob1_stamp_actor\); this schema lacks it/.test(half.out),
+  assert(half.code === 1 && /055_capture_event_payload\.sql\s+FAILED: migration 055 needs 050 \(thought_audit\.seq, ob1_stamp_actor\); this schema lacks it/.test(half.out),
     `…and with 046's columns but not 050's it names 050 (exit ${half.code})${half.code === 1 ? "" : `:\n${half.out}`}`);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "050" && f < "054" });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "050" && f < "055" });
   const full = await migrate();
   const present = (await sql2`SELECT to_regprocedure('backfill_thought_payloads(integer)') IS NOT NULL AS f, to_regclass('thought_audit_awaiting_payload_idx') IS NOT NULL AS i`)[0] as { f: boolean; i: boolean };
   assert(full.code === 0 && present.f === true && present.i === true, `…and applied once both are there: the backfill and the index are present (exit ${full.code})`);

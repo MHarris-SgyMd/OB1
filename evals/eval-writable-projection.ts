@@ -4,7 +4,7 @@
  * write lands as an event first and a projector writes the row?
  *
  * The run resets a throwaway Postgres to the shipped migrations (053 when this
- * was measured; 054 since SMD-2115 shipped the diff rule, the append and the
+ * was measured; 055 since SMD-2115 shipped the diff rule, the append and the
  * stamp arms, which the prototype SQL now calls rather than defines) and measures the same
  * scripted writes — the vendored capture as readwise sends it, the 2- and
  * 4-argument forms, the server's and the integrations' update_thought calls,
@@ -860,7 +860,7 @@ async function teardown(url: string): Promise<void> {
   await sql`DROP TRIGGER IF EXISTS thoughts_snapshot_embedding ON thoughts`;
   for (const fn of [
     // (ob1_thought_diff, ob1_append_thought_event, ob1_actor_stamp and
-    // ob1_actor_stamp_kept were the prototype's until 054 shipped them —
+    // ob1_actor_stamp_kept were the prototype's until 055 shipped them —
     // SMD-2115; test-support's reset owns them now.)
     "ob1_snapshot_embedding()", "ob1_project_thought_event(uuid, vector, text, boolean)", "ob1_refresh_thought_vector(uuid, vector, text)",
     "ob1_thoughts_view_insert()", "ob1_thoughts_view_update()", "ob1_thoughts_view_delete()",
@@ -969,7 +969,7 @@ function selfCheck(): void {
   assert(Object.keys(EXPECTED).join() === "baseline,option2,option1-unchanged,option1", "a row per option");
   assert(Object.values(EXPECTED).every((row) => Object.keys(row).every((k) => CRITERION_IDS.includes(k as CriterionId) && k !== "C13" && k !== "C14")), "cells only for gating criteria");
   assert(EXPECTED.option2.C6 === "PASS" && EXPECTED.option1.C6 === "FAIL" && EXPECTED["option1-unchanged"].C1 === "FAIL", "the record: option 2 keeps the community DDL, option 1 breaks it, 053's functions fail through the view");
-  assert(EXPECTED.baseline.C1 === "PASS" && EXPECTED.baseline.C12 === "N/A", "the record: the shipped capture event carries the content since 054 (SMD-2115; at 053 the baseline failed C1's last clause), and the baseline still cannot be replayed — no projector");
+  assert(EXPECTED.baseline.C1 === "PASS" && EXPECTED.baseline.C12 === "N/A", "the record: the shipped capture event carries the content since 055 (SMD-2115; at 053 the baseline failed C1's last clause), and the baseline still cannot be replayed — no projector");
   const obsAll: Observation[] = (Object.keys(EXPECTED) as OptionId[]).flatMap((opt) => (Object.entries(EXPECTED[opt]) as [CriterionId, Outcome][]).map(([c, o]) => {
     const count = EXPECTED_PROBES[opt][c];
     const probes = count ? count[1] : o === "N/A" ? 0 : 1;

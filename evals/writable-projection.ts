@@ -7,7 +7,7 @@
  * `--self-check` with no database.
  *
  *   OPTIONS     — the schemas measured: the shipped schema as it stands (the
- *                 baseline — 053 when measured, 054 since SMD-2115 put the
+ *                 baseline — 053 when measured, 055 since SMD-2115 put the
  *                 content in the capture event, which C1 reads),
  *                 option 2 (table stays, functions append then project), option
  *                 1 with the functions unchanged, option 1 with option 2's
@@ -48,7 +48,7 @@ export type OptionInfo = { id: OptionId; label: string; movedObjects: number; de
  * (third review pass).
  */
 export const OPTIONS: readonly OptionInfo[] = [
-  { id: "baseline", label: "the shipped schema as it stands", movedObjects: 0, description: "the shipped migrations (054: the audit trigger derives the event from the row after the write, the capture event carrying the content since SMD-2115)" },
+  { id: "baseline", label: "the shipped schema as it stands", movedObjects: 0, description: "the shipped migrations (055: the audit trigger derives the event from the row after the write, the capture event carrying the content since SMD-2115)" },
   { id: "option2", label: "option 2 — table stays, functions append then project", movedObjects: 9,
     description: "upsert_thought (2), update_thought, delete_thought append the event and call one projector; the audit trigger checks a projected write and appends a raw one; 001's updated_at trigger yields to the projector; the snapshot table and its trigger" },
   { id: "option1-unchanged", label: "option 1 — a view named thoughts, 053's functions unchanged", movedObjects: 6,
@@ -298,7 +298,7 @@ export function costLine(t: Timing): string {
  */
 export const EXPECTED: Readonly<Record<OptionId, Readonly<Partial<Record<CriterionId, Outcome>>>>> = {
   // C1 was FAIL at 053 (the capture event carried no content — SMD-1998's
-  // finding, measured from the other side); 054 (SMD-2115) put the content in
+  // finding, measured from the other side); 055 (SMD-2115) put the content in
   // the event and the baseline passes it since.
   baseline: { C1: "PASS", C2: "PASS", C3: "PASS", C4: "PASS", C5: "PASS", C6: "PASS", C7: "PASS", C8: "PASS", C9: "PASS", C10: "PASS", C11: "PASS", C12: "N/A" },
   option2: { C1: "PASS", C2: "PASS", C3: "PASS", C4: "PASS", C5: "PASS", C6: "PASS", C7: "PASS", C8: "PASS", C9: "PASS", C10: "PASS", C11: "PASS", C12: "PASS" },

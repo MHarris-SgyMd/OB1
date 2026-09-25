@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1666 assertions: 1666 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1672 assertions: 1672 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-four (54) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -204,7 +204,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
-051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2115).
+051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 055 SMD-2115).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -222,9 +222,9 @@ The decision that `thought_audit` is the write-side source of truth and the
 and one projector writing the row, the audit trigger becoming the check, the
 table kept for the community's DDL — is `../docs/event-log-as-truth.md`
 (SMD-1997). Its three steps are filed (SMD-2115, SMD-2116, SMD-2117) and the
-first has landed as migration 054 (below); at 054 the row is still written
+first has landed as migration 055 (below); at 055 the row is still written
 first and the trigger derives the event from it, as the paragraphs below
-describe — what 054 changes is what the event carries.
+describe — what 055 changes is what the event carries.
 
 Migration 046 makes `thought_audit` the log of record (SMD-1730): eight columns
 beside 008's and 010's — `actor_kind` and `trust` (who holds the key, and the
@@ -313,7 +313,7 @@ an `extract:*` pass replaces only extracted rows, and where both name one
 (thought, entity) or edge the structured row stands. Additive, no data change,
 no ACL; the ingester and the board sync write through it (below).
 
-Migration 054 makes the capture event carry the payload (SMD-2115, step 1 of
+Migration 055 makes the capture event carry the payload (SMD-2115, step 1 of
 `../docs/event-log-as-truth.md`): a capture's `diff` carries the **content**
 and, when the writer set the row's own time (`db/ingest-records.ts` backdates
 a record), its **`created_at`**; an update's `diff` carries the key's move
@@ -325,7 +325,7 @@ rule, its append and 050's two stamp arms become functions the triggers call
 `ob1_actor_stamp_kept`), one copy each for the write functions to call before
 the row exists at step 2. Rows already written: `SELECT
 backfill_thought_payloads();` fills `diff.content` (and `created_at`) on every
-capture row from before 054 — from the first content-moving update's `before`,
+capture row from before 055 — from the first content-moving update's `before`,
 else the tombstone's `previous_content`, else the live row — under
 `ob1.audit_amend = 'payload'`, the third amendment the append-only trigger
 allows (a capture row's `diff.content` and `diff.created_at` where absent, with
@@ -335,11 +335,19 @@ bounds the batch, as for 023 and 050); preflight's `audit events` counts the
 capture rows still without content and names the pass. On the dogfood brain
 every one of 632 rows derived (239 from an update, 1 from a tombstone, 392
 from the live row; 222 gained a `created_at`). The events read for a capture
-are the thought's rows written after it (`seq` later, or `(created_at, seq)`
-later — `created_at` is the transaction's start, so an edit from an older
-transaction can be stamped before the capture it follows) and no further than
-the first later tombstone or capture — an id `ingest-records.ts` re-uses after
-a delete has a second incarnation whose edits are not the first capture's.
+are the thought's rows written after it — since `ob1_config.audit_seq_exact_since`
+(050's `applied_at`, recorded at apply) a row is later when its `seq` is
+larger and rows order by `seq`, the identity being exact insertion order; before
+it a row is later when `(created_at, seq)` is larger and rows order so, the
+pre-050 `seq` being heap order — and no further than the first later tombstone
+or capture: an id `ingest-records.ts` re-uses after a delete has a second
+incarnation whose edits are not the first capture's, and a prior incarnation's
+rows are not the second's. `created_at` is the transaction's start, so an edit
+from an older transaction can be stamped before the capture it follows; the
+boundary is what tells it from a prior incarnation's row. A thought deleted
+while the pass runs makes the gate refuse that row; the pass catches it, sets
+the row aside as `skipped` and runs again, and the next pass fills it from the
+tombstone.
 Additive, no signature moves, no return changes, no row written differently.
 What a reader sees change: `thought_changes` lists `content_fingerprint` in
 `changed` when a text moves; and two passes that wrote no audit row before
@@ -2019,8 +2027,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1666 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 683 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1672 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 687 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

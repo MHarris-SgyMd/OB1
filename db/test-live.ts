@@ -2386,10 +2386,10 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
 
   // The audit log: nothing for a vector replaced by a vector, one row for a
   // vector where there was none — 008's trigger diffs presence, not value —
-  // and, since 054 (SMD-2115), one for the legacy twin update_thought keyed
+  // and, since 055 (SMD-2115), one for the legacy twin update_thought keyed
   // as it passed (the first of the pair it reached takes 003's key, the other
   // stays NULL under 018): the key's move is the third thing the event
-  // carries, and before 054 that fill left no trace.
+  // carries, and before 055 that fill left no trace.
   const [{ auditAfter }] = await sql`SELECT count(*)::int AS "auditAfter" FROM thought_audit`;
   assert(Number(auditAfter) - Number(auditBefore) === 2, `the pass wrote two audit rows, not thirty-seven — the vector where there was none, and the key the first legacy twin gained (${Number(auditAfter) - Number(auditBefore)})`);
   const keyRows = await sql`
@@ -4555,7 +4555,7 @@ await sql.close();
 // db/README.md's Testing block quotes this suite's assertion total. The count
 // is lower when a group is skipped (PostgreSQL 18, or JIT off), so only a full
 // run — as CI's pg16-with-JIT job is — is compared to the headline (SMD-1805).
-console.log("\n[24] Migration 054's payload backfill under two connections: a second pass beside a held one skips what the first filled and counts only its own; the derivation of a capture whose update was stamped before it by an older transaction reads that update (SMD-2115)");
+console.log("\n[25] Migration 055's payload backfill under two connections: a second pass beside a held one skips what the first filled and counts only its own; the derivation of a capture whose update was stamped before it by an older transaction reads that update (SMD-2115)");
 {
   // PGlite is one connection, so test-schema [49] cannot hold what the
   // header promises of two passes at once — the fill's re-read under the row
@@ -4569,7 +4569,7 @@ console.log("\n[24] Migration 054's payload backfill under two connections: a se
   for (let i = 0; i < N; i++) {
     await sql`INSERT INTO thoughts (content, metadata) VALUES (${`concurrent pass row ${i}`}, '{"source": "plant"}'::jsonb)`;
   }
-  // 046's shape: a second capture row per thought, without content, older than the real one would be irrelevant — plant them as the thought's only capture by stripping 054's.
+  // 046's shape: a second capture row per thought, without content, older than the real one would be irrelevant — plant them as the thought's only capture by stripping 055's.
   await sql.unsafe(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_immutable`);
   await sql.unsafe(`UPDATE thought_audit SET diff = diff - 'content' - 'created_at' WHERE action = 'capture' AND diff->'metadata'->>'source' = 'plant'`);
   await sql.unsafe(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_immutable`);
@@ -4580,12 +4580,19 @@ console.log("\n[24] Migration 054's payload backfill under two connections: a se
   await held`BEGIN`;
   const first = (await held`SELECT backfill_thought_payloads() AS r`)[0].r as Bf;
   // The second pass, while the first holds its rows: it waits on the row
-  // locks, re-reads each row as filled, and writes nothing.
+  // locks — seen waiting, not assumed after a sleep (cold read, second review
+  // pass) — re-reads each row as filled, and writes nothing.
   const pending = sql`SELECT backfill_thought_payloads() AS r`.execute();
-  await new Promise((r) => setTimeout(r, 300));
+  let waited = false;
+  for (let i = 0; i < 200 && !waited; i++) {
+    const [w] = await held`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'SELECT backfill_thought_payloads()%'`;
+    waited = Number(w.n) > 0;
+    if (!waited) await new Promise((r) => setTimeout(r, 50));
+  }
   await held`COMMIT`;
   await held.close();
   const second = (await pending)[0].r as Bf;
+  assert(waited, "the second pass was seen waiting on the first's row locks before the first committed");
   assert(first.rows === N && first.from_row === N && first.skipped === 0, `the held pass filled every row from the live rows (${JSON.stringify(first)})`);
   assert(second.rows === 0 && second.from_row === 0 && second.skipped === N && second.awaiting === 0, `the second pass, beside it, filled nothing, counted every candidate as skipped — not as its own — and raised nothing (${JSON.stringify(second)})`);
   assert((await waiting()) === 0 && Number((await sql`SELECT count(*)::int AS c FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE a.action = 'capture' AND a.diff->>'content' IS DISTINCT FROM t.content`)[0].c) === 0, "…and every capture row carries its row's text, once");
@@ -4609,8 +4616,36 @@ console.log("\n[24] Migration 054's payload backfill under two connections: a se
   await sql.unsafe(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_immutable`);
   const [derived] = (await sql`SELECT p.content, p.source FROM thought_audit a CROSS JOIN LATERAL ob1_capture_payload(a.thought_id, a.created_at, a.seq) p WHERE a.thought_id = ${inverted}::uuid AND a.action = 'capture'`) as { content: string; source: string }[];
   assert(derived.content === "inverted: the first text" && derived.source === "update", `the capture derives from the older-stamped update's before — the text as captured (${JSON.stringify(derived)})`);
-  const fill = (await sql`SELECT backfill_thought_payloads() AS r`)[0].r as Bf;
-  assert(fill.rows === 1 && fill.from_row === 0, `…and the pass writes that text (${JSON.stringify(fill)})`);
+  const fill = (await sql`SELECT backfill_thought_payloads() AS r`)[0].r as Bf & { from_update: number };
+  assert(fill.rows === 1 && fill.from_update === 1 && fill.from_row === 0, `…and the pass writes that text, from the update (${JSON.stringify(fill)})`);
+
+  // A pass beside ordinary delete_thought calls (run-it, second review pass:
+  // one delete from a live server during the apply failed the whole
+  // migration — the gate, reading under a fresh snapshot, derived a deleted
+  // thought's created_at as gone and refused, and the statement was the
+  // pass). The pass catches the refusal, sets the moved rows aside and runs
+  // again; nothing it filled is lost, and the next pass fills the deleted
+  // thoughts' captures from their tombstones.
+  await sql`DELETE FROM thoughts`;
+  const M = 2000;
+  await sql.unsafe(`INSERT INTO thoughts (content, metadata, created_at) SELECT 'racing pass row ' || g, '{"source": "race"}'::jsonb, now() - interval '1 day' FROM generate_series(1, ${M}) g`);
+  await sql.unsafe(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_immutable`);
+  await sql.unsafe(`UPDATE thought_audit SET diff = diff - 'content' - 'created_at' WHERE action = 'capture' AND diff->'metadata'->>'source' = 'race'`);
+  await sql.unsafe(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_immutable`);
+  assert((await waiting()) === M, `${M} capture rows wait, every one with a created_at the pass would fill (${await waiting()})`);
+  const victims = (await sql`SELECT id FROM thoughts WHERE metadata->>'source' = 'race' ORDER BY random() LIMIT 40`).map((r: { id: string }) => r.id);
+  const deleter = new SQL({ url: URL_, max: 1 });
+  const racingPass = sql`SELECT backfill_thought_payloads() AS r`.execute();
+  let deleted = 0;
+  for (const id of victims) {
+    const [{ r }] = await deleter`SELECT delete_thought(${id}::uuid, NULL::jsonb, false) AS r`;
+    if ((r as { ok: boolean }).ok) deleted++;
+  }
+  const raced = (await racingPass)[0].r as Bf & { unrecoverable: number };
+  await deleter.close();
+  assert(raced.rows + raced.skipped + raced.unrecoverable === M, `the pass beside ${deleted} deletes returned rather than raising, and accounts for every candidate — ${raced.rows} filled, ${raced.skipped} set aside, ${raced.unrecoverable} nothing derives for (${JSON.stringify(raced)})`);
+  const after = (await sql`SELECT backfill_thought_payloads() AS r`)[0].r as Bf & { from_tombstone: number };
+  assert(after.rows === raced.skipped && after.from_tombstone === raced.skipped && after.awaiting === 0, `…and the next pass fills what was set aside, from the tombstones, leaving nothing waiting (${JSON.stringify(after)})`);
   await sql`DELETE FROM thoughts`;
   await sql.close();
 }

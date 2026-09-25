@@ -12,7 +12,7 @@ and project the row in the same transaction with an empty contributor delta
 (SMD-1999, § "Does the extension contract survive the move?"). This page is
 the decision, the shape it commits to, what it declines, and the path from
 053 to it in three additive steps (SMD-2115, SMD-2116, SMD-2117). Step 1
-landed as migration 054 (SMD-2115, 2026-09-24): the capture event carries
+landed as migration 055 (SMD-2115, 2026-09-24): the capture event carries
 the content and a backdating writer's `created_at`, the update event the
 key's move, the rules are functions, and the backfill filled every capture
 row on the dogfood log — the option of seeding a replay from the row store

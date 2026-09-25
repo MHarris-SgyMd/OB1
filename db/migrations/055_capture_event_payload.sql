@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 054: the capture event carries the payload — a capture's content
+-- Migration 055: the capture event carries the payload — a capture's content
 --                and a backdating writer's created_at, an update's key move —
 --                and 046's diff rule, its append and 050's stamp become
 --                functions a projector can call; the log alone rebuilds every
@@ -41,7 +41,7 @@
 --      own value is. update: `content_fingerprint` {before, after} when the
 --      key moved, 018's NULL and 023's fill included. Outside these three the
 --      event is byte-equal to 046's: SMD-1999's differential held it so, and
---      test-schema [49] runs one scripted set of writes under 046's trigger
+--      test-schema [50] runs one scripted set of writes under 046's trigger
 --      and under this one and compares every audit column outside the three
 --      keys. Readers of 046's shape ignore the added keys (052's
 --      thought_changes lists an update's diff keys, so `content_fingerprint`
@@ -90,33 +90,44 @@
 --      thought's is gone with the row and the fold falls back to the event's
 --      clock, as it does for a row captured at now(). A created_at is filled
 --      with the content or before it, never onto a row that already carries
---      its content: a complete 054 capture gains no time it never had, even
+--      its content: a complete 055 capture gains no time it never had, even
 --      if the row's created_at is moved by hand later (run-it, first review
 --      pass).
 --
---      WHAT "AFTER THE CAPTURE" MEANS, exactly (first review pass, both
---      readers). The events read are the thought's rows written after the
---      capture's — `seq` later (050's identity is insertion order for every
---      row since 050), or (created_at, seq) later (the ADR's order, which is
---      what pre-050 rows have) — and they stop at the first later tombstone
---      or capture, that row included: an id db/ingest-records.ts re-uses
---      after a delete has a second incarnation whose edits are not this
---      capture's, and the first draft's "first content-moving update" walked
---      into it and would have written the second text onto the first
---      capture, permanently (cold read). And created_at is now(), the
---      TRANSACTION's start, so an editing transaction that began before the
---      capturing one and committed after it leaves an update whose
---      created_at precedes the capture's while its seq follows — a row the
---      (created_at, seq) comparison alone dropped, so the derivation fell
---      through to the live text (run-it, reproduced with two connections;
---      none on the dogfood log). Within the events kept the order is the
---      ADR's, created_at then seq, so for rows from before 050 — heap-order
---      seq, one created_at per transaction — a capture and its edit made in
---      one pre-050 transaction can still sort the wrong way round and derive
---      from the live text rather than the captured one; the ADR's Time
---      section owns that caveat, and SMD-2117's verify mode is the check.
---      A capture row whose diff is NULL (a hand INSERT; every writer's is an
---      object) counts as waiting and is filled onto an empty object.
+--      WHAT "AFTER THE CAPTURE" MEANS, exactly (two review passes, both
+--      readers). Two clocks order the log (the ADR's Time section): `seq`,
+--      050's identity, is exact insertion order for every row written since
+--      050 and heap order for the rows before it (050's own COMMENT: 046's
+--      backfill and VACUUM moved tuples); created_at is now(), the
+--      TRANSACTION's start, so it neither orders two writes inside one
+--      transaction nor a write from a transaction older than the capture's
+--      that committed after it. So: a row written since 050 is after the
+--      capture when its seq is larger, and is ordered by seq; a row from
+--      before 050 is after the capture when (created_at, seq) is larger, and
+--      is ordered so. The boundary is ob1_config.audit_seq_exact_since —
+--      050's applied_at from the ledger, recorded once by this file; the
+--      apply's own time where no ledger says (the suites); a brain baselined
+--      after 050 counts its rows between as before-050, the ADR's default
+--      order, not a wrong one. And the events read stop at the first later
+--      tombstone or capture, that row included: an id db/ingest-records.ts
+--      re-uses after a delete has a second incarnation whose edits are not
+--      this capture's. What the first two readings got wrong: "the first
+--      content-moving update" walked into the second incarnation (cold
+--      read, pass 1); the (created_at, seq) comparison alone dropped an edit
+--      from an older transaction, so the derivation fell to the live text
+--      (run-it, pass 1, two connections); and admitting every row with a
+--      larger seq admitted, on a brain with pre-050 history, a PRIOR
+--      incarnation's rows whose heap seq happened to be larger, which then
+--      sorted first by created_at and became the edge — the tombstone's text
+--      onto a standing thought's capture (both readers, pass 2; the dogfood
+--      log's 512 heap inversions all sit at seq <= 1097 and touch no capture,
+--      measured read-only). The boundary is what tells an older
+--      transaction's edit from a prior incarnation's row; the log alone
+--      cannot. For rows from before 050 a capture and its edit made in one
+--      transaction can still sort the wrong way round and derive from the
+--      live text rather than the captured one; SMD-2117's verify mode is the
+--      check. A capture row whose diff is NULL (a hand INSERT; every writer's
+--      is an object) counts as waiting and is filled onto an empty object.
 --
 --      A filled row is not marked: the record is the ledger's applied_at
 --      for this file — a capture row older than that whose diff carries
@@ -138,14 +149,22 @@
 --      filled (test-live holds this with two connections; PGlite cannot).
 --      A capture whose text moves while a pass derives it derives the same
 --      text either way — the update's `before` IS the row's text the pass
---      read — which is why the gate can re-derive under a fresher snapshot
---      without disagreeing; and the fill re-derives under its own snapshot
---      too, so a row whose derivation moved between the scan and the fill
---      (a delete with the audit trigger held off, a tier load) is skipped
---      and reported, not refused by the gate with the whole pass aborted.
---      The by-source counts are of the rows THIS pass filled (the UPDATE's
---      RETURNING), `skipped` the candidates another pass or a moved
---      derivation took, `unrecoverable` the candidates nothing derives for.
+--      read. A thought DELETED while the pass runs is another matter: its
+--      created_at is gone with the row, the gate — a VOLATILE trigger,
+--      reading under a fresh snapshot — derives a different answer from the
+--      scan's, and refuses; before the second review pass one delete_thought
+--      from a live server during the apply failed the whole migration
+--      (run-it, reproduced with an ordinary delete loop). The fill now runs
+--      inside a block that catches the gate's refusal, re-derives every
+--      candidate under a fresh snapshot, sets the rows whose derivation moved
+--      aside as `skipped`, and runs again — five times at most, then the
+--      refusal is raised as the defect it would be. Nothing of a refused
+--      attempt stands; nothing already filled is lost. The by-source counts
+--      are of the rows THIS pass filled (the UPDATE's RETURNING), `skipped`
+--      the candidates another pass took or whose derivation moved (the next
+--      pass fills them from their tombstones), `unrecoverable` the candidates
+--      nothing derives for. lock_timeout is 10 s: a second pass beside one
+--      that runs longer than that raises rather than waits.
 --
 --      Measured on a copy of the dogfood log (631 thoughts, 2,688 audit rows,
 --      632 capture rows without content, 6.0 MB table and TOAST, Postgres
@@ -201,7 +220,7 @@ DO $qc$
 BEGIN
   IF to_regclass('thought_audit') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 054 needs 008 (thought_audit); this schema lacks it',
+      MESSAGE = 'migration 055 needs 008 (thought_audit); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -210,7 +229,7 @@ BEGIN
                   WHERE table_schema = 'public' AND table_name = 'thought_audit' AND column_name = 'actor_kind')
      OR to_regprocedure('ob1_registry_kind(uuid, text)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 054 needs 046 (thought_audit.actor_kind, ob1_registry_kind); this schema lacks it',
+      MESSAGE = 'migration 055 needs 046 (thought_audit.actor_kind, ob1_registry_kind); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -218,7 +237,7 @@ BEGIN
                   WHERE table_schema = 'public' AND table_name = 'thought_audit' AND column_name = 'seq')
      OR to_regprocedure('ob1_stamp_actor()') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 054 needs 050 (thought_audit.seq, ob1_stamp_actor); this schema lacks it',
+      MESSAGE = 'migration 055 needs 050 (thought_audit.seq, ob1_stamp_actor); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -290,7 +309,7 @@ BEGIN
     IF p_new_derived IS DISTINCT FROM p_old_derived THEN
       d := d || jsonb_build_object('derived_from', jsonb_build_object('before', p_old_derived, 'after', p_new_derived));
     END IF;
-    -- 054: the key's move is recorded — 018 sets it NULL for a text another
+    -- 055: the key's move is recorded — 018 sets it NULL for a text another
     -- row holds, 023 fills a legacy row's after the fact, update_thought
     -- recomputes it with the text; a replay cannot re-derive any of these
     -- from the content it lands. A raw content edit that leaves the key
@@ -313,7 +332,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_thought_diff(text, text, text, jsonb, jsonb, boolean, boolean, uuid, uuid, jsonb, jsonb, text, text, timestamptz) IS
-  'The one diff rule for a thought_audit row (046''s, lifted out of the audit trigger so a write function can compute the event before the row exists — SMD-1997 step 2): capture → {content, metadata, created_at when the writer set one, derived_from and supersedes when set}; update → before/after of each of content, metadata, supersedes, derived_from and content_fingerprint that moved, plus embedding_present when the vector''s presence flipped; delete → previous_content, previous_metadata, previous_derived_from, previous_supersedes. The trigger thoughts_write_audit calls it with OLD and NEW. Migration 054 / SMD-2115.';
+  'The one diff rule for a thought_audit row (046''s, lifted out of the audit trigger so a write function can compute the event before the row exists — SMD-1997 step 2): capture → {content, metadata, created_at when the writer set one, derived_from and supersedes when set}; update → before/after of each of content, metadata, supersedes, derived_from and content_fingerprint that moved, plus embedding_present when the vector''s presence flipped; delete → previous_content, previous_metadata, previous_derived_from, previous_supersedes. The trigger thoughts_write_audit calls it with OLD and NEW. Migration 055 / SMD-2115.';
 
 -- ---------------------------------------------------------------------------
 -- 2. The append: 046's trigger tail as a function. Returns the event's id,
@@ -453,7 +472,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_append_thought_event(uuid, text, text, jsonb, jsonb) IS
-  'Append one thought_audit row — 046''s trigger tail as a function: who from the ob1.actor envelope and the registry (ob1_registry_kind by the envelope''s id, else its name; never from the payload), the trust ceiling (ob1_trust_ceiling), the door (ob1_door_of), a claim the key could not support filed under actor_context.claimed, the event''s stance / cites / window (none on a delete), and 046''s late gate (an update with an empty diff declaring only a trust or kind the key supports writes nothing). Returns the row''s id, or NULL when the gate dropped it. thoughts_write_audit calls it for every audited write; SMD-1997 step 2 makes the write functions call it before the row exists. Migration 054 / SMD-2115.';
+  'Append one thought_audit row — 046''s trigger tail as a function: who from the ob1.actor envelope and the registry (ob1_registry_kind by the envelope''s id, else its name; never from the payload), the trust ceiling (ob1_trust_ceiling), the door (ob1_door_of), a claim the key could not support filed under actor_context.claimed, the event''s stance / cites / window (none on a delete), and 046''s late gate (an update with an empty diff declaring only a trust or kind the key supports writes nothing). Returns the row''s id, or NULL when the gate dropped it. thoughts_write_audit calls it for every audited write; SMD-1997 step 2 makes the write functions call it before the row exists. Migration 055 / SMD-2115.';
 
 -- ---------------------------------------------------------------------------
 -- 3. 050's two stamp arms, callable.
@@ -516,7 +535,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_actor_stamp(jsonb) IS
-  'A new text''s metadata with the writer''s mark (050''s stamp, callable): metadata.actor_kind (ob1_agents.kind for the ob1.actor envelope''s agent_id, else its name — ob1_registry_kind) and metadata.actor_name (the envelope''s name), never from the payload — the payload''s own values under either key are removed first. No envelope, no mark; a non-object metadata passes untouched; a NULL with nothing to add stays NULL. ob1_stamp_actor calls it on an INSERT and on an UPDATE that changes the text. Migration 054 / SMD-2115.';
+  'A new text''s metadata with the writer''s mark (050''s stamp, callable): metadata.actor_kind (ob1_agents.kind for the ob1.actor envelope''s agent_id, else its name — ob1_registry_kind) and metadata.actor_name (the envelope''s name), never from the payload — the payload''s own values under either key are removed first. No envelope, no mark; a non-object metadata passes untouched; a NULL with nothing to add stays NULL. ob1_stamp_actor calls it on an INSERT and on an UPDATE that changes the text. Migration 055 / SMD-2115.';
 
 CREATE OR REPLACE FUNCTION ob1_actor_stamp_kept(p_new jsonb, p_old jsonb)
 RETURNS jsonb
@@ -550,7 +569,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_actor_stamp_kept(jsonb, jsonb) IS
-  'An unchanged text''s metadata with the writer''s mark kept as it was (050''s same-text arm, callable): p_new''s actor_kind and actor_name replaced by p_old''s, whatever the patch said — the actor follows the content. A non-object p_new passes untouched. ob1_stamp_actor calls it on an UPDATE that leaves the text. Migration 054 / SMD-2115.';
+  'An unchanged text''s metadata with the writer''s mark kept as it was (050''s same-text arm, callable): p_new''s actor_kind and actor_name replaced by p_old''s, whatever the patch said — the actor follows the content. A non-object p_new passes untouched. ob1_stamp_actor calls it on an UPDATE that leaves the text. Migration 055 / SMD-2115.';
 
 -- ---------------------------------------------------------------------------
 -- 4. 050's stamp trigger, calling the two arms. The pass-through, the
@@ -604,7 +623,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_stamp_actor() IS
-  'BEFORE INSERT OR UPDATE on thoughts (thoughts_stamp_actor, 050): writes metadata.actor_kind (ob1_agents.kind for the envelope''s agent_id, else its name — ob1_registry_kind, 046) and metadata.actor_name (the envelope''s name) from the ob1.actor setting 008''s writers set, never from the payload — a payload''s own values under either key are overwritten or removed. The actor follows the content: an INSERT and an UPDATE that changes the text (by 003''s normalised fingerprint, so 018''s unchanged edit is unchanged here too) stamp from the envelope present (no envelope, no mark) through ob1_actor_stamp; an UPDATE that leaves the text keeps the mark as it was through ob1_actor_stamp_kept — the two arms as functions since 054, one copy for the write functions to call. A non-object metadata (a raw writer''s) passes untouched. Under ob1.actor_amend = ''backfill'' the keys are taken as given (backfill_thought_actors). Migration 050 / SMD-1726; the arms lifted out by 054 / SMD-2115.';
+  'BEFORE INSERT OR UPDATE on thoughts (thoughts_stamp_actor, 050): writes metadata.actor_kind (ob1_agents.kind for the envelope''s agent_id, else its name — ob1_registry_kind, 046) and metadata.actor_name (the envelope''s name) from the ob1.actor setting 008''s writers set, never from the payload — a payload''s own values under either key are overwritten or removed. The actor follows the content: an INSERT and an UPDATE that changes the text (by 003''s normalised fingerprint, so 018''s unchanged edit is unchanged here too) stamp from the envelope present (no envelope, no mark) through ob1_actor_stamp; an UPDATE that leaves the text keeps the mark as it was through ob1_actor_stamp_kept — the two arms as functions since 055, one copy for the write functions to call. A non-object metadata (a raw writer''s) passes untouched. Under ob1.actor_amend = ''backfill'' the keys are taken as given (backfill_thought_actors). Migration 050 / SMD-1726; the arms lifted out by 055 / SMD-2115.';
 
 -- ---------------------------------------------------------------------------
 -- 5. The audit trigger: 046's body with the rules called rather than
@@ -648,7 +667,7 @@ BEGIN
 
   /**
    * ob1:capture-event-carries-content — the rule is ob1_thought_diff's (046's
-   * diff with the three additions of 054: a capture's content and, when the
+   * diff with the three additions of 055: a capture's content and, when the
    * writer set one, its created_at; an update's key move). The row's
    * created_at is carried only when it differs from the transaction's now()
    * — a defaulted column equals it and says nothing a replay could not
@@ -690,66 +709,91 @@ END;
 $$;
 
 COMMENT ON FUNCTION thoughts_write_audit() IS
-  'AFTER INSERT OR UPDATE OR DELETE on thoughts (thoughts_audit, 008): derives the event from OLD and NEW through ob1_thought_diff (046''s diff rule with 054''s three additions — a capture''s content and a backdating writer''s created_at, an update''s key move), holds 008''s no-op guard (an unchanged write declaring no event writes no row), reads and clears the ob1.event handoff once (046), and appends the row through ob1_append_thought_event (who from the key, the ceiling, the door, the claim, the late gate). At 054 the row is still written first and the trigger describes it; SMD-1997 step 2 makes the trigger the check under ob1.projecting. Migration 008 / 025 / 046 / 054 (SMD-2115).';
+  'AFTER INSERT OR UPDATE OR DELETE on thoughts (thoughts_audit, 008): derives the event from OLD and NEW through ob1_thought_diff (046''s diff rule with 055''s three additions — a capture''s content and a backdating writer''s created_at, an update''s key move), holds 008''s no-op guard (an unchanged write declaring no event writes no row), reads and clears the ob1.event handoff once (046), and appends the row through ob1_append_thought_event (who from the key, the ceiling, the door, the claim, the late gate). At 055 the row is still written first and the trigger describes it; SMD-1997 step 2 makes the trigger the check under ob1.projecting. Migration 008 / 025 / 046 / 055 (SMD-2115).';
+
+-- ---------------------------------------------------------------------------
+-- 5b. The boundary the derivation reads: since when seq is exact insertion
+--     order — 050's applied_at from the ledger when the brain has one, else
+--     this apply's own time (the suites apply the files with no ledger; every
+--     row they write comes after). Written once; a re-apply keeps the first
+--     value, since the rows do not move.
+-- ---------------------------------------------------------------------------
+DO $b$
+DECLARE
+  v_since timestamptz;
+BEGIN
+  IF to_regclass('schema_migrations') IS NOT NULL THEN
+    EXECUTE 'SELECT min(applied_at) FROM schema_migrations WHERE name LIKE ''050\_%''' INTO v_since;
+  END IF;
+  INSERT INTO ob1_config (key, value)
+  VALUES ('audit_seq_exact_since', COALESCE(v_since, now())::text)
+  ON CONFLICT (key) DO NOTHING;
+END
+$b$;
 
 -- ---------------------------------------------------------------------------
 -- 6. What a capture row's payload derives to — one copy for the gate and
---    the backfill. The events after the capture in (created_at, seq) order
---    (050's rule: created_at first, seq as the tiebreak):
+--    the backfill. Among the thought's rows written after the capture — a
+--    row since the boundary above when its seq is larger, a row before it
+--    when (created_at, seq) is larger — ordered by seq since the boundary
+--    and by (created_at, seq) before it, and no further than the first later
+--    tombstone or capture (this incarnation of a re-used id; that row
+--    included, so the tombstone is read):
 --      the first content-moving update's `before` — the text as captured;
---      else the first tombstone's previous_content;
+--      else the tombstone's previous_content;
 --      else the live row's content, when no later capture re-took the id;
 --      else nothing, said as `none`.
 --    created_at comes from the live row alone, and only when it differs
---    from the event's (the transaction's now() at the time).
+--    from the event's (the transaction's now() at the time). The header's
+--    "WHAT AFTER THE CAPTURE MEANS" has the two review passes that shaped it.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION ob1_capture_payload(p_thought uuid, p_at timestamptz, p_seq bigint)
 RETURNS TABLE (content text, row_created_at timestamptz, source text)
 LANGUAGE sql
 STABLE
 AS $$
-  -- The events written after the capture: seq later (050's identity is
-  -- insertion order for every row since 050) or (created_at, seq) later (the
-  -- ADR's order; what pre-050 rows have). created_at is the transaction's
-  -- start, so a later-written row can carry an earlier created_at (an edit
-  -- whose transaction began before the capture's and committed after) — the
-  -- tuple comparison alone dropped it, and the derivation fell through to the
-  -- live text (run-it, first review pass).
-  WITH later AS (
-    SELECT a.action, a.diff, a.created_at, a.seq
-      FROM thought_audit a
+  WITH exact AS (
+    SELECT COALESCE((SELECT c.value::timestamptz FROM ob1_config c WHERE c.key = 'audit_seq_exact_since'),
+                    '-infinity'::timestamptz) AS since
+  ),
+  -- The rows after the capture, and the clock that orders them: a row from
+  -- before the boundary keeps its created_at (heap-order seq breaks ties, as
+  -- 050 reads it); a row since takes the boundary itself, so every such row
+  -- sorts after every earlier one and seq — exact insertion order — decides
+  -- among them, whatever transaction start each carries.
+  later AS (
+    SELECT a.action, a.diff, a.seq,
+           CASE WHEN a.created_at < x.since THEN a.created_at ELSE x.since END AS o_at
+      FROM thought_audit a, exact x
      WHERE a.thought_id = p_thought
-       AND ((a.created_at, a.seq) > (p_at, p_seq) OR a.seq > p_seq)
+       AND CASE WHEN a.created_at < x.since THEN (a.created_at, a.seq) > (p_at, p_seq) ELSE a.seq > p_seq END
   ),
   -- …and no further than this incarnation of the id: the first later
-  -- tombstone or capture closes it (that row included, so the tombstone is
-  -- read). An id re-used after a delete (db/ingest-records.ts's stable ids)
-  -- has a second incarnation whose edits are not this capture's (cold read,
-  -- first review pass: the first draft read them and derived the wrong text).
+  -- tombstone or capture closes it, that row included.
   edge AS (
-    SELECT l.created_at, l.seq
+    SELECT l.o_at, l.seq
       FROM later l
      WHERE l.action IN ('delete', 'capture')
-     ORDER BY l.created_at, l.seq
+     ORDER BY l.o_at, l.seq
      LIMIT 1
   ),
   mine AS (
     SELECT l.*
       FROM later l
-     WHERE NOT EXISTS (SELECT 1 FROM edge e WHERE (l.created_at, l.seq) > (e.created_at, e.seq))
+     WHERE NOT EXISTS (SELECT 1 FROM edge e WHERE (l.o_at, l.seq) > (e.o_at, e.seq))
   ),
   mv AS (
     SELECT l.diff->'content'->>'before' AS c
       FROM mine l
      WHERE l.action = 'update' AND jsonb_typeof(l.diff->'content'->'before') = 'string'
-     ORDER BY l.created_at, l.seq
+     ORDER BY l.o_at, l.seq
      LIMIT 1
   ),
   tomb AS (
     SELECT l.diff->>'previous_content' AS c
       FROM mine l
      WHERE l.action = 'delete' AND jsonb_typeof(l.diff->'previous_content') = 'string'
-     ORDER BY l.created_at, l.seq
+     ORDER BY l.o_at, l.seq
      LIMIT 1
   ),
   recap AS (SELECT 1 FROM later l WHERE l.action = 'capture' LIMIT 1),
@@ -767,7 +811,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION ob1_capture_payload(uuid, timestamptz, bigint) IS
-  'What a capture row written before 054 derives to, for the payload amendment: among the thought''s events written after it (seq later, or (created_at, seq) later) and no further than the first later tombstone or capture — this incarnation of the id — its content from the first content-moving update (the `before`), else the tombstone''s previous_content, else the live row''s content when no later capture re-took the id, else NULL with source `none`; its created_at from the live row alone, and only when it differs from the event''s. The gate (thought_audit_refuse_mutation under ob1.audit_amend = ''payload'') and backfill_thought_payloads both read it, so a hand fill can write nothing the pass would not. Migration 054 / SMD-2115.';
+  'What a capture row written before 055 derives to, for the payload amendment: among the thought''s events written after it — a row since ob1_config.audit_seq_exact_since (050''s applied_at) when its seq is larger, a row before it when (created_at, seq) is larger; ordered by seq since, by (created_at, seq) before — and no further than the first later tombstone or capture (this incarnation of the id), its content from the first content-moving update (the `before`), else the tombstone''s previous_content, else the live row''s content when no later capture re-took the id, else NULL with source `none`; its created_at from the live row alone, and only when it differs from the event''s. The gate (thought_audit_refuse_mutation under ob1.audit_amend = ''payload'') and backfill_thought_payloads both read it, so a hand fill can write nothing the pass would not. Migration 055 / SMD-2115.';
 
 -- ---------------------------------------------------------------------------
 -- 7. Immutable by rule: 008's refusal, 046's kind-fill arm verbatim, and the
@@ -787,6 +831,7 @@ DECLARE
   v_created  timestamptz;
   v_source   text;
   v_old      jsonb;
+  v_new      jsonb;
 BEGIN
   IF TG_OP = 'UPDATE' AND current_setting('ob1.audit_amend', true) = 'backfill' THEN
     -- ob1:audit-amend-fills-null-only — a CONTRACT SENTINEL, not prose (the
@@ -825,7 +870,7 @@ BEGIN
   IF TG_OP = 'UPDATE' AND current_setting('ob1.audit_amend', true) = 'payload' THEN
     -- ob1:audit-amend-fills-payload-only — a CONTRACT SENTINEL, not prose
     -- (the 014 convention); test-schema reads it. The third named amendment
-    -- (054): a CAPTURE row's diff.content and diff.created_at, where absent,
+    -- (055): a CAPTURE row's diff.content and diff.created_at, where absent,
     -- with what the log and the row derive to (ob1_capture_payload, the
     -- backfill's own reading), and nothing else — every other column
     -- byte-equal with `diff` removed as the fifth column under this value
@@ -834,44 +879,45 @@ BEGIN
     -- A NULL diff (a hand INSERT's; every writer's is an object) counts as
     -- empty before, so the pass can fill it onto an object.
     v_old := COALESCE(OLD.diff, '{}'::jsonb);
+    v_new := COALESCE(NEW.diff, '{}'::jsonb);
     IF OLD.action <> 'capture' THEN
       v_why := 'only a capture row takes a payload';
     ELSIF (to_jsonb(OLD) - 'diff') <> (to_jsonb(NEW) - 'diff') THEN
       v_why := 'a column other than diff changes';
-    ELSIF jsonb_typeof(v_old) <> 'object' OR NEW.diff IS NULL OR jsonb_typeof(NEW.diff) <> 'object' THEN
-      v_why := 'diff must be an object before and after (a NULL diff before counts as empty)';
-    ELSIF (v_old - 'content' - 'created_at') <> (NEW.diff - 'content' - 'created_at') THEN
+    ELSIF jsonb_typeof(v_old) <> 'object' OR jsonb_typeof(v_new) <> 'object' THEN
+      v_why := 'diff must be an object before and after (a NULL diff counts as empty)';
+    ELSIF (v_old - 'content' - 'created_at') <> (v_new - 'content' - 'created_at') THEN
       v_why := 'a key of diff other than content and created_at changes';
-    ELSIF v_old ? 'content' AND NEW.diff->'content' IS DISTINCT FROM v_old->'content' THEN
+    ELSIF v_old ? 'content' AND v_new->'content' IS DISTINCT FROM v_old->'content' THEN
       v_why := 'a content once set is never changed';
     ELSIF v_old ? 'created_at'
-          AND (NEW.diff->>'created_at' IS NULL OR NEW.diff->>'created_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}'
-               OR (NEW.diff->>'created_at')::timestamptz IS DISTINCT FROM (v_old->>'created_at')::timestamptz) THEN
+          AND (v_new->>'created_at' IS NULL OR v_new->>'created_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}'
+               OR (v_new->>'created_at')::timestamptz IS DISTINCT FROM (v_old->>'created_at')::timestamptz) THEN
       -- As an instant, not as bytes: a timestamptz in jsonb renders in the
       -- session's TimeZone, and a hand fill under another zone is the same time.
       v_why := 'a created_at once set is never changed';
-    ELSIF (NEW.diff ? 'content') = (v_old ? 'content') AND (NEW.diff ? 'created_at') = (v_old ? 'created_at') THEN
+    ELSIF (v_new ? 'content') = (v_old ? 'content') AND (v_new ? 'created_at') = (v_old ? 'created_at') THEN
       v_why := 'nothing is filled';
-    ELSIF (NEW.diff ? 'created_at') AND NOT (v_old ? 'created_at') AND (v_old ? 'content') AND NOT (NEW.diff ? 'content' AND NOT (v_old ? 'content')) THEN
+    ELSIF (v_new ? 'created_at') AND NOT (v_old ? 'created_at') AND (v_old ? 'content') THEN
       -- A complete capture event gains no time it never had, however the
       -- row's created_at is moved later (run-it, first review pass).
       v_why := 'a created_at is filled with the content or before it, never onto a row that already carries its content';
     ELSE
       SELECT p.content, p.row_created_at, p.source INTO v_content, v_created, v_source
         FROM ob1_capture_payload(OLD.thought_id, OLD.created_at, OLD.seq) p;
-      IF (NEW.diff ? 'content') AND NOT (v_old ? 'content') AND jsonb_typeof(NEW.diff->'content') <> 'string' THEN
+      IF (v_new ? 'content') AND NOT (v_old ? 'content') AND jsonb_typeof(v_new->'content') <> 'string' THEN
         v_why := 'content must be a string';
-      ELSIF (NEW.diff ? 'content') AND NOT (v_old ? 'content')
-         AND (v_content IS NULL OR (NEW.diff->>'content') IS DISTINCT FROM v_content) THEN
+      ELSIF (v_new ? 'content') AND NOT (v_old ? 'content')
+         AND (v_content IS NULL OR (v_new->>'content') IS DISTINCT FROM v_content) THEN
         v_why := CASE WHEN v_content IS NULL THEN 'no content derives for this row (no later content-moving update, no tombstone, no live row)'
                       ELSE format('content must be the text the log and the row derive to (from the %s)', v_source) END;
-      ELSIF (NEW.diff ? 'created_at') AND NOT (v_old ? 'created_at')
-         AND (NEW.diff->>'created_at' IS NULL OR NEW.diff->>'created_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}') THEN
+      ELSIF (v_new ? 'created_at') AND NOT (v_old ? 'created_at')
+         AND (v_new->>'created_at' IS NULL OR v_new->>'created_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}') THEN
         -- Shape first, so a string that is no timestamp is refused by name
         -- rather than by the cast's own error (run-it, first review pass).
         v_why := 'created_at must be a timestamp';
-      ELSIF (NEW.diff ? 'created_at') AND NOT (v_old ? 'created_at')
-         AND (v_created IS NULL OR (NEW.diff->>'created_at')::timestamptz IS DISTINCT FROM v_created) THEN
+      ELSIF (v_new ? 'created_at') AND NOT (v_old ? 'created_at')
+         AND (v_created IS NULL OR (v_new->>'created_at')::timestamptz IS DISTINCT FROM v_created) THEN
         v_why := CASE WHEN v_created IS NULL THEN 'no created_at derives for this row (no live row, or the row''s equals the event''s)'
                       ELSE 'created_at must be the live row''s own' END;
       ELSE
@@ -925,6 +971,8 @@ DECLARE
   v_skipped    integer;
   v_stamped    integer;
   v_awaiting   integer;
+  v_moved      integer;
+  v_try        integer;
 BEGIN
   IF p_limit IS NOT NULL AND p_limit < 1 THEN
     RAISE EXCEPTION 'backfill_thought_payloads: p_limit must be at least 1, or NULL for every row (got %)', p_limit;
@@ -938,7 +986,8 @@ BEGIN
     CREATE TEMP TABLE %I ON COMMIT DROP AS
     SELECT c.id, p.content, p.row_created_at, p.source,
            COALESCE(c.diff ? 'created_at', false) AS had_created_at,
-           false AS filled
+           false AS filled,
+           false AS moved
       FROM (SELECT a.id, a.thought_id, a.created_at, a.seq, a.diff
               FROM thought_audit a
              WHERE a.action = 'capture' AND NOT COALESCE(a.diff ? 'content', false)
@@ -951,31 +1000,60 @@ BEGIN
   -- Re-read on the row as it is when the lock is taken (READ COMMITTED): a
   -- pass that ran beside this one and filled the row first leaves it nothing
   -- to fill, and it is skipped rather than refused (046's rule for its pass);
-  -- a created_at a hand fill set stays as it is. The derivation is re-read
-  -- under this statement's snapshot too, and a row whose derivation moved
-  -- since the scan (a delete with the audit trigger held off) is skipped
-  -- rather than refused by the gate, which would abort the whole pass (cold
-  -- read, first review pass). The rows the UPDATE returns are marked, so the
-  -- counts below are of what THIS pass wrote (run-it, first review pass: a
-  -- second pass reported the first's rows as its own).
-  EXECUTE format($fill$
-    WITH f AS (
-      UPDATE thought_audit a
-         SET diff = COALESCE(a.diff, '{}'::jsonb)
-                    || jsonb_build_object('content', d.content)
-                    || CASE WHEN d.row_created_at IS NULL OR COALESCE(a.diff ? 'created_at', false) THEN '{}'::jsonb
-                            ELSE jsonb_build_object('created_at', d.row_created_at) END
-        FROM %I d
-       WHERE a.id = d.id
-         AND d.content IS NOT NULL
-         AND a.action = 'capture'
-         AND NOT COALESCE(a.diff ? 'content', false)
-         AND EXISTS (SELECT 1 FROM ob1_capture_payload(a.thought_id, a.created_at, a.seq) p
-                      WHERE p.content = d.content AND p.row_created_at IS NOT DISTINCT FROM d.row_created_at)
-       RETURNING d.id)
-    UPDATE %I t SET filled = true FROM f WHERE t.id = f.id
-  $fill$, v_tbl, v_tbl);
-  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  -- a created_at a hand fill set stays as it is. The rows the UPDATE returns
+  -- are marked, so the counts below are of what THIS pass wrote (run-it,
+  -- first review pass: a second pass reported the first's rows as its own).
+  --
+  -- The gate re-derives each row under a fresh snapshot (a VOLATILE trigger),
+  -- so a thought deleted between the scan and the trigger's read derives
+  -- differently — its created_at is gone with the row — and is refused, which
+  -- aborts the statement; before the second review pass one delete_thought
+  -- from a live server during the apply failed the whole migration (run-it).
+  -- A pre-check in the UPDATE's WHERE cannot close that window: it reads the
+  -- statement's snapshot, the gate a later one (the first review pass's
+  -- re-derive changed nothing and cost a third of the pass). So the refusal
+  -- is caught: nothing of the attempt stands, every candidate is re-derived
+  -- under a fresh snapshot, the rows whose derivation moved are set aside as
+  -- `skipped` (the next pass fills them from their tombstones), and the fill
+  -- runs again — five times at most, then the refusal is raised as the defect
+  -- it would then be. The block costs one savepoint per attempt, not per row.
+  FOR v_try IN 1..5 LOOP
+    BEGIN
+      EXECUTE format($fill$
+        WITH f AS (
+          UPDATE thought_audit a
+             SET diff = COALESCE(a.diff, '{}'::jsonb)
+                        || jsonb_build_object('content', d.content)
+                        || CASE WHEN d.row_created_at IS NULL OR COALESCE(a.diff ? 'created_at', false) THEN '{}'::jsonb
+                                ELSE jsonb_build_object('created_at', d.row_created_at) END
+            FROM %I d
+           WHERE a.id = d.id
+             AND d.content IS NOT NULL
+             AND NOT d.moved
+             AND a.action = 'capture'
+             AND NOT COALESCE(a.diff ? 'content', false)
+           RETURNING d.id)
+        UPDATE %I t SET filled = true FROM f WHERE t.id = f.id
+      $fill$, v_tbl, v_tbl);
+      GET DIAGNOSTICS v_rows = ROW_COUNT;
+      EXIT;
+    EXCEPTION WHEN raise_exception THEN
+      EXECUTE format($again$
+        UPDATE %I d SET moved = true
+          FROM (SELECT d2.id, p.content, p.row_created_at
+                  FROM %I d2
+                  JOIN thought_audit a ON a.id = d2.id
+                  CROSS JOIN LATERAL ob1_capture_payload(a.thought_id, a.created_at, a.seq) p
+                 WHERE NOT d2.moved) n
+         WHERE n.id = d.id
+           AND (n.content IS DISTINCT FROM d.content OR n.row_created_at IS DISTINCT FROM d.row_created_at)
+      $again$, v_tbl, v_tbl);
+      GET DIAGNOSTICS v_moved = ROW_COUNT;
+      IF v_try = 5 THEN
+        RAISE;
+      END IF;
+    END;
+  END LOOP;
   PERFORM set_config('ob1.audit_amend', COALESCE(v_prev_amend, ''), true);
 
   EXECUTE format($count$
@@ -1008,16 +1086,16 @@ END;
 $$;
 
 COMMENT ON FUNCTION backfill_thought_payloads(integer) IS
-  'Fill diff.content — and diff.created_at where the live row''s differs from the event''s — on capture rows written before 054, from the first content-moving update''s `before`, else the tombstone''s previous_content, else the live row (ob1_capture_payload): the third amendment thought_audit_immutable allows, under ob1.audit_amend = ''payload''. Idempotent; p_limit bounds a pass (each call its own transaction). Returns {ok, rows, from_update, from_tombstone, from_row, with_created_at, unrecoverable, skipped, awaiting}: rows and the by-source counts are what THIS pass wrote; with_created_at those of them that gained a created_at; unrecoverable the candidates nothing derives for (left as they are); skipped the candidates another pass filled meanwhile or whose derivation moved between the scan and the fill; awaiting the capture rows still without content. Migration 054 / SMD-2115.';
+  'Fill diff.content — and diff.created_at where the live row''s differs from the event''s — on capture rows written before 055, from the first content-moving update''s `before`, else the tombstone''s previous_content, else the live row (ob1_capture_payload): the third amendment thought_audit_immutable allows, under ob1.audit_amend = ''payload''. Idempotent; p_limit bounds a pass (each call its own transaction); a refusal by the gate for a thought deleted while the pass ran is caught, the moved rows set aside, the fill retried (five attempts). Returns {ok, rows, from_update, from_tombstone, from_row, with_created_at, unrecoverable, skipped, awaiting}: rows and the by-source counts are what THIS pass wrote; with_created_at those of them that gained a created_at; unrecoverable the candidates nothing derives for (left as they are); skipped the candidates another pass filled meanwhile or whose derivation moved while this one ran; awaiting the capture rows still without content. Migration 055 / SMD-2115.';
 
 -- ---------------------------------------------------------------------------
 -- 10. What the columns and the table say now.
 -- ---------------------------------------------------------------------------
 COMMENT ON COLUMN thought_audit.diff IS
-  'capture: the creating metadata and, since 054, the content — and created_at when the writer set the row''s own time (a backdating ingester''s; absent when the row took now()); derived_from and supersedes when set. update: before/after of each changed field — content, metadata, supersedes, derived_from and, since 054, content_fingerprint when the key moved — and embedding_present when the vector''s presence flipped. delete: previous_content, previous_metadata, previous_derived_from and previous_supersedes, in full, for recovery. On a capture row from before 054 the content and created_at are filled after the fact by backfill_thought_payloads, the one change the payload amendment allows. Migration 008 / 025 / 046 / 054 (SMD-2115).';
+  'capture: the creating metadata and, since 055, the content — and created_at when the writer set the row''s own time (a backdating ingester''s; absent when the row took now()); derived_from and supersedes when set. update: before/after of each changed field — content, metadata, supersedes, derived_from and, since 055, content_fingerprint when the key moved — and embedding_present when the vector''s presence flipped. delete: previous_content, previous_metadata, previous_derived_from and previous_supersedes, in full, for recovery. On a capture row from before 055 the content and created_at are filled after the fact by backfill_thought_payloads, the one change the payload amendment allows. Migration 008 / 025 / 046 / 055 (SMD-2115).';
 
 COMMENT ON TABLE thought_audit IS
-  'Append-only log of every capture/update/delete on thoughts, and since 046 the log of record SMD-1729''s views derive from: who (actor_name, canonical_agent_id, actor_kind from the key), the door (origin), the ceiling on the content (trust), what changed (diff — since 054 a capture''s content and a backdating writer''s created_at, an update''s key move, so the log alone rebuilds every thought''s text: docs/event-log-as-truth.md, step 1), what the write claimed (stance, cites, valid_from/valid_until) and when (created_at, seq). Written by a trigger inside the mutating transaction, so an event cannot be lost independently of the change it describes. thought_id is deliberately not a foreign key so audit rows outlive their subject. UPDATE and DELETE are refused by trigger, not by grant; two lawful amendments: filling a NULL actor_kind/trust/origin and stamping backfilled_at (046), and filling a capture row''s diff.content / diff.created_at where absent (054). Partition key chosen and not applied (SMD-1730): RANGE on created_at by month — append-only, so a closed month is cold; SMD-1697''s bench decides when.';
+  'Append-only log of every capture/update/delete on thoughts, and since 046 the log of record SMD-1729''s views derive from: who (actor_name, canonical_agent_id, actor_kind from the key), the door (origin), the ceiling on the content (trust), what changed (diff — since 055 a capture''s content and a backdating writer''s created_at, an update''s key move, so the log alone rebuilds every thought''s text: docs/event-log-as-truth.md, step 1), what the write claimed (stance, cites, valid_from/valid_until) and when (created_at, seq). Written by a trigger inside the mutating transaction, so an event cannot be lost independently of the change it describes. thought_id is deliberately not a foreign key so audit rows outlive their subject. UPDATE and DELETE are refused by trigger, not by grant; two lawful amendments: filling a NULL actor_kind/trust/origin and stamping backfilled_at (046), and filling a capture row''s diff.content / diff.created_at where absent (055). Partition key chosen and not applied (SMD-1730): RANGE on created_at by month — append-only, so a closed month is cold; SMD-1697''s bench decides when.';
 
 -- Once, here: every capture row written before this file gains its payload
 -- from the log and the row — or one batch of OB1_BACKFILL_LIMIT rows, the

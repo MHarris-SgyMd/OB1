@@ -142,22 +142,22 @@ const NOBODY = "00000000-0000-4000-8000-000000000000";
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
 const APPLY_042 = "Apply db/migrations/042_thought_citations.sql.";
 /**
- * 046 also holds the audit trigger and the refusal trigger, which 054 last
+ * 046 also holds the audit trigger and the refusal trigger, which 055 last
  * defines (SMD-2115): 046 applied by hand alone puts their 046 bodies back —
  * no payload in the capture event, no payload arm in the amendment gate — so
- * every remedy that names 046 names 054 after it (cold read, SMD-2115's first
+ * every remedy that names 046 names 055 after it (cold read, SMD-2115's first
  * review pass; `migrate.ts --reapply` runs every file in order and is the
  * remedy that cannot get this wrong).
  */
-const THEN_054 = " Then apply db/migrations/054_capture_event_payload.sql — it last defines the audit trigger and the refusal trigger 046 also holds, so 046 alone puts their 046 bodies back (bun migrate.ts --reapply runs every file in order).";
+const THEN_055 = " Then apply db/migrations/055_capture_event_payload.sql — it last defines the audit trigger and the refusal trigger 046 also holds, so 046 alone puts their 046 bodies back (bun migrate.ts --reapply runs every file in order).";
 const APPLY_046 = "Apply db/migrations/046_thought_audit_event_shape.sql.";
-const APPLY_054 = "Apply db/migrations/054_capture_event_payload.sql.";
+const APPLY_055 = "Apply db/migrations/055_capture_event_payload.sql.";
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
- * and THAT body carries it (054). A trigger that calls the function it is
+ * and THAT body carries it (055). A trigger that calls the function it is
  * judged by, not the function's mere presence: 025 re-applied by hand beside
- * 054's function reads no key, and the function nobody calls proves nothing.
+ * 055's function reads no key, and the function nobody calls proves nothing.
  */
 const keyRuleHolds = (trigSrc: string, appendSrc: string): boolean =>
   /ob1_append_thought_event\(/.test(trigSrc) ? /ob1:audit-event-from-the-key/.test(appendSrc) : /ob1:audit-event-from-the-key/.test(trigSrc);
@@ -1134,12 +1134,14 @@ if (configFailed) {
          */
         const ledgerRemedy = (migration: string, apply: string): string => {
           if (ledger.has(migration)) return REAPPLY;
-          const remedy = ledgerRead || !ledgerPresent
-            ? apply
-            : `${apply} — or, if the ledger already records ${migration} (${whyUnread}): ${REAPPLY.charAt(0).toLowerCase()}${REAPPLY.slice(1)}`;
           // 046 applied by hand alone puts 046's audit and refusal bodies back
-          // over 054's (SMD-2115): every remedy that names 046 names 054 after it.
-          return migration === "046" ? `${remedy}${THEN_054}` : remedy;
+          // over 055's (SMD-2115): every remedy that names 046 names 055 after
+          // it — before the "or, if the ledger…" clause, which is the whole
+          // re-apply and needs no second step (second review pass).
+          const applied = migration === "046" ? `${apply}${THEN_055}` : apply;
+          return ledgerRead || !ledgerPresent
+            ? applied
+            : `${applied} — or, if the ledger already records ${migration} (${whyUnread}): ${REAPPLY.charAt(0).toLowerCase()}${REAPPLY.slice(1)}`;
         };
         // By signature, not arity: a vendored bootstrap's upsert_thought(text,
         // vector, jsonb) is a third 3-argument form, and reading whichever the
@@ -1316,8 +1318,8 @@ if (configFailed) {
         // brain still at 044 under this server writes without it, and the
         // `audit events` check says so (second review pass). Read from pg_proc
         // by its sentinel, as the capture-body checks read theirs.
-        // Since 054 the rule (and its sentinel) live in ob1_append_thought_event,
-        // which the trigger calls; a brain before 054 has it in the trigger.
+        // Since 055 the rule (and its sentinel) live in ob1_append_thought_event,
+        // which the trigger calls; a brain before 055 has it in the trigger.
         const auditBodies = (await sql`
           SELECT p.proname AS name, p.prosrc AS src FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
           WHERE n.nspname = 'public' AND p.proname IN ('thoughts_write_audit', 'ob1_append_thought_event')`) as { name: string; src: string }[];
@@ -1491,9 +1493,9 @@ if (configFailed) {
          * trigger that INSERTs into them, so without them every write through
          * this server fails. An older body over the columns is a WARN: writes
          * go through and every row records an unknown kind and no event — the
-         * backfill fills the kind later, the event is lost. 054's payload
+         * backfill fills the kind later, the event is lost. 055's payload
          * (SMD-2115): the trigger body that carries a capture's content and an
-         * update's key move (its sentinel) — an older body over 054's schema is
+         * update's key move (its sentinel) — an older body over 055's schema is
          * a WARN of the same kind: the log cannot rebuild what those rows
          * describe, the payload backfill fills the captures later, the key
          * moves are lost. Then the census: keys nobody has classified and rows
@@ -1518,7 +1520,7 @@ if (configFailed) {
           const trigSrc = String(bodies.find((b) => b.name === "thoughts_write_audit")?.src ?? "");
           const refuseSrc = String(bodies.find((b) => b.name === "thought_audit_refuse_mutation")?.src ?? "");
           // 046's rule — the kind from the key, never the payload — stands in
-          // ob1_append_thought_event since 054 and in the trigger before it;
+          // ob1_append_thought_event since 055 and in the trigger before it;
           // the trigger names the sentinel either way, so the rule is read
           // where it lives, not where it is mentioned (cold read, SMD-2115's
           // first review pass).
@@ -1552,10 +1554,10 @@ if (configFailed) {
                 "the refusal trigger's body is from before 046 (008 re-applied by hand): every UPDATE of thought_audit is refused, the backfill's included, so rows written before a key was classified can never gain their kind",
                 ledgerRemedy("046", APPLY_046));
           } else {
-            // 054's sentinel (SMD-2115): the body that carries a capture's
-            // content and an update's key move. Without it — 054 not yet
+            // 055's sentinel (SMD-2115): the body that carries a capture's
+            // content and an update's key move. Without it — 055 not yet
             // applied (a brain at 053 under this server), or 046 re-applied
-            // by hand over 054 — writes go through, the kind and the event
+            // by hand over 055 — writes go through, the kind and the event
             // are recorded, and the log cannot rebuild what these rows
             // describe: the payload backfill fills the captures later, the
             // key moves are lost for good. Said BESIDE the census, not instead
@@ -1563,8 +1565,8 @@ if (configFailed) {
             // in this ladder and a brain at 053 lost its kind census), and the
             // payload census below is skipped on such a brain, whose schema
             // has no ob1_capture_payload to derive with.
-            const pre054 = !/ob1:capture-event-carries-content/.test(trigSrc);
-            const PRE054 = "the audit trigger's body is from before 054 (migration 054 not yet applied, or 046 re-applied by hand): a capture records no content and an update no key move, so the log alone cannot rebuild those thoughts — backfill_thought_payloads fills the captures later, the key moves are lost";
+            const pre055 = !/ob1:capture-event-carries-content/.test(trigSrc);
+            const PRE055 = "the audit trigger's body is from before 055 (migration 055 not yet applied, or 046 re-applied by hand): a capture records no content and an update no key move, so the log alone cannot rebuild those thoughts — backfill_thought_payloads fills the captures later, the key moves are lost";
             // The census names what waits, not only how many: the names the
             // waiting rows carry that no classified key answers to (the
             // set_agent_kind the remedy asks for), and the rows whose key IS
@@ -1616,9 +1618,9 @@ if (configFailed) {
                                                     FROM thought_audit a
                                                    WHERE a.canonical_agent_id = g.canonical_agent_id AND a.actor_name IS NOT NULL
                                                   OFFSET 0) d
-                                    WHERE ob1_registry_kind(NULL, d.actor_name) IS NOT NULL))${pre054 ? "" : `,
-              -- 054's payload (SMD-2115): the capture rows still without
-              -- content, read through 054's partial index on exactly them —
+                                    WHERE ob1_registry_kind(NULL, d.actor_name) IS NOT NULL))${pre055 ? "" : `,
+              -- 055's payload (SMD-2115): the capture rows still without
+              -- content, read through 055's partial index on exactly them —
               -- empty on a brain whose pass has run — bounded, ordered as the
               -- index is so the planner takes it with stale statistics too
               -- (run-it, first review pass: a seq scan the first start after
@@ -1642,25 +1644,25 @@ if (configFailed) {
                      COALESCE(sum(n), 0)::int AS awaiting,
                      COALESCE(sum(n) FILTER (WHERE fillable), 0)::int AS fillable,
                      (SELECT string_agg(nm, ', ' ORDER BY nm) FROM (SELECT DISTINCT name AS nm FROM resolved WHERE NOT fillable LIMIT 8) s) AS unnamed,
-                     ${pre054 ? "0 AS payload, 0 AS recoverable" : "(SELECT count(*)::int FROM payload) AS payload, (SELECT n FROM derivable) AS recoverable"}
-                FROM resolved`, pre054 ? [] : [PAYLOAD_CENSUS_BOUND + 1, PAYLOAD_CENSUS_BOUND])) as Record<string, unknown>[];
+                     ${pre055 ? "0 AS payload, 0 AS recoverable" : "(SELECT count(*)::int FROM payload) AS payload, (SELECT n FROM derivable) AS recoverable"}
+                FROM resolved`, pre055 ? [] : [PAYLOAD_CENSUS_BOUND + 1, PAYLOAD_CENSUS_BOUND])) as Record<string, unknown>[];
             const unclassified = Number(census.unclassified), awaiting = Number(census.awaiting), fillable = Number(census.fillable);
             const payload = Number(census.payload), recoverable = Number(census.recoverable);
             const overBound = payload > PAYLOAD_CENSUS_BOUND;
             // What the payload census says beside the kind census, and its remedy.
             const payloadClause = overBound
-              ? `more than ${PAYLOAD_CENSUS_BOUND.toLocaleString("en-US")} capture event(s) carry no content (written before migration 054, or under a re-applied 046)`
-              : `${payload} capture event(s) carry no content (written before migration 054, or under a re-applied 046)${payload > recoverable ? `, ${payload - recoverable} of them with nothing to derive from — the thought gone without a tombstone` : ""}${payload > 0 && recoverable > 0 ? ` — ${recoverable} of them the payload backfill fills` : ""}`;
+              ? `more than ${PAYLOAD_CENSUS_BOUND.toLocaleString("en-US")} capture event(s) carry no content (written before migration 055, or under a re-applied 046)`
+              : `${payload} capture event(s) carry no content (written before migration 055, or under a re-applied 046)${payload > recoverable ? `, ${payload - recoverable} of them with nothing to derive from — the thought gone without a tombstone` : ""}${payload > 0 && recoverable > 0 ? ` — ${recoverable} of them the payload backfill fills` : ""}`;
             const payloadFinding = payload > 0 && (overBound || recoverable > 0);
             const PAYLOAD_REMEDY = "As the owner (the pass amends thought_audit), SELECT backfill_thought_payloads(); fills them from the first content-moving update, the tombstone or the live row, and reports any row nothing derives for (db/README.md).";
-            const PAYLOAD_REMEDY_THEN = "Then, as the owner (the pass amends thought_audit), SELECT backfill_thought_payloads(); fills the capture events written before 054 from the first content-moving update, the tombstone or the live row, and reports any row nothing derives for (db/README.md).";
+            const PAYLOAD_REMEDY_THEN = "Then, as the owner (the pass amends thought_audit), SELECT backfill_thought_payloads(); fills the capture events written before 055 from the first content-moving update, the tombstone or the live row, and reports any row nothing derives for (db/README.md).";
             if (unclassified > 0 || awaiting > 0) {
               const needsKinds = unclassified > 0 || Boolean(census.unnamed);
-              // The payload census's finding — or the pre-054 body — rides the
+              // The payload census's finding — or the pre-055 body — rides the
               // same line, message AND remedy (cold read, first review pass: the
               // first draft appended the remedy and dropped the clause).
               add("audit events", "warn",
-                  `${unclassified} key(s) with no kind${unclassified ? ` (${census.labels})` : ""} and ${awaiting} audit row(s) naming a key with no kind${census.unnamed ? ` (names: ${census.unnamed})` : ""}${fillable ? `, ${fillable} of them naming a key classified since — waiting only on the backfill` : ""} — every write through an unclassified key is recorded with actor_kind and trust unknown, which every read built on them will say${pre054 ? `; and ${PRE054}` : payloadFinding ? `; and ${payloadClause}` : ""}`,
+                  `${unclassified} key(s) with no kind${unclassified ? ` (${census.labels})` : ""} and ${awaiting} audit row(s) naming a key with no kind${census.unnamed ? ` (names: ${census.unnamed})` : ""}${fillable ? `, ${fillable} of them naming a key classified since — waiting only on the backfill` : ""} — every write through an unclassified key is recorded with actor_kind and trust unknown, which every read built on them will say${pre055 ? `; and ${PRE055}` : payload > 0 ? `; and ${payloadClause}` : ""}`,
                   // The backfill is the owner's call: its pass holds a share lock on
                   // ob1_agents, which needs UPDATE there (seventh review pass: the
                   // remedy read as a plain SELECT and a connector role following it
@@ -1670,9 +1672,9 @@ if (configFailed) {
                     ? "For each name: SELECT set_agent_kind('<label>', '<operator | agent | ingested>'); then, as the owner (the pass amends thought_audit and locks ob1_agents), SELECT backfill_thought_audit_events(); fills the rows already written (db/README.md)."
                     : "As the owner (the pass amends thought_audit and locks ob1_agents), SELECT backfill_thought_audit_events(); fills them — every key they name is classified (db/README.md).")
                   + (/(^|, )agent [0-9a-f-]{36}/.test(String(census.unnamed ?? "")) ? " A name shaped `agent <uuid>` is an id the registry has no row for: set_agent_kind cannot reach those rows, and they stay unknown." : "")
-                  + (pre054 ? ` Then: ${ledgerRemedy("054", APPLY_054)}` : payloadFinding ? ` ${PAYLOAD_REMEDY_THEN}` : ""));
-            } else if (pre054) {
-              add("audit events", "warn", `046's event shape present and every key classified, but ${PRE054}`, ledgerRemedy("054", APPLY_054));
+                  + (pre055 ? ` Then, ${ledgerRemedy("055", APPLY_055).charAt(0).toLowerCase()}${ledgerRemedy("055", APPLY_055).slice(1)}` : payloadFinding ? ` ${PAYLOAD_REMEDY_THEN}` : ""));
+            } else if (pre055) {
+              add("audit events", "warn", `046's event shape present and every key classified, but ${PRE055}`, ledgerRemedy("055", APPLY_055));
             } else if (payloadFinding) {
               // Every key classified, and captures the log cannot rebuild yet
               // (SMD-2115): the pass is the remedy, and it says what it filled.
@@ -1680,7 +1682,7 @@ if (configFailed) {
                   `046's event shape present and every key classified, but ${payloadClause}; the log alone cannot rebuild those thoughts until it runs`,
                   PAYLOAD_REMEDY);
             } else {
-              add("audit events", "ok", `046's event shape present — the columns, the trigger that derives the kind from the key, the one lawful amendment — and every key classified; 054's payload in every capture event${payload > 0 ? ` that has one — ${payload} with nothing to derive it from (the thought gone without a tombstone; the fold names them)` : ""}`);
+              add("audit events", "ok", `046's event shape present — the columns, the trigger that derives the kind from the key, the one lawful amendment — and every key classified; 055's payload in every capture event${payload > 0 ? ` that has one — ${payload} with nothing to derive it from (the thought gone without a tombstone; the fold names them)` : ""}`);
             }
           }
         } catch (e) {
@@ -1698,13 +1700,13 @@ if (configFailed) {
             // The group each table the census reads belongs to, as db/config.mjs's
             // ROLE_GRANTS has them (fifth review pass: ob1_agent_keys is the
             // server group's, and was sent to the community group).
-            // thoughts joined the census with 054 (ob1_capture_payload reads the
+            // thoughts joined the census with 055 (ob1_capture_payload reads the
             // live row); the fallback is a whole clause, not a fragment (run-it,
             // SMD-2115's first review pass: "— a row of, which").
             const group = denied === "ob1_agents" ? "the capture group's row since 046"
               : denied === "ob1_agent_keys" ? "the server group's row"
               : denied === "thought_audit" ? "the community group's row"
-              : denied === "thoughts" ? "the capture group's row since 001, read by the payload census since 054"
+              : denied === "thoughts" ? "the capture group's row since 001, read by the payload census since 055"
               : "a row of the grants table";
             add("audit events", "skip", `not checked — this role cannot read the census (${msg}); the shape is checked, the waiting keys are not`,
                 `GRANT SELECT ON ${denied} TO <the connector's role>; — ${group}, which migrate.ts --grant issues (db/README.md, Grants for a capturing role).`);

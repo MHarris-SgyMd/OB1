@@ -1,7 +1,7 @@
 -- =============================================================================
 -- SMD-1999 prototype — the pieces both options share. NOT a migration: applied
 -- by evals/eval-writable-projection.ts onto a throwaway database at the shipped
--- schema (053 when it was measured; 054 since SMD-2115 shipped the diff rule,
+-- schema (053 when it was measured; 055 since SMD-2115 shipped the diff rule,
 -- the append and the stamp arms — sections 1, 2 and 5a below are now the
 -- migration's, and this file calls them), for the measurement, and thrown away
 -- with it. Placeholders: {{EMBEDDING_DIM}}
@@ -10,7 +10,7 @@
 --
 -- What this file states, in the order a write runs:
 --
---   1. ONE DIFF RULE (shipped by 054). ob1_thought_diff is what 046's audit
+--   1. ONE DIFF RULE (shipped by 055). ob1_thought_diff is what 046's audit
 --      trigger computed from OLD and NEW, lifted out so the write functions
 --      can compute the event BEFORE the row exists and the trigger can
 --      compute it AFTER and compare. Three additions over 046, and nothing
@@ -20,7 +20,7 @@
 --      own time — the event's clock is the write's); an update records the
 --      fingerprint's before/after when it moves — 018 sets the column NULL
 --      when another row holds the key, a decision a replay cannot re-derive.
---   2. THE APPEND (shipped by 054). ob1_append_thought_event is 046's trigger tail — who, the
+--   2. THE APPEND (shipped by 055). ob1_append_thought_event is 046's trigger tail — who, the
 --      kind from the registry, the trust ceiling, the door, the claim — as a
 --      function that INSERTs the thought_audit row and returns its id. The
 --      trigger calls it for a raw write; the functions call it first.
@@ -60,7 +60,7 @@
 --      ob1.projecting = 'vector' it verifies that only the vector moved.
 --      Without any setting (a raw write) it appends, as 046 does, reading and
 --      clearing ob1.event as 046 did.
---   5. THE STAMP, CALLABLE (the two arms shipped by 054). 050 stamps metadata.actor_kind / actor_name in a
+--   5. THE STAMP, CALLABLE (the two arms shipped by 055). 050 stamps metadata.actor_kind / actor_name in a
 --      BEFORE trigger from the envelope; an event written before the row must
 --      carry the stamped metadata, so the two arms are functions the writers
 --      call, and the projector runs under 050's own pass-through
@@ -73,7 +73,7 @@
 
 -- ---------------------------------------------------------------------------
 -- 1, 2 and 5a — the diff rule, the append and 050's two stamp arms — SHIPPED:
--- migration 054 (SMD-2115, step 1 of the decision) defines ob1_thought_diff,
+-- migration 055 (SMD-2115, step 1 of the decision) defines ob1_thought_diff,
 -- ob1_append_thought_event, ob1_actor_stamp and ob1_actor_stamp_kept with the
 -- bodies this file carried, and the shipped audit trigger calls the first two.
 -- This file calls them and defines only what step 2 (SMD-2116) will ship: the
