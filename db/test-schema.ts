@@ -160,6 +160,33 @@ async function restoreShipped(...fns: string[]): Promise<string[]> {
   for (const f of latest) await db.exec(subst(readFileSync(join(MIGRATIONS, f), "utf8")));
   return latest;
 }
+/**
+ * Empty thoughts and run a bulk load with the walk's HNSW index dropped, then
+ * build it again from its own definition over what was loaded. Measured on
+ * [8c]'s 1,200 rows at 1024 dims (SMD-2097): 28.6 s inserted into the index a
+ * row at a time, 1.2 s without it and 4.8 s to build it after, and the triggers
+ * cost nothing either way. Built over the live rows, the graph also carries no
+ * dead rows from the section before — grown, [8d]'s 300 took 11 s behind [8c]'s
+ * 1,201. The rows are byte for byte what the section inserted; only the graph
+ * over them is built in one pass instead of grown, and it is in place before
+ * the section calls match_thoughts. (Whether the walk then scans it is
+ * SMD-2151's: with no ANALYZE the planner takes the GIN bitmap and a sort.)
+ */
+async function loadWithoutWalkIndex(load: () => Promise<void>): Promise<void> {
+  const def = await dropWalkIndex();
+  try {
+    await db.exec(`DELETE FROM thoughts`);
+    await load();
+  } finally {
+    await db.exec(def);
+  }
+}
+/** Drop thoughts_embedding_idx and return the statement that builds it again. */
+async function dropWalkIndex(): Promise<string> {
+  const def = (await db.query<{ def: string }>(`SELECT pg_get_indexdef('thoughts_embedding_idx'::regclass) AS def`)).rows[0].def;
+  await db.exec(`DROP INDEX thoughts_embedding_idx`);
+  return def;
+}
 
 // ── 1. Migrations apply, in order ────────────────────────────────────────────
 
@@ -638,16 +665,18 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
 
 console.log("\n[8c] above the exact threshold, the walk branch agrees with an exact scan");
 {
-  await db.exec(`DELETE FROM thoughts`);
   const { unitVector } = seededRandom(968);
   const N = 1200;
-  for (let i = 0; i < N; i += 100) {
-    const values = Array.from({ length: 100 }, (_, k) => `('walk ${i + k}', '{"kind":"c"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
-    await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
-  }
-  // Two that must not be found: a different kind, nearest to the query.
-  const q = unitVector(EMBEDDING_DIM);
-  await db.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ('near but d', '{"kind":"d"}'::jsonb, $1::vector)`, [`[${q.join(",")}]`]);
+  let q: number[] = [];
+  await loadWithoutWalkIndex(async () => {
+    for (let i = 0; i < N; i += 100) {
+      const values = Array.from({ length: 100 }, (_, k) => `('walk ${i + k}', '{"kind":"c"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
+      await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+    }
+    // Two that must not be found: a different kind, nearest to the query.
+    q = unitVector(EMBEDDING_DIM);
+    await db.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ('near but d', '{"kind":"d"}'::jsonb, $1::vector)`, [`[${q.join(",")}]`]);
+  });
   const matches = await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts WHERE metadata @> '{"kind":"c"}'`);
   assert(matches.rows[0].c > 1000, `${matches.rows[0].c} matching rows, above the 1,000-row exact threshold — the walk branch`);
 
@@ -687,22 +716,23 @@ console.log("\n[8c] above the exact threshold, the walk branch agrees with an ex
 
 console.log("\n[8d] rows without a vector or chunks do not count towards the walk threshold");
 {
-  await db.exec(`DELETE FROM thoughts`);
   const { unitVector } = seededRandom(1018);
-  // Enough indexed rows of another kind that a bounded walk cannot stumble on
-  // the wanted ones by luck.
-  for (let i = 0; i < 300; i += 100) {
-    const values = Array.from({ length: 100 }, (_, k) => `('other ${i + k}', '{"kind":"o"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
-    await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
-  }
-  // 1,200 kind "u" rows with no vector (the fallback's shape), plus five with one.
-  for (let i = 0; i < 1200; i += 200) {
-    const values = Array.from({ length: 200 }, (_, k) => `('unscoreable ${i + k}', '{"kind":"u"}'::jsonb, NULL)`).join(",");
-    await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
-  }
-  for (let i = 0; i < 5; i++) {
-    await db.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ($1, '{"kind":"u"}'::jsonb, $2::vector)`, [`scoreable ${i}`, `[${unitVector(EMBEDDING_DIM).join(",")}]`]);
-  }
+  await loadWithoutWalkIndex(async () => {
+    // Enough indexed rows of another kind that a bounded walk cannot stumble on
+    // the wanted ones by luck.
+    for (let i = 0; i < 300; i += 100) {
+      const values = Array.from({ length: 100 }, (_, k) => `('other ${i + k}', '{"kind":"o"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
+      await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+    }
+    // 1,200 kind "u" rows with no vector (the fallback's shape), plus five with one.
+    for (let i = 0; i < 1200; i += 200) {
+      const values = Array.from({ length: 200 }, (_, k) => `('unscoreable ${i + k}', '{"kind":"u"}'::jsonb, NULL)`).join(",");
+      await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+    }
+    for (let i = 0; i < 5; i++) {
+      await db.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ($1, '{"kind":"u"}'::jsonb, $2::vector)`, [`scoreable ${i}`, `[${unitVector(EMBEDDING_DIM).join(",")}]`]);
+    }
+  });
   const matching = await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts WHERE metadata @> '{"kind":"u"}'`);
   assert(matching.rows[0].c === 1205, `1,205 rows match the filter, 1,200 of them unscoreable (got ${matching.rows[0].c})`);
   await db.exec(`SET hnsw.max_scan_tuples = 1`);
@@ -767,13 +797,14 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
   // first 38 pages were already empty — the "emptied band" below was then
   // mostly pre-empty and the probe passed on an incidental layout (review
   // pass 2). Compacted, 1,000 rows are some sixteen pages, every one live.
-  await db.exec(`DELETE FROM thoughts`);
-  await db.exec(`VACUUM thoughts`);
   const { unitVector } = seededRandom(1463);
-  for (let i = 0; i < 1000; i += 100) {
-    const values = Array.from({ length: 100 }, (_, k) => `('gate ${i + k}', '{"kind":"${(i + k) % 100 === 0 ? "thin" : "broad"}"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
-    await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
-  }
+  await loadWithoutWalkIndex(async () => {
+    await db.exec(`VACUUM thoughts`);
+    for (let i = 0; i < 1000; i += 100) {
+      const values = Array.from({ length: 100 }, (_, k) => `('gate ${i + k}', '{"kind":"${(i + k) % 100 === 0 ? "thin" : "broad"}"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
+      await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+    }
+  });
   const exactTop = async (qv: string, filter: string) => {
     await db.exec(`SET enable_indexscan = off`);
     await db.exec(`SET enable_bitmapscan = off`);
@@ -816,6 +847,7 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
   // pass 1). A body the regex cannot read fails the one assertion and skips
   // the rest, rather than throwing the suite away from [9] on (review pass 2).
   assert(stmt !== null, "the sample statement reads out of the installed body (SELECT <three counts> INTO v_hits, v_hit_pages, v_pages_seen FROM (<the draw>) b LEFT JOIN LATERAL (<the probe>) p ON true)");
+  let walkIndex: string | null = null;
   if (stmt) {
     type Draw = { hits: number; hit_pages: number; pages_seen: number };
     /**
@@ -900,6 +932,11 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
               count(*) FILTER (WHERE ctid >= ('(' || ${lo} || ',0)')::tid AND ctid < ('(' || ${hi} || ',0)')::tid)::int AS inside
        FROM thoughts`)).rows;
     assert(inside > 0 && beyond > 0, `the band [${lo}, ${hi}) holds ${inside} live rows and ${beyond} live rows lie beyond it, so emptying it leaves the heap its size (the fixture's ${pages} pages need to be at least ${ROUTE_SAMPLE_PAGES + 3} with the last one live — a narrower EMBEDDING_DIM packs more rows a page)`);
+    // The walk's index goes first and is built again on the emptied table at
+    // the end of the section: the VACUUM took 6.8 s repairing the HNSW graph
+    // around the band's dead rows (SMD-2097), and from here on the section reads
+    // the heap alone — the pinned probe, its buffers and the random draws.
+    walkIndex = await dropWalkIndex();
     const deleted = (await db.query(`DELETE FROM thoughts WHERE ctid >= ('(' || ${lo} || ',0)')::tid AND ctid < ('(' || ${hi} || ',0)')::tid`)).affectedRows ?? -1;
     await db.exec(`VACUUM thoughts`);
     const [{ live_pages, heap_pages }] = (await db.query<{ live_pages: number; heap_pages: number }>(
@@ -932,6 +969,11 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
     }
     assert(stillSound === 5,
       `on the heap with ${ROUTE_SAMPLE_PAGES} of ${pages} pages emptied every random draw still reaches 2 to ${ROUTE_SAMPLE_PAGES} pages and the rule still says "collect" (hits/hit pages/pages drawn: ${sparse.join(", ")})`);
+  }
+  // The rows out first, which [9] would delete anyway, so the build is over nothing.
+  if (walkIndex !== null) {
+    await db.exec(`DELETE FROM thoughts`);
+    await db.exec(walkIndex);
   }
   const restored = await restoreShipped("match_thoughts");
   assert(restored.length === 1 && restored[0].startsWith("041") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped()),
