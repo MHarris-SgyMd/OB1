@@ -355,6 +355,32 @@ A `--diff` or `--replay` replays what stable logged, so:
 `--replay` prints how many were replayed and skipped. A `--diff` that
 replayed none still says nothing moved (SMD-2182), so read `--replay` first.
 
+### Compare two live brains
+
+`--diff`/`--replay` is the merge-time replay over Postgres. To ask instead "are
+these two running brains telling me the same thing, and if not why?" in one step,
+point them at each other over HTTP (SMD-2109):
+
+```bash
+# each brain is a connector name (claude mcp get resolves the URL + key) or an
+# http(s):// URL with its key in --a-key/--b-key, OB1_COMPARE_KEY, or ?key=
+bun db/tier.ts --compare open-brain open-brain-canary
+bun db/tier.ts --compare open-brain open-brain-canary --replay --hybrid \
+  --query "highest value open ticket" --queries-file deploy/compare-queries.txt --json
+```
+
+It reads each brain as a client — the keyed `GET /health` record (version,
+commit, tier, the tree's latest migration against the ledger's highest, schema
+version, embedding, counts) and, with `--replay`, the two search tools over a
+supplied query set (the vector arm needs no local model — each brain embeds its
+own query). It writes to neither brain, never prints a key, and prints a one-line
+verdict ("current with each other" / "canary is 1 migration behind; 407 vs 597
+thoughts"). It exits non-zero when anything differs. Because it is HTTP-only, the
+exact id-set difference and a replay sourced from stable's `query_log` are out of
+reach and named as such; a DB-backed mode can add them. Until SMD-2037 lands, a
+refreshed brain runs at pgvector's default HNSW settings, so a hybrid-arm
+difference can be GUC-induced — the retrieval section says so.
+
 `--from` and `--to` name a database on the network as `HOST[:PORT][/DB]`
 (port 5432 and database `openbrain` by default). The wrapper builds the URL as
 the services here do, with `POSTGRES_PASSWORD`. A full `postgres://` URL is used

@@ -402,6 +402,14 @@ jobs:
         working-directory: db
         run: bun test-replay.ts
 
+      # SMD-2109. The cross-brain compare (db/brain-compare.ts) is a read client:
+      # two fake brains (Bun.serve) answer a keyed /health and tools/call, so the
+      # identity/freshness/retrieval diff, the verdict and the key-safety run with
+      # no service container, no model and no key.
+      - name: Cross-brain compare (fake brains, no database)
+        working-directory: db
+        run: bun test-brain-compare.ts
+
   db-live:
     name: Schema against real Postgres
     runs-on: ubuntu-24.04
