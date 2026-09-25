@@ -521,14 +521,18 @@ if (!egress.problems.length) {
   } else {
     add("egress policy", "ok", `allow — a thought's text reaches an endpoint not declared local unless an OB1_EGRESS_DENY term matches; ${showTerms(egress.deny)}`);
   }
-  // A `source:` term gates a label the caller supplies (capture_thought takes
-  // `source`, SMD-1298), so a capture may name any label and pass it; who
-  // wrote is `actor:`, which the key proves. Said here, where a policy written
-  // before that change is read back (ninth review pass; SMD-1941).
+  // A `source:` term does NOT gate a capture_thought capture: its `source` is
+  // the caller's claim (SMD-1298), dodged by naming another label or none, so
+  // the handler keeps it off the subject and no term can match it (SMD-1941).
+  // It gates the row's OWN label — the value the server wrote — at an edit and
+  // at the re-embed and consolidation passes that read the row back (and at
+  // db/sync-linear.ts's captures, whose `source` is the server's). Who may
+  // capture is `actor:`, which the key proves. Said here, where a policy is
+  // read back (ninth review pass; SMD-1941).
   const sourceTerms = [...egress.allow, ...egress.deny].filter((t) => t.unit === "source");
   if (sourceTerms.length && egress.mode !== "off") {
-    add("egress policy", "warn", `${sourceTerms.length} source: term(s) (${sourceTerms.map((t) => `source:${t.value}`).join(", ")}) gate a label the caller supplies — since SMD-1298 a capture names its own \`source\`, so the term holds only for callers that keep the label`,
-        "Gate who wrote with actor:<key name>; keep source: terms for what a row's label says, not for who may send.");
+    add("egress policy", "warn", `${sourceTerms.length} source: term(s) (${sourceTerms.map((t) => `source:${t.value}`).join(", ")}) do NOT gate a capture_thought capture — its \`source\` is the caller's claim, kept off the gate (SMD-1941); they gate a row's stored label at an edit and the re-embed/consolidation passes, and db/sync-linear.ts's captures`,
+        "Gate who may capture with actor:<key name>; keep source: terms for what a row's label says, not for who may send.");
   }
   // Terms in the knob the mode does not read decide nothing — a natural
   // misreading (deny + OB1_EGRESS_DENY) that fails closed and silently

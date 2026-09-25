@@ -166,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1794 assertions: 1794 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1806 assertions: 1806 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-six (56) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -404,8 +404,9 @@ redirect is spelled `@>` now, which 016's GIN index serves. A writer call
 already running 053's body when the file commits writes by 053's rule: stop the
 extraction workers for the upgrade, or run `SELECT apply_entity_type_gate()`
 once they have finished (and again after a source stops stating a name the rule
-refuses), as the role that migrated — a `--grant` role lacks UPDATE on the
-mention tables (SMD-2216). Such a run's counts are its result; `ob1_config`
+refuses), as the role that migrated or a `--grant` role — one granted before
+SMD-2216 lacks UPDATE on the mention tables, which a merge needs, until
+`--grant` is run for it again. Such a run's counts are its result; `ob1_config`
 keeps only the file's. `server-portable/entity-gate.ts` is its JavaScript twin,
 for the capture-time `people` facet (`metadata.ts`), which never reaches the
 function and keeps only the names the rule keeps as a person; test-schema [52]
@@ -472,9 +473,11 @@ issues every group at once.
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `INSERT, UPDATE` |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
-| **extraction** — the entity-extraction worker, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
-| | `thought_entities` (016) | `SELECT, INSERT, DELETE` |
-| | `ob1_entity_edges` (016) | `SELECT, INSERT, DELETE` |
+| **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `thought_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for 016's `merge_entities`, and since 053 for `record_thought_entities`, which upserts (`ON CONFLICT DO UPDATE`): Postgres checks it for every call, conflict or none, so until SMD-2216 a `--grant` role could not record a mention |
+| | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
+| **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` reads the source rows too | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
+| | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets; capture's `SELECT, UPDATE` cover the reads and the closing |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
 | | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
@@ -485,7 +488,7 @@ issues every group at once.
 | | sequences `ingestion_jobs_id_seq`, `ingestion_items_id_seq` (schemas/smart-ingest; `BIGSERIAL` ids) | `USAGE, SELECT` |
 | | function `append_thought_evidence(uuid, jsonb)` (schemas/smart-ingest; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`; the bigint form, dropped by the file since SMD-2128, loses its grant — run `--grant` again) | `EXECUTE` |
 | | `entities`, `edges`, `entity_extraction_queue`, `consolidation_log` (schemas/entity-extraction — upstream's tables, not 016's `ob1_*`) | `SELECT, INSERT, UPDATE, DELETE` |
-| | `thought_entities` (schemas/entity-extraction names 016's table under `IF NOT EXISTS`; the **extraction** row's privileges exactly, so the merge widens nothing) | `SELECT, INSERT, DELETE` |
+| | `thought_entities` (schemas/entity-extraction names 016's table under `IF NOT EXISTS`; the **extraction** row's privileges exactly, so the merge widens nothing) | `SELECT, INSERT, UPDATE, DELETE` |
 | | sequences `entities_id_seq`, `edges_id_seq`, `consolidation_log_id_seq` (schemas/entity-extraction; `BIGSERIAL` ids) | `USAGE, SELECT` |
 | | `thought_edges` (schemas/typed-reasoning-edges) | `SELECT, INSERT, UPDATE, DELETE` |
 | | sequence `thought_edges_id_seq` (schemas/typed-reasoning-edges; `BIGSERIAL` id) | `USAGE, SELECT` |
@@ -512,10 +515,15 @@ issues every group at once.
 | | `operating_model_profiles`, `operating_model_sessions`, `operating_model_layer_checkpoints`, `operating_model_entries`, `operating_model_exports` (recipes/work-operating-model-activation; its three functions keep PUBLIC's EXECUTE — upstream only granted them to its service role) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `world_model_assessments`, `world_model_boundary_flows` (recipes/world-model-diagnostic-activation, its `schema-v2-draft.sql` — a draft its README's V1 does not apply; listed so applying it is one `--grant` away) | `SELECT, INSERT, UPDATE, DELETE` |
 
-Plus `USAGE ON SCHEMA public`. The migrations' own tables need no sequence
-grant — every primary key is a `uuid` or a natural key — but three community
-schemas use `BIGSERIAL` ids, and an `INSERT` into such a table needs `USAGE` on
-the sequence (`permission denied for sequence …` with the table fully granted),
+Plus `USAGE ON SCHEMA public`, and the right to create a temp table:
+`record_thought_entities`, `record_source_links` and `apply_entity_type_gate()`
+stage their rows in `ON COMMIT DROP` temp tables, so a database that has revoked
+`TEMPORARY` from `PUBLIC` (the default grants it) needs `GRANT TEMPORARY ON
+DATABASE … TO your_role` as well — `--grant` does not issue it. The migrations'
+own tables need no sequence grant — every primary key is a `uuid` or a natural
+key — but three community schemas use `BIGSERIAL` ids, and an `INSERT` into such
+a table needs `USAGE` on the sequence (`permission denied for sequence …` with
+the table fully granted),
 so the **community** group names those six sequences; an identity column
 (`wiki_section_revisions.id`) needs none. Both are measured, not recalled:
 test-schema [40] grants the tables alone and watches which inserts are still
@@ -544,10 +552,11 @@ as the objects' owner or a superuser; it never creates the role or sets a passwo
 create the role first. `--grant --dry-run` prints the statements without running
 them, so a locked-down deployment can grant a subset by hand. A role that only
 ever runs the server needs the **capture** and **server** groups; add **worker**
-for the role your bulk passes connect as, and **extraction** on top of that for
-entity extraction. The **community**, **extensions** and **recipes** groups are
-issued for whichever schema files you have applied — the objects not yet
-present are skipped and named, so run `--grant` again after applying one; apply
+for the role your bulk passes connect as, **extraction** on top of that for
+entity extraction, and **structure** as well for a structured pass. The
+**community**, **extensions** and **recipes** groups are issued for whichever
+schema files you have applied — the objects not yet present are skipped and
+named, so run `--grant` again after applying one; apply
 a schema with `psql "$DATABASE_URL" -f <its path>`, as its README says. Presence is
 per object, not per file, so the two community rows whose tables a migration
 also creates — `thought_audit` (008) and `thought_entities` (016) — are issued
@@ -1778,7 +1787,7 @@ agent-written capture is one source among several):
 | `commit` | git commit messages since the upstream pin (the fork's whole delta) | in the tree; `--since <ref>` to move the range start |
 | `linear` | a corpus dump built by `evals/build-linear-corpus.ts` — each record's `issue`, through the Linear adapter: the row the board sync writes (SMD-1958) | `--linear <dump.json>` and `--allow linear:corpus` |
 | `memory` | the `*.md` memory files (`MEMORY.md`, the index, excluded) | `--memory-dir <path>` or `OB1_MEMORY_DIR` |
-| `markdown` | a Markdown / Obsidian vault, through the Markdown adapter | `--markdown <root>` or `OB1_MARKDOWN_DIR`, and `--allow <root>` |
+| `markdown` | a Markdown / Obsidian vault, through the Markdown adapter: every `.md` (any case) at any depth, a `Templates/` folder and dot-folders included and a symlink followed; only `.obsidian/`, `.trash/`, `.git/` and `node_modules/` are skipped, by name at any depth. One vault per brain: the identity is the note's name and the vault root is stored nowhere, so a second vault's note of the same name overwrites the first's across runs (SMD-2228) | `--markdown <root>` or `OB1_MARKDOWN_DIR`, and `--allow <root>` as a path (a bare name is not resolved — SMD-2221); `--source markdown` takes the vault alone |
 | `items` | ingestion-contract items from a file, one JSON object per line, emitted by a parser in any language — the import recipes' seam (SMD-2136); each row labelled with the item's own system | `--items <file.jsonl>` (`-` reads stdin) and `--allow <scope>`; `--source items` takes the file alone |
 
 `--source all` (the default) ingests every source it has an input for and says on
@@ -1971,8 +1980,10 @@ bun tier.ts --promote --from <canary-url> --to <stable-url>
 **`--refresh`** takes a faithful whole-database snapshot with `pg_dump | pg_restore`
 (thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
 migration might touch, so a migration meets *all* the real data), resets the target
-and restores into it, then runs `migrate.ts` forward with the merged tree. It is
-destructive to `--to`, so it guards the target three ways.
+and restores into it, copies the source's database-level settings the dump leaves
+out (`ALTER DATABASE … SET` — migration 014's HNSW bounds, SMD-2037), then runs
+`migrate.ts` forward with the merged tree. It is destructive to `--to`, so it
+guards the target three ways.
 
 - **It is not the `--from` database.** The source session is looked up in the
   target's `pg_stat_activity`. Two names for one server are still one server,
@@ -2266,8 +2277,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1794 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 728 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1806 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 733 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
