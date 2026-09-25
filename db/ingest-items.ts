@@ -29,20 +29,23 @@
  * A malformed line refuses the WHOLE file, naming the line and the field
  * (ItemsRefusal), and the pipeline writes nothing — a file half written is a
  * file the emitter cannot re-run cleanly, where a file refused is fixed and
- * run again. The rules are the contract's own (SYSTEM_RE, IDENTITY_MAX,
- * LINK_RELATIONS, ENTITY_TYPES, normaliseLinks / normaliseMentions) plus what
- * a `text` or `jsonb` column cannot hold — a NUL, a lone surrogate, a byte
- * that is not UTF-8, a value nested past what a parser's stack takes —
- * checked here rather than discovered at the cast, which would abort the run
- * on line N of M with N-1 written; plus what the pipeline's own knobs could
- * not act on — a scope with a `/` (`--allow` reads one as a path) or a `,`
- * (its separator), a key or
- * scope with surrounding whitespace (a link's target and an `--allow` entry
- * are trimmed, so neither could ever match). Two lines of one identity are
- * refused together: they would land on one row, the second silently over the
- * first. A system the pipeline reads itself (`fork`, `commit`, `linear`,
- * `memory`, `markdown`, `items`) is refused: a file's row on the board sync's
- * id for a ticket would overwrite the sync's row with no `held` to say so.
+ * run again. The rules, in three groups. The contract's own: SYSTEM_RE,
+ * IDENTITY_MAX (a key and a link target alike, in characters), LINK_RELATIONS,
+ * ENTITY_TYPES, normaliseLinks / normaliseMentions. What a `text` or `jsonb`
+ * column cannot hold, checked here rather than discovered at the cast, which
+ * would abort the run on line N of M with N-1 written: a byte that is not
+ * UTF-8 (the file is read as bytes, each line decoded strictly), a NUL, a lone
+ * surrogate, an object or array at level DEPTH_MAX, an instant the cast would
+ * refuse or round, an integer JSON.parse did not read exactly. What the
+ * pipeline could not act on: a scope with a `/` (`--allow` reads one as a
+ * path) or a `,` (its separator), a key or scope with surrounding whitespace
+ * (a link's target and an `--allow` entry are trimmed, so neither could ever
+ * match), a facet or watermark under a key the pipeline owns (`source`, the
+ * two actor keys), a system the pipeline reads itself (`fork`, `commit`,
+ * `linear`, `memory`, `markdown`, `items` — a file's row on the board sync's
+ * id for a ticket would overwrite the sync's row with no `held` to say so).
+ * Two lines of one identity are refused together: they would land on one
+ * row, the second silently over the first.
  *
  * The items are external content and pass SMD-1813's allowlist as the two
  * adapter sources do: each names its `scope`, and the pipeline ingests only a
@@ -522,13 +525,15 @@ export function selfCheck(): number {
   ok(parseItem(deepOk, 1).item.facets !== undefined, `a line whose deepest array is at level ${DEPTH_MAX - 1} passes, a scalar inside it at ${DEPTH_MAX} too; an array at level ${DEPTH_MAX} is refused`);
   ok(parseItem({ ...SAMPLE_ITEM, mentions: [{ name: "n".repeat(MENTION_NAME_MAX), type: "topic" }], identity: { system: "chatgpt", key: "k".repeat(IDENTITY_MAX) } }, 1).item.identity.key.length === IDENTITY_MAX, `a name of exactly ${MENTION_NAME_MAX} and a key of exactly ${IDENTITY_MAX} pass — the bounds are inclusive`);
 
+  /** The refusal a text or its bytes draws, or null when it parses; any other throw is the self-check's own failure. */
+  const refusalOf = (input: string | Uint8Array, label = "x.jsonl"): ItemsRefusal | null => {
+    try { parseItems(input, label); return null; } catch (e) { if (e instanceof ItemsRefusal) return e; throw e; }
+  };
   // Each malformed kind: refused, on the line given, naming the field. The
   // first line is another identity, so a rule mutated away fails on ITS
   // field, never as a duplicate of line 1.
   for (const [label, line, field, reason] of MALFORMED) {
-    let got: ItemsRefusal | null = null;
-    try { parseItems(`${OTHER_LINE}\n${line}\n`, "x.jsonl"); }
-    catch (e) { if (e instanceof ItemsRefusal) got = e; else throw e; }
+    const got = refusalOf(`${OTHER_LINE}\n${line}\n`);
     ok(got !== null && got.line === 2 && got.field === field && reason.test(got.reason) && got.message.startsWith(`x.jsonl: line 2: ${field}: `), `${label}: refused on line 2 naming ${JSON.stringify(field)} (${got ? `${got.line} ${JSON.stringify(got.field)}: ${got.reason.slice(0, 60)}` : "not refused"})`);
   }
 
@@ -543,13 +548,11 @@ export function selfCheck(): number {
   ok(parseItems(`${BOM}${SAMPLE_LINE}\n`).items.length === 1 && parseItems(new TextEncoder().encode(`${BOM}${SAMPLE_LINE}\n`)).items.length === 1, "a byte-order mark before the first line is dropped, as text or as bytes");
   const unterminated = parseItems(new TextEncoder().encode(`${SAMPLE_LINE}\n${OTHER_LINE}`), "x.jsonl");
   ok(unterminated.items.length === 2 && unterminated.lines.join(",") === "1,2", "a bytes file with no trailing newline keeps its last line (second review pass: the mutant that lost it survived)");
-  let lastBad: ItemsRefusal | null = null;
-  try { parseItems(new TextEncoder().encode(`${SAMPLE_LINE}\n{oops`), "x.jsonl"); } catch (e) { if (e instanceof ItemsRefusal) lastBad = e; else throw e; }
+  const lastBad = refusalOf(new TextEncoder().encode(`${SAMPLE_LINE}\n{oops`));
   ok(lastBad?.line === 2 && /not JSON/.test(lastBad.reason), "…and a bad unterminated last line is refused as line 2");
-  let utf16: ItemsRefusal | null = null;
-  try { parseItems(new Uint8Array([0xff, 0xfe, 0x7b, 0x00, 0x7d, 0x00, 0x0a, 0x00]), "x.jsonl"); } catch (e) { if (e instanceof ItemsRefusal) utf16 = e; else throw e; }
+  const utf16 = refusalOf(new Uint8Array([0xff, 0xfe, 0x7b, 0x00, 0x7d, 0x00, 0x0a, 0x00]));
   ok(utf16?.line === 1 && /UTF-16/.test(utf16.reason), "a UTF-16 file is named as such, not as a NUL byte");
-  const utf16Of = (bytes: number[]) => { try { parseItems(new Uint8Array(bytes), "x.jsonl"); return ""; } catch (e) { return e instanceof ItemsRefusal ? e.reason : "wrong"; } };
+  const utf16Of = (bytes: number[]) => refusalOf(new Uint8Array(bytes))?.reason ?? "";
   ok(/UTF-16/.test(utf16Of([0xfe, 0xff, 0x00, 0x7b, 0x00, 0x7d, 0x00, 0x0a])), "…big-endian with its mark too");
   ok(/UTF-16 without a byte-order mark/.test(utf16Of([0x7b, 0x00, 0x22, 0x00, 0x61, 0x00, 0x22, 0x00, 0x7d, 0x00, 0x0a, 0x00])) && /UTF-16 without a byte-order mark/.test(utf16Of([0x00, 0x7b, 0x00, 0x22, 0x00, 0x61, 0x00, 0x22, 0x00, 0x7d, 0x00, 0x0a])), "…and without its mark, in either byte order: every other byte is 0x00");
   ok(/NUL byte/.test(utf16Of([0x7b, 0x22, 0x61, 0x00, 0x62, 0x22, 0x7d, 0x0a])), "…while one NUL byte in UTF-8 is a NUL byte");
@@ -563,23 +566,17 @@ export function selfCheck(): number {
   ok(parseItems(`   \n${SAMPLE_LINE}\n\t\n`).lines.join(",") === "2", "a whitespace-only line is a blank line: skipped, counted");
   ok(parseItem({ ...SAMPLE_ITEM, facets: { n: 9007199254740991, f: 0.1, neg: -1.5e-300, source: "x" } }, 1).item.facets.n === 9007199254740991, "2^53 - 1 (the last safe integer), a float and a tiny magnitude pass (1e300 is an integer to Number.isInteger and is refused: write it as a string); a facets.source passes (overwritten, as the contract says)");
   ok(inexact(9007199254740992) !== null && inexact(9007199254740991) === null && inexact(Infinity) !== null && inexact(1.5) === null, "inexact: 2^53 itself (the first integer with a neighbour it cannot be told from), Infinity; not 2^53 − 1, not a float");
-  let dup: ItemsRefusal | null = null;
-  try { parseItems(`${SAMPLE_LINE}\n${JSON.stringify({ ...SAMPLE_ITEM, text: "another text" })}\n`, "x.jsonl"); }
-  catch (e) { if (e instanceof ItemsRefusal) dup = e; else throw e; }
+  const dup = refusalOf(`${SAMPLE_LINE}\n${JSON.stringify({ ...SAMPLE_ITEM, text: "another text" })}\n`);
   ok(dup?.line === 2 && dup.field === "identity" && /line 1's too/.test(dup.reason), `two lines of one identity are refused, the second naming the first (${dup?.reason.slice(0, 50)})`);
   ok(parseItems(`${SAMPLE_LINE}\n${JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "other", key: "conv-8f3a" } })}\n`).items.length === 2, "…the same key under another system is another identity");
   ok(parseItems(`${JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "ab", key: "c" } })}\n${JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "a", key: "bc" } })}\n`).items.length === 2, "…and (ab, c) is not (a, bc): the identity key has a separator");
-  let third: ItemsRefusal | null = null;
-  try { parseItems(`${SAMPLE_LINE}\n${JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "chatgpt", key: "k2" } })}\n{oops\n`, "--items x.jsonl"); }
-  catch (e) { if (e instanceof ItemsRefusal) third = e; else throw e; }
+  const third = refusalOf(`${SAMPLE_LINE}\n${JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "chatgpt", key: "k2" } })}\n{oops\n`, "--items x.jsonl");
   ok(third?.line === 3 && third.message === "--items x.jsonl: line 3: (line): " + third.reason, `a bad third line refuses the file naming line 3, in the flag's own words (${third?.message.slice(0, 40)})`);
   // Bytes that are not UTF-8, or a NUL byte: refused with the line, never repaired to U+FFFD.
   const badBytes = new Uint8Array([...new TextEncoder().encode(`${SAMPLE_LINE}\n`), 0x7b, 0x22, 0xff, 0x22, 0x7d, 0x0a]);
-  let notUtf8: ItemsRefusal | null = null;
-  try { parseItems(badBytes, "x.jsonl"); } catch (e) { if (e instanceof ItemsRefusal) notUtf8 = e; else throw e; }
+  const notUtf8 = refusalOf(badBytes);
   ok(notUtf8?.line === 2 && notUtf8.field === "(line)" && /not valid UTF-8/.test(notUtf8.reason), `a byte that is not UTF-8 refuses its line rather than becoming U+FFFD (${notUtf8?.reason.slice(0, 40)})`);
-  let nulByte: ItemsRefusal | null = null;
-  try { parseItems(new TextEncoder().encode(`${SAMPLE_LINE}\n{"a":"b\u0000c"}\n`), "x.jsonl"); } catch (e) { if (e instanceof ItemsRefusal) nulByte = e; else throw e; }
+  const nulByte = refusalOf(new TextEncoder().encode(`${SAMPLE_LINE}\n{"a":"b\u0000c"}\n`));
   ok(nulByte?.line === 2 && /NUL/.test(nulByte.reason), "a raw NUL byte refuses its line");
 
   // The instant rule.

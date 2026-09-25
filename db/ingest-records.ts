@@ -912,13 +912,18 @@ async function main(): Promise<void> {
   const tally: Record<UpsertResult, number> = { inserted: 0, updated: 0, patched: 0, unchanged: 0, skipped: 0, held: 0, stale: 0 };
   const structure = { canonical: { inserted: 0, updated: 0, unchanged: 0 } as Record<string, number>, links: { added: 0, closed: 0, kept: 0, dropped: 0 }, mentions: 0, records: 0 };
   const heldBy = new Map<string, number>();
+  /** Why an item wrote nothing, in the emitter's terms (held names the holder inline). */
+  const ITEM_OUTCOME_WHY = { skipped: "another row already holds this text", stale: "the row carries a newer watermark, or the same one written after this view was taken" } as const;
   try {
     for (const doc of docs) {
       const r = await upsertRecord(sql, doc, run);
       tally[r.outcome]++;
       if (r.outcome === "held") heldBy.set(doc.source, (heldBy.get(doc.source) ?? 0) + 1);
       // An item counted but not named is a line the emitter cannot find (fifth review pass, run-it).
-      if (itemIds.has(doc.id) && (r.outcome === "skipped" || r.outcome === "stale" || r.outcome === "held")) note("items", `${name(doc)} ${r.outcome}${r.outcome === "skipped" ? " — another row already holds this text" : r.outcome === "stale" ? " — the row carries a newer watermark, or the same one written after this view was taken" : ` — thought ${r.heldBy} already is this item`}; nothing written for it`);
+      if (itemIds.has(doc.id) && (r.outcome === "skipped" || r.outcome === "stale" || r.outcome === "held")) {
+        const why = r.outcome === "held" ? `thought ${r.heldBy} already is this item` : ITEM_OUTCOME_WHY[r.outcome];
+        note("items", `${name(doc)} ${r.outcome} — ${why}; nothing written for it`);
+      }
       if (r.structure) {
         structure.records++;
         structure.canonical[r.structure.canonical] = (structure.canonical[r.structure.canonical] ?? 0) + 1;
