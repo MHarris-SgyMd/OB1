@@ -322,9 +322,16 @@ export function loadConfig() {
   // file, then the server's own OB1_* env for a box that already runs one.
   const env = process.env;
   const summary = String(env.OB1_SESSION_CAPTURE_SUMMARY || cfg.summary || "derived").toLowerCase() === "model" ? "model" : "derived";
-  const modelUrlRaw = env.OB1_SESSION_CAPTURE_MODEL_URL || cfg.model_url || env.OB1_CHAT_BASE_URL || env.OB1_LLM_BASE_URL;
+  // The URL and its key are read as a pair per tier so a partial override never
+  // pairs one provider's key with another's endpoint (review pass 4): this hook's
+  // own env or config first, else the server's own OB1_CHAT_*/OB1_LLM_*. The
+  // server's KEY is used only when the server's URL is — never sent to a
+  // hook-specific endpoint the server key was not minted for.
+  const hookModelUrl = env.OB1_SESSION_CAPTURE_MODEL_URL || cfg.model_url;
+  const hookModelKey = env.OB1_SESSION_CAPTURE_MODEL_KEY || cfg.model_key;
+  const modelUrlRaw = hookModelUrl || env.OB1_CHAT_BASE_URL || env.OB1_LLM_BASE_URL;
   const modelRaw = env.OB1_SESSION_CAPTURE_MODEL || cfg.model || env.OB1_METADATA_MODEL;
-  const modelKey = env.OB1_SESSION_CAPTURE_MODEL_KEY || cfg.model_key || env.OB1_CHAT_API_KEY || env.OB1_LLM_API_KEY;
+  const modelKey = hookModelKey || (hookModelUrl ? undefined : env.OB1_CHAT_API_KEY || env.OB1_LLM_API_KEY);
   const modelLocal = cfg.model_local ?? (env.OB1_CHAT_LOCAL === "1" || env.OB1_LLM_LOCAL === "1");
   const egressRaw = String(env.OB1_EGRESS_POLICY || cfg.egress || "deny").toLowerCase();
   const egress = EGRESS_MODES.has(egressRaw) ? egressRaw : "deny"; // an unknown or unparseable value fails closed to deny, as the server's gate does
@@ -332,10 +339,16 @@ export function loadConfig() {
   // truthy but would abort the fetch at once and always fall back (first review
   // pass 2), and 0 or a non-number means "use the default" (SMD-2014).
   const modelTimeoutRaw = Number(env.OB1_SESSION_CAPTURE_MODEL_TIMEOUT || cfg.model_timeout || 0);
-  // Clamped to the 32-bit setTimeout ceiling: a value above it is truncated by
-  // the runtime to a near-zero delay that aborts every call at once, so a
-  // generous timeout would silently become the shortest one (review pass 3).
-  const modelTimeout = Number.isFinite(modelTimeoutRaw) && modelTimeoutRaw > 0 ? Math.min(modelTimeoutRaw, 2_147_483_647) : undefined;
+  // The model call holds the inflight claim, and the post that follows can take
+  // up to six rpc attempts (POST_TIMEOUT_MS each); both must finish inside ONE
+  // claim window or a sibling run's sweep reclaims this live child's payload
+  // mid-call and posts the episode twice (review pass 4). So the timeout is
+  // capped below the window minus the worst-case post — which also keeps it
+  // under the 32-bit setTimeout ceiling a larger value would truncate to a
+  // near-zero abort (review pass 3), and 0 or a non-positive value takes the
+  // default (review pass 2).
+  const modelTimeoutMax = CLAIM_MAX_AGE_MS - 6 * POST_TIMEOUT_MS - 30_000;
+  const modelTimeout = Number.isFinite(modelTimeoutRaw) && modelTimeoutRaw > 0 ? Math.min(modelTimeoutRaw, modelTimeoutMax) : undefined;
   return {
     url: String(url).replace(/\/*$/, "/"), key: String(key),
     summary,

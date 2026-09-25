@@ -1809,7 +1809,16 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   const savedT = process.env.OB1_SESSION_CAPTURE_MODEL_TIMEOUT; process.env.OB1_SESSION_CAPTURE_MODEL_TIMEOUT = "999999999999";
   const bigT = loadConfig();
   if (savedT === undefined) delete process.env.OB1_SESSION_CAPTURE_MODEL_TIMEOUT; else process.env.OB1_SESSION_CAPTURE_MODEL_TIMEOUT = savedT;
-  assert(bigT.modelTimeout === 2_147_483_647, `a model_timeout above the setTimeout ceiling is clamped, not truncated to a near-zero abort (${bigT.modelTimeout})`);
+  assert(bigT.modelTimeout === 330_000, `a model_timeout is clamped so the model call plus the worst-case post fit one 15-min claim window, not truncated to a near-zero abort (${bigT.modelTimeout})`);
+  // The server's LLM key is never paired with a hook-overridden URL, but pairs
+  // with the server's own URL (review pass 4).
+  const setEnv = (o) => { const r = {}; for (const [k, v] of Object.entries(o)) { r[k] = process.env[k]; process.env[k] = v; } return () => { for (const k of Object.keys(o)) { if (r[k] === undefined) delete process.env[k]; else process.env[k] = r[k]; } }; };
+  let undo = setEnv({ OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_SESSION_CAPTURE_MODEL_URL: "http://remote/v1", OB1_SESSION_CAPTURE_MODEL: "m", OB1_LLM_API_KEY: "server-llm-key" });
+  const pc = loadConfig(); undo();
+  assert(pc.modelUrl === "http://remote/v1" && pc.modelKey === undefined, `a hook-specific model_url does not borrow the server's LLM key (${pc.modelUrl}, key ${pc.modelKey})`);
+  undo = setEnv({ OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_LLM_BASE_URL: "http://server/v1", OB1_LLM_API_KEY: "server-llm-key" });
+  const sc = loadConfig(); undo();
+  assert(sc.modelUrl === "http://server/v1" && sc.modelKey === "server-llm-key", "…while the server's own URL and key pair together");
 
   // A joined excerpt over the cap keeps the recent TAIL, where decisions land,
   // not the head; and the per-episode window keeps the most recent messages,
@@ -1927,6 +1936,17 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   await postPending({ url: URL_, key: "cap-key", summary: "model", modelUrl: MODEL_URL, model: "test-model", modelLocal: true, egress: "deny" }, reusePath);
   assert(modelCalls === beforeReuse && received.length === 1 && received[0].args.content === "already the model's text" && received[0].args.metadata?.summary_model === "test-model",
     "a payload a model already wrote is posted as-is on a retry — the model is not called again");
+
+  // A payload that already LANDED (captured_id set, a bookkeeping retry) does not
+  // call the model — its result would be discarded, so the call would be wasted
+  // egress (review pass 4).
+  received.length = 0;
+  modelReply = "must not be called";
+  const beforeLanded = modelCalls;
+  const landedPath = join(STATE, "pending", `${Date.now()}-9998-landed0-s-landed.json`);
+  writeFileSync(landedPath, JSON.stringify({ session_id: "s-landed", chain_id: "s-landed", episode: 1, harness: "claude-code", event: "SessionEnd", text: "derived text", fingerprint: "fp-landed", derived_from: [], assistant: "some assistant text", captured_id: uuid(700), prompts: 1, prepared_at: new Date().toISOString(), attempts: 0 }));
+  await postPending({ url: URL_, key: "cap-key", summary: "model", modelUrl: MODEL_URL, model: "test-model", modelLocal: true, egress: "deny" }, landedPath);
+  assert(modelCalls === beforeLanded && received.length === 0, "a payload that already landed does not call the model again — nothing is re-posted");
 
   modelSrv.stop(true);
 }
