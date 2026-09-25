@@ -70,7 +70,7 @@ import { fileURLToPath } from "node:url";
 import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, CONTRIB_DIR, CONTRIB_SCHEMA_FILES, createAssert, FUNCTION_COMMENT_SQL, ISO_RE, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
 import {
-  DEFAULT_OPTIONS, DONE_WEIGHT, FUZZY_FLOOR, coverage as graphCoverage, lifecycleCaveat, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
+  BLOCKED_WEIGHT, DEFAULT_OPTIONS, DONE_WEIGHT, FUZZY_FLOOR, coverage as graphCoverage, lifecycleCaveat, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
   resolveSubject, subjectThoughts, topEntities, topThoughts, weightsSql, type Options as GraphOptions, type Runner,
 } from "./graph-centrality.ts";
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
@@ -5555,7 +5555,7 @@ console.log("\n[43] Migration 046: the event shape at the write boundary — who
 // (SMD-2061) and reads them under --startable, the reports without the flag
 // compared byte for byte before and after the links are written.
 
-console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defined; the resolution ladder; numeric names out of every count; edges on vs off is the drop-the-graph control (SMD-1938); a thought's lifecycle is a weight — the filter, the decay, and the unstamped passing every filter (SMD-1994); --startable weighs a thought with an open blocker 0, a settled blocker none (SMD-2061)");
+console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defined; the resolution ladder; numeric names out of every count; edges on vs off is the drop-the-graph control (SMD-1938); a thought's lifecycle is a weight — the filter, the decay, and the unstamped passing every filter (SMD-1994); --startable weighs a thought with an open blocker 0, a settled blocker none (SMD-2061); --decay-blocked weighs it BLOCKED_WEIGHT and names its blockers (SMD-2181)");
 {
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`);
@@ -6003,6 +6003,63 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   assert(!render(await graphReport(run, null, { ...wide, status: "open" })).includes("Dependencies are read"), "…a line printed under --startable alone");
   assert(render(await graphReport(run, "Anita", { ...on, types: ["place"], status: "open", startable: true })).includes("shares a --status open startable thought"), "a subject with no neighbour under the flag is told the flag emptied it");
 
+  // ── Blocked decay (SMD-2181): the same read, the held thoughts sunk to
+  // BLOCKED_WEIGHT instead of dropped, and listed with what holds them.
+  const openDecay: GraphOptions = { ...wide, status: "open", decayBlocked: true };
+  const byId = async (o: GraphOptions) => new Map((await topThoughts(run, o)).map((t) => [t.id, t]));
+  const od = await byId(openDecay);
+  const heldAs = (id: string) => `${od.get(id)?.weight}:${JSON.stringify(od.get(id)?.blockers)}`;
+  assert(BLOCKED_WEIGHT === 0.25 && [tP, tQ, tPsec, tV, tX].map(heldAs).join() === ["0.25:[\"SMD-7002\"]", "0.25:[\"SMD-7003\"]", "0.25:[\"SMD-7002\"]", "0.25:[\"SMD-7003\"]", "0.25:[\"SMD-7999\"]"].join()
+      && [tR, tS, tW].map(heldAs).join() === ["1:null", "1:null", "1:null"].join() && !od.has(tD),
+    `--status open --decay-blocked lists what --startable drops, at 0.25, each with its open blockers — the derived tPsec its ticket's, tX the unknown one — and the startable tR, tS and tW at 1 with none (${[tP, tQ, tPsec, tV, tX, tR, tS, tW].map(heldAs).join(" ")})`);
+  const allDecay = await byId({ ...wide, decayBlocked: true });
+  assert(allDecay.get(tD)?.weight === 1 && allDecay.get(tD)?.blockers === null,
+    "a Done ticket is settled under the decay as under the filter: tD weighs its lifecycle's 1 and names no blocker, though its blocked_by to the open tQ is active");
+  const bothDecays = await byId({ ...wide, decayDone: true, decayBlocked: true });
+  assert([t1, tD, tR, tP, tQ].map((id) => bothDecays.get(id)?.weight).join() === "0.25,0.25,1,0.25,0.25" && [...bothDecays.values()].every((t) => t.weight === 1 || t.weight === 0.25),
+    "--decay-done --decay-blocked multiplies, and the decays never meet: the settled t1 and tD at 0.25, the started tR at 1, the blocked tP and tQ at 0.25 — no thought at 0.0625");
+  const activeDecay = await byId({ ...wide, status: "active", decayBlocked: true });
+  assert(!activeDecay.has(tP) && activeDecay.get(tQ)?.weight === 0.25 && (await graphCoverage(run, { ...wide, status: "active", decayBlocked: true })).dependencies!.held === 1,
+    "under --status active the decay multiplies the filter: the backlog tP stays at 0, tQ sinks to 0.25, and one thought is counted down-weighted");
+  const covD = await graphCoverage(run, openDecay);
+  assert(JSON.stringify(covD.dependencies) === JSON.stringify(covS.dependencies) && covD.weighed === (await graphCoverage(run, { ...wide, status: "open" })).weighed && covD.weighed === 13 && lc(covD) === lc(covS),
+    `coverage under the decay: the dependency counts are --startable's (five down-weighted, one unknown blocker), thirteen weigh in — --startable's eight and the five it held — and the lifecycle counts are unmoved (${JSON.stringify(covD.dependencies)}, ${covD.weighed})`);
+  // Degree counts neighbours, not evidence: an edge a blocked thought alone
+  // evidences stays under the decay, at its weight's worth of support.
+  await record(tQ, [E("Open Brain", "project"), E("Kafka", "tool")], [R("Kafka", "Open Brain", "depends_on")]);
+  const degrees = async (o: GraphOptions) => (await topEntities(run, o)).byMentions.map((e) => `${e.name}:${e.degree}`).sort().join();
+  const kafkaD = (await topEntities(run, { ...wide, decayBlocked: true })).byMentions.find((e) => e.name === "Kafka")!;
+  assert((await degrees({ ...wide, decayBlocked: true })) === (await degrees(wide)) && kafkaD.degree === 1 && kafkaD.support === 0.25
+      && (await topEntities(run, openDecay)).byMentions.find((e) => e.name === "Kafka")!.mentions === 1.25
+      && (await topEntities(run, { ...wide, startable: true })).byMentions.find((e) => e.name === "Open Brain")!.degree! < (await topEntities(run, { ...wide, decayBlocked: true })).byMentions.find((e) => e.name === "Open Brain")!.degree!,
+    `degree under --decay-blocked is degree without it, entity by entity — Kafka keeps the edge the blocked tQ evidences, at support 0.25 — and Kafka's mentions under --status open are the weighted sum of tP, tQ, tPsec, tV and tX (1.25); --startable drops the edge (${JSON.stringify(kafkaD)})`);
+  const rBlocked = render(await graphReport(run, null, openDecay));
+  const tPline = rBlocked.split("\n").find((l) => l.includes(tP)) ?? "";
+  assert(rBlocked.includes("lifecycle open, blocked ×0.25;") && /weight +status +blocked by +thought/.test(rBlocked) && /0\.25 +Backlog +SMD-7002 +/.test(tPline) && rBlocked.includes("in-scope edges evidenced, times the weight:")
+      && rBlocked.includes(". --decay-blocked: 5 thoughts with an open blocker weigh 0.25 of their lifecycle weight in every count (pre-registered, one weight) and are listed with their blockers; degree counts neighbours, not evidence, and is unchanged; a completed or canceled ticket is settled, not blocked,")
+      && rBlocked.includes("1 blocker of the down-weighted thoughts is unsettled") && rBlocked.includes("plus every thought without a lifecycle — it passes every filter; those with an open blocker at 0.25)")
+      && render(await graphReport(run, null, { ...wide, decayBlocked: true })).includes("By its lifecycle every thought weighs 1: a Done ticket counts as a live one (--status open|active|done filters; --decay-done down-weights).\n"),
+    `the report under the decay: the header names it, the thought table has the weight and a blocked by column (tP's row: ${JSON.stringify(tPline)}), and the dependency and lifecycle lines say what the decay did`);
+  // Two blockers, one from each direction: tR's `blocks` and tV's own blocked_by.
+  await links(tV, [["blocked_by", "SMD-7001"]]);
+  const tVline = render(await graphReport(run, null, openDecay)).split("\n").find((l) => l.includes(tV)) ?? "";
+  assert(JSON.stringify((await byId(openDecay)).get(tV)?.blockers) === JSON.stringify(["SMD-7001", "SMD-7003"]) && tVline.includes(" SMD-7001, SMD-7003 "),
+    `a thought held by two blockers lists both, sorted, whichever side stated each — an array in the JSON, "a, b" in the table (${JSON.stringify(tVline)})`);
+  await links(tV, []);
+  assert(render(await graphReport(run, null, openStart)).includes("--startable: 5 thoughts with an open blocker weigh 0 in this run; a completed") && !weightsSql({ status: "open", decayDone: false, startable: true }, []).includes("END AS blockers")
+      && weightsSql({ status: "open", decayDone: false, startable: true }, []) === weightsSql({ status: "open", decayDone: false, startable: true, decayBlocked: false }, [])
+      && weightsSql({ status: "open", decayDone: false, decayBlocked: true }, []).includes("END AS blockers") && !("blockers" in (await topThoughts(run, openStart))[0]),
+    "--startable's line, SQL and rows are SMD-2061's: the blockers column is the decay's alone");
+  const pb = parseArgs(["--decay-blocked"]);
+  const pbs = parseArgs(["--decay-blocked", "--status", "open"]);
+  const pbd = parseArgs(["--decay-done", "--decay-blocked"]);
+  let threwB = "";
+  try { weightsSql({ status: "all", decayDone: false, startable: true, decayBlocked: true }, []); } catch (e) { threwB = (e as Error).message; }
+  assert(!("error" in pb) && pb.opts.decayBlocked && !pb.opts.startable && !("error" in pbs) && pbs.opts.status === "open" && !("error" in pbd) && pbd.opts.decayDone && pbd.opts.decayBlocked && !DEFAULT_OPTIONS.decayBlocked
+      && [["--startable", "--decay-blocked"], ["--decay-blocked", "--startable"]].every((a) => { const r = parseArgs(a); return "error" in r && r.error.includes("--startable already drops them — pass one or the other"); })
+      && "error" in parseArgs(["--decay-blocked", "--decay-blocked"]) && threwB.includes("pass one or the other"),
+    "--decay-blocked lands alone, beside --status and beside --decay-done, is off by default, is refused beside --startable in either order and twice, and weightsSql refuses the pair");
+
   // A settled blocker is not a blocker: tR completes, so tQ and tV are free;
   // tP stays blocked by the still-open tQ, and tX by the unknown SMD-7999.
   await db.query(`UPDATE thoughts SET metadata = metadata || '{"status": "Done", "status_type": "completed"}'::jsonb WHERE id = $1`, [tR]);
@@ -6031,6 +6088,8 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   await db.query(`DELETE FROM thoughts WHERE id = $1`, [tZed]);
   assert((await graphCoverage(run, on)).entities === 5 && (await topEntities(run, on)).byMentions.some((e) => e.name === "Zed" && e.mentions === 0) && !(await topEntities(run, open)).byMentions.some((e) => e.name === "Zed"),
     "an entity whose thought was deleted and not yet pruned is in scope, listed at 0 by default as before, and absent under a filter");
+  assert((await topEntities(run, { ...on, decayBlocked: true })).byMentions.some((e) => e.name === "Zed" && e.mentions === 0) && !(await topEntities(run, { ...on, startable: true })).byMentions.some((e) => e.name === "Zed"),
+    "…listed at 0 under --decay-blocked too, a decay and not a filter, and absent under --startable, which is one");
   await db.exec(`SELECT prune_orphan_entities()`);
   assert((await graphCoverage(run, on)).entities === 4, "…and pruned away");
 
