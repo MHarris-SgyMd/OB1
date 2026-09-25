@@ -1169,6 +1169,28 @@ console.log("\n[6c] The backfill holds the table: a capture and an edit wait for
   await sql`DELETE FROM thoughts`;
 }
 
+/**
+ * The sessions of the races in [6d], [6f], [6g] and [6i]. Each section's
+ * deadlocking arm provokes a deadlock on purpose, and Postgres looks for a
+ * cycle only once a lock wait has lasted deadlock_timeout, 1 s by default, so
+ * every provoked deadlock cost up to a second — fifteen in one CI run of
+ * [6g]'s first arm (SMD-2135). At 50 ms a cycle is found within 50 ms of
+ * closing. The arms that must not deadlock use the same sessions, so the arms
+ * differ only in the code under test and a deadlock that comes back is found
+ * as fast.
+ *
+ * The setting moves when a wait is checked, and so which side of a cycle is
+ * broken; every deadlocking arm accepts either side. A wait probed before any
+ * cycle closes — [6i]'s 400 ms "still waiting" probes and arm 1's lower bound
+ * on the delete's wait — is untouched, since no cycle is there to find, and
+ * every other bound on a wait is 8 s or more. deadlock_timeout is
+ * superuser-only by default and goes as a startup parameter, so it holds for
+ * the session: CI's service and with-postgres.sh connect as postgres, and any
+ * other role races at the default, only slower.
+ */
+const RACE_SETTINGS: Record<string, string> = (await sql`SELECT current_setting('is_superuser') = 'on' AS su`)[0].su ? { deadlock_timeout: "50ms" } : {};
+const racer = () => new SQL({ url: URL_!, max: 1, connection: RACE_SETTINGS });
+
 console.log("\n[6d] An edit naming supersedes meets an edit of its target: FOR UPDATE on the target deadlocks with the FK's KEY SHARE, update_thought's FOR NO KEY UPDATE does not (migration 032)");
 {
   await sql`DELETE FROM thoughts`;
@@ -1211,8 +1233,8 @@ console.log("\n[6d] An edit naming supersedes meets an edit of its target: FOR U
   // raised (40P01) in one of the two, where the tool promised DUPLICATE_CONTENT
   // or a clean edit.
   {
-    const connA = new SQL({ url: URL_, max: 1 });
-    const connB = new SQL({ url: URL_, max: 1 });
+    const connA = racer();
+    const connB = racer();
     const { p: goP, open: go } = gate();
     const { p: doneP, open: done } = gate();
     const a: { holding?: boolean; wrote?: boolean; error?: string } = {};
@@ -1244,8 +1266,8 @@ console.log("\n[6d] An edit naming supersedes meets an edit of its target: FOR U
   // SHARE is granted either way; the assertion below reads the wait, not
   // the row.
   {
-    const connA = new SQL({ url: URL_, max: 1 });
-    const connB = new SQL({ url: URL_, max: 1 });
+    const connA = racer();
+    const connB = racer();
     const { p: goP, open: go } = gate();
     const { p: doneP, open: done } = gate();
     const a: { holding?: boolean; wrote?: boolean; error?: string } = {};
@@ -1425,7 +1447,7 @@ console.log("\n[6f] Four writers on two texts: the row-then-fingerprint order 01
   // fingerprint lock for its new text; each capture is the shipped function
   // after a hand-taken fingerprint lock (which it re-enters).
   {
-    const conns = [0, 1, 2, 3].map(() => new SQL({ url: URL_, max: 1 }));
+    const conns = [0, 1, 2, 3].map(() => racer());
     const [e1, e2, c1, c2]: Out[] = [{ pid: -1 }, { pid: -1 }, { pid: -1 }, { pid: -1 }];
     const hold = gate(); const gE1 = gate(), gE2 = gate(), gC1 = gate(), gC2 = gate();
     const pE1 = run(conns[0], e1, (t) => t`SELECT 1 FROM thoughts WHERE id = ${r}::uuid FOR NO KEY UPDATE`, gE1.p, (t) => t`SELECT pg_advisory_xact_lock(hashtextextended(${fpX}, 0))`, hold.p);
@@ -1455,7 +1477,7 @@ console.log("\n[6f] Four writers on two texts: the row-then-fingerprint order 01
   // waits on a capture holding nothing; when the captures commit, the edits
   // find the rows that own their new texts and are told, not deadlocked.
   {
-    const conns = [0, 1, 2, 3].map(() => new SQL({ url: URL_, max: 1 }));
+    const conns = [0, 1, 2, 3].map(() => racer());
     const [c1, c2, e1, e2]: Out[] = [{ pid: -1 }, { pid: -1 }, { pid: -1 }, { pid: -1 }];
     const holdC = gate(); const never = gate();
     const pC1 = run(conns[0], c1, (t) => t`SELECT upsert_thought(${X}, '{"metadata":{},"embedding_model":"m"}'::jsonb, ${unit(4)}::vector) AS r`, Promise.resolve(), (t) => t`SELECT 1`, holdC.p);
@@ -1508,11 +1530,15 @@ console.log("\n[6g] delete_thought joins the lock order: an accept racing a dele
   // not depend on where the review takes the advisory lock — so the count
   // varies run to run and the arm only asserts it happens at all.) This is the
   // one deliberately stochastic assertion in the suite: with the delete fully
-  // lockless the per-try cycle rate is roughly half, so P(0 deadlocks in 40) is
-  // on the order of 1e-15 — a spurious pass is not a practical risk.
+  // lockless the per-try cycle rate was roughly half on 033's pass, so P(0
+  // deadlocks in 40) was on the order of 1e-15. CI's runner deadlocked
+  // 15 of 40 on main's run 36131497058, P(0) about 1e-8, and CI-shaped
+  // containers about 30%; runs through with-postgres.sh's published port
+  // deadlock 9–13%, which makes a spurious failure about one run in 35 to 260
+  // there (SMD-2155).
   {
-    const connR = new SQL({ url: URL_, max: 1 });
-    const connD = new SQL({ url: URL_, max: 1 });
+    const connR = racer();
+    const connD = racer();
     let deadlocks = 0;
     for (let i = 0; i < 40; i++) {
       const { z, p } = await mkCase();
@@ -1530,8 +1556,8 @@ console.log("\n[6g] delete_thought joins the lock order: an accept racing a dele
   // before the DELETE: forty tries, no 40P01. The delete is never the victim
   // now; whichever writer runs first, its cascade still takes the proposal.
   {
-    const connR = new SQL({ url: URL_, max: 1 });
-    const connD = new SQL({ url: URL_, max: 1 });
+    const connR = racer();
+    const connD = racer();
     let deadlocks = 0, deleteVictim = 0, proposalLeft = 0;
     for (let i = 0; i < 40; i++) {
       const { z, p } = await mkCase();
@@ -1610,8 +1636,8 @@ console.log("\n[6i] A citation written while a delete of its source is in flight
     x: ((await sql`SELECT upsert_thought(${"an older version the note supersedes — " + tag}, '{"metadata":{}}'::jsonb, ${unit(2)}::vector) AS r`)[0].r as { id: string }).id,
   });
   type Env = { ok: boolean; error?: string; cited_by?: number };
-  const connW = new SQL({ url: URL_, max: 1 });
-  const connD = new SQL({ url: URL_, max: 1 });
+  const connW = racer();
+  const connD = racer();
   // A wait that never ends would hang the suite: cap both sides.
   await connW.unsafe("SET statement_timeout = '8s'");
   await connD.unsafe("SET statement_timeout = '8s'");
@@ -1645,8 +1671,14 @@ console.log("\n[6i] A citation written while a delete of its source is in flight
     const wrote = ((await connW`SELECT record_citation(${c}::uuid, ${s}::uuid, 'rests on it', 'retrieved') AS r`) as { r: Env }[])[0].r;
     const del = startDelete(s);
     assert(wrote.ok === true && (await stillWaiting(del)), "the citation is written under the advisory lock and the delete waits on that lock");
-    const upd = ((await connW`SELECT update_thought(${c}::uuid, p_provenance => jsonb_build_object('supersedes', ${x}::uuid)) AS r`) as { r: Env }[])[0].r;
-    await connW.unsafe("COMMIT");
+    // Caught, as arm 3's is: the delete has waited through the 400 ms probe, so
+    // its one 50 ms check on racer()'s timer is past, and a cycle this write
+    // closed would make this write the victim — uncaught, a regression would
+    // end the suite here instead of failing the assertion.
+    let upd: Env, updThrew = false;
+    try { upd = ((await connW`SELECT update_thought(${c}::uuid, p_provenance => jsonb_build_object('supersedes', ${x}::uuid)) AS r`) as { r: Env }[])[0].r; }
+    catch (e) { upd = { ok: false, error: (e as Error).message }; updThrew = true; }
+    await connW.unsafe(updThrew ? "ROLLBACK" : "COMMIT");
     const d = await del;
     assert(upd.ok === true && d.r.ok === false && d.r.error === "CITED", `the same transaction's supersedes write proceeds — no deadlock — and the delete is refused after the commit (update ${JSON.stringify(upd)}, delete ${JSON.stringify(d.r)})`);
     assert((await dangling(s)) === 0, "…nothing dangles");
@@ -1665,7 +1697,7 @@ console.log("\n[6i] A citation written while a delete of its source is in flight
     let updErr = "";
     try { await connW`SELECT update_thought(${c}::uuid, p_provenance => jsonb_build_object('supersedes', ${x}::uuid)) AS r`; } catch (e) { updErr = (e as Error).message; }
     const d = await del;
-    try { await connW.unsafe("COMMIT"); } catch { /* an aborted transaction: the ROLLBACK below ends it */ }
+    try { await connW.unsafe("COMMIT"); } catch { /* COMMIT of an aborted transaction answers ROLLBACK; the ROLLBACK below covers a throw */ }
     try { await connW.unsafe("ROLLBACK"); } catch { /* no transaction in progress */ }
     assert(/deadlock detected/.test(updErr) || /deadlock detected/.test(d.r.error ?? ""),
       `a raw writer that takes the advisory lock after the row closes the cycle record_citation avoids — deadlock detected in one of the two (update: ${updErr.slice(0, 40) || "ok"}; delete: ${(d.r.error ?? "ok").slice(0, 40)})`);
@@ -1938,6 +1970,21 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   const rerun = await sql`SELECT thought_id FROM claim_thoughts(${JOB}, 'rerun', 100)`;
   assert(Number(again) === 0 && rerun.length === 0, "re-running the pass adds nothing and claims nothing: processed rows are not reprocessed");
 
+  // The lease clock for (c) and (e). claim_thoughts reaps a lease whose
+  // ttl_expires_at < now() (015) and renew_claims moves it to
+  // GREATEST(ttl_expires_at, now() + the lease) (031); neither compares
+  // against the time any other way, and the stamps they write from it
+  // (claimed_at, finished_at) are read by nothing here. So moving a key's
+  // deadlines s seconds back is, to both functions, the same as waiting s
+  // seconds, and it takes no time: the sleeps it replaces were 13 of the
+  // section's 20 s on CI (SMD-2135). test-schema.ts [30] likewise puts a lease
+  // past its deadline by an UPDATE, not a wait. Only the named key's claimed
+  // leases move; every other key's stand still, so a step that needs another
+  // key's lease to lapse needs an elapse of its own, and a Bun.sleep here adds
+  // real time on top, for every key.
+  const elapse = (key: string, s: number) =>
+    sql`UPDATE thought_work_claims SET ttl_expires_at = ttl_expires_at - make_interval(secs => ${s}::float8) WHERE work_type = ${key} AND status = 'claimed'`;
+
   // (c) A worker dies holding leases; the TTL returns them; a second worker completes them.
   const JOB2 = "test:crash";
   const eight = [...pool].slice(0, 8);
@@ -1949,7 +1996,7 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   assert(dead.length === 5, `a worker takes five rows on a 2 s lease and dies (got ${dead.length})`);
   const tooSoon = await sql`SELECT thought_id FROM claim_thoughts(${JOB2}, 'second', 10)`;
   assert(tooSoon.length === 3, `before the lease expires a second worker gets only the three unclaimed rows (got ${tooSoon.length})`);
-  await Bun.sleep(2200);
+  await elapse(JOB2, 2.2);
   const second = (await sql`SELECT thought_id, attempt FROM claim_thoughts(${JOB2}, 'second', 10)`) as { thought_id: string; attempt: number }[];
   assert(second.length === 5, `after it expires the second worker receives the dead worker's five (got ${second.length})`);
   assert(dead.every((id) => second.find((r) => r.thought_id === id)?.attempt === 2), "…each on its second attempt");
@@ -2000,27 +2047,27 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   // deadline keeps its rows — a claim made after the ORIGINAL deadline gets
   // none of them and its release succeeds — and a worker that stops renewing
   // loses them on the RENEWED deadline, not the original, to a second worker
-  // that completes them. Five-second leases. Every wait is a lower bound from
-  // Bun.sleep, so a slow runner only makes the "after" claims later; the one
-  // step with an upper bound — the claim at 5.5 s must land before the renewed
-  // deadline at 9.5 s — has four seconds. The beat at 4.5 s has no upper
-  // bound: a lease past its deadline that no claim has reaped is still the
-  // holder's, and the beat renews it ([30] asserts that).
+  // that completes them. Five-second leases, timed on the lease clock: each
+  // step is at the clock's time plus the milliseconds the statements take, so
+  // the one step with an upper bound — the claim at 5.5 s must land before
+  // the renewed deadline at 9.5 s — has its four seconds less only the
+  // statements' own time. The beat at 4.5 s has no upper bound: a lease past
+  // its deadline that no claim has reaped is still the holder's, and the beat
+  // renews it (test-schema.ts [30] asserts that).
   const JOB4 = "test:heartbeat";
   const six = [...pool].slice(8, 14);
   await sql`SELECT enqueue_thoughts(${JOB4}, ${sql.array(six, "TEXT")}::uuid[])`;
-  const t0 = Date.now();
   const alive: string[] = (await sql`SELECT thought_id FROM claim_thoughts(${JOB4}, 'alive', 4, 5)`).map((r: { thought_id: string }) => r.thought_id);
   assert(alive.length === 4, `a worker takes four rows on a 5 s lease (got ${alive.length})`);
-  await Bun.sleep(4500);
+  await elapse(JOB4, 4.5);
   const b0 = performance.now();
   const beat1 = (await sql`SELECT thought_id FROM renew_claims(${JOB4}, 'alive', 5)`).map((r: { thought_id: string }) => r.thought_id);
   const beatMs = performance.now() - b0;
   assert(beat1.length === 4 && alive.every((id) => beat1.includes(id)), `a beat at 4.5 s renews all four (${beat1.length})`);
-  await Bun.sleep(1000); // 5.5 s: past the original deadline, 4 s before the renewed one
+  await elapse(JOB4, 1); // 5.5 s: past the original deadline, 4 s before the renewed one
   const afterOriginal: string[] = (await sql`SELECT thought_id FROM claim_thoughts(${JOB4}, 'second', 10)`).map((r: { thought_id: string }) => r.thought_id);
   assert(afterOriginal.length === 2 && afterOriginal.every((id) => !alive.includes(id)),
-    `a claim after the original deadline gets only the two unclaimed rows — none of the heartbeating worker's (${afterOriginal.length}, at ${Date.now() - t0} ms)`);
+    `a claim after the original deadline gets only the two unclaimed rows — none of the heartbeating worker's (${afterOriginal.length})`);
   const [{ ok: released }] = await sql`SELECT release_thought(${alive[0]}::uuid, ${JOB4}, 'alive', 'succeeded') AS ok`;
   assert(released === true, "…and the heartbeating worker's release succeeds past the original deadline");
   const b1 = performance.now();
@@ -2030,7 +2077,7 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   // The worker dies here: no more beats. Its rows expire 5 s after beat2.
   const tooSoonHb = (await sql`SELECT thought_id FROM claim_thoughts(${JOB4}, 'second', 10)`).length;
   assert(tooSoonHb === 0, "before the renewed deadline a second worker gets nothing");
-  await Bun.sleep(5300);
+  await elapse(JOB4, 5.3);
   const inherited = (await sql`SELECT thought_id, attempt FROM claim_thoughts(${JOB4}, 'second', 10)`) as { thought_id: string; attempt: number }[];
   assert(inherited.length === 3 && inherited.every((r) => beat2.includes(r.thought_id) && r.attempt === 2),
     `after the renewed deadline the second worker receives the dead worker's three, on their second attempt (${inherited.length})`);

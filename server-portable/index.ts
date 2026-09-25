@@ -2,7 +2,7 @@
 import { displayDate, thoughtTitle, thoughtUrl, THOUGHT_TYPES } from "./thoughts.ts";
 import { cleanForDisplay } from "./consolidate.ts";
 import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedKind, type EmbeddedCapture } from "./embed.ts";
-import { extractMetadata as extractMetadataWith, metadataRefused } from "./metadata.ts";
+import { extractMetadata as extractMetadataWith, metadataRefused, TAG_KEYS } from "./metadata.ts";
 import { decideCalls, mayLeaveBox, type EgressDecision, type EgressSubject } from "./egress.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
@@ -413,6 +413,34 @@ function explainRefusal(
  * an importer says what it imports from, and the default stays `mcp`.
  */
 const SOURCE_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
+
+// A caller-set metadata key (SMD-2014): lower-case, starts with a letter, 2-40
+// characters — the shape a reader can filter on. The server owns some keys of
+// `metadata`, and a caller naming one is refused rather than silently overruled
+// by the merge below: `source` (the origin label, set from the `source` arg),
+// the extractor's tag set (TAG_KEYS: type, topics, people…), the actor columns
+// migration 050 stamps from the key, the embedding model migration 021 records,
+// and the extractor's own failure marker. Everything else — `summary_model`,
+// which the session hook sets when a local model wrote the summary — is the
+// caller's to add.
+const META_KEY_RE = /^[a-z][a-z0-9_]{1,39}$/;
+const RESERVED_META = new Set<string>([...TAG_KEYS, "source", "actor_kind", "actor_name", "embedding_model", "metadata_extraction_failed"]);
+const META_VALUE_MAX = 200;
+const META_KEYS_MAX = 8;
+/** The refusal for a bad `metadata` argument, or null when it is clean (or absent). Checked before the model calls, as the other shape refusals are. */
+function refuseMetadataShape(metadata: Record<string, unknown> | undefined): string | null {
+  if (metadata === undefined) return null;
+  const keys = Object.keys(metadata);
+  if (keys.length > META_KEYS_MAX) return `Refused: \`metadata\` carries ${keys.length} keys — at most ${META_KEYS_MAX}.`;
+  for (const k of keys) {
+    if (!META_KEY_RE.test(k)) return `Refused: the \`metadata\` key "${k.slice(0, 40)}" must be lower-case letters, digits and underscores, 2–40 characters, starting with a letter.`;
+    if (RESERVED_META.has(k)) return `Refused: \`metadata.${k}\` is set by the server, not the caller — use the \`source\` argument for the origin label; drop the rest.`;
+    const v = metadata[k];
+    if (typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") return `Refused: \`metadata.${k}\` must be a string, number or boolean.`;
+    if (typeof v === "string" && v.length > META_VALUE_MAX) return `Refused: \`metadata.${k}\` is ${v.length} characters — at most ${META_VALUE_MAX}.`;
+  }
+  return null;
+}
 
 /**
  * Untrusted text — a thought's, a citation's, a judge's reason — on one line
@@ -1572,9 +1600,17 @@ function buildServer(principal: Principal): McpServer {
         // one spelling.
         source: z.string().regex(SOURCE_RE, "lower-case letters, digits and hyphens, 2–40 characters, starting with a letter or digit").optional()
           .describe("Where this capture comes from, recorded as metadata.source — e.g. `claude-code` or `codex` for a session-end hook, `mcp` (the default) for an agent capturing in conversation. Lower-case letters, digits and hyphens, 2–40 characters. A label the caller gives; the audit row's actor says which key wrote."),
+        // SMD-2014. Extra metadata keys the caller controls, merged UNDER the
+        // server's own (source, the extractor's tags, the actor columns), so a
+        // reserved name is refused, never silently overruled. The session hook
+        // sets `summary_model` when a local model wrote the summary, so a reader
+        // and a per-source weight (SMD-1297) can tell a model summary from the
+        // derived one.
+        metadata: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
+          .describe("Extra metadata keys to store on the thought (e.g. `{\"summary_model\": \"llama3.1:8b\"}`). Lower-case keys, string/number/boolean values; at most 8 keys. Keys the server owns — `source` (use the `source` argument), `type`, `topics`, `people` and the like — are refused. Returned to readers alongside the server's own metadata."),
       },
     },
-    async ({ content, derived_from, supersedes, source }) => {
+    async ({ content, derived_from, supersedes, source, metadata: clientMetadata }) => {
       // What a key that cannot read is told and allowed — decided once here
       // and read below, in the catch too (fifth review pass: six scattered
       // canRead tests; sixth: one survived in the catch).
@@ -1592,6 +1628,11 @@ function buildServer(principal: Principal): McpServer {
         // Existence stays the write's.
         const badDerived = derived_from?.find((d) => !UUID_RE.test(d));
         if (badDerived !== undefined) return toolError(`Refused: every \`derived_from\` entry must be a thought id (the ID: line of a search result), not "${badDerived.slice(0, 40)}".`);
+        // A caller `metadata` key that names a server-owned one, or a bad shape,
+        // is refused BEFORE the two model calls are paid for (SMD-2014), as the
+        // pointer shapes above are.
+        const badMetadata = refuseMetadataShape(clientMetadata);
+        if (badMetadata) return toolError(badMetadata);
         // A capture-only key's provenance is trimmed to the ids that exist
         // BEFORE the write, and the reply says nothing of it — not which
         // (third review pass: positions were an existence oracle on a key that
@@ -1671,7 +1712,12 @@ function buildServer(principal: Principal): McpServer {
         const chunks = embedded?.chunks ?? [];
         const contextFailures = embedded?.contextFailures ?? 0;
 
-        const payload = { metadata: { ...metadata, source: origin } };
+        // The caller's keys UNDER the server's: the extractor's tags and the
+        // origin label win over anything a caller sent by the same name (the
+        // shape check above has already refused a reserved key outright, so this
+        // only orders the rest), and `summary_model` and its like survive
+        // (SMD-2014).
+        const payload = { metadata: { ...clientMetadata, ...metadata, source: origin } };
 
         // Atomicity is the store's problem now: the SQL path writes content,
         // metadata and vector in one statement, while the PostgREST path keeps the
