@@ -1216,7 +1216,7 @@ else {
   // (asserted further down too) and 046 is the file whose DROP chain reaches
   // it — 032's reaches only 8 and 7 and would leave its own 9-argument form
   // beside the shipped one (SMD-1730).
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") || f.startsWith("046") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") || f.startsWith("046") || f.startsWith("055") });
   const restored = await run(SQL_ENV);
   assert(restored.code === 0 && new RegExp(`vector models\\s+no vector is known to be at ${rx(EMBEDDING_MODEL)}: 4 unlabelled \\(model unknown\\)`).test(restored.out) && /the pass takes every row nothing vouches for/.test(restored.out),
          `021 re-applied: the column is back, its labels gone — and a corpus with no vector known to be at its model is a warning with the pass as the remedy, not an ok (exit ${restored.code}: ${restored.out.split("\n").filter((l) => /vector models|fail/.test(l)).join(" | ").trim()})`);
@@ -1310,10 +1310,17 @@ else {
   assert(/!  audit events\s+the columns are there but the audit trigger's body is from before 046 \(025 or an earlier file re-applied by hand\): every write records an unknown kind, no door and no event/.test(reapplied025.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\./.test(reapplied025.out),
          "…and 025 re-applied put 025's audit trigger back over 046's: the event check warns — writes go through, the kind and the event are not recorded — naming 046 (SMD-1730)");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") });
+  // 046 re-applied over 055 puts 046's audit trigger back: the event shape is
+  // whole, the payload is not — a warning naming 055 (SMD-2115); 055
+  // re-applied is the shipped body again.
+  const pre055 = await run(SQL_ENV);
+  assert(/!  audit events\s+046's event shape present and every key classified, but the audit trigger's body is from before 055 \(migration 055 not yet applied, or 046 re-applied by hand\): a capture records no content and an update no key move/.test(pre055.out) && /Apply db\/migrations\/055_capture_event_payload\.sql\./.test(pre055.out),
+         "…046 re-applied over 055 puts a trigger back that records no payload: the event check warns beside the census — the kind and the event are recorded, the content is not — naming 055 and both causes (SMD-2115)");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("055") });
   const shippedPair = await run(SQL_ENV);
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 046's — the 3-argument body carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop, and both set the write event beside the actor \(046\); the 2-argument body refuses a non-object payload \(005\) and takes the lock\s*$/m.test(shippedPair.out),
          "…and 046 re-applied is the shipped pair again, said as such");
-  assert(/✓  audit events\s+046's event shape present/.test(shippedPair.out), "…and the event shape is whole again: 046 re-applied put the trigger's body back");
+  assert(/✓  audit events\s+046's event shape present[^\n]*055's payload in every capture event/.test(shippedPair.out), "…and the event shape is whole again with 055's payload: 046 then 055 re-applied put the trigger's body back");
   // 033 re-applied by hand over 035 (SMD-1453): 033's lock and sentinel are
   // back, and with them 025's fill of a NULL pointer on a re-capture and the
   // supersession lock on every capture naming one — 035's sentinel is what
@@ -1334,7 +1341,7 @@ else {
   // the line says so rather than reporting the log as complete.
   assert(/query log\s+present; .*Cite rows \(a write naming a returned id as its source, SMD-1719\) need migration 035's upsert_thought and will NOT be logged on this brain/.test(reapplied033.out) && /!  query log/.test(reapplied033.out),
          "…and the query-log line warns that cite rows will not be logged under the pre-035 body");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") || f.startsWith("055") });
   const shippedAgain = await run(SQL_ENV);
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 046's/.test(shippedAgain.out), "…and 046 after it is the shipped pair again");
   assert(/✓  query log\s+present; /.test(shippedAgain.out) && !/will NOT be logged/.test(shippedAgain.out), "…and the query-log line is ok again, without the cite warning");
@@ -1349,7 +1356,7 @@ else {
   assert(reapplied035.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, 025's envelope, the fingerprint lock and writes provenance on a first capture only, but it is from before migration 046 \(migration 046 is not yet applied, or 035 was re-applied by hand\): the write event a capture declares — stance, cites, the valid window, trust — is dropped silently, so no audit row carries it.*; and the 2-argument body is not 046's either — it is from before migration 046 \(migration 046 is not yet applied, or 033 or 035 was re-applied by hand\): it sets no write event beside the actor/.test(reapplied035.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\./.test(reapplied035.out),
          "035 re-applied over 046 is a warning naming 046 for both bodies: neither sets the write event, and a capture's declaration would be dropped silently (SMD-1730, sixth review pass)");
   assert(/✓  edit signature/.test(reapplied035.out), "…and the edit signature is untouched by it — 035 defines no update_thought");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") || f.startsWith("055") });
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 046's/.test((await run(SQL_ENV)).out), "…and 046 after it is the shipped pair again");
   // The 2-argument form from before 005 — what the getting-started guide, the
   // fingerprint recipe's Step 2 and upstream's enhanced-thoughts schema all
@@ -1373,7 +1380,7 @@ else {
   const fiveAlone = await run(SQL_ENV);
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 .*; and the 2-argument body is not 046's either — it is from before migration 033 \(migrations 033, 035 and 046 are not yet applied, or 005 was re-applied by hand\): it takes no fingerprint lock/.test(fiveAlone.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql — the last definer/.test(fiveAlone.out),
          "…and 005 re-applied alone leaves a pre-022 3-argument body and a 2-argument body with the guard and no lock, said as such");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") || f.startsWith("055") });
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 046's/.test((await run(SQL_ENV)).out), "…and 046 after it is the shipped pair again");
   // The 3-argument form gone from a 035 database: the remedy is the last
   // definer, not 004, 022 or 025 — whose bodies would drop 005's guard, 008's
@@ -1383,7 +1390,7 @@ else {
   const noThree = await run(SQL_ENV);
   assert(noThree.code === 1 && /atomic capture\s+2 upsert_thought overload\(s\) — the 3-argument form, the atomic capture, is missing/.test(noThree.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql — the last definer of both forms/.test(noThree.out) && !/Apply db\/migrations\/00[24]_/.test(noThree.out) && !/Apply db\/migrations\/02[25]_/.test(noThree.out),
          "the 3-argument form missing is a refusal whose remedy is 046, the last definer — not 004, 022 or 025");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") || f.startsWith("055") });
   assert((await run(SQL_ENV)).code === 0, "…which 046 re-applied performs");
   // A database whose update_thought predates 032: 018's form alone, then
   // 021's alone — each named by its signature, 032 the remedy.
@@ -1392,6 +1399,19 @@ else {
   const pre021 = await run(SQL_ENV);
   assert(pre021.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) is the form from before migration 032; the server sends p_provenance/.test(pre021.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\. Its DROP chain reaches every older form/.test(pre021.out),
          "a 018-era update_thought under this server does not start, and is named by its signature with 046 — whose DROP chain reaches every older form — as the remedy");
+  // The ledger recording 046 makes the remedy the re-run — and the re-run
+  // still says what 046's DROP chain drops, as the apply text does (cold
+  // read, fourth review pass: the sentence rode the apply text alone, and a
+  // ledgered brain with stale forms was not told what re-applying does).
+  const led046 = new SQL({ url: LIVE, max: 1 });
+  await led046.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
+  await led046.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('046_thought_audit_event_shape.sql', 'test')`);
+  const ledgered = await run(SQL_ENV);
+  await led046.unsafe(`DROP TABLE schema_migrations`);
+  await led046.close();
+  // The remedy prints on the line after the finding, so the whole output is read, as the arms above read it.
+  assert(ledgered.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) is the form from before migration 032/.test(ledgered.out) && /re-apply the recorded migrations with the migrator/.test(ledgered.out) && /Re-applied, 046's DROP chain reaches every older form and leaves the one the servers call\./.test(ledgered.out) && !/Apply db\/migrations\/046/.test(ledgered.out),
+         `with 046 recorded in the ledger the edit-signature remedy is the re-run alone, and it says what 046's DROP chain drops (exit ${ledgered.code}: ${ledgered.out.split("\n").filter((l) => /edit signature|re-apply the recorded|DROP chain/.test(l)).join(" | ").trim().slice(0, 400)})`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
   const pre032 = await run(SQL_ENV);
   assert(pre032.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\) is the form from before migration 032; the server sends p_provenance, which only 032's form and its successors take — so every edit would fail, and db\/reembed\.ts refuses to run/.test(pre032.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\. Its DROP chain reaches every older form/.test(pre032.out),
@@ -1415,7 +1435,7 @@ else {
   // (022, 025, 033 or 035 alone would leave the later ones' out, warnings
   // above) — 032 and 033 first, so the 9-argument update_thought 046 drops is
   // there to drop, the ACL crossing as it did at the upgrade.
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("026") || f.startsWith("032") || f.startsWith("033") || f.startsWith("046") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("026") || f.startsWith("032") || f.startsWith("033") || f.startsWith("046") || f.startsWith("055") });
   const restoredAll = await run(SQL_ENV);
   assert(/provenance\s+trace_provenance and find_derivatives present; trace_provenance's body is 026's, the walk bounded/.test(restoredAll.out),
          "…and trace_provenance is 026's again: every 025 re-applied above was followed by 026, so no later healthy run carries the provenance warn");
@@ -1435,12 +1455,42 @@ else {
   assert(/✓  audit events\s+046's event shape present/.test((await run(SQL_ENV)).out), "…and an unclassified key whose every digest is revoked is not counted: it cannot write");
   // Rows waiting on the backfill alone — every key they name classified: the
   // remedy is the backfill call, with no key to classify (run-it, third pass).
-  await claims.unsafe(`INSERT INTO thought_audit (thought_id, action, actor_name, diff) VALUES (gen_random_uuid(), 'capture', 'unclassified-key', '{}'::jsonb)`);
+  // (The planted row carries a content since 055 — this arm is about the
+  // kind; the payload census has its own arm below.)
+  await claims.unsafe(`INSERT INTO thought_audit (thought_id, action, actor_name, diff) VALUES (gen_random_uuid(), 'capture', 'unclassified-key', '{"content": "planted", "metadata": {}}'::jsonb)`);
   const fillOnly = await run(SQL_ENV);
   assert(/!  audit events\s+0 key\(s\) with no kind and 1 audit row\(s\) naming a key with no kind, 1 of them naming a key classified since — waiting only on the backfill/.test(fillOnly.out) && /SELECT backfill_thought_audit_events\(\); fills them — every key they name is classified/.test(fillOnly.out) && !/For each name/.test(fillOnly.out),
          "rows waiting on the backfill alone get the backfill as the remedy, with no key to classify");
   await claims.unsafe(`SELECT backfill_thought_audit_events()`);
   assert(/✓  audit events\s+046's event shape present/.test((await run(SQL_ENV)).out), "…which fills them");
+  // 055's payload census (SMD-2115): a capture row without content whose
+  // thought stands is waiting on the payload backfill — a warning with the
+  // pass as the remedy; one whose thought is gone without a tombstone has
+  // nothing to derive from and is named in the ok line, not carried as a
+  // warning on every start; the pass fills the first and reports the second.
+  // Planted with no actor (the kind census counts rows naming a key), after
+  // the thought's own capture (a capture that re-took the id later would
+  // leave the earlier one nothing to derive from).
+  const [{ id: payloadThought }] = (await claims`SELECT id FROM thoughts ORDER BY created_at LIMIT 1`) as { id: string }[];
+  // The first names a classified key with no kind on the row — waiting on the
+  // kind backfill AND the payload — so the line carries both findings and
+  // both remedies (cold read, first review pass: the first draft dropped the
+  // payload clause from the message and spliced "Then As the owner").
+  await claims`INSERT INTO thought_audit (thought_id, action, actor_name, diff) VALUES (${payloadThought}::uuid, 'capture', 'unclassified-key', '{"metadata": {}}'::jsonb)`;
+  await claims.unsafe(`INSERT INTO thought_audit (thought_id, action, diff) VALUES (gen_random_uuid(), 'capture', '{"metadata": {}}'::jsonb)`);
+  const both = await run(SQL_ENV);
+  assert(both.code === 0 && /!  audit events\s+0 key\(s\) with no kind and 1 audit row\(s\) naming a key with no kind, 1 of them naming a key classified since — waiting only on the backfill — every write through an unclassified key is recorded with actor_kind and trust unknown, which every read built on them will say; and 2 capture event\(s\) carry no content \(written before migration 055, or under a re-applied 046\), 1 of them with nothing to derive from — the thought gone without a tombstone — 1 of them the payload backfill fills/.test(both.out)
+         && /SELECT backfill_thought_audit_events\(\); fills them — every key they name is classified \(db\/README\.md\)\. Then, as the owner \(the pass amends thought_audit\), SELECT backfill_thought_payloads\(\);/.test(both.out),
+         "a row waiting on the kind backfill beside capture rows waiting on the payload: one line naming both, the two remedies in order (SMD-2115)");
+  await claims.unsafe(`SELECT backfill_thought_audit_events()`);
+  const payloadWaiting = await run(SQL_ENV);
+  assert(payloadWaiting.code === 0 && /!  audit events\s+046's event shape present and every key classified, but 2 capture event\(s\) carry no content \(written before migration 055, or under a re-applied 046\), 1 of them with nothing to derive from — the thought gone without a tombstone — 1 of them the payload backfill fills; the log alone cannot rebuild those thoughts until it runs/.test(payloadWaiting.out) && /SELECT backfill_thought_payloads\(\);/.test(payloadWaiting.out),
+         "two capture rows without content: a warning counting both, saying which the pass fills and which nothing derives for, with the pass as the remedy (SMD-2115)");
+  const [{ r: payloadPass }] = (await claims`SELECT backfill_thought_payloads() AS r`) as { r: { rows: number; from_row: number; unrecoverable: number; awaiting: number } }[];
+  assert(payloadPass.rows === 1 && payloadPass.from_row === 1 && payloadPass.unrecoverable === 1 && payloadPass.awaiting === 1, `the pass fills the row whose thought stands (from the live row) and reports the other as unrecoverable (${JSON.stringify(payloadPass)})`);
+  const payloadAfter = await run(SQL_ENV);
+  assert(/✓  audit events\s+046's event shape present[^\n]*055's payload in every capture event that has one — 1 with nothing to derive it from \(the thought gone without a tombstone; the fold names them\)/.test(payloadAfter.out),
+         "…after which the check is ok, naming the one row nothing derives for rather than warning on every start");
   // A column dropped from under 046's trigger is fatal — the trigger INSERTs
   // into it, so every write would fail; the same missing column on a brain
   // whose trigger is 025's is the ordinary state before 046 — writes go
@@ -1454,8 +1504,8 @@ else {
   const pre046 = await run(SQL_ENV);
   assert(pre046.code === 0 && /!  audit events\s+thought_audit lacks 1 of 046's eight columns \(backfilled_at\) — the brain predates migration 046: writes go through, and every row records no kind, trust, door or event until it is applied/.test(pre046.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\./.test(pre046.out),
          "…while the same column missing under 025's trigger — a brain before 046 — is a warning that writes go through, naming 046");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") });
-  assert(/✓  audit events\s+046's event shape present/.test((await run(SQL_ENV)).out), "…and 046 re-applied puts the column and the trigger back");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") || f.startsWith("055") });
+  assert(/✓  audit events\s+046's event shape present/.test((await run(SQL_ENV)).out), "…and 046 then 055 re-applied put the column and the trigger back (055's body over 046's — SMD-2115)");
   await claims.unsafe("UPDATE thoughts SET embedding = NULL");
 
   await claims.unsafe("DROP TABLE thought_work_claims");
@@ -1592,7 +1642,7 @@ else {
       const pre046Agents = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(/write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(pre046Agents.out) && !/ob1_agents/.test(writeLine(pre046Agents.out)),
              `under 025's audit trigger the same role holds the capture set — SELECT on ob1_agents is required only while the body that reads it is installed (exit ${pre046Agents.code})`);
-      await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") });
+      await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") || f.startsWith("055") });
       // 046 re-applied requires the SELECT again, and grants it to nobody: the
       // grant is the operator's, by the convention every privilege has landed
       // under — a ROLE_GRANTS row, this check naming what is missing, --grant

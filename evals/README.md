@@ -5009,6 +5009,13 @@ running — is named.
 
 ### Results, 2026-09-24 (PostgreSQL 16.15, pgvector 0.8.6, width 8; the program's output, verbatim)
 
+(The run below is the run at 053, as it was. Since migration 055 — SMD-2115,
+step 1 of the decision — the shipped capture event carries the content, the
+baseline passes C1 and the recorded matrix in `evals/writable-projection.ts`
+says so; the prototype SQL calls the shipped diff rule, append and stamp arms
+rather than defining them, and CI's `--check` holds the live run to the
+matrix as recorded now, not to this block.)
+
 ```
 Writable projection — SMD-1999 (Spike 2 of SMD-1997), PostgreSQL 16.15 (Debian 16.15-1.pgdg12+2)
 

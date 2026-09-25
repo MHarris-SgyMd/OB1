@@ -154,9 +154,11 @@ statements. It sets a 10 s lock timeout for everything it does — for the
 session, and again inside every transaction — so a held lock fails the run
 rather than freezing it and every reader behind it. 001 and 003
 take ACCESS EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if
-`OB1_TRGM_INDEX` is on and the index is absent; 023's call runs again and takes
-its lock (`OB1_BACKFILL_LIMIT` bounds it, as on a first apply; it writes nothing
-when no row is waiting); 025 re-validates its constraints over the table. 021's
+`OB1_TRGM_INDEX` is on and the index is absent; 023's and 050's backfill calls
+run again and take `thoughts` EXCLUSIVE (`OB1_BACKFILL_LIMIT` bounds each, as on
+a first apply; they write nothing when no row is waiting); 055's locks the audit
+rows it fills and then builds its partial index over `thought_audit` (SHARE,
+tens of milliseconds); 025 re-validates its constraints over the table. 021's
 evidence backfill runs as written, the acceptances out of its sight (above);
 030, reached after it in the same transaction, finds nothing of 021's to take
 back and corrects the own-key labels an earlier paste of the body left
@@ -164,8 +166,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1651 assertions: 1651 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports fifty-four (54) migrations applied, and
+`bun test-schema.ts` prints `1747 assertions: 1747 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports fifty-five (55) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -204,7 +206,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
-051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090).
+051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -221,9 +223,10 @@ The decision that `thought_audit` is the write-side source of truth and the
 `thoughts` row its projection — the write functions appending the event first
 and one projector writing the row, the audit trigger becoming the check, the
 table kept for the community's DDL — is `../docs/event-log-as-truth.md`
-(SMD-1997). Its three steps are filed (SMD-2115, SMD-2116, SMD-2117) and none
-has landed: at 053 the row is still written first and the trigger derives the
-event from it, as the paragraphs below describe.
+(SMD-1997). Its three steps are filed (SMD-2115, SMD-2116, SMD-2117) and the
+first has landed as migration 055 (below); at 055 the row is still written
+first and the trigger derives the event from it, as the paragraphs below
+describe — what 055 changes is what the event carries.
 
 Migration 046 makes `thought_audit` the log of record (SMD-1730): eight columns
 beside 008's and 010's — `actor_kind` and `trust` (who holds the key, and the
@@ -330,6 +333,49 @@ default either write fails 40001 instead, which the server retries. Same
 signature and grants, no data change; a role missing UPDATE on
 `ob1_agent_keys` now fails only a lookup that writes (a stale key, a scope
 change, a registration) rather than every known-key lookup.
+
+Migration 055 makes the capture event carry the payload (SMD-2115, step 1 of
+`../docs/event-log-as-truth.md`): a capture's `diff` carries the **content**
+and, when the writer set the row's own time (`db/ingest-records.ts` backdates
+a record), its **`created_at`**; an update's `diff` carries the key's move
+(`content_fingerprint` before/after — 018's NULL for a text another row
+holds, 023's fill, an edit's recomputation) — the three things SMD-1999
+measured a projector needs beyond 046's event, and nothing else. 046's diff
+rule, its append and 050's two stamp arms become functions the triggers call
+(`ob1_thought_diff`, `ob1_append_thought_event`, `ob1_actor_stamp`,
+`ob1_actor_stamp_kept`), one copy each for the write functions to call before
+the row exists at step 2. Rows already written: `SELECT
+backfill_thought_payloads();` fills `diff.content` (and `created_at`) on every
+capture row from before 055 — from the first content-moving update's `before`,
+else the tombstone's `previous_content`, else the live row — under
+`ob1.audit_amend = 'payload'`, the payload amendment the append-only trigger
+allows — the second it allows, the third named (a capture row's `diff.content` and `diff.created_at` where absent, with
+what the log and the row derive to, and nothing else; under 046's `'backfill'`
+an UPDATE of `diff` stays refused). The file calls it once (`OB1_BACKFILL_LIMIT`
+bounds the batch, as for 023 and 050); preflight's `audit events` counts the
+capture rows still without content and names the pass. On the dogfood brain
+every one of 632 rows derived (239 from an update, 1 from a tombstone, 392
+from the live row; 222 gained a `created_at`). The events read for a capture
+are the thought's rows written after it — since `ob1_config.audit_seq_exact_since`
+(050's `applied_at`, recorded at apply) a row is later when its `seq` is
+larger and rows order by `seq`, the identity being exact insertion order; before
+it a row is later when `(created_at, seq)` is larger and rows order so, the
+pre-050 `seq` being heap order — and no further than the first later tombstone
+or capture: an id `ingest-records.ts` re-uses after a delete has a second
+incarnation whose edits are not the first capture's, and a prior incarnation's
+rows are not the second's. `created_at` is the transaction's start, so an edit
+from an older transaction can be stamped before the capture it follows; the
+boundary is what tells it from a prior incarnation's row. A thought deleted
+while the pass runs makes the gate refuse that row; the fill runs in batches of
+1,000, catches the refusal, sets the row aside as `skipped` and runs the batch
+again (a refusal that sets nothing aside is raised after five), and the next
+pass fills it from the tombstone. A capture row whose `diff` is no object is no
+candidate and is not counted as waiting; run one pass at a time.
+Additive, no signature moves, no return changes, no row written differently.
+What a reader sees change: `thought_changes` lists `content_fingerprint` in
+`changed` when a text moves; and two passes that wrote no audit row before
+write one per row they key, since a key's move is an event — 023's
+`backfill_content_fingerprints()` and `reembed.ts`'s edit of a legacy twin.
 
 ## What changed relative to the guide
 
@@ -2088,8 +2134,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1651 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 703 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1747 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 716 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

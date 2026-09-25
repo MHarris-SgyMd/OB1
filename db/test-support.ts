@@ -164,6 +164,15 @@ const FUNCTIONS = [
   // 050 (SMD-1726): the stamp trigger's function and the backfill.
   "ob1_stamp_actor()",
   "backfill_thought_actors(integer)",
+  // 055 (SMD-2115): 046's diff rule, its append and 050's two stamp arms as
+  // functions, the payload's derivation and its backfill; the partial index
+  // drops with the table.
+  "ob1_thought_diff(text, text, text, jsonb, jsonb, boolean, boolean, uuid, uuid, jsonb, jsonb, text, text, timestamptz)",
+  "ob1_append_thought_event(uuid, text, text, jsonb, jsonb)",
+  "ob1_actor_stamp(jsonb)",
+  "ob1_actor_stamp_kept(jsonb, jsonb)",
+  "ob1_capture_payload(uuid, timestamptz, bigint)",
+  "backfill_thought_payloads(integer)",
 ];
 
 /**
