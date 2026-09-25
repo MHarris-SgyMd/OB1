@@ -474,8 +474,8 @@ issues every group at once.
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
 | **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for 016's `merge_entities`, and since 053 for `record_thought_entities`, which upserts (`ON CONFLICT DO UPDATE`): Postgres checks it for every call, conflict or none, so until SMD-2216 a `--grant` role could not record a mention |
-| | `ob1_entity_edges` (053) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
-| **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216) | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
+| | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
+| **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` reads the source rows too | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
 | | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets; capture's `SELECT, UPDATE` cover the reads and the closing |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
@@ -514,7 +514,11 @@ issues every group at once.
 | | `operating_model_profiles`, `operating_model_sessions`, `operating_model_layer_checkpoints`, `operating_model_entries`, `operating_model_exports` (recipes/work-operating-model-activation; its three functions keep PUBLIC's EXECUTE — upstream only granted them to its service role) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `world_model_assessments`, `world_model_boundary_flows` (recipes/world-model-diagnostic-activation, its `schema-v2-draft.sql` — a draft its README's V1 does not apply; listed so applying it is one `--grant` away) | `SELECT, INSERT, UPDATE, DELETE` |
 
-Plus `USAGE ON SCHEMA public`. The migrations' own tables need no sequence
+Plus `USAGE ON SCHEMA public`, and the right to create a temp table:
+`record_thought_entities`, `record_source_links` and `apply_entity_type_gate()`
+stage their rows in `ON COMMIT DROP` temp tables, so a database that has revoked
+`TEMPORARY` from `PUBLIC` (the default grants it) needs `GRANT TEMPORARY ON
+DATABASE … TO your_role` as well — `--grant` does not issue it. The migrations' own tables need no sequence
 grant — every primary key is a `uuid` or a natural key — but three community
 schemas use `BIGSERIAL` ids, and an `INSERT` into such a table needs `USAGE` on
 the sequence (`permission denied for sequence …` with the table fully granted),

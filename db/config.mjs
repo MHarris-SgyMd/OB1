@@ -1696,13 +1696,15 @@ export const ROLE_GRANTS = Object.freeze({
   // edge rows was missing until SMD-2216: 016's merge_entities re-points
   // mentions with one, and since 053 record_thought_entities UPSERTs both
   // tables (INSERT … ON CONFLICT DO UPDATE, the structured-wins rule), which
-  // Postgres checks UPDATE for when it plans the statement, conflict or none —
-  // so every call failed under a --grant role — and 056's
-  // apply_entity_type_gate() re-points mentions as merge_entities does.
+  // Postgres checks UPDATE for each time the statement runs, conflict or none
+  // — so every call failed under a --grant role — and 056's
+  // apply_entity_type_gate() re-points mentions as merge_entities does when a
+  // retype merges. `since` dates each row by its table's first requirement
+  // (016); the edges' UPDATE is 053's.
   extraction: Object.freeze([
     Object.freeze({ table: "ob1_entities",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "016" }),
     Object.freeze({ table: "thought_entities", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "016" }),
-    Object.freeze({ table: "ob1_entity_edges", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "053" }),
+    Object.freeze({ table: "ob1_entity_edges", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "016" }),
   ]),
   // A structured pass — sync-linear.ts, the ingest adapters' structure step
   // (ingest-structure.ts) — additionally records the thought's source row and
@@ -1711,6 +1713,8 @@ export const ROLE_GRANTS = Object.freeze({
   // inserts `link` facets (capture's SELECT, UPDATE on thought_facets cover the
   // reads and the closing). It records its mentions through
   // record_thought_entities, so it needs `extraction` as well (SMD-2216).
+  // graph-centrality.ts's lifecycle rows (--startable) read `thought_sources`
+  // too, so a reader running it needs this group's SELECT.
   structure: Object.freeze([
     Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "053" }),
     Object.freeze({ table: "thought_facets",  privileges: Object.freeze(["INSERT"]),                               since: "053" }),

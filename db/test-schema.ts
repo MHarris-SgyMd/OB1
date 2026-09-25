@@ -61,6 +61,7 @@ import {
   grantedSequences,
   grantedTables,
   grantedViews,
+  ROLE_GRANT_GROUPS,
   stripSqlComments,
   supabaseIsmsIn,
   UPDATE_THOUGHT_SIGNATURE_9,
@@ -7726,8 +7727,8 @@ console.log("\n[52] Migration 056: the entity name gate — a number or a type w
 // ── 53. A --grant role runs the entity writer, a structured pass and 056's ───
 //
 // Since 053 record_thought_entities upserts the mention and edge rows, and
-// Postgres checks UPDATE for an INSERT … ON CONFLICT DO UPDATE when it plans
-// it — so a role migrate.ts --grant set up, holding SELECT/INSERT/DELETE
+// Postgres checks UPDATE for an INSERT … ON CONFLICT DO UPDATE each time it
+// runs one, conflict or none — so a role migrate.ts --grant set up, holding SELECT/INSERT/DELETE
 // there, failed every call; a structured pass also wrote thought_sources and
 // `link` facets, which no group granted. The role here is set up exactly as
 // --grant sets one up (every group, the objects present), and runs each path
@@ -7742,11 +7743,16 @@ console.log("\n[53] A role migrate.ts --grant set up runs the entity writer (an 
   await db.exec(`SELECT prune_orphan_entities()`);
 
   // The class, not only this instance: every table the migrations create is
-  // named by some group, so a table a migration adds without a grant row fails
-  // here, not under an operator's role. thought_sources was the one (053).
-  const namedTables = new Set(grantedTables());
-  const ungranted = (await q<{ t: string }>(`SELECT tablename AS t FROM pg_tables WHERE schemaname = 'public' ORDER BY 1`)).map((r) => r.t).filter((t) => !namedTables.has(t));
-  assert(ungranted.length === 0, `every table in the migrated schema is named by a ROLE_GRANTS group (unnamed: ${ungranted.join(", ") || "none"})`);
+  // named by one of the migrations' own groups (not the community, extension
+  // and recipe ones, whose names a migration table could share), so a table a
+  // migration adds without a grant row fails here, not under an operator's
+  // role. thought_sources was the one (053). OWNER_ONLY is what no role
+  // is granted on purpose: migrate.ts's ledger, absent from this suite's
+  // brain (it applies the files itself) and present on a migrated one.
+  const OWNER_ONLY = new Set(["schema_migrations"]);
+  const namedTables = new Set(grantedTables(ROLE_GRANT_GROUPS.filter((g) => !["community", "extensions", "recipes"].includes(g))));
+  const ungranted = (await q<{ t: string }>(`SELECT tablename AS t FROM pg_tables WHERE schemaname = 'public' ORDER BY 1`)).map((r) => r.t).filter((t) => !namedTables.has(t) && !OWNER_ONLY.has(t));
+  assert(ungranted.length === 0, `every table in the migrated schema is named by one of the migrations' ROLE_GRANTS groups, migrate.ts's ledger aside (unnamed: ${ungranted.join(", ") || "none"})`);
   // The community row for 016's mention table is issued on every migrated
   // brain, so it is held to the extraction row's privileges, no wider and now
   // no narrower (config.mjs, the schemas/entity-extraction comment).
