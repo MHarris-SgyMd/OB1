@@ -531,7 +531,7 @@ if (!egress.problems.length) {
   // read back (ninth review pass; SMD-1941).
   const sourceTerms = [...egress.allow, ...egress.deny].filter((t) => t.unit === "source");
   if (sourceTerms.length && egress.mode !== "off") {
-    add("egress policy", "warn", `${sourceTerms.length} source: term(s) (${sourceTerms.map((t) => `source:${t.value}`).join(", ")}) do NOT gate a capture — its \`source\` is the caller's claim (SMD-1941); they gate a row's stored label at an edit and at the re-embed and consolidation passes`,
+    add("egress policy", "warn", `${sourceTerms.length} source: term(s) (${sourceTerms.map((t) => `source:${t.value}`).join(", ")}) do NOT gate a capture_thought capture — its \`source\` is the caller's claim, kept off the gate (SMD-1941); they gate a row's stored label at an edit and the re-embed/consolidation passes, and db/sync-linear.ts's captures`,
         "Gate who may capture with actor:<key name>; keep source: terms for what a row's label says, not for who may send.");
   }
   // Terms in the knob the mode does not read decide nothing — a natural

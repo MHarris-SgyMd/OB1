@@ -270,7 +270,12 @@ process.env.MCP_ACCESS_KEYS = `gated:write:${hashKey(GATED_KEY)},open:write:${ha
 // One key allowed by name, and one type — which only a row already tagged can
 // carry, so it reaches an EDIT of such a row and never a first capture; the
 // policy itself is the default.
-process.env.OB1_EGRESS_ALLOW = "actor:open,type:idea";
+// A source: term in the FROZEN policy so [7] can prove capture_thought drops
+// its caller's `source` claim: env() snapshots process.env once at the first
+// request (initEnv's `if (ENV) return`), so the term must be here at module
+// load, not set later. A gated capture NAMING source:claude-code must still be
+// refused — the handler omits the claim, so the term matches nothing.
+process.env.OB1_EGRESS_ALLOW = "actor:open,type:idea,source:claude-code";
 for (const k of ["OB1_LLM_LOCAL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_DENY", "OPENROUTER_API_KEY", "OB1_LLM_API_KEY", "OB1_CHAT_BASE_URL", "OB1_CHAT_API_KEY", "MCP_ACCESS_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "OB1_EMBEDDING_DIMENSIONS", "OB1_CHUNK_CONTEXT"]) delete process.env[k];
 
 const worker = (await import("./index.ts")).default as { fetch: (r: Request) => Response | Promise<Response> };
@@ -296,7 +301,7 @@ console.log("\n[6] The server under deny: a refused capture lands without a vect
   const before = seen.length;
   const cap = await call(GATED_KEY, "capture_thought", { content: "gated-thought-marker: a note that must not leave" });
   assert(!cap.isError && /Captured as thought — id [0-9a-f-]{36}/.test(cap.text), `the capture succeeds, typed as nothing (${cap.text.split("\n")[0]})`);
-  assert(/Note: saved WITHOUT a vector — OB1_EGRESS_POLICY=deny \(the default\) and no OB1_EGRESS_ALLOW term matches this capture \(actor:open, type:idea\) — the text was not sent to 127\.0\.0\.1:\d+\./.test(cap.text),
+  assert(/Note: saved WITHOUT a vector — OB1_EGRESS_POLICY=deny \(the default\) and no OB1_EGRESS_ALLOW term matches this capture \(actor:open, type:idea, source:claude-code\) — the text was not sent to 127\.0\.0\.1:\d+\./.test(cap.text),
          "…the reply says the vector is missing, names the rule, the terms and the host");
   assert(/findable by exact text \(search_thoughts_keyword\)/.test(cap.text) && /re-embed pass/.test(cap.text), "…and the two ways it is still reachable");
   assert(/Note: no topics, people or type were extracted — OB1_EGRESS_POLICY=deny/.test(cap.text), "…and that no tags were extracted, under the same rule");
@@ -376,26 +381,25 @@ console.log("\n[6] The server under deny: a refused capture lands without a vect
   assert(!untypedEdit.isError && /content saved without a vector/.test(untypedEdit.text) && seen.length === m + 1, "…while an edit of the untyped row is still refused at zero requests");
 }
 
-console.log("\n[7] capture_thought keeps its caller-CLAIMED source OFF the egress subject: a source: allow term does not admit a capture that names that source (SMD-1941)");
+console.log("\n[7] capture_thought keeps its caller-CLAIMED source OFF the egress subject: the frozen policy's source:claude-code term does not admit a capture that names that source (SMD-1941)");
 {
-  // A `source:` term names the row's server-written label, never the caller's
-  // claim. Under deny with ONLY a source: allow term, a capture that names that
-  // very source must STILL be refused: the handler judges the gate on a subject
-  // carrying no `source`, so the term matches nothing (this is the sole boundary
-  // now the gate no longer branches on kind — the pass-1 finding). The row still
-  // RECORDS the label (SMD-1297's per-source weight reads it); it just does not
-  // open the gate. embedConfig() reads the env live, so the term is set here.
-  const saved = process.env.OB1_EGRESS_ALLOW;
-  process.env.OB1_EGRESS_ALLOW = "source:leak";
+  // The frozen allow list carries source:claude-code (set at module load above,
+  // before env() snapshotted it). A gated capture that NAMES source:claude-code
+  // must STILL be refused at zero requests: the handler drops the caller's claim,
+  // so the subject carries no source and the term matches nothing — actor:open
+  // and type:idea do not match it either. This is the end-to-end pin of the
+  // pass-1 boundary: re-adding `metadata: { source: origin }` to the capture
+  // subject would let source:claude-code match and the capture would leave,
+  // failing the zero-requests assertion. The row still RECORDS the label
+  // (SMD-1297's per-source weight reads it); it just does not open the gate.
   const n0 = seen.length;
-  const claimed = await call(GATED_KEY, "capture_thought", { content: "claims-to-be-leak: a note naming its own source", source: "leak" });
+  const claimed = await call(GATED_KEY, "capture_thought", { content: "claims-claude-code: a gated note naming its own source", source: "claude-code" });
   assert(!claimed.isError && /Captured as thought/.test(claimed.text) && /saved WITHOUT a vector/.test(claimed.text) && seen.length === n0,
-         `a capture naming source:leak under OB1_EGRESS_ALLOW=source:leak is still refused at zero requests — the caller's claim does not gate (${seen.length - n0})`);
+         `a gated capture naming source:claude-code, with source:claude-code in the allow list, is still refused at zero requests — the claim does not gate (${seen.length - n0})`);
   const cid = /id ([0-9a-f-]{36})/.exec(claimed.text)![1];
   const [crow] = await sql`SELECT metadata, embedding IS NULL AS no_vector FROM thoughts WHERE id = ${cid}::uuid`;
-  assert(crow.no_vector === true && crow.metadata.source === "leak",
-         `…and the row RECORDS source:leak all the same — the label is stored, it just does not open the gate (${JSON.stringify(crow.metadata)})`);
-  if (saved === undefined) delete process.env.OB1_EGRESS_ALLOW; else process.env.OB1_EGRESS_ALLOW = saved;
+  assert(crow.no_vector === true && crow.metadata.source === "claude-code",
+         `…and the row RECORDS source:claude-code all the same — the label is stored, it just does not open the gate (${JSON.stringify(crow.metadata)})`);
 }
 
 await sql.close();
