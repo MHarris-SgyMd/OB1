@@ -36,11 +36,17 @@
  *              never writes, them.
  *   markdown — a Markdown / Obsidian vault, through the Markdown adapter
  *              (db/ingest-markdown.ts). Needs --markdown <root> or OB1_MARKDOWN_DIR.
+ *   items    — ingestion-contract items from a file, one JSON object per line,
+ *              emitted by a parser in any language (db/ingest-items.ts, SMD-2136):
+ *              the import recipes' seam. Needs --items <file.jsonl> (`-` reads
+ *              stdin). Each item's row is labelled with ITS system
+ *              (`metadata.source`), not `items`; a malformed line refuses the
+ *              file whole, naming the line and the field, before any write.
  * `--source all` (the default) ingests every source it has an input for and says
  * on stderr which it skipped for lack of one.
  *
- * The two adapter sources are EXTERNAL content and pass SMD-1813's allowlist:
- * every item names a scope (the corpus, a vault root) and only a scope named
+ * The adapter sources are EXTERNAL content and pass SMD-1813's allowlist:
+ * every item names a scope (the corpus, a vault root, an export) and only a scope named
  * by `--allow <a,b>` / OB1_INGEST_ALLOW is ingested — default nothing, the
  * refusal counted and said. The fork's own records (fork, commit, memory) are
  * not external and are not gated.
@@ -49,6 +55,8 @@
  *   bun db/ingest-records.ts --url … --source fork         # one source
  *   bun db/ingest-records.ts --url … --linear /tmp/linear-corpus-full.json --allow linear:corpus
  *   bun db/ingest-records.ts --url … --markdown ~/vault --allow ~/vault
+ *   bun db/ingest-records.ts --url … --source items --items out.jsonl --allow chatgpt:export
+ *   python3 import-x.py export.zip | bun db/ingest-records.ts --url … --source items --items - --allow x:export
  *   bun db/ingest-records.ts --url … --memory-dir ~/.claude/…/memory
  *   bun db/ingest-records.ts --url … --since <ref>         # commit range start (default the pin tag)
  *   bun db/ingest-records.ts --self-check                  # the pure parsers, no DB
@@ -82,6 +90,7 @@ import { headingOf, ticketsOf } from "../scripts/fork-index.ts";
 import { AdapterRefusal, allowlistFrom, scopeRefusal, type Allowlist, type Identity, type Ingested } from "./ingest-contract.ts";
 import { LINEAR_SYSTEM, linearAdapter, renderIssue, SAMPLE_ISSUE, WATERMARK_KEY } from "./ingest-linear.ts";
 import { markdownAdapter, markdownFiles, MARKDOWN_SYSTEM } from "./ingest-markdown.ts";
+import { ItemsRefusal, parseItems, SAMPLE_ITEM, SAMPLE_LINE } from "./ingest-items.ts";
 import { IdentityHeld, recordStructure, runName as structureRunName, type Structure, type StructureResult } from "./ingest-structure.ts";
 
 // The structure writer lives in ingest-structure.ts so db/sync-linear.ts can
@@ -92,7 +101,8 @@ export { IdentityHeld, recordStructure, type Structure, type StructureResult };
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-export const SOURCES = ["fork", "commit", "linear", "memory", "markdown"] as const;
+/** The sources the CLI reads — `items` is a file of items whose rows are labelled with their own systems. */
+export const SOURCES = ["fork", "commit", "linear", "memory", "markdown", "items"] as const;
 export type Source = (typeof SOURCES)[number];
 /** The pipeline tiers, from the one source db/config.mjs owns (SMD-1953) — migration 045's CHECK and preflight/initEnv validate against the same list. */
 export const TIERS = PIPELINE_TIERS;
@@ -102,7 +112,8 @@ export type Tier = (typeof TIERS)[number];
 export type Doc = {
   id: string;
   content: string;
-  source: Source;
+  /** The row's `metadata.source` label: one of the CLI's sources, or — for an item from a file (SMD-2136) — the system the item names. */
+  source: string;
   meta: Record<string, unknown>;
   /** When the record came to be (a ticket opened, a commit authored); left to now() when a source has none. */
   createdAt?: string;
@@ -233,7 +244,7 @@ export function memoryDocs(dir: string): Doc[] {
  */
 export function docOf(ingested: Ingested): Doc {
   const { system, key } = ingested.identity;
-  const source = system as Source;
+  const source = system;
   // The watermark IS one of the facets — written by the pipeline, not trusted
   // to the adapter: a key the row never carried would leave the clock guard
   // inert, silently (first review pass, independent read).
@@ -341,6 +352,12 @@ export function markdownDocs(root: string): { docs: Doc[]; refused: { path: stri
     }
   }
   return { docs, refused };
+}
+
+/** What a file of items yields as Docs: one per line, on `recordId(system, key)`, labelled with the item's system; the systems counted; the links normaliseLinks set aside. Throws ItemsRefusal for a malformed line — the file whole. */
+export function itemDocs(text: string, label: string): { docs: Doc[]; systems: Record<string, number>; linksDropped: number } {
+  const parsed = parseItems(text, label);
+  return { docs: parsed.items.map(docOf), systems: parsed.systems, linksDropped: parsed.linksDropped };
 }
 
 /**
@@ -677,12 +694,22 @@ function selfCheck(): number {
   try { corpusIngested({ ...record, id: "SMD-99" }); } catch (e) { refusal = e instanceof AdapterRefusal ? e.message : "wrong"; }
   ok(/disagree/.test(refusal), "a record whose id and issue identifier disagree is refused");
 
+  // Items from a file (SMD-2136): a line is a Doc on its system's id space, labelled with the system, structure and scope carried; a malformed line refuses the file in the flag's words.
+  const fromFile = itemDocs(`${SAMPLE_LINE}\n${JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "readwise", key: "h-1" }, scope: "readwise:export", text: "a highlight" })}\n`, "--items out.jsonl");
+  ok(fromFile.docs.length === 2 && fromFile.docs[0].id === recordId("chatgpt", "conv-8f3a") && fromFile.docs[0].source === "chatgpt" && fromFile.docs[1].source === "readwise" && fromFile.systems.chatgpt === 1 && fromFile.systems.readwise === 1, "an item is a Doc on recordId(system, key), labelled with its own system, the systems counted");
+  ok(fromFile.docs[0].content === SAMPLE_ITEM.text && fromFile.docs[0].structure?.canonical.form === SAMPLE_ITEM.canonical.form && fromFile.docs[0].structure.links.length === 1 && fromFile.docs[0].structure.mentions.length === 1 && fromFile.docs[0].scope === SAMPLE_ITEM.scope && fromFile.docs[0].createdAt === SAMPLE_ITEM.createdAt, "…its text, canonical, links, mentions, scope and createdAt carried into the Doc");
+  ok(fromFile.docs[0].watermark?.key === "chatgpt_updated_at" && fromFile.docs[0].meta.chatgpt_updated_at === "2026-09-02T00:00:00Z" && fromFile.docs[0].meta.title === "Postgres pooling", "…the watermark and the facets are the row's metadata");
+  ok(applyAllowlist(fromFile.docs, allowlistFrom("")).refused.length === 2 && applyAllowlist(fromFile.docs, allowlistFrom(SAMPLE_ITEM.scope)).docs.length === 1, "an item is gated by its scope as an adapter's record is — the structure is the tell; one scope cleared passes one");
+  let fileRefusal = "";
+  try { itemDocs(`${SAMPLE_LINE}\n${JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "chatgpt", key: "k2" } })}\n${JSON.stringify({ ...SAMPLE_ITEM, identity: 1 })}\n`, "--items out.jsonl"); } catch (e) { fileRefusal = e instanceof ItemsRefusal ? e.message : `wrong: ${(e as Error).name}`; }
+  ok(/^--items out\.jsonl: line 3: identity: /.test(fileRefusal), `a malformed third line refuses the file, naming the flag, the line and the field (${fileRefusal.slice(0, 60)})`);
+
   // The allowlist (SMD-1813): gated sources refuse by scope, one line per scope; the fork's own records pass.
   const gated = applyAllowlist([doc, { ...doc, id: "x" }, { id: "f", content: "c", source: "fork", meta: {} }], allowlistFrom(""));
   ok(gated.docs.length === 1 && gated.docs[0].source === "fork" && gated.refused.length === 2 && gated.reasons.length === 1 && /^linear: scope "linear:corpus" is not on the allowlist/.test(gated.reasons[0]) && /--allow "linear:corpus"/.test(gated.reasons[0]), `an empty allowlist refuses every gated record, says so once per scope, names the knob (${gated.reasons[0]})`);
   ok(applyAllowlist([doc], allowlistFrom(" linear:corpus , other ")).docs.length === 1, "a cleared scope passes (list trimmed)");
   ok(applyAllowlist([doc], allowlistFrom("linear")).docs.length === 0, "a prefix is not a clearance — exact scope only");
-  ok(applyAllowlist([{ ...doc, source: "future" as Source }], allowlistFrom("")).docs.length === 0, "a record an adapter mapped is gated whatever its source label — the structure is the tell, not a list of names");
+  ok(applyAllowlist([{ ...doc, source: "future" }], allowlistFrom("")).docs.length === 0, "a record an adapter mapped is gated whatever its source label — the structure is the tell, not a list of names");
   ok(allowlistOf("./vault, linear:corpus").has(resolve("./vault")) && allowlistOf("./vault, linear:corpus").has("linear:corpus"), "an allow entry that names a path is resolved as the markdown scope is; the rest are taken as written");
   ok(runName("t", new Date("2026-09-23T00:00:00.000Z")) === "t@2026-09-23T00:00:00.000Z", "a run is named by tool and moment");
 
@@ -706,9 +733,9 @@ async function main(): Promise<void> {
   // does not have, a value where none is expected, a one-value flag with nothing
   // after it, or a flag given twice, is refused rather than silently dropped.
   {
-    const TAKES_ONE = new Set(["url", "source", "linear", "memory-dir", "markdown", "allow", "tier", "since"]);
+    const TAKES_ONE = new Set(["url", "source", "linear", "memory-dir", "markdown", "items", "allow", "tier", "since"]);
     const TAKES_NONE = new Set(["dry-run", "self-check"]);
-    const USAGE = "  flags: --url <postgres://…>, --source <all|fork|commit|linear|memory|markdown>, --linear <dump.json>, --memory-dir <path>, --markdown <vault root>, --allow <scope,scope> (or OB1_INGEST_ALLOW), --tier <stable|canary|working>, --since <ref>, --dry-run, --self-check";
+    const USAGE = "  flags: --url <postgres://…>, --source <all|fork|commit|linear|memory|markdown|items>, --linear <dump.json>, --memory-dir <path>, --markdown <vault root>, --items <file.jsonl | ->, --allow <scope,scope> (or OB1_INGEST_ALLOW), --tier <stable|canary|working>, --since <ref>, --dry-run, --self-check";
     const seen = new Set<string>();
     for (let i = 0; i < args.length; i++) {
       const a = args[i];
@@ -750,6 +777,7 @@ async function main(): Promise<void> {
   const linearPath = flag("linear");
   const memoryDir = flag("memory-dir") ?? process.env.OB1_MEMORY_DIR;
   const markdownDir = flag("markdown") ?? process.env.OB1_MARKDOWN_DIR;
+  const itemsPath = flag("items");
   // SMD-1813's allowlist: the flag, else the environment; empty clears nothing.
   const allow = allowlistOf(flag("allow") ?? process.env.OB1_INGEST_ALLOW);
 
@@ -799,6 +827,35 @@ async function main(): Promise<void> {
       for (const r of refused) note("markdown", `refused ${r.path} — ${r.reason}`);
     }
   }
+  // The items' systems are their own labels; the refusal count below finds
+  // them by id, since `d.source` names the system, not this source.
+  const itemIds = new Set<string>();
+  let itemSystems: Record<string, number> = {};
+  if (wanted.has("items")) {
+    if (!itemsPath) note("items", "skipped — pass --items <file.jsonl> (one ingestion-contract item per line; `-` reads stdin)");
+    else {
+      let text: string;
+      if (itemsPath === "-") text = await Bun.stdin.text();
+      else if (!existsSync(itemsPath)) { console.error(`--items: no such file: ${itemsPath}`); process.exit(2); }
+      else text = readFileSync(itemsPath, "utf8");
+      // A malformed line is a wrong input, as a missing file is: exit 2 with the
+      // line and the field, the file refused WHOLE, before any write — the
+      // gather precedes every write, so no row of a refused file is ever half
+      // in (SMD-2136).
+      let parsed: ReturnType<typeof itemDocs>;
+      try { parsed = itemDocs(text, `--items ${itemsPath}`); }
+      catch (e) {
+        if (!(e instanceof ItemsRefusal)) throw e;
+        console.error(`${e.message} — the file is refused whole; nothing written. Fix the line and run again.`);
+        process.exit(2);
+      }
+      perSource.items = parsed.docs.length;
+      itemSystems = parsed.systems;
+      for (const d of parsed.docs) itemIds.add(d.id);
+      collected.push(...parsed.docs);
+      if (parsed.linksDropped) note("items", `${parsed.linksDropped} link(s) set aside — a link to the item itself, a duplicate, or an empty target (ingest-contract.ts normaliseLinks)`);
+    }
+  }
 
   // The allowlist before the dedupe, so a refused record never claims a text
   // a cleared one carries; the refusals are counted per source and said once
@@ -806,14 +863,15 @@ async function main(): Promise<void> {
   const gate = applyAllowlist(collected, allow);
   for (const line of gate.reasons) console.error(`  ${line}`);
   const refusedPerSource: Record<string, number> = {};
-  for (const d of gate.refused) refusedPerSource[d.source] = (refusedPerSource[d.source] ?? 0) + 1;
+  for (const d of gate.refused) { const s = itemIds.has(d.id) ? "items" : d.source; refusedPerSource[s] = (refusedPerSource[s] ?? 0) + 1; }
 
   const { docs, dropped } = dedupeByContent(gate.docs);
   const printCounts = () => {
     for (const s of SOURCES) {
       if (perSource[s] === undefined) continue;
       const refused = refusedPerSource[s] ?? 0;
-      console.log(`  ${s}: ${perSource[s]} record(s)${refused ? ` — ${refused} REFUSED by the allowlist (the scope and the knob that clears it are said above)` : ""}`);
+      const systems = s === "items" && perSource[s] ? ` (${Object.entries(itemSystems).map(([k, n]) => `${k} ${n}`).join(", ")})` : "";
+      console.log(`  ${s}: ${perSource[s]} record(s)${systems}${refused ? ` — ${refused} REFUSED by the allowlist (the scope and the knob that clears it are said above)` : ""}`);
     }
   };
 

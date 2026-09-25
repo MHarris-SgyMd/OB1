@@ -1639,7 +1639,7 @@ bun ingest-records.ts --url postgres://… \
 bun reembed.ts --url postgres://…
 ```
 
-`ingest-records.ts` reads five sources, each a record becoming one thought row
+`ingest-records.ts` reads six sources, each a record becoming one thought row
 with a deterministic id and a `metadata.source` label (SMD-1806 rule 5 — an
 agent-written capture is one source among several):
 
@@ -1650,6 +1650,7 @@ agent-written capture is one source among several):
 | `linear` | a corpus dump built by `evals/build-linear-corpus.ts` — each record's `issue`, through the Linear adapter: the row the board sync writes (SMD-1958) | `--linear <dump.json>` and `--allow linear:corpus` |
 | `memory` | the `*.md` memory files (`MEMORY.md`, the index, excluded) | `--memory-dir <path>` or `OB1_MEMORY_DIR` |
 | `markdown` | a Markdown / Obsidian vault, through the Markdown adapter | `--markdown <root>` or `OB1_MARKDOWN_DIR`, and `--allow <root>` |
+| `items` | ingestion-contract items from a file, one JSON object per line, emitted by a parser in any language — the import recipes' seam (SMD-2136); each row labelled with the item's own system | `--items <file.jsonl>` (`-` reads stdin) and `--allow <scope>`; `--source items` takes the file alone |
 
 `--source all` (the default) ingests every source it has an input for and says on
 stderr which it skipped; `--source <one>` restricts it; `--dry-run` counts per
@@ -1718,11 +1719,58 @@ own identity, canonical, text, links and facets, written after the parent
 under its scope and watermark with `derived_from` the row that holds the
 parent's identity, whichever writer's it is.
 
-**The allowlist (SMD-1813).** The two adapter sources are external content —
+**Items from a file (SMD-2136).** The third adapter is not a map but a seam:
+`ingest-items.ts` reads a file of items already mapped — one JSON object per
+line, the keys `Ingested` names (`identity {system, key}`, `scope`,
+`canonical {form, mediaType}`, `text`, `links`, `mentions`, `facets`, and
+optionally `createdAt` and `watermark {key, value, asOf?}`) — so a parser in
+any language emits the contract and the pipeline writes it: no database client
+in the recipe, no rewrite under `db/` (SMD-2126 routes four import recipes
+here, three of them Python). The row is labelled with the item's own system
+(`metadata.source` — a `chatgpt` row is `chatgpt`'s, not `items`'), lands on
+the deterministic id for `(system, key)`, and gets everything an adapter's
+record gets: the canonical byte for byte (the round trip holds by construction
+— the canonical IS the line's `form`), the links as a set, the mentions under
+`source:<system>`, the merge, the watermark, the vector left for `reembed.ts`.
+Each line passes the contract's own rules — `SYSTEM_RE` (and not one of the
+pipeline's own record sources, `fork` / `commit` / `memory`), `IDENTITY_MAX`,
+the six relations, the six entity types, `normaliseLinks` / `normaliseMentions`
+— and what no column holds: a NUL or a lone surrogate anywhere in the line, a
+`createdAt` that is not an instant a `timestamptz` cast accepts (February the
+30th is refused, not rolled to March as `Date.parse` would). A malformed line
+refuses the **whole file** with its line number and the field, exit 2, before
+any write — a file half written is one the emitter cannot re-run cleanly, a
+file refused is fixed and run again — and two lines of one identity are refused
+together, since they would land on one row. `derived` is not taken from a
+file: a part that is a thought of its own is a line of its own. The emitter an
+import recipe copies, its own parser kept:
+
+```python
+import json, sys
+for conv in parse(sys.argv[1]):  # the recipe's own parser, unchanged
+    print(json.dumps({"identity": {"system": "chatgpt", "key": conv.id}, "scope": "chatgpt:export",
+                      "canonical": {"form": conv.raw, "mediaType": "application/json"}, "text": conv.summary,
+                      "links": [], "mentions": [{"name": t, "type": "topic"} for t in conv.tags],
+                      "facets": {"title": conv.title}, "createdAt": conv.created_at}))
+```
+
+```bash
+python3 import-chatgpt.py export.zip > items.jsonl
+bun ingest-records.ts --url postgres://… --source items --items items.jsonl --allow chatgpt:export --dry-run  # counts; a bad line is refused here
+bun ingest-records.ts --url postgres://… --source items --items items.jsonl --allow chatgpt:export            # the rows
+bun reembed.ts --url postgres://…                                                                              # the vectors
+```
+
+`bun ingest-items.ts --self-check` runs the rules over a good line and every
+malformed kind, naming the line and field each is refused on; `test-live.ts`
+[19] drives the flag end to end through the CLI against a real server.
+
+**The allowlist (SMD-1813).** The adapter sources — `linear`, `markdown`, `items` — are external content —
 stored un-isolated, embedded, sent to a model provider — and are ingested only
 for a **scope** the operator cleared: `--allow <scope,scope>` or
 `OB1_INGEST_ALLOW`, an exact match on the scope each record names (the corpus:
-`linear:corpus`; a vault: its resolved root path), never a prefix and never "the
+`linear:corpus`; a vault: its resolved root path; an item: the `scope` its
+emitter wrote, an export or a workspace), never a prefix and never "the
 whole workspace". The default is nothing; a record refused is counted per source
 and the refusal names the knob that clears it. The fork's own records (`fork`,
 `commit`, `memory`) are not external and are not gated.
@@ -2057,7 +2105,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1625 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 703 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+./with-postgres.sh bun test-live.ts         # 714 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
