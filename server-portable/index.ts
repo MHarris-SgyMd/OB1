@@ -352,9 +352,25 @@ function gateQuery(query: string, principal: Principal): { subject: EgressSubjec
 
 // --- MCP Server Setup ---
 
-/** The `{ isError: true }` envelope the other tools return, in one place. */
-function toolError(text: string) {
-  return { content: [{ type: "text" as const, text }], isError: true as const };
+/**
+ * A machine-readable verdict carried in `structuredContent` beside the prose
+ * (SMD-1978), so a client — the session-capture hook — need not parse English
+ * to tell a refusal from a transient, which pointer to drop, or which
+ * `derived_from` positions named no thought. `retryable` is the transient/final
+ * split; `positions` are the derived_from indices to drop, present only for a
+ * caller allowed to know they exist (the existence-oracle rule, SMD-1298).
+ */
+type ToolErrorCode =
+  | "REFUSED_SUPERSEDES_OWNERSHIP" // a capture key named a supersedes it did not write
+  | "REFUSED_SUPERSEDES_UNKNOWN"   // the supersedes names no thought
+  | "DERIVED_FROM_MISSING"         // a derived_from id names no thought
+  | "SUPERSEDES_UNJUDGED"          // the server could not check/attribute the supersedes; retry
+  | "STORE_UNAVAILABLE";           // the store did not answer; retry
+type ToolErrorInfo = { code: ToolErrorCode; retryable: boolean; positions?: number[] };
+
+/** The `{ isError: true }` envelope the other tools return, in one place; with a code, its machine-readable verdict rides `structuredContent` (SMD-1978). */
+function toolError(text: string, info?: ToolErrorInfo) {
+  return { content: [{ type: "text" as const, text }], isError: true as const, ...(info ? { structuredContent: { ...info } } : {}) };
 }
 
 /**
@@ -1667,7 +1683,7 @@ function buildServer(principal: Principal): McpServer {
             // connection, a timeout or a brain before 010 gets the store's own
             // words, since `--grant` would change nothing there (sixth review pass).
             const noPrivilege = (e as { code?: string }).code === "42501" || /permission denied/i.test(why);
-            return toolError(`Error: this key's \`supersedes\` could not be checked against the target's capture record (${why})${noPrivilege ? " — the server role needs SELECT on thought_audit: cd db && bun migrate.ts --grant <role> --url $DATABASE_URL" : ""}.`);
+            return toolError(`Error: this key's \`supersedes\` could not be checked against the target's capture record (${why})${noPrivilege ? " — the server role needs SELECT on thought_audit: cd db && bun migrate.ts --grant <role> --url $DATABASE_URL" : ""}.`, { code: "SUPERSEDES_UNJUDGED", retryable: true });
           }
           // By agent id when both sides carry one; by name only when NEITHER
           // does (the registry away now, as it was at the write). A row without
@@ -1681,14 +1697,14 @@ function buildServer(principal: Principal): McpServer {
           // label the SQL rejects): that will not heal on a retry, so it is a
           // refusal, and the caller posts without the pointer (sixth review pass).
           if (writer !== null && writer.agentId !== null && principal.agentId === undefined) {
-            if (principal.agentUnresolved === "refused") return toolError("Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself, and this key's identity could not be resolved — the agent registry refused its name or digest; see the server log.");
-            return toolError("Error: this key's `supersedes` could not be attributed while the agent registry is unavailable — retry when resolve_agent answers.");
+            if (principal.agentUnresolved === "refused") return toolError("Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself, and this key's identity could not be resolved — the agent registry refused its name or digest; see the server log.", { code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false });
+            return toolError("Error: this key's `supersedes` could not be attributed while the agent registry is unavailable — retry when resolve_agent answers.", { code: "SUPERSEDES_UNJUDGED", retryable: true });
           }
           const own = writer !== null && (
             writer.agentId !== null && principal.agentId !== undefined ? writer.agentId === principal.agentId
               : writer.agentId === null && principal.agentId === undefined ? writer.actorName === principal.name
                 : false);
-          if (!own) return toolError("Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself.");
+          if (!own) return toolError("Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself.", { code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false });
         }
         // What may leave the box (SMD-1903): asked once, for both calls, and
         // only the allowed ones are made — a refused capture costs no request
@@ -1925,7 +1941,7 @@ function buildServer(principal: Principal): McpServer {
         // thought (a re-capture writes no pointer, so it never fires there —
         // migration 035). Said as update_thought says it, not as Postgres does
         // (fourth review pass).
-        if (/thoughts_supersedes_fkey/.test(msg)) return toolError("Refused: no thought with the id given as supersedes. Pass the id of an existing thought — the ID: line of a search result.");
+        if (/thoughts_supersedes_fkey/.test(msg)) return toolError("Refused: no thought with the id given as supersedes. Pass the id of an existing thought — the ID: line of a search result.", { code: "REFUSED_SUPERSEDES_UNKNOWN", retryable: false });
         // Its sibling: validate_derived_from's existence refusal (032), the
         // one provenance refusal that still reached the caller as a raw error
         // (fifth review pass).
@@ -1953,12 +1969,15 @@ function buildServer(principal: Principal): McpServer {
           const where = named.length
             ? named.map((i) => `derived_from[${i}] (${sent[i]})`).join(", ")
             : "a `derived_from` id";
-          return toolError(`Refused: ${where} name${named.length > 1 ? "" : "s"} no thought. Each entry must be an existing thought id (the ID: line of a search result).`);
+          // The positions ride the code only when they are NAMED in the prose —
+          // a caller allowed to know a source exists (the existence-oracle rule);
+          // a capture key gets the code with no positions, as it gets no prose
+          // position (SMD-1978).
+          return toolError(`Refused: ${where} name${named.length > 1 ? "" : "s"} no thought. Each entry must be an existing thought id (the ID: line of a search result).`, { code: "DERIVED_FROM_MISSING", retryable: false, ...(named.length ? { positions: named } : {}) });
         }
-        return {
-          content: [{ type: "text" as const, text: `Error: ${msg}` }],
-          isError: true,
-        };
+        // The store did not answer as itself — down, a missing function, a front
+        // returning 401: a transient the caller keeps and retries (SMD-1978).
+        return toolError(`Error: ${msg}`, { code: "STORE_UNAVAILABLE", retryable: true });
       }
     }
   );

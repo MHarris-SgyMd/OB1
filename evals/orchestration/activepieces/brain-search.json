@@ -1,0 +1,55 @@
+{
+  "displayName": "OB1 — brain_search (MCP tool)",
+  "schemaVersion": null,
+  "notes": null,
+  "trigger": {
+    "name": "trigger",
+    "valid": true,
+    "displayName": "MCP tool: brain_search",
+    "type": "PIECE_TRIGGER",
+    "settings": {
+      "pieceName": "@activepieces/piece-mcp",
+      "pieceVersion": "~0.0.21",
+      "triggerName": "mcp_tool",
+      "input": {
+        "toolName": "brain_search",
+        "toolDescription": "Search the Open Brain for thoughts about a topic; returns the best matches with their text.",
+        "inputSchema": [{ "name": "query", "type": "Text", "required": true, "description": "What to search for" }],
+        "returnsResponse": true
+      },
+      "propertySettings": {}
+    },
+    "nextAction": {
+      "name": "step_1",
+      "valid": true,
+      "displayName": "Search the brain",
+      "type": "PIECE",
+      "settings": {
+        "pieceName": "@activepieces/piece-mcp-client",
+        "pieceVersion": "~0.0.3",
+        "actionName": "call-tool",
+        "input": {
+          "auth": "{{connections['brain-read']}}",
+          "tool": "search_thoughts",
+          "args": { "query": "{{trigger.query}}", "limit": 3 }
+        },
+        "propertySettings": {},
+        "errorHandlingOptions": { "continueOnFailure": { "value": false }, "retryOnFailure": { "value": false } }
+      },
+      "nextAction": {
+        "name": "step_2",
+        "valid": true,
+        "displayName": "Reply",
+        "type": "PIECE",
+        "settings": {
+          "pieceName": "@activepieces/piece-mcp",
+          "pieceVersion": "~0.0.21",
+          "actionName": "reply_to_mcp_client",
+          "input": { "mode": "simple", "response": { "response": { "result": "{{step_1.content}}" } }, "respond": "stop" },
+          "propertySettings": {},
+          "errorHandlingOptions": { "continueOnFailure": { "value": false }, "retryOnFailure": { "value": false } }
+        }
+      }
+    }
+  }
+}
