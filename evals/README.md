@@ -5315,8 +5315,14 @@ in the path.
 - the sample;
 - the split: dev/test by md5 of the thought;
 - the arms;
-- the margin: the arm chosen on dev beats B1 by 10 points of balanced
-  accuracy on test, with the paired bootstrap's 95% interval above 0.
+- the margins: the arm chosen on dev beats B1 by 10 points of balanced
+  accuracy on test, with the paired bootstrap's 95% interval above 0; and the
+  per-type gates beat the extractor's own type by 10 points on the valid
+  mentions.
+
+The grading rubric (v1, below) was fixed before any tier call. Its rule that a
+code identifier is never an entity was settled at adjudication, not in the
+pre-registration commit.
 
 **The graded set** is `fixtures/entity-gate-grades.json` (ids and numbers only):
 - 201 dogfood mentions whose name passes B0: every `person`, `place` and
@@ -5352,7 +5358,7 @@ it outside the tree. `--grades fixtures/entity-gate-grades-v2.json` (with or
 without `--strict-code`) runs the report under rubric v2, and `--diagnose`
 runs the probes of why the tier fails. Both are below.
 
-On the test split (90 mentions, 52 invalid), with the threshold, temperature
+On the test split under rubric v1 (90 mentions, 52 invalid), with the threshold, temperature
 and Platt refit taken from dev. The Brier skill is measured against a constant
 at the test split's base rate, scored on the same rows:
 
@@ -5404,8 +5410,8 @@ at the test split's base rate, scored on the same rows:
   | the choice (no type when it abstains or picks number or generic) | 53% |
   | pertype (argmax) | 21% |
 
-  pertype − extractor = −50 points (−66 to −32). The per-type binaries call 23
-  of the 38 a tool.
+  pertype − extractor = −50 points (−66 to −32), so the pre-registered typing
+  margin is not met either. The per-type binaries call 23 of the 38 a tool.
 - **A stored confidence (SMD-1925).** The extractor's column carries no signal:
   it is 1.00 on 89 of the 90 test mentions (41.6% valid) and 0.90 on one;
   AUROC 0.487. v2's P after Platt trades precision for recall, but barely:
@@ -5436,7 +5442,8 @@ at the test split's base rate, scored on the same rows:
 - **Post hoc, not in the verdict.** B1's shapes read for every type reject 40%
   of the invalid mentions and 40% of the valid ones (a ticket id is a valid
   project), balanced accuracy 0.505. No shape rule separates the code
-  identifiers either.
+  identifiers either: under rubric v1 they are invalid, and under the
+  maintainer's decision below they are entities.
 - **What the self-check holds.** `--self-check` is a fork-checks step.
   - The gate is a post-filter with no other path to the graph. Off, it keeps
     every candidate with the extractor's type: today's graph. That is
@@ -5475,7 +5482,6 @@ under it, and `--strict-code` reads code artifacts as junk.
 - **The margin fails under every rubric.**
 - **The junk share is one definition:** whether a code artifact is an entity.
   The entity level and the roles barely move it.
-- **Topics are at least half junk either way** (54% counting code, 86% not).
 - **Some URL-only junk is a type split, not garbage.** `Linear` typed
   organization has 2 mentions, both in URLs, while the Linear the notes discuss
   is a separate tool entity with 160 (SMD-1913's under-merging).
@@ -5530,14 +5536,15 @@ have. SemIf (SMD-2052) is the test of that reading.
 **What it settles.**
 - **Verdict v1.4 stays out of the extraction path,** as a validity gate and as a
   typer, under every rubric and every framing tried.
-- **SMD-1935's deterministic gate ships first.**
+- **SMD-1935's deterministic gate ships first,** with its identifier-shape rule
+  turned into a retype (below).
 - **The next model should know names.** SemIf (SMD-2052), the same contract over
   Qwen3.5-4B, is the one untried lever on this harness.
 - **Code artifacts are entities: the maintainer's decision (2026-09-24).**
   Files, scripts, tables, functions, environment variables, branches and CI jobs
   belong in this brain's graph, as tools (or as projects, for a directory of
   work). So rubric v2 counting them is the brain's working definition, and the
-  verdict above stays on v1 only as what was pre-registered. Under it:
+  recorded verdict stays on rubric v1, fixed before any tier call. Under it:
   - **The junk is about 28% of the graph** (~690 of 2,420). In the graded
     sample it is 57 of 201: 31 generic words or roles, 10 names no window
     holds, 9 minted from URLs or paths alone, and 7 numbers or hashes.
@@ -5545,19 +5552,27 @@ have. SemIf (SMD-2052) is the test of that reading.
     persons (33%) and places (18%). Tools (16%) and projects (12%) are mostly
     sound once code artifacts count.
   - **SMD-1935's gate should retype an identifier, not reject it.** Over the
-    201 graded mentions, B1's number and vocabulary rules reject 3 junk
-    mentions (`person`, `place`, `organization`) and nothing valid. Its
+    201 graded mentions, B1's vocabulary rule rejects 3 junk mentions
+    (`person`, `place`, `organization`) and nothing valid. Its number rule does
+    not fire here, since the sample was drawn past B0; its evidence is the 67
+    numeric names in D4. Its
     identifier-shape rule, which bars a person or place with an identifier's
     shape, rejects 1 junk mention (`host.containers.internal`) and 7 valid ones.
     Five of those are code artifacts the extractor typed as a place
     (`michaelharris/**`, `open-brain_default` and the like); the other two are
     `hono/mcp` and `openrouter.ai`. So under this definition B1 scores 0.474
-    balanced accuracy on test, below keeping everything. The fix is to keep the
+    balanced accuracy on test, below keeping everything. On test that figure is
+    the shape rule alone, since the three vocabulary words fall in dev. The fix is to keep the
     number and vocabulary rules and turn the shape rule into a retype, to tool.
     The post-hoc every-type shape rule above is worse: it would reject real
     entities of every type.
-  - **The targets are the rest:** generic words, URL fragments, numbers and
-    hashes, and the extractor splitting one thing over two types (`Linear` as
+  - **The targets are the rest, as measured:**
+    - generic words and roles (31 of the 57 junk);
+    - names no window holds (10);
+    - names minted from URLs or paths (9);
+    - numbers and hashes (7).
+
+    Some URL-only junk is one thing split over two types (`Linear` as
     organization and as tool; SMD-1913).
 - **A free signal is untested:** the notes write code artifacts in backticks,
   which a deterministic rule on the source text could read to type them as

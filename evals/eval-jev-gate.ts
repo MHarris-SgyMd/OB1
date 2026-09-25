@@ -41,8 +41,8 @@
  *              the entity level (up to three of its mentions, not the first
  *              alone), with a role that points at one person counted as that
  *              person, and each mention given a category — a code artifact
- *              counts as a tool, or as junk with --strict-code. The verdict
- *              above stays on rubric v1; v2 is reported beside it.
+ *              counts as a tool, or as junk with --strict-code. The recorded
+ *              verdict stays on rubric v1; v2 is reported beside it.
  *   margin     on test, the chosen arm's balanced accuracy at rejecting an
  *              invalid mention must beat B1's by 10 points, with the paired
  *              bootstrap's 95% interval of the difference above 0. For typing,
@@ -135,7 +135,8 @@ export const IDENTIFIER_SHAPES: readonly [string, RegExp][] = [
 /**
  * NOT pre-registered: B1's identifier shapes read for every type, not only
  * person and place. Added after the first run showed the invalid mentions B1
- * keeps are mostly code identifiers typed tool, topic or project. Reported as
+ * keeps are mostly code identifiers typed tool, topic or project (invalid
+ * under rubric v1; entities under the maintainer's later decision). Reported as
  * post hoc, for SMD-1935 to weigh; the verdict does not read it.
  */
 export function anyTypeShapeRejects(name: string, type: string): string | null {
@@ -587,7 +588,8 @@ type Ask = (c: Candidate, ds: JevDecision[]) => Promise<JevResult[]>;
  * question this model was already asked is answered from `cached`, any other
  * is asked (under the candidate's own thought's metadata, so an egress term
  * applies row by row) and kept. A refusal is the caller's: the report counts
- * it and goes on, and the diagnosis stops on it (the cache is still written). The cache key names the model and what was
+ * it and goes on, and the diagnosis stops on it (the cache is still
+ * written). The cache key names the model and what was
  * asked, the window included, so another model or window is asked afresh.
  * `run` goes between a SIGINT/SIGTERM handler and a `finally`, both of which
  * write the cache: a signal does not run `finally`, and an interrupted
@@ -822,7 +824,8 @@ async function report(url: string, numericN: number, costThoughts: number, cache
  * decides about a short text whose answer the text states; this gate asks what
  * a name inside a long note is. The probes separate the causes: does the model
  * read the name at all (D1), is it the note's length (D2), is it the label
- * wording (D3), and what it says across the whole graph (D4).
+ * wording (D3), what it says across the whole graph (D4), and the graph's junk
+ * and the seven-way labels under each rubric (D5).
  */
 export const JUNK = "junk";
 const sevenWay = (descriptions: Record<EntityType, string>, junk: string) => [...ENTITY_TYPES.map((t) => ({ id: t, description: descriptions[t] })), { id: JUNK, description: junk }];
@@ -1050,16 +1053,18 @@ function selfCheck() {
   const model = { name: "m", revision: "r", weights_sha256: "w", calibrator_sha256: "c", rules: "u" };
   const k0 = cacheKey(model, ds);
   ok(k0 !== cacheKey({ ...model, revision: "r2" }, ds) && k0 !== cacheKey({ ...model, weights_sha256: "w2" }, ds) && k0 !== cacheKey(model, decisionsFor({ name: "Bun", context: "ctx2" })) && k0 === cacheKey({ ...model }, decisionsFor({ name: "Bun", context: "ctx" })), "the cache key changes with the model's revision or weights and with the window, and only with them");
-  const tmpDir = tmpdir(), bad1 = join(tmpDir, `gate-cache-${process.pid}-1.json`), bad2 = join(tmpDir, `gate-cache-${process.pid}-2.json`);
-  writeFileSync(bad1, "{\"a\": [1]"); writeFileSync(bad2, "{\"a\": 1}");
-  const refusal = (path: string) => { try { readCache(path); return ""; } catch (e) { return (e as Error).message; } };
-  ok(refusal(bad1).includes(bad1) && refusal(bad1).includes("not JSON") && refusal(bad2).includes("not an object of answer lists") && Object.keys(readCache(join(tmpDir, "absent-gate-cache.json"))).length === 0, "a cache that is not JSON, or not an object of answer lists, is refused by name; an absent one is empty");
-  const badGrades = join(tmpDir, `gate-grades-${process.pid}.json`);
-  writeFileSync(badGrades, JSON.stringify({ generated: "g", origin: "o", note: "n", mentions: [{ thought: "x" }] }));
-  ok(refuses(() => readGateGrades(badGrades)).startsWith(badGrades), "a grades file that fails validation is refused naming its path");
-  rmSync(bad1); rmSync(bad2); rmSync(badGrades);
+  const tmpDir = tmpdir(), bad1 = join(tmpDir, `gate-cache-${process.pid}-1.json`), bad2 = join(tmpDir, `gate-cache-${process.pid}-2.json`), badGrades = join(tmpDir, `gate-grades-${process.pid}.json`);
+  try {
+    writeFileSync(bad1, "{\"a\": [1]"); writeFileSync(bad2, "{\"a\": 1}");
+    const refusal = (path: string) => { try { readCache(path); return ""; } catch (e) { return (e as Error).message; } };
+    ok(refusal(bad1).includes(bad1) && refusal(bad1).includes("not JSON") && refusal(bad2).includes("not an object of answer lists") && Object.keys(readCache(join(tmpDir, "absent-gate-cache.json"))).length === 0, "a cache that is not JSON, or not an object of answer lists, is refused by name; an absent one is empty");
+    writeFileSync(badGrades, JSON.stringify({ generated: "g", origin: "o", note: "n", mentions: [{ thought: "x" }] }));
+    ok(refuses(() => readGateGrades(badGrades)).startsWith(badGrades), "a grades file that fails validation is refused naming its path");
+  } finally {
+    for (const f of [bad1, bad2, badGrades]) rmSync(f, { force: true });
+  }
 
-  // The grades: the shape, and the committed file when it is there.
+  // The grades: the shape rules; the committed files are held at the end.
   const good = { generated: "g", origin: "o", note: "n", mentions: [{ thought: A, entity: B, valid: 1, type: 3, grader_a: [1, 3], grader_b: [1, 2] }] };
   ok(validateGateGrades(good).length === 0, "a sound grades file validates");
   const row = good.mentions[0], C = "10000000-0000-4000-8000-00000000000c";
@@ -1091,6 +1096,8 @@ function selfCheck() {
   ok(win(wtext, "the name").context === `${"x".repeat(400)}The Name${"y".repeat(400)}` && win(wtext, "the name").inWindow && win("short The Name text", "the name").context === "short The Name text" && win(wtext, "absent").context === wtext.slice(0, 800) && !win(wtext, "absent").inWindow, "the window: 400 characters either side of the first place the name appears, found without case, clipped at the ends; the head, and not in the window, when the text lacks the name");
   const dotted = `${"İ".repeat(500)} see Bun here`;
   ok(win(dotted, "bun").inWindow && win(dotted, "bun").context.includes("Bun") && win("a+b (c) and more", "(c)").inWindow && win("a+b (c) and more", "a+b").inWindow && win("x [y z", "[y").inWindow && win(`Bun first${"-".repeat(900)}bun again`, "BUN").context.startsWith("Bun first"), "the name is found on the text itself: a character whose lower case is longer (İ) does not misplace the window, and a name's regex characters are literal");
+  // The committed files, which must be there: a deleted fixture fails here, not silently.
+  ok(existsSync(GATE_GRADES_PATH) && existsSync(GATE_GRADES_V2_PATH), "both committed grades files are present");
   if (existsSync(GATE_GRADES_PATH)) {
     const g = readGateGrades();
     const n = g.mentions.length, dev = g.mentions.filter((m) => splitOf(m.thought) === "dev").length;
