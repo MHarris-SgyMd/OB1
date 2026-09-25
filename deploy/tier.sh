@@ -132,8 +132,7 @@ done
 TMP_ENV="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-env.XXXXXX")"
 COMPOSE_ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-compose.XXXXXX")" # mktemp creates both mode 600
 CID=""
-STARTED=""
-trap 'rm -f "$TMP_ENV" "$COMPOSE_ERR_FILE"; [ -z "$CID" ] || [ -n "$STARTED" ] || "$RUNTIME" rm -f "$CID" >/dev/null 2>&1 || true' EXIT
+trap 'rm -f "$TMP_ENV" "$COMPOSE_ERR_FILE"; [ -z "$CID" ] || "$RUNTIME" rm -f "$CID" >/dev/null 2>&1 || true' EXIT
 
 # The environment as compose builds it for the stack: an empty project, the
 # file, the shell. stderr apart, since a delegating `podman compose` prints a
@@ -225,13 +224,16 @@ if [ "$RUNTIME" = docker ] && docker buildx version >/dev/null 2>&1; then LOAD=(
 # sees the one --from and --to.
 #
 # Created on the first network, connected to the rest, then started attached
-# (which forwards signals, as run does, and exits with the container's
-# status): `run --network A --network B` needs Docker Engine 25, and Ubuntu
-# 24.04's docker.io is 24. One path for one network or several. Not `exec`:
-# the EXIT trap removes the temporary files, and the container if it was never
-# started.
+# (which forwards signals, as run does): `run --network A --network B` needs
+# Docker Engine 25, and Ubuntu 24.04's docker.io is 24. One path for one
+# network or several. No --rm: the status is read back from the container,
+# not taken from `start -a`, which under the docker CLI over podman returns 0
+# when the container dies of the Ctrl-C it forwarded (measured; `run` returned
+# 130), and a refresh stopped mid-restore must not read as done to the script
+# that called this one. The EXIT trap removes the container and the
+# temporary files. Not `exec`, for the trap.
 # shellcheck disable=SC2016 # the container's sh expands them, not this one
-CID="$("$RUNTIME" create --rm --init \
+CID="$("$RUNTIME" create --init \
   --network "${NETS[0]}" \
   --env-file "$TMP_ENV" \
   -v "$REPO:/repo:ro" \
@@ -239,5 +241,13 @@ CID="$("$RUNTIME" create --rm --init \
   "$IMAGE" \
   sh -c 'exec bun --no-env-file /repo/db/tier.ts "$@" --from "$TIER_FROM_URL" --to "$TIER_TO_URL"' tier ${PASS[@]+"${PASS[@]}"})"
 for net in "${NETS[@]:1}"; do "$RUNTIME" network connect "$net" "$CID" >/dev/null; done
-STARTED=1
-"$RUNTIME" start -a "$CID"
+start_rc=0
+"$RUNTIME" start -a "$CID" || start_rc=$?
+case "$("$RUNTIME" inspect -f '{{.State.Status}}' "$CID" 2>/dev/null || echo gone)" in
+  # never ran: start's own failure (a network removed since the check, say)
+  created|gone) exit $(( start_rc ? start_rc : 1 )) ;;
+  # the CLI came back first (a Ctrl-C): the container's own end decides
+  running) status="$("$RUNTIME" wait "$CID")" ;;
+  *) status="$("$RUNTIME" inspect -f '{{.State.ExitCode}}' "$CID")" ;;
+esac
+exit "$status"
