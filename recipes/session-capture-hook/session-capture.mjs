@@ -834,7 +834,8 @@ export function renderSummary(s) {
  * a fragment no pattern matched). Findings from a source name where they sit.
  */
 export function scanSummary(s, text) {
-  const found = scanForSecrets(text);
+  // The backstop over the blanked text runs beside the scan (fourth review pass): key material a block split by a name left beside a marker.
+  const found = [...scanForSecrets(text), ...residualKeyMaterial(text)];
   // Each prompt on its own (SMD-2127's first review pass): the redaction blanks
   // one prompt at a time, so a hit that existed only across the join —
   // `--password` ending one prompt, its value opening the next — was a refusal
@@ -1062,29 +1063,85 @@ const KEY_MATERIAL = new Set(["high-entropy token", "private key block", "64-hex
  */
 const blockLine = (run) => /^[A-Za-z0-9+/=]+$/.test(run) && (run.length >= 32 || (run.length >= 4 && run.endsWith("="))) && (/[0-9]/.test(run) || (/[a-z]/.test(run) && /[A-Z]/.test(run))) && (run.match(/[a-z]{3,}/g) ?? []).join("").length / run.length < 0.6;
 /**
- * A key-material span grown over the block it sits in: the whitespace-
- * delimited runs before and after it that read as lines of the block, as far
- * as they run. A block of base64 — a PEM body with no footer, PGP armor, any
- * wrapped blob — was blanked run by run, and the eighth or so of its lines
- * with no run of thirty-two were no hit on their own and went out verbatim,
- * the second scan clean, where the episode used to be refused (third review
- * pass). The header alone matches when the footer is gone, so the body joins
- * the header's span.
+ * A base64-shaped run shorter than a full block line — a key's final line of
+ * fewer than thirty-two characters, no `=` padding (a DER length divisible by
+ * three) — taken only at a block's edge, after a full line, never on its own.
+ */
+const shortKeyRun = (run) => run.length >= 4 && run.length < 32 && /^[A-Za-z0-9+/=]+$/.test(run) && (/[0-9]/.test(run) || (/[a-z]/.test(run) && /[A-Z]/.test(run))) && (run.match(/[a-z]{3,}/g) ?? []).join("").length / run.length < 0.6;
+/**
+ * A key-material span grown over the block it sits in. The hit's own
+ * whitespace-run is re-taken when it reads as a block line — the `/tail`
+ * `tokenSpan` left out of a bare token to spare a path — then the runs on
+ * either side that read as block lines, and one short base64 run at each end.
+ * A block of base64 — a PEM body, PGP armor, a wrapped blob — was blanked run
+ * by run, and a `/` at the span's edge (base64 carries `/`, which the token
+ * class leaves out) stopped the growth, so an interior line with no run of
+ * thirty-two, or a short trailing line, went out verbatim, the second scan
+ * clean, where the episode used to be refused (third and fourth review
+ * passes). A run that is not a block line — a token in a path or a sentence, a
+ * `NAME=value` — keeps its tight span; a block split by such a run leaves key
+ * material the growth cannot reach, which `residualKeyMaterial` refuses.
  */
 function growBlock(text, at, end) {
-  for (;;) {
-    const ws = /\s+$/.exec(text.slice(0, at));
-    const run = ws && /\S+$/.exec(text.slice(0, at - ws[0].length))?.[0];
-    if (!run || !blockLine(run)) break;
-    at -= ws[0].length + run.length;
+  const runStart = (i) => { let j = i; while (j > 0 && !/\s/.test(text[j - 1])) j--; return j; };
+  const runEnd = (i) => { let j = i; while (j < text.length && !/\s/.test(text[j])) j++; return j; };
+  let anchored = false;
+  {
+    // The hit's own LINE, snapped to only when it is a single block-shaped run
+    // — a wrapped blob's line, its `/tail` included — never a path or a
+    // sentence, which carry spaces or short word segments (fourth review pass:
+    // a run-boundary snap swallowed `/Users/.../` and a trailing `/HEAD`).
+    const ls = text.lastIndexOf("\n", at - 1) + 1;
+    let le = text.indexOf("\n", end); if (le === -1) le = text.length;
+    const line = text.slice(ls, le), trimmed = line.trim();
+    if (trimmed && !/\s/.test(trimmed) && blockLine(trimmed)) { at = ls + (line.length - line.trimStart().length); end = at + trimmed.length; anchored = true; }
   }
-  for (;;) {
-    const ws = /^\s+/.exec(text.slice(end));
-    const run = ws && /^\S+/.exec(text.slice(end + ws[0].length))?.[0];
-    if (!run || !blockLine(run)) break;
-    end += ws[0].length + run.length;
-  }
+  const grow = (up) => {
+    let full = anchored;
+    for (;;) {
+      const ws = up ? /\s+$/.exec(text.slice(0, at)) : /^\s+/.exec(text.slice(end));
+      if (!ws) break;
+      const s = up ? runStart(at - ws[0].length) : end + ws[0].length;
+      const e = up ? at - ws[0].length : runEnd(end + ws[0].length);
+      const run = text.slice(s, e);
+      if (blockLine(run)) { if (up) at = s; else end = e; full = true; continue; }
+      if (full && shortKeyRun(run)) { if (up) at = s; else end = e; }
+      break;
+    }
+  };
+  grow(true); grow(false);
   return [at, end];
+}
+/**
+ * The coarse backstop (fourth review pass) — the ticket's "refusal as the net"
+ * for what the precise spans cannot reach. On the ALREADY-BLANKED text: a run
+ * of base64 of twenty or more sitting on a line that carries, or is next to a
+ * line that carries, a `[redacted:…]` marker is key material a block split by
+ * a name or a header left orphaned — a git sha (lower-case hex, no upper, no
+ * `+/`), a data URI's payload and a word-shaped run are not. Reported so the
+ * gate refuses, since a fragment that was never a hit is invisible to the scan
+ * itself. Inert on a text with no marker (the raw first scan, and `refuse`
+ * mode, which redacts nothing).
+ */
+export function residualKeyMaterial(text) {
+  if (!text.includes("[redacted:")) return [];
+  const findings = [];
+  const lines = text.split("\n");
+  const marked = lines.map((l) => /\[redacted:[^\]]*\]/.test(l));
+  let pos = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (marked[i] || marked[i - 1] || marked[i + 1]) {
+      for (const m of lines[i].matchAll(/[A-Za-z0-9+/=]{20,}/g)) {
+        const run = m[0];
+        if (!/[A-Z]/.test(run) && !/[+/]/.test(run)) continue; // a base64 signal, so a lower-case hex sha is not one
+        if ((run.match(/[a-z]{3,}/g) ?? []).join("").length / run.length >= 0.6) continue; // word-shaped
+        if (lines[i].slice(0, m.index).endsWith("base64,")) continue; // a data URI's payload
+        findings.push({ reason: "key material beside a redaction", at: pos + m.index, end: pos + m.index + run.length });
+      }
+    }
+    pos += lines[i].length + 1;
+  }
+  return findings;
 }
 /** The marker a span becomes: what kind of thing was there — never how long, never what. */
 export const redactionMarker = (reasons) => `[redacted:${reasons.join(", ")}]`;

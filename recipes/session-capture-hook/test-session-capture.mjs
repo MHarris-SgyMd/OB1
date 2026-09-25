@@ -37,7 +37,7 @@ delete process.env.OB1_CAPTURE_KEY;
 
 const {
   stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, provenanceOf,
-  scanForSecrets, scanSummary, SECRET_PATTERNS, redactSecrets, redactEpisode, cleanEpisode, secretMode, SECRET_MODES, redactionMarker, describeRedactions, parseRpcBody, postCapture, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX,
+  scanForSecrets, scanSummary, SECRET_PATTERNS, redactSecrets, redactEpisode, cleanEpisode, secretMode, SECRET_MODES, redactionMarker, describeRedactions, residualKeyMaterial, parseRpcBody, postCapture, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX,
 } = await import(SCRIPT);
 
 let passed = 0, failed = 0;
@@ -731,6 +731,27 @@ console.log("\n[4] The secret scan catches every shape it names and leaves the s
   assert(redactSecrets('password: “correct horse battery” and password: `correct horse battery` and password: «correct horse battery» and password: ‘correct horse battery’ end').text === 'password: “[redacted:password assignment]” and password: `[redacted:password assignment]` and password: «[redacted:password assignment]» and password: ‘[redacted:password assignment]’ end',
     "typographic quotes, guillemets and a backtick close a quoted value as the straight quotes do — the opening one is no value character");
   assert(redactSecrets("t eyJhbGciOiJSU0EtT0FFUCJ9.abcdefghij1234.abcdefghij5678.abcdefghij9012.FuKgOY7Ph6CX1oIDbrkvrA t").text === "t [redacted:jwt] t", "a five-segment JWE is blanked whole, not to its third segment");
+  // Fourth review pass: a block line whose only seed sits behind a `/` at the span's edge — the orphan interior/trailing line — is blanked with it, the whole LINE snapped when it is a single block run, and a short trailing line taken.
+  const A33 = "Ab12Cd34Ef56Gh78Ij90Kl12Mn34Op56X"; // 34 chars, one 32-run, one whitespace run
+  assert(scanForSecrets(A33).length === 1 && scanForSecrets(`${A33}/xy`).length === 1, "the seed line has a 32-run; its `/xy` tail is outside the token span");
+  assert(redactSecrets(`${A33}/xy\n${SEEDLESS}\nmore prose`).text === "[redacted:high-entropy token]\nmore prose" && !redactSecrets(`${A33}/xy\n${SEEDLESS}\nmore prose`).text.includes(SEEDLESS.slice(0, 20)),
+    "the seed line snapped whole (its `/xy` re-taken) and the seedless line after it grown in — a `/` at the edge no longer stops the block");
+  assert(redactSecrets(`-----BEGIN PRIVATE KEY-----\n${SEEDED}\n${SEEDLESS}\nZWJoiPk/XvENLy5RUEiF8qxm`).text === "[redacted:private key block, high-entropy token]" && redactSecrets(`-----BEGIN PRIVATE KEY-----\n${SEEDED}\n${SEEDLESS}\nZWJoiPk/XvENLy5RUEiF8qxm`).text.length < 60,
+    "a footer-less key's short final line of fewer than thirty-two characters joins the block");
+  assert(redactSecrets(`see /Users/me/Projects/${highEntropy}/notes.md now`).text === `see /Users/me/Projects/[redacted:high-entropy token]/notes.md now` && redactSecrets(`${highEntropy}/HEAD here`).text === "[redacted:high-entropy token]/HEAD here",
+    "a token on a line WITH other words keeps its tight span — the path and HEAD around it are not a block line");
+  assert(redactSecrets(`note ${A33} Ab3d1x done`).text === "note [redacted:high-entropy token] Ab3d1x done",
+    "a short base64-ish word beside an inline token, not in a block, is NOT eaten — a short run is taken only after a full block line");
+  // The coarse backstop: a block a name splits leaves key material the growth cannot reach; on the blanked text, beside a marker, it is a hit — a git sha or a data URI is not.
+  const split = redactSecrets(`-----BEGIN PRIVATE KEY-----\n${SEEDLESS}\napi_key=abcdef1234567890abcdefghij\n${SEEDLESS}\nend`);
+  const resid = residualKeyMaterial(split.text);
+  assert(resid.length >= 1 && resid.every((f) => f.reason === "key material beside a redaction") && split.text.slice(resid[0].at, resid[0].end).includes("ZVEiR2Bwp"),
+    `a base64 line a name split off, still beside a marker, is caught by the backstop (${resid.length})`);
+  assert(residualKeyMaterial("nothing redacted here " + SEEDLESS).length === 0, "…inert on a text with no marker: the raw first scan and refuse mode do not trip it");
+  assert(residualKeyMaterial("MCP_ACCESS_KEY=[redacted:credential assignment, high-entropy token] and a sha 8541cec9f2a1b3c4d5e6f7a8b9c0d1e2f3a4b5c6 here").length === 0, "…a lower-case hex sha beside a marker is not key material");
+  assert(residualKeyMaterial("img [redacted:high-entropy token] data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ").length === 0, "…nor a data URI's payload beside a marker");
+  assert(residualKeyMaterial(`clean [redacted:high-entropy token]\n${SEEDLESS}\nend`).length === 1, "…but an orphaned base64 line on the next line is");
+  assert(redactSecrets("t eyJhbGciOiJSU0EtT0FFUCJ9.abcdefghij1234.abcdefghij5678.abcdefghij9012.FuKgOY7Ph6CX1oIDbrkvrA t").text === "t [redacted:jwt] t", "a five-segment JWE is blanked whole, not to its third segment");
   const many = describeRedactions([...Array.from({ length: 30 }, () => ({ reason: "password assignment", at: 26, in: "prompt 1" })), { reason: "anthropic key", at: 4, in: "the outcome" }]);
   assert(many === "password assignment at chars 26, 26, 26 and 27 more in prompt 1; anthropic key at char 4 in the outcome", `the message groups a reason and source, listing three offsets and counting the rest (${many})`);
   assert(/; and 2 more$/.test(describeRedactions(Array.from({ length: 10 }, (_, i) => ({ reason: `r${i}`, at: i, in: "prompt 1" })))) && describeRedactions([{ reason: "access key in a URL", at: 3, in: "prompt 2" }]) === "access key in a URL at char 3 in prompt 2", "…eight entries then a count; a reason with ` in ` in it survives the grouping");
@@ -924,6 +945,17 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   assert(armor.code === 0 && armor.payload && !armor.payload.text.includes(SEEDLESS.slice(0, 12)) && !armor.payload.text.includes(SEEDED.slice(0, 12)) && /export: \[redacted:private key block, high-entropy token\] done/.test(armor.payload.text) && /saved \[redacted:private key block, high-entropy token\]/.test(armor.payload.text) && armor.payload.redactions.length === 2,
     `PGP armor in a prompt and a footer-less body in the outcome: one marker each, none of the lines (${armor.message.slice(0, 100)})`);
   if (armor.payloadPath) unlinkSync(armor.payloadPath);
+  // …and a block a name splits — key material the growth cannot cross — is refused by the coarse backstop under redact, not half-sent (fourth review pass).
+  writeFileSync(join(TMP, "split.jsonl"), [user(`stored:\n-----BEGIN PRIVATE KEY-----\n${"ZVEiR2BwpZOOkE/Z0/BVnhZYL71oZV34bKfWjQIt6V/isSMahdsAASACp4ZTGtwi"}\napi_key=abcdef1234567890abcdefghij\n${"ZVEiR2BwpZOOkE/Z0/BVnhZYL71oZV34bKfWjQIt6V/isSMahdsAASACp4ZTGtwi"}\ndone`, { origin: { kind: "human" } }), assistant([{ type: "text", text: "ok" }])].join("\n")); // eslint-disable-line
+  const splitR = prepare({ ...base, session_id: "s-split", transcript_path: join(TMP, "split.jsonl") });
+  assert(splitR.code === 1 && /key material beside a redaction/.test(splitR.message) && / after \d+ redactions/.test(splitR.message) && splitR.payloadPaths.length === 0 && !existsSync(join(STATE, "s-split.json")) && !/ZVEiR2Bwp/.test(splitR.message),
+    `a name-split key block: the growth blanks what it can, the backstop refuses the rest, nothing sent (${splitR.message.slice(0, 120)})`);
+  // …while a clean summary with an ordinary redacted inline key is NOT refused by the backstop.
+  writeFileSync(join(TMP, "inline-ok.jsonl"), [user("rotate MCP_ACCESS_KEY=abcdefghijklmnopqrstuvwxyz012345 today", { origin: { kind: "human" } }), assistant([{ type: "text", text: "the commit is 8541cec9f2a1b3c4d5e6f7a8b9c0d1e2f3a4b5c6" }])].join("\n"));
+  const inlineOk = prepare({ ...base, session_id: "s-inline-ok", transcript_path: join(TMP, "inline-ok.jsonl") });
+  assert(inlineOk.code === 0 && inlineOk.payloadPath && /MCP_ACCESS_KEY=\[redacted:credential assignment, high-entropy token\]/.test(inlineOk.payload.text) && !/abcdefghijklmnop/.test(inlineOk.payload.text),
+    `an inline key beside a git sha is redacted and sent — the backstop does not refuse it (${inlineOk.message.slice(0, 80)})`);
+  if (inlineOk.payloadPath) unlinkSync(inlineOk.payloadPath);
   // The backstop: a blanking the scan still finds something after is refused as every hit was — the net under the redaction. A URL's password blanked, the URL no longer reads as one, and the digest in its path reads as a bare key.
   writeFileSync(join(TMP, "backstop.jsonl"), [user("pull https://u:p4ssw0rd@h/blobs/" + "3f9a".repeat(16) + " now", { origin: { kind: "human" } }), assistant([{ type: "text", text: "pulled" }])].join("\n"));
   const bs = prepare({ ...base, session_id: "s-backstop", transcript_path: join(TMP, "backstop.jsonl") });
