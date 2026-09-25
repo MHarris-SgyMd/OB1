@@ -121,12 +121,25 @@ export function safeEmbedding(emb: number[] | null | undefined): number[] | unde
   return Array.isArray(emb) && emb.length === EMBEDDING_DIMENSION ? emb : undefined;
 }
 
+/** A vector and the model that made it, as `thoughts.embedding_model` labels it (db/migrations/021). */
+export type LabelledEmbedding = { vector: number[]; model: string };
+
 /**
  * Generate a text embedding via OpenRouter (primary) or OpenAI (fallback).
  *
  * OB1 adaptation: OpenRouter is tried first (reversed from ExoCortex).
  */
 export async function embedText(text: string): Promise<number[]> {
+  return (await embedTextLabelled(text)).vector;
+}
+
+/**
+ * The embedding with its model's label (SMD-2128): the writer passes the label to upsert_thought beside the vector,
+ * and this call is the one place that knows which provider answered — the fallback below means a label read from the
+ * environment alone (rest-api's shape, whose embedText has no fallback) would name OpenRouter's model for a vector
+ * OpenAI made. OpenAI's bare model name is labelled `openai/<model>`, the spelling every other writer's label has.
+ */
+export async function embedTextLabelled(text: string): Promise<LabelledEmbedding> {
   const openRouterKey = process.env.OPENROUTER_API_KEY ?? "";
   const openAiKey = process.env.OPENAI_API_KEY ?? "";
   const openRouterModel = process.env.OPENROUTER_EMBEDDING_MODEL ?? "openai/text-embedding-3-small";
@@ -157,7 +170,7 @@ export async function embedText(text: string): Promise<number[]> {
       if (!Array.isArray(embedding) || embedding.length === 0) {
         throw new Error("OpenRouter embedding response missing vector data");
       }
-      return embedding as number[];
+      return { vector: embedding as number[], model: openRouterModel };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       errors.push(`openrouter: ${msg}`);
@@ -187,7 +200,7 @@ export async function embedText(text: string): Promise<number[]> {
       if (!Array.isArray(embedding) || embedding.length === 0) {
         throw new Error("OpenAI embedding response missing vector data");
       }
-      return embedding as number[];
+      return { vector: embedding as number[], model: openAiModel.includes("/") ? openAiModel : `openai/${openAiModel}` };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       errors.push(`openai: ${msg}`);

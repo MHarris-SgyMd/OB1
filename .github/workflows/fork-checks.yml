@@ -104,10 +104,11 @@ jobs:
         working-directory: scripts
         run: bunx tsc --noEmit
 
-      # The session capture hook (SMD-1298, SMD-2012, SMD-2035, SMD-2013): both transcript parsers, the segmenter, the
-      # summary's shape, every secret pattern's probe, the refusal, the detached
-      # hand-off and the MCP post — against synthetic transcripts and a fake
-      # endpoint on localhost. Bun only, no database, so it runs here.
+      # The session capture hook (SMD-1298, SMD-2012, SMD-2035, SMD-2013, SMD-2014): both transcript parsers, the segmenter, the
+      # summary's shape, every secret pattern's probe, the refusal, the opt-in
+      # model summary and its fallbacks, the detached hand-off and the MCP post —
+      # against synthetic transcripts and fake endpoints on localhost. Bun only,
+      # no database, so it runs here.
       - name: Session capture hook
         run: bun recipes/session-capture-hook/test-session-capture.mjs
 
@@ -241,6 +242,17 @@ jobs:
       - name: Writable-projection rules
         working-directory: evals
         run: bun eval-writable-projection.ts --self-check
+
+      # The entity-gate spike's rules (SMD-1937): the deterministic baselines
+      # on the shapes SMD-1935 names and the ones they must keep, AUROC,
+      # balanced accuracy, the dev threshold, the temperature and Platt refits
+      # recovering a known slope, kappa, the paired bootstrap, the
+      # drop-the-mechanism identity, the permuted-score mutant, the framings
+      # and the committed grades' shape. No database, no tier; the measurement
+      # reads the dogfood brain.
+      - name: Entity-gate rules
+        working-directory: evals
+        run: bun eval-jev-gate.ts --self-check
 
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.

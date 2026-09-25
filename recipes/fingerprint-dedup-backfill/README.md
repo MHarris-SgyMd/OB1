@@ -1,5 +1,7 @@
 # Fingerprint Dedup Backfill
 
+> **On this fork (SMD-2126).** `delete-duplicates.mjs` and `backfill-fingerprints.mjs` reach the brain as PostgREST clients — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and this fork's stack runs no PostgREST (SETUP.md), so both fail at their first request. The first moves onto `compat/supabase-sql` under `bun` (the `node` commands below become `bun`) with its deletes through `delete_thought`; the second is removed — migration 023 backfills the fingerprint server-side and 003's function writes it at capture — in SMD-2145. The decision for the class is in `docs/vendored-disposition.md`.
+
 <div align="center">
 
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)

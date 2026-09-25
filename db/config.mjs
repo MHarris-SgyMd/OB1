@@ -1749,12 +1749,12 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "openbrain_agents",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/per-agent-identity" }),
     Object.freeze({ table: "agent_memory_keys", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/per-agent-identity" }),
     Object.freeze({ function: "lookup_agent_memory_key(text)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/per-agent-identity" }),
-    // schemas/smart-ingest (bigserial ids; the SECURITY DEFINER append is REVOKEd FROM PUBLIC)
+    // schemas/smart-ingest (bigserial ids; the SECURITY DEFINER append is REVOKEd FROM PUBLIC, and takes the fork's uuid thought id — SMD-2128)
     Object.freeze({ table: "ingestion_jobs",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/smart-ingest" }),
     Object.freeze({ table: "ingestion_items", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/smart-ingest" }),
     Object.freeze({ sequence: "ingestion_jobs_id_seq",  privileges: Object.freeze(["USAGE", "SELECT"]), since: "schemas/smart-ingest" }),
     Object.freeze({ sequence: "ingestion_items_id_seq", privileges: Object.freeze(["USAGE", "SELECT"]), since: "schemas/smart-ingest" }),
-    Object.freeze({ function: "append_thought_evidence(bigint, jsonb)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/smart-ingest" }),
+    Object.freeze({ function: "append_thought_evidence(uuid, jsonb)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/smart-ingest" }),
     // schemas/entity-extraction (upstream's `entities`/`edges`, not 016's ob1_* tables; three bigserial ids;
     // `thought_entities` is the one name the two share — on a migrated brain the file's IF NOT EXISTS
     // leaves 016's table, so this row is `extraction`'s privileges exactly, not upstream's GRANT ALL:
