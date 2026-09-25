@@ -10,7 +10,10 @@
  *              ingest-records.ts (slice 1). This tool never writes to it except on
  *              --promote.
  *   canary   — main's shadow. On every merge: refresh from stable's dump, migrate
- *              forward with the merged tree, replay the query log and diff the ids.
+ *              forward with the merged tree, replay the query log and diff the ids
+ *              — the searches stable logs over a soak after the refresh, or a
+ *              --since before it: straight after a refresh the default window is
+ *              empty, and --diff exits 3 on it.
  *   working  — a per-worktree disposable copy of stable, migrated by the branch.
  *
  * This is the tooling half (slice 2); ingest-records.ts, OB1_TIER, the
@@ -22,7 +25,7 @@
  *   # replay stable's logged searches against the canary and report the ranking
  *   bun db/tier.ts --replay --from <stable-url> --to <canary-url> [--since <iso-ts>]
  *
- *   # the same, as a gate: exit 1 if a ranking moved, 3 if nothing was compared
+ *   # the same, as a gate: exit 1 if a ranking moved (or a step failed), 3 if nothing was compared
  *   bun db/tier.ts --diff   --from <stable-url> --to <canary-url> [--since <iso-ts>]
  *
  *   # after a soak: stamp the canary's version onto stable
@@ -647,15 +650,16 @@ export async function promote(canaryUrl: string, stableUrl: string): Promise<{ v
  * Print a replay's report and return its verdict: `empty` when nothing was
  * replayed, so nothing was compared — a window stable logged nothing in, or
  * one whose every row was skipped — which --diff must not pass as "nothing
- * moved" (SMD-2182). `window` says which searches were read, in words.
+ * moved" (SMD-2182). `window.words` says which searches were read; `bounded`
+ * is false when that was all of stable's log, which no --since can widen.
  */
-function printSummary(s: ReplaySummary, gate: boolean, window: string): "moved" | "unmoved" | "empty" {
+function printSummary(s: ReplaySummary, gate: boolean, window: { words: string; bounded: boolean }): "moved" | "unmoved" | "empty" {
   const short = (id: string) => id.slice(0, 8);
-  console.log(`replayed ${s.replayed} of ${s.total} logged searches ${window} (${s.skipped} skipped)`);
+  console.log(`replayed ${s.replayed} of ${s.total} logged searches ${window.words} (${s.skipped} skipped)`);
   for (const [reason, n] of Object.entries(s.skips)) console.log(`  skipped ${n}: ${reason}`);
   if (s.replayed === 0) {
     console.log(s.total === 0
-      ? "nothing to compare: stable logged no searches in the window. Stable logs them only with OB1_QUERY_LOG=on, and an earlier --since widens the window."
+      ? `nothing to compare: stable logged no searches in the window. Stable logs them only with OB1_QUERY_LOG=on${window.bounded ? ", and an earlier --since widens the window" : ""}.`
       : "nothing to compare: every search in the window was skipped.");
     return "empty";
   }
@@ -770,9 +774,10 @@ async function main(): Promise<void> {
     const embedFn: EmbedFn | undefined = embedModel ? (q) => embed(embedModel, q, true) : undefined;
     if (!embedFn) console.error(`note: OB1_EVAL_EMBED is not set — hybrid-arm searches will be skipped (keyword arm replays without a model).`);
     const summary = await replayAndDiff(stable, canary, { since: window, embedFn });
-    const verdict = printSummary(summary, verb === "diff", words);
+    const verdict = printSummary(summary, verb === "diff", { words, bounded: window !== null });
     // The gate: 1 when a ranking moved, 3 when nothing was compared — not a
-    // pass, and not a move either, so a caller can tell the two apart.
+    // pass, and not a move either, so a caller can tell the two apart. (A
+    // failed step is 1 as well, below; a usage error or refusal is 2.)
     if (verb === "diff" && verdict !== "unmoved") process.exit(verdict === "moved" ? 1 : 3);
   } finally {
     await stable.close();

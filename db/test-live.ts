@@ -4476,10 +4476,14 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     // The CLI's report and verdict (SMD-2182), on the same canary. Both verbs
     // print the window and the counts, and a window that replayed nothing is
     // --diff's exit 3, where it used to be the pass "nothing moved".
+    // No model, and no env file to bring one back: tier.ts imports evals/lib.ts,
+    // whose loadEnv() fills a missing OB1_EVAL_EMBED from evals/.env, .env or
+    // deploy/.env, and Bun loads the working directory's .env on its own — so
+    // off, --no-env-file and a directory outside the checkout, as tier.sh does.
     const tierCli = async (args: string[], extraEnv: Record<string, string> = {}) => {
-      const env: Record<string, string | undefined> = { ...process.env, ...extraEnv };
+      const env: Record<string, string | undefined> = { ...process.env, ...extraEnv, OB1_ENV_FILES: "off" };
       delete env.OB1_EVAL_EMBED;
-      const p = Bun.spawn(["bun", join(HERE, "tier.ts"), ...args], { stdout: "pipe", stderr: "pipe", env });
+      const p = Bun.spawn(["bun", "--no-env-file", join(HERE, "tier.ts"), ...args], { stdout: "pipe", stderr: "pipe", env, cwd: tmpdir() });
       const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
       return { code: await p.exited, out, err };
     };
@@ -4490,7 +4494,7 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     // The server's clock, which stamped the logged rows, not this host's.
     await canarySql`INSERT INTO ob1_config (key, value) VALUES ('last_refresh', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
     const fresh = await tierCli(["--diff", ...both]);
-    assert(fresh.code === 3 && /^replayed 0 of 0 logged searches since \S+ \(the canary's last refresh\)/m.test(fresh.out) && fresh.out.includes("nothing to compare: stable logged no searches"),
+    assert(fresh.code === 3 && /^replayed 0 of 0 logged searches since \S+ \(the canary's last refresh\)/m.test(fresh.out) && fresh.out.includes("nothing to compare: stable logged no searches") && fresh.out.includes("an earlier --since widens the window"),
       `--diff right after a refresh, with no --since, compared nothing and exits 3, not 0 (exit ${fresh.code}: ${fresh.out.trim()})`);
     const freshReplay = await tierCli(["--replay", ...both]);
     assert(freshReplay.code === 0 && freshReplay.out.includes("nothing to compare"), `--replay, the report, says the same and exits 0 (exit ${freshReplay.code})`);
@@ -4507,10 +4511,19 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
       `--diff whose every row was skipped compared nothing and exits 3 (exit ${skippedAll.code}: ${skippedAll.out.trim()})`);
     await sql`DELETE FROM query_log WHERE arm = 'hybrid'`;
     await canarySql`DELETE FROM ob1_config WHERE key = 'last_refresh'`;
+    // A window that is already all of the log: the canary as its own --from
+    // (its query_log is empty, and it records no refresh). No --since can
+    // widen that, so the hint does not offer one.
+    const unbounded = await tierCli(["--diff", "--from", canaryUrl, "--to", canaryUrl]);
+    assert(unbounded.code === 3 && /^replayed 0 of 0 logged searches in all of stable's log \(the canary records no refresh\)/m.test(unbounded.out) && unbounded.out.includes("only with OB1_QUERY_LOG=on.") && !unbounded.out.includes("--since"),
+      `--diff over all of an empty log exits 3 and offers no --since (exit ${unbounded.code}: ${unbounded.out.trim()})`);
     // A side that does not answer is named, with its host, and never its password.
     const deadTo = await tierCli(["--diff", "--from", URL_!, "--to", "postgres://postgres:s3cret-2182@127.0.0.1:1/ob1_nowhere"]);
     assert(deadTo.code === 1 && deadTo.err.includes("could not connect to --to (canary) at 127.0.0.1:1/ob1_nowhere") && !deadTo.err.includes("s3cret"),
       `--diff's connection failure names --to and its host, not its password (exit ${deadTo.code}: ${deadTo.err.trim()})`);
+    // OB1_ALLOW_REMOTE_DB only so a test server off loopback still reaches the
+    // connection check rather than the loopback refusal; nothing is reset, as
+    // --from never answers.
     const deadFrom = await tierCli(["--refresh", "--from", "postgres://postgres:s3cret-2182@ob1-no-such-host.invalid:5432/openbrain", "--to", canaryUrl], { OB1_ALLOW_REMOTE_DB: "1" });
     assert(deadFrom.code === 1 && deadFrom.err.includes("could not connect to --from at ob1-no-such-host.invalid:5432/openbrain") && !deadFrom.err.includes("s3cret"),
       `--refresh's names --from and its host (exit ${deadFrom.code}: ${deadFrom.err.trim()})`);

@@ -354,7 +354,8 @@ A `--diff` or `--replay` replays what stable logged, so:
 
 Both print the window and how many searches were replayed and skipped. A
 `--diff` that replayed none says `nothing to compare` and exits 3, where a
-pass is 0 and a moved ranking 1 (SMD-2182).
+pass is 0, a moved ranking or a failed step 1, and a usage error or refusal
+2 (SMD-2182).
 
 `--from` and `--to` name a database on the network as `HOST[:PORT][/DB]`
 (port 5432 and database `openbrain` by default). The wrapper builds the URL as
