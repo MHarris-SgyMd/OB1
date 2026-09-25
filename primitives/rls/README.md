@@ -1,5 +1,7 @@
 # Row Level Security (RLS)
 
+> **This fork (SMD-1810):** no extension or recipe in this tree ships these policies any more. Upstream's Extensions 1, 2, 4, 5 and 6 enabled RLS on `auth.uid() = user_id` (only Family Calendar never did), which needs Supabase's GoTrue; the fork runs one operator's brain on plain Postgres and scopes rows by `DEFAULT_USER_ID` in the server, with per-user isolation deferred by decision (SMD-1716). This guide stays as the concept guide — what the policies did, and how to add them on a database that has an authenticated-user context — and describes Supabase's model throughout; `scripts/check-fork-consistency.ts` check 12 refuses the constructs in any `.sql` here.
+
 Row Level Security (RLS) is PostgreSQL's built-in mechanism for controlling which rows in a table are visible or modifiable by different users. Instead of managing access control in your application code, you define policies directly on the database — so security is enforced at the data layer regardless of how you connect (MCP, REST API, direct SQL).
 
 ## Why RLS Matters for Open Brain Extensions
@@ -327,11 +329,9 @@ CREATE POLICY "Users can delete their own recipes"
 - Test policies directly in the SQL editor with `SELECT auth.uid();` to confirm authentication context
 - Consider implementing user-scoped RLS even with `service_role` by adding a `user_id` parameter to your queries and filtering explicitly
 
-## Extensions That Use This
+## Extensions That Used This
 
-- [Meal Planning](../../extensions/meal-planning/) — All tables (recipes, meal_plans, shopping_lists) use RLS to enable shared household access
-- [Professional CRM](../../extensions/professional-crm/) — RLS protects contacts, interactions, and opportunities
-- [Job Hunt Pipeline](../../extensions/job-hunt/) — RLS secures the entire 5-table job search schema
+Upstream's [Household Knowledge](../../extensions/household-knowledge/) and [Home Maintenance](../../extensions/home-maintenance/) (Pattern 1 on two tables each), [Meal Planning](../../extensions/meal-planning/) (shared household access to recipes, meal plans and shopping lists), [Professional CRM](../../extensions/professional-crm/) (contacts, interactions, opportunities) and [Job Hunt Pipeline](../../extensions/job-hunt/) (five tables) carried Pattern 1 — meal planning Pattern 2 as well — in their `schema.sql`. On this fork each file carries a note where the policies stood (SMD-1810), and the three that list it in `requires_primitives` (Meal Planning, Professional CRM, Job Hunt) point here as background.
 
 ## Further Reading
 

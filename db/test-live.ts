@@ -29,12 +29,12 @@
  */
 
 import { SQL } from "bun";
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 import { consolidateKey } from "../server-portable/consolidate.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
@@ -44,7 +44,7 @@ import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, syncIssue, t
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
-import { promote, refresh, refreshToolsReady, replayAndDiff } from "./tier.ts";
+import { promote, refresh, refreshToolsReady, replayAndDiff, targetRefusal } from "./tier.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -1169,6 +1169,28 @@ console.log("\n[6c] The backfill holds the table: a capture and an edit wait for
   await sql`DELETE FROM thoughts`;
 }
 
+/**
+ * The sessions of the races in [6d], [6f], [6g] and [6i]. Each section's
+ * deadlocking arm provokes a deadlock on purpose, and Postgres looks for a
+ * cycle only once a lock wait has lasted deadlock_timeout, 1 s by default, so
+ * every provoked deadlock cost up to a second — fifteen in one CI run of
+ * [6g]'s first arm (SMD-2135). At 50 ms a cycle is found within 50 ms of
+ * closing. The arms that must not deadlock use the same sessions, so the arms
+ * differ only in the code under test and a deadlock that comes back is found
+ * as fast.
+ *
+ * The setting moves when a wait is checked, and so which side of a cycle is
+ * broken; every deadlocking arm accepts either side. A wait probed before any
+ * cycle closes — [6i]'s 400 ms "still waiting" probes and arm 1's lower bound
+ * on the delete's wait — is untouched, since no cycle is there to find, and
+ * every other bound on a wait is 8 s or more. deadlock_timeout is
+ * superuser-only by default and goes as a startup parameter, so it holds for
+ * the session: CI's service and with-postgres.sh connect as postgres, and any
+ * other role races at the default, only slower.
+ */
+const RACE_SETTINGS: Record<string, string> = (await sql`SELECT current_setting('is_superuser') = 'on' AS su`)[0].su ? { deadlock_timeout: "50ms" } : {};
+const racer = () => new SQL({ url: URL_!, max: 1, connection: RACE_SETTINGS });
+
 console.log("\n[6d] An edit naming supersedes meets an edit of its target: FOR UPDATE on the target deadlocks with the FK's KEY SHARE, update_thought's FOR NO KEY UPDATE does not (migration 032)");
 {
   await sql`DELETE FROM thoughts`;
@@ -1211,8 +1233,8 @@ console.log("\n[6d] An edit naming supersedes meets an edit of its target: FOR U
   // raised (40P01) in one of the two, where the tool promised DUPLICATE_CONTENT
   // or a clean edit.
   {
-    const connA = new SQL({ url: URL_, max: 1 });
-    const connB = new SQL({ url: URL_, max: 1 });
+    const connA = racer();
+    const connB = racer();
     const { p: goP, open: go } = gate();
     const { p: doneP, open: done } = gate();
     const a: { holding?: boolean; wrote?: boolean; error?: string } = {};
@@ -1244,8 +1266,8 @@ console.log("\n[6d] An edit naming supersedes meets an edit of its target: FOR U
   // SHARE is granted either way; the assertion below reads the wait, not
   // the row.
   {
-    const connA = new SQL({ url: URL_, max: 1 });
-    const connB = new SQL({ url: URL_, max: 1 });
+    const connA = racer();
+    const connB = racer();
     const { p: goP, open: go } = gate();
     const { p: doneP, open: done } = gate();
     const a: { holding?: boolean; wrote?: boolean; error?: string } = {};
@@ -1425,7 +1447,7 @@ console.log("\n[6f] Four writers on two texts: the row-then-fingerprint order 01
   // fingerprint lock for its new text; each capture is the shipped function
   // after a hand-taken fingerprint lock (which it re-enters).
   {
-    const conns = [0, 1, 2, 3].map(() => new SQL({ url: URL_, max: 1 }));
+    const conns = [0, 1, 2, 3].map(() => racer());
     const [e1, e2, c1, c2]: Out[] = [{ pid: -1 }, { pid: -1 }, { pid: -1 }, { pid: -1 }];
     const hold = gate(); const gE1 = gate(), gE2 = gate(), gC1 = gate(), gC2 = gate();
     const pE1 = run(conns[0], e1, (t) => t`SELECT 1 FROM thoughts WHERE id = ${r}::uuid FOR NO KEY UPDATE`, gE1.p, (t) => t`SELECT pg_advisory_xact_lock(hashtextextended(${fpX}, 0))`, hold.p);
@@ -1455,7 +1477,7 @@ console.log("\n[6f] Four writers on two texts: the row-then-fingerprint order 01
   // waits on a capture holding nothing; when the captures commit, the edits
   // find the rows that own their new texts and are told, not deadlocked.
   {
-    const conns = [0, 1, 2, 3].map(() => new SQL({ url: URL_, max: 1 }));
+    const conns = [0, 1, 2, 3].map(() => racer());
     const [c1, c2, e1, e2]: Out[] = [{ pid: -1 }, { pid: -1 }, { pid: -1 }, { pid: -1 }];
     const holdC = gate(); const never = gate();
     const pC1 = run(conns[0], c1, (t) => t`SELECT upsert_thought(${X}, '{"metadata":{},"embedding_model":"m"}'::jsonb, ${unit(4)}::vector) AS r`, Promise.resolve(), (t) => t`SELECT 1`, holdC.p);
@@ -1508,11 +1530,15 @@ console.log("\n[6g] delete_thought joins the lock order: an accept racing a dele
   // not depend on where the review takes the advisory lock — so the count
   // varies run to run and the arm only asserts it happens at all.) This is the
   // one deliberately stochastic assertion in the suite: with the delete fully
-  // lockless the per-try cycle rate is roughly half, so P(0 deadlocks in 40) is
-  // on the order of 1e-15 — a spurious pass is not a practical risk.
+  // lockless the per-try cycle rate was roughly half on 033's pass, so P(0
+  // deadlocks in 40) was on the order of 1e-15. CI's runner deadlocked
+  // 15 of 40 on main's run 36131497058, P(0) about 1e-8, and CI-shaped
+  // containers about 30%; runs through with-postgres.sh's published port
+  // deadlock 9–13%, which makes a spurious failure about one run in 35 to 260
+  // there (SMD-2155).
   {
-    const connR = new SQL({ url: URL_, max: 1 });
-    const connD = new SQL({ url: URL_, max: 1 });
+    const connR = racer();
+    const connD = racer();
     let deadlocks = 0;
     for (let i = 0; i < 40; i++) {
       const { z, p } = await mkCase();
@@ -1530,8 +1556,8 @@ console.log("\n[6g] delete_thought joins the lock order: an accept racing a dele
   // before the DELETE: forty tries, no 40P01. The delete is never the victim
   // now; whichever writer runs first, its cascade still takes the proposal.
   {
-    const connR = new SQL({ url: URL_, max: 1 });
-    const connD = new SQL({ url: URL_, max: 1 });
+    const connR = racer();
+    const connD = racer();
     let deadlocks = 0, deleteVictim = 0, proposalLeft = 0;
     for (let i = 0; i < 40; i++) {
       const { z, p } = await mkCase();
@@ -1610,8 +1636,8 @@ console.log("\n[6i] A citation written while a delete of its source is in flight
     x: ((await sql`SELECT upsert_thought(${"an older version the note supersedes — " + tag}, '{"metadata":{}}'::jsonb, ${unit(2)}::vector) AS r`)[0].r as { id: string }).id,
   });
   type Env = { ok: boolean; error?: string; cited_by?: number };
-  const connW = new SQL({ url: URL_, max: 1 });
-  const connD = new SQL({ url: URL_, max: 1 });
+  const connW = racer();
+  const connD = racer();
   // A wait that never ends would hang the suite: cap both sides.
   await connW.unsafe("SET statement_timeout = '8s'");
   await connD.unsafe("SET statement_timeout = '8s'");
@@ -1645,8 +1671,14 @@ console.log("\n[6i] A citation written while a delete of its source is in flight
     const wrote = ((await connW`SELECT record_citation(${c}::uuid, ${s}::uuid, 'rests on it', 'retrieved') AS r`) as { r: Env }[])[0].r;
     const del = startDelete(s);
     assert(wrote.ok === true && (await stillWaiting(del)), "the citation is written under the advisory lock and the delete waits on that lock");
-    const upd = ((await connW`SELECT update_thought(${c}::uuid, p_provenance => jsonb_build_object('supersedes', ${x}::uuid)) AS r`) as { r: Env }[])[0].r;
-    await connW.unsafe("COMMIT");
+    // Caught, as arm 3's is: the delete has waited through the 400 ms probe, so
+    // its one 50 ms check on racer()'s timer is past, and a cycle this write
+    // closed would make this write the victim — uncaught, a regression would
+    // end the suite here instead of failing the assertion.
+    let upd: Env, updThrew = false;
+    try { upd = ((await connW`SELECT update_thought(${c}::uuid, p_provenance => jsonb_build_object('supersedes', ${x}::uuid)) AS r`) as { r: Env }[])[0].r; }
+    catch (e) { upd = { ok: false, error: (e as Error).message }; updThrew = true; }
+    await connW.unsafe(updThrew ? "ROLLBACK" : "COMMIT");
     const d = await del;
     assert(upd.ok === true && d.r.ok === false && d.r.error === "CITED", `the same transaction's supersedes write proceeds — no deadlock — and the delete is refused after the commit (update ${JSON.stringify(upd)}, delete ${JSON.stringify(d.r)})`);
     assert((await dangling(s)) === 0, "…nothing dangles");
@@ -1665,7 +1697,7 @@ console.log("\n[6i] A citation written while a delete of its source is in flight
     let updErr = "";
     try { await connW`SELECT update_thought(${c}::uuid, p_provenance => jsonb_build_object('supersedes', ${x}::uuid)) AS r`; } catch (e) { updErr = (e as Error).message; }
     const d = await del;
-    try { await connW.unsafe("COMMIT"); } catch { /* an aborted transaction: the ROLLBACK below ends it */ }
+    try { await connW.unsafe("COMMIT"); } catch { /* COMMIT of an aborted transaction answers ROLLBACK; the ROLLBACK below covers a throw */ }
     try { await connW.unsafe("ROLLBACK"); } catch { /* no transaction in progress */ }
     assert(/deadlock detected/.test(updErr) || /deadlock detected/.test(d.r.error ?? ""),
       `a raw writer that takes the advisory lock after the row closes the cycle record_citation avoids — deadlock detected in one of the two (update: ${updErr.slice(0, 40) || "ok"}; delete: ${(d.r.error ?? "ok").slice(0, 40)})`);
@@ -1938,6 +1970,21 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   const rerun = await sql`SELECT thought_id FROM claim_thoughts(${JOB}, 'rerun', 100)`;
   assert(Number(again) === 0 && rerun.length === 0, "re-running the pass adds nothing and claims nothing: processed rows are not reprocessed");
 
+  // The lease clock for (c) and (e). claim_thoughts reaps a lease whose
+  // ttl_expires_at < now() (015) and renew_claims moves it to
+  // GREATEST(ttl_expires_at, now() + the lease) (031); neither compares
+  // against the time any other way, and the stamps they write from it
+  // (claimed_at, finished_at) are read by nothing here. So moving a key's
+  // deadlines s seconds back is, to both functions, the same as waiting s
+  // seconds, and it takes no time: the sleeps it replaces were 13 of the
+  // section's 20 s on CI (SMD-2135). test-schema.ts [30] likewise puts a lease
+  // past its deadline by an UPDATE, not a wait. Only the named key's claimed
+  // leases move; every other key's stand still, so a step that needs another
+  // key's lease to lapse needs an elapse of its own, and a Bun.sleep here adds
+  // real time on top, for every key.
+  const elapse = (key: string, s: number) =>
+    sql`UPDATE thought_work_claims SET ttl_expires_at = ttl_expires_at - make_interval(secs => ${s}::float8) WHERE work_type = ${key} AND status = 'claimed'`;
+
   // (c) A worker dies holding leases; the TTL returns them; a second worker completes them.
   const JOB2 = "test:crash";
   const eight = [...pool].slice(0, 8);
@@ -1949,7 +1996,7 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   assert(dead.length === 5, `a worker takes five rows on a 2 s lease and dies (got ${dead.length})`);
   const tooSoon = await sql`SELECT thought_id FROM claim_thoughts(${JOB2}, 'second', 10)`;
   assert(tooSoon.length === 3, `before the lease expires a second worker gets only the three unclaimed rows (got ${tooSoon.length})`);
-  await Bun.sleep(2200);
+  await elapse(JOB2, 2.2);
   const second = (await sql`SELECT thought_id, attempt FROM claim_thoughts(${JOB2}, 'second', 10)`) as { thought_id: string; attempt: number }[];
   assert(second.length === 5, `after it expires the second worker receives the dead worker's five (got ${second.length})`);
   assert(dead.every((id) => second.find((r) => r.thought_id === id)?.attempt === 2), "…each on its second attempt");
@@ -2000,27 +2047,27 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   // deadline keeps its rows — a claim made after the ORIGINAL deadline gets
   // none of them and its release succeeds — and a worker that stops renewing
   // loses them on the RENEWED deadline, not the original, to a second worker
-  // that completes them. Five-second leases. Every wait is a lower bound from
-  // Bun.sleep, so a slow runner only makes the "after" claims later; the one
-  // step with an upper bound — the claim at 5.5 s must land before the renewed
-  // deadline at 9.5 s — has four seconds. The beat at 4.5 s has no upper
-  // bound: a lease past its deadline that no claim has reaped is still the
-  // holder's, and the beat renews it ([30] asserts that).
+  // that completes them. Five-second leases, timed on the lease clock: each
+  // step is at the clock's time plus the milliseconds the statements take, so
+  // the one step with an upper bound — the claim at 5.5 s must land before
+  // the renewed deadline at 9.5 s — has its four seconds less only the
+  // statements' own time. The beat at 4.5 s has no upper bound: a lease past
+  // its deadline that no claim has reaped is still the holder's, and the beat
+  // renews it (test-schema.ts [30] asserts that).
   const JOB4 = "test:heartbeat";
   const six = [...pool].slice(8, 14);
   await sql`SELECT enqueue_thoughts(${JOB4}, ${sql.array(six, "TEXT")}::uuid[])`;
-  const t0 = Date.now();
   const alive: string[] = (await sql`SELECT thought_id FROM claim_thoughts(${JOB4}, 'alive', 4, 5)`).map((r: { thought_id: string }) => r.thought_id);
   assert(alive.length === 4, `a worker takes four rows on a 5 s lease (got ${alive.length})`);
-  await Bun.sleep(4500);
+  await elapse(JOB4, 4.5);
   const b0 = performance.now();
   const beat1 = (await sql`SELECT thought_id FROM renew_claims(${JOB4}, 'alive', 5)`).map((r: { thought_id: string }) => r.thought_id);
   const beatMs = performance.now() - b0;
   assert(beat1.length === 4 && alive.every((id) => beat1.includes(id)), `a beat at 4.5 s renews all four (${beat1.length})`);
-  await Bun.sleep(1000); // 5.5 s: past the original deadline, 4 s before the renewed one
+  await elapse(JOB4, 1); // 5.5 s: past the original deadline, 4 s before the renewed one
   const afterOriginal: string[] = (await sql`SELECT thought_id FROM claim_thoughts(${JOB4}, 'second', 10)`).map((r: { thought_id: string }) => r.thought_id);
   assert(afterOriginal.length === 2 && afterOriginal.every((id) => !alive.includes(id)),
-    `a claim after the original deadline gets only the two unclaimed rows — none of the heartbeating worker's (${afterOriginal.length}, at ${Date.now() - t0} ms)`);
+    `a claim after the original deadline gets only the two unclaimed rows — none of the heartbeating worker's (${afterOriginal.length})`);
   const [{ ok: released }] = await sql`SELECT release_thought(${alive[0]}::uuid, ${JOB4}, 'alive', 'succeeded') AS ok`;
   assert(released === true, "…and the heartbeating worker's release succeeds past the original deadline");
   const b1 = performance.now();
@@ -2030,7 +2077,7 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   // The worker dies here: no more beats. Its rows expire 5 s after beat2.
   const tooSoonHb = (await sql`SELECT thought_id FROM claim_thoughts(${JOB4}, 'second', 10)`).length;
   assert(tooSoonHb === 0, "before the renewed deadline a second worker gets nothing");
-  await Bun.sleep(5300);
+  await elapse(JOB4, 5.3);
   const inherited = (await sql`SELECT thought_id, attempt FROM claim_thoughts(${JOB4}, 'second', 10)`) as { thought_id: string; attempt: number }[];
   assert(inherited.length === 3 && inherited.every((r) => beat2.includes(r.thought_id) && r.attempt === 2),
     `after the renewed deadline the second worker receives the dead worker's three, on their second attempt (${inherited.length})`);
@@ -2385,9 +2432,18 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(Number(workers) === 2, `both workers took rows (${workers} distinct worker ids)`);
 
   // The audit log: nothing for a vector replaced by a vector, one row for a
-  // vector where there was none — 008's trigger diffs presence, not value.
+  // vector where there was none — 008's trigger diffs presence, not value —
+  // and, since 055 (SMD-2115), one for the legacy twin update_thought keyed
+  // as it passed (the first of the pair it reached takes 003's key, the other
+  // stays NULL under 018): the key's move is the third thing the event
+  // carries, and before 055 that fill left no trace.
   const [{ auditAfter }] = await sql`SELECT count(*)::int AS "auditAfter" FROM thought_audit`;
-  assert(Number(auditAfter) - Number(auditBefore) === 1, `the pass wrote one audit row, not thirty-seven (${Number(auditAfter) - Number(auditBefore)})`);
+  assert(Number(auditAfter) - Number(auditBefore) === 2, `the pass wrote two audit rows, not thirty-seven — the vector where there was none, and the key the first legacy twin gained (${Number(auditAfter) - Number(auditBefore)})`);
+  const keyRows = await sql`
+    SELECT a.actor_name, a.author_session_id, a.diff FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id
+    WHERE t.content IN (${twins[0]}, ${twins[1]}) AND a.action = 'update'`;
+  assert(keyRows.length === 1 && keyRows[0].actor_name === "reembed" && keyRows[0].author_session_id === REEMBED_JOB && Object.keys(keyRows[0].diff).join(",") === "content_fingerprint" && keyRows[0].diff.content_fingerprint.before === null && typeof keyRows[0].diff.content_fingerprint.after === "string",
+    `…one of them the twin that took the key: the move alone — before NULL, after 003's key — attributed to the pass (${JSON.stringify(keyRows.map((r: { diff: unknown }) => r.diff))})`);
   const [auditRow] = await sql`
     SELECT a.actor_name, a.author_session_id, a.diff FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id
     WHERE t.content = ${bare} AND a.action = 'update'`;
@@ -3969,9 +4025,9 @@ console.log("\n[17] Over near-equidistant vectors the HNSW walk misses live rows
 
 // ── 18. The community schemas over TCP ───────────────────────────────────────
 
-console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role present, and migrate.ts --grant makes a LOGIN role able to use them (SMD-1796)");
+console.log("\n[18] Every schemas/*.sql, then every extension and recipe schema, applies over TCP with no Supabase role present, and migrate.ts --grant makes a LOGIN role able to use them (SMD-1796, SMD-1810)");
 {
-  // test-schema [40] is the PGlite half of this; here is what PGlite cannot do:
+  // test-schema [40] and [50] are the PGlite halves of this; here is what PGlite cannot do:
   // the migrator's --grant over TCP — its presence probe against a real
   // server's to_regclass/to_regprocedure, its "not yet present, skipped" list
   // before the files are applied and its full list after — and a role that
@@ -4003,6 +4059,11 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
   };
   const SCHEMAS = SCHEMAS_DIR;
   const schemaFiles = communitySchemaFiles();
+  // The extension and recipe schemas (SMD-1810), after the community files —
+  // ops-views.sql reads enhanced-thoughts' columns and its guarded views need
+  // smart-ingest's and entity-extraction's tables. Same drop in the finally.
+  const contribFiles = CONTRIB_SCHEMA_FILES;
+  const ALL_GROUPS = ["community", "extensions", "recipes"] as const;
   const [{ c: supabaseRoles }] = (await sql`SELECT count(*)::int AS c FROM pg_roles WHERE rolname IN ('authenticated', 'anon', 'service_role')`) as { c: number }[];
   assert(supabaseRoles === 0, "no Supabase role exists on this server");
 
@@ -4029,17 +4090,27 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
       const dry = await migrate("--grant", ROLE, "--dry-run");
       const skippedLine = dry.out.split("\n").find((l) => /not yet present, skipped/.test(l)) ?? "";
       const communityTables = grantedTables(["community"]).filter((t) => t !== "thought_audit" && t !== "thought_entities");
-      assert(dry.code === 0 && communityTables.every((t) => skippedLine.includes(t)) && grantedViews(["community"]).every((v) => skippedLine.includes(v)) && grantedSequences(["community"]).every((s) => skippedLine.includes(s)) && grantedFunctions(["community"]).every((f) => skippedLine.includes(f)),
-             `before the files are applied, --grant --dry-run names every community table, view, sequence and function as not yet present (exit ${dry.code}; ${skippedLine.length} chars of skipped list)`);
+      const contribObjects = [...grantedTables(["extensions", "recipes"]), ...grantedViews(["extensions", "recipes"])];
+      assert(dry.code === 0 && communityTables.every((t) => skippedLine.includes(t)) && grantedViews(["community"]).every((v) => skippedLine.includes(v)) && grantedSequences(["community"]).every((s) => skippedLine.includes(s)) && grantedFunctions(["community"]).every((f) => skippedLine.includes(f)) && contribObjects.every((o) => skippedLine.includes(o)),
+             `before the files are applied, --grant --dry-run names every community table, view, sequence and function, and every extension and recipe table and view, as not yet present (exit ${dry.code}; ${skippedLine.length} chars of skipped list)`);
       assert(!/ON SEQUENCE|ON FUNCTION|agent_memories/.test(dry.out.replace(skippedLine, "")) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
              "…grants nothing of the community group, and grants the migrations' tables");
 
       const failed: string[] = [];
+      // A file that opens a transaction (BEGIN … COMMIT — agent-memory, per-agent-identity, typed-reasoning-edges,
+      // smart-ingest) and fails leaves it aborted on this pool's one connection: rolled back, as [40] and [50] do, or every
+      // statement after it answers "current transaction is aborted" (SMD-2128, review pass 3).
       for (const f of schemaFiles) {
         try { await sql.unsafe(readFileSync(join(SCHEMAS, f), "utf8")); }
-        catch (e) { failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); }
+        catch (e) { failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); await sql.unsafe("ROLLBACK").catch(() => {}); }
       }
       assert(schemaFiles.length >= 14 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files; failed: ${failed.join(" | ") || "none"})`);
+      const contribFailed: string[] = [];
+      for (const f of contribFiles) {
+        try { await sql.unsafe(readFileSync(join(CONTRIB_DIR, f), "utf8")); }
+        catch (e) { contribFailed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); await sql.unsafe("ROLLBACK").catch(() => {}); }
+      }
+      assert(contribFiles.length === 15 && contribFailed.length === 0, `…and so does every listed extension and recipe schema after them, with no auth schema either (${contribFiles.length} files; failed: ${contribFailed.join(" | ") || "none"})`);
 
       // After: --grant issues the whole community group, over TCP, in one
       // transaction — views as tables, sequences and functions spelled as GRANT
@@ -4056,16 +4127,16 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
       // error, or success, means it is not.
       asRole = new SQL({ url: ROLE_URL, max: 1 });
       const denied: string[] = [];
-      for (const t of grantedTables(["community"])) {
+      for (const t of grantedTables([...ALL_GROUPS])) {
         try { await asRole.unsafe(`INSERT INTO ${t} DEFAULT VALUES`); }
         catch (e) { if (/permission denied/.test((e as Error).message)) denied.push(`${t}: ${(e as Error).message.split("\n")[0]}`); }
       }
-      assert(denied.length === 0, `the role's INSERT into every community table gets past privileges (${grantedTables(["community"]).length} tables; denied: ${denied.join("; ") || "none"})`);
+      assert(denied.length === 0, `the role's INSERT into every community, extension and recipe table gets past privileges (${grantedTables([...ALL_GROUPS]).length} tables; denied: ${denied.join("; ") || "none"})`);
       let viewDenied = "";
-      for (const v of grantedViews(["community"])) {
+      for (const v of grantedViews([...ALL_GROUPS])) {
         try { await asRole.unsafe(`SELECT 1 FROM ${v} LIMIT 0`); } catch (e) { viewDenied += `${v}: ${(e as Error).message.split("\n")[0]}; `; }
       }
-      assert(viewDenied === "", `…and reads the community view through its own SELECT grant (denied: ${viewDenied || "none"})`);
+      assert(viewDenied === "", `…and reads the community view, the eight ops views and lint-sweep's seven through its own SELECT grants (${grantedViews([...ALL_GROUPS]).length} views; denied: ${viewDenied || "none"})`);
       const seqDenied: string[] = [];
       for (const s of grantedSequences(["community"])) {
         try { await asRole.unsafe(`SELECT nextval('${s}')`); } catch (e) { seqDenied.push(s); }
@@ -4275,9 +4346,11 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
   // it returned; the canary, refreshed from stable, replays that search and its
   // ids are diffed against stable's. This drives the ENGINE (readLoggedSearches →
   // replayOne → diffResult) end to end over the KEYWORD arm, which needs no model
-  // — the arm CI can run. The pg_dump-based refresh() and the hybrid arm need
-  // client tools / a provider CI does not have; they are exercised by the compose
-  // stack and documented, the same split as eval-replay.ts vs test-replay.ts.
+  // — the arm CI can run. A real pg_dump refresh needs client tools this job
+  // does not have: the deploy-stack job runs one through deploy/tier.sh
+  // (SMD-2036), and below, stand-in tools drive refresh() to its restore and
+  // the guards run before any tool is looked for. The hybrid arm needs a
+  // provider, the same split as eval-replay.ts vs test-replay.ts.
   await sql`DELETE FROM query_log`; // scope the replay window to this section's rows
   const put = (s: SQL, id: string, content: string) =>
     s`INSERT INTO thoughts (id, content, metadata, content_fingerprint)
@@ -4343,6 +4416,119 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     assert(canaryVer != null && version === canaryVer, "promote reads the canary's schema_version (migration 044), not an absent 'version' key");
     const stableCfg = Object.fromEntries((await sql`SELECT key, value FROM ob1_config WHERE key IN ('tier','promoted_schema_version','promoted_at')`).map((r: { key: string; value: string }) => [r.key, r.value]));
     assert(stableCfg.tier === "stable" && stableCfg.promoted_schema_version === canaryVer && /^\d{4}-\d\d-\d\dT/.test(stableCfg.promoted_at ?? ""), "promote stamps stable: tier=stable, promoted_schema_version and a promoted_at time");
+
+    // --from and --to the wrong way round (SMD-2036): the canary into stable is two
+    // distinct databases, so the same-database guard passes it, and the target is
+    // the record. Refused on the stamp, before the client tools are looked for.
+    let refusedStable: string | null = null;
+    try { await refresh(canaryUrl, URL_!, "canary"); }
+    catch (e) { refusedStable = (e as Error).message; }
+    assert(/stamped tier=stable/.test(refusedStable ?? ""), `refresh refuses a --to stamped tier=stable — --from and --to swapped (got: ${refusedStable ?? "no refusal"})`);
+    // And a --to that is a brain with no tier stamp — the shape of an untiered
+    // stable. This canary was migrated and loaded here, never refreshed, so it
+    // carries rows and no ob1_config.tier.
+    let refusedBrain: string | null = null;
+    try { await refresh(URL_!, canaryUrl, "canary"); }
+    catch (e) { refusedBrain = (e as Error).message; }
+    assert(/holds thoughts and no tier stamp/.test(refusedBrain ?? ""), `refresh refuses a --to holding thoughts under no tier stamp (got: ${refusedBrain ?? "no refusal"})`);
+
+    // targetRefusal's cells, read directly (no pg_dump needed). Each read is a new
+    // session, since a database-level setting reaches only sessions opened after it.
+    const refusalAt = async (url: string) => { const s = new SQL({ url, max: 1 }); try { return await targetRefusal(s); } finally { await s.close(); } };
+    const setMark = (db: string, v: string | null) => sql.unsafe(v === null ? `ALTER DATABASE ${db} RESET ob1.refresh_target` : `ALTER DATABASE ${db} SET ob1.refresh_target = '${v}'`);
+    // A refresh that died after its restore: the target holds the source's rows and
+    // its tier=stable, and carries the mark the refresh set before the reset.
+    await canarySql`INSERT INTO ob1_config (key, value) VALUES ('tier', 'stable') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+    assert(/stamped tier=stable/.test((await refusalAt(canaryUrl)) ?? ""), "unmarked, stamped tier=stable and holding rows: refused");
+    // Only the database's own setting is a mark: the same name set for a role in
+    // this database (or for a role, the server, a connection option) is not.
+    await sql.unsafe(`ALTER ROLE CURRENT_USER IN DATABASE ${canaryDb} SET ob1.refresh_target = 'canary'`);
+    try {
+      assert(/stamped tier=stable/.test((await refusalAt(canaryUrl)) ?? ""), "a role-level ob1.refresh_target is not the database's mark: still refused");
+    } finally {
+      await sql.unsafe(`ALTER ROLE CURRENT_USER IN DATABASE ${canaryDb} RESET ob1.refresh_target`);
+    }
+    // Only a value a refresh writes is a mark: `stable` set by hand to protect a
+    // database does not arm its reset.
+    await setMark(canaryDb, "stable");
+    assert(/stamped tier=stable/.test((await refusalAt(canaryUrl)) ?? ""), "ob1.refresh_target='stable' (not a value a refresh writes) is no mark: still refused");
+    await setMark(canaryDb, "canary");
+    assert((await refusalAt(canaryUrl)) === null, "marked by a refresh, the same target is allowed whatever its restored ob1_config says — a failed refresh can be retried");
+    let refusedPromote: string | null = null;
+    try { await promote(URL_!, canaryUrl); }
+    catch (e) { refusedPromote = (e as Error).message; }
+    assert(/is a tier \(refresh mark canary\)/.test(refusedPromote ?? ""), `promote refuses a --to that carries the refresh mark — --from and --to swapped (got: ${refusedPromote ?? "no refusal"})`);
+    await setMark(canaryDb, null);
+    await canarySql`UPDATE ob1_config SET value = 'canary' WHERE key = 'tier'`;
+    assert((await refusalAt(canaryUrl)) === null, "unmarked but stamped tier=canary (a canary refreshed before the mark existed): allowed");
+    await canarySql`DELETE FROM ob1_config WHERE key = 'tier'`;
+    for (const c of corpus) await canarySql`DELETE FROM thoughts WHERE id = ${c.id}::uuid`;
+    assert((await refusalAt(canaryUrl)) === null, "an Open Brain schema holding no thoughts (a tier stack's database after `up`): allowed");
+    // Another application's database, one name away from a tier.
+    const foreignDb = "ob1_tier_foreign";
+    const foreignUrl = (() => { const u = new URL(URL_!); u.pathname = `/${foreignDb}`; return u.toString(); })();
+    await sql.unsafe(`DROP DATABASE IF EXISTS ${foreignDb}`);
+    await sql.unsafe(`CREATE DATABASE ${foreignDb}`);
+    try {
+      assert((await refusalAt(foreignUrl)) === null, "a new database with nothing in its public schema: allowed");
+      // What a template's extensions bring is not "tables": pg_stat_statements'
+      // views (extension members) and tablefunc's row types (composite relkind,
+      // no 'e' dependency of their own).
+      const withExtensions = new SQL({ url: foreignUrl, max: 1 });
+      try { await withExtensions`CREATE EXTENSION IF NOT EXISTS pg_stat_statements`; await withExtensions`CREATE EXTENSION IF NOT EXISTS tablefunc`; } finally { await withExtensions.close(); }
+      assert((await refusalAt(foreignUrl)) === null, "the same with pg_stat_statements and tablefunc installed in public (what a template may carry): allowed");
+      const foreign = new SQL({ url: foreignUrl, max: 1 });
+      try { await foreign`CREATE TABLE invoices (id int)`; } finally { await foreign.close(); }
+      assert(/not an Open Brain schema/.test((await refusalAt(foreignUrl)) ?? ""), "a database whose public schema holds another application's tables: refused");
+      const railsLike = new SQL({ url: foreignUrl, max: 1 });
+      try { await railsLike`CREATE TABLE schema_migrations (version varchar PRIMARY KEY)`; } finally { await railsLike.close(); }
+      assert(/not an Open Brain schema/.test((await refusalAt(foreignUrl)) ?? ""), "the same with a schema_migrations table (Rails', Ecto's, dbmate's name too) and no thoughts: still refused");
+    } finally {
+      await sql.unsafe(`DROP DATABASE IF EXISTS ${foreignDb}`);
+    }
+
+    // The mark goes on BEFORE the reset, so a refresh that dies after it — here
+    // a pg_restore that fails — leaves a target the next refresh recognises. Two
+    // stand-in tools on PATH, reporting the server's major so refreshToolsReady
+    // passes: the dump writes nothing, the restore fails.
+    const shimDb = "ob1_tier_shim";
+    const shimUrl = (() => { const u = new URL(URL_!); u.pathname = `/${shimDb}`; return u.toString(); })();
+    const shimDir = join(tmpdir(), `ob1-tier-shim-${process.pid}`);
+    const savedPath = process.env.PATH;
+    await sql.unsafe(`DROP DATABASE IF EXISTS ${shimDb}`);
+    await sql.unsafe(`CREATE DATABASE ${shimDb}`);
+    try {
+      const [{ n }] = await sql<{ n: string }[]>`SELECT current_setting('server_version_num') AS n`;
+      const major = Math.floor(Number(n) / 10000);
+      mkdirSync(shimDir, { recursive: true });
+      const shim = (name: string, rest: string) => {
+        writeFileSync(join(shimDir, name), `#!/bin/sh\nif [ "$1" = --version ]; then echo "${name} (PostgreSQL) ${major}.0"; exit 0; fi\n${rest}\n`);
+        chmodSync(join(shimDir, name), 0o755);
+      };
+      shim("pg_dump", `while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; shift; done; exit 0`);
+      shim("pg_restore", "exit 1");
+      process.env.PATH = `${shimDir}:${savedPath}`;
+      let failed: string | null = null;
+      try { await refresh(URL_!, shimUrl, "working"); }
+      catch (e) { failed = (e as Error).message; }
+      assert(/did not produce the thoughts table/.test(failed ?? ""), `a refresh whose restore fails stops there (got: ${failed ?? "no failure"})`);
+      const shimSql = new SQL({ url: shimUrl, max: 1 });
+      let mark: string | undefined;
+      try { mark = parseSetConfig((await shimSql.unsafe(DB_LEVEL_SETTINGS_SQL))[0]?.cfg)["ob1.refresh_target"]; } finally { await shimSql.close(); }
+      assert(mark === "working", `…and leaves its target marked (ob1.refresh_target=working), set before the restore (got: ${mark ?? "no mark"})`);
+    } finally {
+      process.env.PATH = savedPath;
+      rmSync(shimDir, { recursive: true, force: true });
+      await sql.unsafe(`DROP DATABASE IF EXISTS ${shimDb} WITH (FORCE)`);
+    }
+
+    // promote's mirror of the same-database guard, the URL respelled.
+    const samePromote = new URL(URL_!);
+    samePromote.searchParams.set("application_name", "tier-same-db-promote");
+    let refusedSamePromote: string | null = null;
+    try { await promote(URL_!, samePromote.toString()); }
+    catch (e) { refusedSamePromote = (e as Error).message; }
+    assert(/name the same database/.test(refusedSamePromote ?? ""), `promote refuses a --to that is the --from database spelled another way (got: ${refusedSamePromote ?? "no refusal"})`);
     await sql`DELETE FROM ob1_config WHERE key IN ('promoted_schema_version','promoted_at')`;
   } finally {
     if (canarySql) await canarySql.close();
@@ -4360,6 +4546,17 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
   catch { refusedRemote = true; }
   finally { if (savedAllow !== undefined) process.env.OB1_ALLOW_REMOTE_DB = savedAllow; }
   assert(refusedRemote, "refresh refuses a non-loopback target unless OB1_ALLOW_REMOTE_DB=1 (it drops the target's schema)");
+  // And a --to that is the --from database under another spelling (SMD-2036):
+  // deploy/tier.sh sets OB1_ALLOW_REMOTE_DB, so this is the guard it runs
+  // under. The second URL differs as a string (a parameter only), so string
+  // equality would let it through; the server's identity does not. It refuses
+  // before the client tools are looked for, so no pg_dump is needed here.
+  const respelled = new URL(URL_!);
+  respelled.searchParams.set("application_name", "tier-same-db-guard");
+  let refusedSame: string | null = null;
+  try { await refresh(URL_!, respelled.toString(), "canary"); }
+  catch (e) { refusedSame = (e as Error).message; }
+  assert(/name the same database/.test(refusedSame ?? ""), `refresh refuses a --to that is the --from database spelled another way (got: ${refusedSame ?? "no refusal"})`);
 
   for (const c of corpus) await sql`DELETE FROM thoughts WHERE id = ${c.id}::uuid`;
   await sql`DELETE FROM query_log`;
@@ -4793,9 +4990,129 @@ console.log("\n[24] resolve_agent under a held key row: a recently used key answ
 
 await sql.close();
 
+console.log("\n[25] Migration 055's payload backfill under two connections: a second pass beside a held one skips what the first filled and counts only its own; the derivation of a capture whose update was stamped before it by an older transaction reads that update (SMD-2115)");
+{
+  // PGlite is one connection, so test-schema [51] cannot hold what the
+  // header promises of two passes at once — the fill's re-read under the row
+  // lock (`NOT COALESCE(a.diff ? 'content', false)`) is what makes the second
+  // pass skip rather than trip the gate's "nothing is filled" (run-it, first
+  // review pass: the mutant that dropped it survived 1,658 assertions).
+  // Its own pool: the section before closes the shared one.
+  const sql = new SQL({ url: URL_, max: 4 });
+  await sql`DELETE FROM thoughts`;
+  const N = 300;
+  for (let i = 0; i < N; i++) {
+    await sql`INSERT INTO thoughts (content, metadata) VALUES (${`concurrent pass row ${i}`}, '{"source": "plant"}'::jsonb)`;
+  }
+  // 046's shape: a second capture row per thought, without content, older than the real one would be irrelevant — plant them as the thought's only capture by stripping 055's.
+  await sql.unsafe(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_immutable`);
+  await sql.unsafe(`UPDATE thought_audit SET diff = diff - 'content' - 'created_at' WHERE action = 'capture' AND diff->'metadata'->>'source' = 'plant'`);
+  await sql.unsafe(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_immutable`);
+  const waiting = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false) AND jsonb_typeof(COALESCE(diff, '{}'::jsonb)) = 'object'`)[0].c);
+  assert((await waiting()) === N, `${N} capture rows wait for their payload (${await waiting()})`);
+  type Bf = { rows: number; from_row: number; skipped: number; unrecoverable: number; awaiting: number };
+  const held = new SQL({ url: URL_, max: 1 });
+  await held`BEGIN`;
+  const first = (await held`SELECT backfill_thought_payloads() AS r`)[0].r as Bf;
+  // The second pass, while the first holds its rows: it waits on the row
+  // locks — seen waiting, not assumed after a sleep (cold read, second review
+  // pass) — re-reads each row as filled, and writes nothing.
+  const pending = sql`SELECT backfill_thought_payloads() AS r`.execute();
+  let waited = false;
+  // Under the pass's 10 s lock_timeout: a poll that outlasted it would see
+  // the waiting pass raise 55P03 in place of the `waited` assertion (sixth
+  // review pass).
+  for (let i = 0; i < 100 && !waited; i++) {
+    const [w] = await held`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'SELECT backfill_thought_payloads()%'`;
+    waited = Number(w.n) > 0;
+    if (!waited) await new Promise((r) => setTimeout(r, 50));
+  }
+  await held`COMMIT`;
+  await held.close();
+  const second = (await pending)[0].r as Bf;
+  assert(waited, "the second pass was seen waiting on the first's row locks before the first committed");
+  assert(first.rows === N && first.from_row === N && first.skipped === 0, `the held pass filled every row from the live rows (${JSON.stringify(first)})`);
+  assert(second.rows === 0 && second.from_row === 0 && second.skipped === N && second.awaiting === 0, `the second pass, beside it, filled nothing, counted every candidate as skipped — not as its own — and raised nothing (${JSON.stringify(second)})`);
+  assert((await waiting()) === 0 && Number((await sql`SELECT count(*)::int AS c FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE a.action = 'capture' AND a.diff->>'content' IS DISTINCT FROM t.content`)[0].c) === 0, "…and every capture row carries its row's text, once");
+
+  // Two connections, the older transaction's edit committed after the newer
+  // one's capture: the update event's created_at (the transaction's start)
+  // precedes the capture's, its seq follows. The derivation reads it — the
+  // text as captured — not the live text (run-it, first review pass).
+  const older = new SQL({ url: URL_, max: 1 });
+  await older`BEGIN`;
+  await older`SELECT now()`;  // the transaction's clock starts here
+  await new Promise((r) => setTimeout(r, 1100));
+  const [{ id: inverted }] = (await sql`INSERT INTO thoughts (content, metadata) VALUES ('inverted: the first text', '{"source": "inverted"}'::jsonb) RETURNING id`) as { id: string }[];
+  await older`UPDATE thoughts SET content = 'inverted: the second text' WHERE id = ${inverted}::uuid`;
+  await older`COMMIT`;
+  await older.close();
+  const events = (await sql`SELECT action, created_at, seq FROM thought_audit WHERE thought_id = ${inverted}::uuid ORDER BY seq`) as { action: string; created_at: Date; seq: string }[];
+  assert(events.length === 2 && events[0].action === "capture" && events[1].action === "update" && events[1].created_at < events[0].created_at, `the update is stamped before the capture and numbered after it (${JSON.stringify(events.map((e) => [e.action, e.created_at.toISOString(), e.seq]))})`);
+  await sql.unsafe(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_immutable`);
+  await sql`UPDATE thought_audit SET diff = diff - 'content' WHERE thought_id = ${inverted}::uuid AND action = 'capture'`;
+  await sql.unsafe(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_immutable`);
+  const [derived] = (await sql`SELECT p.content, p.source FROM thought_audit a CROSS JOIN LATERAL ob1_capture_payload(a.thought_id, a.created_at, a.seq) p WHERE a.thought_id = ${inverted}::uuid AND a.action = 'capture'`) as { content: string; source: string }[];
+  assert(derived.content === "inverted: the first text" && derived.source === "update", `the capture derives from the older-stamped update's before — the text as captured (${JSON.stringify(derived)})`);
+  const fill = (await sql`SELECT backfill_thought_payloads() AS r`)[0].r as Bf & { from_update: number };
+  assert(fill.rows === 1 && fill.from_update === 1 && fill.from_row === 0, `…and the pass writes that text, from the update (${JSON.stringify(fill)})`);
+
+  // A pass beside ordinary delete_thought calls (run-it, second review pass:
+  // one delete from a live server during the apply failed the whole
+  // migration — the gate, reading under a fresh snapshot, derived a deleted
+  // thought's created_at as gone and refused, and the statement was the
+  // pass). The pass catches the refusal, sets the moved rows aside and runs
+  // again; nothing it filled is lost, and the next pass fills the deleted
+  // thoughts' captures from their tombstones.
+  // Fourth review pass (run-it): forty deletes fired at once landed inside
+  // one or two attempts of a pass retried five times as one statement, and
+  // the arm passed; ten deletes SPREAD over half a second — one per attempt
+  // — exhausted the five and failed the apply. So the deleter runs for as
+  // long as the pass does. Fifth review pass (run-it): deletes spread over
+  // all eight batches landed about one refusal per batch against a budget of
+  // five per batch, so the arm returned with the budget rule removed as
+  // well. The victims are the FIRST batch's candidates, one deleted every
+  // 3 ms, so each attempt of that batch is refused and re-derived until the
+  // deleter stops: the budget spent by every refusal raises after some
+  // twenty deletes — the raise is what kills that mutant; spent by a
+  // fruitless one alone, the pass returns with the deleted rows set aside.
+  // The rows-set-aside assertion guards the vacuous run: a deleter that never
+  // landed would leave the mutant returning with nothing set aside (sixth
+  // review pass). Only a delete before the scan's snapshot is not set aside
+  // (it is filled from its tombstone in the same pass), so a slower runner
+  // sets more aside, not fewer.
+  await sql`DELETE FROM thoughts`;
+  const M = 8000;
+  await sql.unsafe(`INSERT INTO thoughts (content, metadata, created_at) SELECT 'racing pass row ' || g, '{"source": "race"}'::jsonb, now() - interval '1 day' FROM generate_series(1, ${M}) g`);
+  await sql.unsafe(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_immutable`);
+  await sql.unsafe(`UPDATE thought_audit SET diff = diff - 'content' - 'created_at' WHERE action = 'capture' AND diff->'metadata'->>'source' = 'race'`);
+  await sql.unsafe(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_immutable`);
+  assert((await waiting()) === M, `${M} capture rows wait, every one with a created_at the pass would fill (${await waiting()})`);
+  const victims = (await sql`SELECT t.id FROM thoughts t JOIN (SELECT thought_id, row_number() OVER (ORDER BY created_at, seq) AS n FROM thought_audit WHERE action = 'capture' AND NOT COALESCE(diff ? 'content', false) AND jsonb_typeof(COALESCE(diff, '{}'::jsonb)) = 'object') a ON a.thought_id = t.id WHERE a.n <= 300 ORDER BY a.n`).map((r: { id: string }) => r.id);
+  const deleter = new SQL({ url: URL_, max: 1 });
+  let passDone = false;
+  const racingPass = (async () => { try { return await sql`SELECT backfill_thought_payloads() AS r`.execute(); } finally { passDone = true; } })();
+  let deleted = 0;
+  for (const id of victims) {
+    if (passDone) break;
+    const [{ r }] = await deleter`SELECT delete_thought(${id}::uuid, NULL::jsonb, false) AS r`;
+    if ((r as { ok: boolean }).ok) deleted++;
+    await new Promise((r) => setTimeout(r, 3));
+  }
+  const raced = (await racingPass)[0].r as Bf & { unrecoverable: number };
+  await deleter.close();
+  assert(deleted > 5 && raced.skipped > 5, `more of the first batch's rows were deleted while the pass ran, and set aside by it, than the five refusals a budget spent by every refusal allows (${deleted} deleted, ${raced.skipped} set aside)`);
+  assert(raced.rows + raced.skipped + raced.unrecoverable === M && raced.unrecoverable === 0, `the pass beside ${deleted} deletes of its first batch's rows, one every 3 ms for as long as it ran, returned rather than raising, and accounts for every candidate — ${raced.rows} filled, ${raced.skipped} set aside (${JSON.stringify(raced)})`);
+  const after = (await sql`SELECT backfill_thought_payloads() AS r`)[0].r as Bf & { from_tombstone: number };
+  assert(after.rows === raced.skipped && after.from_tombstone === raced.skipped && after.awaiting === 0, `…and the next pass fills what was set aside, from the tombstones, leaving nothing waiting (${JSON.stringify(after)})`);
+  await sql`DELETE FROM thoughts`;
+  await sql.close();
+}
+
 // db/README.md's Testing block quotes this suite's assertion total. The count
 // is lower when a group is skipped (PostgreSQL 18, or JIT off), so only a full
 // run — as CI's pg16-with-JIT job is — is compared to the headline (SMD-1805).
+
 console.log("\n[doc] db/README.md states this suite's assertion total (full runs only)");
 {
   const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");

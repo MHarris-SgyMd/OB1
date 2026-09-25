@@ -37,7 +37,11 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION public.merge_thought_metadata(bigint, jsonb) TO service_role;
+-- This fork (SMD-1810): upstream GRANTed EXECUTE on the function TO
+-- service_role here. Supabase's role; on plain Postgres the statement fails
+-- (`role "service_role" does not exist`). Removed — EXECUTE is PUBLIC's by
+-- default and upstream did not REVOKE it, so the grant added nothing a caller
+-- lacked.
 
 COMMENT ON FUNCTION public.merge_thought_metadata(bigint, jsonb) IS
   'Shallow-merge p_patch into the thought''s metadata JSONB. Returns true if a row was updated. Used by targeted metadata backfills (e.g. gmail-smart-pull recipe).';

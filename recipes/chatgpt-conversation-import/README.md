@@ -1,5 +1,7 @@
 # ChatGPT Conversation Import
 
+> **On this fork (SMD-2126).** `import-chatgpt.py` reaches the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and embeds each item itself; this fork's stack runs no PostgREST (SETUP.md), so the import fails at its first request (`--dry-run` runs). It becomes an adapter of the ingestion contract — the parser emits items for `bun db/ingest-records.ts --items`, which inserts each row itself with 003's fingerprint function, the audit actor and its `thought_sources` identity (`bun db/reembed.ts` embeds it) — in SMD-2147 (after SMD-2136); the decision for the class is in `docs/vendored-disposition.md`.
+
 > Import your ChatGPT history into Open Brain as curated, searchable thoughts — not raw transcripts.
 
 ## What It Does
@@ -210,7 +212,7 @@ When enabled, each processed conversation is also stored in a `chatgpt_conversat
 
 ### How to set it up
 
-1. Open the Supabase SQL Editor in your project dashboard
+1. Open a SQL session on your brain's database (`psql "$DATABASE_URL"`, or Supabase's SQL Editor if that is where it lives)
 2. Paste and run the contents of `schema.sql` from this recipe folder
 3. Pass `--store-conversations` when running the import:
 
@@ -343,4 +345,4 @@ Solution: Just run the script again pointing at your new export. The sync log (`
 Solution: Check that your OpenRouter API key is valid and has credits. Go to openrouter.ai/credits to verify your balance. The embedding model (text-embedding-3-small) costs $0.02 per million tokens — even a large import costs pennies.
 
 **Issue: How to use `--store-conversations`**
-Solution: You need to create the `chatgpt_conversations` table first. Open the Supabase SQL Editor, paste the contents of `schema.sql` from this recipe folder, and run it. Then pass `--store-conversations` on your next import run. The table stores conversation-level summaries and metadata — it is optional and the core thought import works without it.
+Solution: You need to create the `chatgpt_conversations` table first. Run `schema.sql` from this recipe folder against your brain's database — `psql "$DATABASE_URL" -f recipes/chatgpt-conversation-import/schema.sql`. Then pass `--store-conversations` on your next import run. The table stores conversation-level summaries and metadata — it is optional and the core thought import works without it.

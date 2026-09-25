@@ -1,5 +1,7 @@
 # OB-Graph: Knowledge Graph Layer for Open Brain
 
+> **On this fork (SMD-2126).** The server (`index.ts`) reaches the brain through `compat/supabase-sql` since SMD-1798. The smoke script, `smoke-graph-rpcs.mjs`, still reaches it as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and this fork's stack runs no PostgREST (SETUP.md), so it fails at its first request; it moves onto the shim or into `extensions/test-tools.ts`, which already drives these tools, in SMD-2146. The decision for the class is in `docs/vendored-disposition.md`.
+
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
 
 **Created by [@alanshurafa](https://github.com/alanshurafa)**
@@ -48,7 +50,7 @@ GENERATED DURING SETUP
 ![Step 1](https://img.shields.io/badge/Step_1-Create_Database_Schema-2E86AB?style=for-the-badge)
 
 <details>
-<summary><strong>SQL: Create tables, indexes, RLS, and graph functions</strong> (click to expand)</summary>
+<summary><strong>SQL: Create tables, indexes, and graph functions</strong> (click to expand)</summary>
 
 Run `schema.sql` against your brain's database — `psql "$DATABASE_URL" -f recipes/ob-graph/schema.sql` (or paste it into Supabase's SQL Editor, if that is where your Postgres lives).
 
@@ -60,26 +62,13 @@ The schema creates:
 | `graph_edges` | Directed relationships between nodes |
 | `traverse_graph()` | Recursive CTE for multi-hop traversal (one row per acyclic path) |
 | `find_shortest_path()` | Iterative BFS shortest path between two nodes |
-| `reconstruct_bfs_path()` | Internal helper that walks the BFS parent map (service_role only) |
-| RLS policies | User-scoped data isolation on both tables |
+| `reconstruct_bfs_path()` | Internal helper that walks the BFS parent map |
 | Indexes | Fast lookups by user, type, label, source/target |
 
 </details>
 
-> [!IMPORTANT]
-> The schema includes `GRANT` statements for `service_role` and row-level-security policies on `auth.uid()`. On a Supabase project both exist — don't skip the grants. On a plain Postgres, give the schema the three roles and the two functions first (the server connects as one role and scopes rows by `DEFAULT_USER_ID` itself; the table owner is not subject to the policies):
->
-> ```bash
-> psql "$DATABASE_URL" -c "DO \$r\$ BEGIN
->     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN CREATE ROLE service_role NOLOGIN; END IF;
->     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN CREATE ROLE anon NOLOGIN; END IF;
->     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN CREATE ROLE authenticated NOLOGIN; END IF;
->   END \$r\$;
->   CREATE SCHEMA IF NOT EXISTS auth;
->   CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS 'SELECT NULL::uuid';
->   CREATE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT ''{}''::jsonb';"
-> psql "$DATABASE_URL" -f recipes/ob-graph/schema.sql
-> ```
+> [!NOTE]
+> The schema needs nothing first — no Supabase role, no `auth.*` stub. Upstream's file granted both tables to `service_role`, revoked the three functions from `anon` and `authenticated`, and enabled row-level security on `auth.uid()`; this fork removed all of it (SMD-1810). The server connects as one role and scopes rows by `DEFAULT_USER_ID` itself, and a role other than the tables' owner is granted them by `bun db/migrate.ts --grant <role>` (`db/README.md`, "Grants for a capturing role", the **recipes** group).
 
 Done when: `graph_nodes` and `graph_edges` exist and `traverse_graph` and `find_shortest_path` are functions in your database (`\dt graph_*` and `\df traverse_graph` in psql; the Supabase Table Editor and Database → Functions, there).
 

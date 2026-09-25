@@ -1,5 +1,7 @@
 # Obsidian Vault Import
 
+> **On this fork (SMD-2126).** `import-obsidian.py` embeds each note itself and POSTs it raw to `${SUPABASE_URL}/rest/v1/…` with a service-role key, and this fork's stack runs no PostgREST (SETUP.md), so the import fails at its first request (`--dry-run` runs). The fork's Obsidian import is the Markdown adapter of the ingestion contract — `bun db/ingest-records.ts --markdown <vault> --allow <vault>`, then `bun db/reembed.ts` (frontmatter, `[[wikilinks]]` and tags become facets and edges; the file is kept byte for byte); this recipe's heading split with LLM distillation, its `--min-words` / `--skip-folders` / `--after` filters, secret scan, sync log and source label have no counterpart there and are dropped with it, each named in SMD-2137, where the recipe retires; the decision for the class is in `docs/vendored-disposition.md`.
+
 <div align="center">
 
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)

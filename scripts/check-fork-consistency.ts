@@ -47,12 +47,15 @@
  *      (DENO_EXCEPTIONS counts per file; none today); and a file that imports the SQL shim (Bun's client)
  *      imports no specifier Bun cannot resolve (`jsr:`, `npm:`, a URL), itself
  *      or through the files it imports (SMD-1480)
- *  12. a .sql file under schemas/ or db/ runs nothing that needs Supabase — no
- *      `service_role`, `authenticated` or `anon`, no `auth.uid()`, `auth.role()`
- *      or `auth.users`, no `supabase_`-prefixed name, no RLS or policy —
- *      comments excepted by a literal-aware strip, string literals included
- *      (SMD-1796); the rules are db/config.mjs's SUPABASE_SQL_RULES, which
- *      test-schema [10] and [40] apply from inside the suite; no exceptions
+ *  12. a .sql file under db/ or any of the seven category directories runs
+ *      nothing that needs Supabase — no `service_role`, `authenticated` or
+ *      `anon`, no `auth.uid()`, `auth.role()` or `auth.users`, no
+ *      `supabase_`-prefixed name, no RLS or policy — comments excepted by a
+ *      literal-aware strip, string literals included (SMD-1796; widened from
+ *      schemas/ and db/ to db/ and the seven category directories by
+ *      SMD-1810); the rules are
+ *      db/config.mjs's SUPABASE_SQL_RULES, which test-schema [10], [40] and
+ *      [50] apply from inside the suite; no exceptions
  *  13. every port a compose file under deploy/ publishes names its host address
  *      as a knob that defaults to the literal 127.0.0.1 — the short form
  *      `"${X_BIND:-127.0.0.1}:${X_PORT:-n}:n"`, each `X_BIND` documented in
@@ -221,6 +224,20 @@
  *      own line, block scalars skipped; the rules are workflowPinProblems
  *      and dependabotProblems, pure functions their probes run on in-memory
  *      text (SMD-2093); no exceptions
+ *  24. no vendored script speaks PostgREST — a `rest/v1` path in any string,
+ *      a supabase-py import or `create_client(` (Python and shell), or a
+ *      `@supabase/postgrest-js` specifier, comments blanked (the JS scanner;
+ *      a `#` outside a string for .py, one at a word's start for .sh), in
+ *      every code file under the
+ *      seven category directories and docs/: the fork's stack runs no
+ *      PostgREST, so such a script's live mode fails at its first request;
+ *      the class decision is docs/vendored-disposition.md's "PostgREST-
+ *      speaking scripts" (an import emits ingestion-contract items, a
+ *      maintenance script moves onto compat/supabase-sql, three retire), and
+ *      POSTGREST_EXCEPTIONS counts the twenty-eight files with a call site
+ *      (two more reach the gateway through a lib) with the ticket that ports
+ *      or retires each — a landed port fails until its entry goes, so the
+ *      table's size is the class's remaining size (SMD-2126)
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20 and 23 parse YAML with Bun.YAML)
@@ -1996,18 +2013,28 @@ function checkBunNative() {
 // is literal-aware (a `--` inside a string no longer hides the rest of its
 // line — SMD-1316's ask) and scans string literals, since `EXECUTE 'GRANT … TO
 // service_role'` runs the grant as surely as the bare statement. Every .sql
-// under schemas/ and db/ whole; no exceptions. The extension and recipe
-// directories carry thirteen more such files, with per-user `auth.uid() =
-// user_id` policies that need a design of their own — their ticket is the
-// umbrella SMD-1795's.
+// under db/ and the seven category directories, whole; no exceptions. Until
+// SMD-1810 the walk covered schemas/ and db/ alone, and the extension and
+// recipe directories carried fourteen more such files — per-user `auth.uid()
+// = user_id` policies on most, GRANTs TO service_role or authenticated, one
+// `REFERENCES auth.users`, and `EXECUTE 'GRANT … TO service_role'` strings
+// inside ops-views.sql's DO blocks (the case the literal-aware scan exists
+// for). Those were cut on that ticket under SMD-1716's single-operator model
+// (the server scopes rows by DEFAULT_USER_ID; the policies were the same fact
+// in GoTrue's schema), their tables became `--grant`'s `extensions` and
+// `recipes` groups, and the walk widened to db/ and the seven category
+// directories (SQL_RULE_DIRS — evals/ keeps its own SQL out of it) so the
+// next new recipe is held to the rule the day it lands.
+
+const SQL_RULE_DIRS = ["db", "extensions", "primitives", "recipes", "schemas", "dashboards", "integrations", "skills"];
 
 function checkSupabaseIsms() {
-  for (const dir of ["schemas", "db"]) {
+  for (const dir of SQL_RULE_DIRS) {
     const base = join(ROOT, dir);
     if (!existsSync(base)) continue;
     for (const file of walk(base, [], /\.sql$/)) {
       const rel = relOf(file);
-      for (const h of supabaseIsmsIn(readFileSync(file, "utf8"))) fail(`${rel}:${h.line}`, `${h.msg} (SMD-1796)`);
+      for (const h of supabaseIsmsIn(readFileSync(file, "utf8"))) fail(`${rel}:${h.line}`, `${h.msg} (SMD-1796, SMD-1810)`);
     }
   }
 }
@@ -4810,6 +4837,211 @@ function checkWorkflowPins() {
   for (const [where, msg] of dependabotProblems(existsSync(depPath) ? readFileSync(depPath, "utf8") : null)) fail(where, msg);
 }
 checkWorkflowPins();
+
+// ── 24: no vendored script speaks PostgREST (SMD-2126) ──────────────────────
+//
+// Thirty scripts in twenty-one recipes reached the brain as PostgREST clients:
+// `${SUPABASE_URL}/rest/v1/<table>` and `/rest/v1/rpc/<fn>` with a service-role
+// key from a `.mjs`/`.js`/`.ts` fetch, or supabase-py's `create_client` from a
+// `.py`. The fork's stack runs no PostgREST (SETUP.md), so each one's live mode
+// failed at its first request, and neither check 10 (a URL string is not
+// `.insert(`) nor check 22 (no supabase-js import) saw them. The class decision
+// is docs/vendored-disposition.md's "PostgREST-speaking scripts" section: an
+// import emits ingestion-contract items for db/ingest-records.ts (SMD-1867,
+// SMD-2136), a maintenance script reaches Postgres through compat/supabase-sql
+// under bun, three whose capability the core already owns retire — one ticket
+// each, filed under SMD-2126. This holds the class where it stands and stops it
+// growing back: in every code file (.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs, .py,
+// .sh) under the seven category directories and docs/, comments blanked (the
+// JS scanner for JS; a `#` outside a string for Python, and for shell one at
+// a word's start (after one of bash's metacharacters, whitespace, `;`, `(`,
+// `)`, `|`, `&`, `<`, `>`, or the text's start) — `$#`, `${#a[@]}` and `a#b`
+// are not comments, so a hit after
+// one on the same line is read; a docstring is a string and is read: a file
+// that says it posts to `/rest/v1/rpc/…` is making a claim about itself), a
+// `rest/v1` path in any string, a supabase-py import or `create_client(`
+// (Python and shell alone), or a `@supabase/postgrest-js` specifier is a hit.
+// POSTGREST_EXCEPTIONS counts the twenty-eight files with a call site (two
+// more reach the gateway through a lib) with the ticket that ports or retires
+// each: a line past the count fails (a new call beside the documented ones),
+// a count no line reaches fails as stale (the port landed on those lines —
+// lower the count, or remove the entry when none remains), a file that is
+// gone fails until its entry goes. So every child PR shrinks the table,
+// and the table's size is the class's remaining size.
+const POSTGREST_CODE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|sh)$/;
+/** The files whose comments start at `#`: Python and shell. */
+const HASH_COMMENT_FILE = /\.(py|sh)$/;
+/** The shell files among them: a `#` opens their comments at a word's start alone (hashCommentsBlanked's `shell`). */
+const SHELL_FILE = /\.sh$/;
+/** A PostgREST path in any string: `…/rest/v1/thoughts`, `/rest/v1/rpc/f`, a bare "rest/v1" joined later; `v10` and `arrest/v1` are not it. */
+const POSTGREST_PATH = /\brest\/v1\b/g;
+/** supabase-py: the import in either spelling, and the client constructor (Python and shell files alone — `create_client` is a plain name elsewhere). */
+const SUPABASE_PY_FORMS = [/^\s*from\s+supabase(?:\.[\w.]+)?\s+import\b/gm, /^\s*import\s+supabase\b/gm, /\bcreate_client\s*\(/g];
+/** postgrest-js, in every specifier shape check 22 reads for supabase-js. */
+const POSTGREST_JS_SPECIFIER = /(["'])(?:npm:|jsr:|https?:\/\/[^"'\s]*\/)?@supabase\/postgrest-js(?:@[^"'/]*)?(?:\/[^"']*)?\1/g;
+/**
+ * `text` with `#` comments blanked: a `#` outside a string, to the line's end,
+ * every blanked character a space so offsets and line numbers hold — in
+ * Python anywhere, in shell (`shell`) only at a word's start (the text's
+ * start, or after one of bash's metacharacters: whitespace, `;`, `(`, `)`,
+ * `|`, `&`, `<`, `>` — the second review pass measured `)#c`, `>#c` and `<#c`
+ * as comment starts in bash, dash and zsh), since `$#`, `${#a[@]}` and
+ * `a#b` are not comments and a hit after one on the same line must be read
+ * (the first review pass). Strings — `'…'`, `"…"`, `'''…'''`, `"""…"""` — are
+ * kept whole, an escape inside one honoured, so a `#` in a string is text and
+ * a quote in a comment is blanked. Not a parser: an unterminated quote in a
+ * shell word (`don't`) leaves the rest of the file read as a string, which
+ * can only add hits — visible, and answered by quoting the word.
+ */
+function hashCommentsBlanked(text: string, shell = false): string {
+  let out = "";
+  let quote: string | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quote) {
+      if (c === "\\") { out += c + (text[i + 1] ?? ""); i++; continue; }
+      if (text.startsWith(quote, i)) { out += quote; i += quote.length - 1; quote = null; continue; }
+      out += c;
+      continue;
+    }
+    if (c === "'" || c === '"') { quote = text.startsWith(c + c + c, i) ? c + c + c : c; out += quote; i += quote.length - 1; continue; }
+    if (c === "#" && (!shell || i === 0 || /[\s;(|&)<>]/.test(text[i - 1]))) { let j = i; while (j < text.length && text[j] !== "\n") j++; out += " ".repeat(j - i); i = j - 1; continue; }
+    out += c;
+  }
+  return out;
+}
+/** The 1-based lines of `text` holding a PostgREST form, ascending — comments blanked by the file's kind, strings read. */
+function postgrestIn(text: string, rel: string): number[] {
+  const hash = HASH_COMMENT_FILE.test(rel);
+  const code = hash ? hashCommentsBlanked(text, SHELL_FILE.test(rel)) : blanked(text, false);
+  const lineOf = lineIndexer(code);
+  const lines = new Set<number>();
+  for (const re of hash ? [POSTGREST_PATH, ...SUPABASE_PY_FORMS] : [POSTGREST_PATH, POSTGREST_JS_SPECIFIER]) for (const m of code.matchAll(re)) lines.add(lineOf(m.index!));
+  return [...lines].sort((a, b) => a - b);
+}
+/** [text, file name (its kind), whether it is a hit] — the thirty files' shapes, and the neighbours the rule must not reach. */
+const POSTGREST_PROBES: [string, string, boolean][] = [
+  ["const res = await fetch(`${SUPABASE_URL}/rest/v1/thoughts?select=id`, { headers });", "x.mjs", true],
+  ['fetch(SUPABASE_URL + "/rest/v1/rpc/match_thoughts", { method: "POST", headers, body });', "x.ts", true],
+  ["const BASE = `${url}/rest/v1`;\nconst r = await fetch(`${BASE}/${pathQuery}&limit=1`);", "x.js", true],
+  ['resp = requests.post(f"{SUPABASE_URL}/rest/v1/thoughts", headers=h, json=body, timeout=120)', "x.py", true],
+  ["from supabase import create_client, Client", "x.py", true],
+  ["supabase: Client = create_client(url, key)", "x.py", true],
+  ['import { PostgrestClient } from "@supabase/postgrest-js";', "x.ts", true],
+  ['"""Posts each row to /rest/v1/rpc/upsert_thought, the 3-argument form."""\nimport sys', "x.py", true],
+  ['curl -s "$SUPABASE_URL/rest/v1/thoughts?select=id" -H "apikey: $KEY"', "x.sh", true],
+  ["const url = `${SUPABASE_URL}/rest/v1/thoughts`; // the same in a comment: /rest/v1/thoughts", "x.mjs", true],
+  ["echo '# not a comment: /rest/v1 inside quotes is a hit though'", "x.sh", true],
+  // Not hits: a comment in either grammar, the shim's import, the key alone, a regex literal, other paths, a longer name.
+  ["// the old path: ${SUPABASE_URL}/rest/v1/thoughts\nconst x = 1;", "x.mjs", false],
+  ["/* POST /rest/v1/thoughts */\nconst x = 1;", "x.ts", false],
+  ["# posts to /rest/v1/rpc/upsert_thought\nresp = requests.post(url, json=body)", "x.py", false],
+  ["url = base  # was /rest/v1/thoughts", "x.py", false],
+  ["x = \"it's\"  # /rest/v1/thoughts after an apostrophe in a string", "x.py", false],
+  ['import { createClient } from "../../compat/supabase-sql/index.ts";', "x.ts", false],
+  ["const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;", "x.mjs", false],
+  ["const re = /rest\\/v1/;", "x.ts", false],
+  ['const v = "/api/v1/thoughts";', "x.ts", false],
+  ["const u = `${base}/functions/v1/smart-ingest`;", "x.ts", false],
+  ['const p = "/api/rest/v10/x"; const q = "/arrest/v1/y";', "x.ts", false],
+  ["name = create_client_name(x)", "x.py", false],
+  ["const c = create_client(url);", "x.ts", false],
+  // Shell: `#` inside a word is not a comment, so the hit after it is read; Python: it is, anywhere.
+  ['n=${#arr[@]}; curl -s "$U/rest/v1/thoughts"', "x.sh", true],
+  ["x = 1#c /rest/v1/thoughts", "x.py", false],
+  ["import supabase\nsb = supabase.Client(url, key)", "x.py", true],
+  ["from supabase.client import Client", "x.py", true],
+  ["A=1;#c /rest/v1/thoughts", "x.sh", false],
+  ["(true)#c /rest/v1/thoughts", "x.sh", false],
+  ["# /rest/v1/thoughts\nx=1", "x.sh", false],
+];
+/** A helper for the table: the file's kind and its ticket. */
+const POSTGREST = (what: string, ticket: string, lines: number): CountedException => ({ why: `${what} — ${ticket}`, lines });
+const IMPORT = "an import that embeds the text itself and POSTs the row raw; it emits ingestion-contract items for `bun db/ingest-records.ts --items` (SMD-2136)";
+const SHIM = "a maintenance script; it moves onto compat/supabase-sql under bun";
+/**
+ * file → the ticket that ports or retires it, and the exact count of lines that speak PostgREST. Thirty files in
+ * twenty-one recipes (SMD-2126's survey of f7693c4c, re-measured on d8e3de60); two more of the thirty —
+ * atomizer's backfill-gmail-correspondents.mjs and authorship-edges' backfill-authorship.mjs — reach the
+ * gateway through their `lib/` file alone and have no line of their own.
+ */
+const POSTGREST_EXCEPTIONS = new Map<string, CountedException>([
+  // Imports → the ingestion contract (after SMD-2136).
+  ["recipes/chatgpt-conversation-import/import-chatgpt.py", POSTGREST(`${IMPORT}; SMD-2147 decides its match_thoughts dedup and chatgpt_conversations sidecar`, "SMD-2147", 3)],
+  ["recipes/perplexity-conversation-import/import-perplexity.py", POSTGREST(IMPORT, "SMD-2148", 1)],
+  ["recipes/readwise-import/import-readwise.py", POSTGREST("an import on supabase-py that already captures through upsert_thought (SMD-1524) over a transport the fork lacks; it emits contract items", "SMD-2149", 2)],
+  ["recipes/google-activity-import/import-google-activity.mjs", POSTGREST(IMPORT, "SMD-2150", 1)],
+  ["recipes/email-history-import/pull-gmail.ts", POSTGREST(IMPORT, "SMD-2021", 2)],
+  // Retire: the fork's core owns the capability.
+  ["recipes/obsidian-vault-import/import-obsidian.py", POSTGREST("superseded by db/ingest-markdown.ts (ingest-records.ts --markdown); the recipe retires", "SMD-2137", 3)],
+  ["recipes/local-ollama-embeddings/embed-local.py", POSTGREST("superseded by the server's local embedding (OB1_LLM_BASE_URL) and db/reembed.ts; the recipe retires", "SMD-2138", 2)],
+  ["recipes/fingerprint-dedup-backfill/backfill-fingerprints.mjs", POSTGREST("superseded by migration 023; the file is removed", "SMD-2145", 1)],
+  // Maintenance scripts → the shim under bun.
+  ["recipes/fingerprint-dedup-backfill/delete-duplicates.mjs", POSTGREST(`${SHIM}, its deletes through delete_thought`, "SMD-2145", 1)],
+  ["recipes/thought-enrichment/enrich-thoughts.mjs", POSTGREST(SHIM, "SMD-2139", 4)],
+  ["recipes/thought-enrichment/backfill-type.mjs", POSTGREST(SHIM, "SMD-2139", 1)],
+  ["recipes/thought-enrichment/backfill-sensitivity.mjs", POSTGREST(SHIM, "SMD-2139", 1)],
+  ["recipes/atomizer/audit-gmail-pipeline.mjs", POSTGREST(SHIM, "SMD-2140", 2)],
+  ["recipes/atomizer/lib/entity-resolver.mjs", POSTGREST(`${SHIM} (backfill-gmail-correspondents.mjs reaches the gateway through it)`, "SMD-2140", 2)],
+  ["recipes/atomizer/re-atomize-gmail-thought.mjs", POSTGREST(`${SHIM}, its thought writes through upsert_thought and delete_thought`, "SMD-2140", 2)],
+  ["recipes/authorship-edges/lib/author-edges.mjs", POSTGREST(`${SHIM} (backfill-authorship.mjs reaches the gateway through it)`, "SMD-2141", 2)],
+  ["recipes/typed-edge-classifier/classify-edges.mjs", POSTGREST(SHIM, "SMD-2141", 1)],
+  ["recipes/provenance-chains/backfill.mjs", POSTGREST(SHIM, "SMD-2142", 1)],
+  ["recipes/provenance-chains/eval.mjs", POSTGREST(SHIM, "SMD-2142", 1)],
+  ["recipes/wiki-synthesis/scripts/synthesize-wiki.mjs", POSTGREST(SHIM, "SMD-2143", 1)],
+  ["recipes/wiki-synthesis/scripts/backfill-gmail-wikis.mjs", POSTGREST(`${SHIM}, its page deletes through delete_thought`, "SMD-2143", 1)],
+  ["recipes/entity-wiki/generate-wiki.mjs", POSTGREST(SHIM, "SMD-2143", 1)],
+  ["recipes/weekly-digest/weekly-digest.mjs", POSTGREST(`${SHIM}; read-only`, "SMD-2144", 1)],
+  ["recipes/brain-backup/backup-brain.mjs", POSTGREST(`${SHIM}; read-only`, "SMD-2144", 1)],
+  ["recipes/lint-sweep/lint-sweep.js", POSTGREST(`${SHIM}; read-only`, "SMD-2144", 1)],
+  ["recipes/source-filtering/backfill-metadata.ts", POSTGREST(SHIM, "SMD-2021", 2)],
+  // Smoke harnesses, each with its own ticket.
+  ["recipes/brain-smoke-test/smoke-all.js", POSTGREST("the smoke harness takes the fork's shape or deploy/smoke.sh absorbs it", "SMD-2103", 1)],
+  ["recipes/ob-graph/smoke-graph-rpcs.mjs", POSTGREST("the smoke moves onto the shim or into extensions/test-tools.ts", "SMD-2146", 1)],
+]);
+function checkPostgrestClients() {
+  for (const name of ["x.ts", "x.tsx", "x.mts", "x.cts", "x.js", "x.jsx", "x.mjs", "x.cjs", "x.py", "x.sh"]) if (!POSTGREST_CODE_FILE.test(name)) fail(SELF, `check 24's POSTGREST_CODE_FILE no longer reads ${name} (its own probe)`);
+  for (const name of ["x.md", "x.sql", "x.json", "x.html", "x.yaml", "x.pyc"]) if (POSTGREST_CODE_FILE.test(name)) fail(SELF, `check 24's POSTGREST_CODE_FILE reads ${name}, which it should not (its own probe)`);
+  for (const name of ["x.py", "x.sh"]) if (!HASH_COMMENT_FILE.test(name)) fail(SELF, `check 24's HASH_COMMENT_FILE no longer treats ${name} as #-commented (its own probe)`);
+  if (HASH_COMMENT_FILE.test("x.mjs")) fail(SELF, "check 24's HASH_COMMENT_FILE treats x.mjs as #-commented (its own probe)");
+  if (!SHELL_FILE.test("x.sh") || SHELL_FILE.test("x.py")) fail(SELF, "check 24's SHELL_FILE no longer names x.sh alone (its own probe)");
+  // The blanker on its own: a `#` in each string kind kept, one after each closed string blanked, offsets and newlines held.
+  const blankerProbe = "a = 'x#y' # c1\nb = \"p#q\" # c2\nc = '''m#n\n#o''' # c3\nd = \"\"\"s\\\"#t\"\"\" # c4\ne = 1 # c5\n";
+  const blankerWant = "a = 'x#y'     \nb = \"p#q\"     \nc = '''m#n\n#o'''     \nd = \"\"\"s\\\"#t\"\"\"     \ne = 1     \n";
+  if (hashCommentsBlanked(blankerProbe) !== blankerWant) fail(SELF, `check 24's hashCommentsBlanked no longer blanks exactly the comments of its probe: ${JSON.stringify(hashCommentsBlanked(blankerProbe))}`);
+  // Every way a shell comment opens — the text's start, whitespace, `;`, `|`, `&`, `(`, `)`, `>`, `<` — and the three
+  // ways a `#` is not one (`$#`, `${#a[@]}`, `a#b`); the second review pass found the class asserted and unprobed.
+  const shellProbe = "#c0\nn=$# ; m=${#a[@]} ;a#b # c1\n#c2\n x=1 #c3\na;#c4\nb|#c5\nc&#c6\n(#c7\n)#c8\nd>#c9\ne<#c10\n";
+  const shellWant = "   \nn=$# ; m=${#a[@]} ;a#b     \n   \n x=1    \na;   \nb|   \nc&   \n(   \n)   \nd>   \ne<    \n";
+  if (hashCommentsBlanked(shellProbe, true) !== shellWant) fail(SELF, `check 24's hashCommentsBlanked (shell) no longer blanks exactly the comments of its probe: ${JSON.stringify(hashCommentsBlanked(shellProbe, true))}`);
+  for (const [probe, name, hit] of POSTGREST_PROBES) {
+    const n = postgrestIn(probe, name).length;
+    if (hit && n === 0) fail(SELF, `check 24 no longer catches its probe: ${JSON.stringify(probe)} (its own probe)`);
+    if (!hit && n > 0) fail(SELF, `check 24 catches a non-probe: ${JSON.stringify(probe)} (its own probe)`);
+  }
+  // The line is the string's, once, for the probe whose hit and comment share a line: line 1 alone.
+  const beside = POSTGREST_PROBES.find(([text]) => text.includes("// the same in a comment"));
+  if (!beside) fail(SELF, "check 24's hit-beside-a-comment probe is gone (its own probe)");
+  const twice = beside ? postgrestIn(beside[0], beside[1]) : [1];
+  if (twice.length !== 1 || twice[0] !== 1) fail(SELF, `check 24 reports lines ${twice.join(",")} for a hit beside a comment, not line 1 once (its own probe)`);
+  const files = textFilesUnder(SCANNED_ROOTS).filter((f) => POSTGREST_CODE_FILE.test(f));
+  if (files.length === 0) fail(SELF, "check 24 found no code file under the seven category directories and docs/ — the listing is broken, not the tree clean");
+  const MSG = "speaks PostgREST — a `rest/v1` path, a supabase-py client or postgrest-js reaches a brain only through Supabase's PostgREST, which this fork's stack does not run (SETUP.md), so the script's live mode fails at its first request; the class decision is docs/vendored-disposition.md's \"PostgREST-speaking scripts\" (SMD-2126): an import emits ingestion-contract items for `bun db/ingest-records.ts --items` (SMD-2136), a maintenance script reaches Postgres through compat/supabase-sql under bun (`SUPABASE_URL` a postgres:// string), or the file is listed in POSTGREST_EXCEPTIONS with its line count and the ticket that ports or retires it";
+  const seen = new Set<string>();
+  for (const file of files) {
+    const rel = relOf(file);
+    const lines = postgrestIn(readFileSync(file, "utf8"), rel);
+    const excepted = POSTGREST_EXCEPTIONS.get(rel);
+    if (excepted) {
+      seen.add(rel);
+      if (lines.length !== excepted.lines) fail(rel, `check 24's exception covers ${excepted.lines} line(s) that speak PostgREST and the file has ${lines.length} (${lines.join(", ") || "none"}) — ${lines.length > excepted.lines ? "a new call beside the documented ones" : "the port landed on those lines, so the exception is stale: lower the count, or remove the entry when no line remains"} (${excepted.why})`);
+      continue;
+    }
+    for (const line of lines) fail(`${rel}:${line}`, MSG);
+  }
+  for (const rel of POSTGREST_EXCEPTIONS.keys()) if (!seen.has(rel)) fail(rel, "check 24's exception names a file the scan does not reach — stale, or the file is gone: remove the entry");
+}
+checkPostgrestClients();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so

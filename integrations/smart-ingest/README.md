@@ -85,7 +85,7 @@ without human review.
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
 - **Enhanced thoughts schema** applied — install `schemas/enhanced-thoughts` first (adds type, importance, sensitivity columns and utility RPCs)
-- **Smart ingest tables** applied — install `schemas/smart-ingest-tables` to create the `ingestion_jobs` and `ingestion_items` tables plus the `append_thought_evidence` RPC
+- **Smart ingest tables** applied — install `schemas/smart-ingest` to create the `ingestion_jobs` and `ingestion_items` tables plus the `append_thought_evidence` RPC. On this fork the two item columns that hold a thought id (`matched_thought_id`, `result_thought_id`) are `uuid`, as `thoughts.id` is here (SMD-2128): an executed item records the thought it wrote or matched, and re-applying the file to a brain that had upstream's `bigint` columns retypes them in place (its header says what is kept, and that the rewrite locks the table). A dashboard's per-item "view thought" link carries that UUID to `open-brain-dashboard-pro`'s thought page, which takes one since SMD-2128 (its `Thought.id: number` typing is SMD-2152's)
 - At least one LLM API key for extraction: OpenRouter (recommended), OpenAI, or Anthropic
 - An embedding API key: OpenRouter or OpenAI (required for semantic deduplication)
 - [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/))
@@ -96,9 +96,9 @@ This server depends on these database functions:
 
 | RPC | Source | Purpose |
 |-----|--------|---------|
-| `upsert_thought(text, jsonb)` | Core OB1 schema (`db/migrations/003`, `004`) | Creates or updates a thought with content and payload |
+| `upsert_thought(text, jsonb, vector)` | Core OB1 schema (`db/migrations/004`, last redefined by `046`) | Creates a thought — content, envelope and vector in one statement, the fork's 3-argument form (SMD-1228): the vector's model label, the actor and a revision's `supersedes` ride in the envelope; the enhanced columns (`type`, `importance`, `quality_score`, `source_type`, `sensitivity_tier`) follow by an update on a fresh row. Until SMD-2128 this server called the 2-argument form with the vector inside the payload, which the fork's function ignores, so its thoughts had no vector and default columns; `bun db/reembed.ts` embeds such rows (it takes a thought whose vector is NULL) |
 | `match_thoughts(vector, float, int)` | Core OB1 schema | Semantic similarity search for deduplication |
-| `append_thought_evidence(bigint, jsonb)` | `schemas/smart-ingest-tables` | Appends corroborating evidence to an existing thought's metadata |
+| `append_thought_evidence(uuid, jsonb)` | `schemas/smart-ingest` | Appends corroborating evidence to an existing thought's metadata (`bigint` upstream; the fork's thought id is a UUID — SMD-2128) |
 
 ## Credential Tracker
 
@@ -138,11 +138,11 @@ OPENROUTER_API_KEY='your-openrouter-key' \
 bun integrations/smart-ingest/index.ts
 ```
 
-`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the core server holds — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI. A caller on another machine reaches it through the same TLS proxy as the core server ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
+`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the core server holds — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). Beside the [rest-api gateway](../rest-api/) on 8787, give this server a port of its own (`PORT=8788`) and point the gateway's `SMART_INGEST_URL` at it (`http://127.0.0.1:8788`); the gateway forwards its `MCP_ACCESS_KEY`, so the two hold the same key (SMD-2110). `extensions/test-auth.ts` starts it this way in CI. A caller on another machine reaches it through the same TLS proxy as the core server ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
 
 ### 2. Set the environment
 
-`MCP_ACCESS_KEY` is the one key this server holds — the raw key, compared constant-time (this server predates the hashed `MCP_ACCESS_KEYS` list, change 67) — sent as `x-brain-key`. Optional multi-provider fallback, in the same environment:
+`MCP_ACCESS_KEY` is the one key this server holds — the raw key, compared constant-time (this server predates the hashed `MCP_ACCESS_KEYS` list, change 67) — sent as `x-brain-key`. `ENTITY_EXTRACTION_WORKER_URL`, optional, is the entity-extraction worker's http(s) address (`integrations/entity-extraction-worker`): after a write that adds or revises a thought, this server POSTs to it with its key and `?limit=` the count, so extraction runs at once; unset, the server says so when it starts and the queue waits for whatever runs the worker on a schedule, and any scheme but `http`/`https` is refused at start (SMD-2110 — until it the address was built from `SUPABASE_URL`, the Postgres connection string here, so every trigger failed). Optional multi-provider fallback, in the same environment:
 
 ```bash
 OPENAI_API_KEY="your-openai-key" ANTHROPIC_API_KEY="your-anthropic-key"
@@ -256,7 +256,7 @@ After completing setup, you should be able to:
 1. Send raw text to the `/smart-ingest` endpoint and receive extracted thoughts
 2. Use dry-run mode to preview extractions before committing
 3. Execute dry-run jobs to write thoughts to the database
-4. See new thoughts in your brain with `source_type = 'smart_ingest'`
+4. See new thoughts in your brain with `source_type = 'smart_ingest'`, each with its vector and `embedding_model`, and a `create_revision` item's thought pointing at the one it revises through `supersedes`; every item of a finished job is `executed` — its `result_thought_id` the thought it wrote or matched, where there was one — or `failed`, with its `error_message` (SMD-2128). The vectors this server makes are `openai/text-embedding-3-small`'s, 1536 wide, so the brain must be built at that model and width (`OB1_EMBEDDING_MODEL=openai/text-embedding-3-small`, `OB1_EMBEDDING_DIM=1536`); on this fork's default, `qwen3-embedding:4b` at 1024, `match_thoughts` refuses the vector and every item is skipped as `semantic_check_failed_skipped`
 5. Observe deduplication in action — re-sending the same text returns the existing job instead of creating duplicates
 
 ## Troubleshooting

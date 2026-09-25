@@ -30,11 +30,12 @@
  * comes back is read: the row a write stored, the rows a read chose, the
  * embedded relation as an object or null, the trigger's effect, the message a
  * failure carries. The database is the fork's migrations (crm_link_thought
- * reads `thoughts`) plus the four `schema.sql` files, applied as their READMEs'
- * Step 1 says — after the two `auth.*` stubs a plain Postgres lacks — and
- * dropped again at the end, whether or not the run finished, because CI shares
- * one Postgres across the job. The role that connects owns the tables, so the
- * row-level-security policies do not apply to it, as the READMEs say.
+ * reads `thoughts`) plus the seven `schema.sql` files, applied as their READMEs'
+ * Step 1 says — with no `auth.*` stub and no Supabase role: since SMD-1810 the
+ * files carry no policy on auth.uid() and no GRANT to a role Postgres does not
+ * have — and dropped again at the end, whether or not the run finished,
+ * because CI shares one Postgres across the job. The role that connects owns
+ * the tables and needs no grant.
  *
  * The drift guard: each server's `tools/list` under a write key is exactly the
  * set of tools driven here, so a tool added to a server fails this suite until
@@ -57,7 +58,7 @@ const ROOT = resolve(HERE, "..");
 const URL_ = requireDatabaseUrl("test-tools.ts");
 const { assert, report } = createAssert();
 
-// ── The database: the fork's schema, the READMEs' stubs, the four extension schemas ──
+// ── The database: the fork's schema and the seven extension schemas ──
 
 // The width is pinned as test-writes.ts pins it: one thought is planted through upsert_thought for crm_link_thought, and no
 // vector is involved.
@@ -68,7 +69,7 @@ const sql = new SQL({ url: URL_, max: 2 });
 const SCHEMAS = ["extensions/household-knowledge/schema.sql", "extensions/home-maintenance/schema.sql", "extensions/meal-planning/schema.sql", "extensions/professional-crm/schema.sql",
   "extensions/family-calendar/schema.sql", "extensions/job-hunt/schema.sql", "recipes/ob-graph/schema.sql"];
 const schemaText = (rel: string) => readFileSync(join(ROOT, rel), "utf8");
-/** What the schemas create, dropped before they are applied and at the end. meal-planning's and family-calendar's CREATE TABLE have no IF NOT EXISTS. */
+/** What the schemas create, dropped before they are applied and at the end. family-calendar's CREATE TABLE has no IF NOT EXISTS (meal-planning's gained it under SMD-1810's boyscout). */
 async function dropExtensionSchemas() {
   for (const rel of SCHEMAS) {
     const text = schemaText(rel);
@@ -77,16 +78,11 @@ async function dropExtensionSchemas() {
   }
 }
 await dropExtensionSchemas();
-// The READMEs' Step 1: the two Supabase functions the RLS policies call, created plain (a Supabase database has them; a
-// throwaway one does not — dropped first here so a re-run on a kept database applies cleanly), and the three Supabase
-// roles ob-graph's GRANT and REVOKE statements name, as its README says to create them.
-await sql.unsafe(`CREATE SCHEMA IF NOT EXISTS auth;
-  DROP FUNCTION IF EXISTS auth.uid(); DROP FUNCTION IF EXISTS auth.jwt();
-  CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS 'SELECT NULL::uuid';
-  CREATE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT ''{}''::jsonb';`);
-for (const role of ["authenticated", "service_role", "anon"]) {
-  await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN CREATE ROLE ${role} NOLOGIN; END IF; END $r$`);
-}
+// The READMEs' Step 1, exactly: the files, on a Postgres with no `auth` schema and no Supabase role. Until SMD-1810 this
+// suite created two `auth.*` stubs and the three roles first, because the files' policies and GRANTs named them; a
+// file that needs either again fails here, as it would for a user.
+const [{ authSchema, supabaseRoles }] = (await sql`SELECT to_regnamespace('auth') IS NOT NULL AS "authSchema", (SELECT count(*)::int FROM pg_roles WHERE rolname IN ('authenticated', 'anon', 'service_role')) AS "supabaseRoles"`) as { authSchema: boolean; supabaseRoles: number }[];
+if (authSchema || supabaseRoles > 0) console.error(`test-tools.ts: this database carries ${authSchema ? "an auth schema" : ""}${authSchema && supabaseRoles ? " and " : ""}${supabaseRoles ? `${supabaseRoles} Supabase role(s)` : ""} — the schemas apply regardless, but a fresh database proves more`);
 for (const rel of SCHEMAS) await sql.unsafe(schemaText(rel));
 
 // ── The servers' handlers, and the environment the READMEs document ─────────
@@ -689,7 +685,6 @@ console.log("\n[every tool each server registers is driven here]");
 } finally {
   try {
     await dropExtensionSchemas();
-    await sql.unsafe("DROP FUNCTION IF EXISTS auth.uid(); DROP FUNCTION IF EXISTS auth.jwt();");
   } catch (e) {
     console.error(`test-tools.ts: dropping the extension schemas failed — ${e instanceof Error ? e.message : String(e)}`);
   }

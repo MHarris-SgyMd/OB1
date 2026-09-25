@@ -154,9 +154,11 @@ statements. It sets a 10 s lock timeout for everything it does — for the
 session, and again inside every transaction — so a held lock fails the run
 rather than freezing it and every reader behind it. 001 and 003
 take ACCESS EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if
-`OB1_TRGM_INDEX` is on and the index is absent; 023's call runs again and takes
-its lock (`OB1_BACKFILL_LIMIT` bounds it, as on a first apply; it writes nothing
-when no row is waiting); 025 re-validates its constraints over the table. 021's
+`OB1_TRGM_INDEX` is on and the index is absent; 023's and 050's backfill calls
+run again and take `thoughts` EXCLUSIVE (`OB1_BACKFILL_LIMIT` bounds each, as on
+a first apply; they write nothing when no row is waiting); 055's locks the audit
+rows it fills and then builds its partial index over `thought_audit` (SHARE,
+tens of milliseconds); 025 re-validates its constraints over the table. 021's
 evidence backfill runs as written, the acceptances out of its sight (above);
 030, reached after it in the same transaction, finds nothing of 021's to take
 back and corrects the own-key labels an earlier paste of the body left
@@ -164,8 +166,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1608 assertions: 1608 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports fifty-four (54) migrations applied, and
+`bun test-schema.ts` prints `1747 assertions: 1747 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports fifty-five (55) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -204,7 +206,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
-051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090).
+051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -221,9 +223,10 @@ The decision that `thought_audit` is the write-side source of truth and the
 `thoughts` row its projection — the write functions appending the event first
 and one projector writing the row, the audit trigger becoming the check, the
 table kept for the community's DDL — is `../docs/event-log-as-truth.md`
-(SMD-1997). Its three steps are filed (SMD-2115, SMD-2116, SMD-2117) and none
-has landed: at 053 the row is still written first and the trigger derives the
-event from it, as the paragraphs below describe.
+(SMD-1997). Its three steps are filed (SMD-2115, SMD-2116, SMD-2117) and the
+first has landed as migration 055 (below); at 055 the row is still written
+first and the trigger derives the event from it, as the paragraphs below
+describe — what 055 changes is what the event carries.
 
 Migration 046 makes `thought_audit` the log of record (SMD-1730): eight columns
 beside 008's and 010's — `actor_kind` and `trust` (who holds the key, and the
@@ -331,6 +334,49 @@ signature and grants, no data change; a role missing UPDATE on
 `ob1_agent_keys` now fails only a lookup that writes (a stale key, a scope
 change, a registration) rather than every known-key lookup.
 
+Migration 055 makes the capture event carry the payload (SMD-2115, step 1 of
+`../docs/event-log-as-truth.md`): a capture's `diff` carries the **content**
+and, when the writer set the row's own time (`db/ingest-records.ts` backdates
+a record), its **`created_at`**; an update's `diff` carries the key's move
+(`content_fingerprint` before/after — 018's NULL for a text another row
+holds, 023's fill, an edit's recomputation) — the three things SMD-1999
+measured a projector needs beyond 046's event, and nothing else. 046's diff
+rule, its append and 050's two stamp arms become functions the triggers call
+(`ob1_thought_diff`, `ob1_append_thought_event`, `ob1_actor_stamp`,
+`ob1_actor_stamp_kept`), one copy each for the write functions to call before
+the row exists at step 2. Rows already written: `SELECT
+backfill_thought_payloads();` fills `diff.content` (and `created_at`) on every
+capture row from before 055 — from the first content-moving update's `before`,
+else the tombstone's `previous_content`, else the live row — under
+`ob1.audit_amend = 'payload'`, the payload amendment the append-only trigger
+allows — the second it allows, the third named (a capture row's `diff.content` and `diff.created_at` where absent, with
+what the log and the row derive to, and nothing else; under 046's `'backfill'`
+an UPDATE of `diff` stays refused). The file calls it once (`OB1_BACKFILL_LIMIT`
+bounds the batch, as for 023 and 050); preflight's `audit events` counts the
+capture rows still without content and names the pass. On the dogfood brain
+every one of 632 rows derived (239 from an update, 1 from a tombstone, 392
+from the live row; 222 gained a `created_at`). The events read for a capture
+are the thought's rows written after it — since `ob1_config.audit_seq_exact_since`
+(050's `applied_at`, recorded at apply) a row is later when its `seq` is
+larger and rows order by `seq`, the identity being exact insertion order; before
+it a row is later when `(created_at, seq)` is larger and rows order so, the
+pre-050 `seq` being heap order — and no further than the first later tombstone
+or capture: an id `ingest-records.ts` re-uses after a delete has a second
+incarnation whose edits are not the first capture's, and a prior incarnation's
+rows are not the second's. `created_at` is the transaction's start, so an edit
+from an older transaction can be stamped before the capture it follows; the
+boundary is what tells it from a prior incarnation's row. A thought deleted
+while the pass runs makes the gate refuse that row; the fill runs in batches of
+1,000, catches the refusal, sets the row aside as `skipped` and runs the batch
+again (a refusal that sets nothing aside is raised after five), and the next
+pass fills it from the tombstone. A capture row whose `diff` is no object is no
+candidate and is not counted as waiting; run one pass at a time.
+Additive, no signature moves, no return changes, no row written differently.
+What a reader sees change: `thought_changes` lists `content_fingerprint` in
+`changed` when a text moves; and two passes that wrote no audit row before
+write one per row they key, since a key's move is an event — 023's
+`backfill_content_fingerprints()` and `reembed.ts`'s edit of a legacy twin.
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -356,7 +402,9 @@ introduce multi-tenancy; do not port this one.
 connects as — and to more than `thoughts`: see [Grants for a capturing
 role](#grants-for-a-capturing-role) below. The community schemas under
 `schemas/` carried the same grants, and RLS with a policy for that role, until
-change 93 (SMD-1796) cut them; their tables are the **community** group there.
+change 93 (SMD-1796) cut them; the extension and recipe schemas carried them
+too, with per-user policies on `auth.uid()`, until SMD-1810. Their tables are
+the **community**, **extensions** and **recipes** groups there.
 
 ## Grants for a capturing role
 
@@ -401,7 +449,7 @@ issues every group at once.
 | | function `lookup_agent_memory_key(text)` (schemas/per-agent-identity; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
 | | `ingestion_jobs`, `ingestion_items` (schemas/smart-ingest) | `SELECT, INSERT, UPDATE, DELETE` |
 | | sequences `ingestion_jobs_id_seq`, `ingestion_items_id_seq` (schemas/smart-ingest; `BIGSERIAL` ids) | `USAGE, SELECT` |
-| | function `append_thought_evidence(bigint, jsonb)` (schemas/smart-ingest; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
+| | function `append_thought_evidence(uuid, jsonb)` (schemas/smart-ingest; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`; the bigint form, dropped by the file since SMD-2128, loses its grant — run `--grant` again) | `EXECUTE` |
 | | `entities`, `edges`, `entity_extraction_queue`, `consolidation_log` (schemas/entity-extraction — upstream's tables, not 016's `ob1_*`) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_entities` (schemas/entity-extraction names 016's table under `IF NOT EXISTS`; the **extraction** row's privileges exactly, so the merge widens nothing) | `SELECT, INSERT, DELETE` |
 | | sequences `entities_id_seq`, `edges_id_seq`, `consolidation_log_id_seq` (schemas/entity-extraction; `BIGSERIAL` ids) | `USAGE, SELECT` |
@@ -414,6 +462,21 @@ issues every group at once.
 | | `crm_persons`, `crm_person_mentions` (schemas/crm-person-tiers) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `readwise_books` (schemas/readwise-books — upstream granted the table nothing; its integration wrote it through Supabase's default privileges) | `SELECT, INSERT, UPDATE, DELETE` |
 | | functions `merge_thought_provenance_metadata(uuid, jsonb)`, `merge_thought_eval_metadata(uuid, jsonb)` (schemas/provenance-chains; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
+| **extensions** — the learning path's six `extensions/*/schema.sql`, applied by hand as each README's Step 1 says (SMD-1810). Upstream's five with policies enabled RLS on `auth.uid() = user_id` and granted nothing — Supabase's default privileges carried its service role — and family-calendar's carried neither; the policies are gone, and this group is what a role other than the tables' owner needs. Every id is a `uuid` (no sequences) and no function is `REVOKE`d `FROM PUBLIC` | `household_items`, `household_vendors` (extensions/household-knowledge) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `maintenance_tasks`, `maintenance_logs` (extensions/home-maintenance) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `recipes`, `meal_plans`, `shopping_lists` (extensions/meal-planning) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `professional_contacts`, `contact_interactions`, `opportunities` (extensions/professional-crm) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `family_members`, `activities`, `important_dates` (extensions/family-calendar — upstream's file carried no RLS and no grant; listed so the whole path is one grant) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `companies`, `job_postings`, `applications`, `interviews`, `job_contacts` (extensions/job-hunt) | `SELECT, INSERT, UPDATE, DELETE` |
+| **recipes** — the nine recipe SQL files a brain applies as a schema (tables or views; `CONTRIB_SCHEMA_FILES` in `db/test-support.ts`), applied by hand as each README says (SMD-1810). Upstream granted most of these to `service_role` (adaptive-capture's four to `authenticated`; lint-sweep's views nothing), enabled RLS on most with policies on `auth.uid()`, and `REVOKE`d ob-graph's three functions from `anon` and `authenticated`; all cut, the REVOKEs too (none is SECURITY DEFINER, and there is no PostgREST here to expose them), so EXECUTE stays PUBLIC's and no function row is needed. Every id is a `uuid` or text: no sequences. The privileges are upstream's own for its roles | `correction_learnings`, `classification_outcomes`, `capture_thresholds`, `ab_comparisons` (recipes/adaptive-capture-classification — upstream's three privileges to its API role, kept; the recipe deletes nothing) | `SELECT, INSERT, UPDATE` |
+| | views `ops_source_volume_24h`, `ops_recent_thoughts`, `ops_enrichment_gaps`, `ops_type_distribution`, `ops_sensitivity_distribution`, `ops_ingestion_summary`, `ops_stalled_entity_queue`, `ops_graph_coverage` (recipes/brain-health-monitoring, its `ops-views.sql`; the last three exist only where smart-ingest and entity-extraction are applied, and are skipped until then) | `SELECT` |
+| | `chatgpt_conversations` (recipes/chatgpt-conversation-import; `user_id` is a plain nullable `uuid` now — upstream's referenced `auth.users`) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `life_engine_habits`, `life_engine_habit_log`, `life_engine_checkins`, `life_engine_briefings`, `life_engine_evolution`, `life_engine_state` (recipes/life-engine) | `SELECT, INSERT, UPDATE, DELETE` |
+| | views `lint_orphans_by_tag`, `lint_over_tagged`, `lint_empty_content`, `lint_very_long`, `lint_low_signal`, `lint_exact_duplicates`, `lint_high_importance_isolated` (recipes/lint-sweep, its `views.sql`; the last two are guarded on `content_fingerprint` and `thought_entities`, both the migrations', so all seven exist on a migrated brain) | `SELECT` |
+| | `graph_nodes`, `graph_edges` (recipes/ob-graph) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `repo_learning_projects`, `repo_learning_research_documents`, `repo_learning_tracks`, `repo_learning_lessons`, `repo_learning_quizzes`, `repo_learning_quiz_questions`, `repo_learning_lesson_progress`, `repo_learning_quiz_attempts`, `repo_learning_quiz_responses`, `repo_learning_lesson_comments` (recipes/repo-learning-coach) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `operating_model_profiles`, `operating_model_sessions`, `operating_model_layer_checkpoints`, `operating_model_entries`, `operating_model_exports` (recipes/work-operating-model-activation; its three functions keep PUBLIC's EXECUTE — upstream only granted them to its service role) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `world_model_assessments`, `world_model_boundary_flows` (recipes/world-model-diagnostic-activation, its `schema-v2-draft.sql` — a draft its README's V1 does not apply; listed so applying it is one `--grant` away) | `SELECT, INSERT, UPDATE, DELETE` |
 
 Plus `USAGE ON SCHEMA public`. The migrations' own tables need no sequence
 grant — every primary key is a `uuid` or a natural key — but three community
@@ -448,10 +511,10 @@ create the role first. `--grant --dry-run` prints the statements without running
 them, so a locked-down deployment can grant a subset by hand. A role that only
 ever runs the server needs the **capture** and **server** groups; add **worker**
 for the role your bulk passes connect as, and **extraction** on top of that for
-entity extraction. The **community** group is issued for whichever `schemas/`
-files you have applied — the objects not yet present are skipped and named, so
-run `--grant` again after applying one; apply a community schema with `psql
-"$DATABASE_URL" -f schemas/<name>/schema.sql`, as its README says. Presence is
+entity extraction. The **community**, **extensions** and **recipes** groups are
+issued for whichever schema files you have applied — the objects not yet
+present are skipped and named, so run `--grant` again after applying one; apply
+a schema with `psql "$DATABASE_URL" -f <its path>`, as its README says. Presence is
 per object, not per file, so the two community rows whose tables a migration
 also creates — `thought_audit` (008) and `thought_entities` (016) — are issued
 on every migrated brain: the audit row adds only upstream's `SELECT` on the
@@ -1022,6 +1085,7 @@ bun graph-centrality.ts --url … "Open Brain" --no-edges        # the control: 
 bun graph-centrality.ts --url … --types project,tool --json    # a typed subgraph, as data
 bun graph-centrality.ts --url … "Open Brain" --status open     # as the live tickets build it: no Done or Canceled evidence
 bun graph-centrality.ts --url … --decay-done                   # a settled ticket weighs 0.25 in every count
+bun graph-centrality.ts --url … --status open --startable      # what you could start now: no ticket with an open blocker
 ```
 
 The subject resolves by 016's own rule, one rung at a time — exact
@@ -1082,12 +1146,43 @@ thoughts carry a status, how many are settled, the latest `linear_updated_at`
 (the status is as fresh as the last sync pass), and under a filter how many
 thoughts weighed in. `LIFECYCLE_CTE` is the one place the status comes from;
 when SMD-2074 folds `thought_audit`'s transitions into a node-state
-projection, that CTE reads it and nothing downstream changes. Exit 0 when ranked, 1 when no
+projection, that CTE reads it and nothing downstream changes.
+
+**Startability** (SMD-2061). The lifecycle says a ticket is open, not that it
+can be started. Migration 053 (SMD-1867) stores the board's relations as `link`
+facets on the row holding a ticket's identity, `blocks` on the blocker and
+`blocked_by` on the blocked, and `--startable` reads both directions (an edge
+stated on one side only still counts). It multiplies a second factor into the
+same weight: an **unsettled** thought whose ticket has an **open blocker**
+weighs 0. Unsettled, because Linear keeps a relation after a ticket completes: a
+Done ticket whose blocker is still open is settled, not blocked, and weighs what
+its lifecycle says. A blocker is open unless its own lifecycle, resolved through
+`source_thought()` and read by the ticket-head rule above, is completed or
+canceled, so a settled blocker is not a blocker. A blocker the brain does not
+hold, or one with no status_type this tool knows, still blocks, and the output
+counts those. A row derived from a ticket takes its ticket's blockers as it
+takes its status. Only an active link counts (053 closes a relation the source
+dropped), and only `blocks` / `blocked_by`: `child_of` makes nobody a blocker. A
+thought whose ticket no dependency names counts as unblocked. The dependency
+caveat line (`coverage.dependencies` in the JSON) gives the active dependency
+facets and when the latest was written or closed, how many thoughts belong to a
+ticket a dependency names on either side, how many the flag held back in the run
+(took from a weight above 0 to 0), and how many of the held thoughts' blockers
+are unsettled only for want of a known status. The edges are as current as
+board-sync's last passes over both tickets of a relation: it is read from either
+side, so one removed on the board blocks until both are re-read. The flag
+composes with `--status` and `--decay-done` (the weights multiply). Without it
+the dependency read is not in the SQL, so every other mode renders byte for byte
+what it did (the JSON's `options` carries one more key, `startable: false`) and
+a brain without 053 runs them. With it, a brain without 053 is exit 2.
+`dependencySql` is the seam SMD-2074's node-state projection replaces.
+
+Exit 0 when ranked, 1 when no
 entity resolves (a near-miss whose only guesses the numeric rule hid is still
 no entity: exit 1, and the line counts the hidden guesses), 3 when the subject
 IS an entity — by id, name, alias or merged-in name — that the numeric rule
 excluded (`--keep-numeric` would rank it), 2 for a usage error, a brain
-without 016 or a query that failed — never 1 for a failure or an exclusion. `test-schema.ts` [44] runs the
+without 016 (or, under `--startable`, without 053) or a query that failed — never 1 for a failure or an exclusion. `test-schema.ts` [44] runs the
 script's own SQL under PGlite over a graph whose every count is known by
 construction, and its edges-on and edges-off orders differ at every position.
 
@@ -1745,14 +1840,49 @@ bun tier.ts --promote --from <canary-url> --to <stable-url>
 (thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
 migration might touch, so a migration meets *all* the real data), resets the target
 and restores into it, then runs `migrate.ts` forward with the merged tree. It is
-destructive to `--to` and refuses a non-loopback target unless
-`OB1_ALLOW_REMOTE_DB=1`. It needs a `pg_dump`/`pg_restore` whose major version is at
-least the source server's — the pgvector image the tiers run carries matching client
-tools; a host needs `postgresql-client >=` the server. A branch that changes the
+destructive to `--to`, so it guards the target three ways.
+
+- **It is not the `--from` database.** The source session is looked up in the
+  target's `pg_stat_activity`. Two names for one server are still one server,
+  and a copy that shares the source's `system_identifier` is still another.
+- **It is a tier, or empty** (`targetRefusal`). A target is allowed when:
+  - an earlier refresh marked it. Before its reset, each refresh sets
+    `ALTER DATABASE … SET ob1.refresh_target`, which neither the reset nor the
+    restore touches. A refresh that died after its restore therefore retries,
+    even though the restore left the source's `tier=stable` in `ob1_config`;
+  - it is stamped `canary` or `working`;
+  - its public schema holds nothing but what extensions own;
+  - it is an Open Brain schema with no thoughts.
+
+  Anything else is refused, and the refusal names no override: the record
+  (`tier=stable`), a brain with thoughts under no stamp, and another
+  application's schema. For that check, `schema_migrations` alone does not
+  make an Open Brain schema, since Rails and others use the name. `--promote`
+  mirrors this and refuses a `--to` that is the `--from` database, marked, or
+  stamped `canary`/`working`.
+
+  The mark is read from the database's own setting only, never a role's or the
+  server's, and only `canary` or `working` counts. Setting it needs a superuser,
+  or `GRANT SET ON PARAMETER ob1.refresh_target` (PG15+); restoring pgvector
+  needs a superuser in the default install anyway. It lasts until
+  `ALTER DATABASE … RESET ob1.refresh_target`. `deploy/README.md`, "Refreshing
+  a tier", has both statements.
+- **It is loopback,** unless `OB1_ALLOW_REMOTE_DB=1`.
+
+It needs Bun
+and a `pg_dump`/`pg_restore` whose major version is at least the source server's, and
+no image the stack runs has both — the pgvector image has the client and no Bun,
+`oven/bun` the reverse. **`deploy/tier.sh` is the runnable form** (SMD-2036): it
+builds `db/tier.Dockerfile` (`oven/bun:1.4.0-alpine` + `postgresql16-client`, the
+stack server's major) and runs this checkout's `tier.ts` in it on the stack's
+network, so a refresh migrates forward with the tree it was run from —
+`deploy/README.md` has the commands. A host with Bun and `postgresql-client >=` the
+server can still run `bun tier.ts` directly. A branch that changes the
 embedding model or width cannot inherit stable's vectors: `migrate.ts` refuses the
 mismatch on the refreshed copy, so that branch's working tier is rebuilt from the
-records instead (`ingest-records.ts` then `reembed.ts`, the claim path) — a real
-test of the re-embed path, not a cost.
+records instead (`ingest-records.ts --tier working` then `reembed.ts`, the claim
+path; without `--tier` the ingester stamps `stable`) — a real test of the
+re-embed path, not a cost.
 
 **`--replay` / `--diff`** are the *live* half of the replay gate (SMD-1295, whose
 `db/test-replay.ts` is the offline, model-free, fixture-vector half CI runs). For
@@ -2004,8 +2134,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1608 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 685 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1747 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 716 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

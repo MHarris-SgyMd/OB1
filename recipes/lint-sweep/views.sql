@@ -1,13 +1,15 @@
 -- lint-sweep views.sql
 --
 -- OPTIONAL: SQL views that let you run the Tier 1 checks directly in
--- Supabase Studio or psql without installing the Node.js script. Apply
+-- psql (or any SQL client) without installing the Node.js script. Apply
 -- once; they become queryable read-only views over `public.thoughts`
 -- (and optionally `public.entities` / `public.thought_entities`).
 --
--- Safety: VIEWS ONLY. No destructive DDL, no data modification. Run in
--- the Supabase SQL editor as the project owner. To remove a view later,
--- use "DROP VIEW IF EXISTS <view_name> CASCADE;" from the SQL editor.
+-- Safety: VIEWS ONLY. No destructive DDL, no data modification. Run it as
+-- the role that owns `thoughts` — psql "$DATABASE_URL" -f recipes/lint-sweep/views.sql
+-- — and grant any other role the views with `bun db/migrate.ts --grant <role>`
+-- (db/config.mjs ROLE_GRANTS' `recipes` group lists the seven; SMD-1810). To
+-- remove a view later, DROP VIEW IF EXISTS <view_name> CASCADE.
 
 -- 1. Orphans by tag — thoughts with no topics, tags, or people in metadata
 CREATE OR REPLACE VIEW lint_orphans_by_tag AS
