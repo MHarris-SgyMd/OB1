@@ -4747,7 +4747,7 @@ log: 441 capture / 1659 update / 1 delete rows (4.3 MB table and TOAST); 288 upd
 graph: 5878 model mentions (a source: pass's rows apart), 5211 edges; 17 thought(s) with 275 mention rows extracted before their fingerprint last moved — under the recorded key extract:qwen2.5:7b@p2: 11 queued for a re-read, 5 failed (terminal until --retry-failed), 1 succeeded before the move (re-enqueued under another key), 0 succeeded after it with the rows still older, 0 succeeded with no stamp to place, 0 never asked; 6 of the unqueued pending under another key, which refreshes nothing here; 24 proposals
 
 the snapshot key per projection (the contract):
-  thoughts.embedding                        recorded             derived (content_fingerprint_of(content), embedding_model); the prompt template and the requested width ride on the model name by convention (embed.ts, EMBEDDING_PROMPTS) — code, not data, so a template change under one name invalidates every vector with the key unmoved, and the cosine bar below is the check for that; recorded: content_fingerprint (003/023), embedding_model (021)
+  thoughts.embedding                        recorded             derived (content_fingerprint_of(content), embedding_model); the prompt template and the requested width ride on the model name by convention (db/config.mjs's EMBEDDING_PROMPTS, applied by server-portable/embed.ts) — code, not data, so a template change under one name invalidates every vector with the key unmoved, and the cosine bar below is the check for that; recorded: content_fingerprint (003/023), embedding_model (021)
   thought_chunks                            recipe not recorded  derived the parent's key + the window recipe (chunk tokens, overlap, chunk_context, the blurb model); recorded: the parent's label vouches for the rows (022); no recipe
   thought_entities / ob1_entity_edges       half recorded        derived (content_fingerprint, extraction_key); recorded: extraction_key, extracted_at; no fingerprint — staleness after an edit is read from the audit and the claim pool
   supersession_proposals                    recorded             derived (older_fingerprint, newer_fingerprint, judge_key); recorded: all three when the caller passed them (nullable, 029); consolidate.ts does
@@ -4892,7 +4892,414 @@ fingerprint on the graph rows, content in the capture event. The record is
 `changes/smd-1998.md`.
 
 
+## Does the extension contract survive the move? `thoughts` as a writable projection, prototyped (SMD-1999)
+
+`eval-writable-projection.ts`. Spike 2 of the event-sourcing ADR (SMD-1997):
+under CQRS-lite the write-side truth is the event log and the `thoughts` row
+is a projection of it — and the entire community surface (recipes, schemas,
+integrations) writes to that row, through `upsert_thought` /
+`update_thought` / `delete_thought` and, out of tree, around them. The ticket
+named three shapes: `thoughts` as an updatable view with INSTEAD OF triggers
+(option 1), the table kept and the write functions appending the event before
+the row (option 2), a projection table beside a compat view (option 3, whose
+writer surface is option 1's). The question was which keeps the contract
+with the least surface, with read-your-writes non-negotiable: an agent that
+captures then searches must see its own write, so an eventually consistent
+projector is disqualified whatever its shape.
+
+**Pre-registered, then measured.** The criteria (C1–C14), the bar and the
+expected outcome went on the ticket before the prototype ran (2026-09-24). An
+option is GO when C1–C6 and C10–C12 all PASS and C7–C9 each hold; NO-GO on
+any contract FAIL; C13 (cost) and C14 (the contributor delta) inform the
+recommendation and never the verdict; the recommendation is the GO option
+with the shorter delta, fewer moved objects on a tie. One clause was added
+when the runner was written and is said so: an unmeasured contract criterion
+is not a PASS — a verdict rests on what was measured.
+
+**How it was measured.** A throwaway Postgres (pgvector 0.8.6 / PG 16, width
+8, no provider) is reset to migration 053 four times, once per schema, and
+one scripted set of writes runs against each — the callers' own shapes: the
+3-argument capture as `integrations/readwise-capture` sends it (metadata,
+`embedding_model`, an actor envelope), the 2-argument form the recipes use,
+the 4-argument form with two chunks, the server's 9-argument and the
+integrations' 6-argument `update_thought` (a content edit, a metadata-only
+patch, `supersedes`, `DUPLICATE_CONTENT`, `STALE_READ`, the re-embed's
+same-text-new-vector), `delete_thought` plain, refused `CITED` and detaching,
+a raw `INSERT INTO thoughts (content, metadata)`, and `db/ingest-records.ts`'s
+`INSERT … ON CONFLICT (id) … RETURNING (xmax = 0)` with a backdated
+`created_at` as the ingester writes it. The review passes added: a capture
+with an actor kept to the census so its row's stamp is compared; a hand-set
+`ob1.event` followed by a function call and a raw insert in one transaction,
+three ways (an edit that projects, an edit whose patch changes nothing, an
+identical re-capture); a payload whose metadata is JSON null; a capture
+carrying 046's envelope (a stance, a citation, a valid window, a trust under
+the key's ceiling) and an edit claiming an `actor_kind` the key does not
+support; a raw content `UPDATE` that leaves 018's stale key; and row images
+taken between the steps a later delete would hide. Then, per schema: the
+community DDL verbatim from `schemas/` (workflow-status's `ALTER TABLE
+thoughts ADD COLUMN IF NOT EXISTS status …` and `CREATE INDEX … ON thoughts
+(status)`, agent-memory's `REFERENCES public.thoughts(id) ON DELETE SET NULL`,
+entity-extraction's `AFTER INSERT OR UPDATE OF content, metadata ON
+public.thoughts FOR EACH ROW`, a sidecar `UPDATE thoughts SET status`), each
+in a transaction rolled back; the three behaviours the functions carry, two
+sessions each with the waiter read from `pg_locks` — SMD-1043 (two captures of
+one text serialise on the fingerprint lock: one row, the second `existed`),
+SMD-1323 (an edit naming `supersedes` completes while `update_thought` holds
+its target FOR NO KEY UPDATE), SMD-1462 (`update_thought` naming `supersedes`
+and `delete_thought` of the target serialise on the supersession lock, the
+pointer nulled by the cascade); the audit-row count per step (one per logical
+write, none for a refused or a no-op one, two for a detaching delete of a
+superseded thought — the tombstone and the successor's nulled pointer) and
+the extraction claims (one per thought, 016's requeue); read-your-writes in
+one session — a capture, then a `SELECT` on `thoughts` and
+`search_thoughts_keyword`, no delay — with the drop-the-projector control:
+the event appended and the projector not run, the row absent and the search a
+miss, then the projector run on that event and both present; and the replay:
+the rows copied, the projection wiped with its triggers held off, every event
+replayed in `(created_at, seq)` order through `ob1_project_thought_event(id,
+NULL, NULL, true)` — the same projector the live write used — and the rebuilt
+rows compared column by column, then a capture event in 008's shape (metadata,
+no content) handed to the projector, which must refuse it. The baseline's log
+and rows are compared to option 2's for the same writes, the prototype's three
+additions (the content and a backdating writer's `created_at` on a capture,
+the key's before/after on an update) set aside and the random ids read as
+their step's letter; the events' stance, cites, valid window and context (its
+`claimed`) are in the comparison. The cost line is the
+median of 200 captures and 200 edits, baseline against option 2.
+
+**The prototype** is SQL in `evals/writable-projection/`, applied on top of
+053 and thrown away with the database — where check 7 does not look,
+deliberately: the write functions are redefined for the measurement, not
+shipped. `common.sql` lifts 046's diff rule out of the audit trigger into
+`ob1_thought_diff` (one addition: an update records the fingerprint's
+before/after, since 018 sets it NULL for a text another row holds — a decision
+a replay cannot re-derive), makes the append a function
+(`ob1_append_thought_event`, 046's trigger tail: the kind from the registry,
+the trust ceiling, the door, the claim), adds the projector
+(`ob1_project_thought_event`: capture → INSERT, update → UPDATE by the diff's
+afters, delete → DELETE; a live write passes its vector, a replay takes it
+from `ob1_embedding_snapshot` by `(content_fingerprint, embedding_model)` —
+SMD-1998's key made a table, fed by a trigger on the row store — or leaves it
+NULL for the re-embed pool, so the row is readable while its vector is still
+materialising; a capture event without content is refused), turns the audit
+trigger into the CHECK under `ob1.projecting = <event id>` (the row's diff
+recomputed and held to the event's afters, SQLSTATE `OB002` on a divergence,
+the vector aside; a raw write without the setting is appended as 046 does),
+makes 050's stamp callable so the event carries the stamped metadata and the
+projector writes the row under 050's own pass-through, and lets 001's
+`updated_at` trigger yield to the projector's stamp for the event's own row.
+`option2-functions.sql` redefines the three write functions: everything
+before the row write stays in the same order (005's guard, 025's provenance
+validation, 046's event validation, the actor setting, 003's key, 033's
+advisory lock, 035's row read FOR NO KEY UPDATE, SMD-1323's lock, 018's
+unchanged-content rule, the cycle walk, `STALE_READ`), and the `INSERT … ON
+CONFLICT` / `UPDATE` / `DELETE` becomes: compute the after-image, the diff,
+append, project with the caller's vector — a vector arriving on a row that
+already has one is a projection refresh with no event, verified as such. The
+contract sentinels preflight and test-schema read stay where the behaviours
+stay. `option1-view.sql` renames the table to `thought_rows`, creates the
+view `thoughts` and its INSTEAD OF INSERT/UPDATE/DELETE triggers (the same
+append and projector); `option1-undo.sql` reverses it so test-support's
+reset can run again. `writable-projection.ts` holds every rule pure and
+`--self-check` (62 probes) runs in the portable-server job; `--check` runs
+the prototype in the data-layer job and holds it to the matrix recorded
+below (`EXPECTED`, an outcome and a probe count per measured cell), so a
+Postgres or prototype change that moves a cell — or a step that stops
+running — is named.
+
+### Results, 2026-09-24 (PostgreSQL 16.15, pgvector 0.8.6, width 8; the program's output, verbatim)
+
+```
+Writable projection — SMD-1999 (Spike 2 of SMD-1997), PostgreSQL 16.15 (Debian 16.15-1.pgdg12+2)
+
+criterion  baseline           option2            option1-unchanged  option1            
+C1         FAIL (5/6)         PASS (6/6)         FAIL (3/6)         PASS (6/6)           the vendored capture unchanged: 3-argument upsert_thought, the readwise payload, one capture event carrying the content
+C2         PASS (5/5)         PASS (5/5)         FAIL (1/5)         PASS (5/5)           the 2- and 4-argument forms unchanged
+C3         PASS (12/12)       PASS (12/12)       PASS (12/12)       PASS (12/12)         update_thought unchanged: content, metadata, provenance, DUPLICATE_CONTENT, STALE_READ, the re-embed shape
+C4         PASS (7/7)         PASS (7/7)         PASS (7/7)         PASS (7/7)           delete_thought unchanged: a delete event with the previous content; a cited delete refused and eventless
+C5         PASS (6/6)         PASS (6/6)         FAIL (3/6)         FAIL (4/6)           raw writers: INSERT INTO thoughts audited once; ingest-records' ON CONFLICT (id) … RETURNING xmax = 0
+C6         PASS (4/4)         PASS (4/4)         FAIL (0/4)         FAIL (0/4)           the community DDL verbatim: ADD COLUMN, CREATE INDEX, REFERENCES, a row trigger, a sidecar UPDATE
+C7         PASS (4/4)         PASS (4/4)         N/A                PASS (4/4)           SMD-1043: two captures of one text serialise on the fingerprint lock — one row, one id
+C8         PASS (3/3)         PASS (3/3)         N/A                PASS (3/3)           SMD-1323: an edit naming supersedes is not blocked by update_thought's row lock on its target
+C9         PASS (4/4)         PASS (4/4)         N/A                PASS (4/4)           SMD-1462: update_thought naming supersedes and delete_thought of the target serialise, no deadlock
+C10        PASS (36/36)       PASS (40/40)       N/A                PASS (38/38)         trigger interaction: one audit row and one extraction claim per logical write, the actor stamp, updated_at
+C11        PASS (2/2)         PASS (4/4)         N/A                PASS (4/4)           read-your-writes in the same session, and the drop-the-projector control
+C12        N/A                PASS (5/5)         N/A                PASS (5/5)           the log rebuilds the rows through the same projector; the content-less capture is refused
+
+option2: GO
+  C14 contributor delta: none
+option1-unchanged: NO-GO
+  - C1 FAIL: s1 capture A (3-arg, readwise payload, actor) — there is no unique or exclusion constraint matching the ON CONFLICT specification; s1 returns {id, fingerprint, existed: false, supersedes: null} — there is no unique or exclusion constraint matching the ON CONFLICT specification; the capture event names the actor from the key (op-key, operator, via mcp) — [null,null,null]
+  - C2 FAIL: s4 capture B (2-arg) — there is no unique or exclusion constraint matching the ON CONFLICT specification; s5 capture C (4-arg, two chunks) returns existed = false — there is no unique or exclusion constraint matching the ON CONFLICT specification; s4 returns {id, fingerprint} — null; s5 returns chunks: 2 — null
+  - C5 FAIL: ingest-records' first write: inserted = true — column "xmax" does not exist; ingest-records' rewrite: inserted = false, moved = true — column "xmax" does not exist; s21's raw content UPDATE on F: the new text, the vector and its label kept — null
+  - C6 FAIL: schemas/workflow-status: ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS status …, and the sidecar UPDATE thoughts SET status — ALTER action ADD COLUMN cannot be performed on relation "thoughts"; schemas/workflow-status: CREATE INDEX IF NOT EXISTS idx_thoughts_status ON thoughts (status) WHERE status IS NOT NULL — ALTER action ADD COLUMN cannot be performed on relation "thoughts"; schemas/agent-memory: thought_id UUID REFERENCES public.thoughts(id) ON DELETE SET NULL — referenced relation "thoughts" is not a table; schemas/entity-extraction: CREATE TRIGGER … AFTER INSERT OR UPDATE OF content, metadata ON public.thoughts FOR EACH ROW — "thoughts" is a view
+  - C7 not measured
+  - C8 not measured
+  - C9 not measured
+  - C10 not measured
+  - C11 not measured
+  - C12 not measured
+  C14 contributor delta: 
+    - C1 s1 capture A (3-arg, readwise payload, actor) — there is no unique or exclusion constraint matching the ON CONFLICT specification
+    - C1 s1 returns {id, fingerprint, existed: false, supersedes: null} — there is no unique or exclusion constraint matching the ON CONFLICT specification
+    - C1 the capture event names the actor from the key (op-key, operator, via mcp) — [null,null,null]
+    - C2 s4 capture B (2-arg) — there is no unique or exclusion constraint matching the ON CONFLICT specification
+    - C2 s5 capture C (4-arg, two chunks) returns existed = false — there is no unique or exclusion constraint matching the ON CONFLICT specification
+    - C2 s4 returns {id, fingerprint} — null
+    - C2 s5 returns chunks: 2 — null
+    - C5 ingest-records' first write: inserted = true — column "xmax" does not exist
+    - C5 ingest-records' rewrite: inserted = false, moved = true — column "xmax" does not exist
+    - C5 s21's raw content UPDATE on F: the new text, the vector and its label kept — null
+    - C6 schemas/workflow-status: ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS status …, and the sidecar UPDATE thoughts SET status — ALTER action ADD COLUMN cannot be performed on relation "thoughts"
+    - C6 schemas/workflow-status: CREATE INDEX IF NOT EXISTS idx_thoughts_status ON thoughts (status) WHERE status IS NOT NULL — ALTER action ADD COLUMN cannot be performed on relation "thoughts"
+    - C6 schemas/agent-memory: thought_id UUID REFERENCES public.thoughts(id) ON DELETE SET NULL — referenced relation "thoughts" is not a table
+    - C6 schemas/entity-extraction: CREATE TRIGGER … AFTER INSERT OR UPDATE OF content, metadata ON public.thoughts FOR EACH ROW — "thoughts" is a view
+option1: NO-GO
+  - C5 FAIL: ingest-records' first write: inserted = true — column "xmax" does not exist; ingest-records' rewrite: inserted = false, moved = true — column "xmax" does not exist
+  - C6 FAIL: schemas/workflow-status: ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS status …, and the sidecar UPDATE thoughts SET status — ALTER action ADD COLUMN cannot be performed on relation "thoughts"; schemas/workflow-status: CREATE INDEX IF NOT EXISTS idx_thoughts_status ON thoughts (status) WHERE status IS NOT NULL — ALTER action ADD COLUMN cannot be performed on relation "thoughts"; schemas/agent-memory: thought_id UUID REFERENCES public.thoughts(id) ON DELETE SET NULL — referenced relation "thoughts" is not a table; schemas/entity-extraction: CREATE TRIGGER … AFTER INSERT OR UPDATE OF content, metadata ON public.thoughts FOR EACH ROW — "thoughts" is a view
+  C14 contributor delta: 
+    - C5 ingest-records' first write: inserted = true — column "xmax" does not exist
+    - C5 ingest-records' rewrite: inserted = false, moved = true — column "xmax" does not exist
+    - C6 schemas/workflow-status: ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS status …, and the sidecar UPDATE thoughts SET status — ALTER action ADD COLUMN cannot be performed on relation "thoughts"
+    - C6 schemas/workflow-status: CREATE INDEX IF NOT EXISTS idx_thoughts_status ON thoughts (status) WHERE status IS NOT NULL — ALTER action ADD COLUMN cannot be performed on relation "thoughts"
+    - C6 schemas/agent-memory: thought_id UUID REFERENCES public.thoughts(id) ON DELETE SET NULL — referenced relation "thoughts" is not a table
+    - C6 schemas/entity-extraction: CREATE TRIGGER … AFTER INSERT OR UPDATE OF content, metadata ON public.thoughts FOR EACH ROW — "thoughts" is a view
+
+C13 cost (medians):
+  3-argument capture with a vector, 200 each: baseline 676 µs, option 2 787 µs (×1.16)
+  content edit with a vector, 200 each: baseline 701 µs, option 2 1.00 ms (×1.43)
+
+Differential, baseline against option 2 (events and rows for the same scripted writes, the prototype's three additions set aside): identical
+
+C12 replay under option2: 0 difference(s) beyond the 4 tolerated
+  - (tolerated) 1d09bd5d content_fingerprint: null → "5ede44fecbf41f73d39683f9f265a464e1b0954a6c124dbb67c2eaec…
+  - (tolerated) 28caeb35 content_fingerprint: null → "72d47147bf6dfa9099bc2e09806d1b4678b7b7660b07f50fe2e3447e…
+  - (tolerated) 93f2d194 content_fingerprint: null → "ed03218f17617156c47705e3be5b973298ccf9ab4c70e3f1c5c3955d…
+  - (tolerated) e92dd964 content_fingerprint: null → "103a9ba691fc63c733f213861430c75ade7fea9020959305e6374744…
+C12 replay under option1: every column of every row equal
+
+Notes:
+  - baseline: the raw insert's key is NULL (003's rule lives in the functions)
+  - baseline: after the raw content UPDATE F's key stayed stale (018's case: 003's rule lives in the functions)
+  - baseline: an identical re-capture (s3) bumps updated_at with no audit row (053's ON CONFLICT DO UPDATE)
+  - baseline: no projector and no content in a capture event — the log cannot rebuild the rows (SMD-1998); C12 is not measurable
+  - option2: the raw insert's key is NULL (003's rule lives in the functions)
+  - option2: after the raw content UPDATE F's key stayed stale (018's case: 003's rule lives in the functions)
+  - option2: an identical re-capture (s3) leaves updated_at as it was — no event, no write
+  - option1-unchanged: the raw insert's key is filled (the view's trigger applied 003's rule)
+  - option1: the raw insert's key is filled (the view's trigger applied 003's rule)
+  - option1: after the raw content UPDATE F's key was refreshed by the writer's door
+  - option1: C10 counted no audit rows for s15a, s15b — the step itself failed (C5)
+  - option1: an identical re-capture (s3) leaves updated_at as it was — no event, no write
+  - option1-unchanged: s1 capture A (3-arg, readwise payload, actor) — there is no unique or exclusion constraint matching the ON CONFLICT specification
+  - option1-unchanged: A planted raw after its capture failed
+  - option1-unchanged: s2 re-capture A, metadata changed, no vector — there is no unique or exclusion constraint matching the ON CONFLICT specification
+  - option1-unchanged: s3 re-capture A identical — there is no unique or exclusion constraint matching the ON CONFLICT specification
+  - option1-unchanged: s4 capture B (2-arg) — there is no unique or exclusion constraint matching the ON CONFLICT specification
+  - option1-unchanged: B planted raw after its capture failed
+  - option1-unchanged: s5 capture C (4-arg, two chunks) — there is no unique or exclusion constraint matching the ON CONFLICT specification
+  - option1-unchanged: C planted raw after its capture failed (2 chunk rows)
+  - option1-unchanged: s15a ingest-records' statement, first write — column "xmax" does not exist
+  - option1-unchanged: s15b ingest-records' statement, rewrite — column "xmax" does not exist
+  - option1-unchanged: s16 capture F (3-arg, actor; kept for the census) — there is no unique or exclusion constraint matching the ON CONFLICT specification
+  - option1-unchanged: s18 capture H (2-arg, "metadata": null in the payload) — there is no unique or exclusion constraint matching the ON CONFLICT specification
+  - option1-unchanged: s17c a hand-set ob1.event, an identical 2-arg re-capture, then a raw INSERT — there is no unique or exclusion constraint matching the ON CONFLICT specification
+  - option1-unchanged: s19 capture I (3-arg, actor, event: stance, cites, valid window, trust) — there is no unique or exclusion constraint matching the ON CONFLICT specification
+  - option1-unchanged: s20 update I (10-arg) with an event claiming an actor_kind the key does not support — invalid input syntax for type uuid: ""
+  - option1-unchanged: s21 raw UPDATE thoughts SET content on F (the key left stale) — invalid input syntax for type uuid: ""
+  - option1: s15a ingest-records' statement, first write — column "xmax" does not exist
+  - option1: s15b ingest-records' statement, rewrite — column "xmax" does not exist
+  - option2 / option1: a vector arriving on a row that already has one is a projection refresh — no event, and updated_at is left as it was (053 bumps it through update_thought); the vector's own time is ob1_embedding_snapshot.taken_at
+
+Recommendation: option2 — option 2 — table stays, functions append then project: an empty contributor delta; the only GO option
+```
+
+### What it says
+
+**Option 2 is GO, with an empty contributor delta.** Every scripted write
+returns what 046 returns; the log and the rows equal the baseline's for the
+same writes — the rows on their eight caller-visible columns (content, key,
+the metadata and its JSON type, provenance, the vector's presence and label;
+no id, no stamp), the events on every column — stance, cites, the window,
+the context's claim included — outside the prototype's three additions (the
+content and a backdating writer's `created_at` on a capture, the key's move
+on an update); the three
+behaviours hold with the same locks in the same order; one
+audit row and one claim per logical write; a capture is visible to a `SELECT`
+and to the keyword search in the same session with no delay, and the control
+shows the row exists only once the projector has run; the whole log replays
+into rows equal to their copy on every column — content, key, metadata,
+provenance, `created_at`, `updated_at`, the vector from the snapshot and its
+label — the one difference the raw rows' key, NULL before (003's rule lives in
+the functions) and filled after. Two things the replay did not meet, said:
+the wipe cascades through the foreign keys, so the rows were rebuilt into a
+database with no chunks, claims or citations, and a replayed tombstone runs
+in detach mode (the delete happened; 042's guard would otherwise refuse a
+thought that was cited when it went). The cost is the round trip: medians
+between 0.5 and 1.9 ms in a laptop container, the ratio moving between ×0.65
+and ×1.8 across the fourteen timed runs the review passes made, plus one edit
+run at ×3 under load — the noise exceeds the effect; C13 informs and gates
+nothing.
+
+**Option 1 is NO-GO twice.** With 053's functions unchanged, every capture
+fails — `INSERT … ON CONFLICT` has no unique constraint to name on a view —
+while `update_thought` and `delete_thought` through the INSTEAD OF triggers
+work (measured on rows planted raw after the captures failed), so the view
+cannot be a transparent move even before the community surface is asked. With
+option 2's functions pointed at the base table, the functions work through the
+view and so does a raw insert (which gains 003's key on the way), but C6 fails
+whole: `ADD COLUMN` and `CREATE INDEX` are "not supported for views", a
+`REFERENCES` finds "not a table", a row trigger "is a view" — and
+ingest-records' `xmax` "does not exist" (a view has no system columns). Three
+community schema files run `ALTER TABLE thoughts ADD COLUMN`, two run five
+`CREATE INDEX ON thoughts`, six `REFERENCES public.thoughts(id)` stand in
+four, one row trigger:
+the view breaks all of them, and no in-tree rewrite can reach them. Row
+locks do work through the simple view, so the functions' lock order was never
+the obstacle; the DDL surface is. Option 3 shares that surface.
+
+**053 as it stands** passes everything but C1's last clause — the capture
+event carries no content — and cannot be replayed at all (C12 N/A): SMD-1998's
+finding, measured again from the other side.
+
+**Two consequences the run found that the design must own.** A projected
+write CASCADES: a tombstone's `ON DELETE SET NULL` (025) writes every
+successor's pointer and 042's guard bumps a citing thought's stamp, all under
+the delete's projection, so the check needs a rule for the rows an event
+moves that it does not name — live, the successor's move is appended as its
+own update event (as 046 does today); on a replay it is skipped, since the
+log already holds that event and will replay it, and the check compares the
+event's AFTER image rather than its before/after pair so a cascade that
+applied part of a later event first still verifies. And "no event, no write":
+an identical re-capture leaves `updated_at` as it was where 053's `ON
+CONFLICT DO UPDATE` bumps it, and a vector arriving on a row that has one is
+a projection refresh whose stamp the log cannot replay, so it leaves
+`updated_at` alone where 053's re-embed bumps it (and reads today as a change
+to a caller's `if_unchanged_since`). Both were named in the plan; both are
+for SMD-1997 to accept or reverse.
+
+**Named deltas the differential cannot show** (the first review pass read the
+bodies against 046 line by line): `update_thought`'s `if_unchanged_since`
+predicate lived in the UPDATE's own WHERE with a `STALE_READ` lost-race arm —
+unreachable under the row lock taken first, by 046's own argument, but a
+documented refusal path that the option-2 body no longer has; the 2-argument
+`upsert_thought` takes a row lock FOR NO KEY UPDATE that 046's pure `INSERT …
+ON CONFLICT` did not, under the same advisory lock. Defects the two passes
+found in the prototype itself, fixed and now probed: the three functions had
+stopped clearing `ob1.event`, 046's rule against a raw write inheriting an
+earlier call's stance (s17 sets one by hand and checks the raw insert after a
+function call carries none; s17b and s17c do it after a call that projects
+nothing, so each body's own clear is exercised); option 1's INSTEAD OF UPDATE
+dropped a same-text re-embed's vector and label as "no event" (the row image
+after s11 shows the label) and dropped the vector on a raw content edit by
+passing NULL for "unchanged" (the check now holds the vector's presence to
+the event on a live write); a raw writer's backdated `created_at` was not in
+the capture event, so an ingested record would have been rebuilt at the
+write's clock (the third addition; the ingest step is backdated to 2024 and
+replays equal); and the projector would have replayed a raw content edit's
+stale key into a corrected one — the log is faithful now, a key the event
+does not move stays, a vector the event does not flip stays unless the
+snapshot holds one for the new text (s21 leaves F's key stale live, and the
+replay leaves it too).
+
+**The migration path** the ticket asked for, from the prototype's parts: (1)
+the capture event carries content and the diff rule, the append and the
+stamp become functions — additive, 046-shaped; (2) the three write functions
+append then project and the trigger checks under `ob1.projecting`, appending
+otherwise — dual-write, the log complete for every function-borne write from
+that day, a vendored contributor changing nothing; (3) the projector is the
+only writer of the row for the in-tree paths, a raw write still trigger-
+audited, and the rebuild is the replay. `thought_changes` (052) can then read
+a capture's head from the event rather than the row. Preflight's recognisers
+and test-schema's sentinel reads pin the current bodies and move with them.
+
+Not built here: the production projector, a migration, `thought_changes`
+reading the event, the raw in-tree writers (`review_supersession_proposal`,
+the backfills, the guard's bump — trigger-audited as today), the chunk rows.
+The record is `changes/smd-1999.md`.
+
+## The typed-decision tier beside Ollama, and the entity gate run against it (SMD-2050)
+
+SMD-2050 stood up a typed-decision tier (`jev/`, `server-portable/jev.ts`) for
+seven spikes that each assumed one. Its Verify asked two things only a running
+box answers: what the tier costs beside the embedder and the metadata model,
+and whether a consumer spike runs against it with no serving code of its own.
+
+**Beside Ollama** — `eval-jev-coload.ts`. On the dogfood Mac (M5 Pro, 64 GB),
+host Ollama with `OLLAMA_MAX_LOADED_MODELS=2`, `OLLAMA_NUM_PARALLEL=3` (read
+from Ollama's own process), both models resident (`qwen2.5:7b` 9.9 GB,
+`qwen3-embedding:4b` 9.3 GB), the tier as a host process (`bun jev/serve.ts`,
+4 threads). Alone, 30 embeddings, 10 chat completions and 30 decisions in
+turn; together, the three loops to one shared deadline as long as the alone
+phase took (about 2.5 s), so they overlap throughout — with chat's 15 samples
+there, its p95 is its maximum:
+
+| call | alone: calls, p50 / p95 | beside the other two: calls, p50 / p95 | p50 ratio |
+| --- | --- | --- | --- |
+| embedding | 30, 24 / 27 ms | 65, 39 / 43 ms | 1.6× |
+| chat, 16 tokens | 10, 118 / 121 ms | 15, 176 / 188 ms | 1.5× |
+| decision | 30, 21 / 23 ms | 92, 28 / 31 ms | 1.3× |
+
+The warm-up loaded nothing, and no Ollama model was evicted or reloaded: both
+of its runners (`llama-server`) kept their pids and start times across the run.
+The tier is its own process, outside the scheduler `OLLAMA_MAX_LOADED_MODELS`
+governs; its footprint was 944 → 953 MB with 12.2 → 12.1 GB free in the table's
+run, 942–953 MB over two (macOS `footprint`, which counts the compressed pages
+`ps`'s resident set leaves out: an earlier run's `ps` read 536–622 MB). The
+cost is contention, not memory. What
+this does not test, and the run says so: past a warm-up load, no model load was
+requested and no memory pressure applied — Ollama evicts on a load, which the
+tier never makes — so it shows the tier causes no eviction by being there, not
+what a box short of memory would do.
+
+```sh
+OB1_JEV_BASE_URL=http://127.0.0.1:8020 OB1_JEV_LOCAL=1 \
+  bun eval-jev-coload.ts --n 30 --jev-pid <tier pid>
+```
+
+It warms and uses the host's Ollama, so it slows a brain sharing it for the
+few seconds it runs, and longer if the warm-up has a model to load.
+
+**SMD-1937's gate, end to end** — `eval-jev-gate.ts`. Candidates from a brain's
+own entity graph in one read-only transaction — `bad` (names `^[0-9.:]+$`,
+SMD-1935's rule: a strong label), `positive` (tools, projects, organizations in
+≥ 5 thoughts: a weak label) and the `person`/`place` layer (no label) — each
+with a window of the first thought naming it, sent through the client and
+nothing else, under its own thought's metadata (so an egress policy's
+source/type/topic terms apply row by row, a refused row counted and left out);
+at most `--per-cohort` (60) of each, the most mentioned. The dogfood brain's
+Postgres is not published, so the run is a one-off container
+on the stack's network, the tier on the host (reached through the podman
+machine's `host.containers.internal`):
+
+```sh
+podman run --rm --network open-brain_default --env-file deploy/.env \
+  -e OB1_JEV_BASE_URL=http://host.containers.internal:8020 -e OB1_JEV_LOCAL=1 \
+  -v "$PWD":/repo:ro -w /repo/evals oven/bun:1.4.0-alpine sh -c \
+  'export DATABASE_URL="postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/openbrain"; exec bun eval-jev-gate.ts'
+```
+
+On the dogfood brain (2,420 entities):
+
+| arm | rejects `bad` | rejects `positive` (weak) |
+| --- | --- | --- |
+| baseline `^[0-9.:]+$` | 100.0% | 0.0% |
+| tier, binary validity (p < 0.5 or abstained) | 18.3% | 18.3% |
+| tier, choice → number, generic or abstained | 15.0% | 3.3% |
+
+149 candidates in 23 s, 75 ms p50 a decision container-to-host. The number is
+negative: P(named entity) does not separate a migration number from a tool on
+this graph (AUROC 0.509; medians 0.555 and 0.568), and the choice kept the
+extractor's type for 37% of positives and for none of the 29 persons and
+places left once the 11 numeric-named ones fall to `bad` — a person's full
+name typed as a project. It is one framing on Verdict v1.4, whose
+open-domain hard tier is 37% (jev/README.md, "Conformance"); which framing, which
+calibration and which model (SemIf, SMD-2052) is SMD-1937's measurement to make
+on this harness. What the run shows is the Verify bullet: the spike ran against
+the tier with no serving code of its own.
+
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform
+- `../docs/event-log-as-truth.md` — the decision the two gate sections above (SMD-1998, SMD-1999) opened: the event log as the source of truth, the `thoughts` row its projection (SMD-1997)
 - `../db/config.mjs` — `KNOWN_MODEL_DIMS`, so a model/width mismatch is caught

@@ -6,7 +6,7 @@ Primitives are reusable concept guides that show up in multiple extensions. Lear
 
 | Primitive | What It Teaches | Used By |
 | --------- | --------------- | ------- |
-| [Deploy an Edge Function](deploy-edge-function/) | Deploying any extension as a Supabase Edge Function | All extensions |
+| [Run a Remote MCP Server](deploy-remote-mcp/) | Running any extension server under Bun, behind HTTPS | All extensions |
 | [Remote MCP Connection](remote-mcp/) | Connecting to Claude Desktop, ChatGPT, Claude Code, Cursor, and other clients | All extensions |
 | [Common Troubleshooting](troubleshooting/) | Solutions for connection, deployment, and database issues | All extensions |
 | [Row Level Security](rls/) | PostgreSQL policies for multi-user data isolation | Extensions 4, 5, 6 |

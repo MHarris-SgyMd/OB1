@@ -36,7 +36,7 @@ The machine-readable schema for that bundle lives in [context-profile.schema.jso
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
 - Existing core Open Brain connector with `search_thoughts` and `capture_thought`
 - AI client that supports reusable skills or prompt packs
-- Supabase CLI installed and linked to your project
+- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/))
 - Canonical [Work Operating Model skill](../../skills/work-operating-model/)
 - Optional source material to import: existing AI memory, exported notes, Obsidian vault content, Notion exports, text files, or similar context sources
 
@@ -49,8 +49,7 @@ BRING YOUR OWN CONTEXT -- CREDENTIAL TRACKER
 --------------------------------------------
 
 FROM YOUR OPEN BRAIN SETUP
-  Project URL:                ____________
-  Project ref:                ____________
+  Postgres URL:               ____________  (SUPABASE_URL — the shim's name for it)
   MCP Access Key:             ____________
   Core connector available:   yes / no
   Core search tool visible:   yes / no
@@ -59,7 +58,7 @@ FROM YOUR OPEN BRAIN SETUP
 GENERATED DURING SETUP
   Prompt source used:         memory / import / both
   DEFAULT_USER_ID:            ____________
-  Function URL:               ____________
+  MCP Server URL:             ____________
   MCP Connection URL:         ____________
   Latest session ID:          ____________
   Current profile version:    ____________
@@ -122,7 +121,7 @@ BYOC reuses the [Work Operating Model Activation](../work-operating-model-activa
 
 ### 4.1 Run the schema
 
-Run [`recipes/work-operating-model-activation/schema.sql`](../work-operating-model-activation/schema.sql) in the Supabase SQL Editor.
+Run [`recipes/work-operating-model-activation/schema.sql`](../work-operating-model-activation/schema.sql) against your brain's database — `psql "$DATABASE_URL" -f recipes/work-operating-model-activation/schema.sql`.
 
 ### 4.2 Generate a Default User ID
 
@@ -130,34 +129,25 @@ Run [`recipes/work-operating-model-activation/schema.sql`](../work-operating-mod
 uuidgen | tr '[:upper:]' '[:lower:]'
 ```
 
-Then set it as a secret:
+It goes on the server's run command as `DEFAULT_USER_ID`.
 
-```bash
-supabase secrets set DEFAULT_USER_ID=your-generated-uuid
-```
+### 4.3 Run the Server
 
-### 4.3 Deploy the Function
-
-Use the [Deploy an Edge Function](../../primitives/deploy-edge-function/) pattern with these values:
-
-| Setting | Value |
-| ------- | ----- |
-| Function name | `work-operating-model-mcp` |
-| Download path | `recipes/work-operating-model-activation` |
+Run the Work Operating Model server as [its README's Step 4](../work-operating-model-activation/README.md#4-run-the-mcp-server) shows — `PORT=8787 … bun recipes/work-operating-model-activation/index.ts` with `DEFAULT_USER_ID` and `MCP_ACCESS_KEYS` in its environment ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the steps). Your **MCP Server URL** is `http://your-host:8787/mcp`; a hosted connector needs the HTTPS form.
 
 ### 4.4 Connect It to Your AI Client
 
 URL-based connector example:
 
 ```text
-https://YOUR_PROJECT_REF.supabase.co/functions/v1/work-operating-model-mcp?key=your-access-key
+https://your-host/mcp?key=your-access-key
 ```
 
 Header-based connector example for Claude Code:
 
 ```bash
 claude mcp add --transport http work-operating-model \
-  https://YOUR_PROJECT_REF.supabase.co/functions/v1/work-operating-model-mcp \
+  http://127.0.0.1:8787/mcp \
   --header "x-access-key: your-access-key"
 ```
 

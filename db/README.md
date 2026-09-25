@@ -217,6 +217,14 @@ the brain, or a brain has run past its version's range. Both are introduced by a
 fragment or a cut rather than a hand-numbered change, so they are named here by
 their ticket (FORK.md's "Versioning" and "Cutting a release", SMD-1804, SMD-1860).
 
+The decision that `thought_audit` is the write-side source of truth and the
+`thoughts` row its projection — the write functions appending the event first
+and one projector writing the row, the audit trigger becoming the check, the
+table kept for the community's DDL — is `../docs/event-log-as-truth.md`
+(SMD-1997). Its three steps are filed (SMD-2115, SMD-2116, SMD-2117) and none
+has landed: at 053 the row is still written first and the trigger derives the
+event from it, as the paragraphs below describe.
+
 Migration 046 makes `thought_audit` the log of record (SMD-1730): eight columns
 beside 008's and 010's — `actor_kind` and `trust` (who holds the key, and the
 ceiling on the content: `operator | agent | ingested`), `origin` (the door — the

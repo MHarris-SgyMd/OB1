@@ -1,6 +1,6 @@
 {
   "name": "Agent Memory API",
-  "description": "Runtime-neutral Supabase Edge Function for OB1 Agent Memory recall, write-back, review, inspection, and recall traces.",
+  "description": "Runtime-neutral HTTP API, one process under Bun, for OB1 Agent Memory recall, write-back, review, inspection, and recall traces.",
   "category": "integrations",
   "author": {
     "name": "Nate Jones Team",
@@ -10,7 +10,7 @@
   "requires": {
     "open_brain": true,
     "services": ["OpenRouter"],
-    "tools": ["Supabase CLI"]
+    "tools": ["Bun 1.4+"]
   },
   "tags": ["agent-memory", "api", "recall", "writeback", "openclaw"],
   "difficulty": "advanced",

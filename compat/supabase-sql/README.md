@@ -48,7 +48,7 @@ than at the first query.
 
 ### 3. Run a migrated server under Bun
 
-A migrated server was written as a Supabase Edge Function — `Deno.env.get` for its
+A migrated server was written for upstream's Edge Function host — `Deno.env.get` for its
 environment, `Deno.serve` at the end — and the shim imports `bun`, so until
 SMD-1799 such a file also took `compat/deno-on-bun.ts`, a polyfill for those two
 members, as its first import (SMD-1480, FORK.md change 74). The servers are

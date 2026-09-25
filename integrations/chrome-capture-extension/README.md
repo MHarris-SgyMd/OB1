@@ -10,7 +10,7 @@
 
 A client-side Chrome (or Chromium-based browser) extension that sits on top of Claude.ai, chatgpt.com, and gemini.google.com. When you finish an interesting exchange, click the extension icon and the extension extracts the latest user + assistant turn from the page DOM, runs local sensitivity and duplicate filters, and POSTs the result to your Open Brain REST API gateway. It also supports bulk backfill from Claude and ChatGPT using their internal conversation APIs so you can import your existing chat history in one pass.
 
-This is a **client-side** integration — unlike the other integrations in this repo (Slack, Discord, email capture) which deploy as Supabase Edge Functions, a Chrome extension runs entirely in the user's browser. It does **not** register as an MCP server. All it does is call the REST API gateway's `/ingest` endpoint with standard `x-brain-key` auth. Every user installs it locally against their own Open Brain.
+This is a **client-side** integration — unlike the other integrations in this repo (Slack, Discord, email capture) which run as servers under Bun, a Chrome extension runs entirely in the user's browser. It does **not** register as an MCP server. All it does is call the REST API gateway's `/ingest` endpoint with standard `x-brain-key` auth. Every user installs it locally against their own Open Brain.
 
 ## Screenshots
 
@@ -38,8 +38,8 @@ CHROME CAPTURE EXTENSION -- CREDENTIAL TRACKER
 
 FROM YOUR OPEN BRAIN SETUP
   REST API base URL:     ____________
-    (Supabase example: https://YOUR_PROJECT_REF.supabase.co/functions/v1
-     Self-hosted example: https://brain.example.com)
+    (e.g. https://brain.example.com — the HTTPS proxy in front of the gateway,
+     or http://127.0.0.1:8787 for a gateway on this machine)
   x-brain-key API key:   ____________
 
 BROWSER INFO
@@ -63,8 +63,8 @@ BROWSER INFO
 The extension ships with **no hardcoded server URLs**. On first install it opens `popup/config.html` and asks for two things:
 
 1. **Open Brain REST API URL** — the base URL of your REST API gateway. Examples:
-   - Supabase-hosted: `https://your-project-ref.supabase.co/functions/v1`
-   - Self-hosted: `https://brain.example.com`
+   - On this machine: `http://127.0.0.1:8787`
+   - Hosted: `https://brain.example.com` (the HTTPS proxy in front of the gateway)
 2. **API Key** — the `x-brain-key` (`MCP_ACCESS_KEY`) you configured when deploying the REST API integration
 
 When you click **Save & Grant Permission**, Chrome shows a native permission prompt asking whether the extension may access the specific origin you entered. Approve it. This is a one-time grant — Chrome remembers it and the extension can now talk to your Open Brain without asking again. You can revoke the grant any time from `chrome://extensions → Open Brain Capture → Details → Site access`.
@@ -119,7 +119,7 @@ Switch to the Sync tab and click **Sync All** under the platform you want to imp
 ┌──────────────────────────┐
 │ Open Brain REST API      │
 │ /open-brain-rest/ingest  │
-│ (Supabase Edge Function) │
+│ (one server under Bun)   │
 └──────────────────────────┘
 ```
 

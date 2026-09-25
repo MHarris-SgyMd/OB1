@@ -21,8 +21,8 @@ This schema adds sidecar tables that let Open Brain store agent-created operatio
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- Supabase project with the core `thoughts` table
-- The core dedupe setup from Step 2.6 is recommended
+- A Postgres with the core `thoughts` table — the fork's stack, or a Supabase project
+- The core dedupe setup (`db/migrations/003`–`005`, applied by the core setup) is recommended
 
 ## Credential Tracker
 
@@ -84,4 +84,4 @@ Solution: Run the core Open Brain setup first.
 Solution: This is usually correct. `can_use_as_instruction` is only allowed for `user_confirmed` or `imported` memory.
 
 **Issue: API cannot read tables**
-Solution: Re-run the GRANT section at the bottom of `schema.sql` and redeploy the Edge Function so PostgREST reloads the schema cache.
+Solution: Re-run the GRANT section at the bottom of `schema.sql` as the table owner; it takes effect on the next request — no restart.
