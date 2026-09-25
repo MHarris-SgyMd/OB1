@@ -74,8 +74,8 @@ export const activepieces: Adapter = {
     // On first boot the piece catalogue arrives from Activepieces' cloud after
     // the API already answers — about 12,800 piece versions written to its
     // database in the background — and a connection for a piece the server does
-    // not yet know is refused (404 piece_metadata_not_found). Of nine fresh
-    // boots behind this wait, the pieces appeared within it once; eight times
+    // not yet know is refused (404 piece_metadata_not_found). Of ten fresh
+    // boots behind this wait, the pieces appeared within it once; nine times
     // they stayed 404 (once watched for 300 s with the rows already in
     // piece_metadata) until a restart rebuilt the server's index from the
     // database. So: wait, and restart once if needed.
@@ -131,6 +131,15 @@ export const activepieces: Adapter = {
     const record = await api("GET", `/v1/flow-runs/${run[1]}`, undefined, s.token);
     const iterations: any[] = record.steps?.step_3?.output?.iterations ?? [];
     return iterations.filter((i) => i?.step_4?.status === "SUCCEEDED").length;
+  },
+  async scheduledRuns(env, since) {
+    // The schedule runs the published flow in PRODUCTION; ap_test_flow's runs
+    // are TESTING, so the environment separates the two.
+    const s = await session(env);
+    const id = (await flowsByName(s)).get(INGEST);
+    if (!id) return 0;
+    const page = await api("GET", `/v1/flow-runs?projectId=${s.projectId}&flowId=${id}&status=SUCCEEDED&limit=100&createdAfter=${encodeURIComponent(since)}`, undefined, s.token);
+    return (page.data as any[]).filter((r) => r.environment === "PRODUCTION" && r.created >= since).length;
   },
   async mcpServer(env) {
     return mcpEndpoint(await session(env));

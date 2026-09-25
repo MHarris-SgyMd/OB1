@@ -4,7 +4,7 @@
  * the ticket before any of them ran.
  *
  *   bun eval-orchestration.ts --up <tool>        # brain + candidate, provisioned headlessly
- *   bun eval-orchestration.ts --verify <tool> [--json]
+ *   bun eval-orchestration.ts --verify <tool> [--json] [--wait-schedule]
  *   bun eval-orchestration.ts --down <tool>      # removes the project's containers AND volumes
  *
  * <tool> is one of n8n | activepieces | windmill. Each runs as its own compose
@@ -24,6 +24,9 @@
  *       workflow passed as "+0, +0" on a re-verify); the record makes the second
  *       (review pass 2: a skipped second run passed as a dedup's "+0"). A run
  *       that throws is a FAIL row, not an abort.
+ *   C1s with --wait-schedule: those runs were on-demand, so the verifier then
+ *       waits (up to 16 min, the schedule is every 15) for a run the SCHEDULE
+ *       started since the verify began to succeed, by the tool's run history.
  *   C2  capture: those rows' writer is `orch-capture`, a CAPTURE-scope record
  *       in MCP_ACCESS_KEYS, carried by the TOOL's own MCP client — as the
  *       criteria were posted; a script of ours standing in where the tool has
@@ -57,7 +60,7 @@ const WRITER = "orch-capture";
 type Check = { id: string; pass: boolean; detail: string };
 
 function usage(msg: string): never {
-  console.error(`${msg}\nusage: bun eval-orchestration.ts --up|--verify|--down <${Object.keys(ADAPTERS).join("|")}> [--json]`);
+  console.error(`${msg}\nusage: bun eval-orchestration.ts --up|--verify|--down <${Object.keys(ADAPTERS).join("|")}> [--json] [--wait-schedule]`);
   process.exit(2);
 }
 
@@ -66,6 +69,9 @@ const mode = ["--up", "--verify", "--down"].find((m) => args.includes(m)) ?? usa
 const tool = args[args.indexOf(mode) + 1] ?? usage("no tool");
 const adapter = ADAPTERS[tool] ?? usage(`unknown tool ${tool}`);
 const json = args.includes("--json");
+const waitSchedule = args.includes("--wait-schedule");
+/** A 15-minute schedule, and a minute for the run itself. */
+const SCHEDULE_WAIT_MS = 16 * 60_000;
 
 loadEnv();
 const env: Record<string, string> = { ...ensureEnv(), LINEAR_API_KEY: process.env.LINEAR_API_KEY ?? "" };
@@ -120,6 +126,7 @@ async function ingest(): Promise<{ answered: number; after: { rows: number; ids:
 
 async function verify(): Promise<void> {
   const checks: Check[] = [];
+  const startedAt = new Date().toISOString();
   const idle = memoryByContainer(tool);
   const cleared = reset();
   const before = written();
@@ -178,6 +185,16 @@ async function verify(): Promise<void> {
     pass: searchOk && actOk && anon.refused && wrong.refused,
     detail: `tools [${names.join(", ")}]${listed instanceof Error ? ` (${(listed as Error).message.slice(0, 120)})` : ""}; search ${searchOk ? "ok" : `FAIL ${search.text.slice(0, 160)}`}; act ${actOk ? "ok" : `FAIL ${act.text.slice(0, 160)}`}; no key → ${anon.refused ? "refused" : "NOT REFUSED"} (${anon.detail}); wrong key → ${wrong.refused ? "refused" : "NOT REFUSED"} (${wrong.detail})`,
   });
+
+  // C1's schedule half: the on-demand runs above say nothing about whether the
+  // schedule fires. With --wait-schedule, wait for a run the schedule started
+  // since this verify began to succeed, by the tool's own run history.
+  if (waitSchedule) {
+    let fired = 0;
+    const t0 = Date.now();
+    await waitFor("a scheduled run", async () => (fired = await adapter.scheduledRuns(env, startedAt)) > 0, SCHEDULE_WAIT_MS, 30_000).catch(() => {});
+    checks.push({ id: "C1s", pass: fired > 0, detail: fired > 0 ? `${fired} scheduled run(s) succeeded since the verify began, the first seen after ${Math.round((Date.now() - t0) / 1000)} s of waiting` : `no scheduled run succeeded in ${SCHEDULE_WAIT_MS / 60_000} min` });
+  }
 
   const busy = memoryByContainer(tool);
   const size = run(["docker", "image", "inspect", adapter.image, "--format", "{{.Size}}"]).out.trim();

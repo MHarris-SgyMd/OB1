@@ -5341,18 +5341,18 @@ reach the throwaway brain; a knob for one run (`ORCH_AP_PIECES_SYNC_MODE`) goes
 in `orchestration/.env`. `--up` onto an existing project skips what already
 exists: after editing a workflow file, `--down` first.
 
-**The result — n8n and Activepieces pass the POC; Windmill passes C1, C3 and C4
-but not C2**, because the criteria posted before the run ask for the capture to
+**The result — n8n and Activepieces pass the POC; Windmill passes C1, C1s, C3
+and C4 but not C2**, because the criteria posted before the run ask for the capture to
 go through the tool's own MCP client and Windmill has none outside an AI-agent
 step (below). One clean cycle each, 2026-09-25, on the dogfood Mac: the podman
 VM, 8 vCPU, 14.9 GiB; the host's Ollama serving nothing else during the runs
 recorded:
 
-| candidate | C1: run 1 / run 2 (answered by the tool, rows added) | C2: what carried the capture | C3: the endpoint's tools | C3: no key / wrong key |
-| --- | --- | --- | --- | --- |
-| n8n 2.40.6 | PASS: 10, +10 (10 issues) in 31.6 s / 10, +0 | PASS: n8n's MCP Client node | `linear_issue`, `brain_search_thoughts` | PASS: 403 / 403 |
-| activepieces 0.91.3 | PASS: 10, +10 (10 issues) in 22.3 s / 10, +0 | PASS: the MCP Client piece's call-tool action | `linear_issue_lr4n_e9jtph_mcp`, `brain_search_u9lc_n2srby_mcp` + 42 `ap_*` | PASS: 401 / 401 |
-| windmill CE v1.817.0 | PASS: 10, +10 (10 issues) in 20.9 s / 10, +0 | FAIL: a script of ours importing the MCP SDK (Windmill has no MCP-client step) | `s-f_ob1_brain__search`, `s-f_ob1_linear__issue`, `runScriptByPath` | PASS: 401 / 401 |
+| candidate | C1: run 1 / run 2 (answered by the tool, rows added) | C1s: the schedule fired | C2: what carried the capture | C3: the endpoint's tools | C3: no key / wrong key |
+| --- | --- | --- | --- | --- | --- |
+| n8n 2.40.6 | PASS: 10, +10 (10 issues) in 24.7 s / 10, +0 | PASS: seen after 722 s | PASS: n8n's MCP Client node | `linear_issue`, `brain_search_thoughts` | PASS: 403 / 403 |
+| activepieces 0.91.3 | PASS: 10, +10 (10 issues) in 22.4 s / 10, +0 | PASS: seen after 903 s | PASS: the MCP Client piece's call-tool action | `linear_issue_2itn_e8awgw_mcp`, `brain_search_s4yq_n2xh0y_mcp` + 42 `ap_*` | PASS: 401 / 401 |
+| windmill CE v1.817.0 | PASS: 10, +10 (10 issues) in 23.6 s / 10, +0 | PASS: seen after 601 s | FAIL: a script of ours importing the MCP SDK (Windmill has no MCP-client step) | `s-f_ob1_brain__search`, `s-f_ob1_linear__issue`, `runScriptByPath` | PASS: 401 / 401 |
 
 C1: `--verify` first deletes what `orch-capture` wrote (`delete_thought`), then
 runs the ingestion twice. Each run must report ten `capture_thought` calls
@@ -5365,7 +5365,11 @@ the runs lands a second thought (a real sync writes one per edit). The time is
 one run's wall clock, n=1, and is mostly the brain's own embedding and metadata
 calls to Ollama, with each tool's own start-up in front (a second n8n process, an
 Activepieces sign-in and MCP session, a Windmill job pickup) — it does not rank
-the tools. C2: the capture's writer is a capture-scope key and the read's the
+the tools. C1s: those runs were on-demand, so `--wait-schedule` then waits (up to
+16 minutes) for a run the schedule started to succeed, by the tool's own
+history — n8n's executions whose mode is `trigger`, Activepieces' PRODUCTION
+flow runs (`ap_test_flow`'s are TESTING), Windmill's jobs under the schedule's
+path. C2: the capture's writer is a capture-scope key and the read's the
 read key, and the capture must go through the tool's own MCP client; the column
 says what carried it. C3: the endpoint lists both tools, `brain_search` returns
 SMD thoughts, `linear_issue` returns SMD-1863 and an `updatedAt` timestamp as
@@ -5376,8 +5380,10 @@ step below was an API or CLI call.
 
 Memory is `docker stats`' usage per container — the cgroup's, page cache
 included, not a resident set — read when `--verify` starts (after `--up`, and
-after any scheduled run that fired in between) and again after its two
-ingestion runs and MCP calls. The shared Postgres column is the whole
+after any scheduled run that fired in between) and again at its end — after the
+two ingestion runs, the MCP calls and, in these runs, the 16-minute schedule
+wait, so the second reading includes a scheduled run and a quarter hour of
+idling (Windmill's shared Postgres grew over it: its queue lives there). The shared Postgres column is the whole
 container: the candidate's database and the brain's own work together, with no
 brain-only baseline beside it, so it bounds what hosting the candidate costs
 the brain's server rather than isolating it. Image sizes are as podman reports
@@ -5385,9 +5391,9 @@ them.
 
 | candidate | image | candidate: start → after runs | shared Postgres: start → after runs | brain server after |
 | --- | --- | --- | --- | --- |
-| n8n | `docker.io/n8nio/n8n@sha256:9c7871d5cc4fc2565bb905e4df5bf7d6a5a4bf2f4313fb99a2b3fa380f331d7c` (1103 MiB) | 568 → 367 MiB | 52 → 78 MiB | 50 MiB |
-| activepieces | `ghcr.io/activepieces/activepieces@sha256:71184b412cde4cc22fca1dd683744588e68b2d198e21ed3316806d549e31f7a6` (1217 MiB) | 1233 → 1463 MiB | 171 → 193 MiB | 44 MiB |
-| windmill | `ghcr.io/windmill-labs/windmill@sha256:8e54fce496ee000eb99489dc022aadec320c8e726ea7387c674adeea7730f86f` (3795 MiB) | 213 → 186 MiB | 171 → 262 MiB | 38 MiB |
+| n8n | `docker.io/n8nio/n8n@sha256:9c7871d5cc4fc2565bb905e4df5bf7d6a5a4bf2f4313fb99a2b3fa380f331d7c` (1103 MiB) | 770 → 380 MiB | 65 → 90 MiB | 46 MiB |
+| activepieces | `ghcr.io/activepieces/activepieces@sha256:71184b412cde4cc22fca1dd683744588e68b2d198e21ed3316806d549e31f7a6` (1217 MiB) | 1175 → 1133 MiB | 119 → 187 MiB | 43 MiB |
+| windmill | `ghcr.io/windmill-labs/windmill@sha256:8e54fce496ee000eb99489dc022aadec320c8e726ea7387c674adeea7730f86f` (3795 MiB) | 288 → 257 MiB | 167 → 775 MiB | 37 MiB |
 
 **On a busy model server.** A cycle run while another job had the host's Ollama
 swapping a 27B model in and out failed on two of the three: Windmill's script
@@ -5400,20 +5406,40 @@ inherits every capture's latency, and only n8n let the workflow say so.
 
 **What each needed, and what it did that the survey did not say.**
 
-- **n8n 2.40.6** — CLI only: `import:credentials` (it encrypts a plain `data`
-  object with the instance key), `import:workflow`, `publish:workflow`, a
-  restart. The MCP Client node is a normal workflow step (Streamable HTTP, a
-  header credential); the MCP Server Trigger exposes exactly the tool nodes wired
-  to it, behind a static header the operator chooses — so an AI client connects
-  with a URL and a header, the OB1 pattern. A toolkit's tools are prefixed with
-  the node's name (`brain_search_thoughts`). The Linear node lists issues with no
-  filter, only a limit, so the fetch is the HTTP Request node with n8n's stored
-  `linearApi` credential — the tool still holds the key. The CLI's `execute` runs
-  a workflow only from an Execute Workflow Trigger, and beside the running
-  server it needs its own task-broker port. n8n says of the brain's Postgres 16:
-  "outside the supported range and receives compatibility support only. Upgrade
-  to Postgres 17 or newer." 918 node types ship in the image, and the POC used
-  no community node, so nothing it ran needed a package fetched at run time.
+- **n8n 2.40.6** — its public REST API (`/api/v1`: an OpenAPI spec of 92
+  paths ships in the image, versioned, an `X-N8N-API-KEY` header), with one
+  step outside it: a fresh instance has no owner and the public API cannot mint
+  its own key, so the adapter sets the owner up, signs in and mints a key
+  through the internal endpoints the editor uses (`/rest/owner/setup`,
+  `/rest/login`, `/rest/api-keys`) — once, scoped to the eight scopes it calls
+  of the ~90 offered, kept in `orchestration/.env`. Then `POST /credentials`
+  (into the encrypted store; n8n chooses each id, which replaces the
+  placeholder the workflow files reference), `POST /workflows`, and `POST
+  /workflows/{id}/publish` (v1's "activate", now deprecated), which registers
+  the schedule, the webhook and the MCP endpoint without a restart. The public
+  API has no "run now": its `test-runs` paths are the evaluations feature, so
+  an on-demand run is the workflow's own Webhook trigger (header auth,
+  answering when the last node finishes) and what it did is read back from
+  `GET /executions` — the same history `--wait-schedule` reads for a run whose
+  mode is `trigger`. The Linear credential carries n8n's per-credential domain
+  allowlist (`allowedHttpRequestDomains: domains`, `api.linear.app`): pinned to
+  `example.com` instead, the fetch and the lookup both failed with "Domain not
+  allowed: This credential is restricted from accessing api.linear.app"
+  (measured) — a key the tool holds cannot be sent to another host by editing a
+  workflow. The MCP Client node is a normal workflow step
+  (Streamable HTTP, a header credential); the MCP Server Trigger exposes exactly
+  the tool nodes wired to it, behind a static header the operator chooses — so
+  an AI client connects with a URL and a header, the OB1 pattern. A toolkit's
+  tools are prefixed with the node's name (`brain_search_thoughts`). The Linear
+  node lists issues with no filter, only a limit, so the fetch is the HTTP
+  Request node with n8n's stored `linearApi` credential — the tool still holds
+  the key. n8n says of the brain's Postgres 16: "outside the supported range and
+  receives compatibility support only. Upgrade to Postgres 17 or newer." 918
+  node types ship in the image, and the POC used no community node, so nothing
+  it ran needed a package fetched at run time. (The first version of this
+  adapter used n8n's CLI — `import:credentials`, `import:workflow`, `execute`
+  with its printout parsed; the API replaced it after review, since the CLI had
+  already renamed `update:workflow` to `publish:workflow` under it.)
 - **Activepieces 0.91.3** — REST only: the first sign-up becomes the platform
   admin (sign-up is invitation-only after it), three app connections, each flow
   created, `IMPORT_FLOW`ed and `LOCK_AND_PUBLISH`ed. One trigger per flow, so
@@ -5426,7 +5452,7 @@ inherits every capture's latency, and only n8n let the workflow say so.
   first use. On a fresh boot the server can go on refusing a piece whose rows the
   sync has already written — 404 `piece_metadata_not_found` for 300 s with
   11,300 of the rows in place, until a restart rebuilt its index from the
-  database: eight of nine fresh boots here, so the adapter waits 120 s and
+  database: nine of ten fresh boots here, so the adapter waits 120 s and
   restarts once (its `--up` line says when). Measured: with `AP_PIECES_SYNC_MODE=NONE`
   on a fresh stack the catalogue stays empty and provisioning cannot start (every
   piece lookup 404s for 300 s); set after provisioning, the published flows keep
@@ -5474,9 +5500,9 @@ self-hosted n8n users"), so the ingestion source is Linear with an API key, and
 OAuth custody is untested. A live AI session: the verifier is the MCP SDK's
 client over Streamable HTTP, the transport Claude Code speaks. Egress: the
 overlays set each tool's documented telemetry switches, and nothing probed
-what the containers dial — the one egress measurement is Activepieces' sync
-mode above. The schedule: each workflow has one (every 15 minutes) and the
-verifier runs the on-demand path, so a schedule that never fires would pass;
+what the containers dial — the egress measurements are Activepieces' sync mode
+and n8n's credential domain pin, both above. The schedule is checked only with `--wait-schedule` (C1s: up to
+16 minutes for a schedule-started run to succeed, by the tool's own history);
 a scheduled run overlapping a verify was tried (a per-minute schedule, six
 verifies, no flake — its captures dedup), and one committing between the
 reset and the count would read as a FAIL, never a PASS. Load: ten issues, one

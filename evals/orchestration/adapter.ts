@@ -21,6 +21,12 @@ export type Adapter = {
    * skipped outright passed as "+0").
    */
   runIngestion(env: Record<string, string>): Promise<number>;
+  /**
+   * Successful runs of the ingestion workflow that its SCHEDULE started since
+   * `since` (ISO), from the tool's own run history — the on-demand path the
+   * verifier drives says nothing about whether the schedule fires.
+   */
+  scheduledRuns(env: Record<string, string>, since: string): Promise<number>;
   /** The candidate's own MCP endpoint and the header an AI client presents. */
   mcpServer(env: Record<string, string>): Promise<{ url: string; headers: Record<string, string> }>;
   /** What carries the capture to the brain: the tool's own MCP-client step, or a script of ours where it has none. */

@@ -91,6 +91,17 @@ export function ensureEnv(): Record<string, string> {
   return parseEnv(readFileSync(ENV_FILE, "utf8"));
 }
 
+/**
+ * Set one value in orchestration/.env, replacing its line or appending one —
+ * for a secret a candidate mints at provisioning (n8n's API key), which the
+ * next process (`--verify`) must find.
+ */
+export function setEnvValue(key: string, value: string): void {
+  const lines = readFileSync(ENV_FILE, "utf8").split("\n").filter((l) => !l.startsWith(`${key}=`));
+  if (lines.at(-1) === "") lines.pop();
+  writeFileSync(ENV_FILE, [...lines, `${key}=${value}`, ""].join("\n"), { mode: 0o600 });
+}
+
 export const project = (tool: string) => `ob1-orch-${tool}`;
 
 /** `docker compose` with this candidate's project, env file and the two -f files. */

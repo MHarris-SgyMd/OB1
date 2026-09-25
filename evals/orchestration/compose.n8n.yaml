@@ -1,6 +1,6 @@
 # n8n beside a throwaway brain (SMD-1863). An overlay on deploy/compose.yaml:
 #
-#   bun evals/eval-orchestration.ts --up n8n     # writes .env, starts, imports
+#   bun evals/eval-orchestration.ts --up n8n     # writes .env, starts, provisions over the public API
 #
 # Paths below are relative to deploy/, the first -f file's directory, as
 # compose resolves every file's paths. The candidate's state lives in its own
@@ -62,12 +62,12 @@ services:
       N8N_DIAGNOSTICS_CONFIG_FRONTEND: ""
       N8N_DIAGNOSTICS_CONFIG_BACKEND: ""
       # No secret in this block: the Linear key and the brain's two keys reach
-      # n8n's own encrypted credential store through `import:credentials` at
-      # provision time, and a workflow reads none of them from $env.
+      # n8n's own encrypted credential store through the public API's
+      # POST /credentials at provisioning, and a workflow reads none of them
+      # from $env.
       N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"
     volumes:
       - n8n-data:/home/node/.n8n
-      - ../evals/orchestration/n8n:/import:ro
 
 volumes:
   n8n-data:

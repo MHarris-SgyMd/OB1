@@ -101,6 +101,11 @@ export const windmill: Adapter = {
     const result = await api("POST", `/w/${WS}/jobs/run_wait_result/p/f/ob1/linear_ingest`, {}, t);
     return Array.isArray(result?.captured) ? result.captured.length : 0;
   },
+  async scheduledRuns(env, since) {
+    const t = await login(env);
+    const jobs = await api("GET", `/w/${WS}/jobs/completed/list?schedule_path=f/ob1/linear_ingest_every_15m&success=true&created_or_started_after=${encodeURIComponent(since)}&per_page=100`, undefined, t);
+    return Array.isArray(jobs) ? jobs.length : 0;
+  },
   async mcpServer(env) {
     const t = await login(env);
     const token = await api("POST", "/users/tokens/create", {
