@@ -44,7 +44,7 @@ import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, syncIssue, t
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
-import { promote, refresh, refreshToolsReady, replayAndDiff, targetRefusal } from "./tier.ts";
+import { applyDatabaseSettings, databaseSettings, promote, refresh, refreshToolsReady, replayAndDiff, targetRefusal } from "./tier.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -4461,6 +4461,48 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
       process.env.PATH = savedPath;
       rmSync(shimDir, { recursive: true, force: true });
       await sql.unsafe(`DROP DATABASE IF EXISTS ${shimDb} WITH (FORCE)`);
+    }
+
+    // The settings a refresh copies (SMD-2037): pg_dump leaves out what
+    // ALTER DATABASE … SET put on the source (014's HNSW bounds), so refresh
+    // writes them onto --to itself. Two scratch databases: the source with
+    // 014's two bounds, a list setting with quoting to survive, and a mark of
+    // its own; the target with a setting the source lacks and its own mark.
+    const setSrc = "ob1_tier_settings_src", setDst = "ob1_tier_settings_dst";
+    const urlOf = (db: string) => { const u = new URL(URL_!); u.pathname = `/${db}`; return u.toString(); };
+    for (const db of [setSrc, setDst]) { await sql.unsafe(`DROP DATABASE IF EXISTS ${db}`); await sql.unsafe(`CREATE DATABASE ${db}`); }
+    try {
+      for (const db of [setSrc, setDst]) {
+        const s = new SQL({ url: urlOf(db), max: 1 });
+        try { await s`CREATE EXTENSION IF NOT EXISTS vector`; } finally { await s.close(); }
+      }
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET hnsw.max_scan_tuples = 100000`);
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET hnsw.scan_mem_multiplier = 8`);
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET search_path = "$user", public, "Odd ""Schema"", with comma"`);
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET statement_timeout = '5min'`);
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET ob1.refresh_target = 'canary'`);
+      await sql.unsafe(`ALTER DATABASE ${setDst} SET work_mem = '7MB'`);
+      await sql.unsafe(`ALTER DATABASE ${setDst} SET ob1.refresh_target = 'working'`);
+      const rawOf = async (db: string) => { const s = new SQL({ url: urlOf(db), max: 1 }); try { return parseSetConfig((await s.unsafe(DB_LEVEL_SETTINGS_SQL))[0]?.cfg); } finally { await s.close(); } };
+      const srcSql = new SQL({ url: urlOf(setSrc), max: 1 }), dstSql = new SQL({ url: urlOf(setDst), max: 1 });
+      try {
+        const copied = await databaseSettings(srcSql);
+        assert(!("ob1.refresh_target" in copied) && copied["hnsw.max_scan_tuples"] === "100000", `the source's settings are read without its mark (${JSON.stringify(copied)})`);
+        await applyDatabaseSettings(dstSql, copied);
+      } finally { await srcSql.close(); await dstSql.close(); }
+      const [src, dst] = [await rawOf(setSrc), await rawOf(setDst)];
+      const { ["ob1.refresh_target"]: srcMark, ...srcRest } = src;
+      const { ["ob1.refresh_target"]: dstMark, ...dstRest } = dst;
+      assert(JSON.stringify(Object.entries(dstRest).sort()) === JSON.stringify(Object.entries(srcRest).sort()), `the target's database settings now equal the source's, byte for byte — the list setting's quoting included (source ${JSON.stringify(srcRest)}, target ${JSON.stringify(dstRest)})`);
+      assert(!("work_mem" in dst), "a setting the target had and the source lacks is reset");
+      assert(srcMark === "canary" && dstMark === "working", `each keeps its own refresh mark — the source's does not travel (source ${srcMark}, target ${dstMark})`);
+      const fresh = new SQL({ url: urlOf(setDst), max: 1 });
+      try {
+        const [{ tuples }] = await fresh<{ tuples: string }[]>`SELECT current_setting('hnsw.max_scan_tuples') AS tuples FROM (SELECT '[1]'::vector) v`;
+        assert(tuples === "100000", `a new session on the target runs with the source's HNSW bound (got ${tuples})`);
+      } finally { await fresh.close(); }
+    } finally {
+      for (const db of [setSrc, setDst]) await sql.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
     }
 
     // promote's mirror of the same-database guard, the URL respelled.

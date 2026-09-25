@@ -1761,8 +1761,10 @@ bun tier.ts --promote --from <canary-url> --to <stable-url>
 **`--refresh`** takes a faithful whole-database snapshot with `pg_dump | pg_restore`
 (thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
 migration might touch, so a migration meets *all* the real data), resets the target
-and restores into it, then runs `migrate.ts` forward with the merged tree. It is
-destructive to `--to`, so it guards the target three ways.
+and restores into it, copies the source's database-level settings the dump leaves
+out (`ALTER DATABASE … SET` — migration 014's HNSW bounds, SMD-2037), then runs
+`migrate.ts` forward with the merged tree. It is destructive to `--to`, so it
+guards the target three ways.
 
 - **It is not the `--from` database.** The source session is looked up in the
   target's `pg_stat_activity`. Two names for one server are still one server,
@@ -2057,7 +2059,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1625 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 703 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+./with-postgres.sh bun test-live.ts         # 708 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

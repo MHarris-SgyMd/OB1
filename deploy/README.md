@@ -414,13 +414,17 @@ where podman labels by default), the container can read the mounted checkout
 only once it is relabelled: `chcon -Rt container_file_t <checkout>`. The
 script does not relabel it for you.
 
-A refresh does not carry the per-database HNSW settings over (SMD-2037), and a
-server already running on the refreshed database keeps its old pool until it
-is recreated. It does not carry grants either (the restore runs with
-`--no-privileges`), so a server that connects to the copy as a role other than
-`postgres` needs `bun db/migrate.ts --url <copy> --grant <role>` first. Since
-migration 054 a key used recently on stable is not written on its next lookup,
-so a missing grant can surface minutes after a start that looked healthy. The
+The dump carries no database-level settings (`ALTER DATABASE … SET`), so the
+refresh copies `--from`'s onto `--to` itself before migrating it, and resets
+any `--to` has that `--from` lacks, the refresh mark aside (SMD-2037). That is
+how migration 014's HNSW bounds reach the copy: without them a broad filtered
+search on it walks at pgvector's defaults and returns short. A server already
+running on the refreshed database keeps its old pool until it is recreated.
+Grants are not carried either (the restore runs with `--no-privileges`), so a
+server that connects to the copy as a role other than `postgres` needs
+`bun db/migrate.ts --url <copy> --grant <role>` first. Since migration 054 a
+key used recently on stable is not written on its next lookup, so a missing
+grant can surface minutes after a start that looked healthy. The
 canary-beside-the-dogfood standup is SMD-2038.
 
 ## The typed-decision tier

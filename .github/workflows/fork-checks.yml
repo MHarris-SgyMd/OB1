@@ -877,6 +877,14 @@ jobs:
           [ "$STABLE" = "$COPY" ] || { echo "the refreshed copy differs from stable" >&2; exit 1; }
           [ "$(q ob1_tier_ci "SELECT count(embedding) FROM thoughts WHERE content LIKE '%quokka ledger%'")" = 1 ] || { echo "the probe thought or its vector did not arrive" >&2; exit 1; }
           [ "$(q ob1_tier_ci "SELECT value FROM ob1_config WHERE key = 'tier'")" = working ] || { echo "the copy is not stamped tier=working" >&2; exit 1; }
+          # SMD-2037: the dump carries no database-level settings; the refresh
+          # copies them, so the copy walks HNSW under 014's bounds as stable does.
+          SETTINGS="SELECT coalesce(string_agg(c, ',' ORDER BY c), '') FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase, unnest(s.setconfig) c WHERE d.datname = current_database() AND s.setrole = 0 AND c NOT LIKE 'ob1.refresh_target=%'"
+          STABLE_SET="$(q openbrain "$SETTINGS")"
+          COPY_SET="$(q ob1_tier_ci "$SETTINGS")"
+          echo "database settings: stable $STABLE_SET, refreshed $COPY_SET"
+          grep -q 'hnsw.max_scan_tuples=' <<<"$STABLE_SET" || { echo "stable has no HNSW bound to copy (014 seeds one)" >&2; exit 1; }
+          [ "$STABLE_SET" = "$COPY_SET" ] || { echo "the refreshed copy's database settings differ from stable's" >&2; exit 1; }
           ./tier.sh --replay --since 1970-01-01T00:00:00Z --from postgres --to postgres/ob1_tier_ci | tee /tmp/tier-replay.out
           grep -E '^replayed [1-9][0-9]* of ' /tmp/tier-replay.out
           ./tier.sh --diff --since 1970-01-01T00:00:00Z --from postgres --to postgres/ob1_tier_ci | tee /tmp/tier-diff.out

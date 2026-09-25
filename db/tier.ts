@@ -30,7 +30,8 @@
  *
  * --refresh uses pg_dump | pg_restore for a faithful whole-database snapshot
  * (thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
- * migration might touch), then runs migrate.ts against the target. It needs a
+ * migration might touch), copies the source's database-level settings the dump
+ * leaves out (SMD-2037), then runs migrate.ts against the target. It needs a
  * pg_dump / pg_restore whose major version is at least the source server's, AND
  * Bun: no image the stack runs has both, so deploy/tier.sh runs this file in one
  * that does (db/tier.Dockerfile, SMD-2036); a host that runs it directly needs
@@ -59,7 +60,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DB_LEVEL_SETTINGS_SQL, parseSetConfig } from "./config.mjs";
+import { alignVectorSearchPath, DB_LEVEL_SETTINGS_SQL, parseSetConfig } from "./config.mjs";
 import { stampTier, TIERS, type Tier } from "./ingest-records.ts";
 import { parsePgUuidArray } from "../evals/query-log.ts";
 import { embed } from "../evals/lib.ts";
@@ -301,6 +302,74 @@ async function refreshMark(sql: SQL): Promise<string | null> {
 }
 
 /**
+ * Settings Postgres stores as a list of quoted names, so that a value is SQL
+ * list syntax (`"$user", public`) rather than one literal. pg_dump's
+ * variable_is_guc_list_quote names the same six.
+ */
+const LIST_SETTINGS = new Set(["local_preload_libraries", "search_path", "session_preload_libraries", "shared_preload_libraries", "temp_tablespaces", "unix_socket_directories"]);
+const SETTING_NAME = /^[a-z_][a-z0-9_$]*(\.[a-z_][a-z0-9_$]*)*$/i;
+
+/**
+ * The database's own settings (`ALTER DATABASE … SET`, pg_db_role_setting
+ * setrole 0) as name → value, the refresh mark left out. pg_dump without
+ * --create carries none of them, so a refresh copies them from --from onto
+ * --to itself (SMD-2037): migration 014 seeds the HNSW walk's bounds there
+ * once, and a copy without them answers a broad filtered search short.
+ */
+export async function databaseSettings(sql: SQL): Promise<Record<string, string>> {
+  const [row] = await sql.unsafe(DB_LEVEL_SETTINGS_SQL);
+  const { ["ob1.refresh_target"]: _mark, ...settings } = parseSetConfig(row?.cfg);
+  for (const name of Object.keys(settings)) {
+    if (!SETTING_NAME.test(name)) throw new Error(`database setting ${JSON.stringify(name)} is not a name this tool can write back`);
+  }
+  return settings;
+}
+
+/** A list setting's stored value (`"$user", public`) as its elements. */
+function listElements(value: string): string[] {
+  const out: string[] = [];
+  let cur = "", quoted = false, inQuotes = false;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if (inQuotes) {
+      if (ch === '"' && value[i + 1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') inQuotes = false;
+      else cur += ch;
+    } else if (ch === '"') { inQuotes = true; quoted = true; }
+    else if (ch === ",") { out.push(cur); cur = ""; quoted = false; }
+    else if (ch !== " ") cur += ch;
+  }
+  if (cur !== "" || quoted || out.length) out.push(cur);
+  return out;
+}
+
+/**
+ * Make `dst`'s own settings equal `settings`, the refresh mark aside: each one
+ * `dst` has that `settings` lacks is reset, and each in `settings` is set.
+ * pgvector is loaded first, as migration 014's remedy does, so `hnsw.*` are
+ * the library's settings, which a database owner may set, rather than
+ * placeholders only a superuser may.
+ */
+export async function applyDatabaseSettings(dst: SQL, settings: Record<string, string>): Promise<void> {
+  const current = await databaseSettings(dst);
+  const [{ db, vector }] = await dst<{ db: string; vector: boolean }[]>`SELECT current_database() AS db, to_regtype('vector') IS NOT NULL AS vector`;
+  if (!vector) await alignVectorSearchPath(dst);
+  const [{ loadable }] = await dst<{ loadable: boolean }[]>`SELECT to_regtype('vector') IS NOT NULL AS loadable`;
+  if (loadable) await dst`SELECT '[1]'::vector`;
+  const target = `"${db.replaceAll('"', '""')}"`;
+  for (const name of Object.keys(current)) {
+    if (!(name in settings)) await dst.unsafe(`ALTER DATABASE ${target} RESET ${name}`);
+  }
+  for (const [name, value] of Object.entries(settings)) {
+    const elements = LIST_SETTINGS.has(name) ? listElements(value) : null;
+    const rhs = elements === null ? `'${value.replaceAll("'", "''")}'`
+      : elements.length === 0 || (elements.length === 1 && elements[0] === "") ? "''"
+      : elements.map((e) => `"${e.replaceAll('"', '""')}"`).join(", ");
+    await dst.unsafe(`ALTER DATABASE ${target} SET ${name} = ${rhs}`);
+  }
+}
+
+/**
  * Why `target` must not be reset by a refresh, or null when it may. A refresh
  * resets only a database that is plainly a tier or plainly empty:
  *   • marked by an earlier refresh (refreshMark) — whatever its ob1_config
@@ -372,8 +441,10 @@ async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Pr
  *   2. mark the target as a refresh target (refreshMark), then reset its public
  *      schema (the destructive step, guarded by targetRefusal and the loopback check).
  *   3. pg_restore the dump.
- *   4. migrate.ts forward — the point of the canary: a migration meets real data.
- *   5. stamp the tier and this refresh's time in ob1_config.
+ *   4. copy the source's database-level settings (databaseSettings), which the
+ *      dump does not carry — 014's HNSW bounds among them (SMD-2037).
+ *   5. migrate.ts forward — the point of the canary: a migration meets real data.
+ *   6. stamp the tier and this refresh's time in ob1_config.
  * Throws with a plain message on any failed step.
  */
 export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promise<void> {
@@ -383,8 +454,10 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
   const src = new SQL({ url: fromUrl, max: 1 });
   const target = new SQL({ url: toUrl, max: 1 });
   let serverMaj: number;
+  let settings: Record<string, string>;
   try {
     serverMaj = await serverMajor(src);
+    settings = await databaseSettings(src);
     // The reset below drops --to's schema, so --to must be neither the source
     // nor the record. The loopback guard covers neither — deploy/tier.sh sets
     // OB1_ALLOW_REMOTE_DB, since from its container every database is remote —
@@ -448,6 +521,17 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     // present, so proceed — but show the warnings rather than swallow them, so a
     // partial restore is not silent.
     if (restored.code !== 0 && restored.err.trim()) console.error(`pg_restore warnings (exit ${restored.code}):\n${restored.err.trim()}`);
+
+    // Before the migration, so a migration that reads a setting sees the
+    // source's; each later session on --to — migrate.ts's, the server's — does.
+    const settle = new SQL({ url: toUrl, max: 1 });
+    try {
+      await applyDatabaseSettings(settle, settings);
+    } catch (e) {
+      throw new Error(`copying --from's database settings onto --to failed: ${(e as Error).message}. --to is restored and still marked, so re-run the refresh once that is fixed.`);
+    } finally {
+      await settle.close();
+    }
 
     const migrated = await run(["bun", join(HERE, "migrate.ts"), "--url", toUrl], { stdio: "inherit" });
     if (migrated.code !== 0) throw new Error(`migrate.ts failed on the refreshed target (exit ${migrated.code})`);
