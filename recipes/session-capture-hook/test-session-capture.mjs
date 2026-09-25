@@ -506,7 +506,7 @@ let episodesLines;
   assert(/^refused — the summary for session s-one-sec carries what looks like a secret \(credential assignment[^)]*\); nothing sent\./.test(prepare({ session_id: "s-one-sec", transcript_path: join(TMP, "one-secret.jsonl"), hook_event_name: "SessionEnd" }, { onSecret: "refuse" }).message), "…while a session of one episode is refused in the words it always was");
   // Under redact (the default, SMD-2127): the episode's secret is blanked and all four are prepared; the episode's payload alone records a redaction.
   const secRed = prepare({ session_id: "s-ep-sec-red", transcript_path: join(TMP, "episodes-secret.jsonl"), hook_event_name: "SessionEnd" });
-  assert(secRed.code === 0 && secRed.payloadPaths.length === 4 && /^prepared: session s-ep-sec-red, episodes 1, 2, 3, 4 of 4 — 1: 2 prompt\(s\), 1 source id\(s\); 2: 2 prompt\(s\), 3 source id\(s\), redacted: credential assignment, high-entropy token at char \d+ in a prompt; 3: /.test(secRed.message) && !/abcdefghijklmnop/.test(secRed.message),
+  assert(secRed.code === 0 && secRed.payloadPaths.length === 4 && /^prepared: session s-ep-sec-red, episodes 1, 2, 3, 4 of 4 — 1: 2 prompt\(s\), 1 source id\(s\); 2: 2 prompt\(s\), 3 source id\(s\), redacted: credential assignment, high-entropy token at char \d+ in prompt 2; 3: /.test(secRed.message) && !/abcdefghijklmnop/.test(secRed.message),
     `under redact the episode's secret is blanked and all four prepared, the message saying which episode, what and where (${secRed.message.slice(0, 200)})`);
   const secBodies = secRed.payloadPaths.map((p) => JSON.parse(readFileSync(p, "utf8")));
   assert(/MCP_ACCESS_KEY=\[redacted:credential assignment, high-entropy token\] was the key/.test(secBodies[1]?.text ?? "") && secBodies[1]?.redactions?.length === 1 && [0, 2, 3].every((i) => !("redactions" in secBodies[i])) && !JSON.stringify(secBodies).includes("abcdefghijklmnop"),
@@ -690,6 +690,18 @@ console.log("\n[4] The secret scan catches every shape it names and leaves the s
     assert(r.spans.length >= 1 && r.text !== t && scanForSecrets(r.text).length === 0, `blanked, then clean: ${name} (${r.text.slice(0, 70)})`);
   }
   assert(redactSecrets("nothing here but prose and a uuid " + uuid(4)).text === "nothing here but prose and a uuid " + uuid(4), "a clean text is returned as it was");
+  // First review pass: the token's span is the WHOLE bare secret — base64 carries `/`, which the class leaves out for paths; a body's own `=` is no name — and a value's trailing punctuation is the sentence's.
+  const b64 = "L4HmvD0hgfx/z2Ov9zukFDtJufEIt41DZORiSBylHXw=";
+  assert(redactSecrets(`the value ${b64} for the run`).text === "the value [redacted:high-entropy token] for the run" && scanForSecrets(`the value ${b64} for the run`)[0].at === 10, `a base64 token with a slash is blanked whole, not from the slash on (${redactSecrets(`the value ${b64} for the run`).text})`);
+  assert(redactSecrets("x dGVzdGtleQ==bm90aGVyc2VjcmV0MTIzNDU2Nzg5MA== y").text === "x [redacted:high-entropy token] y" && redactSecrets("x QUJDREVGR0hJSktMTU5PUFFSU1Q1=MTIzNDU2Nzg5MEFCQ0RFRjEyMw== y").text === "x [redacted:high-entropy token] y",
+    "a token whose own body carries `=` keeps no head: only a snake-case NAME= — an underscore in it — is a name");
+  assert(redactSecrets(`FOO_BAR=${highEntropy}`).text === "FOO_BAR=[redacted:high-entropy token]" && redactSecrets(`see Projects/x/${highEntropy}/y.txt now`).text === "see Projects/x/[redacted:high-entropy token]/y.txt now" && redactSecrets(`see /Users/me/Projects/${highEntropy} now`).text === "see /Users/me/Projects/[redacted:high-entropy token] now",
+    "…a snake-case name stays before the marker, and a path's word-shaped segments beside a token stay");
+  assert(redactSecrets("(POSTGRES_PASSWORD=hunter2) and then POSTGRES_PASSWORD=hunter2. Also --api-key abcdefghijklmnopqrstuv7).").text === "(POSTGRES_PASSWORD=[redacted:password assignment]) and then POSTGRES_PASSWORD=[redacted:password assignment]. Also --api-key [redacted:credential flag]).",
+    `a closing bracket or a full stop after a value stays in the text (${redactSecrets("(POSTGRES_PASSWORD=hunter2) x").text})`);
+  const many = describeRedactions([...Array.from({ length: 30 }, () => ({ reason: "password assignment", at: 26, in: "prompt 1" })), { reason: "anthropic key", at: 4, in: "the outcome" }]);
+  assert(many === "password assignment at chars 26, 26, 26 and 27 more in prompt 1; anthropic key at char 4 in the outcome", `the message groups a reason and source, listing three offsets and counting the rest (${many})`);
+  assert(/; and 2 more$/.test(describeRedactions(Array.from({ length: 10 }, (_, i) => ({ reason: `r${i}`, at: i, in: "prompt 1" })))) && describeRedactions([{ reason: "access key in a URL", at: 3, in: "prompt 2" }]) === "access key in a URL at char 3 in prompt 2", "…eight entries then a count; a reason with ` in ` in it survives the grouping");
   // The mode: the environment's word, or an error naming what it takes — never a mode a typo picked.
   assert(secretMode({}).mode === "redact" && secretMode({ OB1_CAPTURE_ON_SECRET: "" }).mode === "redact" && secretMode({ OB1_CAPTURE_ON_SECRET: "refuse" }).mode === "refuse" && secretMode({ OB1_CAPTURE_ON_SECRET: "redact" }).mode === "redact" && SECRET_MODES.join() === "redact,refuse",
     "OB1_CAPTURE_ON_SECRET: absent or empty is redact, the two words are themselves");
@@ -825,7 +837,7 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   assert(pcr.code === 1 && /refused/.test(pcr.message) && /in a prompt/.test(pcr.message), `…so the capture is refused under refuse (${pcr.message.slice(0, 80)})`);
   // Under redact (the default), the prompt is blanked BEFORE the clip: the key past it is gone from the source, the text carries no marker (the clip took it), and the count says one (SMD-2127).
   const pcRed = prepare({ ...base, session_id: "s-past-clip-red", transcript_path: pastClipT });
-  assert(pcRed.code === 0 && pcRed.payload?.redactions?.length === 1 && pcRed.payload.redactions[0]?.in === "a prompt" && /^credential assignment, 64-hex token/.test(pcRed.payload.redactions[0]?.reason ?? "") && !/3f9a3f9a/.test(pcRed.payload.text) && !/\[redacted/.test(pcRed.payload.text) && scanSummary(cleanEpisode(summariseTranscript(pastClipT).episodes[0], "redact").ep, pcRed.payload.text).length === 0,
+  assert(pcRed.code === 0 && pcRed.payload?.redactions?.length === 1 && pcRed.payload.redactions[0]?.in === "prompt 1" && /^credential assignment, 64-hex token/.test(pcRed.payload.redactions[0]?.reason ?? "") && !/3f9a3f9a/.test(pcRed.payload.text) && !/\[redacted/.test(pcRed.payload.text) && scanSummary(cleanEpisode(summariseTranscript(pastClipT).episodes[0], "redact").ep, pcRed.payload.text).length === 0,
     `under redact the key past the clip is blanked in the source, counted once, and the sent text is clean (${pcRed.message.slice(0, 120)})`);
   if (pcRed.payloadPath) unlinkSync(pcRed.payloadPath);
   // A secret in the summary refuses before any payload.
@@ -838,11 +850,11 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   assert(readdirSync(join(STATE, "pending")).length === before && !existsSync(join(STATE, "s-secret.json")), "…and nothing is written");
   // Under redact (the default, SMD-2127): the span is blanked in the prompt, the summary rendered from the blanked prompt, the payload written, the message saying what and where — never the match.
   const red = prepare({ ...base, session_id: "s-secret-red", transcript_path: secretT });
-  assert(red.code === 0 && red.payloadPath && red.message === "prepared: session s-secret-red, 1 prompt(s), 0 source id(s), redacted: anthropic key at char 14 in a prompt", `under redact the secret is blanked and the capture prepared, the message naming the shape, the offset and the source (${red.message})`);
+  assert(red.code === 0 && red.payloadPath && red.message === "prepared: session s-secret-red, 1 prompt(s), 0 source id(s), redacted: anthropic key at char 14 in prompt 1", `under redact the secret is blanked and the capture prepared, the message naming the shape, the offset and the source (${red.message})`);
   const redPayload = red.payloadPath ? JSON.parse(readFileSync(red.payloadPath, "utf8")) : {}; // a refusal under a mutant fails the arms below, it does not crash the suite
   assert(/\nTitle: use this key: \[redacted:anthropic key\]\n/.test(redPayload.text) && /\n- use this key: \[redacted:anthropic key\]\n/.test(redPayload.text) && !redPayload.text.includes("Ab1Ab1") && scanForSecrets(redPayload.text).length === 0 && !JSON.stringify(redPayload).includes("Ab1Ab1"),
     "…the text carries the marker where the key was, in the title and the ask, and nothing of the key anywhere in the payload");
-  assert(redPayload.redactions?.length === 1 && redPayload.redactions[0]?.reason === "anthropic key" && redPayload.redactions[0]?.in === "a prompt" && redPayload.redactions[0]?.at === 14, `…and records the redaction (${JSON.stringify(redPayload.redactions)})`);
+  assert(redPayload.redactions?.length === 1 && redPayload.redactions[0]?.reason === "anthropic key" && redPayload.redactions[0]?.in === "prompt 1" && redPayload.redactions[0]?.at === 14, `…and records the redaction (${JSON.stringify(redPayload.redactions)})`);
   writeFileSync(join(STATE, "s-secret-red.json"), JSON.stringify({ thought_id: uuid(9), fingerprint: redPayload.fingerprint, captured_at: new Date().toISOString() }));
   assert(/^skip: session s-secret-red already captured as/.test(prepare({ ...base, session_id: "s-secret-red", transcript_path: secretT }).message), "…the same transcript again is a skip");
   assert(redPayload.fingerprint === createHash("sha256").update(redPayload.text ?? "").digest("hex"), "…and the fingerprint is the blanked text's — the text sent — not the raw render's (the mutant fingerprinting the raw text skipped the same transcript too)");
@@ -855,6 +867,19 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   assert(prov.code === 0 && prov.payload?.derived_from.length === 3 && prov.payload.redactions?.length === 1 && prov.payload.prompts === 3 && /\n- now push and open the PR with the key \[redacted:anthropic key\]\n/.test(prov.payload.text) && !prov.payload.text.includes("Ab1Ab1"),
     `derived_from keeps its three ids beside one redaction; the retried prompt is one line and counted once (${prov.message.slice(0, 120)})`);
   if (prov.payloadPath) unlinkSync(prov.payloadPath);
+  // First review pass: the gate reads each prompt on its own, as the redaction blanks them — a flag ending one prompt and a word opening the next was a refusal under either mode that no redaction could clear.
+  writeFileSync(join(TMP, "join.jsonl"), [user("run psql --password", { origin: { kind: "human" } }), assistant([{ type: "text", text: "ok" }]), user("hunter2 then check the row count", { origin: { kind: "human" } }), assistant([{ type: "text", text: "done" }])].join("\n"));
+  const jn = prepare({ ...base, session_id: "s-join", transcript_path: join(TMP, "join.jsonl") });
+  const jnR = prepare({ ...base, session_id: "s-join-refuse", transcript_path: join(TMP, "join.jsonl") }, { onSecret: "refuse" });
+  assert(jn.code === 0 && jn.payloadPath && !("redactions" in jn.payload) && jnR.code === 0 && jnR.payloadPath && scanSummary(summariseTranscript(join(TMP, "join.jsonl")).episodes[0], "x").length === 0,
+    `two prompts that read as a secret only joined are no secret in either mode (${jn.message.slice(0, 60)} | ${jnR.message.slice(0, 60)})`);
+  for (const x of [jn, jnR]) if (x.payloadPath) unlinkSync(x.payloadPath);
+  // …and two asks that differ in their secret alone are one line once blanked: the payload counts them as the text does (first review pass).
+  writeFileSync(join(TMP, "same-ask.jsonl"), [user("use sk-ant-api03-" + "Ab1".repeat(12), { origin: { kind: "human" } }), assistant([{ type: "text", text: "ok" }]), user("use sk-ant-api03-" + "Cd2".repeat(12), { origin: { kind: "human" } }), assistant([{ type: "text", text: "ok" }])].join("\n"));
+  const same = prepare({ ...base, session_id: "s-same-ask", transcript_path: join(TMP, "same-ask.jsonl") });
+  assert(same.code === 0 && same.payload.prompts === 1 && /\nAsked \(1 prompt\):\n- use \[redacted:anthropic key\]\n/.test(same.payload.text) && same.payload.redactions.length === 2 && /redacted: anthropic key at char 4 in prompt 1; anthropic key at char 4 in prompt 2$/.test(same.message),
+    `the count is the blanked text's (${same.message.slice(0, 120)})`);
+  if (same.payloadPath) unlinkSync(same.payloadPath);
   // The backstop: a blanking the scan still finds something after is refused as every hit was — the net under the redaction. A URL's password blanked, the URL no longer reads as one, and the digest in its path reads as a bare key.
   writeFileSync(join(TMP, "backstop.jsonl"), [user("pull https://u:p4ssw0rd@h/blobs/" + "3f9a".repeat(16) + " now", { origin: { kind: "human" } }), assistant([{ type: "text", text: "pulled" }])].join("\n"));
   const bs = prepare({ ...base, session_id: "s-backstop", transcript_path: join(TMP, "backstop.jsonl") });
@@ -862,7 +887,7 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
     `a summary the blanking leaves a hit in is refused as every hit was, the message naming the hit, its source and the redactions tried, nothing written (${bs.message.slice(0, 160)})`);
   const bsDry = cleanEpisode(summariseTranscript(join(TMP, "backstop.jsonl")).episodes[0], "redact");
   const bsAgain = scanSummary(bsDry.ep, bsDry.text);
-  assert(bsDry.redactions.map((r) => r.in).join() === "a prompt,the text,the text" && /https:\/\/u:\[redacted:url with a password\]@h\/blobs\/\[redacted:64-hex token/.test(bsDry.text) && !/3f9a3f9a/.test(bsDry.text) && bsAgain.length === 1 && /^64-hex token .* in a prompt$/.test(bsAgain[0].reason),
+  assert(bsDry.redactions.map((r) => r.in).join() === "prompt 1,the text,the text" && /https:\/\/u:\[redacted:url with a password\]@h\/blobs\/\[redacted:64-hex token/.test(bsDry.text) && !/3f9a3f9a/.test(bsDry.text) && bsAgain.length === 1 && /^64-hex token .* in a prompt$/.test(bsAgain[0].reason),
     `…the source round took the password, the text round the digest the un-URL'd path then showed (title and ask); the prompt, read whole and unclipped, still carries it, and that is the hit (${bsDry.redactions.map((r) => r.in).join()})`);
 }
 
@@ -1808,6 +1833,10 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const okRefuse = await spawnScript(["--check"], { env: { OB1_CAPTURE_ON_SECRET: "refuse" } });
   const okTypo = await spawnScript(["--check"], { env: { OB1_CAPTURE_ON_SECRET: "REFUSE" } });
   assert(okRefuse.code === 0 && /On a secret: refuse\./.test(okRefuse.out) && okTypo.code === 1 && /OB1_CAPTURE_ON_SECRET takes redact or refuse, not "REFUSE"/.test(okTypo.err) && !okTypo.out.trim(), "…the environment's mode is the one named; a misspelt one is exit 1 and named (SMD-2127)");
+  const noCfgTypo = await spawnScript(["--check"], { env: { OB1_CAPTURE_ON_SECRET: "x", OB1_SESSION_CAPTURE_CONFIG: join(TMP, "nope.json") } });
+  const printTypo = await spawnScript(["--print-hook", "claude-code"], { env: { OB1_CAPTURE_ON_SECRET: "x" } });
+  assert(noCfgTypo.code === 1 && /not "x"/.test(noCfgTypo.err) && !/no endpoint or key/.test(noCfgTypo.err) && printTypo.code === 2 && /not "x"/.test(printTypo.err) && !printTypo.out.trim(),
+    `a misspelt mode is named before a missing config, and --print-hook refuses it too, exit 2, printing no hook (first review pass: the one path that let it by; exits ${noCfgTypo.code}/${printTypo.code})`);
   const wide = await run(["--check"], "write-key");
   assert(wide.code === 0 && /warning: the key can capture, and it can also/.test(wide.err) && /--scope capture/.test(wide.err), "--check with a write key: a warning naming the fix");
   const ro = await run(["--check"], "read-key");
@@ -1846,7 +1875,7 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   assert(dryEpSec.code === 1 && /^--- would REFUSE episode 2: credential assignment/m.test(dryEpSec.out) && (dryEpSec.out.match(/secret scan: clean/g) ?? []).length === 3 && /abcdefghijklmnop/.test(dryEpSec.out), `…and under refuse a secret in one episode is refused by episode, the others clean — the dry run shows the text, as it does for one episode, so an operator sees the offset (exit ${dryEpSec.code}: ${dryEpSec.out.split("\n").filter((l) => /^--- (?:would REFUSE|secret)/.test(l)).join(" | ").slice(0, 300)})`);
   // Under redact (the default, SMD-2127) the dry run shows the text as it would be SENT — the marker in it, the key not — and says what was blanked and where.
   const dryEpRed = await run(["--dry-run", join(TMP, "episodes-secret.jsonl")]);
-  assert(dryEpRed.code === 0 && /^--- secret scan: 1 redaction — credential assignment, high-entropy token at char \d+ in a prompt; the text above is what would be sent$/m.test(dryEpRed.out) && (dryEpRed.out.match(/secret scan: clean/g) ?? []).length === 3 && /MCP_ACCESS_KEY=\[redacted:credential assignment, high-entropy token\] was the key/.test(dryEpRed.out) && !/abcdefghijklmnop/.test(dryEpRed.out) && !/would REFUSE/.test(dryEpRed.out),
+  assert(dryEpRed.code === 0 && /^--- secret scan: 1 redaction — credential assignment, high-entropy token at char \d+ in prompt 2; the text above is what would be sent$/m.test(dryEpRed.out) && (dryEpRed.out.match(/secret scan: clean/g) ?? []).length === 3 && /MCP_ACCESS_KEY=\[redacted:credential assignment, high-entropy token\] was the key/.test(dryEpRed.out) && !/abcdefghijklmnop/.test(dryEpRed.out) && !/would REFUSE/.test(dryEpRed.out),
     `under redact the dry run exits 0, prints the blanked text and names the redaction (${dryEpRed.out.split("\n").filter((l) => /^--- secret/.test(l)).join(" | ").slice(0, 200)})`);
   const dryBackstop = await run(["--dry-run", join(TMP, "backstop.jsonl")]);
   assert(dryBackstop.code === 1 && /^--- would REFUSE: 64-hex token \(a raw key, or a digest out of its context\) in a prompt at char \d+ after 3 redactions$/m.test(dryBackstop.out) && /\[redacted:url with a password\]@h\/blobs\/\[redacted:64-hex token/.test(dryBackstop.out) && !/3f9a3f9a|p4ssw0rd/.test(dryBackstop.out), `…and a summary the blanking leaves a hit in is shown blanked and refused, the redactions tried named (${dryBackstop.out.split("\n").filter((l) => /^--- would/.test(l)).join(" | ").slice(0, 200)})`);
