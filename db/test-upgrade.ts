@@ -520,7 +520,11 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
 
   // What the operator reads first. --status runs against any schema and says
   // what a run would refuse on; the ledgered remedy is the migrator's command.
-  const status = await runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_, "--status"], { env: MIGRATOR_ENV, cwd: HERE });
+  // Its colour codes stripped: a shell with FORCE_COLOR set (MIGRATOR_ENV
+  // keeps it) ends the refusal with a reset after --reapply, where the regex
+  // anchors the line's end (SMD-2219).
+  const statusRun = await runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_, "--status"], { env: MIGRATOR_ENV, cwd: HERE });
+  const status = { ...statusRun, out: statusRun.out.replace(/\x1b\[[0-9;]*m/g, "") };
   const recorded021 = async () => Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '021%'`)[0].c);
   const ledger = async () => JSON.stringify(await sql`SELECT name, sha256, applied_at::text AS a FROM schema_migrations ORDER BY 1`);
   assert(status.code === 0 && /a run would refuse: the schema predates migration 021/.test(status.out) &&
@@ -1044,14 +1048,16 @@ console.log("\n[12] Migration 033 onto a populated 032 — both capture forms ta
   // The mirror: the paths a brain uses the day after. A same-model
   // re-capture keeps the window (022's rule, unchanged); a re-capture naming
   // provenance the row already has leaves it (025, unchanged); the 2-argument
-  // form resolves and, since 033, attributes; and no lock outlives a call.
+  // form resolves and, since 033, attributes; and no lock outlives a call —
+  // in this database: pg_locks is the cluster's, and CI runs this suite beside
+  // test-preflight.ts, whose captures take the same lock in its own (SMD-2219).
   await sql`SELECT upsert_thought(${TEXT}, ${{ metadata: { k: 1 }, embedding_model: OPTS.model, supersedes: id }}::jsonb, ${vec(3)}::vector)`;
   const [row] = await sql`SELECT supersedes AS s, (metadata->>'k')::int AS k FROM thoughts WHERE id = ${id}::uuid`;
   assert((await windows()) === 1 && row.s === older && row.k === 1, "after 033 a same-model re-capture keeps the window and the pointer it already had, merging the metadata");
   const [{ r: twoR }] = await sql`SELECT upsert_thought('a two-argument capture at 033', '{"metadata":{},"actor":{"name":"after","source":"test"}}'::jsonb) AS r`;
   const [{ a: attributed }] = await sql`SELECT actor_name AS a FROM thought_audit WHERE action = 'capture' AND thought_id = ${(twoR as { id: string }).id}::uuid`;
   assert(attributed === "after", `…a capture through the 2-argument form resolves and is attributed (${attributed})`);
-  assert(Number((await sql`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory'`)[0].c) === 0, "…and no advisory lock is held once the calls return");
+  assert(Number((await sql`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`)[0].c) === 0, "…and no advisory lock is held once the calls return");
 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("033") });
   assert((await aclOf(THREE)) === acl && JSON.stringify(await shape(sql)) === JSON.stringify(after) && (await windows()) === 1, "re-applying 033 is a no-op: the ACL, the shape and the window as they were");
@@ -1124,7 +1130,7 @@ console.log("\n[13] Migration 035 onto a populated 033 — a re-capture no longe
   assert(cleared.ok === true && (await twoRowLoops()) === 0 && (await pointer(x.id)) === r.id, "…the loop written at 033 is cleared through update_thought's envelope, X → R kept");
   const again = (await sql`SELECT update_thought(${r.id}::uuid, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ${{ supersedes: x.id }}::jsonb) AS r`)[0].r as { ok: boolean; error?: string };
   assert(again.ok === false && again.error === "WOULD_CYCLE", `…and cannot be re-written by the one path left to it (${again.error})`);
-  assert(Number((await sql`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory'`)[0].c) === 0, "…and no advisory lock is held once the calls return");
+  assert(Number((await sql`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`)[0].c) === 0, "…and no advisory lock is held once the calls return");
 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("035") });
   assert((await aclOf(THREE)) === acl && JSON.stringify(await shape(sql)) === JSON.stringify(after) && (await bodyOf(THREE)) === three, "re-applying 035 is a no-op: the ACL, the shape and the body as they were");
