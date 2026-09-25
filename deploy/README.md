@@ -352,8 +352,9 @@ A `--diff` or `--replay` replays what stable logged, so:
 - hybrid-arm rows (`search_thoughts`) are replayed only with `OB1_EVAL_EMBED`
   set to the brain's model, as in the example, and otherwise skipped.
 
-`--replay` prints how many were replayed and skipped. A `--diff` that
-replayed none still says nothing moved (SMD-2182), so read `--replay` first.
+Both print the window and how many searches were replayed and skipped. A
+`--diff` that replayed none says `nothing to compare` and exits 3, where a
+pass is 0 and a moved ranking 1 (SMD-2182).
 
 `--from` and `--to` name a database on the network as `HOST[:PORT][/DB]`
 (port 5432 and database `openbrain` by default). The wrapper builds the URL as
@@ -433,9 +434,10 @@ server's, and `refreshToolsReady` refuses the refresh otherwise, so a
 Postgres bump in the compose files means bumping the package in
 `db/tier.Dockerfile` with it. On
 every PR, the deploy-stack CI job seeds one thought and one logged search, then
-runs through this script: a refresh, a `--replay`, a `--diff`, a retry over a
-copy left stamped `stable` (as a refresh that died after its restore leaves
-it), and both refusals. On a host with SELinux enforcing (Fedora and RHEL,
+runs through this script: a refresh, a `--replay`, a `--diff`, a `--diff` over
+the empty window after the refresh (exit 3), a retry over a copy left
+stamped `stable` (as a refresh that died after its restore leaves it), and
+both refusals. On a host with SELinux enforcing (Fedora and RHEL,
 where podman labels by default), the container can read the mounted checkout
 only once it is relabelled: `chcon -Rt container_file_t <checkout>`. The
 script does not relabel it for you.

@@ -22,7 +22,7 @@
  *   # replay stable's logged searches against the canary and report the ranking
  *   bun db/tier.ts --replay --from <stable-url> --to <canary-url> [--since <iso-ts>]
  *
- *   # the same, but print ONLY what moved and exit non-zero if anything did (the gate)
+ *   # the same, as a gate: exit 1 if a ranking moved, 3 if nothing was compared
  *   bun db/tier.ts --diff   --from <stable-url> --to <canary-url> [--since <iso-ts>]
  *
  *   # after a soak: stamp the canary's version onto stable
@@ -52,7 +52,11 @@
  *     text, so it is replayed only when a model is configured (OB1_EVAL_EMBED, as
  *     evals/eval-replay.ts uses) and skipped-with-a-note otherwise.
  * A row logged before migration 045 carries a NULL arm (no way to know which arm
- * produced its ids), so it is skipped rather than guessed.
+ * produced its ids), so it is skipped rather than guessed. Both verbs print how
+ * many rows the window held, replayed and skipped. A window that replayed none
+ * compared nothing, so --diff exits 3 on it rather than passing (SMD-2182):
+ * stable logs nothing unless it runs with OB1_QUERY_LOG=on, and the default
+ * window starts at the canary's last refresh.
  */
 
 import { SQL } from "bun";
@@ -229,6 +233,30 @@ function isLoopback(url: string): boolean {
     return h === "" || h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]";
   } catch {
     return false;
+  }
+}
+
+/** Where a URL points, for a message: host:port/database, never its user or password. */
+function where(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.hostname || "localhost"}:${u.port || "5432"}${u.pathname.length > 1 ? u.pathname : ""}`;
+  } catch {
+    return "a URL that does not parse";
+  }
+}
+
+/**
+ * Reach `sql` once, so a failure names the side and the host. Bun's own error
+ * for a host that does not resolve or does not answer is a bare "Failed to
+ * connect" (ERR_POSTGRES_CONNECTION_REFUSED, Bun 1.4), which from inside
+ * deploy/tier.sh leaves a stale container name to guess (SMD-2182).
+ */
+async function reach(sql: SQL, url: string, side: string): Promise<void> {
+  try {
+    await sql`SELECT 1`;
+  } catch (e) {
+    throw new Error(`could not connect to ${side} at ${where(url)}: ${(e as Error).message}`);
   }
 }
 
@@ -456,6 +484,8 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
   let serverMaj: number;
   let settings: Record<string, string>;
   try {
+    await reach(src, fromUrl, "--from");
+    await reach(target, toUrl, "--to");
     serverMaj = await serverMajor(src);
     settings = await databaseSettings(src);
     // The reset below drops --to's schema, so --to must be neither the source
@@ -583,6 +613,8 @@ export async function promote(canaryUrl: string, stableUrl: string): Promise<{ v
   const canary = new SQL({ url: canaryUrl, max: 1 });
   const stable = new SQL({ url: stableUrl, max: 1 });
   try {
+    await reach(canary, canaryUrl, "--from (canary)");
+    await reach(stable, stableUrl, "--to (stable)");
     // The mirror of refresh's guard: promote stamps --to as stable, so --to must
     // not be the canary itself, nor a tier — the shape of --from and --to the
     // wrong way round, which would make the canary read as the record.
@@ -611,15 +643,26 @@ export async function promote(canaryUrl: string, stableUrl: string): Promise<{ v
 // Output
 // ---------------------------------------------------------------------------
 
-function printSummary(s: ReplaySummary, onlyChanged: boolean): void {
+/**
+ * Print a replay's report and return its verdict: `empty` when nothing was
+ * replayed, so nothing was compared — a window stable logged nothing in, or
+ * one whose every row was skipped — which --diff must not pass as "nothing
+ * moved" (SMD-2182). `window` says which searches were read, in words.
+ */
+function printSummary(s: ReplaySummary, gate: boolean, window: string): "moved" | "unmoved" | "empty" {
   const short = (id: string) => id.slice(0, 8);
-  if (!onlyChanged) {
-    console.log(`replayed ${s.replayed} of ${s.total} logged searches (${s.skipped} skipped)`);
-    for (const [reason, n] of Object.entries(s.skips)) console.log(`  skipped ${n}: ${reason}`);
+  console.log(`replayed ${s.replayed} of ${s.total} logged searches ${window} (${s.skipped} skipped)`);
+  for (const [reason, n] of Object.entries(s.skips)) console.log(`  skipped ${n}: ${reason}`);
+  if (s.replayed === 0) {
+    console.log(s.total === 0
+      ? "nothing to compare: stable logged no searches in the window. Stable logs them only with OB1_QUERY_LOG=on, and an earlier --since widens the window."
+      : "nothing to compare: every search in the window was skipped.");
+    return "empty";
   }
   if (s.changed === 0) {
-    console.log(onlyChanged ? "what moved: nothing — the canary reproduces stable's rankings." : "no ranking moved.");
-    return;
+    const scope = s.skipped ? `the ${s.replayed} replayed (${s.skipped} skipped, not compared)` : s.replayed === 1 ? "the one replayed" : `all ${s.replayed} replayed`;
+    console.log(gate ? `what moved: nothing — the canary reproduces stable's rankings on ${scope}.` : `no ranking moved on ${scope}.`);
+    return "unmoved";
   }
   console.log(`\nwhat moved — ${s.changed} of ${s.replayed} replayed queries returned different ids:`);
   for (const d of s.diffs) {
@@ -629,6 +672,7 @@ function printSummary(s: ReplaySummary, onlyChanged: boolean): void {
     if (d.reordered) bits.push("reordered");
     console.log(`  • ${JSON.stringify(d.query.slice(0, 70))}: ${bits.join("; ")}`);
   }
+  return "moved";
 }
 
 // ---------------------------------------------------------------------------
@@ -706,6 +750,8 @@ async function main(): Promise<void> {
   const stable = new SQL({ url: from, max: 4 });
   const canary = new SQL({ url: to, max: 4 });
   try {
+    await reach(stable, from, "--from (stable)");
+    await reach(canary, to, "--to (canary)");
     // The table must exist on both ends; say so in the reader's words, not a driver trace.
     for (const [sql, label] of [[stable, "--from (stable)"], [canary, "--to (canary)"]] as const) {
       const [{ present }] = await sql<{ present: boolean }[]>`SELECT to_regclass('public.query_log') IS NOT NULL AS present`;
@@ -715,13 +761,19 @@ async function main(): Promise<void> {
       }
     }
     // The default window is since the canary was last refreshed; else everything.
-    const window = since ?? (await readConfig(canary, "last_refresh"));
+    const refreshed = since === null ? await readConfig(canary, "last_refresh") : null;
+    const window = since ?? refreshed;
+    const words = since !== null ? `since ${since} (--since)`
+      : refreshed !== null ? `since ${refreshed} (the canary's last refresh)`
+      : "in all of stable's log (the canary records no refresh)";
     const embedModel = process.env.OB1_EVAL_EMBED;
     const embedFn: EmbedFn | undefined = embedModel ? (q) => embed(embedModel, q, true) : undefined;
     if (!embedFn) console.error(`note: OB1_EVAL_EMBED is not set — hybrid-arm searches will be skipped (keyword arm replays without a model).`);
     const summary = await replayAndDiff(stable, canary, { since: window, embedFn });
-    printSummary(summary, verb === "diff");
-    if (verb === "diff" && summary.changed > 0) process.exit(1);
+    const verdict = printSummary(summary, verb === "diff", words);
+    // The gate: 1 when a ranking moved, 3 when nothing was compared — not a
+    // pass, and not a move either, so a caller can tell the two apart.
+    if (verb === "diff" && verdict !== "unmoved") process.exit(verdict === "moved" ? 1 : 3);
   } finally {
     await stable.close();
     await canary.close();
@@ -730,7 +782,7 @@ async function main(): Promise<void> {
 
 // A refusal or a failed step is a sentence for the operator, not a stack trace
 // with Bun's source excerpt around it. Exit 1, as before: --diff's "moved" is
-// also 1, and either one fails a gate.
+// also 1, and either one fails a gate (as does its 3, nothing compared).
 if (import.meta.main) {
   await main().catch((e: unknown) => {
     console.error(`tier.ts: error: ${e instanceof Error ? e.message : String(e)}`);

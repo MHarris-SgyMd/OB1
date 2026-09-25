@@ -4473,6 +4473,48 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     assert(clean.replayed === 2 && clean.skipped === 0, `both logged keyword searches replay model-free (replayed ${clean.replayed}, skipped ${clean.skipped})`);
     assert(clean.changed === 0, "an identical canary reproduces stable's logged rankings — the diff is empty");
 
+    // The CLI's report and verdict (SMD-2182), on the same canary. Both verbs
+    // print the window and the counts, and a window that replayed nothing is
+    // --diff's exit 3, where it used to be the pass "nothing moved".
+    const tierCli = async (args: string[], extraEnv: Record<string, string> = {}) => {
+      const env: Record<string, string | undefined> = { ...process.env, ...extraEnv };
+      delete env.OB1_EVAL_EMBED;
+      const p = Bun.spawn(["bun", join(HERE, "tier.ts"), ...args], { stdout: "pipe", stderr: "pipe", env });
+      const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+      return { code: await p.exited, out, err };
+    };
+    const both = ["--from", URL_!, "--to", canaryUrl];
+    const all = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both]);
+    assert(all.code === 0 && /^replayed 2 of 2 logged searches since 1970-01-01T00:00:00Z \(--since\) \(0 skipped\)$/m.test(all.out) && all.out.includes("what moved: nothing — the canary reproduces stable's rankings on all 2 replayed."),
+      `--diff over both keyword searches prints the window and the counts, and passes (exit ${all.code}: ${all.out.trim()})`);
+    // The server's clock, which stamped the logged rows, not this host's.
+    await canarySql`INSERT INTO ob1_config (key, value) VALUES ('last_refresh', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+    const fresh = await tierCli(["--diff", ...both]);
+    assert(fresh.code === 3 && /^replayed 0 of 0 logged searches since \S+ \(the canary's last refresh\)/m.test(fresh.out) && fresh.out.includes("nothing to compare: stable logged no searches"),
+      `--diff right after a refresh, with no --since, compared nothing and exits 3, not 0 (exit ${fresh.code}: ${fresh.out.trim()})`);
+    const freshReplay = await tierCli(["--replay", ...both]);
+    assert(freshReplay.code === 0 && freshReplay.out.includes("nothing to compare"), `--replay, the report, says the same and exits 0 (exit ${freshReplay.code})`);
+    // A hybrid row, logged after the refresh: with no OB1_EVAL_EMBED it is
+    // skipped, and the report says so on both windows.
+    await sql`
+      INSERT INTO query_log (kind, tool, query, match_count, threshold, recency_weight, filter, result_ids, arm, tier, logged_at)
+      VALUES ('search', 'search_thoughts', 'zqcanary', 10, 0.2, 0, '{}'::jsonb, ${`{${canaryHits.join(",")}}`}::uuid[], 'hybrid', 'stable', now() + interval '1 hour')`;
+    const mixed = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both]);
+    assert(mixed.code === 0 && /^replayed 2 of 3 logged searches .* \(1 skipped\)$/m.test(mixed.out) && mixed.out.includes("skipped 1: hybrid needs a provider (set OB1_EVAL_EMBED)") && mixed.out.includes("on the 2 replayed (1 skipped, not compared)."),
+      `--diff with a hybrid row and no OB1_EVAL_EMBED reports it skipped, and claims only the rows it replayed (exit ${mixed.code}: ${mixed.out.trim()})`);
+    const skippedAll = await tierCli(["--diff", ...both]);
+    assert(skippedAll.code === 3 && /^replayed 0 of 1 logged searches/m.test(skippedAll.out) && skippedAll.out.includes("nothing to compare: every search in the window was skipped."),
+      `--diff whose every row was skipped compared nothing and exits 3 (exit ${skippedAll.code}: ${skippedAll.out.trim()})`);
+    await sql`DELETE FROM query_log WHERE arm = 'hybrid'`;
+    await canarySql`DELETE FROM ob1_config WHERE key = 'last_refresh'`;
+    // A side that does not answer is named, with its host, and never its password.
+    const deadTo = await tierCli(["--diff", "--from", URL_!, "--to", "postgres://postgres:s3cret-2182@127.0.0.1:1/ob1_nowhere"]);
+    assert(deadTo.code === 1 && deadTo.err.includes("could not connect to --to (canary) at 127.0.0.1:1/ob1_nowhere") && !deadTo.err.includes("s3cret"),
+      `--diff's connection failure names --to and its host, not its password (exit ${deadTo.code}: ${deadTo.err.trim()})`);
+    const deadFrom = await tierCli(["--refresh", "--from", "postgres://postgres:s3cret-2182@ob1-no-such-host.invalid:5432/openbrain", "--to", canaryUrl], { OB1_ALLOW_REMOTE_DB: "1" });
+    assert(deadFrom.code === 1 && deadFrom.err.includes("could not connect to --from at ob1-no-such-host.invalid:5432/openbrain") && !deadFrom.err.includes("s3cret"),
+      `--refresh's names --from and its host (exit ${deadFrom.code}: ${deadFrom.err.trim()})`);
+
     // Perturb the canary: drop one "zqcanary" row. Now that query — and only that
     // query — moves, and the diff names the dropped id. The gate has teeth.
     await canarySql`DELETE FROM thoughts WHERE id = ${corpus[0].id}::uuid`;

@@ -1962,7 +1962,7 @@ verbs are the promotion pipeline:
 bun tier.ts --refresh --from <stable-url> --to <canary-url> [--tier canary|working]
 # replay stable's logged searches against the canary and report the ranking
 bun tier.ts --replay  --from <stable-url> --to <canary-url> [--since <iso-ts>]
-# the same, printing ONLY what moved and exiting non-zero if anything did (the gate)
+# the same, as a gate: exit 1 if a ranking moved, 3 if nothing was compared
 bun tier.ts --diff    --from <stable-url> --to <canary-url> [--since <iso-ts>]
 # after a soak: stamp the canary's version onto stable
 bun tier.ts --promote --from <canary-url> --to <stable-url>
@@ -2027,7 +2027,11 @@ the hand-written control run. The **keyword** arm replays with no model (the arm
 `test-live` [20] exercises end to end); the **hybrid** arm re-embeds the query text,
 so it replays only when a provider is configured (`OB1_EVAL_EMBED`, as
 `evals/eval-replay.ts` uses) and is skipped-with-a-note otherwise; a row logged
-before migration 045 carries a NULL arm and is skipped rather than guessed.
+before migration 045 carries a NULL arm and is skipped rather than guessed. Both
+verbs print the window and how many rows it held, replayed and skipped. A window
+that replayed none compared nothing, and `--diff` exits 3 on it: 0 is a pass and
+1 a ranking that moved (SMD-2182). A side that does not answer is named with its
+host and port.
 
 The three tiers run as one stack, `deploy/compose.tiers.yaml` — three Postgres
 services, one shared Ollama, three servers on three loopback ports — built from the
@@ -2269,7 +2273,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1794 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 733 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+./with-postgres.sh bun test-live.ts         # 740 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
