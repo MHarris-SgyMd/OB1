@@ -166,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1779 assertions: 1779 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1780 assertions: 1780 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-six (56) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -392,7 +392,9 @@ relation naming a refused entity is dropped and counted as any unlisted one is. 
 numeric name a source states (a Linear label `2024`) can remain.
 `apply_entity_type_gate()` applies the rule to the rows written before it, each
 entity judged on its name, leaving any a structured pass names or a human curated
-(a name merged into it) — a refused entity's edges, mentions and row deleted; a
+(a name merged into it; its own name, answered again, lands on an entity of the
+new type, since the writer's redirect is per type) — a refused entity's edges,
+mentions and row deleted; a
 retyped one merged by `merge_entities`' steps into the entity of its new type the
 writer would resolve it to, or moved when there is none — and the file runs it
 once, keeping the first run's counts in `ob1_config` under `entity_name_gate_056`
@@ -402,7 +404,9 @@ ACL. The writer's `merged_from` redirect is spelled `@>` now, which 016's GIN
 index serves. A writer call already running 053's body
 when the file commits writes by 053's rule: stop the extraction workers for the
 upgrade, or run `SELECT apply_entity_type_gate()` once they have finished (and
-again after a source stops stating a name the rule refuses).
+again after a source stops stating a name the rule refuses), as the role that
+migrated — a `--grant` role lacks UPDATE on the mention tables (SMD-2216). Such a
+run's counts are its result; `ob1_config` keeps only the file's.
 `server-portable/entity-gate.ts` is its JavaScript twin, for the capture-time
 `people` facet (`metadata.ts`), which never reaches the function and keeps only
 the names the rule keeps as a person; test-schema [52] holds the two to one
@@ -2247,7 +2251,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1779 assertions, PGlite, no container
+bun test-schema.ts                          # 1780 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 728 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

@@ -18,9 +18,10 @@
  *      domain or file, or a snake_case name or glob, becomes a `tool` from a
  *      `place` only, since a person's handle takes those shapes (`john.smith`,
  *      `@john_doe`; second review pass). SMD-1937 measured refusing instead on
- *      201 graded mentions: it dropped seven real entities (code artifacts the
- *      extractor typed `place`, and the maintainer's decision is that code
- *      artifacts are entities) for one junk mention. The URL shape is one step
+ *      201 graded mentions: it dropped seven real entities — five code
+ *      artifacts the extractor typed `place` (the maintainer's decision is that
+ *      code artifacts are entities), `hono/mcp` and `openrouter.ai` — for one
+ *      junk mention. The URL shape is one step
  *      past what SMD-1937 measured, for `http://127.0.0.1:65536/v1` typed
  *      `place` on the dogfood brain.
  *   4. Anything else keeps the extractor's type.
@@ -54,8 +55,8 @@
  * The numeric rule, as a POSIX pattern over `normalized_name`: digits, then
  * any run of digits, dots, colons and spaces — "021", "11434", "127.0.0.1",
  * "10 000"; "pg16" and "smd 1938" have letters and stay. db/graph-centrality.ts
- * reads it too, for the numeric names 056 leaves: a brain before it, and a
- * name a structured pass states.
+ * reads it too, for the numeric names 056 leaves: a brain before it, a name
+ * a structured pass states, and an entity a human curated.
  */
 export const NUMERIC_NAME_RE = "^[0-9][0-9 .:]*$";
 

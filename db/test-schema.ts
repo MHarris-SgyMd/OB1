@@ -7600,6 +7600,8 @@ console.log("\n[52] Migration 056: the entity name gate — a number or a type w
     "056 is the last definer of record_thought_entities, and its live body carries the name-gate sentinel beside 053's");
   assert(/en\.merged_from @> ARRAY\[i\.nname\]/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)")) && !/= ANY\(en\.merged_from\)/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)")),
     "…and resolves a merged name with `@>`, which 016's GIN index serves, not `= ANY`");
+  const passSrc = await src("apply_entity_type_gate()");
+  assert(/en\.merged_from @> ARRAY\[r\.normalized_name\]/.test(passSrc) && !/= ANY\(en\.merged_from\)/.test(passSrc), "…and so does the pass's target lookup");
   const comments = await Promise.all(["entity_type_gate(text, text)", "record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)", "apply_entity_type_gate()"].map(async (sig) => (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? ""));
   assert(comments.every((c) => /SMD-1935/.test(c)) && /refused_entities, retyped_entities/.test(comments[1]) && /Idempotent/.test(comments[2]), "each function's comment names the ticket; the writer's lists the two new counts, the pass says it is idempotent");
 
@@ -7664,9 +7666,16 @@ console.log("\n[52] Migration 056: the entity name gate — a number or a type w
   await db.query(`INSERT INTO ob1_entities (id, entity_type, name, normalized_name, merged_from) VALUES ($1::uuid, 'tool', 'Zeta', 'zeta', '{q.r}'), ($2::uuid, 'tool', 'q.r', 'q.r', '{}'), ($3::uuid, 'place', 'q.r', 'q.r', '{}')`, [ZETA, TOOL_QR, PLACE_QR]);
   await db.query(`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, 0.9, 'extract:m@p2')`, [t4, PLACE_QR]);
 
-  const pass = await one<{ r: J }>(`SELECT apply_entity_type_gate() AS r`);
+  // The pass as the file runs it: 056 applied over these rows, its record
+  // cleared first so this run's is the one kept (fourth review pass: a
+  // record written on an empty graph proved only that a row exists).
+  const recorded = async () => (await q<{ v: string }>(`SELECT value AS v FROM ob1_config WHERE key = 'entity_name_gate_056'`))[0]?.v;
+  await db.exec(`DELETE FROM ob1_config WHERE key = 'entity_name_gate_056'`);
+  await reapply("056");
+  const firstRecord = await recorded();
+  const pass = { r: JSON.parse(firstRecord ?? "{}") as J };
   assert(pass.r.ok === true && pass.r.refused_entities === 2 && pass.r.dropped_mentions === 2 && pass.r.dropped_edges === 1 && pass.r.moved_entities === 1 && pass.r.merged_entities === 4,
-    `the pass refuses 021 and "places" (their two mentions, 021's edge), moves the person x/y and merges four (${JSON.stringify(pass.r)})`);
+    `the file's pass refuses 021 and "places" (their two mentions, 021's edge), moves the person x/y and merges four, and ob1_config keeps exactly that (${JSON.stringify(pass.r)})`);
   const after2 = await entities();
   assert(!after2.some((e) => /^person:(021|hono\/mcp|x\/y)$|^topic:places$|^place:(x\/y|p\.q|q\.r)$/.test(e)) && after2.includes("tool:x/y") && after2.includes("tool:hono/mcp"), `…leaving no refused name and no identifier-shaped person or place (${after2.join(", ")})`);
   assert(JSON.stringify(await mentionsOf(toolHono)) === JSON.stringify([t1, t3, t4].sort()), "the tool hono/mcp now holds t1's mention, the person's t3, and one t4 — the person's duplicate there dropped");
@@ -7697,8 +7706,7 @@ console.log("\n[52] Migration 056: the entity name gate — a number or a type w
   const t5 = await put("The main office moved.");
   const w5 = await rte(t5, "extract:m@p2", [E("Main Office", "place")]);
   assert(w5.ok === true && w5.new_entities === 0 && JSON.stringify(await mentionsOf(OFFICE)) === JSON.stringify([t5]), `a name a human merged into the curated place still lands there, through the writer's merged_from redirect (${JSON.stringify(w5)})`);
-  const record = (await q<{ v: string }>(`SELECT value AS v FROM ob1_config WHERE key = 'entity_name_gate_056'`))[0] as { v: string } | undefined;
-  assert(record !== undefined && JSON.parse(record.v).ok === true && "refused_entities" in JSON.parse(record.v), `the first run's counts are kept in ob1_config, where the operator can read them (${record?.v})`);
+  assert((await recorded()) === firstRecord, `a re-apply, which finds nothing, keeps the first run's record (${await recorded()})`);
 
   // The guard: a schema without 053 is refused by name, not left to fail later.
   await db.exec(`ALTER TABLE thought_sources RENAME TO thought_sources_gone`);

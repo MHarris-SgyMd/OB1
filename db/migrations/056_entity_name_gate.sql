@@ -20,8 +20,9 @@
 --   SMD-1937 measured the ticket's proposed gate on 201 blind-graded mentions
 --   before this file was written. The number and vocabulary rules are right;
 --   REFUSING an identifier-shaped person or place dropped seven real entities
---   (code artifacts, which the maintainer decided are entities, typed `place`)
---   for one junk mention. So a shape corrects the type instead.
+--   — five code artifacts typed `place` (the maintainer decided code artifacts
+--   are entities), `hono/mcp` and `openrouter.ai` — for one junk mention. So a
+--   shape corrects the type instead.
 --
 -- WHAT
 --   1. entity_type_gate(name, type) — IMMUTABLE, STRICT — the type the graph
@@ -61,7 +62,11 @@
 --      structured pass names (once the source stops naming it, a later run
 --      of this takes it), and one a human curated — a name merged into it
 --      with merge_entities() — since retyping it would bring the names merged
---      into it back as entities of the old type (third review pass). A
+--      into it back as entities of the old type (third review pass). Its own
+--      name, answered again, is retyped by the writer and lands on an entity
+--      of the new type, while the names merged into it still land on it: the
+--      writer's redirect is per type, so no choice keeps both (fourth review
+--      pass). A curated entity can therefore keep a numeric name too. A
 --      refused entity's edges, mentions and row are deleted. A
 --      retyped one is MERGED into the entity of the new type the writer
 --      would resolve its name to — the one a human merged the name into,
@@ -261,11 +266,11 @@ BEGIN
   -- last_seen_at moves for an extraction (016's rule) and, for a structured
   -- pass, only where a mention is actually written below — so a sync pass
   -- over an unchanged ticket leaves the project entity's last_seen_at where
-  -- it was and 029's stale_entities can still see it (third review pass,
-  -- independent read).
+  -- it was and 029's stale_entities can still see it (053's third review
+  -- pass, independent read).
   -- …and a structured pass that brings no new alias writes no entity row at
   -- all: without the WHERE, a no-op pass left a dead tuple per entity every
-  -- five minutes on every stale ticket (fourth review pass). An extraction
+  -- five minutes on every stale ticket (053's fourth review pass). An extraction
   -- still moves last_seen_at, so it always writes.
   WITH up AS (
     INSERT INTO ob1_entities (entity_type, name, normalized_name, aliases)
