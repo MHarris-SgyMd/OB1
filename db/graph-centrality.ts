@@ -139,8 +139,10 @@
  *     thought weighs 1 — a Done ticket counts as a live one until `--status`
  *     or `--decay-done` says otherwise. The lifecycle line gives the numbers.
  *   • Dependencies (`--startable`) are the board's link facets, as current as
- *     board-sync's last pass over each ticket: a relation removed on the board
- *     since then stays active here until a pass re-reads the ticket holding it.
+ *     board-sync's last passes over both tickets of a relation: the relation
+ *     is read from either side, so one removed on the board keeps blocking
+ *     until a pass has re-read both — the price of catching one the sync has
+ *     so far stated on one side only.
  *     The dependency line gives the numbers.
  *   • Only what has been extracted is in the graph: the coverage line says how
  *     many thoughts db/extract-entities.ts has reached.
@@ -234,7 +236,7 @@ export type Dependencies = {
   in_dependencies: number;
   /** Thoughts the flag took from a weight above 0 to 0 in this run: unsettled, weighed in by the lifecycle, and with an open blocker. */
   held: number;
-  /** Blockers still in force because nothing settles them — not in the brain, or with no status_type this tool knows. */
+  /** Blockers that hold back a thought in this run only because nothing settles them — not in the brain, or with no status_type this tool knows. */
   unknown_blockers: number;
   /** The latest dependency facet written or closed. Null when the brain holds none. */
   last_link_change: string | null;
@@ -315,12 +317,13 @@ export const dependencySql = (doneSlot: number) => `ticket_of AS (
             SELECT thought_id, system, identity FROM thought_sources
             UNION
             SELECT t.id, 'linear', coalesce(t.metadata->>'ticket', t.metadata->>'issue') FROM thoughts t WHERE t.metadata ? 'ticket' OR t.metadata ? 'issue'),
-          deps AS MATERIALIZED (
-            SELECT DISTINCT s.system,
+          dep_links AS MATERIALIZED (
+            SELECT s.system,
                    CASE WHEN f.payload->>'relation' = 'blocked_by' THEN s.identity ELSE f.payload->>'target' END AS blocked,
                    CASE WHEN f.payload->>'relation' = 'blocked_by' THEN f.payload->>'target' ELSE s.identity END AS blocker
               FROM thought_facets f JOIN thought_sources s ON s.thought_id = f.thought_id AND s.system = f.payload->>'system'
              WHERE f.kind = 'link' AND f.valid_until IS NULL AND f.payload->>'relation' IN ('blocks', 'blocked_by')),
+          deps AS MATERIALIZED (SELECT DISTINCT system, blocked, blocker FROM dep_links),
           blockers AS MATERIALIZED (
             SELECT d.system, d.blocked, d.blocker, bl.status_type AS blocker_status
               FROM (SELECT d.system, d.blocked, d.blocker, source_thought(d.system, d.blocker) AS blocker_id FROM deps d) d
@@ -347,7 +350,7 @@ export function weightsSql(opts: Pick<Options, "status" | "decayDone"> & Partial
   // own Options: decay and a filter are two answers to one question.
   if (opts.decayDone && opts.status !== "all") throw new Error(`weightsSql: --decay-done with --status ${opts.status}; pass one or the other`);
   let dependency = "";
-  let doneSlot = 0;
+  let doneSlot = 0; // read only under --startable, where it is bound
   if (opts.startable) {
     params.push(pgArray(LIFECYCLE_FILTERS.done));
     doneSlot = params.length;
@@ -377,12 +380,17 @@ export function weightsSql(opts: Pick<Options, "status" | "decayDone"> & Partial
   const base = `CASE WHEN status_type = ANY($${kept}::text[]) THEN 1.0
                                    WHEN status_type = ANY($${known}::text[]) THEN ${opts.decayDone ? DONE_WEIGHT : 0}
                                    ELSE 1.0 END`;
-  const blocked = `(blockers IS NOT NULL AND NOT coalesce(status_type = ANY($${doneSlot}::text[]), false))`;
+  let factor = "", held = "", join = "";
+  if (opts.startable) {
+    const blocked = `(blockers IS NOT NULL AND NOT coalesce(status_type = ANY($${doneSlot}::text[]), false))`;
+    factor = ` * CASE WHEN ${blocked} THEN 0 ELSE 1.0 END`;
+    held = `,\n                             (${blocked} AND ${base} > 0) AS held`;
+    join = " LEFT JOIN dependency USING (thought_id)";
+  }
   return `${LIFECYCLE_CTE}${dependency},
           weights AS MATERIALIZED (SELECT thought_id, CASE WHEN status_type = ANY($${known}::text[]) THEN status END AS status, status_type,
-                             (${base}${opts.startable ? ` * CASE WHEN ${blocked} THEN 0 ELSE 1.0 END` : ""})::float8 AS w${opts.startable ? `,
-                             (${blocked} AND ${base} > 0) AS held` : ""}
-                        FROM lifecycle${opts.startable ? " LEFT JOIN dependency USING (thought_id)" : ""})`;
+                             (${base}${factor})::float8 AS w${held}
+                        FROM lifecycle${join})`;
 }
 
 /**
@@ -425,14 +433,20 @@ export async function coverage(run: Runner, opts: Options): Promise<Coverage> {
   // facet (first review pass: "any active link on the holder" counted every
   // synced thought and missed that one). `held` is what the flag did in this
   // run, not every thought with a blocker; `unknown_blockers` counts distinct
-  // blockers in force that no known status settles or opens.
+  // blockers no known status settles or opens that hold back a thought in
+  // this run — one hanging off a Done ticket holds nothing and is not "in
+  // force". `facets` counts `dep_links`, the rows the ranking read, not a
+  // second scan with its own predicate (second review pass).
   const dependencyCols = opts.startable
     ? `,
-            (SELECT count(*) FROM thought_facets WHERE kind = 'link' AND valid_until IS NULL AND payload->>'relation' IN ('blocks', 'blocked_by'))::int AS dep_facets,
+            (SELECT count(*) FROM dep_links)::int AS dep_facets,
             (SELECT count(DISTINCT k.thought_id) FROM ticket_of k
-              WHERE EXISTS (SELECT 1 FROM deps d WHERE d.system = k.system AND (d.blocked = k.identity OR d.blocker = k.identity)))::int AS dep_named,
+               JOIN (SELECT system, blocked AS identity FROM deps UNION SELECT system, blocker FROM deps) n ON n.system = k.system AND n.identity = k.identity)::int AS dep_named,
             (SELECT count(*) FROM weights WHERE held)::int AS dep_held,
-            (SELECT count(*) FROM (SELECT DISTINCT system, blocker FROM blockers WHERE blocker_status IS NULL OR NOT blocker_status = ANY($${knownSlot}::text[])) u)::int AS dep_unknown,
+            (SELECT count(*) FROM (SELECT DISTINCT b.system, b.blocker FROM blockers b
+                                     JOIN ticket_of k ON k.system = b.system AND k.identity = b.blocked
+                                     JOIN weights w ON w.thought_id = k.thought_id AND w.held
+                                    WHERE b.blocker_status IS NULL OR NOT b.blocker_status = ANY($${knownSlot}::text[])) u)::int AS dep_unknown,
             (SELECT max(greatest(created_at, valid_until)) FROM thought_facets WHERE kind = 'link' AND payload->>'relation' IN ('blocks', 'blocked_by')) AS dep_last_change`
     : "";
   const [r] = await run(
@@ -746,11 +760,16 @@ export function caveats(c: Coverage, opts: Options): string[] {
  */
 export function lifecycleCaveat(c: Coverage, opts: Options): string {
   const source = `Ticket status is read from synced metadata (board-sync, SMD-1954), as fresh as its last pass${c.last_sync ? ` — latest linear_updated_at ${c.last_sync}` : c.with_lifecycle ? " — no linear_updated_at is stamped beside them" : " — none is stamped here"}: ${c.with_lifecycle} of ${c.thoughts} thoughts carry a lifecycle, ${c.done} of them completed or canceled${c.unknown_status ? `, and ${c.unknown_status} carr${c.unknown_status === 1 ? "ies" : "y"} a status_type this tool does not know (weighed 1)` : ""}.`;
+  // Under --startable the lifecycle is one factor of two: the line states the
+  // lifecycle's rule as the lifecycle's, and the run's weighed count carries
+  // both (second review pass: "every thought weighs 1" sat beside a
+  // dependency line holding thoughts at 0).
   const rule = opts.status !== "all"
-    ? ` --status ${opts.status}: ${c.weighed} of ${c.thoughts} thoughts weigh in this run (${LIFECYCLE_FILTERS[opts.status].join(", ")}, plus every thought without a lifecycle — it passes every filter).`
-    : opts.decayDone
+    ? ` --status ${opts.status}: ${c.weighed} of ${c.thoughts} thoughts weigh in this run (${LIFECYCLE_FILTERS[opts.status].join(", ")}, plus every thought without a lifecycle — it passes every filter${opts.startable ? "; less those --startable holds back" : ""}).`
+    : (opts.decayDone
       ? ` --decay-done: a completed or canceled thought weighs ${DONE_WEIGHT} in every count (pre-registered, one weight); degree counts neighbours, not evidence, and is unchanged.`
-      : ` Every thought weighs 1: a Done ticket counts as a live one (--status open|active|done filters; --decay-done down-weights).`;
+      : ` ${opts.startable ? "By its lifecycle every" : "Every"} thought weighs 1: a Done ticket counts as a live one (--status open|active|done filters; --decay-done down-weights).`)
+      + (opts.startable ? ` With --startable, ${c.weighed} of ${c.thoughts} thoughts weigh more than 0 in this run.` : "");
   return source + rule;
 }
 
@@ -758,7 +777,7 @@ export function lifecycleCaveat(c: Coverage, opts: Options): string {
  * The dependency line, under `--startable` alone: where the edges come from
  * and how current they can be, how many thoughts a dependency names (the rest
  * count as unblocked), how many the flag held back in this run, and how many
- * blockers are in force only because nothing settles them.
+ * blockers hold a thought back only because nothing settles them.
  */
 export function dependencyCaveat(c: Coverage, d: Dependencies): string {
   // A pass that changes no relation writes no facet (053's set semantics), so
@@ -766,9 +785,9 @@ export function dependencyCaveat(c: Coverage, d: Dependencies): string {
   // pass last looked — the line says which (first review pass).
   const moved = d.last_link_change ? `; the latest was written or closed ${d.last_link_change}` : "";
   const unknown = d.unknown_blockers
-    ? ` ${d.unknown_blockers} blocker${d.unknown_blockers === 1 ? " is" : "s are"} in force only because nothing settles ${d.unknown_blockers === 1 ? "it" : "them"}: not in the brain, or with no status_type this tool knows.`
+    ? ` ${d.unknown_blockers} blocker${d.unknown_blockers === 1 ? " is" : "s are"} holding a thought back only because nothing settles ${d.unknown_blockers === 1 ? "it" : "them"}: not in the brain, or with no status_type this tool knows.`
     : "";
-  return `Dependencies are read from the board's blocks / blocked_by link facets (SMD-1867), as current as board-sync's last pass over each ticket: ${d.facets} active dependency facet${d.facets === 1 ? "" : "s"}${moved}. ${d.in_dependencies} of ${c.thoughts} thoughts belong to a ticket a dependency names; every other thought has none recorded and counts as unblocked. --startable: ${d.held} thought${d.held === 1 ? "" : "s"} with an open blocker weigh${d.held === 1 ? "s" : ""} 0 in this run; a completed or canceled ticket is settled, not blocked, a blocker completed or canceled does not block, and a parent is not blocked by its children.${unknown}`;
+  return `Dependencies are read from the board's blocks / blocked_by link facets (SMD-1867), as current as board-sync's last passes over both tickets of each (a relation is read from either side, so one removed on the board blocks until both are re-read): ${d.facets} active dependency facet${d.facets === 1 ? "" : "s"}${moved}. ${d.in_dependencies} of ${c.thoughts} thoughts belong to a ticket a dependency names; every other thought has none recorded and counts as unblocked. --startable: ${d.held} thought${d.held === 1 ? "" : "s"} with an open blocker weigh${d.held === 1 ? "s" : ""} 0 in this run; a completed or canceled ticket is settled, not blocked, a blocker completed or canceled does not block, and a parent is not blocked by its children.${unknown}`;
 }
 
 export type Report = {
