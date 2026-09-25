@@ -7690,7 +7690,7 @@ console.log("\n[52] Migration 056: the entity name gate — a number or a type w
   assert(sym !== undefined && sym.f < sym.t && [sym.f, sym.t].sort().join() === [bun, toolHono].sort().join(), "…a symmetric relation re-pointed in the writer's order");
   const e4 = await q<{ f: string; t: string }>(`SELECT from_entity_id AS f, to_entity_id AS t FROM ob1_entity_edges WHERE thought_id = $1::uuid`, [t4]);
   assert(e4.length === 1 && e4[0].f === TOOL_PQ && e4[0].t === ZED, `on t4 the person-to-tool edge, a self-edge once merged, is dropped, and Zed–p.q is flipped to (p.q, Zed) as the survivor's id sorts first (${JSON.stringify(e4)})`);
-  const hono = await one<{ aliases: string[]; f: string; l: string; m: string[] }>(`SELECT aliases, first_seen_at::date::text AS f, last_seen_at::date::text AS l, merged_from AS m FROM ob1_entities WHERE id = $1::uuid`, [toolHono]);
+  const hono = await one<{ aliases: string[]; f: string; l: string }>(`SELECT aliases, first_seen_at::date::text AS f, last_seen_at::date::text AS l FROM ob1_entities WHERE id = $1::uuid`, [toolHono]);
   assert(hono.aliases.includes("@hono/mcp") && !hono.aliases.includes("hono/mcp") && hono.f === "2020-01-01" && hono.l === "2030-01-01", `the survivor keeps the merged row's aliases (its own name is no alias) and the earlier first and later last sighting (${JSON.stringify(hono)})`);
   const curated = await q<{ id: string; t: string; m: string[] }>(`SELECT id, entity_type AS t, merged_from AS m FROM ob1_entities WHERE id IN ($1::uuid, $2::uuid) ORDER BY id`, [OFFICE, SEVENS]);
   assert(curated.length === 2 && curated[0].t === "place" && curated[0].m.join() === "main office" && curated[1].t === "person" && curated[1].m.join() === "lucky sevens",

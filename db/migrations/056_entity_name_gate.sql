@@ -479,7 +479,6 @@ BEGIN
      WHERE a.to_type IS NOT NULL
      ORDER BY e.first_seen_at, e.id
   LOOP
-    v_target := NULL;
     SELECT en.id INTO v_target FROM ob1_entities en
      WHERE en.entity_type = r.to_type AND en.merged_from @> ARRAY[r.normalized_name]
      ORDER BY en.first_seen_at, en.id

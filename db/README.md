@@ -381,36 +381,35 @@ Migration 056 gates the entity graph's names (SMD-1935). `entity_type_gate(name,
 type)` is the rule: a name that normalises to digits, dots, colons and spaces (a
 migration number, a port, an address, a CIDR) or to the type vocabulary itself
 (`person`, `tools`, `entity`) is refused, and a `person` or `place` with an
-identifier's shape is retyped — a ticket id to `project`; a URL, package, path or
-host:port to `tool`; and for a place only (a person's handle takes these), a host,
-domain, file, snake_case name or glob to `tool` — since code artifacts are
+identifier's shape is retyped — a ticket id to `project`; a URL, package, path
+or host:port to `tool`; and for a place only (a person's handle takes these), a
+host, domain, file, snake_case name or glob to `tool` — since code artifacts are
 entities and refusing them dropped real ones (SMD-1937's measurement).
 `record_thought_entities` applies it to every extraction and returns
 `refused_entities` and `retyped_entities`, one per answered (type, name); a
-relation naming a refused entity is dropped and counted as any unlisted one is. A
-`source:` pass states its names on the source's authority and is not gated, so a
-numeric name a source states (a Linear label `2024`) can remain.
+relation naming a refused entity is dropped and counted as any unlisted one is.
+A `source:` pass states its names on the source's authority and is not gated, so
+a numeric name a source states (a Linear label `2024`) can remain.
 `apply_entity_type_gate()` applies the rule to the rows written before it, each
-entity judged on its name, leaving any a structured pass names or a human curated
-(a name merged into it; its own name, answered again, lands on an entity of the
-new type, since the writer's redirect is per type) — a refused entity's edges,
-mentions and row deleted; a
-retyped one merged by `merge_entities`' steps into the entity of its new type the
-writer would resolve it to, or moved when there is none — and the file runs it
-once, keeping the first run's counts in `ob1_config` under `entity_name_gate_056`
-(`SELECT value FROM ob1_config WHERE key = 'entity_name_gate_056'`): on the
-dogfood brain at 053, 116 refused, 8 moved and 4 merged of 3,384. Idempotent; no
-ACL. The writer's `merged_from` redirect is spelled `@>` now, which 016's GIN
-index serves. A writer call already running 053's body
-when the file commits writes by 053's rule: stop the extraction workers for the
-upgrade, or run `SELECT apply_entity_type_gate()` once they have finished (and
-again after a source stops stating a name the rule refuses), as the role that
-migrated — a `--grant` role lacks UPDATE on the mention tables (SMD-2216). Such a
-run's counts are its result; `ob1_config` keeps only the file's.
-`server-portable/entity-gate.ts` is its JavaScript twin, for the capture-time
-`people` facet (`metadata.ts`), which never reaches the function and keeps only
-the names the rule keeps as a person; test-schema [52] holds the two to one
-answer.
+entity judged on its name, leaving any a structured pass names or a human
+curated (a name merged into it; its own name, answered again, lands on an entity
+of the new type, since the writer's redirect is per type) — a refused entity's
+edges, mentions and row deleted; a retyped one merged by `merge_entities`' steps
+into the entity of its new type the writer would resolve it to, or moved when
+there is none — and the file runs it once, keeping the first run's counts in
+`ob1_config` under `entity_name_gate_056` (`SELECT value FROM ob1_config WHERE
+key = 'entity_name_gate_056'`): on the dogfood brain at 053, 116 refused, 8
+moved and 4 merged of 3,384. Idempotent; no ACL. The writer's `merged_from`
+redirect is spelled `@>` now, which 016's GIN index serves. A writer call
+already running 053's body when the file commits writes by 053's rule: stop the
+extraction workers for the upgrade, or run `SELECT apply_entity_type_gate()`
+once they have finished (and again after a source stops stating a name the rule
+refuses), as the role that migrated — a `--grant` role lacks UPDATE on the
+mention tables (SMD-2216). Such a run's counts are its result; `ob1_config`
+keeps only the file's. `server-portable/entity-gate.ts` is its JavaScript twin,
+for the capture-time `people` facet (`metadata.ts`), which never reaches the
+function and keeps only the names the rule keeps as a person; test-schema [52]
+holds the two to one answer.
 
 ## What changed relative to the guide
 
@@ -1144,11 +1143,11 @@ recency: the same rows give the same order every run.
 with its own numbers: edges are unweighted (SMD-1925 — on real runs every edge
 carries confidence 1.00, so support is an edge's only weight); entity typing is
 noisy (SMD-1935 — names that are only digits, dots, colons and spaces are out
-of scope by default — a brain from before 056 holds them, and a name a
-structured source states can be one — `--keep-numeric` admits them, `--types` narrows further,
-and the scope IS the graph: an entity outside it is in no list and no count,
-the subject the one exception, so `--types tool "Open Brain"` is the tools
-around a project); hubs and clusters inflate each other; ticket status is read
+of scope by default — a brain from before 056 holds them, and so can a name a
+structured source states or an entity a human curated — `--keep-numeric` admits
+them, `--types` narrows further, and the scope IS the graph: an entity outside
+it is in no list and no count, the subject the one exception, so `--types tool
+"Open Brain"` is the tools around a project); hubs and clusters inflate each other; ticket status is read
 from synced metadata and by default not acted on (below); and only extracted
 thoughts are in the graph, which the coverage line counts.
 
