@@ -4871,6 +4871,8 @@ checkWorkflowPins();
 const POSTGREST_CODE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|sh)$/;
 /** The files whose comments start at `#`: Python and shell. */
 const HASH_COMMENT_FILE = /\.(py|sh)$/;
+/** The shell files among them: a `#` opens their comments at a word's start alone (hashCommentsBlanked's `shell`). */
+const SHELL_FILE = /\.sh$/;
 /** A PostgREST path in any string: `…/rest/v1/thoughts`, `/rest/v1/rpc/f`, a bare "rest/v1" joined later; `v10` and `arrest/v1` are not it. */
 const POSTGREST_PATH = /\brest\/v1\b/g;
 /** supabase-py: the import in either spelling, and the client constructor (Python and shell files alone — `create_client` is a plain name elsewhere). */
@@ -4911,7 +4913,7 @@ function hashCommentsBlanked(text: string, shell = false): string {
 /** The 1-based lines of `text` holding a PostgREST form, ascending — comments blanked by the file's kind, strings read. */
 function postgrestIn(text: string, rel: string): number[] {
   const hash = HASH_COMMENT_FILE.test(rel);
-  const code = hash ? hashCommentsBlanked(text, /\.sh$/.test(rel)) : blanked(text, false);
+  const code = hash ? hashCommentsBlanked(text, SHELL_FILE.test(rel)) : blanked(text, false);
   const lineOf = lineIndexer(code);
   const lines = new Set<number>();
   for (const re of hash ? [POSTGREST_PATH, ...SUPABASE_PY_FORMS] : [POSTGREST_PATH, POSTGREST_JS_SPECIFIER]) for (const m of code.matchAll(re)) lines.add(lineOf(m.index!));
@@ -4929,6 +4931,7 @@ const POSTGREST_PROBES: [string, string, boolean][] = [
   ['"""Posts each row to /rest/v1/rpc/upsert_thought, the 3-argument form."""\nimport sys', "x.py", true],
   ['curl -s "$SUPABASE_URL/rest/v1/thoughts?select=id" -H "apikey: $KEY"', "x.sh", true],
   ["const url = `${SUPABASE_URL}/rest/v1/thoughts`; // the same in a comment: /rest/v1/thoughts", "x.mjs", true],
+  ["echo '# not a comment: /rest/v1 inside quotes is a hit though'", "x.sh", true],
   // Not hits: a comment in either grammar, the shim's import, the key alone, a regex literal, other paths, a longer name.
   ["// the old path: ${SUPABASE_URL}/rest/v1/thoughts\nconst x = 1;", "x.mjs", false],
   ["/* POST /rest/v1/thoughts */\nconst x = 1;", "x.ts", false],
@@ -4943,7 +4946,6 @@ const POSTGREST_PROBES: [string, string, boolean][] = [
   ['const p = "/api/rest/v10/x"; const q = "/arrest/v1/y";', "x.ts", false],
   ["name = create_client_name(x)", "x.py", false],
   ["const c = create_client(url);", "x.ts", false],
-  ["echo '# not a comment: /rest/v1 inside quotes is a hit though'", "x.sh", true],
   // Shell: `#` inside a word is not a comment, so the hit after it is read; Python: it is, anywhere.
   ['n=${#arr[@]}; curl -s "$U/rest/v1/thoughts"', "x.sh", true],
   ["x = 1#c /rest/v1/thoughts", "x.py", false],
@@ -5002,6 +5004,7 @@ function checkPostgrestClients() {
   for (const name of ["x.md", "x.sql", "x.json", "x.html", "x.yaml", "x.pyc"]) if (POSTGREST_CODE_FILE.test(name)) fail(SELF, `check 24's POSTGREST_CODE_FILE reads ${name}, which it should not (its own probe)`);
   for (const name of ["x.py", "x.sh"]) if (!HASH_COMMENT_FILE.test(name)) fail(SELF, `check 24's HASH_COMMENT_FILE no longer treats ${name} as #-commented (its own probe)`);
   if (HASH_COMMENT_FILE.test("x.mjs")) fail(SELF, "check 24's HASH_COMMENT_FILE treats x.mjs as #-commented (its own probe)");
+  if (!SHELL_FILE.test("x.sh") || SHELL_FILE.test("x.py")) fail(SELF, "check 24's SHELL_FILE no longer names x.sh alone (its own probe)");
   // The blanker on its own: a `#` in each string kind kept, one after each closed string blanked, offsets and newlines held.
   const blankerProbe = "a = 'x#y' # c1\nb = \"p#q\" # c2\nc = '''m#n\n#o''' # c3\nd = \"\"\"s\\\"#t\"\"\" # c4\ne = 1 # c5\n";
   const blankerWant = "a = 'x#y'     \nb = \"p#q\"     \nc = '''m#n\n#o'''     \nd = \"\"\"s\\\"#t\"\"\"     \ne = 1     \n";
@@ -5016,8 +5019,10 @@ function checkPostgrestClients() {
     if (hit && n === 0) fail(SELF, `check 24 no longer catches its probe: ${JSON.stringify(probe)} (its own probe)`);
     if (!hit && n > 0) fail(SELF, `check 24 catches a non-probe: ${JSON.stringify(probe)} (its own probe)`);
   }
-  // The line is the string's, once, for a probe whose hit and comment share a line (probe 9, the hit beside a comment): line 1 alone.
-  const twice = postgrestIn(POSTGREST_PROBES[9][0], "x.mjs");
+  // The line is the string's, once, for the probe whose hit and comment share a line: line 1 alone.
+  const beside = POSTGREST_PROBES.find(([text]) => text.includes("// the same in a comment"));
+  if (!beside) fail(SELF, "check 24's hit-beside-a-comment probe is gone (its own probe)");
+  const twice = beside ? postgrestIn(beside[0], beside[1]) : [1];
   if (twice.length !== 1 || twice[0] !== 1) fail(SELF, `check 24 reports lines ${twice.join(",")} for a hit beside a comment, not line 1 once (its own probe)`);
   const files = textFilesUnder(SCANNED_ROOTS).filter((f) => POSTGREST_CODE_FILE.test(f));
   if (files.length === 0) fail(SELF, "check 24 found no code file under the seven category directories and docs/ — the listing is broken, not the tree clean");

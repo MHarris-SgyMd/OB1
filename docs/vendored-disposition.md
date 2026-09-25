@@ -151,7 +151,9 @@ no database client.
 Not the REST gateway the ticket named as the `.py` target: `integrations/open-brain-rest`'s
 `POST /capture` embeds at `openai/text-embedding-3-small` (1536), which the fork's default
 brain (`qwen3-embedding:4b`, 1024) refuses, and a request per row is the wrong shape for a
-ten-thousand-row import. A **maintenance script** (reads `thoughts`, writes metadata or a
+ten-thousand-row import.
+
+**Maintenance scripts.** A **maintenance script** (reads `thoughts`, writes metadata or a
 sidecar table) moves onto `compat/supabase-sql` under `bun`, its brain URL variable a
 `postgres://` string — `SUPABASE_URL` for most; `OPEN_BRAIN_URL` for entity-wiki,
 typed-edge-classifier and wiki-synthesis; lint-sweep, weekly-digest and provenance-chains
@@ -163,15 +165,18 @@ and a thought a script deletes goes through `.rpc("delete_thought", { p_id, p_ac
 actor a JSON object naming the script; a `CITED` answer arrives as `data.ok === false`, not in
 `error`, and each ticket says whether a cited row stays or `p_detach` goes. The key variable
 (`SUPABASE_SERVICE_ROLE_KEY`, `OPEN_BRAIN_SERVICE_KEY`) is read and ignored by the shim, so a
-script may stop requiring it. Four scripts — atomizer's, authorship-edges', entity-wiki's,
+script may stop requiring it.
+
+**The entity tables.** Four scripts — atomizer's, authorship-edges', entity-wiki's,
 typed-edge-classifier's — assume upstream's `schemas/entity-extraction` tables; on a fork
 brain `thought_entities` is migration 016's (a uuid `entity_id` to `ob1_entities`, no
 `mention_role`), so the schema's `CREATE TABLE IF NOT EXISTS` is a no-op there and a write of
 `mention_role` fails with 42703 whatever the transport (change 093 recorded the shared name
 for grants; the third review pass measured the write). Each port reads 016's shape and writes
 mentions through the fork's `record_thought_entities`, or its ticket says why not;
-`thought_edges` (`schemas/typed-reasoning-edges`) is its own name and applies. A **smoke
-harness** has its own ticket. A script whose
+`thought_edges` (`schemas/typed-reasoning-edges`) is its own name and applies.
+
+**Smoke harnesses and retirements.** A **smoke harness** has its own ticket. A script whose
 capability is **in core** retires: `obsidian-vault-import` (the Markdown adapter,
 `ingest-records.ts --markdown`, is the import; the recipe's heading split with LLM
 distillation of long sections, its `--min-words` / `--skip-folders` / `--after` filters, its
