@@ -205,9 +205,12 @@ not in the node).
   any capability uses it. The check refuses a capability naming an undeclared
   family, and refuses `notification-target` until its `reserved` flag is dropped
   — which is the spec change the ticket names, made on purpose.
-- **A second direction for an existing vendor** (Obsidian becomes writable under
-  SMD-1814). Add the capability; the connector's declared direction must move to
-  `bidirectional` in the same edit or the check names the disagreement.
+- **A second direction for an existing vendor** (Gmail was one: the imports
+  pull, the digest's draft is the sink). Add the capability; the connector's
+  declared direction must move to `bidirectional` in the same edit or the check
+  names the disagreement. A vendor whose last artifact retired left the table
+  with it — `obsidian` went with its batch import (SMD-2137) — and comes back
+  when a capability names it again (SMD-1814's connector, `writable`).
 - **An artifact that looks external but is not.** A dashboard over the brain's
   REST surface, an agent runtime consuming the brain, a backup to local JSON, a
   skill over the MCP surface: excuse it by name under
@@ -312,7 +315,7 @@ must-pass probes on every run:
 | The same vendor via a low-code node and via a native driver produce identical canonical / text / edges | **Specified** (identity recomputed at the seam, fetcher as provenance). **Proven on one vendor once SMD-1863 picks the tool** |
 
 <!-- connector-tables:start — generated from docs/connector-registry.json by scripts/connector-registry.ts; do not edit by hand -->
-22 artifacts, 32 capability rows, 16 connectors (4 bidirectional: `discord`, `gmail`, `slack`, `telegram`), 7 of 8 declared families in use.
+21 artifacts, 31 capability rows, 15 connectors (4 bidirectional: `discord`, `gmail`, `slack`, `telegram`), 7 of 8 declared families in use.
 
 Coverage net — the connector-shaped tags that mark an undeclared contribution: `import`, `digest`, `webhook`, `messaging`, `email`, `bot`; a declared connector's name as a tag marks it too.
 
@@ -392,8 +395,8 @@ What a fetcher of any kind hands the seam (the **canonical**), and how the brain
 - **Metadata.** `vendor`, `page_id`, `path or url`, `title`, `tags`, `frontmatter or typed properties`, `created_at`, `updated_at`, `author`
 - **Identity.** `<vendor>:<page id>` where the vendor has one (Notion, Confluence, Blogger); for a file vault, the frontmatter id when present, else the path with a rename detected by content fingerprint (SMD-1813's identity rule: it must survive a rename on either side)
 - **Sink shape.** the page's owned sections written back in the source form; a page the brain did not create is never overwritten whole
-- **Dividing line.** a vault or export import is a batch → native driver; a live two-way sync (SMD-1814–1818) is a stateful workflow → tool node with the section-ownership and conflict rules of SMD-1813 applied in the brain, not in the node. Splitting a long page by heading is an enrichment past the seam; obsidian-vault-import declares `1:many` because that is what reaches the brain
-- **Instances today.** `blogger`, `obsidian`
+- **Dividing line.** a vault or export import is a batch → native driver; a live two-way sync (SMD-1814–1818) is a stateful workflow → tool node with the section-ownership and conflict rules of SMD-1813 applied in the brain, not in the node. Splitting a long page by heading is an enrichment past the seam (the atomizer's), not the seam's: the fork's Markdown adapter (`db/ingest-markdown.ts`, SMD-1867) is `1:1`, one file one thought, its chunks retrieval's alone; the retired obsidian-vault-import declared `1:many` because its split reached the brain (SMD-2137)
+- **Instances today.** `blogger`
 
 #### `web-clip`
 
@@ -439,7 +442,6 @@ What a fetcher of any kind hands the seam (the **canonical**), and how the brain
 | `google-takeout` | source | `recipes/google-activity-import` (activity-export · batch · native-driver) | — |
 | `grok` | source | `recipes/grok-export-import` (conversation-export · batch · native-driver); `recipes/x-twitter-import` (conversation-export · batch · native-driver) | — |
 | `instagram` | source | `recipes/instagram-import` (message-stream/chat · batch · native-driver); `recipes/instagram-import` (activity-export · batch · native-driver) | — |
-| `obsidian` | source | `recipes/obsidian-vault-import` (document/page · batch · native-driver) | — |
 | `perplexity` | source | `recipes/perplexity-conversation-import` (conversation-export · batch · native-driver) | — |
 | `readwise` | source | `integrations/readwise-capture` (annotation/highlight · push · native-driver); `recipes/readwise-import` (annotation/highlight · pull · native-driver) | — |
 | `slack` | bidirectional | `integrations/slack-capture` (message-stream/chat · push · native-driver) | `recipes/editorial-policy` (message-stream/chat · push · native-driver) |
@@ -473,7 +475,6 @@ What a fetcher of any kind hands the seam (the **canonical**), and how the brain
 | `recipes/instagram-import` | `instagram` | message-stream/chat | batch | source | many:1 | read-only | native-driver |
 | `recipes/instagram-import` | `instagram` | activity-export | batch | source | many:1 | read-only | native-driver |
 | `recipes/journals-blogger-import` | `blogger` | document/page | batch | source | 1:1 | read-only | native-driver |
-| `recipes/obsidian-vault-import` | `obsidian` | document/page | batch | source | 1:many | read-only | native-driver |
 | `recipes/daily-digest` | `gmail` | mailbox/email | push | sink | many:1 | read-only | mcp-server |
 | `recipes/weekly-digest` | `telegram` | message-stream/chat | push | sink | many:1 | read-only | native-driver |
 | `recipes/editorial-policy` | `slack` | message-stream/chat | push | sink | many:1 | read-only | native-driver |

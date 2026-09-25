@@ -107,7 +107,7 @@
       "metadata": ["vendor", "page_id", "path or url", "title", "tags", "frontmatter or typed properties", "created_at", "updated_at", "author"],
       "identity": "`<vendor>:<page id>` where the vendor has one (Notion, Confluence, Blogger); for a file vault, the frontmatter id when present, else the path with a rename detected by content fingerprint (SMD-1813's identity rule: it must survive a rename on either side)",
       "typical_transport": ["batch", "pull", "push"],
-      "dividing_line": "a vault or export import is a batch → native driver; a live two-way sync (SMD-1814–1818) is a stateful workflow → tool node with the section-ownership and conflict rules of SMD-1813 applied in the brain, not in the node. Splitting a long page by heading is an enrichment past the seam; obsidian-vault-import declares `1:many` because that is what reaches the brain",
+      "dividing_line": "a vault or export import is a batch → native driver; a live two-way sync (SMD-1814–1818) is a stateful workflow → tool node with the section-ownership and conflict rules of SMD-1813 applied in the brain, not in the node. Splitting a long page by heading is an enrichment past the seam (the atomizer's), not the seam's: the fork's Markdown adapter (`db/ingest-markdown.ts`, SMD-1867) is `1:1`, one file one thought, its chunks retrieval's alone; the retired obsidian-vault-import declared `1:many` because its split reached the brain (SMD-2137)",
       "sink_shape": "the page's owned sections written back in the source form; a page the brain did not create is never overwritten whole"
     },
     "web-clip": {
@@ -148,7 +148,6 @@
     "telegram": { "direction": "bidirectional", "note": "telegram-capture and vercel-neon-telegram's bot route are the source; weekly-digest, life-engine and life-engine-video are the sink. Five artifacts, one vendor driver's worth of client." },
     "gmail": { "direction": "bidirectional", "note": "email-history-import and gmail-smart-pull are the source (pull); daily-digest's draft is the sink, through the client's Gmail MCP connector." },
     "readwise": { "direction": "source", "note": "readwise-capture (push) and readwise-import (pull) are two transports of one source capability; both resolve to `readwise:<highlight id>`." },
-    "obsidian": { "direction": "source", "note": "obsidian-vault-import is the read-only batch; the SMD-1814 connector adds the writable direction and makes this bidirectional." },
     "claude-ai": { "direction": "source", "note": "captured by chrome-capture-extension: a manual push of the open exchange and a pull over the internal conversation API for bulk and auto sync." },
     "chatgpt": { "direction": "source", "note": "two fetchers, one vendor: chrome-capture-extension (push and pull) and chatgpt-conversation-import (batch) — the same conversation id from either." },
     "gemini": { "direction": "source", "note": "chrome-capture-extension: a best-effort manual push and a debugger-observed history pull." },
@@ -257,12 +256,6 @@
       "path": "recipes/journals-blogger-import",
       "capabilities": [
         { "vendor": "blogger", "family": "document/page", "transport": "batch", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "Atom XML export; one thought per post" }
-      ]
-    },
-    {
-      "path": "recipes/obsidian-vault-import",
-      "capabilities": [
-        { "vendor": "obsidian", "family": "document/page", "transport": "batch", "direction": "source", "cardinality": "1:many", "round_trip": "read-only", "fetcher": "native-driver", "note": "a note is split by heading and long sections distilled; the read-only projection of the two-way SMD-1814 connector, which will keep the file as the canonical" }
       ]
     },
     {

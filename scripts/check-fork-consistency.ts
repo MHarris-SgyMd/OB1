@@ -234,8 +234,9 @@
  *      the class decision is docs/vendored-disposition.md's "PostgREST-
  *      speaking scripts" (an import emits ingestion-contract items, a
  *      maintenance script moves onto compat/supabase-sql, three retire), and
- *      POSTGREST_EXCEPTIONS counts the twenty-eight files with a call site
- *      (two more reach the gateway through a lib) with the ticket that ports
+ *      POSTGREST_EXCEPTIONS counts the twenty-seven files with a call site
+ *      (two more reach the gateway through a lib; twenty-eight until
+ *      obsidian-vault-import retired, SMD-2137) with the ticket that ports
  *      or retires each — a landed port fails until its entry goes, so the
  *      table's size is the class's remaining size (SMD-2126)
  *
@@ -4963,7 +4964,8 @@ const SHIM = "a maintenance script; it moves onto compat/supabase-sql under bun"
  * file → the ticket that ports or retires it, and the exact count of lines that speak PostgREST. Thirty files in
  * twenty-one recipes (SMD-2126's survey of f7693c4c, re-measured on d8e3de60); two more of the thirty —
  * atomizer's backfill-gmail-correspondents.mjs and authorship-edges' backfill-authorship.mjs — reach the
- * gateway through their `lib/` file alone and have no line of their own.
+ * gateway through their `lib/` file alone and have no line of their own. One of the thirty is gone:
+ * obsidian-vault-import's import-obsidian.py retired with its recipe (SMD-2137), the first entry to leave.
  */
 const POSTGREST_EXCEPTIONS = new Map<string, CountedException>([
   // Imports → the ingestion contract (after SMD-2136).
@@ -4973,7 +4975,6 @@ const POSTGREST_EXCEPTIONS = new Map<string, CountedException>([
   ["recipes/google-activity-import/import-google-activity.mjs", POSTGREST(IMPORT, "SMD-2150", 1)],
   ["recipes/email-history-import/pull-gmail.ts", POSTGREST(IMPORT, "SMD-2021", 2)],
   // Retire: the fork's core owns the capability.
-  ["recipes/obsidian-vault-import/import-obsidian.py", POSTGREST("superseded by db/ingest-markdown.ts (ingest-records.ts --markdown); the recipe retires", "SMD-2137", 3)],
   ["recipes/local-ollama-embeddings/embed-local.py", POSTGREST("superseded by the server's local embedding (OB1_LLM_BASE_URL) and db/reembed.ts; the recipe retires", "SMD-2138", 2)],
   ["recipes/fingerprint-dedup-backfill/backfill-fingerprints.mjs", POSTGREST("superseded by migration 023; the file is removed", "SMD-2145", 1)],
   // Maintenance scripts → the shim under bun.
