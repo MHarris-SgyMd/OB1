@@ -9,7 +9,7 @@ POC in `evals/README.md` § "Which orchestration tool?" (`evals/eval-orchestrati
 PR #173): the same two workflows on n8n 2.40.6, Activepieces 0.91.3 and
 Windmill CE 1.817.0 beside a throwaway brain, held to criteria posted on the
 ticket before any of them ran (C1s, the schedule seen to fire, was added after
-the second review pass to test what C1 already said: "on a schedule"). This
+the second review pass to test what C1 already said: "A scheduled workflow"). This
 page is the pick, the two gates, the boundary, what it declines and what it
 leaves open.
 
@@ -19,9 +19,10 @@ leaves open.
    criterion (C1 ingestion, C1s the schedule firing, C2 the capture through the
    tool's own MCP client, C3 the tool's own MCP endpoint, C4 headless);
    Windmill failed C2 — it has no MCP-client step outside an AI agent. Between
-   the two that passed, n8n wins on every axis the POC measured except the
-   licence (the ranking below), and its licence passes the gate for the shape
-   OB1 ships.
+   the two that passed, n8n wins on the axes the POC measured — MCP, operations,
+   egress controls — and loses on the licence; breadth, from the vendors' own
+   listings, is comparable (the ranking below). Its licence passes the gate for
+   the shape OB1 ships.
 2. **A sidecar, opt-in, beside the brain.** A `deploy/compose.yaml` profile
    (`orchestration`, as `board-sync` and `jev` are profiles), off unless asked
    for; a brain plus Claude Code never runs it. The profile references n8n's
@@ -58,13 +59,21 @@ leaves open.
    the brain's MCP, under its own key, attributed and revocable per client,
    which a brain read through n8n's shared static header would lose (every
    client would read as the one key n8n holds). The POC's `brain_search` on
-   n8n's endpoint proved the path; it is not a template.
+   n8n's endpoint proved the path; it is not a template. So the ticket's pitch —
+   the AI client sees "remember" and "act" on **one** MCP surface — is declined:
+   the client sees both through two connectors, the brain's and n8n's, at the
+   cost of one more connector to configure. The live check below shows each path
+   works.
 8. **One owner per source per brain.** A source is ingested by one writer on a
    given brain, or the brain holds the same item twice in two renderings. The
    fork's Linear board is board-sync's (SMD-1954), which updates a ticket's row
    in place; an n8n Linear template ships only when it can do the same —
    identity-keyed upsert through SMD-1931's capture route with SMD-1867's
-   identity — and then replaces board-sync rather than running beside it.
+   identity — and then, on a brain that runs it, replaces board-sync there.
+   The rule holds during a cut-over too: a template proving itself "unattended"
+   before a native path retires does so on another brain (the canary tier is its
+   own Postgres server), or with the native path switched off — never beside it
+   on the same brain.
 9. **v1 sends no brain content to a vendor.** Ingestion into the brain, and act
    tools that call a vendor with what the AI client gives them. No template
    delivers thoughts to an outside system until the egress checkpoint below
@@ -94,12 +103,12 @@ SMD-1863) and read SMD-1863's live state from Linear, in four turns.
 
 | axis | n8n | Activepieces | Windmill |
 | --- | --- | --- | --- |
-| connector breadth | 918 node types in the image (tool variants included); 2,274 integrations on n8n.io/integrations (2026-09-24) | 763 pieces on activepieces.com/pieces (2026-09-24) | a Hub of scripts; no Linear trigger (measured), and the Hub's Gmail integration is send-only (hub.windmill.dev, 2026-09-24) |
+| connector breadth (the vendors' listings, not measured) | 918 node types in the image (tool variants included); 2,274 integrations on n8n.io/integrations (2026-09-24) | 763 pieces on activepieces.com/pieces (2026-09-24) | a Hub of scripts; no Linear trigger, and the Hub's Gmail integration is send-only (its docs and hub.windmill.dev, 2026-09-24) |
 | MCP maturity (live) | client node + server trigger, static header auth — the OB1 pattern | client piece with no timeout property; OAuth-only endpoint listing 42 of its own tools (flows, tables, run any piece action) beside yours | server with path-scoped tokens (held); no deterministic client |
 | licence (Gate 1) | Sustainable Use License — passes for OB1's shape | MIT for everything used — cleanest | AGPLv3 + a proprietary CE image: "not … modify or wrap under any form without an explicit agreement" |
-| operational fit | 361–575 MiB; nothing it ran fetched a package at run time; wants Postgres 17 | 1.2 GiB, 2.1–3.3× n8n; needs its cloud catalogue to provision a fresh stack; refused known pieces on 10 of 11 fresh boots until a restart | smallest container after the runs, the heaviest Postgres growth (its queue lives there); superuser-made cluster roles (`windmill_admin WITH BYPASSRLS`); no job isolation unprivileged |
-| auditability | workflow JSON; an OpenAPI contract with the two gaps in decision 6 | flow JSON; no published, versioned API found — the kit calls the endpoints its web app uses | scripts as files — the most reviewable, and the connectors are ours to write |
-| egress controls (measured) | a per-credential domain allowlist, enforced; key scopes enforced | catalogue sync can be turned off after provisioning, not before | none measured |
+| operational fit | 361–575 MiB; what it ran needed no package fetched at run time (inferred from stock nodes; not probed); warns below Postgres 17 | 1.1–1.2 GiB, 2.1–3.3× n8n; needs its cloud catalogue to provision a fresh stack; refused known pieces on 10 of 11 fresh boots until a restart | smallest container after the runs, the heaviest Postgres growth (its queue lives there); superuser-made cluster roles (`windmill_admin WITH BYPASSRLS`); no job isolation unprivileged |
+| auditability | workflow JSON; an OpenAPI contract with the two gaps in decision 6 | flow JSON; a published `/v1` OpenAPI, whose API keys need the Platform or Enterprise edition — on the community image the kit signs in as a user and calls it | scripts as files — the most reviewable, and the connectors are ours to write |
+| egress controls (measured) | a per-credential domain allowlist, enforced; key scopes enforced on the two calls tried | catalogue sync can be turned off after provisioning, not before | none measured |
 
 Windmill's strength — connectors as reviewable scripts — is also the reason not
 to pick it: writing each connector ourselves is the per-service work this
@@ -120,7 +129,9 @@ available and derivative works, limited so: "You may use or modify the software
 only for your own internal business purposes or for non-commercial or personal
 use. You may distribute the software or provide it to others only if you do so
 free of charge for non-commercial purposes." Files with ".ee." in the filename
-or ".ee" in the dirname are not under it. n8n does not call it open source.
+or ".ee" in the dirname are not under it. n8n calls it fair-code and
+source-available and says it does not call itself open source (its licence FAQ
+and docs.n8n.io/n8n-community-license).
 
 Why OB1's shape is inside it — the second and third points are inferences the
 licence does not address in words:
@@ -135,20 +146,28 @@ licence does not address in words:
 - **The templates are OB1's.** Workflow JSON naming nodes and connections is
   configuration an operator writes; OB1 writing it for them adds nothing of
   n8n's to the tree.
-- **No ".ee" code is used.** n8n's Git source control (`environments.ee`) is not
-  needed: templates are files loaded through the public API. The profile names
-  n8n only to identify it, not as a mark of OB1's.
+- **No licence-gated feature is enabled.** The image ships and loads ".ee"
+  directories; what the profile never turns on is a feature that needs an
+  Enterprise licence — n8n's Git source control (`modules/source-control.ee`)
+  among them, since templates are files loaded through the public API. The
+  profile names n8n only to identify it, not as a mark of OB1's.
 
-**Where the two licences diverge.** OB1's FSL-1.1-MIT forbids only a Competing
-Use — offering OB1 as a commercial product or service that substitutes for it —
-and explicitly permits professional services to a licensee; it becomes MIT two
-years after each release. The SUL permits neither commercial provision to
-others nor, ever, anything more. So an operator combining the two is held to
-the stricter: a consultant deploying the profile for a paying client, or a paid
-product that embeds a brain with the profile, is permitted by OB1's licence and
-not by n8n's. The docs for the profile say so, and that the operator is then
-running two non-OSI licences side by side. n8n's licence FAQ names
-`license@n8n.io` for anything outside it.
+**Where the two licences differ.** OB1's FSL-1.1-MIT forbids a Competing Use —
+making OB1 available in a commercial product or service that substitutes for
+it, substitutes for another product the licensor offers with it, or offers the
+same or substantially similar functionality — and permits professional
+services to a licensee; each release becomes MIT two years after it is made
+available. n8n's SUL never converts, and it draws its line elsewhere: n8n's own
+licence FAQ permits consulting and automation services, and installing and
+managing n8n on a client's own server "provided that you are not *also*
+hosting for them", while hosting n8n for others, or letting others build
+workflows on it, is outside the licence. So the same deployment can meet both:
+a consultant installing an OB1 brain with the profile on a client's own
+infrastructure is inside both licences; hosting the profile for a client is
+outside the SUL; a commercial product built on OB1 that competes with it is
+outside the FSL whatever the SUL says. The profile's docs state those three,
+and that the operator is running two non-OSI licences side by side. n8n's FAQ
+names `license@n8n.io` for anything unclear.
 
 **The other two.** Activepieces is MIT outside `packages/ee/` and
 `packages/server/api/src/app/ee`, and everything the POC used is outside them.
@@ -171,12 +190,16 @@ concern SMD-1813's allowlist and SMD-1903's egress policy already name.
 - **Act tools carry what the AI client gives them to a vendor.** That is any MCP
   connector's contract; the client decides what it sends. No v1 template feeds a
   vendor call from the brain itself.
-- **n8n keeps a copy of every capture.** n8n saves execution data by default, so
-  each capture's text sits in n8n's own store as well as the brain's — outside
-  `delete_thought`, redaction and the brain's retention. SMD-2210 sets n8n's
-  execution pruning (saved successes kept briefly, then deleted). The POC's
-  verifier reads a run's saved data to count its captures, so the profile's
-  acceptance keeps saving on long enough for the check, or counts another way.
+- **n8n keeps a copy of every run.** n8n saves execution data by default and
+  prunes it after 14 days or 10,000 runs (its defaults, read from the 2.40.6
+  image's configuration), so each capture's text sits in n8n's store as well as
+  the brain's for up to a fortnight — outside `delete_thought`, redaction and the
+  brain's retention. The same holds for an act tool's arguments: whatever the
+  client handed it, brain content included, lingers in n8n's run history.
+  SMD-2210 shortens the window or turns on n8n's execution-data redaction. The
+  POC's verifier reads a run's saved data to count its captures, so the
+  profile's acceptance keeps saving on long enough for the check, or counts
+  another way.
 - **Brain reads do not go through n8n** (decision 7), so no brain search result
   transits it.
 
@@ -187,7 +210,7 @@ concern SMD-1813's allowlist and SMD-1903's egress policy already name.
 2. **Every credential in a template is pinned to its host** (SMD-2211). n8n
    enforces a per-credential domain allowlist (`allowedHttpRequestDomains`):
    the Linear key pinned elsewhere was refused, "Domain not allowed: This
-   credential is restricted from accessing api.linear.app" (measured). The POC
+   credential is restricted from accessing api.linear.app…" (measured). The POC
    pinned the Linear credential only; whether the MCP Client node honours a pin
    on the brain's header credentials is not measured and is the first thing
    SMD-2211 measures.
@@ -195,8 +218,9 @@ concern SMD-1813's allowlist and SMD-1903's egress policy already name.
    capture-scope brain key; nothing holds a write key. The key an AI client
    presents to n8n's MCP endpoint is not the key that starts an ingestion (the
    POC shared one).
-4. **Key custody** (SMD-2210). n8n's API key is scoped to eight of ~90 scopes and
-   n8n enforces them (a call outside them answered 403, measured), but those
+4. **Key custody** (SMD-2210). n8n's API key is scoped to eight of ~90 scopes, and
+   the two calls outside them tried in the third review pass answered 403 —
+   though n8n's docs say non-Enterprise keys have full access — but those
    eight include creating and publishing workflows — so a holder can publish
    one that sends any unpinned credential anywhere. The key gets an expiry; the
    key it replaces is revoked (in the POC, replaced keys stayed valid). Every
@@ -226,11 +250,13 @@ not dropped when the recipe retires.
 - **The profile** (SMD-2210). `n8nio/n8n` pinned by digest (2.40.6 measured), a
   store of its own (decision 3), one published port on loopback (the house rule,
   check 13), the telemetry switches, `N8N_BLOCK_ENV_ACCESS_IN_NODE=true` so no
-  workflow reads a secret from the environment, execution pruning, and a
-  one-shot provisioning step — owner, key, credentials, templates, publish — the
-  POC's adapter grown up.
+  workflow reads a secret from the environment, a shorter execution window, and
+  a one-shot provisioning step — owner, key, credentials, templates, publish —
+  the POC's adapter grown up. The eval kit gains a profile-shaped overlay so its
+  checks run against the profile, not against the shape decision 3 rejects.
 - **The templates** (SMD-2212). Gmail → brain, once an operator's Google OAuth
-  client exists (self-hosted n8n has no managed OAuth), gated on SMD-1813; an
+  client exists (self-hosted n8n has no managed OAuth; the consent is one
+  browser step, outside C4's "no UI step"), gated on SMD-1813; an
   act-tool workflow on n8n's MCP endpoint; the Linear template only on the terms
   of decision 8.
 - **What the brain sees.** A capture from n8n is a capture from a key: its actor
@@ -245,15 +271,18 @@ not dropped when the recipe retires.
   store of its own — was not run; SMD-2210's acceptance measures it, SQLite and
   Postgres 17 both.
 - **Upgrades.** The image is pinned by digest and bumped deliberately. Each bump
-  re-runs `evals/eval-orchestration.ts --up n8n` then `--verify n8n
-  --wait-schedule`, because two things the profile depends on are not n8n's
-  published contract: the internal key-mint endpoints, and the shape of the run
-  data the verifier counts.
+  re-runs the eval kit's `--up` and `--verify --wait-schedule` against the
+  profile-shaped overlay, because two things the profile depends on are not
+  n8n's published contract: the internal key-mint endpoints, and the shape of
+  the run data the verifier counts. That is the kit's one operational use.
 - **Backups.** n8n's store holds workflows, credentials (encrypted with
-  `N8N_ENCRYPTION_KEY`) and run history. The workflows are the templates in the
-  tree; the credentials are re-created from `deploy/.env` at provisioning; so
-  what needs keeping is `deploy/.env` itself — the owner password and the
-  encryption key with the brain's own secrets.
+  `N8N_ENCRYPTION_KEY`), each polling workflow's cursor (its static data) and
+  run history. The workflows are the templates in the tree, and an API-key
+  credential is re-created from `deploy/.env` at provisioning — but an OAuth
+  credential's refresh token (Gmail's) exists only in n8n's store, and losing a
+  cursor means re-ingesting from the start. So what needs keeping is
+  `deploy/.env` — the owner password and the encryption key with the brain's
+  own secrets — **and** n8n's store.
 
 ## The capture layer's sync trigger
 
@@ -261,23 +290,27 @@ The ticket asked for the trigger decision to be made once for every source, not
 per connector. It is:
 
 - **Poll, for now.** v1 templates poll on a schedule. A vendor webhook needs the
-  vendor to reach n8n, which needs the one inbound origin SMD-1846 adds.
+  vendor to reach n8n, whose one port is loopback-only (check 13); exposing it
+  is what the single inbound origin SMD-1846 adds. The Linear Trigger (Linear's
+  webhook) waits on the same.
 - **The native push receivers stay native** until then — the chat and highlight
   captures the taxonomy lists as `push` (Slack, Discord, Telegram, Readwise).
 - **After SMD-1846, push moves to n8n's triggers**, one receiver at a time, each
-  retired when its trigger has run unattended; board-sync's poll is retired the
-  same way, if and when an n8n Linear template meets decision 8.
+  proven on another brain or with its native receiver off (decision 8), then the
+  native receiver retired.
 - **Batch stays a native driver**: an archive parse has no workflow state for a
   tool to hold.
 
 ## What moves, what stays
 
-- **board-sync (SMD-1954) stays**: it owns the fork's Linear board (decision 8),
-  and it is the path for any brain without the profile.
+- **board-sync (SMD-1954) stays** as the no-orchestrator fallback: the path for
+  any brain without the profile, and the owner of the fork's Linear board until
+  an n8n Linear template meets decision 8 — at which point, on a brain that runs
+  that template, the template replaces it there.
 - **The recipes stay until a template replaces one.** Of the capture recipes,
   only `gmail-smart-pull` has a planned template (SMD-2212), and it retires only
-  after that template has run unattended with its sensitivity routing carried
-  over. The import recipes (Takeout, exports, vaults) are batch and stay native
+  after that template has run unattended — on another brain, or with the recipe
+  off (decision 8) — with its sensitivity routing carried over. The import recipes (Takeout, exports, vaults) are batch and stay native
   drivers. SMD-1251, SMD-1317 and SMD-1455 are hardening work on that family and
   are unaffected.
 - **SMD-949's connectors are re-scoped against n8n before any is built.** Notion
@@ -331,9 +364,10 @@ per connector. It is:
 ## Follow-ups
 
 - **SMD-2210** — the `orchestration` compose profile: pinned image, a store of
-  its own (measured), loopback, execution pruning, one provisioning step,
-  expiring and separate keys, custody of the owner password and encryption key,
-  the egress probe.
+  its own (measured), loopback, a shorter execution window, one provisioning
+  step, expiring and separate keys, custody of the owner password, the
+  encryption key and n8n's store, the kit's profile-shaped overlay, the egress
+  probe.
 - **SMD-2211** — the egress checkpoint: every template credential pinned, the MCP
   Client node's honouring of a pin measured, no sink before the retrieve route
   and the egress decision carry it.
@@ -351,7 +385,7 @@ as a mutant in three review passes (PR #173). Measured once by hand and not
 re-run by the kit: the credential domain pin, the key scopes' 403, the webhook's
 refusal, replaced keys staying valid, Activepieces' sync-mode behaviour, and the
 live Claude Code check. SMD-2210's acceptance re-runs the kit against the
-profile and adds the egress probe.
+profile through its profile-shaped overlay and adds the egress probe.
 
 ## Related
 

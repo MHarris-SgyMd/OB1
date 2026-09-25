@@ -5797,10 +5797,12 @@ without an explicit agreement" — the ticket's "Apache 2.0" was wrong. What the
 licenses mean for a profile OB1 ships is the ADR's to decide.
 
 **The live AI-client check (n8n).** The verifier is the MCP SDK's client; the
-ticket asked for the AI client itself. A headless Claude Code session (2.1.282,
-Opus 5.5) was given n8n's MCP endpoint and nothing else — `claude -p <prompt>
---mcp-config <file> --strict-mcp-config --allowedTools
-mcp__ob1-n8n__brain_search_thoughts,mcp__ob1-n8n__linear_issue`, the file a
+ticket asked for the AI client itself. A headless Claude Code session (Opus
+5.5; Claude Code 2.1.282, the version installed that day) was given n8n's MCP
+endpoint and nothing else — `claude -p <prompt> --mcp-config <file>
+--strict-mcp-config --allowedTools
+mcp__ob1-n8n__brain_search_thoughts,mcp__ob1-n8n__linear_issue --output-format
+json`, the file a
 throwaway holding the endpoint's URL and header, so no user or project
 configuration was touched — and asked to call both tools and report. In four
 turns it listed `brain_search_thoughts` and `linear_issue`, searched the brain
