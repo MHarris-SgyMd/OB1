@@ -244,12 +244,14 @@ function isLoopback(url: string): boolean {
  * password. An `@` after the host means the userinfo was not percent-encoded
  * and the parse split it early: a password holding `/`, `#` or `?` becomes
  * the host, port or path (`postgres:1234/secret@db` — host `postgres`, port
- * 1234), and Bun still tries that host. So no part of such a URL is shown.
+ * 1234), and Bun still tries that host. So no part of such a URL is shown,
+ * and the message asks rather than says: an `@` in a query value or a
+ * database name trips the same rule.
  */
 export function where(url: string): string {
   try {
     const u = new URL(url);
-    if (`${u.pathname}${u.search}${u.hash}`.includes("@")) return "a URL whose password is not percent-encoded";
+    if (`${u.pathname}${u.search}${u.hash}`.includes("@")) return "a URL with an @ after its host — is its password percent-encoded?";
     return `${u.hostname || "localhost"}:${u.port || "5432"}${u.pathname.length > 1 ? u.pathname : ""}`;
   } catch {
     return "a URL that does not parse";
@@ -761,10 +763,9 @@ async function main(): Promise<void> {
   const stable = new SQL({ url: from, max: 4 });
   const canary = new SQL({ url: to, max: 4 });
   try {
-    await reach(stable, from, "--from (stable)");
-    await reach(canary, to, "--to (canary)");
-    // The table must exist on both ends; say so in the reader's words, not a driver trace.
-    for (const [sql, label] of [[stable, "--from (stable)"], [canary, "--to (canary)"]] as const) {
+    // Each side answers and has the table; say so in the reader's words, not a driver trace.
+    for (const [sql, url, label] of [[stable, from, "--from (stable)"], [canary, to, "--to (canary)"]] as const) {
+      await reach(sql, url, label);
       const [{ present }] = await sql<{ present: boolean }[]>`SELECT to_regclass('public.query_log') IS NOT NULL AS present`;
       if (!present) {
         console.error(`tier.ts --${verb}: query_log is not present on ${label} — migration 034 is not applied there.`);

@@ -4531,7 +4531,7 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     // the host, port or path, and Bun still tries that host. where() shows no
     // part of such a URL; an encoded one is shown as host:port/db.
     const unencoded = ["1234/s3cret", "/s3cret", "12#s3cret", "12?s3cret"].map((pw) => where(`postgres://postgres:${pw}@127.0.0.1:5432/openbrain`));
-    assert(unencoded.every((w) => w === "a URL whose password is not percent-encoded"), `where() shows nothing of a URL whose password was not encoded (got: ${JSON.stringify(unencoded)})`);
+    assert(unencoded.every((w) => w === "a URL with an @ after its host — is its password percent-encoded?"), `where() shows nothing of a URL whose password was not encoded (got: ${JSON.stringify(unencoded)})`);
     assert(where("postgres://postgres:1234%2Fs3cret@db.internal:6543/openbrain") === "db.internal:6543/openbrain", "where() shows an encoded URL as host:port/db, without its password");
 
     // Perturb the canary: drop one "zqcanary" row. Now that query — and only that
