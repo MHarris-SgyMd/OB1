@@ -111,9 +111,10 @@ const MAX_INPUT_CHARS = Number(process.env.SMART_INGEST_MAX_INPUT_CHARS ?? 100_0
 const MAX_CHUNKS_PER_REQUEST = Number(process.env.SMART_INGEST_MAX_CHUNKS ?? 10);
 const MAX_LLM_CALLS_PER_REQUEST = Number(process.env.SMART_INGEST_MAX_CALLS ?? 10_000);
 
-// ── Edge Function wall-clock budget (Wave 2.5 HIGH / BLOCKER-2 assist) ─────
-// Supabase Edge Functions cap at ~150s. Leave a 10s safety margin so we can
-// record partial-completion state before the platform kills us.
+// ── Request wall-clock budget (Wave 2.5 HIGH / BLOCKER-2 assist) ───────────
+// Upstream's Edge Function runtime killed a request at ~150 s; the ceiling is
+// kept (the name with it — `edge_function_budget_reached` is what clients
+// see), with a 10 s margin to record partial-completion state before it.
 const EDGE_FUNCTION_BUDGET_MS = Number(process.env.SMART_INGEST_BUDGET_MS ?? 140_000);
 
 const CORS_HEADERS: Record<string, string> = {

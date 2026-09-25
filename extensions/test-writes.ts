@@ -105,12 +105,14 @@
  * every call handed fetch() the database credentials and failed. Each takes
  * its own http(s) knob now (SMART_INGEST_URL, ENTITY_EXTRACTION_WORKER_URL),
  * set here before the modules load: the rest-api block drives both proxy
- * routes to the stub at the knob's address, the 503 naming the variable
- * through an instance loaded without it, and the boot refusal of a DSN in it;
- * the smart-ingest block drives one write whose trigger reaches the stub at
- * ITS knob's address with the key, an instance without the knob that writes
- * and triggers nothing, and the same boot refusal; and the tail asserts no
- * URL the stub was handed, all suite long, began postgres://.
+ * routes to the stub at the knob's address (the key on both hops, job_id a
+ * number), the 503 naming the variable through an instance loaded without
+ * it, and the boot refusal of a DSN or a query in it; the smart-ingest block
+ * drives one write whose trigger reaches the stub at ITS knob's address with
+ * the key, a dry run then /execute through the server's own execute path, an
+ * instance without the knob that writes and triggers nothing, and the same
+ * boot refusal; and the tail asserts no URL the stub was handed, all suite
+ * long, began postgres:// or carried /functions/v1/.
  *
  * The files are imported as modules — each exports Bun's entry shape, and its
  * default export's `fetch` is the handler driven here (SMD-1799) — under the
