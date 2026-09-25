@@ -1405,7 +1405,7 @@ export function verdictOf(result, text) {
   // store away, a pointer it could not judge) is a transient the payload keeps.
   const isRefused = REFUSAL_RE.test(text);
   const refused = isRefused || SDK_ERROR_RE.test(text);
-  const mend = isRefused ? (/derived_from/.test(text) ? "derived" : /supersedes/.test(text) ? "supersedes" : null) : null;
+  const mend = isRefused ? (/derived_from/.test(text) ? "derived" : /supersedes/.test(text) ? "supersedes" : /metadata/.test(text) ? "metadata" : null) : null;
   return {
     code: null, retryable: !refused, mend,
     positions: [...text.matchAll(/derived_from\[(\d+)\]/g)].map((m) => Number(m[1])),
@@ -1427,10 +1427,16 @@ export async function postCapture(cfg, payload) {
   const args = { content: payload.text, source: payload.harness };
   if (payload.derived_from?.length) args.derived_from = payload.derived_from;
   if (payload.supersedes) args.supersedes = payload.supersedes;
-  // The model that wrote this summary, if one did (SMD-2014): metadata.source
-  // stays the harness, so a reader and a per-source weight (SMD-1297) can still
-  // tell a model summary from the derived one by this key.
-  if (payload.summary_model) args.metadata = { summary_model: payload.summary_model };
+  // What rides in metadata.* beside the row's own source (which stays the
+  // harness, so a reader and a per-source weight — SMD-1297 — still tell a model
+  // summary from a derived one, and a redacted one from a clean one): the model
+  // that wrote the summary if one did (SMD-2014), and the COUNT of secrets
+  // blanked from it (SMD-2168) — the count alone, never the reasons or offsets,
+  // which the text's markers already name.
+  const meta = {};
+  if (payload.summary_model) meta.summary_model = payload.summary_model;
+  if (payload.redactions?.length) meta.redactions = payload.redactions.length;
+  if (Object.keys(meta).length) args.metadata = meta;
   const call = () => rpc(cfg, "tools/call", { name: "capture_thought", arguments: args });
   let result = await call();
   let text = textOfResult(result);
@@ -1452,6 +1458,11 @@ export async function postCapture(cfg, payload) {
         if (!args.derived_from.length) delete args.derived_from;
       } else { notes.push("provenance dropped: " + oneLine(text).slice(0, 160)); delete args.derived_from; }
     } else if (v.mend === "supersedes" && args.supersedes) { notes.push("supersedes dropped: " + oneLine(text).slice(0, 160)); delete args.supersedes; }
+    // A server that refuses `metadata` — a reserved-key clash, or a brain from
+    // before it took the argument (SMD-2014) — is met by dropping metadata and
+    // posting the summary anyway (SMD-2168): the count is a nicety, the summary
+    // is the point, as with a dropped pointer.
+    else if (v.mend === "metadata" && args.metadata) { notes.push("metadata dropped: " + oneLine(text).slice(0, 160)); delete args.metadata; }
     else break;
     result = await call();
     text = textOfResult(result);

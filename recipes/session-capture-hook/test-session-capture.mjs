@@ -124,6 +124,10 @@ const fake = Bun.serve({
       if (/\[\[state-moves\]\]/.test(content)) writeFileSync(join(STATE, "s-raced.json"), JSON.stringify({ thought_id: uuid(82), fingerprint: "sib", captured_at: new Date().toISOString(), summary_at: new Date().toISOString() }));
       if (/\[\[grant-missing\]\]/.test(content) && args.supersedes) return err("Error: this key's `supersedes` could not be checked against the target's capture record (permission denied for table thought_audit) — the server role needs SELECT on thought_audit: cd db && bun migrate.ts --grant <role> --url $DATABASE_URL.", { code: "SUPERSEDES_UNJUDGED", retryable: true });
       if (/\[\[registry-away\]\]/.test(content) && args.supersedes) return err("Error: this key's `supersedes` could not be attributed while the agent registry is unavailable — retry when resolve_agent answers.", { code: "SUPERSEDES_UNJUDGED", retryable: true });
+      if (/\[\[refuse-metadata\]\]/.test(content) && args.metadata && !refusedOnce.has(content)) {
+        refusedOnce.add(content); // a reserved-key clash, or a brain from before the metadata argument: the first call with metadata is refused (prose only, no code, as the real server's is), the retry without it lands
+        return err("Refused: `metadata.redactions` is set by the server, not the caller — drop it.", null);
+      }
       if (/\[\[refuse-hard\]\]/.test(content)) return err("Refused: the content is not a thought this brain will hold."); // a Refused the server did not code: the hook falls back to the prose rule
       if (/\[\[fn-missing\]\]/.test(content)) return err("Error: function upsert_thought(text, jsonb, vector) not found; a function must be defined before it is called", { code: "STORE_UNAVAILABLE", retryable: true });
       const at = /\[\[refuse-derived-at:(\d+)\]\]/.exec(content);
@@ -1245,6 +1249,22 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   const r4 = await postCapture(cfg, { text: "[[refuse-derived]][[refuse-supersedes]] both", harness: "codex", derived_from: [uuid(61)], supersedes: uuid(62) });
   assert(r4.id && /source id\(s\) dropped/.test(r4.note) && /supersedes dropped/.test(r4.note) && received.at(-1).args.derived_from === undefined && received.at(-1).args.supersedes === undefined,
     "both pointers refused: both dropped, three calls, one capture");
+  // SMD-2168: a redacted summary's capture carries metadata.redactions — the COUNT, never the reasons or offsets the payload records.
+  received.length = 0;
+  const rr = await postCapture(cfg, { text: "a redacted summary", harness: "claude-code", derived_from: [], redactions: [{ reason: "anthropic key", at: 4, in: "prompt 1" }, { reason: "password assignment", at: 20, in: "the outcome" }] });
+  assert(rr.id && received.length === 1 && received[0].args.metadata?.redactions === 2 && JSON.stringify(received[0].args.metadata) === '{"redactions":2}' && !/anthropic|password|prompt 1|the outcome/.test(JSON.stringify(received[0].args.metadata)),
+    `a redacted capture sends metadata.redactions as the count alone, no reasons or offsets (${JSON.stringify(received[0]?.args?.metadata)})`);
+  received.length = 0;
+  await postCapture(cfg, { text: "a clean summary", harness: "claude-code", derived_from: [] });
+  assert(received[0].args.metadata === undefined, "a clean capture — no redactions, no model — sends no metadata, so its row is unchanged");
+  received.length = 0;
+  await postCapture(cfg, { text: "the model's redacted summary", harness: "claude-code", derived_from: [], summary_model: "test-model", redactions: [{ reason: "anthropic key", at: 4, in: "prompt 1" }] });
+  assert(received[0].args.metadata?.summary_model === "test-model" && received[0].args.metadata?.redactions === 1, "a model summary that was also redacted carries both keys");
+  // A server that refuses the metadata key drops it and posts the summary anyway (SMD-2168): the summary is the point, the count a nicety.
+  received.length = 0;
+  let rm; try { rm = await postCapture(cfg, { text: "[[refuse-metadata]] a redacted summary", harness: "claude-code", derived_from: [], redactions: [{ reason: "anthropic key", at: 4, in: "prompt 1" }] }); } catch (e) { rm = { error: e.message }; } // a mutant that drops the mend throws; the guard turns that into a failed arm, not a crashed suite
+  assert(rm.id && /metadata dropped/.test(rm.note) && received.length === 2 && received[0].args.metadata?.redactions === 1 && received[1].args.metadata === undefined && received[1].args.content === received[0].args.content,
+    `a metadata refusal is mended by dropping metadata and re-posting the same summary (${rm.note?.slice(0, 60) ?? rm.error})`);
 }
 
 // ── [6b] Two children on one queue ───────────────────────────────────────────
