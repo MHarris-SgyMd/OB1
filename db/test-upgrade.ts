@@ -465,7 +465,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // SMD-1726), 051 (the second release's schema_version, 1.1.0), 052
   // (thought_changes, the read over the audit log, SMD-1296), 053
   // (thought_sources, the link facet kind and the structured-wins rule,
-  // SMD-1867) and 054 (resolve_agent's stale-only write, SMD-2090) stay recorded and are never tried. 030 is the right one to make pending because its
+  // SMD-1867) and 054 (resolve_agent's stale-only write, SMD-2090) stay
+  // recorded and are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
   // embedding_model column — are
   // exactly what a through-020 schema lacks, so it fails by name rather than
@@ -494,8 +495,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // record_thought_entities and 042's thought_facets_validate on their own
   // bodies, refusing by name without 016 or 042 ([20g]); 054 redefines 010's
   // resolve_agent on its own body, refusing by name without 010's table
-  // ([20h]) or its last_used_at or scope (test-schema [49]) — all recorded by
-  // the baseline with their prerequisites present, so none
+  // ([20h]) or its last_used_at or scope (test-schema [49]) — all recorded
+  // by the baseline with their prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
   assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 25, `030 is among the last twenty-five migrations (${last})`);

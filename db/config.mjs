@@ -1665,8 +1665,8 @@ export const ROLE_GRANTS = Object.freeze({
   // it raising. Since 054 a known key's lookup writes only when stale or on a
   // scope change, so a missing UPDATE can show up minutes after a start that
   // looked fine (a registration still needs it at once). A capture tolerates
-  // all of this (SELECT on ob1_agents excepted,
-  // which 046's trigger made hard — above): the resolve step is caught
+  // all of this (SELECT on ob1_agents excepted, which 046's trigger made hard
+  // — above): the resolve step is caught
   // (agents.ts) and attribution degrades, and preflight only warns on the
   // config read. Documented and granted, not enforced — but granted with the
   // writes `resolve_agent` actually makes, so attribution works when it lands.

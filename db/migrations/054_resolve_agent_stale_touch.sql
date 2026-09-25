@@ -12,16 +12,13 @@
 --   FOR UPDATE, another replica's lookup of the same key. The SQL store caps
 --   each wait at 250 ms (SMD-2072), and a key whose lookup still times out
 --   after the server's retries is `busy`, refused with a retry. The cap bounds
---   the cost; the wait itself was for a
---   write that, most of the time, changed nothing anyone reads.
+--   the cost; the wait was for a write that mostly changed nothing anyone reads.
 --
 --   And the write re-checked only key_hash. A lookup that overlapped a
 --   revoke_agent_key of the same key, not yet committed, read the key as
 --   active (its SELECT does not wait), waited on the revoker's row lock in the
 --   UPDATE, and once the revoker committed wrote last_used_at and answered
---   ok:true. The server then kept that answer for its cache TTL (60 s by
---   default). Measured in SMD-2072's second review pass: a revocation
---   committing 50 or 150 ms into the lookup was served ok three runs in three.
+--   ok:true — which the server kept for its cache TTL (60 s by default).
 --
 -- WHAT
 --   resolve_agent(text, text, text) redefined on 010's body, same signature
@@ -31,22 +28,14 @@
 --     its agent never waits on a row lock, so a committed revocation is still
 --     refused at once. It now also reads last_used_at and the recorded scope.
 --   * WRITES ONLY WHEN STALE. The row is written when last_used_at is NULL,
---     more than five minutes old or in the future (a clock stepped back, a
---     restore from a skewed host — else it would never be written until the
---     clock passed it), or when a scope was presented that differs from the
---     one recorded. Otherwise nothing is written and no row lock is taken: a
+--     more than five minutes old or in the future (a clock stepped back would
+--     otherwise hold it fresh), or when a scope was presented that differs
+--     from the one recorded — the column's job is to show a privilege change
+--     (010, 049). Otherwise nothing is written and no row lock is taken: a
 --     recently used key presenting its recorded scope answers while another
 --     transaction holds its row. Five minutes is five times the server's
---     default cache TTL, so a server re-resolving a key once a minute writes
---     its row one lookup in five; OB1_AGENT_CACHE_TTL_MS=0 (a lookup per
---     request) writes it once per five minutes rather than on every request.
---     last_used_at now means "the last use, to within five minutes", which is
---     what it is read for: which keys are in use, which have gone quiet. A
---     scope change is always written,
---     since the column's job is to show a privilege change (010, 049) — so a
---     key presented under two scopes at once (two processes on different
---     MCP_ACCESS_KEYS during a rollout) writes on every lookup from either,
---     as 010 did on every lookup of any key.
+--     default cache TTL (60 s). last_used_at now means "the last use, to within
+--     five minutes": which keys are in use, which have gone quiet.
 --   * THE WRITE RE-CHECKS THE REVOCATION. `WHERE key_hash = … AND revoked_at IS
 --     NULL`: under READ COMMITTED an UPDATE that waited on a row re-evaluates
 --     its WHERE against the version that committed, so a revocation that
@@ -79,29 +68,22 @@
 --     the server's TTL already allows for (a revocation "takes effect within
 --     the server resolve cache TTL", 010's column comment). What this file
 --     removes is the answer given after a commit its write waited on.
---   * A first sight that answers REVOKED from registration keeps the agent
---     row it inserted for its label, with no key, and a later key under that
---     label rotates onto it. It needs one digest presented under two names at
---     once (auth.ts refuses that config) or a key row inserted revoked by
---     hand; 010 left the same row and answered ok. Removing it would need
---     DELETE on ob1_agents, which db/config.mjs's server grants do not include
---     (a least-privilege role would then fail the refusal), or a
---     subtransaction, whose rollback would release the refused row's lock.
---   * A role granted SELECT and INSERT but not UPDATE on ob1_agent_keys failed
---     every known-key lookup under 010; now it fails only a lookup that writes
---     — a stale one, a scope change, or a registration (INSERT … ON CONFLICT DO
---     UPDATE needs UPDATE too). The documented grants (db/config.mjs's server
---     group) include it.
+--   * A first sight answering REVOKED from registration keeps the agent row it
+--     inserted for its label, and a later key under that label rotates onto
+--     it — reached by one digest under two names (auth.ts refuses that) or a
+--     key row inserted revoked by hand; 010 did the same and answered ok.
+--     Removing it needs DELETE on ob1_agents, outside db/config.mjs's server
+--     grants, or a subtransaction, whose rollback would drop the row's lock.
+--   * A role without UPDATE on ob1_agent_keys fails only a lookup that writes
+--     (stale, a scope change, a registration), not every known-key lookup; the
+--     documented grants include it.
 --
 -- SAFETY
---   Refuses up front, by name, when 010's table or the three columns the body
---   reads, writes or re-checks (last_used_at, revoked_at, scope) are missing
---   (a ledger baselined over an older schema) — 049's guard. No table change,
---   no data change; the function and two comments. Idempotent: CREATE OR
---   REPLACE and COMMENT, so a re-run lands here, and so does --reapply, which
---   runs 010's body and then this file's. A redefined function is a behaviour
---   change at the schema, so under the version rules it ships in a minor
---   release (check-fork's checkFragments).
+--   Refuses up front, by name, when 010's table or its last_used_at,
+--   revoked_at or scope is missing (a ledger baselined over an older schema)
+--   — 049's guard. No table or data change; the function and two comments.
+--   Idempotent: a re-run lands here, and so does --reapply (010's body, then
+--   this file's). A redefined function ships in a minor release.
 -- =============================================================================
 
 DO $g$
