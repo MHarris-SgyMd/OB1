@@ -1124,11 +1124,12 @@ export const redactionMarker = (reasons) => `[redacted:${reasons.join(", ")}]`;
 /**
  * Every span the scan finds, blanked in place. Overlapping and adjacent spans
  * are ONE — the live case was a credential assignment, a linear key and a
- * high-entropy token at one site — a key-material span grown over its block,
- * sorted by start and replaced RIGHT TO LEFT,
+ * high-entropy token at one site — sorted by start and replaced RIGHT TO LEFT,
  * so an earlier offset stays true after a later span has changed the length.
- * Returns the text and the spans taken, each its reasons and its offsets in
- * the text returned — where its marker sits; nothing of the match.
+ * Returns { text, spans, blocks }: `spans` are the single-line redactions taken,
+ * each its reasons and its offset in the text returned (where its marker sits);
+ * `blocks` are the spans that cross a newline — a multi-line key blob the caller
+ * refuses rather than trust a precise blanking (SMD-2127). Nothing of the match.
  */
 export function redactSecrets(text) {
   const spans = [];
