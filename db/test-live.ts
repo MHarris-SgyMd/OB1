@@ -413,32 +413,26 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
   // at ten times the exact threshold on eight hits over three pages; 038 draws
   // those pages by TID range, one block per probe, so every draw reaches its
   // pages. The skip needs a table past ten times the threshold, which PGlite's
-  // [8e] cannot hold; this section can. 15,000 rows at the configured width, generated on
-  // the server (a client round trip per row would be the slow part), every row
-  // tagged broad and one in 250 also tagged thin. The HNSW index is dropped for
-  // the load and put back on the emptied table at the end: maintaining it on
-  // every insert at the shipped width is time the assertions here do not
-  // need, and without it the walk is a GIN bitmap and a sort — exact, and slow
-  // in a way that does not matter to a section about the statement BEFORE it.
+  // [8e] cannot hold; this section can. 15,000 rows at the configured width,
+  // generated on the server (a client round trip per row would be the slow
+  // part), every row tagged broad and one in 250 also tagged thin. The HNSW
+  // index is dropped for the load and put back on the emptied table at the
+  // end: maintaining it on every insert at the shipped width is time the
+  // assertions here do not need, and without it the walk is a GIN bitmap and
+  // a sort — exact, and slow in a way that does not matter to a section about
+  // the statement BEFORE it.
   //
-  // Why 15,000 (SMD-2135 cut it from 25,000). The skip needs the sample's
-  // scaled estimate at ten times v_exact (10,000 for these calls). Every full
-  // page holds the same number of rows (about 70), so a draw of d distinct
-  // pages estimates at least (d − 1)/d of the table (pages x rows a page is
-  // at least N), short only by the last, partly filled page. The gate's
-  // three-page condition admits no draw of fewer than three, and 15,000 is
-  // the smallest table two thirds of which is 10,000 (on this heap 2/3 of
-  // 215 pages x 70 rows is 10,033). Over 5,000 draws of the deployed
-  // statement, 11,000 missed 4.9% — 7/8 of it is under 10,000, and its last
-  // page held 10 rows — and 12,000, safe by the bound on every draw of six
-  // pages or more, missed none.
-  //
-  // That bound assumes every page but the last is full, which holds only on
-  // an emptied heap: [5b]'s 2,000 rows are dead after the DELETE, and without
-  // the VACUUM below the load goes in after their 28 pages, which the sample
-  // draws and counts as seen with no hit (041's LEFT join, on purpose). At
-  // 15,000 rows that missed 49 of 5,000 draws, one call in a hundred — so the
-  // load is followed by an assertion that every page holds a live row.
+  // Why 15,000. The skip needs the sample's scaled estimate at ten times
+  // v_exact, 10,000 here. Every row is broad and every full page holds about
+  // 70, so pages × 70 ≥ N and a draw of d distinct pages estimates at least
+  // (d − 1)/d of N, short only by the last, partly filled page. The gate
+  // admits no draw of fewer than three hit pages (037's condition 3), and
+  // 15,000 is the smallest N two thirds of which is 10,000 (here 2/3 × 215
+  // pages × 70 = 10,033). Over 5,000 draws of the deployed statement each,
+  // 12,000 (safe by the bound from six pages up) missed none, and 11,000
+  // missed 4.9%, each time its 10-row last page was drawn. The bound needs
+  // every page but the last full: the VACUUM below. The section loaded 25,000
+  // before SMD-2135.
   await sql`DELETE FROM thoughts`;
   const [{ hnswDef }] = await sql.unsafe(`SELECT pg_get_indexdef('thoughts_embedding_idx'::regclass) AS "hnswDef"`);
   // Read by the finally block below as well as the section: the last definer
@@ -463,8 +457,12 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
   await applyMigrations(URL_, { ...opts041, routeEstimateMinPages: 0 });
   assert(/IF v_pages >= 0 THEN/.test(await body()) && TID_PROBE.test(await body()) && (await hasClauses()), "041 is installed with its floor at 0 (038's gate, carried through 039), jit = off and both pins on the function: the sample runs on every filtered call to this table");
   await sql.unsafe(`DROP INDEX thoughts_embedding_idx`);
-  // After the drop, so it does not clean [5b]'s entries out of an index
-  // about to go; before the load, which it hands an empty heap (above).
+  // [5b]'s 2,000 rows are dead after the DELETE above. Unvacuumed, their 28
+  // pages stay and the load goes in after them; the sample draws them and
+  // counts them as seen with no hit (041's LEFT join, on purpose): 49 misses
+  // in 5,000 draws at 15,000 rows, about one run in six. The page check after
+  // the load holds this. After the DROP INDEX, so it does not clean an index
+  // about to go.
   await sql.unsafe(`VACUUM thoughts`);
   // User triggers off for the load, as the bench does: 008's audit trigger
   // would write a row per row (15,000 here, then 15,000 more for the DELETE)
@@ -505,10 +503,10 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     const { unitVector } = seededRandom(1463);
     // Twenty calls. Under 037 the gate missed a broad filter when its
     // TABLESAMPLE draw reached fewer than three pages — 17 in 1,000 draws on
-    // the 25,000-row fixture of the time — and the band below was 0.75–1.0; 038 draws eight blocks
-    // and reads each, so a draw reaches fewer than three pages only when all
-    // eight land on one or two of some 215 (about 1e-12), and the band is
-    // exact.
+    // the 25,000-row fixture of the time — and the band below was 0.75–1.0;
+    // 038 draws eight blocks and reads each, so a draw reaches fewer than
+    // three pages only when all eight land on one or two of some 215 (about
+    // 1e-12), and the band is exact.
     const QUERIES = 20;
     const queries = Array.from({ length: QUERIES }, () => `[${unitVector(EMBEDDING_DIM).join(",")}]`);
     const exactTop = (qv: string, filter: string) =>
@@ -578,8 +576,9 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     const saved = plainBroad.scans - gatedBroad.scans;
     // Every draw reads eight pages of some 70 rows each (seven in about one
     // draw in eight, when a block comes up twice), all broad, so every call
-    // meets the three conditions (condition 1 needs about 370 hits on this
-    // heap, 330 at seven pages; they hold some 560 and 490) and skips the collection; the
+    // meets the three conditions (037's condition 1, the ten-times one, needs
+    // about 370 hits on this heap, 330 at seven pages; they hold some 560 and
+    // 490) and skips the collection; the
     // rest of a call's GIN scans (the walk's bitmap) are the same under both
     // bodies and cancel. Exactly one fewer per call is the band — 037's draw
     // could reach fewer than three pages and missed, which is why this
