@@ -2470,7 +2470,7 @@ first assumed. See FORK.md's SMD-1632 section.
   (no data change), the next such re-capture fills nothing, and no capture
   takes the supersession lock.
 - **The routing count is gated by a sample of the heap, drawn by TID range**
-  (migrations 037 and 038). [5d] loads 25,000 rows at the configured width,
+  (migrations 037 and 038). [5d] loads 15,000 rows at the configured width,
   applies the last definer (041 — 039's body, run with `jit = off` and its
   two planner paths pinned) with its
   floor lowered to zero, and counts GIN index scans per call: the broad
@@ -2498,7 +2498,7 @@ first assumed. See FORK.md's SMD-1632 section.
   under the raw column's; [20] compares the candidate CTEs to 014's with the
   cast taken out. [5] holds both plans on a real server; [5d] applies the
   last definer before it drops the index, the order 039's swap needed (it
-  would have built one over its 25,000 rows). `test-upgrade.ts` [17] applies 039 onto a populated 038 — no row,
+  would have built one over its loaded rows). `test-upgrade.ts` [17] applies 039 onto a populated 038 — no row,
   signature or privilege moves, the walk agrees with the exact answer before
   and after, the index OIDs survive a re-apply, and an INVALID staging index
   (an interrupted `CREATE INDEX CONCURRENTLY`) is rebuilt rather than adopted.
@@ -2526,7 +2526,7 @@ first assumed. See FORK.md's SMD-1632 section.
   node on 18, fewer buffers than the heap has pages — and, with the pin RESET (the
   mutant), `disable_cost` back on 14–17 and on 18 the disabled node back and,
   under `enable_tidscan = off`, the probe a sequential scan of the whole heap
-  per block (SMD-1703's state). [5f] loads 12,000 rows with chunks and, under
+  per block (SMD-1703's state). [5f] loads 6,000 rows with chunks and, under
   a session `enable_nestloop = off`, explains the three RETURN QUERY
   statements read out of the body under the function's settings: every join
   a Nested Loop touching the default's buffers; with the pin RESET a Merge or
