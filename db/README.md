@@ -166,8 +166,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1817 assertions: 1817 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports fifty-seven (57) migrations applied, and
+`bun test-schema.ts` prints `1832 assertions: 1832 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports fifty-eight (58) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -206,7 +206,8 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
-051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804).
+051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
+058 SMD-2074).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -412,6 +413,30 @@ keeps only the file's. `server-portable/entity-gate.ts` is its JavaScript twin,
 for the capture-time `people` facet (`metadata.ts`), which never reaches the
 function and keeps only the names the rule keeps as a person; test-schema [52]
 holds the two to one answer.
+
+Migration 058 is `node_state` (SMD-2074): one read of a thought's lifecycle,
+blockers and supersession, for every surface that ranks by them. Until it,
+`graph-centrality.ts` held those rules as SQL private to the script, and the
+server — which cannot import a `db/` script, and whose PostgREST store reaches
+only RPCs — could not share them. Five functions, all `LANGUAGE sql`, SECURITY
+INVOKER, no SET, not STRICT, so a caller's planner inlines them:
+`node_lifecycle_types()` and `node_settled_types()` (the six status types this
+schema knows, and the two that settle a node); `node_lifecycle()` (per thought:
+status, status_type, the source watermark `synced_at` and `created_at` — a row
+carrying `ticket` or `issue` reads its ticket's head; it reads `thoughts`
+alone); `node_dependencies()` (one row per `blocks` / `blocked_by` link facet,
+active or closed, with whether its system gates — SMD-2218's rule); and
+`node_state(ids)` (every thought, or those named: the lifecycle beside `open`,
+`blocked`, `blockers`, `unknown_blockers`, `in_dependencies` and
+`superseded_by`). Coverage and freshness are columns — a node carries a
+lifecycle when `open` is not NULL; its freshness is `synced_at`, never
+`updated_at` — so each consumer counts over what it ranks. `graph-centrality.ts`
+is the first reader, its reports byte for byte what they were; search is the
+second (SMD-2074's second PR). `metadata.status_type` is a transitional, lossy
+scalar: when SMD-1997 folds the transitions `thought_audit` holds,
+`node_lifecycle()`'s body changes and its signature does not. Reads only, no
+grant row (EXECUTE is PUBLIC): `node_lifecycle()` needs SELECT on `thoughts`,
+the other two reads `thought_sources` too — the `structure` group.
 
 ## What changed relative to the guide
 
@@ -1190,9 +1215,12 @@ construction, so a Done ticket still counts as a live one until a flag says
 otherwise, and the lifecycle caveat says so with the run's numbers: how many
 thoughts carry a status, how many are settled, the latest `linear_updated_at`
 (the status is as fresh as the last sync pass), and under a filter how many
-thoughts weighed in. `LIFECYCLE_CTE` is the one place the status comes from;
-when SMD-2074 folds `thought_audit`'s transitions into a node-state
-projection, that CTE reads it and nothing downstream changes.
+thoughts weighed in. The status, and every rule below, is migration 058's
+`node_state` (SMD-2074): `node_lifecycle()` without a dependency flag, which
+reads `thoughts` alone, and `node_state()` with one, which reads
+`thought_sources` too (the `structure` group); when SMD-1997 folds
+`thought_audit`'s transitions, the functions' bodies change and this script
+does not.
 
 **Startability** (SMD-2061). The lifecycle says a ticket is open, not that it
 can be started. Migration 053 (SMD-1867) stores the board's relations as `link`
@@ -1222,9 +1250,8 @@ effect, blocking where its system gates, until both are re-read. The flag
 composes with `--status` and `--decay-done` (the weights multiply). Without it
 (or `--decay-blocked`, below) the dependency read is not in the SQL, so every
 other mode renders byte for byte what it did (the JSON's `options` carries two
-more keys, `startable` and `decayBlocked`, both false) and a brain without 053
-runs them. With either, a brain without 053 is exit 2. `dependencySql` is the
-seam SMD-2074's node-state projection replaces.
+more keys, `startable` and `decayBlocked`, both false) and a role without
+`thought_sources` runs them.
 
 **Blocked decay** (SMD-2181). `--startable` is a filter, so a blocked hub
 vanishes rather than sinks. `--decay-blocked` reads the same dependencies by the
@@ -1259,7 +1286,7 @@ entity resolves (a near-miss whose only guesses the numeric rule hid is still
 no entity: exit 1, and the line counts the hidden guesses), 3 when the subject
 IS an entity — by id, name, alias or merged-in name — that the numeric rule
 excluded (`--keep-numeric` would rank it), 2 for a usage error, a brain
-without 016 (or, under `--startable` or `--decay-blocked`, without 053) or a query that failed — never 1 for a failure or an exclusion. `test-schema.ts` [44] runs the
+without 016 or 058 (or whose 058 knows other status types than the script) or a query that failed — never 1 for a failure or an exclusion. `test-schema.ts` [44] runs the
 script's own SQL under PGlite over a graph whose every count is known by
 construction, and its edges-on and edges-off orders differ at every position.
 
@@ -2294,7 +2321,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1817 assertions, PGlite, no container
+bun test-schema.ts                          # 1832 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 733 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
