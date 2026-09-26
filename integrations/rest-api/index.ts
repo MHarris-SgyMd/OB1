@@ -276,6 +276,28 @@ function validateId(raw: string): string | null {
 }
 
 /**
+ * Postgres `integer` (int4) upper bound. `p_limit`/`p_offset`/`match_count` are
+ * INTEGER, and the shim renders LIMIT/OFFSET by interpolation, so an offset past
+ * this — or a NaN/Infinity/fraction — reaches SQL and 500s. Every paging
+ * parameter passes through `intParam` first (SMD-2083).
+ */
+const INT4_MAX = 2147483647;
+
+/**
+ * A paging parameter (`limit`, `offset`, `page`, `per_page`) held to a finite
+ * integer in range. A missing, empty or non-numeric value is the default; a
+ * fraction is truncated; a non-finite value (Infinity, NaN, 1e400) is the
+ * default, never rendered into SQL; the result is clamped to [min, max]. Reads a
+ * query string, a JSON number or anything else the same way (SMD-2083).
+ */
+function intParam(value: unknown, opts: { min: number; max: number; default: number }): number {
+  if (value === null || value === undefined || value === "") return opts.default;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return opts.default;
+  return Math.min(Math.max(Math.trunc(n), opts.min), opts.max);
+}
+
+/**
  * Extract thought ID from upsert_thought RPC response, which may return:
  *   - A scalar number (e.g. 42)
  *   - { thought_id: 42, action: "inserted", content_fingerprint: "..." }
@@ -551,12 +573,18 @@ function withinDates(row: Record<string, unknown>, w: DateWindow): boolean {
 // ── Search ──────────────────────────────────────────────────────────────────
 
 async function handleSearch(req: Request): Promise<Response> {
-  const body = await req.json() as Record<string, unknown>;
+  const read = await readJsonWithCap(req);
+  if (!read.ok) return read.resp;
+  const body = read.body;
   const query = String(body.query ?? "").trim();
   const mode = String(body.mode ?? "semantic");
-  const limit = Math.min(Math.max(Number(body.limit) || 25, 1), 100);
-  const page = Math.max(Number(body.page) || 1, 1);
-  const offset = (page - 1) * limit;
+  const limit = intParam(body.limit, { min: 1, max: 100, default: 25 });
+  // page bounded, and the offset clamped so `p_limit + p_offset` — the int4
+  // addition inside search_thoughts_text (schemas/enhanced-thoughts/schema.sql)
+  // — cannot overflow: the invariant is offset + limit ≤ INT4_MAX, not just
+  // offset ≤ INT4_MAX (review pass 2; SMD-2083).
+  const page = intParam(body.page, { min: 1, max: Math.floor(INT4_MAX / 100) + 1, default: 1 });
+  const offset = Math.min((page - 1) * limit, INT4_MAX - limit);
   const minSimilarity = Math.min(Math.max(Number(body.min_similarity) || 0.3, 0), 1);
   const excludeRestricted = body.exclude_restricted !== false;
   const startDate = body.start_date ? String(body.start_date).trim() : null;
@@ -625,7 +653,9 @@ async function handleSearch(req: Request): Promise<Response> {
 // ── Capture ─────────────────────────────────────────────────────────────────
 
 async function handleCapture(req: Request): Promise<Response> {
-  const body = await req.json() as Record<string, unknown>;
+  const read = await readJsonWithCap(req);
+  if (!read.ok) return read.resp;
+  const body = read.body;
   const content = String(body.content ?? "").trim();
   const source = String(body.source ?? "rest_api").trim();
   const sourceType = String(body.source_type ?? "").trim() || source;
@@ -703,8 +733,8 @@ async function handleCapture(req: Request): Promise<Response> {
 // ── Recent ──────────────────────────────────────────────────────────────────
 
 async function handleRecent(url: URL): Promise<Response> {
-  const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 20, 1), 100);
-  const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
+  const limit = intParam(url.searchParams.get("limit"), { min: 1, max: 100, default: 20 });
+  const offset = intParam(url.searchParams.get("offset"), { min: 0, max: INT4_MAX, default: 0 });
   const source = url.searchParams.get("source")?.trim() || null;
   const type = url.searchParams.get("type")?.trim() || null;
   const topic = url.searchParams.get("topic")?.trim() || null;
@@ -743,7 +773,9 @@ async function handleGetThought(id: string, excludeRestricted: boolean): Promise
 }
 
 async function handleUpdateThought(id: string, req: Request): Promise<Response> {
-  const body = await req.json() as Record<string, unknown>;
+  const read = await readJsonWithCap(req);
+  if (!read.ok) return read.resp;
+  const body = read.body;
   const content = String(body.content ?? "").trim();
   if (!content) return json({ error: "content is required" }, 400);
 
@@ -836,7 +868,7 @@ async function handleStats(url: URL): Promise<Response> {
   const daysParam = url.searchParams.get("days");
   const excludeRestricted = url.searchParams.get("exclude_restricted") !== "false";
   const allTime = !daysParam;
-  const sinceDays = allTime ? 0 : Math.max(Number(daysParam) || 30, 1);
+  const sinceDays = allTime ? 0 : intParam(daysParam, { min: 1, max: 36500, default: 30 });
   const since = allTime ? null : new Date(Date.now() - (sinceDays * 86_400_000)).toISOString();
 
   let countQuery = supabase.from("thoughts").select("id", { count: "exact", head: true });
@@ -871,8 +903,8 @@ const ALLOWED_BROWSE_SORT = new Set([
 ]);
 
 async function handleBrowseThoughts(url: URL): Promise<Response> {
-  const page = Math.max(Number(url.searchParams.get("page")) || 1, 1);
-  const perPage = Math.min(Math.max(Number(url.searchParams.get("per_page") || url.searchParams.get("limit")) || 20, 1), 100);
+  const page = intParam(url.searchParams.get("page"), { min: 1, max: Math.floor(INT4_MAX / 100) + 1, default: 1 });
+  const perPage = intParam(url.searchParams.get("per_page") || url.searchParams.get("limit"), { min: 1, max: 100, default: 20 });
   const type = url.searchParams.get("type")?.trim() || null;
   const sourceType = url.searchParams.get("source_type")?.trim() || null;
   const importanceMin = url.searchParams.get("importance_min") ? Number(url.searchParams.get("importance_min")) : null;
@@ -888,7 +920,7 @@ async function handleBrowseThoughts(url: URL): Promise<Response> {
   const sort = rawSort ?? "created_at";
   const order = url.searchParams.get("order") === "asc";
   const excludeRestricted = url.searchParams.get("exclude_restricted") !== "false";
-  const offset = (page - 1) * perPage;
+  const offset = Math.min((page - 1) * perPage, INT4_MAX);
 
   let countQuery = supabase.from("thoughts").select("id", { count: "exact", head: true });
   let dataQuery = supabase.from("thoughts")
@@ -943,7 +975,7 @@ async function handleCount(url: URL): Promise<Response> {
 
 async function handleGetConnections(thoughtId: string, url: URL): Promise<Response> {
   const excludeRestricted = url.searchParams.get("exclude_restricted") !== "false";
-  const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 20, 1), 50);
+  const limit = intParam(url.searchParams.get("limit"), { min: 1, max: 50, default: 20 });
 
   const { data, error } = await supabase.rpc("get_thought_connections", {
     p_thought_id: thoughtId, p_limit: limit, p_exclude_restricted: excludeRestricted,
@@ -1179,7 +1211,7 @@ async function handleExecuteJob(jobId: string): Promise<Response> {
 }
 
 async function handleListJobs(url: URL): Promise<Response> {
-  const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 20, 1), 100);
+  const limit = intParam(url.searchParams.get("limit"), { min: 1, max: 100, default: 20 });
   const status = url.searchParams.get("status")?.trim() || null;
   let query = supabase.from("ingestion_jobs")
     .select("id, source_label, status, extracted_count, added_count, skipped_count, appended_count, revised_count, created_at, completed_at")
@@ -1203,8 +1235,8 @@ async function handleGetJob(jobId: string): Promise<Response> {
 
 async function handleFindDuplicates(url: URL): Promise<Response> {
   const threshold = Math.min(Math.max(Number(url.searchParams.get("threshold")) || 0.85, 0.5), 0.99);
-  const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 200);
-  const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
+  const limit = intParam(url.searchParams.get("limit"), { min: 1, max: 200, default: 50 });
+  const offset = intParam(url.searchParams.get("offset"), { min: 0, max: INT4_MAX, default: 0 });
 
   const { data, error } = await supabase.rpc("find_near_duplicates", { p_threshold: threshold, p_limit: limit, p_offset: offset });
   if (error) throw new Error(`find_near_duplicates failed: ${error.message}`);
@@ -1212,7 +1244,9 @@ async function handleFindDuplicates(url: URL): Promise<Response> {
 }
 
 async function handleDuplicateResolve(req: Request): Promise<Response> {
-  const body = await req.json() as Record<string, unknown>;
+  const read = await readJsonWithCap(req);
+  if (!read.ok) return read.resp;
+  const body = read.body;
   const thoughtIdA = body.thought_id_a != null ? String(body.thought_id_a) : "";
   const thoughtIdB = body.thought_id_b != null ? String(body.thought_id_b) : "";
   const action = String(body.action ?? "");
@@ -1272,8 +1306,8 @@ async function handleDuplicateResolve(req: Request): Promise<Response> {
 async function handleEntities(url: URL): Promise<Response> {
   const searchQuery = url.searchParams.get("q")?.trim() || null;
   const entityType = url.searchParams.get("type")?.trim() || null;
-  const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 20, 1), 50);
-  const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
+  const limit = intParam(url.searchParams.get("limit"), { min: 1, max: 50, default: 20 });
+  const offset = intParam(url.searchParams.get("offset"), { min: 0, max: INT4_MAX, default: 0 });
 
   let q = supabase.from("entities")
     .select("id, entity_type, canonical_name, aliases, metadata, first_seen_at, last_seen_at", { count: "exact" })

@@ -204,6 +204,47 @@ console.log("\n[5] Auth failure — missing key, and an unparseable body");
   assert((await r2.json())?.id === null, "unparseable body → id: null");
 }
 
+console.log("\n[5b] A refused NOTIFICATION (no id) gets no JSON-RPC body — 202, not a 200 envelope the client drops (SMD-2106)");
+{
+  const post = (body: string, headers: Record<string, string> = H) => fetch(BASE, { method: "POST", headers, body });
+  // A body that is NOT positively notification-only keeps the 200 JSON-RPC
+  // envelope with -32001 — a request, a mixed or empty batch, a non-string
+  // `method`, a JSON `null` body or a `[null]` element (the null-guard) all fall
+  // here, never a bodyless 202. Returns the response for a caller that checks more.
+  const keepsEnvelope = async (label: string, body: string) => {
+    const r = await post(body);
+    const b = await r.json();
+    assert(r.status === 200 && b?.error?.code === -32001, `${label} keeps the 200 envelope, not a bodyless 202`);
+    return { r, b };
+  };
+
+  const NOTIF = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" });
+  for (const [label, headers] of [["missing key", H], ["wrong key", { ...H, "x-brain-key": "wrong" }]] as [string, Record<string, string>][]) {
+    const r = await post(NOTIF, headers);
+    const body = await r.text();
+    assert(r.status === 202 && body === "", `${label}: notification → 202 with no body (${r.status}, ${JSON.stringify(body.slice(0, 40))})`);
+    assert(corsOk(r) && !r.headers.has("retry-after"), `${label}: CORS present, no Retry-After — no key never changes on a retry`);
+  }
+  // A batch that is all notifications is answered the same.
+  const batch = await post(JSON.stringify([{ jsonrpc: "2.0", method: "notifications/initialized" }, { jsonrpc: "2.0", method: "notifications/cancelled", params: {} }]));
+  assert(batch.status === 202 && (await batch.text()) === "", "an all-notifications batch → 202 with no body");
+
+  // A request in the batch keeps the envelope; so does a lone id:null request
+  // (presence of `id`, not its value, makes it a request); so do a non-string
+  // `method`, an empty batch, and a JSON `null` body or `[null]` element.
+  await keepsEnvelope("a batch with a request", JSON.stringify([{ jsonrpc: "2.0", method: "notifications/initialized" }, { jsonrpc: "2.0", id: 9, method: "tools/list", params: {} }]));
+  const nullId = await post(JSON.stringify({ jsonrpc: "2.0", id: null, method: "tools/list", params: {} }));
+  const nullBody = await nullId.json();
+  assert(nullId.status === 200 && nullBody?.error?.code === -32001 && nullBody?.id === null, "a request with id: null keeps the 200 envelope, echoing null");
+  const { r: badMethod } = await keepsEnvelope("a non-string method (no id)", JSON.stringify({ jsonrpc: "2.0", method: 123 }));
+  await keepsEnvelope("an empty batch []", "[]");
+  await keepsEnvelope("a JSON null body", "null");
+  await keepsEnvelope("a [null] batch element", "[null]");
+  // Retry-After is not CORS-safelisted, so it is exposed for browser clients to
+  // read off the busy refusal (SMD-2106); corsHeaders carries it on every answer.
+  assert((badMethod.headers.get("access-control-expose-headers") ?? "").includes("Retry-After"), "responses expose Retry-After so a browser client can read it");
+}
+
 console.log("\n[6] Auth via ?key= — the documented connector path");
 {
   const ok = await fetch(`${BASE}/?key=${KEY}`, { method: "POST", headers: H, body: INIT });
