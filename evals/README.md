@@ -2575,12 +2575,14 @@ sparse and dense). Every class is filtered, so match_thoughts answers exactly
 | LITERAL, sparse / dense | 1.000 / 0.500 | 0.250 / 0.000 | 0.000 / 0.000 | −0.750 / −0.500 |
 
 At threshold 0 each topic admits about five rows (the relative floor keeps
-only its own), so the window is small and a demoted row drops a rank or two.
+only its own; 21 for the dense literal), so the window is small and a demoted
+row drops a rank or two.
 At threshold −1 the window fills, as it does on a real brain, and **demote
 equals exclude for the top N in every cell**: PREVIOUS −0.449, NOTE −0.524,
 SETTLED −0.380, a settled key −1.000 (CURRENT and LIVE are the same gains).
 Once the window holds N current rows, a demoted thought is out of the top N
-(the first review pass: the threshold-0 costs alone understated this).
+unless it holds the query's literal (the first review pass: the threshold-0
+costs alone understated this).
 
 **Decision, by the pre-registered rule:** the controls hold, CURRENT and LIVE
 each gain at least 0.05, and demote beats exclude on PREVIOUS — build, opt-in,

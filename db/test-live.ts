@@ -5360,9 +5360,11 @@ console.log("\n[26] search_thoughts_current against a hand oracle on real Postgr
   // test-schema [55] holds the rule under PGlite, whose small plans hand the
   // window to the final sort in the hybrid's order, so a tie-break by that
   // order is invisible there (review pass 1: dropping it survived [55]). Here
-  // the join order is PostgreSQL's own. The fixture ties on purpose — six rows
-  // on one vector, four far rows and two unembedded rows carrying one literal
-  // — with settled rows among each group, and the oracle is 059's rule written
+  // the join order is PostgreSQL's own. The fixture ties on purpose: four far
+  // rows and two unembedded rows carrying one literal tie on the needle bonus
+  // outside the vector window, and every row scores 0 on the literal-only
+  // query (six rows on one vector do not tie — the vector arm numbers them) —
+  // with settled rows among each group, and the oracle is 059's rule written
   // out: the hybrid at the window, node_state's two facts, score × 0.25 for a
   // demoted row, ties to the current row and then to the hybrid's order.
   // Its own connection, as [25]'s: the suite's closed after [24].

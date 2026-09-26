@@ -57,7 +57,9 @@
  *     end-to-end (test-live [20]) exercises;
  *   • the hybrid arm (search_thoughts_hybrid) needs a provider to embed the query
  *     text, so it is replayed only when a model is configured (OB1_EVAL_EMBED, as
- *     evals/eval-replay.ts uses) and skipped-with-a-note otherwise.
+ *     evals/eval-replay.ts uses) and skipped-with-a-note otherwise;
+ *   • the current arm (search_thoughts with prefer_current, 059) is the hybrid's
+ *     through search_thoughts_current, with the same provider rule.
  * A row logged before migration 045 carries a NULL arm (no way to know which arm
  * produced its ids), so it is skipped rather than guessed. Both verbs print how
  * many rows the window held, replayed and skipped. A window that replayed none
@@ -874,7 +876,7 @@ async function main(): Promise<void> {
       : "in all of stable's log (the canary records no refresh)";
     const embedModel = process.env.OB1_EVAL_EMBED;
     const embedFn: EmbedFn | undefined = embedModel ? (q) => embed(embedModel, q, true) : undefined;
-    if (!embedFn) console.error(`note: OB1_EVAL_EMBED is not set — hybrid-arm searches will be skipped (keyword arm replays without a model).`);
+    if (!embedFn) console.error(`note: OB1_EVAL_EMBED is not set — hybrid- and current-arm searches will be skipped (keyword arm replays without a model).`);
     const summary = await replayAndDiff(stable, canary, { since: window, embedFn });
     const verdict = printSummary(summary, verb === "diff", { words, bounded: window !== null });
     // The gate: 1 when a ranking moved, 3 when nothing was compared — not a

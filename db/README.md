@@ -463,8 +463,8 @@ the weight bites only against an exact-literal hit, so a settled ticket looked
 up by its key can drop — to look one up, leave the flag off. A blocked or
 unknown status does not demote a thought (superseded still does); ties go to
 the current row. Once the window holds N current rows a demoted thought is out
-of the top N, which is where the eval's costs grow at threshold −1 (NOTE
-−0.524, PREVIOUS −0.449). Each row carries `fused` (before the
+of the top N unless it holds the query's literal, which is where the eval's
+costs grow at threshold −1 (NOTE −0.524, PREVIOUS −0.449). Each row carries `fused` (before the
 weight), `demoted` (why) and the window's size, lifecycle coverage, demoted
 count, latest source watermark and whether its top N is exact. Priced first in
 `evals/eval-supersession.ts` against a pre-registered rule (CURRENT-version

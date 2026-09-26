@@ -249,7 +249,11 @@ assert(currentExcl.mrr >= currentLabel.mrr - 0.005, "exclusion does not HURT the
 // ticket head's lifecycle). The rule, pre-registered before any number here
 // was read: over the hybrid's top W = min(100, 4N), a demoted row's fused
 // score is multiplied by 0.25 (one weight, once even when both apply), the
-// window re-sorted — ties in the hybrid's own order — and cut to N.
+// window re-sorted — ties in the hybrid's own order — and cut to N. Amended
+// after the first review pass: ties go to the current row first, then the
+// hybrid's order (a literal-only query scores every other row 0, and a
+// demoted zero stayed among the current ones); no query here is literal-only,
+// so no number moved.
 //
 // PRICED BEFORE THE SQL EXISTS, as this file priced exclude: `demote` is a
 // TypeScript oracle over the hybrid's window and node_state's columns, so the
@@ -493,7 +497,8 @@ const controlsOk = plainSame && settledSame && exactDisagree === 0 && sqlDisagre
 const builds = controlsOk && liftCurrent >= 0.05 && liftLive >= 0.05 && previousOk;
 console.log("  ── verdict (SMD-2255, pre-registered) ──");
 console.log(`  CURRENT ${d(at0("TWIN/CURRENT").demote.mrr, at0("TWIN/CURRENT").off.mrr)}, LIVE ${d(at0("LIFECYCLE/LIVE").demote.mrr, at0("LIFECYCLE/LIVE").off.mrr)} (bar: +0.050 each); PREVIOUS demote ${at0("TWIN/PREVIOUS").demote.mrr.toFixed(3)} against exclude ${at0("TWIN/PREVIOUS").exclude.mrr.toFixed(3)}; controls ${controlsOk ? "hold" : "FAIL"}.`);
-console.log(`  Costs, disclosed: TOPICAL ${d(at0("TWIN/TOPICAL").demote.mrr, at0("TWIN/TOPICAL").off.mrr)}, NOTE ${d(at0("LIFECYCLE/NOTE").demote.mrr, at0("LIFECYCLE/NOTE").off.mrr)}, SETTLED ${d(at0("LIFECYCLE/SETTLED").demote.mrr, at0("LIFECYCLE/SETTLED").off.mrr)}, LITERAL sparse ${d(at0("LITERAL_SPARSE/KEY").demote.mrr, at0("LITERAL_SPARSE/KEY").off.mrr)}, dense ${d(at0("LITERAL_DENSE/KEY").demote.mrr, at0("LITERAL_DENSE/KEY").off.mrr)}.`);
+const costs = (th: number) => { const at = (k: string) => cells[`${k}@${th}`]; return `TOPICAL ${d(at("TWIN/TOPICAL").demote.mrr, at("TWIN/TOPICAL").off.mrr)}, PREVIOUS ${d(at("TWIN/PREVIOUS").demote.mrr, at("TWIN/PREVIOUS").off.mrr)}, NOTE ${d(at("LIFECYCLE/NOTE").demote.mrr, at("LIFECYCLE/NOTE").off.mrr)}, SETTLED ${d(at("LIFECYCLE/SETTLED").demote.mrr, at("LIFECYCLE/SETTLED").off.mrr)}, LITERAL sparse ${d(at("LITERAL_SPARSE/KEY").demote.mrr, at("LITERAL_SPARSE/KEY").off.mrr)}, dense ${d(at("LITERAL_DENSE/KEY").demote.mrr, at("LITERAL_DENSE/KEY").off.mrr)}`; };
+console.log(`  Costs, disclosed: at threshold 0 ${costs(0)}; at -1, where the window fills, ${costs(-1)}.`);
 console.log(`  Decision: ${builds ? "BUILD prefer_current, opt-in, default off" : "do NOT build the flag"} — the default ranking is unchanged either way (025's label stands for every caller who does not ask).\n`);
 
 await hsql.close();

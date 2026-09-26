@@ -25,11 +25,13 @@
 --   TOPICAL -0.127, a note filed under a Done ticket -0.292, the settled
 --   ticket itself -0.161, a settled ticket looked up by its key -0.750
 --   (sparse) and -0.500 (dense). Those are small windows — the eval's topics
---   admit five rows at threshold 0, so a demoted row drops a rank or two. At
---   threshold -1, where the window fills as it does on a real brain, demote
---   equals exclude for the top N in every cell (PREVIOUS -0.449, NOTE -0.524,
---   SETTLED -0.380, a settled key -1.000): once the window holds N current
---   rows, a demoted one is out of the top N (first review pass).
+--   admit five rows at threshold 0 (21 for the dense literal), so a demoted
+--   row drops a rank or two. At threshold -1, where the window fills as it
+--   does on a real brain, demote equals exclude for the top N in every cell
+--   (PREVIOUS -0.449, NOTE -0.524, SETTLED -0.380, a settled key -1.000): once
+--   the window holds N current rows, a demoted row is out of the top N unless
+--   it holds the query's literal, whose bonus it keeps a quarter of (first
+--   and second review passes).
 --
 -- WHAT
 --   * search_demote_weight() — IMMUTABLE 0.25: what a demoted thought's fused

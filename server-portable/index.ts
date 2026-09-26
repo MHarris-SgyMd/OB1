@@ -730,23 +730,29 @@ export function demotedLine(t: Pick<ThoughtHybridMatch, "demoted" | "score" | "f
 /**
  * The header note under prefer_current: what the window held — how many rows
  * were demoted, how many carry a lifecycle and the latest sync among them —
- * and, when the window held fewer current rows than `limit` and may not be
+ * and, when the window held fewer current rows than asked for and may not be
  * the whole list, that the rows after them are demoted ones and a current
  * match past the window may have been missed. The window is min(100, 4 ×
- * limit), so a larger limit reads more only below 25 (first review pass: the
- * note told a caller at 100 to raise it). Null without the flag (no window on
- * the rows). Exported for the unit test.
+ * limit), so a larger limit reads more only below 100 rows (first review
+ * pass: the note told a caller at 100 to raise it). Null without the flag (no
+ * window on the rows). Exported for the unit test.
  */
-export function currentNote(rows: Pick<ThoughtHybridMatch, "window">[], limit: number): string | null {
+export function currentNote(rows: Pick<ThoughtHybridMatch, "window">[]): string | null {
   const w = rows[0]?.window;
   if (!w) return null;
   const lifecycle = `${w.known} carr${w.known === 1 ? "ies" : "y"} a lifecycle${w.syncedAt ? ` (latest sync ${w.syncedAt})` : ""}`;
-  const note = `Current first (prefer_current): ${w.demoted} of the top ${w.rows} match${w.rows === 1 ? "" : "es"} ${w.demoted === 1 ? "is" : "are"} settled or superseded and ranked below the current ones; ${lifecycle}.`;
+  // "unless holding the query's literal": a demoted exact hit keeps a quarter
+  // of its needle bonus, which can keep it above current rows (second review pass).
+  const note = `Current first (prefer_current): ${w.demoted} of the top ${w.rows} match${w.rows === 1 ? "" : "es"} ${w.demoted === 1 ? "is" : "are"} settled or superseded and ranked below the current ones, unless holding the query's literal; ${lifecycle}.`;
   if (w.exact) return note;
   const current = w.rows - w.demoted;
   const held = current === 0 ? `No current match was in the top ${w.rows}, so every row here is a demoted one`
     : `Only ${current} current match${current === 1 ? " was" : "es were"} in the top ${w.rows}, so the rows after ${current === 1 ? "it" : "them"} are demoted ones`;
-  const advice = 4 * limit < 100 ? " — raise limit to read further" : ` — the window is capped at ${w.rows}`;
+  // Not exact means the window was full (its size is W = min(100, 4 × the
+  // limit the function clamped)), so the window's own size says whether a
+  // larger limit reads further — not the limit as sent, which the SQL clamps
+  // and truncates (second review pass: 24.6 binds as 25, a window of 100).
+  const advice = w.rows < 100 ? " — raise limit to read further" : ` — the window is capped at ${w.rows}`;
   return `${note} ${held}, and a current match past the window may have been missed${advice}.`;
 }
 
@@ -1181,7 +1187,7 @@ function buildServer(principal: Principal): McpServer {
         if (absent.length) notes.push(`No thought contains: ${absent.join(", ")}.`);
         if (truncated.length) notes.push(`Outside the top ${data.length}${prefer_current ? " (or demoted past it)" : ""}: ${truncated.map((n, ) => `${n} (in ${head.needleCounts[head.needles.indexOf(n)]} thought${head.needleCounts[head.needles.indexOf(n)] === 1 ? "" : "s"})`).join(", ")} — raise limit or use search_thoughts_keyword.`);
         if (head.commonNeedles.length) notes.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${head.commonNeedles.join(", ")}.`);
-        const current = currentNote(data, limit);
+        const current = currentNote(data);
         if (current) notes.push(current);
         if (head.literalOnly) {
           notes.push(matchedAny.size
