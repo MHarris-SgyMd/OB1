@@ -404,7 +404,7 @@ says so; see Caveats.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 309 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
+bun test-server.ts        # 312 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
 bun test-auth.ts          # 97 — scoped, hashed, named keys
 bun run test:local        # 52 — fully local provider, no credential
 bun run test:sql          # 123 — store conformance, real Postgres in a container
@@ -502,7 +502,10 @@ stored in the same write").
   `docker compose stop server` returns in about 0.1 s idle, or when the last
   call answers. A call still running at 8 s (`DRAIN_BOUND_MS` in
   `shutdown.ts`, under Docker's 10 s grace period) is cut off, the line says
-  how many, and the exit is 1; a second signal cuts the wait short. Before,
+  how many, the call's own line says the stop cut it, and the exit is 1; a
+  second signal cuts the wait short. The bound is a constant: on a platform
+  whose grace period is longer (Kubernetes' and ECS's 30 s), a call of 8–30 s
+  that used to finish before the kill is now cut at 8 s. Before,
   the image ignored SIGTERM — the server is the container's PID 1, which has
   no default action for it — so every stop waited out the grace period and
   was killed (exit 137), mid-request. A stop during preflight ends the

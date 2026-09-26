@@ -255,7 +255,7 @@ their first thought, with the real error buried inside a tool response.
 On Supabase this mattered less: the platform injected the database credentials, so
 they could not be wrong. Off Supabase every one is hand-written.
 
-So the container's entrypoint is `bun preflight.ts && exec bun index.ts`. A
+So the container's entrypoint runs `bun preflight.ts` and, only if it passes, `exec bun index.ts`. A
 misconfigured deployment crashloops, which is visible, instead of looking healthy,
 which is not. `preflight.ts --json` suits a pipeline gate; `--deep` also calls
 OpenRouter and checks the embedding width still matches the schema.

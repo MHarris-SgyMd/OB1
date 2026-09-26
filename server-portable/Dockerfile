@@ -68,7 +68,9 @@ USER bun
 # started, and the stop waited out the grace period and was killed (10.1 s,
 # exit 137, measured). A trap runs only once the foreground command returns,
 # hence preflight in the background and `wait`, which a trapped signal
-# interrupts. From the `exec` on, index.ts's own handlers answer (shutdown.ts).
+# interrupts. From the `exec` on, index.ts's own handlers answer (shutdown.ts),
+# once its imports have loaded: a stop in that fraction of a second is still
+# the grace period's kill.
 ENTRYPOINT ["/bin/sh", "-c", "trap 'exit 143' TERM; trap 'exit 130' INT; bun preflight.ts & wait $! || exit $?; exec bun index.ts"]
 
 # Liveness only. The MCP endpoint requires auth, so a probe cannot exercise a real

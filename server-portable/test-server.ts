@@ -818,25 +818,30 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
       .then(async (r) => ({ status: r.status, body: await r.text(), at: performance.now() - t0 }), (e: Error) => ({ status: 0, body: e.message, at: performance.now() - t0 }));
     await Bun.sleep(300);
     busy.proc.kill("SIGTERM");
-    await Bun.sleep(100);
-    const late = await fetch(`http://127.0.0.1:${busy.port}/health`).then((r) => `answered ${r.status}`, () => "refused");
+    // Polled, not slept on: a loaded runner may take a while to deliver the
+    // signal, and until then the child rightly answers (review pass 1).
+    let late = "";
+    for (let i = 0; i < 40 && late !== "refused"; i++) {
+      late = await fetch(`http://127.0.0.1:${busy.port}/health`).then((r) => `answered ${r.status}`, () => "refused");
+      if (late !== "refused") await Bun.sleep(50);
+    }
     const answered = await inFlight;
     const code = await exited(busy.proc, HEALTH_DEADLINE_MS + 5_000);
     const took = performance.now() - t0;
     const log = await busy.out;
     assert(answered.status === 200 && answered.body === "ok" && answered.at >= HEALTH_DEADLINE_MS - 100,
       `the keyed /health in flight when SIGTERM landed is answered, 200 \`ok\` at its deadline (${Math.round(answered.at)} ms; got ${answered.status} ${answered.body.slice(0, 60)})`);
-    assert(late === "refused", `…a new connection after the signal is refused (${late})`);
+    assert(late === "refused" && answered.status === 200, `…a new connection after the signal is refused while it is in flight (${late})`);
     assert(code === 0 && took < HEALTH_DEADLINE_MS + 2_500, `…and the server exits 0 once it is, not at the drain bound (${code} at ${Math.round(took)} ms)`);
-    assert(/SIGTERM: no longer accepting; 1 request in flight/.test(log) && /SIGTERM: stopped in [\d.]+ s; database pool .*; exit 0/.test(log),
+    assert(/SIGTERM: no longer accepting; 1 request in flight/.test(log) && /SIGTERM: stopped in [\d.]+ s; database pool not closed within 1000 ms; exit 0/.test(log),
       `…saying so on stdout, the request counted (${log.split("\n").filter((l) => l.startsWith("SIGTERM")).join(" | ")})`);
 
     const t1 = performance.now();
     idle.proc.kill("SIGTERM");
     const idleCode = await exited(idle.proc, 3_000);
     const idleLog = await idle.out;
-    assert(idleCode === 0 && performance.now() - t1 < 1_000 && /0 requests in flight/.test(idleLog) && /database pool closed; exit 0/.test(idleLog),
-      `an idle server stops at once, exit 0, no pool to close (${idleCode} in ${Math.round(performance.now() - t1)} ms)`);
+    assert(idleCode === 0 && performance.now() - t1 < 1_000 && /0 requests in flight/.test(idleLog) && /no database pool was opened; exit 0/.test(idleLog),
+      `an idle server stops at once, exit 0, and says it opened no pool (${idleCode} in ${Math.round(performance.now() - t1)} ms)`);
 
     ctrlC.proc.kill("SIGINT");
     const intCode = await exited(ctrlC.proc, 3_000);
@@ -849,29 +854,31 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
   // The bounds, against a stand-in server: a request that never finishes is
   // cut off at the drain bound (exit 1, named), a second signal cuts the wait
   // short, a pool that will not close is left at its bound, and with no server
-  // yet there is nothing to wait on.
+  // yet there is nothing to wait on. The stand-in's stop(true) never resolves
+  // either, as Bun's does not while a handler has yet to return (review pass 1).
   const { drainOnSignal, isStoppable } = await import("./shutdown.ts");
+  const { cutByStopLine, abandonedRequestLine } = await import("./index.ts");
   const stuck = () => {
-    const calls: boolean[] = [];
-    return { calls, server: { pendingRequests: 1, stop: (force?: boolean) => { calls.push(!!force); return force ? Promise.resolve() : new Promise<void>(() => {}); } } };
+    const calls: string[] = [];
+    return { calls, server: { pendingRequests: 1, stop: (force?: boolean) => { calls.push(force ? "stop(true)" : "stop()"); return new Promise<void>(() => {}); } } };
   };
   const harness = (opts: Partial<Parameters<typeof drainOnSignal>[0]> & { server: () => any }) => {
     const handlers = new Map<string, () => void>();
     const lines: string[] = [];
     const exits: number[] = [];
-    const { stopped } = drainOnSignal({ close: async () => {}, drainBoundMs: 200, closeBoundMs: 100, log: (l) => lines.push(l), exit: (c) => exits.push(c), on: (s, h) => handlers.set(s, h), ...opts });
+    const { stopped } = drainOnSignal({ close: async () => true, drainBoundMs: 200, closeBoundMs: 100, log: (l) => lines.push(l), exit: (c) => exits.push(c), on: (s, h) => handlers.set(s, h), ...opts });
     return { handlers, lines, exits, stopped };
   };
   /** The stop's exit code, or -1 when it has not run to its exit within 3 s: a hang fails its row rather than the suite. */
   const settled = (p: Promise<number>) => Promise.race([p, Bun.sleep(3_000).then(() => -1)]);
 
   let s = stuck();
-  let h = harness({ server: () => s.server });
+  let h = harness({ server: () => s.server, onCut: () => s.calls.push("onCut") });
   const b0 = performance.now();
   h.handlers.get("SIGTERM")!();
   let c = await settled(h.stopped);
-  assert(c === 1 && h.exits.join() === "1" && performance.now() - b0 >= 190 && s.calls.join() === "false,true" && h.lines.some((l) => /1 request still in flight after 0\.\d s, closed unfinished/.test(l)),
-    `a request that never finishes is cut off at the drain bound: stop(), then stop(true), exit 1, the line naming it (${h.lines.join(" | ")})`);
+  assert(c === 1 && h.exits.join() === "1" && performance.now() - b0 >= 190 && s.calls.join() === "stop(),onCut,stop(true)" && h.lines.some((l) => /1 request still in flight after 0\.\d s, closed unfinished/.test(l)),
+    `a request that never finishes is cut off at the drain bound: stop(), the cut told, stop(true) not waited on, exit 1, the line naming it (${s.calls.join()}; ${h.lines.join(" | ")})`);
 
   s = stuck();
   h = harness({ server: () => s.server, drainBoundMs: 60_000 });
@@ -879,10 +886,10 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
   h.handlers.get("SIGTERM")!();
   h.handlers.get("SIGINT")!();
   c = await settled(h.stopped);
-  assert(c === 1 && performance.now() - b1 < 1_000 && h.lines.some((l) => l === "SIGINT again: not waiting for the rest") && s.calls.join() === "false,true",
+  assert(c === 1 && performance.now() - b1 < 1_000 && h.lines.some((l) => l === "SIGINT again: not waiting for the rest") && s.calls.join() === "stop(),stop(true)",
     `a second signal cuts a 60 s wait short (${Math.round(performance.now() - b1)} ms, exit ${c})`);
 
-  h = harness({ server: () => undefined, close: () => new Promise<void>(() => {}) });
+  h = harness({ server: () => undefined, close: () => new Promise<boolean>(() => {}) });
   h.handlers.get("SIGTERM")!();
   c = await settled(h.stopped);
   assert(c === 0 && h.lines.some((l) => /0 requests in flight/.test(l)) && h.lines.some((l) => /database pool not closed within 100 ms; exit 0/.test(l)),
@@ -891,6 +898,23 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
   h = harness({ server: () => undefined, close: () => Promise.reject(new Error("boom")) });
   h.handlers.get("SIGTERM")!();
   assert(await settled(h.stopped) === 0 && /database pool not closed: boom; exit 0/.test(h.lines.at(-1) ?? ""), "a pool whose close throws is said, and the stop still exits 0");
+
+  h = harness({ server: () => undefined, close: () => new Promise<boolean>(() => {}), closeBoundMs: 60_000 });
+  const b2 = performance.now();
+  h.handlers.get("SIGTERM")!();
+  await Bun.sleep(20);
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 0 && performance.now() - b2 < 1_000 && /database pool not closed: a second signal; exit 0/.test(h.lines.at(-1) ?? ""),
+    `…and a second signal during the pool's close ends that wait too (${Math.round(performance.now() - b2)} ms: ${h.lines.at(-1)})`);
+
+  h = harness({ server: () => undefined, close: async () => false });
+  h.handlers.get("SIGTERM")!();
+  assert(await settled(h.stopped) === 0 && /; no database pool was opened; exit 0$/.test(h.lines.at(-1) ?? ""), "no pool opened is said as such, not as a pool closed");
+
+  const cut = cutByStopLine("tools/call capture_thought", 8_400);
+  assert(cut.startsWith("request cut off by the server's stop after 8.4 s: tools/call capture_thought") && !/runs to its end/.test(cut) && cut !== abandonedRequestLine("tools/call capture_thought", 8_400),
+    "a request the stop cuts off is said to be the stop's, not the client leaving (SMD-1864's line says the call runs to its end, which it will not)");
 
   assert(isStoppable({ stop: () => Promise.resolve(), pendingRequests: 0 }) && !isStoppable({ OB1_STORE: "postgrest" }) && !isStoppable(undefined) && !isStoppable(null),
     "isStoppable: Bun's server shape, not a Workers env, not nothing");

@@ -18,8 +18,9 @@
  * second signal cuts the wait short the same way.
  *
  * Bun only, and only when index.ts is the entry: Workers has no signals, and a
- * suite that imports the module must keep its own. jev/serve.ts has the same
- * handler for the same reason (SMD-2050).
+ * suite that imports the module must keep its own. jev/serve.ts handles the
+ * signal for the same reason (SMD-2050), but exits as soon as it has called
+ * `stop()`, which cuts off what is in flight.
  */
 
 /** What stopping needs from the running server: Bun's `Server`, as its fetch handler receives it. */
@@ -46,8 +47,10 @@ export const CLOSE_BOUND_MS = 1_000;
 export interface DrainOptions {
   /** The running server, once the first request has handed it over; undefined before, when nothing can be in flight. */
   server: () => Stoppable | undefined;
-  /** Close the database pool, if one was opened. */
-  close: () => Promise<void>;
+  /** Close the database pool: true once closed, false when none was ever opened. */
+  close: () => Promise<boolean>;
+  /** Told just before the requests still in flight at the bound are closed, so the lines they leave say the stop cut them. */
+  onCut?: () => void;
   drainBoundMs?: number;
   closeBoundMs?: number;
   log?: (line: string) => void;
@@ -67,6 +70,7 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
   const on = opts.on ?? ((signal, handler) => { process.on(signal, handler); });
   let settle: (code: number) => void = () => {};
   const stopped = new Promise<number>((resolve) => { settle = resolve; });
+  // What a second signal ends: the drain while it runs, then the pool's close.
   let cutShort: (() => void) | undefined;
 
   const stop = async (signal: string) => {
@@ -82,15 +86,23 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
     clearTimeout(timer);
     if (!drained && server) {
       log(`${signal}: ${requests(server.pendingRequests)} still in flight after ${((performance.now() - t0) / 1000).toFixed(1)} s, closed unfinished`);
-      await server.stop(true).catch(() => {});
+      opts.onCut?.();
+      // Not awaited: Bun closes the sockets at once, but the promise waits
+      // for every handler to settle, and one stalled before it returned a
+      // response (a lookup on a database that never answers) would hold it
+      // until the grace period's kill (review pass 1, measured on 1.4.0).
+      server.stop(true).catch(() => {});
     }
     const closed = await Promise.race([
-      opts.close().then(() => "closed", (e: Error) => `not closed: ${e.message}`),
-      new Promise<string>((resolve) => { timer = setTimeout(() => resolve(`not closed within ${closeBoundMs} ms`), closeBoundMs); }),
+      opts.close().then((had) => (had ? "database pool closed" : "no database pool was opened"), (e: Error) => `database pool not closed: ${e.message}`),
+      new Promise<string>((resolve) => {
+        timer = setTimeout(() => resolve(`database pool not closed within ${closeBoundMs} ms`), closeBoundMs);
+        cutShort = () => resolve("database pool not closed: a second signal");
+      }),
     ]);
     clearTimeout(timer);
     const code = drained ? 0 : 1;
-    log(`${signal}: stopped in ${((performance.now() - t0) / 1000).toFixed(1)} s; database pool ${closed}; exit ${code}`);
+    log(`${signal}: stopped in ${((performance.now() - t0) / 1000).toFixed(1)} s; ${closed}; exit ${code}`);
     settle(code);
     exit(code);
   };

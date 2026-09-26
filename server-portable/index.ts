@@ -2583,6 +2583,16 @@ export function abandonedRequestLine(label: string, elapsedMs: number): string {
   return `request abandoned by the client after ${(elapsedMs / 1000).toFixed(1)} s: ${label} — the connection closed before the response was complete; the call runs to its end on this side, so a capture may still have landed (SMD-1864)`;
 }
 
+/**
+ * The same close when the server's own stop made it: the request was still
+ * running at the drain bound (shutdown.ts), and the process exits next, so
+ * the call does not run to its end (review pass 1 of SMD-2250 — before, this
+ * was logged as the client leaving).
+ */
+export function cutByStopLine(label: string, elapsedMs: number): string {
+  return `request cut off by the server's stop after ${(elapsedMs / 1000).toFixed(1)} s: ${label} — still running at the drain bound, and the process exits now; a capture may or may not have landed (SMD-2250)`;
+}
+
 // The MCP endpoint, registered for MCP_METHODS only. The transport is built per
 // request and is sessionless, so a GET has no server stream to open: before
 // change 75 an authenticated GET cost an agent-registry resolve and a server
@@ -2608,7 +2618,7 @@ app.on(MCP_METHODS, "*", async (c) => {
   let label = "?";
   let settled = false;
   const abandoned = () => {
-    if (!settled) console.warn(abandonedRequestLine(label, performance.now() - started));
+    if (!settled) console.warn((cutByStop ? cutByStopLine : abandonedRequestLine)(label, performance.now() - started));
   };
   signal.addEventListener("abort", abandoned, { once: true });
   if (signal.aborted) {
@@ -2722,9 +2732,15 @@ app.notFound((c) =>
 // its bindings, nor in a suite that imports the module.
 const SERVES_ON_BUN = typeof Bun !== "undefined" && import.meta.main === true;
 let bunServer: Stoppable | undefined;
+/** Set once the stop closes what is still in flight at its bound, so the route's close line names the stop, not the client. */
+let cutByStop = false;
 if (SERVES_ON_BUN) {
-  // The pool only if a request opened one; a store that failed to build has none to close.
-  drainOnSignal({ server: () => bunServer, close: async () => { await _store?.then((s) => s.close(), () => {}); } });
+  drainOnSignal({
+    server: () => bunServer,
+    // The pool only if a request opened one; a store that failed to build has none to close.
+    close: async () => (_store ? _store.then(async (s) => { await s.close(); return true; }, () => false) : false),
+    onCut: () => { cutByStop = true; },
+  });
 }
 
 export default {
