@@ -404,7 +404,7 @@ says so; see Caveats.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 314 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
+bun test-server.ts        # 319 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
 bun test-auth.ts          # 97 — scoped, hashed, named keys
 bun run test:local        # 52 — fully local provider, no credential
 bun run test:sql          # 123 — store conformance, real Postgres in a container
@@ -498,20 +498,36 @@ stored in the same write").
   rather than a second row. The rest of per-request logging is SMD-1849.
 - **A stop finishes what is in flight, for up to 8 s** (SMD-2250). On SIGTERM
   or SIGINT the server stops accepting, waits for the requests in flight
-  (a tool call's stream included), closes the database pool and exits 0:
-  `docker compose stop server` returns in about 0.1 s idle, or when the last
-  call answers. A call still running at 8 s (`DRAIN_BOUND_MS` in
-  `shutdown.ts`, under Docker's 10 s grace period) is cut off, the line says
-  how many, the call's own line says the stop cut it, and the exit is 1; a
-  second signal cuts the wait short. The bound is a constant: on a platform
-  whose grace period is longer (Kubernetes' and ECS's 30 s), a call with more
-  than 8 s still to run, which used to finish before the kill, is now cut. Before,
-  the image ignored SIGTERM — the server is the container's PID 1, which has
-  no default action for it — so every stop waited out the grace period and
-  was killed (exit 137), mid-request. A stop during preflight ends the
-  container at once, exit 143 (the Dockerfile's traps). Only when `index.ts`
-  is Bun's entry: Workers has no signals, and a suite that imports the module
-  keeps its own.
+  (a tool call's stream included) and for the tool calls still running (one
+  whose client has gone runs on, and a capture may still land), closes the
+  database pool and exits 0: `docker compose stop server` returns in about
+  0.1 s idle, or when the last call ends. A call still running at 8 s
+  (`DRAIN_BOUND_MS` in `shutdown.ts`) is cut off, the line says how many, an
+  MCP call's own line says the stop cut it, and the exit is 1; a second signal
+  cuts the wait short. The bounds count from the handler, so the stop inside
+  Docker's 10 s grace period is measured (8.4–8.5 s for a cut at the bound),
+  not guaranteed. The bound is a constant: on a platform whose grace period is
+  longer (Kubernetes' and ECS's 30 s), a call with more than 8 s still to run,
+  which used to finish before the kill, is now cut. Before, the image ignored
+  SIGTERM — the server is the container's PID 1, which has no default action
+  for it — so every stop waited out the grace period and was killed (exit
+  137), cutting off any call in flight. Run with an init as PID 1 (`docker run
+  --init`, compose's `init: true`, Fly), under systemd or in a terminal, Bun
+  died at the signal at once; it now drains the same way, and Ctrl-C exits 0.
+  Only when `index.ts` is Bun's entry: Workers has no signals, and a suite
+  that imports the module keeps its own. What the container's exit code says:
+
+  | Exit | Meaning |
+  | --- | --- |
+  | 0 | Stopped once everything in flight had ended (or nothing was) |
+  | 1 | The stop cut calls off at the bound or on a second signal — or preflight refused the configuration, or the server failed; the last `SIGTERM: stopped` line tells which |
+  | 143 / 130 | Stopped by SIGTERM / SIGINT during preflight, before it served (the Dockerfile's traps) |
+  | 137 | Killed: the stop outlasted the grace period, or the signal landed while `index.ts` was still loading |
+
+  Under podman, `podman restart` and `docker compose restart` without `-t`
+  kill the server at once (exit 137, measured on podman 6.0.2) rather than
+  signal it; `compose stop server` then `compose start server`, or
+  `podman restart -t 10`, drains.
 
 ## Related
 

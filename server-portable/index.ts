@@ -14,7 +14,7 @@ import { authenticateRequest, canCapture, canRead, canWrite, SCOPES, type Princi
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "./version.ts";
 import { brainInfo, renderBrainInfo, type BrainInfo, type ReadOptions, type ServerFacts } from "./brain-info.ts";
-import { drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
+import { createCallCount, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 
 /**
  * Runtime-portable env access.
@@ -715,6 +715,15 @@ export function actorLine(m: Record<string, unknown>): string | null {
   return `By: ${name ?? "an unnamed key"} (${kind ?? "kind not classified"})`;
 }
 
+/**
+ * The tool calls running, counted for the stop (SMD-2250, review pass 3): a
+ * call runs on after its client has gone, and a stop that waited only on the
+ * requests Bun counts exited under it.
+ */
+const toolCalls = createCallCount();
+/** How many tool calls are running now, for test-server [13d]. */
+export const toolCallsRunning = (): number => toolCalls.running;
+
 function buildServer(principal: Principal): McpServer {
   const server = new McpServer({
     name: SERVER_NAME,
@@ -722,6 +731,13 @@ function buildServer(principal: Principal): McpServer {
     // here said 1.0.0 from before the fork had a version scheme until 1.1.0.
     version: FORK_VERSION,
   });
+  // Every tool registered below runs inside toolCalls.track: registerTool's
+  // last argument is the handler, whatever its overload.
+  const registerTool = server.registerTool.bind(server) as (...args: unknown[]) => unknown;
+  (server as unknown as { registerTool: (...args: unknown[]) => unknown }).registerTool = (...args: unknown[]) => {
+    const handler = args[args.length - 1] as (...call: unknown[]) => unknown;
+    return registerTool(...args.slice(0, -1), (...call: unknown[]) => toolCalls.track(() => handler(...call)));
+  };
 
   // The opt-in query log (migration 034, SMD-1295). Off unless OB1_QUERY_LOG=on,
   // and best-effort either way: a log write is never allowed to fail a search, a
@@ -2738,6 +2754,7 @@ let cutByStop = false;
 if (SERVES_ON_BUN) {
   drainOnSignal({
     server: () => bunServer,
+    calls: toolCalls,
     // The pool only if a request opened one: a store that failed to build has
     // none, and the PostgREST store holds no pooled connection to close.
     close: async () => (_store ? _store.then(async (s) => { await s.close(); return s.kind === "sql"; }, () => false) : false),

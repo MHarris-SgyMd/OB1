@@ -617,13 +617,15 @@ const DRAIN_BOUND_MS = 20_000; // under the 30 s grace period, with room for the
 let bunServer: { stop(closeActiveConnections?: boolean): Promise<void>; readonly pendingRequests: number } | undefined;
 if (import.meta.main) {
   let stopping = false;
+  let drained = false;
   for (const signal of ["SIGTERM", "SIGINT"] as const) {
     process.on(signal, async () => {
-      if (stopping) process.exit(1); // a second signal: not waiting for the rest
+      if (stopping) process.exit(drained ? 0 : 1); // a second signal: not waiting for the rest, 0 once everything was answered
       stopping = true;
       const t0 = performance.now();
       console.log(`${signal}: no longer accepting; ${bunServer?.pendingRequests ?? 0} in flight, waited on for up to ${DRAIN_BOUND_MS / 1000} s (SMD-2250)`);
-      const drained = await Promise.race([bunServer ? bunServer.stop().then(() => true) : true, Bun.sleep(DRAIN_BOUND_MS).then(() => false)]);
+      // A stop() that rejects has stopped accepting all the same (review pass 3).
+      drained = await Promise.race([bunServer ? bunServer.stop().then(() => true, () => true) : true, Bun.sleep(DRAIN_BOUND_MS).then(() => false)]);
       await Promise.race([sql.close().catch(() => {}), Bun.sleep(1_000)]);
       console.log(`${signal}: stopped in ${((performance.now() - t0) / 1000).toFixed(1)} s${drained ? "" : `, ${bunServer?.pendingRequests} cut off at the bound`}; exit ${drained ? 0 : 1}`);
       process.exit(drained ? 0 : 1);

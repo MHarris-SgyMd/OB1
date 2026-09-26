@@ -887,8 +887,8 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
   // short, a pool that will not close is left at its bound, and with no server
   // yet there is nothing to wait on. The stand-in's stop(true) never resolves
   // either, as Bun's does not while a handler has yet to return (review pass 1).
-  const { drainOnSignal, isStoppable } = await import("./shutdown.ts");
-  const { cutByStopLine, abandonedRequestLine } = await import("./index.ts");
+  const { drainOnSignal, isStoppable, createCallCount } = await import("./shutdown.ts");
+  const { cutByStopLine, abandonedRequestLine, toolCallsRunning } = await import("./index.ts");
   const stuck = () => {
     const calls: string[] = [];
     return { calls, server: { pendingRequests: 1, stop: (force?: boolean) => { calls.push(force ? "stop(true)" : "stop()"); return new Promise<void>(() => {}); } } };
@@ -953,6 +953,65 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
   const cut = cutByStopLine("tools/call capture_thought", 8_400);
   assert(cut.startsWith("request cut off by the server's stop after 8.4 s: tools/call capture_thought — still running when the stop closed it") && !/runs to its end/.test(cut) && cut !== abandonedRequestLine("tools/call capture_thought", 8_400),
     "a request the stop cuts off is said to be the stop's, not the client leaving (SMD-1864's line says the call runs to its end, which it will not)");
+
+  // A tool call runs on after its client has gone, which Bun's request count
+  // does not see (review pass 3: a stop whose only call's client had just left
+  // exited under it, and the capture was lost). The count, then the drain
+  // waiting on it, then the wrap in index.ts counting a real call past its
+  // client, served in-process with the provider slowed.
+  const count = createCallCount();
+  let release: () => void = () => {};
+  const held = count.track(() => new Promise<string>((resolve) => { release = () => resolve("done"); }));
+  const failing = count.track(async () => { throw new Error("boom"); }).catch((e: Error) => e.message);
+  const idleEarly = await Promise.race([count.idle().then(() => "idle"), Bun.sleep(30).then(() => "waiting")]);
+  const during = count.running;
+  release();
+  const results = [await held, await failing];
+  const idleAfter = await Promise.race([count.idle().then(() => "idle"), Bun.sleep(30).then(() => "waiting")]);
+  assert(during === 1 && idleEarly === "waiting" && idleAfter === "idle" && count.running === 0 && results.join() === "done,boom",
+    `the call count: a running call holds idle(), a failed one is still let go, each result passed through (${during} running, ${idleEarly} → ${idleAfter})`);
+
+  let callsLeft = 1;
+  let callsIdle: () => void = () => {};
+  const bc = performance.now();
+  h = harness({ server: () => ({ pendingRequests: 0, stop: () => Promise.resolve() }), calls: { get running() { return callsLeft; }, idle: () => new Promise<void>((resolve) => { callsIdle = resolve; }) }, drainBoundMs: 5_000 });
+  h.handlers.get("SIGTERM")!();
+  setTimeout(() => { callsLeft = 0; callsIdle(); }, 150);
+  c = await settled(h.stopped);
+  assert(c === 0 && performance.now() - bc >= 140 && h.lines[0].includes("0 requests in flight, 1 tool call running"),
+    `the drain waits for a tool call its request no longer counts, and says so (${Math.round(performance.now() - bc)} ms: ${h.lines[0].slice(0, 70)})`);
+
+  h = harness({ server: () => ({ pendingRequests: 0, stop: () => new Promise<void>(() => {}) }), calls: { running: 0, idle: () => Promise.resolve() } });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 0 && !h.lines.some((l) => /closed unfinished/.test(l)),
+    `a bound that finds nothing left in flight is a drain, not "0 still in flight, closed unfinished" and exit 1 (${h.lines.at(-1)})`);
+
+  h = harness({ server: () => ({ pendingRequests: 1, stop: () => Bun.sleep(170) }), close: () => new Promise<boolean>(() => {}), closeBoundMs: 60_000, closeAfterCutMs: 30 });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  const lateClose = Number(/database pool not closed within (\d+) ms; exit 0$/.exec(h.lines.at(-1) ?? "")?.[1] ?? NaN);
+  assert(c === 0 && lateClose >= 30 && lateClose <= 70,
+    `a drain that ends late gives the close what is left of the bound, not its full second (${lateClose} ms of a 200 ms bound ended at about 170)`);
+
+  const aborter = new AbortController();
+  embedDelayMs = 700;
+  const gone = fetch(BASE, { method: "POST", headers: AUTH, signal: aborter.signal, body: JSON.stringify({ jsonrpc: "2.0", id: 60, method: "tools/call", params: { name: "search_thoughts", arguments: { query: "a call whose client leaves" } } }) }).then(async (r) => { await r.text(); return "read"; }, () => "left");
+  const quiet = console.warn;
+  console.warn = () => {};
+  try {
+    await Bun.sleep(150);
+    aborter.abort();
+    await gone;
+    await Bun.sleep(150);
+    const whileRunning = toolCallsRunning();
+    await Bun.sleep(900);
+    assert(whileRunning === 1 && toolCallsRunning() === 0,
+      `index.ts counts a tool call past its client leaving, and lets it go when the handler ends (${whileRunning} after the client left, ${toolCallsRunning()} after)`);
+  } finally {
+    console.warn = quiet;
+    embedDelayMs = 0;
+  }
 
   assert(isStoppable({ stop: () => Promise.resolve(), pendingRequests: 0 }) && !isStoppable({ OB1_STORE: "postgrest" }) && !isStoppable(undefined) && !isStoppable(null),
     "isStoppable: Bun's server shape, not a Workers env, not nothing");

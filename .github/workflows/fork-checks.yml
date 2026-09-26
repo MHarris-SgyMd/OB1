@@ -792,7 +792,7 @@ jobs:
           docker run -d --name ob1-k8s-embed --network ob1-k8s-stop ob1-k8s-mcp:ci bun -e 'Bun.serve({ port: 8080, async fetch() { await Bun.sleep(2000); return new Response("stub", { status: 503 }); } })' > /dev/null
           docker run -d --name ob1-k8s-stop --network ob1-k8s-stop -p 127.0.0.1:8099:8000 -e DB_PASSWORD=unused -e EMBEDDING_API_BASE=http://ob1-k8s-embed:8080 -e "MCP_ACCESS_KEYS=ci:read:$HASH" ob1-k8s-mcp:ci > /dev/null
           up=""
-          for _ in $(seq 1 40); do curl -s -o /dev/null -X POST -d '{}' http://127.0.0.1:8099/ && { up=1; break; }; sleep 0.25; done
+          for _ in $(seq 1 40); do curl -s -m 2 -o /dev/null -X POST -d '{}' http://127.0.0.1:8099/ && { up=1; break; }; sleep 0.25; done
           curl -s -N --max-time 10 -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $KEY" \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_thoughts","arguments":{"query":"stop probe"}}}' http://127.0.0.1:8099/ > /tmp/k8s-call.out &
           sleep 0.5
