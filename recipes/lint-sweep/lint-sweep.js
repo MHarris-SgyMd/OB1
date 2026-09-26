@@ -204,10 +204,17 @@ function makeClient(url, serviceKey) {
   // shim's own explanation.
   const client = createClient(url, serviceKey || undefined);
 
+  /**
+   * The error a refused query becomes: the message names the read and Postgres's
+   * code, and the code rides along for the two reads that tolerate one (an
+   * undefined table or column) and refuse every other.
+   */
+  const failure = (what, error) => Object.assign(new Error(`${what} → ${error.code ? `${error.code} ` : ""}${error.message}`), { code: error.code });
+
   /** The rows a query answers. A database error is fatal, as an HTTP error was. */
   async function rows(query, what) {
     const { data, error } = await query;
-    if (error) throw new Error(`${what} → ${error.code ? `${error.code} ` : ""}${error.message}`);
+    if (error) throw failure(what, error);
     return Array.isArray(data) ? data : [];
   }
 
@@ -217,12 +224,23 @@ function makeClient(url, serviceKey) {
    */
   async function count(table, where = (q) => q) {
     const { count: n, error } = await where(client.from(table).select("*", { count: "exact", head: true }));
-    if (error) throw new Error(`count ${table} → ${error.code ? `${error.code} ` : ""}${error.message}`);
+    if (error) throw failure(`count ${table}`, error);
     return typeof n === "number" ? n : 0;
   }
 
   return { from: (table) => client.from(table), rows, count, close: () => client.close() };
 }
+
+// ── absence, not refusal ────────────────────────────────────────────────────
+//
+// The two conditions a tier tolerates: 42P01, the table is not there (an
+// optional schema never applied); 42703, the column is not (content_fingerprint
+// on an upstream brain). Anything else — 42501, a role without SELECT, first
+// among them — aborts the run: read as absence, it produced a report that
+// called a denied table missing and exited 0 (review pass 4, SMD-2144).
+const UNDEFINED_TABLE = "42P01";
+const UNDEFINED_COLUMN = "42703";
+const absent = (err, code) => Boolean(err) && err.code === code;
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -311,12 +329,8 @@ async function tier1SqlLint(db, args) {
     veryLongContent: 0,        // content > 20K chars (usually unchunked dumps)
   };
 
-  // Total row count — a counted head query, no rows pulled
-  try {
-    out.totalThoughts = await db.count("thoughts");
-  } catch {
-    out.totalThoughts = 0;
-  }
+  // Total row count — a counted head query, no rows pulled; a refusal aborts the run.
+  out.totalThoughts = await db.count("thoughts");
 
   // Orphans by tag: metadata.topics and metadata.tags both empty or missing.
   // The safer path is to pull a bounded sample and filter in JS. We look at the
@@ -364,13 +378,15 @@ async function tier1SqlLint(db, args) {
       }
     }
   } catch (e) {
-    // column may not exist on this brain; that's fine — report it
+    if (!absent(e, UNDEFINED_COLUMN)) throw e;
+    // the column is not on this brain; that's fine — report it
     out.exactDuplicates = [{ note: "content_fingerprint column missing — see recipes/content-fingerprint-dedup" }];
   }
 
   try {
     out.noFingerprint = await db.count("thoughts", (q) => q.is("content_fingerprint", null));
-  } catch {
+  } catch (e) {
+    if (!absent(e, UNDEFINED_COLUMN)) throw e;
     // column missing — already flagged above
     out.noFingerprint = 0;
   }
@@ -397,7 +413,8 @@ async function tier2GraphLint(db, args) {
   for (const t of ["entities", "edges", "thought_entities"]) {
     try {
       await db.rows(db.from(t).select("*").limit(1), t);
-    } catch {
+    } catch (e) {
+      if (!absent(e, UNDEFINED_TABLE)) throw e;
       out.graphTablesMissing.push(t);
     }
   }

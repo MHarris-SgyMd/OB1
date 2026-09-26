@@ -5316,6 +5316,27 @@ console.log("\n[26] recipes/brain-backup and recipes/lint-sweep on the SQL shim:
     const httpsUrl = await lint({ SUPABASE_URL: "https://example.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "unused" }, "--tier=1");
     assert(noUrl.code === 1 && /ERROR: SUPABASE_URL must be set/.test(noUrl.out) && httpsUrl.code === 1 && /expected a postgres:\/\/ connection URL/.test(httpsUrl.out) && !/\[tier 1\] done/.test(httpsUrl.out),
       `…no URL exits 1 naming the variable; a Supabase URL exits 1 with the shim's refusal, before any query (${noUrl.code}: ${firstLine(noUrl.out)}; ${httpsUrl.code}: ${firstLine(httpsUrl.out).slice(0, 120)})`);
+    // A graph table the role may not read is a refusal, not an absence: with SELECT on `thoughts` alone, Tier 2 exits 1
+    // naming 42501 on `entities`, where it had called the three tables absent and exited 0 with a report (review pass 4,
+    // run-it — both readers, from a denied role and from the README's promise). A LOGIN role, so [18]'s two guards:
+    // skipped where the connection cannot create one or carries no credentials to swap.
+    const PROBE_ROLE = "ob1_live_lint_probe";
+    const probeUrl = URL_.replace(/\/\/[^@]*@/, `//${PROBE_ROLE}:ob1probe@`);
+    const [{ mayCreate: mayCreateProbe }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
+    if (probeUrl === URL_ || !mayCreateProbe) {
+      skip("…a role with SELECT on thoughts alone: Tier 2 refuses, not \"absent\"", probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+    } else {
+      const dropProbe = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PROBE_ROLE}') THEN EXECUTE 'DROP OWNED BY ${PROBE_ROLE}'; EXECUTE 'DROP ROLE ${PROBE_ROLE}'; END IF; END $$`);
+      await dropProbe();
+      try {
+        await sql.unsafe(`CREATE ROLE ${PROBE_ROLE} LOGIN PASSWORD 'ob1probe'; GRANT USAGE ON SCHEMA public TO ${PROBE_ROLE}; GRANT SELECT ON thoughts TO ${PROBE_ROLE}`);
+        const denied = await lint({ SUPABASE_URL: probeUrl }, "--tier=2", `--report=${join(lintDir, "denied.md")}`);
+        assert(denied.code === 1 && /\[lint-sweep\] FAILED: entities → 42501 permission denied for table entities/.test(denied.out) && !/Graph tables absent|\[tier 2\] done/.test(denied.out) && !existsSync(join(lintDir, "denied.md")),
+          `…a role with SELECT on thoughts alone: Tier 2 exits 1 naming 42501 on entities and writes no report, rather than calling the three tables absent (${denied.code}: ${firstLine(denied.out.split("\n").filter((l) => /FAILED/.test(l)).join(" ") || denied.out)})`);
+      } finally {
+        await dropProbe();
+      }
+    }
     }
 
     // The export: every thought, past the first page; the optional tables it

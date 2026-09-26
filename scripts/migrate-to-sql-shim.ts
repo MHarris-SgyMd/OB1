@@ -258,7 +258,7 @@ const eligible = found.filter((f) => f.eligible && !f.already);
 const blocked = found.filter((f) => !f.eligible);
 const migrated = found.filter((f) => f.already);
 
-console.log(`Scanned ${found.length} file(s) importing @supabase/supabase-js.\n`);
+console.log(`Scanned ${found.length} file(s) importing @supabase/supabase-js or compat/supabase-sql.\n`);
 
 if (migrated.length) {
   const hand = migrated.filter((f) => f.handPorted).length;

@@ -2308,7 +2308,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1817 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 741 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or [26]'s four sweep cases are, on a machine with a recipes/lint-sweep/.env)
+./with-postgres.sh bun test-live.ts         # 742 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or [26]'s five sweep cases are, on a machine with a recipes/lint-sweep/.env)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

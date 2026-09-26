@@ -133,7 +133,7 @@ All flags:
 
 ## Report Format
 
-The output is a self-contained markdown file ready for human review. Sample output from a small test brain:
+The output is a self-contained markdown file ready for human review. Sample output from a small test brain (upstream's, with integer ids — on this fork a thought id is a uuid, so `#48221` reads `#2b3a2174-5158-…`):
 
 ```markdown
 ---
@@ -275,13 +275,13 @@ Solution: `SUPABASE_URL` still holds a Supabase project URL. On this fork it is 
 **Issue: `thoughts (recent 2000) → 42703 column "source_type" does not exist`** (under `--tier=2` alone: `thoughts (high importance) → 42703 column "importance" does not exist`)
 Solution: Apply `schemas/enhanced-thoughts/schema.sql` — Tier 1 reads two of the columns it adds to `thoughts` (Postgres names the first missing one), Tier 2 reads `importance`, Tier 3 those two and `type`.
 
-**Issue: `42501 permission denied for table thoughts`**
-Solution: The connection's role lacks SELECT. Connect as the brain's owner, or grant the role with `bun db/migrate.ts --grant <role>` (`db/README.md`) — that is the capturing role's grant, SELECT and the writes on every table the sweep reads; a read-only credential is a hand `GRANT SELECT ON thoughts, thought_entities, entities, edges TO <role>` instead.
+**Issue: `42501 permission denied for table thoughts`** (or `entities → 42501 …` from Tier 2's probe)
+Solution: The connection's role lacks SELECT on the table named — a table the role may not read is a refusal, never reported as absent. Connect as the brain's owner, or grant the role with `bun db/migrate.ts --grant <role>` (`db/README.md`) — that is the capturing role's grant, SELECT and the writes on every table the sweep reads; a read-only credential is a hand `GRANT SELECT ON thoughts, thought_entities, entities, edges TO <role>` instead.
 
 **Issue: Tier 1 shows `content_fingerprint column missing — see recipes/content-fingerprint-dedup`**
 Solution: Your brain predates the [content-fingerprint-dedup](../content-fingerprint-dedup/) primitive. Apply that recipe (and the [fingerprint-dedup-backfill](../fingerprint-dedup-backfill/) recipe) to get duplicate detection.
 
-**Issue: Tier 2 reports `Graph tables absent`**
+**Issue: Tier 2 reports `Graph tables absent`** (a table that exists but the role may not read is not this — that aborts the run with `42501`, above)
 Solution: Tier 2 requires the `entity-extraction` schema (`entities`, `edges`, `thought_entities`). If your brain predates that schema, see PRs [#197](https://github.com/NateBJones-Projects/OB1/pull/197) and [#199](https://github.com/NateBJones-Projects/OB1/pull/199), or skip Tier 2 entirely by running `--tier=1` and `--tier=3` separately. Note: the `ob-graph` recipe uses different table names (`graph_nodes`, `graph_edges`) and does NOT satisfy this dependency.
 
 **Issue: Tier 3 fails with `OpenRouter HTTP 401`**
