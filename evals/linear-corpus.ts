@@ -128,9 +128,10 @@ export async function cachedDocumentVectors(
  * One line of the answers dump db/extract-entities.ts --dump writes: the
  * model's parsed answer for one thought, the fingerprint of the text it saw,
  * and (since 2026-09-07) the extraction key it ran under. Older dumps lack
- * `key`; readers say so rather than assume.
+ * `key`; readers say so rather than assume. `coverage` (SMD-2240) is set when
+ * the thought was over the per-thought bound and the answer is its prefix's.
  */
-export type EntityAnswer = { id: string; fingerprint?: string; key?: string; entities: unknown[]; relations: unknown[] };
+export type EntityAnswer = { id: string; fingerprint?: string; key?: string; entities: unknown[]; relations: unknown[]; coverage?: { windows: number; of: number; cut: boolean } };
 
 /** Every usable line of a dump, and how many were not — a torn last line, or a shape the database would reject. */
 export function readEntityAnswers(path: string): { answers: EntityAnswer[]; unusable: number } {
@@ -145,5 +146,9 @@ export function readEntityAnswers(path: string): { answers: EntityAnswer[]; unus
       unusable++;
     }
   }
+  // Said once, here, for every replay: a prefix's answer scores as the
+  // thought's whole answer unless the reader is told (review pass 2).
+  const partial = answers.filter((a) => a.coverage).length;
+  if (partial) console.error(`  ${partial} dump line(s) are a prefix only — the thought was over the per-thought bound (SMD-2240), so its tail is in no answer; a score over them measures the prefix`);
   return { answers, unusable };
 }

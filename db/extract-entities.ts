@@ -18,6 +18,7 @@
  *   bun db/extract-entities.ts --url … --status               # where the pass stands, and what it has found
  *   bun db/extract-entities.ts --url … --dry-run              # what a run would do; writes nothing
  *   bun db/extract-entities.ts --url … --retry-failed         # failed rows back into the pool first
+ *   bun db/extract-entities.ts --url … --retry-partial        # rows extracted over a prefix back into the pool — after raising OB1_EXTRACT_MAX_WINDOWS
  *   bun db/extract-entities.ts --url … --dump answers.jsonl   # also append every model answer, for evals/eval-entities.ts --replay
  *   bun db/extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from ob1_config
  *   --workers N (2)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (300, per model call — per window of a long thought)
@@ -48,6 +49,22 @@
  * answer budget (entities.ts) turn them into fast, visible failures or, for
  * the long ones, into extractions. --workers beyond two is for a hosted
  * provider that really does serve calls in parallel.
+ *
+ * One thought is extracted in at most OB1_EXTRACT_MAX_WINDOWS windows (24
+ * unset), and runs chunk.ts cannot split are cut where the thought's text
+ * reaches that many windows' worth (server-portable/entities.ts,
+ * boundedWindows). A
+ * longer one — an ingested PDF, a page, a long
+ * session summary — is extracted over its first windows and its claim is
+ * released succeeded with a caveat: migration 028's rule, last_error on a
+ * succeeded row, here beginning "partial: " and naming how many windows of how
+ * many (SMD-2240). Until SMD-2240 such a thought was failed before any call
+ * and contributed nothing to the graph. The run's summary and --status count
+ * the partial rows apart from the full ones and from the failures, and list
+ * them; raise OB1_EXTRACT_MAX_WINDOWS and --retry-partial returns them to the
+ * pool, where record_thought_entities replaces the prefix's rows with the
+ * longer reading's. A row failed by the old rule ("over EXTRACT_MAX_WINDOWS
+ * (24); not extracted") comes back with --retry-failed and is extracted so.
  *
  * Nothing spends it until this runs. The first run writes the extraction key
  * to `ob1_config.entity_extraction_key`; from then on migration 016's trigger
@@ -88,7 +105,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
-import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
+import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, type Extraction } from "../server-portable/entities.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 
@@ -148,7 +165,11 @@ const TIMEOUT_S = numberFlag("timeout", 300, 1);
     process.exit(2);
   }
 }
-/** Append every model answer here as JSONL — {id, fingerprint, entities, relations} — for evals/eval-entities.ts --replay. */
+/**
+ * Append every model answer here as JSONL — {id, fingerprint, entities,
+ * relations}, and `windows` (the windows SENT), `coverage` when that was a
+ * prefix of the thought (SMD-2240) — for evals/eval-entities.ts --replay.
+ */
 const DUMP = flag("dump");
 if (DUMP !== undefined && DUMP.startsWith("--")) {
   console.error("--dump needs a file path.");
@@ -160,8 +181,11 @@ const STATUS_ONLY = has("status");
 const DRY_RUN = has("dry-run");
 const SWITCH_KEY = has("switch-key");
 const RETRY_FAILED = has("retry-failed");
+const RETRY_PARTIAL = has("retry-partial");
 
 const cfg = resolveEmbedConfig(process.env as EmbedEnv);
+/** The windowing every row is extracted under — its bound is what a partial row's caveat names. */
+const WINDOWING = windowingFor(cfg);
 const JOB = flag("job") ?? extractionKey(cfg.metadataModel);
 
 console.log(`  job:    ${JOB}`);
@@ -268,22 +292,33 @@ if (!STATUS_ONLY && !DRY_RUN) {
 
 // ── Where the pass stands ───────────────────────────────────────────────────
 
-type Counts = { pending: number; claimed: number; succeeded: number; failed: number; unpooled: number; thoughts: number };
+/**
+ * A succeeded row extracted over a prefix (SMD-2240): 028's caveat rule, the
+ * caveat this worker writes for it. One predicate for the counts, the list
+ * and --retry-partial, so the three cannot disagree about which rows are
+ * partial.
+ */
+const partialRow = () => sql`status = 'succeeded' AND last_error IS NOT NULL AND starts_with(last_error, ${PARTIAL_CAVEAT_PREFIX})`;
+
+/** `partial` is a subset of `succeeded`: the rows extracted over a prefix only. */
+type Counts = { pending: number; claimed: number; succeeded: number; partial: number; failed: number; unpooled: number; thoughts: number };
 async function counts(): Promise<Counts> {
   const rows = (await sql`
-    SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${JOB} GROUP BY status`) as { status: string; c: number }[];
+    SELECT status, count(*)::int AS c, count(*) FILTER (WHERE ${partialRow()})::int AS partial
+    FROM thought_work_claims WHERE work_type = ${JOB} GROUP BY status`) as { status: string; c: number; partial: number }[];
   const by = Object.fromEntries(rows.map((r) => [r.status, Number(r.c)]));
+  const partial = rows.reduce((n, r) => n + Number(r.partial), 0);
   const [{ unpooled, thoughts }] = await sql`
     SELECT count(*)::int AS thoughts,
            count(*) FILTER (WHERE NOT EXISTS (
              SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${JOB}))::int AS unpooled
     FROM thoughts t`;
-  return { pending: by.pending ?? 0, claimed: by.claimed ?? 0, succeeded: by.succeeded ?? 0, failed: by.failed ?? 0, unpooled: Number(unpooled), thoughts: Number(thoughts) };
+  return { pending: by.pending ?? 0, claimed: by.claimed ?? 0, succeeded: by.succeeded ?? 0, partial, failed: by.failed ?? 0, unpooled: Number(unpooled), thoughts: Number(thoughts) };
 }
 
 function printCounts(c: Counts, label: string): void {
   console.log(
-    `  ${label}: ${c.thoughts} thoughts — ${c.succeeded} extracted, ${c.failed} failed, ` +
+    `  ${label}: ${c.thoughts} thoughts — ${c.succeeded} extracted${c.partial ? ` (${c.partial} over a prefix only)` : ""}, ${c.failed} failed, ` +
       `${c.claimed} in flight, ${c.pending} pending, ${c.unpooled} not yet in the pool`
   );
 }
@@ -307,6 +342,17 @@ async function printFailures(limit = 10): Promise<void> {
     WHERE work_type = ${JOB} AND status = 'failed' ORDER BY finished_at DESC LIMIT ${limit}`) as
     { thought_id: string; attempt_count: number; last_error: string | null }[];
   for (const r of rows) console.error(`    ${r.thought_id}  attempt ${r.attempt_count}  ${r.last_error ?? "(no error recorded)"}`);
+}
+
+/** The rows extracted over a prefix, each with its caveat — succeeded, so on stdout, not among the failures. */
+async function printPartials(total: number, limit = 10): Promise<void> {
+  const rows = (await sql`
+    SELECT thought_id, last_error FROM thought_work_claims
+    WHERE work_type = ${JOB} AND ${partialRow()} ORDER BY finished_at DESC LIMIT ${limit}`) as { thought_id: string; last_error: string }[];
+  // Each caveat names the bound its row was read under; the bound in force may
+  // already be wider, so the advice names it rather than saying "raise" (review pass 1).
+  console.log(`  extracted over a prefix only (${Math.min(total, limit)} of ${total}) — the rest of each is not in the graph; --retry-partial re-extracts them over at most ${cfg.extractMaxWindows} windows (OB1_EXTRACT_MAX_WINDOWS${cfg.extractMaxWindowsFrom === "default" ? " unset" : ""}), more than a row read under a smaller bound got; raise it for more:`);
+  for (const r of rows) console.log(`    ${r.thought_id}  ${r.last_error}`);
 }
 
 const recordedKey: string | undefined = ((await sql`SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'`) as { key: string }[])[0]?.key;
@@ -336,15 +382,17 @@ if (STATUS_ONLY || DRY_RUN) {
   printCounts(c, STATUS_ONLY ? "status" : "before");
   if (c.claimed > 0) for (const h of await leaseHolders(sql, JOB)) console.log(describeHolder(h));
   await printGraph();
+  if (c.partial > 0) await printPartials(c.partial);
   if (c.failed > 0) {
     console.error(`  failed rows (${Math.min(c.failed, 10)} of ${c.failed}):`);
     await printFailures();
   }
   if (DRY_RUN) {
-    const todo = c.pending + c.unpooled + (RETRY_FAILED ? c.failed : 0);
+    const todo = c.pending + c.unpooled + (RETRY_FAILED ? c.failed : 0) + (RETRY_PARTIAL ? c.partial : 0);
     console.log(
       `\n  would: ${recordedKey === JOB ? "" : `record ${JOB} in ob1_config so new captures enqueue; `}` +
         `${RETRY_FAILED ? `return ${c.failed} failed rows to the pool; ` : ""}` +
+        `${RETRY_PARTIAL ? `return ${c.partial} row(s) extracted over a prefix to the pool; ` : ""}` +
         `add ${c.unpooled} thoughts to the pool; send ${LIMIT ? Math.min(LIMIT, todo) : todo} thought(s) to ${cfg.metadataModel} ` +
         `with ${WORKERS} worker(s), ${TTL} s leases renewed every ${HEARTBEAT} s. Nothing was written.`
     );
@@ -371,8 +419,24 @@ if (RETRY_FAILED) {
   console.log(`  --retry-failed: ${n} failed row(s) returned to the pool`);
 }
 
+if (RETRY_PARTIAL) {
+  // --retry-failed's statement over the partial rows: pending, the caveat
+  // cleared, so the row is extracted afresh under the bound in force now and
+  // a longer reading replaces the prefix's rows (record_thought_entities).
+  const [{ n }] = await sql`
+    WITH retried AS (
+      UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0
+      WHERE work_type = ${JOB} AND ${partialRow()} RETURNING 1)
+    SELECT count(*)::int AS n FROM retried`;
+  // Each row is read afresh under the bound in force, which may be smaller
+  // than the one it was read under: say both directions (review pass 1).
+  console.log(`  --retry-partial: ${n} row(s) extracted over a prefix returned to the pool, to be extracted over at most ${cfg.extractMaxWindows} window(s) (OB1_EXTRACT_MAX_WINDOWS${cfg.extractMaxWindowsFrom === "default" ? " unset" : ""}) — a row read under a smaller bound gains coverage, one read under this bound is read to the same place again, and one read under a larger bound keeps less than it had`);
+}
+
 let stopping = false;
 let done = 0;
+/** Of `done`, the thoughts extracted over a prefix only (SMD-2240). */
+let partial = 0;
 let failed = 0;
 let vanished = 0;
 let superseded = 0;
@@ -410,7 +474,8 @@ function progress(force = false): void {
 
 type Row = { id: string; content: string; fingerprint: string | null; metadata: Record<string, unknown> | null };
 type Outcome =
-  | { outcome: "succeeded" }
+  /** `caveat` is set for a thought extracted over a prefix: 028's caveat, released on the succeeded row (SMD-2240). */
+  | { outcome: "succeeded"; caveat?: string }
   | { outcome: "failed"; error: string }
   | { outcome: "vanished" }
   /** Edited while it was being extracted; the trigger has already re-queued it and the pool will redo it. */
@@ -430,12 +495,14 @@ async function processRow(row: Row): Promise<Outcome> {
   // Every call the thought cost: one per window, and one more per window
   // that was retried (first review pass: the retries went uncounted).
   calls += callsOf(extraction);
-  if (extraction.windows > 1) windowed++;
+  // A per-window record, not a count over one: a prefix of one window of a
+  // longer thought is windowed — sent "Part 1 of N" (review pass 2).
+  if (extraction.parts) windowed++;
   if (extraction.retried) retried++;
   if (extraction.abortedMs !== undefined) aborted++;
   if (extraction.malformed) {
     malformed++;
-    const where = extraction.parts ? ` (window ${extraction.parts.filter((p) => p.malformed).map((p) => p.index + 1).join(", ")} of ${extraction.windows})` : "";
+    const where = extraction.parts ? ` (window ${extraction.parts.filter((p) => p.malformed).map((p) => p.index + 1).join(", ")} of ${extraction.windows}${extraction.coverage ? ` sent, a prefix of ${extraction.coverage.of}` : ""})` : "";
     // "No retry was made" is reachable only with EXTRACT_RETRY_RUNAWAY off and
     // the stream abort on — a constant flipped — and stays for that truth.
     // A runaway aborted on the stream is named in the failed row's error, so
@@ -456,7 +523,7 @@ async function processRow(row: Row): Promise<Outcome> {
     // what a replay needs to re-score a rule change without the model — and,
     // for a windowed thought, each window's own answer beside the merged one:
     // the derivation record (SMD-1731) until a lineage table holds it.
-    appendFileSync(DUMP, JSON.stringify({ id: row.id, fingerprint: row.fingerprint, key: JOB, entities: extraction.entities, relations: extraction.relations, windows: extraction.windows, ...(extraction.retried ? { retried: true } : {}), ...(extraction.abortedMs !== undefined ? { abortedMs: extraction.abortedMs } : {}), ...(extraction.parts ? { parts: extraction.parts } : {}) }) + "\n");
+    appendFileSync(DUMP, JSON.stringify({ id: row.id, fingerprint: row.fingerprint, key: JOB, entities: extraction.entities, relations: extraction.relations, windows: extraction.windows, ...(extraction.retried ? { retried: true } : {}), ...(extraction.abortedMs !== undefined ? { abortedMs: extraction.abortedMs } : {}), ...(extraction.coverage ? { coverage: extraction.coverage } : {}), ...(extraction.parts ? { parts: extraction.parts } : {}) }) + "\n");
   }
   const [r] = await sql`
     SELECT record_thought_entities(
@@ -476,7 +543,8 @@ async function processRow(row: Row): Promise<Outcome> {
     if (res.refused_entities !== undefined) totals.gated = true;
     totals.refused += res.refused_entities ?? 0;
     totals.retyped += res.retyped_entities ?? 0;
-    return { outcome: "succeeded" };
+    // A prefix's rows stand, and the claim says they are a prefix (SMD-2240).
+    return extraction.coverage ? { outcome: "succeeded", caveat: partialCaveat(extraction.coverage, WINDOWING) } : { outcome: "succeeded" };
   }
   if (res.error === "NOT_FOUND") return { outcome: "vanished" };
   // Edited between the claim and the write. What was extracted describes text
@@ -667,7 +735,7 @@ async function worker(n: number): Promise<void> {
         try {
           [{ ok }] = await sql`
             SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId},
-                                   ${outcome.outcome}, ${outcome.outcome === "failed" ? outcome.error : null}) AS ok`;
+                                   ${outcome.outcome}, ${outcome.outcome === "failed" ? outcome.error : outcome.caveat ?? null}) AS ok`;
           if (!ok) {
             const [{ exists }] = await sql`SELECT EXISTS (SELECT 1 FROM thoughts WHERE id = ${b.thought_id}::uuid) AS exists`;
             gone = !exists;
@@ -697,6 +765,7 @@ async function worker(n: number): Promise<void> {
           console.error(`  ${b.thought_id}: ${outcome.error}`);
         } else {
           done++;
+          if (outcome.caveat) partial++;
         }
         progress();
       }
@@ -761,7 +830,7 @@ if (FOLLOW) {
 
 const elapsed = ((Date.now() - started) / 1000).toFixed(1);
 console.log(
-  `\n  ${done} extracted, ${failed} failed, ${superseded} edited mid-extraction and re-queued, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}, in ${elapsed}s ` +
+  `\n  ${done} extracted${partial ? ` (${partial} over a prefix only — past the per-thought bound, OB1_EXTRACT_MAX_WINDOWS (${cfg.extractMaxWindows}); each row's caveat says how much)` : ""}, ${failed} failed, ${superseded} edited mid-extraction and re-queued, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}, in ${elapsed}s ` +
     `(${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s) across ${WORKERS} worker(s), ${windowed} thought(s) in windows, ${retried} retried after a runaway answer (${aborted} aborted on the stream before the budget), ${beats} heartbeat(s))`
 );
 console.log(
@@ -772,6 +841,7 @@ console.log(
 if (malformed > 0) console.error(`  ${malformed} answer(s) were not JSON of the expected shape — recorded failed`);
 printCounts(after, "after");
 await printGraph();
+if (after.partial > 0) await printPartials(after.partial);
 if (after.failed > 0) {
   console.error(`\n  failed rows (${Math.min(after.failed, 10)} of ${after.failed}) — fix the cause and re-run with --retry-failed:`);
   await printFailures();

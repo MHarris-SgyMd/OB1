@@ -29,7 +29,7 @@ The core setup creates:
 - A `thoughts` table with text content, vector embeddings, metadata, fingerprints, and timestamps.
 - A `match_thoughts` RPC for semantic search.
 - An `upsert_thought` RPC for deduplicated capture.
-- The MCP server (`server-portable/`) as a container, the stack's one published port.
+- The MCP server (`server-portable/`) as a container, the one port the stack publishes by default.
 - A remote MCP connection URL like `http://127.0.0.1:8000/?key=YOUR_MCP_ACCESS_KEY` on the machine, or `https://your-host/?key=…` through the TLS proxy in front of it.
 
 The core user journey is:

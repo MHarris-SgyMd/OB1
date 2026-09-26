@@ -265,6 +265,15 @@ console.log("\n[5] Modifiers");
   assert((ranged.data as unknown[]).length === 2, "range(0,1) returns 2 rows — inclusive, as PostgREST is");
   const ranged2 = await db.from("widgets").select("name").order("id").range(1, 2);
   assert((ranged2.data as { name: string }[])[0].name === "beta", "range offsets correctly");
+
+  // A non-integer page argument is refused at the call site with a named
+  // RangeError, before any SQL: the compiler renders LIMIT/OFFSET by
+  // interpolation, so a NaN/Infinity/fraction would otherwise reach Postgres as
+  // a bare token read as a column name (SMD-2083).
+  const badLimit = (() => { try { db.from("widgets").limit(2.5); return ""; } catch (e) { return String((e as Error).message); } })();
+  assert(/limit\(\) requires a finite integer/.test(badLimit), `limit(2.5) throws a named RangeError, not a rendered LIMIT 2.5 (${badLimit})`);
+  const badRange = (() => { try { db.from("widgets").range(0, Infinity); return ""; } catch (e) { return String((e as Error).message); } })();
+  assert(/range\(\) to requires a finite integer/.test(badRange), `range(0, Infinity) throws a named RangeError before SQL (${badRange})`);
 }
 
 console.log("\n[6] single() and maybeSingle()");

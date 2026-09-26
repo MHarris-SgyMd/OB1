@@ -80,6 +80,13 @@ type Env = {
    */
   OB1_EXTRACT_CHUNK_TOKENS?: string;
   /**
+   * The most windows one thought is extracted in (SMD-2240); a longer one is
+   * extracted over its first this many and recorded with a caveat. Unset:
+   * db/config.mjs's EXTRACT_MAX_WINDOWS, 24. Read here only by preflight,
+   * for the same reason as the window above.
+   */
+  OB1_EXTRACT_MAX_WINDOWS?: string;
+  /**
    * "on" to record the opt-in query log (migration 034, SMD-1295): one row per
    * search and one per follow-up fetch/edit/delete of a returned id — or, since
    * SMD-1719, per id a write cited as its source — so a
@@ -1547,6 +1554,81 @@ function buildServer(principal: Principal): McpServer {
           content: [{ type: "text" as const, text: `Error: ${msg}${hint}` }],
           isError: true,
         };
+      }
+    }
+  );
+
+  // Tool 3b-ii: the corpus's thought ids (SMD-2244) — ids only, in id order, for a
+  // cheap cross-brain id-set diff (db/tier.ts --compare) that the prose read tools
+  // cannot give (they page content, capped). One JSON object per page,
+  // {total, digest, ids, cursor}: total and the whole-corpus md5 digest ride the
+  // first page (SQL store; the PostgREST shim leaves digest null), and `after` =
+  // the previous page's `cursor` pages on until it is null. Read-only, ids only —
+  // no content, no vectors. Gated like the other read tools, so a capture-only key
+  // never sees it.
+  if (canRead(principal)) server.registerTool(
+    "list_thought_ids",
+    {
+      title: "List Thought IDs",
+      description:
+        "List the brain's thought IDs — ids only, no content — in id order, for comparing one brain's corpus against another's cheaply. " +
+        "Returns a JSON object {total, digest, ids, cursor}: on the first page `total` is the whole corpus and `digest` is an md5 of every id (null where the store cannot compute it); page on by passing `after` = the previous page's `cursor` until `cursor` is null.",
+      annotations: {
+        readOnlyHint: true,
+      },
+      inputSchema: {
+        limit: z.number().int().min(1).max(10000).optional().default(1000).describe("IDs per page, 1–10000 (default 1000); ids are small, so pages are large to keep an enumeration to few round-trips"),
+        after: z.string().optional().describe("Keyset cursor — the previous page's `cursor` (a thought id); omit for the first page"),
+      },
+    },
+    async ({ limit, after }) => {
+      if (after !== undefined && !UUID_RE.test(after)) {
+        return { content: [{ type: "text" as const, text: "Error: `after` must be a thought id (a uuid) — pass the previous page's `cursor`." }], isError: true };
+      }
+      try {
+        const page = await (await db()).listThoughtIds({ limit, after: after ?? null });
+        return { content: [{ type: "text" as const, text: JSON.stringify(page) }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool 3b-iii: the brain's logged searches (SMD-2245) — the query_log rows a
+  // cross-brain replay sources from (db/tier.ts --compare --from-log), so it can
+  // replay what a brain ACTUALLY searched instead of a supplied set. Telemetry
+  // (migration 034), read-key gated, no thought content, no keys. One JSON object
+  // {searches, truncated}: the most recent searches at or after `since`, bounded by
+  // `limit` (a replay is two searches per row, so a window is the unit, not the
+  // whole log). Empty when OB1_QUERY_LOG was never on.
+  if (canRead(principal)) server.registerTool(
+    "list_logged_searches",
+    {
+      title: "List Logged Searches",
+      description:
+        "List the brain's logged searches from query_log — the query text, which arm ran it, and its arguments — for replaying what a brain actually searched against another brain. " +
+        "query_log is opt-in (OB1_QUERY_LOG); this is empty when it was never on. Returns a JSON object {searches, truncated}: the most recent searches at or after `since`, up to `limit`; `truncated` is whether more matched. No thought content.",
+      annotations: {
+        readOnlyHint: true,
+      },
+      inputSchema: {
+        since: z.string().optional().describe("An ISO-8601 time (searches logged after it); omit for the most recent"),
+        limit: z.number().int().min(1).max(1000).optional().default(200).describe("Searches to return, 1–1000 (default 200), most recent first"),
+      },
+    },
+    async ({ since, limit }) => {
+      if (since !== undefined && Number.isNaN(Date.parse(since))) {
+        return { content: [{ type: "text" as const, text: "Error: `since` must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z)." }], isError: true };
+      }
+      try {
+        const page = await (await db()).listLoggedSearches({ since: since ?? null, limit });
+        return { content: [{ type: "text" as const, text: JSON.stringify(page) }] };
+      } catch (err: unknown) {
+        const msg = (err as Error).message;
+        const hint = /query_log/.test(msg) && /does not exist|could not find/i.test(msg)
+          ? " — migration 034 (db/migrations/034_query_log.sql) is not applied, or PostgREST has not reloaded its schema cache"
+          : "";
+        return { content: [{ type: "text" as const, text: `Error: ${msg}${hint}` }], isError: true };
       }
     }
   );
