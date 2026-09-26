@@ -376,11 +376,14 @@ async function collectIds(ep: BrainEndpoint, first: ThoughtIdPage): Promise<Set<
 }
 
 /**
- * The exact id-set difference. Reads each brain's first page; when both carry a
- * digest and the two match, the corpora are identical and neither is enumerated
- * (the fast path). Otherwise both are paged in full and the sets are diffed. A
- * brain that does not expose `list_thought_ids` (older than SMD-2244) degrades to
- * `unavailable` rather than aborting the compare — the thought-count stand-in holds.
+ * The exact id-set difference, in one of four shapes. Reads each brain's first
+ * page; when both carry a digest and the two match, the corpora are identical and
+ * neither is enumerated (the fast path, `equal`). Otherwise both are paged in full
+ * and the sets are diffed (`onlyA`/`onlyB`). A brain that does not expose
+ * `list_thought_ids` (older than SMD-2244) is `unavailable` — the thought-count
+ * stand-in holds. Any other read failure (a refusal, a timeout, a mid-walk error,
+ * a short enumeration) is `failed` with its reason. None of the three non-diff
+ * shapes aborts the compare: the rest of the report still prints.
  */
 export async function corpusIdDiff(a: BrainEndpoint, b: BrainEndpoint): Promise<IdDiff> {
   const blank = (patch: Partial<IdDiff>): IdDiff => ({ equal: false, onlyA: [], onlyB: [], totalA: 0, totalB: 0, ...patch });
