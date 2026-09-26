@@ -80,6 +80,13 @@ type Env = {
    */
   OB1_EXTRACT_CHUNK_TOKENS?: string;
   /**
+   * The most windows one thought is extracted in (SMD-2240); a longer one is
+   * extracted over its first this many and recorded with a caveat. Unset:
+   * db/config.mjs's EXTRACT_MAX_WINDOWS, 24. Read here only by preflight,
+   * for the same reason as the window above.
+   */
+  OB1_EXTRACT_MAX_WINDOWS?: string;
+  /**
    * "on" to record the opt-in query log (migration 034, SMD-1295): one row per
    * search and one per follow-up fetch/edit/delete of a returned id — or, since
    * SMD-1719, per id a write cited as its source — so a
