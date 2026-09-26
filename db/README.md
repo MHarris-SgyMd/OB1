@@ -2295,7 +2295,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1817 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 733 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+./with-postgres.sh bun test-live.ts         # 734 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
@@ -2470,7 +2470,9 @@ first assumed. See FORK.md's SMD-1632 section.
   (no data change), the next such re-capture fills nothing, and no capture
   takes the supersession lock.
 - **The routing count is gated by a sample of the heap, drawn by TID range**
-  (migrations 037 and 038). [5d] loads 15,000 rows at the configured width,
+  (migrations 037 and 038). [5d] loads 15,000 rows at the configured width
+  into a vacuumed heap (asserting every page holds a live row, so no page
+  the sample draws is empty),
   applies the last definer (041 — 039's body, run with `jit = off` and its
   two planner paths pinned) with its
   floor lowered to zero, and counts GIN index scans per call: the broad

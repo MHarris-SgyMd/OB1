@@ -421,20 +421,24 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
   // need, and without it the walk is a GIN bitmap and a sort — exact, and slow
   // in a way that does not matter to a section about the statement BEFORE it.
   //
-  // Why 15,000. The skip needs the sample's estimate at ten times v_exact
-  // (10,000 for these calls). Every full page holds the same number of rows
-  // (about 70), so a draw of d distinct pages reads at least (d − 1)/d of N,
-  // short only by the last, partly filled page: at 15,000 even five pages
-  // with an empty last page among them read 12,000. At 11,000 the last page
-  // held 10 rows and 4.9% of 5,000 draws missed; 12,000 missed none, but only
-  // because its last page happened to hold 30 (SMD-2135, which cut the
-  // section from 25,000). The VACUUM after the DELETE makes the smaller table safe:
-  // [5b]'s 2,000 rows are dead after the DELETE and the load goes in after
-  // their ~30 pages, which the sample draws and counts as seen with no hit —
-  // an eighth of a 15,000-row heap, where a draw with four of its eight pages
-  // there reads under the threshold about once in a hundred calls.
+  // Why 15,000 (SMD-2135 cut it from 25,000). The skip needs the sample's
+  // scaled estimate at ten times v_exact (10,000 for these calls). Every full
+  // page holds the same number of rows (about 70), so a draw of d distinct
+  // pages estimates at least (d − 1)/d of the table, short only by the last,
+  // partly filled page; the gate's third condition admits no draw of fewer
+  // than three pages, and 15,000 is the smallest table on which even a
+  // three-page draw clears (2/3 of its 215 pages x 70 rows is 10,033). Over
+  // 5,000 draws of the deployed statement, 11,000 missed 4.9% — 7/8 of it is
+  // under 10,000, and its last page held 10 rows — and 12,000, safe on every
+  // draw of six pages or more, missed none.
+  //
+  // That bound assumes every page but the last is full, which holds only on
+  // an emptied heap: [5b]'s 2,000 rows are dead after the DELETE, and without
+  // the VACUUM below the load goes in after their 28 pages, which the sample
+  // draws and counts as seen with no hit (041's LEFT join, on purpose). At
+  // 15,000 rows that missed 49 of 5,000 draws, one call in a hundred — so the
+  // load is followed by an assertion that every page holds a live row.
   await sql`DELETE FROM thoughts`;
-  await sql.unsafe(`VACUUM thoughts`);
   const [{ hnswDef }] = await sql.unsafe(`SELECT pg_get_indexdef('thoughts_embedding_idx'::regclass) AS "hnswDef"`);
   // Read by the finally block below as well as the section: the last definer
   // of match_thoughts — 041, 039's body (038's gate, the half-precision walk)
@@ -458,6 +462,9 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
   await applyMigrations(URL_, { ...opts041, routeEstimateMinPages: 0 });
   assert(/IF v_pages >= 0 THEN/.test(await body()) && TID_PROBE.test(await body()) && (await hasClauses()), "041 is installed with its floor at 0 (038's gate, carried through 039), jit = off and both pins on the function: the sample runs on every filtered call to this table");
   await sql.unsafe(`DROP INDEX thoughts_embedding_idx`);
+  // After the drop, so it does not clean [5b]'s entries out of an index
+  // about to go; before the load, which it hands an empty heap (above).
+  await sql.unsafe(`VACUUM thoughts`);
   // User triggers off for the load, as the bench does: 008's audit trigger
   // would write a row per row (15,000 here, then 15,000 more for the DELETE)
   // into a table later sections read differentially — nothing this section
@@ -478,6 +485,8 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     await sql.unsafe(`VACUUM ANALYZE thoughts`);
     const [{ pages }] = await sql.unsafe(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages`);
     assert(Number(pages) > 0 && Number(pages) < ROUTE_ESTIMATE_MIN_PAGES, `${N.toLocaleString()} rows at ${EMBEDDING_DIM} dimensions are ${pages} heap pages (the vectors are TOASTed), under the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES}`);
+    const [{ used }] = await sql.unsafe(`SELECT count(DISTINCT (ctid::text::point)[0])::int AS used FROM thoughts`);
+    assert(Number(used) === Number(pages), `every one of the ${pages} heap pages holds a live row (${used} do): the VACUUM before the load left no page of [5b]'s dead rows for the sample to draw empty`);
 
     // The deployed body — 041, carrying 038's sample — kept for the timing at the end: by then 020's re-apply has replaced it.
     const bodyGate = await body();
@@ -495,7 +504,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     const { unitVector } = seededRandom(1463);
     // Twenty calls. Under 037 the gate missed a broad filter when its
     // TABLESAMPLE draw reached fewer than three pages — 17 in 1,000 draws on
-    // this fixture — and the band below was 0.75–1.0; 038 draws eight blocks
+    // the 25,000-row fixture of the time — and the band below was 0.75–1.0; 038 draws eight blocks
     // and reads each, so a draw reaches fewer than three pages only when all
     // eight land on one or two of some 215 (about 1e-12), and the band is
     // exact.
@@ -566,9 +575,10 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     // 0.9999999999999998), so the property is asserted on the integers
     // (SMD-1526 review pass 3).
     const saved = plainBroad.scans - gatedBroad.scans;
-    // Every draw reads eight pages of some 70 rows each, all broad, so every
-    // call meets the three conditions (condition 1 needs about 370 hits on
-    // this heap; eight pages hold some 560) and skips the collection; the
+    // Every draw reads eight pages of some 70 rows each (seven in about one
+    // draw in eight, when a block comes up twice), all broad, so every call
+    // meets the three conditions (condition 1 needs about 370 hits on this
+    // heap, 330 at seven pages; they hold some 560 and 490) and skips the collection; the
     // rest of a call's GIN scans (the walk's bitmap) are the same under both
     // bodies and cancel. Exactly one fewer per call is the band — 037's draw
     // could reach fewer than three pages and missed, which is why this
@@ -902,12 +912,15 @@ console.log("\n[5f] Every join in the body keeps its nested loop under an operat
   // Why 6,000. The section's time is the two HNSW builds, and a build grows
   // faster than its rows (locally, the thoughts index took 9.4 s over 12,000
   // rows, 3.3 s over 6,000 and 1.1 s over 3,000, with or without parallel
-  // workers). Every assertion here holds
-  // down to 2,000, with the mutant's buffer excess thousands of pages over
-  // the heap's size at each; 6,000 is the smallest count at which each
-  // mutant plan is the one the header names — at 5,000 and under, the
-  // unfiltered call's parent lookup becomes a Hash Join over the heap rather
-  // than a Merge Join over the whole primary key. The section loaded 12,000
+  // workers). Every assertion here holds down to 2,000, with the mutant's
+  // buffer excess thousands of pages over the heap's size at each. At 6,000
+  // each mutant plan is also the one the header names, at both widths the
+  // suite runs on PostgreSQL 16; below that the unfiltered call's parent
+  // lookup becomes a Hash Join over the heap rather than a Merge Join over
+  // the whole primary key — measured between 5,000 and 5,600 rows at 1,024
+  // dimensions and between 5,500 and 6,000 at 768, so at 768 this count sits
+  // just above the switch. The assertion takes either join, so a switch that
+  // moves costs this paragraph, not the run. The section loaded 12,000
   // before SMD-2135.
   const N = 6_000;
   await sql`DELETE FROM thoughts`;
@@ -933,10 +946,10 @@ console.log("\n[5f] Every join in the body keeps its nested loop under an operat
              (SELECT ('[' || string_agg((random() - 0.5)::text, ',') || ']')::vector FROM generate_series(1, ${EMBEDDING_DIM} + 0 * r.i))
       FROM generate_series(1, ${N}) AS r(i)`);
     await loadChunkRows(sql, 2);
-    // Both indexes back over the loaded rows, in memory (at the 18,000
-    // vectors this section loaded before, the server's 64 MB
-    // maintenance_work_mem default would have built the graph on disk;
-    // 512 MB covers it at any width).
+    // Both indexes back over the loaded rows, in memory: 512 MB holds the
+    // graph at any width HNSW takes, where the server's 64 MB default was
+    // said to build it on disk at the 18,000 vectors this section loaded
+    // before SMD-2135.
     await sql.begin(async (tx: SQL) => {
       await tx.unsafe(`SET LOCAL maintenance_work_mem = '512MB'`);
       for (const { d } of defs) await tx.unsafe(d);
