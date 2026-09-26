@@ -1265,7 +1265,10 @@ jobs:
       # ends the container (the Dockerfile's traps): before, each waited out
       # the 10 s grace period and was killed, exit 137 — about 30 s of this
       # job, over the canary's stops and the teardown. Last of the steps that
-      # use the server: it is left stopped. The second stop lands inside
+      # use the server: it is left stopped. The serving stop is given 5 s:
+      # on the PR's first run the server logged `stopped in 0.0 s` and
+      # `docker compose stop` still took 2,476 ms on the runner, against a
+      # 10 s kill the gate exists to tell apart. The second stop lands inside
       # preflight because the stub holds GET /models 2 s, and must end inside
       # 1 s: the traps alone, with preflight in the foreground, end it only
       # when the 2 s hold does (review pass 1). The log is read once, into a
@@ -1283,7 +1286,7 @@ jobs:
           # open, whatever ran before it (review pass 2).
           curl -s --max-time 10 -o /dev/null -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' http://127.0.0.1:8010/
-          stop serving 0 3000
+          stop serving 0 5000
           last=$(docker compose -f compose.yaml logs --no-log-prefix server | grep '^SIGTERM: stopped' | tail -1 || true)
           echo "$last"
           [[ "$last" =~ ^SIGTERM:\ stopped\ in\ [0-9.]+\ s\;\ database\ pool\ closed\;\ exit\ 0$ ]] || { echo "the stop's line does not say the pool closed and exit 0" >&2; exit 1; }
