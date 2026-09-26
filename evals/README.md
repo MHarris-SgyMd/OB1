@@ -5627,7 +5627,11 @@ that file and an allowlisted environment — never the driver's, which
 `loadEnv()` fills from `deploy/.env`, so a dogfood stack's port and keys cannot
 reach the throwaway brain; a knob for one run (`ORCH_AP_PIECES_SYNC_MODE`) goes
 in `orchestration/.env`. `--up` onto an existing project skips what already
-exists: after editing a workflow file, `--down` first.
+exists: after editing a workflow file, `--down` first (n8n's provisioning
+replaces instead, since SMD-2210). Since SMD-2210, too, `--up n8n` runs the
+shipped `orchestration` profile rather than the overlay described here, which
+put n8n in a database on the brain's server ("The orchestration profile
+(SMD-2210)", below). The n8n rows in this section are that POC's.
 
 **The result — n8n and Activepieces pass the POC; Windmill passes C1, C1s, C3
 and C4 but not C2**, because the criteria posted before the run ask for the capture to
@@ -5709,7 +5713,8 @@ inherits every capture's latency, and only n8n let the workflow say so.
   owner's password. n8n enforces the scopes — a call outside them (`GET /users`,
   `DELETE /executions/{id}`) answered 403 — although n8n's docs say keys on a
   non-Enterprise instance have full access; and a re-mint leaves the key it
-  replaced valid (both measured in the third review pass). Then `POST /credentials`
+  replaced valid (both measured in the third review pass). The profile's key
+  expires, and a re-mint revokes the key it replaces (SMD-2210, below). Then `POST /credentials`
   (into the encrypted store; n8n chooses each id, which replaces the
   placeholder the workflow files reference), `POST /workflows`, and `POST
   /workflows/{id}/publish` (v1's "activate", now deprecated), which registers
@@ -5728,7 +5733,8 @@ inherits every capture's latency, and only n8n let the workflow say so.
   missing, a wrong and an empty key with 403 and starts no execution (measured;
   the verifier checks refusal on the MCP endpoint only), and it shares its key
   with the MCP endpoint — a client given that endpoint can also start an
-  ingestion. The MCP Client node is a normal workflow step
+  ingestion. The profile gives the two separate keys, and the kit checks each
+  is refused on the other's path (SMD-2210, below). The MCP Client node is a normal workflow step
   (Streamable HTTP, a header credential); the MCP Server Trigger exposes exactly
   the tool nodes wired to it, behind a static header the operator chooses — so
   an AI client connects with a URL and a header, the OB1 pattern. A toolkit's
@@ -5815,7 +5821,8 @@ self-hosted n8n users"), so the ingestion source is Linear with an API key, and
 OAuth custody is untested. Egress: the
 overlays set each tool's documented telemetry switches, and nothing probed
 what the containers dial — the egress measurements are Activepieces' sync mode
-and n8n's credential domain pin, both above. The schedule is checked only with `--wait-schedule` (C1s: up to
+and n8n's credential domain pin, both above. The profile's n8n is probed
+(SMD-2210, below). The schedule is checked only with `--wait-schedule` (C1s: up to
 20 minutes for a schedule-started run to succeed, by the tool's own history —
 its status, not its ten captures, which C1 checks for the on-demand runs);
 a scheduled run overlapping a verify was tried (a per-minute schedule, six
@@ -5823,6 +5830,190 @@ verifies, no flake — its captures dedup), and one committing between the
 reset and the count would read as a FAIL, never a PASS. Load: ten issues, one
 run at a time. Upgrades, backups and the reference multi-container shapes
 (Redis and separate workers for Activepieces, three workers for Windmill).
+
+## The orchestration profile (SMD-2210)
+
+Since SMD-2210, `--up n8n` runs what ships: `deploy/compose.yaml`'s `n8n`
+service under `--profile orchestration`. It is provisioned by the profile's
+own step, `deploy/orchestration/provision.ts`, which the adapter imports.
+`orchestration/compose.n8n.yaml` changes only the pruning cadence, and two
+variants add what the decision needed measured:
+
+```sh
+cd evals
+bun eval-orchestration.ts --up n8n [--with postgres] [--with sealed]
+bun eval-orchestration.ts --verify n8n [--wait-schedule]   # reads the variants --up chose
+bun eval-orchestration.ts --down n8n                       # removes every variant
+```
+
+The credentials are the profile's own: the brain's capture key, and two
+inbound keys where the POC had one. The kit adds a Linear credential and a
+read key for its eval-only brain tool, declared `brainScope: read`. The
+kit's `.env` carries the profile's keys under `deploy/.env`'s names, made
+by the profile's own `--init` (the owner's hash among them, so n8n sets its
+owner from the environment here as it does in a deployment). `--up` stamps the brain's build and refuses
+a brain that does not report the stamp (below, "Found on the way").
+`--verify` runs C1–C3 and C1s as above, then three checks of the profile's:
+
+- **K — keys.** The on-demand webhook refuses the MCP key and the MCP
+  endpoint refuses the run key (401/403). Then a rotation
+  (`provision --rotate`):
+  - the replaced API key must answer 401 and the new one 200;
+  - the new key's JWT expiry must be `N8N_API_KEY_DAYS` (90) from now,
+    within a day;
+  - the env file must hold exactly one key under its tag in n8n.
+
+  The kit's key carries the profile's eight scopes plus the two run-history
+  reads it needs. The decisions K does not reach are in
+  `provision.ts --self-check` (CI), against a fake n8n: renewal near
+  expiry, a busy n8n, missing scopes, the sweep of a key a failed run left,
+  and a rate-limited sign-in.
+- **P — the window.** Two of the verify's own saved runs are moved in n8n's
+  store, one to the window plus an hour back and one to the window minus an
+  hour. The first must be gone from `GET /executions/{id}` (404) and from the
+  store's `execution_entity`, and the second kept. The window is the profile's
+  24 hours, read from compose's rendered config. Only the pruning cadence is
+  shortened, to one-minute sweeps with no hard-delete buffer.
+- **E — egress, under `--with sealed`.** n8n sits on an `internal: true`
+  network, in the network namespace of a tcpdump watcher that starts before
+  it. A Bun HTTP relay on both networks publishes the loopback port, and the
+  brain's server joins the sealed network as well as its own. The ingestion
+  is a probe workflow of ten fixed captures, since Linear is unreachable by
+  design. C3 requires the act tool to fail. E reads the watcher's capture:
+  every UDP datagram (DNS decoded), every TCP segment on port 53, every
+  IPv4 TCP connection attempt, and all IPv6 TCP. It is judged against facts
+  read live: n8n's resolvers and search domains from its `/etc/resolv.conf`,
+  and the brain's addresses (v4 and v6) from the engine. Every outbound
+  packet on n8n's interfaces must be one of three things:
+  - a DNS question to a listed resolver whose name is read (UDP or TCP);
+  - an empty TCP segment on such a connection;
+  - a connection attempt to the brain's `:8000`.
+
+  Anything else fails as a dial outside. Data to the resolver with no
+  readable question fails, and so does any packet line the judge cannot
+  read. A question is read in any of tcpdump's shapes: any type, EDNS, the
+  CD flag, a notify opcode, a non-IN class, inside a TCP segment. A name
+  fails unless it is a service's (bare, or with the network's own domain) or
+  a host the kit's templates name (`api.linear.app`). Expansions with the
+  host's own search domains (`server.<isp domain>`) are reported apart and
+  pass: fixed names, carrying nothing. The brain must have been seen, or the
+  capture proves nothing. E also fails with CANNOT JUDGE in four cases:
+  - the capture itself did not run once for the whole window (not exactly
+    one `listening on` header, or tcpdump's exit summary in the log);
+  - the watcher was not running when judged, or started after n8n;
+  - the facts cannot be read;
+  - the resolver is on loopback (Docker's embedded DNS, whose questions
+    reach the capture rewritten to another port).
+
+  Stopping the watcher mid-run on podman also cut n8n off (review pass 4,
+  measured), but E no longer relies on that. E is measured on podman.
+
+  What E cannot see: on an intact internal network, a dial to an address off
+  the subnet fails inside n8n (ENETUNREACH) and sends nothing, so the seal
+  stops it and E catches a seal that leaks. The subnet's gateway is the
+  podman VM and answers on its own ports, and a connection to it is a packet
+  E fails (both measured in review pass 3).
+
+  The judge is pure, and `eval-orchestration.ts --self-check` (CI) holds it
+  on 35 crafted logs in the watcher's format, tcpdump's own lines from pass
+  3's runs among them. Each way out below fails:
+  - a raw-IP dial, and the same on another interface;
+  - `n8n.io`, and `server.9.9.9.9.nip.io`;
+  - EDNS, NS, CD-flag, notify, unknown-type, CHAOS and TCP-carried
+    queries;
+  - data to the resolver without a readable question;
+  - the resolver's address on another port;
+  - Linear's address answered and dialled;
+  - a foreign resolver;
+  - NTP and QUIC datagrams tcpdump decodes, and a plain UDP datagram;
+  - port 5678 or 8000 on another host;
+  - the brain on another port, or over UDP;
+  - an unreadable line;
+  - a capture without the brain;
+  - a loopback resolver;
+  - unread facts;
+  - a capture that restarted, never opened, or ended early.
+
+  The recorded shape, a host search-domain expansion, an empty TCP DNS
+  connection and the host's own polls pass. Each earlier version of E passed
+  a real escape. The first judged names only. The second inferred "inside"
+  from DNS answers and read only the line shapes it expected. Pass 3 found
+  five query shapes that hid their names from the third, and the resolver
+  forwarded them when the seal leaked.
+
+**The result: every check passes, on both stores and sealed.** One cycle
+each on the dogfood Mac (2026-09-25, the podman VM, the host's Ollama). SQLite
+and Postgres ran with `--wait-schedule`, on the implementation commit.
+Review pass 4 re-ran SQLite with `--wait-schedule` on pass 3's code, after
+three passes had changed the owner, the keys and the port. It passed C1–C3,
+C1s, K and P again: 20.3 s, the schedule seen after 811 s, the past run gone
+after 50 s, n8n 369 MiB, a 6.4 MiB store. Sealed ran without it, by design,
+on review pass 3's code: the owner set from the environment, key tags bound
+to their file, and E reading a question in any shape. Pass 3 also re-ran the
+plain profile without the wait. It passed C1–C3, K and P: 20.3 s, the past
+run gone after 81 s, n8n 352 MiB.
+
+| run | C1: run 1 / run 2 | C1s | C3 | K | P | E |
+| --- | --- | --- | --- | --- | --- | --- |
+| SQLite (the profile) | PASS: 10, +10 in 20.4 s / 10, +0 | PASS: seen after 811 s | PASS: 403 / 403 | PASS: 403 / 403; replaced key 401 | PASS: gone after 50 s, the one inside kept | — |
+| `--with postgres` | PASS: 10, +10 in 22.8 s / 10, +0 | PASS: seen after 752 s | PASS: 403 / 403 | PASS: the same | PASS: gone after 40 s, kept | — |
+| `--with sealed` | PASS: 10, +10 in 12.6 s / 10, +0 (the probe) | not run | PASS: act fails ("The connection cannot be established") | PASS: the same | PASS: gone after 91 s, kept | PASS: only `api.linear.app` outside, every packet out a question to the resolver or the brain |
+
+**The store: SQLite.** Memory is the cgroup's, after the runs, as above:
+
+| store | n8n | the store's own server | image beside n8n's (1103 MiB) | store on disk |
+| --- | --- | --- | --- | --- |
+| SQLite | 369 MiB | none | none | 6.4 MiB (`database.sqlite` 2.4 + WAL 3.9) |
+| Postgres 17.11 | 404 MiB | 52 MiB | 280 MiB (`postgres:17.11-alpine`) | 15.5 MiB (`pg_database_size`) |
+
+Both pass everything. For one operator's schedules, SQLite is one container
+fewer, about 90 MiB lighter, and under half the disk. It backs up as a copy
+of one file, `VACUUM INTO` while n8n runs (`deploy/README.md`,
+"Orchestration"). That section's commands were run as written, from the
+doc. A marker workflow added after the copy was taken was absent after
+each restore, and one added before was present. That held over a stopped
+n8n, with its old WAL still in the volume, and into a fresh volume: the
+stored API key answered 200, and `PRAGMA integrity_check` said ok. The
+first version of that restore overwrote the database file alone. Over a
+stopped n8n, SQLite replayed the old WAL onto the copy: "database disk
+image is malformed", and n8n crash-looped (review pass 1). Postgres would
+be the shape for n8n's queue mode, with several workers, which the profile
+does not run.
+
+**What the sealed n8n tried to reach.** With the profile's switches alone,
+the first sealed run showed n8n asking for `api.n8n.io` at boot. The caller
+was its MCP registry module, fetching `https://api.n8n.io/api/mcp-servers`
+for the editor's catalogue, with an 8-hour refresh (read from the image).
+The profile now sets `N8N_DISABLED_MODULES=mcp-registry`, and the stock MCP
+Client node the templates use works without it (every run above). After
+that, over provisioning, two ingestions, the MCP session and the key and
+pruning checks, the watcher saw (pass 3's run):
+- DNS: `api.linear.app` (A and AAAA, once; the act tool's call, refused) and
+  `server.dns.podman` ×14 (the brain), all to the network's resolver, each
+  question read.
+- TCP: seven connection attempts, every one to the brain's `:8000`.
+- UDP: nothing but that DNS.
+- No packet line the judge could not read.
+
+The counts vary from run to run (7–10 attempts, 14–20 lookups across the
+passes' runs). Nothing else was asked for or dialled. The window was about
+2 minutes 15 seconds, from the cycle's start to the end of `--verify` (the
+watcher itself starts a few seconds after). A
+caller on a longer timer (n8n has modules for instance reporting and version
+history) would not show in it. The probe answers "what does n8n dial while
+it works", not "what does it dial in a week".
+
+**Found on the way.** The kit's `--up --build` had been starting a stale
+brain. On podman the build was loaded as `ob1-orch-n8n-server`, beside a
+day-old `localhost/ob1-orch-n8n-server`. compose started the old one, a
+server whose migrations stopped at 054 while the tree had 056, and nothing
+said so. `--up` now stamps the build (`OB1_GIT_SHA` = the commit plus a
+per-run suffix) and refuses a brain whose keyed `/health` does not report
+that stamp. It lists the images held under the project's names, so the
+stale one can be seen. The first sealed attempt
+also failed C1–C3 on 23-second captures. The cause was another session's
+jobs on the host's Ollama (a direct capture then took 18.6 s, then timed out
+on embeddings), not the seal: the re-run above has the host quiet.
 
 ## Related
 

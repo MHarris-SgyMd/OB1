@@ -396,6 +396,25 @@ console.log("\n[6] thought_stats aggregates the whole corpus");
   assert(/Date range:/.test(out), "date range is reported");
 }
 
+console.log("\n[6b] list_thought_ids returns the id set, its digest and paging over HTTP (SMD-2244)");
+{
+  const page = JSON.parse(await call("list_thought_ids"));
+  assert(page.total === 3 && Array.isArray(page.ids) && page.ids.length === 3, `the whole small corpus and its total (${page.ids?.length}/${page.total})`);
+  assert(typeof page.digest === "string" && /^[0-9a-f]{32}$/.test(page.digest), `a first-page md5 digest (${page.digest})`);
+  assert(page.cursor === null, "a page shorter than the limit ends the walk (null cursor)");
+  assert(page.ids.every((id: string) => /^[0-9a-f-]{36}$/.test(id)), "ids only — uuids, no content");
+  // Keyset paging over HTTP: total and digest ride the first page only.
+  const p1 = JSON.parse(await call("list_thought_ids", { limit: 2 }));
+  assert(p1.ids.length === 2 && p1.cursor === p1.ids[1], "a full page carries a cursor = its last id");
+  const p2 = JSON.parse(await call("list_thought_ids", { limit: 2, after: p1.cursor }));
+  assert(p2.total === 0 && p2.digest === null, "a later page carries no total and no digest");
+  assert([...p1.ids, ...p2.ids].sort().join() === [...page.ids].sort().join(), "the two pages cover the same id set as one");
+  // A malformed cursor is refused by the tool, before any store read.
+  let refused = "";
+  try { await call("list_thought_ids", { after: "not-a-uuid" }); } catch (e) { refused = (e as Error).message; }
+  assert(/must be a thought id/.test(refused), `a non-uuid cursor is refused (${refused})`);
+}
+
 console.log("\n[7] Dedup through the tool surface");
 {
   const before = await call("thought_stats");

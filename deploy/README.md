@@ -143,11 +143,12 @@ the repo root, with whatever `-f` files the stack was started with:
 
 | Service | On the compose network | On the host | From another machine |
 | --- | --- | --- | --- |
-| `server` | `server:8000` | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
+| `server` | `server:8000` | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration` | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
 | `postgres` | `postgres:5432` — the server and the migrator | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
 | `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
 | `jev` (`--profile jev`) | `jev:8020` — the server's preflight, and a spike run in a container | Nothing. The host-ports file publishes it on `127.0.0.1:${JEV_PORT:-8020}` for a spike run from a checkout (`OB1_JEV_BASE_URL=http://127.0.0.1:8020`) | Not intended; an unauthenticated model API, as Ollama's is |
 | `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` and the model provider, and Linear's API outward | Nothing | Nothing |
+| `n8n` (`--profile orchestration`) | `n8n:5678`, which nothing in the stack dials; n8n dials `server:8000` and the vendors its workflows name | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
 
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes one
 server per tier, each on loopback by default; its three Postgres services and
@@ -167,8 +168,8 @@ its server on `127.0.0.1:8011` (`--port`).
 every `compose*.yaml` under `deploy/` and refuses a mapping that drops the
 address, a service that reaches outside the file (`extends`, `include`) or onto
 the host without a port (`network_mode`), and holds an inventory of which
-service publishes from which file — the server from `compose.yaml`, the
-database and Ollama from the host-ports file — so a new published port is
+service publishes from which file — the server and the profile's n8n from
+`compose.yaml`, the database and Ollama from the host-ports file — so a new published port is
 named there deliberately, with its row in the table above; the "Full stack, no
 Supabase" CI job reads the rendered config the same way.
 
@@ -660,6 +661,156 @@ container; `JEV_THREADS` (and `JEV_HUB`, a mirror for the weights) in
 adds `-f deploy/compose.host-ports.yaml` and reaches it at
 `http://127.0.0.1:8020`; without compose, `bun jev/serve.ts` on the host serves
 the same contract on the same port.
+
+## Orchestration
+
+The fork's orchestration tool is n8n (`../docs/orchestration-tool.md`,
+SMD-1863). It runs workflows that need state — a schedule, a trigger, a retry,
+a cursor — and captures through the brain's MCP endpoint with a capture-scope
+key, never a table and never a write key. The `orchestration` profile runs it
+beside the stack (SMD-2210). The image is n8n's, pinned by digest and never
+vendored. OB1's part is the provisioning step in `orchestration/` and the
+templates it loads (SMD-2212 ships the first).
+
+```bash
+bun deploy/orchestration/provision.ts --init   # once: the profile's secrets into deploy/.env (it never replaces one)
+# the brain key n8n captures with, a CAPTURE key:
+cd server-portable && bun keygen.ts --name n8n --scope capture && cd ..
+#   the key into deploy/.env as N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS
+podman compose -f deploy/compose.yaml --profile orchestration up -d   # restart the server too, for the new key
+bun deploy/orchestration/provision.ts        # --env-file for another file; --rotate for a new API key
+```
+
+`--init` writes `N8N_ENCRYPTION_KEY`, `N8N_OWNER_PASSWORD` and its bcrypt
+hash `N8N_OWNER_PASSWORD_HASH` (single-quoted, since compose would read its
+`$`s as variables), `N8N_MCP_KEY` and `N8N_WEBHOOK_KEY`, where the file has
+none. n8n sets its owner from the email and the hash at every start
+(`N8N_INSTANCE_OWNER_MANAGED_BY_ENV`). So the owner exists from the first
+boot, and nobody who reaches the port before provisioning can claim the
+instance. To change the password, edit it, run `--init` again, and recreate
+n8n: `compose up -d n8n`. A `compose restart` keeps the environment the
+container was created with, and so the old hash. `--init` re-derives a hash that no longer matches, and rewrites one
+whose line is not single-quoted. Keep the password within 72 bytes: bcrypt
+reads no further, and `--init` refuses a longer one. Without the key or the
+hash, the container exits at once with the reason in its log, and `ps` shows
+it restarting. The step reads `deploy/.env` alone. A shell variable of the
+same name overrides the file for compose, so an exported `N8N_OWNER_EMAIL`
+or `N8N_PORT` would split the two.
+
+The provisioning step runs from a checkout against the loopback port. It
+signs in as the owner and keeps n8n's API key in `deploy/.env` with its id,
+its scopes and the file's tag (`N8N_API_KEY`, `_ID`, `_SCOPES`, `_TAG`), all
+written at once. The key carries eight of n8n's 106 scopes, the credential
+and workflow calls the step makes, and it expires after `N8N_API_KEY_DAYS`
+(90). A run mints a new key when that one has less than a week left, or on
+`--rotate`. Every run deletes every other key this env file minted, and
+n8n answers a deleted key with 401. A key an interrupted run left behind
+goes on the next run. A second env file provisioning the same n8n keeps its
+own key: each file tags its keys, and a tag counts only beside a fingerprint
+of the machine (its stable id, not its network hostname) and the file's
+real path (`N8N_API_KEY_TAG_OF`). That holds for another machine's checkout
+provisioning this n8n, and for a copy of `deploy/.env`, which mints under a
+tag of its own on its first run and revokes nothing. A moved file does the
+same. The step names the tag it left, with its live keys, and `--adopt`
+revokes them. A symlinked `deploy/.env` is written through, and stays a
+link. Then the step creates or patches each
+credential from `orchestration/credentials.template.json` with values from
+the env file, and creates or replaces each template. A replaced workflow
+loses edits made in the editor: the template is the source. Run it again
+after changing a key in `deploy/.env` or a template. Before it writes
+anything, it refuses:
+- a brain key at write scope, or one `MCP_ACCESS_KEYS` does not list,
+  wherever in a credential it sits: a header, `Bearer <key>`, a URL's `?key=`;
+- a key whose scope is not the one its credential declares (`brainScope`);
+- a template naming a credential no template declares.
+
+No secret sits in n8n's environment but the encryption key and the owner's
+hash, and no workflow can read one from there
+(`N8N_BLOCK_ENV_ACCESS_IN_NODE`). n8n rate-limits sign-in to five a minute,
+so several runs in a row can meet a 429. The step says so.
+
+**An AI client** connects to an MCP endpoint a template publishes, at
+`http://127.0.0.1:5678/mcp/<path>` with the header `x-n8n-key: $N8N_MCP_KEY`
+(Claude Code: `claude mcp add --transport http n8n <url> --header
+"x-n8n-key: …"`). What that endpoint exposes is workflow-shaped: an act tool
+that is a multi-step flow, or a trigger an agent may pull. The brain's own
+tools stay on the brain's endpoint, under the client's own key (decision 7).
+**An on-demand run** is a POST to `/webhook/<path>` with the header
+`x-n8n-run-key: $N8N_WEBHOOK_KEY`. The two keys are separate: the MCP key
+starts no run, and the run key opens no MCP endpoint (both measured).
+
+**Custody and backups.**
+- **The owner password** is the profile's standing secret, stronger than the
+  API key, since every mint signs in with it.
+- **`N8N_ENCRYPTION_KEY`** encrypts every stored credential: lose it and they
+  are unreadable. n8n also writes it into its volume
+  (`/home/node/.n8n/config`), so a copy of the whole volume carries the key
+  beside the credentials it protects. The copy below is the database alone.
+  Keep the password, the key and the hash with `deploy/.env`.
+- **n8n's store** needs keeping as well. The workflows are the templates, and
+  an API-key credential comes back from `deploy/.env`. But an OAuth
+  credential's refresh token (Gmail's) and each polling workflow's cursor
+  live only in n8n's store.
+
+The store is one SQLite file, and it can be copied while n8n runs. Here
+`compose` stands for `podman compose -f deploy/compose.yaml --profile
+orchestration`, or docker compose:
+
+```bash
+umask 077   # the copy holds run history (a capture's text) in the clear
+compose exec -T n8n sh -c "rm -f /home/node/.n8n/backup.sqlite && node -e \"new (require('node:sqlite').DatabaseSync)('/home/node/.n8n/database.sqlite').exec(\\\"VACUUM INTO '/home/node/.n8n/backup.sqlite'\\\")\""
+compose exec -T n8n sh -c 'cat /home/node/.n8n/backup.sqlite && rm /home/node/.n8n/backup.sqlite' > n8n-backup.sqlite
+# restore: stop n8n first (compose stop n8n), then write the file as the image's
+# own user, removing the old WAL, which SQLite would otherwise replay onto the copy
+compose run --rm --no-deps -T --entrypoint sh n8n -c 'rm -f /home/node/.n8n/database.sqlite-wal /home/node/.n8n/database.sqlite-shm && cat > /home/node/.n8n/database.sqlite' < n8n-backup.sqlite
+compose up -d --no-deps n8n
+bun deploy/orchestration/provision.ts --rotate   # the copy brings back keys and credentials as they were then
+```
+
+Both shapes were measured, with the same `N8N_ENCRYPTION_KEY`: a restore
+into a fresh volume, and one over a stopped n8n. The workflows and
+credentials come back. So does every API key n8n held when the copy was
+taken, including one revoked since, and every credential as it was then.
+That is why the restore ends with a `--rotate` provisioning run: it revokes
+the file's old keys and patches the credentials to the env file's current
+keys. Two ways to lose the store: `compose cp` writes the file root-owned,
+and n8n then opens it read-only; and a restore that leaves the old WAL in
+place came back as "database disk image is malformed" (measured).
+
+**After a compromise** (a leaked owner password or API key), a password
+change revokes nothing by itself. Delete every key in n8n's Settings → n8n
+API, change the password, run `--init`, recreate n8n (`compose up -d n8n`),
+and provision with `--rotate`.
+
+**Run history.** Each run's data is a copy of what the run carried: a
+capture's text, an act tool's arguments. It sits outside `delete_thought`
+and the brain's retention. The profile keeps it 24 hours or 1,000 runs
+(`N8N_EXECUTIONS_MAX_AGE`, `N8N_EXECUTIONS_MAX_COUNT`); n8n's defaults are 14
+days and 10,000. n8n marks runs past the window hourly, and deletes a marked
+run's rows at its first 15-minute sweep an hour after that. So a run's rows
+can outlive the window by up to about two and a quarter hours. Rows, not
+bytes: SQLite may keep a deleted row's text in the file's free pages until
+they are reused or the file is vacuumed, and a backup keeps whatever it
+copied. The eval kit's P check proves the rows gone.
+
+**Upgrades.** Take a backup (above) first: n8n migrates its store on the new
+image, and nothing reverses that. Bump the digest deliberately, and re-run
+the eval kit against the new image in two cycles. First
+`bun evals/eval-orchestration.ts --up n8n`, then `--verify n8n
+--wait-schedule`, then `--down n8n`. Then `--up n8n --with sealed`, then
+`--verify n8n`, then `--down n8n`. The second is the egress probe, and the
+one that catches a new image calling out. The endpoints that mint the key
+and the run data the kit counts are not n8n's published contract. The kit
+runs this profile as it ships (`../evals/README.md`, "The orchestration
+profile (SMD-2210)").
+
+**Licences** (the fork's reading, not legal advice; the ADR's Gate 1). n8n is
+under its Sustainable Use License, OB1 under FSL-1.1-MIT, and an operator
+running the profile is running two non-OSI licences side by side.
+Installing an OB1 brain with the profile on a client's own infrastructure is
+inside both: n8n's FAQ permits consulting and installing on a client's
+server. Hosting the profile for others is outside n8n's licence. A
+commercial product built on OB1 that competes with it is outside OB1's.
 
 ## What this does not cover
 

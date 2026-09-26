@@ -506,8 +506,10 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // SMD-1867), 054 (resolve_agent's stale-only write, SMD-2090), 055 (the
   // capture event carries the payload — the content, a backdating writer's
   // created_at, an update's key move — 046's rules as functions, the payload
-  // amendment and its backfill, SMD-2115) and 056 (the entity name gate,
-  // SMD-1935) stay recorded and are never tried. 030 is the right one to make pending because its
+  // amendment and its backfill, SMD-2115), 056 (the entity name gate,
+  // SMD-1935), 057 (the third release's schema_version, 1.2.0) and 058
+  // (node_state, the shared read of a thought's lifecycle and blockers,
+  // SMD-2074) stay recorded and are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
   // embedding_model column — are
   // exactly what a through-020 schema lacks, so it fails by name rather than
@@ -542,11 +544,13 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // refusing by name without 008, 046 or 050 ([20i]); 056 adds two functions
   // over 016's tables and redefines 053's record_thought_entities on its own
   // body, refusing by name without 016 or 053 ([20j]); 057 upserts
-  // ob1_config.schema_version for the 1.2.0 cut, needing only 006's table — all recorded by
+  // ob1_config.schema_version for the 1.2.0 cut, needing only 006's table;
+  // 058 adds five read functions over 001's thoughts, 025's supersedes and
+  // 053's tables and resolver, refusing by name without 025 or 053 ([20k]) — all recorded by
   // the baseline with their prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 28, `030 is among the last twenty-eight migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 29, `030 is among the last twenty-nine migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -2128,6 +2132,36 @@ console.log("\n[20j] Migration 056 on a schema without 016, and on 016's tables 
   // An apply that did not throw is not the function present ([20c]'s lesson): read 056's sentinel off the live body.
   const [body] = await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure('record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)')`;
   assert(/ob1:name-gate/.test(String(body?.s ?? "")) && (await sql`SELECT to_regprocedure('apply_entity_type_gate()') IS NOT NULL AS p`)[0].p === true, "…and applied once both are there: the live writer is 056's and the pass is present");
+  await sql.close();
+}
+
+console.log("\n[20k] Migration 058 on a schema without 025, and on 025's pointer without 053's tables — refused up front, naming the missing migration and --reapply, and applied once both are there (SMD-2074)");
+{
+  // 058's bodies are SQL, validated at CREATE: without the guard a schema
+  // stopping before 025 would fail at node_lifecycle() with a bare "column
+  // s.supersedes does not exist", and one with 025 but not 053 at
+  // node_dependencies() with "relation thought_sources does not exist".
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "025" });
+  const baselined = await migrate("--baseline");
+  assert(baselined.code === 0, `--baseline records every migration over the pre-025 schema (exit ${baselined.code})`);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the058 = MIGRATIONS.find((f) => f.startsWith("058_"))!;
+  await sql`DELETE FROM schema_migrations WHERE name = ${the058}`;
+  const plain = await migrate();
+  const ok = plain.code === 1 &&
+    /058_node_state\.sql\s+FAILED: migration 058 needs 025 \(thoughts\.supersedes\); this schema lacks it/.test(plain.out) &&
+    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+  assert(ok, `a plain run fails at 058 naming 025 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the058}`)[0].c) === 0, "…058 records nothing");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "025" && f < "053" });
+  const half = await migrate();
+  assert(half.code === 1 && /058_node_state\.sql\s+FAILED: migration 058 needs 053 \(thought_sources, source_thought\); this schema lacks it/.test(half.out),
+    `…and with 025's pointer but not 053's tables it names 053 (exit ${half.code})${half.code === 1 ? "" : `:\n${half.out}`}`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "053" });
+  // An apply that did not throw is not the function present ([20c]'s lesson): call it.
+  const [probe] = await sql`SELECT to_regprocedure('node_state(uuid[])') IS NOT NULL AS p, (SELECT count(*)::int FROM node_state()) AS n, (SELECT count(*)::int FROM thoughts) AS t`;
+  assert(probe.p === true && probe.n === probe.t, `…and applied once both are there: node_state() is present and reads every thought (${probe.n} of ${probe.t})`);
   await sql.close();
 }
 

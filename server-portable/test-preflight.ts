@@ -230,12 +230,18 @@ console.log("\n[3c] The extraction window is derived from the METADATA model's s
   // The embedding model is the default here and the metadata model varies, so
   // the row that moves is the extraction window's — and the chunk window row
   // beside it must not move, since the two models are two tables.
-  const base = { ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", OB1_EXTRACT_CHUNK_TOKENS: undefined };
+  const base = { ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", OB1_EXTRACT_CHUNK_TOKENS: undefined, OB1_EXTRACT_MAX_WINDOWS: undefined };
   const qwen = await run({ ...base, OB1_METADATA_MODEL: "qwen2.5:7b" });
+  // The per-thought bound closes the row (SMD-2240): the count, where it came from, and the text it allows.
+  assert(/extraction window\s+[^\n]*, read whole; a thought over 24 windows \(the default; OB1_EXTRACT_MAX_WINDOWS widens it\), or whose whitespace-free runs take it past 28800 estimated tokens, is extracted over its opening and recorded succeeded with a caveat naming the coverage$/m.test(qwen.out),
+         "the row ends with the per-thought bound: 24 windows by default, the runs' text bound at 24 × 1200 tokens, and what a thought over it gets");
+  const widened = await run({ ...base, OB1_METADATA_MODEL: "qwen2.5:7b", OB1_EXTRACT_MAX_WINDOWS: "80" });
+  assert(/extraction window\s+[^\n]*; a thought over 80 windows \(from OB1_EXTRACT_MAX_WINDOWS\), or whose whitespace-free runs take it past 96000 estimated tokens, is extracted over its opening/.test(widened.out),
+         "…and OB1_EXTRACT_MAX_WINDOWS moves both numbers, the row naming the variable");
   assert(/extraction window\s+thoughts over 1200 estimated tokens are extracted in 1200-token windows \(overlap 150\), derived from qwen2\.5:7b's 32768-token served context — held at 1200, the size the default model was measured to finish reliably \(evals\/README\.md, SMD-1879\); the answer is streamed and a call is aborted once it holds 3 copies of one item, and a call aborted so or run to its answer budget is made once more with a 0\.5 frequency penalty, read whole/.test(qwen.out),
          "the default model derives the measured size from its 32,768-token context, the row says the context would have allowed more, and names the stream abort and the runaway retry");
   const unknown = await run({ ...base, OB1_METADATA_MODEL: "some-chat-model" });
-  assert(/extraction window\s+thoughts over 1200 estimated tokens are extracted in 1200-token windows \(overlap 150\), the default for some-chat-model's served context, which db\/config\.mjs's KNOWN_CHAT_MODEL_WINDOW does not list; the answer is streamed and a call is aborted once it holds 3 copies of one item, and a call aborted so or run to its answer budget is made once more with a 0\.5 frequency penalty, read whole — set OB1_EXTRACT_CHUNK_TOKENS if the model serves fewer than 6814 tokens/.test(unknown.out),
+  assert(/extraction window\s+thoughts over 1200 estimated tokens are extracted in 1200-token windows \(overlap 150\), the default for some-chat-model's served context, which db\/config\.mjs's KNOWN_CHAT_MODEL_WINDOW does not list; the answer is streamed and a call is aborted once it holds 3 copies of one item, and a call aborted so or run to its answer budget is made once more with a 0\.5 frequency penalty, read whole; a thought over 24 windows [^\n]* naming the coverage — set OB1_EXTRACT_CHUNK_TOKENS if the model serves fewer than 6814 tokens/.test(unknown.out),
          "an unknown model keeps the default, is told where the table is, and what context the default needs");
   const pinned = await run({ ...base, OB1_METADATA_MODEL: "qwen2.5:7b", OB1_EXTRACT_CHUNK_TOKENS: "600" });
   assert(/extraction window\s+thoughts over 600 estimated tokens are extracted in 600-token windows \(overlap 75\), from OB1_EXTRACT_CHUNK_TOKENS \(qwen2\.5:7b's 32768-token served context\)/.test(pinned.out),
