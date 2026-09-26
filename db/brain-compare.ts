@@ -103,8 +103,16 @@ export async function resolveBrain(ref: string, keyArg: string | undefined, envK
 
 /** Read a connector's base URL and key from `claude mcp get <name>` — its key is used, never printed. */
 export async function resolveConnector(name: string, keyArg: string | undefined, envKey: string | undefined): Promise<BrainEndpoint> {
-  const proc = Bun.spawn(["claude", "mcp", "get", name], { stdout: "pipe", stderr: "pipe" });
-  const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+  let out: string;
+  let code: number;
+  try {
+    const proc = Bun.spawn(["claude", "mcp", "get", name], { stdout: "pipe", stderr: "pipe" });
+    [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+  } catch (e) {
+    // The binary is not on PATH (ENOENT) — say so, rather than surface a raw spawn
+    // error, and point at the URL path that needs no CLI (review pass 3).
+    throw new Error(`--compare: the connector-name path needs the Claude CLI (\`claude\`) on PATH to resolve ${JSON.stringify(name)} — pass an http(s):// URL instead. (${(e as Error).message})`);
+  }
   if (code !== 0) {
     throw new Error(`--compare: could not resolve the brain named ${JSON.stringify(name)} — \`claude mcp get ${name}\` exited ${code}. Pass an http(s):// URL instead, or register the connector.`);
   }
@@ -497,7 +505,11 @@ export function renderComparison(c: Comparison): string {
     lines.push(`  (these are real searches — a brain running OB1_QUERY_LOG=on records them in query_log, telemetry, not the thoughts corpus.)`);
     for (const r of skipped) lines.push(`  ~ [${r.arm}] ${JSON.stringify(r.query.slice(0, 60))}: skipped — ${r.skipped}`);
     if (moved.length === 0) {
-      lines.push(`  no delta — b returns the same ids as a for every query and arm${skipped.length ? ` (${skipped.length} skipped)` : ""}.`);
+      // All rows skipped is not "no delta" — nothing was compared (review pass 3).
+      const allSkipped = skipped.length > 0 && skipped.length === c.retrieval.rows.length;
+      lines.push(allSkipped
+        ? `  nothing compared — all ${skipped.length} quer${skipped.length === 1 ? "y" : "ies"} were skipped.`
+        : `  no delta — b returns the same ids as a for every query and arm${skipped.length ? ` (${skipped.length} skipped)` : ""}.`);
     } else {
       for (const r of moved) {
         const bits: string[] = [];

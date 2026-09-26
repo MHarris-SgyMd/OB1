@@ -325,6 +325,18 @@ ok(trimBase("http://h:1///") === "http://h:1" && trimBase("http://h:1") === "htt
   } finally { a.server.stop(true); b.server.stop(true); }
 }
 
+// When every query is skipped, the retrieval section says "nothing compared", not "no delta".
+{
+  const cfg = () => ({ info: baseInfo({}), newest: "9/24/2026", hits: {}, refuse: ["only"] });
+  const a = startFake(cfg());
+  const b = startFake(cfg());
+  try {
+    const c = await compareBrains(a.ep, b.ep, { queries: ["only"] });
+    const out = renderComparison(c);
+    ok(/nothing compared — all 1 query/.test(out) && !/no delta — b returns/.test(out), `all-skipped retrieval reads "nothing compared", not "no delta"`);
+  } finally { a.server.stop(true); b.server.stop(true); }
+}
+
 // runCompare exit code: the gate. A same-migration count drift still exits 1;
 // identical brains exit 0.
 {
