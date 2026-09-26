@@ -343,6 +343,10 @@ console.log("\n[5c] listThoughtIds — the id set, its digest and keyset paging 
   // A malformed cursor is treated as the start, not a driver cast error.
   const bad = await store.listThoughtIds({ limit: 100, after: "not-a-uuid" });
   assert(bad.ids.length === total, "a non-uuid cursor reads as the first page");
+
+  // limit 0: an empty page whose cursor is null, not undefined (review pass 3).
+  const zero = await store.listThoughtIds({ limit: 0, after: null });
+  assert(zero.ids.length === 0 && zero.cursor === null, "limit 0 yields no ids and a null cursor (not undefined)");
 }
 
 console.log("\n[6] Dedup and merge behave as the tools expect");

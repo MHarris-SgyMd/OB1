@@ -409,6 +409,13 @@ export async function corpusIdDiff(a: BrainEndpoint, b: BrainEndpoint): Promise<
   // aborting the whole compare over its one optional axis (review pass 1).
   try {
     const [setA, setB] = await Promise.all([collectIds(a, pa), collectIds(b, pb)]);
+    // The walk must account for the whole corpus the first page counted. Fewer ids
+    // than `total` means an incomplete enumeration — a PostgREST db-max-rows below
+    // the page size (a short page reads as the last), or a concurrent delete — so
+    // fail rather than report a partial set as a real difference (review pass 3).
+    if (setA.size < pa.total || setB.size < pb.total) {
+      return blank({ failed: `the id enumeration returned fewer ids than the corpus total (${setA.size}/${pa.total}, ${setB.size}/${pb.total}) — a paging limit or a concurrent change; not comparing a partial set`, totalA: pa.total, totalB: pb.total });
+    }
     const onlyA = [...setA].filter((id) => !setB.has(id));
     const onlyB = [...setB].filter((id) => !setA.has(id));
     return { equal: onlyA.length === 0 && onlyB.length === 0, onlyA, onlyB, totalA: pa.total, totalB: pb.total };

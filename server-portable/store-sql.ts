@@ -226,7 +226,10 @@ export class SqlStore implements ThoughtStore {
       LIMIT ${opts.limit}::int`;
     const ids = rows.map((r: { id: string }) => String(r.id));
     // A full page means more may follow; the cursor is its last id.
-    const cursor = ids.length === opts.limit ? ids[ids.length - 1] : null;
+    // A full page (limit rows) means more may follow; its last id is the cursor. The
+    // `> 0` guards a limit of 0 (unreachable via the tool, but a direct caller) from
+    // an undefined cursor (review pass 3).
+    const cursor = ids.length === opts.limit && ids.length > 0 ? ids[ids.length - 1] : null;
     // total and the whole-corpus digest ride the first page only — one extra scan,
     // skipped while paging. string_agg over zero rows is NULL, so an empty corpus
     // has a null digest (never mistaken for a match — the caller requires equal

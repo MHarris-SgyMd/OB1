@@ -50,7 +50,7 @@ interface FakeConfig {
   /** queries this brain refuses (an egress-gated embedding) — the search tool returns isError. */
   refuse?: string[];
   /** the brain's thought-id set for list_thought_ids; omit to make the tool absent (a brain older than SMD-2244). */
-  corpus?: { ids: string[]; digest?: string | null; pageCap?: number; fail?: string; failAfter?: boolean; badShape?: boolean; stuckCursor?: boolean };
+  corpus?: { ids: string[]; digest?: string | null; pageCap?: number; fail?: string; failAfter?: boolean; badShape?: boolean; stuckCursor?: boolean; fakeTotal?: number };
   /** a gateway/proxy that answers every tools/call POST with a plain 404 body (GET /health still routes). */
   proxy404?: boolean;
   /** frame the tools/call reply as an SSE stream rather than raw JSON. */
@@ -128,7 +128,8 @@ function startFake(cfg: FakeConfig): { server: ReturnType<typeof Bun.serve>; ep:
           // A cursor that never advances (a buggy server) — always the same value.
           if (cfg.corpus.stuckCursor) cursor = "ffffffff-0000-0000-0000-000000000000";
           const digest = isFirst ? (cfg.corpus.digest !== undefined ? cfg.corpus.digest : corpusDigest(all)) : null;
-          text = JSON.stringify({ total: isFirst ? all.length : 0, digest, ids: slice, cursor });
+          const total = isFirst ? (cfg.corpus.fakeTotal ?? all.length) : 0;
+          text = JSON.stringify({ total, digest, ids: slice, cursor });
         } else if (name === "thought_stats") {
           if (cfg.newest === null) return replyError(body.id, "thought_stats unavailable", cfg.sse);
           const total = "counts" in cfg.info.database ? (cfg.info.database.counts?.thoughts ?? 0) : 0;
@@ -442,6 +443,17 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   try {
     const c = await compareBrains(a.ep, b.ep, {});
     ok(!!c.idDiff.failed && /no ids array/.test(c.idDiff.failed) && !c.idDiff.equal, `a malformed ids page fails, not a silent empty read (${c.idDiff.failed})`);
+  } finally { a.server.stop(true); b.server.stop(true); }
+}
+
+// A short enumeration (fewer ids than the reported total — a PostgREST db-max-rows
+// below the page size) fails, not a partial diff read as real (review pass 3).
+{
+  const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, corpus: { ids: [uid(1)], digest: null, fakeTotal: 5 } });
+  const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, corpus: { ids: [uid(1)], digest: null } });
+  try {
+    const c = await compareBrains(a.ep, b.ep, {});
+    ok(!!c.idDiff.failed && /fewer ids than the corpus total/.test(c.idDiff.failed) && !c.idDiff.equal, `a short enumeration fails, not a partial diff (${c.idDiff.failed})`);
   } finally { a.server.stop(true); b.server.stop(true); }
 }
 

@@ -177,14 +177,20 @@ export class PostgrestStore implements ThoughtStore {
     // md5(string_agg(...)) aggregate the SQL store uses, and re-reading the whole
     // corpus here just to hash it would be a second full walk — so `digest` is
     // null and the caller enumerates (the shim is not the performance path). The
-    // total (exact count) still rides the first page.
+    // total (exact count) still rides the first page. A caller's page `limit` must
+    // stay within the deployment's PostgREST db-max-rows, or a page comes back short
+    // and the walk ends early; the caller (db/brain-compare.ts) guards against a
+    // short enumeration by comparing the collected count against this total.
     const after = opts.after && UUID_RE.test(opts.after) ? opts.after.toLowerCase() : null;
     let q = this.client.from("thoughts").select("id").order("id", { ascending: true }).limit(opts.limit);
     if (after) q = q.gt("id", after);
     const { data, error } = await q;
     if (error) throw new Error(error.message);
     const ids = ((data ?? []) as { id: string }[]).map((r) => String(r.id));
-    const cursor = ids.length === opts.limit ? ids[ids.length - 1] : null;
+    // A full page (limit rows) means more may follow; its last id is the cursor. The
+    // `> 0` guards a limit of 0 (unreachable via the tool, but a direct caller) from
+    // an undefined cursor (review pass 3).
+    const cursor = ids.length === opts.limit && ids.length > 0 ? ids[ids.length - 1] : null;
     const total = after === null ? await this.countThoughts() : 0;
     return { ids, total, digest: null, cursor };
   }
