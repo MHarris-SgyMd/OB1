@@ -3228,6 +3228,50 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   const [{ actors }] = await sql`SELECT count(*) FILTER (WHERE actor_name = 'entity-worker')::int AS actors FROM thought_audit`;
   assert(Number(actors) === 0, "the worker writes no thought_audit rows — it never mutates thoughts; its rows carry its agent id instead");
 
+  // A thought over the per-thought bound (SMD-2240) is extracted over its
+  // prefix and released succeeded with a caveat — not failed — its prefix's
+  // rows in the graph and its tail's not; --retry-partial under a wider bound
+  // reads it whole. The closing key is listed first: every window after the
+  // first carries the opening line as its header, so the last window's prompt
+  // holds both words and the stub answers the first key it finds.
+  answers["tome-closing"] = { entities: [{ name: "Inkwell", type: "tool", confidence: 0.9 }], relationships: [] };
+  answers["tome-opening"] = {
+    entities: [{ name: "Quill", type: "tool", confidence: 0.9 }, { name: "Quentin", type: "person", confidence: 0.9 }],
+    relationships: [{ from: "Quentin", to: "Quill", relation: "uses", confidence: 0.8 }],
+  };
+  const tomeText = Array.from({ length: 6 }, (_, p) =>
+    `${p === 0 ? "The tome-opening chapter." : p === 5 ? "The tome-closing chapter." : `Chapter ${p}.`} ${Array.from({ length: 24 }, (__, i) => `Quentin noted point ${p}.${i} about the book.`).join(" ")}`).join("\n\n");
+  const tome = await seed(tomeText);
+  const [{ r: ledgerCaveat }] = await sql`SELECT last_error AS r FROM thought_work_claims WHERE thought_id = ${ledger}::uuid AND work_type = ${KEY}`;
+  assert(ledgerCaveat === null, "under the default bound the windowed ledger thought is a clean success, no caveat — the drop-the-env control");
+  const capped = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!], { env: { ...env, OB1_EXTRACT_MAX_WINDOWS: "2" } as Record<string, string>, cwd: HERE });
+  assert(capped.code === 0 && /1 extracted \(1 over a prefix only — past the per-thought bound, OB1_EXTRACT_MAX_WINDOWS \(2\); each row's caveat says how much\), 0 failed/.test(capped.out),
+         `under OB1_EXTRACT_MAX_WINDOWS=2 the long thought is extracted, counted as a prefix, and the run exits 0 (exit ${capped.code}: ${capped.out.split("\n").find((l) => /extracted/.test(l) && /failed/.test(l))?.trim()})`);
+  assert(/window: [^\n]*a thought over 2 windows \(from OB1_EXTRACT_MAX_WINDOWS\), or whose whitespace-free runs take it past 600 estimated tokens, is extracted over its opening/.test(capped.out), "…the banner stating the bound it ran under");
+  const [tomeClaim] = await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${tome}::uuid AND work_type = ${KEY}`;
+  assert(tomeClaim.status === "succeeded" && /^partial: 2 of [3-9] windows extracted, the thought is over OB1_EXTRACT_MAX_WINDOWS \(2\); the rest of the thought is not in the graph$/.test(tomeClaim.last_error),
+         `…its claim succeeded with the coverage as its caveat (${tomeClaim.status}: ${tomeClaim.last_error})`);
+  const tomeTools = async () => (await sql`
+    SELECT e.name FROM thought_entities te JOIN ob1_entities e ON e.id = te.entity_id WHERE te.thought_id = ${tome}::uuid ORDER BY e.name`).map((r: { name: string }) => r.name);
+  const tomeEdges = async () => Number((await sql`SELECT count(*)::int AS c FROM ob1_entity_edges WHERE thought_id = ${tome}::uuid`)[0].c);
+  assert(JSON.stringify(await tomeTools()) === '["Quentin","Quill"]' && (await tomeEdges()) === 1,
+         `…the prefix's entities and its edge are in the graph and the tail's entity is not (${JSON.stringify(await tomeTools())}, ${await tomeEdges()} edge(s))`);
+  const partialStatus = await extract("--status");
+  assert(partialStatus.code === 0 && /12 extracted \(1 over a prefix only\), 0 failed/.test(partialStatus.out)
+         && new RegExp(`extracted over a prefix only \\(1 of 1\\)[^\\n]*--retry-partial re-extracts them over at most 24 windows \\(OB1_EXTRACT_MAX_WINDOWS unset\\)[^\\n]*\\n\\s+${tome}  partial: 2 of`).test(partialStatus.out),
+         `--status counts the partial row apart from the full ones and the failures, and lists it with its caveat (${partialStatus.out.split("\n").filter((l) => /prefix/.test(l)).join(" | ").slice(0, 300)})`);
+  const partialDry = await extract("--dry-run", "--retry-partial");
+  assert(partialDry.code === 0 && /return 1 row\(s\) extracted over a prefix to the pool; /.test(partialDry.out) && /send 1 thought\(s\)/.test(partialDry.out), "--dry-run --retry-partial says it would return the one partial row and send one thought");
+  const widenedRun = await extract("--retry-partial");
+  assert(widenedRun.code === 0 && /--retry-partial: 1 row\(s\) extracted over a prefix returned to the pool, to be extracted over at most 24 window\(s\) \(OB1_EXTRACT_MAX_WINDOWS unset\) — a row read under a smaller bound gains coverage/.test(widenedRun.out)
+         && /1 extracted, 0 failed/.test(widenedRun.out),
+         `--retry-partial under the default bound returns the row and extracts it whole (exit ${widenedRun.code})`);
+  const [tomeAfter] = await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${tome}::uuid AND work_type = ${KEY}`;
+  assert(tomeAfter.status === "succeeded" && tomeAfter.last_error === null && JSON.stringify(await tomeTools()) === '["Inkwell","Quentin","Quill"]',
+         `…the caveat cleared and the tail's entity added to the graph (${tomeAfter.last_error}; ${JSON.stringify(await tomeTools())})`);
+  const noPartial = await extract("--status");
+  assert(/12 extracted, 0 failed/.test(noPartial.out) && !/over a prefix/.test(noPartial.out), "…and --status no longer counts or lists a partial row");
+
   model.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   await sql`DELETE FROM thoughts`;

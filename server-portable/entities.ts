@@ -47,12 +47,26 @@
  * measured models, 32 of 32 against 2. The one thing
  * per-window extraction cannot see is a relation whose two endpoints are named
  * in different windows — measured, and the loss stated, in evals/README.md.
+ *
+ * ── A thought over the bound is extracted over its prefix (SMD-2240) ───────
+ * One thought is extracted in at most `EmbedConfig.extractMaxWindows` windows
+ * (OB1_EXTRACT_MAX_WINDOWS, else db/config.mjs's EXTRACT_MAX_WINDOWS, 24; a
+ * window's runaway retry is a second call), and runs chunk.ts cannot split
+ * are cut where the thought's text reaches that many windows' worth. Until
+ * SMD-2240 a thought over the count
+ * was failed before any call, and ingested documents — whole PDFs and pages,
+ * 26 to 74 windows — sat failed with nothing in the graph. Now the first
+ * windows are extracted (boundedWindows) and the answer's `coverage` says how
+ * many of how many; the worker records the row succeeded with partialCaveat's
+ * text, and --retry-partial re-extracts such rows once the bound is raised.
+ * The prefix is the note's opening, the part the header already treats as
+ * what the note is about; what it misses is stated on the row, not guessed at.
  */
 
 import { refuseEgress, type EmbedConfig } from "./embed.ts";
 import { mayLeaveBox, type EgressSubject } from "./egress.ts";
-import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, estimateTokens } from "./chunk.ts";
-import { EXTRACT_MAX_WINDOWS, extractOutputBudget } from "../db/config.mjs";
+import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, estimateTokens, type Chunk } from "./chunk.ts";
+import { extractOutputBudget } from "../db/config.mjs";
 
 /**
  * Bumped when the prompt or the parsing rules change what gets stored. Part of
@@ -96,7 +110,11 @@ export type Extraction = {
   rejected: { entities: number; relations: number };
   /** True when the model's answer was not parseable JSON of the expected shape — in ANY window. */
   malformed: boolean;
-  /** How many calls the thought took: 1 for a thought within the window, the window count above it. */
+  /**
+   * How many windows were sent: 1 for a thought within the window, the window
+   * count above it — a prefix's, a cut window included, when `coverage` is set
+   * (SMD-2240). callsOf adds the runaway retries.
+   */
   windows: number;
   /** Per window, when there was more than one: what each call returned before the merge. */
   parts?: ExtractionWindow[];
@@ -111,7 +129,17 @@ export type Extraction = {
    * was aborted. Only a first call is ever aborted: the retry is read whole.
    */
   abortedMs?: number;
+  /**
+   * Set when the thought was over the per-thought bound and only its prefix
+   * was extracted (SMD-2240, boundedWindows): `windows` of its `of` windows
+   * were sent, and `cut` says the last of them was cut short at the text
+   * bound, which runs chunk.ts cannot split (SMD-1974) had used up. Absent on a whole
+   * extraction. The worker records a thought with it succeeded with the
+   * caveat partialCaveat writes.
+   */
+  coverage?: Coverage;
 };
+export type Coverage = { windows: number; of: number; cut: boolean };
 
 /**
  * One user message holding the rules and the wrapped thought — upstream's
@@ -188,6 +216,14 @@ export type ExtractWindowing = {
   /** Estimated tokens of thought text per call; content at or under it is one call. */
   windowTokens: number;
   overlapTokens: number;
+  /**
+   * The per-thought bound (SMD-2240): at most this many windows, and a text
+   * bound of this many windows' worth that the large windows a run chunk.ts
+   * cannot split makes count in full against (boundedWindows says how). A
+   * thought over either is extracted over its prefix and its answer carries
+   * the coverage.
+   */
+  maxWindows: number;
   /** Prepend the note's opening line to every window after the first. */
   header: boolean;
   /** Send `max_tokens`, sized by extractOutputBudget to the text of each call. Off reproduces the p1 request. */
@@ -414,7 +450,7 @@ export function windowingFor(cfg: EmbedConfig): ExtractWindowing {
   const budgeted = !reasoningOn(cfg);
   // The stream abort follows the budget too: it makes a runaway of a call,
   // and only a budgeted call has a retry to send one to (SMD-1960).
-  return { windowTokens: cfg.extractChunkTokens, overlapTokens: cfg.extractChunkOverlap, header: cfg.extractHeader, outputBudget: budgeted, retryRunaway: budgeted && cfg.extractRetryRunaway, streamAbort: budgeted && cfg.extractStreamAbort };
+  return { windowTokens: cfg.extractChunkTokens, overlapTokens: cfg.extractChunkOverlap, maxWindows: cfg.extractMaxWindows, header: cfg.extractHeader, outputBudget: budgeted, retryRunaway: budgeted && cfg.extractRetryRunaway, streamAbort: budgeted && cfg.extractStreamAbort };
 }
 
 /**
@@ -438,15 +474,18 @@ export function describeExtractWindow(cfg: EmbedConfig): string {
       // Reachable with EXTRACT_RETRY_RUNAWAY flipped and the abort on: the
       // consequence named, as the worker's failed-row note names it.
       : abort ? `${abort}, and is the thought's answer, malformed — no retry` : "";
-  if (cfg.extractChunkTokensFrom === "OB1_EXTRACT_CHUNK_TOKENS") return `${rule}, from OB1_EXTRACT_CHUNK_TOKENS (${ctx})${retry}`;
+  // The per-thought bound (SMD-2240), last: what a thought over it gets.
+  const m = cfg.extractMaxWindows;
+  const cap = `; a thought over ${m} windows (${cfg.extractMaxWindowsFrom === "OB1_EXTRACT_MAX_WINDOWS" ? "from OB1_EXTRACT_MAX_WINDOWS" : "the default; OB1_EXTRACT_MAX_WINDOWS widens it"}), or whose whitespace-free runs take it past ${m * n} estimated tokens, is extracted over its opening and recorded succeeded with a caveat naming the coverage`;
+  if (cfg.extractChunkTokensFrom === "OB1_EXTRACT_CHUNK_TOKENS") return `${rule}, from OB1_EXTRACT_CHUNK_TOKENS (${ctx})${retry}${cap}`;
   if (cfg.extractChunkTokensFrom === "window") {
     // `capped` is the resolver's own answer (second review pass: inferring it
     // from the size said "held" of a context that yields exactly the default).
     const held = cfg.extractChunkTokensCapped
       ? ` — held at ${DEFAULT_EXTRACT_WINDOW_TOKENS}, the size the default model was measured to finish reliably (evals/README.md, SMD-1879)` : "";
-    return `${rule}, derived from ${ctx}${held}${retry}`;
+    return `${rule}, derived from ${ctx}${held}${retry}${cap}`;
   }
-  return `${rule}, the default for ${ctx}${retry}`;
+  return `${rule}, the default for ${ctx}${retry}${cap}`;
 }
 
 /**
@@ -885,6 +924,92 @@ async function extractCall(text: string, cfg: EmbedConfig, timeoutMs: number, pa
 }
 
 /**
+ * The part of a thought the per-thought bound admits (SMD-2240): at most
+ * `maxWindows` windows, taken in order, each sent as chunk.ts made it. A run
+ * chunk.ts cannot split — a whitespace-free blob (SMD-1974) — it sends whole
+ * however long, in one window or, carried by the overlap, in two; until this
+ * nothing bounded it. So the windows also meet a text bound, maxWindows ×
+ * windowTokens estimated tokens: a LARGE window, twice the size or more (only
+ * such a run makes one), counts its whole length, and any other counts its
+ * length up to the size (`charge`, below, says why). The window that would
+ * pass the bound is cut to what is left and ends the prefix — which only a
+ * large window can bring about, since other windows reach the count first.
+ * What a multi-window thought sends is therefore under twice maxWindows
+ * windows' worth, and one call's size over a window stays SMD-1974's.
+ * `windows` is chunk.ts's split, empty or of one for a thought sent whole, in
+ * which case `whole` is the thought itself, sent with its blank lines.
+ */
+export function boundedWindows(whole: string, windows: Chunk[], w: Pick<ExtractWindowing, "windowTokens" | "maxWindows">): { windows: Chunk[]; coverage?: Coverage } {
+  const budget = w.maxWindows * w.windowTokens;
+  // What a window counts against the text bound. Under twice the size it
+  // counts its length, but never more than the size: chunk.ts fills a window
+  // with whole words and the last may run past it, and a paragraph with no
+  // break chunk.ts knows — unspaced CJK prose, whose 。 is no sentence end to
+  // it — can sit just over; either way 24 such windows are a thought
+  // extracted whole before SMD-2240, not one to cut (review passes 1 and 2).
+  // A large window, twice the size or more, counts its whole length.
+  const charge = (t: number) => (t < 2 * w.windowTokens ? Math.min(t, w.windowTokens) : t);
+  if (windows.length <= 1) {
+    // Measured on chunk.ts's window, which is trimmed, not on the thought:
+    // blank lines around a thought are no text to bound (review pass 2).
+    const text = windows[0]?.content ?? whole;
+    if (charge(estimateTokens(text)) <= budget) return { windows: [{ index: 0, content: whole }] };
+    return { windows: [{ index: 0, content: cutToTokens(text, budget) }], coverage: { windows: 1, of: 1, cut: true } };
+  }
+  const taken: Chunk[] = [];
+  let used = 0;
+  let cut = false;
+  let stopped = false;
+  for (const win of windows) {
+    if (taken.length === w.maxWindows) break;
+    const t = charge(estimateTokens(win.content));
+    if (used + t > budget) {
+      // Nothing left is nothing sent: an empty window would be a call about no text.
+      const rest = cutToTokens(win.content, budget - used);
+      if (rest.trim()) { taken.push({ index: win.index, content: rest }); cut = true; }
+      stopped = true;
+      break;
+    }
+    taken.push(win);
+    used += t;
+  }
+  return taken.length === windows.length && !stopped ? { windows } : { windows: taken, coverage: { windows: taken.length, of: windows.length, cut } };
+}
+
+/** A prefix of `text` chunk.ts estimates at `tokens` or fewer — the longest, or within a tenth of it. */
+function cutToTokens(text: string, tokens: number): string {
+  // Four characters a token is estimateTokens' character term; its word term
+  // can only lengthen the estimate, so shorten by tenths until it fits.
+  let cut = text.slice(0, Math.max(0, Math.floor(tokens * 4)));
+  while (cut.length > 0 && estimateTokens(cut) > tokens) cut = cut.slice(0, Math.floor(cut.length * 0.9));
+  // A slice by UTF-16 unit can end between the halves of a surrogate pair;
+  // a lone high half is not text a strict provider accepts (review pass 2).
+  return /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
+}
+
+/** What a partial extraction's caveat begins with: the worker counts, lists and returns partial rows by it. */
+export const PARTIAL_CAVEAT_PREFIX = "partial: ";
+
+/**
+ * The caveat a thought extracted over its prefix is recorded with — the claim
+ * row's last_error on a succeeded row, migration 028's rule (SMD-2240). It
+ * names the coverage and the knob, so the row says what a raised bound would
+ * add; the worker's --retry-partial returns such rows to the pool.
+ */
+export function partialCaveat(c: Coverage, w: Pick<ExtractWindowing, "windowTokens" | "maxWindows">): string {
+  const bound = `OB1_EXTRACT_MAX_WINDOWS (${w.maxWindows})`;
+  // Only large windows use the text bound up (boundedWindows), and the window
+  // cut or stopped at need not be one of them: say what used it (review pass 3).
+  const text = `the text bound, ${w.maxWindows * w.windowTokens} estimated tokens (${w.maxWindows} windows' worth under ${bound}), which runs chunk.ts cannot split (SMD-1974) used up`;
+  // A cut window was sent in part, so it is "sent", not "extracted" — "24 of
+  // 24 extracted" beside "the rest is not in the graph" read as a contradiction
+  // (review pass 2). A prefix that ended short of the count ended at the text
+  // bound, whether or not anything of the next window fitted.
+  const how = c.cut ? `sent, the last cut short at ${text}` : c.windows < w.maxWindows ? `extracted, stopped at ${text}` : `extracted, the thought is over ${bound}`;
+  return `${PARTIAL_CAVEAT_PREFIX}${c.windows} of ${c.of} window${c.of === 1 ? "" : "s"} ${how}; the rest of the thought is not in the graph`;
+}
+
+/**
  * Extract one thought. The egress gate (egress.ts, SMD-1903) is asked once,
  * about the whole text, before any call; `subject` is whose text this is — the
  * row's metadata for the pass, the actor for a query. A thought at or under
@@ -892,7 +1017,9 @@ async function extractCall(text: string, cfg: EmbedConfig, timeoutMs: number, pa
  * longer one is split with chunk.ts at the window, each window one call in
  * order, and the answers merged (mergeExtractions). `timeoutMs` is PER CALL —
  * the worker's --timeout — so a long thought's budget grows with its windows
- * rather than sharing one deadline across them. `windowing` is the
+ * rather than sharing one deadline across them. A thought over the
+ * windowing's bound is extracted over its prefix, and the answer's `coverage`
+ * says so (boundedWindows, SMD-2240). `windowing` is the
  * configuration's unless a harness measures another (evals/eval-extract-windows.ts).
  */
 export async function extractEntities(content: string, cfg: EmbedConfig, timeoutMs: number | undefined, subject: EgressSubject, windowing: ExtractWindowing = windowingFor(cfg)): Promise<Extraction> {
@@ -905,13 +1032,13 @@ export async function extractEntities(content: string, cfg: EmbedConfig, timeout
   // One window is the whole thought: chunk.ts can pack an over-estimate
   // (leading whitespace, say) into a single window, and that is not a
   // windowed thought — no marker, no `parts` (third review pass).
-  const windows = chunkContent(content, { maxTokens: windowing.windowTokens, overlapTokens: windowing.overlapTokens });
-  // The per-thought cost bound (fifth review pass): a thought over
-  // EXTRACT_MAX_WINDOWS is recorded failed with the count rather than
-  // extracted for hours — the 8,000-character cut used to bound this.
-  if (windows.length > EXTRACT_MAX_WINDOWS) {
-    throw new Error(`the thought is ${windows.length} windows of ${windowing.windowTokens} estimated tokens, over EXTRACT_MAX_WINDOWS (${EXTRACT_MAX_WINDOWS}); not extracted`);
-  }
+  // The per-thought cost bound (fifth review pass of SMD-1879, the
+  // 8,000-character cut's successor): a thought over it is extracted over its
+  // prefix and says so, where until SMD-2240 it was failed with the count and
+  // nothing extracted.
+  const { windows, coverage } = boundedWindows(content, chunkContent(content, { maxTokens: windowing.windowTokens, overlapTokens: windowing.overlapTokens }), windowing);
+  // The part marker counts the thought's windows, not the prefix's: "part 3 of 67".
+  const of = coverage?.of ?? windows.length;
   // The calls made before a throw ride on the error (`callsMade`), counted as
   // each is made, so the worker's and the eval's call counts include a thought
   // that timed out in its fourth window or on a retry (second and third review
@@ -919,20 +1046,21 @@ export async function extractEntities(content: string, cfg: EmbedConfig, timeout
   let made = 0;
   const onCall = () => { made++; };
   try {
-    if (windows.length <= 1) {
-      const { runaway: _r, retried, ...one } = await extractCall(content, cfg, deadline, undefined, windowing, onCall);
-      return { ...one, retried: retried || undefined };
+    if (of <= 1) {
+      // The thought itself, or its cut when it is over the text bound.
+      const { runaway: _r, retried, ...one } = await extractCall(windows[0].content, cfg, deadline, undefined, windowing, onCall);
+      return { ...one, retried: retried || undefined, ...(coverage ? { coverage } : {}) };
     }
     const header = windowing.header ? documentHeader(content) : undefined;
     const parts: ExtractionWindow[] = [];
     let retriedAny = false;
     for (const w of windows) {
       const t0 = Date.now();
-      const ex = await extractCall(w.content, cfg, deadline, { index: w.index, of: windows.length, header }, windowing, onCall);
+      const ex = await extractCall(w.content, cfg, deadline, { index: w.index, of, header }, windowing, onCall);
       retriedAny ||= ex.retried;
       parts.push({ index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, retried: ex.retried || undefined, ...(ex.abortedMs !== undefined ? { abortedMs: ex.abortedMs } : {}), ms: Date.now() - t0 });
     }
-    return { ...mergeExtractions(parts), retried: retriedAny || undefined };
+    return { ...mergeExtractions(parts), retried: retriedAny || undefined, ...(coverage ? { coverage } : {}) };
   } catch (e) {
     (e as Error & { callsMade?: number }).callsMade = made;
     throw e;

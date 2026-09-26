@@ -30,7 +30,9 @@ One more per-thought cost exists and is **off until you turn it on**: entity
 extraction (`db/extract-entities.ts`, migration 016) sends every thought to the
 metadata model once — a long thought in windows sized to that model, each call
 with an answer budget (`OB1_EXTRACT_CHUNK_TOKENS` overrides the derived window;
-preflight prints it) — and every new capture after that. Locally that is compute;
+preflight prints it), and at most 24 windows of any one thought
+(`OB1_EXTRACT_MAX_WINDOWS`; a longer one is extracted over its opening and
+recorded as partial) — and every new capture after that. Locally that is compute;
 on a hosted provider it is money per thought and every thought's text leaves
 your machine. `db/README.md` has the measured cost and quality. A second
 optional pass builds on it: consolidation (`db/consolidate.ts`, migration 029)

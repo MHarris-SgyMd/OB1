@@ -391,9 +391,9 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   // on the refusal rather than passing on a call that happened to fit.
   const { resolveEmbedConfig } = await import("./embed.ts");
   const { extractEntities, windowingFor } = await import("./entities.ts");
-  const { estimateTokens } = await import("./chunk.ts");
+  const { chunkContent, estimateTokens } = await import("./chunk.ts");
   const { extractOutputBudget } = await import("../db/config.mjs");
-  type Req = { text: string; maxTokens: number | undefined; part: string | undefined };
+  type Req ={ text: string; maxTokens: number | undefined; part: string | undefined };
   const reqs: Req[] = [];
   const CEILING = 700; // estimated tokens of thought text the stub accepts per call
   let prose = false;
@@ -468,14 +468,106 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   const one2 = await extractEntities(padded, cfgD, undefined, { kind: "extraction" });
   assert(reqs.length === 1 && one2.windows === 1 && one2.parts === undefined && reqs[0].part === undefined, "…and is one unmarked call with no per-window record");
 
-  // A thought over EXTRACT_MAX_WINDOWS is refused before any call — the
-  // per-thought cost bound (fifth review pass).
+  // A thought over the per-thought bound is extracted over its prefix, not
+  // refused (SMD-2240): at most EXTRACT_MAX_WINDOWS windows, in order, and the
+  // answer's coverage says how many of how many.
   const { EXTRACT_MAX_WINDOWS } = await import("../db/config.mjs");
+  const { boundedWindows, partialCaveat, PARTIAL_CAVEAT_PREFIX } = await import("./entities.ts");
+  assert(cfgD.extractMaxWindows === EXTRACT_MAX_WINDOWS && cfgD.extractMaxWindowsFrom === "default" && EXTRACT_MAX_WINDOWS === 24,
+         "with OB1_EXTRACT_MAX_WINDOWS unset the bound is the constant, 24 — today's number (the drop-the-env control)");
   reqs.length = 0;
+  // Each paragraph of ~330 tokens is its own 600-token window's subject: Anita0 … Anita29.
   const enormous = Array.from({ length: EXTRACT_MAX_WINDOWS + 6 }, (_, i) => para(`Anita${i}`, 40)).join("\n\n");
-  let refusedWindows = "";
-  try { await extractEntities(enormous, cfgD, undefined, { kind: "extraction" }); } catch (e) { refusedWindows = (e as Error).message; }
-  assert(/over EXTRACT_MAX_WINDOWS \(24\); not extracted/.test(refusedWindows) && reqs.length === 0, `a thought of more than ${EXTRACT_MAX_WINDOWS} windows is refused with the count and costs no call (${refusedWindows.slice(0, 90)})`);
+  const enormousWindows = chunkContent(enormous, { maxTokens: 600, overlapTokens: 75 }).length;
+  // Caught, as the long thought's call above is: the refusal this replaced is a red line here, not a crash.
+  const prefix = await extractEntities(enormous, cfgD, undefined, { kind: "extraction" }).catch((e: Error) => {
+    assert(false, `the over-bound thought was refused, not extracted over its prefix (${e.message.slice(0, 90)})`);
+    return { entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: true, windows: 0 } as Awaited<ReturnType<typeof extractEntities>>;
+  });
+  assert(reqs.length === EXTRACT_MAX_WINDOWS && prefix.windows === EXTRACT_MAX_WINDOWS && !prefix.malformed,
+         `a thought of ${enormousWindows} windows is extracted over its first ${EXTRACT_MAX_WINDOWS} — ${reqs.length} calls, not refused and not all ${enormousWindows}`);
+  assert(prefix.coverage?.windows === EXTRACT_MAX_WINDOWS && prefix.coverage.of === enormousWindows && prefix.coverage.cut === false,
+         `…and its answer says so: ${JSON.stringify(prefix.coverage)}`);
+  assert(reqs[0].part === `[Part 1 of ${enormousWindows} of a longer note]` && reqs.every((r, i) => r.part === `[Part ${i + 1} of ${enormousWindows} of a longer note]`),
+         `…each call's marker counting the thought's windows, not the prefix's (${reqs[0].part} … ${reqs.at(-1)?.part})`);
+  // The stub names "Anita" for every paragraph, so what was SENT says which: the opening in, the tail out.
+  const sent = reqs.map((r) => r.text).join("\n");
+  assert(sent.includes("Anita0 wrote") && sent.includes("Anita20 wrote") && !sent.includes(`Anita${EXTRACT_MAX_WINDOWS + 5} wrote`),
+         "…the thought's opening paragraphs were sent and its last was not — a prefix, in order");
+  const caveat = partialCaveat(prefix.coverage!, windowingFor(cfgD));
+  assert(caveat === `${PARTIAL_CAVEAT_PREFIX}24 of ${enormousWindows} windows extracted, the thought is over OB1_EXTRACT_MAX_WINDOWS (24); the rest of the thought is not in the graph`,
+         `the caveat the worker records names the coverage and the knob (${caveat})`);
+  const within = await extractEntities(long, cfgD, undefined, { kind: "extraction" });
+  assert(within.coverage === undefined,"a thought within the bound carries no coverage — a whole extraction");
+
+  // OB1_EXTRACT_MAX_WINDOWS overrides the constant, floored; what is not a
+  // positive safe integer once floored is unset.
+  const cfgCap = (v: string | undefined) => resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: D, OB1_METADATA_MODEL: "stub-chat", OB1_EXTRACT_CHUNK_TOKENS: "600", OB1_EXTRACT_MAX_WINDOWS: v });
+  assert(cfgCap("2").extractMaxWindows === 2 && cfgCap("2").extractMaxWindowsFrom === "OB1_EXTRACT_MAX_WINDOWS" && cfgCap("40.9").extractMaxWindows === 40,
+         "OB1_EXTRACT_MAX_WINDOWS sets the bound, floored");
+  for (const v of [undefined, "", "0", "-3", "0.5", "many", "1e21", "1e308"]) {
+    assert(cfgCap(v).extractMaxWindows === 24 && cfgCap(v).extractMaxWindowsFrom === "default", `OB1_EXTRACT_MAX_WINDOWS=${JSON.stringify(v)} is unset: the default, 24`);
+  }
+  reqs.length = 0;
+  const two = await extractEntities(long, cfgCap("2"), undefined, { kind: "extraction" });
+  assert(reqs.length === 2 && two.windows === 2 && two.coverage?.windows === 2 && two.coverage.of >= 3 && !two.coverage.cut,
+         `under OB1_EXTRACT_MAX_WINDOWS=2 the ${two.coverage?.of}-window thought is two calls, a prefix (${JSON.stringify(two.coverage)})`);
+  assert(two.entities.some((e) => e.name === "Anita") && two.entities.some((e) => e.name === "Dev") && !two.entities.some((e) => e.name === "Sam"),
+         "…its first two windows' people, not the last one's");
+  reqs.length = 0;
+  const wide = await extractEntities(enormous, cfgCap("40"), undefined, { kind: "extraction" });
+  assert(reqs.length === enormousWindows && wide.coverage === undefined, `…and widened to 40 the ${enormousWindows}-window thought is extracted whole (${reqs.length} calls)`);
+
+  // A thought that is one whitespace-free blob (SMD-1974) is one window
+  // chunk.ts cannot split, however long — until SMD-2240 it went to the model
+  // whole. The text bound (the bound's windows × the window) holds it: one
+  // call, cut to the bound.
+  reqs.length = 0;
+  const blobCfg = cfgCap("1");
+  const blob = "x".repeat(4 * 600 * 5); // ~3,000 estimated tokens, one "word"
+  assert(chunkContent(blob, { maxTokens: 600, overlapTokens: 75 }).length === 1, "the blob is one window to chunk.ts — the SMD-1974 shape");
+  let blobEx: Awaited<ReturnType<typeof extractEntities>> | undefined;
+  let blobErr = "";
+  try { blobEx = await extractEntities(blob, blobCfg, undefined, { kind: "extraction" }); } catch (e) { blobErr = (e as Error).message; }
+  assert(reqs.length === 1 && estimateTokens(reqs[0].text) <= 600 && reqs[0].text === blob.slice(0, reqs[0].text.length) && reqs[0].text.length > 2000,
+         `…is one call of at most the bound's text, its opening (${reqs[0]?.text.length} characters sent of ${blob.length}${blobErr ? `; ${blobErr.slice(0, 80)}` : ""})`);
+  assert(blobEx?.coverage?.windows === 1 && blobEx.coverage.of === 1 && blobEx.coverage.cut === true && reqs[0].part === undefined,
+         `…and its answer says it was cut (${JSON.stringify(blobEx?.coverage)})`);
+  assert(/^partial: 1 of 1 window sent, the last cut short at the text bound, 600 estimated tokens \(1 windows' worth under OB1_EXTRACT_MAX_WINDOWS \(1\)\), which runs chunk\.ts cannot split \(SMD-1974\) used up; the rest/.test(partialCaveat(blobEx!.coverage!, windowingFor(blobCfg))),
+         `…with a caveat saying the window was sent cut short at the text bound, which the run used up (${partialCaveat(blobEx!.coverage!, windowingFor(blobCfg)).slice(0, 80)})`);
+  // Review pass 2's cases. Unspaced prose chunk.ts cannot split at a
+  // sentence (CJK: 。 is no sentence end to it) sits one token a paragraph,
+  // just over the window: under twice the size it counts no more than the
+  // size, and a thought of the bound's windows so is whole.
+  const unspaced = Array.from({ length: 3 }, (_, i) => ({ index: i, content: "字".repeat(1236) })); // 309 estimated tokens, one "word"
+  assert(boundedWindows("", unspaced, { windowTokens: 300, maxWindows: 3 }).coverage === undefined,
+         "three unspaced paragraphs each just over the window, under a bound of three, are whole — not charged as runs");
+  // Blank lines around a one-window thought are no text to bound: measured on chunk.ts's trimmed window.
+  const padded1 = `${"\n".repeat(12000)}${"Anita wrote about Open Brain. ".repeat(40)}`;
+  const paddedB = boundedWindows(padded1, chunkContent(padded1, { maxTokens: 600, overlapTokens: 75 }), { windowTokens: 600, maxWindows: 1 });
+  assert(paddedB.coverage === undefined && paddedB.windows[0].content === padded1, `a one-window thought behind 12,000 blank lines is sent whole, no caveat (${JSON.stringify(paddedB.coverage)})`);
+  // A run that uses the whole bound leaves nothing of the next window: nothing
+  // is sent of it, and the caveat says the prefix stopped at the text bound.
+  const exact = boundedWindows("", [{ index: 0, content: "z".repeat(3600) }, { index: 1, content: "the words after it" }], { windowTokens: 300, maxWindows: 3 });
+  assert(exact.windows.length === 1 && exact.windows[0].content.length === 3600 && exact.coverage?.cut === false && exact.coverage.of === 2,
+         `a run of exactly the bound is sent whole and the next window not at all — no empty call (${exact.windows.length} window(s), ${JSON.stringify(exact.coverage)})`);
+  assert(/^partial: 1 of 2 windows extracted, stopped at the text bound, 900 estimated tokens/.test(partialCaveat(exact.coverage!, { windowTokens: 300, maxWindows: 3 })),
+         "…its caveat: extracted, stopped at the text bound — not \"over OB1_EXTRACT_MAX_WINDOWS\", which it was not");
+  // A cut never ends between the halves of a surrogate pair.
+  const emoji = `a${"😀".repeat(5000)}`;
+  const emojiCut = boundedWindows(emoji, chunkContent(emoji, { maxTokens: 600, overlapTokens: 75 }), { windowTokens: 600, maxWindows: 1 }).windows[0].content;
+  assert(emojiCut.length > 2000 && !/[\uD800-\uDBFF]$/.test(emojiCut), `a cut at 2,400 units lands mid-pair and drops the lone half (${emojiCut.length} units, last ${emojiCut.charCodeAt(emojiCut.length - 1).toString(16)})`);
+  // A window chunk.ts packed from words may pass the size by the word that
+  // filled it; a thought of exactly the bound's windows, each so, is whole —
+  // the text bound is not a cut of what the count admits (review pass 1).
+  const overshot = Array.from({ length: 3 }, (_, i) => ({ index: i, content: "word ".repeat(236).trim() })); // 236 words: 307 estimated tokens, 7 over a 300 window
+  assert(overshot.every((c) => estimateTokens(c.content) > 300) && boundedWindows("", overshot, { windowTokens: 300, maxWindows: 3 }).coverage === undefined,
+         "three windows each a word past the size, under a bound of three, are extracted whole — no coverage");
+  // The prefix rule itself, on windows given: the text bound ends a prefix
+  // at an over-window run mid-thought, cut to what is left.
+  const mid = boundedWindows("", [{ index: 0, content: "a b c ".repeat(100) }, { index: 1, content: "y".repeat(4000) }, { index: 2, content: "tail words here" }], { windowTokens: 300, maxWindows: 3 });
+  assert(mid.windows.length === 2 && mid.coverage?.cut === true && mid.coverage.of === 3 && estimateTokens(mid.windows.map((w) => w.content).join("")) <= 900 && mid.windows[1].content.startsWith("yyy"),
+         `a run over the text bound mid-thought ends the prefix there, cut to what the bound left (${JSON.stringify(mid.coverage)}, ${mid.windows[1]?.content.length} characters of the run)`);
 
   // One window answering prose fails the thought, not the window.
   reqs.length = 0;
