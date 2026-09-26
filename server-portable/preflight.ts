@@ -776,10 +776,12 @@ if (configFailed) {
                      has_schema_privilege('public', 'USAGE') AS usage,
                      quote_ident(current_user::text) AS role,
                      quote_ident(current_database()::text) AS db`) as { present: boolean; usage: boolean; role: string; db: string }[];
-            const putOnPath = `ALTER ROLE ${r?.role} IN DATABASE ${r?.db} SET search_path = <the schemas it has>, public; (a search_path in the connection string outranks it)`;
-            if (r?.present) offPath = r.usage
-              ? { cause: "public is not on its search_path", fix: `Put public on the role's search_path: ${putOnPath}` }
-              : { cause: "no USAGE on schema public", fix: `GRANT USAGE ON SCHEMA public TO ${r.role};  then, if public is not on the role's search_path, ${putOnPath}` };
+            if (r?.present) {
+              const putOnPath = `ALTER ROLE ${r.role} IN DATABASE ${r.db} SET search_path = <the schemas it has>, public; (a search_path in the connection string outranks it)`;
+              offPath = r.usage
+                ? { cause: "public is not on its search_path", fix: `Put public on the role's search_path: ${putOnPath}` }
+                : { cause: "no USAGE on schema public", fix: `GRANT USAGE ON SCHEMA public TO ${r.role};  then, if public is not on the role's search_path, ${putOnPath}` };
+            }
           } finally {
             await probe.close();
           }

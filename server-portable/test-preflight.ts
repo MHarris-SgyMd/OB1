@@ -297,12 +297,12 @@ else {
   // the schema row still says to migrate. Run with public off the path, so
   // a probe that read every schema would find a cause and say otherwise.
   const otherTool = new SQL({ url: LIVE, max: 1 });
-  await otherTool.unsafe("DROP SCHEMA IF EXISTS pf_stray CASCADE; CREATE SCHEMA pf_stray; CREATE TABLE pf_stray.thoughts (id int)");
   let strayRun: { code: number; out: string };
   try {
+    await otherTool.unsafe("DROP SCHEMA IF EXISTS pf_stray CASCADE; CREATE SCHEMA pf_stray; CREATE TABLE pf_stray.thoughts (id int)");
     strayRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: `${LIVE}${LIVE.includes("?") ? "&" : "?"}options=-csearch_path%3Dnowhere` });
   } finally {
-    await otherTool.unsafe("DROP SCHEMA pf_stray CASCADE");
+    await otherTool.unsafe("DROP SCHEMA IF EXISTS pf_stray CASCADE");
     await otherTool.close();
   }
   assert(/✗\s+schema\s+relation "thoughts" does not exist\n\s+→ Apply the migrations: cd db && bun migrate\.ts/.test(strayRun.out),
