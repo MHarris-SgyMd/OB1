@@ -78,6 +78,10 @@ const arm = (name: string, windowTokens: number, opts: Partial<ExtractWindowing>
   name,
   windowing: { windowTokens, overlapTokens: windowTokens === Number.MAX_SAFE_INTEGER ? 0 : overlap(windowTokens), maxWindows: EXTRACT_MAX_WINDOWS, header: false, outputBudget: true, retryRunaway: false, streamAbort: false, ...opts },
 });
+// The larger model the `e` arms escalate a runaway to (SMD-2000): --escalate,
+// else OB1_EXTRACT_ESCALATE_MODEL. Absent, the `e` arms are refused below
+// rather than silently measured as a same-model penalised retry.
+const ESCALATE = flag("escalate") ?? process.env.OB1_EXTRACT_ESCALATE_MODEL ?? "";
 const ALL_ARMS: Arm[] = [
   arm("whole", Number.MAX_SAFE_INTEGER, { outputBudget: false }),
   arm("whole+budget", Number.MAX_SAFE_INTEGER),
@@ -94,10 +98,18 @@ const ALL_ARMS: Arm[] = [
   arm("whole+s", Number.MAX_SAFE_INTEGER, { retryRunaway: true, streamAbort: true }),
   arm("w1200s", 1200, { retryRunaway: true, streamAbort: true }),
   arm("w600s", 600, { retryRunaway: true, streamAbort: true }),
+  // `e`: a call that runs to its budget is escalated to a larger model
+  // (SMD-2000), unpenalised, rather than retried on the same model under the
+  // penalty — the w1200e arm the ticket measures beside w1200p on the
+  // stragglers and the brain's runaways.
+  arm("w1200e", 1200, { retryRunaway: true, ...(ESCALATE ? { escalateModel: ESCALATE } : {}) }),
 ];
 const wanted = flag("arms")?.split(",").map((s) => s.trim()).filter(Boolean);
 const ARMS = wanted ? ALL_ARMS.filter((a) => wanted.includes(a.name)) : ALL_ARMS;
 if (wanted && ARMS.length !== wanted.length) { console.error(`unknown arm in --arms; known: ${ALL_ARMS.map((a) => a.name).join(", ")}`); process.exit(2); }
+// An `e` arm with no model to escalate to would fall through to the penalised
+// retry and measure the wrong thing (SMD-2000) — refuse it by name.
+if (ARMS.some((a) => a.windowing.retryRunaway && a.name.endsWith("e") && !a.windowing.escalateModel)) { console.error("the w1200e arm escalates a runaway to a larger model — pass --escalate <model> (or set OB1_EXTRACT_ESCALATE_MODEL)"); process.exit(2); }
 
 // ── The planted set ──────────────────────────────────────────────────────────
 
@@ -164,7 +176,7 @@ const norm = async (s: string) => ((await sql`SELECT normalize_entity_name(${s})
 /** `calls` is every model call the thought cost — entities.ts's callsOf, the worker's own count, or what a thrown thought had made (fourth and fifth review passes). */
 /** `abortedMs` is how far into its call a runaway was aborted on the stream — the longest call's, when several were (SMD-1960); absent when none was. */
 /** `partial`: the thought was over the per-thought bound and only its prefix was extracted (SMD-2240) — ok, but its counts are the prefix's. */
-type Outcome = { arm: string; id: string; tokens: number; windows: number; calls: number; ok: boolean; malformed: boolean; timedOut: boolean; error?: string; seconds: number; entities: number; edges: number; retried: boolean; abortedMs?: number; partial?: Coverage };
+type Outcome = { arm: string; id: string; tokens: number; windows: number; calls: number; ok: boolean; malformed: boolean; timedOut: boolean; error?: string; seconds: number; entities: number; edges: number; retried: boolean; escalated?: string; abortedMs?: number; partial?: Coverage };
 const outcomes: Outcome[] = [];
 
 async function runOne(arm: Arm, doc: Doc): Promise<{ thoughtId: string | null; ex: Extraction | null; out: Outcome }> {
@@ -176,15 +188,16 @@ async function runOne(arm: Arm, doc: Doc): Promise<{ thoughtId: string | null; e
     const ex = await extractEntities(doc.content, cfg, TIMEOUT_MS, { kind: "extraction" }, arm.windowing);
     const seconds = (Date.now() - t0) / 1000;
     const retried = ex.retried === true;
+    const escalated = ex.escalated !== undefined ? { escalated: ex.escalated } : {};
     const aborted = ex.abortedMs !== undefined ? { abortedMs: ex.abortedMs } : {};
     if (ex.malformed) {
-      const out = { arm: arm.name, id: doc.id, tokens, windows: ex.windows, calls: callsOf(ex), ok: false, malformed: true, timedOut: false, seconds, entities: 0, edges: 0, retried, ...aborted };
+      const out = { arm: arm.name, id: doc.id, tokens, windows: ex.windows, calls: callsOf(ex), ok: false, malformed: true, timedOut: false, seconds, entities: 0, edges: 0, retried, ...escalated, ...aborted };
       outcomes.push(out);
       return { thoughtId, ex, out };
     }
     const [{ w }] = await sql`SELECT record_thought_entities(${thoughtId}::uuid, ${key}, ${ex.entities}::jsonb, ${ex.relations}::jsonb) AS w`;
     const res = w as { mentions?: number; edges?: number };
-    const out = { arm: arm.name, id: doc.id, tokens, windows: ex.windows, calls: callsOf(ex), ok: true, malformed: false, timedOut: false, seconds, entities: res.mentions ?? 0, edges: res.edges ?? 0, retried, ...aborted, ...(ex.coverage ? { partial: ex.coverage } : {}) };
+    const out = { arm: arm.name, id: doc.id, tokens, windows: ex.windows, calls: callsOf(ex), ok: true, malformed: false, timedOut: false, seconds, entities: res.mentions ?? 0, edges: res.edges ?? 0, retried, ...escalated, ...aborted, ...(ex.coverage ? { partial: ex.coverage } : {}) };
     outcomes.push(out);
     return { thoughtId, ex, out };
   } catch (e) {
@@ -260,7 +273,7 @@ for (const arm of ARMS) {
   for (const d of docs) {
     process.stderr.write(`  … ${arm.name} ${d.id.slice(0, 8)} (${estimateTokens(d.content)} tokens)\n`);
     const { out } = await runOne(arm, d);
-    console.log(`    ${arm.name.padEnd(13)} ${d.id.slice(0, 8)} ${String(out.tokens).padStart(5)} tok  ${out.ok ? "ok       " : out.malformed ? "malformed" : out.timedOut ? "TIMEOUT  " : "ERROR    "}  ${out.seconds.toFixed(1).padStart(6)} s  windows ${out.windows}  entities ${out.entities}  edges ${out.edges}${out.retried ? "  retried" : ""}${out.abortedMs !== undefined ? `  aborted at ${(out.abortedMs / 1000).toFixed(1)} s` : ""}${out.partial ? `  PARTIAL ${out.partial.windows} of ${out.partial.of} windows` : ""}${out.error ? `  ${out.error}` : ""}`);
+    console.log(`    ${arm.name.padEnd(13)} ${d.id.slice(0, 8)} ${String(out.tokens).padStart(5)} tok  ${out.ok ? "ok       " : out.malformed ? "malformed" : out.timedOut ? "TIMEOUT  " : "ERROR    "}  ${out.seconds.toFixed(1).padStart(6)} s  windows ${out.windows}  entities ${out.entities}  edges ${out.edges}${out.escalated ? `  escalated→${out.escalated}` : out.retried ? "  retried" : ""}${out.abortedMs !== undefined ? `  aborted at ${(out.abortedMs / 1000).toFixed(1)} s` : ""}${out.partial ? `  PARTIAL ${out.partial.windows} of ${out.partial.of} windows` : ""}${out.error ? `  ${out.error}` : ""}`);
   }
 }
 

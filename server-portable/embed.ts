@@ -76,6 +76,8 @@ export type EmbedEnv = {
   OB1_EXTRACT_MAX_WINDOWS?: string;
   /** The supersession judge's model, when it is not the metadata model (SMD-1901). */
   OB1_JUDGE_MODEL?: string;
+  /** A larger local model a runaway extraction call escalates to instead of the penalised retry (SMD-2000); unset keeps the same-model retry. */
+  OB1_EXTRACT_ESCALATE_MODEL?: string;
   OB1_METADATA_TEMPERATURE?: string;
   OB1_METADATA_REASONING?: string;
   OB1_LLM_TIMEOUT?: string;
@@ -391,6 +393,20 @@ export type EmbedConfig = {
   /** Whether a budgeted call's answer is streamed and aborted at the third copy of one item, before its budget — entities.ts's RunawayDetector; measured in evals/README.md (SMD-1960). */
   extractStreamAbort: boolean;
   /**
+   * A larger local model a runaway extraction call is remade on — no penalty,
+   * the same messages — instead of the penalised same-model retry (SMD-2000):
+   * OB1_EXTRACT_ESCALATE_MODEL, else "" (the retry stays as it was). The 27B
+   * that never looped on the thoughts the 7B could not finish is the case; the
+   * escalation spends the large model only where the small one has failed, so
+   * this is a per-brain choice the way judgeModel is (SMD-1901). The pass key
+   * stays the FIRST model's — the pass is the small model's and the escalation
+   * is its retry mechanism; which model answered is recorded on the dump line,
+   * and durable per-row lineage is SMD-1731's. windowingFor ignores it when it
+   * matches the metadata model (a same-model retry with no penalty is weaker
+   * than the penalised one it would replace).
+   */
+  extractEscalateModel: string;
+  /**
    * The model the supersession judge (consolidate.ts) runs on: OB1_JUDGE_MODEL,
    * else the metadata model. The two tasks were one knob, so the only way to
    * judge with a stronger model was to tag every capture with it too; SMD-1873
@@ -496,6 +512,9 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
     extractHeader: EXTRACT_WINDOW_HEADER,
     extractRetryRunaway: EXTRACT_RETRY_RUNAWAY,
     extractStreamAbort: EXTRACT_STREAM_ABORT,
+    // The larger model a runaway escalates to (SMD-2000); "" keeps the
+    // penalised same-model retry. A per-brain choice, like the judge's model.
+    extractEscalateModel: stringOr(env.OB1_EXTRACT_ESCALATE_MODEL, ""),
     // Trimmed like its sibling (SMD-1843): the judge's own knob, else the
     // metadata model as resolved above.
     judgeModel: stringOr(env.OB1_JUDGE_MODEL, metadataModel),

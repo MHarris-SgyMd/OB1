@@ -74,7 +74,13 @@ const embDim = env.OB1_EMBEDDING_DIM ? Number(env.OB1_EMBEDDING_DIM) : DEF_DIM;
  * probe cannot name a model the worker would not use.
  */
 const resolvedEmbed = resolveEmbedConfig(env);
-const { metadataModel: metaModel, judgeModel, egress } = resolvedEmbed;
+const { metadataModel: metaModel, judgeModel, egress, extractEscalateModel } = resolvedEmbed;
+/**
+ * The larger model a runaway extraction escalates to (SMD-2000), when it is not
+ * the metadata model — the value windowingFor would actually use, so the --deep
+ * probe below tests the model the worker would dial, not the raw knob.
+ */
+const escalateModel = extractEscalateModel && extractEscalateModel !== metaModel ? extractEscalateModel : "";
 /**
  * The two endpoints, by embed.ts's rule — the one the server dials by — so the
  * rows below print what a capture will do, not a second opinion of it. Until
@@ -3289,6 +3295,12 @@ if (deep) {
     ["metadata model", metaModel, "Capture would still succeed, but every thought would be tagged uncategorized."],
     ...(judgeModel !== metaModel
       ? [["judge model", judgeModel, "Capture is unaffected; db/consolidate.ts would fail every pair it judges."] as [string, string, string]]
+      : []),
+    // The escalation target (SMD-2000), when it is a third distinct model: a
+    // runaway is remade on it, so it must honour JSON mode too, or the answer
+    // it was meant to rescue is malformed and the thought fails.
+    ...(escalateModel && escalateModel !== judgeModel
+      ? [["extraction escalation model", escalateModel, "Capture and the judge are unaffected; a runaway extraction escalated to it would fail rather than be rescued."] as [string, string, string]]
       : []),
   ];
   for (const [row, model, consequence] of probes) {
