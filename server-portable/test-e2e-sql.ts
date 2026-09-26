@@ -431,6 +431,21 @@ console.log("\n[6c] list_logged_searches reads back a logged search over HTTP (S
   assert(/since. must be an ISO-8601 time/.test(sinceErr), `a malformed since is refused, not a cast error (${sinceErr.slice(0, 60)})`);
 }
 
+console.log("\n[6d] worker_status over HTTP — the tool and the keyed GET mirror (SMD-2131)");
+{
+  // No claims are seeded over HTTP (nothing here sets ob1_config.entity_extraction_key),
+  // so this is the empty case — an array, not an error — plus the tool/route/auth
+  // wiring. Exact counts are proven in test-store-sql [5e].
+  const viaTool = JSON.parse(await call("worker_status"));
+  assert(Array.isArray(viaTool), `worker_status returns a JSON array (${JSON.stringify(viaTool).slice(0, 40)})`);
+  assert(viaTool.every((r: { workType?: unknown; pending?: unknown }) => typeof r.workType === "string" && typeof r.pending === "number" && "active" in r && "stale" in r), "each row carries the counts, stale and active");
+  // The keyed GET mirror: a read key gets the same array; no key gets plain "ok".
+  const keyed = await fetch(`${BASE}/worker-status`, { headers: { "x-brain-key": "e2e-key" } });
+  assert(Array.isArray(await keyed.json()), "GET /worker-status with a read key returns the JSON array");
+  const bare = await fetch(`${BASE}/worker-status`);
+  assert((await bare.text()) === "ok", "GET /worker-status without a key is plain ok");
+}
+
 console.log("\n[7] Dedup through the tool surface");
 {
   const before = await call("thought_stats");

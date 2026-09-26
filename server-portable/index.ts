@@ -1633,6 +1633,33 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
+  // Tool 3b-iv: the background-work queues (SMD-2131) — per work_type, what is
+  // pending / in flight / done / failed / stalled over thought_work_claims, so an
+  // operator or agent can ask a running brain about its queues without shelling into
+  // Postgres (SMD-1844 closed the host port). Read-only, aggregated in SQL; SQL
+  // backend only (the table is not on PostgREST). Gated like the other read tools.
+  if (canRead(principal)) server.registerTool(
+    "worker_status",
+    {
+      title: "Worker Queue Status",
+      description:
+        "Report the background-work pools (entity extraction, consolidation, re-embed) — one row per work_type with pending / claimed (in flight) / succeeded / failed counts, how many are unpooled (not yet queued), the corpus total, how many claimed leases are STALE (a dead worker's lease past its ttl), and whether the pool is the brain's active one. " +
+        "Read-only. Returns a JSON array; empty when nothing has been queued.",
+      annotations: {
+        readOnlyHint: true,
+      },
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const rows = await (await db()).workerStatus();
+        return { content: [{ type: "text" as const, text: JSON.stringify(rows) }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
   // Tool 3c: what this brain is (SMD-2041) — version, commit, store, tier, the
   // database's versions, ledger, counts, size and HNSW parameters, one short
   // table. Gated like the other read tools. The same record is the keyed
@@ -2526,6 +2553,36 @@ app.get("*", async (c, next) => {
   clearTimeout(timer);
   if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
   return c.json(await info, 200, corsHeaders);
+});
+
+// The worker-queue status as a keyed GET (SMD-2131) — the REST mirror of the
+// worker_status tool, the same authentication as /health (keyed reader → the JSON,
+// capture/wrong/no/revoked key → plain "ok", HEAD → "ok"). Kept off the /health
+// BrainInfo body deliberately: this read is SQL-backend only and would otherwise
+// couple a work-queue read into the health path's identity budget.
+const WORKER_STATUS_PATH = /(^|\/)worker-status\/?$/;
+app.get("*", async (c, next) => {
+  if (!WORKER_STATUS_PATH.test(c.req.path)) return next();
+  const principal = authenticateRequest(c.req.raw, {
+    MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
+    MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
+  }, { admit: SCOPES });
+  if (!principal || !canRead(principal)) return c.text("ok", 200, corsHeaders);
+  if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
+  // The same identity gate as /health: a revoked or unresolved key is shown nothing.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const identity = await Promise.race([
+    agents().resolve(db(), principal),
+    new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), HEALTH_DEADLINE_MS); }),
+  ]);
+  clearTimeout(timer);
+  if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
+  try {
+    return c.json(await (await db()).workerStatus(), 200, corsHeaders);
+  } catch (e) {
+    // SQL-only: a PostgREST (Workers) deployment cannot serve this — a reason, not a bare 500.
+    return c.json({ error: (e as Error).message }, 200, corsHeaders);
+  }
 });
 
 // ── A tool call outlives the runtime's idle timeout (SMD-1864) ───────────────
