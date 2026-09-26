@@ -5243,9 +5243,13 @@ console.log("\n[26] recipes/brain-backup and recipes/lint-sweep on the SQL shim:
   // planted table is the truth every printed count is held to. lint-sweep.js
   // reads `.env` and `.env.local` from ITS OWN directory (the recipe's, not the
   // cwd — `--no-env-file` stops Bun's loader, not the script's), so on a machine
-  // where a developer keeps one there the sweep runs it could reach are skipped: that file's
-  // SUPABASE_URL would defeat the refusal case and its OPENROUTER_API_KEY would
-  // pay for Tier 3 (review pass 1, cold read). CI has no such file.
+  // where a developer keeps one there the four sweep runs it could reach are
+  // skipped: that file's SUPABASE_URL would defeat the refusal case and its
+  // OPENROUTER_API_KEY would pay for Tier 3 (review pass 1, cold read); the two
+  // `--tier=2` runs — absence, the denied role — take their URL from the
+  // environment, which the script prefers, and read no key, so they run
+  // everywhere. CI has no such file. Residue, as [18]'s: entity-extraction's two
+  // indexes on 016's `thought_entities` outlive the catalog diff.
   const sql = new SQL({ url: URL_, max: 2 });
   const catalog26 = async () => ({
     tables: new Set(((await sql`SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
@@ -5262,7 +5266,9 @@ console.log("\n[26] recipes/brain-backup and recipes/lint-sweep on the SQL shim:
   const lint = (extra: Record<string, string>, ...flags: string[]) => runScript(["bun", join(RECIPES, "lint-sweep/lint-sweep.js"), ...flags], { cwd: lintDir, env: env(extra) });
   const backup = (extra: Record<string, string>) => runScript(["bun", join(RECIPES, "brain-backup/backup-brain.mjs")], { cwd: backupDir, env: env(extra) });
   const firstLine = (s: string) => s.trim().split("\n")[0] ?? "";
-  const tierLines = (out: string) => out.split("\n").filter((l) => /^\[tier/.test(l)).join(" | ");
+  // The tier lines and the script's own FAILED line, so a failed assertion's message says why (review pass 6, run-it:
+  // under the mutants it read `[tier 2] graph lint…` alone).
+  const tierLines = (out: string) => out.split("\n").filter((l) => /^\[tier|^\[lint-sweep\] FAILED/.test(l)).join(" | ");
   const recipeEnvFile = [".env", ".env.local"].map((f) => join(RECIPES, "lint-sweep", f)).find((f) => existsSync(f));
   try {
     await sql`DELETE FROM thoughts`;
@@ -5286,16 +5292,13 @@ console.log("\n[26] recipes/brain-backup and recipes/lint-sweep on the SQL shim:
     // The tolerated absence, before the graph schema lands: a brain without `schemas/entity-extraction` — the README's
     // optional case — is Tier 2's "absent", exit 0 and a report naming the two tables; 016's `thought_entities` is here,
     // so it is not among them, and the 210 rows at importance ≥ 4 are all unlinked. A rule that refused everything
-    // aborted here with 42P01 and passed every other assertion (review pass 5, mutant).
-    if (recipeEnvFile) {
-      skip("…Tier 2 on a brain without entity-extraction: absent, not refused", `${recipeEnvFile.slice(CONTRIB_DIR.length + 1)} exists on this machine and the script reads it`);
-    } else {
-      const absentRun = await lint({ SUPABASE_URL: URL_ }, "--tier=2", `--report=${join(lintDir, "absent.md")}`);
-      let absentReport = "";
-      try { absentReport = readFileSync(join(lintDir, "absent.md"), "utf8"); } catch { /* not written: the assertion says so */ }
-      assert(absentRun.code === 0 && /\[tier 2\] done — 210 high-imp isolated, 0 isolated entities, missing: entities,edges$/m.test(absentRun.out) && /\*Graph tables absent: entities, edges\./.test(absentReport),
-        `…Tier 2 on a brain without entity-extraction: exit 0, the two tables named absent and 016's thought_entities not among them, 210 unlinked high-importance rows (${absentRun.code}: ${tierLines(absentRun.out) || firstLine(absentRun.out)})`);
-    }
+    // aborted here with 42P01 and passed every other assertion (review pass 5, mutant). Outside the env-file guard,
+    // as the probe is: the URL rides in the environment and Tier 2 reads no key (review pass 6, cold read).
+    const absentRun = await lint({ SUPABASE_URL: URL_ }, "--tier=2", `--report=${join(lintDir, "absent.md")}`);
+    let absentReport = "";
+    try { absentReport = readFileSync(join(lintDir, "absent.md"), "utf8"); } catch { /* not written: the assertion says so */ }
+    assert(absentRun.code === 0 && /\[tier 2\] done — 210 high-imp isolated, 0 isolated entities, missing: entities,edges$/m.test(absentRun.out) && /\*Graph tables absent: entities, edges\./.test(absentReport),
+      `…Tier 2 on a brain without entity-extraction: exit 0, the two tables named absent and 016's thought_entities not among them, 210 unlinked high-importance rows (${absentRun.code}: ${tierLines(absentRun.out) || firstLine(absentRun.out)})`);
     await sql.unsafe(readFileSync(join(SCHEMAS_DIR, "entity-extraction/schema.sql"), "utf8"));
     await sql.unsafe(readFileSync(join(RECIPES, "lint-sweep/views.sql"), "utf8"));
     await sql`INSERT INTO entities (entity_type, canonical_name, normalized_name) VALUES ('person', 'Ada', 'ada'), ('person', 'Bob', 'bob'), ('topic', 'Graphs', 'graphs')`;
