@@ -251,12 +251,15 @@ export class SqlStore implements ThoughtStore {
     // `since`. One extra row over the limit tells the caller more matched without a
     // count query. query_log is opt-in (OB1_QUERY_LOG); when it was never on this
     // is simply empty.
+    // "" is not a time: normalise it to null (no window) rather than cast it and
+    // fail, so a direct caller matches the PostgREST store, which treats it as falsy.
+    const since = opts.since || null;
     const rows = await this.sql`
       SELECT query, arm, tier, logged_at, match_count, threshold, recency_weight, filter
       FROM query_log
       WHERE kind = 'search'
         AND query IS NOT NULL
-        AND (${opts.since}::timestamptz IS NULL OR logged_at > ${opts.since}::timestamptz)
+        AND (${since}::timestamptz IS NULL OR logged_at > ${since}::timestamptz)
       ORDER BY logged_at DESC, id DESC
       LIMIT ${opts.limit + 1}::int`;
     const truncated = rows.length > opts.limit;

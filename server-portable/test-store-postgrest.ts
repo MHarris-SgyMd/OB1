@@ -510,6 +510,8 @@ console.log("\n[8d] listLoggedSearches over PostgREST — the search rows, windo
     const all = await store.listLoggedSearches({ since: null, limit: 100 });
     assert(all.searches.length === 2 && !all.truncated, `two search rows — the action row excluded (${all.searches.length})`);
     assert(all.searches[0].query === "newer query" && all.searches[0].arm === "hybrid" && all.searches[0].matchCount === 10, "most recent first, arguments intact");
+    assert(all.searches[0].threshold === 0.5 && all.searches[0].recencyWeight === 0.25, "threshold and recency_weight map to the right fields (parity with the SQL store)");
+    assert(all.searches[0].tier === null && all.searches[1].tier === "stable", "tier maps through");
     assert(JSON.stringify(all.searches[0].filter) === JSON.stringify({ type: "note" }), "the filter is an object");
     assert(all.searches.every((s) => s.loggedAt !== null && isoTimestampOrNull(s.loggedAt) === s.loggedAt), "loggedAt is the shared ISO form");
     const one = await store.listLoggedSearches({ since: null, limit: 1 });

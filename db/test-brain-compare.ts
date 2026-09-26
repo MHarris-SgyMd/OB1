@@ -279,6 +279,10 @@ ok(trimBase("http://h:1///") === "http://h:1" && trimBase("http://h:1") === "htt
   let threw = "";
   try { await resolveBrain("http://localhost:9/", undefined, undefined); } catch (e) { threw = (e as Error).message; }
   ok(/no read key/.test(threw), "resolveBrain refuses a URL with no key anywhere");
+  // An invalid URL's ?key= is not echoed in the error (review pass 2 key-safety tidy).
+  let badUrl = "";
+  try { await resolveBrain("http://[oops?key=SEKRIT", undefined, undefined); } catch (e) { badUrl = (e as Error).message; }
+  ok(/is not a valid URL/.test(badUrl) && !/SEKRIT/.test(badUrl), `an invalid URL's ?key= is not echoed (${badUrl})`);
 }
 
 // ---------------------------------------------------------------------------

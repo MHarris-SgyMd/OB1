@@ -106,7 +106,10 @@ export function splitKeyFromUrl(url: string): { base: string; urlKey: string | u
 export async function resolveBrain(ref: string, keyArg: string | undefined, envKey: string | undefined): Promise<BrainEndpoint> {
   if (/^https?:\/\//i.test(ref)) {
     const parsed = splitKeyFromUrl(ref);
-    if (!parsed) throw new Error(`--compare: ${JSON.stringify(ref)} is not a valid URL.`);
+    // Never echo the raw ref: an invalid URL cannot be parsed to strip a ?key=, so
+    // show only the part before any query string (review pass 2 — a key-safety tidy
+    // in already-merged code, reachable via --a/--b too).
+    if (!parsed) throw new Error(`--compare: ${JSON.stringify(ref.split("?")[0])} is not a valid URL.`);
     const host = new URL(ref).host;
     const key = keyArg ?? parsed.urlKey ?? envKey;
     if (!key) throw new Error(`--compare: no read key for ${host}. Pass --a-key/--b-key, set OB1_COMPARE_KEY, or put it in the URL as ?key=.`);

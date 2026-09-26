@@ -369,6 +369,8 @@ console.log("\n[5d] listLoggedSearches — the search rows of query_log, windowe
     assert(one.searches.length === 1 && one.truncated === true && one.searches[0].query === "newer query", "limit 1 returns the newest and flags truncated");
     const recent = await store.listLoggedSearches({ since: new Date(Date.now() - 90 * 60 * 1000).toISOString(), limit: 100 });
     assert(recent.searches.length === 1 && recent.searches[0].query === "newer query", "since excludes the two-hour-old row");
+    const emptySince = await store.listLoggedSearches({ since: "", limit: 100 });
+    assert(emptySince.searches.length === 2, "an empty since is no window, not a ''::timestamptz cast error (review pass 2)");
     await raw`DELETE FROM query_log`;
   } finally {
     await raw.close();
