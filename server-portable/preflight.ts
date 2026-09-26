@@ -31,6 +31,7 @@ import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
 import { LATEST_MIGRATION } from "./version.ts";
+import { drainBoundFrom } from "./shutdown.ts";
 import { tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
 
@@ -601,6 +602,22 @@ if (chatEndpoint === embEndpoint) {
 } else {
   egressRow("embeddings egress", embEndpoint, "OB1_LLM_LOCAL", "embeddings", EMB_REFUSED);
   egressRow("chat egress", chatEndpoint, localKnob({ embeddings: embEndpoint, chat: chatEndpoint }, "chat"), "chat", CHAT_REFUSED);
+}
+
+// ── Stop grace ───────────────────────────────────────────────────────────────
+
+// Only when set (SMD-2250, review pass 4). Compose appends `s` to it for the
+// server's stop_grace_period, so a value the server cannot read as whole
+// seconds makes the two disagree — `1m` a 1 ms kill while the server plans
+// 8 s of drain — and a container that refuses to start says so where a log
+// warning would not.
+if (env.OB1_STOP_GRACE) {
+  const grace = drainBoundFrom(env.OB1_STOP_GRACE);
+  if (grace.problem) {
+    add("stop grace", "fail", grace.problem, "Set OB1_STOP_GRACE to the platform's grace period in whole seconds, no unit (30, not 30s), or unset it for Docker's 10.");
+  } else {
+    add("stop grace", "ok", `${grace.graceS} s (OB1_STOP_GRACE) — a stop drains what is in flight for up to ${grace.drainBoundMs / 1000} s`);
+  }
 }
 
 // ── Access keys ──────────────────────────────────────────────────────────────

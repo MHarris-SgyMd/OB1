@@ -851,7 +851,7 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
     const idleLog = await idle.out;
     assert(idleCode === 0 && performance.now() - t1 < 1_000 && /0 requests in flight/.test(idleLog) && /no database pool was opened; exit 0/.test(idleLog),
       `an idle server stops at once, exit 0, and says it opened no pool (${idleCode} in ${Math.round(performance.now() - t1)} ms)`);
-    assert(/OB1_STOP_GRACE="soon" is not a positive number of seconds; the stop drains as for 10 s/.test(idleLog) && /waited on for up to 8 s/.test(idleLog),
+    assert(/OB1_STOP_GRACE="soon" is not a whole number of seconds from 1 to 3600, with no unit .*; the stop drains as for 10 s/.test(idleLog) && /waited on for up to 8 s/.test(idleLog),
       "…and a malformed OB1_STOP_GRACE is said at start-up and read as the default, 8 s of drain");
 
     await fetch(`http://127.0.0.1:${ctrlC.port}/health`, { headers: { "x-brain-key": KEY } }); // builds its store
@@ -975,9 +975,36 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
     "a request the stop cuts off is said to be the stop's, not the client leaving (SMD-1864's line says the call runs to its end, which it will not)");
 
   const g = (raw: string | undefined) => { const r = drainBoundFrom(raw); return `${r.graceS}/${r.drainBoundMs}/${r.problem ? "said" : "-"}`; };
-  const graceCases = [g(undefined), g(""), g("30"), g(" 20 "), g("2"), g("0"), g("-5"), g("ten")];
-  assert(graceCases.join(" ") === "10/8000/- 10/8000/- 30/28000/- 20/18000/- 2/500/- 10/8000/said 10/8000/said 10/8000/said",
-    `drainBoundFrom: the grace period less 2 s, at least 0.5 s; unset and "" the default; anything but a positive number the default, said (${graceCases.join(" ")})`);
+  const graceCases = [g(undefined), g(""), g("30"), g(" 20 "), g("2"), g("1"), g("3600"), g("0"), g("-5"), g("ten"), g("1.5"), g("30s"), g("1m"), g("3601"), g("1e3")];
+  assert(graceCases.join(" ") === "10/8000/- 10/8000/- 30/28000/- 20/18000/- 2/500/- 1/500/- 3600/3598000/- 10/8000/said 10/8000/said 10/8000/said 10/8000/said 10/8000/said 10/8000/said 10/8000/said 10/8000/said",
+    `drainBoundFrom: whole seconds from 1 to 3600, less 2 s, at least 0.5 s; unset and "" the default; a fraction, a unit, 0, a negative or past an hour the default, said (${graceCases.join(" ")})`);
+
+  // Compose appends `s` to OB1_STOP_GRACE for every server's stop_grace_period,
+  // with its own fallback: held equal to the code's default, since check 14
+  // reads environment forwards only (review pass 4 — FORK.md's value defined twice).
+  const { DEFAULT_STOP_GRACE_S } = await import("./shutdown.ts");
+  const graceFallbacks: string[] = [];
+  for (const file of ["compose.yaml", "compose.tiers.yaml"]) {
+    const doc = Bun.YAML.parse(await Bun.file(new URL(`../deploy/${file}`, import.meta.url)).text()) as { services: Record<string, { build?: { dockerfile?: string }; stop_grace_period?: string }> };
+    for (const [name, svc] of Object.entries(doc.services)) {
+      if (svc.build?.dockerfile !== "server-portable/Dockerfile") continue;
+      graceFallbacks.push(`${file}:${name}=${/^\$\{OB1_STOP_GRACE:-(\d+)\}s$/.exec(svc.stop_grace_period ?? "")?.[1] ?? svc.stop_grace_period}`);
+    }
+  }
+  assert(graceFallbacks.length === 4 && graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
+    `every compose server's stop_grace_period is \${OB1_STOP_GRACE:-${DEFAULT_STOP_GRACE_S}}s, the code's default (${graceFallbacks.join(", ")})`);
+
+  // Preflight refuses a value compose would render wrong, and reports one it reads.
+  const preflightWith = async (grace: string) => {
+    const p = Bun.spawn(["bun", "--no-env-file", "preflight.ts"], { cwd: import.meta.dir, env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", OB1_STOP_GRACE: grace }, stdout: "pipe", stderr: "pipe" });
+    const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
+    await p.exited;
+    return out;
+  };
+  const badGrace = await preflightWith("1m");
+  const goodGrace = await preflightWith("30");
+  assert(/✗\s+stop grace\s+OB1_STOP_GRACE="1m" is not a whole number of seconds/.test(badGrace) && /30, not 30s/.test(badGrace) && /✓\s+stop grace\s+30 s \(OB1_STOP_GRACE\) — a stop drains what is in flight for up to 28 s/.test(goodGrace),
+    "preflight fails a stop grace compose would render wrong (1m → a 1 ms kill), with the fix, and reports one it reads");
 
   // A tool call runs on after its client has gone, which Bun's request count
   // does not see (review pass 3: a stop whose only call's client had just left

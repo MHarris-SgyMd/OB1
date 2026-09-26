@@ -268,7 +268,7 @@ slip — `OB1_STORE=postgrest` kept beside a `SUPABASE_URL` that holds a
 `postgres://` string — is refused by name too, the string masked, rather than
 handed to supabase-js as a base URL.
 
-Optional: `OPEN_BRAIN_CITATION_BASE_URL`, `PORT`, `OB1_STOP_GRACE` (the platform's grace period for a stop, in seconds; default 10 — see Caveats).
+Optional: `OPEN_BRAIN_CITATION_BASE_URL`, `PORT`, and on Bun `OB1_STOP_GRACE` (the platform's grace period for a stop, in whole seconds with no unit; default 10 — see Caveats).
 
 On a container these are ordinary environment variables. On Workers use
 `wrangler secret put NAME` — **never** put them in `wrangler.toml`, which is
@@ -404,7 +404,7 @@ says so; see Caveats.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 322 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
+bun test-server.ts        # 324 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
 bun test-auth.ts          # 97 — scoped, hashed, named keys
 bun run test:local        # 52 — fully local provider, no credential
 bun run test:sql          # 123 — store conformance, real Postgres in a container
@@ -502,10 +502,12 @@ stored in the same write").
   whose client has gone runs on, and a capture may still land), closes the
   database pool and exits 0: `docker compose stop server` returns in about
   0.1 s idle, or when the last call ends. The wait is `OB1_STOP_GRACE` less
-  2 s: the platform's grace period in seconds, 10 unless set (Docker's, so 8 s
-  of drain), which compose also reads for the server's `stop_grace_period`;
-  set it to the platform's elsewhere (Kubernetes' and ECS's 30, Fly's
-  `kill_timeout`). A call still running at the bound is cut off, the line says how many, an
+  2 s (at least 0.5 s): the platform's grace period in whole seconds from 1 to
+  3600, no unit, 10 unless set (Docker's, so 8 s of drain). Compose appends
+  `s` to the same variable for the server's `stop_grace_period`, so preflight
+  refuses anything else (`30s` would fail compose itself, `1m` would be a
+  1 ms kill); set it to the platform's elsewhere (Kubernetes' and ECS's 30,
+  Fly's `kill_timeout`). A call still running at the bound is cut off, the line says how many, an
   MCP call's own line says the stop cut it, and the exit is 1; a second signal
   cuts the wait short. The bounds count from the handler, so the stop inside
   Docker's 10 s grace period is measured (8.4–8.5 s for a cut at the bound),
