@@ -157,7 +157,7 @@ Major recipe categories:
 - Capture and workflow: auto-capture, panning for gold, schema-aware routing, source filtering, daily digest, research-to-decision workflow.
 - Knowledge graph/wiki: OB graph, entity wiki, wiki compiler, wiki synthesis, typed edge classifier.
 - Agent workflows: OpenClaw Agent Memory, code review memory, TaskFlow work log.
-- Alternate architecture: Vercel/Neon/Telegram, local Ollama embeddings, Kubernetes deployment.
+- Alternate architecture: Vercel/Neon/Telegram, Kubernetes deployment. Local embedding is the fork's default stack — a local Ollama, declared local by the operator — not a recipe (SMD-2138).
 
 When helping users pick a recipe, start from their goal and data source. Do not suggest bulk imports until the base Open Brain setup is working and they can capture/search a test thought.
 
