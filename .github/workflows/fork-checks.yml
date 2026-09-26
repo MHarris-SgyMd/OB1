@@ -402,6 +402,14 @@ jobs:
         working-directory: db
         run: bun test-replay.ts
 
+      # SMD-2109. The cross-brain compare (db/brain-compare.ts) is a read client:
+      # two fake brains (Bun.serve) answer a keyed /health and tools/call, so the
+      # identity/freshness/retrieval diff, the verdict and the key-safety run with
+      # no service container, no model and no key.
+      - name: Cross-brain compare (fake brains, no database)
+        working-directory: db
+        run: bun test-brain-compare.ts
+
   db-live:
     name: Schema against real Postgres
     runs-on: ubuntu-24.04
@@ -600,15 +608,6 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
-      # Migrations applied INCREMENTALLY, onto a database that already holds
-      # data — the one situation every other suite avoids by resetting first,
-      # and the only one a real deployment is ever in.
-      - name: Incremental upgrade
-        working-directory: db
-        run: bun test-upgrade.ts
-        env:
-          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
-
       # Stable agent identity: that a rename does not orphan history (which
       # binding to the key NAME could not survive), and that a digest revoked in
       # the database is refused even though MCP_ACCESS_KEYS still lists it.
@@ -653,14 +652,67 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
-      # The deploy gate. Without it a misconfigured server starts, answers the MCP
-      # handshake, passes every HTTP liveness probe, and fails only when a user
-      # captures their first thought.
-      - name: Preflight catches bad configurations
-        working-directory: server-portable
-        run: bun test-preflight.ts
+      # Two suites side by side, each against its own database on the service
+      # container (SMD-2219). test-upgrade.ts applies migrations INCREMENTALLY,
+      # onto a database that already holds data — the one situation every other
+      # suite avoids by resetting first, and the only one a real deployment is
+      # ever in; most of its time is three waits on the migrator's 10 s
+      # lock_timeout. test-preflight.ts is the deploy gate: without it a
+      # misconfigured server starts, answers the MCP handshake, passes every
+      # HTTP liveness probe, and fails only when a user captures their first
+      # thought; its time is its preflight runs, a subprocess each. In series
+      # they were the job's two longest steps, and the job was the run's
+      # critical path. Both connect as one role to one cluster, so what the
+      # cluster shares — a role and its settings, pg_locks, pg_stat_activity —
+      # is scoped in each suite to its own database, or named for the suite;
+      # both headers say so, and a fixture added to either keeps to it. The
+      # rest is SMD-2092's step for the schema legs: each run writes its own
+      # log, both are waited on and printed (a passing one folded, a failing
+      # one open), each has its own time limit (a hang ends as 124, or 137 when
+      # TERM is ignored), and the two summary lines close the step. A leg that
+      # fails here and passes alone (db/with-postgres.sh) is load, or a leak
+      # between the two: replay this run: block against one with-postgres.sh
+      # database.
+      - name: Incremental upgrade and preflight, side by side
+        working-directory: db
+        run: |
+          # test-upgrade's database; the service creates only ob1test.
+          bun --eval 'const s = new Bun.SQL(process.env.DATABASE_URL); await s.unsafe("CREATE DATABASE ob1upgrade"); await s.close()'
+          limit=10m
+          DATABASE_URL=$UPGRADE_DATABASE_URL \
+            timeout --kill-after=10s "$limit" bun test-upgrade.ts > "$RUNNER_TEMP/test-upgrade.log" 2>&1 &
+          upgrade_pid=$!
+          (cd ../server-portable && exec timeout --kill-after=10s "$limit" bun test-preflight.ts) > "$RUNNER_TEMP/test-preflight.log" 2>&1 &
+          preflight_pid=$!
+          # `|| rc=$?`, not a bare wait: the step runs under -e, and a bare wait
+          # on a failed run would end the step before either log is printed.
+          upgrade_rc=0; wait "$upgrade_pid" || upgrade_rc=$?
+          preflight_rc=0; wait "$preflight_pid" || preflight_rc=$?
+          summaries=""
+          for leg in "test-upgrade:$upgrade_rc" "test-preflight:$preflight_rc"; do
+            suite=${leg%%:*}
+            rc=${leg#*:}
+            log="$RUNNER_TEMP/$suite.log"
+            case $rc in
+              124) rc="124, over the $limit limit" ;;
+              137) rc="137, killed: over the $limit limit with TERM ignored, or out of memory" ;;
+            esac
+            if [ "$rc" = 0 ]; then
+              echo "::group::$suite.ts — passed"
+              cat "$log"
+              echo "::endgroup::"
+            else
+              echo "::error title=SQL data layer::$suite.ts failed (exit $rc) — its log follows"
+              cat "$log"
+            fi
+            summary=$(grep -aE '^[0-9]+ assertions: ' "$log" | tail -n 1 || true)
+            summaries+="  $suite.ts: ${summary:-no summary line — the run stopped before its report} (exit $rc)"$'\n'
+          done
+          printf '\n%s' "$summaries"
+          [ "$upgrade_rc" -eq 0 ] && [ "$preflight_rc" -eq 0 ]
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+          UPGRADE_DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1upgrade
 
       # Every vendored writer of a thought's content or vector goes through
       # update_thought or the 3-argument upsert_thought (change 69, SMD-1228):
@@ -898,8 +950,9 @@ jobs:
       # finds it goes through the server, which logs it. Then the refresh into a
       # second database on the server, read back one test per line (a test inside
       # an && list does not trip set -e: a schema-only copy passed that way in
-      # review), the tier stamp, a --replay that replays that search and a --diff
-      # that finds it unmoved, and a retry over a copy left stamped stable, as a
+      # review), the tier stamp, a --replay that replays that search, a --diff
+      # that finds it unmoved and one over the empty window after the refresh
+      # that exits 3, and a retry over a copy left stamped stable, as a
       # refresh that died after its restore leaves it. Then the two guards the
       # wrapper runs under, since from its container every database is remote:
       # the brain under its service name and its container name is one
@@ -935,6 +988,14 @@ jobs:
           grep -E '^replayed [1-9][0-9]* of ' /tmp/tier-replay.out
           ./tier.sh --diff --since 1970-01-01T00:00:00Z --from postgres --to postgres/ob1_tier_ci | tee /tmp/tier-diff.out
           grep -F 'what moved: nothing' /tmp/tier-diff.out
+          # SMD-2182: with no --since the window starts at the copy's refresh,
+          # and stable has logged nothing since, so a --diff compares nothing:
+          # exit 3 through the wrapper, not the pass it used to be.
+          empty_rc=0
+          ./tier.sh --diff --from postgres --to postgres/ob1_tier_ci > /tmp/tier-empty.out || empty_rc=$?
+          cat /tmp/tier-empty.out
+          [ "$empty_rc" = 3 ] || { echo "a --diff that compared nothing exited $empty_rc, not 3" >&2; exit 1; }
+          grep -F 'nothing to compare: stable logged no searches' /tmp/tier-empty.out
           # A refresh that dies after its restore leaves the source's ob1_config
           # behind — the brain's, here no tier; the dogfood's, tier=stable. The
           # mark the refresh set on the database before its reset lets the

@@ -166,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1808 assertions: 1808 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1817 assertions: 1817 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-seven (57) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -689,6 +689,19 @@ nothing for Supabase — no grants, no RLS, no `NOTIFY pgrst`.
 and an extraction pass run at once, and a later re-embed to a third model is a
 fresh pool rather than a no-op against the first one's terminal rows.
 
+**No cloud key.** Nothing here needs one: `deploy/compose.yaml --profile
+local-models` runs an Ollama beside the server and a capture embeds through it
+(`OB1_LLM_BASE_URL`) — once you have declared it local: `OB1_LLM_LOCAL=1` in
+`deploy/.env` for the server, and in the shell you run `reembed.ts` below from
+(it reads its own environment, not `deploy/.env`); the profile sets neither, and
+under the default every embedding is refused without it (`SETUP.md`). The rows
+captured before that, or under another model, are what `reembed.ts` below
+walks, 021's label per row telling which are at the target — an exact match
+with `OB1_EMBEDDING_MODEL`'s spelling — and which are not. The retired
+`recipes/local-ollama-embeddings` did the same by hand — an Ollama call per
+thought, then `upsert_thought` over a PostgREST this stack does not run
+(SMD-2138).
+
 ### `reembed.ts`
 
 ```bash
@@ -1204,25 +1217,27 @@ weighs 0. Unsettled, because Linear keeps a relation after a ticket completes: a
 Done ticket whose blocker is still open is settled, not blocked, and weighs what
 its lifecycle says. A blocker is open unless its own lifecycle, resolved through
 `source_thought()` and read by the ticket-head rule above, is completed or
-canceled, so a settled blocker is not a blocker. A blocker the brain does not
-hold, or one with no status_type this tool knows, still blocks, and the output
-counts those. A row derived from a ticket takes its ticket's blockers as it
-takes its status. Only an active link counts (053 closes a relation the source
-dropped), and only `blocks` / `blocked_by`: `child_of` makes nobody a blocker. A
-thought whose ticket no dependency names counts as unblocked. The dependency
-caveat line (`coverage.dependencies` in the JSON) gives the active dependency
-facets and when the latest was written or closed, how many thoughts belong to a
-ticket a dependency names on either side, how many the flag held back in the run
-(took from a weight above 0 to 0), and how many of the held thoughts' blockers
-are unsettled only for want of a known status. The edges are as current as
-board-sync's last passes over both tickets of a relation: it is read from either
-side, so one removed on the board blocks until both are re-read. The flag
+canceled, so a settled blocker is not a blocker. Within a system that gates
+(Sources, below: the board does), a blocker the brain does not hold, or one with
+no status_type this tool knows, still blocks, and the output counts those. A row
+derived from a ticket takes its ticket's blockers as it takes its status. Only
+an active link counts (053 closes a relation the source dropped), and only
+`blocks` / `blocked_by`: `child_of` makes nobody a blocker. A thought whose
+ticket no gating dependency names counts as unblocked. The dependency caveat
+line (`coverage.dependencies` in the JSON) gives the active dependency facets
+and when the latest was written or closed, how many thoughts belong to a ticket
+a (gating, below) dependency names on either side, how many the flag held back
+in the run (took from a weight above 0 to 0), and how many of the held thoughts'
+blockers are unsettled only for want of a known status. The edges are as current
+as their source's last passes over both ends of a relation (board-sync's, for
+the board): it is read from either side, so one removed at the source keeps its
+effect, blocking where its system gates, until both are re-read. The flag
 composes with `--status` and `--decay-done` (the weights multiply). Without it
 (or `--decay-blocked`, below) the dependency read is not in the SQL, so every
 other mode renders byte for byte what it did (the JSON's `options` carries two
 more keys, `startable` and `decayBlocked`, both false) and a brain without 053
-runs them. With either, a brain without 053 is exit 2.
-`dependencySql` is the seam SMD-2074's node-state projection replaces.
+runs them. With either, a brain without 053 is exit 2. `dependencySql` is the
+seam SMD-2074's node-state projection replaces.
 
 **Blocked decay** (SMD-2181). `--startable` is a filter, so a blocked hub
 vanishes rather than sinks. `--decay-blocked` reads the same dependencies by the
@@ -1237,6 +1252,20 @@ decay composes with `--status` and `--decay-done` by multiplying, though the two
 decays never meet on one thought: a blocked thought is unsettled and
 `DONE_WEIGHT` weighs only settled ones. Degree counts neighbours, not evidence,
 and is unchanged by it. The JSON's `options` gains `decayBlocked: false`.
+
+**Sources** (SMD-2218). The board is not the only writer of dependencies:
+`ingest-records.ts --items` writes `blocks` / `blocked_by` for any system, and
+both flags read them. A blocker is settled by its row's lifecycle, which a row
+of another system has only if its source stated one (an items file, in
+`facets.status_type`, one of the six types). So a system gates only when some
+source row of it states a known status_type in its own metadata — a status a row
+borrows through a Linear ticket claim does not count — and is then read exactly
+as the board is, an unknown blocker blocking. A system that states none cannot
+say a blocker is settled: its links gate nothing, blocking no thought and naming
+no ticket, rather than hide its tickets for good, and the dependency line names
+each source with its facets and says which gate nothing. While the board is the
+only source, and states its lifecycle, the line reads as before. The JSON's
+`dependencies.systems` lists each system's facets and whether it gates.
 
 Exit 0 when ranked, 1 when no
 entity resolves (a near-miss whose only guesses the numeric rule hid is still
@@ -1972,7 +2001,7 @@ verbs are the promotion pipeline:
 bun tier.ts --refresh --from <stable-url> --to <canary-url> [--tier canary|working]
 # replay stable's logged searches against the canary and report the ranking
 bun tier.ts --replay  --from <stable-url> --to <canary-url> [--since <iso-ts>]
-# the same, printing ONLY what moved and exiting non-zero if anything did (the gate)
+# the same, as a gate: exit 1 if a ranking moved (or a step failed), 3 if nothing was compared
 bun tier.ts --diff    --from <stable-url> --to <canary-url> [--since <iso-ts>]
 # after a soak: stamp the canary's version onto stable
 bun tier.ts --promote --from <canary-url> --to <stable-url>
@@ -2037,7 +2066,11 @@ the hand-written control run. The **keyword** arm replays with no model (the arm
 `test-live` [20] exercises end to end); the **hybrid** arm re-embeds the query text,
 so it replays only when a provider is configured (`OB1_EVAL_EMBED`, as
 `evals/eval-replay.ts` uses) and is skipped-with-a-note otherwise; a row logged
-before migration 045 carries a NULL arm and is skipped rather than guessed.
+before migration 045 carries a NULL arm and is skipped rather than guessed. Both
+verbs print the window and how many rows it held, replayed and skipped. A window
+that replayed none compared nothing, and `--diff` exits 3 on it: 0 is a pass, 1 a
+ranking that moved or a step that failed, 2 a usage error or a refusal (SMD-2182).
+A side that does not answer is named with its host and port.
 
 The three tiers run as one stack, `deploy/compose.tiers.yaml` — three Postgres
 services, one shared Ollama, three servers on three loopback ports — built from the
@@ -2050,7 +2083,9 @@ claude mcp add --transport http open-brain-working http://127.0.0.1:8012/mcp
 
 **Deferred to SMD-1805 + SMD-1860:** the *canary CI job on push to `main`* (which
 runs the refresh/replay/diff against the **published** images through the merge
-queue) and `--promote`'s image-repoint half. The engine, the compose stack and the
+queue; straight after a refresh the default window is empty and `--diff` exits
+3, so the job replays a `--since` read before it or waits out a soak) and
+`--promote`'s image-repoint half. The engine, the compose stack and the
 end-to-end test ([20]) do not need them and are here now.
 
 The `query_log.tier` column the tiers read is from migration 045 (SMD-1490): the
@@ -2278,8 +2313,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1808 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 733 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1817 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 743 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

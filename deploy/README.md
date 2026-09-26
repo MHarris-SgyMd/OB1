@@ -13,8 +13,8 @@ backups, no resource limits.
 ## Prerequisites
 
 - podman or docker, with compose
-- A model provider: the stack's own Ollama (`--profile local-models`, nothing to
-  set), an Ollama on the host, or an OpenRouter key — the shipped defaults are
+- A model provider: the stack's own Ollama (`--profile local-models`, one line to
+  set: `OB1_LLM_LOCAL=1`), an Ollama on the host, or an OpenRouter key — the shipped defaults are
   local; `deploy/.env.example`, "Model provider", is the one line to choose
 
 ## Steps
@@ -352,8 +352,39 @@ A `--diff` or `--replay` replays what stable logged, so:
 - hybrid-arm rows (`search_thoughts`) are replayed only with `OB1_EVAL_EMBED`
   set to the brain's model, as in the example, and otherwise skipped.
 
-`--replay` prints how many were replayed and skipped. A `--diff` that
-replayed none still says nothing moved (SMD-2182), so read `--replay` first.
+Both print the window and how many searches were replayed and skipped. A
+`--diff` that replayed none says `nothing to compare` and exits 3, where a
+pass is 0, a moved ranking or a failed step 1, and a usage error or refusal
+2 (SMD-2182).
+
+### Compare two live brains
+
+`--diff`/`--replay` is the merge-time replay over Postgres. To ask instead "are
+these two running brains telling me the same thing, and if not why?" in one step,
+point them at each other over HTTP (SMD-2109):
+
+```bash
+# each brain is a connector name (claude mcp get resolves the URL + key) or an
+# http(s):// URL with its key in --a-key/--b-key, OB1_COMPARE_KEY, or ?key=
+bun db/tier.ts --compare open-brain open-brain-canary
+bun db/tier.ts --compare open-brain open-brain-canary --replay --hybrid \
+  --query "highest value open ticket" --queries-file deploy/compare-queries.txt --json
+```
+
+It reads each brain as a client — the keyed `GET /health` record (version,
+commit, tier, the tree's latest migration against the ledger's highest, schema
+version, embedding, counts) and, with `--replay`, the two search tools over a
+supplied query set (the vector arm needs no local model — each brain embeds its
+own query). It never prints a key and prints a one-line verdict ("current with
+each other" / "canary is 1 migration behind; 407 vs 597 thoughts"). It exits
+non-zero when anything differs. The default compare writes nothing; `--replay`
+issues real searches, which a brain running `OB1_QUERY_LOG=on` records in
+`query_log` (telemetry, migration 034, never the thoughts corpus), as any client
+search does. Because it is HTTP-only, the exact id-set difference and a replay
+sourced from stable's `query_log` are out of reach and named as such; a DB-backed
+mode can add them. Until SMD-2037 lands, a
+refreshed brain runs at pgvector's default HNSW settings, so a hybrid-arm
+difference can be GUC-induced — the retrieval section says so.
 
 `--from` and `--to` name a database on the network as `HOST[:PORT][/DB]`
 (port 5432 and database `openbrain` by default). The wrapper builds the URL as
@@ -433,9 +464,10 @@ server's, and `refreshToolsReady` refuses the refresh otherwise, so a
 Postgres bump in the compose files means bumping the package in
 `db/tier.Dockerfile` with it. On
 every PR, the deploy-stack CI job seeds one thought and one logged search, then
-runs through this script: a refresh, a `--replay`, a `--diff`, a retry over a
-copy left stamped `stable` (as a refresh that died after its restore leaves
-it), and both refusals. On a host with SELinux enforcing (Fedora and RHEL,
+runs through this script: a refresh, a `--replay`, a `--diff`, a `--diff` over
+the empty window after the refresh (exit 3), a retry over a copy left
+stamped `stable` (as a refresh that died after its restore leaves it), and
+both refusals. On a host with SELinux enforcing (Fedora and RHEL,
 where podman labels by default), the container can read the mounted checkout
 only once it is relabelled: `chcon -Rt container_file_t <checkout>`. The
 script does not relabel it for you.

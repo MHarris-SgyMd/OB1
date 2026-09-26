@@ -299,7 +299,9 @@ per connector. It is:
   proven on another brain or with its native receiver off (decision 8), then the
   native receiver retired.
 - **Batch stays a native driver**: an archive parse has no workflow state for a
-  tool to hold.
+  tool to hold. The orchestrator wraps it rather than replacing it: one generic
+  import template runs the recipe's emitter and the pipeline on a schedule and
+  keeps the credential and the log (SMD-2212).
 
 ## What moves, what stays
 
@@ -310,9 +312,13 @@ per connector. It is:
 - **The recipes stay until a template replaces one.** Of the capture recipes,
   only `gmail-smart-pull` has a planned template (SMD-2212), and it retires only
   after that template has run unattended — on another brain, or with the recipe
-  off (decision 8) — with its sensitivity routing carried over. The import recipes (Takeout, exports, vaults) are batch and stay native
-  drivers. SMD-1251, SMD-1317 and SMD-1455 are hardening work on that family and
-  are unaffected.
+  off (decision 8) — with its sensitivity routing carried over. The import
+  recipes (Takeout, exports, vaults) are batch and stay native drivers as the
+  unit — each ships as a CLI emitter of ingestion-contract items (SMD-2136) —
+  and SMD-2212's generic import template wraps that command unchanged, one
+  instance per recipe (the routing decided 2026-09-25 on SMD-2147–2150 and
+  SMD-2021). SMD-1251, SMD-1317 and SMD-1455 are hardening work on that family
+  and are unaffected.
 - **SMD-949's connectors are re-scoped against n8n before any is built.** Notion
   (SMD-1816), Linear (SMD-1817) and Jira/Confluence (SMD-1818) have n8n nodes
   and become templates carrying SMD-1813's rules on the brain side — the Linear
@@ -372,7 +378,8 @@ per connector. It is:
   Client node's honouring of a pin measured, no sink before the retrieve route
   and the egress decision carry it.
 - **SMD-2212** — the first templates: Gmail → brain once an OAuth client exists,
-  an act-tool workflow, and the Linear template only on decision 8's terms.
+  the generic import template wrapping the CLI emitters, an act-tool workflow,
+  and the Linear template only on decision 8's terms.
 - SMD-949 carries the connector re-scope (a comment on the ticket).
 
 ## Held by
