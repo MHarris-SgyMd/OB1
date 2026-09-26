@@ -15,8 +15,10 @@ import {
   captureDaysApart,
   compareBrains,
   diffRow,
+  fetchLoggedSearches,
   freshnessVerdict,
   getBrainInfo,
+  replayPlanFromLog,
   parseResultIds,
   renderComparison,
   resolveBrain,
@@ -51,6 +53,8 @@ interface FakeConfig {
   refuse?: string[];
   /** the brain's thought-id set for list_thought_ids; omit to make the tool absent (a brain older than SMD-2244). */
   corpus?: { ids: string[]; digest?: string | null; pageCap?: number; fail?: string; failAfter?: boolean; badShape?: boolean; stuckCursor?: boolean; fakeTotal?: number };
+  /** the brain's logged searches for list_logged_searches; omit to make the tool absent. */
+  log?: { searches: { query: string; arm: "keyword" | "hybrid" | null }[]; truncated?: boolean };
   /** a gateway/proxy that answers every tools/call POST with a plain 404 body (GET /health still routes). */
   proxy404?: boolean;
   /** frame the tools/call reply as an SSE stream rather than raw JSON. */
@@ -134,6 +138,9 @@ function startFake(cfg: FakeConfig): { server: ReturnType<typeof Bun.serve>; ep:
           if (cfg.newest === null) return replyError(body.id, "thought_stats unavailable", cfg.sse);
           const total = "counts" in cfg.info.database ? (cfg.info.database.counts?.thoughts ?? 0) : 0;
           text = `Total thoughts: ${total}\nDate range: 1/1/2026 → ${cfg.newest}`;
+        } else if (name === "list_logged_searches") {
+          if (!cfg.log) return replyError(body.id, "unknown tool list_logged_searches", cfg.sse);
+          text = JSON.stringify({ searches: cfg.log.searches, truncated: cfg.log.truncated === true });
         } else if (name === "search_thoughts_keyword" || name === "search_thoughts") {
           const q = body.params.arguments.query ?? "";
           if (cfg.refuse?.includes(q)) return replyError(body.id, `Refused: the query may not leave the box`, cfg.sse);
@@ -272,6 +279,10 @@ ok(trimBase("http://h:1///") === "http://h:1" && trimBase("http://h:1") === "htt
   let threw = "";
   try { await resolveBrain("http://localhost:9/", undefined, undefined); } catch (e) { threw = (e as Error).message; }
   ok(/no read key/.test(threw), "resolveBrain refuses a URL with no key anywhere");
+  // An invalid URL's ?key= is not echoed in the error (review pass 2 key-safety tidy).
+  let badUrl = "";
+  try { await resolveBrain("http://[oops?key=SEKRIT", undefined, undefined); } catch (e) { badUrl = (e as Error).message; }
+  ok(/is not a valid URL/.test(badUrl) && !/SEKRIT/.test(badUrl), `an invalid URL's ?key= is not echoed (${badUrl})`);
 }
 
 // ---------------------------------------------------------------------------
@@ -519,7 +530,7 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   try {
     const c = await compareBrains(a.ep, b.ep, { queries: ["only"] });
     const out = renderComparison(c);
-    ok(/nothing compared — all 1 query/.test(out) && !/no delta — b returns/.test(out), `all-skipped retrieval reads "nothing compared", not "no delta"`);
+    ok(/nothing compared — all 1 replay/.test(out) && !/no delta — b returns/.test(out), `all-skipped retrieval reads "nothing compared", not "no delta"`);
   } finally { a.server.stop(true); b.server.stop(true); }
 }
 
@@ -540,6 +551,109 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
 }
 
 // ---------------------------------------------------------------------------
+// The log-sourced replay (SMD-2245).
+// ---------------------------------------------------------------------------
+
+// replayPlanFromLog: each search on its arm, null-arm and empty-query skipped, dedup.
+{
+  const plan = replayPlanFromLog([
+    { query: "a", arm: "keyword" },
+    { query: "a", arm: "keyword" }, // dup
+    { query: "b", arm: null }, // null arm (pre-045) — skipped
+    { query: "", arm: "hybrid" }, // empty — skipped
+    { query: "c", arm: "hybrid" },
+  ]);
+  ok(plan.length === 2 && plan[0].query === "a" && plan[0].arm === "keyword" && plan[1].query === "c" && plan[1].arm === "hybrid", `replayPlanFromLog dedups, skips null-arm and empty (${JSON.stringify(plan)})`);
+}
+
+// fetchLoggedSearches + a from-log plan: each logged search replays on ITS arm, the
+// diff names what moved; the report says the source and the count.
+{
+  const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: { q1: [uid(1)], q2: [uid(2)] } });
+  const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: { q1: [uid(1)], q2: [uid(9)] } });
+  try {
+    const plan = replayPlanFromLog([{ query: "q1", arm: "keyword" }, { query: "q2", arm: "hybrid" }]);
+    const c = await compareBrains(a.ep, b.ep, { fromLog: plan, source: "the log of open-brain", truncated: true });
+    ok(c.retrieval!.queries === 2 && c.retrieval!.arms.includes("keyword") && c.retrieval!.arms.includes("hybrid"), "both arms of the log plan run");
+    const moved = c.retrieval!.rows.filter((r) => r.changed);
+    ok(moved.length === 1 && moved[0].arm === "hybrid" && moved[0].onlyA.join() === uid(2) && moved[0].onlyB.join() === uid(9), "q2 (hybrid) moved; q1 (keyword) matched");
+    const out = renderComparison(c);
+    ok(/from the log of open-brain/.test(out) && /window truncated/.test(out), `render names the log source and the truncation (${out.split("\n").find((l) => l.includes("arms:"))})`);
+  } finally { a.server.stop(true); b.server.stop(true); }
+}
+
+// A --from-log source with an empty log: the report says so, does not silently skip.
+{
+  const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {} });
+  const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {} });
+  try {
+    const c = await compareBrains(a.ep, b.ep, { fromLog: [], source: "the log of open-brain-canary" });
+    ok(c.retrieval !== null && c.retrieval.queries === 0, "an empty log still reports a retrieval section");
+    ok(/logged no searches/.test(renderComparison(c)), "render says the source logged no searches");
+  } finally { a.server.stop(true); b.server.stop(true); }
+}
+
+// fetchLoggedSearches over the fake: parses {searches, truncated}; an absent tool throws.
+{
+  const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, log: { searches: [{ query: "x", arm: "keyword" }], truncated: true } });
+  const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {} }); // no log → tool absent
+  try {
+    const page = await fetchLoggedSearches(a.ep, null);
+    ok(page.searches.length === 1 && page.searches[0].query === "x" && page.truncated === true, "fetchLoggedSearches parses the page");
+    let threw = "";
+    try { await fetchLoggedSearches(b.ep, null); } catch (e) { threw = (e as Error).message; }
+    ok(/unknown tool|not found/i.test(threw), "a brain without list_logged_searches throws (the caller surfaces it)");
+  } finally { a.server.stop(true); b.server.stop(true); }
+}
+
+// A --from-log source that resolves but LACKS the tool (older brain) degrades — the
+// compare still prints identity/freshness, and the retrieval says it could not read.
+{
+  const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {} }); // no `log` → tool absent
+  const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {} });
+  const logFn = console.log;
+  console.log = () => {};
+  let code = -1;
+  let c: Awaited<ReturnType<typeof compareBrains>> | null = null;
+  try {
+    // runCompare degrades a fetch failure; capture the Comparison via a spy on render.
+    code = await runCompare({ a: a.ep.base, b: b.ep.base, aKey: KEY, bKey: KEY, replay: true, hybrid: false, queries: [], fromLog: `${a.ep.base}?key=${KEY}`, json: false });
+  } catch { code = -2; } finally { console.log = logFn; }
+  ok(code === 0 || code === 1, `runCompare --from-log with a tool-absent source does NOT abort (returned ${code}, not a throw)`);
+  // And the degradation shows in the report (drive compareBrains directly for the assert).
+  const a2 = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {} });
+  const b2 = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {} });
+  try {
+    c = await compareBrains(a2.ep, b2.ep, { fromLog: [], source: "the log of open-brain", sourceError: "open-brain: list_logged_searches — Tool list_logged_searches not found" });
+    ok(/could not read the log of open-brain/.test(renderComparison(c!)) && /identity and freshness above still compare/.test(renderComparison(c!)), "the report degrades the log-source failure and keeps the rest");
+  } finally { a2.server.stop(true); b2.server.stop(true); a.server.stop(true); b.server.stop(true); }
+}
+
+// The supplied+hybrid path reports "replays" (query-arm pairs), not "queries".
+{
+  const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: { q: [uid(1)] } });
+  const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: { q: [uid(1)] } });
+  try {
+    const c = await compareBrains(a.ep, b.ep, { queries: ["q"], hybrid: true, source: "the supplied queries" });
+    ok(c.retrieval!.queries === 2, "one query on two arms is two replays");
+    ok(/over 2 replays from the supplied queries/.test(renderComparison(c)), "render says '2 replays', not '2 queries'");
+  } finally { a.server.stop(true); b.server.stop(true); }
+}
+
+// runCompare --from-log end to end: resolves the source, replays its log, exits 1 on a delta.
+{
+  const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: { q: [uid(1)] }, log: { searches: [{ query: "q", arm: "keyword" }] } });
+  const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: { q: [uid(2)] } });
+  const logFn = console.log;
+  console.log = () => {};
+  let code = -1;
+  try {
+    code = await runCompare({ a: a.ep.base, b: b.ep.base, aKey: KEY, bKey: KEY, replay: true, hybrid: false, queries: [], fromLog: `${a.ep.base}?key=${KEY}`, json: false });
+  } finally { console.log = logFn; a.server.stop(true); b.server.stop(true); }
+  ok(code === 1, `runCompare --from-log replays the log and exits 1 on a retrieval delta (${code})`);
+}
+
+// ---------------------------------------------------------------------------
 // parseCompareArgs (in tier.ts) — grammar teeth.
 // ---------------------------------------------------------------------------
 {
@@ -549,13 +663,26 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   // --replay with no queries is refused. parseCompareArgs exits the process, so
   // drive it through the real CLI in a child (it refuses before any network).
   const child = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--replay"], { cwd: import.meta.dir });
-  ok(child.exitCode === 2 && /needs a query set/.test(child.stderr.toString()), `parseCompareArgs: --replay with no query set is refused with exit 2 (${child.exitCode})`);
+  ok(child.exitCode === 2 && /needs a query source/.test(child.stderr.toString()), `parseCompareArgs: --replay with no query source is refused with exit 2 (${child.exitCode})`);
   // An empty --query value is refused before any network, not sent to the brain.
   const emptyQ = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--replay", "--query", ""], { cwd: import.meta.dir });
   ok(emptyQ.exitCode === 2 && /--query is empty/.test(emptyQ.stderr.toString()), `parseCompareArgs: an empty --query is refused with exit 2 (${emptyQ.exitCode})`);
   // A query set with no --replay is refused rather than silently ignored.
   const noReplay = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--query", "x"], { cwd: import.meta.dir });
   ok(noReplay.exitCode === 2 && /only apply with --replay/.test(noReplay.stderr.toString()), `parseCompareArgs: --query without --replay is refused with exit 2 (${noReplay.exitCode})`);
+  // --from-log's grammar: two sources, --hybrid, and missing --replay each refused.
+  const twoSrc = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--replay", "--from-log", "z", "--query", "q"], { cwd: import.meta.dir });
+  ok(twoSrc.exitCode === 2 && /two query sources/.test(twoSrc.stderr.toString()), `parseCompareArgs: --from-log with --query is refused (${twoSrc.exitCode})`);
+  const logHybrid = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--replay", "--from-log", "z", "--hybrid"], { cwd: import.meta.dir });
+  ok(logHybrid.exitCode === 2 && /--hybrid does not apply to --from-log/.test(logHybrid.stderr.toString()), `parseCompareArgs: --from-log with --hybrid is refused (${logHybrid.exitCode})`);
+  const sinceNoLog = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--since", "2026-01-01"], { cwd: import.meta.dir });
+  ok(sinceNoLog.exitCode === 2 && /--since only applies with --from-log/.test(sinceNoLog.stderr.toString()), `parseCompareArgs: --since without --from-log is refused (${sinceNoLog.exitCode})`);
+  const emptyLog = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--replay", "--from-log", ""], { cwd: import.meta.dir });
+  ok(emptyLog.exitCode === 2 && /--from-log is empty/.test(emptyLog.stderr.toString()), `parseCompareArgs: an empty --from-log is refused (${emptyLog.exitCode})`);
+  const badSince = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--replay", "--from-log", "z", "--since", "not-a-time"], { cwd: import.meta.dir });
+  ok(badSince.exitCode === 2 && /--since must be an ISO-8601 time/.test(badSince.stderr.toString()), `parseCompareArgs: a malformed --since is refused (${badSince.exitCode})`);
+  const dupLog = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--replay", "--from-log", "z", "--from-log", "w"], { cwd: import.meta.dir });
+  ok(dupLog.exitCode === 2 && /--from-log given twice/.test(dupLog.stderr.toString()), `parseCompareArgs: a duplicate single-value flag is refused (${dupLog.exitCode})`);
 }
 
 console.log(`\ntest-brain-compare: ${pass} passed, ${fail} failed`);

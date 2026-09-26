@@ -349,6 +349,34 @@ console.log("\n[5c] listThoughtIds — the id set, its digest and keyset paging 
   assert(zero.ids.length === 0 && zero.cursor === null, "limit 0 yields no ids and a null cursor (not undefined)");
 }
 
+console.log("\n[5d] listLoggedSearches — the search rows of query_log, windowed and bounded (SMD-2245)");
+{
+  const raw = new SQL({ url: URL_, max: 1 });
+  try {
+    await raw`DELETE FROM query_log`; // isolate this section
+    await raw`INSERT INTO query_log (kind, tool, query, arm, match_count, threshold, recency_weight, filter, tier, logged_at) VALUES
+      ('search','search_thoughts_keyword','older query','keyword',25,NULL,NULL,'{}'::jsonb,'stable', now() - interval '2 hours'),
+      ('search','search_thoughts','newer query','hybrid',10,0.5,0.25,'{"type":"note"}'::jsonb,NULL, now() - interval '1 hour')`;
+    await raw`INSERT INTO query_log (kind, tool, target_id) VALUES ('action','fetch', gen_random_uuid())`; // an action row — excluded by kind='search'
+    const all = await store.listLoggedSearches({ since: null, limit: 100 });
+    assert(all.searches.length === 2 && !all.truncated, `two search rows — the action row is excluded (${all.searches.length})`);
+    assert(all.searches[0].query === "newer query" && all.searches[0].arm === "hybrid", "most recent first");
+    assert(all.searches[0].matchCount === 10 && all.searches[0].threshold === 0.5 && all.searches[0].recencyWeight === 0.25, "the search's arguments come back");
+    assert(JSON.stringify(all.searches[0].filter) === JSON.stringify({ type: "note" }), "the filter is an object, not a string");
+    assert(all.searches[1].query === "older query" && all.searches[1].tier === "stable", "the older row, with its tier");
+    assert(all.searches.every((s) => s.loggedAt !== null && ISO_RE.test(s.loggedAt)), "loggedAt is ISO on each");
+    const one = await store.listLoggedSearches({ since: null, limit: 1 });
+    assert(one.searches.length === 1 && one.truncated === true && one.searches[0].query === "newer query", "limit 1 returns the newest and flags truncated");
+    const recent = await store.listLoggedSearches({ since: new Date(Date.now() - 90 * 60 * 1000).toISOString(), limit: 100 });
+    assert(recent.searches.length === 1 && recent.searches[0].query === "newer query", "since excludes the two-hour-old row");
+    const emptySince = await store.listLoggedSearches({ since: "", limit: 100 });
+    assert(emptySince.searches.length === 2, "an empty since is no window, not a ''::timestamptz cast error (review pass 2)");
+    await raw`DELETE FROM query_log`;
+  } finally {
+    await raw.close();
+  }
+}
+
 console.log("\n[6] Dedup and merge behave as the tools expect");
 {
   const before = await store.countThoughts();

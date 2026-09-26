@@ -41,6 +41,7 @@ import type {
   SupersessionProposal,
   ThoughtHybridMatch,
   ThoughtKeywordMatch,
+  LoggedSearchPage,
   ThoughtIdPage,
   ThoughtListItem,
   ThoughtMatch,
@@ -243,6 +244,36 @@ export class SqlStore implements ThoughtStore {
       digest = (agg.digest as string | null) ?? null;
     }
     return { ids, total, digest, cursor };
+  }
+
+  async listLoggedSearches(opts: { since: string | null; limit: number }): Promise<LoggedSearchPage> {
+    // The search rows of query_log (migration 034), most recent first, windowed by
+    // `since`. One extra row over the limit tells the caller more matched without a
+    // count query. query_log is opt-in (OB1_QUERY_LOG); when it was never on this
+    // is simply empty.
+    // "" is not a time: normalise it to null (no window) rather than cast it and
+    // fail, so a direct caller matches the PostgREST store, which treats it as falsy.
+    const since = opts.since || null;
+    const rows = await this.sql`
+      SELECT query, arm, tier, logged_at, match_count, threshold, recency_weight, filter
+      FROM query_log
+      WHERE kind = 'search'
+        AND query IS NOT NULL
+        AND (${since}::timestamptz IS NULL OR logged_at > ${since}::timestamptz)
+      ORDER BY logged_at DESC, id DESC
+      LIMIT ${opts.limit + 1}::int`;
+    const truncated = rows.length > opts.limit;
+    const searches = rows.slice(0, opts.limit).map((r: Record<string, unknown>) => ({
+      query: r.query as string,
+      arm: (r.arm as LoggedSearchPage["searches"][number]["arm"]) ?? null,
+      tier: (r.tier as string | null) ?? null,
+      loggedAt: isoTimestampOrNull(r.logged_at as string | null),
+      matchCount: (r.match_count as number | null) ?? null,
+      threshold: (r.threshold as number | null) ?? null,
+      recencyWeight: (r.recency_weight as number | null) ?? null,
+      filter: (r.filter as Record<string, unknown> | null) ?? {},
+    }));
+    return { searches, truncated };
   }
 
   async databaseFacts(opts?: ReadOptions, progress?: ReadProgress): Promise<DatabaseFacts> {

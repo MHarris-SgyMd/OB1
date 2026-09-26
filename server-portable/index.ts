@@ -1594,6 +1594,45 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
+  // Tool 3b-iii: the brain's logged searches (SMD-2245) — the query_log rows a
+  // cross-brain replay sources from (db/tier.ts --compare --from-log), so it can
+  // replay what a brain ACTUALLY searched instead of a supplied set. Telemetry
+  // (migration 034), read-key gated, no thought content, no keys. One JSON object
+  // {searches, truncated}: the most recent searches at or after `since`, bounded by
+  // `limit` (a replay is two searches per row, so a window is the unit, not the
+  // whole log). Empty when OB1_QUERY_LOG was never on.
+  if (canRead(principal)) server.registerTool(
+    "list_logged_searches",
+    {
+      title: "List Logged Searches",
+      description:
+        "List the brain's logged searches from query_log — the query text, which arm ran it, and its arguments — for replaying what a brain actually searched against another brain. " +
+        "query_log is opt-in (OB1_QUERY_LOG); this is empty when it was never on. Returns a JSON object {searches, truncated}: the most recent searches at or after `since`, up to `limit`; `truncated` is whether more matched. No thought content.",
+      annotations: {
+        readOnlyHint: true,
+      },
+      inputSchema: {
+        since: z.string().optional().describe("An ISO-8601 time (searches logged after it); omit for the most recent"),
+        limit: z.number().int().min(1).max(1000).optional().default(200).describe("Searches to return, 1–1000 (default 200), most recent first"),
+      },
+    },
+    async ({ since, limit }) => {
+      if (since !== undefined && Number.isNaN(Date.parse(since))) {
+        return { content: [{ type: "text" as const, text: "Error: `since` must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z)." }], isError: true };
+      }
+      try {
+        const page = await (await db()).listLoggedSearches({ since: since ?? null, limit });
+        return { content: [{ type: "text" as const, text: JSON.stringify(page) }] };
+      } catch (err: unknown) {
+        const msg = (err as Error).message;
+        const hint = /query_log/.test(msg) && /does not exist|could not find/i.test(msg)
+          ? " — migration 034 (db/migrations/034_query_log.sql) is not applied, or PostgREST has not reloaded its schema cache"
+          : "";
+        return { content: [{ type: "text" as const, text: `Error: ${msg}${hint}` }], isError: true };
+      }
+    }
+  );
+
   // Tool 3c: what this brain is (SMD-2041) — version, commit, store, tier, the
   // database's versions, ledger, counts, size and HNSW parameters, one short
   // table. Gated like the other read tools. The same record is the keyed

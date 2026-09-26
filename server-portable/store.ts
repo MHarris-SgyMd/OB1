@@ -377,6 +377,33 @@ export type ThoughtIdPage = {
   cursor: string | null;
 };
 
+/**
+ * One logged search from `query_log` (SMD-2245), for a log-sourced cross-brain
+ * replay. Telemetry, not thought content: the query text, which arm ran it, the
+ * tier that logged it, when, and the search's own arguments. `result_ids` (the
+ * historical answer) is left off — the compare replays each query FRESH against
+ * both brains and diffs those, so the recorded ids are not needed, and a uuid
+ * array would diverge across the two stores' drivers for no gain.
+ */
+export type LoggedSearchRow = {
+  query: string;
+  arm: "hybrid" | "keyword" | null;
+  tier: string | null;
+  loggedAt: string | null;
+  matchCount: number | null;
+  threshold: number | null;
+  recencyWeight: number | null;
+  filter: Record<string, unknown>;
+};
+
+/**
+ * A window of a brain's logged searches, most recent first, bounded by `limit`.
+ * `truncated` is whether more searches matched the window than were returned —
+ * a log-sourced replay is bounded (two search calls per row), so the whole log
+ * is never streamed; a window is the unit.
+ */
+export type LoggedSearchPage = { searches: LoggedSearchRow[]; truncated: boolean };
+
 export type ListFilters = {
   limit: number;
   type?: string;
@@ -941,6 +968,14 @@ export interface ThoughtStore {
    * enumeration when two brains' digests match. Ids only: no content, no vectors.
    */
   listThoughtIds(opts: { limit: number; after: string | null }): Promise<ThoughtIdPage>;
+
+  /**
+   * A window of the brain's logged searches (`query_log`), most recent first, for a
+   * log-sourced cross-brain replay (SMD-2245). `since` bounds the window; `limit`
+   * caps it (one extra row is read to set `truncated`). Empty when the log is off
+   * or the window holds none. Telemetry only — no thought content, no keys.
+   */
+  listLoggedSearches(opts: { since: string | null; limit: number }): Promise<LoggedSearchPage>;
 
   /**
    * Everything thought_stats needs, aggregated by the store. The two backends
