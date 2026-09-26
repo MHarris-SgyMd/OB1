@@ -89,13 +89,15 @@ for (const [searchId, uses] of bySearch) {
 
 // The baseline ranking per query: the ids the MOST RECENT search of that text
 // returned, in rank order. Distinct on the query keeps one baseline per query.
-// Not a prefer_current ranking (arm `current`, 059): eval-replay replays the
-// default search, and would count the demotion as drift (SMD-2255, second
-// review pass). arm read through the row's jsonb, as above.
+// Only the default search's rankings — hybrid, or NULL from before 045:
+// eval-replay replays that search, so a prefer_current ranking (arm current,
+// 059) would count the demotion as drift and a keyword one the other arm
+// (SMD-2255, second and third review passes). arm read through the row's
+// jsonb, as above.
 const baselines = await sql<{ query: string; result_ids: unknown }[]>`
   SELECT DISTINCT ON (query) query, result_ids
     FROM query_log
-   WHERE kind = 'search' AND query IS NOT NULL AND (to_jsonb(query_log) ->> 'arm') IS DISTINCT FROM 'current'
+   WHERE kind = 'search' AND query IS NOT NULL AND coalesce(to_jsonb(query_log) ->> 'arm', 'hybrid') = 'hybrid'
    ORDER BY query, logged_at DESC`;
 const baselineOf = new Map(baselines.map((b) => [b.query, parsePgUuidArray(b.result_ids)]));
 

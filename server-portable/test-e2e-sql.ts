@@ -250,7 +250,7 @@ console.log("\n[3] search_thoughts ranks over real pgvector");
   const demotedBlock = preferred.split("--- Result ").find((b) => /alpha thought about migrations/.test(b)) ?? "";
   const plainAgain = await call("search_thoughts", { query: "alpha", limit: 5, threshold: -1 });
   assert(!/alpha thought about migrations/.test(preferredFirst) && /\n↓ Ranked ×0\.25 — completed\n/.test(demotedBlock) && /^\d+ \(100\.0% match\) ---/.test(demotedBlock)
-      && /Current first \(prefer_current\): 1 of the top \d+ matches is settled or superseded and ranked below the current ones, unless holding the query's literal; 1 carries a lifecycle \(latest sync 2026-09-25T00:00:00\.000Z\)\./.test(preferred)
+      && /Current first \(prefer_current\): 1 of the top \d+ matches is settled or superseded and ranked below the current ones; 1 carries a lifecycle \(latest sync 2026-09-25T00:00:00\.000Z\)\./.test(preferred)
       && /^1 \(100\.0% match\) ---/.test(plainAgain.split("--- Result ")[1] ?? "") && !/↓ Ranked|Current first/.test(plainAgain),
     `prefer_current demotes the completed alpha ticket below the current rows, says ×0.25 — completed on its block (its similarity still the cosine) and the window in the header; without it the ticket is first and unmarked (${demotedBlock.split("\n").slice(0, 3).join(" / ")})`);
   // The tool's description states the weight 059 applies, and they agree.

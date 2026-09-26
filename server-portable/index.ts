@@ -737,21 +737,28 @@ export function demotedLine(t: Pick<ThoughtHybridMatch, "demoted" | "score" | "f
  * pass: the note told a caller at 100 to raise it). Null without the flag (no
  * window on the rows). Exported for the unit test.
  */
-export function currentNote(rows: Pick<ThoughtHybridMatch, "window">[]): string | null {
+export function currentNote(rows: Pick<ThoughtHybridMatch, "window" | "literalOnly" | "needles">[]): string | null {
   const w = rows[0]?.window;
   if (!w) return null;
   const lifecycle = `${w.known} carr${w.known === 1 ? "ies" : "y"} a lifecycle${w.syncedAt ? ` (latest sync ${w.syncedAt})` : ""}`;
-  // "unless holding the query's literal": a demoted exact hit keeps a quarter
-  // of its needle bonus, which can keep it above current rows (second review pass).
-  const note = `Current first (prefer_current): ${w.demoted} of the top ${w.rows} match${w.rows === 1 ? "" : "es"} ${w.demoted === 1 ? "is" : "are"} settled or superseded and ranked below the current ones, unless holding the query's literal; ${lifecycle}.`;
+  // A demoted exact hit keeps a quarter of its needle bonus: below every
+  // current row in the vector arm's top 62, so it outranks current rows only on
+  // a query of literals only (every row without one scores 0) or far down by
+  // meaning. Said only where the query has a literal (third review pass: the
+  // second's unconditional "unless holding the literal" was false as a rule).
+  const head = rows[0];
+  const exception = head?.literalOnly ? " — on a query of literals only, a demoted exact hit still ranks above the rows without one"
+    : head?.needles?.length ? " — a demoted exact hit on the query's literal can still outrank current matches far down by meaning"
+    : "";
+  const note = `Current first (prefer_current): ${w.demoted} of the top ${w.rows} match${w.rows === 1 ? "" : "es"} ${w.demoted === 1 ? "is" : "are"} settled or superseded and ranked below the current ones${exception}; ${lifecycle}.`;
   if (w.exact) return note;
   const current = w.rows - w.demoted;
   const held = current === 0 ? `No current match was in the top ${w.rows}, so every row here is a demoted one`
     : `Only ${current} current match${current === 1 ? " was" : "es were"} in the top ${w.rows}, so the rows after ${current === 1 ? "it" : "them"} are demoted ones`;
   // Not exact means the window was full (its size is W = min(100, 4 × the
   // limit the function clamped)), so the window's own size says whether a
-  // larger limit reads further — not the limit as sent, which the SQL clamps
-  // and truncates (second review pass: 24.6 binds as 25, a window of 100).
+  // larger limit reads further — not the limit as sent, which the SQL rounds
+  // and clamps (second review pass: 24.6 binds as 25, a window of 100).
   const advice = w.rows < 100 ? " — raise limit to read further" : ` — the window is capped at ${w.rows}`;
   return `${note} ${held}, and a current match past the window may have been missed${advice}.`;
 }

@@ -231,7 +231,9 @@ and a superseded hit is only labelled (`⚠ Superseded by …`). On, it calls 05
 whose ticket is settled — completed or canceled, by 058's `node_state`, so a
 note filed under a Done ticket counts — or that a newer thought supersedes has
 its score multiplied by 0.25. Under the hybrid's fusion that puts every current
-match in the window first, then the demoted ones in their own order; each
+match in the window first, then the demoted ones in their own order (a demoted
+exact hit stays above current rows only on a query of literals only, or past
+the vector arm's 62nd rank); each
 demoted hit says `↓ Ranked ×0.25 — completed` (or `canceled`, `superseded`),
 and the header says how many of the window were demoted, how many carry a
 lifecycle and the latest sync among them — and, when the window held fewer

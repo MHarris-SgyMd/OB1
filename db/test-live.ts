@@ -5362,8 +5362,9 @@ console.log("\n[26] search_thoughts_current against a hand oracle on real Postgr
   // order is invisible there (review pass 1: dropping it survived [55]). Here
   // the join order is PostgreSQL's own. The fixture ties on purpose: four far
   // rows and two unembedded rows carrying one literal tie on the needle bonus
-  // outside the vector window, and every row scores 0 on the literal-only
-  // query (six rows on one vector do not tie — the vector arm numbers them) —
+  // outside the vector window, and every row without the literal scores 0 on
+  // the literal-only query (six rows on one vector do not tie — the vector arm
+  // numbers them) —
   // with settled rows among each group, and the oracle is 059's rule written
   // out: the hybrid at the window, node_state's two facts, score × 0.25 for a
   // demoted row, ties to the current row and then to the hybrid's order.
