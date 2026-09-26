@@ -1288,14 +1288,16 @@ each source with its facets and says which gate nothing. While the board is the
 only source, and states its lifecycle, the line reads as before. The JSON's
 `dependencies.systems` lists each system's facets and whether it gates.
 
-Exit 0 when ranked, 1 when no
-entity resolves (a near-miss whose only guesses the numeric rule hid is still
-no entity: exit 1, and the line counts the hidden guesses), 3 when the subject
-IS an entity — by id, name, alias or merged-in name — that the numeric rule
-excluded (`--keep-numeric` would rank it), 2 for a usage error, a brain
-without 016 or 058 (or whose 058 knows other status types than the script) or a query that failed — never 1 for a failure or an exclusion. `test-schema.ts` [44] runs the
-script's own SQL under PGlite over a graph whose every count is known by
-construction, and its edges-on and edges-off orders differ at every position.
+Exit 0 when ranked, 1 when no entity resolves (a near-miss whose only guesses
+the numeric rule hid is still no entity: exit 1, and the line counts the hidden
+guesses), 3 when the subject IS an entity — by id, name, alias or merged-in
+name — that the numeric rule excluded (`--keep-numeric` would rank it), 2 for a
+usage error, a brain without 016 or 058 (or whose 058 knows other status types
+than the script) or a query that failed — never 1 for a failure or an
+exclusion. `test-schema.ts` [44] runs the script's own SQL under PGlite over a
+graph whose every count is known by construction, and its edges-on and
+edges-off orders differ at every position; [54] holds 058's functions to the
+contract a second reader relies on.
 
 ## Consolidation: proposing which thoughts supersede which
 

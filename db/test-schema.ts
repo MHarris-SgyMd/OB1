@@ -5591,9 +5591,11 @@ console.log("\n[43] Migration 046: the event shape at the write boundary — who
 // the lifecycle block reads the same graph under each filter and under decay.
 // The startability block adds tickets with 053's source rows and link facets
 // (SMD-2061) and reads them under --startable, the reports without the flag
-// compared byte for byte before and after the links are written.
+// compared byte for byte before and after the links are written. Every rule
+// is migration 058's node_state now (SMD-2074), and the block asks it
+// directly beside the reports, on the same fixture; [54] holds its contract.
 
-console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defined; the resolution ladder; numeric names out of every count; edges on vs off is the drop-the-graph control (SMD-1938); a thought's lifecycle is a weight — the filter, the decay, and the unstamped passing every filter (SMD-1994); --startable weighs a thought with an open blocker 0, a settled blocker none (SMD-2061); --decay-blocked weighs it BLOCKED_WEIGHT and names its blockers (SMD-2181); a system that states no lifecycle gates nothing (SMD-2218)");
+console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defined; the resolution ladder; numeric names out of every count; edges on vs off is the drop-the-graph control (SMD-1938); a thought's lifecycle is a weight — the filter, the decay, and the unstamped passing every filter (SMD-1994); --startable weighs a thought with an open blocker 0, a settled blocker none (SMD-2061); --decay-blocked weighs it BLOCKED_WEIGHT and names its blockers (SMD-2181); a system that states no lifecycle gates nothing (SMD-2218); node_state (058) answers alike, asked directly (SMD-2074)");
 {
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`);

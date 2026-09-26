@@ -109,12 +109,12 @@
  * weight, exact in binary) times its lifecycle weight instead of 0. It stays in
  * the ranking, and where it is listed it names the blockers that hold it — its
  * ticket's open blockers, sorted, an unknown one included, another system's as
- * `system:key` — in a `blocked by` column and the JSON's `blockers`. The two are two answers to
- * one question, so they are refused together, as `--decay-done` is beside
- * `--status`. The decays never meet on one thought: a blocked thought is
- * unsettled and `DONE_WEIGHT` weighs only settled ones, so under both each
- * thought weighs 1 or 0.25, never their product. Degree counts neighbours, not
- * evidence, and is unchanged by it.
+ * `system:key` — in a `blocked by` column and the JSON's `blockers`. The two
+ * are two answers to one question, so they are refused together, as
+ * `--decay-done` is beside `--status`. The decays never meet on one thought: a
+ * blocked thought is unsettled and `DONE_WEIGHT` weighs only settled ones, so
+ * under both each thought weighs 1 or 0.25, never their product. Degree counts
+ * neighbours, not evidence, and is unchanged by it.
  *
  * ── Sources (SMD-2218) ──────────────────────────────────────────────────────
  * The board is not the only writer of dependencies: SMD-2136's `--items`
