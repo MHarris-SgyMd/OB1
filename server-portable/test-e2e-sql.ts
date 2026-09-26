@@ -444,6 +444,27 @@ console.log("\n[6d] worker_status over HTTP — the tool and the keyed GET mirro
   assert(Array.isArray(await keyed.json()), "GET /worker-status with a read key returns the JSON array");
   const bare = await fetch(`${BASE}/worker-status`);
   assert((await bare.text()) === "ok", "GET /worker-status without a key is plain ok");
+
+  // Now a POPULATED brain end to end: seed a pool over raw SQL, set it active, and
+  // read it back through BOTH the tool and the keyed GET (the empty case above misses
+  // that a populated array serializes right over each surface). Cleaned up so the
+  // capture trigger and later sections stay unaffected.
+  const sql = new SQL({ url: URL_, max: 1 });
+  try {
+    const ids = (await sql`SELECT id::text AS id FROM thoughts ORDER BY id LIMIT 2`).map((r: { id: string }) => r.id);
+    const WT = "extract:e2e-probe@p1";
+    await sql`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${WT}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+    await sql`INSERT INTO thought_work_claims (thought_id, work_type, status) VALUES (${ids[0]}::uuid, ${WT}, 'pending')`;
+    await sql`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at) VALUES (${ids[1]}::uuid, ${WT}, 'succeeded', 'w', now())`;
+    const toolRow = (JSON.parse(await call("worker_status")) as { workType: string }[]).find((r) => r.workType === WT) as Record<string, unknown> | undefined;
+    assert(!!toolRow && toolRow.pending === 1 && toolRow.succeeded === 1 && toolRow.active === true, `the tool returns the populated pool, active (${JSON.stringify(toolRow)})`);
+    const getRow = ((await (await fetch(`${BASE}/worker-status`, { headers: { "x-brain-key": "e2e-key" } })).json()) as { workType: string }[]).find((r) => r.workType === WT);
+    assert(!!getRow && (getRow as Record<string, unknown>).pending === 1, "the keyed GET returns the same populated pool");
+  } finally {
+    await sql`DELETE FROM thought_work_claims WHERE work_type = 'extract:e2e-probe@p1'`;
+    await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+    await sql.close();
+  }
 }
 
 console.log("\n[7] Dedup through the tool surface");
