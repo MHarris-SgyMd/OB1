@@ -5832,7 +5832,9 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
     `coverage: five thoughts carry a lifecycle, two of them settled, one an unknown status_type; every thought weighs in by default; the latest linear_updated_at is the freshness (${cov.with_lifecycle}/${cov.done}/${cov.unknown_status}/${cov.weighed}, ${cov.last_sync})`);
   assert((await graphCoverage(run, open)).weighed === 5 && (await graphCoverage(run, active)).weighed === 4 && (await graphCoverage(run, doneOnly)).weighed === 4 && (await graphCoverage(run, decay)).weighed === 7,
     "weighed: open drops t1 and t5; active drops t3 too; done keeps t1, t5 and the two without a lifecycle; decay drops none");
-  // The lifecycle is node_lifecycle()'s, and node_state carries it unchanged;
+  // The lifecycle is node_lifecycle()'s, and node_state carries it unchanged —
+  // true by construction today (node_state reads node_lifecycle()), held for
+  // the fold, which may give node_state a lifecycle of its own;
   // `open` is a known, unsettled status — NULL for t6 (no status_type) and t8
   // (one no set knows), which claim nothing either way.
   const ns0 = await nodeState();
@@ -8130,6 +8132,11 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
   const planIds = await plan(`SELECT * FROM node_state('{00000000-0000-0000-0000-000000000000}'::uuid[])`);
   assert(!/Function Scan on node_/.test(planAll) && !/Function Scan on node_/.test(planIds) && /thoughts/.test(planAll),
     `node_state() and node_lifecycle() inside it are inlined: the plan scans thoughts and no node_* function, with and without ids (${planAll.split("\n")[0]})`);
+  // The gate projected, as coverage reads it: one grouped pass, no subplan run
+  // per facet (first review pass: a correlated EXISTS ran once per link).
+  const planGate = await plan(`SELECT system, gates FROM node_dependencies()`);
+  assert(!/SubPlan/.test(planGate) && /Aggregate/.test(planGate),
+    `node_dependencies()' gate is one grouped pass over the source rows, not a subplan per facet (${planGate.split("\n").filter((l) => /Aggregate|SubPlan/.test(l)).join(" | ").trim()})`);
 
   const [sets] = await q<{ known: string[]; settled: string[] }>(`SELECT node_lifecycle_types() AS known, node_settled_types() AS settled`);
   assert(sets.known.join() === LIFECYCLE_TYPES.join() && sets.settled.join() === LIFECYCLE_FILTERS.done.join() && sets.known.filter((t) => !sets.settled.includes(t)).join() === LIFECYCLE_FILTERS.open.join(),
@@ -8167,7 +8174,10 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
   };
   const base: GraphOptions = { ...DEFAULT_OPTIONS, limit: 10 };
   const plainModes: GraphOptions[] = [base, { ...base, status: "open" }, { ...base, status: "active" }, { ...base, status: "done" }, { ...base, decayDone: true }];
-  const plainOut = await Promise.all(plainModes.map(async (o) => ({ o, role: await asRole(o), owner: render(await graphReport(run, null, o)) })));
+  // One session: the modes run one after another, so a RESET ROLE never lands
+  // under another mode's queries (first review pass).
+  const plainOut: { o: GraphOptions; role: string; owner: string }[] = [];
+  for (const o of plainModes) plainOut.push({ o, role: await asRole(o), owner: render(await graphReport(run, null, o)) });
   const startOut = await asRole({ ...base, startable: true });
   const decayOut = await asRole({ ...base, decayBlocked: true });
   assert(!priv.sources && priv.thoughts && plainOut.every((p) => p.role === p.owner) && plainOut[0].role.includes("PostgreSQL")
@@ -8188,13 +8198,15 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
   await reapply("058");
   await db.exec(`CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{completed}'::text[] $$`);
   const skewSettled = await schemaProblem(run, DEFAULT_OPTIONS);
+  await db.exec(`CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{canceled,completed}'::text[] $$`);
+  const reordered = await schemaProblem(run, DEFAULT_OPTIONS);
   await reapply("058");
   assert(fine === null && (await schemaProblem(run, startOpts)) === null
       && missing === "graph-centrality reads a thought's lifecycle through node_state: migration 058 is not applied. Run db/migrate.ts."
       && missingStart === "graph-centrality reads a thought's lifecycle and its blockers through node_state: migration 058 is not applied. Run db/migrate.ts."
       && (skewKnown ?? "").includes("this brain's migration 058 knows triage,backlog,unstarted,started,completed,canceled,duplicate (settled: completed,canceled). Update whichever is behind.")
-      && (skewSettled ?? "").includes("knows triage,backlog,unstarted,started,completed,canceled (settled: completed)"),
-    `schemaProblem: nothing on a migrated brain; without node_state every mode is refused naming 058 (the dependency flags naming the blockers too); a known or settled set that is not the script's is refused naming both (${skewKnown})`);
+      && (skewSettled ?? "").includes("knows triage,backlog,unstarted,started,completed,canceled (settled: completed)") && reordered === null,
+    `schemaProblem: nothing on a migrated brain; without node_state every mode is refused naming 058 (the dependency flags naming the blockers too); a known or settled set that is not the script's is refused naming both, and the same members in another order are not (${skewKnown})`);
 
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`SELECT prune_orphan_entities()`);

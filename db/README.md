@@ -166,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1832 assertions: 1832 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1833 assertions: 1833 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-eight (58) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -430,13 +430,16 @@ active or closed, with whether its system gates — SMD-2218's rule); and
 `blocked`, `blockers`, `unknown_blockers`, `in_dependencies` and
 `superseded_by`). Coverage and freshness are columns — a node carries a
 lifecycle when `open` is not NULL; its freshness is `synced_at`, never
-`updated_at` — so each consumer counts over what it ranks. `graph-centrality.ts`
-is the first reader, its reports byte for byte what they were; search is the
-second (SMD-2074's second PR). `metadata.status_type` is a transitional, lossy
-scalar: when SMD-1997 folds the transitions `thought_audit` holds,
-`node_lifecycle()`'s body changes and its signature does not. Reads only, no
-grant row (EXECUTE is PUBLIC): `node_lifecycle()` needs SELECT on `thoughts`,
-the other two reads `thought_sources` too — the `structure` group.
+`updated_at` — so each consumer counts over what it ranks. The ids narrow the
+rows returned, not the work: the whole brain is computed and filtered last.
+`graph-centrality.ts` is the first reader, its reports byte for byte what they
+were; search is the second (SMD-2074's second PR). `metadata.status_type` is a
+transitional, lossy scalar: when SMD-1997 folds the transitions `thought_audit`
+holds, the two reads of it change — `node_lifecycle()`'s body and
+`node_dependencies()`' gate — and no signature does. Reads only, no grant row
+(EXECUTE is PUBLIC): `node_lifecycle()` needs SELECT on `thoughts`;
+`node_dependencies()` and `node_state()` also need it on `thought_facets` (the
+capture group) and `thought_sources` (the `structure` group).
 
 ## What changed relative to the guide
 
@@ -502,7 +505,7 @@ issues every group at once.
 | **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for 016's `merge_entities`, and since 053 for `record_thought_entities`, which upserts (`ON CONFLICT DO UPDATE`): Postgres checks it for every call, conflict or none, so until SMD-2216 a `--grant` role could not record a mention |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
-| **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` reads the source rows too | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
+| **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
 | | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets; capture's `SELECT, UPDATE` cover the reads and the closing |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
@@ -2321,7 +2324,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1832 assertions, PGlite, no container
+bun test-schema.ts                          # 1833 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 733 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

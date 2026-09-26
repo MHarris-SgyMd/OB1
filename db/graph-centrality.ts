@@ -69,8 +69,8 @@
  *   active  = unstarted, started                    (on the board and moving)
  *   done    = completed, canceled
  *
- * `LIFECYCLE_CTE` is where the status comes from: migration 058's
- * `node_lifecycle()` (below, "node_state").
+ * The status comes from migration 058: `node_lifecycle()` (`LIFECYCLE_CTE`), or
+ * `node_state()` under a dependency flag (`STATE_CTE`) — below, "node_state".
  *
  * ── Startability (SMD-2061) ─────────────────────────────────────────────────
  * The lifecycle says whether a ticket is open; it does not say whether it can
@@ -149,8 +149,9 @@
  * which reads `thoughts` alone, so a role without the `structure` group's
  * `thought_sources` runs every other mode; the flags read `node_state()`,
  * which needs it. `metadata.status_type` is a transitional, lossy scalar — the
- * transitions are `thought_audit`'s (046) — and when SMD-1997 folds them,
- * `node_lifecycle()`'s body changes and no caller does.
+ * transitions are `thought_audit`'s (046) — and when SMD-1997 folds them, the
+ * two reads of it change (`node_lifecycle()`'s body and `node_dependencies()`'
+ * gate, which reads a source row's own status) and no caller does.
  *
  * The subject resolves by 016's own rule, one rung at a time: an exact
  * `normalized_name` match (`normalize_entity_name`, so "Open-Brain" finds
@@ -337,7 +338,7 @@ function scopeSql(alias: string, scope: Scope, params: unknown[]): { where: stri
  * carrying `issue` or `ticket` reads its head's keys, falling back to its own
  * (first review pass of SMD-1994; the rule's text is 058's now). When SMD-1997
  * folds the transitions `thought_audit` (046) already holds, the function's
- * body changes and this does not. It reads `thoughts` alone, so a role without
+ * body changes (and the gate's, in `node_dependencies()`) and this does not. It reads `thoughts` alone, so a role without
  * `thought_sources` runs every mode but the dependency read.
  */
 export const LIFECYCLE_CTE = `lifecycle AS (SELECT thought_id, status, status_type, synced_at FROM node_lifecycle())`;
@@ -1063,7 +1064,8 @@ export function parseArgs(argv: readonly string[]): Parsed | { error: string } {
  * dependency flags its node_state()), so both must be applied — and 058's two
  * status sets must be the ones this file filters and renders by, or a count
  * would pair one set's rows with the other's words (a script older or newer
- * than the brain's migrations, SMD-2158's `duplicate` the case in view).
+ * than the brain's migrations, SMD-2158's `duplicate` the case in view). The
+ * sets are compared as sets: their order is no rule (first review pass).
  */
 export async function schemaProblem(run: Runner, opts: Pick<Options, "startable" | "decayBlocked">): Promise<string | null> {
   // The tables as this connection resolves them — a same-named table in a
@@ -1074,7 +1076,8 @@ export async function schemaProblem(run: Runner, opts: Pick<Options, "startable"
                                       AND to_regprocedure('node_dependencies()') IS NOT NULL AND to_regprocedure('node_state(uuid[])') IS NOT NULL) AS ok`, []);
   if (!ok) return `graph-centrality reads a thought's lifecycle${readsDependencies(opts) ? " and its blockers" : ""} through node_state: migration 058 is not applied. Run db/migrate.ts.`;
   const [{ known, settled }] = await run(`SELECT array_to_string(node_lifecycle_types(), ',') AS known, array_to_string(node_settled_types(), ',') AS settled`, []);
-  if (known !== LIFECYCLE_TYPES.join(",") || settled !== LIFECYCLE_FILTERS.done.join(",")) {
+  const same = (sql: unknown, ts: readonly string[]) => String(sql).split(",").sort().join() === [...ts].sort().join();
+  if (!same(known, LIFECYCLE_TYPES) || !same(settled, LIFECYCLE_FILTERS.done)) {
     return `This script knows the status types ${LIFECYCLE_TYPES.join(",")} (settled: ${LIFECYCLE_FILTERS.done.join(",")}); this brain's migration 058 knows ${known} (settled: ${settled}). Update whichever is behind.`;
   }
   return null;

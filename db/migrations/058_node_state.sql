@@ -19,15 +19,19 @@
 --   board sync overwrites it each pass, and the transitions themselves are on
 --   thought_audit since 046. Under SMD-1997's event log node_state is the first
 --   read-model fold (docs/event-log-as-truth.md); when that fold lands it
---   replaces node_lifecycle()'s body, and the signatures below are what it
---   keeps, so no caller changes. The link facets and the supersedes pointer are
---   already event-shaped (append and close; a pointer on the newer row).
+--   replaces the two reads of the scalar — node_lifecycle()'s body and
+--   node_dependencies()' gate, which reads a source row's own status_type —
+--   and the signatures below are what it keeps, so no caller changes. The link
+--   facets and the supersedes pointer are already event-shaped (append and
+--   close; a pointer on the newer row).
 --
 -- WHAT
---   Five functions. Every body is graph-centrality's rule as it stood at
---   ec9693ef, moved rather than rewritten, so its reports are byte-identical
---   on top of them (test-schema [44], and the live drop-in diff in
---   changes/smd-2074.md).
+--   Five functions holding graph-centrality's rules as they stood at
+--   ec9693ef — the ticket-head rule and the blocker resolution verbatim, the
+--   rest reshaped into rows a second reader can use (closed facets as rows,
+--   the gate per system, the unknown blockers per thought) — so its reports
+--   are byte-identical on top of them (test-schema [44], and the live drop-in
+--   diff in changes/smd-2074.md), bar one count noted there.
 --
 --   * node_lifecycle_types() / node_settled_types() — IMMUTABLE: the six
 --     status types this schema knows (Linear's) and the two that settle a
@@ -79,8 +83,13 @@
 --   read's are node_dependencies()'s active, gates and changed_at. Each
 --   consumer aggregates them over the population it ranks.
 --
---   Functions, not a view: no migration ships one, a view needs its own grant
---   row, and it cannot take the ids a search passes. LANGUAGE sql, one SELECT
+--   Functions, not a view: no migration ships one and a view needs its own
+--   grant row. p_ids narrows the ROWS, not the work: the lifecycle (a window
+--   over every ticket row) and the dependency resolution are computed for the
+--   whole brain whatever ids are passed, and the filter applies last — a
+--   search calling it per query pays that each time (first review pass; the
+--   second PR measures it and, if it must, narrows the reads to the tickets of
+--   the ids under this same signature). LANGUAGE sql, one SELECT
 --   each, no SET, not STRICT, not SECURITY DEFINER — so a caller's planner
 --   inlines them and a NULL p_ids folds away. String bodies, so the functions
 --   record no dependencies and a reset drops them in any order.
@@ -94,6 +103,13 @@
 --   ROLE_GRANTS). Idempotent: CREATE OR REPLACE. MINOR under the version
 --   rules. The guard first, 052's shape: without 025's pointer or 053's tables
 --   the bodies would fail at CREATE bare, so refuse naming the migration.
+--
+--   One trap for whoever edits this next (012's): CREATE OR REPLACE cannot
+--   change a function's return type, and each RETURNS TABLE below IS one —
+--   node_state's columns are the contract search reads. A later migration that
+--   reshapes one must DROP FUNCTION it first (no grant or dependency is lost:
+--   none is issued, and string bodies record none), and adding a column is a
+--   reshape.
 --
 -- Expected outcome
 --   SELECT * FROM node_state() lists every thought with its lifecycle and
@@ -167,13 +183,16 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION node_lifecycle() IS
-  'Every thought''s lifecycle: status, status_type, synced_at (the source watermark, metadata.linear_updated_at, as text) and created_at. A row carrying `ticket` or `issue` reads its ticket''s head (the issue row nothing supersedes, then the newest sync, then the id), falling back to its own keys; any other row reads its own. Reads thoughts only. metadata.status_type is a transitional lossy scalar (the transitions are thought_audit''s since 046): SMD-1997''s fold replaces this body, not this signature. Migration 058 / SMD-2074.';
+  'Every thought''s lifecycle: status, status_type, synced_at (the source watermark, metadata.linear_updated_at, as text) and created_at. A row carrying `ticket` or `issue` reads its ticket''s head (the issue row nothing supersedes, then the newest sync, then the id), falling back to its own keys; any other row reads its own. Reads thoughts only. metadata.status_type is a transitional lossy scalar (the transitions are thought_audit''s since 046): SMD-1997''s fold replaces this body — and node_dependencies()'' gate, the other read of it — not this signature. Migration 058 / SMD-2074.';
 
 -- ---------------------------------------------------------------------------
 -- node_dependencies — the blocks / blocked_by links, and which systems gate
 -- ---------------------------------------------------------------------------
--- The gate is computed once per system, joined, rather than as an EXISTS per
--- facet: an ungated system's rows would be rescanned for every one of its links.
+-- The gate is one grouped pass over the source rows, joined, not a correlated
+-- EXISTS: projected rather than filtered (coverage reads `gates` for every
+-- facet), the planner ran an EXISTS once per facet, and a system that states no
+-- status — the one the gate is for — scanned every one of its rows for each of
+-- its links (first review pass: 5.4 s against 0.36 s at 2,000 such links).
 CREATE OR REPLACE FUNCTION node_dependencies()
 RETURNS TABLE (system text, blocked text, blocker text, active boolean, changed_at timestamptz, gates boolean)
 LANGUAGE sql
@@ -187,10 +206,9 @@ AS $$
          g.gates
     FROM thought_facets f
     JOIN thought_sources s ON s.thought_id = f.thought_id AND s.system = f.payload->>'system'
-    JOIN (SELECT x.system,
-                 EXISTS (SELECT 1 FROM thought_sources o JOIN thoughts t ON t.id = o.thought_id
-                          WHERE o.system = x.system AND t.metadata->>'status_type' = ANY(node_lifecycle_types())) AS gates
-            FROM (SELECT DISTINCT d.system FROM thought_sources d) x) g ON g.system = s.system
+    JOIN (SELECT o.system, coalesce(bool_or(t.metadata->>'status_type' = ANY(node_lifecycle_types())), false) AS gates
+            FROM thought_sources o JOIN thoughts t ON t.id = o.thought_id
+           GROUP BY o.system) g ON g.system = s.system
    WHERE f.kind = 'link' AND f.payload->>'relation' IN ('blocks', 'blocked_by')
 $$;
 
@@ -253,4 +271,4 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION node_state(uuid[]) IS
-  'Per thought (every thought when p_ids is NULL, else those named): node_lifecycle()''s columns; open (known and not settled, NULL when the status_type is missing or unknown); blocked (open blockers, and the thought itself not settled); blockers (its ticket''s open blockers from gating active links, a blocker settled only by its own known lifecycle, sorted, linear bare and another system''s as system:key, NULL when none — kept on a settled thought); unknown_blockers (those with no known status); in_dependencies (a gating active link names its ticket); superseded_by (the newest thought superseding it, NULL when current). Coverage is open IS NOT NULL; freshness is synced_at and created_at, never updated_at. The one read graph-centrality and search rank by. Migration 058 / SMD-2074.';
+  'Per thought (every thought when p_ids is NULL, else those named): node_lifecycle()''s columns; open (known and not settled, NULL when the status_type is missing or unknown); blocked (open blockers, and the thought itself not settled); blockers (its ticket''s open blockers from gating active links, a blocker settled only by its own known lifecycle, sorted, linear bare and another system''s as system:key, NULL when none — kept on a settled thought); unknown_blockers (those with no known status); in_dependencies (a gating active link names its ticket); superseded_by (the newest thought superseding it, NULL when current). Coverage is open IS NOT NULL; freshness is synced_at and created_at, never updated_at. p_ids narrows the rows, not the work: the whole brain is computed and filtered last. The one read graph-centrality and search rank by. Migration 058 / SMD-2074.';
