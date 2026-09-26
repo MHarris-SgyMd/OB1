@@ -162,8 +162,8 @@ async function pruningCheck(env: Record<string, string>, ctx: Ctx): Promise<Chec
 
 /** The profile's act tools as the template ships them (SMD-2212): the MCP endpoint must list exactly these. */
 const ACT = { path: "ob1-act", tools: ["linear_file_issue"] };
-/** The kit's import pipelines (runner/pipelines.json): the fixture's five rows, and a batch the runner must refuse. */
-const IMPORT = { pipeline: "fixture", stray: "stray", system: "orch-fixture", rows: 5, actor: RUNNER_ACTOR };
+/** The kit's import pipelines (runner/pipelines.json): the fixture's five rows, a batch the runner must refuse, and an emitter that tries to read the runner's secrets. */
+const IMPORT = { pipeline: "fixture", stray: "stray", snoop: "snoop", system: "orch-fixture", rows: 5, actor: RUNNER_ACTOR };
 
 /**
  * A: the act endpoint lists exactly the template's tools and refuses a
@@ -188,19 +188,30 @@ async function actChecks(env: Record<string, string>, ctx: Ctx): Promise<Check> 
   };
 }
 
-/** The runner's answer for one on-demand run of an import instance, read from that run's record. */
-async function importRun(env: Record<string, string>, pipeline: string): Promise<{ statusCode: number; report: any; error?: string }> {
+/** One on-demand run of an import instance: the door's answer, which is the runner's report, or the reason the run failed. */
+async function importRun(env: Record<string, string>, pipeline: string): Promise<{ status: number; report: any }> {
+  const r = await fetch(`${BASE}/webhook/ob1-import-${pipeline}`, { method: "POST", headers: { "x-n8n-run-key": env.N8N_WEBHOOK_KEY, "content-type": "application/json" }, body: "{}" });
+  const text = await r.text();
+  let report: any;
+  try { report = JSON.parse(text); } catch { report = { ok: false, why: text.slice(0, 300) }; }
+  return { status: r.status, report };
+}
+
+/**
+ * Whether a value appears anywhere in the saved runs of the given workflows,
+ * the data included. Returns how many runs were read and how many held it.
+ * The value is never printed.
+ */
+async function inRunData(env: Record<string, string>, names: string[], value: string): Promise<{ runs: number; holding: number }> {
   const key = await apiKey(env);
-  const id = await workflowId(key, `OB1 import — ${pipeline}`);
-  if (!id) throw new Error(`no workflow "OB1 import — ${pipeline}" — is ${pipeline} in the kit's runner/pipelines.json?`);
-  const newest = Number((await api(BASE, key, "GET", `/executions?workflowId=${id}&limit=1`)).data?.[0]?.id ?? 0);
-  await fetch(`${BASE}/webhook/ob1-import-${pipeline}`, { method: "POST", headers: { "x-n8n-run-key": env.N8N_WEBHOOK_KEY, "content-type": "application/json" }, body: "{}" });
-  const page = await api(BASE, key, "GET", `/executions?workflowId=${id}&includeData=true&limit=5`);
-  const run = (page.data as any[]).find((e) => Number(e.id) > newest);
-  const answer = run?.data?.resultData?.runData?.["Run the pipeline"]?.at(-1)?.data?.main?.[0]?.[0]?.json;
-  if (!answer) throw new Error(`the import run for ${pipeline} left no runner answer (${run ? run.data?.resultData?.error?.message ?? run.status : "no run in the history"})`);
-  const report = typeof answer.body === "string" ? JSON.parse(answer.body) : answer.body;
-  return { statusCode: answer.statusCode, report, error: run.data?.resultData?.error?.message };
+  let runs = 0, holding = 0;
+  for (const name of names) {
+    const id = await workflowId(key, name);
+    if (!id) continue;
+    const page = await api(BASE, key, "GET", `/executions?workflowId=${id}&includeData=true&limit=50`);
+    for (const e of page.data as any[]) { runs++; if (JSON.stringify(e).includes(value)) holding++; }
+  }
+  return { runs, holding };
 }
 
 /**
@@ -208,10 +219,14 @@ async function importRun(env: Record<string, string>, pipeline: string): Promise
  * through the brain's own delete path first, so the first run proves itself.
  * Then:
  * - the first run inserts the five, under the runner's actor, each with a
- *   vector;
+ *   vector, and the door answers the report;
  * - a rerun writes nothing;
  * - `stray`, whose third line claims another source, is refused whole with
- *   nothing written.
+ *   nothing written, and the door answers the runner's reason;
+ * - `snoop`'s emitter cannot read the runner's environment (/proc/1/environ)
+ *   or its parent's: it runs as a user of its own (review pass 1);
+ * - neither the run key nor the runner's key is anywhere in n8n's saved runs
+ *   of the import workflows (review pass 1: the webhook saved its headers).
  */
 async function importChecks(env: Record<string, string>): Promise<Check> {
   const rows = () => brainSql("n8n", `SELECT count(*), count(*) FILTER (WHERE metadata->>'actor_name' = '${IMPORT.actor}'), count(*) FILTER (WHERE embedding IS NOT NULL) FROM thoughts WHERE metadata->>'source' = '${IMPORT.system}'`).split("|").map(Number);
@@ -222,17 +237,24 @@ async function importChecks(env: Record<string, string>): Promise<Check> {
   const [n2] = rows();
   const stray = await importRun(env, IMPORT.stray);
   const [n3] = rows();
+  const snoop = await importRun(env, IMPORT.snoop);
   const leaked = Number(brainSql("n8n", `SELECT count(*) FROM thoughts WHERE metadata->>'source' = 'gmail' AND metadata->>'actor_name' = '${IMPORT.actor}'`));
+  const flows = [IMPORT.pipeline, IMPORT.stray, IMPORT.snoop].flatMap((p) => [`OB1 import — ${p}`, `OB1 import — ${p} (on demand)`]);
+  const [runKey, runnerKey] = [await inRunData(env, flows, env.N8N_WEBHOOK_KEY), await inRunData(env, flows, env.OB1_RUNNER_KEY)];
   const c1 = first.report?.counts, c2 = second.report?.counts;
-  const pass = first.statusCode === 200 && c1?.inserted === IMPORT.rows && n1 === IMPORT.rows && byRunner === IMPORT.rows && embedded === IMPORT.rows
-    && second.statusCode === 200 && c2?.inserted === 0 && c2?.updated === 0 && c2?.patched === 0 && c2?.unchanged === IMPORT.rows && n2 === IMPORT.rows
-    && stray.statusCode === 422 && stray.report?.stage === "one-source" && n3 === IMPORT.rows && leaked === 0;
-  const fmt = (r: { statusCode: number; report: any }) => `${r.statusCode}${r.report?.counts ? ` inserted ${r.report.counts.inserted} unchanged ${r.report.counts.unchanged}` : ""}${r.report?.ok ? "" : ` ${r.report?.stage}: ${r.report?.why}`}`;
+  const pass = first.status === 200 && c1?.inserted === IMPORT.rows && n1 === IMPORT.rows && byRunner === IMPORT.rows && embedded === IMPORT.rows
+    && second.status === 200 && c2?.inserted === 0 && c2?.updated === 0 && c2?.patched === 0 && c2?.unchanged === IMPORT.rows && n2 === IMPORT.rows
+    && stray.status === 500 && /the runner answered 422: one-source/.test(stray.report?.why ?? "") && n3 === IMPORT.rows && leaked === 0
+    && snoop.status === 200 && snoop.report?.emitted === 0
+    && runKey.runs > 0 && runKey.holding === 0 && runnerKey.holding === 0;
+  const fmt = (r: { status: number; report: any }) => `${r.status}${r.report?.counts ? ` inserted ${r.report.counts.inserted} unchanged ${r.report.counts.unchanged}` : ""}${r.report?.ok === false ? ` ${r.report.why}` : ""}`;
   return {
     id: "I",
     pass,
     detail: `${reset} earlier fixture row(s) deleted; first run → ${fmt(first)}: ${n1} rows, ${byRunner} by ${IMPORT.actor}, ${embedded} with a vector; `
-      + `rerun → ${fmt(second)}, ${n2} rows; stray → ${fmt(stray)}${stray.report?.notes?.[0] ? ` (${stray.report.notes[0]})` : ""}, ${n3} rows, ${leaked} of another source`,
+      + `rerun → ${fmt(second)}, ${n2} rows; stray → ${fmt(stray)}, ${n3} rows, ${leaked} of another source; `
+      + `snoop → ${snoop.status}, ${snoop.report?.emitted === 0 ? "the runner's environment unreadable" : `READABLE: ${JSON.stringify(snoop.report).slice(0, 200)}`}; `
+      + `the run key in ${runKey.holding} of ${runKey.runs} saved import runs, the runner's key in ${runnerKey.holding}`,
   };
 }
 

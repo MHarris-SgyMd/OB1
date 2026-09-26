@@ -5863,7 +5863,7 @@ a brain that does not report the stamp (below, "Found on the way").
     within a day;
   - the env file must hold exactly one key under its tag in n8n.
 
-  The kit's key carries the profile's eight scopes plus the two run-history
+  The kit's key carries the profile's scopes (ten since SMD-2212) plus the two run-history
   reads it needs. The decisions K does not reach are in
   `provision.ts --self-check` (CI), against a fake n8n: renewal near
   expiry, a busy n8n, missing scopes, the sweep of a key a failed run left,
@@ -6021,11 +6021,14 @@ Since SMD-2212, `--up n8n` also loads the profile's own templates as they
 ship (`deploy/orchestration/templates/`), and starts the import runner
 (`orchestration-runner`) beside n8n. The runner's shipped allowlist is empty
 until an import recipe is converted. So `compose.n8n.yaml` mounts the kit's
-`orchestration/runner/pipelines.json` over it, with two pipelines:
+`orchestration/runner/pipelines.json` over it, with three pipelines:
 - **`fixture`:** a Python emitter (`runner/emit-fixture.py`, standard
   library) over a five-entry export in `runner/imports/fixture/`;
 - **`stray`:** the same emitter, with its third line claiming another
-  source.
+  source;
+- **`snoop`:** an emitter an export has taken over. It reads
+  `/proc/<pid>/environ` for the runner and its parent, and fails if either
+  holds `DATABASE_URL` or `OB1_RUNNER_KEY`.
 
 The act tool's Linear key is the kit's one Linear key. Two checks join K, P
 and E:
@@ -6041,42 +6044,46 @@ and E:
   Sealed, the call must fail, and not with that answer: Linear is
   unreachable. The create path (label, then issue) writes to a real
   workspace, so the kit does not run it.
-- **I — the import template, through the runner.** The fixture's rows are
-  first deleted through `delete_thought`. Then:
-  - the first on-demand run must report `inserted 5`, and leave five rows
-    labelled `orch-fixture`, all under the actor `orchestration-runner`,
-    each with a vector;
+- **I — the import template, through the runner.** Each run goes through
+  the on-demand door, and its answer is read: the report, or the runner's
+  reason. The fixture's rows are first deleted through `delete_thought`.
+  Then:
+  - the first run must report `inserted 5` and leave five rows labelled
+    `orch-fixture`, all under the actor `orchestration-runner`, each with
+    a vector;
   - a rerun must report `unchanged 5` and nothing inserted, updated or
     patched;
-  - `stray` must answer 422 at the one-source check, with no row of the
-    other source written.
-
-  The report is read from n8n's own run record: the runner's answer, as the
-  template's HTTP step received it.
+  - `stray` must fail with "the runner answered 422: one-source", with no
+    row of the other source written;
+  - `snoop` must emit nothing, because the emitter runs as `ob1-emitter`
+    and cannot read either environment. Run as root in the same container,
+    it reports both (measured, names only);
+  - neither the run key nor the runner's key may appear in any saved run of
+    the import workflows, the data included. Before the door, the webhook
+    saved its request headers, the run key among them (review pass 1).
 - **E** admits a connection to the runner's `:8090`, its addresses read from
   the engine, and nothing else of it. The runner joins the sealed network
   as the server does. The judge holds 39 crafted logs in CI.
 
-**The result (2026-09-26, the dogfood Mac, SQLite, on the implementation
-commit):**
-- **A passes.** The tools are `["linear_file_issue"]`, no key and a wrong
-  key are both 403, and the call answers "no Linear team with key
-  ZZQNOPE".
-- **I passes.** The first run inserted 5, all 5 under
-  `orchestration-runner` and all with a vector. The rerun found 5 unchanged
-  and inserted nothing. `stray` answered 422 at the one-source check, with
-  no row of the other source written.
-- **K and C3 pass as before.**
-- **The runner** is 11–12 MiB of memory.
+**The result (2026-09-26, the dogfood Mac, SQLite, on review pass 1's code,
+`--wait-schedule`): every check passes.**
+- **C1:** 10, +10 in 20.9 s, then 10, +0.
+- **C1s:** the schedule seen after 601 s.
+- **P:** the past run was gone after 51 s.
+- **K, A and C3** pass.
+- **I:**
+  - inserted 5, all with vectors, then `unchanged 5`;
+  - `stray` refused with its reason;
+  - `snoop` found the environment unreadable;
+  - the run key was in 0 of 23 saved import runs.
+- **The runner** used 11–12 MiB.
 
-On that run, C1, C1s and P did not pass. The host's Ollama held another
-session's 27B model beside the embedder, and allows two loaded models. So
-the capture path's metadata model timed out after 120 s (the server's log),
-four of the ten captures landed, and P had no runs to move. That path is
-unchanged by SMD-2212. An earlier attempt the same afternoon met a wedged
-Ollama, and every check that embeds failed. I's first two runs then
-reported `reembed: exited 2` with the rows written, which is the runner's
-report for a provider outage.
+The implementation commit's first run had passed A, I, K and C3. C1, C1s
+and P failed that time because another session's 27B model held the host's
+Ollama. The capture path's metadata model then timed out (the server's log),
+though that path is unchanged by SMD-2212. An earlier attempt met a wedged
+Ollama. The runner then reported its rows written and reembed failed, which
+is its answer to a provider outage.
 
 ## Related
 

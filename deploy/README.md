@@ -702,7 +702,7 @@ or `N8N_PORT` would split the two.
 The provisioning step runs from a checkout against the loopback port. It
 signs in as the owner and keeps n8n's API key in `deploy/.env` with its id,
 its scopes and the file's tag (`N8N_API_KEY`, `_ID`, `_SCOPES`, `_TAG`), all
-written at once. The key carries eight of n8n's 106 scopes, the credential
+written at once. The key carries ten of n8n's 106 scopes, the credential
 and workflow calls the step makes, and it expires after `N8N_API_KEY_DAYS`
 (90). A run mints a new key when that one has less than a week left, or on
 `--rotate`. Every run deletes every other key this env file minted, and
@@ -724,14 +724,20 @@ anything, it refuses:
 - a brain key at write scope, or one `MCP_ACCESS_KEYS` does not list,
   wherever in a credential it sits: a header, `Bearer <key>`, a URL's `?key=`;
 - a key whose scope is not the one its credential declares (`brainScope`);
-- one of OB1's own keys (the inbound keys, the runner's) in two credentials:
-  each does one job;
+- one of OB1's own keys (the inbound keys, the runner's) in any other
+  credential, a vendor's included, or inside a longer value: each does one
+  job;
 - a template naming a credential no template declares, or a workflow
   (`ob1wf:<template>`) no template is.
 
 A credential marked `optional` whose value is unset is skipped, and so is
-every workflow that needs it: without `N8N_LINEAR_API_KEY` the act tool is
-not loaded, and the run says so.
+every workflow that needs it. Without `N8N_LINEAR_API_KEY` the act tool is
+not loaded, and the run says so. A run also unloads what it no longer
+produces:
+- a workflow skipped that way, and an import instance whose pipeline left
+  `pipelines.json`, are unpublished (their endpoint, webhook and schedule
+  stop; the workflow stays, with its history);
+- a skipped optional credential is deleted, with the key it held.
 
 No secret sits in n8n's environment but the encryption key and the owner's
 hash, and no workflow can read one from there
@@ -758,35 +764,63 @@ starts no run, and the run key opens no MCP endpoint (both measured).
 It holds a Linear key of its own, `N8N_LINEAR_API_KEY`, which needs write
 access and is pinned to `api.linear.app`. Everything the AI client passes is
 sent to Linear, and n8n keeps a copy in its run history for the window
-below. Leave the key unset and the endpoint is not loaded.
+below. Leave the key unset and the endpoint is not loaded, or is unloaded on
+the next run if it was.
 
-**Imports** (`templates/import.per-pipeline.json`, the runner
-`orchestration/runner.ts`). An import recipe converted to an emitter of
-ingestion-contract items (SMD-2147–2150, SMD-2021) runs as one instance of
-the import template, one per line of `orchestration/pipelines.json`. That
-file is empty until the first recipe is converted. Each instance runs on a
-schedule of the pipeline's own (`everyHours`), and on demand as a POST to
-`/webhook/ob1-import-<pipeline>` with the run key. n8n's image has neither
-Bun nor python3, so the instance asks the runner, `orchestration-runner`,
-over the compose network, with `OB1_RUNNER_KEY`. The runner publishes no
-port, and it:
-1. runs the pipeline's emitter over `deploy/imports/<pipeline>/`, mounted
-   read-only (`IMPORTS_DIR` moves it). The emitter gets no database URL
-   and no key;
-2. refuses the whole batch if any line is not the pipeline's one source
-   and scope;
-3. runs `db/ingest-records.ts --source items --items -` under the actor
-   `orchestration-runner`, then `db/reembed.ts`.
+**Imports** (`templates/import.per-pipeline.json` and
+`import-on-demand.per-pipeline.json`, the runner `orchestration/runner.ts`).
+An import recipe converted to an emitter of ingestion-contract items
+(SMD-2147–2150, SMD-2021) runs as one instance of the import template, one
+per line of `orchestration/pipelines.json`. That file is empty until the
+first recipe is converted.
+- **Triggers.** Each instance runs on a schedule of the pipeline's own
+  (`everyHours`), and on demand as a POST to `/webhook/ob1-import-<pipeline>`
+  with the run key.
+- **The on-demand door** is a workflow of its own that saves no runs. It
+  drops the request, headers and all, and calls the import. So the run key
+  never lands in n8n's store, and the caller gets the report back, or the
+  runner's reason with a 500.
+- **The runner.** n8n's image has neither Bun nor python3, so the import asks
+  the runner, `orchestration-runner`, over the compose network, with
+  `OB1_RUNNER_KEY`. The runner publishes no port, and it:
+  1. runs the pipeline's emitter over `deploy/imports/<pipeline>/`, mounted
+     read-only (`IMPORTS_DIR` moves it). The emitter runs as a user of its
+     own, `ob1-emitter`, with no database URL or key in its environment, and
+     it cannot read the runner's or the ingester's. A parser an export
+     exploits holds nothing. Emitters share that user, so one can read
+     another pipeline's exports;
+  2. refuses the whole batch if any line is not the pipeline's one source
+     and scope;
+  3. runs `db/ingest-records.ts --source items --items -` under the actor
+     `orchestration-runner`, then `db/reembed.ts`, both as `bun`. reembed
+     embeds every row the brain holds without a vector at its model, not
+     only this run's (normally just this run's).
+- **Success** means every row of the pipeline's source has a vector.
+  reembed's own exit code (1 for any failed row in its job, or another
+  pass's leases) does not decide it. A row the provider refused fails every
+  run until `bun db/reembed.ts --retry-failed` embeds it.
+- **The deadline.** One run, emitter to reembed, is bounded by
+  `OB1_RUNNER_TIMEOUT_S` (3600). n8n waits that long and a minute more:
+  provisioning reads the same value, so run it again after changing the
+  knob.
 
 The run's answer is the ingester's count line and the items it named
-(skipped, stale, held). A refusal fails the run with the runner's reason.
-Drop an export into the pipeline's directory and the next run ingests it,
-and a rerun writes nothing. The export never passes through n8n: the
-request names the pipeline and nothing else, so n8n's run history holds the
-report, not the content. The runner's key is a write capability bounded by
-the allowlist (the ADR's decision 4, amended), and not a brain key. To
-change it, edit `OB1_RUNNER_KEY`, recreate the runner (`compose up -d
-orchestration-runner`), and provision, which patches n8n's copy.
+(skipped, stale, held). Drop an export into the pipeline's directory and the
+next run ingests it, and a rerun writes nothing. The export never passes
+through n8n. The request names the pipeline and nothing else, so n8n's run
+history holds the report, not the export. The report does name items by
+identity, and a refusal can quote the value it refused.
+
+The runner's key is a write capability bounded by the allowlist (the ADR's
+decision 4, amended), and not a brain key. To change it, edit
+`OB1_RUNNER_KEY`, recreate the runner (`compose up -d orchestration-runner`),
+and provision, which patches n8n's copy.
+
+The runner reads `pipelines.json` at start, from the same file provisioning
+reads. After adding a line, rebuild the runner with the recipe's emitter
+(`compose up -d --build orchestration-runner`), then provision. A line whose
+emitter the image lacks stops the runner at start with the name, rather than
+failing every run.
 
 **Custody and backups.**
 - **The owner password** is the profile's standing secret, stronger than the

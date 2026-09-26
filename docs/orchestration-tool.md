@@ -416,10 +416,12 @@ runs outside n8n:
   The runner's key is not a brain key: MCP_ACCESS_KEYS does not list it, so
   provisioning's brain-key rule does not govern it. Its own rule, built in
   SMD-2212, holds the key to its one job:
-  - provisioning refuses it in any other credential: an inbound key, the
-    brain's capture key;
+  - provisioning refuses it in any other credential (an inbound key, the
+    brain's capture key, a vendor's), and inside a longer value;
   - the runner answers 401 without it and 403 to a wrong one;
-  - an emitter never sees it or the database URL.
+  - an emitter runs as a user of its own, with neither the key nor the
+    database URL in its environment, and it cannot read the runner's
+    (review pass 1 found a same-user emitter reading both from `/proc`).
 
   The three bounds are the runner's own checks:
   - a pipeline not in the file is a 404;

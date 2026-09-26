@@ -149,6 +149,20 @@ const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "obj
 const isString = (v: unknown): v is string => typeof v === "string";
 
 /**
+ * Why a scope could never be cleared by `--allow`, or null when it can be.
+ * One rule for an item's scope and for the import runner's pipelines
+ * (deploy/orchestration/runner.ts), so a pipeline whose scope every item
+ * would fail is refused when the runner loads it, not on every run.
+ */
+export function scopeProblem(scope: unknown): string | null {
+  if (!isString(scope) || scope.trim() === "") return "a non-empty string — the unit --allow clears (an export, a vault, a workspace)";
+  if (scope !== scope.trim()) return "surrounding whitespace — --allow trims its entries, so this scope could never be cleared";
+  if (scope.includes("/")) return "holds a `/`, which --allow reads as a path (the markdown vault's scope) and resolves, so this scope could never be cleared; spell it with `:` (chatgpt:export)";
+  if (scope.includes(",")) return "holds a `,`, which --allow reads as its separator between scopes, so this scope could never be cleared; spell it with `:` or `-`";
+  return null;
+}
+
+/**
  * Every string and number inside a JSON value with the path to it, for the
  * storability check over facets and the rest. Iterative, with its own stack: a
  * value nested two hundred thousand deep is a line to refuse, not a RangeError
@@ -214,11 +228,9 @@ export function parseItem(value: unknown, line: number, label: string = "--items
   if (keyChars > IDENTITY_MAX) return refuse("identity.key", `${keyChars} characters; thought_sources.identity holds ${IDENTITY_MAX}`);
 
   // scope
-  const scope = value.scope;
-  if (!isString(scope) || scope.trim() === "") return refuse("scope", "a non-empty string — the unit --allow clears (an export, a vault, a workspace)");
-  if (scope !== scope.trim()) return refuse("scope", "surrounding whitespace — --allow trims its entries, so this scope could never be cleared");
-  if (scope.includes("/")) return refuse("scope", "holds a `/`, which --allow reads as a path (the markdown vault's scope) and resolves, so this scope could never be cleared; spell it with `:` (chatgpt:export)");
-  if (scope.includes(",")) return refuse("scope", "holds a `,`, which --allow reads as its separator between scopes, so this scope could never be cleared; spell it with `:` or `-`");
+  const scope = value.scope as string;
+  const scopeWhy = scopeProblem(scope);
+  if (scopeWhy) return refuse("scope", scopeWhy);
 
   // canonical
   const canonical = value.canonical;

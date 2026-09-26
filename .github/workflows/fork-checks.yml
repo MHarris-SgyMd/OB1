@@ -275,9 +275,16 @@ jobs:
         run: bun provision.ts --self-check
 
       # SMD-2212: the import runner's rules against stand-in commands, with no
-      # database. The allowlist's checks, the one-source rule, the key's 401
-      # and 403, a stray line refused before the ingester runs, and an emitter
-      # that sees neither the database URL nor the key.
+      # database:
+      # - the allowlist's checks, the one-source rule, and the key's 401/403;
+      # - success judged by the pipeline's rows having vectors, not by
+      #   reembed's exit;
+      # - a stray line refused before the ingester runs, and an emitter
+      #   environment with no secret in it;
+      # - the run's deadline, SIGKILL for a step that ignores SIGTERM, and a
+      #   leftover child that cannot hold the pipeline.
+      # The emitter's own user is the image's, and the kit's I check holds it
+      # live.
       - name: Orchestration import runner rules
         working-directory: deploy/orchestration
         run: bun runner.ts --self-check

@@ -598,6 +598,19 @@ services:
       # The exports, read-only: one subdirectory per pipeline. Private data,
       # which git and every build context ignore (deploy/imports/README.md).
       - ${IMPORTS_DIR:-./imports}:/imports:ro
+      # The allowlist provisioning reads, so the two cannot disagree: a line
+      # the runner does not hold would load an import that fails every run
+      # (review pass 1). The runner reads it at start, so recreate it after an
+      # edit. It refuses to start on a line whose emitter the image lacks.
+      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro
+    # It starts as root only to hand each step to its own user (su-exec: an
+    # emitter as ob1-emitter, the pipeline as bun). These are the only
+    # capabilities it keeps: changing user, and signalling a step's process at
+    # the deadline. init reaps a step's leftover children.
+    init: true
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, KILL]
+    security_opt: ["no-new-privileges:true"]
     environment:
       <<: *server-env
       # The server's key material stays with the server (board-sync's rule).

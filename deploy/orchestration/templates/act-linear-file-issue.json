@@ -54,7 +54,7 @@
         "nodeCredentialType": "linearApi",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ query: 'query($key: String!, $label: String!) { teams(first: 1, filter: { key: { eq: $key } }) { nodes { id key } } issueLabels(first: 20, filter: { name: { eqIgnoreCase: $label } }) { nodes { id name team { id } } } }', variables: { key: String($json.team ?? '').trim().toUpperCase(), label: String($json.label ?? '').trim() } }) }}",
+        "jsonBody": "={{ JSON.stringify({ query: 'query($key: String!, $label: String!) { teams(first: 1, filter: { key: { eq: $key } }) { nodes { id key } } issueLabels(first: 20, filter: { name: { eqIgnoreCase: $label }, or: [{ team: { key: { eq: $key } } }, { team: { null: true } }] }) { nodes { id name team { id } } } }', variables: { key: String($json.team ?? '').trim().toUpperCase(), label: String($json.label ?? '').trim() } }) }}",
         "options": {}
       },
       "credentials": {

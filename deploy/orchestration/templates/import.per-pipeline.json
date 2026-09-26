@@ -1,7 +1,8 @@
 {
   "name": "OB1 import — {{pipeline}}",
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner"
   },
   "nodes": [
     {
@@ -26,27 +27,15 @@
     },
     {
       "id": "7a1f0c2e-0002-4d3b-9e10-000000000002",
-      "name": "On demand",
-      "type": "n8n-nodes-base.webhook",
-      "typeVersion": 2,
+      "name": "Called on demand",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
       "position": [
         0,
         200
       ],
-      "webhookId": "{{pipeline.webhookId}}",
       "parameters": {
-        "httpMethod": "POST",
-        "path": "ob1-import-{{pipeline}}",
-        "authentication": "headerAuth",
-        "responseMode": "lastNode",
-        "responseData": "firstEntryJson",
-        "options": {}
-      },
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "ob1inboundRun001",
-          "name": "OB1 inbound — on-demand runs"
-        }
+        "inputSource": "passthrough"
       }
     },
     {
@@ -64,7 +53,7 @@
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "options": {
-          "timeout": 3600000,
+          "timeout": "{{pipeline.timeoutMs}}",
           "response": {
             "response": {
               "fullResponse": true,
@@ -106,7 +95,7 @@
         ]
       ]
     },
-    "On demand": {
+    "Called on demand": {
       "main": [
         [
           {

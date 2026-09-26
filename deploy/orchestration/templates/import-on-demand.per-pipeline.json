@@ -1,0 +1,124 @@
+{
+  "name": "OB1 import — {{pipeline}} (on demand)",
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false
+  },
+  "nodes": [
+    {
+      "id": "7b2e1d3f-0001-4e4c-8f20-000000000001",
+      "name": "On demand",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "{{pipeline.webhookId}}",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ob1-import-{{pipeline}}",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ob1inboundRun001",
+          "name": "OB1 inbound — on-demand runs"
+        }
+      }
+    },
+    {
+      "id": "7b2e1d3f-0002-4e4c-8f20-000000000002",
+      "name": "Drop the request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Nothing of the request goes on: its headers carry the run key.\nreturn [{ json: {} }];"
+      }
+    },
+    {
+      "id": "7b2e1d3f-0003-4e4c-8f20-000000000003",
+      "name": "Run the import",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        440,
+        0
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "ob1wf:import:{{pipeline}}"
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    },
+    {
+      "id": "7b2e1d3f-0004-4e4c-8f20-000000000004",
+      "name": "Answer",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.error ? { ok: false, why: String($json.error.message ?? $json.error).replace(/ \\[line \\d+\\]$/, '') } : $json) }}",
+        "options": {
+          "responseCode": "={{ $json.error ? 500 : 200 }}"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "On demand": {
+      "main": [
+        [
+          {
+            "node": "Drop the request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Drop the request": {
+      "main": [
+        [
+          {
+            "node": "Run the import",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run the import": {
+      "main": [
+        [
+          {
+            "node": "Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

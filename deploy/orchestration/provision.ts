@@ -66,6 +66,9 @@
  *   id: the act tool's MCP endpoint calls its sub-workflow by id.
  * - A `*.per-pipeline.json` template loads once per pipeline in the import
  *   runner's allowlist (runner.ts, pipelines.json), filled by instanceFor.
+ * - What a run no longer produces is unloaded: a skipped workflow, or an
+ *   import instance whose pipeline left the allowlist, is unpublished; a
+ *   skipped optional credential is deleted.
  *
  * Nothing secret is printed. The eval kit imports this module and provisions
  * through it (evals/orchestration/n8n.ts), so the kit tests these bytes.
@@ -77,7 +80,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "../../db/env.ts";
 import { hashKey, parseKeyRecords, type Scope } from "../../server-portable/auth.ts";
-import { loadPipelines, PIPELINES_FILE, type Pipeline } from "./runner.ts";
+import { DEFAULT_TIMEOUT_S, loadPipelines, PIPELINES_FILE, type Pipeline } from "./runner.ts";
 
 export const HERE = dirname(fileURLToPath(import.meta.url));
 /** The profile's own credentials — the keys its templates reference by placeholder id. */
@@ -87,12 +90,15 @@ export const PROFILE_TEMPLATES = join(HERE, "templates");
 
 /**
  * What provisioning calls, out of the 106 scopes n8n 2.40.6 offers (measured):
- * credentials and workflows, nothing else. A caller that reads run history
- * (the eval kit) asks for execution:list and execution:read on top.
+ * credentials and workflows, nothing else. The last two unload what a run no
+ * longer produces: a workflow is unpublished, and a skipped optional
+ * credential deleted (SMD-2212). A caller that reads run history (the eval
+ * kit) asks for execution:list and execution:read on top.
  */
 export const SCOPES = [
   "credential:create", "credential:list", "credential:update",
   "workflow:create", "workflow:list", "workflow:read", "workflow:update", "workflow:activate",
+  "workflow:deactivate", "credential:delete",
 ];
 /** Every key this script mints carries this label prefix, then the env file's tag. A run revokes the others with its tag, never a key someone made by hand. */
 export const KEY_LABEL = "ob1-provision";
@@ -424,31 +430,37 @@ const SETTING_FIELDS = new Set(["name", "allowedHttpRequestDomains", "allowedDom
 const OWN_KEY_TYPES = new Set(["httpHeaderAuth", "httpQueryAuth", "httpBearerAuth", "httpBasicAuth"]);
 
 /**
- * None of OB1's own keys sits in two credentials. Each does one job: the
- * runner's, an inbound path's, the brain's capture. A key reused across two
- * would let whoever holds it for one job do the other. That rule is what
- * keeps the runner's key and the two inbound keys apart (SMD-2212). A brain
- * key reused as any of them is refused by checkBrainKey. A vendor's key, in
- * the vendor's own credential type, may serve two templates: the eval kit's
- * Linear lookup and the act tool share one. Returns the problems, naming the
- * credentials, never the value.
+ * None of OB1's own keys sits in any other credential. Each does one job: the
+ * runner's, an inbound path's, the brain's capture. A key reused would let
+ * whoever holds it for one job do the other. That rule keeps the runner's key
+ * and the two inbound keys apart (SMD-2212). An own key is a value in a
+ * generic-auth credential (a header, a query, a bearer), and it is looked for
+ * in every other credential of any type, and inside longer strings
+ * (`Bearer <key>`, `?key=`), as checkBrainKey looks (review pass 1: the
+ * runner's key as a vendor's key, or as a bearer, went through). A brain key
+ * reused is refused by checkBrainKey too. A vendor's key, in the vendor's own
+ * type, may serve two templates: the eval kit's Linear lookup and the act tool
+ * share one. Returns the problems, naming the credentials, never the value.
  */
 export function sharedSecrets(creds: { name: string; type?: string; data?: Record<string, unknown> }[]): string[] {
-  const holder = new Map<string, string>();
-  const problems: string[] = [];
-  for (const c of creds) for (const [field, v] of Object.entries(OWN_KEY_TYPES.has(c.type ?? "") ? c.data ?? {} : {})) {
-    if (SETTING_FIELDS.has(field) || typeof v !== "string" || v.length < 16) continue;
-    const other = holder.get(v);
-    if (other !== undefined && other !== c.name) problems.push(`credentials "${other}" and "${c.name}" hold the same secret — each key does one job, so each needs a value of its own (--init writes one per key)`);
-    else holder.set(v, c.name);
+  const own = (c: { type?: string; data?: Record<string, unknown> }) => OWN_KEY_TYPES.has(c.type ?? "")
+    ? Object.entries(c.data ?? {}).flatMap(([field, v]) => (!SETTING_FIELDS.has(field) && typeof v === "string" && v.length >= 16 ? [v] : []))
+    : [];
+  const secretsOf = (c: { data?: Record<string, unknown> }) => candidates(Object.fromEntries(Object.entries(c.data ?? {}).filter(([field]) => !SETTING_FIELDS.has(field))));
+  const pairs = new Set<string>();
+  for (const c of creds) for (const key of own(c)) for (const other of creds) {
+    if (other !== c && other.name !== c.name && secretsOf(other).includes(key)) pairs.add([c.name, other.name].sort().join("\u0000"));
   }
-  return problems;
+  return [...pairs].map((pair) => {
+    const [a, b] = pair.split("\u0000");
+    return `credentials "${a}" and "${b}" hold the same secret — each key does one job, so each needs a value of its own (--init writes one per key)`;
+  });
 }
 
 /** A per-pipeline template's suffix: it is loaded once for each pipeline in the runner's allowlist. */
 export const PER_PIPELINE = ".per-pipeline.json";
-/** A template's name for another template's workflow: `ob1wf:<file stem>`, replaced by the workflow's id when it loads. */
-const REF_RE = /"ob1wf:([a-z0-9-]+)"/g;
+/** A template's name for another template's workflow: `ob1wf:<file stem>` (`ob1wf:<stem>:<pipeline>` for an instance), replaced by the workflow's id when it loads. */
+const REF_RE = /"ob1wf:([a-z0-9-]+(?::[a-z0-9-]+)?)"/g;
 export const workflowRefs = (text: string) => [...new Set([...text.matchAll(REF_RE)].map((m) => m[1]))];
 export const stemOf = (file: string) => basename(file).replace(/\.per-pipeline\.json$|\.json$/, "");
 
@@ -463,17 +475,23 @@ function derivedUuid(seed: string): string {
  * `{{pipeline}}` becomes the pipeline's name. A string that is exactly
  * `{{pipeline.everyHours}}` becomes its schedule, as a number. One that is
  * exactly `{{pipeline.webhookId}}` becomes a UUID derived from the template and
- * the name. Any other `{{pipeline…}}` is refused, so a typo does not reach n8n
- * as text. n8n's own expressions (`={{ $json.x }}`) are left alone.
+ * the name. One that is exactly `{{pipeline.timeoutMs}}` becomes how long n8n
+ * waits for the runner: the runner's whole-run deadline (`timeoutS`,
+ * OB1_RUNNER_TIMEOUT_S) and a minute more, so n8n never gives up on a run the
+ * runner is still allowed to finish (review pass 1). Any other
+ * `{{pipeline…}}` is refused, so a typo does not reach n8n as text. n8n's own
+ * expressions (`={{ $json.x }}`) are left alone.
  */
-export function instanceFor(template: unknown, p: Pipeline, stem: string): any {
+export function instanceFor(template: unknown, p: Pipeline, stem: string, timeoutS = DEFAULT_TIMEOUT_S): any {
   const walk = (v: unknown): unknown => {
     if (typeof v === "string") {
       if (v === "{{pipeline.everyHours}}") return p.everyHours;
       if (v === "{{pipeline.webhookId}}") return derivedUuid(`${stem}:${p.name}`);
+      if (v === "{{pipeline.timeoutMs}}") return (timeoutS + 60) * 1000;
       const out = v.replaceAll("{{pipeline}}", p.name);
-      const left = /\{\{\s*pipeline\b[^}]*\}\}/.exec(out);
-      if (left) throw new Error(`${stem}${PER_PIPELINE}: ${left[0]} is not a pipeline placeholder ({{pipeline}}, {{pipeline.everyHours}}, {{pipeline.webhookId}})`);
+      // `pipeline` then anything up to the braces: `{{pipelines}}` is a typo too (review pass 1).
+      const left = /\{\{\s*pipeline[^}]*\}\}/.exec(out);
+      if (left) throw new Error(`${stem}${PER_PIPELINE}: ${left[0]} is not a pipeline placeholder ({{pipeline}}, {{pipeline.everyHours}}, {{pipeline.webhookId}}, {{pipeline.timeoutMs}})`);
       return out;
     }
     if (Array.isArray(v)) return v.map(walk);
@@ -481,6 +499,12 @@ export function instanceFor(template: unknown, p: Pipeline, stem: string): any {
     return v;
   };
   return walk(template);
+}
+
+/** The names a per-pipeline template's instances carry: its name with `{{pipeline}}` standing for any pipeline's. */
+export function instanceNamePattern(templateName: string): RegExp {
+  const esc = templateName.replace(/[.*+?^${}()|[\]\\]/g, (c) => `\\${c}`);
+  return new RegExp(`^${esc.split("\\{\\{pipeline\\}\\}").join("[a-z][a-z0-9-]{0,39}")}$`);
 }
 
 /** Workflow template files under a directory, sorted; none when it does not exist. */
@@ -506,6 +530,7 @@ export async function provision(o: Options): Promise<{ steps: string[]; key: Key
   // act tool's Linear key) whose value is unset is skipped, and so is every
   // workflow that needs it. Said, never silent. A required one refuses the run.
   const skippedCreds = new Map<string, string>();
+  const skippedCredNames: string[] = [];
   const declared = new Set<string>();
   for (const file of o.credentials) {
     for (const t of JSON.parse(readFileSync(file, "utf8")) as any[]) {
@@ -516,6 +541,7 @@ export async function provision(o: Options): Promise<{ steps: string[]; key: Key
         const missing = /names ([A-Z0-9_]+), which the env file does not set/.exec((e as Error).message)?.[1];
         if (!t.optional || !missing) throw e;
         skippedCreds.set(t.id, `credential "${t.name}" (${missing} is not set)`);
+        skippedCredNames.push(t.name);
       }
     }
   }
@@ -527,12 +553,15 @@ export async function provision(o: Options): Promise<{ steps: string[]; key: Key
   }
   const shared = sharedSecrets(creds.map(({ c }) => c));
   if (shared.length) throw new Error(shared.join("; "));
+  // The runner's whole-run deadline, which an import instance's HTTP call must outwait.
+  const runnerTimeoutS = Number(o.env.OB1_RUNNER_TIMEOUT_S?.trim() || DEFAULT_TIMEOUT_S);
+  if (!Number.isFinite(runnerTimeoutS) || runnerTimeoutS <= 0) throw new Error(`OB1_RUNNER_TIMEOUT_S must be a positive number of seconds, got "${o.env.OB1_RUNNER_TIMEOUT_S}"`);
   // Each template once, and each per-pipeline template once per pipeline.
   const flows: { file: string; stem: string; text: string }[] = [];
   for (const file of o.workflows) {
     const text = readFileSync(file, "utf8");
     if (!file.endsWith(PER_PIPELINE)) { flows.push({ file, stem: stemOf(file), text }); continue; }
-    for (const p of o.pipelines ?? []) flows.push({ file, stem: `${stemOf(file)}:${p.name}`, text: JSON.stringify(instanceFor(JSON.parse(text), p, stemOf(file))) });
+    for (const p of o.pipelines ?? []) flows.push({ file, stem: `${stemOf(file)}:${p.name}`, text: JSON.stringify(instanceFor(JSON.parse(text), p, stemOf(file), runnerTimeoutS)) });
   }
   const stems = new Set(flows.map((f) => f.stem));
   const problems = flows.flatMap(({ file, text }) => [
@@ -611,6 +640,31 @@ export async function provision(o: Options): Promise<{ steps: string[]; key: Key
     await api(o.base, k, "POST", `/workflows/${id}/publish`, {});
     flowIds.set(stem, id as string);
   }
+  // What this run no longer produces is unloaded (review pass 1: an unset
+  // optional key, or a pipeline taken out of the allowlist, left the old
+  // workflow published). Two kinds: a workflow skipped for an unset optional
+  // credential, and an instance of a per-pipeline template whose pipeline is
+  // gone. Each is unpublished, so its endpoint, webhook and schedule stop, and
+  // kept, with its history. A skipped optional credential is deleted, so its
+  // old key leaves n8n's store.
+  const nameOf = (text: string) => JSON.parse(text).name as string;
+  const produced = new Set(ordered.map((f) => nameOf(f.text)));
+  const skippedNames = new Set(flows.filter((f) => skippedFlows.has(f.stem)).map((f) => nameOf(f.text)));
+  const instanceNames = o.workflows.filter((f) => f.endsWith(PER_PIPELINE)).map((f) => instanceNamePattern(nameOf(readFileSync(f, "utf8"))));
+  const unpublished: string[] = [];
+  for (const w of (await api(o.base, k, "GET", "/workflows?limit=250")).data as any[]) {
+    if (produced.has(w.name) || w.active === false) continue;
+    if (!skippedNames.has(w.name) && !instanceNames.some((re) => re.test(w.name))) continue;
+    await api(o.base, k, "POST", `/workflows/${w.id}/deactivate`, {});
+    unpublished.push(w.name);
+  }
+  const deletedCreds: string[] = [];
+  for (const name of skippedCredNames) {
+    const id = existing.get(name);
+    if (!id) continue;
+    await api(o.base, k, "DELETE", `/credentials/${id}`);
+    deletedCreds.push(name);
+  }
   // The inherited tag's keys: named, so a moved file's leftovers are not
   // silent, and revoked with --adopt. A copy of a file still in use must NOT
   // adopt: that would revoke the original's key.
@@ -632,6 +686,8 @@ export async function provision(o: Options): Promise<{ steps: string[]; key: Key
       `credentials: ${n.created} created, ${n.patched} patched${skippedCreds.size ? `, ${skippedCreds.size} optional skipped` : ""}`,
       `workflows: ${n.workflowsCreated} created, ${n.workflowsReplaced} replaced, ${ordered.length} published`,
       ...[...skippedFlows].map(([stem, why]) => `skipped workflow ${stem}: it ${why}`),
+      ...unpublished.map((name) => `unpublished "${name}": no template produces it now`),
+      ...deletedCreds.map((name) => `deleted credential "${name}": its value is unset`),
     ],
   };
 }
@@ -656,6 +712,8 @@ function fakeN8n() {
     keys: new Map<string, { raw: string; label: string; scopes: string[] }>(), logins: 0, probeStatus: 0, loginStatus: 200, mintStatus: 200, next: 1,
     // The workflows it was given, by the id it answered, and the credentials' names.
     workflows: new Map<string, any>(), credentials: [] as string[],
+    // What it holds, as n8n would list it: credentials by id, the published workflows, and what a run unloaded.
+    creds: new Map<string, string>(), active: new Set<string>(), unpublished: [] as string[], deletedCreds: [] as string[],
     // The owner the fake knows: sign-in checks both, as n8n does.
     email: DEFAULT_OWNER_EMAIL, password: "Ob1-pw-1", cookie: `n8n-auth=${randomBytes(8).toString("hex")}`, lastScopes: [] as string[],
     jwt: (exp: number | null) => `h.${Buffer.from(JSON.stringify(exp === null ? { sub: "o" } : { sub: "o", exp })).toString("base64url")}.s${s.next++}`,
@@ -686,8 +744,18 @@ function fakeN8n() {
       if (u.pathname.startsWith("/api/v1/")) {
         if (s.probeStatus) return new Response("busy", { status: s.probeStatus });
         if (!valid(req.headers.get("x-n8n-api-key"))) return new Response("unauthorized", { status: 401 });
-        if (u.pathname === "/api/v1/credentials" && req.method === "POST") { s.credentials.push((await req.json() as any).name); return j({ id: `c${s.next++}` }); }
+        const idIn = (prefix: string) => u.pathname.slice(prefix.length).split("/")[0];
+        if (u.pathname === "/api/v1/credentials" && req.method === "POST") { const name = (await req.json() as any).name; s.credentials.push(name); const id = `c${s.next++}`; s.creds.set(id, name); return j({ id }); }
+        if (u.pathname === "/api/v1/credentials" && req.method === "GET") return j({ data: [...s.creds].map(([id, name]) => ({ id, name })) });
+        if (u.pathname.startsWith("/api/v1/credentials/") && req.method === "DELETE") { const id = idIn("/api/v1/credentials/"); s.deletedCreds.push(s.creds.get(id) ?? id); s.creds.delete(id); return j({}); }
         if (u.pathname === "/api/v1/workflows" && req.method === "POST") { const id = `w${s.next++}`; s.workflows.set(id, await req.json()); return j({ id }); }
+        if (u.pathname === "/api/v1/workflows" && req.method === "GET") {
+          const name = u.searchParams.get("name");
+          return j({ data: [...s.workflows].filter(([, w]) => name === null || w.name === name).map(([id, w]) => ({ id, name: w.name, active: s.active.has(id) })) });
+        }
+        if (u.pathname.startsWith("/api/v1/workflows/") && req.method === "PUT") { s.workflows.set(idIn("/api/v1/workflows/"), await req.json()); return j({}); }
+        if (u.pathname.endsWith("/publish")) { s.active.add(idIn("/api/v1/workflows/")); return j({}); }
+        if (u.pathname.endsWith("/deactivate")) { const id = idIn("/api/v1/workflows/"); s.active.delete(id); s.unpublished.push(s.workflows.get(id)?.name ?? id); return j({}); }
         return j({ data: [] });
       }
       return new Response("not here", { status: 404 });
@@ -812,7 +880,7 @@ async function selfCheck(): Promise<number> {
   const kitIds = existsSync(join(KIT, "credentials.template.json")) ? idsOf(join(KIT, "credentials.template.json")) : [];
   const declaredIds = new Set([...profileIds, ...kitIds]);
   const shipped = [...templatesIn(PROFILE_TEMPLATES), ...templatesIn(KIT).filter((f) => !f.endsWith("credentials.template.json"))];
-  expect("the profile ships its templates: the act tool's two and the import template", ["act-mcp.json", "act-linear-file-issue.json", `import${PER_PIPELINE}`].every((t) => shipped.some((f) => f.endsWith(`/${t}`))));
+  expect("the profile ships its templates: the act tool's two and the import template", ["act-mcp.json", "act-linear-file-issue.json", `import${PER_PIPELINE}`, `import-on-demand${PER_PIPELINE}`].every((t) => shipped.some((f) => f.endsWith(`/${t}`))));
   for (const t of shipped) for (const p of undeclaredCredentials(JSON.parse(readFileSync(t, "utf8")), declaredIds, t)) fails.push(p);
   expect("an undeclared credential id is reported", undeclaredCredentials({ nodes: [{ name: "n", credentials: { x: { id: "nope" } } }] }, declaredIds, "t").length === 1);
 
@@ -934,7 +1002,7 @@ async function selfCheck(): Promise<number> {
       writeFileSync(join(tdir, "top.json"), flow("Top", [{ name: "tool", parameters: { workflowId: { value: "ob1wf:sub" } } }]));
       writeFileSync(join(tdir, "plain.json"), flow("Plain", [{ name: "call", parameters: { workflowId: { value: "ob1wf:leaf" } } }]));
       writeFileSync(join(tdir, "leaf.json"), flow("Leaf", [{ name: "x" }]));
-      writeFileSync(join(tdir, `imp${PER_PIPELINE}`), flow("Import {{pipeline}}", [{ name: "hook", webhookId: "{{pipeline.webhookId}}", parameters: { path: "imp-{{pipeline}}", every: "{{pipeline.everyHours}}", expr: "={{ $json.x }}" }, credentials: { httpHeaderAuth: { id: "ob1runnerKey0001" } } }]));
+      writeFileSync(join(tdir, `imp${PER_PIPELINE}`), flow("Import {{pipeline}}", [{ name: "hook", webhookId: "{{pipeline.webhookId}}", parameters: { path: "imp-{{pipeline}}", every: "{{pipeline.everyHours}}", wait: "{{pipeline.timeoutMs}}", expr: "={{ $json.x }}" }, credentials: { httpHeaderAuth: { id: "ob1runnerKey0001" } } }]));
       const pipes: Pipeline[] = [{ name: "alpha", system: "alpha", scope: "alpha:x", emitter: ["bun", "a.ts"], everyHours: 6 }, { name: "beta", system: "beta", scope: "beta:x", emitter: ["bun", "b.ts"], everyHours: 24 }];
       const run = (env: Record<string, string>) => provision(opts({ ...base, ...file(), ...env }, { credentials: [credFile], workflows: templatesIn(tdir), pipelines: pipes }));
       const keys16 = { RUN_KEY: "r".repeat(32), RUNNER_KEY: "n".repeat(32) };
@@ -946,11 +1014,34 @@ async function selfCheck(): Promise<number> {
       const leafId = byName("Leaf")?.[0];
       expect("a workflow reference becomes the id of the workflow it names, loaded first", leafId !== undefined && byName("Plain")?.[1].nodes[0].parameters.workflowId.value === leafId);
       const [alpha, beta] = [byName("Import alpha")?.[1].nodes[0], byName("Import beta")?.[1].nodes[0]];
-      expect("a per-pipeline template is loaded once per pipeline: its name, path and schedule filled, n8n's own expression left alone", alpha?.parameters.path === "imp-alpha" && alpha.parameters.every === 6 && beta?.parameters.every === 24 && alpha.parameters.expr === "={{ $json.x }}");
+      expect("a per-pipeline template is loaded once per pipeline: its name, path and schedule filled, n8n's own expression left alone", alpha?.parameters.path === "imp-alpha" && alpha.parameters.every === 6 && beta?.parameters.every === 24 && alpha.parameters.expr === "={{ $json.x }}" && alpha.parameters.wait === 3_660_000);
       expect("each instance's webhook id is its own, and the same on every run", /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/.test(alpha?.webhookId ?? "") && alpha?.webhookId !== beta?.webhookId && instanceFor({ w: "{{pipeline.webhookId}}" }, pipes[0], "imp").w === alpha?.webhookId);
       f.s.workflows.clear();
       await run({ ...keys16, VENDOR_KEY: "v".repeat(32) });
       expect("with the optional credential set, its workflows load too", ["Sub", "Top"].every((n) => byName(n)) && byName("Top")?.[1].nodes[0].parameters.workflowId.value === byName("Sub")?.[0]);
+      // Review pass 1: unsetting the key, or dropping a pipeline, left the old workflows published.
+      f.s.unpublished.length = 0; f.s.deletedCreds.length = 0;
+      const unset = await run(keys16);
+      expect(`unsetting the optional key again unpublishes its workflows and deletes its credential (${f.s.unpublished.join(",")}; ${f.s.deletedCreds.join(",")})`, f.s.unpublished.sort().join() === "Sub,Top" && f.s.deletedCreds.join() === "vendor" && unset.steps.some((l) => /unpublished "Top"/.test(l)) && unset.steps.some((l) => /deleted credential "vendor"/.test(l)));
+      f.s.unpublished.length = 0;
+      await provision(opts({ ...base, ...file(), ...keys16 }, { credentials: [credFile], workflows: templatesIn(tdir), pipelines: [pipes[0]] }));
+      expect(`a pipeline taken out of the allowlist has its instance unpublished, and nothing else (${f.s.unpublished.join(",")})`, f.s.unpublished.join() === "Import beta");
+      f.s.unpublished.length = 0;
+      await run(keys16);
+      expect("a run that changes nothing unpublishes nothing", f.s.unpublished.length === 0);
+      expect("one of OB1's keys reused as a vendor's key is refused", sharedSecrets([{ name: "runner", type: "httpHeaderAuth", data: { name: "x-runner-key", value: "n".repeat(32) } }, { name: "vendor", type: "linearApi", data: { apiKey: "n".repeat(32) } }]).length === 1);
+      expect("one of OB1's keys inside a longer value (`Bearer <key>`) is refused", sharedSecrets([{ name: "runner", type: "httpHeaderAuth", data: { name: "x-runner-key", value: "n".repeat(32) } }, { name: "b", type: "httpHeaderAuth", data: { name: "Authorization", value: `Bearer ${"n".repeat(32)}` } }]).length === 1);
+      expect("an instance's HTTP wait is the runner's deadline and a minute", instanceFor({ t: "{{pipeline.timeoutMs}}" }, pipes[0], "imp").t === 3_660_000 && instanceFor({ t: "{{pipeline.timeoutMs}}" }, pipes[0], "imp", 7200).t === 7_260_000);
+      expect("`{{pipelines}}` is a typo, not text", throws(() => instanceFor({ x: "{{pipelines}}" }, pipes[0], "imp"), /not a pipeline placeholder/));
+      writeFileSync(join(tdir, `door${PER_PIPELINE}`), flow("Door {{pipeline}}", [{ name: "call", parameters: { workflowId: { value: "ob1wf:imp:{{pipeline}}" } } }]));
+      f.s.workflows.clear();
+      await run(keys16);
+      expect("a per-pipeline template names its own pipeline's instance of another, which loads first", byName("Door alpha")?.[1].nodes[0].parameters.workflowId.value === byName("Import alpha")?.[0] && byName("Door beta")?.[1].nodes[0].parameters.workflowId.value === byName("Import beta")?.[0]);
+      rmSync(join(tdir, `door${PER_PIPELINE}`));
+      f.s.workflows.clear();
+      await run({ ...keys16, OB1_RUNNER_TIMEOUT_S: "120" });
+      expect("an instance waits the env file's OB1_RUNNER_TIMEOUT_S and a minute", byName("Import alpha")?.[1].nodes[0].parameters.wait === 180_000);
+      expect("a timeout that is not a positive number is refused", await rejects(() => run({ ...keys16, OB1_RUNNER_TIMEOUT_S: "soon" }), /OB1_RUNNER_TIMEOUT_S must be a positive number/));
       expect("the runner's key reused as an inbound key is refused before anything is written", await rejects(() => run({ RUN_KEY: "n".repeat(32), RUNNER_KEY: "n".repeat(32) }), /credentials "run" and "runner" hold the same secret/));
       expect("a vendor's key may serve two credentials of its own type", sharedSecrets([{ name: "a", type: "linearApi", data: { apiKey: "k".repeat(40) } }, { name: "b", type: "linearApi", data: { apiKey: "k".repeat(40) } }]).length === 0);
       expect("a required credential whose value is unset still refuses the run", await rejects(() => run({ RUN_KEY: "r".repeat(32) }), /names RUNNER_KEY, which the env file does not set/));
