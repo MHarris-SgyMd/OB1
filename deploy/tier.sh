@@ -68,8 +68,9 @@
 # needs a label the container may read; relabel the checkout once (`chcon -Rt
 # container_file_t <checkout>`) — this script does not relabel it for you.
 #
-# Exit status is tier.ts's (--diff exits 1 when a ranking moved); 2 for a usage
-# error here, a network that does not exist included.
+# Exit status is tier.ts's (--diff exits 1 when a ranking moved, 3 when it
+# compared nothing); 2 for a usage error here, a network that does not exist
+# included.
 set -euo pipefail
 unset CDPATH # a cd that prints the directory would put two lines in HERE
 
