@@ -63,6 +63,8 @@ import {
   grantedViews,
   ROLE_GRANT_GROUPS,
   ROLE_GRANTS,
+  SEARCH_THOUGHTS_CURRENT_SIGNATURE,
+  SEARCH_THOUGHTS_HYBRID_SIGNATURE,
   stripSqlComments,
   supabaseIsmsIn,
   UPDATE_THOUGHT_SIGNATURE_9,
@@ -3962,7 +3964,11 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
   let refusedArm = false;
   try { await db.exec(`INSERT INTO query_log (kind, tool, query, arm) VALUES ('search', 'search_thoughts', 'q', 'vector')`); }
   catch { refusedArm = true; }
-  assert(refusedArm, "an arm outside hybrid|keyword is refused by the CHECK");
+  // 059 (SMD-2255) admits 'current': search_thoughts with prefer_current.
+  let currentErr = "";
+  try { await db.exec(`INSERT INTO query_log (kind, tool, query, arm) VALUES ('search', 'search_thoughts', 'q', 'current')`); }
+  catch (e) { currentErr = (e as Error).message; }
+  assert(refusedArm && currentErr === "", `an arm outside hybrid|keyword|current is refused by the CHECK, and current (059) is admitted (${currentErr || "admitted"})`);
   await db.exec(`DELETE FROM query_log WHERE arm IS NOT NULL OR query = 'q'`);
 
   // The export join over hand-made rows: an agent searches (id a and b returned,
@@ -4572,6 +4578,8 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   assert(dbRow({ surviving: "1" }).resultTokens === null, "one returned id since deleted → no estimate, not a partial one");
   assert(dbRow({ chars: null, surviving: "0", result_ids: "{}" }).resultTokens === null, "nothing returned → no estimate");
   assert(armOf(whole) === "search_thoughts k=5 thr=0.3 rw=0", `a real's float32 noise does not reach the arm name (${armOf(whole)})`);
+  assert(armOf({ ...whole, arm: "current" }) === "search_thoughts k=5 thr=0.3 rw=0 current" && armOf({ ...whole, arm: "hybrid" }) === armOf(whole),
+    "a prefer_current row (arm current, 059) is its own arm; a hybrid row's name is unchanged");
   const actDb = toActionRow({ agent_id: null, logged_at: t(1), at_us: "1789816860000000", tool: "fetch", target_id: A });
   assert(actDb.agentId === null && actDb.atUs === 1789816860000000, "an action row's NULL agent and at_us survive the coercion");
   const goldFx = goldFromFixture({ queries: [{ query: "first", relevant: `{${C},"${D}"}` }, { query: "second", relevant: [C] }] });
@@ -8178,12 +8186,16 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
   assert(atTwo.facets === 2 && atFour.facets === 4 && atTwo.loops > 0 && atFour.loops === atTwo.loops && !atTwo.subplan && !atFour.subplan,
     `node_dependencies()' gate is one grouped pass over the source rows: its reads of thoughts are ${atTwo.loops} at two facets and ${atFour.loops} at four, and no subplan runs (${atFour.scans})`);
   // The role split: every migrations' group but structure — thoughts,
-  // thought_facets and the graph, not thought_sources.
+  // thought_facets and the graph — with the server group's SELECT on
+  // thought_sources, which it holds since 059 (search_thoughts'
+  // prefer_current, SMD-2255), revoked below: graph-centrality's default
+  // modes need the rest of that group (ob1_config), not the source rows.
   const ROLE = "ob1_node_reader";
   await db.exec(`CREATE ROLE ${ROLE} NOLOGIN`);
   const groups = ROLE_GRANT_GROUPS.filter((g) => g !== "structure" && ROLE_GRANTS[g].every((r) => /^\d{3}$/.test(r.since)));
   const present = new Set((await q<{ name: string; present: boolean }>(grantPresenceSql(grantedObjects()))).filter((r) => r.present).map((r) => r.name));
   for (const s of [`GRANT USAGE ON SCHEMA public TO "${ROLE}";`, ...grantStatements(ROLE, { groups, present })]) await db.exec(s);
+  await db.exec(`REVOKE SELECT ON thought_sources FROM "${ROLE}"`);
   const [priv] = await q<{ sources: boolean; thoughts: boolean }>(`SELECT has_table_privilege($1, 'thought_sources', 'SELECT') AS sources, has_table_privilege($1, 'thoughts', 'SELECT') AS thoughts`, [ROLE]);
   const asRole = async (o: GraphOptions): Promise<string> => {
     await db.exec(`SET ROLE ${ROLE}`);
@@ -8199,7 +8211,7 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
   const decayOut = await asRole({ ...base, decayBlocked: true });
   assert(!priv.sources && priv.thoughts && plainOut.every((p) => p.role === p.owner) && plainOut[0].role.includes("PostgreSQL")
       && /^ERROR permission denied for table thought_sources/.test(startOut) && /^ERROR permission denied for table thought_sources/.test(decayOut),
-    `a role without the structure group runs every mode but the dependency read, each report the owner's exactly — node_lifecycle() reads thoughts alone — and --startable and --decay-blocked are refused on thought_sources (${startOut.slice(0, 80)})`);
+    `a role without the structure group, and without the server group's SELECT on thought_sources, runs every mode but the dependency read, each report the owner's exactly — node_lifecycle() reads thoughts alone — and --startable and --decay-blocked are refused on thought_sources (${startOut.slice(0, 80)})`);
   await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
 
   // The script's own check, on this brain as it stands, then without 058's
@@ -8232,6 +8244,230 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
       && (skewKnown ?? "").includes("this brain's migration 058 knows triage,backlog,unstarted,started,completed,canceled,duplicate (settled: completed,canceled). Update whichever is behind.")
       && (skewSettled ?? "").includes("knows triage,backlog,unstarted,started,completed,canceled (settled: completed)") && reordered === null,
     `schemaProblem: nothing on a migrated brain; without node_state every mode is refused naming 058 (the dependency flags naming the blockers too); a known or settled set that is not the script's is refused naming both, and the same members in another order are not (${skewKnown})`);
+
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT prune_orphan_entities()`);
+}
+
+// ── 55. Migration 059: search_thoughts_current (SMD-2255, SMD-2074's second consumer) ──
+//
+// The hybrid with settled and superseded thoughts ranked below current ones,
+// for search_thoughts' opt-in prefer_current. Every row sits at a controlled
+// cosine to the query's axis ([21]'s construction), so each rank is known.
+// Held here: the contract (signature, columns, settings, the weight); with
+// nothing to demote, the hybrid's first N at its window, row for row over
+// [21]'s grid; the rule — who is demoted and who is not, the weight exactly,
+// once; ties to the current row, then the hybrid's order (a literal-only
+// query's zeros); what 0.25 does to an exact-literal hit; the window and its
+// exactness, both branches; the clamp; the coverage columns; node_state's
+// dependency joins dropped from the plan; the grant the server group now
+// holds; a replay over a reshape. The tie-break's teeth on real Postgres are
+// test-live [27]'s, where the join does not hand rows over in order.
+console.log("\n[55] Migration 059: search_thoughts_current — the hybrid with settled and superseded thoughts ranked below current ones, on request: the contract, the hybrid's rows when nothing is demoted, who is demoted and by exactly what, an exact-literal hit's cost, the window, and the server group's grant (SMD-2255)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT prune_orphan_entities()`);
+  const Q = unit(0);
+  const { rnd: rnd55 } = seededRandom(2255);
+  const at = (cos: number) => {
+    const r = Array.from({ length: 32 }, () => rnd55() - 0.5);
+    const n = Math.hypot(...r);
+    const s = Math.sqrt(1 - cos * cos);
+    const v = new Array(EMBEDDING_DIM).fill(0);
+    for (let k = 0; k < 32; k++) v[1 + k] = (r[k] / n) * s;
+    v[0] = cos;
+    return `[${v.join(",")}]`;
+  };
+  const put = async (content: string, cos: number, metadata: Record<string, unknown>, supersedes?: string) => {
+    const env: Record<string, unknown> = { metadata: { type: "note", ...metadata } };
+    if (supersedes) env.supersedes = supersedes;
+    return (await q<{ r: { id: string } }>(`SELECT upsert_thought($1, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify(env), at(cos)]))[0].r.id;
+  };
+  const stamp = (id: string, keys: Record<string, unknown>) => db.query(`UPDATE thoughts SET metadata = metadata || $2::jsonb WHERE id = $1`, [id, JSON.stringify(keys)]);
+  type Row = { id: string; score: number; fused: number; demoted: string[] | null; window_rows: number; window_known: number; window_demoted: number; window_synced_at: string | null; window_exact: boolean };
+  const current = (text: string, threshold: number, count: number, filter: Record<string, unknown> = {}, recency = 0) =>
+    q<Row>(`SELECT id::text AS id, score, fused, demoted, window_rows, window_known, window_demoted, window_synced_at, window_exact
+              FROM search_thoughts_current($1::vector, $2, $3::float, $4::int, $5::jsonb, $6::float, 90.0::float)`, [Q, text, threshold, count, JSON.stringify(filter), recency]);
+  const hybrid = (text: string, threshold: number, count: number, filter: Record<string, unknown> = {}, recency = 0) =>
+    q<{ id: string; score: number }>(`SELECT id::text AS id, score FROM search_thoughts_hybrid($1::vector, $2, $3::float, $4::int, $5::jsonb, $6::float, 90.0::float)`, [Q, text, threshold, count, JSON.stringify(filter), recency]);
+
+  // The contract.
+  const [fn] = await q<{ result: string; vol: string; lang: string; definer: boolean; strict: boolean; config: string[] | null; comment: string | null }>(
+    `SELECT pg_get_function_result(p.oid) AS result, p.provolatile::text AS vol, l.lanname AS lang, p.prosecdef AS definer, p.proisstrict AS strict, p.proconfig AS config,
+            obj_description(p.oid, 'pg_proc') AS comment
+       FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang WHERE p.oid = to_regprocedure($1)`, [SEARCH_THOUGHTS_CURRENT_SIGNATURE]);
+  const [wt] = await q<{ w: number; vol: string }>(`SELECT search_demote_weight() AS w, (SELECT provolatile::text FROM pg_proc WHERE proname = 'search_demote_weight') AS vol`);
+  const hybridCols = (await q<{ r: string }>(`SELECT pg_get_function_result(to_regprocedure($1)) AS r`, [SEARCH_THOUGHTS_HYBRID_SIGNATURE]))[0].r.replace(/\)$/, "");
+  assert(fn?.result === `${hybridCols}, fused double precision, demoted text[], window_rows integer, window_known integer, window_demoted integer, window_synced_at text, window_exact boolean)`
+      && fn.vol === "s" && fn.lang === "sql" && !fn.definer && !fn.strict && JSON.stringify(fn.config) === '["jit=off"]' && (fn.comment ?? "").includes("Migration 059 / SMD-2255")
+      && wt.w === 0.25 && wt.vol === "i",
+    `search_thoughts_current: the hybrid's eleven columns in order, then fused, demoted and the window's five; STABLE, LANGUAGE sql, invoker, not strict, jit off alone; the weight IMMUTABLE and 0.25 (${fn?.result?.slice(-160)})`);
+
+  // Nothing demotable: plain rows only (a filter keeps the demotable ones out).
+  const plain: string[] = [];
+  for (let i = 0; i < 24; i++) plain.push(await put(i % 5 === 0 ? `plain ${i} ERR_5501 config` : `plain ${i} about alpha`, 0.55 + 0.4 * rnd55(), { kind: "plain" }));
+  // The wrapper reads the hybrid at its window W = min(100, 4N): its top N is
+  // the hybrid's first N at W, row for row and score for score. Against the
+  // hybrid at N it is the same for a query with no identifier; with one, a
+  // literal hit the vector arm reached only at W ranks higher there (the
+  // hybrid prices a literal hit's meaning only within its own window, 017),
+  // so that is compared at W alone.
+  let compared = 0, sameAtW = true, sameAtN = true, firstMiss = "";
+  for (const threshold of [-1, 0, 0.5]) for (const count of [1, 3, 10, 25, 100]) for (const text of ["alpha beta", "ERR_5501 alpha"]) for (const recency of [0, 0.3]) {
+    const hW = (await hybrid(text, threshold, Math.min(100, 4 * count), { kind: "plain" }, recency)).slice(0, count);
+    const hN = await hybrid(text, threshold, count, { kind: "plain" }, recency);
+    const c = await current(text, threshold, count, { kind: "plain" }, recency);
+    compared++;
+    const cPairs = JSON.stringify(c.map((r) => [r.id, r.score]));
+    if (cPairs !== JSON.stringify(hW.map((r) => [r.id, r.score])) || c.some((r) => r.fused !== r.score || r.demoted !== null)) {
+      if (sameAtW) firstMiss = `thr ${threshold} n ${count} "${text}" rec ${recency}`;
+      sameAtW = false;
+    }
+    if (text === "alpha beta" && JSON.stringify(c.map((r) => r.id)) !== JSON.stringify(hN.map((r) => r.id))) sameAtN = false;
+  }
+  assert(sameAtW && sameAtN, `with nothing to demote, search_thoughts_current is the hybrid's first N at its window, row for row and score for score, over ${compared} calls (thresholds, counts 1 to 100, a needle, a recency weight), and the hybrid at N itself for a query with no identifier; fused equals score and nothing is marked demoted ${firstMiss}`);
+
+  // The rule, on rows ranked high by meaning.
+  const settled = await put("the settled ticket about alpha", 0.97, { kind: "demo" });
+  await stamp(settled, { source: "linear", issue: "SMD-5501", status: "Done", status_type: "completed", linear_updated_at: "2026-09-20T00:00:00.000Z" });
+  const canceled = await put("the canceled ticket about alpha", 0.965, { kind: "demo" });
+  await stamp(canceled, { source: "linear", issue: "SMD-5502", status: "Canceled", status_type: "canceled", linear_updated_at: "2026-09-21T00:00:00.000Z" });
+  const note = await put("a note filed under the settled ticket about alpha", 0.96, { kind: "demo" });
+  await stamp(note, { ticket: "SMD-5501" });
+  const oldVersion = await put("the older version of the alpha decision", 0.955, { kind: "demo" });
+  const newVersion = await put("the current version of the alpha decision", 0.62, { kind: "demo" }, oldVersion);
+  const bothOld = await put("a settled ticket's earlier row about alpha", 0.95, { kind: "demo" });
+  await stamp(bothOld, { source: "linear", issue: "SMD-5503", status: "Done", status_type: "completed" });
+  const bothHead = await put("the settled ticket's head row about alpha", 0.6, { kind: "demo" }, bothOld);
+  await stamp(bothHead, { source: "linear", issue: "SMD-5503", status: "Done", status_type: "completed", linear_updated_at: "2026-09-22T00:00:00.000Z" });
+  const blocked = await put("the blocked live ticket about alpha", 0.945, { kind: "demo" });
+  await stamp(blocked, { source: "linear", issue: "SMD-5510", status: "Todo", status_type: "unstarted", linear_updated_at: "2026-09-23T00:00:00.000Z" });
+  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-5510', 'SMD-5510', 'text/markdown')`, [blocked]);
+  await db.query(`SELECT record_source_links($1::uuid, 'linear', '[{"relation": "blocked_by", "target": "SMD-5599"}]'::jsonb)`, [blocked]);
+  const unknown = await put("a row with an unknown status about alpha", 0.94, { kind: "demo" });
+  await stamp(unknown, { status_type: "weird" });
+  const live = await put("the live ticket about alpha", 0.9, { kind: "demo" });
+  await stamp(live, { source: "linear", issue: "SMD-5504", status: "In Progress", status_type: "started", linear_updated_at: "2026-09-24T00:00:00.000Z" });
+  const [blockedState] = await q<{ blocked: boolean }>(`SELECT blocked FROM node_state(ARRAY[$1::uuid])`, [blocked]);
+  const demoAll = { kind: "demo" };
+  const c10 = await current("alpha beta", -1, 10, demoAll);
+  const h40 = await hybrid("alpha beta", -1, 40, demoAll);
+  const why = new Map(c10.map((r) => [r.id, r.demoted === null ? "-" : r.demoted.join("+")]));
+  const demotedIds = new Set([settled, canceled, note, oldVersion, bothOld, bothHead]);
+  const firstDemoted = c10.findIndex((r) => r.demoted !== null);
+  const partitioned = c10.slice(0, firstDemoted).every((r) => !demotedIds.has(r.id)) && c10.slice(firstDemoted).every((r) => demotedIds.has(r.id));
+  const hybridOrder = (ids: string[]) => h40.map((r) => r.id).filter((id) => ids.includes(id));
+  const keptOrder = JSON.stringify(c10.filter((r) => r.demoted === null).map((r) => r.id)) === JSON.stringify(hybridOrder(c10.filter((r) => r.demoted === null).map((r) => r.id)))
+    && JSON.stringify(c10.filter((r) => r.demoted !== null).map((r) => r.id)) === JSON.stringify(hybridOrder(c10.filter((r) => r.demoted !== null).map((r) => r.id)));
+  const exactWeight = c10.every((r) => r.score === (r.demoted === null ? r.fused : r.fused * 0.25));
+  assert(blockedState?.blocked === true && [settled, canceled, note, oldVersion, bothOld, bothHead, blocked, unknown, live, newVersion].map((id) => why.get(id)).join() === "completed,canceled,completed,superseded,completed+superseded,completed,-,-,-,-",
+    `who is demoted: the completed and the canceled ticket, a note under the settled ticket (its ticket's lifecycle), the superseded version, a settled row that is superseded too (one mark each), and that ticket's head (settled itself); not a blocked ticket (node_state.blocked ${blockedState?.blocked}), an unknown status, a live ticket, or the current version of a decision (${[settled, canceled, note, oldVersion, bothOld, bothHead, blocked, unknown, live, newVersion].map((id) => why.get(id)).join()})`);
+  assert(partitioned && keptOrder && exactWeight && c10.length === 10,
+    "every current row ranks above every demoted one, each group in the hybrid's own order, and a demoted row's score is exactly 0.25 of its fused score — once, when it is both settled and superseded");
+
+  // A query that is only a literal: every row without it scores 0, and 0 ×
+  // 0.25 is 0 — the tie goes to the current row (first review pass: without
+  // that the demoted zeros stayed among the current ones, each marked as
+  // ranked below them). Four rows carry LIT_5599 and no vector, so their
+  // fused scores tie and the hybrid's own order must decide among them.
+  const litKeys: string[] = [];
+  for (let i = 0; i < 4; i++) litKeys.push((await q<{ r: { id: string } }>(`SELECT upsert_thought($1, $2::jsonb) AS r`, [`LIT_5599 — a keyword-only note ${i}`, JSON.stringify({ metadata: { type: "note", kind: "lit" } })]))[0].r.id);
+  await stamp(litKeys[1], { source: "linear", issue: "SMD-5701", status: "Done", status_type: "completed" });
+  const litVec: string[] = [];
+  for (const cos of [0.9, 0.8, 0.7, 0.6]) litVec.push(await put(`a lit neighbour at ${cos}`, cos, { kind: "lit" }));
+  await stamp(litVec[0], { source: "linear", issue: "SMD-5702", status: "Done", status_type: "completed" });
+  await stamp(litVec[2], { source: "linear", issue: "SMD-5703", status: "Done", status_type: "completed" });
+  const litOn = await current("LIT_5599", -1, 8, { kind: "lit" });
+  const litOff = await hybrid("LIT_5599", -1, 8, { kind: "lit" });
+  const zeros = litOn.filter((r) => r.fused === 0);
+  const firstDemotedZero = zeros.findIndex((r) => r.demoted !== null);
+  const hybridOrderOf = (ids: string[]) => litOff.map((r) => r.id).filter((id) => ids.includes(id));
+  const currentKeys = litOn.filter((r) => r.fused > 0 && r.demoted === null).map((r) => r.id);
+  assert(litOn.length === 8 && zeros.length === 4 && firstDemotedZero === 2 && zeros.slice(2).every((r) => r.demoted !== null) && zeros.slice(0, 2).every((r) => r.demoted === null)
+      && JSON.stringify(currentKeys) === JSON.stringify(hybridOrderOf(currentKeys)) && currentKeys.length === 3
+      && litOn.findIndex((r) => r.id === litKeys[1]) === 3,
+    `on a literal-only query the demoted rows that score 0 rank below the current ones that do, the three current literal hits keep the hybrid's order among their tied scores, and the demoted literal hit keeps 0.25 of its needle bonus, above every zero (${litOn.map((r) => `${r.fused > 0 ? "k" : "z"}${r.demoted ? "D" : ""}`).join(" ")})`);
+
+  // window_exact's second branch: a full window (4 rows at N 1) with nothing
+  // demoted holds N current rows, so its top N is exact though the list goes on.
+  const full = await current("alpha beta", -1, 1, { kind: "plain" });
+  assert(full.length === 1 && full[0].window_rows === 4 && full[0].window_demoted === 0 && full[0].window_exact === true,
+    `a full window holding at least N current rows is exact: at N 1 the window is 4 of the 24 plain rows, none demoted (${JSON.stringify(full[0] && [full[0].window_rows, full[0].window_demoted, full[0].window_exact])})`);
+  // The clamp is 017's: 0 and a negative count are 1, over 100 is 100.
+  const clampOk = (await Promise.all([0, -5, 500].map(async (n) => (await current("alpha beta", -1, n, { kind: "plain" })).length === (await hybrid("alpha beta", -1, n, { kind: "plain" })).length))).every(Boolean);
+  const [nullCount] = await q<{ n: number }>(`SELECT count(*)::int AS n FROM search_thoughts_current($1::vector, 'alpha beta', -1, NULL, '{"kind": "plain"}'::jsonb)`, [Q]);
+  assert(clampOk && nullCount.n === 10, `a count of 0, -5 or 500 returns what the hybrid returns for it, and NULL is 10 — 017's clamp, held to the hybrid's (${nullCount.n})`);
+
+  // An exact-literal hit on a settled thought is demoted too: off, the key's
+  // ticket is first; on, it sinks below the current meaning-matches.
+  await db.query(`UPDATE thoughts SET content = 'SMD-5501 — ' || content WHERE id = $1`, [settled]);
+  const offKey = await hybrid("what happened with SMD-5501", 0, 10, demoAll);
+  const onKey = await current("what happened with SMD-5501", 0, 10, demoAll);
+  const liveKey = await put("LIVE_5577 — the live ticket's key, about alpha", 0.3, { kind: "demo" });
+  const onLiveKey = await current("what happened with LIVE_5577", 0, 10, demoAll);
+  assert(offKey[0]?.id === settled && onKey[0]?.id !== settled && onKey.findIndex((r) => r.id === settled) > onKey.findIndex((r) => r.id === live) && onLiveKey[0]?.id === liveKey,
+    `an exact hit on a settled ticket is first by default and sinks below the current meaning-matches with the flag (rank ${onKey.findIndex((r) => r.id === settled) + 1}); a current exact hit stays first`);
+  await db.query(`DELETE FROM thoughts WHERE id = $1`, [liveKey]);
+
+  // Coverage and freshness, on every row: the window's size, how many carry a
+  // lifecycle, how many were demoted, the latest source watermark among them.
+  const cov = c10[0];
+  assert(cov.window_rows === h40.length && cov.window_demoted === 6 && cov.window_known === 7 && cov.window_synced_at === "2026-09-24T00:00:00.000Z" && cov.window_exact === true && c10.every((r) => r.window_rows === cov.window_rows),
+    `the window's coverage on every row: ${cov.window_rows} rows, ${cov.window_known} with a lifecycle (the five ticket rows, the note and the settled twin; not the unknown status or the two decision versions), ${cov.window_demoted} demoted, the latest watermark ${cov.window_synced_at}, exact`);
+
+  // The window: W = min(100, 4N). Thirty-five settled rows above ten live ones:
+  // at N 10 the window (40) holds five live rows, so its top ten is not the
+  // whole list re-weighted, and says so; at N 25 the window is 100 and holds all.
+  for (let i = 0; i < 35; i++) {
+    const id = await put(`crowd ${i} — settled, about alpha`, 0.9 + 0.09 * rnd55(), { kind: "crowd" });
+    await stamp(id, { source: "linear", issue: `SMD-56${String(i).padStart(2, "0")}`, status: "Done", status_type: "completed" });
+  }
+  const crowdLive: string[] = [];
+  for (let i = 0; i < 10; i++) crowdLive.push(await put(`crowd ${i} — live, about alpha`, 0.5 + 0.3 * rnd55(), { kind: "crowd" }));
+  const narrow = await current("alpha beta", -1, 10, { kind: "crowd" });
+  const wide = await current("alpha beta", -1, 25, { kind: "crowd" });
+  const liveIn = (rows: Row[]) => rows.filter((r) => crowdLive.includes(r.id)).length;
+  assert(narrow[0].window_rows === 40 && narrow[0].window_demoted === 35 && narrow[0].window_exact === false && liveIn(narrow) === 5
+      && wide[0].window_rows === 45 && wide[0].window_exact === true && liveIn(wide) === 10 && JSON.stringify(wide.slice(0, 10).map((r) => r.id).sort()) === JSON.stringify([...crowdLive].sort()),
+    `the window is min(100, 4N): at N 10 it holds 40 rows, 35 demoted, so only 5 of the 10 live rows are read and window_exact is false; at N 25 it holds all 45 and the 10 live rows lead (${narrow[0].window_rows}/${narrow[0].window_demoted}/${narrow[0].window_exact}; ${wide[0].window_rows}/${wide[0].window_exact})`);
+
+  // node_state's dependency joins are not executed for the columns read: the
+  // join shape the wrapper uses, under ANALYZE, scans no link facet and no
+  // source row (the grant is still needed — privileges are checked on them).
+  const joinPlan = (await q<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+      SELECT w.id, s.open, s.superseded_by, s.status_type, s.synced_at FROM (SELECT id FROM thoughts LIMIT 40) w LEFT JOIN node_state(NULL) s ON s.thought_id = w.id`)).map((r) => r["QUERY PLAN"]);
+  const depScans = joinPlan.filter((l) => /on thought_(facets|sources)\b/.test(l) && !/never executed/.test(l));
+  assert(depScans.length === 0 && !joinPlan.some((l) => /Function Scan on node_/.test(l)),
+    `node_state(NULL) joined for open, superseded_by, status_type and synced_at is inlined and runs no scan of thought_facets or thought_sources (${depScans.map((l) => l.trim()).join(" | ") || "none"})`);
+
+  // The grant: the server group's SELECT on thought_sources runs it; the
+  // capture group alone is refused on that table.
+  const asGroups = async (groups: string[]) => {
+    const role = `ob1_search_${groups.join("_")}`;
+    await db.exec(`CREATE ROLE ${role} NOLOGIN`);
+    const present = new Set((await q<{ name: string; present: boolean }>(grantPresenceSql(grantedObjects()))).filter((r) => r.present).map((r) => r.name));
+    for (const s of [`GRANT USAGE ON SCHEMA public TO "${role}";`, ...grantStatements(role, { groups: groups as never, present })]) await db.exec(s);
+    await db.exec(`SET ROLE ${role}`);
+    let out = "";
+    try { out = `${(await current("alpha beta", 0, 5, demoAll)).length} rows`; } catch (e) { out = (e as Error).message.split("\n")[0]; } finally { await db.exec(`RESET ROLE`); }
+    await db.exec(`DROP OWNED BY ${role}; DROP ROLE ${role}`);
+    return out;
+  };
+  const withServer = await asGroups(["capture", "server"]);
+  const captureOnly = await asGroups(["capture"]);
+  assert(withServer === "5 rows" && /permission denied for table thought_sources/.test(captureOnly) && ROLE_GRANTS.server.some((r) => (r as { table?: string }).table === "thought_sources"),
+    `a role with the capture and server groups runs it; the capture group alone is refused on thought_sources (${withServer}; ${captureOnly})`);
+
+  // A later migration reshapes the wrapper by DROP and CREATE; --reapply
+  // replays 059 over it, which drops it first.
+  await db.exec(`DROP FUNCTION search_thoughts_current(vector, text, float, int, jsonb, float, float);
+    CREATE FUNCTION search_thoughts_current(query_embedding vector(${EMBEDDING_DIM}), query_text text, match_threshold float DEFAULT 0.7, match_count int DEFAULT 10, filter jsonb DEFAULT '{}', recency_weight float DEFAULT 0, half_life_days float DEFAULT 90)
+      RETURNS TABLE (id uuid, as_of timestamptz) LANGUAGE sql STABLE AS $$ SELECT id, now() FROM thoughts $$`);
+  let replayError = "";
+  try { await reapply("059"); } catch (e) { replayError = (e as Error).message; }
+  const [reshaped] = await q<{ r: string }>(`SELECT pg_get_function_result(to_regprocedure($1)) AS r`, [SEARCH_THOUGHTS_CURRENT_SIGNATURE]);
+  assert(replayError === "" && reshaped.r === fn?.result, `059 replays over a reshaped wrapper — it drops it first — and leaves its own columns (${replayError || "replayed"})`);
 
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`SELECT prune_orphan_entities()`);

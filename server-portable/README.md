@@ -222,6 +222,37 @@ has them, or has an old form re-created beside 020's. The ChatGPT `search` tool
 cannot take a parameter and sends a fixed weight; `db/migrations/020_*.sql` and
 `evals/eval-recency.ts` record how it was chosen.
 
+### Current thoughts first, opt-in (migration 059)
+
+`search_thoughts` takes `prefer_current` (default false). Off, the server calls
+`search_thoughts_hybrid` exactly as before, so the default ranking is unchanged
+and a superseded hit is only labelled (`⚠ Superseded by …`). On, it calls 059's
+`search_thoughts_current`: over the hybrid's top min(100, 4 × limit), a thought
+whose ticket is settled — completed or canceled, by 058's `node_state`, so a
+note filed under a Done ticket counts — or that a newer thought supersedes has
+its score multiplied by 0.25. Under the hybrid's fusion that puts every current
+match in the window first, then the demoted ones in their own order (a demoted
+exact hit keeps a quarter of its literal bonus, so on a query of literals only,
+or holding several of the query's literals, it can still outrank current rows —
+the header says when one does); each
+demoted hit says `↓ Ranked ×0.25 — completed` (or `canceled`, `superseded`),
+and the header says how many of the window were demoted, how many carry a
+lifecycle and the latest sync among them — and, when the window held fewer
+current matches than asked for, that one past it may have been missed (raise
+`limit` below 25; above, the window is already capped at 100). A blocked or
+unknown status does not demote a thought (superseded still does), and ties go
+to the current one. An exact identifier hit on a settled thought is demoted
+too: to look a finished ticket up by its key, leave the flag off. The
+server's role needs SELECT on `thought_sources` (the server group,
+`db/README.md`); without it, or without 059, that search is refused naming the
+fix and every other search runs. The query log records such a search as arm
+`current`. It costs `node_state`'s whole-brain read per call — a few
+milliseconds on a brain of a thousand thoughts, about 130 ms at 100,000
+(`db/bench-hybrid.ts`; SMD-2256 narrows it). The ChatGPT `search` tool cannot take the parameter and never
+demotes; `evals/eval-supersession.ts` records what the demotion finds higher
+(the current version, the live ticket) and lower (the topical answer, a note
+under a finished ticket, a finished ticket looked up by its key).
+
 ## Steps
 
 ### 1. Install

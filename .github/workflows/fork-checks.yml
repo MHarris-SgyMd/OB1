@@ -1269,7 +1269,7 @@ jobs:
         working-directory: compat/supabase-sql
         run: bunx tsc --noEmit
 
-      # 29 files depend on this behaving exactly like supabase-js. A shim that is
+      # Every file the codemod lists depends on this behaving exactly like supabase-js. A shim that is
       # merely close is worse than none — they would inherit the differences with
       # no failing test to find them.
       - name: Conformance against real Postgres
