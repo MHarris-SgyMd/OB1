@@ -1062,6 +1062,34 @@ try {
   const recentOpen = await send(h, "GET", "/recent?limit=50&exclude_restricted=false");
   assert(recent.status === 200 && ids(recent).includes(cid) && !ids(recent).includes(rid) && ids(recentOpen).includes(rid) && ids(recentOpen).includes(cid),
     `GET /recent hides the restricted twin by default and shows it under exclude_restricted=false, as its siblings do — it filtered nothing before (${recent.status}: ${ids(recent).length} rows${ids(recent).includes(rid) ? ", the twin among them" : ""}; open: ${ids(recentOpen).length})`);
+  // SMD-2083: no paging parameter reaches SQL non-finite or fractional, and a
+  // non-object JSON body is a named 400 — each a 500 on the pre-fix file. The
+  // GET /recent arms clamp/truncate/default the paging param and echo it back.
+  for (const [path, field, want, note] of [
+    ["/recent?offset=Infinity&limit=5", "offset", 0, "offset=Infinity clamps to 0, not LIMIT NaN OFFSET Infinity → 500"],
+    ["/recent?limit=2.5", "limit", 2, "limit=2.5 truncates to 2, not a fractional LIMIT"],
+    ["/recent", "limit", 20, "no limit uses the default 20, not the min"],
+    ["/recent?limit=", "limit", 20, "?limit= (empty) uses the default 20, not the min"],
+  ] as [string, string, number, string][]) {
+    const r = await send(h, "GET", path);
+    assert(r.status === 200 && r.json?.[field] === want, `GET ${path}: ${note} (${r.status}: ${field} ${r.json?.[field]})`);
+  }
+  const bigPage = await send(h, "POST", "/search", { query: captured, mode: "text", page: 1e9 });
+  assert(bigPage.status === 200 && Number.isInteger(bigPage.json?.page),
+    `POST /search text mode page=1e9 answers a page, not an int4 overflow → 500 (${bigPage.status}: page ${bigPage.json?.page})`);
+  // The offset+limit int4 boundary (review pass 2): limit at max and page at its
+  // max, where (page-1)*limit alone is under int4 but p_limit+p_offset inside
+  // search_thoughts_text would overflow — offset is clamped to INT4_MAX-limit.
+  const maxPage = await send(h, "POST", "/search", { query: captured, mode: "text", limit: 100, page: 21474837 });
+  assert(maxPage.status === 200 && Number.isInteger(maxPage.json?.page),
+    `POST /search text mode limit=100 at max page answers a page, not a p_limit+p_offset int4 overflow → 500 (${maxPage.status}: page ${maxPage.json?.page})`);
+  const fracSearch = await send(h, "POST", "/search", { query: captured, limit: 2.5 });
+  assert(fracSearch.status === 200 && fracSearch.json?.per_page === 2,
+    `POST /search limit=2.5 reports an integer per_page (${fracSearch.status}: per_page ${fracSearch.json?.per_page})`);
+  const nullBody = await send(h, "POST", "/search", null);
+  assert(nullBody.status === 400 && /object/i.test(String(nullBody.json?.error)),
+    `POST /search with a JSON null body is a named 400, not a TypeError → 500 (${nullBody.status}: ${nullBody.json?.error})`);
+
   // Every answer of the gateway carries the request's CORS headers (SMD-2079): json() built them only when handed `req`,
   // and forty-five of the file's sixty-two answers were not, so under an allowlist a browser could read /search (SMD-2054)
   // and no other route's page. Set once now, on the way out of the main handler; an unlisted origin gets NO allow-origin
@@ -1493,12 +1521,11 @@ spells("recipes/provenance-chains/mcp-tools.ts", /\.select\("id"\)\s*\.in\("id",
 spells("integrations/consolidation-workers/bio/index.ts", /if \(!OPENROUTER_API_KEY && !OPENAI_API_KEY\) \{\s*return json\(\{ error: "An embedding key is required/s, " refuses an Anthropic-only configuration before it pays for the profile it could not store");
 spells("integrations/telegram-capture/README.md", /rpc\("update_thought", \{\s*p_id: existing\[0\]\.id,\s*p_content: messageText,/s, "'s sample edits through update_thought");
 spells("integrations/telegram-capture/README.md", /p_embedding_model: EMBEDDING_MODEL,/, "…with the label beside the vector");
-// SMD-1524: the example capture, the two Python recipes and the two README samples capture through the function.
+// SMD-1524: the example capture, the Python recipe and the two README samples capture through the function (the second
+// Python recipe, local-ollama-embeddings' embed-local.py, retired with SMD-2138).
 spells("integrations/readwise-capture/index.ts", /\.update\(\{ \[column\]: value \}\)\s*\.eq\("id", result\.id\)\s*\.is\(column, null\)/s, " writes each column where it is NULL — a fresh row, or one an interrupted first write left half-shaped");
 spells("recipes/readwise-import/import-readwise.py", /for column in \("source_type", "type"\):\s*supabase\.table\("thoughts"\)\.update\(\s*\{column: thoughts\[0\]\[column\]\}\s*\)\.in_\("id", ids\)\.is_\(column, "null"\)\.execute\(\)/s, " writes each column over the batch's rows where it is NULL");
 spells("recipes/adaptive-capture-classification/capture-with-gating.ts", /db\.rpc\("upsert_thought", \{\s*p_content: classified\.title,\s*p_payload: \{\s*metadata: \{/s, " captures through upsert_thought, the classifier's fields in metadata");
-spells("recipes/local-ollama-embeddings/embed-local.py", /\/rest\/v1\/rpc\/upsert_thought/, " posts to the function, not the table");
-spells("recipes/local-ollama-embeddings/embed-local.py", /"p_payload": \{"metadata": metadata_dict, "embedding_model": model\},\s*"p_embedding": embedding,/s, "…with the vector and the Ollama model's name as its label");
 spells("recipes/readwise-import/import-readwise.py", /supabase\.rpc\(\s*"upsert_thought",\s*\{\s*"p_content": thought\["content"\],\s*"p_payload": \{\s*"metadata": thought\["metadata"\],\s*"embedding_model": EMBEDDING_MODEL,\s*\},\s*"p_embedding": thought\["embedding"\],/s, " stores each highlight through the 3-argument upsert_thought with its label");
 spells("recipes/readwise-import/import-readwise.py", /ids\.append\(str\(data\["id"\]\)\)\s*if not data\.get\("existed"\):\s*fresh \+= 1\s*except BaseException as e:\s*loop_error = e\s*raise\s*finally:[\s\S]{0,1200}?if ids:\s*try:\s*for column in \("source_type", "type"\):\s*supabase\.table\("thoughts"\)\.update\(/s, "…and writes the enhanced columns once per column per batch, in a finally, so a refused reply leaves no half-shaped row behind it — the loop's own error staying the one raised");
 spells("recipes/readwise-import/import-readwise.py", /if not data\.get\("id"\):[\s\S]{0,400}?raise RuntimeError\(/, "…and refuses a reply that names no id instead of skipping the row");

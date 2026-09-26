@@ -68,14 +68,16 @@ exactly one disposition.
   — undoes abandoned upstream PR #27 column-chunking; no-op on the fork; and
   `recipes/fingerprint-dedup-backfill/backfill-fingerprints.mjs` — migration 023 backfills the
   fingerprint server-side (SMD-2126 → SMD-2145).
-- **PostgREST-speaking scripts (SMD-2126, decided 2026-09-24): 30 files in 21 recipes**, one
-  fate each — an import onto the ingestion contract, a maintenance script onto the shim, the
-  two smoke harnesses to their own tickets, the three above retire — in the section below;
+- **PostgREST-speaking scripts (SMD-2126, decided 2026-09-24): 30 files in 21 recipes at the
+  decision (28 in 19 after SMD-2137 and SMD-2138)**, one fate each — an import onto the ingestion contract, a
+  maintenance script onto the shim, the two smoke harnesses to their own tickets, the three above
+  retire (`obsidian-vault-import` and `local-ollama-embeddings` done, SMD-2137 and SMD-2138) — in
+  the section below;
   check 24 holds the class.
 - **fold-in SMD-1867 (capture-source adapters): 5 integrations** — `chrome-capture-extension`,
   `discord-capture`, `slack-capture`, `telegram-capture`, `readwise-capture`. Plus **~11
   import recipes** flagged as candidate adapters (`chatgpt` / `email-history` / `gmail-smart-pull`
-  / `google-activity` / `grok` / `instagram` / `journals-blogger` / ~~`obsidian`~~ (retires — SMD-2126 → SMD-2137) / `perplexity`
+  / `google-activity` / `grok` / `instagram` / `journals-blogger` / ~~`obsidian`~~ (retired — SMD-2126 → SMD-2137) / `perplexity`
   / `readwise` / `x-twitter`).
 - **rebuild-tickets linked (kept + tracked):** `enhanced-mcp` → SMD-1525 + SMD-1798;
   `schemas/typed-reasoning-edges` → SMD-1253; `schemas/wiki-pages` → SMD-949;
@@ -115,7 +117,9 @@ fails CI"):**
 
 ## PostgREST-speaking scripts (decided 2026-09-24, SMD-2126)
 
-Thirty scripts in twenty-one recipes reach the brain as PostgREST clients —
+Thirty scripts in twenty-one recipes reached the brain as PostgREST clients at the decision
+(twenty-eight in nineteen remain — `obsidian-vault-import`'s and `local-ollama-embeddings`'
+retired, SMD-2137 and SMD-2138, their rows kept as the record) —
 `${SUPABASE_URL}/rest/v1/<table>` or `/rest/v1/rpc/<fn>` with a service-role `apikey`
 from a `.mjs` / `.js` / `.ts` `fetch`, or supabase-py's `create_client` from a `.py` — and
 none imports `compat/supabase-sql`. The fork's stack (SETUP.md) runs no PostgREST, so on
@@ -178,11 +182,11 @@ mentions through the fork's `record_thought_entities`, or its ticket says why no
 
 **Smoke harnesses and retirements.** A **smoke harness** has its own ticket. A script whose
 capability is **in core** retires: `obsidian-vault-import` (the Markdown adapter,
-`ingest-records.ts --markdown`, is the import; the recipe's heading split with LLM
+`ingest-records.ts --source markdown --markdown`, is the import; the recipe's heading split with LLM
 distillation of long sections, its `--min-words` / `--skip-folders` / `--after` filters, its
-secret scan, sync log and source label have no counterpart there and are dropped with it,
-each named in SMD-2137), `local-ollama-embeddings` (the server embeds locally through
-`OB1_LLM_BASE_URL`; `reembed.ts`), `fingerprint-dedup-backfill/backfill-fingerprints.mjs`
+secret scan, sync log and source label have no counterpart there and were dropped with it,
+each named in SMD-2137, which removed the directory), `local-ollama-embeddings` (the server embeds locally through
+`OB1_LLM_BASE_URL`; `reembed.ts`; removed in SMD-2138; two of its three models are rows of `SETUP.md`'s table, with the fork's numbers), `fingerprint-dedup-backfill/backfill-fingerprints.mjs`
 (migration 023).
 
 **Held by check 24** of `scripts/check-fork-consistency.ts`: in every code file under the
@@ -190,7 +194,9 @@ seven category directories and docs/, a `rest/v1` path in a string, a supabase-p
 `create_client(`, or a `@supabase/postgrest-js` specifier is a hit, comments blanked; the
 files below are counted per file in `POSTGREST_EXCEPTIONS` with the ticket that ports or
 retires each, so a new call fails, a landed port fails until its entry goes, and the class
-cannot grow back. The table's size is the class's remaining size.
+cannot grow back. `POSTGREST_EXCEPTIONS`'s size, plus the two scripts that reach the gateway
+through a lib, is the class's remaining size; a retired row below stays as the record and counts
+nothing.
 
 | Recipe | Scripts (lines that speak PostgREST) | Touches | Fate | Ticket |
 |---|---|---|---|---|
@@ -204,9 +210,9 @@ cannot grow back. The table's size is the class's remaining size.
 | `fingerprint-dedup-backfill` | `delete-duplicates.mjs` (1), `backfill-fingerprints.mjs` (1) | `thoughts` (PATCH, DELETE) | `delete-duplicates.mjs` onto the shim, its deletes through `delete_thought`; `backfill-fingerprints.mjs` removed (migration 023) | SMD-2145 |
 | `google-activity-import` | `import-google-activity.mjs` (1) | `thoughts` (raw POST with a vector) | port onto the ingestion contract | SMD-2150 |
 | `lint-sweep` | `lint-sweep.js` (1) | `thoughts`, the entity tables, the seven `lint_*` views (read; either URL name) | port onto the shim; read-only | SMD-2144 |
-| `local-ollama-embeddings` | `embed-local.py` (2) | `upsert_thought` over `/rest/v1/rpc/` | retire: the server embeds locally (`OB1_LLM_BASE_URL`), `db/reembed.ts` for existing rows | SMD-2138 |
+| `local-ollama-embeddings` | `embed-local.py` (2) | `upsert_thought` over `/rest/v1/rpc/` | retired: the server embeds locally (`OB1_LLM_BASE_URL`), `db/reembed.ts` for existing rows; the directory, its two test-writes guards and its check 24 entry are gone | SMD-2138 |
 | `ob-graph` | `smoke-graph-rpcs.mjs` (1); `index.ts` is on the shim since SMD-1798 | `graph_nodes`, `graph_edges`; `traverse_graph`, `find_shortest_path` | the smoke onto the shim or into `extensions/test-tools.ts` | SMD-2146 |
-| `obsidian-vault-import` | `import-obsidian.py` (3) | `thoughts` (raw POST with a vector) | retire: `db/ingest-markdown.ts` is the fork's Obsidian import (`ingest-records.ts --markdown`) | SMD-2137 |
+| `obsidian-vault-import` | `import-obsidian.py` (3) | `thoughts` (raw POST with a vector) | retired: `db/ingest-markdown.ts` is the fork's Obsidian import (`ingest-records.ts --source markdown --markdown`); the directory, its registry rows and its check 24 entry are gone | SMD-2137 |
 | `perplexity-conversation-import` | `import-perplexity.py` (1) | `thoughts` (raw POST with a vector) | port onto the ingestion contract | SMD-2148 |
 | `provenance-chains` | `backfill.mjs` (1), `eval.mjs` (1); `mcp-tools.ts` takes an injected client and test-writes drives it on the shim (SMD-1524) | `thoughts` (PATCH); `merge_thought_provenance_metadata` and `merge_thought_eval_metadata` (`schemas/provenance-chains`' functions) over `/rpc/`; `eval.mjs` writes metadata (reads either URL name) | port onto the shim | SMD-2142 |
 | `readwise-import` | `import-readwise.py` (2, supabase-py) | `upsert_thought`, `readwise_books`, `thoughts` (UPDATE of two columns) | port onto the ingestion contract | SMD-2149 |
@@ -328,9 +334,9 @@ remaining drafts are unreferenced markdown working-notes.
 | `lint-sweep` | keep + audited → **SMD-2126**: port onto the shim (SMD-2144) | Read-only three-tier quality audit (`views.sql` + `lint-sweep.js`); never mutates thoughts. |
 | `live-retrieval` | keep + audited | Read-side "flywheel" workflow that surfaces thoughts on topic shifts. |
 | `local-brain-no-mcp` | ~~keep + audited *(own-database)*~~ → **retired (SMD-1800)** | Was a self-hosted LAN Supabase stack with three Edge Functions for curl-only capture/search/list where MCP is blocked. The fork's stack (`SETUP.md`) already runs without a cloud, and `integrations/open-brain-rest` is the HTTP surface without MCP; the companion `skills/ob1-local-http` now calls it. Its check 7/10/11/22 exceptions went with it. |
-| `local-ollama-embeddings` | ~~keep + audited~~ → **remove** *(no-parity posture; SMD-2126 → SMD-2138)* | The `ALTER COLUMN embedding TYPE` is a README example explicitly annotated "not altered by hand on this fork — build at `db/config.mjs`'s width; `upsert_thought` refuses another width." CI-driven (`test-writes.ts:707`, SMD-1524). **SMD-2126:** the fork embeds locally by default (`OB1_LLM_BASE_URL`, `deploy/compose.yaml --profile local-models`) and `db/reembed.ts` re-embeds existing rows, so the recipe's capability is core and its only transport is one the stack lacks; it retires in SMD-2138 (test-writes' two text assertions on it go with it). |
+| `local-ollama-embeddings` | ~~keep + audited~~ → **retired (SMD-2138)** *(no-parity posture; SMD-2126 → SMD-2138)* | Was the capture-without-a-cloud-key recipe. The `ALTER COLUMN embedding TYPE` was a README example explicitly annotated "not altered by hand on this fork — build at `db/config.mjs`'s width; `upsert_thought` refuses another width."; the example was CI-held (`test-writes.ts`, SMD-1524; its two guards went with it). **SMD-2126:** the fork embeds locally by default (`OB1_LLM_BASE_URL`, `deploy/compose.yaml --profile local-models`) and `db/reembed.ts` re-embeds existing rows, so the recipe's capability is core and its only transport is one the stack lacks; it retired in SMD-2138 (test-writes' two text assertions on it went with it; the two models it named that `SETUP.md`'s table lacked are rows there — mxbai with the fork's own 0.882 MRR, gte-qwen2 unmeasured here). |
 | `ob-graph` | keep + audited + SMD-1798 → **SMD-2126**: `smoke-graph-rpcs.mjs` onto the shim or into test-tools (SMD-2146) | Knowledge-graph layer (own nodes/edges tables + recursive-CTE traversal + MCP server); no core clobber. `index.ts` uses supabase-js at runtime → SMD-1798 portability. |
-| `obsidian-vault-import` | ~~keep + audited → SMD-1867 candidate~~ → **remove** *(no-parity posture; SMD-2126 → SMD-2137)* | Obsidian-vault import. SMD-1867 candidate. **SMD-2126:** the Markdown adapter of the ingestion contract (`db/ingest-markdown.ts`, SMD-1867 — frontmatter, `[[wikilinks]]` and tags as facets and edges, the file kept byte for byte) is the fork's Obsidian import, so the recipe retires in SMD-2137; its heading split with LLM distillation, `--min-words` / `--skip-folders` / `--after` filters, secret scan, sync log and source label have no counterpart in the adapter and are dropped with it, each named there; the root README row and the registry row follow. |
+| `obsidian-vault-import` | ~~keep + audited, an SMD-1867 candidate~~ → **retired (SMD-2137)** *(no-parity posture; SMD-2126 → SMD-2137)* | Was the Obsidian-vault import, an SMD-1867 candidate. **SMD-2126:** the Markdown adapter of the ingestion contract (`db/ingest-markdown.ts`, SMD-1867 — frontmatter, `[[wikilinks]]` and tags as facets and edges, the file kept byte for byte) is the fork's Obsidian import, so the recipe retired in SMD-2137 (the directory is gone); its heading split with LLM distillation, `--min-words` / `--skip-folders` / `--after` filters, secret scan, sync log and source label have no counterpart in the adapter and were dropped with it, each named there — the filters, the label, an mtime date and a pre-allowlist vault scan noted on SMD-1814 as the connector's; the root README row points at the adapter and the registry rows went (the `obsidian` vendor returns with SMD-1814's capability). |
 | `openclaw-agent-memory` | keep + audited | Canonical OpenClaw × OB1 Agent Memory workflow recipe (depends on the kept `agent-memory-api`). Distinct from the `integrations/openclaw-agent-memory` plugin. |
 | `openclaw-code-review-memory` | keep + audited | OpenClaw code-review-agent memory workflow over Agent Memory. |
 | `openclaw-taskflow-work-log` | keep + audited | OpenClaw TaskFlow handoff-log workflow over Agent Memory. |

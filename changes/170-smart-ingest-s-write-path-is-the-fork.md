@@ -1,0 +1,135 @@
+# 170. smart-ingest's write path is the fork's — the 3-argument `upsert_thought` with the vector as `p_embedding`, the label and the actor in the envelope, and `uuid` thought-id columns on its items, where upstream's 2-argument call dropped every vector on the floor and the fork's UUID failed every item that named a thought (SMD-2128)
+
+**What changed.** `integrations/smart-ingest/index.ts`: `writeThought` is the
+one call site of `upsert_thought`, the 3-argument form every other vendored
+writer uses (SMD-1228; `db/migrations/004`, last redefined by `046`): the
+vector as `p_embedding`, `embedding_model` (021) and `actor` (008, SMD-1541 —
+`{ name: "MCP_ACCESS_KEY", via: "smart-ingest" }`, the one key the server
+holds) in the envelope, and the enhanced-thoughts columns — `type`,
+`importance`, `quality_score`, `source_type`, `sensitivity_tier` — by an
+update carrying neither content nor vector, on a fresh row only (`existed`
+false), as rest-api and enhanced-mcp write them. Both the `add` and the
+`create_revision` branch go through it; a revision passes `supersedes`, the
+matched thought's id, at the envelope's top level, where the function
+validates and writes it as the row's pointer (025 made the column the one
+mechanism for supersession) — upstream put the id in `metadata.supersedes`, a
+second place for the same fact. The label is the model that answered:
+`_shared/helpers.ts` gains `embedTextLabelled`, the vector with the provider's
+model name (OpenAI's bare name spelled `openai/<model>`) — this server's embed
+falls back from OpenRouter to OpenAI, so a label read from the environment
+would name the wrong model after a fallback. `matched_thought_id` is a string,
+`extractThoughtId` answers a UUID alone (no integer id exists here), and
+`recordItemResult` is one statement again — `status` and `result_thought_id`
+together — the `metadata.result_thought_uuid` detour gone, and both execute
+paths record a skipped item through it, its result the thought it matched:
+`/execute` stepped over a skip, leaving it `ready` under a complete job and in
+the pending index a worker claims from — a row the `bigint` column had made
+impossible (review pass 1); an item persisted `failed` stays so on both paths
+and `/execute` answers `failed_count` (pass 2). A revision whose text was
+captured since the dry run fails with why — the function writes `supersedes`
+on a fresh row only, and "revised" would be false (pass 2).
+`schemas/smart-ingest/schema.sql`: the two columns are `uuid`; a section 2b
+retypes a table created under upstream's shape in place, guarded on the
+column's type — an integer either column held is kept as
+`metadata.<column>_bigint` (it could name no thought here; a `.sql` file
+destroys no rows, and a value is kept in that spirit), and `result_thought_id`
+is filled from `metadata.result_thought_uuid`;
+`append_thought_evidence(bigint, jsonb)` is dropped before the `uuid` form is
+created, so one function answers the name, and the REVOKE names the new form.
+Anything that reads either column or fixes its type — a view, trigger, policy,
+constraint, index predicate, default, foreign key — makes Postgres refuse the
+retype under one of four SQLSTATEs: the block relays whatever the ALTER
+raised, naming the file, the column, the object (the error's DETAIL) and the
+fix (passes 1–3), and the file is one transaction, `BEGIN` to `COMMIT`, so
+plain `psql -f` — which runs on past an error — leaves nothing half done
+either (pass 2); the header says the rewrite runs under `ACCESS EXCLUSIVE`.
+`db/config.mjs`'s community group and `db/README.md`'s grant table name
+`append_thought_evidence(uuid, jsonb)`.
+`dashboards/open-brain-dashboard-pro`'s `IngestionItem` types the two ids as
+strings, its ingest route casts them so, and its thought page takes the id as
+rest-api does — a UUID or digits, as a string — where `parseInt` made a UUID a
+404 or a truncated integer, so the per-item link this change lights lands
+(review pass 1; the `Thought.id: number` typing is SMD-2152's). The two
+READMEs describe the form, the columns, the retype and its lock, the re-grant;
+smart-ingest's names `db/reembed.ts` for the rows written before this and the
+1536 width the server's vectors need.
+
+**Why.** Found by SMD-2110's first suite run (2026-09-24): its one real write
+answered `added_count: 0, failed_count: 1` — `extractThoughtId` read the
+fork's UUID as no id — and the row it left had content and fingerprint and
+nothing else. The 2-argument `upsert_thought` (046's body) reads `content`,
+`metadata` and `actor` from the payload and nothing else: every thought
+smart-ingest wrote on this fork landed without a vector — so invisible to
+`match_thoughts` and every semantic search — unlabelled, its `type` and
+`source_type` NULL and `importance`, `quality_score` and `sensitivity_tier` at
+the sidecar's defaults, not the extractor's. And the item table was
+upstream's: `thoughts.id` is `uuid` here and the two columns were `bigint`, so
+`persistItems`' INSERT of any item carrying a matched id — a fingerprint or
+semantic match — failed whole and the job completed over an empty item list,
+and no executed item could record its thought.
+
+**Held.** `extensions/test-writes.ts`, 383 assertions. Before the sidecars are
+applied, the two tables are created from the file's own text with the columns
+`bigint`, an item seeded as SMD-2110 left an executed one and upstream's
+function stubbed; the sidecar then retypes both columns to `uuid`, keeps the
+`42` as `metadata.matched_thought_id_bigint`, fills `result_thought_id` from
+the metadata key, leaves one `append_thought_evidence` taking a `uuid`, and
+applies again on its own shape; with a view over the old column first, and
+then a CHECK, the file refuses with Postgres's words for each and the view's
+name, and rolls back whole — the column `bigint`, its metadata and the
+`bigint` function untouched. The inline path's `failed`-skip guard is not
+driven: the reconcile path swallows its errors. The smart-ingest block: the
+first write's row has the stub's vector at its axis under the model's label,
+the enhanced columns set, 008's row naming `MCP_ACCESS_KEY` through
+`smart-ingest`, and the item's `result_thought_id` is the row's id; the same
+text again (`reprocess: true`) is one item skipped by fingerprint with the
+first thought as `matched_thought_id` and as its result, persisted, and no
+second row — the arm that fails on main's `bigint` column — and the same
+through a dry run and `/execute`, the skip `executed` with its result, an item
+planted `failed` beside it staying so and counted; a revision parked by a dry
+run whose text is captured meanwhile fails with why, the row's `supersedes`
+unset; a stub vector `0.88` from the first thought's drives both actions
+between the thresholds — a shorter text appends evidence through
+`append_thought_evidence(uuid, jsonb)`, the entry on the thought's metadata
+and the item naming it as matched and result; a longer text is a revision, a
+new row with its vector and label whose `supersedes` is the first thought and
+`metadata.supersedes` unset, 008's row for it too; the dry-run-then-`/execute`
+arm's item carries its result id and its row a vector. The file's text: one
+`rpc("upsert_thought"` call site, the actor in the envelope and the vector as
+`p_embedding`, no `embedding` key inside the payload. Eighteen mutants, each
+alone and restored, each failing the arm that holds it — nine against the
+first commit (the 2-argument form with the vector in the payload fails five
+arms; the retype disabled with the function on `bigint` fails six, every item
+arm, as on main; no label, no actor, no enhanced columns, no `supersedes`, the
+result as status alone, a match naming no thought, the result column
+unfilled), four from pass 1 (the `/execute` skip, the inline skip, an
+`embedding` key after the spread, the raw view error), four from pass 2 (the
+failed skip flipped, no `failed_count`, a revision of text already there, the
+DETAIL dropped), one from pass 3 (the handler on one SQLSTATE).
+`db/test-schema.ts` [40] and `db/test-live.ts` [18] apply the sidecar to a
+fresh brain and probe the community group's function; [18] rolls a refused
+file back (pass 3). `test-auth.ts` 767/767; `check-fork-consistency` PASS.
+
+**Review passes.**
+
+| Pass | Finding | Caught by | Fix |
+|---|---|---|---|
+| 3 | the handler caught one SQLSTATE: a CHECK, a partial index's predicate, a default or a foreign key on the column refused the retype raw, the failure pass 1 removed for views; `test-live` [18] never rolled a refused sidecar back on its one connection; the inline path's `failed` guard had no arm; an `add` whose text existed by execute time counts as added | cold read (fourth reviewer) + run-it (PGlite over eleven dependency kinds) + mutant (the inline guard's mutant survives) | the handler relays whatever the ALTER raised, a CHECK arm; the rollback; the guard recorded as not driven; SMD-2154 filed |
+| 2 | the refusal's "nothing half done" held only for a client sending the file as one query — plain `psql -f` ran on past it, dropping the `bigint` function beside `bigint` columns; the handler named a view or rule where a trigger, policy or generated column raises the same SQLSTATE, and dropped the DETAIL naming the object; a revision of text captured since the dry run lost its `supersedes` silently and counted as revised; `/execute` flipped an item persisted `failed` to `executed` and counted it skipped; the README said every finished item is `executed` with a thought | cold read (third reviewer) + run-it (psql against a scratch brain; PGlite over five dependency kinds) | the file is one transaction; the DETAIL in the message, the cause named for what it is; the revision fails with why; a failed item stays so, `failed_count` on `/execute`; the words |
+| 1 | `/execute` stepped over a skipped item, leaving it `ready` under a complete job and in the pending index — reachable for the first time with the columns `uuid`; the per-item link the change lights landed on a page that `parseInt`s its id, a 404 or a truncated integer; a view over either column made Postgres refuse the retype with a raw error, the file stopped mid-way; two of the enhanced-column sub-assertions equalled the sidecar's defaults; the payload text guard stopped at the label spread's brace, so a key after it passed; section 2b sat before 2a; the record said "destroys no data" and "none of the enhanced columns", both wider than true; the README's width pin missing | cold read (second reviewer) + run-it (a PGlite probe of the retype under a view, an index and a NULL metadata; the guard against five shapes) + mutant (the 2-argument mutant died with the guard still green) | the skip recorded on both paths, an arm through `/execute`; the page takes a UUID; the block re-raises by name and rolls back, an arm with a view; `quality_score === 59`, the tier unclaimed; the guard reads the block with balanced braces; the order, the words, the pin |
+
+**Not taken.** A foreign key from the two columns to `thoughts(id)`: a `KEY
+SHARE` lock on the thought for every item write, and a deleted thought would
+null or refuse the item's history — the columns are a record, not a reference.
+A NOTICE-and-skip for a dependent object (pass 1's other option): the server
+would run against `bigint` columns with nothing said; a named refusal with the
+fix is the cheaper failure.
+
+**Follow-ups.** SMD-2152 (the pro dashboard's integer `Thought.id`; its page
+takes a UUID now); SMD-2154 (an item counts by its dry-run action — an `add`
+whose text existed by execute time is "added"). Rows written before this carry
+no vector; `db/reembed.ts` takes them (the README says so).
+
+**Upstream status:** not sent — the fork dropped parity (SMD-1924); upstream's
+`thoughts.id` is an integer and its `upsert_thought` reads the payload's
+vector.

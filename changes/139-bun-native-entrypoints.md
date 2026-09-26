@@ -1,0 +1,137 @@
+# 139. Bun-native entrypoints — every server on the SQL shim reads `process.env` and exports `{ port, fetch }`, the polyfill for Deno's two globals goes, and `Deno` is refused anywhere but the Edge Function set SMD-1800 retires (SMD-1799)
+
+**What changed.** The 22 files that imported `compat/deno-on-bun.ts` — seven
+extension servers, eleven integrations, four recipes — and the six `_shared`
+helpers they evaluate lose the Edge Function shape: `Deno.env.get("X")` is
+`process.env.X` (300-odd reads), the runtime import line is gone, and
+`Deno.serve(…)` at the tail is the core server's own tail,
+
+```ts
+export default {
+  port: Number(process.env.PORT || 8000),
+  fetch: app.fetch,
+};
+```
+
+— `||`, not `??`: an empty `PORT` is unset, not port 0 (a random port,
+silently), the guard the polyfill had, now in the one shape — the core
+server's tail takes it too. The nine files that handed `Deno.serve` an inline
+function bind it as `const handler = (req: Request) => …` and export that.
+Bun serves the entry module's default export when it has `fetch`, printing
+`Started development server: http://localhost:PORT` (`Started server:` under
+`NODE_ENV=production`) — measured on 1.4.0: `port` in the export wins over
+`PORT` in the environment; an imported module with the shape is not served; a
+file with the export AND an `if (import.meta.main) Bun.serve(...)` beside it
+starts two servers, so the ticket's second clause is not taken.
+`integrations/kubernetes-deployment/index.ts`, the one Deno-shaped
+file `extensions/test-auth.ts` still imported, takes the same shape through an
+explicit `import process from "node:process"` (typed for `deno check`), its
+Dockerfile runs `deno serve --port 8000 index.ts` (which serves that export by
+Deno's documentation; `deno run` would load the module and exit — unmeasured
+here, no `deno` on this machine; CI's `deno check` types the file) and
+`k8s/openbrain.yml` drops its `PORT`; the `denoland/deno` image stays
+SMD-1800's. `compat/deno-on-bun.ts` is deleted;
+`compat/supabase-sql/tsconfig.json` no longer includes it.
+
+The two recipes on the members the polyfill never supplied are ported by hand:
+`recipes/email-history-import/pull-gmail.ts` (`Bun.file(p).text()` and
+`Bun.write` for its three reads and two writes, each inside the try/catch that
+handled a missing file; `Bun.argv.slice(2)`; `process.exit(1)` ×7; the OAuth
+callback as `Bun.serve({ port: 3847, fetch })` with `server.stop()`) and
+`recipes/source-filtering/backfill-metadata.ts` (`process.exit`, `Bun.argv`);
+their shebangs, usage lines and READMEs say `bun <file>`.
+
+The three suites drop their stand-in for `Deno`: each imports a server as a
+module and takes `default.fetch`, the handler `bun <file>` serves, and a module
+without one fails at import by name; `test-auth` asserts no import installed a
+`Deno` global, holds the tail to the letter (`ENTRY_SHAPE`) in the guard that
+every shim file with the shape is started, and its live section binds port 0
+for a moment, hands that port to the child as `PORT` and polls it every 100 ms
+until any HTTP answer, the child's exit or the 30-second deadline — no
+`Listening on` line to parse, Bun's own start line unread.
+
+Check 11 in `scripts/check-fork-consistency.ts` is the shape, not the polyfill:
+no code file under the seven category directories or docs/ reaches `Deno` —
+any member, or the bare name, comments and strings blanked — save the seven
+Edge Function files in `DENO_EXCEPTIONS` (local-brain-no-mcp's five, the cost
+recipe's `after/` sample and its 410 stub), each with the reason and the exact
+line count, a stale count or a missing file failing too; and a shim importer
+still imports no `jsr:`/`npm:`/URL specifier, transitively. Twenty-four `Deno`
+probes (twelve of them the review passes') and ten specifier probes hold the
+rule. `scripts/migrate-to-sql-shim.ts`
+loses the runtime line's machinery (the types-import swap, `--revert`'s
+restoration, the `incomplete` state) and gains one blocker: a file that reaches
+`Deno.<member>` is refused with the shape to port it to. 19 READMEs and
+`primitives/deploy-edge-function` say "Bun-native" where they named the
+polyfill, the two hand-ported recipes' say `bun <file>`, and
+`compat/supabase-sql/README.md` §3 shows the tail; the extension template's
+sample (`extensions/_template/AGENT_SPEC.md`) and `primitives/shared-mcp`'s
+take the shape, so an extension written from them passes check 11.
+
+**Why.** Nothing under Bun needed `Deno`: the polyfill existed so files kept
+upstream's Edge Function shape while running on a runtime that has no such
+globals (SMD-1480, change 74), and the fork dropped upstream parity since
+(SMD-1924). One shape — the core server's — with no runtime detection is what
+the suites can import and what Bun serves; a rule over the whole tree, not
+over shim importers, is what keeps a new vendored file from bringing `Deno`
+back. The polyfill's own refusal of `readTextFile`, `args` and `exit` is now
+the whole rule.
+
+**Held.** `extensions/test-auth.ts` 832 (22 servers started as `bun <file>` and
+answered on the port given), `test-tools.ts` 185, `test-writes.ts` 313 on a
+held Postgres; check-fork PASS with its probes and the seven counts exact —
+and, before the hand ports, it named the 13 + 5 `Deno` lines of the two
+recipes; the codemod round trip (revert → apply → apply) leaves the tree
+unchanged and every migrated file parses; tsc clean for `scripts/` and
+`compat/supabase-sql`; `bun <file>` starts family-calendar (200 on `/`),
+rest-api and agent-memory-api (401 at the gate). Four mutants, each restored:
+a server whose export has no `fetch` fails test-auth at import by name; a
+tail drifted to `?? 8001` drops out of `ENTRY_SHAPE`'s list and the guard
+fails; `if (false) Deno.exit(0);` appended to a server is named by check 11
+with its line; an exception count lowered by one fails as stale.
+
+**Review passes.** Two reviewers on passes 1 and 2, one on pass 3, cold-read;
+pass 2's checker reviewer ran a TypeScript-parser oracle over the 294 code
+files, the tree's `Deno` lines agreeing with the parser's before and after its
+fixes. The stop signal fired at pass 3: its findings were inside pass 2's
+fixes, none reachable in the tree. Boyscout, after it: test-auth's `served` is
+`handlers`, check 11's three line lookups use `lineIndexer`, the CI step and
+the helpers' Web Crypto note name Bun.
+
+| Pass | Finding | Caught | Fix |
+| --- | --- | --- | --- |
+| 1 | the checker's blanker read a template literal whole, `${Deno.env.get("X")}` included — the Edge Function's commonest idiom reported nothing | cold-read | `${…}` expressions are code, recursively |
+| 1 | a quote inside a regex literal opened a "string" that hid the code after it; the session-capture hook's redaction regex was the tree's witness, passing by parity | cold-read | a `/` where a value cannot end opens a regex literal, blanked to its close on the line |
+| 1 | check 11 read .ts/.js/.mjs; the roots hold 68 .tsx files it never opened | cold-read | `BUN_CODE_FILE`, every code extension, with a probe |
+| 1 | `Number(process.env.PORT ?? 8000)`: an empty PORT was port 0, a random port silently — the guard the polyfill had | run-it | `\|\|` in the one shape, the core server's tail too |
+| 1 | nine READMEs promised the polyfill's `Listening on` line; the primitives note had two extensions deploying as Edge Functions; the template and shared-MCP samples taught `Deno.env.get` and `Deno.serve` | cold-read | Bun's start line or `curl`; none deploys that way; the samples take the shape |
+| 2 | a `/` after `<` read as a regex: two JSX closers on a .tsx line blanked the cell between (`<td>{a}</td><td>{Deno.env.get("B")}</td>`) | automated | `<` leaves the regex-start set |
+| 2 | the expression-end scanner knew no regex or comment: a quote or `}` inside one ended or swallowed the `${…}` expression | automated | one linear scanner reads the expression by the same rules |
+| 2 | a member named like a keyword (`a.return / x / 2`) read as the keyword; a `\`-newline continuation lost its newline and shifted every later line | run-it | a word after `.` is a member; the escape keeps its newline |
+| 2 | `importSpecifiers` missed every semicolon-less import (repo-learning-coach's twelve files), so such a shim importer skipped the specifier scan; the walk resolved `.js` specifiers and directories literally | automated | single-line semicolon-less imports read; `.js`→`.ts` and `index.ts` resolved |
+| 2 | the template's and shared-MCP's prose still deployed an Edge Function around the ported samples; Bun's start line has two spellings (`Started server:` under `NODE_ENV=production`) | run-it | the prose follows the samples; no README promises one spelling |
+| 3 | `importSpecifiers` counted a semicolon-less import twice through a `;`-led next line and credited a mixed file's `;`-import to the line above (pass 2's fix; unreachable in the tree) | run-it | a statement's run never crosses into a line that opens another or leads with `;`; three probes |
+| 3 | the shared-MCP primitive's Step 4 still set Supabase secrets and a node `package.json` between the rewritten Steps 3 and 5 | cold-read | Step 4 mints the keys Step 5's command takes; no package.json of its own |
+| 4 | the merge of main (release 1.1.0, SMD-1296, SMD-1982): nothing of main's 55 files reaches the shape, the polyfill or check 11's roots; both hand-resolved files are exactly branch plus main; main's `evals/README.md` names `changes/smd-1809.md`, a path the 1.1.0 cut renumbered | cold-read | none here; SMD-2047 filed for the cut to rewrite such paths |
+
+**Not taken.** `if (import.meta.main) Bun.serve(...)` beside the export (two
+servers, measured). A shared `compat/serve.ts` helper for the tail (one shape
+in 23 files is the point; SMD-2001's keepalive wraps `fetch` in the export
+when it lands). Porting the Edge Function set (`recipes/local-brain-no-mcp`,
+the cost recipe's `after/` sample) — they deploy on a Deno edge runtime and
+SMD-1800 retires them; a stand-in for `Deno` kept in `test-auth` around the
+Kubernetes import — porting the file was smaller than keeping the stand-in.
+Running the two hand-ported recipes against a scratch brain: both speak
+PostgREST over HTTPS, which the fork's stack does not run (SMD-2021).
+
+**Follow-ups.** SMD-2021: `pull-gmail.ts` and `backfill-metadata.ts` read and
+write `thoughts` through `/rest/v1/thoughts` with a service-role key; onto the
+shim or the REST integration, off the raw row insert. SMD-1800 is unblocked
+(this and SMD-1798 were its blockers): `server/`, 20 `deno.json`, the
+`@ts-types` pragmas and their `// Deno reads the SDK's types` notes, the
+`deno-check` job, the `denoland/deno` image and the seven excepted files.
+SMD-1802: the slack-capture and telegram-capture READMEs still show Edge
+Function samples ending in `Deno.serve`. SMD-2001's home is the default
+export's `fetch`.
+
+**Upstream status:** not sent — the shape and the runtime are the fork's.

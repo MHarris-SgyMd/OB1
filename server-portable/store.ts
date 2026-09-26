@@ -361,6 +361,22 @@ export type ThoughtStats = {
   aggregated: number;
 };
 
+/**
+ * A page of a brain's thought-id set (SMD-2244) — for a cheap cross-brain id-set
+ * diff. `ids` are in id order; `cursor` is the last id when a full page was
+ * returned (more may follow), else null. The first page (asked with `after`
+ * null) also carries `total` (the whole corpus) and, where a store can compute it
+ * server-side, a `digest` (an md5 of every id in id order) — so a caller can tell
+ * two corpora apart without enumerating either. `digest` is null on a store that
+ * cannot aggregate server-side (the PostgREST shim), and on an empty corpus.
+ */
+export type ThoughtIdPage = {
+  ids: string[];
+  total: number;
+  digest: string | null;
+  cursor: string | null;
+};
+
 export type ListFilters = {
   limit: number;
   type?: string;
@@ -916,6 +932,15 @@ export interface ThoughtStore {
 
   /** Exact row count of the whole corpus. */
   countThoughts(): Promise<number>;
+
+  /**
+   * A page of the corpus's thought ids in id order, for a cheap cross-brain
+   * id-set diff (SMD-2244). `after` is a keyset cursor (exclusive, a thought id);
+   * the first page (after null) also carries the corpus `total` and, where the
+   * store can aggregate server-side, a `digest` of all ids — so a caller can skip
+   * enumeration when two brains' digests match. Ids only: no content, no vectors.
+   */
+  listThoughtIds(opts: { limit: number; after: string | null }): Promise<ThoughtIdPage>;
 
   /**
    * Everything thought_stats needs, aggregated by the store. The two backends

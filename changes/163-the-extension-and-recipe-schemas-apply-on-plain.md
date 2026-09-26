@@ -1,0 +1,129 @@
+# 163. The extension and recipe schemas apply on plain Postgres — fourteen files stop needing Supabase's roles and `auth` schema, `--grant` learns their tables and views as two more groups, and the SQL rule reaches every category directory (SMD-1810)
+
+**What changed.** Change 93 (SMD-1796) did this for `schemas/`; the same
+survey counted the files under `extensions/` and `recipes/` and left them for
+a design decision, because most carried per-user policies. The decision is
+SMD-1716's, already taken: one operator's brain, the server scoping rows by
+`DEFAULT_USER_ID`, per-user isolation deferred. Applied to all fourteen:
+
+1. The files. Five `extensions/*/schema.sql` (household-knowledge,
+   home-maintenance, meal-planning, professional-crm, job-hunt) lose `ENABLE
+   ROW LEVEL SECURITY` and the `auth.uid() = user_id` policies — meal-planning
+   its `household_member` policies on `auth.jwt()` too. Nine recipe files:
+   adaptive-capture-classification's four `GRANT … TO authenticated` +
+   RLS + `auth.role()` policies (the ticket's survey missed this file — its
+   role was `authenticated`, not `service_role`); brain-health-monitoring's
+   five `GRANT SELECT … TO service_role`, the three `EXECUTE 'GRANT …'`
+   strings inside its guarded DO blocks and the `NOTIFY pgrst`; chatgpt's
+   `REFERENCES auth.users(id) DEFAULT auth.uid()` (a plain nullable uuid now),
+   its policy and grant; gmail-smart-pull's and work-operating-model's
+   `GRANT EXECUTE … TO service_role`; life-engine's six RLS + six grants;
+   ob-graph's policies, grants and the three `REVOKE ALL … FROM PUBLIC, anon,
+   authenticated` + `GRANT EXECUTE TO service_role` pairs — the REVOKEs too,
+   since none of the three functions is SECURITY DEFINER and there is no
+   PostgREST here to expose them as RPCs, so EXECUTE stays PUBLIC's;
+   repo-learning-coach's ten grants; work-operating-model's five RLS +
+   policies + grants; the world-model draft's two `references auth.users`
+   (NOT NULL uuids now), two policies and two grants. Each cut is a note in
+   the file: what stood there, why it fails off Supabase, where the grant
+   lives. Four file headers that said "run in your Supabase SQL Editor" say
+   `psql -f`.
+2. The grant path. `db/config.mjs`'s `ROLE_GRANTS` gains `extensions` (18
+   tables, family-calendar's three included so the whole learning path is one
+   grant) and `recipes` (30 tables, 15 views — brain-health-monitoring's
+   eight and lint-sweep's seven, whose `views.sql` carried no Supabase-ism
+   but is a schema a brain applies, so a granted role can read it). Privileges are upstream's own
+   for its roles: four verbs everywhere but adaptive-capture's four tables,
+   which keep `SELECT, INSERT, UPDATE` (its API role had no DELETE; the recipe
+   deletes nothing). No sequence row (every id is a uuid or text) and no
+   function row (nothing is REVOKEd FROM PUBLIC) — both measured in [50],
+   not recalled. `db/README.md`'s grants table carries the same rows (the checker
+   holds the two equal, SMD-1471); `--grant --dry-run` names them as "not yet
+   present" until the files are applied.
+3. The rule. Check 12 walks `db/` and the seven category directories, not
+   `schemas/` and `db/` alone; its message cites both tickets. The
+   `EXECUTE 'GRANT …'` strings are why the scan reads string literals.
+4. The suites. test-schema [50]: a third PGlite, the migrations, the
+   community files, then `CONTRIB_SCHEMA_FILES` (a list in test-support —
+   `recipes/` also holds a query layer, a pg_cron line and a Neon build of
+   `thoughts`, which no brain applies as a schema; every `extensions/*/`
+   schema is asserted to be on it); no `auth` schema, no Supabase role; the
+   two groups' presence, the 48 tables and 15 views exactly, no sequence, no
+   locked function; a role refused everywhere before the groups' statements
+   and nowhere after; `grantVerifySql` holding all 204 rows (203 privileges
+   and the schema's USAGE); the
+   narrower DELETE refused on adaptive-capture; an ops view over `thoughts`
+   readable with no grant on `thoughts`. test-live [18] applies the fifteen
+   listed files over TCP after the community files (the fourteen cut files
+   less gmail-smart-pull's function, which no suite applies, plus
+   family-calendar's and lint-sweep's), and its dry-run, INSERT and view
+   probes cover the three groups. `extensions/test-tools.ts` no longer
+   creates two `auth.*` stubs and three roles before the seven schemas: the
+   files as they are, on a database with neither, as a user has.
+5. The docs. Five extension READMEs' Step 1 drop the `psql -c "CREATE
+   FUNCTION auth.uid() …"` block and the "RLS-enabled tables" prose;
+   "Required reading: RLS" becomes background reading; the template's
+   `AGENT_SPEC.md` rules say `user_id UUID NOT NULL`, no RLS, no `GRANT`,
+   add the tables to `ROLE_GRANTS.extensions` and `CONTRIB_SCHEMA_FILES`;
+   `primitives/rls` opens with the fork note and "Extensions That Use This"
+   becomes "Used"; `deploy-remote-mcp`'s Step 1 and troubleshooting entry,
+   `troubleshooting`'s three RLS lines, the shim README's stub sentence,
+   ob-graph's IMPORTANT block (roles + stubs) and table row, life-engine's
+   "error harmlessly", repo-learning's "grants service_role" all follow.
+
+**Why.** On any Postgres that is not Supabase each file stopped at its first
+such statement (`schema "auth" does not exist` — `function auth.uid() does
+not exist` only once a user had created the schema by hand — or `role
+"service_role" does not exist`), and the READMEs'
+workaround — two stub functions returning NULL — made the policies deny every
+row to any role but the tables' owner, silently. The tools suite carried the
+same workaround, so it proved the files applied with the stubs, not without.
+
+**Held.** Four mutants run against the checker, each reverted: a `GRANT … TO
+service_role` drill file under `recipes/` fails check 12 (the ticket's
+drill); an `ENABLE ROW LEVEL SECURITY` put back in household-knowledge's
+schema fails it at the line; `household_vendors` dropped from
+`ROLE_GRANTS.extensions` fails the grants-table comparison (the README still
+lists it); adaptive-capture's `capture_thresholds` widened to four verbs
+fails it on the privilege. The last two run together against test-schema
+fail six of [50]'s assertions — 62 objects not 63, `household_vendors`
+unlisted, 201 verify rows, and the DELETE on `capture_thresholds` allowed
+(rerun after pass 1 moved the counts; the same six).
+
+**Measured after.** `bun scripts/check-fork-consistency.ts` PASS; test-schema
+1607/1607 ([50] adds 17); test-live 676/676 over a throwaway container ([18]
++1, 114 objects granted); test-writes then test-tools on one container, in
+CI's order, 185 assertions, 55 tools, no stub and no role warning;
+`grep -rlE "service_role|auth\.uid\(\)" extensions recipes --include=*.sql`
+matches comment lines only.
+
+**Review passes.**
+
+| Pass | Finding | Caught | Fix |
+| --- | --- | --- | --- |
+| 1 | `extensions/test-writes.ts` still created the three Supabase roles, and CI runs it before test-tools on one Postgres, so test-tools' new "no Supabase role" probe met them on every CI run; the `recipes` group's "every file that creates tables or views" missed lint-sweep's seven views; the fragment and check 12's comment said "the whole tree" (evals/ is not walked) and "the fourteen over TCP" (the applied list is not the cut list); eleven stale lines in files the cut touched or their READMEs (meal-planning's `auth.jwt()` sentence and schema header, brain-health-monitoring's "re-run the GRANTs", AGENT_SPEC's table row and rule 7, family-calendar's "RLS is introduced in Extension 4", CONTRIBUTING's metadata example, the importer's comment, two more "Supabase SQL Editor" headers, ob-graph's "RLS would have excluded it"); three files' commented sample INSERTs still called `auth.uid()`; [50]'s `+6` floor and `26` were hand-written | cold read; run-it | the role loop gone; lint-sweep in the group, the list and the README (63 objects, 15 views); the lines rewritten; the samples take `'<your DEFAULT_USER_ID>'::uuid`; the counts derived from the groups |
+| 2 | ten cut notes and two primitives quoted `function auth.uid() does not exist` or `relation "auth.users" does not exist`, which a plain Postgres never raises for these files — with no `auth` schema every one fails as `schema "auth" does not exist`, the quoted messages appear only after the old README's stub created the schema; CONTRIBUTING's GRANT step still mandated hand-written grant lines the branch replaced with `ROLE_GRANTS.extensions`; the RLS primitive's fork note said upstream's Extensions 4, 5 and 6 carried policies (1 and 2 did too); three more "Supabase SQL Editor" lines and a service-role warning in cut files' READMEs; ob-graph's second note claimed the first stop its first note already had; `<your_role>` inside fenced SQL against the house's bare `your_role`; the fragment's verify counts on two bases and its "three of the seven" naming none | cold read; run-it | the message every note quotes is the one Postgres raises; CONTRIBUTING points at the group and the list; the primitive counts five; the lines rewritten; the fragment names the four files and one basis. The run-it reader walked `--grant` end to end on a live server (114 objects; the role inserts, reads both view kinds, is refused the DELETE), re-ran the two recorded mutants (62 / 201 / six), and found a re-added `REVOKE … FROM PUBLIC` caught by [50] by name and a re-added `NOTIFY pgrst` caught by nothing — harmless on Postgres, so not a rule |
+| 3 | pass 2's rewrite of schema-aware-routing's grant block dropped the `thoughts` grant and pointed at `--grant`, but that block creates its own `thoughts` — a non-owner role following it as written got `permission denied for table thoughts`; chatgpt's `.env.example` still called `USER_ID` "for multi-tenant RLS, from Supabase Auth"; adaptive-capture's note said the role alone got past to the policy (the policy needs a stub too — `schema "auth" does not exist` comes next); the RLS primitive's "the three READMEs" lost its antecedent when the note began counting five; the checker's header kept one "whole tree"; the template's hidden HTML comment still mandated hand grant lines; three nits (lint-sweep's "Supabase Studio", ob-graph's `user_id` for `DEFAULT_USER_ID`, the primitive's metadata description); the troubleshooting entry named two of the three by-hand-schema messages | cold read; run-it | the fifth grant restored with a note for a migrated brain; the env example, note, antecedent, header, comment and nits rewritten; the third message added. The run-it reader measured every message per statement kind (all `schema "auth" does not exist` with no schema), confirmed the notes' "first statement" against the a3833988 files, re-applied the fifteen files twice (the same three pre-existing re-apply failures), resolved every quoted path, and dropped lint-sweep from the list against test-live — three [18] assertions fail, the third naming all seven views |
+
+**Boyscout.** After the stop signal, what the passes cut for space: the only
+statements in the fifteen listed files that failed on a second apply were
+meal-planning's three bare `CREATE TABLE` and four bare `CREATE INDEX` and
+life-engine's two `CREATE TRIGGER` — upstream's, not this branch's; they
+take `IF NOT EXISTS` and a `DROP TRIGGER IF EXISTS` first, so every listed
+file applies twice (measured on a migrated PGlite brain; family-calendar's,
+untouched here, is the one that still does not). life-engine's `life_engine_state`
+comment says "per brain" where it said "per Supabase project"; test-tools'
+drop comment follows.
+
+**Not taken.** Expressing ownership through the fork's `agent_id` and a
+session setting (the ticket's other branch): that is SMD-1716's design, not a
+cut, and nothing here forecloses it — `user_id` stays on every table. Applying
+every `.sql` under `recipes/` by walk: four of the seven non-schema files
+fail or damage a migrated brain (vercel-neon-telegram's bare `CREATE TABLE
+thoughts` and a second `match_thoughts` beside 040's, editorial-policy's
+`cron.schedule`, gmail-smart-pull's ALTER of a table only entity-extraction
+creates). Dropping `rls` from three extensions' `requires_primitives`: the
+READMEs call it background now, but the primitive would fall below the
+two-extension floor CONTRIBUTING sets, so the declaration stays. Keeping ob-graph's REVOKEs as `FROM PUBLIC`:
+they guarded a PostgREST surface the fork does not have, and would have made
+three function rows the role must be granted for nothing.

@@ -13,8 +13,8 @@ backups, no resource limits.
 ## Prerequisites
 
 - podman or docker, with compose
-- A model provider: the stack's own Ollama (`--profile local-models`, nothing to
-  set), an Ollama on the host, or an OpenRouter key — the shipped defaults are
+- A model provider: the stack's own Ollama (`--profile local-models`, one line to
+  set: `OB1_LLM_LOCAL=1`), an Ollama on the host, or an OpenRouter key — the shipped defaults are
   local; `deploy/.env.example`, "Model provider", is the one line to choose
 
 ## Steps
@@ -143,15 +143,19 @@ the repo root, with whatever `-f` files the stack was started with:
 
 | Service | On the compose network | On the host | From another machine |
 | --- | --- | --- | --- |
-| `server` | `server:8000` | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
+| `server` | `server:8000` | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration` | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
 | `postgres` | `postgres:5432` — the server and the migrator | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
 | `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
 | `jev` (`--profile jev`) | `jev:8020` — the server's preflight, and a spike run in a container | Nothing. The host-ports file publishes it on `127.0.0.1:${JEV_PORT:-8020}` for a spike run from a checkout (`OB1_JEV_BASE_URL=http://127.0.0.1:8020`) | Not intended; an unauthenticated model API, as Ollama's is |
 | `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` and the model provider, and Linear's API outward | Nothing | Nothing |
+| `n8n` (`--profile orchestration`) | `n8n:5678`, which nothing in the stack dials; n8n dials `server:8000` and the vendors its workflows name | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
 
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes one
 server per tier, each on loopback by default; its three Postgres services and
-shared Ollama publish nothing, exactly as above.
+shared Ollama publish nothing, exactly as above. A canary stood beside this
+stack (`deploy/canary.sh`, "A canary beside the stack" below) is this file
+again under the project `open-brain-canary`: the same rows on its own network,
+its server on `127.0.0.1:8011` (`--port`).
 
 | Service | On the compose network | On the host | From another machine |
 | --- | --- | --- | --- |
@@ -164,8 +168,8 @@ shared Ollama publish nothing, exactly as above.
 every `compose*.yaml` under `deploy/` and refuses a mapping that drops the
 address, a service that reaches outside the file (`extends`, `include`) or onto
 the host without a port (`network_mode`), and holds an inventory of which
-service publishes from which file — the server from `compose.yaml`, the
-database and Ollama from the host-ports file — so a new published port is
+service publishes from which file — the server and the profile's n8n from
+`compose.yaml`, the database and Ollama from the host-ports file — so a new published port is
 named there deliberately, with its row in the table above; the "Full stack, no
 Supabase" CI job reads the rendered config the same way.
 
@@ -323,13 +327,65 @@ service) as `open-brain-tier:latest`, and runs this checkout's `tier.ts`
 in it, mounted read-only, on the stack's network:
 
 ```bash
-# stable (this stack's postgres) into a canary on its own server beside it; from
-# a branch worktree, name the running stack's env file (deploy/.env is gitignored)
-deploy/tier.sh --env-file ~/OB1/deploy/.env --refresh --from postgres --to open-brain-canary-postgres --tier canary
-deploy/tier.sh --env-file ~/OB1/deploy/.env --diff    --from postgres --to open-brain-canary-postgres
+# stable (this stack's postgres) into a working copy, a scratch database on the
+# same server, created first; from a branch worktree, name the running stack's
+# env file (deploy/.env is gitignored)
+docker compose --env-file ~/OB1/deploy/.env -f deploy/compose.yaml exec postgres createdb -U postgres openbrain_working
+deploy/tier.sh --env-file ~/OB1/deploy/.env --refresh --from postgres --to postgres/openbrain_working --tier working
+# replay stable's logged searches on the canary deploy/canary.sh stood up — on
+# both projects' networks, so by container name (each has a `postgres`)
+OB1_EVAL_EMBED=qwen3-embedding:4b@1024 deploy/tier.sh --env-file ~/OB1/deploy/.env \
+  --network open-brain_default,open-brain-canary_default \
+  --diff --since 2026-01-01 --from open-brain-postgres-1 --to open-brain-canary-postgres-1
 # the three-tier stack's own network and services
 deploy/tier.sh --refresh --from stable-postgres --to canary-postgres --network open-brain-tiers_default
 ```
+
+A working copy on stable's server is a scratch database for a branch's
+migration, reset at will. It shares stable's memory and WAL as a canary must
+not, since the canary is the tier that takes the risky rebuilds ("A canary
+beside the stack", below).
+
+A `--diff` or `--replay` replays what stable logged, so:
+- stable must run with `OB1_QUERY_LOG=on`, which is off by default;
+- the window starts at the canary's last refresh unless `--since` says
+  otherwise, and a refresh is what `canary.sh up` just did;
+- hybrid-arm rows (`search_thoughts`) are replayed only with `OB1_EVAL_EMBED`
+  set to the brain's model, as in the example, and otherwise skipped.
+
+Both print the window and how many searches were replayed and skipped. A
+`--diff` that replayed none says `nothing to compare` and exits 3, where a
+pass is 0, a moved ranking or a failed step 1, and a usage error or refusal
+2 (SMD-2182).
+
+### Compare two live brains
+
+`--diff`/`--replay` is the merge-time replay over Postgres. To ask instead "are
+these two running brains telling me the same thing, and if not why?" in one step,
+point them at each other over HTTP (SMD-2109):
+
+```bash
+# each brain is a connector name (claude mcp get resolves the URL + key) or an
+# http(s):// URL with its key in --a-key/--b-key, OB1_COMPARE_KEY, or ?key=
+bun db/tier.ts --compare open-brain open-brain-canary
+bun db/tier.ts --compare open-brain open-brain-canary --replay --hybrid \
+  --query "highest value open ticket" --queries-file deploy/compare-queries.txt --json
+```
+
+It reads each brain as a client — the keyed `GET /health` record (version,
+commit, tier, the tree's latest migration against the ledger's highest, schema
+version, embedding, counts) and, with `--replay`, the two search tools over a
+supplied query set (the vector arm needs no local model — each brain embeds its
+own query). It never prints a key and prints a one-line verdict ("current with
+each other" / "canary is 1 migration behind; 407 vs 597 thoughts"). It exits
+non-zero when anything differs. The default compare writes nothing; `--replay`
+issues real searches, which a brain running `OB1_QUERY_LOG=on` records in
+`query_log` (telemetry, migration 034, never the thoughts corpus), as any client
+search does. Because it is HTTP-only, the exact id-set difference and a replay
+sourced from stable's `query_log` are out of reach and named as such; a DB-backed
+mode can add them. Until SMD-2037 lands, a
+refreshed brain runs at pgvector's default HNSW settings, so a hybrid-arm
+difference can be GUC-induced — the retrieval section says so.
 
 `--from` and `--to` name a database on the network as `HOST[:PORT][/DB]`
 (port 5432 and database `openbrain` by default). The wrapper builds the URL as
@@ -402,26 +458,174 @@ ALTER DATABASE openbrain RESET ob1.refresh_target;
 
 `--promote` refuses a marked `--to` and prints the `RESET` for it.
 
-The container runs with `--init`, so Ctrl-C stops a refresh, and it publishes
-nothing. The client's major has to be at least the source server's, and
-`refreshToolsReady` refuses the refresh otherwise, so a Postgres bump in the
-compose files means bumping the package in `db/tier.Dockerfile` with it. On
+The container runs with `--init`, so Ctrl-C stops a refresh, and `tier.sh`
+then exits with the container's status (130), so a script calling it stops
+too. It publishes nothing. The client's major has to be at least the source
+server's, and `refreshToolsReady` refuses the refresh otherwise, so a
+Postgres bump in the compose files means bumping the package in
+`db/tier.Dockerfile` with it. On
 every PR, the deploy-stack CI job seeds one thought and one logged search, then
-runs through this script: a refresh, a `--replay`, a `--diff`, a retry over a
-copy left stamped `stable` (as a refresh that died after its restore leaves
-it), and both refusals. On a host with SELinux enforcing (Fedora and RHEL,
+runs through this script: a refresh, a `--replay`, a `--diff`, a `--diff` over
+the empty window after the refresh (exit 3), a retry over a copy left
+stamped `stable` (as a refresh that died after its restore leaves it), and
+both refusals. On a host with SELinux enforcing (Fedora and RHEL,
 where podman labels by default), the container can read the mounted checkout
 only once it is relabelled: `chcon -Rt container_file_t <checkout>`. The
 script does not relabel it for you.
 
-A refresh does not carry the per-database HNSW settings over (SMD-2037), and a
-server already running on the refreshed database keeps its old pool until it
-is recreated. It does not carry grants either (the restore runs with
-`--no-privileges`), so a server that connects to the copy as a role other than
-`postgres` needs `bun db/migrate.ts --url <copy> --grant <role>` first. Since
-migration 054 a key used recently on stable is not written on its next lookup,
-so a missing grant can surface minutes after a start that looked healthy. The
-canary-beside-the-dogfood standup is SMD-2038.
+The dump carries no database-level settings (`ALTER DATABASE … SET`), so the
+refresh copies `--from`'s onto `--to` itself before migrating it, and resets
+any `--to` has that `--from` lacks, the refresh mark aside (SMD-2037). That is
+how migration 014's HNSW bounds reach the copy: without them a broad filtered
+search on it walks at pgvector's defaults and returns short. Only the
+database's own settings travel. Where stable's bounds come from the server's
+configuration instead (`postgresql.conf`, `ALTER SYSTEM`, and 014 then seeds
+none), a copy on another server has whatever that server says. A server already
+running on the refreshed database keeps its old pool until it is recreated.
+Grants are not carried either (the restore runs with `--no-privileges`), so a
+server that connects to the copy as a role other than `postgres` needs
+`bun db/migrate.ts --url <copy> --grant <role>` first. Since migration 054 a
+key used recently on stable is not written on its next lookup, so a missing
+grant can surface minutes after a start that looked healthy.
+
+## A canary beside the stack
+
+`compose.tiers.yaml` stands three new brains up from nothing. A stack that is
+already running holds a brain of its own, and SMD-1806 makes it stable, the
+record. `canary.sh` stands the canary beside it, and takes it down again
+(SMD-2038):
+
+```bash
+# from a branch worktree, name the running stack's env file (deploy/.env is gitignored)
+export OB1_SMOKE_KEY=…   # a raw write key whose hash is in MCP_ACCESS_KEYS; the canary takes stable's keys
+deploy/canary.sh --env-file ~/OB1/deploy/.env up --connect
+deploy/canary.sh --env-file ~/OB1/deploy/.env down --volumes
+```
+
+The canary is `compose.yaml` again under the project `open-brain-canary`, with
+its own Postgres, volume, network and images, and `OB1_TIER=canary`. It needs
+Docker Compose v2 (`config --format json`, `up --wait`), which is what
+`docker compose` is and what `podman compose` runs when it is installed; the
+Python podman-compose is not enough. Its server listens on `127.0.0.1:8011`
+(`--port`), on loopback whatever `SERVER_BIND` says for stable. It reads the stack's env file, so the canary's
+server gets stable's knobs and none is copied. Four things are the canary's
+own: the port, the address, the tier, and the compose profiles (none). Each
+tier has its own Postgres server, never a second database on stable's: a
+canary exists to absorb the risky migration, reembed or index rebuild, and a
+shared server would share its memory, its WAL and its crashes with the
+record. The canary's server is not on stable's network, so it cannot reach
+stable's database, or a service a compose profile runs there.
+
+`up` can be re-run, and re-running it is how the canary catches up after
+stable is redeployed:
+
+1. It refuses, with exit 2 and nothing changed, when:
+   - the canary's server would dial a bare hostname for a model endpoint
+     (`OB1_LLM_BASE_URL`, `OB1_CHAT_BASE_URL`, `OB1_JEV_BASE_URL`). Stable's
+     compose services are on stable's network: `OB1_LLM_BASE_URL` unset falls
+     back to the `local-models` profile's `ollama`, and the jev profile's
+     setup is `http://jev:8020`. Name an endpoint the canary can reach for
+     the canary alone, in the shell, which wins over the env file for the
+     canary and leaves stable as it is:
+     `OB1_LLM_BASE_URL=http://host.docker.internal:11434/v1 deploy/canary.sh
+     … up` for an Ollama on the host, or a host's full name for one on the
+     LAN. It must serve the brain's embedding model. A remote provider also
+     needs `OB1_LLM_LOCAL=` cleared there, or the egress gate takes it for
+     local. A stack whose only model server is the `local-models` profile
+     needs an Ollama on the host for its canary;
+   - its port is taken. For another container's, pass another `--port`; if
+     that container is a canary stood up by hand, remove it instead, since
+     the new canary is refreshed from stable and nothing is lost that stable
+     does not hold. A process on the host listening there is refused too;
+   - `--connect` finds another connector under the name (below);
+   - stable's Postgres, found by its compose labels (`--stable-project`,
+     default `open-brain`), is stamped `canary` or `working`, or carries a
+     refresh's mark (`canary`, `working`): that is a copy, not the record.
+     A mark of `stable` or `off`, an operator's protection, is not one.
+
+   Stable with no tier stamp is stamped `tier=stable`. When stable's server
+   runs without `OB1_TIER=stable` it says so; set that in the env file and
+   recreate the server.
+2. It starts the canary's Postgres, and refreshes it from stable through
+   `tier.sh` on both networks: the dump, the settings, a migration with this
+   checkout, the stamp and the mark ("Refreshing a tier", above).
+3. It builds the server from this checkout and recreates it, so the pool
+   opens on the refreshed database. A standing canary's server is stopped
+   before the refresh, so nothing serves the copy mid-restore through the
+   connector, or writes rows the restore then collides with. `OB1_GIT_SHA` is
+   the checkout's `git describe`, unless the shell sets it.
+4. It smoke-tests the canary with `OB1_SMOKE_KEY`. The keyed `/health` must
+   say `tier` `canary`, and `smoke.sh` must pass. Then the vector arm, which
+   `smoke.sh` leaves out and a `--diff` replays only with a provider
+   configured. A candidate thought is searched for by its own text, with
+   every literal that search matches exactly taken out: SMD keys, dates,
+   paths and identifiers, as `extract_search_needles` finds them. It must
+   come back as Result 1, at 50% or more. Up to five candidates are tried,
+   and the first that passes decides.
+   - Taking the literals out matters. `search_thoughts` is hybrid, and it
+     scores a keyword hit by cosine too, so a probe holding an identifier was
+     found by the keyword arm at 0.2% under a provider answering random
+     vectors.
+   - The floor is what a thought scores against its own text. On the
+     dogfood's brain that was 78–94%, and about 0 under the random provider
+     or another model.
+   - Five candidates, because with the literals out two session summaries of
+     one template are nearly one text, and the vector arm rightly ranks a
+     sibling first. On the dogfood's brain that happened to 10 of the 30 newest
+     candidates, with at most two misses in a row. From any of the 26
+     starting points the first five held a pass, and a broken provider or
+     index fails all five.
+   - Candidates are the newest thoughts embedded with the brain's model
+     whose opening, digits aside, no other thought shares.
+   - A canary with no such thought is not checked, and says so, unless stable
+     had one before the refresh: then a migration emptied the vectors, or the
+     model changed without a reembed, and the smoke fails.
+
+   `--no-smoke` skips the smoke and needs no key.
+5. With `--connect` it registers the Claude Code connector
+   `open-brain-canary` (`--name`) at user scope, under the same key; a new
+   session sees its tools. The URL is the canary's own port until SMD-1846
+   puts one origin in front of the stack.
+
+`down` removes the canary's containers and network. It deregisters the
+connector only when `claude` has it at user scope and at the canary's port
+(any path or `?key=` after it). The port is read from the canary's server
+container, running or stopped (after a reboot podman leaves it stopped, and
+Docker restarts the server but not its Postgres); once that is gone, pass the
+`--port` it was stood up with. `claude mcp get` shows the
+entry that wins for the current directory, so a local entry by the name
+hides a user one behind it. One by that name anywhere else, or in local or
+project scope, is left alone with a line saying so, and `up --connect`
+refuses to replace it. `--volumes` also deletes the canary's database, and
+only once it says it is a canary: stamped `canary`, marked by a refresh, or
+holding nothing, which is what a first refresh that died before its mark
+leaves. A refusal puts the canary's Postgres back as it found it. The volume
+is looked for by name (`open-brain-canary_pgdata`), which is how `compose
+down --volumes` removes it. With none there is nothing to delete, and nothing
+is started to find out. Neither touches stable: `down` acts on the project
+`open-brain-canary` alone.
+
+On every PR, the deploy-stack CI job runs `canary.sh` beside its stack, in
+two steps. The first is every refusal above, each with exit 2 and nothing
+started, stamped or registered. The second is the canary's life:
+- `up --connect` over a stable carrying the protective mark `stable`, under
+  `SERVER_BIND=0.0.0.0`. The canary must stay on loopback, and its probe must
+  pass on a thought whose text holds literals, searched for without them;
+- a second `up` against a provider stub serving another model. The thought
+  put on stable just before it must reach the canary, and the smoke must
+  fail on the floor;
+- `down --volumes` refused on a canary stamped `working`, an empty canary
+  deleted, and nothing to delete once the volume is gone (a local-scope
+  connector left alone);
+- a volume by the canary's name that compose did not make, holding a table,
+  refused with nothing left running;
+- a last `down` that removes its own connector.
+
+Afterwards the stack's Postgres container, its thoughts and its server are
+checked unchanged. A stand-in `claude` on PATH answers `mcp get` there. The
+provider stub embeds by bag of words, and the probe thoughts are seeded with
+its vectors, so a thought is near its own text and far from the others. Its
+wrong-model mode scores a thought's own text at about 30%.
 
 ## The typed-decision tier
 
@@ -457,6 +661,156 @@ container; `JEV_THREADS` (and `JEV_HUB`, a mirror for the weights) in
 adds `-f deploy/compose.host-ports.yaml` and reaches it at
 `http://127.0.0.1:8020`; without compose, `bun jev/serve.ts` on the host serves
 the same contract on the same port.
+
+## Orchestration
+
+The fork's orchestration tool is n8n (`../docs/orchestration-tool.md`,
+SMD-1863). It runs workflows that need state — a schedule, a trigger, a retry,
+a cursor — and captures through the brain's MCP endpoint with a capture-scope
+key, never a table and never a write key. The `orchestration` profile runs it
+beside the stack (SMD-2210). The image is n8n's, pinned by digest and never
+vendored. OB1's part is the provisioning step in `orchestration/` and the
+templates it loads (SMD-2212 ships the first).
+
+```bash
+bun deploy/orchestration/provision.ts --init   # once: the profile's secrets into deploy/.env (it never replaces one)
+# the brain key n8n captures with, a CAPTURE key:
+cd server-portable && bun keygen.ts --name n8n --scope capture && cd ..
+#   the key into deploy/.env as N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS
+podman compose -f deploy/compose.yaml --profile orchestration up -d   # restart the server too, for the new key
+bun deploy/orchestration/provision.ts        # --env-file for another file; --rotate for a new API key
+```
+
+`--init` writes `N8N_ENCRYPTION_KEY`, `N8N_OWNER_PASSWORD` and its bcrypt
+hash `N8N_OWNER_PASSWORD_HASH` (single-quoted, since compose would read its
+`$`s as variables), `N8N_MCP_KEY` and `N8N_WEBHOOK_KEY`, where the file has
+none. n8n sets its owner from the email and the hash at every start
+(`N8N_INSTANCE_OWNER_MANAGED_BY_ENV`). So the owner exists from the first
+boot, and nobody who reaches the port before provisioning can claim the
+instance. To change the password, edit it, run `--init` again, and recreate
+n8n: `compose up -d n8n`. A `compose restart` keeps the environment the
+container was created with, and so the old hash. `--init` re-derives a hash that no longer matches, and rewrites one
+whose line is not single-quoted. Keep the password within 72 bytes: bcrypt
+reads no further, and `--init` refuses a longer one. Without the key or the
+hash, the container exits at once with the reason in its log, and `ps` shows
+it restarting. The step reads `deploy/.env` alone. A shell variable of the
+same name overrides the file for compose, so an exported `N8N_OWNER_EMAIL`
+or `N8N_PORT` would split the two.
+
+The provisioning step runs from a checkout against the loopback port. It
+signs in as the owner and keeps n8n's API key in `deploy/.env` with its id,
+its scopes and the file's tag (`N8N_API_KEY`, `_ID`, `_SCOPES`, `_TAG`), all
+written at once. The key carries eight of n8n's 106 scopes, the credential
+and workflow calls the step makes, and it expires after `N8N_API_KEY_DAYS`
+(90). A run mints a new key when that one has less than a week left, or on
+`--rotate`. Every run deletes every other key this env file minted, and
+n8n answers a deleted key with 401. A key an interrupted run left behind
+goes on the next run. A second env file provisioning the same n8n keeps its
+own key: each file tags its keys, and a tag counts only beside a fingerprint
+of the machine (its stable id, not its network hostname) and the file's
+real path (`N8N_API_KEY_TAG_OF`). That holds for another machine's checkout
+provisioning this n8n, and for a copy of `deploy/.env`, which mints under a
+tag of its own on its first run and revokes nothing. A moved file does the
+same. The step names the tag it left, with its live keys, and `--adopt`
+revokes them. A symlinked `deploy/.env` is written through, and stays a
+link. Then the step creates or patches each
+credential from `orchestration/credentials.template.json` with values from
+the env file, and creates or replaces each template. A replaced workflow
+loses edits made in the editor: the template is the source. Run it again
+after changing a key in `deploy/.env` or a template. Before it writes
+anything, it refuses:
+- a brain key at write scope, or one `MCP_ACCESS_KEYS` does not list,
+  wherever in a credential it sits: a header, `Bearer <key>`, a URL's `?key=`;
+- a key whose scope is not the one its credential declares (`brainScope`);
+- a template naming a credential no template declares.
+
+No secret sits in n8n's environment but the encryption key and the owner's
+hash, and no workflow can read one from there
+(`N8N_BLOCK_ENV_ACCESS_IN_NODE`). n8n rate-limits sign-in to five a minute,
+so several runs in a row can meet a 429. The step says so.
+
+**An AI client** connects to an MCP endpoint a template publishes, at
+`http://127.0.0.1:5678/mcp/<path>` with the header `x-n8n-key: $N8N_MCP_KEY`
+(Claude Code: `claude mcp add --transport http n8n <url> --header
+"x-n8n-key: …"`). What that endpoint exposes is workflow-shaped: an act tool
+that is a multi-step flow, or a trigger an agent may pull. The brain's own
+tools stay on the brain's endpoint, under the client's own key (decision 7).
+**An on-demand run** is a POST to `/webhook/<path>` with the header
+`x-n8n-run-key: $N8N_WEBHOOK_KEY`. The two keys are separate: the MCP key
+starts no run, and the run key opens no MCP endpoint (both measured).
+
+**Custody and backups.**
+- **The owner password** is the profile's standing secret, stronger than the
+  API key, since every mint signs in with it.
+- **`N8N_ENCRYPTION_KEY`** encrypts every stored credential: lose it and they
+  are unreadable. n8n also writes it into its volume
+  (`/home/node/.n8n/config`), so a copy of the whole volume carries the key
+  beside the credentials it protects. The copy below is the database alone.
+  Keep the password, the key and the hash with `deploy/.env`.
+- **n8n's store** needs keeping as well. The workflows are the templates, and
+  an API-key credential comes back from `deploy/.env`. But an OAuth
+  credential's refresh token (Gmail's) and each polling workflow's cursor
+  live only in n8n's store.
+
+The store is one SQLite file, and it can be copied while n8n runs. Here
+`compose` stands for `podman compose -f deploy/compose.yaml --profile
+orchestration`, or docker compose:
+
+```bash
+umask 077   # the copy holds run history (a capture's text) in the clear
+compose exec -T n8n sh -c "rm -f /home/node/.n8n/backup.sqlite && node -e \"new (require('node:sqlite').DatabaseSync)('/home/node/.n8n/database.sqlite').exec(\\\"VACUUM INTO '/home/node/.n8n/backup.sqlite'\\\")\""
+compose exec -T n8n sh -c 'cat /home/node/.n8n/backup.sqlite && rm /home/node/.n8n/backup.sqlite' > n8n-backup.sqlite
+# restore: stop n8n first (compose stop n8n), then write the file as the image's
+# own user, removing the old WAL, which SQLite would otherwise replay onto the copy
+compose run --rm --no-deps -T --entrypoint sh n8n -c 'rm -f /home/node/.n8n/database.sqlite-wal /home/node/.n8n/database.sqlite-shm && cat > /home/node/.n8n/database.sqlite' < n8n-backup.sqlite
+compose up -d --no-deps n8n
+bun deploy/orchestration/provision.ts --rotate   # the copy brings back keys and credentials as they were then
+```
+
+Both shapes were measured, with the same `N8N_ENCRYPTION_KEY`: a restore
+into a fresh volume, and one over a stopped n8n. The workflows and
+credentials come back. So does every API key n8n held when the copy was
+taken, including one revoked since, and every credential as it was then.
+That is why the restore ends with a `--rotate` provisioning run: it revokes
+the file's old keys and patches the credentials to the env file's current
+keys. Two ways to lose the store: `compose cp` writes the file root-owned,
+and n8n then opens it read-only; and a restore that leaves the old WAL in
+place came back as "database disk image is malformed" (measured).
+
+**After a compromise** (a leaked owner password or API key), a password
+change revokes nothing by itself. Delete every key in n8n's Settings → n8n
+API, change the password, run `--init`, recreate n8n (`compose up -d n8n`),
+and provision with `--rotate`.
+
+**Run history.** Each run's data is a copy of what the run carried: a
+capture's text, an act tool's arguments. It sits outside `delete_thought`
+and the brain's retention. The profile keeps it 24 hours or 1,000 runs
+(`N8N_EXECUTIONS_MAX_AGE`, `N8N_EXECUTIONS_MAX_COUNT`); n8n's defaults are 14
+days and 10,000. n8n marks runs past the window hourly, and deletes a marked
+run's rows at its first 15-minute sweep an hour after that. So a run's rows
+can outlive the window by up to about two and a quarter hours. Rows, not
+bytes: SQLite may keep a deleted row's text in the file's free pages until
+they are reused or the file is vacuumed, and a backup keeps whatever it
+copied. The eval kit's P check proves the rows gone.
+
+**Upgrades.** Take a backup (above) first: n8n migrates its store on the new
+image, and nothing reverses that. Bump the digest deliberately, and re-run
+the eval kit against the new image in two cycles. First
+`bun evals/eval-orchestration.ts --up n8n`, then `--verify n8n
+--wait-schedule`, then `--down n8n`. Then `--up n8n --with sealed`, then
+`--verify n8n`, then `--down n8n`. The second is the egress probe, and the
+one that catches a new image calling out. The endpoints that mint the key
+and the run data the kit counts are not n8n's published contract. The kit
+runs this profile as it ships (`../evals/README.md`, "The orchestration
+profile (SMD-2210)").
+
+**Licences** (the fork's reading, not legal advice; the ADR's Gate 1). n8n is
+under its Sustainable Use License, OB1 under FSL-1.1-MIT, and an operator
+running the profile is running two non-OSI licences side by side.
+Installing an OB1 brain with the profile on a client's own infrastructure is
+inside both: n8n's FAQ permits consulting and installing on a client's
+server. Hosting the profile for others is outside n8n's licence. A
+commercial product built on OB1 that competes with it is outside OB1's.
 
 ## What this does not cover
 

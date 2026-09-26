@@ -170,7 +170,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 17 | `[fork] evals: choose the local models by measurement` | The local defaults were picked by size. `evals/` benchmarks retrieval and extraction against real Ollama; `nomic-embed-text` placed 5th of 7 and `llama3.2` reproduced its production faults. Defaults are now `embeddinggemma` + `qwen2.5:7b`. | **Unfiled** |
 
 <!-- changes-index:start — generated from changes/ by scripts/fork-index.ts; do not edit by hand -->
-**134 numbered changes** on top of the pin: 1–17 are the table above; 18–134 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
+**185 numbered changes** on top of the pin: 1–17 are the table above; 18–185 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
 
 | # | Change | Ticket |
 | --- | --- | --- |
@@ -291,6 +291,57 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 132 | [The SQL shim answers what PostgREST answers](changes/132-the-sql-shim-answers-what-postgrest-answers.md) | SMD-1602 |
 | 133 | [Shim everywhere](changes/133-shim-everywhere.md) | SMD-1798 |
 | 134 | [Entity extraction sent the whole thought in one unbounded call](changes/134-entity-extraction-sent-the-whole-thought-in-one.md) | SMD-1879 |
+| 135 | [A resuming agent asks what changed since it was last here](changes/135-a-resuming-agent-asks-what-changed-since.md) | SMD-1296 |
+| 136 | [The extractor's hedge, graded blind](changes/136-the-extractor-s-hedge-graded-blind.md) | SMD-1982 |
+| 137 | [The third layer measured](changes/137-the-third-layer-measured.md) | SMD-1713 |
+| 138 | [The session hook captures at checkpoints](changes/138-the-session-hook-captures-at-checkpoints.md) | SMD-2012 |
+| 139 | [Bun-native entrypoints](changes/139-bun-native-entrypoints.md) | SMD-1799 |
+| 140 | [Every capture source maps to the same five things, the source form is kept and the text and edges are derived from it](changes/140-every-capture-source-maps-to-the-same-five.md) | SMD-1867 |
+| 141 | [One renderer and one merge rule for a Linear ticket, whichever tool writes it](changes/141-one-renderer-and-one-merge-rule-for-a-linear.md) | SMD-1958 |
+| 142 | [A runaway extraction call ran to its answer budget before it was known to be one](changes/142-a-runaway-extraction-call-ran-to-its-answer.md) | SMD-1960 |
+| 143 | [Preflight passed a local model endpoint it never dialled](changes/143-preflight-passed-a-local-model-endpoint-it-never.md) | SMD-1875 |
+| 144 | [A ticket's dated sections are thoughts of their own](changes/144-a-ticket-s-dated-sections-are-thoughts-of-their.md) | SMD-2059 |
+| 145 | [enhanced-mcp's search tools stop sending the tier and the dates as containment keys](changes/145-enhanced-mcp-s-search-tools-stop-sending.md) | SMD-1986 |
+| 146 | [Retire the Edge Function build](changes/146-retire-the-edge-function-build.md) | SMD-1800 |
+| 147 | [The incremental replay measured](changes/147-the-incremental-replay-measured.md) | SMD-1998 |
+| 148 | [graph-centrality reads the ticket lifecycle board-sync already stamps](changes/148-graph-centrality-reads-the-ticket-lifecycle.md) | SMD-1994 |
+| 149 | [A brain says what it is at runtime](changes/149-a-brain-says-what-it-is-at-runtime.md) | SMD-2041 |
+| 150 | [FORK.md's index lists numbered changes alone](changes/150-fork-md-s-index-lists-numbered-changes-alone.md) | SMD-2084 |
+| 151 | [Three vendored MCP servers' CORS allow-lists name the two headers a browser client sends after initialize](changes/151-three-vendored-mcp-servers-cors-allow-lists-name.md) | SMD-1668 |
+| 152 | [The dashboards off Supabase](changes/152-the-dashboards-off-supabase.md) | SMD-1801 |
+| 153 | [rest-api's `POST /search` drops restricted thoughts by the column and reads its date bounds as instants, and `GET /recent` takes the tier filter its siblings had](changes/153-rest-api-s-post-search-drops-restricted-thoughts.md) | SMD-2054 |
+| 154 | [A typed-decision tier the Jev spikes share](changes/154-a-typed-decision-tier-the-jev-spikes-share.md) | SMD-2050 |
+| 155 | [The registry lookup's lock waits are capped and a timed-out lookup is retried briefly, a key it still cannot confirm is refused with a retry, and a revocation the server has read stands through any failure](changes/155-the-registry-lookup-s-lock-waits-are-capped.md) | SMD-2072 |
+| 156 | [The writable projection prototyped](changes/156-the-writable-projection-prototyped.md) | SMD-1999 |
+| 157 | [Docs and policy off Supabase](changes/157-docs-and-policy-off-supabase.md) | SMD-1802 |
+| 158 | [A session's end steps aside for the checkpoint its child is still posting, and supersedes it](changes/158-a-session-s-end-steps-aside-for-the-checkpoint.md) | SMD-2035 |
+| 159 | [The workflows name their runner image and pin every action to a commit; Dependabot moves the pins and check 23 holds them](changes/159-the-workflows-name-their-runner-image-and-pin.md) | SMD-2093 |
+| 160 | [rest-api sets the request's CORS headers once, on every response the main handler returns, and answers an unlisted origin with no allow-origin header](changes/160-rest-api-sets-the-request-s-cors-headers-once.md) | SMD-2079 |
+| 161 | [The event log is the source of truth](changes/161-the-event-log-is-the-source-of-truth.md) | SMD-1997 |
+| 162 | [resolve_agent writes a key's row only when the write says something, and a revocation that commits during its wait is answered REVOKED](changes/162-resolve-agent-writes-a-key-s-row-only-when.md) | SMD-2090 |
+| 163 | [The extension and recipe schemas apply on plain Postgres](changes/163-the-extension-and-recipe-schemas-apply-on-plain.md) | SMD-1810 |
+| 164 | ["Schema migrations" runs test-schema.ts at both embedding widths at once, not one after the other](changes/164-schema-migrations-runs-test-schema-ts-at-both.md) | SMD-2092 |
+| 165 | [One thought per episode of a session, not per session](changes/165-one-thought-per-episode-of-a-session-not-per.md) | SMD-2013 |
+| 166 | [rest-api's ingest proxy and smart-ingest's extraction trigger read their upstream from a URL variable of their own, http(s) only](changes/166-rest-api-s-ingest-proxy-and-smart-ingest.md) | SMD-2110 |
+| 167 | [`deploy/tier.sh` + `db/tier.Dockerfile` make `tier.ts --refresh` runnable; refresh marks its targets and refuses its source, a brain, or a stranger](changes/167-deploy-tier-sh-db-tier-dockerfile-make-tier-ts.md) | SMD-2036 |
+| 168 | [test-schema.ts loads its match_thoughts fixtures without the HNSW index and builds it after](changes/168-test-schema-ts-loads-its-match-thoughts-fixtures.md) | SMD-2097 |
+| 169 | [The PostgREST-speaking recipe scripts are decided](changes/169-the-postgrest-speaking-recipe-scripts-are.md) | SMD-2126 |
+| 170 | [smart-ingest's write path is the fork's](changes/170-smart-ingest-s-write-path-is-the-fork.md) | SMD-2128 |
+| 171 | [A typed-decision gate after the entity extractor, measured on the cases a regex cannot judge](changes/171-a-typed-decision-gate-after-the-entity-extractor.md) | SMD-1937 |
+| 172 | [An opt-in model-written session summary](changes/172-an-opt-in-model-written-session-summary.md) | SMD-2014 |
+| 173 | [test-live.ts stops waiting on clocks it does not test](changes/173-test-live-ts-stops-waiting-on-clocks-it-does.md) | SMD-2135 |
+| 174 | [graph-centrality reads the dependency edges 053 already stores](changes/174-graph-centrality-reads-the-dependency-edges-053.md) | SMD-2061 |
+| 175 | [The capture event carries the payload](changes/175-the-capture-event-carries-the-payload.md) | SMD-2115 |
+| 176 | [The pipeline takes ingestion-contract items from a file](changes/176-the-pipeline-takes-ingestion-contract-items-from.md) | SMD-2136 |
+| 177 | [Tool refusals carry a machine-readable code; the session hook reads the code, not the server's prose](changes/177-tool-refusals-carry-a-machine-readable-code.md) | SMD-1978 |
+| 178 | [The orchestration tool is n8n](changes/178-the-orchestration-tool-is-n8n.md) | SMD-1863 |
+| 179 | [The entity graph refuses a number or a type word the extractor names and retypes an identifier-shaped person or place, at the writer and over the rows before it; the people facet takes the same rule](changes/179-the-entity-graph-refuses-a-number-or-a-type-word.md) | SMD-1935 |
+| 180 | [graph-centrality --decay-blocked sinks a blocked open thought to a pre-registered 0.25 instead of dropping it, and names its blockers](changes/180-graph-centrality-decay-blocked-sinks-a-blocked.md) | SMD-2181 |
+| 181 | [The session-capture hook blanks a secret and sends the summary, where one key refused the whole episode](changes/181-the-session-capture-hook-blanks-a-secret.md) | SMD-2127 |
+| 182 | [`deploy/canary.sh` stands a canary beside a running stack and takes it down again; a refresh copies the source's database settings](changes/182-deploy-canary-sh-stands-a-canary-beside.md) | SMD-2038, SMD-2037 |
+| 183 | [A `source:` egress term gates a row's stored label, not who may capture](changes/183-a-source-egress-term-gates-a-row-s-stored-label.md) | SMD-1941 |
+| 184 | [The Obsidian vault import recipe retires](changes/184-the-obsidian-vault-import-recipe-retires.md) | SMD-2137 |
+| 185 | [A --grant role can run the entity writer and a structured pass](changes/185-a-grant-role-can-run-the-entity-writer.md) | SMD-2216 |
 
 Changes landed since the last release, if any, are the [`changes/smd-*.md`](changes/) files, numbered at the next cut (SMD-1804).
 <!-- changes-index:end -->

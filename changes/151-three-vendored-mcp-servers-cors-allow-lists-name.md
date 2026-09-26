@@ -1,0 +1,50 @@
+# 151. Three vendored MCP servers' CORS allow-lists name the two headers a browser client sends after initialize — a preflight naming them was refused before the request arrived (SMD-1668)
+
+**What changed.** `integrations/delete-thought-mcp/index.ts`,
+`integrations/update-thought-mcp/index.ts` and
+`integrations/enhanced-mcp/index.ts`: `Access-Control-Allow-Headers` ends
+`…, mcp-session-id, mcp-protocol-version, last-event-id`, the core server's
+list exactly (change 8's, in `server-portable/index.ts`) and the tail of
+kubernetes-deployment's; enhanced-mcp's also gains `x-access-key`, the
+second header the shared auth module reads, which the other two already
+named. `extensions/test-auth.ts`: `holdsBrowserHeaders` — for every MCP
+server in `SERVERS` that publishes an allow-list, and for enhanced-mcp in
+its own block, the list names both headers, and the rule asserts it read
+four lists, so a list respelled out of the regex's reach cannot drop out
+silently; a server that publishes no list (the seven extension servers, the
+two recipe servers) is not a browser's to reach and is not held.
+
+**Why.** Found by change 84's second review pass. The Streamable HTTP spec
+(2025-06-18 and later) has the client send `MCP-Protocol-Version` on every
+request after initialize, and `Last-Event-ID` to resume a stream. A
+browser-hosted client asks for the headers it will send at preflight; a list
+without them refuses the preflight, and the request never arrives. Since
+change 84 moved `@hono/mcp` to 0.3.2 the server reads `mcp-protocol-version`
+on every non-initialize POST, so a browser client that could not send it was
+the one class of client that check could never see. Non-browser clients —
+Claude Desktop connectors, claude.ai's server-side connectors, mcp-remote,
+the SDK client under Node or Bun — send no preflight and were never
+affected. The ticket's fourth file, the cost recipe's after sample, left with
+SMD-1800. Fixed on SMD-1801's way, as that ticket said it would be: the
+dashboard it ports speaks to the core server, whose list was already whole,
+so the fix is the three vendored servers this ticket names.
+
+**Held.** Nine assertions in `extensions/test-auth.ts` (767 in all): both
+headers named in each of the four lists the tree publishes
+(delete-thought, update-thought, kubernetes-deployment, enhanced-mcp), and
+that four is what the rule read. The mutant that puts delete-thought's list
+back to its old shape fails both of that file's by name.
+
+**Measured after.** Nothing to measure: a header list.
+
+**Review passes.**
+
+| Pass | Finding | Caught | Fix |
+| --- | --- | --- | --- |
+| 1 | the rule skipped a file with no list it could read, so a list respelled (a template literal, hono's `cors()`) would drop out silently; the record cited change 75 for the core list, which is change 8's (change 84 named the gap), and said the three match kubernetes-deployment's, which lacks two of the core's names | cold-read (two reviewers) | the rule asserts it read four lists; the record says which list is matched exactly |
+
+**Not taken.** An OPTIONS probe per server: the lists are literals, and the
+text rule reads what the probe would — the ticket allowed either.
+
+**Upstream status:** not sent — the fork dropped parity (SMD-1924);
+upstream's copies of the three files still end at `mcp-session-id`.

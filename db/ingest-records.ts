@@ -54,7 +54,7 @@
  *   bun db/ingest-records.ts --url … --dry-run             # count per source, write nothing
  *   bun db/ingest-records.ts --url … --source fork         # one source
  *   bun db/ingest-records.ts --url … --linear /tmp/linear-corpus-full.json --allow linear:corpus
- *   bun db/ingest-records.ts --url … --markdown ~/vault --allow ~/vault
+ *   bun db/ingest-records.ts --url … --source markdown --markdown ~/vault --allow ~/vault
  *   bun db/ingest-records.ts --url … --source items --items out.jsonl --allow chatgpt:export
  *   python3 import-x.py export.zip | bun db/ingest-records.ts --url … --source items --items - --allow x:export
  *   bun db/ingest-records.ts --url … --memory-dir ~/.claude/…/memory

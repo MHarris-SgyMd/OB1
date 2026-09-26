@@ -30,7 +30,9 @@ One more per-thought cost exists and is **off until you turn it on**: entity
 extraction (`db/extract-entities.ts`, migration 016) sends every thought to the
 metadata model once — a long thought in windows sized to that model, each call
 with an answer budget (`OB1_EXTRACT_CHUNK_TOKENS` overrides the derived window;
-preflight prints it) — and every new capture after that. Locally that is compute;
+preflight prints it), and at most 24 windows of any one thought
+(`OB1_EXTRACT_MAX_WINDOWS`; a longer one is extracted over its opening and
+recorded as partial) — and every new capture after that. Locally that is compute;
 on a hosted provider it is money per thought and every thought's text leaves
 your machine. `db/README.md` has the measured cost and quality. A second
 optional pass builds on it: consolidation (`db/consolidate.ts`, migration 029)
@@ -68,8 +70,9 @@ fixture carries them; only the synthetic gate fixture is content-free). A self-h
 | `embeddinggemma` | 768 | 0.916 MRR at 621 MB, the fastest of the three. Was the default until real-corpus measurement moved it to third. |
 | `openai/text-embedding-3-small` | 1536 | Hosted. Cheap, and still unmeasured here — see [`evals/`](evals/README.md). |
 | `bge-m3` | 1024 | Ties `embeddinggemma` on retrieval; pick it if your notes are multilingual. |
-| `nomic-embed-text` | 768 | The obvious small default, and measurably worse — 5th of 10. |
-| `qwen3-embedding:4b` | 2560 → **1024** | **Best measured on real data** (0.903 MRR vs `embeddinggemma`'s 0.873 over 441 full-length issues). Too wide to index natively — needs `OB1_EMBEDDING_DIMENSIONS=on`, below. Costs ~5x the embedding time. |
+| `nomic-embed-text` | 768 | The obvious small default, and measurably worse — 5th of 10 on the synthetic set, 9th of 11 on the 97-issue table. |
+| `mxbai-embed-large` | 1024 | Measured here: 0.882 MRR on the 97-issue real-corpus table, 10th of its 11 rows and below `nomic-embed-text`'s 0.890 there (`evals/README.md`; the 441-issue build measured two models, not this one). The retired `recipes/local-ollama-embeddings` ranked it first of its three on four text pairs — the toy and the corpus disagree (SMD-2138). |
+| `rjmalagon/gte-qwen2-1.5b-instruct-embed-f16` | 1536 | Unmeasured here; community-published, not an official Ollama model, and `db/config.mjs` knows no width for it, so a wrong `OB1_EMBEDDING_DIM` beside it is caught by `preflight.ts --deep`'s provider probe or, without that, when the first vector is refused. The retired recipe's only measurement was four text pairs — run `evals/eval-real.ts` before choosing it (SMD-2138). |
 | `openai/text-embedding-3-large` | 3072 | **Exceeds pgvector's HNSW limit of 2000.** The column works, but no index can be built, so every search becomes a full table scan. Truncatable to 1536 with `OB1_EMBEDDING_DIMENSIONS=on`. |
 
 #### Using a model that is too wide to index
@@ -106,9 +109,10 @@ opaque cast error from Postgres.
 
 Every capture makes two calls: an embedding, and a metadata extraction that
 produces the `topics`, `people`, `type` and `action_items` behind
-`list_thoughts`'s filters and the `thought_stats` tallies. By default both go to
-OpenRouter, which means **the text of every thought you capture leaves your
-machine**.
+`list_thoughts`'s filters and the `thought_stats` tallies. Pointed at OpenRouter
+(`OB1_LLM_BASE_URL` with a key set) both go there, which means **the text of
+every thought you capture leaves your machine**; the shipped default is the
+local endpoint above, refused until you declare it local.
 
 Both are configurable, and both speak the OpenAI-compatible shapes that Ollama
 exposes at `/v1` — so a fully local brain is a URL change, not a code change:
@@ -470,8 +474,8 @@ claude mcp add --transport http --scope user open-brain http://127.0.0.1:8000/ -
 
 `127.0.0.1` rather than `localhost`, since the port binds the IPv4 loopback
 only. By default nothing outside your machine can reach it: the server is the
-stack's only published port and it binds `127.0.0.1`; the database and Ollama
-are not published at all (`deploy/README.md`, "What is reachable from where").
+one port the stack publishes without its opt-in profiles (n8n's profile adds
+one, also on loopback), and it binds `127.0.0.1`; the database and Ollama are not published at all (`deploy/README.md`, "What is reachable from where").
 A claude.ai or Claude Desktop custom connector (Settings → Connectors → Add
 custom connector) connects from Anthropic's side, not from your machine, so it
 needs a TLS proxy or a tunnel in front. One on this host (caddy, cloudflared,
@@ -486,6 +490,38 @@ they do not appear in `tools/list` at all rather than failing when called.
 Opening the connector URL in a browser shows `Method Not Allowed`: the endpoint
 serves POST only, and that answer is expected. `capture_thought` returns the
 new thought's id, which is what the other two take.
+
+### 5. Optional: workflows beside the brain (n8n)
+
+For ingestion that runs on its own — a mailbox polled on a schedule, a
+tracker synced — the `orchestration` profile runs n8n beside the stack
+(`docs/orchestration-tool.md`). Its workflows capture through the brain's
+MCP endpoint with a capture-scope key. No workflow template ships yet
+(SMD-2212 brings the first), so today the steps below leave n8n
+provisioned, with its credentials and keys and no workflows. Once, `--init` writes its secrets
+into `deploy/.env`. The capture key is yours to mint (`bun keygen.ts --name
+n8n --scope capture`: the key as `N8N_BRAIN_CAPTURE_KEY`, the line it prints
+into `MCP_ACCESS_KEYS`). Then:
+
+```bash
+bun deploy/orchestration/provision.ts --init
+podman compose -f deploy/compose.yaml --profile orchestration up -d
+bun deploy/orchestration/provision.ts
+```
+
+Once a template publishes an MCP endpoint, an AI client reaches it at
+`http://127.0.0.1:5678/mcp/<path>`, with the header
+`x-n8n-key: <N8N_MCP_KEY>`. That endpoint carries workflow tools; the
+brain's own tools stay on the connector above. `deploy/README.md`,
+"Orchestration", has the keys, backups, the run-history window and upgrades.
+
+The licences, as the fork reads them (not legal advice): n8n is under its
+Sustainable Use License, OB1 under FSL-1.1-MIT, so running the profile means
+running two non-OSI licences side by side. Installing an OB1 brain with the
+profile on a client's own infrastructure is inside both, since n8n's FAQ
+permits consulting and installing on a client's server. Hosting the profile
+for others is outside n8n's licence. A commercial product built on OB1 that
+competes with it is outside OB1's.
 
 ## Expected outcome
 

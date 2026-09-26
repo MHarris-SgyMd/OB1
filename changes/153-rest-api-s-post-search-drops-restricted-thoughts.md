@@ -1,0 +1,136 @@
+# 153. rest-api's `POST /search` drops restricted thoughts by the column and reads its date bounds as instants, and `GET /recent` takes the tier filter its siblings had — semantic search leaked restricted content through a filter that compared a column the function never returned, text search answered nothing, and the recent-thoughts route filtered nothing (SMD-2054)
+
+**What changed.** `integrations/rest-api/index.ts`, `handleSearch`: text
+mode passes `p_filter: {}` to the enhanced-thoughts sidecar's
+`search_thoughts_text` and filters the page it returns by the
+`sensitivity_tier` column and the date window; semantic mode passes
+`filter: {}` to this fork's `match_thoughts` as before and, when
+`exclude_restricted` is on, reads the tier of the returned ids in one `.in()`
+query (`columnsOf`; an id the lookup does not return is treated as
+restricted) before it drops a row — the same lookup supplies the
+`source_type` the semantic results carry, and the `type` where the row's
+metadata has none, which `match_thoughts` returns no more than the tier. Every
+answer of the route carries the request's CORS headers; the file's other
+routes answer `Access-Control-Allow-Origin: null` under an allowlist
+(SMD-2079). The README lists the two routes' parameters, formats and
+defaults beside the route table. The date bounds are `dateWindow` and `withinDates`,
+enhanced-mcp's helpers (SMD-1986) carried over by hand: each bound an ISO
+8601 date or date-time held to that shape and to the calendar, read as UTC
+unless it carries an offset, applied to the rows in both modes; a bound off
+the shape, a day the calendar lacks, or a window closed before it opens is a
+`400` naming the field. Text mode's `total` and `total_pages` stay the
+function's, hidden rows counted, and `count` is the rows shown; the README's
+fork note says so. `GET /recent`, the one route reading `thoughts` directly
+with no tier predicate, takes `exclude_restricted` (default `true`) as
+`/thoughts`, `/count` and `/thought/:id` do — their `<>` on the column, which
+hides a NULL tier too, where the sidecar's functions use `IS DISTINCT FROM` and
+`/search` itself shows such a row, as enhanced-mcp's tools do; the two routes
+differ there, and the README says which way each goes.
+
+**Why.** SMD-1986's independent review read this route beside enhanced-mcp's
+tools. Semantic mode filtered the rows with
+`r.sensitivity_tier !== "restricted"`, and this fork's `match_thoughts`
+(041's `RETURNS TABLE`) returns id, content, metadata, similarity,
+created_at and score — no `sensitivity_tier` — so the comparison was
+`undefined !== "restricted"`, always true: a restricted thought's full
+content came back under the default `exclude_restricted: true`. Text mode
+built `{ exclude_restricted: true }` as `p_filter`, which the function reads
+as `t.metadata @> coalesce(p_filter, '{}')`, so every text-mode search
+answered an empty page with `total: 0`; it had no row filter of its own, so
+dropping the key alone would have opened text mode the way semantic mode was
+open. Text mode also read no date bound, and semantic mode compared the
+bounds as strings, where a bound written with a UTC offset sorted against the
+shim's `Z` rendering by its digits. The review found `GET /recent` beside it:
+every restricted thought's full content, newest first — the wider leak.
+
+**Held.** `extensions/test-writes.ts`, the rest-api block: a restricted twin
+is planted at the captured thought's own vector with text the query matches
+and a rank above the capture's (`plantRestricted`, the enhanced-mcp block's
+twin made a helper the two blocks share), so a search that finds the capture
+must drop the twin. Twelve assertions in the block (one the `send` counter's
+self-check, below) and a text pin at the end of the file: semantic mode and text mode find the capture and not the twin, text
+mode with `total: 2`, `count: 1`; a semantic result carries the row's
+`source_type`, and the twin — given a `type` its metadata does not carry —
+shows it through the lookup;
+`exclude_restricted: false` shows the twin beside it in both modes; an
+`end_date` in the past hides the capture and a `start_date` in the past shows
+it, in both modes; a `start_date` with a UTC offset is the instant it names;
+`yesterday` and an inverted window are `400` by name; with `limit: 1` the
+twin is the whole first page — `count: 0`, `total: 2`, `total_pages: 2` —
+page 2 holds the capture with `count: 1`, and page 3, past the last hit,
+answers `total: 0`; `GET /recent` hides the twin and shows it under
+`exclude_restricted=false`; under an allowlist set before the module loads,
+the route's `200` and `400` echo a listed origin and answer `null` to an
+unlisted one; and the date helpers the route copied from
+enhanced-mcp are held identical to the character, comment lines and the
+row's type aside, since the date-only, zone-less and calendar arms are driven
+through enhanced-mcp's copy alone. Against the route as main had it, with
+this suite, ten of the eleven arms that predate the CORS arm and the self-check fail — the leak (two rows, the twin among them), the missing `source_type`, the empty text page, the twin's type, the bounds, the offset bound, the refusals (a `200` each), the page, `GET /recent` and the helper pin (no block to read) — and the page-3 arm alone passes, since that route answered every text query with an empty page (the CORS arm came after that run; the old `200` passed no `req`, so it would fail too). 337 assertions on a throwaway Postgres, CI's step
+under `TZ=America/Chicago`; the same from a clean export of the branch tip with CI's own commands (review pass 5). Found on the way: the suite's `send` silenced
+`console.error` per request and restored what it found, so two requests in
+flight hid every later failure from the log while the tally counted them; it
+now counts requests in flight and restores the console when the last returns.
+
+**Mutants.** Each mechanism removed alone (review pass 4): the semantic tier
+filter fails the leak arm; the text filter, the text arm and the emptied page;
+the window ignored, the `end_date` arm (and the pin — the helper's text moved);
+a bound off the shape accepted, the refusal arm, the CORS arm (its `400` a
+`200`) and the pin; `/recent`'s predicate, its arm; `req` off a `200`, the CORS
+arm; the lookup's two columns, their two arms. The `send` counter reverted
+fails nothing while every arm passes — it fixes how a failure is reported —
+so its teeth are a self-check that the console is the module's after two
+requests in flight.
+
+**Review passes.**
+
+| Pass | Finding | Caught | Fix |
+| --- | --- | --- | --- |
+| 1 | `GET /recent` had no tier filter and no `exclude_restricted` parameter: every restricted thought's full content, newest first, with `limit=100` — the one route on the file reading `thoughts` directly with no tier predicate | cold-read (second reviewer) | the siblings' `exclude_restricted`, default true, as a column predicate; held against the twin |
+| 1 | the docblock and the README named `GET /recent` among the routes that hand a date string to Postgres; it takes none | run-it | `/thoughts` and `/count`, which do |
+| 1 | the semantic projection read `source_type` and `type` from rows `match_thoughts` returns neither on — the defect class the fix names, three lines below it: `source_type` was missing from every semantic result | cold-read (second reviewer) | the tier lookup is `columnsOf`, reading the two beside the tier; held |
+| 1 | "kept in step by hand" held nothing: the rest-api block drives fewer date arms than enhanced-mcp's, so a divergence in the copied `parseBound` would pass the suite | cold-read (second reviewer) | a text pin holds the two helper blocks identical, comment lines and the row's type aside |
+| 1 | `?? rows.length` behind `total_count` could never fire (the count is non-null on every returned row); a page past the last hit answers `total: 0`, unsaid and undriven | cold-read (second reviewer) | removed; the README says it; page 3 is driven — an arm the unfixed route also passes, so its teeth are the `total: 2` arm before it and the `rows.length` guard |
+| 1 | three arms proved less than their labels: `page === 2` is the request echoed back, the `start_date`-in-the-past arms pass with the date filter removed, and the fail-closed branch of the tier lookup is never reached | cold-read (second reviewer) | `count === 1` on page 2; the arms labelled as controls; the branch's comment says nothing drives it — the lookup reads the table the match just read |
+| 1 | the README sent readers to `GET /count` for "an exact count", which takes no query and cannot count a search's matches | cold-read (second reviewer) | it says no route does until SMD-2055 |
+| 1 | the twin's comment gave 0.45 and 0.316 as ranks; they are the bonus terms over an equal text term (both rows hold the query as a substring, 0.35 each) | cold-read (second reviewer) | said as bonuses |
+| 2 | the record called `GET /recent` "the one content route with no tier filter", in six places; `GET /duplicates` returns `find_near_duplicates`'s rows with no filter either — a function defined nowhere on this fork, so the route fails rather than answers, but the sentence claimed more than was checked | cold-read (second reviewer) | "the one route reading `thoughts` directly with no tier predicate", with `/duplicates` named |
+| 2 | two comments still pointed at `tiersOf`, renamed `columnsOf` in pass 1 | cold-read (second reviewer) | renamed |
+| 2 | the `type` half of the new semantic-result arm could not fail: a capture's `metadata.type` is written from the same value as the column, so the fallback never fires for it; the record credited the lookup with the `type` | cold-read (second reviewer) | the twin, whose metadata carries no type, is given one and shows it under `exclude_restricted: false`; the record says where the fallback fires |
+| 2 | "six of the first seven failed" enumerated the pre-pass-1 arms | cold-read (second reviewer) | the mutant run repeated with this suite; the sentence is its count |
+| 2 | `GET /recent`'s `<>` hides a row whose tier is NULL, where the sidecar's functions use `IS DISTINCT FROM`; unsaid | cold-read (second reviewer) | the siblings' shape kept (closed either way); the comment, the README and this record say it |
+| 2 | the route's `400`s answered without the request's CORS headers — `Access-Control-Allow-Origin: null` under an allowlist, so a browser client could not read the refusal; the query-length `400` had the same shape before | cold-read (second reviewer) | `req` passed to `json()` on all three |
+| 3 | pass 2 passed `req` on the route's `400`s and said the `200`s did the same; they did not — under an allowlist a browser could read a refusal and not a page — and nothing in the repo asserted a CORS header | cold-read (second reviewer, maintainer lens) | `req` on the two `200`s; one arm under `CORS_ALLOWED_ORIGINS` set before the module loads; the other routes are SMD-2079 |
+| 3 | the Changelog line omitted `GET /recent`, the change a client notices | cold-read (second reviewer, maintainer lens) | named |
+| 3 | the README documented no parameter of either route; `exclude_restricted`, the dates, ISO 8601 and the `400` lived only in the fork note two-thirds down | cold-read (second reviewer, maintainer lens) | a parameter list beside the route table |
+| 3 | `integrations/rest-api/index.ts` is type-checked nowhere since SMD-1800 retired deno-check, and this branch adds about 150 typed lines (ninety when pass 3 wrote it); an ad hoc tsc shows fifteen pre-existing shim-typing errors and none in the new code | cold-read (second reviewer, maintainer lens) | SMD-2080 |
+| 3 | `bump: patch` is right by FORK.md's letter, whose MAJOR clause names migrations and the MCP surface and not the vendored gateways' contract | cold-read (second reviewer, maintainer lens) | kept; SMD-2081 for the rule |
+| 3 | the table's rows were out of pass order and the fragment had no Follow-ups paragraph | cold-read (second reviewer, maintainer lens) | grouped; added |
+| 4 | an adversarial read of every input shape — `exclude_restricted` as `"false"`, `0`, `null`, missing, a prototype key; `mode` in other cases; `min_similarity` out of range; bounds as non-strings — found no way back to a restricted thought's content; a NULL tier is shown by `/search` and hidden by `/recent`, and the record claimed one behaviour | cold-read (second reviewer, adversarial lens) | no leak to fix; the record says the two routes differ |
+| 4 | integer parameters are held to nothing: `GET /recent?offset=Infinity` renders `LIMIT NaN OFFSET Infinity` through the shim's interpolated page and answers `500`, a fractional `limit` reaches INTEGER arguments, text mode's `page` overflows int4 where semantic mode ignores `page`, and a JSON body of `null` is a `500`; `/search` reads its body with no cap | cold-read (second reviewer, adversarial lens) | pre-existing on every route: SMD-2083; the README marks `page` as text mode's |
+| 4 | the identity pin began at `const ISO_BOUND`, one line below `type DateWindow` — a divergence in the window's fields would pass | cold-read (second reviewer, adversarial lens) | the pin begins at the type |
+| 4 | the `send` counter reverted fails no arm (the mutant run): it fixes how a failure is reported | mutant | a self-check after two requests in flight |
+| 4 | noted, not taken: `+2400` and a leap second pass the shape and fail `Date.parse`, so the `400` blames the date where the shape is the fault (the helpers are pinned to enhanced-mcp's, whose file this branch does not touch); `GET /recent` still answers `Access-Control-Allow-Origin: null` under an allowlist (SMD-2079); `{"query":"%%","mode":"text"}` is the corpus in one call, restricted rows dropped — the key is full access by design | cold-read (second reviewer, adversarial lens) | the field is named either way; the tickets; the README's trust model |
+| 5 | after the boyscout (`send` carries an origin and returns headers; one `clocksOf`; the lookup's Map typed), a cold read of it and of the final tree: "Eleven" and "336" were pass 3's counts after pass 4's self-check, "ninety typed lines" was pass 3's figure, `clocksOf`'s docblock said both blocks read all four clocks where rest-api reads one, SMD-2079's title said forty-nine where the tree has forty-seven, and the boyscout's "no behaviour change" left unsaid that the CORS arm now runs under the same console silencing as every other request; a clean export of the tip runs CI's commands green | cold-read (second reviewer) + run-it | each said as it is; the ticket retitled |
+
+**Not taken.** `IS NULL OR <> 'restricted'` on `GET /recent` (its siblings
+predicate the same way; the difference is a row written with an explicit
+NULL tier). A shared module for the two servers' date helpers (they deploy
+alone and share only `_shared/`, whose copies already differ; the suite holds
+the copy identical instead). Over-fetching in text mode and `has_more`
+(offsets shift under hidden rows; the exact answer is SMD-2055's argument).
+The fail-closed branch of the tier lookup is undriven here and in enhanced-mcp.
+
+**Follow-ups.** SMD-2055 (`search_thoughts_text` takes the tier and the
+window as arguments, so text mode's page and total are exact); SMD-2079
+(rest-api's other forty-seven answers carry no CORS headers under an
+allowlist); SMD-2080 (the vendored servers have no type gate); SMD-2081
+(FORK.md's version rules and the gateways' HTTP contract); SMD-2083 (no
+integer parameter is held to a finite integer, a `null` body is a `500`,
+`/search` reads its body with no cap). Beside SMD-2055:
+`/search` refuses date shapes `/thoughts` and `/count` accept, so one date
+picker feeding both behaves two ways — the README says so.
+
+**Upstream status:** not sent — the fork dropped parity (SMD-1924). The
+text-mode key is upstream's call shape too; whether its `match_thoughts`
+returns `sensitivity_tier` decides whether its semantic filter compares
+anything.

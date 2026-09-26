@@ -1,0 +1,105 @@
+# 182. `deploy/canary.sh` stands a canary beside a running stack and takes it down again; a refresh copies the source's database settings (SMD-2038 / 2037)
+
+**What changed.**
+- `deploy/canary.sh up`:
+  - runs `compose -p open-brain-canary --env-file <stack's> -f deploy/compose.yaml`. `SERVER_PORT` (default 8011), `SERVER_BIND=127.0.0.1`, `OB1_TIER=canary`, an empty `COMPOSE_PROFILES` and the checkout's `OB1_GIT_SHA` are set for those calls alone;
+  - refuses with exit 2, before anything changes:
+    - a provider or Jev URL naming a bare service (the profile's `ollama` or `jev`), as `compose config` resolves the canary server's environment;
+    - a port a container of another project publishes, or a host process listens on;
+    - under `--connect`, another connector by the name;
+    - a stable stamped `canary`/`working` or carrying a refresh's mark (`canary`/`working`; `stable` or `off` is an operator's protection, as tier.ts reads it);
+  - stamps an unstamped stable `tier=stable`;
+  - starts the canary's Postgres, stops a standing canary's server (so nothing serves or writes the copy mid-restore), refreshes it through `tier.sh` on both projects' networks by container name, recreates the server with `--no-deps`, and waits for `/health`.
+- The smoke test, which needs `OB1_SMOKE_KEY` (`--no-smoke` skips it):
+  - the keyed `/health` must say `tier: canary`;
+  - `smoke.sh` must pass;
+  - a probe must pass:
+    - Candidates come from the canary's database: the newest thoughts with a vector from the brain's model whose first 300 characters, digits aside, no other thought shares.
+    - A candidate's own text is the query, with every literal `extract_search_needles` finds taken out over up to six rounds, so only the vector arm can match.
+    - It must come back as Result 1, the one header that comes before any thought's raw content, at 50% or more.
+    - Up to five candidates are tried, and the first to pass decides. When none does, each one's miss is printed.
+    - The reply is parsed whole in Python, and the candidate query fails loudly, so every outcome prints a line.
+- `up --connect` runs `claude mcp add --scope user open-brain-canary …` and discards its output, which echoes the key back.
+- `down`:
+  - runs `compose down --remove-orphans` on the canary project.
+  - It deregisters the connector only at user scope and at the canary's port (`--port`, or what its server container is bound to, running or stopped), with any path or query after it. It reads only the `Scope:` and `URL:` lines, since `claude mcp get` prints the key too. A failed removal is reported, not fatal.
+  - `--volumes` deletes the database when it is stamped `canary`, carries a mark, or holds no relations (a first refresh that died before its mark).
+  - The volume is looked for by name, as `compose down --volumes` removes it. With none, `down` starts nothing and says there was nothing to delete.
+  - A refusal puts the canary's Postgres back as it found it: absent, stopped or running.
+- `deploy/tier.sh --network` takes `NAME,NAME`. It refuses an empty element, a space and a repeat, and checks each network.
+  - The container is created on the first network, connected to the rest, and started attached (`start -a`). `run --network A --network B` needs Docker Engine 25, and Ubuntu 24.04's docker.io is 24.
+  - Its status is read back from the container: `inspect` once exited, `wait` while it still runs. `start -a` under the docker CLI over podman returns 0 on a Ctrl-C. Any other state (never started, podman's `configured`, `dead`) fails closed.
+  - A Ctrl-C anywhere exits 130, and the EXIT trap removes the container.
+- `db/tier.ts` (SMD-2037):
+  - `databaseSettings()` reads a database's own `setconfig` through `DB_LEVEL_SETTINGS_SQL`, without the mark, and checks each name.
+  - `applyDatabaseSettings()` loads pgvector, resets each target setting the source lacks, and sets each source setting.
+  - A list setting (`search_path` and pg_dump's other five) is written as SQL list syntax, element by element. Anything else is written as one literal.
+  - `refresh()` reads the source's settings with its guards and applies them after the restore, before `migrate.ts`.
+- The deploy-stack CI job:
+  - compares the tier step's copy's settings with stable's (014's two bounds present);
+  - adds a refusals step: a port a container holds, a host listener, stable stamped or marked as a copy, a profile-only provider, another connector by the name. Each exits 2 with nothing started, stamped or registered, and a stand-in `claude` on PATH answers `mcp get` and logs the rest, key cut;
+  - adds a lifecycle step in two `up`s:
+    - `up --connect` over a stable marked `stable`, under `SERVER_BIND=0.0.0.0`, loopback kept, the probe pinned to the thought holding literals;
+    - `up` with the stub serving another model: the stable thought put in just before arrives, and the smoke fails on the floor;
+  - then the teardown: `down --volumes` refused on a canary stamped `working`, an empty one deleted, a no-volume one saying so beside a local-scope connector, and an unlabelled volume holding a table refused with nothing left running. The last `down` removes its own connector, and stable's container, thoughts and server are unchanged;
+  - gives the runner's provider stub `POST /v1/embeddings`: a bag of words hashed into dimensions 1–1023, the query instruction left off, the probe thoughts seeded with its vectors. While a flag file exists it serves another model, each vector turned onto dimension 0, so a thought's own text ranks first at about 30%.
+- test-live [20] adds five cells (708; 733 merged): the source's settings read without its mark, the target's equal to the source's (a quoted list, a value with a quote and an empty list included), a stale target setting reset, each database keeping its own mark, and a new session on the target running at the source's HNSW bound.
+
+**Why.** Standing the canary up on 2026-09-23 took about eight manual steps: a hand-built Postgres, a refresh run with a runtime `apk add`, the HNSW settings re-seeded by hand, a server env file copied from the running container's, `claude mcp add`. None of it was in the tree, so a second operator or a rebuild could not reproduce it. That standup's first attempt put the canary in a second database on stable's server. A canary exists to take the risky migration, reembed or index rebuild, and a shared server shares its memory, WAL and crash domain with the record, so each tier gets its own server. The refresh dropped 014's per-database HNSW bounds (pg_dump without `--create` carries no `ALTER DATABASE … SET`), and a refreshed brain answered broad filtered searches short until someone re-seeded them. Only the target's next preflight noticed, and only as a warning.
+
+**Not taken.**
+- A `deploy/compose.canary.yaml` overlay. Check 13 refuses `extends`, so the canary server's environment would have been a copy of `compose.yaml`'s, the drift this fork keeps finding. The same file under a second project name copies nothing.
+- Attaching the canary's Postgres to stable's network instead. Compose aliases a service by its name on every network it joins, so a canary `postgres` there would answer to stable's name.
+- Re-seeding the two HNSW settings in `canary.sh`. Every refresh loses them, so `refresh()` copies them, and whatever else the source sets.
+
+**Measured.** On this Mac (docker CLI over podman 6, host Ollama):
+- A throwaway stable, then the dogfood's own canary, switched over from the hand-built one on 2026-09-25 (677 thoughts). One command, 12.7–13.7 s with images cached; later re-syncs took 20–22 s. The results:
+  - migration 054 applied to the canary, which stable did not yet have;
+  - smoke 10 of 10;
+  - `claude mcp list` showed `open-brain` and `open-brain-canary` both `✔ Connected`;
+  - preflight clean but for the two warnings stable shares;
+  - `filtered search ✓ … walk bounded at 100000 tuples, memory x8` with no manual step. A broad filtered `match_thoughts` (`type=task`, 500) returned 423 rows with the same ids on both (SMD-2037's Verify items);
+  - thoughts, vectors and audit rows equal to stable's, and a `--diff` found nothing moved. Stable's containers ran on untouched.
+- The probe on the live canary, read-only but for its query log:
+  - the 30 newest candidates scored 78.5–94.3% against their own text;
+  - 20 came back as Result 1, and the other 10 lost to a sibling session summary at 80–88%;
+  - the five-candidate rule passed from all 26 starting points, with at most two misses in a row.
+- tier.sh under a process-group SIGINT, mid-refresh and very early, under docker and podman: exit 130 each time, no container left, the target never migrated.
+- After main was merged (bf2986c8), the dogfood's canary took a pending migration end to end for the first time. Stable was at 054; the refresh applied 055 to the copy ("applied 1, skipped 54"), under stable's copied database settings. The canary passed preflight with the two warnings stable shares, smoke 10 of 10, and the probe on its third candidate at 86.1%.
+- A failure-recovery matrix (pass 5) interrupted `up` or failed it at each step, for a first `up` and a re-run: 19 cases. Each recovered with a plain re-run of `up`, `down --volumes` worked from every state, and stable was untouched beyond its tier stamp.
+- Every refusal fired with exit 2 before anything changed. A replica of the deploy-stack job (the workflow's own stub on another port, its steps extracted from the YAML, run from a copy with the canary's project renamed) passed at each pass.
+- Mutants, each caught unless marked:
+  - test-live: the stale-setting reset dropped, a list setting written as one literal, the source's mark copied across, a quote left undoubled, the empty-list branch dropped;
+  - the CI replica: canary.sh's port, host-port, stamp, mark and unreachable-provider refusals; the mark read as any value; the volume guard, label gate, empty allowance and absent restore; `ours()` always true, scope ignored, the up-front connector check; the bind pin; a provider serving another model; FLOOR=0; the server left running over the refresh;
+  - not caught by CI (survived): the literal strip dropped (CI cannot break the index while the provider stays right, SMD-2183) and tier.sh's own status used (CI sends no Ctrl-C; measured directly above).
+
+**Review passes.**
+
+| Pass | Finding | Caught | Fix |
+| --- | --- | --- | --- |
+| 1 | The vector smoke searched the newest thought's first line. On the live brain's templated session summaries it failed a healthy canary 4 times in 8, and it could pass on an id and a similarity from two different results. A pipe to `grep -q` could fail it by SIGPIPE, and a non-JSON reply ended `up` silently. Now a probe with a vector and text of its own, its own block's similarity, parsed whole | run-it, cold-read | pass 1 |
+| 1 | `down --volumes` with no canary created one and then refused (exit 2 after changing things), and an empty canary could never be deleted. Now no volume means nothing to do, and an empty database is deletable | run-it, cold-read; held: CI canary step | pass 1 |
+| 1 | A stack on the `local-models` or `jev` profile gave a canary whose server dialled `ollama`/`jev`, names its network lacks, and crashlooped for 120 s. Now refused up front, and the README no longer says every knob reaches it | cold-read; held: CI canary step | pass 1 |
+| 1 | `SERVER_BIND` from stable's env file published the canary on every interface (or only a LAN address, failing the health wait). The canary is now pinned to loopback | cold-read, run-it | pass 1 |
+| 1 | The connector rule: a local- or project-scope entry made `remove --scope user` abort `down`; `--connect` checked late; `?key=` URLs and a `down` without `--port` read as someone else's. Now checked up front, user scope and the published port only, and a failed removal is not fatal | cold-read, run-it; held: CI canary step | pass 1 |
+| 1 | `run --network A --network B` needs Docker Engine 25, so the canary's refresh failed on Ubuntu 24.04's docker.io. Now create, connect and `start -a` | cold-read | pass 1 |
+| 1 | canary.sh counted any `ob1.refresh_target` as a mark, refusing a stable an operator had protected with `stable` or `off`; tier.ts counts only `canary`/`working`. Now the same rule | cold-read; held: CI canary step | pass 1 |
+| 1 | No test failed when canary.sh's gates were dropped (all five survived CI), the second `up` proved no re-sync, and a quoted value and an empty list setting had no cell. The CI step now runs each refusal, a stable change between `up`s and a stand-in `claude`, and test-live carries both settings | mutant, cold-read | pass 1 |
+| 1 | Minor: `--network` accepted `a,`, `a, b` and `a,a` and failed the last two late, `--port 99999` exited 1, and the README said the copy walks HNSW "as stable does" where stable's bounds are server-level | run-it, cold-read | pass 1 |
+| 2 | Pass 1's `create` + `start -a`: under the docker CLI over podman `start -a` returns 0 when the container dies of Ctrl-C, so tier.sh exited 0 mid-restore and canary.sh rebuilt and recreated the server on a half-restored database, left stamped `stable`. The status is now read back from the container | run-it | pass 2 |
+| 2 | The vector probe passed under a provider answering random vectors (0.2–3%, 3 in 3). `search_thoughts` is hybrid and scores a keyword hit by cosine, and the probe's SMD keys, dates and paths made it one. Content printed raw could also forge a result block. Now the query has its literals taken out, the probe must be Result 1, and it must score 50% or more; uniqueness ignores digits | run-it, cold-read | pass 2 |
+| 2 | CI left pass 1's own rules unguarded: five of seven mutants survived (the empty-database allowance, scope, the bind pin, uniqueness, the verdict). The stub now embeds by bag of words, and the step adds `SERVER_BIND`, an empty-canary delete, a no-volume `down` and a local-scope entry. Uniqueness and a needle-free query cannot be told apart by CI's two thoughts; the live brain measures those | mutant, run-it | pass 2 |
+| 2 | A host process on the port passed the port check, and `up` failed only after the refresh. It is now refused up front | cold-read | pass 2 |
+| 2 | The volume gate found the volume by label, and `compose down --volumes` removes it by name. A refused `down --volumes` left a container it had created. A no-volume `down` said "its database deleted". Each fixed | cold-read, run-it | pass 2 |
+| 2 | Minor: `claude mcp get` was read by line order, and a URL-less (stdio) entry read as none. IPv6 provider literals were refused. `compose config` errors were hidden. The provider refusal's remedy changed stable too, where a shell override changes only the canary. The verdict parser could raise on a truncated reply | cold-read, run-it | pass 2 |
+| 3 | The probe failed a healthy canary on one candidate in three on the dogfood's brain: with the literals out, two session summaries of one template are nearly one text, and the vector arm rightly ranked a sibling first (80–88%). Now up to five candidates, the first to pass deciding: 26 of 26 starting points pass. `needle_free` never re-checked its last round, which emptied 7 candidates; candidates now match the brain's embedding model | run-it, cold-read | pass 3 |
+| 3 | tier.sh read any status its `case` did not name (podman's `configured`, `dead`) as finished, and a Ctrl-C before the container started was swallowed. It now fails closed and exits 130 | cold-read, run-it | pass 3 |
+| 3 | CI caught none of pass 2's rules (8 of 8 mutants survived). The step adds a host listener, a probe holding literals, a random-vector `up` and an unlabelled volume; the label gate, the absent restore, the host-port check and the floor are each caught now. Dropping the strip survives: CI cannot break the vector index while the provider stays right | mutant | pass 3 |
+| 4 | A re-run `up` refreshed under the running canary server: a failed refresh (a migration failing on the copy, a Ctrl-C) left it serving a half-restored copy stamped `stable` through the connector, and its writes could collide with the restore. The server is now stopped first | cold-read | pass 4 |
+| 4 | The docs, walked end to end: the README's `--diff` replayed nothing (the log off by default, the window since the refresh, hybrid rows skipped); tier.sh's header examples were the broken ones; the working copy needed a `createdb`; the provider remedy would mark a remote endpoint local; the port refusal sent the operator to delete another application's container; `down` on a stopped canary missed its own connector; `OB1_CHAT_BASE_URL`, the write key and exit 130 went unsaid. Each fixed; `--diff` itself is SMD-2182 | walkthrough | pass 4 |
+| 4 | CI: the probe's pass was not pinned to a candidate, the floor mutant was caught by chance (pass 3 said always), three `up`s where two do, and a busybox pull. Now pinned, a deterministic wrong-model stub, two `up`s, refusals in a step of their own. The corpus probe's exact-check replacement is SMD-2183 | cold-read | pass 4 |
+| 5 | A skipped vector probe exited 0 even when stable had vectors and the refreshed canary none (a migration emptying them, a model switch): now a failure. A connector URL printed its `?key=`. A Ctrl-C outside tier.sh exited with the child's status (125), and a tier.sh usage error passed on as exit 2 after stable was stamped; now 130 and 1. A server that never answered was left crashlooping (743 restarts); now stopped, with a word on the connector | cold-read, run-it | pass 5 |
+| 5 | Minor: a re-run within the old server's stop read its own port as another process's; `down` removed the connector before the compose down; the `createdb` example lacked `--env-file`; "a reboot leaves it stopped" held for podman only; Compose v2 went unsaid. Keys on argv and a SIGKILLed tier container's secrets went to SMD-2119, and bun as PID 1 ignoring SIGTERM to SMD-2214 | cold-read, run-it | pass 5 |
+| boyscout | Tidied while the files were open, no change in behaviour: `applyDatabaseSettings` asks for the database and whether `vector` resolves in one query (`alignVectorSearchPath` is a no-op where it already does); canary.sh's two server-container lookups share `server_id`; test-live's settings comment names the cells it now holds | — | boyscout |
+| 6 | Merge interactions with main's eleven PRs (#164–#175): none broke the branch. The fragment's test-live count predated the merge, and no run had shown a canary taking a pending migration; 055 now has, on the dogfood's canary | cold-read, run-it | pass 6 |
+| boyscout | After pass 6: the README and canary.sh's header now say what pass 5's probe rule does when the canary has nothing to probe, and four paragraphs the passes' edits left ragged are rewrapped | — | boyscout |

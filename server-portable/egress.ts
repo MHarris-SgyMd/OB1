@@ -60,13 +60,15 @@ export const DEFAULT_EGRESS_MODE: EgressMode = "deny";
  * one unit the key proves; `source`, `type` and `topic` read the row's
  * metadata, so they decide for the passes and the re-embed over rows already
  * tagged and are unknown at a first capture (the tags come FROM the call being
- * gated) — and `source` is the row's label at every step, the caller's at a
- * capture (capture_thought's `source`, `mcp` when it gave none; SMD-1298), so
- * one policy decides the same for a row at its capture and at the passes that
- * read it back; a caller's label is a claim, so a term about WHO wrote names
- * `actor`, which the key proves (SMD-1941 is binding a label to the key).
- * `marker` is a literal the text contains —
- * `#public`, `[phi]` — the one unit a writer controls per thought.
+ * gated). `source` gates on the row's OWN label — the value the server wrote:
+ * an edit and the re-embed and consolidation passes read the stored row, and
+ * db/sync-linear.ts writes an authoritative `source` on its captures. The one
+ * caller-CLAIMED source is capture_thought's (`mcp` when it gave none;
+ * SMD-1298): a claim is dodged by naming another label or none, so it MUST NOT
+ * gate — the handler keeps it OFF the capture subject entirely, so no `source:`
+ * term can match it, and WHO may capture is named with `actor`, which the key
+ * proves (SMD-1941). `marker` is a literal the text contains — `#public`,
+ * `[phi]` — the one unit a writer controls per thought.
  */
 export const EGRESS_UNITS = ["actor", "source", "type", "topic", "marker"] as const;
 export type EgressUnit = (typeof EGRESS_UNITS)[number];
@@ -199,6 +201,11 @@ export function termMatches(term: EgressTerm, subject: EgressSubject): boolean {
     case "actor":
       return lower(subject.actor) === want;
     case "source":
+      // The row's own label, server-written — an edit, the re-embed and
+      // consolidation passes, and db/sync-linear.ts's authoritative captures.
+      // capture_thought keeps its caller-claimed source OFF the subject, so it
+      // never reaches here; the gate does NOT branch on kind (SMD-1941; the
+      // rationale is on EGRESS_UNITS).
       return lower(subject.metadata?.source) === want;
     case "type":
       return lower(subject.metadata?.type) === want;

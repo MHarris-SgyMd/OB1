@@ -1,0 +1,129 @@
+# 180. graph-centrality --decay-blocked sinks a blocked open thought to a pre-registered 0.25 instead of dropping it, and names its blockers (SMD-2181)
+
+**What changed.** SMD-2061's `--startable` is a filter: an unsettled thought
+whose ticket has an open blocker weighs 0, so a blocked hub vanishes from the
+attention ranking instead of sinking — the trade SMD-1994 made between
+`--status` and `--decay-done`. `--decay-blocked` reads the same dependencies by
+the same rules (unsettled only, a settled blocker does not block, an unknown one
+does, `child_of` never gates, a derived row takes its ticket's blockers) and
+multiplies the held thought's lifecycle weight by `BLOCKED_WEIGHT` instead of 0.
+The weight is 0.25, pre-registered in the file before any number was read, one
+weight, exact in binary — `DONE_WEIGHT`'s value, since no reason to differ was
+written first. A down-weighted thought stays in the ranking, and where it is
+listed it says what holds it: a `blocked by` column in the thought tables and
+`blockers` in the JSON rows, its ticket's open blockers sorted (the array
+SMD-2061 built and left unread), an unknown one included and a settled one never
+— a Done ticket's leftover relation holds nothing, so it names nothing. The
+filter and the decay are two answers to one question, so `--startable
+--decay-blocked` is refused (and `weightsSql` throws on the pair), as
+`--decay-done` is beside `--status`. The decay composes with `--status` and
+`--decay-done` by multiplying, but the two decays never meet on one thought: a
+blocked thought is unsettled and `DONE_WEIGHT` weighs only settled ones, so
+under both every thought weighs 1 or 0.25. Degree counts neighbours, not
+evidence, and the decay leaves it; the whole-graph lists under `--status all`
+keep every in-scope entity, as under `--decay-done`. The header reads `blocked
+×0.25`, the thought tables show the weight, and the dependency line says how
+many thoughts were down-weighted, at what weight, and that degree is unchanged.
+Without the flag the blockers column is not in the SQL: the default, `--status`
+and `--startable` render as before, and the JSON's `options` gains
+`decayBlocked: false`. No migration; a brain without 053 is exit 2 under the
+flag, as under `--startable`.
+
+**Why.** On the dogfood brain (2026-09-25, before SMD-2115 completed at 16:39Z
+and freed SMD-2116's second blocker: 822 thoughts, 167 active dependency facets
+naming 125 thoughts' tickets), `--status open --decay-blocked` over the whole
+graph lists all 458 thoughts `--status open` lists; the 28 `--startable` drops
+are there at 0.25 of their weight, each with its blockers, and an independent
+query written from the definitions finds the same 28 rows of 21 open tickets.
+Where they sink: SMD-1794 (blocked by SMD-1731 and SMD-1732) from 2nd to 80th,
+SMD-2116 (SMD-1723, SMD-2115) from 5th to 150th, SMD-1897 (SMD-1899, SMD-1900)
+from 10th to 223rd, SMD-2117 from 18th to 256th, and the wiki connectors
+SMD-1814–1818 (SMD-1812, SMD-1813) to between 358th and 433rd. The read costs
+what `--startable`'s does: 781 ms against 634 ms without it under `--status
+open`, 839 against 607 over the whole graph.
+
+**Held.** `test-schema.ts` [44], 14 assertions on SMD-2061's fixture: under
+`--status open --decay-blocked` the held tP, tQ, tPsec, tV and tX are listed at
+0.25 with their blockers (tPsec its ticket's, tX the unknown SMD-7999), and the
+startable tR, tS and tW at 1 with none. tD, Done with an active `blocked_by` to
+the open tQ, weighs its lifecycle's 1 and names no blocker. `--decay-done
+--decay-blocked` weighs the settled t1 and tD 0.25 and the blocked tP and tQ
+0.25, and nothing 0.0625; under `--status active` the backlog tP stays at 0. The
+dependency counts are `--startable`'s, thirteen weigh in (its eight and the five
+it held) and the lifecycle counts do not move. An edge only the blocked tQ
+evidences keeps Kafka's degree, entity by entity as without the flag, at support
+0.25; `--startable` drops it. A thought held by two blockers, one stated from
+each side, lists both, sorted: an array in the JSON, "a, b" in the table; ten
+are named in full, and one carrying a newline renders as one space. A `jira`
+item's blocker reads `jira:PROJ-2`, a linear one bare. Around a subject, tP is
+listed with its blocker and Kafka's co_mentions and support are the blocked
+thoughts' quarters. The report: the header, the weight and `blocked by` columns,
+the dependency and lifecycle lines. `--startable`'s line, SQL and rows are
+SMD-2061's; an orphan entity is listed at 0 under the decay and not under the
+filter; and `parseArgs` and `weightsSql` refuse the pair in either order.
+Mutants, each killed: the decay's factor 0 (7) or 1 (5); the blockers column
+always null (4), unfiltered by `blocked` (2), or not selected into the rows (4);
+`held` dropped under the decay (3); the column hidden (2); the weight column
+hidden, the array cell rule dropped, either refusal removed, the header clause
+dropped, the filter's `mentions > 0` applied under the decay, the headings, the
+`--status` wording, the dependency sentence, the unknown-blocker wording and the
+"by its lifecycle" wording ignoring the decay (1 each). Pass 1 added three, each
+killed (1 each): the subject rows without blockers, the subject heading ignoring
+the decay, and `--startable`'s SQL drifting. Pass 2 added two (1 each): the
+array cell skipping the whitespace rule, and the column capped at 80. Pass 3
+added one: the column back mid-table (3). Pass 4 added two: every blocker bare
+(1), and linear ones labelled too (5).
+
+**Review passes.** 1: a definitions cold read and a run-it reader on the dogfood
+brain, in parallel; both found no defect in what the flag computes. 2:
+`/code-review`; three of its top four findings sat in pass 1's fixes (the stop
+signal). 3: `/code-review`, confirming: both findings sat in pass 2's additions.
+4: `/code-review` after merging main: SMD-2136 (#174), which landed meanwhile,
+lets an `--items` file write links of any system. Then a tidy of what the
+passes' scripted edits left: prose re-wrapped at 80 columns, words unchanged,
+and the header's usage comments aligned.
+
+| Pass | Finding | Caught | Fix |
+| --- | --- | --- | --- |
+| 1 | the dependency line said the N down-weighted thoughts "are listed with their blockers"; N is the run's count, and at the default top 20 none was listed | cold read, run-it | "a listed one names its blockers"; the header and README say it stays in the ranking |
+| 1 | the `blocked by` column was capped at 30, so four blockers (SMD-1723's on 2026-09-24) were cut | run-it | the table's own cap |
+| 1 | the subject path under the decay was unexercised: its rows' blockers and heading could drop and the suite pass | cold read | a subject assertion; both mutants killed |
+| 1 | "--startable's SQL is SMD-2061's" compared `weightsSql` with itself | cold read | the decay's text is `--startable`'s with the factor at 0.25 and the column, nothing else |
+| 1 | the header, README, the `startable` option and two comments said "without `--startable` no dependency is read" | cold read | they name both flags; the README says the decay needs 053 |
+| 1 | the fragment's live numbers moved when SMD-2115 completed minutes later | run-it | stated as of before it |
+| 2 | pass 1's cap of 80 still cut the column at about eight blockers | cold read | uncapped; ten asserted in full |
+| 2 | an array cell skipped the whitespace rule every string cell gets, so a facet target with a newline split the row | cold read | the rule applies to the joined cell |
+| 2 | pass 1's sweep missed the README's exit-code sentence, two code docs, the option's doc and the Changelog ("is listed"); the Changelog's "every mode unchanged" omitted the JSON key | cold read | each names both flags or the key |
+| 2 | the degree test's edge on tQ stayed in SMD-2061's fixture for the assertions after it | cold read | re-recorded without it, and asserted gone |
+| 3 | the uncapped column sat mid-table, so one long cell padded every row's later columns | cold read | the column is last, where an empty cell trims away |
+| 3 | "nine blockers" was ten: tV's nine and tR's `blocks` | cold read | ten |
+| 4 | since SMD-2136's `--items` writes links for any system, a bare blocker key could be anyone's, and pass 2's reason for no label no longer held | cold read | a non-linear blocker reads `system:key`; what such a dependency means is SMD-2218 |
+| 4 | the README's usage comment and a `held` comment still said "listed" and "to 0" | cold read | "naming its blockers where listed"; "or to BLOCKED_WEIGHT of it" |
+
+**Not taken.** *"In every count" beside the weighed count and degree* (pass 2):
+it is `--decay-done`'s sentence, which the suite pins, and `weighed` counts the
+thoughts above 0, not a weighted sum. *Computing `blocked` once* rather than in
+the factor, `held` and the column (pass 2): one JS string feeds all three, as
+SMD-2061 declined for two, and a subquery would move `--startable`'s SQL.
+*Deciding here what a non-Linear dependency means* (pass 4) — it has no
+lifecycle, so its blocker blocks forever, and the caveat names only the board:
+it governs `--startable` too, and nothing but Linear writes one yet (169 of 169
+facets); SMD-2218. *Accepting `--startable --decay-blocked`* (the decay as a
+modifier of the filter): the two decide the same thoughts, and the pair would
+need a rule for which wins; refused, as `--decay-done` is beside `--status`. *A
+tunable weight* (`--decay-blocked=0.1`): a value chosen after reading the
+ranking is a knob, not a measurement; one weight, pre-registered. *Weighting by
+the number of blockers or the chain's depth* (SMD-1794 has two; SMD-1732 waits
+on SMD-1731, which waits on nothing open): another model, to be argued on this
+one's numbers. *The blockers column under `--startable`*: a blocked thought is
+not listed there, so it would always be empty. *Blocker titles beside the
+identities*: the facets hold identities; a title is one more resolution per
+blocker, and the identity is what a reader searches for. *Dropping the lifecycle
+line's "those with an open blocker at 0.25" when nothing is held, or refusing
+`--status done --decay-blocked`* (pass 1): the clause states the rule and the
+dependency line the count, as `--startable`'s does, and `--startable` runs under
+`done` too. *The shared node-state projection*: SMD-2074, which replaces
+`dependencySql`, not its callers.
+
+**Upstream status:** not sent — upstream has no entity graph, board sync or
+link facets.

@@ -80,6 +80,13 @@ type Env = {
    */
   OB1_EXTRACT_CHUNK_TOKENS?: string;
   /**
+   * The most windows one thought is extracted in (SMD-2240); a longer one is
+   * extracted over its first this many and recorded with a caveat. Unset:
+   * db/config.mjs's EXTRACT_MAX_WINDOWS, 24. Read here only by preflight,
+   * for the same reason as the window above.
+   */
+  OB1_EXTRACT_MAX_WINDOWS?: string;
+  /**
    * "on" to record the opt-in query log (migration 034, SMD-1295): one row per
    * search and one per follow-up fetch/edit/delete of a returned id — or, since
    * SMD-1719, per id a write cited as its source — so a
@@ -1551,6 +1558,42 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
+  // Tool 3b-ii: the corpus's thought ids (SMD-2244) — ids only, in id order, for a
+  // cheap cross-brain id-set diff (db/tier.ts --compare) that the prose read tools
+  // cannot give (they page content, capped). One JSON object per page,
+  // {total, digest, ids, cursor}: total and the whole-corpus md5 digest ride the
+  // first page (SQL store; the PostgREST shim leaves digest null), and `after` =
+  // the previous page's `cursor` pages on until it is null. Read-only, ids only —
+  // no content, no vectors. Gated like the other read tools, so a capture-only key
+  // never sees it.
+  if (canRead(principal)) server.registerTool(
+    "list_thought_ids",
+    {
+      title: "List Thought IDs",
+      description:
+        "List the brain's thought IDs — ids only, no content — in id order, for comparing one brain's corpus against another's cheaply. " +
+        "Returns a JSON object {total, digest, ids, cursor}: on the first page `total` is the whole corpus and `digest` is an md5 of every id (null where the store cannot compute it); page on by passing `after` = the previous page's `cursor` until `cursor` is null.",
+      annotations: {
+        readOnlyHint: true,
+      },
+      inputSchema: {
+        limit: z.number().int().min(1).max(10000).optional().default(1000).describe("IDs per page, 1–10000 (default 1000); ids are small, so pages are large to keep an enumeration to few round-trips"),
+        after: z.string().optional().describe("Keyset cursor — the previous page's `cursor` (a thought id); omit for the first page"),
+      },
+    },
+    async ({ limit, after }) => {
+      if (after !== undefined && !UUID_RE.test(after)) {
+        return { content: [{ type: "text" as const, text: "Error: `after` must be a thought id (a uuid) — pass the previous page's `cursor`." }], isError: true };
+      }
+      try {
+        const page = await (await db()).listThoughtIds({ limit, after: after ?? null });
+        return { content: [{ type: "text" as const, text: JSON.stringify(page) }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
   // Tool 3c: what this brain is (SMD-2041) — version, commit, store, tier, the
   // database's versions, ledger, counts, size and HNSW parameters, one short
   // table. Gated like the other read tools. The same record is the keyed
@@ -1711,14 +1754,12 @@ function buildServer(principal: Principal): McpServer {
         // and lands all the same, without the vector or the tags the refused
         // call would have produced, with the decision on its audit row.
         const cfg = embedConfig();
-        // The gate judges the label the ROW will carry — one value for the
-        // row's lifetime, so a `source:` term decides the same at the capture
-        // and at the re-embed and consolidation passes that read the row
-        // (fourth review pass: judging `mcp` here and the label there let one
-        // policy allow and refuse the same row). The label is the caller's, so
-        // a term about WHO wrote names `actor`, which the key proves; SMD-1941
-        // binds a label to the key.
-        const subject: EgressSubject = { kind: "capture", actor: principal.name, metadata: { source: origin }, content };
+        // Gated on `actor` (the key, proven) and `marker` (the text), NOT
+        // `source`: a capture's `source` is the caller's claim, so the subject
+        // carries none and no `source:` term can match this call — re-adding it
+        // here reopens the dodge (SMD-1941; egress.ts EGRESS_UNITS). The row
+        // still RECORDS the label below, for the passes and the per-source weight.
+        const subject: EgressSubject = { kind: "capture", actor: principal.name, content };
         const gate = decideCalls(subject, cfg, cfg.egress);
         // Independent of each other, so they overlap.
         const [embedded, metadata] = await Promise.all([
@@ -2042,6 +2083,10 @@ function buildServer(principal: Principal): McpServer {
         // moves (first review pass: an edit judged under the capture's bare
         // {source: "mcp"} let a row a type: or source: term names slip past).
         // A row that is not there is judged as bare and refused by the write.
+        // Here a `source:` term DOES gate: the label is the row's, written by
+        // the server at its capture, not a claim on this call — the opposite of
+        // capture_thought, which keeps its caller-claimed `source` off the
+        // subject so it cannot gate (SMD-1941).
         const cfg = embedConfig();
         const existing = content !== undefined ? await (await db()).getThought(id) : null;
         const subject: EgressSubject = { kind: "edit", actor: principal.name, metadata: existing?.metadata ?? { source: "mcp" }, content };
@@ -2170,6 +2215,12 @@ const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key, x-access-key, accept, mcp-session-id, mcp-protocol-version, last-event-id",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
+  // Retry-After is not a CORS-safelisted response header, so a browser-hosted
+  // client (claude.ai, the Claude Desktop connector) cannot read it off a fetch
+  // without this. It is the one header the fork means such a client to read —
+  // the busy refusal's retry delay (SMD-2106) — so it is exposed; on a response
+  // that carries no Retry-After this says nothing.
+  "Access-Control-Expose-Headers": "Retry-After",
 };
 
 // The two 405 header sets, built once; the refusal path spreads nothing per request.
@@ -2194,6 +2245,11 @@ const JSON_RPC_UNAUTHORIZED_CODE = -32001;
 // confirm the key in time (agents.ts's `busy`). Its own code, in the same
 // implementation-defined range, so a client can tell "retry" from "denied".
 const JSON_RPC_BUSY_CODE = -32003;
+
+// How long a client should wait before retrying a refusal that can change —
+// the busy case (a registry lock; agents.ts retries within its own deadline).
+// Advisory, as `Retry-After` is: it names "a few seconds" as BUSY_MESSAGE says.
+const RETRY_AFTER_SECONDS = 2;
 
 /**
  * The ids in `ids` that name a thought, or undefined when none does — the one
@@ -2266,15 +2322,49 @@ function extractJsonRpcId(bodyText: string | null): string | number | null {
 }
 
 /**
- * Build a JSON-RPC 2.0 error envelope response for auth failures.
+ * Whether a refused body expects a JSON-RPC reply, and the id to echo if it
+ * does. A Request expects one; a Notification (JSON-RPC 2.0: "the Server MUST
+ * NOT reply") does not, and neither does a batch that is all notifications.
+ *
+ * Conservative: `expectsReply` is false ONLY when the body is positively
+ * notification-only — every message a plain object with a string `method` and
+ * NO `id` member (a genuine notification; the `id`'s VALUE does not matter, its
+ * presence does — `id: null` is a request). Anything else — a request, a
+ * response, a malformed body, a mixed or empty batch — keeps the 200 envelope,
+ * so this only ever suppresses a reply where the spec forbids one. `id` is the
+ * best-effort inbound id for the envelope (null for a batch or a bad body), as
+ * before this helper existed.
+ */
+function refusalTarget(bodyText: string | null): { expectsReply: boolean; id: string | number | null } {
+  const id = extractJsonRpcId(bodyText);
+  let parsed: unknown;
+  try {
+    parsed = bodyText ? JSON.parse(bodyText) : undefined;
+  } catch {
+    return { expectsReply: true, id };
+  }
+  const messages = Array.isArray(parsed) ? parsed : [parsed];
+  const isNotification = (m: unknown): boolean =>
+    typeof m === "object" && m !== null && !Array.isArray(m)
+    && typeof (m as { method?: unknown }).method === "string"
+    && !("id" in (m as object));
+  const notificationOnly = messages.length > 0 && messages.every(isNotification);
+  return { expectsReply: !notificationOnly, id };
+}
+
+/**
+ * Build a JSON-RPC 2.0 error envelope response for auth failures on a REQUEST.
  * Returns HTTP 200 — the JSON-RPC layer expresses the error so that
  * strict MCP clients keep the connection alive instead of treating
- * the failure as a transport-level fault.
+ * the failure as a transport-level fault. This is the REQUEST shape; a refused
+ * notification has no envelope (notificationRefusedResponse). `retryAfter` adds
+ * the header on the busy request, as its bodyless twin sets it too (SMD-2106).
  */
 function unauthorizedResponse(
   id: string | number | null,
   message: string = UNAUTHORIZED_MESSAGE,
-  code: number = JSON_RPC_UNAUTHORIZED_CODE
+  code: number = JSON_RPC_UNAUTHORIZED_CODE,
+  opts: { retryAfter?: number } = {}
 ): Response {
   const body = {
     jsonrpc: "2.0",
@@ -2284,13 +2374,27 @@ function unauthorizedResponse(
     },
     id,
   };
-  return new Response(JSON.stringify(body), {
-    status: 200,
-    headers: {
-      "Content-Type": "application/json",
-      ...corsHeaders,
-    },
-  });
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...corsHeaders,
+  };
+  if (opts.retryAfter !== undefined) headers["Retry-After"] = String(opts.retryAfter);
+  return new Response(JSON.stringify(body), { status: 200, headers });
+}
+
+/**
+ * The refusal for a NOTIFICATION-only body (SMD-2106): no JSON-RPC body, since
+ * the spec forbids a reply to a notification and the MCP TS SDK cancels the
+ * body of a 200 that held no request (dropping the notification silently). A
+ * refusal that cannot change on retry — no, wrong or revoked key — answers 202
+ * Accepted (the notification is taken and discarded); one that can — the
+ * registry busy — answers 503 with `Retry-After`, so the client retries rather
+ * than believing it was delivered.
+ */
+function notificationRefusedResponse(opts: { retryAfter?: number } = {}): Response {
+  const headers: Record<string, string> = { ...corsHeaders };
+  if (opts.retryAfter !== undefined) headers["Retry-After"] = String(opts.retryAfter);
+  return new Response(null, { status: opts.retryAfter !== undefined ? 503 : 202, headers });
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -2576,9 +2680,11 @@ app.on(MCP_METHODS, "*", async (c) => {
     // Best-effort echo of the inbound request id keeps the response
     // correlated; malformed/missing bodies fall back to id: null.
     const bodyText = await readBodyText(c.req.raw);
-    const id = extractJsonRpcId(bodyText);
+    const target = refusalTarget(bodyText);
     settled = true;
-    return unauthorizedResponse(id);
+    // A notification (no id) gets no JSON-RPC body: 202, since no key never
+    // changes on a retry (SMD-2106). A request keeps the 200 envelope.
+    return target.expectsReply ? unauthorizedResponse(target.id) : notificationRefusedResponse();
   }
 
   /**
@@ -2596,10 +2702,18 @@ app.on(MCP_METHODS, "*", async (c) => {
   const identity = await agents().resolve(db(), principal);
   if (identity.status === "revoked" || identity.status === "busy") {
     const bodyText = await readBodyText(c.req.raw);
+    const target = refusalTarget(bodyText);
     settled = true;
-    return identity.status === "revoked"
-      ? unauthorizedResponse(extractJsonRpcId(bodyText), REVOKED_MESSAGE)
-      : unauthorizedResponse(extractJsonRpcId(bodyText), BUSY_MESSAGE, JSON_RPC_BUSY_CODE);
+    // Revoked never changes on a retry, so a notification gets a bare 202; busy
+    // can, so it gets 503 + Retry-After (and a busy REQUEST keeps the 200
+    // envelope but gains Retry-After too). A request stays the 200 envelope,
+    // answering its id (SMD-2106).
+    if (identity.status === "revoked") {
+      return target.expectsReply ? unauthorizedResponse(target.id, REVOKED_MESSAGE) : notificationRefusedResponse();
+    }
+    return target.expectsReply
+      ? unauthorizedResponse(target.id, BUSY_MESSAGE, JSON_RPC_BUSY_CODE, { retryAfter: RETRY_AFTER_SECONDS })
+      : notificationRefusedResponse({ retryAfter: RETRY_AFTER_SECONDS });
   }
   principal.agentId = identity.agentId;
   principal.agentUnresolved = identity.unresolved;

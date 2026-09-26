@@ -76,6 +76,8 @@ main() {
   FAILED=0
   run db                 test-schema.ts
   run db                 test-live.ts
+  # CI runs this one later, beside test-preflight.ts, on a database of its
+  # own (SMD-2219); here, in this place and in series, on the shared one.
   run db                 test-upgrade.ts
   run db                 test-search-path.ts
   run server-portable    test-store-sql.ts
