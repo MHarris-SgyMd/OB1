@@ -579,10 +579,12 @@ async function handleSearch(req: Request): Promise<Response> {
   const query = String(body.query ?? "").trim();
   const mode = String(body.mode ?? "semantic");
   const limit = intParam(body.limit, { min: 1, max: 100, default: 25 });
-  // page bounded so (page - 1) * limit stays within int4 (limit ≤ 100); the
-  // computed offset is clamped as a belt (SMD-2083).
+  // page bounded, and the offset clamped so `p_limit + p_offset` — the int4
+  // addition inside search_thoughts_text (schemas/enhanced-thoughts/schema.sql)
+  // — cannot overflow: the invariant is offset + limit ≤ INT4_MAX, not just
+  // offset ≤ INT4_MAX (review pass 2; SMD-2083).
   const page = intParam(body.page, { min: 1, max: Math.floor(INT4_MAX / 100) + 1, default: 1 });
-  const offset = Math.min((page - 1) * limit, INT4_MAX);
+  const offset = Math.min((page - 1) * limit, INT4_MAX - limit);
   const minSimilarity = Math.min(Math.max(Number(body.min_similarity) || 0.3, 0), 1);
   const excludeRestricted = body.exclude_restricted !== false;
   const startDate = body.start_date ? String(body.start_date).trim() : null;

@@ -1079,6 +1079,12 @@ try {
   const bigPage = await send(h, "POST", "/search", { query: captured, mode: "text", page: 1e9 });
   assert(bigPage.status === 200 && Number.isInteger(bigPage.json?.page),
     `POST /search text mode page=1e9 answers a page, not an int4 overflow → 500 (${bigPage.status}: page ${bigPage.json?.page})`);
+  // The offset+limit int4 boundary (review pass 2): limit at max and page at its
+  // max, where (page-1)*limit alone is under int4 but p_limit+p_offset inside
+  // search_thoughts_text would overflow — offset is clamped to INT4_MAX-limit.
+  const maxPage = await send(h, "POST", "/search", { query: captured, mode: "text", limit: 100, page: 21474837 });
+  assert(maxPage.status === 200 && Number.isInteger(maxPage.json?.page),
+    `POST /search text mode limit=100 at max page answers a page, not a p_limit+p_offset int4 overflow → 500 (${maxPage.status}: page ${maxPage.json?.page})`);
   const fracSearch = await send(h, "POST", "/search", { query: captured, limit: 2.5 });
   assert(fracSearch.status === 200 && fracSearch.json?.per_page === 2,
     `POST /search limit=2.5 reports an integer per_page (${fracSearch.status}: per_page ${fracSearch.json?.per_page})`);
