@@ -514,11 +514,11 @@ export async function waitReady(base: string, timeoutMs = 180_000): Promise<void
 /**
  * A fake n8n for the self-check: the endpoints provisioning calls, with keys
  * as JWT-shaped strings whose `exp` it chooses, and a switch per failure. It
- * holds state: the keys it holds, and the sign-ins and deletes it saw.
+ * holds state: the keys it holds, the sign-ins it saw, and the scopes it was last asked for.
  */
 function fakeN8n() {
   const s = {
-    keys: new Map<string, { raw: string; label: string; scopes: string[] }>(), logins: 0, deletes: 0, probeStatus: 0, loginStatus: 200, mintStatus: 200, next: 1,
+    keys: new Map<string, { raw: string; label: string; scopes: string[] }>(), logins: 0, probeStatus: 0, loginStatus: 200, mintStatus: 200, next: 1,
     // The owner the fake knows: sign-in checks both, as n8n does.
     email: DEFAULT_OWNER_EMAIL, password: "Ob1-pw-1", cookie: `n8n-auth=${randomBytes(8).toString("hex")}`, lastScopes: [] as string[],
     jwt: (exp: number | null) => `h.${Buffer.from(JSON.stringify(exp === null ? { sub: "o" } : { sub: "o", exp })).toString("base64url")}.s${s.next++}`,
@@ -545,7 +545,7 @@ function fakeN8n() {
         return j({ data: { id, rawApiKey: raw } });
       }
       if (u.pathname === "/rest/api-keys") return j({ data: { items: [...s.keys].map(([id, k]) => ({ id, label: k.label })) } });
-      if (u.pathname.startsWith("/rest/api-keys/") && req.method === "DELETE") { s.deletes++; s.keys.delete(u.pathname.split("/").pop()!); return j({ data: { success: true } }); }
+      if (u.pathname.startsWith("/rest/api-keys/") && req.method === "DELETE") { s.keys.delete(u.pathname.split("/").pop()!); return j({ data: { success: true } }); }
       if (u.pathname.startsWith("/api/v1/")) {
         if (s.probeStatus) return new Response("busy", { status: s.probeStatus });
         if (!valid(req.headers.get("x-n8n-api-key"))) return new Response("unauthorized", { status: 401 });
@@ -567,9 +567,16 @@ function fakeN8n() {
  * - the env writer's replace, append, quoting and modes;
  * - `--init`;
  * - every shipped template's credential ids, the profile's and the kit's;
- * - the key decisions against a fake n8n: reuse, renewal, a refused key, a
- *   busy n8n, rotation, missing scopes, the sweep of a key a failed run left,
- *   and a rate-limited sign-in.
+ * - compose's owner block and entrypoint guard;
+ * - a symlinked env file written through, and fingerprinted as its target;
+ * - the key decisions against a fake n8n that checks the owner's email,
+ *   password and session:
+ *   - reuse, renewal, a refused key, a busy n8n, rotation, exact scopes;
+ *   - the sweep of a key a failed run left, a stored id n8n does not list, a
+ *     key and id naming two keys;
+ *   - a copied file and a moved one (with and without --adopt);
+ *   - a mint whose env write fails;
+ *   - a rate-limited sign-in, a custom email, and an over-long password.
  */
 async function selfCheck(): Promise<number> {
   const fails: string[] = [];

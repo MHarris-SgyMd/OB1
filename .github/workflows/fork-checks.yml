@@ -262,11 +262,13 @@ jobs:
       # - the env writer's quoting and modes;
       # - every credential a shipped template names declared (the kit's
       #   templates, until SMD-2212 ships the profile's);
-      # - the key decisions against a fake n8n on loopback: reuse, renewal, a
-      #   refused key, a busy n8n, rotation, missing scopes, the sweep of a
-      #   key a failed run left, and a rate-limited sign-in.
-      # Then the eval kit's egress judge (E) against a watcher-format log. The
-      # kit runs the rest against a live profile (evals/README.md).
+      # - compose's owner block;
+      # - the key decisions against a fake n8n on loopback: reuse, renewal,
+      #   rotation, the sweep, a copied or moved file (--adopt), a symlinked
+      #   env file, a failed env write, and a rate-limited sign-in.
+      # Then the eval kit's egress judge (E) on crafted watcher logs, the
+      # parsing of the engine's facts, and the watcher's filter. The kit runs
+      # the rest against a live profile (evals/README.md).
       - name: Orchestration provisioning rules
         working-directory: deploy/orchestration
         run: bun provision.ts --self-check

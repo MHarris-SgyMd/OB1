@@ -6,7 +6,7 @@
  *   bun eval-orchestration.ts --up <tool> [--with <variant>]…   # brain + candidate, provisioned headlessly
  *   bun eval-orchestration.ts --verify <tool> [--json] [--wait-schedule]
  *   bun eval-orchestration.ts --down <tool>      # removes the project's containers AND volumes
- *   bun eval-orchestration.ts --self-check       # n8n's egress judge on a crafted log, no stack (CI)
+ *   bun eval-orchestration.ts --self-check       # n8n's egress judge, facts and filter; no stack (CI)
  *
  * <tool> is one of n8n | activepieces | windmill. Each runs as its own compose
  * project, `ob1-orch-<tool>`: deploy/compose.yaml as shipped plus
@@ -79,10 +79,11 @@ function usage(msg: string): never {
 }
 
 /**
- * `--self-check`: the egress judge (n8n's E) against a log in the watcher's
- * own format. The recorded run's shape passes. Each way out fails: a raw-IP
- * dial, an outside name, a foreign resolver, a UDP datagram, and a capture
- * that never saw the brain. No stack and no network (CI).
+ * `--self-check`: the egress judge (n8n's E) against logs in the watcher's
+ * own format, tcpdump's own lines among them. The recorded run's shape
+ * passes, and each way out fails. Also checked: the engine's facts parsed from
+ * podman's own output, and the watcher's filter in its overlay. No stack and
+ * no network (CI).
  */
 function selfCheck(): number {
   const T = "2026-09-25 22:17:00.100000 ";
