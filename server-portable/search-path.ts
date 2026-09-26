@@ -7,9 +7,9 @@
  * own schemas, kept, with public added. The setting it starts from
  * (`current_setting('search_path')`) is the session's own text, from the role,
  * the database or the connection. `SET` and `ALTER ROLE … SET` store it
- * re-quoted, but a connection string's `options`,
- * `set_config` and `SET search_path FROM CURRENT` store it as written. So it is
- * parsed, never echoed: an echoed path printed invalid SQL for an empty path
+ * re-quoted, but a connection string's `options`, `set_config` and `SET
+ * search_path FROM CURRENT` store it as written. So it is parsed, never
+ * echoed: an echoed path printed invalid SQL for an empty path
  * (which reads back as `""`) and for a raw `$user`, and pasted a stored
  * `x;drop …;--` into the remedy an operator runs.
  *

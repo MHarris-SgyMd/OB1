@@ -2140,9 +2140,12 @@ else {
         }
         assert(resolves, `…and run as printed by the login role itself it takes (${refused ? `refused: ${refused}` : resolves})`);
       } finally {
-        await readerOnThisDatabase("RESET search_path");
-        await claims.unsafe("ALTER ROLE pf_reader RESET role");
-        await claims.unsafe("DROP ROLE pf_acting");
+        try {
+          await readerOnThisDatabase("RESET search_path");
+        } finally {
+          await claims.unsafe("ALTER ROLE pf_reader RESET role");
+          await claims.unsafe("DROP ROLE pf_acting");
+        }
       }
       // A role barred from pg_settings (a view in this database) cannot read
       // where its path came from, and still gets the statement, not migrate.
@@ -2159,9 +2162,9 @@ else {
       // for this role calling a function that reads a missing table — is the
       // same undefined-table error (42P01) with thoughts resolving: public is
       // on the path, and the row must not say otherwise.
-      await claims.unsafe("ALTER ROLE pf_reader SET search_path = \"$user\", public");
       const [{ rowSecurity }] = (await claims`SELECT relrowsecurity AS "rowSecurity" FROM pg_class WHERE oid = 'public.thoughts'::regclass`) as { rowSecurity: boolean }[];
       try {
+        await claims.unsafe("ALTER ROLE pf_reader SET search_path = \"$user\", public");
         await claims.unsafe("DROP POLICY IF EXISTS pf_rls ON public.thoughts; DROP FUNCTION IF EXISTS public.pf_rls_missing()");
         await claims.unsafe("CREATE FUNCTION public.pf_rls_missing() RETURNS boolean LANGUAGE plpgsql AS $f$ BEGIN PERFORM 1 FROM pf_no_such_table; RETURN true; END $f$");
         await claims.unsafe("CREATE POLICY pf_rls ON public.thoughts FOR SELECT TO pf_reader USING (public.pf_rls_missing())");
