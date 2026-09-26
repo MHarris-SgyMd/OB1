@@ -33,16 +33,20 @@
  *     running brain can say them, so identity is an HTTP read by nature.
  *   • Freshness — counts.thoughts and the migration delta come from that same body
  *     (machine-readable); newest capture is read best-effort from thought_stats.
+ *   • Id set — list_thought_ids (SMD-2244) enumerates each corpus's ids, id-only,
+ *     with a first-page md5 digest that lets an identical pair skip enumeration;
+ *     the two sets are diffed for the EXACT "which thoughts one holds and the other
+ *     does not", not the thought-count stand-in the count line still shows.
  *   • Retrieval — the two search tools, called against both brains over the same
  *     queries, their returned ids diffed. The VECTOR arm needs no model here: the
  *     brain embeds the query server-side, so search_thoughts (hybrid) replays it.
  *
- * Two signals a compare would ideally carry live only in a brain's Postgres and
- * are NOT reachable over the read surface, so this HTTP-only compare names them as
- * out of reach rather than guessing: the EXACT id-set difference (which thoughts one
- * holds and the other does not — the read tools page prose, they do not enumerate a
- * corpus), and a replay sourced from stable's own query_log (this replays a supplied
- * query set instead). A DB-backed mode can add both (SMD-2109 notes).
+ * One signal a compare would ideally carry lives only in a brain's Postgres and is
+ * NOT reachable over the read surface, so this HTTP-only compare names it as out of
+ * reach rather than guessing: a replay sourced from stable's own query_log (this
+ * replays a supplied query set instead; SMD-2245 adds the surface). The board-sync
+ * watermark is likewise deferred (SMD-2109 notes). The EXACT id-set difference,
+ * once deferred here too, now rides list_thought_ids (SMD-2244).
  *
  * Until SMD-2037 lands, a refreshed brain runs at pgvector's default HNSW scan
  * settings, so a hybrid-arm difference here can be GUC-induced rather than a real
@@ -192,6 +196,10 @@ export async function callTool(ep: BrainEndpoint, name: string, args: Record<str
     headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": ep.key },
     body,
   });
+  // A non-2xx is infrastructure (a gateway/proxy 404, a 502), not the protocol —
+  // classify it as HTTP status, never the body, so a "404 page not found" page can't
+  // be read downstream as an absent tool (review pass 2).
+  if (!r.ok) throw new Error(`${ep.label}: ${name} → HTTP ${r.status}`);
   const raw = await r.text();
   const msg = unwrapRpc(raw);
   if (!msg) throw new Error(`${ep.label}: ${name} returned no JSON-RPC reply (${raw.slice(0, 80)}).`);
@@ -299,6 +307,127 @@ export function parseResultIds(text: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// The corpus id set — the exact id-set difference (SMD-2244).
+// ---------------------------------------------------------------------------
+
+/** One page of `list_thought_ids`. */
+interface ThoughtIdPage {
+  ids: string[];
+  total: number;
+  /** md5 of all ids (first page, SQL store); null on the PostgREST shim or an empty corpus. */
+  digest: string | null;
+  cursor: string | null;
+}
+
+/** The exact id-set difference between two corpora, or `unavailable` when a brain predates the surface. */
+export interface IdDiff {
+  equal: boolean;
+  /** ids A holds that B does not. */
+  onlyA: string[];
+  /** ids B holds that A does not. */
+  onlyB: string[];
+  /** the whole-corpus totals, from each first page. */
+  totalA: number;
+  totalB: number;
+  /** set when a brain does not expose list_thought_ids (older than SMD-2244) — the count stand-in still stands. */
+  unavailable?: boolean;
+  /** set when the id-set read FAILED for another reason (a timeout, a refusal, a mid-walk error) — the reason. Distinct from `unavailable`: the tool is there, the read did not finish; the rest of the compare still prints. */
+  failed?: string;
+}
+
+/** A safety bound on the enumeration walk — 10M ids at the 1000-default page. */
+const MAX_ID_PAGES = 10_000;
+
+/** Fetch one page of a brain's thought ids. */
+async function fetchIdPage(ep: BrainEndpoint, after: string | null): Promise<ThoughtIdPage> {
+  const text = await callTool(ep, "list_thought_ids", after ? { after } : {});
+  let page: Partial<ThoughtIdPage>;
+  try {
+    page = JSON.parse(text) as Partial<ThoughtIdPage>;
+  } catch {
+    throw new Error(`${ep.label}: list_thought_ids did not return JSON (${text.slice(0, 80)}).`);
+  }
+  // A valid-JSON page whose `ids` is not an array is a broken page, not an empty
+  // corpus — throw so it reads as a failure, never a silent "this brain holds
+  // nothing" that would report the peer's whole corpus as a difference (review pass 2).
+  if (!Array.isArray(page.ids)) throw new Error(`${ep.label}: list_thought_ids returned no ids array.`);
+  return {
+    ids: page.ids.map(String),
+    total: Number(page.total ?? 0),
+    digest: page.digest ?? null,
+    cursor: page.cursor ?? null,
+  };
+}
+
+/** Page a brain's whole id set into a Set, starting from an already-read first page. */
+async function collectIds(ep: BrainEndpoint, first: ThoughtIdPage): Promise<Set<string>> {
+  const set = new Set(first.ids);
+  let cursor = first.cursor;
+  for (let guard = 0; cursor && guard < MAX_ID_PAGES; guard++) {
+    const page = await fetchIdPage(ep, cursor);
+    // A cursor that does not advance would page the same rows until the guard and
+    // return a partial set read as a real diff — throw so a buggy server reads as a
+    // failure, not a wrong answer (review pass 2).
+    if (page.cursor === cursor) throw new Error(`${ep.label}: list_thought_ids cursor did not advance past ${cursor.slice(0, 8)}.`);
+    for (const id of page.ids) set.add(id);
+    cursor = page.cursor;
+  }
+  return set;
+}
+
+/**
+ * The exact id-set difference, in one of four shapes. Reads each brain's first
+ * page; when both carry a digest and the two match, the corpora are identical and
+ * neither is enumerated (the fast path, `equal`). Otherwise both are paged in full
+ * and the sets are diffed (`onlyA`/`onlyB`). A brain that does not expose
+ * `list_thought_ids` (older than SMD-2244) is `unavailable` — the thought-count
+ * stand-in holds. Any other read failure (a refusal, a timeout, a mid-walk error,
+ * a short enumeration) is `failed` with its reason. None of the three non-diff
+ * shapes aborts the compare: the rest of the report still prints.
+ */
+export async function corpusIdDiff(a: BrainEndpoint, b: BrainEndpoint): Promise<IdDiff> {
+  const blank = (patch: Partial<IdDiff>): IdDiff => ({ equal: false, onlyA: [], onlyB: [], totalA: 0, totalB: 0, ...patch });
+  // An unknown tool is an older brain (degrade to unavailable, the count stands in);
+  // anything else is a real failure of the read, kept distinct so the wrong cause
+  // is never asserted and — crucially — so the rest of the compare still prints
+  // (review pass 1). The MCP SDK answers an unregistered tool with `Tool <name> not
+  // found` (server/mcp.js); others say "unknown tool"/"method not found". Match those
+  // phrasings, NOT a bare "not found" — a proxy's "404 page not found" body is a read
+  // failure, not an absent tool, and callTool's r.ok check keeps it out of here (review pass 2).
+  const isAbsent = (e: unknown) => /\bunknown tool\b|\btool\b[^]*?\bnot found\b|\bmethod not found\b|\bno such tool\b/i.test((e as Error).message);
+  let pa: ThoughtIdPage;
+  let pb: ThoughtIdPage;
+  try {
+    [pa, pb] = await Promise.all([fetchIdPage(a, null), fetchIdPage(b, null)]);
+  } catch (e) {
+    return isAbsent(e) ? blank({ unavailable: true }) : blank({ failed: (e as Error).message });
+  }
+  // Equal NON-null digests only: two null digests (the shim, or two empty corpora)
+  // must be enumerated, not read as a match.
+  if (pa.digest != null && pa.digest === pb.digest) {
+    return { equal: true, onlyA: [], onlyB: [], totalA: pa.total, totalB: pb.total };
+  }
+  // The full walk fails soft too: a mid-enumeration error (a timeout on page 2 of a
+  // corpus with hundreds of differing ids) marks the id-set failed rather than
+  // aborting the whole compare over its one optional axis (review pass 1).
+  try {
+    const [setA, setB] = await Promise.all([collectIds(a, pa), collectIds(b, pb)]);
+    // The walk must account for the whole corpus the first page counted. Fewer ids
+    // than `total` means an incomplete enumeration — a PostgREST db-max-rows below
+    // the page size (a short page reads as the last), or a concurrent delete — so
+    // fail rather than report a partial set as a real difference (review pass 3).
+    if (setA.size < pa.total || setB.size < pb.total) {
+      return blank({ failed: `the id enumeration returned fewer ids than the corpus total (${setA.size}/${pa.total}, ${setB.size}/${pb.total}) — a paging limit or a concurrent change; not comparing a partial set`, totalA: pa.total, totalB: pb.total });
+    }
+    const onlyA = [...setA].filter((id) => !setB.has(id));
+    const onlyB = [...setB].filter((id) => !setA.has(id));
+    return { equal: onlyA.length === 0 && onlyB.length === 0, onlyA, onlyB, totalA: pa.total, totalB: pb.total };
+  } catch (e) {
+    return blank({ failed: (e as Error).message, totalA: pa.total, totalB: pb.total });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The comparison.
 // ---------------------------------------------------------------------------
 
@@ -332,6 +461,8 @@ export interface Comparison {
   migrationDelta: number | null;
   /** a and b thoughts counts. */
   counts: { a: number | null; b: number | null };
+  /** The exact id-set difference (SMD-2244), or unavailable on a brain that predates list_thought_ids. */
+  idDiff: IdDiff;
   /** The retrieval rows, when --replay ran; the arms that ran. */
   retrieval: { rows: RetrievalRow[]; arms: string[]; queries: number } | null;
   /** The one-line verdict. */
@@ -366,7 +497,7 @@ export async function compareBrains(
   b: BrainEndpoint,
   opts: { queries?: string[]; hybrid?: boolean } = {},
 ): Promise<Comparison> {
-  const [ra, rb] = await Promise.all([readBrain(a), readBrain(b)]);
+  const [ra, rb, idDiff] = await Promise.all([readBrain(a), readBrain(b), corpusIdDiff(a, b)]);
 
   const fa = identityFields(ra);
   const fb = identityFields(rb);
@@ -404,6 +535,7 @@ export async function compareBrains(
     identity,
     migrationDelta,
     counts: { a: ra.thoughts, b: rb.thoughts },
+    idDiff,
     retrieval,
     verdict: freshnessVerdict(ra, rb, migrationDelta),
   };
@@ -493,7 +625,19 @@ export function renderComparison(c: Comparison): string {
   lines.push(`  thoughts: a=${ca === null ? "unread" : ca.toLocaleString("en-US")}  b=${cb === null ? "unread" : cb.toLocaleString("en-US")}`);
   lines.push(`  newest capture: a=${c.a.newestCapture ?? "n/a"}  b=${c.b.newestCapture ?? "n/a"}`);
   lines.push(`  migration ledger: a=${c.a.highestMigration ?? "unread"}  b=${c.b.highestMigration ?? "unread"}`);
-  lines.push(`  (board-sync watermark and the exact id-set difference are not on the read surface — a DB-backed compare adds them, SMD-2109.)`);
+  // The exact id-set difference (SMD-2244): which thoughts one holds and the other does not.
+  const d = c.idDiff;
+  if (d.unavailable) {
+    lines.push(`  id-set: unavailable — a brain does not expose list_thought_ids (older than SMD-2244); the thought count above stands in.`);
+  } else if (d.failed) {
+    lines.push(`  id-set: could not be read — ${d.failed}; the thought count above stands in.`);
+  } else if (d.equal) {
+    lines.push(`  id-set: identical — both brains hold the same ${d.totalA.toLocaleString("en-US")} thought ids.`);
+  } else {
+    const ex = (ids: string[]) => (ids.length ? ` (e.g. ${ids.slice(0, 3).map(shortId).join(", ")}${ids.length > 3 ? ", …" : ""})` : "");
+    lines.push(`  id-set: ${d.onlyA.length.toLocaleString("en-US")} only in a${ex(d.onlyA)}; ${d.onlyB.length.toLocaleString("en-US")} only in b${ex(d.onlyB)}.`);
+  }
+  lines.push(`  (board-sync watermark is not on the read surface — a DB-backed compare adds it, SMD-2109.)`);
 
   lines.push("");
   lines.push("Retrieval:");
@@ -564,7 +708,11 @@ export async function runCompare(args: CompareArgs): Promise<number> {
   // (review pass 1: it exited 0 while the verdict printed the count delta).
   const countDelta = c.counts.a !== null && c.counts.b !== null && c.counts.a !== c.counts.b;
   const captureDelta = captureDaysApart(c.a.newestCapture, c.b.newestCapture);
-  const freshDelta = countDelta || (captureDelta !== null && captureDelta !== 0);
+  // An id-set difference is a delta too (a same-count corpus that drifted, SMD-2244).
+  // A read that could not be had — `unavailable` (older brain) or `failed` — is not a
+  // delta: the count stand-in already spoke and we do not force the gate on an unread axis.
+  const idSetDelta = !c.idDiff.unavailable && !c.idDiff.failed && !c.idDiff.equal;
+  const freshDelta = countDelta || (captureDelta !== null && captureDelta !== 0) || idSetDelta;
   const anyDelta =
     c.identity.length > 0 ||
     (c.migrationDelta ?? 0) !== 0 ||
