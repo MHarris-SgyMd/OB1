@@ -112,9 +112,12 @@
 --   replays this one over the newer shape and the later one after it (second
 --   review pass: without the drop the replay failed here). What the drop
 --   costs: nothing of 058's (no grant is issued, and string bodies record no
---   dependency), but an object of an operator's that depends on one — a view
---   over node_state() — refuses the drop, and the replay stops naming it; a
---   REVOKE an operator issued on one is not kept.
+--   dependency), but an object that depends on one — an operator's view over
+--   node_state(), or a later migration's BEGIN ATOMIC caller (so a caller's
+--   body stays a string) — refuses the drop: the replay stops at 058 naming
+--   the function, the dependent only in the server log's DETAIL, and the
+--   CASCADE Postgres's hint offers would drop that dependent too. A REVOKE an
+--   operator issued on one is not kept (third review pass).
 --
 -- Expected outcome
 --   SELECT * FROM node_state() lists every thought with its lifecycle and

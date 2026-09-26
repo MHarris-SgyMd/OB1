@@ -8155,19 +8155,26 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
   assert(counts.all_ === 2 && counts.none === 0 && counts.nul === 0 && counts.one === 1 && hubRow.open === true && hubRow.synced_at === "2026-09-25T00:00:00.000Z" && hubRow.blocked === false,
     `node_state(NULL) is every thought, an empty or all-NULL list none, a named id its one row; the ticket open with its own watermark as its freshness (${JSON.stringify(counts)}, ${JSON.stringify(hubRow)})`);
 
-  // The gate projected, as coverage reads it, over two facets: the scan of
-  // thoughts under it — the gate's only read of that table — runs once, and no
+  // The gate projected, as coverage reads it: its reads of thoughts — the
+  // gate's only use of that table — do not grow with the facets, and no
   // subplan runs per facet (first review pass: a correlated EXISTS ran once per
   // link; second: a LATERAL aggregate has no SubPlan and ran its scan once per
-  // facet too, so the scan's loops are what is read — an aggregate the planner
-  // rescans unparameterised reports a loop per rescan and re-reads nothing).
+  // facet; third: the scan's own loop count is a property of the source rows,
+  // not the gate, so the loops are compared at two facets and at four over the
+  // same source rows).
   await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-8001', 'SMD-8001', 'text/markdown')`, [hub]);
-  await db.query(`SELECT record_source_links($1::uuid, 'linear', '[{"relation": "blocked_by", "target": "SMD-8002"}, {"relation": "blocks", "target": "SMD-8003"}]'::jsonb)`, [hub]);
-  const gatePlan = (await q<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT system, gates FROM node_dependencies()`)).map((r) => r["QUERY PLAN"]);
-  const thoughtScans = gatePlan.filter((l) => /Scan.* on thoughts\b/.test(l));
-  const [facetsSeen] = await q<{ n: number }>(`SELECT count(*)::int AS n FROM node_dependencies()`);
-  assert(facetsSeen.n === 2 && thoughtScans.length > 0 && thoughtScans.every((l) => /loops=1\)/.test(l)) && !gatePlan.some((l) => /SubPlan/.test(l)),
-    `node_dependencies()' gate is one grouped pass over the source rows: over ${facetsSeen.n} facets its scan of thoughts runs once and no subplan runs (${thoughtScans.map((l) => l.trim()).join(" | ")})`);
+  const gateReads = async (targets: string[]) => {
+    await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [hub, JSON.stringify(targets.map((target) => ({ relation: "blocked_by", target })))]);
+    const planLines = (await q<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT system, gates FROM node_dependencies()`)).map((r) => r["QUERY PLAN"]);
+    const scans = planLines.filter((l) => /Scan.* on thoughts\b/.test(l));
+    const loops = scans.reduce((a, l) => a + Number(/loops=(\d+)\)/.exec(l)?.[1] ?? NaN), 0);
+    const [{ n }] = await q<{ n: number }>(`SELECT count(*)::int AS n FROM node_dependencies() WHERE active`);
+    return { facets: n, loops, subplan: planLines.some((l) => /SubPlan/.test(l)), scans: scans.map((l) => l.trim()).join(" | ") };
+  };
+  const atTwo = await gateReads(["SMD-8002", "SMD-8003"]);
+  const atFour = await gateReads(["SMD-8002", "SMD-8003", "SMD-8004", "SMD-8005"]);
+  assert(atTwo.facets === 2 && atFour.facets === 4 && atTwo.loops > 0 && atFour.loops === atTwo.loops && !atTwo.subplan && !atFour.subplan,
+    `node_dependencies()' gate is one grouped pass over the source rows: its reads of thoughts are ${atTwo.loops} at two facets and ${atFour.loops} at four, and no subplan runs (${atFour.scans})`);
   // The role split: every migrations' group but structure — thoughts,
   // thought_facets and the graph, not thought_sources.
   const ROLE = "ob1_node_reader";

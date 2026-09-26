@@ -439,7 +439,11 @@ holds, the two reads of it change — `node_lifecycle()`'s body and
 `node_dependencies()`' gate — and no signature does. Reads only, no grant row
 (EXECUTE is PUBLIC): `node_lifecycle()` needs SELECT on `thoughts`;
 `node_dependencies()` and `node_state()` also need it on `thought_facets` (the
-capture group) and `thought_sources` (the `structure` group).
+capture group) and `thought_sources` (the `structure` group). The file drops
+its three table functions before creating them, so `--reapply` replays it over
+a later migration's reshape; the price is that a view of an operator's over
+`node_state()` (or any other object that records a dependency on one) stops
+that replay at 058, and a REVOKE on one is not kept.
 
 ## What changed relative to the guide
 
