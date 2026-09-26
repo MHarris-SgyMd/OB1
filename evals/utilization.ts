@@ -64,6 +64,8 @@ export type SearchRow = {
   matchCount: number | null;
   threshold: number | null;
   recencyWeight: number | null;
+  /** The retrieval arm the log recorded (045): hybrid, keyword or current (059's prefer_current); absent in a fixture or an older export. */
+  arm?: string | null;
   resultIds: string[];
   /** Approximate tokens of the content returned (chars / 4 over the ids as stored now); null when unknown. */
   resultTokens?: number | null;
@@ -92,6 +94,8 @@ export type SearchDbRow = {
   match_count: number | null;
   threshold: number | null;
   recency_weight: number | null;
+  /** query_log.arm (045); NULL before 045 wrote it. */
+  arm?: string | null;
   /** uuid[] as the driver returns it: an array, or the `{a,b}` literal. */
   result_ids: unknown;
   /** sum(length(content)) over the returned ids still stored — bigint, so possibly a string. */
@@ -131,6 +135,7 @@ export function toSearchRow(r: SearchDbRow): SearchRow {
     matchCount: r.match_count,
     threshold: r.threshold,
     recencyWeight: r.recency_weight,
+    arm: r.arm ?? null,
     resultIds,
     resultTokens: whole ? Math.round(Number(r.chars) / 4) : null,
   };
@@ -265,7 +270,10 @@ const fmt = (x: number | null): string => (x === null ? "?" : String(Number(x.to
 
 /** The arm a search row ran under: the tool and the arguments the log recorded. */
 export function armOf(s: SearchRow): string {
-  return `${s.tool} k=${s.matchCount ?? "?"} thr=${fmt(s.threshold)} rw=${fmt(s.recencyWeight)}`;
+  // prefer_current (059, SMD-2255) is another ranking of the same tool and
+  // arguments: named, so its rows are not pooled with the default's. Every
+  // other row's name is what it was.
+  return `${s.tool} k=${s.matchCount ?? "?"} thr=${fmt(s.threshold)} rw=${fmt(s.recencyWeight)}${s.arm === "current" ? " current" : ""}`;
 }
 
 export type ArmStats = {
