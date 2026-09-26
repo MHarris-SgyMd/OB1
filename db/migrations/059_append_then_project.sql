@@ -322,7 +322,10 @@
 --      SMD-1723's, which lands after this file and owns the marker table the
 --      fold reads (docs/event-log-as-truth.md, Deletion and forgetting); the
 --      decision ordered that redaction no later than this step, and the
---      order is the maintainer's to keep or waive at the merge. The fold
+--      maintainer waived the order at this file's merge (2026-09-26): 055
+--      put every thought's text in the log and this file adds none, so it
+--      lands no later than SMD-2117's fold, where a copied log first carries
+--      text to a server that cannot remove it. The fold
 --      itself (db/fold.ts), the raw in-tree writers moving onto the projector
 --      (db/ingest-records.ts's INSERT ... ON CONFLICT with its own
 --      created_at, review_supersession_proposal, the backfills), a
