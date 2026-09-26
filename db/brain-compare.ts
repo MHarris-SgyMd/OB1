@@ -734,8 +734,8 @@ export function renderComparison(c: Comparison): string {
       // All rows skipped is not "no delta" — nothing was compared (review pass 3).
       const allSkipped = skipped.length > 0 && skipped.length === c.retrieval.rows.length;
       lines.push(allSkipped
-        ? `  nothing compared — all ${skipped.length} quer${skipped.length === 1 ? "y" : "ies"} were skipped.`
-        : `  no delta — b returns the same ids as a for every query and arm${skipped.length ? ` (${skipped.length} skipped)` : ""}.`);
+        ? `  nothing compared — all ${skipped.length} replay${skipped.length === 1 ? "" : "s"} were skipped.`
+        : `  no delta — b returns the same ids as a for every replay${skipped.length ? ` (${skipped.length} skipped)` : ""}.`);
     } else {
       for (const r of moved) {
         const bits: string[] = [];

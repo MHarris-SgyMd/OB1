@@ -717,6 +717,7 @@ export function parseCompareArgs(args: string[]): CompareArgs {
   const TAKES_NONE = new Set(["compare", "replay", "hybrid", "json"]);
   const out: CompareArgs = { a: "", b: "", replay: false, hybrid: false, queries: [], json: false };
   const refs: string[] = [];
+  const seenOne = new Set<string>(); // single-value flags refuse a repeat, as the SQL-verb parser does
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     const name = a.startsWith("--") ? a.slice(2) : null;
@@ -733,6 +734,7 @@ export function parseCompareArgs(args: string[]): CompareArgs {
     if (name !== null && (TAKES_ONE.has(name) || TAKES_MANY.has(name))) {
       const v = args[i + 1];
       if (v === undefined || v.startsWith("--")) { console.error(`--${name} takes a value.\n${USAGE}`); process.exit(2); }
+      if (TAKES_ONE.has(name)) { if (seenOne.has(name)) { console.error(`--${name} given twice.\n${USAGE}`); process.exit(2); } seenOne.add(name); }
       if (name === "a-key") out.aKey = v;
       else if (name === "b-key") out.bKey = v;
       else if (name === "queries-file") out.queries.push(...readQueriesFile(v));

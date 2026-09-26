@@ -530,7 +530,7 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   try {
     const c = await compareBrains(a.ep, b.ep, { queries: ["only"] });
     const out = renderComparison(c);
-    ok(/nothing compared — all 1 query/.test(out) && !/no delta — b returns/.test(out), `all-skipped retrieval reads "nothing compared", not "no delta"`);
+    ok(/nothing compared — all 1 replay/.test(out) && !/no delta — b returns/.test(out), `all-skipped retrieval reads "nothing compared", not "no delta"`);
   } finally { a.server.stop(true); b.server.stop(true); }
 }
 
@@ -681,6 +681,8 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   ok(emptyLog.exitCode === 2 && /--from-log is empty/.test(emptyLog.stderr.toString()), `parseCompareArgs: an empty --from-log is refused (${emptyLog.exitCode})`);
   const badSince = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--replay", "--from-log", "z", "--since", "not-a-time"], { cwd: import.meta.dir });
   ok(badSince.exitCode === 2 && /--since must be an ISO-8601 time/.test(badSince.stderr.toString()), `parseCompareArgs: a malformed --since is refused (${badSince.exitCode})`);
+  const dupLog = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--replay", "--from-log", "z", "--from-log", "w"], { cwd: import.meta.dir });
+  ok(dupLog.exitCode === 2 && /--from-log given twice/.test(dupLog.stderr.toString()), `parseCompareArgs: a duplicate single-value flag is refused (${dupLog.exitCode})`);
 }
 
 console.log(`\ntest-brain-compare: ${pass} passed, ${fail} failed`);
