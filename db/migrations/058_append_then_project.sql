@@ -107,9 +107,9 @@
 --      042's guard locks the citing rows after it, as before (cold read,
 --      first review pass) — then the after-image computed in plpgsql (050's
 --      two stamp arms and 046's diff rule, the functions 055 lifted out),
---      ob1_append_thought_event
---      (046's trigger tail: who from the key, the registry's kind, the trust
---      ceiling, the door, the claim, the late gate), then the projector.
+--      ob1_append_thought_event (046's trigger tail: who from the key, the
+--      registry's kind, the trust ceiling, the door, the claim, the late
+--      gate), then the projector.
 --      Every body clears ob1.event: the event rides the append now, and the
 --      setting a raw write later in the transaction would read is left empty
 --      (SMD-1999's first review pass found the bodies had stopped setting it
@@ -307,11 +307,10 @@
 --      after-image in plpgsql and the snapshot's upsert; the capture the
 --      same upsert, the savepoint and one row read more (the 2-argument
 --      form's lock). This file's apply, the seed over 200 rows included,
---      14-25 ms; over the
---      dogfood copy's 873 rows with key, model and vector at 1,024 dimensions,
---      30 ms, every seeded vector byte-equal to its row's with the row's stamp
---      as taken_at; the scripted writes and a replay of one thought's log
---      then behaved as test-schema [54] holds.
+--      14-25 ms; over the dogfood copy's 873 rows with key, model and vector
+--      at 1,024 dimensions, 30 ms, every seeded vector byte-equal to its
+--      row's with the row's stamp as taken_at; the scripted writes and a
+--      replay of one thought's log then behaved as test-schema [54] holds.
 --
 --   NOT HERE, SAID SO. db/reembed.ts does not call the refresh function
 --      directly (the ticket's item 4): the stale-read guard, the chunk
