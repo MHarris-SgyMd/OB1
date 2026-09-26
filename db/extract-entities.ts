@@ -184,6 +184,8 @@ const RETRY_FAILED = has("retry-failed");
 const RETRY_PARTIAL = has("retry-partial");
 
 const cfg = resolveEmbedConfig(process.env as EmbedEnv);
+/** The windowing every row is extracted under — its bound is what a partial row's caveat names. */
+const WINDOWING = windowingFor(cfg);
 const JOB = flag("job") ?? extractionKey(cfg.metadataModel);
 
 console.log(`  job:    ${JOB}`);
@@ -542,7 +544,7 @@ async function processRow(row: Row): Promise<Outcome> {
     totals.refused += res.refused_entities ?? 0;
     totals.retyped += res.retyped_entities ?? 0;
     // A prefix's rows stand, and the claim says they are a prefix (SMD-2240).
-    return extraction.coverage ? { outcome: "succeeded", caveat: partialCaveat(extraction.coverage, windowingFor(cfg)) } : { outcome: "succeeded" };
+    return extraction.coverage ? { outcome: "succeeded", caveat: partialCaveat(extraction.coverage, WINDOWING) } : { outcome: "succeeded" };
   }
   if (res.error === "NOT_FOUND") return { outcome: "vanished" };
   // Edited between the claim and the write. What was extracted describes text

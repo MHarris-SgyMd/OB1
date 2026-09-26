@@ -53,9 +53,9 @@
  * (OB1_EXTRACT_MAX_WINDOWS, else db/config.mjs's EXTRACT_MAX_WINDOWS, 24; a
  * window's runaway retry is a second call), and runs chunk.ts cannot split
  * are cut where the thought's text reaches that many windows' worth. Until
- * SMD-2240 a thought over the count
- * was failed before any call, and ingested documents — whole PDFs and pages,
- * 26 to 74 windows — sat failed with nothing in the graph. Now the first
+ * SMD-2240 a thought over the count was failed before any call, and ingested
+ * documents — whole PDFs and pages, 26 to 74 windows — sat failed with
+ * nothing in the graph. Now the first
  * windows are extracted (boundedWindows) and the answer's `coverage` says how
  * many of how many; the worker records the row succeeded with partialCaveat's
  * text, and --retry-partial re-extracts such rows once the bound is raised.
@@ -133,9 +133,9 @@ export type Extraction = {
    * Set when the thought was over the per-thought bound and only its prefix
    * was extracted (SMD-2240, boundedWindows): `windows` of its `of` windows
    * were sent, and `cut` says the last of them was cut short at the text
-   * bound, which runs chunk.ts cannot split (SMD-1974) had used up. Absent on a whole
-   * extraction. The worker records a thought with it succeeded with the
-   * caveat partialCaveat writes.
+   * bound, which runs chunk.ts cannot split (SMD-1974) had used up. Absent
+   * on a whole extraction. The worker records a thought with it succeeded
+   * with the caveat partialCaveat writes.
    */
   coverage?: Coverage;
 };

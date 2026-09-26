@@ -1057,10 +1057,11 @@ thought is extracted in at most `OB1_EXTRACT_MAX_WINDOWS` windows (24 unset,
 `db/config.mjs`'s `EXTRACT_MAX_WINDOWS`; a window's runaway retry is a second
 call) — ~29,000 estimated tokens of text at the default window, and under
 twice that at most for a thought of more than one window, since `chunk.ts`
-fills a window with whole words and the last may run past the size. The bound was sized at four times the longest
-thought on the fork's brain; ingested documents broke that, and on one pass 8
-of 53 thoughts (PDFs and pages of 26 to 74 windows) were failed before any
-call with nothing in the graph. A thought over it is now extracted over its
+fills a window with whole words and the last may run past the size. The bound
+was sized at four times the longest thought on the fork's brain; ingested
+documents broke that, and on one pass 8 of 53 thoughts (PDFs and pages of 26
+to 74 windows) were failed before any call with nothing in the graph. A
+thought over it is now extracted over its
 first windows, in order, and its claim is released **succeeded with a caveat**
 — migration 028's rule, `last_error` on a succeeded row — reading
 `partial: N of M windows extracted, …` (`… sent, the last cut short …` when
@@ -1078,11 +1079,11 @@ nothing bounded it until this; the windows now meet a text bound,
 or more (only such a run makes one) counts its whole length and any other its
 length up to the size (a filling word past it, or unspaced CJK prose just over
 it, is not a run), and the window that passes it is cut there, with a caveat
-saying so. A single call's
-size over a window stays SMD-1974's. The prompt version is unchanged: a whole
-extraction is what it was. What changes is a thought over the count, which
-stored nothing and now stores its opening, and a thought whose runs pass the
-text bound, which was sent whole and is now cut at it.
+saying so. A single call's size over a window stays SMD-1974's. The prompt
+version is unchanged: a whole extraction is what it was. What changes is a
+thought over the count, which stored nothing and now stores its opening, and a
+thought whose runs pass the text bound, which was sent whole and is now cut at
+it.
 
 **What may leave.** The egress gate (SMD-1903) reads each row's own
 `metadata` — `source`, `type`, `topics` — and its text against `OB1_EGRESS_POLICY`
