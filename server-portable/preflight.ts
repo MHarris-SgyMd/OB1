@@ -1399,7 +1399,15 @@ if (configFailed) {
             SELECT p.proname AS name, p.prosrc AS src FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
             WHERE n.nspname = 'public' AND p.proname IN ('thoughts_write_audit', 'ob1_append_thought_event')`) as { name: string; src: string }[];
           const auditReadsAgents = keyRuleHolds(String(auditBodies.find((b) => b.name === "thoughts_write_audit")?.src ?? ""), String(auditBodies.find((b) => b.name === "ob1_append_thought_event")?.src ?? ""));
-          const required = [...CAPTURE_WRITES.filter((w) => w.table !== "ob1_agents" || auditReadsAgents), ...conditional];
+          // SELECT on thought_audit is asked of a brain with 055's append: its
+          // INSERT ... RETURNING reads the row it inserts (and since 059 the
+          // trigger's check and the projector read the event). Before 055 the
+          // trigger inserted with no RETURNING, so a brain without the function
+          // is not told to grant it — as ob1_agents is gated on 046's body.
+          const auditReturns = auditBodies.some((b) => b.name === "ob1_append_thought_event");
+          const required = [...CAPTURE_WRITES.filter((w) =>
+            (w.table !== "ob1_agents" || auditReadsAgents)
+            && (w.table !== "thought_audit" || w.privilege !== "SELECT" || auditReturns)), ...conditional];
           const reqTables = required.map((w) => w.table);
           const reqPrivs = required.map((w) => w.privilege);
           const privRows = (await sql`
@@ -1442,10 +1450,11 @@ if (configFailed) {
             // on every write that carries an actor — captures, edits AND deletes
             // — so that one is named with the trigger (SMD-1730).
             const agentsMiss = missingByTable.has("ob1_agents");
-            // 059 (SMD-2116): the audit trigger, checking a projected row against
-            // its event, and the projector read thought_audit as the caller on
-            // every function-borne write; the snapshot trigger writes
-            // ob1_embedding_snapshot as the caller on every write of a vector.
+            // 055's append reads the audit row it inserts (INSERT ... RETURNING)
+            // and since 059 the audit trigger's check and the projector read the
+            // event, as the caller on every function-borne write (SMD-2116); the
+            // snapshot trigger writes ob1_embedding_snapshot as the caller on
+            // every write of a vector.
             const auditReadMiss = (missingByTable.get("thought_audit") ?? []).includes("SELECT");
             const snapshotMiss = missingByTable.has("ob1_embedding_snapshot");
             const fails: string[] = [];
@@ -1453,7 +1462,7 @@ if (configFailed) {
               ? "a windowed capture, an edit with content, 008's audit trigger, or 016's enqueue trigger — which as the caller reads ob1_config on every capture, and upserts a work claim while entity extraction is enabled —"
               : "a windowed capture, an edit with content, or 008's audit trigger")
               + (agentsMiss ? " (046's audit trigger reads ob1_agents as the caller on every capture, edit and delete that carries an actor)" : "")
-              + (auditReadMiss ? " (059's audit trigger, checking a projected row against its event, and the projector read thought_audit as the caller on every capture, edit and delete through the functions)" : "")
+              + (auditReadMiss ? " (055's ob1_append_thought_event reads the audit row it inserts — INSERT … RETURNING — and since 059 the audit trigger's check and the projector read the event, as the caller on every capture, edit and delete through the functions)" : "")
               + (snapshotMiss ? " (059's snapshot trigger writes ob1_embedding_snapshot as the caller on every capture or edit that carries a vector)" : ""));
             if (missingByTable.has("thought_facets")) fails.push("every delete of a thought (042's citation guard reads and writes thought_facets as the caller)");
             const why = ` — so ${fails.join(", and ")} would fail`;

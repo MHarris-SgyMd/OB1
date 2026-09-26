@@ -1669,9 +1669,13 @@ export const ROLE_GRANTS = Object.freeze({
   capture: Object.freeze([
     Object.freeze({ table: "thoughts",       privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "001" }),
     Object.freeze({ table: "thought_chunks", privileges: Object.freeze(["SELECT", "INSERT", "DELETE"]),           since: "007" }),
-    // 059's check reads the event it judges a projected row against — the
-    // audit trigger SELECTs thought_audit on every function-borne write, and
-    // so does the projector (SMD-2116); INSERT alone until then (008).
+    // 055's ob1_append_thought_event reads the audit row it inserts (INSERT
+    // ... RETURNING needs SELECT on the returned column) on every write, so
+    // SELECT has been a hard capture privilege since 055 — this list had no
+    // row for it from 055 to 058, and a role granted then could not write at
+    // all (run-it, SMD-2116's fourth review pass); since 059 the audit
+    // trigger's check and the projector read the event too. INSERT alone
+    // before 055 (008).
     Object.freeze({ table: "thought_audit",  privileges: Object.freeze(["SELECT", "INSERT"]),                      since: "008" }),
     // 042's guard runs as the caller on EVERY delete of a thought: it reads the
     // citations that name the row and, detaching, writes them. A role without

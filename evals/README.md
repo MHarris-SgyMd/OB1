@@ -1522,7 +1522,7 @@ retry instead of 30 s (median 106 s per straggler against 76). The dogfood
 brain, re-run with `--retry-failed` under the new budget: **366 of 373
 extracted, 7 failed**, from 339 of 363 under the old one and 262 of 295 under
 p1; the graph holds 2,149 entities, 5,272 mentions and 4,563 edges. Those 7 —
-5,059 to 21,345 characters, the brain's longest — all extract on the 27B under
+5,058 to 21,345 characters, the brain's longest — all extract on the 27B under
 the shipped shape (7/7, no retry; 2 to 7 windows each, 66 to 351 s), so the
 7B's residue is the 7B's, and a brain that wants them can point
 `OB1_METADATA_MODEL` at the larger model and re-run with `--switch-key`.
@@ -2780,7 +2780,7 @@ instead, stopping at the edge of the history, and says so.
 | vector@-1 (shipped) | 97.2% / 98.6% | 97.2% / 100% | **52.8% / 45.8%** | 52.8% / 44.4% | 2.8% / 0% | — |
 | recency@0.3, half-life 90d | 97.2% / 98.6% | 97.2% / 100% | 52.8% / 45.8% | 52.8% / 44.4% | 2.8% / 0% | +0 / −0 on both models |
 | recency@0.3, half-life 3,650d | 97.2% / 98.6% | 97.2% / 100% | 54.2% / 47.2% | 52.8% / 45.8% | 2.8% / 0% | +1 / −0, p=1.000 |
-| age@1 | 2.8% / 2.8% | 29.2% / 29.2% | 29.2% / 29.2% | 5.6% / 5.6% | 0% / 0% | +10 / −27, p=0.008 · +11 / −23, p=0.059 |
+| age@1 | 2.8% / 2.8% | 29.2% / 29.2% | 29.2% / 29.2% | 5.6% / 5.6% | 0% / 0% | +10 / −27, p=0.008 · +11 / −23, p=0.058 |
 | resolve (oracle chains) | **0% / 0%** | 100% / 100% | **100% / 100%** | 97.2% / 94.4% | 0% / 0% | +34 / −0 · +39 / −0, p<0.001 |
 
 At k=10 the shipped arm reaches 100% on `both` on both models and
@@ -4973,34 +4973,34 @@ median of 200 captures and 200 edits, baseline against option 2.
 the bodies are `db/migrations/059_append_then_project.sql` now), applied on
 top of 053 and thrown away with the database — where check 7 did not look,
 deliberately: the write functions were redefined for the measurement, not
-shipped. `common.sql` lifts 046's diff rule out of the audit trigger into
+shipped. `common.sql` lifted 046's diff rule out of the audit trigger into
 `ob1_thought_diff` (one addition: an update records the fingerprint's
 before/after, since 018 sets it NULL for a text another row holds — a decision
-a replay cannot re-derive), makes the append a function
+a replay cannot re-derive), made the append a function
 (`ob1_append_thought_event`, 046's trigger tail: the kind from the registry,
-the trust ceiling, the door, the claim), adds the projector
+the trust ceiling, the door, the claim), added the projector
 (`ob1_project_thought_event`: capture → INSERT, update → UPDATE by the diff's
 afters, delete → DELETE; a live write passes its vector, a replay takes it
 from `ob1_embedding_snapshot` by `(content_fingerprint, embedding_model)` —
 SMD-1998's key made a table, fed by a trigger on the row store — or leaves it
 NULL for the re-embed pool, so the row is readable while its vector is still
-materialising; a capture event without content is refused), turns the audit
+materialising; a capture event without content is refused), turned the audit
 trigger into the CHECK under `ob1.projecting = <event id>` (the row's diff
 recomputed and held to the event's afters, SQLSTATE `OB002` on a divergence,
 the vector aside; a raw write without the setting is appended as 046 does),
-makes 050's stamp callable so the event carries the stamped metadata and the
-projector writes the row under 050's own pass-through, and lets 001's
+made 050's stamp callable so the event carries the stamped metadata and the
+projector writes the row under 050's own pass-through, and let 001's
 `updated_at` trigger yield to the projector's stamp for the event's own row.
-`option2-functions.sql` redefines the three write functions: everything
-before the row write stays in the same order (005's guard, 025's provenance
+`option2-functions.sql` redefined the three write functions: everything
+before the row write stayed in the same order (005's guard, 025's provenance
 validation, 046's event validation, the actor setting, 003's key, 033's
 advisory lock, 035's row read FOR NO KEY UPDATE, SMD-1323's lock, 018's
 unchanged-content rule, the cycle walk, `STALE_READ`), and the `INSERT … ON
-CONFLICT` / `UPDATE` / `DELETE` becomes: compute the after-image, the diff,
+CONFLICT` / `UPDATE` / `DELETE` became: compute the after-image, the diff,
 append, project with the caller's vector — a vector arriving on a row that
 already has one is a projection refresh with no event, verified as such. The
-contract sentinels preflight and test-schema read stay where the behaviours
-stay. `option1-view.sql` renamed the table to `thought_rows`, created the
+contract sentinels preflight and test-schema read stayed where the behaviours
+did. `option1-view.sql` renamed the table to `thought_rows`, created the
 view `thoughts` and its INSTEAD OF INSERT/UPDATE/DELETE triggers (the same
 append and projector); `option1-undo.sql` reversed it so test-support's
 reset could run again. `writable-projection.ts` held every rule pure and

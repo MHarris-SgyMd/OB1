@@ -468,9 +468,17 @@ row that has one with no event and no `updated_at`; `ob1_embedding_snapshot`
 holds every vector by (key, model), seeded once from the rows and fed by
 `thoughts_snapshot_embedding` on live writes alone, so a fold rebuilds vectors
 without the provider (no row leaves it by itself — the decision's forgetting
-rule, SMD-1723 then SMD-1732, is the removal path, not built); 001's `update_updated_at` yields for the projected row.
-Six deltas against 055 — five the decision accepted, a sixth the write path forced: an identical re-capture,
-a no-op edit and a vector refresh write nothing and move no stamp; the
+rule, SMD-1723 then SMD-1732, is the removal path, not built); 001's
+`update_updated_at` yields for the projected row. A role granted before this
+file lacks `SELECT` on `thought_audit` and every privilege on the snapshot:
+run `migrate.ts --grant` for it again before the server writes, as
+SMD-2216's note above says for its rows (preflight refuses, naming them).
+The `SELECT` has been needed since 055 — `ob1_append_thought_event` reads the
+row it inserts (`INSERT … RETURNING`) — and the grant set had no row for it
+from 055 to 058, so a role granted then could not write at all; the row lands
+here (SMD-2116's fourth review pass).
+Six deltas against 055 — five the decision accepted, a sixth the write path
+forced: an identical re-capture, a no-op edit and a vector refresh write nothing and move no stamp; the
 stale-read guard is the pre-check alone; the 2-argument form locks the row it
 lands on; a raw writer committing the same text inside a fresh capture's window
 is merged as a re-capture (046's `ON CONFLICT` did it; 059 catches the unique
@@ -533,7 +541,7 @@ issues every group at once.
 | --- | --- | --- |
 | **capture** — the server's own connection; preflight refuses a role missing any of it | `thoughts` (001) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_chunks` (007) | `SELECT, INSERT, DELETE` |
-| | `thought_audit` (008) | `SELECT, INSERT` — since 059 the audit trigger, checking a projected row against its event, and the projector read the event (SMD-2116) |
+| | `thought_audit` (008) | `SELECT, INSERT` — since 055 `ob1_append_thought_event` reads the row it inserts (`INSERT … RETURNING`), and since 059 the audit trigger's check and the projector read the event; the row lacked `SELECT` from 055 to 058 (SMD-2116) |
 | | `thought_facets` (042) | `SELECT, UPDATE` — the delete guard reads the citations that name a thought and, detaching, writes them, on every delete |
 | | `ob1_agents` (046) | `SELECT` — the audit trigger reads the key's kind on every write that carries an actor (SMD-1730) |
 | | `ob1_embedding_snapshot` (059) | `SELECT, INSERT, UPDATE` — the snapshot trigger upserts the row's vector under its key on every write of a vector, a label or a key (SMD-2116). `ob1_project_thought_event` and `ob1_refresh_thought_vector` keep PUBLIC's EXECUTE, as the SECURITY INVOKER writers that call them require; the audit trigger holds what either may do, and a replay is the owner's |

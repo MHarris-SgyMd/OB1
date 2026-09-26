@@ -553,7 +553,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // without 042, 050 or 055 ([20l]) — all recorded by the baseline with their
   // prerequisites present, so none becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 30, `030 is among the last thirty migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 30, `030 is among the last thirty migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -2177,7 +2177,7 @@ console.log("\n[20l] Migration 059 onto a populated brain at the file before it 
   await sql`SELECT set_agent_kind('laptop', 'operator')`;
   const laptop = (await sql`SELECT resolve_agent(${"a".repeat(64)}, 'laptop', 'write') AS r`)[0].r as { agent_id: string };
   const actor = { name: "laptop", agent_id: laptop.agent_id, via: "open-brain" };
-  // A corpus at 056: a labelled vector, an unlabelled one (021: a vector of
+  // A corpus at 058, the file before this one: a labelled vector, an unlabelled one (021: a vector of
   // unknown model), a row without a vector, a raw row with a NULL key, and
   // one edited so its stamp differs from its clock.
   const labelled = (await sql`SELECT upsert_thought('upgrade 059: labelled', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
@@ -2188,7 +2188,7 @@ console.log("\n[20l] Migration 059 onto a populated brain at the file before it 
   await sql.unsafe(`UPDATE thoughts SET content_fingerprint = NULL WHERE id = '${RAW}'`);
   const edited = (await sql`SELECT upsert_thought('upgrade 059: edited once', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(3)}::vector) AS r`)[0].r as { id: string };
   await sql`SELECT update_thought(${edited.id}::uuid, NULL, '{"k": 1}'::jsonb, NULL, NULL, NULL, ${actor}::jsonb, NULL, NULL, NULL)`;
-  assert((await sql`SELECT to_regclass('ob1_embedding_snapshot') IS NULL AS none`)[0].none === true, "at 056 there is no snapshot table");
+  assert((await sql`SELECT to_regclass('ob1_embedding_snapshot') IS NULL AS none`)[0].none === true, "before 059 there is no snapshot table");
   const stamps = async () => JSON.stringify(await sql`SELECT id, content, content_fingerprint, metadata, embedding::text AS e, embedding_model, updated_at::text AS u FROM thoughts ORDER BY id`);
   const before = await stamps();
   const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
@@ -2225,7 +2225,7 @@ console.log("\n[20l] Migration 059 onto a populated brain at the file before it 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("059") });
   assert(JSON.stringify(await shape(sql)) === JSON.stringify(shapeAfter) && (await stamps()) === again && Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === Number(auditAgain)
     && JSON.stringify(await sql`SELECT content_fingerprint, embedding_model, embedding::text AS e, taken_at::text AS t FROM ob1_embedding_snapshot ORDER BY 1, 2`) === snapAfter && JSON.stringify(shapeAfter) !== JSON.stringify(shapeBefore),
-    "re-applying 059 is a no-op: the shape as it left it (three functions and a table more than 056), no row moved, no audit row added, no snapshot row re-seeded");
+    "re-applying 059 is a no-op: the shape as it left it (four functions and a table more than 058), no row moved, no audit row added, no snapshot row re-seeded");
   await sql.close();
 
   // The guard, driven ([20g]'s shape): a brain baselined at a ledger through

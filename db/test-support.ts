@@ -186,9 +186,9 @@ const FUNCTIONS = [
   "ob1_actor_stamp_kept(jsonb, jsonb)",
   "ob1_capture_payload(uuid, timestamptz, bigint)",
   "backfill_thought_payloads(integer)",
-  // 059 (SMD-2116): the projector, the refresh and the snapshot's feeding
-  // trigger function; the three write functions and the audit trigger it
-  // redefines are named above.
+  // 059 (SMD-2116): the projector, the refresh, the snapshot's feeding
+  // trigger function and the log's order; the three write functions and the
+  // audit trigger it redefines are named above.
   "ob1_project_thought_event(uuid, vector, text, boolean)",
   "ob1_refresh_thought_vector(uuid, vector, text)",
   "ob1_snapshot_embedding()",

@@ -296,8 +296,8 @@
 --      evals/README.md, which says where each criterion lives now.
 --
 --   COST. Measured on Postgres 16.15 in a container, width 8, no provider,
---      the medians of 200 calls each over five rounds, 056's bodies against
---      this file's on one database: a 3-argument capture with a vector
+--      the medians of 200 calls each over five rounds, the bodies before this
+--      file against its own on one database: a 3-argument capture with a vector
 --      844 us -> 829 us (x0.98), a content edit with a vector 780 us ->
 --      858 us (x1.10); the ratio moved x0.61-x1.26 (capture) and
 --      x0.85-x1.29 (edit) across the rounds, inside SMD-1999's band
@@ -345,13 +345,22 @@
 --   no return shape changes (update_thought's
 --   updated_at is the row's stamp as it stands after the call, which a
 --   no-write arm leaves where it was). The seed is one INSERT ... SELECT over
---   thoughts (SHARE, the length of a read of the vectors) with ON CONFLICT DO
---   NOTHING: idempotent, and a re-apply moves no row. A brain that reverts
+--   thoughts (ACCESS SHARE, the length of a read of the vectors) with ON
+--   CONFLICT DO NOTHING: idempotent, and a re-apply moves no row. A brain that reverts
 --   to 046's bodies (`bun migrate.ts --reapply` runs every file in order, so
 --   055 and this file put theirs back last) writes the row first again and
 --   is trigger-audited; the log written under either is complete and shaped
 --   the same. MINOR under FORK.md's version rules: functions and a table
---   added, none renamed.
+--   added, none renamed. A role granted before this file lacks SELECT on
+--   thought_audit and every privilege on the snapshot table: run
+--   `migrate.ts --grant` for it again before the server writes
+--   (db/config.mjs's capture group carries both; preflight's write
+--   privileges check refuses such a role, naming them). The SELECT is not
+--   this file's need alone — 055's ob1_append_thought_event reads the row
+--   it inserts (INSERT ... RETURNING), so a role granted between 055 and
+--   058 could not capture, edit or delete at all, and the grant set had no
+--   row for it until this one (run-it, fourth review pass); this file's
+--   check and projector read the event as well.
 --
 -- Prerequisites
 --   042 (delete_thought's 3-argument form, the citation guard and its

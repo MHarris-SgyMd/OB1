@@ -1723,25 +1723,38 @@ else {
       // (ninth review pass cut an in-file grant after three passes of edges).
       assert(/SELECT on ob1_agents/.test(writeLine((await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL })).out)), "…and 046's body back, it is required again — and named, not granted, by the apply");
       await claims.unsafe("GRANT SELECT ON ob1_agents TO ob1_pf_capture");
-      // The census SELECTs the log. Since 059 so do the audit trigger — the
-      // check reads the event it judges a projected row against — and the
-      // projector, as the caller, on every function-borne write: SELECT on
-      // thought_audit is in the hard capture set (SMD-2116), so a role
-      // without it is refused for the writes, and the census is skipped
-      // beside that with its own GRANT (run-it, SMD-1730's second review pass
-      // placed the skip; the role's SELECT-on-all otherwise held it).
+      // The census SELECTs the log. So does 055's append on every write —
+      // its INSERT ... RETURNING reads the row it inserts — and since 059 the
+      // audit trigger's check and the projector, as the caller: SELECT on
+      // thought_audit is in the hard capture set (SMD-2116 put it there; it
+      // had been needed since 055 with no row in the grant set — run-it,
+      // SMD-2116's fourth review pass), so a role without it is refused for
+      // the writes, and the census is skipped beside that with its own GRANT
+      // (run-it, SMD-1730's second review pass placed the skip; the role's
+      // SELECT-on-all otherwise held it).
       await claims.unsafe("REVOKE SELECT ON thought_audit FROM ob1_pf_capture");
       const asWriter = new SQL({ url: CAPTURE_URL, max: 1 });
       let deniedInCheck = "";
       try { await asWriter`SELECT upsert_thought('preflight: a capture without SELECT on thought_audit', ${{ metadata: {}, actor: { name: "laptop" } }}::jsonb)`; }
       catch (e) { deniedInCheck = (e as Error).message; }
       finally { await asWriter.close(); }
-      assert(/permission denied for table thought_audit/.test(deniedInCheck), `a capture as a role without SELECT on thought_audit fails inside 059's check (${deniedInCheck.slice(0, 80)})`);
+      assert(/permission denied for table thought_audit/.test(deniedInCheck), `a capture as a role without SELECT on thought_audit fails inside 059's projector, the log's first reader in a write (${deniedInCheck.slice(0, 80)})`);
       const noCensus = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
-      assert(noCensus.code === 1 && /SELECT on thought_audit/.test(writeLine(noCensus.out)) && /059's audit trigger, checking a projected row against its event, and the projector read thought_audit as the caller/.test(writeLine(noCensus.out)) && /GRANT SELECT ON thought_audit TO ob1_pf_capture;/.test(noCensus.out),
-             `a role lacking SELECT on thought_audit is refused, 059's check named (exit ${noCensus.code})`);
+      assert(noCensus.code === 1 && /SELECT on thought_audit/.test(writeLine(noCensus.out)) && /055's ob1_append_thought_event reads the audit row it inserts — INSERT … RETURNING — and since 059 the audit trigger's check and the projector read the event, as the caller/.test(writeLine(noCensus.out)) && /GRANT SELECT ON thought_audit TO ob1_pf_capture;/.test(noCensus.out),
+             `a role lacking SELECT on thought_audit is refused, 059's readers of the log named (exit ${noCensus.code})`);
       assert(/·  audit events\s+not checked — this role cannot read the census \(permission denied for table thought_audit\); the shape is checked, the waiting keys are not/.test(noCensus.out) && /GRANT SELECT ON thought_audit TO <the connector's role>; — the community group's row/.test(noCensus.out),
              "…and the census is skipped beside it, naming the table");
+      // Before 055 nothing on the write path read the log (046's trigger
+      // inserted with no RETURNING), so the SELECT is asked of a brain with
+      // 055's append alone: the function set aside, the role is not refused
+      // for it (run-it, fourth review pass: the requirement dates from 055,
+      // not 059; the audit-events check reads the missing function as its
+      // own finding, so only the write line is held here).
+      await claims.unsafe("ALTER FUNCTION ob1_append_thought_event(uuid, text, text, jsonb, jsonb) RENAME TO ob1_append_thought_event_aside");
+      const pre055Role = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(/write privileges/.test(writeLine(pre055Role.out)) && !/SELECT on thought_audit/.test(writeLine(pre055Role.out)),
+             `a brain without 055's append is not asked for SELECT on thought_audit among the writes (${writeLine(pre055Role.out).slice(0, 120)})`);
+      await claims.unsafe("ALTER FUNCTION ob1_append_thought_event_aside(uuid, text, text, jsonb, jsonb) RENAME TO ob1_append_thought_event");
       await claims.unsafe("GRANT SELECT ON thought_audit TO ob1_pf_capture");
       // 059's snapshot writes alone missing: refused, the trigger named, and a
       // capture that carries a vector fails inside it as the role (SMD-2116).
