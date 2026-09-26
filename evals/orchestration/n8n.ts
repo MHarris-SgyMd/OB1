@@ -220,7 +220,13 @@ export function judgeEgress(log: string, facts: EgressFacts): Check {
   // api.n8n.io at boot (measured), and a bump that adds a caller fails here.
   const unexpectedNames = outside.filter((n) => !TEMPLATE_HOSTS.includes(n));
   const fmt = (m: Map<string, number>, keep: (k: string) => boolean) => [...m].filter(([k]) => keep(k)).map(([k, v]) => `${k} ×${v}`).join(", ") || "none";
-  const blocked = facts.problem ?? (loopbackResolver ? `the resolver is on loopback (${loopbackResolver}, Docker's embedded DNS): its questions are rewritten to another port before the capture, so names cannot be judged — E is measured on podman` : undefined);
+  // The capture itself must have run once, for the whole window: one
+  // `listening on` header (two means tcpdump restarted, none that it never
+  // opened) and no exit summary (tcpdump prints it only when it stops).
+  const opened = log.split("\n").filter((l) => /^listening on /.test(l)).length;
+  const ended = /^\d+ packets (captured|received by filter|dropped by kernel)/m.test(log);
+  const capture = opened !== 1 ? `the watcher's capture opened ${opened} times: it restarted, or never opened` : ended ? "the watcher's capture ended before it was read" : undefined;
+  const blocked = facts.problem ?? capture ?? (loopbackResolver ? `the resolver is on loopback (${loopbackResolver}, Docker's embedded DNS): its questions are rewritten to another port before the capture, so names cannot be judged — E is measured on podman` : undefined);
   return {
     id: "E",
     pass: !blocked && toBrain > 0 && unexpectedNames.length === 0 && dials.size === 0 && unreadable.length === 0,
@@ -236,19 +242,58 @@ export function judgeEgress(log: string, facts: EgressFacts): Check {
   };
 }
 
-/** The facts E is judged against, read live: n8n's resolv.conf, and the brain's addresses (v4 and v6) from the engine. */
-function egressFacts(): EgressFacts {
-  const conf = compose("n8n", ["exec", "-T", "n8n", "cat", "/etc/resolv.conf"]);
-  const resolvers = [...conf.out.matchAll(/^nameserver\s+(\S+)/gm)].map((m) => m[1]);
-  const searchDomains = conf.out.match(/^search\s+(.+)$/m)?.[1].trim().split(/\s+/) ?? [];
-  const id = compose("n8n", ["ps", "-q", "server"]).out.trim();
-  const inspect = id ? run(["docker", "inspect", id, "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.GlobalIPv6Address}} {{end}}"]) : null;
+/** What the engine said, raw: each read's output and exit code. `watcher` is `<running> <startedAt>`, and `n8nStarted` n8n's startedAt. */
+export type RawFacts = {
+  resolv: { out: string; code: number };
+  brain: { out: string; code: number } | null;
+  watcher: { out: string; code: number } | null;
+  n8nStarted: string;
+};
+
+/**
+ * The facts, parsed. Pure, so the self-check holds it on canned output (review
+ * pass 4: three mutants of the live reader survived with nothing testing it).
+ * The watcher must still be running and have started no later than n8n,
+ * because a capture that stopped or began late saw only part of what n8n sent,
+ * and E would pass on it. On podman, stopping the watcher also cut n8n off
+ * (measured), but an unrecorded engine behaviour is not a check.
+ */
+/** An engine's timestamp: Docker's RFC 3339, or podman's Go form `2026-09-26 06:12:26.451290425 -0500 CDT`. NaN when neither. */
+export function engineTime(s: string): number {
+  const m = /^(\d{4}-\d\d-\d\d)[ T](\d\d:\d\d:\d\d)(\.\d+)?\s*(Z|[+-]\d\d:?\d\d)?/.exec(s.trim());
+  if (!m) return NaN;
+  const zone = !m[4] || m[4] === "Z" ? "Z" : m[4].includes(":") ? m[4] : `${m[4].slice(0, 3)}:${m[4].slice(3)}`;
+  return Date.parse(`${m[1]}T${m[2]}${(m[3] ?? "").slice(0, 4)}${zone}`);
+}
+
+export function factsFrom(raw: RawFacts): EgressFacts {
+  const resolvers = [...raw.resolv.out.matchAll(/^nameserver\s+(\S+)/gm)].map((m) => m[1]);
+  const searchDomains = raw.resolv.out.match(/^search\s+(.+)$/m)?.[1].trim().split(/\s+/) ?? [];
   // Addresses only: podman prints "invalid IP" for an unset IPv6 address (measured).
-  const brain = inspect?.out.trim().split(/\s+/).filter((a) => /^\d+\.\d+\.\d+\.\d+$/.test(a) || /^[0-9a-f]*:[0-9a-f:]+$/i.test(a)) ?? [];
-  const problem = conf.code !== 0 ? `n8n's resolv.conf could not be read (${conf.err.trim().slice(0, 100)})`
-    : !inspect || inspect.code !== 0 ? `the brain's addresses could not be read (${inspect?.err.trim().slice(0, 100) ?? "no server container"})`
-    : !resolvers.length || !brain.length ? `the facts are empty (resolvers: ${resolvers.length}, brain addresses: ${brain.length})` : undefined;
+  const brain = raw.brain?.out.trim().split(/\s+/).filter((a) => /^\d+\.\d+\.\d+\.\d+$/.test(a) || /^[0-9a-f]*:[0-9a-f:]+$/i.test(a)) ?? [];
+  const [running, ...startedWords] = (raw.watcher?.out.trim() ?? "").split(/\s+/);
+  const watcherStarted = startedWords.join(" ");
+  const problem = raw.resolv.code !== 0 ? "n8n's resolv.conf could not be read"
+    : !raw.brain || raw.brain.code !== 0 ? "the brain's addresses could not be read"
+    : !resolvers.length || !brain.length ? `the facts are empty (resolvers: ${resolvers.length}, brain addresses: ${brain.length})`
+    : !raw.watcher || raw.watcher.code !== 0 ? "the watcher's state could not be read"
+    : running !== "true" ? "the watcher is not running: the capture stopped before it was read"
+    : !(engineTime(watcherStarted) <= engineTime(raw.n8nStarted)) ? `the watcher started (${watcherStarted}) after n8n (${raw.n8nStarted}): the capture missed n8n's start`
+    : undefined;
   return { resolvers, searchDomains, brain, problem };
+}
+
+/** The facts E is judged against, read live: n8n's resolv.conf, the brain's addresses (v4 and v6), and the watcher's and n8n's state, from the engine. */
+function egressFacts(): EgressFacts {
+  const idOf = (service: string) => compose("n8n", ["ps", "-q", service]).out.trim();
+  const inspect = (id: string, format: string) => (id ? run(["docker", "inspect", id, "--format", format]) : null);
+  const [server, watcher, n8nId] = [idOf("server"), idOf("egress-watch"), idOf("n8n")];
+  return factsFrom({
+    resolv: compose("n8n", ["exec", "-T", "n8n", "cat", "/etc/resolv.conf"]),
+    brain: inspect(server, "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.GlobalIPv6Address}} {{end}}"),
+    watcher: inspect(watcher, "{{.State.Running}} {{.State.StartedAt}}"),
+    n8nStarted: inspect(n8nId, "{{.State.StartedAt}}")?.out.trim() ?? "",
+  });
 }
 
 const egressRecord = (): Check => judgeEgress(compose("n8n", ["logs", "--no-log-prefix", "egress-watch"]).out, egressFacts());

@@ -58,11 +58,12 @@
  * project skips what already exists; after editing a workflow file, --down first.
  * Needs LINEAR_API_KEY (the usual .env search path) and the host's Ollama.
  */
+import { readFileSync } from "node:fs";
 import { loadEnv } from "./env.ts";
 import type { Adapter, Check, Ctx } from "./orchestration/adapter.ts";
 import { callTool, listTools, refuses } from "./orchestration/mcp-client.ts";
 import { activepieces } from "./orchestration/activepieces.ts";
-import { judgeEgress, n8n } from "./orchestration/n8n.ts";
+import { engineTime, factsFrom, judgeEgress, n8n } from "./orchestration/n8n.ts";
 import { windmill } from "./orchestration/windmill.ts";
 import { brainSql, compose, ENV_FILE, ensureEnv, memoryByContainer, run, setEnvValue, setLayout, waitFor } from "./orchestration/stack.ts";
 import { initSecrets } from "../deploy/orchestration/provision.ts";
@@ -132,12 +133,33 @@ function selfCheck(): number {
     ["a capture without the brain fails", base.filter((l) => !l.includes(".8000:")), false, /NO SYN to the brain/],
     ["a loopback resolver (Docker's) cannot be judged, and fails", base, false, /CANNOT JUDGE: the resolver is on loopback/, { ...facts, resolvers: ["127.0.0.11"] }],
     ["facts that could not be read fail", base, false, /CANNOT JUDGE: n8n's resolv\.conf could not be read/, { ...facts, problem: "n8n's resolv.conf could not be read (exit 1)" }],
+    // The capture's own liveness (review pass 4): tcpdump restarted, never opened, or stopped.
+    ["a capture that restarted (two headers) fails", [...base, base[1]], false, /CANNOT JUDGE: the watcher's capture opened 2 times/],
+    ["a capture that never opened fails", base.filter((l) => !l.startsWith("listening on")), false, /opened 0 times/],
+    ["a capture that ended before it was read fails", [...base, "92 packets captured", "92 packets received by filter", "0 packets dropped by kernel"], false, /capture ended before it was read/],
+    ["a question line without its length is unreadable", [...base, out("10.89.4.1.53: 4242+ A? server.dns.podman.")], false, /UNREADABLE PACKET LINES/],
   ];
   let failed = 0;
   for (const [what, lines, pass, re, f] of cases) {
     const r = judgeEgress(lines.join("\n"), f ?? facts);
     if (r.pass !== pass || !re.test(r.detail)) { failed++; console.error(`FAIL ${what}: ${r.pass ? "PASS" : "FAIL"} ${r.detail.slice(0, 220)}`); }
   }
+  // The facts, parsed from what the engine prints (podman's own formats).
+  const expect = (what: string, ok: boolean) => { if (!ok) { failed++; console.error(`FAIL ${what}`); } };
+  const resolv = { out: "search dns.podman cerberus-gondola.ts.net\nnameserver 10.89.4.1\n", code: 0 };
+  const brain = { out: "10.89.4.3 invalid IP 10.89.6.4 invalid IP ", code: 0 };
+  const watcher = (running: string, at: string) => ({ out: `${running} ${at}`, code: 0 });
+  const n8nAt = "2026-09-26 06:12:26.451290425 -0500 CDT";
+  const good = factsFrom({ resolv, brain, watcher: watcher("true", "2026-09-26 06:12:25.9 -0500 CDT"), n8nStarted: n8nAt });
+  expect("facts: resolvers, search domains and the brain's addresses parse; podman's 'invalid IP' is dropped", !good.problem && good.resolvers.join() === "10.89.4.1" && good.searchDomains.join() === "dns.podman,cerberus-gondola.ts.net" && good.brain.join() === "10.89.4.3,10.89.6.4");
+  expect("facts: a stopped watcher is a problem", /not running/.test(factsFrom({ resolv, brain, watcher: watcher("false", "2026-09-26 06:12:25 -0500 CDT"), n8nStarted: n8nAt }).problem ?? ""));
+  expect("facts: a watcher started after n8n is a problem", /after n8n/.test(factsFrom({ resolv, brain, watcher: watcher("true", "2026-09-26 06:12:30 -0500 CDT"), n8nStarted: n8nAt }).problem ?? ""));
+  expect("facts: no brain address is a problem", /empty/.test(factsFrom({ resolv, brain: { out: "invalid IP", code: 0 }, watcher: watcher("true", "2026-09-26 06:12:25 -0500 CDT"), n8nStarted: n8nAt }).problem ?? ""));
+  expect("engineTime reads podman's Go form and Docker's RFC 3339 alike", engineTime(n8nAt) === Date.parse("2026-09-26T11:12:26.451Z") && engineTime("2026-09-26T11:12:26.451Z") === Date.parse("2026-09-26T11:12:26.451Z"));
+  // The watcher's filter keeps every clause E relies on (review pass 4: dropping the IPv6 clause survived).
+  const sealed = Bun.YAML.parse(readFileSync(new URL("./orchestration/compose.n8n-sealed.yaml", import.meta.url), "utf8")) as any;
+  const filter = String(sealed?.services?.["egress-watch"]?.command?.at(-1) ?? "");
+  expect("the watcher's filter records UDP, TCP on 53, IPv4 SYNs and IPv6 TCP", ["udp", "tcp port 53", "tcp[tcpflags] & tcp-syn != 0 and tcp[tcpflags] & tcp-ack == 0", "(ip6 and tcp)"].every((c) => filter.includes(c)));
   console.log(failed ? `eval-orchestration self-check: ${failed} failed` : `eval-orchestration self-check: OK (${cases.length} cases)`);
   return failed ? 1 : 0;
 }

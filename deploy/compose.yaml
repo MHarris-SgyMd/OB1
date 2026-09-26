@@ -504,7 +504,8 @@ services:
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-}
       # The owner, set from the environment at every start: it exists from
       # the first boot, so there is no unclaimed window between `up` and
-      # provisioning. A changed password takes effect on the next restart.
+      # provisioning. A changed password takes effect when the container is
+      # recreated (`up -d n8n`); a `compose restart` keeps the old hash.
       # The hash is bcrypt; --init derives it from N8N_OWNER_PASSWORD and
       # writes it single-quoted, since compose would read its `$`s as
       # variables (measured).

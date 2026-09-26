@@ -13,10 +13,14 @@ the second review pass to test what C1 already said: "A scheduled workflow"). Th
 page is the pick, the two gates, the boundary, what it declines and what it
 leaves open.
 
-**Amended by SMD-2210** (the profile, built): decision 3's store is decided
-(SQLite, measured). The import pipeline's runner is decided ("Running a
-pipeline from a workflow"). The gates, the boundary and operations now say
-what the profile does rather than what it would do.
+**Amended by SMD-2210** (the profile, built):
+- Decision 3's store is decided (SQLite, measured).
+- Decision 4 gains the import runner's bounded write path, which is decided
+  but not built ("Running a pipeline from a workflow").
+- Decision 6 loses the owner-setup endpoint: n8n sets its owner from the
+  environment.
+- The gates, the boundary and operations now say what the profile does
+  rather than what it would do.
 
 ## The decision
 
@@ -276,7 +280,7 @@ concern SMD-1813's allowlist and SMD-1903's egress policy already name.
    kit's `--with sealed` puts n8n on an `internal: true` network with a
    tcpdump watcher in its network namespace. The brain-side paths still pass
    there. The watcher records every DNS question n8n sent, in any shape, and
-   every connection attempt it made. The kit's E check fails closed: every
+   every connection attempt that became a packet. The kit's E check fails closed: every
    outbound packet must be a readable question to the listed resolver or a
    connection to the brain, and every name must be the network's own or a
    template's host (`../evals/README.md`, "The orchestration profile
@@ -324,11 +328,15 @@ not dropped when the recipe retires.
   (SMD-2210): 369 MiB after the runs, on a 6.4 MiB SQLite store. A Postgres
   17 of its own measured 404 MiB for n8n, plus 52 MiB for its server and a
   280 MiB image, on a 15.5 MiB store.
-- **Upgrades.** The image is pinned by digest and bumped deliberately. Each bump
-  re-runs the eval kit's `--up n8n` and `--verify n8n --wait-schedule`, which
-  run the profile as it ships, because two things the profile depends on are not
-  n8n's published contract: the internal key-mint endpoints, and the shape of
-  the run data the verifier counts. That is the kit's one operational use.
+- **Upgrades.** The image is pinned by digest and bumped deliberately, after a
+  backup: n8n migrates its store on the new image and nothing reverses it.
+  Each bump re-runs the eval kit on the profile as it ships, in two cycles.
+  The first is `--up n8n` and `--verify n8n --wait-schedule`. The second is
+  the sealed egress probe, `--up n8n --with sealed` and `--verify n8n`, which
+  is what catches a new image calling out. Two things the profile depends on
+  are not n8n's published contract: the internal key-mint endpoints, and the
+  shape of the run data the verifier counts. That is the kit's one
+  operational use.
 - **Backups.** n8n's store holds workflows, credentials (encrypted with
   `N8N_ENCRYPTION_KEY`), each polling workflow's cursor (its static data) and
   run history. The workflows are the templates in the tree, and an API-key

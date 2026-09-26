@@ -5897,10 +5897,16 @@ a brain that does not report the stamp (below, "Found on the way").
   a host the kit's templates name (`api.linear.app`). Expansions with the
   host's own search domains (`server.<isp domain>`) are reported apart and
   pass: fixed names, carrying nothing. The brain must have been seen, or the
-  capture proves nothing. When the facts cannot be read, or the resolver is
-  on loopback (Docker's embedded DNS, whose questions reach the capture
-  rewritten to another port), E fails with CANNOT JUDGE. E is measured on
-  podman.
+  capture proves nothing. E also fails with CANNOT JUDGE in four cases:
+  - the capture itself did not run once for the whole window (not exactly
+    one `listening on` header, or tcpdump's exit summary in the log);
+  - the watcher was not running when judged, or started after n8n;
+  - the facts cannot be read;
+  - the resolver is on loopback (Docker's embedded DNS, whose questions
+    reach the capture rewritten to another port).
+
+  Stopping the watcher mid-run on podman also cut n8n off (review pass 4,
+  measured), but E no longer relies on that. E is measured on podman.
 
   What E cannot see: on an intact internal network, a dial to an address off
   the subnet fails inside n8n (ENETUNREACH) and sends nothing, so the seal
@@ -5909,7 +5915,7 @@ a brain that does not report the stamp (below, "Found on the way").
   E fails (both measured in review pass 3).
 
   The judge is pure, and `eval-orchestration.ts --self-check` (CI) holds it
-  on 31 crafted logs in the watcher's format, tcpdump's own lines from pass
+  on 35 crafted logs in the watcher's format, tcpdump's own lines from pass
   3's runs among them. Each way out below fails:
   - a raw-IP dial, and the same on another interface;
   - `n8n.io`, and `server.9.9.9.9.nip.io`;
@@ -5925,7 +5931,8 @@ a brain that does not report the stamp (below, "Found on the way").
   - an unreadable line;
   - a capture without the brain;
   - a loopback resolver;
-  - unread facts.
+  - unread facts;
+  - a capture that restarted, never opened, or ended early.
 
   The recorded shape, a host search-domain expansion, an empty TCP DNS
   connection and the host's own polls pass. Each earlier version of E passed
@@ -5937,10 +5944,14 @@ a brain that does not report the stamp (below, "Found on the way").
 **The result: every check passes, on both stores and sealed.** One cycle
 each on the dogfood Mac (2026-09-25, the podman VM, the host's Ollama). SQLite
 and Postgres ran with `--wait-schedule`, on the implementation commit.
-Sealed ran without it, by design, on review pass 3's code: the owner set from
-the environment, key tags bound to their file, and E reading a question in
-any shape. Pass 3 also re-ran the plain profile without the wait. It passed
-C1–C3, K and P: 20.3 s, the past run gone after 81 s, n8n 352 MiB.
+Review pass 4 re-ran SQLite with `--wait-schedule` on pass 3's code, after
+three passes had changed the owner, the keys and the port. It passed C1–C3,
+C1s, K and P again: 20.3 s, the schedule seen after 811 s, the past run gone
+after 50 s, n8n 369 MiB, a 6.4 MiB store. Sealed ran without it, by design,
+on review pass 3's code: the owner set from the environment, key tags bound
+to their file, and E reading a question in any shape. Pass 3 also re-ran the
+plain profile without the wait. It passed C1–C3, K and P: 20.3 s, the past
+run gone after 81 s, n8n 352 MiB.
 
 | run | C1: run 1 / run 2 | C1s | C3 | K | P | E |
 | --- | --- | --- | --- | --- | --- | --- |

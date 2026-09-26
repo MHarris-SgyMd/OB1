@@ -58,9 +58,9 @@
  * Nothing secret is printed. The eval kit imports this module and provisions
  * through it (evals/orchestration/n8n.ts), so the kit tests these bytes.
  */
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
-import { hostname, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "../../db/env.ts";
@@ -100,6 +100,8 @@ export type Options = {
   workflows: string[];
   /** Mint a new key even when the stored one is good, and revoke the rest. */
   rotate?: boolean;
+  /** Revoke the live keys of a tag this file carries but was not made for (a moved file's old keys). */
+  adopt?: boolean;
   /** Scopes beyond SCOPES this caller needs (the kit: its run-history reads). */
   extraScopes?: string[];
 };
@@ -124,7 +126,12 @@ export function setEnvValue(file: string, key: string, value: string): void {
  * sweep deleted the working key (review pass 2, measured). A line to replace
  * may carry `export ` or spaces around `=`.
  */
-export function setEnvValues(file: string, values: Record<string, string>): void {
+export function setEnvValues(given: string, values: Record<string, string>): void {
+  // Written through a symlink to the file it names, so the link stays a link
+  // and the secrets land where the operator keeps them (review pass 4: the
+  // rename replaced the link with a regular file, and the target kept a dead
+  // key and no encryption key).
+  const file = existsSync(given) ? realpathSync(given) : given;
   const text = existsSync(file) ? readFileSync(file, "utf8") : "";
   const keys = Object.keys(values);
   const lines = text.split("\n").filter((l) => !keys.some((k) => new RegExp(`^\\s*(export\\s+)?${k}\\s*=`).test(l)));
@@ -180,7 +187,7 @@ const JSON_HEADERS = { "content-type": "application/json" };
 /**
  * `--init`: the profile's secrets, written where the env file has none. The
  * hash is re-derived when it does not match the password; an operator who
- * changes the password runs this again, then restarts n8n. Returns the names
+ * changes the password runs this again, then recreates n8n. Returns the names
  * written, never the values.
  */
 export async function initSecrets(envFile: string): Promise<string[]> {
@@ -208,18 +215,18 @@ export async function initSecrets(envFile: string): Promise<string[]> {
 async function ownerSession(base: string, env: Record<string, string>): Promise<string> {
   const password = env.N8N_OWNER_PASSWORD;
   if (!password) throw new Error("N8N_OWNER_PASSWORD is not set in the env file — run `bun deploy/orchestration/provision.ts --init` (deploy/README.md, \"Orchestration\")");
-  if (Buffer.byteLength(password) > MAX_PASSWORD_BYTES) throw new Error(`N8N_OWNER_PASSWORD is over ${MAX_PASSWORD_BYTES} bytes, which bcrypt does not read — choose a shorter one, run --init, restart n8n`);
+  if (Buffer.byteLength(password) > MAX_PASSWORD_BYTES) throw new Error(`N8N_OWNER_PASSWORD is over ${MAX_PASSWORD_BYTES} bytes, which bcrypt does not read — choose a shorter one, run --init, and recreate n8n (compose --profile orchestration up -d n8n)`);
   // Checked here first: n8n's owner is the hash, and a hash out of step with
   // the password would otherwise read as n8n refusing the password.
   if (env.N8N_OWNER_PASSWORD_HASH && !(await Bun.password.verify(password, env.N8N_OWNER_PASSWORD_HASH).catch(() => false))) {
-    throw new Error("N8N_OWNER_PASSWORD_HASH does not match N8N_OWNER_PASSWORD — run --init to re-derive it, then restart n8n (compose --profile orchestration up -d n8n), which sets the owner from it");
+    throw new Error("N8N_OWNER_PASSWORD_HASH does not match N8N_OWNER_PASSWORD — run --init to re-derive it, then recreate n8n (compose --profile orchestration up -d n8n; a `compose restart` keeps the old hash), which sets the owner from it");
   }
   const email = env.N8N_OWNER_EMAIL || DEFAULT_OWNER_EMAIL;
   const login = await fetch(`${base}/rest/login`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ emailOrLdapLoginId: email, password }) });
   const cookie = login.headers.get("set-cookie")?.split(";")[0];
   if (login.status === 429) throw new Error(`n8n rate-limits sign-in (5 a minute per email, n8n 2.40.6) and answered 429 — wait a minute and run again`);
   if (!login.ok || !cookie) {
-    throw new Error(`n8n sign-in as ${email} failed (${login.status}): n8n sets its owner from N8N_OWNER_EMAIL and N8N_OWNER_PASSWORD_HASH at start — if either changed since n8n started, restart it; an instance not managed that way has an owner of its own`);
+    throw new Error(`n8n sign-in as ${email} failed (${login.status}): n8n sets its owner from N8N_OWNER_EMAIL and N8N_OWNER_PASSWORD_HASH at start — if either changed since n8n was created, recreate it (compose --profile orchestration up -d n8n; a 'compose restart' keeps the old values); an instance not managed that way has an owner of its own`);
   }
   return cookie;
 }
@@ -239,17 +246,39 @@ async function listKeys(base: string, session: Record<string, string>): Promise<
  * revoke the other's key on every run (review pass 2, measured): a laptop's
  * checkout and a server's, or a copied deploy/.env. A copy carries the tag,
  * though (review pass 3, measured). So a tag counts only beside the
- * fingerprint of the file it was made for (N8N_API_KEY_TAG_OF: the host's
- * name and the file's real path). A copied or moved file then mints under a
- * tag of its own and sweeps nothing it inherited. The keys a moved file
- * leaves behind expire with their N8N_API_KEY_DAYS.
+ * fingerprint of the file it was made for (N8N_API_KEY_TAG_OF: the machine's
+ * stable id and the file's real path). A copied or moved file then mints under
+ * a tag of its own and sweeps nothing it inherited. It names the old tag's
+ * live keys, and --adopt revokes them (a moved file's, never a copy in use).
  */
 const mine = (label: string, tag: string | undefined) => tag !== undefined && label.startsWith(`${KEY_LABEL}-${tag}-`);
 
-/** The host's name and the env file's real path, hashed: what a copy of the file does not carry. */
+/**
+ * The machine's stable id, where it has one: /etc/machine-id (Linux), the
+ * platform UUID (macOS). Not the hostname, which on a Mac with no HostName set
+ * follows the network, and in a one-off container is random (review pass 4,
+ * measured: three hostnames for one file, each a new tag and a key left live).
+ * Empty where there is none, and then the path alone decides.
+ */
+let machine: string | undefined;
+export function machineId(): string {
+  if (machine !== undefined) return machine;
+  for (const f of ["/etc/machine-id", "/var/lib/dbus/machine-id"]) {
+    const id = existsSync(f) ? readFileSync(f, "utf8").trim() : "";
+    if (id) return (machine = id);
+  }
+  if (process.platform === "darwin") {
+    const p = Bun.spawnSync(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"], { stdout: "pipe", stderr: "ignore" });
+    const id = /"IOPlatformUUID" = "([^"]+)"/.exec(p.stdout?.toString() ?? "")?.[1];
+    if (id) return (machine = id);
+  }
+  return (machine = "");
+}
+
+/** The machine's id and the env file's real path, hashed: what a copy of the file, or the file moved, does not carry. */
 export function fileFingerprint(envFile: string): string {
   const path = existsSync(envFile) ? realpathSync(envFile) : resolve(envFile);
-  return createHash("sha256").update(`${hostname()}\0${path}`).digest("hex").slice(0, 12);
+  return createHash("sha256").update(`${machineId()}\0${path}`).digest("hex").slice(0, 12);
 }
 
 /** This file's own tag, or undefined when it has none or carries one made for another file. */
@@ -388,7 +417,7 @@ export async function provision(o: Options): Promise<{ steps: string[]; key: Key
   // compose would interpolate reaches n8n mangled, and every sign-in then
   // fails with no clue why (review pass 2).
   if (o.env.N8N_OWNER_PASSWORD_HASH && !singleQuoted(o.envFile, "N8N_OWNER_PASSWORD_HASH")) {
-    throw new Error("N8N_OWNER_PASSWORD_HASH's line is not single-quoted, so compose reads its `$`s as variables and n8n gets a mangled hash — run --init, which rewrites it quoted, then restart n8n");
+    throw new Error("N8N_OWNER_PASSWORD_HASH's line is not single-quoted, so compose reads its `$`s as variables and n8n gets a mangled hash — run --init, which rewrites it quoted, then recreate n8n (compose --profile orchestration up -d n8n)");
   }
   const creds: { file: string; c: any }[] = [];
   for (const file of o.credentials) for (const c of JSON.parse(render(readFileSync(file, "utf8"), o.env, file))) creds.push({ file, c });
@@ -403,6 +432,9 @@ export async function provision(o: Options): Promise<{ steps: string[]; key: Key
   const problems = flows.flatMap(({ file, text }) => undeclaredCredentials(JSON.parse(text), declared, file));
   if (problems.length) throw new Error(problems.join("; "));
 
+  // A tag this file carries but was not made for: a copy, or the file moved.
+  // Read before the mint below replaces it.
+  const inheritedTag = o.env.N8N_API_KEY_TAG && ownTag(o) === undefined ? o.env.N8N_API_KEY_TAG : undefined;
   let key = await ensureApiKey(o);
   if (!key.minted) {
     // The sweep: a key a previous run minted and then failed to delete is
@@ -445,11 +477,24 @@ export async function provision(o: Options): Promise<{ steps: string[]; key: Key
     else { id = (await api(o.base, k, "POST", "/workflows", body)).id; n.workflowsCreated++; }
     await api(o.base, k, "POST", `/workflows/${id}/publish`, {});
   }
+  // The inherited tag's keys: named, so a moved file's leftovers are not
+  // silent, and revoked with --adopt. A copy of a file still in use must NOT
+  // adopt: that would revoke the original's key.
+  const inheritedNote: string[] = [];
+  if (inheritedTag) {
+    const session = { ...JSON_HEADERS, cookie: await ownerSession(o.base, o.env) };
+    const live = (await listKeys(o.base, session)).filter((l) => mine(l.label, inheritedTag));
+    if (o.adopt) for (const l of live) await call(o.base, `/rest/api-keys/${l.id}`, { method: "DELETE", headers: session }, "revoke key");
+    inheritedNote.push(o.adopt
+      ? `adopted tag ${inheritedTag} (made for another path or machine): ${live.length} of its keys revoked`
+      : `this file carried tag ${inheritedTag}, made for another path or machine, and now has its own; ${live.length} key(s) under the old tag still live — if this file was moved rather than copied, run again with --adopt to revoke them`);
+  }
   const expires = key.expiresAt ? new Date(key.expiresAt * 1000).toISOString().slice(0, 10) : "never";
   return {
     key,
     steps: [
       `${key.minted ? "API key minted through the internal /rest endpoints" : "API key reused"} (expires ${expires}; ${key.revoked} earlier revoked)`,
+      ...inheritedNote,
       `credentials: ${n.created} created, ${n.patched} patched`,
       `workflows: ${n.workflowsCreated} created, ${n.workflowsReplaced} replaced, ${o.workflows.length} published`,
     ],
@@ -588,6 +633,17 @@ async function selfCheck(): Promise<number> {
     setEnvValues(fresh, { N8N_API_KEY: "new", N8N_API_KEY_ID: "k1" });
     expect("setEnvValues replaces an `export` line and writes several at once", readFileSync(fresh, "utf8") === "N8N_API_KEY=new\nN8N_API_KEY_ID=k1\n");
     expect("setEnvValue refuses a line break", throws(() => setEnvValue(fresh, "K", "a\nb"), /line break/));
+    // A symlinked env file is written through, and stays a link; it fingerprints as its target (review pass 4).
+    const link = `${fresh}.link`;
+    try {
+      writeFileSync(fresh, "A=1\n", { mode: 0o600 });
+      symlinkSync(fresh, link);
+      setEnvValue(link, "B", "2");
+      expect("a symlinked env file stays a link, and its target gets the line", lstatSync(link).isSymbolicLink() && readFileSync(fresh, "utf8") === "A=1\nB=2\n");
+      expect("a link fingerprints as the file it names", fileFingerprint(link) === fileFingerprint(fresh));
+    } finally {
+      rmSync(link, { force: true });
+    }
   } finally {
     rmSync(file, { force: true });
     rmSync(fresh, { force: true });
@@ -674,6 +730,20 @@ async function selfCheck(): Promise<number> {
     } finally {
       rmSync(copyFile, { force: true });
     }
+    // A moved file: without --adopt the old tag's keys are named and left; with it they are revoked.
+    const movedFile = join(HERE, `.self-check.${process.pid}.moved.env`);
+    try {
+      const orig = file();
+      writeFileSync(movedFile, readFileSync(keyFile, "utf8"), { mode: 0o600 });
+      const told = await provision({ ...opts({ ...base, ...parseEnv(readFileSync(movedFile, "utf8")) }), envFile: movedFile });
+      expect("a moved file's first run names the old tag and its live keys, and revokes none", told.steps.some((s) => s.includes(`carried tag ${orig.N8N_API_KEY_TAG}`) && /1 key\(s\) under the old tag still live/.test(s)));
+      writeFileSync(movedFile, readFileSync(keyFile, "utf8"), { mode: 0o600 });
+      const adopted = await provision({ ...opts({ ...base, ...parseEnv(readFileSync(movedFile, "utf8")) }, { adopt: true }), envFile: movedFile });
+      const origNow = await fetch(`${f.base}/api/v1/workflows?limit=1`, { headers: { "X-N8N-API-KEY": orig.N8N_API_KEY } });
+      expect("--adopt revokes the old tag's keys", adopted.steps.some((s) => s.includes(`adopted tag ${orig.N8N_API_KEY_TAG}`)) && origNow.status === 401);
+    } finally {
+      rmSync(movedFile, { force: true });
+    }
     // The mint writes the file before revoking anything. When THIS file's write
     // fails (its directory read-only, the same tag), the old key still answers.
     const roDir = mkdtempSync(join(tmpdir(), "ob1-provision-"));
@@ -733,8 +803,8 @@ if (import.meta.main && process.argv.includes("--self-check")) process.exit(awai
 if (import.meta.main) {
   const args = process.argv.slice(2);
   const flag = (n: string) => { const i = args.indexOf(`--${n}`); return i >= 0 ? args[i + 1] : undefined; };
-  const usage = "usage: bun deploy/orchestration/provision.ts [--init] [--env-file deploy/.env] [--rotate] [--url http://127.0.0.1:5678]";
-  const unknown = args.filter((a, i) => a.startsWith("--") && !["--env-file", "--rotate", "--url", "--init"].includes(a) && !["--env-file", "--url"].includes(args[i - 1]));
+  const usage = "usage: bun deploy/orchestration/provision.ts [--init] [--env-file deploy/.env] [--rotate] [--adopt] [--url http://127.0.0.1:5678]";
+  const unknown = args.filter((a, i) => a.startsWith("--") && !["--env-file", "--rotate", "--url", "--init", "--adopt"].includes(a) && !["--env-file", "--url"].includes(args[i - 1]));
   if (unknown.length) {
     console.error(`unknown flag ${unknown[0]}\n${usage}`);
     process.exit(2);
@@ -749,14 +819,14 @@ if (import.meta.main) {
     console.log(written.length ? `wrote ${written.join(", ")} to ${envFile}` : `${envFile} already holds the profile's secrets`);
     const env = parseEnv(readFileSync(envFile, "utf8"));
     if (!env.N8N_BRAIN_CAPTURE_KEY) console.log("still needed: N8N_BRAIN_CAPTURE_KEY — cd server-portable && bun keygen.ts --name n8n --scope capture; the key into N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS (and restart the server)");
-    console.log("back up N8N_ENCRYPTION_KEY and N8N_OWNER_PASSWORD with POSTGRES_PASSWORD; if n8n was running, restart it (compose --profile orchestration up -d n8n)");
+    console.log("back up N8N_ENCRYPTION_KEY and N8N_OWNER_PASSWORD with POSTGRES_PASSWORD; if n8n was running, recreate it (compose --profile orchestration up -d n8n; not `compose restart`, which keeps the old values)");
     process.exit(0);
   }
   const env = parseEnv(readFileSync(envFile, "utf8"));
   const base = flag("url") ?? `http://127.0.0.1:${env.N8N_PORT || "5678"}`;
   try {
     await waitReady(base);
-    const { steps } = await provision({ base, env, envFile, credentials: [PROFILE_CREDENTIALS], workflows: templatesIn(PROFILE_TEMPLATES), rotate: args.includes("--rotate") });
+    const { steps } = await provision({ base, env, envFile, credentials: [PROFILE_CREDENTIALS], workflows: templatesIn(PROFILE_TEMPLATES), rotate: args.includes("--rotate"), adopt: args.includes("--adopt") });
     console.log(`n8n at ${base} provisioned:\n  ${steps.join("\n  ")}`);
   } catch (e) {
     console.error(`provision failed: ${e instanceof Error ? e.message : String(e)}`);

@@ -484,8 +484,9 @@ hash `N8N_OWNER_PASSWORD_HASH` (single-quoted, since compose would read its
 none. n8n sets its owner from the email and the hash at every start
 (`N8N_INSTANCE_OWNER_MANAGED_BY_ENV`). So the owner exists from the first
 boot, and nobody who reaches the port before provisioning can claim the
-instance. To change the password, edit it, run `--init` again, and restart
-n8n. `--init` re-derives a hash that no longer matches, and rewrites one
+instance. To change the password, edit it, run `--init` again, and recreate
+n8n: `compose up -d n8n`. A `compose restart` keeps the environment the
+container was created with, and so the old hash. `--init` re-derives a hash that no longer matches, and rewrites one
 whose line is not single-quoted. Keep the password within 72 bytes: bcrypt
 reads no further, and `--init` refuses a longer one. Without the key or the
 hash, the container exits at once with the reason in its log, and `ps` shows
@@ -503,17 +504,20 @@ and workflow calls the step makes, and it expires after `N8N_API_KEY_DAYS`
 n8n answers a deleted key with 401. A key an interrupted run left behind
 goes on the next run. A second env file provisioning the same n8n keeps its
 own key: each file tags its keys, and a tag counts only beside a fingerprint
-of the host and the file's path (`N8N_API_KEY_TAG_OF`). That holds for
-another checkout, and for a copy of `deploy/.env`, which mints under a tag
-of its own on its first run and revokes nothing. The keys a moved file
-leaves behind expire with their `N8N_API_KEY_DAYS`. Then the step creates or patches each
+of the machine (its stable id, not its network hostname) and the file's
+real path (`N8N_API_KEY_TAG_OF`). That holds for another machine's checkout
+provisioning this n8n, and for a copy of `deploy/.env`, which mints under a
+tag of its own on its first run and revokes nothing. A moved file does the
+same. The step names the tag it left, with its live keys, and `--adopt`
+revokes them. A symlinked `deploy/.env` is written through, and stays a
+link. Then the step creates or patches each
 credential from `orchestration/credentials.template.json` with values from
 the env file, and creates or replaces each template. A replaced workflow
 loses edits made in the editor: the template is the source. Run it again
 after changing a key in `deploy/.env` or a template. Before it writes
 anything, it refuses:
 - a brain key at write scope, or one `MCP_ACCESS_KEYS` does not list,
-  wherever it sits: a header, `Bearer <key>`, a URL's `?key=`;
+  wherever in a credential it sits: a header, `Bearer <key>`, a URL's `?key=`;
 - a key whose scope is not the one its credential declares (`brainScope`);
 - a template naming a credential no template declares.
 
@@ -557,29 +561,45 @@ compose exec -T n8n sh -c 'cat /home/node/.n8n/backup.sqlite && rm /home/node/.n
 # own user, removing the old WAL, which SQLite would otherwise replay onto the copy
 compose run --rm --no-deps -T --entrypoint sh n8n -c 'rm -f /home/node/.n8n/database.sqlite-wal /home/node/.n8n/database.sqlite-shm && cat > /home/node/.n8n/database.sqlite' < n8n-backup.sqlite
 compose up -d --no-deps n8n
+bun deploy/orchestration/provision.ts --rotate   # the copy brings back keys and credentials as they were then
 ```
 
 Both shapes were measured, with the same `N8N_ENCRYPTION_KEY`: a restore
 into a fresh volume, and one over a stopped n8n. The workflows and
-credentials come back. The stored API key is honoured if no mint happened
-since the copy was taken. If one did, the next provisioning run mints a
-fresh key. Two ways to lose the store: `compose cp` writes the file
-root-owned, and n8n then opens it read-only; and a restore that leaves the
-old WAL in place came back as "database disk image is malformed" (measured).
+credentials come back. So does every API key n8n held when the copy was
+taken, including one revoked since, and every credential as it was then.
+That is why the restore ends with a `--rotate` provisioning run: it revokes
+the file's old keys and patches the credentials to the env file's current
+keys. Two ways to lose the store: `compose cp` writes the file root-owned,
+and n8n then opens it read-only; and a restore that leaves the old WAL in
+place came back as "database disk image is malformed" (measured).
+
+**After a compromise** (a leaked owner password or API key), a password
+change revokes nothing by itself. Delete every key in n8n's Settings → n8n
+API, change the password, run `--init`, recreate n8n (`compose up -d n8n`),
+and provision with `--rotate`.
 
 **Run history.** Each run's data is a copy of what the run carried: a
 capture's text, an act tool's arguments. It sits outside `delete_thought`
 and the brain's retention. The profile keeps it 24 hours or 1,000 runs
 (`N8N_EXECUTIONS_MAX_AGE`, `N8N_EXECUTIONS_MAX_COUNT`); n8n's defaults are 14
 days and 10,000. n8n marks runs past the window hourly, and deletes a marked
-run's data at its first 15-minute sweep an hour after that. So a capture's
-text can outlive the window by up to about two and a quarter hours.
+run's rows at its first 15-minute sweep an hour after that. So a run's rows
+can outlive the window by up to about two and a quarter hours. Rows, not
+bytes: SQLite may keep a deleted row's text in the file's free pages until
+they are reused or the file is vacuumed, and a backup keeps whatever it
+copied. The eval kit's P check proves the rows gone.
 
-**Upgrades.** Bump the digest deliberately, and re-run the eval kit against
-the new image (`bun evals/eval-orchestration.ts --up n8n`, then `--verify n8n
---wait-schedule`). The endpoints that mint the key and the run data the kit
-counts are not n8n's published contract. The kit runs this profile as it
-ships (`../evals/README.md`, "The orchestration profile (SMD-2210)").
+**Upgrades.** Take a backup (above) first: n8n migrates its store on the new
+image, and nothing reverses that. Bump the digest deliberately, and re-run
+the eval kit against the new image in two cycles. First
+`bun evals/eval-orchestration.ts --up n8n`, then `--verify n8n
+--wait-schedule`, then `--down n8n`. Then `--up n8n --with sealed`, then
+`--verify n8n`, then `--down n8n`. The second is the egress probe, and the
+one that catches a new image calling out. The endpoints that mint the key
+and the run data the kit counts are not n8n's published contract. The kit
+runs this profile as it ships (`../evals/README.md`, "The orchestration
+profile (SMD-2210)").
 
 **Licences** (the fork's reading, not legal advice; the ADR's Gate 1). n8n is
 under its Sustainable Use License, OB1 under FSL-1.1-MIT, and an operator
