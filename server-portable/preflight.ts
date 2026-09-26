@@ -30,7 +30,7 @@ import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEn
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
-import { quoteIdent, searchPathSchemas, withPublic, withPublicInUrl } from "./search-path.ts";
+import { quoteIdent, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
@@ -756,9 +756,12 @@ if (configFailed) {
       const urlArg = conn ? `$${conn.from}` : "<the brain's postgres:// connection string — Supabase's direct connection, not the pooler>";
       // public.thoughts present but not resolving for this role — no USAGE
       // on public, or public off its search_path, or both — is not a brain
-      // to migrate (SMD-2062). Only when the failure is thoughts not
-      // resolving: an RLS policy reading a missing table fails the same
-      // count with another relation's "does not exist". public alone, as
+      // to migrate (SMD-2062). Only when thoughts itself does not resolve:
+      // the count's error is an undefined table (42P01, in any lc_messages),
+      // and the probe's own to_regclass('thoughts') — same role, same path —
+      // is NULL. An RLS policy whose function reads a missing table, or
+      // reads thoughts under a pinned search_path, fails the same count with
+      // thoughts resolving. public alone, as
       // every direct check judges it: a thoughts in some other schema is
       // another tool's, and an un-migrated public still wants the
       // migrations. Each cause that holds is named with its statement
@@ -769,16 +772,18 @@ if (configFailed) {
       // With USAGE held, thoughts not resolving means off the path whatever
       // the parse says. The GRANT names current_user, whose privilege the
       // count used; the ALTER ROLE names session_user, the login role whose
-      // settings load (a SET ROLE in them leaves the two apart). It is for
-      // this database — a role's setting there outranks its plain ALTER
-      // ROLE and the database's — unless the path came from the connection
-      // (pg_settings.source `client`) or was SET after login (`session`: a
-      // pooler, a login trigger), which outrank it. A role barred from
-      // pg_settings still gets the statement. pg_class answers for any role,
+      // settings load (a SET ROLE in them leaves the two apart, and then only
+      // the owner can run it). It is for this database — a role's setting
+      // there outranks its plain ALTER ROLE and the database's — unless the
+      // path came from the connection (pg_settings.source `client`: given as
+      // the connection string's options, which Bun and libpq both read) or
+      // was SET after login (`session`: a pooler replaying it, a login
+      // trigger), which outrank it. A role barred from pg_settings gets the
+      // statement with that caveat. pg_class answers for any role,
       // whatever its path; over PostgREST there is no catalog to ask, and a
       // failed probe asks nothing.
       let offPath: { causes: string[]; fixes: string[] } | null = null;
-      if (built.kind === "sql" && conn && /"thoughts" does not exist/.test(msg)) {
+      if (built.kind === "sql" && conn && (String((e as { errno?: unknown }).errno ?? "") === "42P01" || /"thoughts" does not exist/.test(msg))) {
         try {
           const { SQL } = await import("bun");
           const probe = new SQL({ url: conn.url, max: 1 });
@@ -786,13 +791,14 @@ if (configFailed) {
             const [r] = (await probe`
               SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                               WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present,
+                     to_regclass('thoughts') IS NULL AS unresolved,
                      has_schema_privilege('public', 'USAGE') AS usage,
                      current_setting('search_path') AS path,
                      current_setting('server_version_num')::int AS version,
                      quote_ident(current_user::text) AS role,
                      quote_ident(session_user::text) AS login,
-                     quote_ident(current_database()::text) AS db`) as { present: boolean; usage: boolean; path: string; version: number; role: string; login: string; db: string }[];
-            if (r?.present) {
+                     quote_ident(current_database()::text) AS db`) as { present: boolean; unresolved: boolean; usage: boolean; path: string; version: number; role: string; login: string; db: string }[];
+            if (r?.present && r.unresolved) {
               let source: string | null = null;
               try {
                 source = ((await probe`SELECT source FROM pg_settings WHERE name = 'search_path'`) as { source: string }[])[0]?.source ?? null;
@@ -806,11 +812,13 @@ if (configFailed) {
               }
               if (r.usage || !schemas.includes("public")) {
                 causes.push(`public is not on its search_path, which is ${schemas.length ? schemas.map(quoteIdent).join(", ") : "empty"}`);
-                const alter = `ALTER ROLE ${r.login} IN DATABASE ${r.db} SET search_path = ${withPublic(schemas)};`;
+                const alter = `ALTER ROLE ${r.login} IN DATABASE ${r.db} SET search_path = ${withPublic(schemas)};${r.login !== r.role ? ` (as the database owner: ${r.role}, the role this connection SETs, may not alter ${r.login})` : ""}`;
                 fixes.push(source === "client"
-                  ? `set search_path in the connection string, which sets it now (?search_path= or options=-c search_path=) and outranks any ALTER ROLE: ?search_path=${withPublicInUrl(schemas)}`
+                  ? `Set search_path in the connection string's options, which set it now and outrank any ALTER ROLE (& before it if the URL has a query already): options=${withPublicInOptions(schemas)}`
                   : source === "session"
-                  ? `${alter}  (this session's path was SET after login — by a pooler or a login trigger — which outranks it; change it there)`
+                  ? `${alter}  (this session's path was SET after login — by a pooler replaying the connection string's, or a login trigger — which outranks it; change it there)`
+                  : source === null
+                  ? `${alter}  (unless the connection string sets search_path, which outranks it)`
                   : alter);
               }
               offPath = { causes, fixes };

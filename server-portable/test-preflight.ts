@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
 import { DIRECT_CHECK_SKIP_OVER_POSTGREST } from "./store.ts";
-import { searchPathSchemas, withPublic, withPublicInUrl } from "./search-path.ts";
+import { searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
 import { ACCEPTED_CAVEAT_PREFIX, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -317,8 +317,8 @@ console.log("\n[4b] A search_path setting is read as Postgres reads it (SMD-2242
   }
   assert(withPublic([]) === "public" && withPublic(["$user", "public"]) === '"$user", public' && withPublic(['a"b', "x;y"]) === '"a""b", "x;y", public',
          "…and the path with public put on it keeps the rest in order, each quoted, public once and last");
-  assert(withPublicInUrl(["nowhere"]) === "%22nowhere%22%2Cpublic" && decodeURIComponent(withPublicInUrl(["a b,c"])) === '"a b,c",public',
-         "…and as a connection string's value it has no space between names and is percent-encoded");
+  assert(withPublicInOptions(["nowhere"]) === "-csearch_path%3D%22nowhere%22%2Cpublic" && decodeURIComponent(withPublicInOptions(["a b,c", "x\\y"])) === '-csearch_path="a\\ b,c","x\\\\y",public',
+         "…and as a connection string's options it has no space between names, escapes a space or backslash inside one, and is percent-encoded");
 }
 
 console.log("\n[5] Against a real database");
@@ -1967,6 +1967,24 @@ else {
       const empty = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
       assert(/public is not on its search_path, which is empty\)\n\s+→ ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = public;/.test(empty.out),
              `an empty path is named empty, and the statement sets public alone (${row(empty.out, "schema")})`);
+      {
+        const printed = /→ (ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = public;)/.exec(empty.out)?.[1];
+        let resolves = false;
+        if (printed) {
+          await claims.unsafe(printed);
+          try {
+            const reader = new SQL({ url: readerUrl, max: 1 });
+            try {
+              resolves = ((await reader`SELECT to_regclass('thoughts') IS NOT NULL AS ok`) as { ok: boolean }[])[0].ok;
+            } finally {
+              await reader.close();
+            }
+          } finally {
+            await claims.unsafe(`DO $r$ BEGIN EXECUTE format('ALTER ROLE pf_reader IN DATABASE %I RESET search_path', current_database()); END $r$`);
+          }
+        }
+        assert(resolves, `…and run as printed it makes thoughts resolve for the role (${printed ?? "nothing printed"})`);
+      }
       // A path stored raw (set_config, then FROM CURRENT): a quoted name with
       // a doubled quote, $user, an unquoted name to fold, an NBSP that is no
       // whitespace to Postgres, and a name that is a statement if pasted bare.
@@ -2014,8 +2032,8 @@ else {
       // A path the connection string sets outranks every ALTER ROLE, so the
       // row says to change it there.
       const viaUrl = await run({ ...SQL_ENV, DATABASE_URL: `${readerUrl}${readerUrl.includes("?") ? "&" : "?"}options=-csearch_path%3Dnowhere` });
-      assert(/→ set search_path in the connection string, which sets it now \(\?search_path= or options=-c search_path=\) and outranks any ALTER ROLE: \?search_path=%22nowhere%22%2Cpublic /.test(viaUrl.out),
-             `a path from the connection string is fixed there, not by ALTER ROLE, as a value the URL carries (${row(viaUrl.out, "schema")})`);
+      assert(/→ Set search_path in the connection string's options, which set it now and outrank any ALTER ROLE \(& before it if the URL has a query already\): options=-csearch_path%3D%22nowhere%22%2Cpublic /.test(viaUrl.out),
+             `a path from the connection string is fixed there, not by ALTER ROLE, in the options form Bun and libpq both read (${row(viaUrl.out, "schema")})`);
       // A login role whose settings SET ROLE: the count runs as the role it
       // becomes, but the settings that load are the login role's, so the
       // ALTER ROLE names the login role.
@@ -2025,8 +2043,8 @@ else {
         await claims.unsafe("GRANT pf_acting TO pf_reader");
         await claims.unsafe("ALTER ROLE pf_reader SET role = pf_acting");
         const acting = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
-        assert(/public is not on its search_path, which is "nowhere"\)\n\s+→ ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public;/.test(acting.out),
-               `a login role that SETs ROLE is the one the ALTER ROLE names (${row(acting.out, "schema")})`);
+        assert(/public is not on its search_path, which is "nowhere"\)\n\s+→ ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public; \(as the database owner: pf_acting, the role this connection SETs, may not alter pf_reader\)/.test(acting.out),
+               `a login role that SETs ROLE is the one the ALTER ROLE names, run as the owner (${row(acting.out, "schema")})`);
       } finally {
         await claims.unsafe("ALTER ROLE pf_reader RESET role");
         await claims.unsafe("DROP ROLE pf_acting");
@@ -2037,14 +2055,15 @@ else {
       await claims.unsafe("REVOKE SELECT ON pg_catalog.pg_settings FROM PUBLIC");
       try {
         const barred = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
-        assert(/public is not on its search_path, which is "nowhere"\)\n\s+→ ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public;/.test(barred.out),
-               `a role that cannot read pg_settings still gets the path's statement (${row(barred.out, "schema")})`);
+        assert(/public is not on its search_path, which is "nowhere"\)\n\s+→ ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public;  \(unless the connection string sets search_path, which outranks it\)/.test(barred.out),
+               `a role that cannot read pg_settings still gets the path's statement, with the connection string's caveat (${row(barred.out, "schema")})`);
       } finally {
         if (settingsReadable) await claims.unsafe("GRANT SELECT ON pg_catalog.pg_settings TO PUBLIC");
       }
       // Another relation's "does not exist" on the same count — an RLS policy
-      // for this role calling a function that reads a missing table — is not
-      // thoughts off the path: public is on it, and the row must not say so.
+      // for this role calling a function that reads a missing table — is the
+      // same undefined-table error (42P01) with thoughts resolving: public is
+      // on the path, and the row must not say otherwise.
       await claims.unsafe("ALTER ROLE pf_reader SET search_path = \"$user\", public");
       try {
         await claims.unsafe("CREATE FUNCTION public.pf_rls_missing() RETURNS boolean LANGUAGE plpgsql AS $f$ BEGIN PERFORM 1 FROM pf_no_such_table; RETURN true; END $f$");
@@ -2054,10 +2073,13 @@ else {
         assert(/✗\s+schema\s+relation "pf_no_such_table" does not exist/.test(rls.out) && !/public is not on its search_path/.test(rls.out),
                `another relation's "does not exist" is not read as thoughts off the path (${row(rls.out, "schema")})`);
       } finally {
-        await claims.unsafe("ALTER TABLE public.thoughts DISABLE ROW LEVEL SECURITY");
-        await claims.unsafe("DROP POLICY IF EXISTS pf_rls ON public.thoughts");
-        await claims.unsafe("DROP FUNCTION IF EXISTS public.pf_rls_missing()");
-        await claims.unsafe("ALTER ROLE pf_reader SET search_path = nowhere");
+        try {
+          await claims.unsafe("ALTER TABLE public.thoughts DISABLE ROW LEVEL SECURITY");
+        } finally {
+          await claims.unsafe("DROP POLICY IF EXISTS pf_rls ON public.thoughts");
+          await claims.unsafe("DROP FUNCTION IF EXISTS public.pf_rls_missing()");
+          await claims.unsafe("ALTER ROLE pf_reader SET search_path = nowhere");
+        }
       }
 
       // With no USAGE on public — PUBLIC's taken too, which a fresh database

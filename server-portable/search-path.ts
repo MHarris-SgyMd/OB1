@@ -5,7 +5,7 @@
  * Preflight's `schema` row, when `public.thoughts` exists but does not resolve
  * for the server's role, names the path's fix as a whole statement: the role's
  * own schemas, kept, with public added. The setting it starts from
- * (`current_setting('search_path')`) is the role's own text. `SET` and
+ * (`current_setting('search_path')`) is the session's own text, from the role, the database or the connection. `SET` and
  * `ALTER ROLE … SET` store it re-quoted, but a connection string's `options`,
  * `set_config` and `SET search_path FROM CURRENT` store it as written. So it is
  * parsed, never echoed: an echoed path printed invalid SQL for an empty path
@@ -61,8 +61,11 @@ const publicLast = (schemas: string[]) => [...schemas.filter((s) => s !== "publi
 export const withPublic = (schemas: string[]) => publicLast(schemas).join(", ");
 
 /**
- * The same path as a connection string's `?search_path=` value: no space
- * between names (libpq's `options` splits on spaces) and percent-encoded, so
- * a quote, a space or a comma inside a name survives the URL.
+ * The same path as a connection string's `options` value, `-c search_path=…`,
+ * percent-encoded: the form both Bun and libpq (psql, pg_dump) read — libpq
+ * refuses a `search_path` URI parameter. No space between names, and a space
+ * or backslash inside one escaped with a backslash, since `options` splits on
+ * whitespace.
  */
-export const withPublicInUrl = (schemas: string[]) => encodeURIComponent(publicLast(schemas).join(","));
+export const withPublicInOptions = (schemas: string[]) =>
+  encodeURIComponent(`-csearch_path=${publicLast(schemas).join(",").replace(/[\\ \t\n\r\f\v]/g, (c) => `\\${c}`)}`);
