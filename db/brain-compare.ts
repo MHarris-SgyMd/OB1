@@ -95,11 +95,11 @@ export async function resolveBrain(ref: string, keyArg: string | undefined, envK
   }
   // A connector name — resolve it the way canary.sh does, reading only Scope/URL
   // and the x-brain-key header out of `claude mcp get`, and echoing neither back.
-  return resolveConnector(ref, keyArg);
+  return resolveConnector(ref, keyArg, envKey);
 }
 
 /** Read a connector's base URL and key from `claude mcp get <name>` — its key is used, never printed. */
-export async function resolveConnector(name: string, keyArg: string | undefined): Promise<BrainEndpoint> {
+export async function resolveConnector(name: string, keyArg: string | undefined, envKey: string | undefined): Promise<BrainEndpoint> {
   const proc = Bun.spawn(["claude", "mcp", "get", name], { stdout: "pipe", stderr: "pipe" });
   const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
   if (code !== 0) {
@@ -112,9 +112,23 @@ export async function resolveConnector(name: string, keyArg: string | undefined)
   if (!url) throw new Error(`--compare: \`claude mcp get ${name}\` named no URL.`);
   const headerLine = out.split("\n").find((l) => /x-brain-key:/i.test(l));
   const headerKey = headerLine?.replace(/^.*x-brain-key:\s*/i, "").trim() || undefined;
-  const key = keyArg ?? headerKey ?? process.env.OB1_COMPARE_KEY;
+  // A connector may hold its key as ?key= on the URL rather than a header; take it
+  // off the base (which then has /health appended) and treat it as the key, so the
+  // key never rides the POST target a proxy logs — the same normalization the URL
+  // path does (review pass 1).
+  let base = url;
+  let urlKey: string | undefined;
+  try {
+    const u = new URL(url);
+    urlKey = u.searchParams.get("key") ?? undefined;
+    u.search = "";
+    base = u.toString();
+  } catch {
+    throw new Error(`--compare: the connector ${JSON.stringify(name)} named an invalid URL.`);
+  }
+  const key = keyArg ?? headerKey ?? urlKey ?? envKey;
   if (!key) throw new Error(`--compare: the connector ${JSON.stringify(name)} carries no x-brain-key and none was given. Pass --a-key/--b-key or set OB1_COMPARE_KEY.`);
-  return { label: name, base: trimBase(url), key };
+  return { label: name, base: trimBase(base), key };
 }
 
 // ---------------------------------------------------------------------------
@@ -242,13 +256,18 @@ export async function searchIds(ep: BrainEndpoint, arm: "keyword" | "hybrid", qu
 }
 
 /**
- * The `ID:` lines of a search result, in order. Only `ID:` (with the colon) is a
- * result's own id — a "Superseded by a newer thought — ID <id>" marker prints
- * "ID <id>" without one, so it is not mistaken for a hit.
+ * The result ids of a search reply, in rank order. Each hit is a block that opens
+ * `--- Result N (…) ---` and carries `ID: <uuid>` as its FIRST field line (both
+ * search tools, SMD-1248). Anchoring to that header is what makes this content-safe:
+ * the hit's own text is appended raw after the fields, so a thought whose content
+ * holds its own `ID: <uuid>` line (a memory quoting a search result) would be
+ * counted as an extra id by a bare `ID:` match — the header-anchored match never
+ * sees it, because content lines are not preceded by a Result header (review pass 1).
+ * A "Superseded … ID <id>" marker has no colon and is excluded regardless.
  */
 export function parseResultIds(text: string): string[] {
   const ids: string[] = [];
-  const re = /(?:^|\n)\s*ID:\s*([0-9a-fA-F-]{36})/g;
+  const re = /--- Result[^\n]*---\r?\n\s*ID:\s*([0-9a-fA-F-]{36})/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) ids.push(m[1].toLowerCase());
   return ids;
@@ -275,6 +294,8 @@ export interface RetrievalRow {
   onlyA: string[];
   reordered: boolean;
   changed: boolean;
+  /** Set when the row could not be replayed (one brain refused or failed the query); the reason. A skipped row never counts as changed. */
+  skipped?: string;
 }
 
 export interface Comparison {
@@ -336,8 +357,15 @@ export async function compareBrains(
     const rows: RetrievalRow[] = [];
     for (const query of opts.queries) {
       for (const arm of arms) {
-        const [ida, idb] = await Promise.all([searchIds(a, arm, query), searchIds(b, arm, query)]);
-        rows.push(diffRow(query, arm, ida, idb));
+        // One query one brain refuses (an egress-gated embedding) or a hybrid arm a
+        // peer has no provider for must not abort the whole compare — mark the row
+        // skipped-with-reason and go on, the way newestCapture degrades (review pass 1).
+        try {
+          const [ida, idb] = await Promise.all([searchIds(a, arm, query), searchIds(b, arm, query)]);
+          rows.push(diffRow(query, arm, ida, idb));
+        } catch (e) {
+          rows.push({ query, arm, a: [], b: [], onlyA: [], onlyB: [], reordered: false, changed: false, skipped: (e as Error).message });
+        }
       }
     }
     retrieval = { rows, arms, queries: opts.queries.length };
@@ -386,8 +414,14 @@ export function freshnessVerdict(a: BrainReading, b: BrainReading, migrationDelt
     parts.push(`${cb.toLocaleString("en-US")} vs ${ca.toLocaleString("en-US")} thoughts`);
   }
   if (parts.length === 0) {
-    const bothMig = migrationDelta !== null;
-    return bothMig ? `current with each other — same migration and thought count.` : `no migration/count delta; migration ledger unread on one side, so freshness is not certain.`;
+    // "current" is a claim about what was compared: assert it only for the signals
+    // that actually answered. A ledger or a count unread on a side is not "same"
+    // (review pass 1: it read "same migration and thought count" over two nulls).
+    const migKnown = migrationDelta !== null;
+    const countsKnown = a.thoughts !== null && b.thoughts !== null;
+    if (migKnown && countsKnown) return `current with each other — same migration and thought count.`;
+    const unread = [migKnown ? null : "migration ledger", countsKnown ? null : "thought count"].filter(Boolean).join(" and ");
+    return `no delta on what could be read; ${unread} unread on one side, so freshness is not certain.`;
   }
   return parts.join("; ") + ".";
 }
@@ -435,9 +469,11 @@ export function renderComparison(c: Comparison): string {
     lines.push("  skipped — pass --replay with --query/--queries-file (query_log is not reachable over HTTP, so the query set is supplied).");
   } else {
     const moved = c.retrieval.rows.filter((r) => r.changed);
+    const skipped = c.retrieval.rows.filter((r) => r.skipped);
     lines.push(`  arms: ${c.retrieval.arms.join(", ")} over ${c.retrieval.queries} quer${c.retrieval.queries === 1 ? "y" : "ies"}${c.retrieval.arms.includes("hybrid") ? " (hybrid = the vector arm, embedded by each brain; until SMD-2037 a hybrid diff can be HNSW-GUC-induced)" : ""}`);
+    for (const r of skipped) lines.push(`  ~ [${r.arm}] ${JSON.stringify(r.query.slice(0, 60))}: skipped — ${r.skipped}`);
     if (moved.length === 0) {
-      lines.push("  no delta — b returns the same ids as a for every query and arm.");
+      lines.push(`  no delta — b returns the same ids as a for every query and arm${skipped.length ? ` (${skipped.length} skipped)` : ""}.`);
     } else {
       for (const r of moved) {
         const bits: string[] = [];
@@ -483,6 +519,19 @@ export async function runCompare(args: CompareArgs): Promise<number> {
   } else {
     console.log(renderComparison(c));
   }
-  const anyDelta = c.identity.length > 0 || (c.retrieval?.rows.some((r) => r.changed) ?? false) || (c.migrationDelta ?? 0) !== 0;
+  // The exit code is the gate a script keys on, so every axis the report calls a
+  // delta must move it — identity, migration, retrieval AND freshness (a count or a
+  // newest-capture difference). A same-migration corpus drift (597 vs 407 thoughts,
+  // no new migration — the confidently-stale case this tool exists to catch) has an
+  // empty identity and a zero migration delta, and must still exit non-zero
+  // (review pass 1: it exited 0 while the verdict printed the count delta).
+  const countDelta = c.counts.a !== null && c.counts.b !== null && c.counts.a !== c.counts.b;
+  const captureDelta = captureDaysApart(c.a.newestCapture, c.b.newestCapture);
+  const freshDelta = countDelta || (captureDelta !== null && captureDelta !== 0);
+  const anyDelta =
+    c.identity.length > 0 ||
+    (c.migrationDelta ?? 0) !== 0 ||
+    freshDelta ||
+    (c.retrieval?.rows.some((r) => r.changed) ?? false);
   return anyDelta ? 1 : 0;
 }

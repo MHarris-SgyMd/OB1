@@ -19,6 +19,7 @@ import {
   parseResultIds,
   renderComparison,
   resolveBrain,
+  runCompare,
   trimBase,
   unwrapRpc,
   type BrainEndpoint,
@@ -44,6 +45,8 @@ interface FakeConfig {
   newest: string | null;
   /** query → the ids each search tool returns, in rank order. */
   hits: Record<string, string[]>;
+  /** queries this brain refuses (an egress-gated embedding) — the search tool returns isError. */
+  refuse?: string[];
   /** frame the tools/call reply as an SSE stream rather than raw JSON. */
   sse?: boolean;
 }
@@ -98,10 +101,16 @@ function startFake(cfg: FakeConfig): { server: ReturnType<typeof Bun.serve>; ep:
           text = `Total thoughts: ${total}\nDate range: 1/1/2026 → ${cfg.newest}`;
         } else if (name === "search_thoughts_keyword" || name === "search_thoughts") {
           const q = body.params.arguments.query ?? "";
+          if (cfg.refuse?.includes(q)) return replyError(body.id, `Refused: the query may not leave the box`, cfg.sse);
           const ids = cfg.hits[q] ?? [];
+          // The real result format: a "--- Result N ---" header, ID: as the first
+          // field, then the hit's raw content — which here itself quotes an ID: line,
+          // so a content-blind parse would over-count (the parseResultIds tooth).
           text = ids.length
-            ? `${ids.length} result(s):\n\n` + ids.map((id, i) => `${i + 1}. some content\n   ID: ${id}`).join("\n\n")
-            : "No matching thoughts found.";
+            ? ids
+                .map((id, i) => `--- Result ${i + 1} (1 occurrence) ---\nID: ${id}\nType: reference\n\nA note that mentions\nID: 00000000-0000-0000-0000-0000000000${String(i).padStart(2, "0")}`)
+                .join("\n\n")
+            : `No thoughts contain "${q}".`;
         } else {
           return replyError(body.id, `unknown tool ${name}`, cfg.sse);
         }
@@ -133,14 +142,29 @@ function frame(msg: unknown, sse?: boolean): Response {
 // Pure-function teeth (no server).
 // ---------------------------------------------------------------------------
 
-// parseResultIds: only `ID:` lines, in order; the superseded marker's "ID <id>" is not a hit.
+// parseResultIds: the first ID: of each "--- Result ---" block, in order, lower-cased;
+// a content ID: line (raw hit text) and a "Superseded … ID <id>" marker are both excluded.
 {
   const uuid = (n: string) => `${n.repeat(8)}-0000-0000-0000-000000000000`.slice(0, 36);
   const a = uuid("a");
   const b = uuid("b");
-  const text = `1. hi\n   ID: ${a.toUpperCase()}\n   ⚠ Superseded by a newer thought — ID ${uuid("c")}\n2. yo\n   ID: ${b}`;
+  const contentId = uuid("c");
+  const supersededId = uuid("d");
+  const text = [
+    `--- Result 1 (2 occurrences) ---`,
+    `ID: ${a.toUpperCase()}`,
+    `Type: reference`,
+    ``,
+    `a memory that quotes a search result:`,
+    `ID: ${contentId}`,
+    `--- Result 2 (1 occurrence) ---`,
+    `ID: ${b}`,
+    `⚠ Superseded by a newer thought — ID ${supersededId}`,
+  ].join("\n");
   const ids = parseResultIds(text);
-  ok(ids.length === 2 && ids[0] === a && ids[1] === b, `parseResultIds reads the two ID: lines in order, lower-cased, and skips the "ID <id>" marker (${JSON.stringify(ids)})`);
+  ok(ids.length === 2 && ids[0] === a && ids[1] === b, `parseResultIds reads the first ID: of each Result block, in order, lower-cased (${JSON.stringify(ids)})`);
+  ok(!ids.includes(contentId), "parseResultIds excludes an ID: line inside a hit's own content (content-injection tooth)");
+  ok(!ids.includes(supersededId), "parseResultIds excludes the \"Superseded … ID <id>\" marker (no colon)");
 }
 
 // unwrapRpc: raw JSON and an SSE data: frame both parse; a keepalive comment is ignored.
@@ -181,6 +205,9 @@ function frame(msg: unknown, sse?: boolean): Response {
   ok(/1 day older/.test(stale) && /407 vs 597 thoughts/.test(stale), `verdict names the capture and count deltas (${stale})`);
   const lock = freshnessVerdict(a, mk({ label: "peer", thoughts: 597, highestMigration: 57, newestCapture: "2026-09-24" }), 0);
   ok(/current with each other/.test(lock), `verdict is "current" in lockstep (${lock})`);
+  // Counts unread on both sides: never assert "same thought count" over two nulls.
+  const unread = freshnessVerdict(mk({ thoughts: null, newestCapture: null }), mk({ thoughts: null, newestCapture: null }), 0);
+  ok(/not certain/.test(unread) && !/same migration and thought count/.test(unread), `verdict does not claim same count when both counts unread (${unread})`);
 }
 
 // trimBase: one or many trailing slashes removed.
@@ -259,6 +286,42 @@ ok(trimBase("http://h:1///") === "http://h:1" && trimBase("http://h:1") === "htt
     ok(c.retrieval!.rows.every((r) => !r.changed), "identical brains: retrieval unchanged");
     ok(/current with each other/.test(c.verdict), `identical brains: verdict current (${c.verdict})`);
   } finally { a.server.stop(true); b.server.stop(true); }
+}
+
+// A refused query is skipped-with-reason and does not abort the compare.
+{
+  const cfg = () => ({ info: baseInfo({}), newest: "9/24/2026", hits: { good: ["aaaaaaaa-0000-0000-0000-000000000000"] }, refuse: ["bad"] });
+  const a = startFake(cfg());
+  const b = startFake(cfg());
+  try {
+    // Guarded: without the per-row catch this rejects, and the mutant must fail an
+    // arm here rather than crash the suite.
+    let c: Awaited<ReturnType<typeof compareBrains>> | null = null;
+    try { c = await compareBrains(a.ep, b.ep, { queries: ["good", "bad"] }); } catch { c = null; }
+    ok(c !== null, "a refused query does not abort the whole compare (it returned)");
+    const rows = c?.retrieval?.rows ?? [];
+    const bad = rows.find((r) => r.query === "bad");
+    const good = rows.find((r) => r.query === "good");
+    ok(rows.length === 2 && !!bad?.skipped && !bad.changed, "a refused query is a skipped row, not a change");
+    ok(!!good && !good.changed, "the other query still ran despite the refusal (no whole-compare abort)");
+    ok(!!c && /current with each other/.test(c.verdict), `the compare still produced a verdict (${c?.verdict})`);
+  } finally { a.server.stop(true); b.server.stop(true); }
+}
+
+// runCompare exit code: the gate. A same-migration count drift still exits 1;
+// identical brains exit 0.
+{
+  const drift = async (over: Partial<Parameters<typeof baseInfo>[0]>) => {
+    const a = startFake({ info: baseInfo({ thoughts: 597, highestMigration: 57 }), newest: "9/24/2026", hits: {} });
+    const b = startFake({ info: baseInfo({ thoughts: 597, highestMigration: 57, ...over }), newest: "9/24/2026", hits: {} });
+    const log = console.log;
+    console.log = () => {};
+    try {
+      return await runCompare({ a: a.ep.base, b: b.ep.base, aKey: KEY, bKey: KEY, replay: false, hybrid: false, queries: [], json: false });
+    } finally { console.log = log; a.server.stop(true); b.server.stop(true); }
+  };
+  ok((await drift({ thoughts: 407 })) === 1, "runCompare exits 1 on a same-migration thought-count drift (the confidently-stale case)");
+  ok((await drift({})) === 0, "runCompare exits 0 when the two brains are identical");
 }
 
 // ---------------------------------------------------------------------------
