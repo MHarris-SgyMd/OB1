@@ -757,18 +757,23 @@ if (configFailed) {
       // public.thoughts present but not resolving for this role — no USAGE on
       // public, public off its search_path, or both — is not a brain to migrate
       // (SMD-2062). Probed only when thoughts itself fails: 42P01 on the count
-      // (in any lc_messages) and the probe's own to_regclass('thoughts') NULL —
-      // an RLS function reading some other missing table fails the count the
-      // same way. public alone: a thoughts elsewhere is another tool's. Each
+      // (in any lc_messages; any other failure spares the second connection)
+      // and the probe's own to_regclass('thoughts') NULL — an RLS function
+      // reading some other missing table fails the count the same way. public
+      // alone: a thoughts elsewhere is another tool's. Each
       // cause is named with its statement (SMD-2242). The path is parsed, never
       // echoed, and not read from current_schemas(), which hides a schema
       // without USAGE (search-path.ts); with USAGE held, thoughts not resolving
       // means off the path whatever the parse says. The GRANT names
       // current_user, whose privilege the count used; the ALTER ROLE names
-      // session_user, whose settings load. A path from the connection (source
-      // `client`) or SET after login (`session`) outranks it; an unread source
-      // gets that caveat. Over PostgREST there is no catalog to ask, and a
-      // failed probe asks nothing.
+      // session_user, whose settings load, IN DATABASE since a role's setting
+      // there outranks its plain one and the database's. A path from the
+      // connection (source `client`) or SET after login (`session`) outranks
+      // it; an unread source gets that caveat. The connection's path is
+      // replaced, never appended to: Bun joins two options with a comma, libpq
+      // keeps the last, and Bun's search_path= parameter outranks options.
+      // Over PostgREST there is no catalog to ask, and a failed probe asks
+      // nothing.
       let offPath: { causes: string[]; fixes: string[] } | null = null;
       if (built.kind === "sql" && conn && String((e as { errno?: unknown }).errno ?? "") === "42P01") {
         try {
@@ -799,7 +804,8 @@ if (configFailed) {
               }
               if (r.usage || !schemas.includes("public")) {
                 causes.push(`public is not on its search_path, which is ${schemas.length ? schemas.map(quoteIdent).join(", ") : "empty"}`);
-                // Only a superuser, or the login role itself, may alter it; under a
+                // Only a superuser, a CREATEROLE role with ADMIN on it, or the login
+                // role itself may alter it; under a
                 // SET ROLE the login role must drop it first (RESET ROLE returns to
                 // the role its settings SET).
                 const alter = r.login !== r.role

@@ -1989,7 +1989,7 @@ else {
       // A path stored raw (set_config, then FROM CURRENT): a quoted name with
       // a doubled quote, $user, an unquoted name to fold, an NBSP that is no
       // whitespace to Postgres, and a name that is a statement if pasted bare.
-      // The printed statement, run as the owner, leaves the sentinel standing
+      // The printed statement, run as a superuser, leaves the sentinel standing
       // and makes thoughts resolve for the role.
       const onThisDatabase = (setting: string) => claims.unsafe(`DO $r$ BEGIN EXECUTE format('ALTER ROLE pf_reader IN DATABASE %I ${setting}', current_database()); END $r$`);
       try {
@@ -2043,16 +2043,20 @@ else {
       assert(token !== undefined && advice.test(viaParam.out),
              `a path from the connection string, in options or as search_path=, is replaced there, not overridden by ALTER ROLE (${row(viaUrl.out, "schema")} | ${row(viaParam.out, "schema")})`);
       {
+        // Beside another -c setting, separated by %20, as the row says.
         let resolves = false;
+        let timeout = "";
         if (token) {
-          const followed = new SQL({ url: `${readerUrl}${q}options=${token}`, max: 1 });
+          const followed = new SQL({ url: `${readerUrl}${q}options=-cstatement_timeout%3D5s%20${token}`, max: 1 });
           try {
-            resolves = ((await followed`SELECT to_regclass('thoughts') IS NOT NULL AS ok`) as { ok: boolean }[])[0].ok;
+            const [f] = (await followed`SELECT to_regclass('thoughts') IS NOT NULL AS ok, current_setting('statement_timeout') AS timeout`) as { ok: boolean; timeout: string }[];
+            resolves = f.ok;
+            timeout = f.timeout;
           } finally {
             await followed.close();
           }
         }
-        assert(resolves, `…and with the connection string's setting replaced as printed, thoughts resolves (${token ?? "nothing printed"})`);
+        assert(resolves && timeout === "5s", `…and with the connection string's setting replaced as printed, beside another -c setting, thoughts resolves and the other setting holds (${token ?? "nothing printed"}; statement_timeout ${timeout})`);
       }
       // A login role whose settings SET ROLE: the count runs as the role it
       // becomes, but the settings that load are the login role's, so the
@@ -2108,6 +2112,7 @@ else {
       // on the path, and the row must not say otherwise.
       await claims.unsafe("ALTER ROLE pf_reader SET search_path = \"$user\", public");
       try {
+        await claims.unsafe("DROP POLICY IF EXISTS pf_rls ON public.thoughts; DROP FUNCTION IF EXISTS public.pf_rls_missing()");
         await claims.unsafe("CREATE FUNCTION public.pf_rls_missing() RETURNS boolean LANGUAGE plpgsql AS $f$ BEGIN PERFORM 1 FROM pf_no_such_table; RETURN true; END $f$");
         await claims.unsafe("CREATE POLICY pf_rls ON public.thoughts FOR SELECT TO pf_reader USING (public.pf_rls_missing())");
         await claims.unsafe("ALTER TABLE public.thoughts ENABLE ROW LEVEL SECURITY");
