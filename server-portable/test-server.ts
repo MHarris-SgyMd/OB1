@@ -783,15 +783,17 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
   const { HEALTH_DEADLINE_MS } = await import("./index.ts");
   const freePort = () => { const p = Bun.serve({ port: 0, fetch: () => new Response() }); const n = p.port!; p.stop(true); return n; };
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
-  const start = () => {
+  // stdout and stderr both read: the per-request lines are warnings.
+  const start = (env: Record<string, string> = {}) => {
     const port = freePort();
     const proc = Bun.spawn(["bun", "--no-env-file", "index.ts"], {
       cwd: import.meta.dir,
-      env: { ...process.env, PORT: String(port), DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, MCP_ACCESS_KEY: KEY },
+      env: { ...process.env, PORT: String(port), DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, MCP_ACCESS_KEY: KEY, ...env },
       stdout: "pipe",
-      stderr: "ignore",
+      stderr: "pipe",
     });
-    return { port, proc, out: new Response(proc.stdout).text() };
+    const err = new Response(proc.stderr).text();
+    return { port, proc, out: new Response(proc.stdout).text().then(async (o) => o + (await err)) };
   };
   const up = async (port: number) => {
     for (let i = 0; i < 200; i++) {
@@ -809,9 +811,11 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
 
   const busy = start();
   const idle = start();
-  const ctrlC = start();
+  // On the PostgREST store, which holds no pool: its stop must not say it closed one (review pass 2).
+  const ctrlC = start({ OB1_STORE: "postgrest", SUPABASE_URL: "https://stub.invalid", SUPABASE_SERVICE_ROLE_KEY: "k" });
+  const cutter = start();
   try {
-    assert(await up(busy.port) && await up(idle.port) && await up(ctrlC.port), "three child servers answer a keyless probe (the first request, which hands the handlers the server)");
+    assert(await up(busy.port) && await up(idle.port) && await up(ctrlC.port) && await up(cutter.port), "four child servers answer a keyless probe (the first request, which hands the handlers the server)");
 
     const t0 = performance.now();
     const inFlight = fetch(`http://127.0.0.1:${busy.port}/health`, { headers: { "x-brain-key": KEY } })
@@ -821,9 +825,11 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
     // Polled, not slept on: a loaded runner may take a while to deliver the
     // signal, and until then the child rightly answers (review pass 1).
     let late = "";
+    let refusedAt = Infinity;
     for (let i = 0; i < 40 && late !== "refused"; i++) {
       late = await fetch(`http://127.0.0.1:${busy.port}/health`).then((r) => `answered ${r.status}`, () => "refused");
-      if (late !== "refused") await Bun.sleep(50);
+      if (late === "refused") refusedAt = performance.now() - t0;
+      else await Bun.sleep(50);
     }
     const answered = await inFlight;
     const code = await exited(busy.proc, HEALTH_DEADLINE_MS + 5_000);
@@ -831,7 +837,7 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
     const log = await busy.out;
     assert(answered.status === 200 && answered.body === "ok" && answered.at >= HEALTH_DEADLINE_MS - 100,
       `the keyed /health in flight when SIGTERM landed is answered, 200 \`ok\` at its deadline (${Math.round(answered.at)} ms; got ${answered.status} ${answered.body.slice(0, 60)})`);
-    assert(late === "refused" && answered.status === 200, `…a new connection after the signal is refused while it is in flight (${late})`);
+    assert(late === "refused" && refusedAt < answered.at, `…a new connection after the signal is refused while it is in flight (${late} at ${Math.round(refusedAt)} ms, the request answered at ${Math.round(answered.at)} ms)`);
     assert(code === 0 && took < HEALTH_DEADLINE_MS + 2_500, `…and the server exits 0 once it is, not at the drain bound (${code} at ${Math.round(took)} ms)`);
     assert(/SIGTERM: no longer accepting; 1 request in flight/.test(log) && /SIGTERM: stopped in [\d.]+ s; database pool not closed within 1000 ms; exit 0/.test(log),
       `…saying so on stdout, the request counted (${log.split("\n").filter((l) => l.startsWith("SIGTERM")).join(" | ")})`);
@@ -843,11 +849,36 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
     assert(idleCode === 0 && performance.now() - t1 < 1_000 && /0 requests in flight/.test(idleLog) && /no database pool was opened; exit 0/.test(idleLog),
       `an idle server stops at once, exit 0, and says it opened no pool (${idleCode} in ${Math.round(performance.now() - t1)} ms)`);
 
+    await fetch(`http://127.0.0.1:${ctrlC.port}/health`, { headers: { "x-brain-key": KEY } }); // builds its store
     ctrlC.proc.kill("SIGINT");
     const intCode = await exited(ctrlC.proc, 3_000);
-    assert(intCode === 0 && /SIGINT: stopped in/.test(await ctrlC.out), `SIGINT stops it the same way (${intCode})`);
+    const intLog = await ctrlC.out;
+    assert(intCode === 0 && /SIGINT: stopped in [\d.]+ s; no database pool was opened; exit 0/.test(intLog),
+      `SIGINT stops it the same way, and a PostgREST store is not said to have a pool closed (${intCode}: ${intLog.split("\n").filter((l) => l.startsWith("SIGINT: stopped")).join("")})`);
+
+    // A keyed call that stalls before its response — the registry lookup, on
+    // the database that never replies — and two SIGTERMs: the second cuts the
+    // drain short, the same path as the bound (onCut, then stop(true) not
+    // waited on), in a fraction of the 8 s. Holds index.ts's flag, which picks
+    // the cut line, on real Bun (review pass 2).
+    const tc = performance.now();
+    const stalled = fetch(`http://127.0.0.1:${cutter.port}/`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": KEY },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    }).then((r) => `answered ${r.status}`, () => "cut off");
+    await Bun.sleep(300);
+    cutter.proc.kill("SIGTERM");
+    await Bun.sleep(200);
+    cutter.proc.kill("SIGTERM");
+    const cutCode = await exited(cutter.proc, 3_000);
+    const cutLog = await cutter.out;
+    const cutLines = cutLog.split("\n").filter((l) => /^request (cut off|abandoned)/.test(l));
+    assert(cutCode === 1 && await stalled === "cut off" && performance.now() - tc < 2_500
+      && cutLines.length === 1 && cutLines[0].startsWith("request cut off by the server's stop after 0.") && /SIGTERM: stopped in [\d.]+ s; database pool not closed: a second signal; exit 1|database pool not closed within 250 ms; exit 1/.test(cutLog),
+      `a call stalled before its response, cut by a second signal: the cut line and not the client's, exit 1, the close given 250 ms (${cutCode} in ${Math.round(performance.now() - tc)} ms: ${cutLines.join(" | ").slice(0, 90)})`);
   } finally {
-    for (const { proc } of [busy, idle, ctrlC]) proc.kill("SIGKILL");
+    for (const { proc } of [busy, idle, ctrlC, cutter]) proc.kill("SIGKILL");
     silent.stop(true);
   }
 
@@ -879,6 +910,13 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
   let c = await settled(h.stopped);
   assert(c === 1 && h.exits.join() === "1" && performance.now() - b0 >= 190 && s.calls.join() === "stop(),onCut,stop(true)" && h.lines.some((l) => /1 request still in flight after 0\.\d s, closed unfinished/.test(l)),
     `a request that never finishes is cut off at the drain bound: stop(), the cut told, stop(true) not waited on, exit 1, the line naming it (${s.calls.join()}; ${h.lines.join(" | ")})`);
+
+  s = stuck();
+  h = harness({ server: () => s.server, close: () => new Promise<boolean>(() => {}), closeBoundMs: 60_000, closeAfterCutMs: 50 });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 1 && /database pool not closed within 50 ms; exit 1$/.test(h.lines.at(-1) ?? ""),
+    `after a cut the pool is given the shorter bound, not the full one (${h.lines.at(-1)})`);
 
   s = stuck();
   h = harness({ server: () => s.server, drainBoundMs: 60_000 });
@@ -913,7 +951,7 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
   assert(await settled(h.stopped) === 0 && /; no database pool was opened; exit 0$/.test(h.lines.at(-1) ?? ""), "no pool opened is said as such, not as a pool closed");
 
   const cut = cutByStopLine("tools/call capture_thought", 8_400);
-  assert(cut.startsWith("request cut off by the server's stop after 8.4 s: tools/call capture_thought") && !/runs to its end/.test(cut) && cut !== abandonedRequestLine("tools/call capture_thought", 8_400),
+  assert(cut.startsWith("request cut off by the server's stop after 8.4 s: tools/call capture_thought — still running when the stop closed it") && !/runs to its end/.test(cut) && cut !== abandonedRequestLine("tools/call capture_thought", 8_400),
     "a request the stop cuts off is said to be the stop's, not the client leaving (SMD-1864's line says the call runs to its end, which it will not)");
 
   assert(isStoppable({ stop: () => Promise.resolve(), pendingRequests: 0 }) && !isStoppable({ OB1_STORE: "postgrest" }) && !isStoppable(undefined) && !isStoppable(null),

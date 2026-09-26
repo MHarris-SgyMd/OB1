@@ -44,6 +44,15 @@ export const DRAIN_BOUND_MS = 8_000;
 /** How long the pool is given to close once nothing is in flight. */
 export const CLOSE_BOUND_MS = 1_000;
 
+/**
+ * How long it is given after the stop has cut calls off: those calls were
+ * stuck, and on the database more often than not, so the pool's connections
+ * usually are too and a full second only spends the margin under Docker's
+ * 10 s (a cut at the bound measured 9.2–9.3 s with the 1 s close, review
+ * pass 2).
+ */
+export const CLOSE_AFTER_CUT_MS = 250;
+
 export interface DrainOptions {
   /** The running server, once the first request has handed it over; undefined before, when nothing can be in flight. */
   server: () => Stoppable | undefined;
@@ -53,6 +62,7 @@ export interface DrainOptions {
   onCut?: () => void;
   drainBoundMs?: number;
   closeBoundMs?: number;
+  closeAfterCutMs?: number;
   log?: (line: string) => void;
   exit?: (code: number) => void;
   /** Where the handlers go; the process, outside a test. */
@@ -65,6 +75,7 @@ const requests = (n: number) => `${n} request${n === 1 ? "" : "s"}`;
 export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } {
   const drainBoundMs = opts.drainBoundMs ?? DRAIN_BOUND_MS;
   const closeBoundMs = opts.closeBoundMs ?? CLOSE_BOUND_MS;
+  const closeAfterCutMs = opts.closeAfterCutMs ?? CLOSE_AFTER_CUT_MS;
   const log = opts.log ?? ((line: string) => console.log(line));
   const exit = opts.exit ?? ((code: number) => process.exit(code));
   const on = opts.on ?? ((signal, handler) => { process.on(signal, handler); });
@@ -80,7 +91,8 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
     log(`${signal}: no longer accepting; ${requests(inFlight)} in flight, waited on for up to ${drainBoundMs / 1000} s (SMD-2250)`);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const drained = await Promise.race([
-      server ? server.stop().then(() => true) : Promise.resolve(true),
+      // A stop() that rejects has stopped accepting all the same; read as drained, not as an unhandled rejection that skips the close and the line.
+      server ? server.stop().then(() => true, () => true) : Promise.resolve(true),
       new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), drainBoundMs); cutShort = () => resolve(false); }),
     ]);
     clearTimeout(timer);
@@ -93,10 +105,11 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
       // until the grace period's kill (review pass 1, measured on 1.4.0).
       server.stop(true).catch(() => {});
     }
+    const closeMs = drained ? closeBoundMs : closeAfterCutMs;
     const closed = await Promise.race([
       opts.close().then((had) => (had ? "database pool closed" : "no database pool was opened"), (e: Error) => `database pool not closed: ${e.message}`),
       new Promise<string>((resolve) => {
-        timer = setTimeout(() => resolve(`database pool not closed within ${closeBoundMs} ms`), closeBoundMs);
+        timer = setTimeout(() => resolve(`database pool not closed within ${closeMs} ms`), closeMs);
         cutShort = () => resolve("database pool not closed: a second signal");
       }),
     ]);

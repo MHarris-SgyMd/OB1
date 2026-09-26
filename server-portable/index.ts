@@ -2585,12 +2585,13 @@ export function abandonedRequestLine(label: string, elapsedMs: number): string {
 
 /**
  * The same close when the server's own stop made it: the request was still
- * running at the drain bound (shutdown.ts), and the process exits next, so
- * the call does not run to its end (review pass 1 of SMD-2250 — before, this
- * was logged as the client leaving).
+ * running when the stop closed it — at the drain bound, or on a second
+ * signal (shutdown.ts) — and the process exits next, so the call does not run
+ * to its end (review pass 1 of SMD-2250 — before, this was logged as the
+ * client leaving).
  */
 export function cutByStopLine(label: string, elapsedMs: number): string {
-  return `request cut off by the server's stop after ${(elapsedMs / 1000).toFixed(1)} s: ${label} — still running at the drain bound, and the process exits now; a capture may or may not have landed (SMD-2250)`;
+  return `request cut off by the server's stop after ${(elapsedMs / 1000).toFixed(1)} s: ${label} — still running when the stop closed it, and the process exits now; a capture may or may not have landed (SMD-2250)`;
 }
 
 // The MCP endpoint, registered for MCP_METHODS only. The transport is built per
@@ -2737,8 +2738,9 @@ let cutByStop = false;
 if (SERVES_ON_BUN) {
   drainOnSignal({
     server: () => bunServer,
-    // The pool only if a request opened one; a store that failed to build has none to close.
-    close: async () => (_store ? _store.then(async (s) => { await s.close(); return true; }, () => false) : false),
+    // The pool only if a request opened one: a store that failed to build has
+    // none, and the PostgREST store holds no pooled connection to close.
+    close: async () => (_store ? _store.then(async (s) => { await s.close(); return s.kind === "sql"; }, () => false) : false),
     onCut: () => { cutByStop = true; },
   });
 }

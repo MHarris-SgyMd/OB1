@@ -782,13 +782,14 @@ jobs:
       # ends with the tool's error and never reaches the database, which is
       # never dialled. The stop has to wait for it and count it — an idle stop
       # passed a handler that exits at once, or that never got the server
-      # (review pass 1).
+      # (review pass 1). The stub runs from the image just built, which has
+      # Bun, so nothing is pulled.
       - name: The Kubernetes image stops on SIGTERM, finishing a call in flight
         run: |
           KEY=$(openssl rand -hex 32)
           HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
           docker network create ob1-k8s-stop > /dev/null
-          docker run -d --name ob1-k8s-embed --network ob1-k8s-stop oven/bun:1.4.0-alpine bun -e 'Bun.serve({ port: 8080, async fetch() { await Bun.sleep(2000); return new Response("stub", { status: 503 }); } })' > /dev/null
+          docker run -d --name ob1-k8s-embed --network ob1-k8s-stop ob1-k8s-mcp:ci bun -e 'Bun.serve({ port: 8080, async fetch() { await Bun.sleep(2000); return new Response("stub", { status: 503 }); } })' > /dev/null
           docker run -d --name ob1-k8s-stop --network ob1-k8s-stop -p 127.0.0.1:8099:8000 -e DB_PASSWORD=unused -e EMBEDDING_API_BASE=http://ob1-k8s-embed:8080 -e "MCP_ACCESS_KEYS=ci:read:$HASH" ob1-k8s-mcp:ci > /dev/null
           up=""
           for _ in $(seq 1 40); do curl -s -o /dev/null -X POST -d '{}' http://127.0.0.1:8099/ && { up=1; break; }; sleep 0.25; done
@@ -1249,7 +1250,10 @@ jobs:
             echo "$1: stopped in ${ms} ms, exit $code"
             if ! { [ "$code" = "$2" ] && [ "$ms" -lt "$3" ]; }; then docker compose -f compose.yaml logs --tail 20 server; echo "$1: expected exit $2 within $3 ms (137 near 10 s is the grace period's kill)" >&2; exit 1; fi
           }
-          curl -s --max-time 5 -o /dev/null http://127.0.0.1:8010/health
+          # A keyed call first, so the pool this stop closes is this step's to
+          # open, whatever ran before it (review pass 2).
+          curl -s --max-time 10 -o /dev/null -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' http://127.0.0.1:8010/
           stop serving 0 3000
           last=$(docker compose -f compose.yaml logs --no-log-prefix server | grep '^SIGTERM: stopped' | tail -1 || true)
           echo "$last"
