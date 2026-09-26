@@ -254,6 +254,29 @@ jobs:
         working-directory: evals
         run: bun eval-jev-gate.ts --self-check
 
+      # The orchestration profile's provisioning rules (SMD-2210), with no real
+      # n8n:
+      # - the brain-key rule (write refused, the declared scope held, a key
+      #   under any field seen);
+      # - --init's secrets and bcrypt hash;
+      # - the env writer's quoting and modes;
+      # - every credential a shipped template names declared (the kit's
+      #   templates, until SMD-2212 ships the profile's);
+      # - compose's owner block;
+      # - the key decisions against a fake n8n on loopback: reuse, renewal,
+      #   rotation, the sweep, a copied or moved file (--adopt), a symlinked
+      #   env file, a failed env write, and a rate-limited sign-in.
+      # Then the eval kit's egress judge (E) on crafted watcher logs, the
+      # parsing of the engine's facts, and the watcher's filter. The kit runs
+      # the rest against a live profile (evals/README.md).
+      - name: Orchestration provisioning rules
+        working-directory: deploy/orchestration
+        run: bun provision.ts --self-check
+
+      - name: Orchestration egress judge
+        working-directory: evals
+        run: bun eval-orchestration.ts --self-check
+
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
       - name: Cloudflare Workers build
@@ -929,6 +952,12 @@ jobs:
             | jq -e '([.services[].ports[]?] | length == 3 and all(.host_ip == "127.0.0.1")) and ([.services[] | select(.network_mode != null)] | length == 0)'
           SERVER_BIND=0.0.0.0 docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 3) and .services.server.ports[0].host_ip == "0.0.0.0" and ([.services.postgres.ports[].host_ip, .services.ollama.ports[].host_ip] == ["127.0.0.1", "127.0.0.1"])'
+          # SMD-2210: the orchestration profile adds n8n's one port, also on
+          # loopback, with its image pinned by digest. Without the profile a
+          # plain config names exactly the three services it did before.
+          docker compose -f compose.yaml --profile orchestration config --format json \
+            | jq -e '([.services[].ports[]?] | length == 2 and all(.host_ip == "127.0.0.1")) and (.services.n8n.image | test("@sha256:[0-9a-f]{64}$"))'
+          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "migrate postgres server " ]
 
       # OB1_SMOKE_COMMIT: check 10 asserts the keyed /health body names the
       # commit the build arg above baked in, beside the version it asserts.

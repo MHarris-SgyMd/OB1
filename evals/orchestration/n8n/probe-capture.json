@@ -1,0 +1,102 @@
+{
+  "name": "OB1 — egress probe captures",
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "id": "5c1d2e3f-0001-4d2a-8b00-000000000001",
+      "name": "On demand",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "5c1d2e3f-aaaa-4d2a-8b00-000000000001",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ob1-probe",
+        "authentication": "headerAuth",
+        "responseMode": "lastNode",
+        "responseData": "allEntries",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ob1inboundRun001",
+          "name": "OB1 inbound — on-demand runs"
+        }
+      }
+    },
+    {
+      "id": "5c1d2e3f-0002-4d2a-8b00-000000000002",
+      "name": "Ten fixed thoughts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "jsCode": "return Array.from({ length: 10 }, (_, i) => ({ json: { content: `PROBE-${i + 1} — egress probe capture ${i + 1} of 10 (SMD-2210): a fixed thought that the sealed n8n writes through the brain's MCP endpoint, with nothing fetched from outside the compose network.` } }));"
+      }
+    },
+    {
+      "id": "5c1d2e3f-0003-4d2a-8b00-000000000003",
+      "name": "Capture into the brain",
+      "type": "@n8n/n8n-nodes-langchain.mcpClient",
+      "typeVersion": 1.1,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "serverTransport": "httpStreamable",
+        "endpointUrl": "http://server:8000/",
+        "authentication": "headerAuth",
+        "tool": {
+          "__rl": true,
+          "mode": "list",
+          "value": "capture_thought",
+          "cachedResultName": "capture_thought"
+        },
+        "inputMode": "json",
+        "jsonInput": "={{ JSON.stringify({ content: $json.content }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ob1brainCapture1",
+          "name": "OB1 brain — capture key"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "On demand": {
+      "main": [
+        [
+          {
+            "node": "Ten fixed thoughts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ten fixed thoughts": {
+      "main": [
+        [
+          {
+            "node": "Capture into the brain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

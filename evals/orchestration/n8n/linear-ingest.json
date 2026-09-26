@@ -44,8 +44,8 @@
       },
       "credentials": {
         "httpHeaderAuth": {
-          "id": "ob1mcpserver0001",
-          "name": "This instance's inbound key"
+          "id": "ob1inboundRun001",
+          "name": "OB1 inbound — on-demand runs"
         }
       }
     },
@@ -115,8 +115,8 @@
       },
       "credentials": {
         "httpHeaderAuth": {
-          "id": "ob1capture000001",
-          "name": "Brain — capture key"
+          "id": "ob1brainCapture1",
+          "name": "OB1 brain — capture key"
         }
       }
     }

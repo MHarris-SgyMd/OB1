@@ -16,7 +16,8 @@
 # Nothing here is production-shaped — no TLS, no backups, no resource limits — it
 # is a working reference for what the pieces are once Supabase is gone.
 #
-# What the host can reach: only the server, and only from the host itself. Every
+# What the host can reach: only the server (and n8n, under --profile
+# orchestration), and only from the host itself. Every
 # published port here names its address, `127.0.0.1` unless the operator sets
 # the `*_BIND` knob, because an address-less `"8000:8000"` binds 0.0.0.0 — every
 # interface — and this stack holds a brain (personal data at rest) behind one
@@ -269,7 +270,7 @@ services:
       PORT: "8000"
     ports:
       # Loopback unless SERVER_BIND says otherwise. The one published port of the
-      # stack. A remote client — a claude.ai connector, another machine — goes
+      # stack without its opt-in profiles. A remote client — a claude.ai connector, another machine — goes
       # through a TLS proxy or a tunnel; one on this host dials 127.0.0.1 and
       # needs no change here. `SERVER_BIND=0.0.0.0` is for a proxy on another
       # machine, and puts the key on the wire in clear on every request: the
@@ -461,7 +462,119 @@ services:
     # stops and `ps` says so rather than looping (the board-sync rule above).
     restart: on-failure:3
 
+  # The orchestration tool (SMD-2210; docs/orchestration-tool.md, SMD-1863's
+  # decision). Optional — `--profile orchestration`; a brain plus an AI client
+  # never runs it. n8n runs workflows (a schedule, a trigger, a cursor), which
+  # reach the brain only through its MCP endpoint with a capture-scope key.
+  # OB1's part is the provisioning and the templates in deploy/orchestration/;
+  # the image is n8n's, referenced and never vendored.
+  #
+  # Pinned by digest, the multi-arch index 2.40.6 resolved to when the eval kit
+  # measured it. Bump it deliberately: each bump re-runs the kit (`bun
+  # evals/eval-orchestration.ts --up n8n`, then `--verify n8n --wait-schedule`),
+  # because the internal endpoints that mint the API key, and the run data
+  # the kit counts, are not n8n's published contract.
+  #
+  # Before the first `up`, `bun deploy/orchestration/provision.ts --init`
+  # writes the secrets below into deploy/.env. After it, one provisioning step
+  # from a checkout, `bun deploy/orchestration/provision.ts`, mints an expiring
+  # API key into deploy/.env and loads credentials and templates
+  # (deploy/README.md, "Orchestration").
+  n8n:
+    image: docker.io/n8nio/n8n:2.40.6@sha256:9c7871d5cc4fc2565bb905e4df5bf7d6a5a4bf2f4313fb99a2b3fa380f331d7c
+    profiles: ["orchestration"]
+    # n8n generates an encryption key when it has none. Backing up deploy/.env
+    # would then miss it, and setting one later leaves n8n refusing to start
+    # on the mismatch. Without an owner from the environment, a fresh n8n lets
+    # whoever reaches the port first claim it. So without both, this container
+    # exits at once and says why. Compose's `:?` cannot do that job here:
+    # compose interpolates every service's block, profile or not, so a
+    # required-variable error would fail every `up` (the board-sync lesson
+    # above). The restart policy then retries it, and `ps` shows it
+    # restarting, with the reason in its log. For a server that should come
+    # back after a reboot, that beats stopping for good after three tries.
+    entrypoint:
+      - tini
+      - --
+      - /bin/sh
+      - -c
+      - '[ -n "$$N8N_ENCRYPTION_KEY" ] && [ -n "$$N8N_INSTANCE_OWNER_PASSWORD_HASH" ] || { echo "n8n: N8N_ENCRYPTION_KEY or N8N_OWNER_PASSWORD_HASH is not set in deploy/.env — run: bun deploy/orchestration/provision.ts --init, and back both up with POSTGRES_PASSWORD" >&2; exit 2; }; exec /docker-entrypoint.sh'
+    environment:
+      # n8n also writes this key into its volume (/home/node/.n8n/config),
+      # beside the credentials it encrypts (read from the 2.40.6 image). So a
+      # copy of the whole volume carries both. deploy/README.md's backup
+      # copies the database alone.
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-}
+      # The owner, set from the environment at every start: it exists from
+      # the first boot, so there is no unclaimed window between `up` and
+      # provisioning. A changed password takes effect when the container is
+      # recreated (`up -d n8n`); a `compose restart` keeps the old hash.
+      # The hash is bcrypt; --init derives it from N8N_OWNER_PASSWORD and
+      # writes it single-quoted, since compose would read its `$`s as
+      # variables (measured).
+      N8N_INSTANCE_OWNER_MANAGED_BY_ENV: "true"
+      N8N_INSTANCE_OWNER_EMAIL: ${N8N_OWNER_EMAIL:-operator@ob1.local}
+      N8N_INSTANCE_OWNER_PASSWORD_HASH: ${N8N_OWNER_PASSWORD_HASH:-}
+      N8N_INSTANCE_OWNER_FIRST_NAME: OB1
+      N8N_INSTANCE_OWNER_LAST_NAME: Operator
+      N8N_HOST: 127.0.0.1
+      N8N_PORT: "5678"
+      WEBHOOK_URL: http://127.0.0.1:${N8N_PORT:-5678}/
+      # Loopback over plain HTTP: the session cookie cannot be Secure here.
+      N8N_SECURE_COOKIE: "false"
+      GENERIC_TIMEZONE: ${N8N_TIMEZONE:-UTC}
+      # n8n's documented switches for usage diagnostics, the version check,
+      # the template gallery and the onboarding survey, each off. The eval
+      # kit's egress probe records what the container still tries to reach
+      # (evals/README.md). With these alone, the MCP registry module fetched
+      # https://api.n8n.io/api/mcp-servers at boot and every 8 hours
+      # (measured). It lists MCP servers for the editor's catalogue, and the
+      # stock MCP Client node the templates use does not need it, so it is
+      # off.
+      N8N_DISABLED_MODULES: mcp-registry
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_TEMPLATES_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      N8N_DIAGNOSTICS_CONFIG_FRONTEND: ""
+      N8N_DIAGNOSTICS_CONFIG_BACKEND: ""
+      # No secret in this block but the encryption key and the owner's hash.
+      # Provisioning puts every key into n8n's encrypted credential store
+      # through the public API, and no workflow can read one from the
+      # environment.
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"
+      # Every run's data is a copy of what the run carried: a capture's text,
+      # an act tool's arguments. It sits outside delete_thought and the
+      # brain's retention. n8n keeps 14 days or 10,000 runs by default; here
+      # it is 24 hours or 1,000 runs. n8n marks a run past the window at
+      # its hourly check, and deletes the data at a 15-minute sweep an hour
+      # later (its hard-delete buffer): up to about 2¼ hours past the window.
+      EXECUTIONS_DATA_MAX_AGE: ${N8N_EXECUTIONS_MAX_AGE:-24}
+      EXECUTIONS_DATA_PRUNE_MAX_COUNT: ${N8N_EXECUTIONS_MAX_COUNT:-1000}
+    ports:
+      # Loopback unless N8N_BIND says otherwise: the editor, the public API,
+      # the webhooks and the MCP endpoint, behind the owner's password and the
+      # keys provisioning stores. No TLS here (SMD-1846 is the one origin).
+      - "${N8N_BIND:-127.0.0.1}:${N8N_PORT:-5678}:5678"
+    volumes:
+      # The store: workflows, encrypted credentials, each workflow's cursor
+      # (static data) and run history, in n8n's default SQLite. Back it up
+      # with deploy/.env; an OAuth credential's refresh token lives only here.
+      - n8n-data:/home/node/.n8n
+    healthcheck:
+      # Readiness, not /healthz: that answers while n8n is still migrating.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5678/healthz/readiness').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    depends_on:
+      server:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   pgdata:
   ollama:
   jev-models:
+  n8n-data:
