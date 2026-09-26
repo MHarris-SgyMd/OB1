@@ -327,6 +327,8 @@ export interface IdDiff {
   totalB: number;
   /** set when a brain does not expose list_thought_ids (older than SMD-2244) — the count stand-in still stands. */
   unavailable?: boolean;
+  /** set when the id-set read FAILED for another reason (a timeout, a refusal, a mid-walk error) — the reason. Distinct from `unavailable`: the tool is there, the read did not finish; the rest of the compare still prints. */
+  failed?: string;
 }
 
 /** A safety bound on the enumeration walk — 10M ids at the 1000-default page. */
@@ -369,22 +371,36 @@ async function collectIds(ep: BrainEndpoint, first: ThoughtIdPage): Promise<Set<
  * `unavailable` rather than aborting the compare — the thought-count stand-in holds.
  */
 export async function corpusIdDiff(a: BrainEndpoint, b: BrainEndpoint): Promise<IdDiff> {
+  const blank = (patch: Partial<IdDiff>): IdDiff => ({ equal: false, onlyA: [], onlyB: [], totalA: 0, totalB: 0, ...patch });
+  // An unknown tool is an older brain (degrade to unavailable, the count stands in);
+  // anything else is a real failure of the read, kept distinct so the wrong cause
+  // is never asserted and — crucially — so the rest of the compare still prints
+  // (review pass 1). The confirmed unknown-tool signal is /not found|unknown tool/i
+  // (test-auth [7b]).
+  const isAbsent = (e: unknown) => /not found|unknown tool/i.test((e as Error).message);
   let pa: ThoughtIdPage;
   let pb: ThoughtIdPage;
   try {
     [pa, pb] = await Promise.all([fetchIdPage(a, null), fetchIdPage(b, null)]);
-  } catch {
-    return { equal: false, onlyA: [], onlyB: [], totalA: 0, totalB: 0, unavailable: true };
+  } catch (e) {
+    return isAbsent(e) ? blank({ unavailable: true }) : blank({ failed: (e as Error).message });
   }
   // Equal NON-null digests only: two null digests (the shim, or two empty corpora)
   // must be enumerated, not read as a match.
   if (pa.digest != null && pa.digest === pb.digest) {
     return { equal: true, onlyA: [], onlyB: [], totalA: pa.total, totalB: pb.total };
   }
-  const [setA, setB] = await Promise.all([collectIds(a, pa), collectIds(b, pb)]);
-  const onlyA = [...setA].filter((id) => !setB.has(id));
-  const onlyB = [...setB].filter((id) => !setA.has(id));
-  return { equal: onlyA.length === 0 && onlyB.length === 0, onlyA, onlyB, totalA: pa.total, totalB: pb.total };
+  // The full walk fails soft too: a mid-enumeration error (a timeout on page 2 of a
+  // corpus with hundreds of differing ids) marks the id-set failed rather than
+  // aborting the whole compare over its one optional axis (review pass 1).
+  try {
+    const [setA, setB] = await Promise.all([collectIds(a, pa), collectIds(b, pb)]);
+    const onlyA = [...setA].filter((id) => !setB.has(id));
+    const onlyB = [...setB].filter((id) => !setA.has(id));
+    return { equal: onlyA.length === 0 && onlyB.length === 0, onlyA, onlyB, totalA: pa.total, totalB: pb.total };
+  } catch (e) {
+    return blank({ failed: (e as Error).message, totalA: pa.total, totalB: pb.total });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -589,6 +605,8 @@ export function renderComparison(c: Comparison): string {
   const d = c.idDiff;
   if (d.unavailable) {
     lines.push(`  id-set: unavailable — a brain does not expose list_thought_ids (older than SMD-2244); the thought count above stands in.`);
+  } else if (d.failed) {
+    lines.push(`  id-set: could not be read — ${d.failed}; the thought count above stands in.`);
   } else if (d.equal) {
     lines.push(`  id-set: identical — both brains hold the same ${d.totalA.toLocaleString("en-US")} thought ids.`);
   } else {
@@ -666,9 +684,10 @@ export async function runCompare(args: CompareArgs): Promise<number> {
   // (review pass 1: it exited 0 while the verdict printed the count delta).
   const countDelta = c.counts.a !== null && c.counts.b !== null && c.counts.a !== c.counts.b;
   const captureDelta = captureDaysApart(c.a.newestCapture, c.b.newestCapture);
-  // An id-set difference is a delta too (a same-count corpus that drifted, SMD-2244);
-  // `unavailable` on an older brain is not — the count stand-in already spoke.
-  const idSetDelta = !c.idDiff.unavailable && !c.idDiff.equal;
+  // An id-set difference is a delta too (a same-count corpus that drifted, SMD-2244).
+  // A read that could not be had — `unavailable` (older brain) or `failed` — is not a
+  // delta: the count stand-in already spoke and we do not force the gate on an unread axis.
+  const idSetDelta = !c.idDiff.unavailable && !c.idDiff.failed && !c.idDiff.equal;
   const freshDelta = countDelta || (captureDelta !== null && captureDelta !== 0) || idSetDelta;
   const anyDelta =
     c.identity.length > 0 ||

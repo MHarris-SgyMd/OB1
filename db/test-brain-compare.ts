@@ -50,7 +50,7 @@ interface FakeConfig {
   /** queries this brain refuses (an egress-gated embedding) — the search tool returns isError. */
   refuse?: string[];
   /** the brain's thought-id set for list_thought_ids; omit to make the tool absent (a brain older than SMD-2244). */
-  corpus?: { ids: string[]; digest?: string | null; pageCap?: number };
+  corpus?: { ids: string[]; digest?: string | null; pageCap?: number; fail?: string; failAfter?: boolean };
   /** frame the tools/call reply as an SSE stream rather than raw JSON. */
   sse?: boolean;
 }
@@ -106,16 +106,21 @@ function startFake(cfg: FakeConfig): { server: ReturnType<typeof Bun.serve>; ep:
         let text = "";
         if (name === "list_thought_ids") {
           if (!cfg.corpus) return replyError(body.id, "unknown tool list_thought_ids", cfg.sse);
-          const all = [...cfg.corpus.ids].sort();
           const after = body.params.arguments.after;
+          const isFirst = after === undefined || after === null;
+          // fail: a NON-unknown-tool error on the first page (a refusal/timeout, not
+          // an older brain). failAfter: succeed on page 1, error on a later page (a
+          // mid-enumeration failure).
+          if (cfg.corpus.fail && isFirst) return replyError(body.id, cfg.corpus.fail, cfg.sse);
+          if (cfg.corpus.failAfter && !isFirst) return replyError(body.id, "page read timed out", cfg.sse);
+          const all = [...cfg.corpus.ids].sort();
           const cap = cfg.corpus.pageCap ?? 1000;
           const limit = Math.min(Number(body.params.arguments.limit ?? 1000), cap);
           const start = after ? all.findIndex((id) => id > after) : 0;
           const slice = start < 0 ? [] : all.slice(start, start + limit);
           const cursor = slice.length === limit && slice.length > 0 ? slice[slice.length - 1] : null;
-          const first = after === undefined || after === null;
-          const digest = first ? (cfg.corpus.digest !== undefined ? cfg.corpus.digest : corpusDigest(all)) : null;
-          text = JSON.stringify({ total: first ? all.length : 0, digest, ids: slice, cursor });
+          const digest = isFirst ? (cfg.corpus.digest !== undefined ? cfg.corpus.digest : corpusDigest(all)) : null;
+          text = JSON.stringify({ total: isFirst ? all.length : 0, digest, ids: slice, cursor });
         } else if (name === "thought_stats") {
           if (cfg.newest === null) return replyError(body.id, "thought_stats unavailable", cfg.sse);
           const total = "counts" in cfg.info.database ? (cfg.info.database.counts?.thoughts ?? 0) : 0;
@@ -372,13 +377,41 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   } finally { a.server.stop(true); b.server.stop(true); }
 }
 
-// A null digest on one side (the PostgREST shim) is NOT read as a match — the sets are enumerated.
+// Null digests (the PostgREST shim) are NOT read as a match (null === null): with
+// DIFFERING sets, dropping the `!= null` guard would wrongly report equal, so the
+// diff must be enumerated and find the difference (review pass 1 tooth).
 {
   const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, corpus: { ids: [uid(1), uid(2)], digest: null } });
-  const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, corpus: { ids: [uid(1), uid(2)], digest: null } });
+  const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, corpus: { ids: [uid(1)], digest: null } });
   try {
     const c = await compareBrains(a.ep, b.ep, {});
-    ok(c.idDiff.equal && c.idDiff.onlyA.length === 0, "two null digests are enumerated (not read as equal) and the equal sets confirm no delta");
+    ok(!c.idDiff.equal && c.idDiff.onlyA.join() === uid(2) && c.idDiff.onlyB.length === 0, `two null digests are enumerated, not matched — the difference is found (onlyA=${c.idDiff.onlyA})`);
+  } finally { a.server.stop(true); b.server.stop(true); }
+}
+
+// A real (non-unknown-tool) failure on the FIRST page → id-set `failed`, not
+// `unavailable`, and the rest of the compare still prints.
+{
+  const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, corpus: { ids: [uid(1)], fail: "Refused: the id set may not leave the box" } });
+  const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, corpus: { ids: [uid(1)] } });
+  try {
+    const c = await compareBrains(a.ep, b.ep, {});
+    ok(!c.idDiff.unavailable && /may not leave the box/.test(c.idDiff.failed ?? ""), `a non-unknown-tool error is failed-with-reason, not "unavailable" (${c.idDiff.failed})`);
+    ok(/current with each other/.test(c.verdict), "the rest of the compare still produced a verdict");
+    ok(/id-set: could not be read/.test(renderComparison(c)), "render says the id-set could not be read");
+  } finally { a.server.stop(true); b.server.stop(true); }
+}
+
+// A mid-enumeration failure (page 2 errors) → `failed`, the whole compare does NOT abort.
+{
+  const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, corpus: { ids: [uid(1), uid(2), uid(3)], pageCap: 1, failAfter: true } });
+  const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, corpus: { ids: [uid(1), uid(4), uid(5)], pageCap: 1, failAfter: true } });
+  let c: Awaited<ReturnType<typeof compareBrains>> | null = null;
+  try {
+    try { c = await compareBrains(a.ep, b.ep, {}); } catch { c = null; }
+    ok(c !== null, "a page-2 failure does not abort the whole compare (it returned)");
+    ok(!!c && !!c.idDiff.failed && !c.idDiff.unavailable, `a mid-walk failure is failed-with-reason (${c?.idDiff.failed})`);
+    ok(!!c && /current with each other/.test(c.verdict), "the verdict still printed");
   } finally { a.server.stop(true); b.server.stop(true); }
 }
 
