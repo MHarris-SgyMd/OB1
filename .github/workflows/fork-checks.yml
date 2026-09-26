@@ -942,8 +942,9 @@ jobs:
       # finds it goes through the server, which logs it. Then the refresh into a
       # second database on the server, read back one test per line (a test inside
       # an && list does not trip set -e: a schema-only copy passed that way in
-      # review), the tier stamp, a --replay that replays that search and a --diff
-      # that finds it unmoved, and a retry over a copy left stamped stable, as a
+      # review), the tier stamp, a --replay that replays that search, a --diff
+      # that finds it unmoved and one over the empty window after the refresh
+      # that exits 3, and a retry over a copy left stamped stable, as a
       # refresh that died after its restore leaves it. Then the two guards the
       # wrapper runs under, since from its container every database is remote:
       # the brain under its service name and its container name is one
@@ -979,6 +980,14 @@ jobs:
           grep -E '^replayed [1-9][0-9]* of ' /tmp/tier-replay.out
           ./tier.sh --diff --since 1970-01-01T00:00:00Z --from postgres --to postgres/ob1_tier_ci | tee /tmp/tier-diff.out
           grep -F 'what moved: nothing' /tmp/tier-diff.out
+          # SMD-2182: with no --since the window starts at the copy's refresh,
+          # and stable has logged nothing since, so a --diff compares nothing:
+          # exit 3 through the wrapper, not the pass it used to be.
+          empty_rc=0
+          ./tier.sh --diff --from postgres --to postgres/ob1_tier_ci > /tmp/tier-empty.out || empty_rc=$?
+          cat /tmp/tier-empty.out
+          [ "$empty_rc" = 3 ] || { echo "a --diff that compared nothing exited $empty_rc, not 3" >&2; exit 1; }
+          grep -F 'nothing to compare: stable logged no searches' /tmp/tier-empty.out
           # A refresh that dies after its restore leaves the source's ob1_config
           # behind — the brain's, here no tier; the dogfood's, tier=stable. The
           # mark the refresh set on the database before its reset lets the
