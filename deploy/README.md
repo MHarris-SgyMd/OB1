@@ -484,25 +484,32 @@ hash `N8N_OWNER_PASSWORD_HASH` (single-quoted, since compose would read its
 none. n8n sets its owner from the email and the hash at every start
 (`N8N_INSTANCE_OWNER_MANAGED_BY_ENV`). So the owner exists from the first
 boot, and nobody who reaches the port before provisioning can claim the
-instance. To change the password, edit it, run `--init` again (it re-derives
-a hash that no longer matches), and restart n8n. Without the key or the hash
-the container exits at once with the reason in its log, and `ps` shows it
-restarting.
+instance. To change the password, edit it, run `--init` again, and restart
+n8n. `--init` re-derives a hash that no longer matches, and rewrites one
+whose line is not single-quoted. Keep the password within 72 bytes: bcrypt
+reads no further, and `--init` refuses a longer one. Without the key or the
+hash, the container exits at once with the reason in its log, and `ps` shows
+it restarting. The step reads `deploy/.env` alone. A shell variable of the
+same name overrides the file for compose, so an exported `N8N_OWNER_EMAIL`
+or `N8N_PORT` would split the two.
 
 The provisioning step runs from a checkout against the loopback port. It
-signs in as the owner and keeps n8n's API key in `deploy/.env` with its id
-(`N8N_API_KEY`, `N8N_API_KEY_ID`). The key carries eight of n8n's 106 scopes,
-the credential and workflow calls the step makes, and it expires after
-`N8N_API_KEY_DAYS` (90). A run mints a new key when that one has less than a
-week left, or on `--rotate`, and every run deletes every other key it
-minted. n8n answers a deleted key with 401, and a key an interrupted run
-left behind goes on the next run. Then the step creates or patches each
+signs in as the owner and keeps n8n's API key in `deploy/.env` with its id,
+its scopes and the file's tag (`N8N_API_KEY`, `_ID`, `_SCOPES`, `_TAG`), all
+written at once. The key carries eight of n8n's 106 scopes, the credential
+and workflow calls the step makes, and it expires after `N8N_API_KEY_DAYS`
+(90). A run mints a new key when that one has less than a week left, or on
+`--rotate`. Every run deletes every other key this env file minted, and
+n8n answers a deleted key with 401. A key an interrupted run left behind
+goes on the next run. A second env file provisioning the same n8n (another
+checkout) keeps its own key, since each file tags its keys. Then the step creates or patches each
 credential from `orchestration/credentials.template.json` with values from
 the env file, and creates or replaces each template. A replaced workflow
 loses edits made in the editor: the template is the source. Run it again
 after changing a key in `deploy/.env` or a template. Before it writes
 anything, it refuses:
-- a brain key at write scope, or one `MCP_ACCESS_KEYS` does not list;
+- a brain key at write scope, or one `MCP_ACCESS_KEYS` does not list,
+  wherever it sits: a header, `Bearer <key>`, a URL's `?key=`;
 - a key whose scope is not the one its credential declares (`brainScope`);
 - a template naming a credential no template declares.
 

@@ -51,7 +51,7 @@ services:
     profiles: ["orchestration"]
     networks: [default, sealed]
     ports:
-      - "127.0.0.1:5678:5678"
+      - "127.0.0.1:${N8N_PORT:-5678}:5678"
     volumes:
       - ../evals/orchestration/front.ts:/front.ts:ro
     environment:

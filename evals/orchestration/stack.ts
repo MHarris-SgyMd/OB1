@@ -105,8 +105,13 @@ export function ensureEnv(): Record<string, string> {
  * the same way.
  */
 function profileKeys(env: Record<string, string>): Record<string, () => string> {
-  return { N8N_BRAIN_CAPTURE_KEY: () => env.ORCH_BRAIN_CAPTURE_KEY };
+  // A host port of the kit's own: the profile's default, 5678, is where an
+  // operator's own n8n listens, and the kit must run beside it (review pass 2).
+  return { N8N_BRAIN_CAPTURE_KEY: () => env.ORCH_BRAIN_CAPTURE_KEY, N8N_PORT: () => N8N_KIT_PORT };
 }
+
+/** The kit's n8n host port, written into orchestration/.env as N8N_PORT (the profile's knob). */
+export const N8N_KIT_PORT = "5680";
 
 /**
  * Set one value in orchestration/.env, replacing its line or appending one —

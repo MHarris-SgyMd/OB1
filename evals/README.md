@@ -5880,35 +5880,49 @@ a brain that does not report the stamp (below, "Found on the way").
   brain's server joins the sealed network as well as its own. The ingestion
   is a probe workflow of ten fixed captures, since Linear is unreachable by
   design. C3 requires the act tool to fail. E reads the watcher's capture:
-  every DNS query and answer, every TCP connection attempt, and every other
-  UDP datagram. It passes when three things hold:
-  - n8n's connections to the brain are there (a capture that saw none
-    proves nothing);
-  - no outside name was asked for but the hosts the kit's templates name
-    (`api.linear.app`);
-  - nothing was dialled but addresses the compose network's own names
-    resolved to, and DNS to the network's own resolver.
+  every UDP datagram (DNS decoded) and every TCP connection attempt. It is
+  judged against facts read live: n8n's resolvers and search domains from
+  its `/etc/resolv.conf`, and the brain's addresses from the engine. Every
+  outbound packet on n8n's interface must be DNS to a listed resolver (UDP,
+  or TCP on 53) or a connection to the brain's `:8000`. Anything else fails
+  as a dial outside, including a packet line the judge cannot read. Every
+  query of any type is read for its name, and a name fails unless it is a
+  service's (bare, or with one of the search domains) or a host the kit's
+  templates name (`api.linear.app`). The brain must have been seen, or the
+  capture proves nothing. Established TCP traffic and ICMP are not recorded.
 
-  Established TCP traffic and ICMP are not recorded. The judge is pure, and
-  `eval-orchestration.ts --self-check` (CI) holds it on a crafted log. The
-  recorded shape passes, and a raw-IP dial, an outside name, a foreign
-  resolver, a UDP datagram out and a capture without the brain each fail.
-  In review pass 1 a sealed network made non-internal still passed E on
-  names alone, and only C3 caught it.
+  The judge is pure, and `eval-orchestration.ts --self-check` (CI) holds it
+  on 18 crafted logs in the watcher's format. Each way out below fails:
+  - a raw-IP dial;
+  - `n8n.io`, and `server.9.9.9.9.nip.io`;
+  - EDNS and NS queries;
+  - Linear's address answered and dialled;
+  - a foreign resolver;
+  - NTP and QUIC datagrams tcpdump decodes, and a plain UDP datagram;
+  - port 5678 on another host;
+  - the brain on another port;
+  - an unreadable line;
+  - a capture without the brain.
+
+  The recorded shape, a search-domain expansion, DNS over TCP and the host's
+  own polls pass. The first two versions of E inferred "inside" from DNS
+  answers and read only the lines they expected. A name starting `server.` or
+  `n8n.` counted as internal, and a decoded NTP datagram went unread. Each
+  of those passed a real escape (review passes 1 and 2).
 
 **The result: every check passes, on both stores and sealed.** One cycle
 each on the dogfood Mac (2026-09-25, the podman VM, the host's Ollama). SQLite
 and Postgres ran with `--wait-schedule`, on the implementation commit.
-Sealed ran without it, by design, on review pass 1's code: the owner set from
-the environment, and E judging dials. Pass 1 also re-ran the plain profile
-without the wait. It passed C1–C3, K and P: 29.5 s, the past run gone after
-102 s, n8n 386 MiB.
+Sealed ran without it, by design, on review pass 2's code: the owner set from
+the environment, keys tagged per env file, and E fail-closed. Pass 2 also
+re-ran the plain profile without the wait. It passed C1–C3, K and P: 35.0 s,
+the past run gone after 61 s, n8n 354 MiB.
 
 | run | C1: run 1 / run 2 | C1s | C3 | K | P | E |
 | --- | --- | --- | --- | --- | --- | --- |
 | SQLite (the profile) | PASS: 10, +10 in 20.4 s / 10, +0 | PASS: seen after 811 s | PASS: 403 / 403 | PASS: 403 / 403; replaced key 401 | PASS: gone after 50 s, the one inside kept | — |
 | `--with postgres` | PASS: 10, +10 in 22.8 s / 10, +0 | PASS: seen after 752 s | PASS: 403 / 403 | PASS: the same | PASS: gone after 40 s, kept | — |
-| `--with sealed` | PASS: 10, +10 in 23.2 s / 10, +0 (the probe) | not run | PASS: act fails ("The connection cannot be established") | PASS: the same | PASS: gone after 81 s, kept | PASS: only `api.linear.app` outside, every dial to the brain |
+| `--with sealed` | PASS: 10, +10 in 14.2 s / 10, +0 (the probe) | not run | PASS: act fails ("The connection cannot be established") | PASS: the same | PASS: gone after 91 s, kept | PASS: only `api.linear.app` outside, every packet out DNS or the brain |
 
 **The store: SQLite.** Memory is the cgroup's, after the runs, as above:
 
@@ -5938,14 +5952,15 @@ for the editor's catalogue, with an 8-hour refresh (read from the image).
 The profile now sets `N8N_DISABLED_MODULES=mcp-registry`, and the stock MCP
 Client node the templates use works without it (every run above). After
 that, over provisioning, two ingestions, the MCP session and the key and
-pruning checks, the watcher saw:
+pruning checks, the watcher saw (pass 2's run):
 - DNS: `api.linear.app` (A and AAAA, once; the act tool's call, refused) and
-  `server.dns.podman` ×20 (the brain).
-- TCP: ten connection attempts, every one to the brain's `10.89.4.3:8000`.
+  `server.dns.podman` ×18 (the brain), all to the network's resolver.
+- TCP: nine connection attempts, every one to the brain's `:8000`.
 - UDP: nothing but that DNS.
+- No packet line the judge could not read.
 
-Nothing else was asked for or dialled. The window was about two and a half
-minutes, from the watcher's start with `--up` to the end of `--verify`. A
+Nothing else was asked for or dialled. The window was 2 minutes 21 seconds,
+from the watcher's start with `--up` to the end of `--verify`. A
 caller on a longer timer (n8n has modules for instance reporting and version
 history) would not show in it. The probe answers "what does n8n dial while
 it works", not "what does it dial in a week".

@@ -25,11 +25,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { api, ensureApiKey, keyExpiry, PROFILE_CREDENTIALS, provision, provisionedKeys, type Options } from "../../deploy/orchestration/provision.ts";
 import { refuses } from "./mcp-client.ts";
-import { compose, ENV_FILE, HERE } from "./stack.ts";
+import { compose, ENV_FILE, HERE, N8N_KIT_PORT, run } from "./stack.ts";
 import type { Adapter, Check, Ctx } from "./adapter.ts";
 
 const DIR = join(HERE, "n8n");
-const BASE = "http://127.0.0.1:5678";
+const BASE = `http://127.0.0.1:${N8N_KIT_PORT}`;
 const INGEST = { name: "OB1 — Linear issues into the brain", path: "ob1-ingest" };
 const PROBE = { name: "OB1 — egress probe captures", path: "ob1-probe" };
 const SEALED = "sealed";
@@ -141,78 +141,88 @@ async function pruningCheck(env: Record<string, string>, ctx: Ctx): Promise<Chec
   };
 }
 
-/** The compose network's own names; anything else n8n asks for is outside it. */
-const INTERNAL = /^(server|n8n|n8n-front|egress-watch|postgres)(\.|$)/;
+/** The compose services whose names are n8n's own network's, bare or with one of its search domains. */
+const SERVICES = ["server", "n8n", "n8n-front", "egress-watch", "postgres"];
+
+/** What the judge is told rather than infers: read from n8n's /etc/resolv.conf and the engine. */
+export type EgressFacts = { resolvers: string[]; searchDomains: string[]; brain: string[] };
 
 /**
- * The watcher's capture read back, and judged. It holds every DNS query n8n
- * sent and every answer, every TCP connection attempt (a SYN with no ACK),
- * and every other UDP datagram. It passes when all three hold:
- * - it saw n8n's calls to the brain (a SYN to :8000). A capture without them
- *   saw nothing, and proves nothing;
- * - no name outside the compose network was asked for, beyond the hosts the
- *   kit's own templates name;
- * - nothing was dialled beyond addresses the network's own names resolved
- *   to, and DNS to the resolver that answered for them. A hard-coded address
- *   fails here, and so does a leaked seal that let Linear answer (review
- *   pass 1: a mutant with the network not internal passed E on names alone).
- * Exported for the self-check: pure over the watcher's log.
+ * The watcher's capture judged, failing closed. Pass 2 found the name-and-answer
+ * inference passing real escapes:
+ * - a name starting `server.` or `n8n.` counted as internal, so `n8n.io`'s
+ *   answer became an allowed address;
+ * - an EDNS or NS query was invisible;
+ * - a UDP datagram tcpdump decodes (NTP, QUIC) was not counted;
+ * - port 5678 was exempt on every address.
+ *
+ * So the facts come from outside (resolvers, search domains, the brain's
+ * addresses), and every OUTBOUND packet line on n8n's network interface
+ * (tcpdump's `Out`; loopback stays in the container) must be one of two
+ * things:
+ * - DNS to a listed resolver (UDP, or TCP port 53 for a truncated answer);
+ * - a connection attempt to the brain's :8000.
+ * Anything else is a dial outside, including a packet line the judge cannot
+ * read. Every DNS query of any type is read for its name, on any interface.
+ * A name outside the network — a service name bare, or with one of the
+ * search domains the resolver appends — fails unless a kit template names
+ * its host. The brain must have been seen, or the capture proves nothing.
+ * Exported for the self-check: pure over the log and the facts.
  */
-export function judgeEgress(log: string): Check {
+export function judgeEgress(log: string, facts: EgressFacts): Check {
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const internal = new RegExp(`^(${SERVICES.map(esc).join("|")})(\\.(${facts.searchDomains.map(esc).join("|") || "(?!)"}))?\\.?$`);
   const names = new Map<string, number>();
-  const asked = new Map<string, string>();
-  const allowed = new Set<string>();
-  const resolvers = new Set<string>();
   const dials = new Map<string, number>();
+  const unreadable: string[] = [];
+  let toBrain = 0;
   const count = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) ?? 0) + 1);
+  const hostPort = (a: string) => { const i = a.lastIndexOf("."); return { host: a.slice(0, i), port: a.slice(i + 1) }; };
   for (const line of log.split("\n")) {
-    // A query: `… IP 10.89.4.2.39771 > 10.89.4.1.53: 59194+ A? server.dns.podman. (35)`.
-    const q = / > (\S+)\.53: (\d+)\+? (?:A|AAAA|HTTPS|SVCB|PTR|SRV|TXT|MX)\? (\S+?)\.? \(\d+\)/.exec(line);
-    if (q) {
-      count(names, q[3]);
-      asked.set(q[2], q[3]);
-      if (INTERNAL.test(q[3])) resolvers.add(q[1]);
-      continue;
-    }
-    // An answer: `… IP 10.89.4.1.53 > 10.89.4.2.39771: 59194 1/0/0 A 10.89.4.3 (51)`.
-    const a = /\.53 > \S+: (\d+)\*?[-|$]? \d+\/\d+\/\d+ (.*)$/.exec(line);
-    if (a) {
-      if (INTERNAL.test(asked.get(a[1]) ?? "")) for (const m of a[2].matchAll(/\b(?:A|AAAA) ([0-9a-f.:]+)/g)) allowed.add(m[1]);
-      continue;
-    }
-    // A SYN to port 5678 is someone connecting TO n8n (the front, the
-    // healthcheck). One to loopback stays inside the container (n8n's task
-    // runner, the healthcheck). Neither is n8n reaching out.
-    const s = / > (\S+)\.(\d+): Flags \[S\]/.exec(line);
-    if (s && s[2] !== "5678" && !/^(127\.|::1$)/.test(s[1])) { count(dials, `${s[1]}:${s[2]}`); continue; }
-    const u = / (\S+)\.\d+ > (\S+)\.(\d+): UDP,/.exec(line);
-    if (u && !/^(127\.|::1$)/.test(u[2])) count(dials, `${u[2]}:${u[3]}/udp`);
+    // tcpdump's own messages carry no timestamp; every packet line does (-tttt).
+    if (!/^\d{4}-\d\d-\d\d /.test(line)) continue;
+    const p = /^\S+ \S+ (\S+)\s+(\S+)\s+IP6? (\S+) > (\S+): (.*)$/.exec(line);
+    if (!p) { unreadable.push(line.slice(0, 120)); continue; }
+    const [, iface, dir, , dstRaw, rest] = p;
+    const dst = hostPort(dstRaw);
+    // A query of any type, EDNS flags and all: `4711+ [1au] A? name. (40)`.
+    const q = /^\d+\+?(?: \[[^\]]*\])* [A-Z0-9-]+\? (\S+?)\.? \(\d+\)/.exec(rest);
+    if (q && dst.port === "53" && (dir === "Out" || iface === "lo")) count(names, q[1].toLowerCase());
+    if (iface === "lo" || dir !== "Out") continue;
+    const syn = /^Flags \[S\]/.test(rest);
+    if (dst.port === "53" && facts.resolvers.includes(dst.host)) continue;
+    if (syn && dst.port === "8000" && facts.brain.includes(dst.host)) { toBrain++; continue; }
+    count(dials, `${dst.host}:${dst.port} (${syn ? "tcp" : rest.split(/[ ,]/)[0] || "udp"})`);
   }
-  // DNS queries to a resolver that never answered for the network's own names count as dials too.
-  for (const line of log.split("\n")) {
-    const q = / > (\S+)\.53: \d+\+? \S+\? /.exec(line);
-    if (q && !resolvers.has(q[1])) count(dials, `${q[1]}:53/dns`);
-  }
-  const external = [...names.keys()].filter((n) => !INTERNAL.test(n));
+  const external = [...names.keys()].filter((n) => !internal.test(n));
   // What the kit's own templates name, and nothing else: n8n itself must
   // dial no one. Before N8N_DISABLED_MODULES=mcp-registry it asked for
   // api.n8n.io at boot (measured), and a bump that adds a caller fails here.
   const unexpectedNames = external.filter((n) => !TEMPLATE_HOSTS.includes(n));
-  const unexpectedDials = [...dials.keys()].filter((d) => !allowed.has(d.replace(/:\d+(\/\w+)?$/, "")));
-  const toBrain = [...dials.keys()].some((d) => d.endsWith(":8000") && allowed.has(d.slice(0, -5)));
   const fmt = (m: Map<string, number>, keep: (k: string) => boolean) => [...m].filter(([k]) => keep(k)).map(([k, v]) => `${k} ×${v}`).join(", ") || "none";
   return {
     id: "E",
-    pass: toBrain && unexpectedNames.length === 0 && unexpectedDials.length === 0,
-    detail: `${toBrain ? "" : "NO SYN to the brain's port 8000 — the watcher saw nothing; "}`
+    pass: toBrain > 0 && unexpectedNames.length === 0 && dials.size === 0 && unreadable.length === 0,
+    detail: `${toBrain ? "" : "NO SYN to the brain's :8000 — the watcher saw nothing; "}`
       + `${unexpectedNames.length ? `NOT A TEMPLATE'S HOST: ${unexpectedNames.join(", ")}; ` : ""}`
-      + `${unexpectedDials.length ? `DIALLED OUTSIDE THE COMPOSE NETWORK: ${unexpectedDials.join(", ")}; ` : ""}`
+      + `${dials.size ? `DIALLED OUTSIDE THE COMPOSE NETWORK: ${fmt(dials, () => true)}; ` : ""}`
+      + `${unreadable.length ? `UNREADABLE PACKET LINES (${unreadable.length}): ${unreadable[0]}; ` : ""}`
       + `names asked outside the compose network: ${fmt(names, (n) => external.includes(n))} (the templates name ${TEMPLATE_HOSTS.join(", ")}); names inside: ${fmt(names, (n) => !external.includes(n))}; `
-      + `dials (TCP SYN, other UDP): ${fmt(dials, () => true)}, to the network's own addresses ${[...allowed].join(", ") || "none"}`,
+      + `connection attempts to the brain (${facts.brain.join(", ")}:8000): ${toBrain}; DNS only to ${facts.resolvers.join(", ")}`,
   };
 }
 
-const egressRecord = (): Check => judgeEgress(compose("n8n", ["logs", "--no-log-prefix", "egress-watch"]).out);
+/** The facts E is judged against, read live: n8n's resolv.conf, and the brain's addresses from the engine. */
+function egressFacts(): EgressFacts {
+  const conf = compose("n8n", ["exec", "-T", "n8n", "cat", "/etc/resolv.conf"]).out;
+  const resolvers = [...conf.matchAll(/^nameserver\s+(\S+)/gm)].map((m) => m[1]);
+  const searchDomains = conf.match(/^search\s+(.+)$/m)?.[1].trim().split(/\s+/) ?? [];
+  const id = compose("n8n", ["ps", "-q", "server"]).out.trim();
+  const brain = id ? run(["docker", "inspect", id, "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}"]).out.trim().split(/\s+/).filter(Boolean) : [];
+  return { resolvers, searchDomains, brain };
+}
+
+const egressRecord = (): Check => judgeEgress(compose("n8n", ["logs", "--no-log-prefix", "egress-watch"]).out, egressFacts());
 
 export const n8n: Adapter = {
   tool: "n8n",

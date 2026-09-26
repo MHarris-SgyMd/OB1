@@ -84,27 +84,44 @@ function usage(msg: string): never {
  * that never saw the brain. No stack and no network (CI).
  */
 function selfCheck(): number {
+  const T = "2026-09-25 22:17:00.100000 ";
+  const facts = { resolvers: ["10.89.4.1"], searchDomains: ["dns.podman", "cerberus-gondola.ts.net"], brain: ["10.89.4.3", "10.89.6.4"] };
   const base = [
-    "t eth0  Out IP 10.89.4.2.39771 > 10.89.4.1.53: 59194+ A? server.dns.podman. (35)",
-    "t eth0  In  IP 10.89.4.1.53 > 10.89.4.2.39771: 59194 1/0/0 A 10.89.4.3 (51)",
-    "t eth0  Out IP 10.89.4.2.51086 > 10.89.4.3.8000: Flags [S], seq 1, win 64240, length 0",
-    "t eth0  In  IP 10.89.4.4.40026 > 10.89.4.2.5678: Flags [S], seq 2, win 64240, length 0",
-    "t lo    In  IP 127.0.0.1.46852 > 127.0.0.1.5679: Flags [S], seq 3, win 65495, length 0",
-    "t eth0  Out IP 10.89.4.2.48800 > 10.89.4.1.53: 9152+ A? api.linear.app. (32)",
-    "t eth0  In  IP 10.89.4.1.53 > 10.89.4.2.48800: 9152 NXDomain 0/0/0 (32)",
+    "tcpdump: verbose output suppressed, use -v[v]... for full protocol decode",
+    "listening on any, link-type LINUX_SLL2 (Linux cooked v2), snapshot length 262144 bytes",
+    `${T}eth0  Out IP 10.89.4.2.39771 > 10.89.4.1.53: 59194+ A? server.dns.podman. (35)`,
+    `${T}eth0  In  IP 10.89.4.1.53 > 10.89.4.2.39771: 59194 1/0/0 A 10.89.4.3 (51)`,
+    `${T}eth0  Out IP 10.89.4.2.51086 > 10.89.4.3.8000: Flags [S], seq 1, win 64240, length 0`,
+    `${T}eth0  In  IP 10.89.4.4.40026 > 10.89.4.2.5678: Flags [S], seq 2, win 64240, length 0`,
+    `${T}lo    In  IP 127.0.0.1.46852 > 127.0.0.1.5679: Flags [S], seq 3, win 65495, length 0`,
+    `${T}eth0  Out IP 10.89.4.2.48800 > 10.89.4.1.53: 9152+ A? api.linear.app. (32)`,
+    `${T}eth0  In  IP 10.89.4.1.53 > 10.89.4.2.48800: 9152 NXDomain 0/0/0 (32)`,
   ];
+  const out = (rest: string) => `${T}eth0  Out IP 10.89.4.2.5555 > ${rest}`;
   const cases: [string, string[], boolean, RegExp][] = [
     ["the recorded shape passes", base, true, /names inside: server\.dns\.podman/],
-    ["a raw-IP dial fails", [...base, "t eth0 Out IP 10.89.4.2.5555 > 9.9.9.9.443: Flags [S], seq 4, length 0"], false, /DIALLED OUTSIDE THE COMPOSE NETWORK: 9\.9\.9\.9:443/],
-    ["an outside name fails", [...base, "t eth0 Out IP 10.89.4.2.4 > 10.89.4.1.53: 1+ A? api.n8n.io. (28)"], false, /NOT A TEMPLATE'S HOST: api\.n8n\.io/],
-    ["a foreign resolver fails", [...base, "t eth0 Out IP 10.89.4.2.4 > 8.8.8.8.53: 2+ A? api.linear.app. (32)"], false, /8\.8\.8\.8:53\/dns/],
-    ["a UDP datagram out fails", [...base, "t eth0 Out IP 10.89.4.2.4 > 1.1.1.1.443: UDP, length 1200"], false, /1\.1\.1\.1:443\/udp/],
+    ["a search-domain expansion of a service name is inside", [...base, out("10.89.4.1.53: 7+ AAAA? server.cerberus-gondola.ts.net. (48)")], true, /server\.cerberus-gondola\.ts\.net ×1; connection/],
+    ["DNS over TCP to the resolver passes", [...base, out("10.89.4.1.53: Flags [S], seq 9, length 0")], true, /DNS only to 10\.89\.4\.1/],
+    ["an inbound SYN to n8n (the host's poll) is not n8n's dial", [...base, `${T}eth0  P   IP 192.168.127.1.62396 > 10.89.4.2.8000: Flags [S], seq 5, length 0`], true, /./],
+    ["a raw-IP dial fails", [...base, out("9.9.9.9.443: Flags [S], seq 4, length 0")], false, /DIALLED OUTSIDE THE COMPOSE NETWORK: 9\.9\.9\.9:443 \(tcp\)/],
+    ["n8n's own domain fails as a name", [...base, out("10.89.4.1.53: 1+ A? n8n.io. (24)")], false, /NOT A TEMPLATE'S HOST: n8n\.io/],
+    ["a name that starts like a service fails", [...base, out("10.89.4.1.53: 2+ A? server.9.9.9.9.nip.io. (39)")], false, /NOT A TEMPLATE'S HOST: server\.9\.9\.9\.9\.nip\.io/],
+    ["an EDNS query is read", [...base, out("10.89.4.1.53: 3+ [1au] A? api.n8n.io. (39)")], false, /NOT A TEMPLATE'S HOST: api\.n8n\.io/],
+    ["an NS query is read", [...base, out("10.89.4.1.53: 4+ NS? example.com. (29)")], false, /NOT A TEMPLATE'S HOST: example\.com/],
+    ["a template's host answered and dialled fails (a leaked seal)", [...base, `${T}eth0  In  IP 10.89.4.1.53 > 10.89.4.2.48800: 9152 1/0/0 A 7.7.7.7 (48)`, out("7.7.7.7.443: Flags [S], seq 6, length 0")], false, /7\.7\.7\.7:443/],
+    ["a foreign resolver fails", [...base, out("8.8.8.8.53: 5+ A? api.linear.app. (32)")], false, /8\.8\.8\.8:53/],
+    ["an NTP datagram tcpdump decodes fails", [...base, out("162.159.200.1.123: NTPv4, Client, length 48")], false, /162\.159\.200\.1:123 \(NTPv4\)/],
+    ["a QUIC datagram tcpdump decodes fails", [...base, out("1.1.1.1.443: quic, initial, v1, dcid 0102")], false, /1\.1\.1\.1:443 \(quic\)/],
+    ["a plain UDP datagram fails", [...base, out("1.1.1.1.4433: UDP, length 1200")], false, /1\.1\.1\.1:4433 \(UDP\)/],
+    ["port 5678 on another host is not exempt", [...base, out("9.9.9.9.5678: Flags [S], seq 7, length 0")], false, /9\.9\.9\.9:5678/],
+    ["the brain on another port fails", [...base, out("10.89.4.3.22: Flags [S], seq 8, length 0")], false, /10\.89\.4\.3:22/],
+    ["a packet line the judge cannot read fails", [...base, `${T}eth0  Out ARP, Request who-has 10.89.4.9 tell 10.89.4.2, length 28`], false, /UNREADABLE PACKET LINES/],
     ["a capture without the brain fails", base.filter((l) => !l.includes(".8000:")), false, /NO SYN to the brain/],
   ];
   let failed = 0;
   for (const [what, lines, pass, re] of cases) {
-    const r = judgeEgress(lines.join("\n"));
-    if (r.pass !== pass || !re.test(r.detail)) { failed++; console.error(`FAIL ${what}: ${r.pass ? "PASS" : "FAIL"} ${r.detail.slice(0, 200)}`); }
+    const r = judgeEgress(lines.join("\n"), facts);
+    if (r.pass !== pass || !re.test(r.detail)) { failed++; console.error(`FAIL ${what}: ${r.pass ? "PASS" : "FAIL"} ${r.detail.slice(0, 220)}`); }
   }
   console.log(failed ? `eval-orchestration self-check: ${failed} failed` : "eval-orchestration self-check: OK");
   return failed ? 1 : 0;

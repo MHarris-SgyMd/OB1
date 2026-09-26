@@ -23,17 +23,22 @@
  * mint its own key, so a run signs in as the owner and mints one through the
  * internal endpoints the editor uses (`/rest/login`, `/rest/api-keys`). The
  * key carries the scopes the caller asks for (SCOPES; the eval kit adds its
- * run-history reads). It expires after N8N_API_KEY_DAYS (90), and is kept in
- * the env file with its id (N8N_API_KEY, N8N_API_KEY_ID). A later run reuses
- * it. It mints again when:
+ * run-history reads). It expires after N8N_API_KEY_DAYS (90). It is kept in
+ * the env file with its id, scopes and the file's tag (N8N_API_KEY, _ID,
+ * _SCOPES, _TAG), all four written at once. A later run reuses it. It
+ * mints again when:
  * - n8n refuses the key;
  * - the key has less than a week left (half its life, for a short one);
- * - the key lacks a scope the caller asks for;
+ * - its scopes are not exactly the ones asked for;
+ * - its id is not one n8n lists as this file's key;
  * - or with --rotate.
- * Every run deletes every other key this script minted, which is n8n's
- * revocation: the old key answers 401 from then on. That includes one a
- * previous run failed to delete. Every mint signs in as the owner, so
- * N8N_OWNER_PASSWORD is the profile's standing secret, stronger than the key.
+ * Every provisioning run deletes every other key THIS env file minted (its
+ * tag in the label), which is n8n's revocation: the old key answers 401 from
+ * then on. That includes one a previous run failed to delete. A second env
+ * file provisioning the same n8n keeps its own key. Every mint signs in as
+ * the owner, so N8N_OWNER_PASSWORD is the profile's standing secret,
+ * stronger than the key. A password over 72 bytes is refused: bcrypt reads
+ * no further.
  *
  * Everything else goes through `/api/v1`. Credentials are created or patched
  * from the credential templates, with values read from the env file. They
@@ -74,7 +79,7 @@ export const SCOPES = [
   "credential:create", "credential:list", "credential:update",
   "workflow:create", "workflow:list", "workflow:read", "workflow:update", "workflow:activate",
 ];
-/** Every key this script mints carries this label prefix. A run revokes the others with it, never a key someone made by hand. */
+/** Every key this script mints carries this label prefix, then the env file's tag. A run revokes the others with its tag, never a key someone made by hand. */
 export const KEY_LABEL = "ob1-provision";
 const DEFAULT_KEY_DAYS = 90;
 const RENEW_WITHIN_DAYS = 7;
@@ -107,16 +112,40 @@ export type KeyResult = { key: string; minted: boolean; revoked: number; expires
  * (measured). A new file is 0600.
  */
 export function setEnvValue(file: string, key: string, value: string): void {
+  setEnvValues(file, { [key]: value });
+}
+
+/**
+ * Several lines in one write, so values that must agree (the key, its id,
+ * its scopes, its tag) are never left half-written. A run killed between
+ * separate writes left a key beside another key's id, and the next run's
+ * sweep deleted the working key (review pass 2, measured). A line to replace
+ * may carry `export ` or spaces around `=`.
+ */
+export function setEnvValues(file: string, values: Record<string, string>): void {
   const text = existsSync(file) ? readFileSync(file, "utf8") : "";
-  const lines = text.split("\n").filter((l) => !l.startsWith(`${key}=`));
+  const keys = Object.keys(values);
+  const lines = text.split("\n").filter((l) => !keys.some((k) => new RegExp(`^\\s*(export\\s+)?${k}\\s*=`).test(l)));
   if (lines.at(-1) === "") lines.pop();
   const mode = existsSync(file) ? statSync(file).mode & 0o777 : 0o600;
-  if (value.includes("'")) throw new Error(`setEnvValue: ${key}'s value holds a single quote, which the env file cannot carry quoted`);
-  const line = /[$#\s"]/.test(value) ? `${key}='${value}'` : `${key}=${value}`;
+  const added = keys.map((k) => {
+    const v = values[k];
+    if (v.includes("'") || /[\r\n]/.test(v)) throw new Error(`setEnvValue: ${k}'s value holds a single quote or a line break, which the env file cannot carry`);
+    return /[$#\s"]/.test(v) ? `${k}='${v}'` : `${k}=${v}`;
+  });
   const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, [...lines, line, ""].join("\n"), { mode });
+  writeFileSync(tmp, [...lines, ...added, ""].join("\n"), { mode });
   renameSync(tmp, file);
 }
+
+/** Is KEY's line in the env file single-quoted? Compose interpolates a bare or double-quoted value, and a bcrypt hash's `$`s are then read as variables. */
+export function singleQuoted(file: string, key: string): boolean {
+  const line = (existsSync(file) ? readFileSync(file, "utf8") : "").split("\n").find((l) => new RegExp(`^\\s*(export\\s+)?${key}\\s*=`).test(l));
+  return line === undefined || /=\s*'[^']*'\s*$/.test(line);
+}
+
+/** bcrypt reads 72 bytes. Bun pre-hashes a longer password and n8n's bcrypt truncates it, so the two would never agree. */
+const MAX_PASSWORD_BYTES = 72;
 
 /** A JWT's `exp` claim, unverified: n8n's keys are JWTs, and the verdict on one is n8n's. Null when there is none. */
 export function keyExpiry(key: string): number | null {
@@ -157,10 +186,14 @@ export async function initSecrets(envFile: string): Promise<string[]> {
   const written: string[] = [];
   const put = (k: string, v: string) => { setEnvValue(envFile, k, v); env[k] = v; written.push(k); };
   if (!env.N8N_ENCRYPTION_KEY) put("N8N_ENCRYPTION_KEY", hex(32));
-  // n8n wants a capital and a number in the owner's password.
+  // n8n wants a capital and a number in the owner's password. With no
+  // password at all, one is made, and the hash follows it below.
   if (!env.N8N_OWNER_PASSWORD) put("N8N_OWNER_PASSWORD", `Ob1-${hex(12)}`);
+  if (Buffer.byteLength(env.N8N_OWNER_PASSWORD) > MAX_PASSWORD_BYTES) throw new Error(`N8N_OWNER_PASSWORD is over ${MAX_PASSWORD_BYTES} bytes: bcrypt reads no further, and n8n and this script would disagree about it — choose a shorter one`);
   const hash = env.N8N_OWNER_PASSWORD_HASH;
-  if (!hash || !(await Bun.password.verify(env.N8N_OWNER_PASSWORD, hash).catch(() => false))) {
+  // Re-derived when it does not match the password, and rewritten when its
+  // line is not single-quoted: a hand-written bare hash reaches n8n mangled.
+  if (!hash || !singleQuoted(envFile, "N8N_OWNER_PASSWORD_HASH") || !(await Bun.password.verify(env.N8N_OWNER_PASSWORD, hash).catch(() => false))) {
     put("N8N_OWNER_PASSWORD_HASH", await Bun.password.hash(env.N8N_OWNER_PASSWORD, { algorithm: "bcrypt", cost: 10 }));
   }
   if (!env.N8N_MCP_KEY) put("N8N_MCP_KEY", hex(32));
@@ -172,6 +205,7 @@ export async function initSecrets(envFile: string): Promise<string[]> {
 async function ownerSession(base: string, env: Record<string, string>): Promise<string> {
   const password = env.N8N_OWNER_PASSWORD;
   if (!password) throw new Error("N8N_OWNER_PASSWORD is not set in the env file — run `bun deploy/orchestration/provision.ts --init` (deploy/README.md, \"Orchestration\")");
+  if (Buffer.byteLength(password) > MAX_PASSWORD_BYTES) throw new Error(`N8N_OWNER_PASSWORD is over ${MAX_PASSWORD_BYTES} bytes, which bcrypt does not read — choose a shorter one, run --init, restart n8n`);
   // Checked here first: n8n's owner is the hash, and a hash out of step with
   // the password would otherwise read as n8n refusing the password.
   if (env.N8N_OWNER_PASSWORD_HASH && !(await Bun.password.verify(password, env.N8N_OWNER_PASSWORD_HASH).catch(() => false))) {
@@ -196,20 +230,41 @@ async function listKeys(base: string, session: Record<string, string>): Promise<
   return items.map((k: any) => ({ id: String(k.id), label: String(k.label ?? ""), expiresAt: k.expiresAt ?? null }));
 }
 
-/** Delete every key this script minted except `keep`: n8n's revocation. Returns how many went. */
-async function revokeOthers(base: string, session: Record<string, string>, keep: string): Promise<number> {
-  const stale = (await listKeys(base, session)).filter((k) => k.label.startsWith(KEY_LABEL) && k.id !== keep);
+/**
+ * Is this key one THIS env file minted? Each file tags its keys
+ * (N8N_API_KEY_TAG, made at its first mint). Two files provisioning one n8n
+ * — a laptop's checkout and a server's, a copied deploy/.env — would
+ * otherwise each revoke the other's key on every run (review pass 2,
+ * measured). A key from before tags (`ob1-provision-<date>`) counts as any
+ * file's, so it is swept once.
+ */
+const mine = (label: string, tag: string | undefined) =>
+  (tag !== undefined && label.startsWith(`${KEY_LABEL}-${tag}-`)) || /^ob1-provision-\d{4}-\d\d-\d\dT/.test(label);
+
+/**
+ * Delete every other key this file minted: n8n's revocation. Returns how many
+ * went, and whether `keep` was among the listed keys at all. A kept id n8n
+ * does not list means the file's key and id disagree, and the caller mints
+ * rather than trust either.
+ */
+async function revokeOthers(base: string, session: Record<string, string>, keep: string, tag: string | undefined): Promise<{ revoked: number; kept: boolean }> {
+  const listed = await listKeys(base, session);
+  const kept = listed.some((k) => k.id === keep && mine(k.label, tag));
+  if (!kept) return { revoked: 0, kept };
+  const stale = listed.filter((k) => mine(k.label, tag) && k.id !== keep);
   for (const k of stale) await call(base, `/rest/api-keys/${k.id}`, { method: "DELETE", headers: session }, "revoke key");
-  return stale.length;
+  return { revoked: stale.length, kept };
 }
 
-/** The keys this script minted that n8n still holds, as the owner sees them: after a run, exactly one. */
+/** The keys this env file minted that n8n still holds, as the owner sees them: after a run, exactly one. */
 export async function provisionedKeys(base: string, env: Record<string, string>): Promise<ListedKey[]> {
   const session = { ...JSON_HEADERS, cookie: await ownerSession(base, env) };
-  return (await listKeys(base, session)).filter((k) => k.label.startsWith(KEY_LABEL));
+  return (await listKeys(base, session)).filter((k) => mine(k.label, env.N8N_API_KEY_TAG));
 }
 
 const wanted = (o: Options) => [...SCOPES, ...(o.extraScopes ?? [])];
+/** The stored key's scopes are exactly the ones asked for: a broader key is replaced too, so a file the kit once used does not keep the kit's reads. */
+const sameScopes = (a: string[], b: string[]) => a.length === b.length && [...a].sort().join() === [...b].sort().join();
 
 /**
  * The stored key if n8n honours it, it covers the scopes asked for, and it is
@@ -223,7 +278,7 @@ export async function ensureApiKey(o: Options): Promise<KeyResult> {
   const days = Number(o.env.N8N_API_KEY_DAYS || DEFAULT_KEY_DAYS);
   if (!Number.isFinite(days) || days <= 0) throw new Error(`N8N_API_KEY_DAYS must be a positive number of days, got "${o.env.N8N_API_KEY_DAYS}"`);
   const stored = o.env.N8N_API_KEY;
-  const covers = wanted(o).every((s) => (o.env.N8N_API_KEY_SCOPES ?? "").split(",").includes(s));
+  const covers = sameScopes(wanted(o), (o.env.N8N_API_KEY_SCOPES ?? "").split(",").filter(Boolean));
   if (stored && !o.rotate && covers) {
     const probe = await fetch(`${o.base}/api/v1/workflows?limit=1`, { headers: { "X-N8N-API-KEY": stored } });
     const exp = keyExpiry(stored);
@@ -235,17 +290,16 @@ export async function ensureApiKey(o: Options): Promise<KeyResult> {
   }
   const session = { ...JSON_HEADERS, cookie: await ownerSession(o.base, o.env) };
   const expiresAt = Math.floor(Date.now() / 1000 + days * 86400);
+  const tag = o.env.N8N_API_KEY_TAG || randomBytes(4).toString("hex");
   const minted = await call(o.base, "/rest/api-keys", {
     method: "POST", headers: session,
-    body: JSON.stringify({ label: `${KEY_LABEL}-${new Date().toISOString()}`, scopes: wanted(o), expiresAt }),
+    body: JSON.stringify({ label: `${KEY_LABEL}-${tag}-${new Date().toISOString()}`, scopes: wanted(o), expiresAt }),
   }, "mint key");
-  const key: string = minted.data.rawApiKey;
-  const id = String(minted.data.id);
-  setEnvValue(o.envFile, "N8N_API_KEY", key);
-  setEnvValue(o.envFile, "N8N_API_KEY_ID", id);
-  setEnvValue(o.envFile, "N8N_API_KEY_SCOPES", wanted(o).join(","));
-  Object.assign(o.env, { N8N_API_KEY: key, N8N_API_KEY_ID: id, N8N_API_KEY_SCOPES: wanted(o).join(",") });
-  return { key, minted: true, revoked: await revokeOthers(o.base, session, id), expiresAt: keyExpiry(key) ?? expiresAt };
+  const lines = { N8N_API_KEY: String(minted.data.rawApiKey), N8N_API_KEY_ID: String(minted.data.id), N8N_API_KEY_SCOPES: wanted(o).join(","), N8N_API_KEY_TAG: tag };
+  setEnvValues(o.envFile, lines);
+  Object.assign(o.env, lines);
+  const { revoked } = await revokeOthers(o.base, session, lines.N8N_API_KEY_ID, tag);
+  return { key: lines.N8N_API_KEY, minted: true, revoked, expiresAt: keyExpiry(lines.N8N_API_KEY) ?? expiresAt };
 }
 
 /** A template's `${NAME}` placeholders filled from the env. The rendered text is never written to disk. */
@@ -257,8 +311,14 @@ function render(template: string, env: Record<string, string>, file: string): st
   });
 }
 
-/** Every string anywhere under a value. */
+/**
+ * Every string anywhere under a value, and every token inside each. The brain
+ * takes a key as `Authorization: Bearer <key>` and as `?key=<key>`
+ * (server-portable/auth.ts presentedKeys), so a key inside a longer string
+ * is still a key (review pass 2).
+ */
 const strings = (v: unknown): string[] => (typeof v === "string" ? [v] : v && typeof v === "object" ? Object.values(v).flatMap(strings) : []);
+const candidates = (v: unknown) => [...new Set(strings(v).flatMap((s) => [s, ...s.split(/[\s?&=,;:"'\/#]+/)]).filter(Boolean))];
 
 /**
  * The brain-key rule. Any string in a credential whose hash is a brain key
@@ -274,10 +334,10 @@ export function checkBrainKey(credential: any, env: Record<string, string>): voi
   const records: { name: string; scope: Scope; sha256: string }[] = [...parseKeyRecords(env.MCP_ACCESS_KEYS ?? "").keys];
   if (env.MCP_ACCESS_KEY) records.push({ name: "MCP_ACCESS_KEY (legacy)", scope: "write", sha256: hashKey(env.MCP_ACCESS_KEY) });
   const declared: string | undefined = credential.brainScope;
-  const hits = strings(credential.data).map(hashKey).flatMap((h) => records.filter((r) => r.sha256 === h));
+  const hits = candidates(credential.data).map(hashKey).flatMap((h) => records.filter((r) => r.sha256 === h));
   for (const r of hits) {
     if (r.scope === "write") throw new Error(`credential "${credential.name}": it holds ${r.name}, a WRITE-scope brain key — a workflow holds a capture key (or, for an eval's read tool, a read key), never a write key`);
-    if (!declared) throw new Error(`credential "${credential.name}": it holds the brain key ${r.name} (${r.scope}) but declares no brainScope — add "brainScope": "${r.scope}" to its template, deliberately`);
+    if (!declared) throw new Error(`credential "${credential.name}": it holds the brain key ${r.name} (${r.scope}) but declares no brainScope — if it is meant to carry a brain key, add "brainScope": "${r.scope}" to its template; if it is an inbound key or a vendor's, it must not reuse a brain key's value`);
     if (r.scope !== declared) throw new Error(`credential "${credential.name}" declares brainScope ${declared} and holds ${r.name}, a ${r.scope}-scope key — mint a ${declared} key (server-portable/keygen.ts --scope ${declared})`);
   }
   if (declared && hits.length === 0) throw new Error(`credential "${credential.name}": its brain key's hash is not in MCP_ACCESS_KEYS — mint it with server-portable/keygen.ts --scope ${declared} and add the line keygen prints`);
@@ -302,7 +362,12 @@ export function templatesIn(dir: string): string[] {
  * Prints nothing secret.
  */
 export async function provision(o: Options): Promise<{ steps: string[]; key: KeyResult }> {
-  // Everything read and checked before anything is written.
+  // Everything read and checked before anything is written. A hash line
+  // compose would interpolate reaches n8n mangled, and every sign-in then
+  // fails with no clue why (review pass 2).
+  if (o.env.N8N_OWNER_PASSWORD_HASH && !singleQuoted(o.envFile, "N8N_OWNER_PASSWORD_HASH")) {
+    throw new Error("N8N_OWNER_PASSWORD_HASH's line is not single-quoted, so compose reads its `$`s as variables and n8n gets a mangled hash — run --init, which rewrites it quoted, then restart n8n");
+  }
   const creds: { file: string; c: any }[] = [];
   for (const file of o.credentials) for (const c of JSON.parse(render(readFileSync(file, "utf8"), o.env, file))) creds.push({ file, c });
   const names = new Set<string>();
@@ -319,10 +384,20 @@ export async function provision(o: Options): Promise<{ steps: string[]; key: Key
   let key = await ensureApiKey(o);
   if (!key.minted) {
     // The sweep: a key a previous run minted and then failed to delete is
-    // still valid. Without the stored key's id, the one to keep is unknown,
-    // so the run mints a fresh one, which revokes the rest.
-    if (!o.env.N8N_API_KEY_ID) key = await ensureApiKey({ ...o, rotate: true });
-    else key = { ...key, revoked: await revokeOthers(o.base, { ...JSON_HEADERS, cookie: await ownerSession(o.base, o.env) }, o.env.N8N_API_KEY_ID) };
+    // still valid. The stored id must be one n8n lists as this file's key:
+    // without it, or with an id the listing lacks, the one to keep is
+    // unknown, so the run mints a fresh key, which revokes the rest.
+    const swept = o.env.N8N_API_KEY_ID && o.env.N8N_API_KEY_TAG
+      ? await revokeOthers(o.base, { ...JSON_HEADERS, cookie: await ownerSession(o.base, o.env) }, o.env.N8N_API_KEY_ID, o.env.N8N_API_KEY_TAG)
+      : { revoked: 0, kept: false };
+    key = swept.kept ? { ...key, revoked: swept.revoked } : await ensureApiKey({ ...o, rotate: true });
+    // The listing is redacted, so a hand-edited file whose key and id name two
+    // different live keys passes the check above, and the sweep deletes the
+    // file's own key. It is probed once more, and replaced if n8n now refuses it.
+    if (!key.minted) {
+      const after = await fetch(`${o.base}/api/v1/workflows?limit=1`, { headers: { "X-N8N-API-KEY": key.key } });
+      if (after.status === 401 || after.status === 403) key = await ensureApiKey({ ...o, rotate: true });
+    }
   }
   const k = key.key;
   const existing = new Map(((await api(o.base, k, "GET", "/credentials?limit=250")).data as any[]).map((c) => [c.name as string, c.id as string]));
@@ -375,9 +450,11 @@ export async function waitReady(base: string, timeoutMs = 180_000): Promise<void
  */
 function fakeN8n() {
   const s = {
-    keys: new Map<string, { raw: string; label: string }>(), logins: 0, deletes: 0, probeStatus: 0, loginStatus: 200, next: 1,
+    keys: new Map<string, { raw: string; label: string; scopes: string[] }>(), logins: 0, deletes: 0, probeStatus: 0, loginStatus: 200, mintStatus: 200, next: 1,
+    // The owner the fake knows: sign-in checks both, as n8n does.
+    email: DEFAULT_OWNER_EMAIL, password: "Ob1-pw-1", cookie: `n8n-auth=${randomBytes(8).toString("hex")}`, lastScopes: [] as string[],
     jwt: (exp: number | null) => `h.${Buffer.from(JSON.stringify(exp === null ? { sub: "o" } : { sub: "o", exp })).toString("base64url")}.s${s.next++}`,
-    add(label: string, exp: number | null) { const id = `k${s.next}`; const raw = s.jwt(exp); s.keys.set(id, { raw, label }); return { id, raw }; },
+    add(label: string, exp: number | null, scopes: string[] = SCOPES) { const id = `k${s.next}`; const raw = s.jwt(exp); s.keys.set(id, { raw, label, scopes }); return { id, raw }; },
   };
   const valid = (raw: string | null) => [...s.keys.values()].some((k) => k.raw === raw);
   const server = Bun.serve({
@@ -385,9 +462,18 @@ function fakeN8n() {
     async fetch(req) {
       const u = new URL(req.url);
       const j = (b: unknown, status = 200) => Response.json(b, { status });
-      if (u.pathname === "/rest/login") { s.logins++; return s.loginStatus === 200 ? new Response("{}", { headers: { "set-cookie": "n8n-auth=x; Path=/" } }) : new Response("no", { status: s.loginStatus }); }
+      if (u.pathname === "/rest/login") {
+        s.logins++;
+        if (s.loginStatus !== 200) return new Response("no", { status: s.loginStatus });
+        const b = await req.json() as any;
+        if (b.emailOrLdapLoginId !== s.email || b.password !== s.password) return new Response("Wrong username or password", { status: 401 });
+        return new Response("{}", { headers: { "set-cookie": `${s.cookie}; Path=/` } });
+      }
+      // The internal endpoints take the session, never a key.
+      if (u.pathname.startsWith("/rest/api-keys") && req.headers.get("cookie") !== s.cookie) return new Response("unauthorized", { status: 401 });
       if (u.pathname === "/rest/api-keys" && req.method === "POST") {
-        const b = await req.json() as any; const { id, raw } = s.add(b.label, b.expiresAt);
+        if (s.mintStatus !== 200) return new Response("mint refused", { status: s.mintStatus });
+        const b = await req.json() as any; s.lastScopes = b.scopes; const { id, raw } = s.add(b.label, b.expiresAt, b.scopes);
         return j({ data: { id, rawApiKey: raw } });
       }
       if (u.pathname === "/rest/api-keys") return j({ data: { items: [...s.keys].map(([id, k]) => ({ id, label: k.label })) } });
@@ -435,6 +521,9 @@ async function selfCheck(): Promise<number> {
   expect("a brain key under another type or field name is still seen", throws(() => checkBrainKey({ name: "q", type: "httpQueryAuth", data: { name: "key", value: wr } }, env), /WRITE-scope/));
   expect("a declared brain credential with an unlisted key is refused", throws(() => checkBrainKey(brain("u".repeat(64), "capture"), env), /not in MCP_ACCESS_KEYS/));
   expect("a credential holding no brain key and declaring none passes", !throws(() => checkBrainKey({ name: "x", type: "httpHeaderAuth", data: { name: "x-n8n-key", value: "anything" } }, env), /./));
+  expect("a key as `Bearer <key>` is seen", throws(() => checkBrainKey({ name: "a", type: "httpHeaderAuth", data: { name: "Authorization", value: `Bearer ${wr}` } }, env), /WRITE-scope/));
+  expect("a key in a URL's ?key= is seen", throws(() => checkBrainKey({ name: "u", type: "httpQueryAuth", data: { url: `http://server:8000/mcp?key=${wr}&x=1` } }, env), /WRITE-scope/));
+  expect("a key nested under another field is seen", throws(() => checkBrainKey({ name: "n", type: "custom", data: { outer: { inner: [cap] } } }, env), /declares no brainScope/));
 
   const tricky = 'a"b\\c\nd';
   expect("render escapes a value into JSON", JSON.parse(render('{"v":"${K}"}', { K: tricky }, "t")).v === tricky);
@@ -465,10 +554,30 @@ async function selfCheck(): Promise<number> {
     expect("--init a second time writes nothing", second.length === 0);
     setEnvValue(fresh, "N8N_OWNER_PASSWORD", "Ob1-changed-9");
     expect("--init re-derives a hash that no longer matches the password", (await initSecrets(fresh)).join() === "N8N_OWNER_PASSWORD_HASH");
+    const good = parseEnv(readFileSync(fresh, "utf8")).N8N_OWNER_PASSWORD_HASH;
+    writeFileSync(fresh, readFileSync(fresh, "utf8").replace(`N8N_OWNER_PASSWORD_HASH='${good}'`, `N8N_OWNER_PASSWORD_HASH="${good}"`), { mode: 0o600 });
+    expect("--init rewrites a hash line compose would interpolate (double-quoted) single-quoted", (await initSecrets(fresh)).join() === "N8N_OWNER_PASSWORD_HASH" && singleQuoted(fresh, "N8N_OWNER_PASSWORD_HASH"));
+    setEnvValue(fresh, "N8N_OWNER_PASSWORD", "Ob1-" + "é".repeat(40));
+    expect("--init refuses a password over 72 bytes", await rejects(() => initSecrets(fresh), /over 72 bytes/));
+    writeFileSync(fresh, "export N8N_API_KEY=old\n", { mode: 0o600 });
+    setEnvValues(fresh, { N8N_API_KEY: "new", N8N_API_KEY_ID: "k1" });
+    expect("setEnvValues replaces an `export` line and writes several at once", readFileSync(fresh, "utf8") === "N8N_API_KEY=new\nN8N_API_KEY_ID=k1\n");
+    expect("setEnvValue refuses a line break", throws(() => setEnvValue(fresh, "K", "a\nb"), /line break/));
   } finally {
     rmSync(file, { force: true });
     rmSync(fresh, { force: true });
   }
+
+  // The compose service's owner block: without it a fresh n8n opens its owner
+  // setup to whoever reaches the port first (review pass 2: a live mutant
+  // with the block removed let a stranger claim the owner, and nothing in CI
+  // noticed).
+  const n8nService = (Bun.YAML.parse(readFileSync(join(HERE, "..", "compose.yaml"), "utf8")) as any)?.services?.n8n ?? {};
+  const envBlock = n8nService.environment ?? {};
+  expect("compose's n8n sets its owner from the environment", String(envBlock.N8N_INSTANCE_OWNER_MANAGED_BY_ENV) === "true"
+    && envBlock.N8N_INSTANCE_OWNER_PASSWORD_HASH === "${N8N_OWNER_PASSWORD_HASH:-}"
+    && String(envBlock.N8N_INSTANCE_OWNER_EMAIL).startsWith("${N8N_OWNER_EMAIL:-"));
+  expect("compose's n8n entrypoint refuses a missing key or hash", /N8N_ENCRYPTION_KEY.*N8N_INSTANCE_OWNER_PASSWORD_HASH/s.test(JSON.stringify(n8nService.entrypoint ?? "")));
 
   // Every shipped template's credential ids: the profile's, and the kit's against both credential files.
   const idsOf = (f: string) => (JSON.parse(readFileSync(f, "utf8")) as any[]).map((c) => c.id as string);
@@ -482,51 +591,78 @@ async function selfCheck(): Promise<number> {
   for (const t of shipped) for (const p of undeclaredCredentials(JSON.parse(readFileSync(t, "utf8")), declaredIds, t)) fails.push(p);
   expect("an undeclared credential id is reported", undeclaredCredentials({ nodes: [{ name: "n", credentials: { x: { id: "nope" } } }] }, declaredIds, "t").length === 1);
 
-  // The key decisions, against a fake n8n.
+  // The key decisions, against a fake n8n that checks the owner's email, password and session.
   const f = fakeN8n();
   const keyFile = join(HERE, `.self-check.${process.pid}.keys.env`);
   try {
     const now = Math.floor(Date.now() / 1000);
     const opts = (env: Record<string, string>, more: Partial<Options> = {}): Options => ({ base: f.base, env, envFile: keyFile, credentials: [], workflows: [], ...more });
+    const file = () => parseEnv(readFileSync(keyFile, "utf8"));
     const base = { N8N_OWNER_PASSWORD: "Ob1-pw-1" };
     writeFileSync(keyFile, "", { mode: 0o600 });
-    const e1: Record<string, string> = { ...base };
-    const r1 = await ensureApiKey(opts(e1));
-    const saved = parseEnv(readFileSync(keyFile, "utf8"));
-    expect("no stored key: a mint, kept with its id and scopes, expiring in 90 days", r1.minted && saved.N8N_API_KEY === r1.key && saved.N8N_API_KEY_ID !== undefined && saved.N8N_API_KEY_SCOPES === SCOPES.join(",") && Math.abs((r1.expiresAt ?? 0) - (now + 90 * 86400)) < 60);
+    const r1 = await ensureApiKey(opts({ ...base }));
+    const saved = file();
+    const tag = saved.N8N_API_KEY_TAG;
+    expect("no stored key: a mint, kept with its id, scopes and tag, expiring in 90 days", r1.minted && saved.N8N_API_KEY === r1.key && saved.N8N_API_KEY_ID !== undefined && saved.N8N_API_KEY_SCOPES === SCOPES.join(",") && /^[0-9a-f]{8}$/.test(tag ?? "") && Math.abs((r1.expiresAt ?? 0) - (now + 90 * 86400)) < 60);
+    expect("the mint asked n8n for exactly SCOPES, under the file's tag", sameScopes(f.s.lastScopes, SCOPES) && [...f.s.keys.values()].every((k) => k.label.startsWith(`${KEY_LABEL}-${tag}-`)));
     const logins = f.s.logins;
     const r2 = await ensureApiKey(opts({ ...base, ...saved }));
     expect("a good stored key is reused without a sign-in", !r2.minted && r2.key === r1.key && f.s.logins === logins);
     const r3 = await ensureApiKey(opts({ ...base, ...saved, N8N_API_KEY: "h.e30.forged" }));
-    expect("a refused key: a mint, and the rest revoked", r3.minted && f.s.keys.size === 1 && r3.revoked === 1);
-    const near = f.s.add(`${KEY_LABEL}-near`, now + 3 * 86400);
-    const r4 = await ensureApiKey(opts({ ...base, N8N_API_KEY: near.raw, N8N_API_KEY_ID: near.id, N8N_API_KEY_SCOPES: SCOPES.join(",") }));
+    expect("a refused key: a mint, and the file's other keys revoked", r3.minted && f.s.keys.size === 1 && r3.revoked === 1);
+    const near = f.s.add(`${KEY_LABEL}-${tag}-near`, now + 3 * 86400);
+    const r4 = await ensureApiKey(opts({ ...base, N8N_API_KEY: near.raw, N8N_API_KEY_ID: near.id, N8N_API_KEY_SCOPES: SCOPES.join(","), N8N_API_KEY_TAG: tag }));
     expect("a key with 3 of 90 days left is renewed", r4.minted);
-    const shortKey = f.s.add(`${KEY_LABEL}-short`, now + 2.5 * 86400);
-    const r5 = await ensureApiKey(opts({ ...base, N8N_API_KEY_DAYS: "3", N8N_API_KEY: shortKey.raw, N8N_API_KEY_ID: shortKey.id, N8N_API_KEY_SCOPES: SCOPES.join(",") }));
+    const shortKey = f.s.add(`${KEY_LABEL}-${tag}-short`, now + 2.5 * 86400);
+    const r5 = await ensureApiKey(opts({ ...base, N8N_API_KEY_DAYS: "3", N8N_API_KEY: shortKey.raw, N8N_API_KEY_ID: shortKey.id, N8N_API_KEY_SCOPES: SCOPES.join(","), N8N_API_KEY_TAG: tag }));
     expect("a 3-day key with 2.5 days left is kept, not re-minted each run", !r5.minted);
-    const cur = parseEnv(readFileSync(keyFile, "utf8"));
-    const r6 = await ensureApiKey(opts({ ...base, ...cur }, { extraScopes: ["execution:list", "execution:read"] }));
-    expect("a key without a scope the caller asks for is replaced by one with it", r6.minted && parseEnv(readFileSync(keyFile, "utf8")).N8N_API_KEY_SCOPES.endsWith("execution:read"));
+    const KIT = ["execution:list", "execution:read"];
+    const r6 = await ensureApiKey(opts({ ...base, ...file() }, { extraScopes: KIT }));
+    expect("a caller asking for more scopes gets a key minted with them", r6.minted && sameScopes(f.s.lastScopes, [...SCOPES, ...KIT]) && sameScopes(file().N8N_API_KEY_SCOPES.split(","), [...SCOPES, ...KIT]));
+    const r6b = await ensureApiKey(opts({ ...base, ...file() }));
+    expect("a broader key is replaced for a caller asking for less, so the file does not keep the kit's reads", r6b.minted && sameScopes(f.s.lastScopes, SCOPES));
     f.s.probeStatus = 503;
-    expect("a busy n8n (503) is an error, not a mint", await rejects(() => ensureApiKey(opts({ ...base, ...parseEnv(readFileSync(keyFile, "utf8")) }, { extraScopes: ["execution:list", "execution:read"] })), /answered 503.*not minting/));
+    expect("a busy n8n (503) is an error, not a mint", await rejects(() => ensureApiKey(opts({ ...base, ...file() })), /answered 503.*not minting/));
+    f.s.probeStatus = 403;
+    expect("a 403 to the stored key counts as refused: a mint", (await ensureApiKey(opts({ ...base, ...file() }))).minted);
     f.s.probeStatus = 0;
-    const r7 = await ensureApiKey(opts({ ...base, ...parseEnv(readFileSync(keyFile, "utf8")) }, { rotate: true }));
+    const r7 = await ensureApiKey(opts({ ...base, ...file() }, { rotate: true }));
     expect("--rotate mints and revokes the key it replaces", r7.minted && r7.revoked >= 1 && f.s.keys.size === 1);
-    // A previous run minted and failed to delete: a stale key beside the stored one. A plain provision sweeps it.
-    f.s.add(`${KEY_LABEL}-left-behind`, now + 80 * 86400);
+    // A previous run minted and failed to delete; a key from before tags; a hand-made key; another env file's key.
+    f.s.add(`${KEY_LABEL}-${tag}-left-behind`, now + 80 * 86400);
+    f.s.add(`${KEY_LABEL}-2026-09-25T20:00:00.000Z`, now + 80 * 86400);
     const handMade = f.s.add("made-by-hand", now + 80 * 86400);
-    const r8 = await provision(opts({ ...base, ...parseEnv(readFileSync(keyFile, "utf8")) }));
-    expect("a plain run sweeps a key a failed run left, and keeps a hand-made one", !r8.key.minted && r8.key.revoked === 1 && f.s.keys.size === 2 && f.s.keys.has(handMade.id));
-    const noId = parseEnv(readFileSync(keyFile, "utf8"));
+    const otherFile = f.s.add(`${KEY_LABEL}-0ther0ne-2026-09-26T00:00:00.000Z`, now + 80 * 86400);
+    const r8 = await provision(opts({ ...base, ...file() }));
+    expect("a plain run sweeps this file's leftover and an untagged old key, and keeps a hand-made key and another file's", !r8.key.minted && r8.key.revoked === 2 && f.s.keys.size === 3 && f.s.keys.has(handMade.id) && f.s.keys.has(otherFile.id));
+    const noId = file();
     delete noId.N8N_API_KEY_ID;
-    const r9 = await provision(opts({ ...base, ...noId }));
-    expect("a stored key without its id is replaced, so the sweep knows what to keep", r9.key.minted);
+    expect("a stored key without its id is replaced, so the sweep knows what to keep", (await provision(opts({ ...base, ...noId }))).key.minted);
+    expect("a stored id n8n no longer lists is replaced, not trusted", (await provision(opts({ ...base, ...file(), N8N_API_KEY_ID: "k-gone" }))).key.minted);
+    // The same, with the mint failing: nothing may have been deleted first, so the file's key still works.
+    const beforeFail = file();
+    f.s.mintStatus = 500;
+    await provision(opts({ ...base, ...beforeFail, N8N_API_KEY_ID: "k-gone" })).catch(() => {});
+    f.s.mintStatus = 200;
+    const stillWorks = await fetch(`${f.base}/api/v1/workflows?limit=1`, { headers: { "X-N8N-API-KEY": beforeFail.N8N_API_KEY } });
+    expect("a run that cannot mint deletes nothing first: the file's key still answers", stillWorks.status === 200);
+    const live = file();
+    const decoy = f.s.add(`${KEY_LABEL}-${tag}-decoy`, now + 80 * 86400);
+    const r9 = await provision(opts({ ...base, ...live, N8N_API_KEY_ID: decoy.id }));
+    const healed = await fetch(`${f.base}/api/v1/workflows?limit=1`, { headers: { "X-N8N-API-KEY": file().N8N_API_KEY } });
+    expect("a file whose key and id name two live keys ends with a working key", r9.key.minted && healed.status === 200);
     f.s.loginStatus = 429;
     expect("a rate-limited sign-in says so, not 'wrong password'", await rejects(() => ensureApiKey(opts({ ...base }, { rotate: true })), /rate-limits sign-in/));
     f.s.loginStatus = 200;
+    f.s.email = "ops@example.org";
+    expect("the owner's email comes from N8N_OWNER_EMAIL", (await ensureApiKey(opts({ ...base, N8N_OWNER_EMAIL: "ops@example.org" }, { rotate: true }))).minted);
+    expect("without it, the default email is tried and refused, and the message says so", await rejects(() => ensureApiKey(opts({ ...base }, { rotate: true })), /sign-in as operator@ob1\.local failed \(401\)/));
+    f.s.email = DEFAULT_OWNER_EMAIL;
     const otherHash = await Bun.password.hash("other", { algorithm: "bcrypt", cost: 4 });
     expect("a hash out of step with the password is refused before any sign-in", await rejects(() => ensureApiKey(opts({ ...base, N8N_OWNER_PASSWORD_HASH: otherHash }, { rotate: true })), /does not match N8N_OWNER_PASSWORD/));
+    expect("a password over 72 bytes is refused", await rejects(() => ensureApiKey(opts({ N8N_OWNER_PASSWORD: "Ob1-" + "x".repeat(70) }, { rotate: true })), /over 72 bytes/));
+    writeFileSync(keyFile, `N8N_OWNER_PASSWORD_HASH=${otherHash}\n`, { mode: 0o600 });
+    expect("an unquoted hash line is refused before anything is written", await rejects(() => provision(opts({ ...base, N8N_OWNER_PASSWORD_HASH: otherHash })), /not single-quoted/));
   } finally {
     f.stop();
     rmSync(keyFile, { force: true });

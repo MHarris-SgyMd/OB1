@@ -44,7 +44,8 @@ what the profile does rather than what it would do.
    file; Postgres adds a second server to pin and upgrade, for a workload of
    one operator's schedules (`../evals/README.md`, "The orchestration profile
    (SMD-2210)", has the numbers).
-4. **It reaches the brain through MCP only.** Captures go through n8n's MCP
+4. **It reaches the brain through MCP only** (amended below, for the import
+   runner). Captures go through n8n's MCP
    Client node with a **capture-scope** key (can add a thought, cannot read
    one); no workflow holds a write key. The brain grows no n8n-specific route,
    and n8n reaches no brain table. Amended in SMD-2210: an import template
@@ -255,9 +256,11 @@ concern SMD-1813's allowlist and SMD-1903's egress policy already name.
    403, though n8n's docs say non-Enterprise keys have full access. But the
    scopes include creating and publishing workflows, so a holder can publish
    one that sends any unpinned credential anywhere. The profile's key
-   expires (`N8N_API_KEY_DAYS`, 90). Every run deletes every other key it
-   minted, which n8n then answers with 401, including one a run cut short
-   left behind (measured; in the POC, replaced keys stayed valid). Every
+   expires (`N8N_API_KEY_DAYS`, 90). Every run deletes every other key its
+   env file minted, which n8n then answers with 401 (the kit's K measures a
+   rotation; in the POC, replaced keys stayed valid). That includes one a
+   run cut short left behind, which provisioning's self-check holds against
+   a fake n8n. Every
    mint and re-mint signs in as the owner, so the **owner password** is a
    standing secret of the profile, stronger than the key; it lives in
    `deploy/.env` beside `POSTGRES_PASSWORD`. So does **`N8N_ENCRYPTION_KEY`**:
@@ -272,10 +275,11 @@ concern SMD-1813's allowlist and SMD-1903's egress policy already name.
    switches. The POC set them and did not probe what the container dials. The
    kit's `--with sealed` puts n8n on an `internal: true` network with a
    tcpdump watcher in its network namespace. The brain-side paths still pass
-   there. The watcher records every name n8n asked for and everything it
-   dialled, and the kit's E check fails on anything outside the compose
-   network beyond the templates' own hosts (`../evals/README.md`, "The
-   orchestration profile (SMD-2210)"). The first run found n8n's MCP registry
+   there. The watcher records every name n8n asked for and every packet it
+   sent out. The kit's E check fails closed: every outbound packet must be DNS
+   to the listed resolver, or a connection to the brain. Every name must be
+   the network's own or a template's host (`../evals/README.md`, "The
+   orchestration profile (SMD-2210)"). It was measured on podman. The first run found n8n's MCP registry
    module calling api.n8n.io, which the profile now switches off.
 
 **On the way in**, the seam's inbound allowlist applies to a template exactly as
@@ -373,8 +377,12 @@ runs outside n8n:
   - one source per pipeline;
   - its own actor on every row it writes.
 
-  n8n still holds no brain write key and reaches no table. Its workflows
-  hold the runner's key, as board-sync's container holds a database URL.
+  n8n itself still holds no brain key above capture scope, and reaches no
+  table directly. But a workflow holding the runner's key can cause writes
+  through it, which is why decision 4 is amended rather than said to hold.
+  The runner's key is not a brain key: MCP_ACCESS_KEYS does not list it, so
+  provisioning's brain-key rule does not govern it. SMD-2212 gives it its
+  own rule when it builds the runner.
 - **Declined: an n8n image with Bun and python3 added**, and Execute Command
   turned back on. OB1 would then build and distribute an image containing
   n8n, which is what Gate 1's "OB1 does not distribute n8n" rests on. And
@@ -476,8 +484,10 @@ ships, provisioned by its own step. `--verify` adds three checks:
   exactly one provisioned key.
 - P: a saved run past the window gone from the API and the store, and one
   inside it kept.
-- E, under `--with sealed`: the egress record. It fails on any name or dial
-  outside the compose network beyond the templates' own hosts.
+- E, under `--with sealed`: the egress record, fail-closed. Any outbound
+  packet but DNS to the listed resolver or a connection to the brain fails,
+  as does any name outside the network but a template's host, or a packet
+  line it cannot read.
 
 `--with postgres` measures the store decision 3 did not take. CI runs
 provisioning's rules against a fake n8n (`provision.ts --self-check`) and E's
