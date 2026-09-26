@@ -15,7 +15,7 @@
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { DatabaseFacts, ReadOptions, ReadProgress } from "./brain-info.ts";
-import { actorPayload, captureEnvelope, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -31,6 +31,8 @@ import type {
   SupersessionProposal,
   ThoughtHybridMatch,
   ThoughtKeywordMatch,
+  LoggedSearchPage,
+  ThoughtIdPage,
   ThoughtListItem,
   ThoughtMatch,
   RecencyOpts,
@@ -171,6 +173,60 @@ export class PostgrestStore implements ThoughtStore {
       .select("*", { count: "exact", head: true });
     if (error) throw new Error(error.message);
     return count ?? 0;
+  }
+
+  async listThoughtIds(opts: { limit: number; after: string | null }): Promise<ThoughtIdPage> {
+    // Keyset by id, ids only. No server-side digest: PostgREST cannot run the
+    // md5(string_agg(...)) aggregate the SQL store uses, and re-reading the whole
+    // corpus here just to hash it would be a second full walk — so `digest` is
+    // null and the caller enumerates (the shim is not the performance path). The
+    // total (exact count) still rides the first page. A caller's page `limit` must
+    // stay within the deployment's PostgREST db-max-rows, or a page comes back short
+    // and the walk ends early; the caller (db/brain-compare.ts) guards against a
+    // short enumeration by comparing the collected count against this total.
+    const after = opts.after && UUID_RE.test(opts.after) ? opts.after.toLowerCase() : null;
+    let q = this.client.from("thoughts").select("id").order("id", { ascending: true }).limit(opts.limit);
+    if (after) q = q.gt("id", after);
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    const ids = ((data ?? []) as { id: string }[]).map((r) => String(r.id));
+    // A full page (limit rows) means more may follow; its last id is the cursor. The
+    // `> 0` guards a limit of 0 (unreachable via the tool, but a direct caller) from
+    // an undefined cursor (review pass 3).
+    const cursor = ids.length === opts.limit && ids.length > 0 ? ids[ids.length - 1] : null;
+    const total = after === null ? await this.countThoughts() : 0;
+    return { ids, total, digest: null, cursor };
+  }
+
+  async listLoggedSearches(opts: { since: string | null; limit: number }): Promise<LoggedSearchPage> {
+    // The search rows of query_log, most recent first, windowed by `since`; one row
+    // over the limit sets `truncated`. `id` breaks the logged_at tie, as the SQL
+    // store's ORDER BY does. logged_at goes through the shared timestamp normaliser
+    // so both stores hand back one form.
+    let q = this.client
+      .from("query_log")
+      .select("query, arm, tier, logged_at, match_count, threshold, recency_weight, filter")
+      .eq("kind", "search")
+      .not("query", "is", null)
+      .order("logged_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(opts.limit + 1);
+    if (opts.since) q = q.gt("logged_at", opts.since);
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    const rows = (data ?? []) as Record<string, unknown>[];
+    const truncated = rows.length > opts.limit;
+    const searches = rows.slice(0, opts.limit).map((r) => ({
+      query: r.query as string,
+      arm: (r.arm as LoggedSearchPage["searches"][number]["arm"]) ?? null,
+      tier: (r.tier as string | null) ?? null,
+      loggedAt: isoTimestampOrNull(r.logged_at as string | null),
+      matchCount: (r.match_count as number | null) ?? null,
+      threshold: (r.threshold as number | null) ?? null,
+      recencyWeight: (r.recency_weight as number | null) ?? null,
+      filter: (r.filter as Record<string, unknown> | null) ?? {},
+    }));
+    return { searches, truncated };
   }
 
   async pageThoughtMeta(offset: number, limit: number): Promise<ThoughtMeta[]> {

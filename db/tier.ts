@@ -33,7 +33,7 @@
  *
  *   # compare two live brains over HTTP — version/migration/freshness/retrieval —
  *   # in one report (SMD-2109, db/brain-compare.ts). No Postgres, no writes.
- *   bun db/tier.ts --compare <a> <b> [--replay [--hybrid]] [--query <q> …] [--json]
+ *   bun db/tier.ts --compare <a> <b> [--replay [--hybrid]] [--query <q> … | --from-log <brain> [--since <iso>]] [--json]
  *
  * --refresh uses pg_dump | pg_restore for a faithful whole-database snapshot
  * (thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
@@ -720,13 +720,14 @@ function printSummary(s: ReplaySummary, gate: boolean, window: { words: string; 
  */
 export function parseCompareArgs(args: string[]): CompareArgs {
   const USAGE =
-    "  db/tier.ts --compare <a> <b> [--replay [--hybrid]] [--query <q> ...] [--queries-file <path>] [--json]\n" +
+    "  db/tier.ts --compare <a> <b> [--replay [--hybrid]] [--query <q> ...] [--queries-file <path>] [--from-log <brain> [--since <iso>]] [--json]\n" +
     "  <a>/<b>: an http(s):// URL (key from --a-key/--b-key, OB1_COMPARE_KEY, or ?key=) or a connector name (open-brain, open-brain-canary)";
-  const TAKES_ONE = new Set(["a-key", "b-key", "queries-file"]);
+  const TAKES_ONE = new Set(["a-key", "b-key", "queries-file", "from-log", "since"]);
   const TAKES_MANY = new Set(["query"]);
   const TAKES_NONE = new Set(["compare", "replay", "hybrid", "json"]);
   const out: CompareArgs = { a: "", b: "", replay: false, hybrid: false, queries: [], json: false };
   const refs: string[] = [];
+  const seenOne = new Set<string>(); // single-value flags refuse a repeat, as the SQL-verb parser does
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     const name = a.startsWith("--") ? a.slice(2) : null;
@@ -743,9 +744,12 @@ export function parseCompareArgs(args: string[]): CompareArgs {
     if (name !== null && (TAKES_ONE.has(name) || TAKES_MANY.has(name))) {
       const v = args[i + 1];
       if (v === undefined || v.startsWith("--")) { console.error(`--${name} takes a value.\n${USAGE}`); process.exit(2); }
+      if (TAKES_ONE.has(name)) { if (seenOne.has(name)) { console.error(`--${name} given twice.\n${USAGE}`); process.exit(2); } seenOne.add(name); }
       if (name === "a-key") out.aKey = v;
       else if (name === "b-key") out.bKey = v;
       else if (name === "queries-file") out.queries.push(...readQueriesFile(v));
+      else if (name === "from-log") { if (v.trim().length === 0) { console.error(`--from-log is empty.\n${USAGE}`); process.exit(2); } out.fromLog = v; }
+      else if (name === "since") { if (Number.isNaN(Date.parse(v))) { console.error(`--since must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z).\n${USAGE}`); process.exit(2); } out.since = v; }
       else if (name === "query") { if (v.trim().length === 0) { console.error(`--query is empty.\n${USAGE}`); process.exit(2); } out.queries.push(v); }
       i++;
       continue;
@@ -760,8 +764,12 @@ export function parseCompareArgs(args: string[]): CompareArgs {
   if (refs.length !== 2) { console.error(`--compare needs two brains.\n${USAGE}`); process.exit(2); }
   [out.a, out.b] = refs;
   if (out.hybrid && !out.replay) { console.error(`--hybrid only applies with --replay.\n${USAGE}`); process.exit(2); }
+  if (out.fromLog && out.queries.length > 0) { console.error(`--from-log and --query/--queries-file are two query sources; pass one.\n${USAGE}`); process.exit(2); }
+  if (out.fromLog && out.hybrid) { console.error(`--hybrid does not apply to --from-log: each logged search replays on the arm that ran it.\n${USAGE}`); process.exit(2); }
+  if (out.fromLog && !out.replay) { console.error(`--from-log only applies with --replay.\n${USAGE}`); process.exit(2); }
+  if (out.since && !out.fromLog) { console.error(`--since only applies with --from-log (it windows the logged searches).\n${USAGE}`); process.exit(2); }
   if (out.queries.length > 0 && !out.replay) { console.error(`--query/--queries-file only apply with --replay (without it, no retrieval runs).\n${USAGE}`); process.exit(2); }
-  if (out.replay && out.queries.length === 0) { console.error(`--replay needs a query set: --query <q> (repeatable) or --queries-file <path>. query_log is not reachable over HTTP, so the queries are supplied.\n${USAGE}`); process.exit(2); }
+  if (out.replay && out.queries.length === 0 && !out.fromLog) { console.error(`--replay needs a query source: --query <q> (repeatable), --queries-file <path>, or --from-log <brain>.\n${USAGE}`); process.exit(2); }
   return out;
 }
 

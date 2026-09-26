@@ -37,6 +37,7 @@ import {
   resolveChunkTokens,
   resolveEmbeddingDimensions,
   resolveExtractWindow,
+  resolveExtractMaxWindows,
   EXTRACT_WINDOW_HEADER,
   EXTRACT_RETRY_RUNAWAY,
   EXTRACT_STREAM_ABORT,
@@ -71,6 +72,8 @@ export type EmbedEnv = {
   OB1_METADATA_MODEL?: string;
   /** Estimated tokens of thought text per entity-extraction call; unset derives it from the metadata model's served context (SMD-1879). */
   OB1_EXTRACT_CHUNK_TOKENS?: string;
+  /** The most windows one thought is extracted in; a longer one is extracted over its first this many (SMD-2240). Unset: db/config.mjs's EXTRACT_MAX_WINDOWS, 24. */
+  OB1_EXTRACT_MAX_WINDOWS?: string;
   /** The supersession judge's model, when it is not the metadata model (SMD-1901). */
   OB1_JUDGE_MODEL?: string;
   OB1_METADATA_TEMPERATURE?: string;
@@ -372,6 +375,15 @@ export type EmbedConfig = {
   extractModelWindow: number | undefined;
   /** Overlap between extraction windows: chunk.ts's ratio of the window (150 of 1200). */
   extractChunkOverlap: number;
+  /**
+   * The most windows one thought is extracted in (SMD-2240), and the text
+   * bound a run chunk.ts cannot split meets (entities.ts, boundedWindows): a longer
+   * thought is extracted over its first windows and its claim recorded
+   * succeeded with a caveat naming the coverage. OB1_EXTRACT_MAX_WINDOWS,
+   * else db/config.mjs's EXTRACT_MAX_WINDOWS.
+   */
+  extractMaxWindows: number;
+  extractMaxWindowsFrom: "OB1_EXTRACT_MAX_WINDOWS" | "default";
   /** Whether a window after the first carries the note's opening line — entities.ts's documentHeader; measured in evals/README.md. */
   extractHeader: boolean;
   /** Whether a call that ran to its answer budget is retried once with a frequency penalty; measured in evals/README.md. */
@@ -439,6 +451,7 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
   // finish. Same shape as the embedding rule above, a different model and a
   // different table.
   const extract = resolveExtractWindow(env.OB1_EXTRACT_CHUNK_TOKENS, metadataModel, DEFAULT_EXTRACT_WINDOW_TOKENS);
+  const extractCap = resolveExtractMaxWindows(env.OB1_EXTRACT_MAX_WINDOWS);
   return {
     ...resolveProviderEndpoints(env),
     embeddingModel: model,
@@ -478,6 +491,8 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
     extractChunkTokensUnfit: extract.unfit,
     extractModelWindow: extract.window,
     extractChunkOverlap: Math.floor(extract.tokens * EXTRACT_OVERLAP_RATIO),
+    extractMaxWindows: extractCap.windows,
+    extractMaxWindowsFrom: extractCap.from,
     extractHeader: EXTRACT_WINDOW_HEADER,
     extractRetryRunaway: EXTRACT_RETRY_RUNAWAY,
     extractStreamAbort: EXTRACT_STREAM_ABORT,

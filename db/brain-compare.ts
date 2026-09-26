@@ -33,16 +33,22 @@
  *     running brain can say them, so identity is an HTTP read by nature.
  *   • Freshness — counts.thoughts and the migration delta come from that same body
  *     (machine-readable); newest capture is read best-effort from thought_stats.
+ *   • Id set — list_thought_ids (SMD-2244) enumerates each corpus's ids, id-only,
+ *     with a first-page md5 digest that lets an identical pair skip enumeration;
+ *     the two sets are diffed for the EXACT "which thoughts one holds and the other
+ *     does not", not the thought-count stand-in the count line still shows.
  *   • Retrieval — the two search tools, called against both brains over the same
  *     queries, their returned ids diffed. The VECTOR arm needs no model here: the
  *     brain embeds the query server-side, so search_thoughts (hybrid) replays it.
+ *     The query set is supplied (--query/--queries-file) or drawn from a brain's own
+ *     log (--from-log, via list_logged_searches, SMD-2245) — each logged search on
+ *     the arm that ran it.
  *
- * Two signals a compare would ideally carry live only in a brain's Postgres and
- * are NOT reachable over the read surface, so this HTTP-only compare names them as
- * out of reach rather than guessing: the EXACT id-set difference (which thoughts one
- * holds and the other does not — the read tools page prose, they do not enumerate a
- * corpus), and a replay sourced from stable's own query_log (this replays a supplied
- * query set instead). A DB-backed mode can add both (SMD-2109 notes).
+ * Both of SMD-2109's once-deferred limits are now closed over the read surface: the
+ * EXACT id-set difference rides list_thought_ids (SMD-2244), and a replay sourced
+ * from a brain's own query_log rides list_logged_searches (SMD-2245). One signal is
+ * still deferred — the board-sync watermark (max metadata.linear_updated_at), which
+ * no read tool exposes; the compare names it rather than guessing (SMD-2109 notes).
  *
  * Until SMD-2037 lands, a refreshed brain runs at pgvector's default HNSW scan
  * settings, so a hybrid-arm difference here can be GUC-induced rather than a real
@@ -100,7 +106,10 @@ export function splitKeyFromUrl(url: string): { base: string; urlKey: string | u
 export async function resolveBrain(ref: string, keyArg: string | undefined, envKey: string | undefined): Promise<BrainEndpoint> {
   if (/^https?:\/\//i.test(ref)) {
     const parsed = splitKeyFromUrl(ref);
-    if (!parsed) throw new Error(`--compare: ${JSON.stringify(ref)} is not a valid URL.`);
+    // Never echo the raw ref: an invalid URL cannot be parsed to strip a ?key=, so
+    // show only the part before any query string (review pass 2 — a key-safety tidy
+    // in already-merged code, reachable via --a/--b too).
+    if (!parsed) throw new Error(`--compare: ${JSON.stringify(ref.split("?")[0])} is not a valid URL.`);
     const host = new URL(ref).host;
     const key = keyArg ?? parsed.urlKey ?? envKey;
     if (!key) throw new Error(`--compare: no read key for ${host}. Pass --a-key/--b-key, set OB1_COMPARE_KEY, or put it in the URL as ?key=.`);
@@ -192,6 +201,10 @@ export async function callTool(ep: BrainEndpoint, name: string, args: Record<str
     headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": ep.key },
     body,
   });
+  // A non-2xx is infrastructure (a gateway/proxy 404, a 502), not the protocol —
+  // classify it as HTTP status, never the body, so a "404 page not found" page can't
+  // be read downstream as an absent tool (review pass 2).
+  if (!r.ok) throw new Error(`${ep.label}: ${name} → HTTP ${r.status}`);
   const raw = await r.text();
   const msg = unwrapRpc(raw);
   if (!msg) throw new Error(`${ep.label}: ${name} returned no JSON-RPC reply (${raw.slice(0, 80)}).`);
@@ -299,6 +312,171 @@ export function parseResultIds(text: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// The corpus id set — the exact id-set difference (SMD-2244).
+// ---------------------------------------------------------------------------
+
+/** One page of `list_thought_ids`. */
+interface ThoughtIdPage {
+  ids: string[];
+  total: number;
+  /** md5 of all ids (first page, SQL store); null on the PostgREST shim or an empty corpus. */
+  digest: string | null;
+  cursor: string | null;
+}
+
+/** The exact id-set difference between two corpora, or `unavailable` when a brain predates the surface. */
+export interface IdDiff {
+  equal: boolean;
+  /** ids A holds that B does not. */
+  onlyA: string[];
+  /** ids B holds that A does not. */
+  onlyB: string[];
+  /** the whole-corpus totals, from each first page. */
+  totalA: number;
+  totalB: number;
+  /** set when a brain does not expose list_thought_ids (older than SMD-2244) — the count stand-in still stands. */
+  unavailable?: boolean;
+  /** set when the id-set read FAILED for another reason (a timeout, a refusal, a mid-walk error) — the reason. Distinct from `unavailable`: the tool is there, the read did not finish; the rest of the compare still prints. */
+  failed?: string;
+}
+
+/** A safety bound on the enumeration walk — 10M ids at the 1000-default page. */
+const MAX_ID_PAGES = 10_000;
+
+/** Fetch one page of a brain's thought ids. */
+async function fetchIdPage(ep: BrainEndpoint, after: string | null): Promise<ThoughtIdPage> {
+  const text = await callTool(ep, "list_thought_ids", after ? { after } : {});
+  let page: Partial<ThoughtIdPage>;
+  try {
+    page = JSON.parse(text) as Partial<ThoughtIdPage>;
+  } catch {
+    throw new Error(`${ep.label}: list_thought_ids did not return JSON (${text.slice(0, 80)}).`);
+  }
+  // A valid-JSON page whose `ids` is not an array is a broken page, not an empty
+  // corpus — throw so it reads as a failure, never a silent "this brain holds
+  // nothing" that would report the peer's whole corpus as a difference (review pass 2).
+  if (!Array.isArray(page.ids)) throw new Error(`${ep.label}: list_thought_ids returned no ids array.`);
+  return {
+    ids: page.ids.map(String),
+    total: Number(page.total ?? 0),
+    digest: page.digest ?? null,
+    cursor: page.cursor ?? null,
+  };
+}
+
+/** Page a brain's whole id set into a Set, starting from an already-read first page. */
+async function collectIds(ep: BrainEndpoint, first: ThoughtIdPage): Promise<Set<string>> {
+  const set = new Set(first.ids);
+  let cursor = first.cursor;
+  for (let guard = 0; cursor && guard < MAX_ID_PAGES; guard++) {
+    const page = await fetchIdPage(ep, cursor);
+    // A cursor that does not advance would page the same rows until the guard and
+    // return a partial set read as a real diff — throw so a buggy server reads as a
+    // failure, not a wrong answer (review pass 2).
+    if (page.cursor === cursor) throw new Error(`${ep.label}: list_thought_ids cursor did not advance past ${cursor.slice(0, 8)}.`);
+    for (const id of page.ids) set.add(id);
+    cursor = page.cursor;
+  }
+  return set;
+}
+
+/**
+ * The exact id-set difference, in one of four shapes. Reads each brain's first
+ * page; when both carry a digest and the two match, the corpora are identical and
+ * neither is enumerated (the fast path, `equal`). Otherwise both are paged in full
+ * and the sets are diffed (`onlyA`/`onlyB`). A brain that does not expose
+ * `list_thought_ids` (older than SMD-2244) is `unavailable` — the thought-count
+ * stand-in holds. Any other read failure (a refusal, a timeout, a mid-walk error,
+ * a short enumeration) is `failed` with its reason. None of the three non-diff
+ * shapes aborts the compare: the rest of the report still prints.
+ */
+export async function corpusIdDiff(a: BrainEndpoint, b: BrainEndpoint): Promise<IdDiff> {
+  const blank = (patch: Partial<IdDiff>): IdDiff => ({ equal: false, onlyA: [], onlyB: [], totalA: 0, totalB: 0, ...patch });
+  // An unknown tool is an older brain (degrade to unavailable, the count stands in);
+  // anything else is a real failure of the read, kept distinct so the wrong cause
+  // is never asserted and — crucially — so the rest of the compare still prints
+  // (review pass 1). The MCP SDK answers an unregistered tool with `Tool <name> not
+  // found` (server/mcp.js); others say "unknown tool"/"method not found". Match those
+  // phrasings, NOT a bare "not found" — a proxy's "404 page not found" body is a read
+  // failure, not an absent tool, and callTool's r.ok check keeps it out of here (review pass 2).
+  const isAbsent = (e: unknown) => /\bunknown tool\b|\btool\b[^]*?\bnot found\b|\bmethod not found\b|\bno such tool\b/i.test((e as Error).message);
+  let pa: ThoughtIdPage;
+  let pb: ThoughtIdPage;
+  try {
+    [pa, pb] = await Promise.all([fetchIdPage(a, null), fetchIdPage(b, null)]);
+  } catch (e) {
+    return isAbsent(e) ? blank({ unavailable: true }) : blank({ failed: (e as Error).message });
+  }
+  // Equal NON-null digests only: two null digests (the shim, or two empty corpora)
+  // must be enumerated, not read as a match.
+  if (pa.digest != null && pa.digest === pb.digest) {
+    return { equal: true, onlyA: [], onlyB: [], totalA: pa.total, totalB: pb.total };
+  }
+  // The full walk fails soft too: a mid-enumeration error (a timeout on page 2 of a
+  // corpus with hundreds of differing ids) marks the id-set failed rather than
+  // aborting the whole compare over its one optional axis (review pass 1).
+  try {
+    const [setA, setB] = await Promise.all([collectIds(a, pa), collectIds(b, pb)]);
+    // The walk must account for the whole corpus the first page counted. Fewer ids
+    // than `total` means an incomplete enumeration — a PostgREST db-max-rows below
+    // the page size (a short page reads as the last), or a concurrent delete — so
+    // fail rather than report a partial set as a real difference (review pass 3).
+    if (setA.size < pa.total || setB.size < pb.total) {
+      return blank({ failed: `the id enumeration returned fewer ids than the corpus total (${setA.size}/${pa.total}, ${setB.size}/${pb.total}) — a paging limit or a concurrent change; not comparing a partial set`, totalA: pa.total, totalB: pb.total });
+    }
+    const onlyA = [...setA].filter((id) => !setB.has(id));
+    const onlyB = [...setB].filter((id) => !setA.has(id));
+    return { equal: onlyA.length === 0 && onlyB.length === 0, onlyA, onlyB, totalA: pa.total, totalB: pb.total };
+  } catch (e) {
+    return blank({ failed: (e as Error).message, totalA: pa.total, totalB: pb.total });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The log-sourced replay plan (SMD-2245).
+// ---------------------------------------------------------------------------
+
+/** A brain's logged searches, as list_logged_searches returns them. */
+interface LoggedSearchPage {
+  searches: { query: string; arm: "keyword" | "hybrid" | null }[];
+  truncated: boolean;
+}
+
+/** Fetch a window of a brain's logged searches — the queries a log-sourced replay draws from. */
+export async function fetchLoggedSearches(ep: BrainEndpoint, since: string | null): Promise<LoggedSearchPage> {
+  const args: Record<string, unknown> = {};
+  if (since) args.since = since;
+  const text = await callTool(ep, "list_logged_searches", args);
+  let page: Partial<LoggedSearchPage>;
+  try {
+    page = JSON.parse(text) as Partial<LoggedSearchPage>;
+  } catch {
+    throw new Error(`${ep.label}: list_logged_searches did not return JSON (${text.slice(0, 80)}).`);
+  }
+  return { searches: Array.isArray(page.searches) ? page.searches : [], truncated: page.truncated === true };
+}
+
+/**
+ * A replay plan from logged searches: each search on the arm that ran it, a
+ * null-arm row skipped (pre-045 rows carry no arm, so which one produced the ids
+ * is unknown — as the SQL replay skips them), an empty query skipped, and identical
+ * (query, arm) pairs collapsed so a query logged a hundred times replays once.
+ */
+export function replayPlanFromLog(searches: { query: string; arm: string | null }[]): ReplayEntry[] {
+  const seen = new Set<string>();
+  const plan: ReplayEntry[] = [];
+  for (const s of searches) {
+    if (s.arm !== "keyword" && s.arm !== "hybrid") continue;
+    if (typeof s.query !== "string" || s.query.length === 0) continue;
+    const key = `${s.arm}\u0000${s.query}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    plan.push({ query: s.query, arm: s.arm });
+  }
+  return plan;
+}
+
+// ---------------------------------------------------------------------------
 // The comparison.
 // ---------------------------------------------------------------------------
 
@@ -332,8 +510,10 @@ export interface Comparison {
   migrationDelta: number | null;
   /** a and b thoughts counts. */
   counts: { a: number | null; b: number | null };
-  /** The retrieval rows, when --replay ran; the arms that ran. */
-  retrieval: { rows: RetrievalRow[]; arms: string[]; queries: number } | null;
+  /** The exact id-set difference (SMD-2244), or unavailable on a brain that predates list_thought_ids. */
+  idDiff: IdDiff;
+  /** The retrieval rows, when --replay ran; the arms that ran, the replay count, where the queries came from, whether a log source was truncated, and any log-source read failure. */
+  retrieval: { rows: RetrievalRow[]; arms: string[]; queries: number; source: string; truncated?: boolean; sourceError?: string } | null;
   /** The one-line verdict. */
   verdict: string;
 }
@@ -361,12 +541,30 @@ function identityFields(r: BrainReading): Record<string, string> {
 }
 
 /** Compose the two readings into a comparison, optionally replaying a query set. */
+/** One entry of a retrieval plan: a query and the arm to replay it on. */
+export interface ReplayEntry {
+  query: string;
+  arm: "keyword" | "hybrid";
+}
+
 export async function compareBrains(
   a: BrainEndpoint,
   b: BrainEndpoint,
-  opts: { queries?: string[]; hybrid?: boolean } = {},
+  opts: {
+    /** A supplied query set (replayed on keyword, plus hybrid when `hybrid`). */
+    queries?: string[];
+    hybrid?: boolean;
+    /** A resolved plan from a brain's log (`--from-log`) — {query, arm} pairs — used in place of `queries`. */
+    fromLog?: ReplayEntry[];
+    /** Where the plan came from, for the report: "the supplied queries" or "the log of <label>". */
+    source?: string;
+    /** Whether a `fromLog` source was truncated (more searches in the window than replayed). */
+    truncated?: boolean;
+    /** Set when a `fromLog` source could not be READ (the source lacks the tool, or is unreachable) — the reason. The rest of the compare still prints, like the id-set path (review pass 1). */
+    sourceError?: string;
+  } = {},
 ): Promise<Comparison> {
-  const [ra, rb] = await Promise.all([readBrain(a), readBrain(b)]);
+  const [ra, rb, idDiff] = await Promise.all([readBrain(a), readBrain(b), corpusIdDiff(a, b)]);
 
   const fa = identityFields(ra);
   const fb = identityFields(rb);
@@ -378,24 +576,30 @@ export async function compareBrains(
   const migrationDelta =
     ra.highestMigration === null || rb.highestMigration === null ? null : rb.highestMigration - ra.highestMigration;
 
+  // The replay plan — {query, arm} pairs — from a supplied set (each query on the
+  // keyword arm, and hybrid when asked) or from a brain's log (each logged search on
+  // its OWN arm). One loop replays either against both brains.
   let retrieval: Comparison["retrieval"] = null;
-  if (opts.queries && opts.queries.length) {
-    const arms: ("keyword" | "hybrid")[] = opts.hybrid ? ["keyword", "hybrid"] : ["keyword"];
+  const suppliedArms: ("keyword" | "hybrid")[] = opts.hybrid ? ["keyword", "hybrid"] : ["keyword"];
+  const plan: ReplayEntry[] = opts.fromLog
+    ? opts.fromLog
+    : (opts.queries ?? []).flatMap((query) => suppliedArms.map((arm) => ({ query, arm })));
+  // A `fromLog` source with no rows still reports (so the operator learns the log
+  // was empty); a supplied set with no queries means retrieval was not asked.
+  if (plan.length || opts.fromLog || opts.sourceError) {
     const rows: RetrievalRow[] = [];
-    for (const query of opts.queries) {
-      for (const arm of arms) {
-        // One query one brain refuses (an egress-gated embedding) or a hybrid arm a
-        // peer has no provider for must not abort the whole compare — mark the row
-        // skipped-with-reason and go on, the way newestCapture degrades (review pass 1).
-        try {
-          const [ida, idb] = await Promise.all([searchIds(a, arm, query), searchIds(b, arm, query)]);
-          rows.push(diffRow(query, arm, ida, idb));
-        } catch (e) {
-          rows.push({ query, arm, a: [], b: [], onlyA: [], onlyB: [], reordered: false, changed: false, skipped: (e as Error).message });
-        }
+    for (const { query, arm } of plan) {
+      // One query one brain refuses (an egress-gated embedding) or a hybrid arm a
+      // peer has no provider for must not abort the whole compare — mark the row
+      // skipped-with-reason and go on, the way newestCapture degrades (review pass 1).
+      try {
+        const [ida, idb] = await Promise.all([searchIds(a, arm, query), searchIds(b, arm, query)]);
+        rows.push(diffRow(query, arm, ida, idb));
+      } catch (e) {
+        rows.push({ query, arm, a: [], b: [], onlyA: [], onlyB: [], reordered: false, changed: false, skipped: (e as Error).message });
       }
     }
-    retrieval = { rows, arms, queries: opts.queries.length };
+    retrieval = { rows, arms: [...new Set(plan.map((p) => p.arm))], queries: plan.length, source: opts.source ?? "the supplied queries", truncated: opts.truncated, sourceError: opts.sourceError };
   }
 
   return {
@@ -404,6 +608,7 @@ export async function compareBrains(
     identity,
     migrationDelta,
     counts: { a: ra.thoughts, b: rb.thoughts },
+    idDiff,
     retrieval,
     verdict: freshnessVerdict(ra, rb, migrationDelta),
   };
@@ -493,24 +698,45 @@ export function renderComparison(c: Comparison): string {
   lines.push(`  thoughts: a=${ca === null ? "unread" : ca.toLocaleString("en-US")}  b=${cb === null ? "unread" : cb.toLocaleString("en-US")}`);
   lines.push(`  newest capture: a=${c.a.newestCapture ?? "n/a"}  b=${c.b.newestCapture ?? "n/a"}`);
   lines.push(`  migration ledger: a=${c.a.highestMigration ?? "unread"}  b=${c.b.highestMigration ?? "unread"}`);
-  lines.push(`  (board-sync watermark and the exact id-set difference are not on the read surface — a DB-backed compare adds them, SMD-2109.)`);
+  // The exact id-set difference (SMD-2244): which thoughts one holds and the other does not.
+  const d = c.idDiff;
+  if (d.unavailable) {
+    lines.push(`  id-set: unavailable — a brain does not expose list_thought_ids (older than SMD-2244); the thought count above stands in.`);
+  } else if (d.failed) {
+    lines.push(`  id-set: could not be read — ${d.failed}; the thought count above stands in.`);
+  } else if (d.equal) {
+    lines.push(`  id-set: identical — both brains hold the same ${d.totalA.toLocaleString("en-US")} thought ids.`);
+  } else {
+    const ex = (ids: string[]) => (ids.length ? ` (e.g. ${ids.slice(0, 3).map(shortId).join(", ")}${ids.length > 3 ? ", …" : ""})` : "");
+    lines.push(`  id-set: ${d.onlyA.length.toLocaleString("en-US")} only in a${ex(d.onlyA)}; ${d.onlyB.length.toLocaleString("en-US")} only in b${ex(d.onlyB)}.`);
+  }
+  lines.push(`  (board-sync watermark is not on the read surface — a DB-backed compare adds it, SMD-2109.)`);
 
   lines.push("");
   lines.push("Retrieval:");
   if (!c.retrieval) {
-    lines.push("  skipped — pass --replay with --query/--queries-file (query_log is not reachable over HTTP, so the query set is supplied).");
+    lines.push("  skipped — pass --replay with --query/--queries-file, or --from-log <brain> to source the queries from a brain's own log.");
+  } else if (c.retrieval.sourceError) {
+    // A --from-log source that resolved but whose log could not be read.
+    lines.push(`  could not read ${c.retrieval.source} — ${c.retrieval.sourceError}; identity and freshness above still compare.`);
+  } else if (c.retrieval.queries === 0) {
+    // A --from-log source that yielded nothing (OB1_QUERY_LOG off, or an empty window).
+    lines.push(`  no queries — ${c.retrieval.source} logged no searches (OB1_QUERY_LOG off, or none in the window).`);
   } else {
     const moved = c.retrieval.rows.filter((r) => r.changed);
     const skipped = c.retrieval.rows.filter((r) => r.skipped);
-    lines.push(`  arms: ${c.retrieval.arms.join(", ")} over ${c.retrieval.queries} quer${c.retrieval.queries === 1 ? "y" : "ies"}${c.retrieval.arms.includes("hybrid") ? " (hybrid = the vector arm, embedded by each brain; until SMD-2037 a hybrid diff can be HNSW-GUC-induced)" : ""}`);
+    const trunc = c.retrieval.truncated ? " (window truncated — the most recent were replayed)" : "";
+    const hybridNote = c.retrieval.arms.includes("hybrid") ? " (hybrid = the vector arm, embedded by each brain; until SMD-2037 a hybrid diff can be HNSW-GUC-induced)" : "";
+    // "replays" not "queries": the count is query-arm pairs (a query on two arms is two).
+    lines.push(`  arms: ${c.retrieval.arms.join(", ")} over ${c.retrieval.queries} replay${c.retrieval.queries === 1 ? "" : "s"} from ${c.retrieval.source}${trunc}${hybridNote}`);
     lines.push(`  (these are real searches — a brain running OB1_QUERY_LOG=on records them in query_log, telemetry, not the thoughts corpus.)`);
     for (const r of skipped) lines.push(`  ~ [${r.arm}] ${JSON.stringify(r.query.slice(0, 60))}: skipped — ${r.skipped}`);
     if (moved.length === 0) {
       // All rows skipped is not "no delta" — nothing was compared (review pass 3).
       const allSkipped = skipped.length > 0 && skipped.length === c.retrieval.rows.length;
       lines.push(allSkipped
-        ? `  nothing compared — all ${skipped.length} quer${skipped.length === 1 ? "y" : "ies"} were skipped.`
-        : `  no delta — b returns the same ids as a for every query and arm${skipped.length ? ` (${skipped.length} skipped)` : ""}.`);
+        ? `  nothing compared — all ${skipped.length} replay${skipped.length === 1 ? "" : "s"} were skipped.`
+        : `  no delta — b returns the same ids as a for every replay${skipped.length ? ` (${skipped.length} skipped)` : ""}.`);
     } else {
       for (const r of moved) {
         const bits: string[] = [];
@@ -539,6 +765,10 @@ export interface CompareArgs {
   replay: boolean;
   hybrid: boolean;
   queries: string[];
+  /** A brain reference whose logged searches source the replay (--from-log), in place of `queries` (SMD-2245). */
+  fromLog?: string;
+  /** The window for --from-log's logged searches (ISO-8601). */
+  since?: string;
   json: boolean;
 }
 
@@ -549,7 +779,27 @@ export async function runCompare(args: CompareArgs): Promise<number> {
     resolveBrain(args.a, args.aKey, envKey),
     resolveBrain(args.b, args.bKey, envKey),
   ]);
-  const c = await compareBrains(a, b, { queries: args.replay ? args.queries : undefined, hybrid: args.hybrid });
+  // The retrieval source, resolved: a supplied query set, or a brain's own log
+  // (--from-log), or nothing when --replay was not asked.
+  let replayOpts: Parameters<typeof compareBrains>[2] = {};
+  if (args.replay) {
+    if (args.fromLog) {
+      // A bad --from-log ref aborts (a usage error, as a bad --a/--b does); a source
+      // that resolves but whose log cannot be READ (an older brain without the tool,
+      // an unreachable one) degrades — the id-set/identity/freshness still print
+      // (review pass 1). src.label carries no key, so the reason is safe to show.
+      const src = await resolveBrain(args.fromLog, undefined, envKey);
+      try {
+        const page = await fetchLoggedSearches(src, args.since ?? null);
+        replayOpts = { fromLog: replayPlanFromLog(page.searches), source: `the log of ${src.label}`, truncated: page.truncated };
+      } catch (e) {
+        replayOpts = { fromLog: [], source: `the log of ${src.label}`, sourceError: (e as Error).message };
+      }
+    } else {
+      replayOpts = { queries: args.queries, hybrid: args.hybrid, source: "the supplied queries" };
+    }
+  }
+  const c = await compareBrains(a, b, replayOpts);
   if (args.json) {
     // The endpoints (and their keys) are never in the Comparison — only labels.
     console.log(JSON.stringify(c, null, 2));
@@ -564,7 +814,11 @@ export async function runCompare(args: CompareArgs): Promise<number> {
   // (review pass 1: it exited 0 while the verdict printed the count delta).
   const countDelta = c.counts.a !== null && c.counts.b !== null && c.counts.a !== c.counts.b;
   const captureDelta = captureDaysApart(c.a.newestCapture, c.b.newestCapture);
-  const freshDelta = countDelta || (captureDelta !== null && captureDelta !== 0);
+  // An id-set difference is a delta too (a same-count corpus that drifted, SMD-2244).
+  // A read that could not be had — `unavailable` (older brain) or `failed` — is not a
+  // delta: the count stand-in already spoke and we do not force the gate on an unread axis.
+  const idSetDelta = !c.idDiff.unavailable && !c.idDiff.failed && !c.idDiff.equal;
+  const freshDelta = countDelta || (captureDelta !== null && captureDelta !== 0) || idSetDelta;
   const anyDelta =
     c.identity.length > 0 ||
     (c.migrationDelta ?? 0) !== 0 ||

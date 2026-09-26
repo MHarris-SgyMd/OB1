@@ -63,7 +63,8 @@
  *      `include`) or onto the host without a port (`network_mode`), and
  *      PUBLISHES names which service publishes from which file, one mapping
  *      each, so a mapping that is gone or refused fails as missing:
- *      compose.yaml publishes the server alone; the database and Ollama
+ *      compose.yaml publishes the server, and n8n under its opt-in profile
+ *      (SMD-2210); the database and Ollama
  *      publish through compose.host-ports.yaml, a second -f. The files are
  *      parsed with Bun.YAML (SMD-1844); no exceptions
  *  14. every knob the server reads reaches the container: each `OB1_*` /
@@ -234,10 +235,11 @@
  *      the class decision is docs/vendored-disposition.md's "PostgREST-
  *      speaking scripts" (an import emits ingestion-contract items, a
  *      maintenance script moves onto compat/supabase-sql, three retire), and
- *      POSTGREST_EXCEPTIONS counts the twenty-six files with a call site
+ *      POSTGREST_EXCEPTIONS counts the twenty-four files with a call site
  *      (two more reach the gateway through a lib; twenty-eight until
  *      obsidian-vault-import and local-ollama-embeddings retired, SMD-2137
- *      and SMD-2138) with the ticket that ports or retires each — a landed
+ *      and SMD-2138, and brain-backup and lint-sweep moved onto the shim,
+ *      SMD-2144) with the ticket that ports or retires each — a landed
  *      port fails until its entry goes, so the
  *      table's size, plus the two lib-reached scripts, is the class's
  *      remaining size (SMD-2126)
@@ -2055,7 +2057,8 @@ function checkSupabaseIsms() {
 // fix every published mapping is the short form `"${X_BIND:-127.0.0.1}:
 // ${X_PORT:-n}:n"` — the literal 127.0.0.1 unless the operator names an
 // address, in a knob deploy/.env.example documents — and the base file
-// publishes the server alone; the database and Ollama reach the host only
+// publishes the server, plus n8n under the opt-in `orchestration` profile
+// since SMD-2210; the database and Ollama reach the host only
 // through compose.host-ports.yaml, a second -f an operator adds for a tool run
 // from a checkout.
 //
@@ -2137,7 +2140,10 @@ function documentedEnvKnobs(pattern: RegExp) {
 
 /** compose file under deploy/ → the services that publish one mapping each from it. */
 const PUBLISHES: Record<string, string[]> = {
-  "compose.yaml": ["server"],
+  // The server; and n8n under `--profile orchestration` (SMD-2210): its
+  // editor, API, webhooks and MCP endpoint on loopback, for the provisioning
+  // step and an AI client on this host.
+  "compose.yaml": ["server", "n8n"],
   "compose.host-ports.yaml": ["postgres", "ollama", "jev"],
   // The three-brain pipeline (SMD-1806): each tier's server on its own loopback
   // port; the three Postgres services and the shared Ollama publish nothing.
@@ -2311,7 +2317,7 @@ function checkPublishedPorts() {
     }
     for (const service of new Set(published)) {
       const n = published.filter((s) => s === service).length;
-      if (!expected.includes(service) || n > 1) fail(rel, `service \`${service}\` publishes ${n} mapping${n === 1 ? "" : "s"} from this file and PUBLISHES in ${SELF} lists ${expected.includes(service) ? "one" : "none"} — ${name === "compose.yaml" ? "the base file publishes the server alone; the database and Ollama publish through compose.host-ports.yaml, a second -f, and " : ""}a new published port is named in PUBLISHES deliberately, with its row in deploy/README.md's "What is reachable from where" (SMD-1844)`);
+      if (!expected.includes(service) || n > 1) fail(rel, `service \`${service}\` publishes ${n} mapping${n === 1 ? "" : "s"} from this file and PUBLISHES in ${SELF} lists ${expected.includes(service) ? "one" : "none"} — ${name === "compose.yaml" ? "the base file publishes the server, and n8n under the orchestration profile; the database and Ollama publish through compose.host-ports.yaml, a second -f, and " : ""}a new published port is named in PUBLISHES deliberately, with its row in deploy/README.md's "What is reachable from where" (SMD-1844)`);
     }
   }
 }
@@ -4864,9 +4870,10 @@ checkWorkflowPins();
 // that says it posts to `/rest/v1/rpc/…` is making a claim about itself), a
 // `rest/v1` path in any string, a supabase-py import or `create_client(`
 // (Python and shell alone), or a `@supabase/postgrest-js` specifier is a hit.
-// POSTGREST_EXCEPTIONS counts the twenty-six files with a call site (two
+// POSTGREST_EXCEPTIONS counts the twenty-four files with a call site (two
 // more reach the gateway through a lib; twenty-eight until the two retirements,
-// obsidian-vault-import and local-ollama-embeddings — SMD-2137 and SMD-2138)
+// obsidian-vault-import and local-ollama-embeddings — SMD-2137 and SMD-2138 —
+// and the first two ports, brain-backup and lint-sweep — SMD-2144)
 // with the ticket that ports or retires each: a line past the count fails (a
 // new call beside the documented ones),
 // a count no line reaches fails as stale (the port landed on those lines —
@@ -4971,7 +4978,9 @@ const SHIM = "a maintenance script; it moves onto compat/supabase-sql under bun"
  * atomizer's backfill-gmail-correspondents.mjs and authorship-edges' backfill-authorship.mjs — reach the
  * gateway through their `lib/` file alone and have no line of their own. Two of the thirty are gone:
  * obsidian-vault-import's import-obsidian.py (SMD-2137) and local-ollama-embeddings' embed-local.py (SMD-2138)
- * retired with their recipes, the first entries to leave.
+ * retired with their recipes, the first entries to leave. Two more are on the shim: brain-backup's
+ * backup-brain.mjs and lint-sweep's lint-sweep.js (SMD-2144), the first ports to land; weekly-digest's
+ * entry moved to SMD-2239 with the rescope of 2026-09-26 (a sink, not a maintenance script).
  */
 const POSTGREST_EXCEPTIONS = new Map<string, CountedException>([
   // Imports → the ingestion contract (after SMD-2136).
@@ -4997,9 +5006,11 @@ const POSTGREST_EXCEPTIONS = new Map<string, CountedException>([
   ["recipes/wiki-synthesis/scripts/synthesize-wiki.mjs", POSTGREST(SHIM, "SMD-2143", 1)],
   ["recipes/wiki-synthesis/scripts/backfill-gmail-wikis.mjs", POSTGREST(`${SHIM}, its page deletes through delete_thought`, "SMD-2143", 1)],
   ["recipes/entity-wiki/generate-wiki.mjs", POSTGREST(SHIM, "SMD-2143", 1)],
-  ["recipes/weekly-digest/weekly-digest.mjs", POSTGREST(`${SHIM}; read-only`, "SMD-2144", 1)],
-  ["recipes/brain-backup/backup-brain.mjs", POSTGREST(`${SHIM}; read-only`, "SMD-2144", 1)],
-  ["recipes/lint-sweep/lint-sweep.js", POSTGREST(`${SHIM}; read-only`, "SMD-2144", 1)],
+  // Not a maintenance script but a sink: it pages thought text and posts it to Telegram, which a shim
+  // port would do from below the server's egress gate — the orchestration ADR's decision 9, written for
+  // templates, is read to cover it. Its
+  // two read-only siblings, brain-backup and lint-sweep, are on the shim (SMD-2144, rescoped 2026-09-26).
+  ["recipes/weekly-digest/weekly-digest.mjs", POSTGREST("a sink; an n8n sink template after SMD-2211's egress checkpoint, or a db/ verb behind SMD-2134's gate — not a shim port", "SMD-2239", 1)],
   ["recipes/source-filtering/backfill-metadata.ts", POSTGREST(SHIM, "SMD-2021", 2)],
   // Smoke harnesses, each with its own ticket.
   ["recipes/brain-smoke-test/smoke-all.js", POSTGREST("the smoke harness takes the fork's shape or deploy/smoke.sh absorbs it", "SMD-2103", 1)],

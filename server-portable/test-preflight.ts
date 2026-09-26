@@ -230,12 +230,18 @@ console.log("\n[3c] The extraction window is derived from the METADATA model's s
   // The embedding model is the default here and the metadata model varies, so
   // the row that moves is the extraction window's — and the chunk window row
   // beside it must not move, since the two models are two tables.
-  const base = { ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", OB1_EXTRACT_CHUNK_TOKENS: undefined };
+  const base = { ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", OB1_EXTRACT_CHUNK_TOKENS: undefined, OB1_EXTRACT_MAX_WINDOWS: undefined };
   const qwen = await run({ ...base, OB1_METADATA_MODEL: "qwen2.5:7b" });
+  // The per-thought bound closes the row (SMD-2240): the count, where it came from, and the text it allows.
+  assert(/extraction window\s+[^\n]*, read whole; a thought over 24 windows \(the default; OB1_EXTRACT_MAX_WINDOWS widens it\), or whose whitespace-free runs take it past 28800 estimated tokens, is extracted over its opening and recorded succeeded with a caveat naming the coverage$/m.test(qwen.out),
+         "the row ends with the per-thought bound: 24 windows by default, the runs' text bound at 24 × 1200 tokens, and what a thought over it gets");
+  const widened = await run({ ...base, OB1_METADATA_MODEL: "qwen2.5:7b", OB1_EXTRACT_MAX_WINDOWS: "80" });
+  assert(/extraction window\s+[^\n]*; a thought over 80 windows \(from OB1_EXTRACT_MAX_WINDOWS\), or whose whitespace-free runs take it past 96000 estimated tokens, is extracted over its opening/.test(widened.out),
+         "…and OB1_EXTRACT_MAX_WINDOWS moves both numbers, the row naming the variable");
   assert(/extraction window\s+thoughts over 1200 estimated tokens are extracted in 1200-token windows \(overlap 150\), derived from qwen2\.5:7b's 32768-token served context — held at 1200, the size the default model was measured to finish reliably \(evals\/README\.md, SMD-1879\); the answer is streamed and a call is aborted once it holds 3 copies of one item, and a call aborted so or run to its answer budget is made once more with a 0\.5 frequency penalty, read whole/.test(qwen.out),
          "the default model derives the measured size from its 32,768-token context, the row says the context would have allowed more, and names the stream abort and the runaway retry");
   const unknown = await run({ ...base, OB1_METADATA_MODEL: "some-chat-model" });
-  assert(/extraction window\s+thoughts over 1200 estimated tokens are extracted in 1200-token windows \(overlap 150\), the default for some-chat-model's served context, which db\/config\.mjs's KNOWN_CHAT_MODEL_WINDOW does not list; the answer is streamed and a call is aborted once it holds 3 copies of one item, and a call aborted so or run to its answer budget is made once more with a 0\.5 frequency penalty, read whole — set OB1_EXTRACT_CHUNK_TOKENS if the model serves fewer than 6814 tokens/.test(unknown.out),
+  assert(/extraction window\s+thoughts over 1200 estimated tokens are extracted in 1200-token windows \(overlap 150\), the default for some-chat-model's served context, which db\/config\.mjs's KNOWN_CHAT_MODEL_WINDOW does not list; the answer is streamed and a call is aborted once it holds 3 copies of one item, and a call aborted so or run to its answer budget is made once more with a 0\.5 frequency penalty, read whole; a thought over 24 windows [^\n]* naming the coverage — set OB1_EXTRACT_CHUNK_TOKENS if the model serves fewer than 6814 tokens/.test(unknown.out),
          "an unknown model keeps the default, is told where the table is, and what context the default needs");
   const pinned = await run({ ...base, OB1_METADATA_MODEL: "qwen2.5:7b", OB1_EXTRACT_CHUNK_TOKENS: "600" });
   assert(/extraction window\s+thoughts over 600 estimated tokens are extracted in 600-token windows \(overlap 75\), from OB1_EXTRACT_CHUNK_TOKENS \(qwen2\.5:7b's 32768-token served context\)/.test(pinned.out),
@@ -289,6 +295,10 @@ console.log("\n[5] Against a real database");
 if (!LIVE) { skip("healthy configuration passes"); skip("missing schema is distinguished from bad credentials"); }
 else {
   const { SQL } = await import("bun");
+  // Shared by the SMD-2237 ledger-row checks below: a connection whose search_path
+  // excludes public, and the adoption row a schema-present/no-ledger brain shows.
+  const offPathUrl = `${LIVE}${LIVE.includes("?") ? "&" : "?"}options=-csearch_path%3Dnowhere`;
+  const adoptRow = /!\s+migration ledger\s+no schema_migrations table — the schema was applied by hand\n\s+→ Adopt it with: cd db && bun migrate\.ts --url \$DATABASE_URL --baseline/;
   // Drop and apply are separate calls on purpose: the two assertions between them
   // observe the un-migrated state, which is the thing this section tests.
   await dropSchema(LIVE);
@@ -296,6 +306,16 @@ else {
   const before = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(before.code === 1, "an un-migrated database exits 1");
   assert(/bun migrate\.ts/.test(before.out), "…and tells you to run the migrations");
+
+  // The migration ledger row on the empty database names the migrate command,
+  // not --baseline: --baseline records every migration as applied without running
+  // one, and over no schema it leaves a ledger the next plain run reads as done
+  // (SMD-2237). It says what the schema row above it says, and never contradicts
+  // it with an adoption step there is nothing to adopt.
+  assert(/!\s+migration ledger\s+no schema_migrations table and no schema — nothing has been migrated here\n\s+→ Apply the migrations: cd db && bun migrate\.ts/.test(before.out),
+         "…the migration ledger row names the migrate command on an empty database (SMD-2237)");
+  assert(!/the schema was applied by hand/.test(before.out) && !/--baseline/.test(before.out),
+         "…and never tells an empty database to --baseline");
 
   // Another tool's thoughts, in a schema of its own, does not make an
   // un-migrated public read as "exists but does not resolve" (SMD-2062):
@@ -305,13 +325,22 @@ else {
   let strayRun: { code: number; out: string };
   try {
     await otherTool.unsafe("DROP SCHEMA IF EXISTS pf_stray CASCADE; CREATE SCHEMA pf_stray; CREATE TABLE pf_stray.thoughts (id int)");
-    strayRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: `${LIVE}${LIVE.includes("?") ? "&" : "?"}options=-csearch_path%3Dnowhere` });
+    strayRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: offPathUrl });
   } finally {
     await otherTool.unsafe("DROP SCHEMA IF EXISTS pf_stray CASCADE");
     await otherTool.close();
   }
   assert(/✗\s+schema\s+relation "thoughts" does not exist\n\s+→ Apply the migrations: cd db && bun migrate\.ts/.test(strayRun.out),
          `…from the schema row too, with another schema's thoughts beside an empty public off the path (${strayRun.out.split("\n").find((l) => /\bschema\b/.test(l))?.trim()})`);
+  // And the migration ledger row reads the SMD-2237 split by public alone: the
+  // probe is pg_class-qualified to schema public, so pf_stray.thoughts (another
+  // tool's, off the path) is not a schema to adopt — the row says "nothing has
+  // been migrated here", never "applied by hand" or --baseline. A probe that
+  // dropped the `nspname = 'public'` qualifier would match the stray table and
+  // offer to --baseline an empty public: the exact wrong advice SMD-2237 removes.
+  assert(/!\s+migration ledger\s+no schema_migrations table and no schema — nothing has been migrated here/.test(strayRun.out) &&
+         !/the schema was applied by hand/.test(strayRun.out) && !/--baseline/.test(strayRun.out),
+         "…and the migration ledger row reads public alone — another schema's thoughts is not a schema to adopt (SMD-2237)");
 
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
 
@@ -320,7 +349,23 @@ else {
   assert(/thoughts table reachable/.test(after.out), "…and confirms the table is reachable");
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 046's/.test(after.out), "…and that atomic capture is available, with the shipped bodies (a warn would also say \"present\")");
   assert(/✓  audit events\s+046's event shape present — the columns, the trigger that derives the kind from the key, the one lawful amendment — and every key classified/.test(after.out), "…and that 046's event shape is present, with no key waiting on a kind (SMD-1730)");
-  assert(/no schema_migrations table/.test(after.out), "…and warns the schema was applied outside the runner");
+  // The schema is present (applyMigrations installs it) but writes no ledger, so
+  // this is the legitimate adoption case: the row offers --baseline, with the full
+  // "applied by hand" wording and the remedy. Pinning both — not merely "no
+  // schema_migrations table", which the empty-database message also contains —
+  // keeps the SMD-2237 split honest from the other side: a probe that always read
+  // "no schema" would send a hand-applied brain to re-run the migrations.
+  assert(adoptRow.test(after.out),
+         "…and, with the schema present but no ledger, offers --baseline to adopt it (the legitimate case the empty-database guard must not swallow, SMD-2237)");
+  // The protective direction of the public-qualified probe: the same
+  // migrated-but-no-ledger brain, read from a role whose search_path excludes
+  // public, still offers --baseline. The probe is pg_class-qualified to public,
+  // so it finds public.thoughts even when the role cannot resolve it by name — the
+  // search_path-independence the probe's comment promises. A to_regclass spelling
+  // would miss it here and wrongly say "nothing has been migrated" (SMD-2237).
+  const afterOffPath = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: offPathUrl });
+  assert(adoptRow.test(afterOffPath.out),
+         "…and offers --baseline even with public off the role's search_path — the probe finds public.thoughts by pg_class (SMD-2237)");
   assert(/resolve_agent present/.test(after.out), "…and that the agent registry is available");
 
   /**

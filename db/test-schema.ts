@@ -8262,7 +8262,7 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
 // exactness, both branches; the clamp; the coverage columns; node_state's
 // dependency joins dropped from the plan; the grant the server group now
 // holds; a replay over a reshape. The tie-break's teeth on real Postgres are
-// test-live [26]'s, where the join does not hand rows over in order.
+// test-live [27]'s, where the join does not hand rows over in order.
 console.log("\n[55] Migration 059: search_thoughts_current — the hybrid with settled and superseded thoughts ranked below current ones, on request: the contract, the hybrid's rows when nothing is demoted, who is demoted and by exactly what, an exact-literal hit's cost, the window, and the server group's grant (SMD-2255)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;

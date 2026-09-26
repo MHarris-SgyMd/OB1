@@ -22,6 +22,14 @@
       "scope": "read"
     },
     {
+      "name": "list_thought_ids",
+      "scope": "read"
+    },
+    {
+      "name": "list_logged_searches",
+      "scope": "read"
+    },
+    {
       "name": "list_supersession_proposals",
       "scope": "read"
     },

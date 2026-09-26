@@ -2280,4 +2280,80 @@ console.log("\n[21] test-support's schema reset leaves nothing of the fork's in 
   await applyMigrations(URL_, OPTS);
 }
 
+console.log("\n[22] --baseline on an empty database refuses, naming public.thoughts, the plain run and --force; --force records the ledger over it (SMD-2237)");
+{
+  await dropSchema(URL_);
+  // A fresh database with no fork schema. --baseline would record every migration
+  // as applied without running one, leaving a ledger the next plain run reads as
+  // done — so it refuses (exit 2), naming what is missing, the plain run and the
+  // override, and before the ledger table is even created: nothing is written.
+  const refused = await migrate("--baseline");
+  assert(refused.code === 2 &&
+         /--baseline refused: public\.thoughts does not exist/.test(refused.out) &&
+         /Apply the migrations instead: cd db && bun migrate\.ts/.test(refused.out) &&
+         /pass --force/.test(refused.out),
+         `--baseline on an empty database refuses, naming public.thoughts, the plain run and --force (exit ${refused.code})`);
+
+  const sql = new SQL({ url: URL_, max: 1 });
+  const [{ present: ledger }] = (await sql`SELECT to_regclass('public.schema_migrations') IS NOT NULL AS present`) as { present: boolean }[];
+  await sql.close();
+  assert(ledger === false, "…and creates no schema_migrations table — the refusal is before any write");
+
+  // Another tool's thoughts, in a schema of its own, is not public.thoughts: the
+  // guard reads public alone (pg_class, nspname='public'), so --baseline still
+  // refuses over an empty public. A probe that dropped the schema qualifier would
+  // read the stray table as "present" and let --baseline record the ledger over an
+  // empty public — the exact bricking SMD-2237 prevents. Plant it, prove the
+  // refusal, drop it.
+  const stray = new SQL({ url: URL_, max: 1 });
+  let strayRefused: { code: number; out: string };
+  try {
+    await stray.unsafe("DROP SCHEMA IF EXISTS tu_stray CASCADE; CREATE SCHEMA tu_stray; CREATE TABLE tu_stray.thoughts (id int)");
+    strayRefused = await migrate("--baseline");
+  } finally {
+    await stray.unsafe("DROP SCHEMA IF EXISTS tu_stray CASCADE");
+    await stray.close();
+  }
+  assert(strayRefused.code === 2 && /--baseline refused: public\.thoughts does not exist/.test(strayRefused.out),
+         `--baseline reads public alone: another schema's thoughts over an empty public still refuses (exit ${strayRefused.code})`);
+
+  // --force is the operator's override: it records every migration over the empty
+  // schema, exactly as --baseline does over a hand-built one.
+  const forced = await migrate("--baseline", "--force");
+  assert(forced.code === 0 && new RegExp(`baselined ${MIGRATIONS.length}, skipped 0`).test(forced.out),
+         `--baseline --force records every migration over an empty database (exit ${forced.code})`);
+
+  // --force without --baseline is refused, not a silent plain run — it exits at
+  // the flag-combo check, before any database connection, whatever the DB holds.
+  const forceAlone = await migrate("--force");
+  assert(forceAlone.code === 2 && /--force overrides --baseline's empty-database guard/.test(forceAlone.out),
+         `--force without --baseline is refused (exit ${forceAlone.code})`);
+
+  // Protective direction of the public-qualified guard: a hand-built public
+  // schema present but OFF the migrator role's search_path must still be found
+  // (pg_class, not to_regclass), so --baseline adopts it rather than refusing.
+  // Build a minimal public.thoughts and a separate schema, then run --baseline
+  // with search_path set to that other schema: the guard finds public.thoughts
+  // and records the ledger (into the off-path schema). A to_regclass spelling —
+  // the "obvious" refactor — would miss public.thoughts here and wrongly refuse,
+  // reintroducing the search_path-hiding the pg_class probe exists to avoid
+  // (SMD-2237, and SMD-2062's restricted-role deployments).
+  const offPathSql = new SQL({ url: URL_, max: 1 });
+  let offPathBaseline: { code: number; out: string };
+  try {
+    await offPathSql.unsafe("CREATE TABLE IF NOT EXISTS public.thoughts (id int); DROP SCHEMA IF EXISTS tu_offpath CASCADE; CREATE SCHEMA tu_offpath");
+    const sep = URL_.includes("?") ? "&" : "?";
+    offPathBaseline = await runMigrator(`${URL_}${sep}options=-csearch_path%3Dtu_offpath`, MIGRATOR_ENV, "--baseline");
+  } finally {
+    await offPathSql.unsafe("DROP SCHEMA IF EXISTS tu_offpath CASCADE; DROP TABLE IF EXISTS public.thoughts");
+    await offPathSql.close();
+  }
+  assert(offPathBaseline.code === 0 && new RegExp(`baselined ${MIGRATIONS.length}, skipped 0`).test(offPathBaseline.out),
+         `--baseline finds public.thoughts by pg_class even with public off the role's search_path — adoption holds off-path (exit ${offPathBaseline.code})`);
+
+  // Leave the database clean and migrated, as the blocks before this one do.
+  await dropSchema(URL_);
+  await applyMigrations(URL_, OPTS);
+}
+
 report();

@@ -3,9 +3,10 @@
  * orchestration candidate beside a throwaway brain, and the criteria posted on
  * the ticket before any of them ran.
  *
- *   bun eval-orchestration.ts --up <tool>        # brain + candidate, provisioned headlessly
+ *   bun eval-orchestration.ts --up <tool> [--with <variant>]…   # brain + candidate, provisioned headlessly
  *   bun eval-orchestration.ts --verify <tool> [--json] [--wait-schedule]
  *   bun eval-orchestration.ts --down <tool>      # removes the project's containers AND volumes
+ *   bun eval-orchestration.ts --self-check       # n8n's egress judge, facts and filter; no stack (CI)
  *
  * <tool> is one of n8n | activepieces | windmill. Each runs as its own compose
  * project, `ob1-orch-<tool>`: deploy/compose.yaml as shipped plus
@@ -13,6 +14,13 @@
  * candidate on its own loopback port. compose runs with an allowlisted
  * environment and orchestration/.env (stack.ts), so a dogfood deploy/.env on
  * the search path reaches neither.
+ *
+ * n8n is the shipped `orchestration` profile (SMD-2210): the driver passes
+ * `--profile orchestration`, and compose.n8n.yaml changes only the pruning
+ * cadence. `--with postgres` gives it a Postgres 17 of its own instead of
+ * SQLite. `--with sealed` is the egress probe: n8n with no route out, and a
+ * record of what it tried to reach (compose.n8n-sealed.yaml). `--verify`
+ * reads the variants `--up` chose, and `--down` removes them all.
  *
  * What --verify checks (the ticket's comment of 2026-09-25 has the wording):
  *   C1  it first deletes the thoughts `orch-capture` wrote (delete_thought),
@@ -39,30 +47,124 @@
  *       a session with no key and one whose key differs in its last character
  *       are each refused with HTTP 401 or 403.
  *   M1  memory per container at the start of --verify and after the runs, the
- *       image and its digest, the version.
+ *       image and its digest, the version, and the store's size where the
+ *       adapter reads it.
+ * A candidate adds its own checks after these (n8n's K, P and E: n8n.ts).
+ * Under a sealed variant, the ingestion is the probe workflow (ten fixed
+ * captures, nothing fetched). The act tool must FAIL, since reaching Linear
+ * would mean an escape, and --wait-schedule is refused, since the schedule
+ * fetches Linear.
  * C4 (no UI step) is --up's: it prints the steps it took. --up onto an existing
  * project skips what already exists; after editing a workflow file, --down first.
  * Needs LINEAR_API_KEY (the usual .env search path) and the host's Ollama.
  */
+import { readFileSync } from "node:fs";
 import { loadEnv } from "./env.ts";
-import type { Adapter } from "./orchestration/adapter.ts";
+import type { Adapter, Check, Ctx } from "./orchestration/adapter.ts";
 import { callTool, listTools, refuses } from "./orchestration/mcp-client.ts";
 import { activepieces } from "./orchestration/activepieces.ts";
-import { n8n } from "./orchestration/n8n.ts";
+import { engineTime, factsFrom, judgeEgress, n8n } from "./orchestration/n8n.ts";
 import { windmill } from "./orchestration/windmill.ts";
-import { brainSql, compose, ensureEnv, memoryByContainer, run, waitFor } from "./orchestration/stack.ts";
+import { brainSql, compose, ENV_FILE, ensureEnv, memoryByContainer, run, setEnvValue, setLayout, waitFor } from "./orchestration/stack.ts";
+import { initSecrets } from "../deploy/orchestration/provision.ts";
 
 const ADAPTERS: Record<string, Adapter> = { n8n, activepieces, windmill };
-/** The ingestion workflow's fixed issue set: ten SMD numbers (see each candidate's workflow). */
+/** The ingestion workflow's fixed item set: ten SMD issues, or the probe's ten fixed thoughts (see each candidate's workflow). */
 const EXPECTED_ISSUES = 10;
 const WRITER = "orch-capture";
 
-type Check = { id: string; pass: boolean; detail: string };
-
 function usage(msg: string): never {
-  console.error(`${msg}\nusage: bun eval-orchestration.ts --up|--verify|--down <${Object.keys(ADAPTERS).join("|")}> [--json] [--wait-schedule]`);
+  console.error(`${msg}\nusage: bun eval-orchestration.ts --up|--verify|--down <${Object.keys(ADAPTERS).join("|")}> [--with <variant>]… [--json] [--wait-schedule]`);
   process.exit(2);
 }
+
+/**
+ * `--self-check`: the egress judge (n8n's E) against logs in the watcher's
+ * own format, tcpdump's own lines among them. The recorded run's shape
+ * passes, and each way out fails. Also checked: the engine's facts parsed from
+ * podman's own output, and the watcher's filter in its overlay. No stack and
+ * no network (CI).
+ */
+function selfCheck(): number {
+  const T = "2026-09-25 22:17:00.100000 ";
+  const facts = { resolvers: ["10.89.4.1"], searchDomains: ["dns.podman", "cerberus-gondola.ts.net"], brain: ["10.89.4.3", "10.89.6.4"] };
+  const base = [
+    "tcpdump: verbose output suppressed, use -v[v]... for full protocol decode",
+    "listening on any, link-type LINUX_SLL2 (Linux cooked v2), snapshot length 262144 bytes",
+    `${T}eth0  Out IP 10.89.4.2.39771 > 10.89.4.1.53: 59194+ A? server.dns.podman. (35)`,
+    `${T}eth0  In  IP 10.89.4.1.53 > 10.89.4.2.39771: 59194 1/0/0 A 10.89.4.3 (51)`,
+    `${T}eth0  Out IP 10.89.4.2.51086 > 10.89.4.3.8000: Flags [S], seq 1, win 64240, length 0`,
+    `${T}eth0  In  IP 10.89.4.4.40026 > 10.89.4.2.5678: Flags [S], seq 2, win 64240, length 0`,
+    `${T}lo    In  IP 127.0.0.1.46852 > 127.0.0.1.5679: Flags [S], seq 3, win 65495, length 0`,
+    `${T}eth0  Out IP 10.89.4.2.48800 > 10.89.4.1.53: 9152+ A? api.linear.app. (32)`,
+    `${T}eth0  In  IP 10.89.4.1.53 > 10.89.4.2.48800: 9152 NXDomain 0/0/0 (32)`,
+  ];
+  const out = (rest: string, iface = "eth0") => `${T}${iface}  Out IP 10.89.4.2.5555 > ${rest}`;
+  // [what, lines, pass, detail must match, facts]
+  const cases: [string, string[], boolean, RegExp, (typeof facts & { problem?: string })?][] = [
+    ["the recorded shape passes", base, true, /the network's own names: server\.dns\.podman ×1/],
+    ["a host search-domain expansion is reported apart, and passes", [...base, out("10.89.4.1.53: 7+ AAAA? server.cerberus-gondola.ts.net. (48)")], true, /search-domain expansions: server\.cerberus-gondola\.ts\.net ×1/],
+    ["a TCP DNS connection to the resolver passes while its segments are empty", [...base, out("10.89.4.1.53: Flags [S], seq 9, length 0"), out("10.89.4.1.53: Flags [.], ack 1, win 63, length 0")], true, /DNS only to 10\.89\.4\.1/],
+    ["an inbound SYN to n8n (the host's poll) is not n8n's dial", [...base, `${T}eth0  P   IP 192.168.127.1.62396 > 10.89.4.2.8000: Flags [S], seq 5, length 0`], true, /./],
+    ["a raw-IP dial fails", [...base, out("9.9.9.9.443: Flags [S], seq 4, length 0")], false, /DIALLED OUTSIDE THE COMPOSE NETWORK: 9\.9\.9\.9:443 \(tcp\)/],
+    ["a dial on another interface fails", [...base, out("9.9.9.9.443: Flags [S], seq 4, length 0", "eth1")], false, /9\.9\.9\.9:443/],
+    ["n8n's own domain fails as a name", [...base, out("10.89.4.1.53: 1+ A? n8n.io. (24)")], false, /NOT A TEMPLATE'S HOST: n8n\.io/],
+    ["a name that starts like a service fails", [...base, out("10.89.4.1.53: 2+ A? server.9.9.9.9.nip.io. (39)")], false, /NOT A TEMPLATE'S HOST: server\.9\.9\.9\.9\.nip\.io/],
+    ["an EDNS query is read", [...base, out("10.89.4.1.53: 3+ [1au] A? api.n8n.io. (39)")], false, /NOT A TEMPLATE'S HOST: api\.n8n\.io/],
+    ["an NS query is read", [...base, out("10.89.4.1.53: 4+ NS? example.com. (29)")], false, /NOT A TEMPLATE'S HOST: example\.com/],
+    // The next four are tcpdump's own lines, from pass 3's run on a sealed network made non-internal, where the resolver forwarded each.
+    ["a CD-flag query is read", [...base, out("10.89.4.1.53: 4242+% A? example.com. (29)")], false, /NOT A TEMPLATE'S HOST: example\.com/],
+    ["a notify query is read", [...base, out("10.89.4.1.53: 4242 notify+ A? example.com. (29)")], false, /NOT A TEMPLATE'S HOST: example\.com/],
+    ["an unknown-type query is read", [...base, out("10.89.4.1.53: 4242+ Type65400? example.com. (29)")], false, /NOT A TEMPLATE'S HOST: example\.com/],
+    ["a CHAOS-class query is read", [...base, out("10.89.4.1.53: 4242+ TXT CHAOS? hidden-chaos-exfil.example.com. (48)")], false, /hidden-chaos-exfil\.example\.com/],
+    ["a TCP DNS segment is read", [...base, out("10.89.4.1.53: Flags [P.], seq 1:32, ack 1, win 63, length 31 4242+ A? example.com. (29)")], false, /NOT A TEMPLATE'S HOST: example\.com/],
+    ["a datagram to the resolver with no readable question fails", [...base, out("10.89.4.1.53: UDP, length 900")], false, /UNREADABLE PACKET LINES \(1\)/],
+    ["a TCP segment to the resolver with no readable question fails", [...base, out("10.89.4.1.53: Flags [P.], seq 1:900, ack 1, win 63, length 899")], false, /UNREADABLE PACKET LINES/],
+    ["the resolver's address on another port fails", [...base, out("10.89.4.1.22: Flags [S], seq 9, length 0")], false, /10\.89\.4\.1:22 \(tcp\)/],
+    ["a template's host answered and dialled fails (a leaked seal)", [...base, `${T}eth0  In  IP 10.89.4.1.53 > 10.89.4.2.48800: 9152 1/0/0 A 7.7.7.7 (48)`, out("7.7.7.7.443: Flags [S], seq 6, length 0")], false, /7\.7\.7\.7:443/],
+    ["a foreign resolver fails", [...base, out("8.8.8.8.53: 5+ A? api.linear.app. (32)")], false, /8\.8\.8\.8:53 \(dns\)/],
+    ["an NTP datagram tcpdump decodes fails", [...base, out("162.159.200.1.123: NTPv4, Client, length 48")], false, /162\.159\.200\.1:123 \(NTPv4\)/],
+    ["a QUIC datagram tcpdump decodes fails", [...base, out("1.1.1.1.443: quic, initial, v1, dcid 0102")], false, /1\.1\.1\.1:443 \(quic\)/],
+    ["a plain UDP datagram fails", [...base, out("1.1.1.1.4433: UDP, length 1200")], false, /1\.1\.1\.1:4433 \(UDP\)/],
+    ["port 5678 on another host is not exempt", [...base, out("9.9.9.9.5678: Flags [S], seq 7, length 0")], false, /9\.9\.9\.9:5678/],
+    ["port 8000 on another host is not the brain", [...base, out("9.9.9.9.8000: Flags [S], seq 7, length 0")], false, /9\.9\.9\.9:8000/],
+    ["the brain on another port fails", [...base, out("10.89.4.3.22: Flags [S], seq 8, length 0")], false, /10\.89\.4\.3:22/],
+    ["UDP to the brain's :8000 fails", [...base, out("10.89.4.3.8000: UDP, length 40")], false, /10\.89\.4\.3:8000 \(UDP\)/],
+    ["a packet line the judge cannot read fails", [...base, `${T}eth0  Out IP truncated-ip - 20 bytes missing! 10.89.4.2.5555 > 9.9.9.9.443: Flags [S]`], false, /UNREADABLE PACKET LINES/],
+    ["a capture without the brain fails", base.filter((l) => !l.includes(".8000:")), false, /NO SYN to the brain/],
+    ["a loopback resolver (Docker's) cannot be judged, and fails", base, false, /CANNOT JUDGE: the resolver is on loopback/, { ...facts, resolvers: ["127.0.0.11"] }],
+    ["facts that could not be read fail", base, false, /CANNOT JUDGE: n8n's resolv\.conf could not be read/, { ...facts, problem: "n8n's resolv.conf could not be read (exit 1)" }],
+    // The capture's own liveness (review pass 4): tcpdump restarted, never opened, or stopped.
+    ["a capture that restarted (two headers) fails", [...base, base[1]], false, /CANNOT JUDGE: the watcher's capture opened 2 times/],
+    ["a capture that never opened fails", base.filter((l) => !l.startsWith("listening on")), false, /opened 0 times/],
+    ["a capture that ended before it was read fails", [...base, "92 packets captured", "92 packets received by filter", "0 packets dropped by kernel"], false, /capture ended before it was read/],
+    ["a question line without its length is unreadable", [...base, out("10.89.4.1.53: 4242+ A? server.dns.podman.")], false, /UNREADABLE PACKET LINES/],
+  ];
+  let failed = 0;
+  for (const [what, lines, pass, re, f] of cases) {
+    const r = judgeEgress(lines.join("\n"), f ?? facts);
+    if (r.pass !== pass || !re.test(r.detail)) { failed++; console.error(`FAIL ${what}: ${r.pass ? "PASS" : "FAIL"} ${r.detail.slice(0, 220)}`); }
+  }
+  // The facts, parsed from what the engine prints (podman's own formats).
+  const expect = (what: string, ok: boolean) => { if (!ok) { failed++; console.error(`FAIL ${what}`); } };
+  const resolv = { out: "search dns.podman cerberus-gondola.ts.net\nnameserver 10.89.4.1\n", code: 0 };
+  const brain = { out: "10.89.4.3 invalid IP 10.89.6.4 invalid IP ", code: 0 };
+  const watcher = (running: string, at: string) => ({ out: `${running} ${at}`, code: 0 });
+  const n8nAt = "2026-09-26 06:12:26.451290425 -0500 CDT";
+  const good = factsFrom({ resolv, brain, watcher: watcher("true", "2026-09-26 06:12:25.9 -0500 CDT"), n8nStarted: n8nAt });
+  expect("facts: resolvers, search domains and the brain's addresses parse; podman's 'invalid IP' is dropped", !good.problem && good.resolvers.join() === "10.89.4.1" && good.searchDomains.join() === "dns.podman,cerberus-gondola.ts.net" && good.brain.join() === "10.89.4.3,10.89.6.4");
+  expect("facts: a stopped watcher is a problem", /not running/.test(factsFrom({ resolv, brain, watcher: watcher("false", "2026-09-26 06:12:25 -0500 CDT"), n8nStarted: n8nAt }).problem ?? ""));
+  expect("facts: a watcher started after n8n is a problem", /after n8n/.test(factsFrom({ resolv, brain, watcher: watcher("true", "2026-09-26 06:12:30 -0500 CDT"), n8nStarted: n8nAt }).problem ?? ""));
+  expect("facts: no brain address is a problem", /empty/.test(factsFrom({ resolv, brain: { out: "invalid IP", code: 0 }, watcher: watcher("true", "2026-09-26 06:12:25 -0500 CDT"), n8nStarted: n8nAt }).problem ?? ""));
+  expect("engineTime reads podman's Go form and Docker's RFC 3339 alike", engineTime(n8nAt) === Date.parse("2026-09-26T11:12:26.451Z") && engineTime("2026-09-26T11:12:26.451Z") === Date.parse("2026-09-26T11:12:26.451Z"));
+  // The watcher's filter keeps every clause E relies on (review pass 4: dropping the IPv6 clause survived).
+  const sealed = Bun.YAML.parse(readFileSync(new URL("./orchestration/compose.n8n-sealed.yaml", import.meta.url), "utf8")) as any;
+  const filter = String(sealed?.services?.["egress-watch"]?.command?.at(-1) ?? "");
+  expect("the watcher's filter records UDP, TCP on 53, IPv4 SYNs and IPv6 TCP", ["udp", "tcp port 53", "tcp[tcpflags] & tcp-syn != 0 and tcp[tcpflags] & tcp-ack == 0", "(ip6 and tcp)"].every((c) => filter.includes(c)));
+  console.log(failed ? `eval-orchestration self-check: ${failed} failed` : `eval-orchestration self-check: OK (${cases.length} cases)`);
+  return failed ? 1 : 0;
+}
+if (process.argv.includes("--self-check")) process.exit(selfCheck());
 
 const args = process.argv.slice(2);
 const mode = ["--up", "--verify", "--down"].find((m) => args.includes(m)) ?? usage("no mode");
@@ -74,23 +176,56 @@ const waitSchedule = args.includes("--wait-schedule");
 const SCHEDULE_WAIT_MS = 20 * 60_000;
 
 loadEnv();
+ensureEnv();
+// The profile's own secrets, made by its own --init: the kit's file is the
+// profile's deploy/.env as far as n8n can tell.
+if (adapter.profile === "orchestration") await initSecrets(ENV_FILE);
 const env: Record<string, string> = { ...ensureEnv(), LINEAR_API_KEY: process.env.LINEAR_API_KEY ?? "" };
+
+// The variants: chosen by --up and kept in orchestration/.env, so --verify
+// runs against what is up rather than what its own flags say.
+const WITH_KEY = `ORCH_WITH_${tool.toUpperCase()}`;
+const asked = args.flatMap((a, i) => (a === "--with" ? [args[i + 1] ?? usage("--with needs a variant")] : []));
+for (const v of asked) if (!adapter.variants?.[v]) usage(`${tool} has no variant ${v}${adapter.variants ? ` (it has ${Object.keys(adapter.variants).join(", ")})` : ""}`);
+for (const v of asked) for (const x of adapter.variants![v].excludes ?? []) if (asked.includes(x)) usage(`--with ${v} and --with ${x} do not combine: ${adapter.variants![v].why ?? "see the overlays"}`);
+if (asked.length && mode !== "--up") usage("--with is --up's: --verify reads what --up chose, and --down removes every variant");
+const ctx: Ctx = { with: mode === "--up" ? asked : (env[WITH_KEY] ?? "").split(",").filter(Boolean) };
+const sealed = adapter.sealedVariant !== undefined && ctx.with.includes(adapter.sealedVariant);
+if (sealed && waitSchedule) usage("--wait-schedule under the sealed variant: the schedule fetches Linear, which the probe exists to make unreachable");
+const overlays = (names: string[]) => names.map((v) => adapter.variants![v].file);
+setLayout(tool, adapter.profile, overlays(mode === "--down" ? Object.keys(adapter.variants ?? {}) : ctx.with));
 const brainHealthy = async () => (await fetch("http://127.0.0.1:8012/health").catch(() => null))?.ok === true;
 
 async function up(): Promise<void> {
   if (!env.LINEAR_API_KEY) usage("LINEAR_API_KEY is not set (evals/.env, <repo>/.env or deploy/.env)");
-  const r = compose(tool, ["up", "-d", "--build", "postgres", "migrate", "server", ...adapter.services]);
+  // Kept before compose runs: a failed --up is followed by --down, which removes every variant anyway.
+  setEnvValue(WITH_KEY, ctx.with.join(","));
+  const variantServices = ctx.with.flatMap((v) => adapter.variants![v].services);
+  // The brain is built from this checkout, and --up proves it started what
+  // it built. The build is stamped with a value unique to this run, which
+  // the keyed /health must report back. On podman, a build loaded as
+  // `ob1-orch-n8n-server` sat beside a day-old `localhost/ob1-orch-n8n-server`,
+  // and compose started the old one: a brain two migrations behind the tree,
+  // with `--build` in the command (SMD-2210, measured).
+  const stamp = `${run(["git", "rev-parse", "--short=12", "HEAD"]).out.trim() || "nogit"}+orch${Date.now()}`;
+  const r = compose(tool, ["up", "-d", "--build", "postgres", "migrate", "server", ...adapter.services, ...variantServices], { OB1_GIT_SHA: stamp });
   if (r.code !== 0) throw new Error(`compose up failed:\n${r.err.slice(-2000)}`);
   await waitFor("the brain's /health", brainHealthy);
+  const reported = await fetch("http://127.0.0.1:8012/health", { headers: { "x-brain-key": env.ORCH_BRAIN_READ_KEY } }).then((h) => h.json()).then((j: any) => String(j.commit), () => "unreadable");
+  if (reported !== stamp) {
+    // What the engine holds under the project's names, so the likely stale copy can be seen rather than guessed at.
+    const held = run(["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedAt}}"]).out.split("\n").filter((l) => l.includes(`ob1-orch-${tool}-`)).join("; ");
+    throw new Error(`the brain reports commit ${reported}, not this --up's build (${stamp}): the running server is not the image this --up built — likely a stale copy the engine resolves the name to first. Images under the project's names: ${held || "none"}. Remove the stale ones (docker image rm <name>), then --down and --up again`);
+  }
   await waitFor(`${tool} to answer`, () => adapter.ready(env), 300_000);
-  const steps = await adapter.provision(env);
+  const steps = await adapter.provision(env, ctx);
   await waitFor(`${tool} after provisioning`, () => adapter.ready(env), 300_000);
-  console.log(`${tool} up and provisioned: ${steps.join(", ")}`);
+  console.log(`${tool}${ctx.with.length ? ` (with ${ctx.with.join(", ")})` : ""} up and provisioned: ${steps.join(", ")}`);
 }
 
-/** Rows `orch-capture` wrote, and how many distinct SMD identifiers they open with. */
+/** Rows `orch-capture` wrote, and how many distinct identifiers (SMD-1863, PROBE-3) they open with. */
 function written(): { rows: number; ids: number } {
-  const [rows, ids] = brainSql(tool, `SELECT count(*), count(DISTINCT substring(content from '^(SMD-[0-9]+)')) FROM thoughts WHERE metadata->>'actor_name' = '${WRITER}'`).split("|").map(Number);
+  const [rows, ids] = brainSql(tool, `SELECT count(*), count(DISTINCT substring(content from '^([A-Z]+-[0-9]+)')) FROM thoughts WHERE metadata->>'actor_name' = '${WRITER}'`).split("|").map(Number);
   return { rows, ids };
 }
 
@@ -117,7 +252,7 @@ const wrongKey = (headers: Record<string, string>) =>
 async function ingest(): Promise<{ answered: number; after: { rows: number; ids: number }; ms: number; error?: string }> {
   const t0 = performance.now();
   try {
-    const answered = await adapter.runIngestion(env);
+    const answered = await adapter.runIngestion(env, ctx);
     return { answered, after: written(), ms: Math.round(performance.now() - t0) };
   } catch (e) {
     return { answered: 0, after: written(), ms: Math.round(performance.now() - t0), error: (e instanceof Error ? e.message : String(e)).slice(0, 240) };
@@ -168,7 +303,7 @@ async function verify(): Promise<void> {
   const act = await call(adapter.tools.act, { identifier: "SMD-1863" });
   const anon = await refuses(url, {});
   const wrong = await refuses(url, wrongKey(headers));
-  const searchOk = !search.isError && /SMD-\d+/.test(search.text);
+  const searchOk = !search.isError && /\b(SMD|PROBE)-\d+/.test(search.text);
   // Values, not names: the request itself carries `updatedAt` (in the query)
   // and "SMD-1863" (in the variables), so an error echoing the request must
   // not pass. A timestamp and the identifier as a value come only from Linear.
@@ -181,10 +316,16 @@ async function verify(): Promise<void> {
     pass: adapter.nativeMcpClient && first.after.rows === EXPECTED_ISSUES && captureScoped && searchOk,
     detail: `capture: ${first.after.rows} rows by ${WRITER} (${captureScoped ? "a capture-scope record" : "NOT a capture-scope record"}) through ${adapter.mcpClient}${adapter.nativeMcpClient ? "" : " — not the tool's MCP client, which C2 as posted requires"}; read: brain search through orch-read ${searchOk ? "answered" : "FAILED"}`,
   });
+  // Sealed, the brain-side half must pass and the act tool must not: Linear
+  // answering means the seal leaked. The tool must still be listed, so a
+  // failure is a refused call, not a missing tool.
+  const actVerdict = sealed
+    ? (find(adapter.tools.act) && !actOk ? `failed, as sealed it must (${act.text.slice(0, 160)})` : actOk ? "ANSWERED — Linear reached from the sealed network" : "NOT LISTED")
+    : actOk ? "ok" : `FAIL ${act.text.slice(0, 160)}`;
   checks.push({
     id: "C3",
-    pass: searchOk && actOk && anon.refused && wrong.refused,
-    detail: `tools [${names.join(", ")}]${listed instanceof Error ? ` (${(listed as Error).message.slice(0, 120)})` : ""}; search ${searchOk ? "ok" : `FAIL ${search.text.slice(0, 160)}`}; act ${actOk ? "ok" : `FAIL ${act.text.slice(0, 160)}`}; no key → ${anon.refused ? "refused" : "NOT REFUSED"} (${anon.detail}); wrong key → ${wrong.refused ? "refused" : "NOT REFUSED"} (${wrong.detail})`,
+    pass: searchOk && (sealed ? Boolean(find(adapter.tools.act)) && !actOk : actOk) && anon.refused && wrong.refused,
+    detail: `tools [${names.join(", ")}]${listed instanceof Error ? ` (${(listed as Error).message.slice(0, 120)})` : ""}; search ${searchOk ? "ok" : `FAIL ${search.text.slice(0, 160)}`}; act ${actVerdict}; no key → ${anon.refused ? "refused" : "NOT REFUSED"} (${anon.detail}); wrong key → ${wrong.refused ? "refused" : "NOT REFUSED"} (${wrong.detail})`,
   });
 
   // C1's schedule half: the on-demand runs above say nothing about whether the
@@ -214,20 +355,26 @@ async function verify(): Promise<void> {
     });
   }
 
+  // The tool's own checks, after the shared ones: they may rotate a key or
+  // move a run's timestamps, which nothing above should see.
+  for (const c of (await adapter.extraChecks?.(env, ctx).catch((e: Error) => [{ id: "extra", pass: false, detail: `threw: ${e.message.slice(0, 240)}` }])) ?? []) checks.push(c);
+
   const busy = memoryByContainer(tool);
   const size = run(["docker", "image", "inspect", adapter.image, "--format", "{{.Size}}"]).out.trim();
   const digest = run(["docker", "image", "inspect", adapter.image, "--format", "{{index .RepoDigests 0}}"]).out.trim();
+  const store = adapter.storeFootprint?.(ctx);
   const report = {
-    tool, version: adapter.version(), image: adapter.image, digest, imageMiB: Math.round(Number(size) / 1048576),
+    tool, with: ctx.with, version: adapter.version(), image: adapter.image, digest, imageMiB: Math.round(Number(size) / 1048576), store,
     memoryMiB: { atStart: idle, afterRuns: busy }, checks, switches: adapter.switches, searchSample: search.text.slice(0, 400), actSample: act.text.slice(0, 400),
   };
   if (json) {
     console.log(JSON.stringify(report, null, 2));
   } else {
-    console.log(`${tool} ${report.version}  ${adapter.image}  ${report.imageMiB} MiB image`);
+    console.log(`${tool} ${report.version}${ctx.with.length ? ` (with ${ctx.with.join(", ")})` : ""}  ${adapter.image}  ${report.imageMiB} MiB image`);
     for (const c of checks) console.log(`  ${c.pass ? "PASS" : "FAIL"} ${c.id}  ${c.detail}`);
-    if (!waitSchedule) console.log("  ---- C1s  not checked: the schedule firing needs --wait-schedule (up to 20 min)");
+    if (!waitSchedule) console.log(`  ---- C1s  not checked: ${sealed ? "sealed, the schedule cannot reach Linear" : "the schedule firing needs --wait-schedule (up to 20 min)"}`);
     for (const [k, v] of Object.entries(busy)) console.log(`  M1   ${k} ${idle[k] ?? "?"} MiB at the start, ${v} MiB after the runs`);
+    if (store) console.log(`  M1   store: ${store}`);
   }
   if (checks.some((c) => !c.pass)) process.exitCode = 1;
 }
@@ -235,6 +382,7 @@ async function verify(): Promise<void> {
 function down(): void {
   const r = compose(tool, ["down", "-v", "--remove-orphans"]);
   if (r.code !== 0) throw new Error(`compose down failed: ${r.err.trim()}`);
+  setEnvValue(WITH_KEY, "");
   console.log(`${tool}: project ob1-orch-${tool} removed with its volumes`);
 }
 
