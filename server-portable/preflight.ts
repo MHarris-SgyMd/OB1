@@ -30,7 +30,7 @@ import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEn
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
-import { quoteIdent, searchPathSchemas, withPublic } from "./search-path.ts";
+import { quoteIdent, searchPathSchemas, withPublic, withPublicInUrl } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
@@ -756,21 +756,29 @@ if (configFailed) {
       const urlArg = conn ? `$${conn.from}` : "<the brain's postgres:// connection string — Supabase's direct connection, not the pooler>";
       // public.thoughts present but not resolving for this role — no USAGE
       // on public, or public off its search_path, or both — is not a brain
-      // to migrate (SMD-2062). public alone, as every direct check judges
-      // it: a thoughts in some other schema is another tool's, and an
-      // un-migrated public still wants the migrations. Each cause that holds
-      // is named with its statement (SMD-2242). current_schemas() cannot say
-      // "on the path" — it leaves out a schema the role has no USAGE on — so
-      // the setting is parsed (search-path.ts) and the statement rebuilt from
-      // the parsed names, each quoted, never echoed. With USAGE held, a table
-      // that exists and does not resolve is off the path whatever the parse
-      // says. The statement is for this database — a role's setting there
-      // outranks its plain ALTER ROLE and the database's — unless the
-      // connection string sets the path, which outranks them all. pg_class
-      // answers for any role, whatever its path; over PostgREST there is no
-      // catalog to ask, and a failed probe asks nothing.
+      // to migrate (SMD-2062). Only when the failure is thoughts not
+      // resolving: an RLS policy reading a missing table fails the same
+      // count with another relation's "does not exist". public alone, as
+      // every direct check judges it: a thoughts in some other schema is
+      // another tool's, and an un-migrated public still wants the
+      // migrations. Each cause that holds is named with its statement
+      // (SMD-2242). current_schemas() cannot say "on the path" — it leaves
+      // out a schema the role has no USAGE on — so the setting is parsed
+      // (search-path.ts, as this server's version parses it) and the
+      // statement rebuilt from the parsed names, each quoted, never echoed.
+      // With USAGE held, thoughts not resolving means off the path whatever
+      // the parse says. The GRANT names current_user, whose privilege the
+      // count used; the ALTER ROLE names session_user, the login role whose
+      // settings load (a SET ROLE in them leaves the two apart). It is for
+      // this database — a role's setting there outranks its plain ALTER
+      // ROLE and the database's — unless the path came from the connection
+      // (pg_settings.source `client`) or was SET after login (`session`: a
+      // pooler, a login trigger), which outrank it. A role barred from
+      // pg_settings still gets the statement. pg_class answers for any role,
+      // whatever its path; over PostgREST there is no catalog to ask, and a
+      // failed probe asks nothing.
       let offPath: { causes: string[]; fixes: string[] } | null = null;
-      if (built.kind === "sql" && conn && /does not exist/i.test(msg)) {
+      if (built.kind === "sql" && conn && /"thoughts" does not exist/.test(msg)) {
         try {
           const { SQL } = await import("bun");
           const probe = new SQL({ url: conn.url, max: 1 });
@@ -780,11 +788,16 @@ if (configFailed) {
                               WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present,
                      has_schema_privilege('public', 'USAGE') AS usage,
                      current_setting('search_path') AS path,
-                     (SELECT source FROM pg_settings WHERE name = 'search_path') AS source,
+                     current_setting('server_version_num')::int AS version,
                      quote_ident(current_user::text) AS role,
-                     quote_ident(current_database()::text) AS db`) as { present: boolean; usage: boolean; path: string; source: string; role: string; db: string }[];
+                     quote_ident(session_user::text) AS login,
+                     quote_ident(current_database()::text) AS db`) as { present: boolean; usage: boolean; path: string; version: number; role: string; login: string; db: string }[];
             if (r?.present) {
-              const schemas = searchPathSchemas(String(r.path ?? ""));
+              let source: string | null = null;
+              try {
+                source = ((await probe`SELECT source FROM pg_settings WHERE name = 'search_path'`) as { source: string }[])[0]?.source ?? null;
+              } catch { /* unread: the ALTER ROLE statement stands */ }
+              const schemas = searchPathSchemas(String(r.path ?? ""), Number(r.version));
               const causes: string[] = [];
               const fixes: string[] = [];
               if (!r.usage) {
@@ -793,9 +806,12 @@ if (configFailed) {
               }
               if (r.usage || !schemas.includes("public")) {
                 causes.push(`public is not on its search_path, which is ${schemas.length ? schemas.map(quoteIdent).join(", ") : "empty"}`);
-                fixes.push(r.source === "client"
-                  ? `the connection string sets the path (options -c search_path=…): set it there to ${withPublic(schemas)}`
-                  : `ALTER ROLE ${r.role} IN DATABASE ${r.db} SET search_path = ${withPublic(schemas)};`);
+                const alter = `ALTER ROLE ${r.login} IN DATABASE ${r.db} SET search_path = ${withPublic(schemas)};`;
+                fixes.push(source === "client"
+                  ? `set search_path in the connection string, which sets it now (?search_path= or options=-c search_path=) and outranks any ALTER ROLE: ?search_path=${withPublicInUrl(schemas)}`
+                  : source === "session"
+                  ? `${alter}  (this session's path was SET after login — by a pooler or a login trigger — which outranks it; change it there)`
+                  : alter);
               }
               offPath = { causes, fixes };
             }

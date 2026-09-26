@@ -13,19 +13,23 @@
  * `x;drop …;--` into the remedy an operator runs.
  *
  * The parse is Postgres's SplitIdentifierString: names separated by commas;
- * whitespace — space, tab, newline, carriage return and form feed, and nothing
- * else — around each; a quoted name kept as written, `""` inside it a quote; an
+ * whitespace around each, as scanner_isspace sees it — space, tab, newline,
+ * carriage return and form feed, and from PostgreSQL 17 vertical tab, nothing
+ * outside ASCII; a quoted name kept as written, `""` inside it a quote; an
  * unquoted name folded A–Z only, as downcase_identifier does in a UTF-8
  * database. The empty name a `''` path reads back as is dropped. Settings
  * Postgres rejects (`a,,b`, `a b`, an unterminated quote) never reach here: its
  * check hook refuses them on every route.
  */
 
-/** Whitespace as scanner_isspace sees it — not `\v`, and nothing outside ASCII. */
-const isSpace = (c: string | undefined) => c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\f";
-
-/** A search_path setting's schemas, in order, as Postgres resolves them. */
-export function searchPathSchemas(setting: string): string[] {
+/**
+ * A search_path setting's schemas, in order, as Postgres resolves them.
+ * `serverVersionNum` is the server's `server_version_num`: 17 counts a
+ * vertical tab as whitespace, 16 reads it as part of a name.
+ */
+export function searchPathSchemas(setting: string, serverVersionNum: number): string[] {
+  const isSpace = (c: string | undefined) =>
+    c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\f" || (c === "\v" && serverVersionNum >= 170000);
   const names: string[] = [];
   let i = 0;
   while (i < setting.length) {
@@ -51,5 +55,14 @@ export function searchPathSchemas(setting: string): string[] {
 /** An identifier, always double-quoted: valid for any name, `$user` among them, which a search_path needs quoted. */
 export const quoteIdent = (name: string) => `"${name.replaceAll('"', '""')}"`;
 
+const publicLast = (schemas: string[]) => [...schemas.filter((s) => s !== "public").map(quoteIdent), "public"];
+
 /** The path with public put on it: the role's schemas kept, in order, each quoted, and public last. */
-export const withPublic = (schemas: string[]) => [...schemas.filter((s) => s !== "public").map(quoteIdent), "public"].join(", ");
+export const withPublic = (schemas: string[]) => publicLast(schemas).join(", ");
+
+/**
+ * The same path as a connection string's `?search_path=` value: no space
+ * between names (libpq's `options` splits on spaces) and percent-encoded, so
+ * a quote, a space or a comma inside a name survives the URL.
+ */
+export const withPublicInUrl = (schemas: string[]) => encodeURIComponent(publicLast(schemas).join(","));
