@@ -100,16 +100,21 @@
 --   privileges decide — node_lifecycle() needs SELECT on thoughts, the capture
 --   group; node_dependencies() and node_state() also thought_sources, the
 --   structure group, and thought_facets, the capture group; db/config.mjs
---   ROLE_GRANTS). Idempotent: CREATE OR REPLACE. MINOR under the version
+--   ROLE_GRANTS). Idempotent: drop and create. MINOR under the version
 --   rules. The guard first, 052's shape: without 025's pointer or 053's tables
 --   the bodies would fail at CREATE bare, so refuse naming the migration.
 --
---   One trap for whoever edits this next (012's): CREATE OR REPLACE cannot
---   change a function's return type, and each RETURNS TABLE below IS one —
---   node_state's columns are the contract search reads. A later migration that
---   reshapes one must DROP FUNCTION it first (no grant or dependency is lost:
---   none is issued, and string bodies record none), and adding a column is a
---   reshape.
+--   One trap, 012's: CREATE OR REPLACE cannot change a function's return
+--   type, and each RETURNS TABLE below IS one — node_state's columns are the
+--   contract search reads, and adding one is a reshape. So this file drops the
+--   three before it creates them: a later migration reshapes one by DROP and
+--   CREATE, and `migrate.ts --reapply`, which replays every file in order,
+--   replays this one over the newer shape and the later one after it (second
+--   review pass: without the drop the replay failed here). What the drop
+--   costs: nothing of 058's (no grant is issued, and string bodies record no
+--   dependency), but an object of an operator's that depends on one — a view
+--   over node_state() — refuses the drop, and the replay stops naming it; a
+--   REVOKE an operator issued on one is not kept.
 --
 -- Expected outcome
 --   SELECT * FROM node_state() lists every thought with its lifecycle and
@@ -138,6 +143,12 @@ BEGIN
   END IF;
 END
 $g$;
+
+-- The three whose RETURNS TABLE a later migration may reshape, dropped so a
+-- replay re-creates them in this file's shape (the trap, above).
+DROP FUNCTION IF EXISTS node_state(uuid[]);
+DROP FUNCTION IF EXISTS node_dependencies();
+DROP FUNCTION IF EXISTS node_lifecycle();
 
 -- ---------------------------------------------------------------------------
 -- The two status sets

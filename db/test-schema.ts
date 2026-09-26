@@ -8132,11 +8132,6 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
   const planIds = await plan(`SELECT * FROM node_state('{00000000-0000-0000-0000-000000000000}'::uuid[])`);
   assert(!/Function Scan on node_/.test(planAll) && !/Function Scan on node_/.test(planIds) && /thoughts/.test(planAll),
     `node_state() and node_lifecycle() inside it are inlined: the plan scans thoughts and no node_* function, with and without ids (${planAll.split("\n")[0]})`);
-  // The gate projected, as coverage reads it: one grouped pass, no subplan run
-  // per facet (first review pass: a correlated EXISTS ran once per link).
-  const planGate = await plan(`SELECT system, gates FROM node_dependencies()`);
-  assert(!/SubPlan/.test(planGate) && /Aggregate/.test(planGate),
-    `node_dependencies()' gate is one grouped pass over the source rows, not a subplan per facet (${planGate.split("\n").filter((l) => /Aggregate|SubPlan/.test(l)).join(" | ").trim()})`);
 
   const [sets] = await q<{ known: string[]; settled: string[] }>(`SELECT node_lifecycle_types() AS known, node_settled_types() AS settled`);
   assert(sets.known.join() === LIFECYCLE_TYPES.join() && sets.settled.join() === LIFECYCLE_FILTERS.done.join() && sets.known.filter((t) => !sets.settled.includes(t)).join() === LIFECYCLE_FILTERS.open.join(),
@@ -8160,6 +8155,19 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
   assert(counts.all_ === 2 && counts.none === 0 && counts.nul === 0 && counts.one === 1 && hubRow.open === true && hubRow.synced_at === "2026-09-25T00:00:00.000Z" && hubRow.blocked === false,
     `node_state(NULL) is every thought, an empty or all-NULL list none, a named id its one row; the ticket open with its own watermark as its freshness (${JSON.stringify(counts)}, ${JSON.stringify(hubRow)})`);
 
+  // The gate projected, as coverage reads it, over two facets: the scan of
+  // thoughts under it — the gate's only read of that table — runs once, and no
+  // subplan runs per facet (first review pass: a correlated EXISTS ran once per
+  // link; second: a LATERAL aggregate has no SubPlan and ran its scan once per
+  // facet too, so the scan's loops are what is read — an aggregate the planner
+  // rescans unparameterised reports a loop per rescan and re-reads nothing).
+  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-8001', 'SMD-8001', 'text/markdown')`, [hub]);
+  await db.query(`SELECT record_source_links($1::uuid, 'linear', '[{"relation": "blocked_by", "target": "SMD-8002"}, {"relation": "blocks", "target": "SMD-8003"}]'::jsonb)`, [hub]);
+  const gatePlan = (await q<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT system, gates FROM node_dependencies()`)).map((r) => r["QUERY PLAN"]);
+  const thoughtScans = gatePlan.filter((l) => /Scan.* on thoughts\b/.test(l));
+  const [facetsSeen] = await q<{ n: number }>(`SELECT count(*)::int AS n FROM node_dependencies()`);
+  assert(facetsSeen.n === 2 && thoughtScans.length > 0 && thoughtScans.every((l) => /loops=1\)/.test(l)) && !gatePlan.some((l) => /SubPlan/.test(l)),
+    `node_dependencies()' gate is one grouped pass over the source rows: over ${facetsSeen.n} facets its scan of thoughts runs once and no subplan runs (${thoughtScans.map((l) => l.trim()).join(" | ")})`);
   // The role split: every migrations' group but structure — thoughts,
   // thought_facets and the graph, not thought_sources.
   const ROLE = "ob1_node_reader";
@@ -8201,6 +8209,14 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
   await db.exec(`CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{canceled,completed}'::text[] $$`);
   const reordered = await schemaProblem(run, DEFAULT_OPTIONS);
   await reapply("058");
+  // A later migration reshapes node_state by DROP and CREATE; --reapply
+  // replays 058 over that shape, which it drops first (second review pass).
+  await db.exec(`DROP FUNCTION node_state(uuid[]); CREATE FUNCTION node_state(p_ids uuid[] DEFAULT NULL) RETURNS TABLE (thought_id uuid, as_of timestamptz) LANGUAGE sql STABLE AS $$ SELECT id, now() FROM thoughts $$`);
+  let replayError = "";
+  try { await reapply("058"); } catch (e) { replayError = (e as Error).message; }
+  const [shape] = await q<{ result: string }>(`SELECT pg_get_function_result('node_state(uuid[])'::regprocedure) AS result`);
+  assert(replayError === "" && shape.result === expected["node_state(uuid[])"][1],
+    `058 replays over a reshaped node_state — it drops the three table functions before creating them — and leaves its own eleven columns (${replayError || "replayed"})`);
   assert(fine === null && (await schemaProblem(run, startOpts)) === null
       && missing === "graph-centrality reads a thought's lifecycle through node_state: migration 058 is not applied. Run db/migrate.ts."
       && missingStart === "graph-centrality reads a thought's lifecycle and its blockers through node_state: migration 058 is not applied. Run db/migrate.ts."

@@ -338,8 +338,9 @@ function scopeSql(alias: string, scope: Scope, params: unknown[]): { where: stri
  * carrying `issue` or `ticket` reads its head's keys, falling back to its own
  * (first review pass of SMD-1994; the rule's text is 058's now). When SMD-1997
  * folds the transitions `thought_audit` (046) already holds, the function's
- * body changes (and the gate's, in `node_dependencies()`) and this does not. It reads `thoughts` alone, so a role without
- * `thought_sources` runs every mode but the dependency read.
+ * body changes (and the gate's, in `node_dependencies()`) and this does not.
+ * It reads `thoughts` alone, so a role without `thought_sources` runs every
+ * mode but the dependency read.
  */
 export const LIFECYCLE_CTE = `lifecycle AS (SELECT thought_id, status, status_type, synced_at FROM node_lifecycle())`;
 
