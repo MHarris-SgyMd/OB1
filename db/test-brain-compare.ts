@@ -191,6 +191,9 @@ function frame(msg: unknown, sse?: boolean): Response {
   ok(captureDaysApart("2026-09-23", "2026-09-24") === 1, "captureDaysApart: one day newer = +1");
   ok(captureDaysApart("2026-09-24", "2026-09-23") === -1, "captureDaysApart: one day older = -1");
   ok(captureDaysApart("not a date", "2026-09-24") === null, "captureDaysApart: unparseable = null");
+  // A 23-hour gap (a DST spring-forward day between two local-midnight dates)
+  // rounds to one day; Math.trunc would read it as zero (review pass 2).
+  ok(captureDaysApart("2026-03-08T00:00:00Z", "2026-03-08T23:00:00Z") === 1, "captureDaysApart: a 23h gap rounds to 1 day, not 0 (DST tooth)");
 }
 
 // freshnessVerdict: names a stale peer; current in lockstep.
@@ -271,7 +274,21 @@ ok(trimBase("http://h:1///") === "http://h:1" && trimBase("http://h:1") === "htt
     // Key never printed.
     const out = renderComparison(c);
     ok(!out.includes(KEY) && !JSON.stringify(c).includes(KEY), "neither the report nor the Comparison JSON carries the read key");
+    ok(/query_log/.test(out), "the retrieval section discloses that --replay's searches are logged on a query-logging brain");
   } finally { stable.server.stop(true); canary.server.stop(true); }
+}
+
+// identity labels an absent pgvector "none", not "unread" (a database that answered).
+{
+  const noVec = baseInfo({});
+  (noVec.database as { pgvector: unknown }).pgvector = null;
+  const a = startFake({ info: noVec, newest: "9/24/2026", hits: {} });
+  const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {} });
+  try {
+    const c = await compareBrains(a.ep, b.ep, {});
+    const pg = c.identity.find((d) => d.field === "pgvector");
+    ok(pg?.a === "none" && pg.b === "0.8.0", `an absent pgvector reads "none" (not "unread") against a brain that has it (${JSON.stringify(pg)})`);
+  } finally { a.server.stop(true); b.server.stop(true); }
 }
 
 // Two identical brains: no delta on any axis, verdict current.
@@ -335,6 +352,12 @@ ok(trimBase("http://h:1///") === "http://h:1" && trimBase("http://h:1") === "htt
   // drive it through the real CLI in a child (it refuses before any network).
   const child = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--replay"], { cwd: import.meta.dir });
   ok(child.exitCode === 2 && /needs a query set/.test(child.stderr.toString()), `parseCompareArgs: --replay with no query set is refused with exit 2 (${child.exitCode})`);
+  // An empty --query value is refused before any network, not sent to the brain.
+  const emptyQ = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--replay", "--query", ""], { cwd: import.meta.dir });
+  ok(emptyQ.exitCode === 2 && /--query is empty/.test(emptyQ.stderr.toString()), `parseCompareArgs: an empty --query is refused with exit 2 (${emptyQ.exitCode})`);
+  // A query set with no --replay is refused rather than silently ignored.
+  const noReplay = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--query", "x"], { cwd: import.meta.dir });
+  ok(noReplay.exitCode === 2 && /only apply with --replay/.test(noReplay.stderr.toString()), `parseCompareArgs: --query without --replay is refused with exit 2 (${noReplay.exitCode})`);
 }
 
 console.log(`\ntest-brain-compare: ${pass} passed, ${fail} failed`);

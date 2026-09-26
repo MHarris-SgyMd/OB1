@@ -19,8 +19,11 @@
  * connector NAME (open-brain, open-brain-canary) resolved through `claude mcp get`
  * — the same base URL and x-brain-key an operator already registered. Either way
  * the compare reaches each brain the way a client does: as ONE HTTP process by URL
- * (CLAUDE.md), with a read key, never Postgres. It writes to neither brain and
- * never prints a key.
+ * (CLAUDE.md), with a read key, never Postgres, and never prints a key. The default
+ * compare writes nothing (a keyed GET /health and the read-only thought_stats).
+ * `--replay` issues REAL searches, which a brain running with OB1_QUERY_LOG=on
+ * records in query_log — telemetry (migration 034), never the thoughts corpus —
+ * exactly as any client's search does; the retrieval section says so.
  *
  * What it reads and why it is HTTP, not SQL:
  *   • Identity — the keyed GET /health body is the whole brain_info record as JSON
@@ -137,11 +140,25 @@ export async function resolveConnector(name: string, keyArg: string | undefined,
 
 const HTTP_TIMEOUT_MS = 20_000;
 
+/**
+ * fetch with the compare's timeout, rewrapping a network/timeout rejection as the
+ * brain's label rather than leaving Bun's raw message (which can name the base URL)
+ * to surface (review pass 2). The key rides a header, never the URL, so a rewrapped
+ * message carries no key.
+ */
+async function fetchOrThrow(ep: BrainEndpoint, url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
+  } catch (e) {
+    const why = e instanceof Error && e.name === "TimeoutError" ? `no reply within ${HTTP_TIMEOUT_MS} ms` : (e as Error).message;
+    throw new Error(`${ep.label}: could not be reached — ${why}`);
+  }
+}
+
 /** The brain_info record as the keyed GET /health body carries it — the whole BrainInfo, as JSON. */
 export async function getBrainInfo(ep: BrainEndpoint): Promise<BrainInfo> {
-  const r = await fetch(`${ep.base}/health`, {
+  const r = await fetchOrThrow(ep, `${ep.base}/health`, {
     headers: { "x-brain-key": ep.key, accept: "application/json" },
-    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
   });
   if (!r.ok) throw new Error(`${ep.label}: GET /health → ${r.status} (a read key whose hash is in MCP_ACCESS_KEYS gets the record; without one /health is the bare body "ok").`);
   const text = await r.text();
@@ -161,11 +178,10 @@ export async function getBrainInfo(ep: BrainEndpoint): Promise<BrainInfo> {
  */
 export async function callTool(ep: BrainEndpoint, name: string, args: Record<string, unknown>): Promise<string> {
   const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } });
-  const r = await fetch(`${ep.base}/`, {
+  const r = await fetchOrThrow(ep, `${ep.base}/`, {
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": ep.key },
     body,
-    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
   });
   const raw = await r.text();
   const msg = unwrapRpc(raw);
@@ -329,7 +345,9 @@ function identityFields(r: BrainReading): Record<string, string> {
     "embedding.model": info.embedding.model,
     "embedding.dim": String(info.embedding.dim),
     postgres: db ? db.postgres.split(" ")[0] : "unread",
-    pgvector: db?.pgvector ? db.pgvector.version : "unread",
+    // db present but pgvector null is "none" (not installed — the fact the record
+    // carries); only a database that did not answer at all is "unread" (review pass 2).
+    pgvector: db ? (db.pgvector ? db.pgvector.version : "none") : "unread",
   };
 }
 
@@ -426,13 +444,18 @@ export function freshnessVerdict(a: BrainReading, b: BrainReading, migrationDelt
   return parts.join("; ") + ".";
 }
 
-/** Whole days between two best-effort capture dates (b − a), or null when either is unparseable. */
+/**
+ * Whole days between two best-effort capture dates (b − a), or null when either is
+ * unparseable. Rounded, not truncated: newestCapture is a local-midnight date
+ * (thought_stats' displayDate), and a day that crosses a DST change is 23 or 25
+ * hours — `trunc(23h)` would read a real one-day drift as zero (review pass 2).
+ */
 export function captureDaysApart(aDate: string | null, bDate: string | null): number | null {
   if (!aDate || !bDate) return null;
   const ta = Date.parse(aDate);
   const tb = Date.parse(bDate);
   if (Number.isNaN(ta) || Number.isNaN(tb)) return null;
-  return Math.trunc((tb - ta) / 86_400_000);
+  return Math.round((tb - ta) / 86_400_000);
 }
 
 // ---------------------------------------------------------------------------
@@ -471,6 +494,7 @@ export function renderComparison(c: Comparison): string {
     const moved = c.retrieval.rows.filter((r) => r.changed);
     const skipped = c.retrieval.rows.filter((r) => r.skipped);
     lines.push(`  arms: ${c.retrieval.arms.join(", ")} over ${c.retrieval.queries} quer${c.retrieval.queries === 1 ? "y" : "ies"}${c.retrieval.arms.includes("hybrid") ? " (hybrid = the vector arm, embedded by each brain; until SMD-2037 a hybrid diff can be HNSW-GUC-induced)" : ""}`);
+    lines.push(`  (these are real searches — a brain running OB1_QUERY_LOG=on records them in query_log, telemetry, not the thoughts corpus.)`);
     for (const r of skipped) lines.push(`  ~ [${r.arm}] ${JSON.stringify(r.query.slice(0, 60))}: skipped — ${r.skipped}`);
     if (moved.length === 0) {
       lines.push(`  no delta — b returns the same ids as a for every query and arm${skipped.length ? ` (${skipped.length} skipped)` : ""}.`);

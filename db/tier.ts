@@ -677,7 +677,7 @@ export function parseCompareArgs(args: string[]): CompareArgs {
       if (name === "a-key") out.aKey = v;
       else if (name === "b-key") out.bKey = v;
       else if (name === "queries-file") out.queries.push(...readQueriesFile(v));
-      else if (name === "query") out.queries.push(v);
+      else if (name === "query") { if (v.trim().length === 0) { console.error(`--query is empty.\n${USAGE}`); process.exit(2); } out.queries.push(v); }
       i++;
       continue;
     }
@@ -691,6 +691,7 @@ export function parseCompareArgs(args: string[]): CompareArgs {
   if (refs.length !== 2) { console.error(`--compare needs two brains.\n${USAGE}`); process.exit(2); }
   [out.a, out.b] = refs;
   if (out.hybrid && !out.replay) { console.error(`--hybrid only applies with --replay.\n${USAGE}`); process.exit(2); }
+  if (out.queries.length > 0 && !out.replay) { console.error(`--query/--queries-file only apply with --replay (without it, no retrieval runs).\n${USAGE}`); process.exit(2); }
   if (out.replay && out.queries.length === 0) { console.error(`--replay needs a query set: --query <q> (repeatable) or --queries-file <path>. query_log is not reachable over HTTP, so the queries are supplied.\n${USAGE}`); process.exit(2); }
   return out;
 }

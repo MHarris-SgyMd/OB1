@@ -373,9 +373,12 @@ It reads each brain as a client — the keyed `GET /health` record (version,
 commit, tier, the tree's latest migration against the ledger's highest, schema
 version, embedding, counts) and, with `--replay`, the two search tools over a
 supplied query set (the vector arm needs no local model — each brain embeds its
-own query). It writes to neither brain, never prints a key, and prints a one-line
-verdict ("current with each other" / "canary is 1 migration behind; 407 vs 597
-thoughts"). It exits non-zero when anything differs. Because it is HTTP-only, the
+own query). It never prints a key and prints a one-line verdict ("current with
+each other" / "canary is 1 migration behind; 407 vs 597 thoughts"). It exits
+non-zero when anything differs. The default compare writes nothing; `--replay`
+issues real searches, which a brain running `OB1_QUERY_LOG=on` records in
+`query_log` (telemetry, migration 034, never the thoughts corpus), as any client
+search does. Because it is HTTP-only, the
 exact id-set difference and a replay sourced from stable's `query_log` are out of
 reach and named as such; a DB-backed mode can add them. Until SMD-2037 lands, a
 refreshed brain runs at pgvector's default HNSW settings, so a hybrid-arm
