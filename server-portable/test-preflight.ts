@@ -288,22 +288,25 @@ else {
   // observe the un-migrated state, which is the thing this section tests.
   await dropSchema(LIVE);
 
+  const before = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(before.code === 1, "an un-migrated database exits 1");
+  assert(/bun migrate\.ts/.test(before.out), "…and tells you to run the migrations");
+
   // Another tool's thoughts, in a schema of its own, does not make an
-  // un-migrated public read as "exists but does not resolve" (SMD-2062's
-  // review pass 1): the schema row still says to migrate.
+  // un-migrated public read as "exists but does not resolve" (SMD-2062):
+  // the schema row still says to migrate. Run with public off the path, so
+  // a probe that read every schema would find a cause and say otherwise.
   const otherTool = new SQL({ url: LIVE, max: 1 });
   await otherTool.unsafe("DROP SCHEMA IF EXISTS pf_stray CASCADE; CREATE SCHEMA pf_stray; CREATE TABLE pf_stray.thoughts (id int)");
-  let before: { code: number; out: string };
+  let strayRun: { code: number; out: string };
   try {
-    before = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+    strayRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: `${LIVE}${LIVE.includes("?") ? "&" : "?"}options=-csearch_path%3Dnowhere` });
   } finally {
     await otherTool.unsafe("DROP SCHEMA pf_stray CASCADE");
     await otherTool.close();
   }
-  assert(before.code === 1, "an un-migrated database exits 1");
-  assert(/bun migrate\.ts/.test(before.out), "…and tells you to run the migrations");
-  assert(/✗\s+schema\s+relation "thoughts" does not exist\n\s+→ Apply the migrations: cd db && bun migrate\.ts/.test(before.out),
-         `…from the schema row too, with another schema's thoughts beside an empty public (${before.out.split("\n").find((l) => /\bschema\b/.test(l))?.trim()})`);
+  assert(/✗\s+schema\s+relation "thoughts" does not exist\n\s+→ Apply the migrations: cd db && bun migrate\.ts/.test(strayRun.out),
+         `…from the schema row too, with another schema's thoughts beside an empty public off the path (${strayRun.out.split("\n").find((l) => /\bschema\b/.test(l))?.trim()})`);
 
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
 
@@ -1890,9 +1893,29 @@ else {
                && /migration ledger\s+schema_migrations exists \(schema public\) but does not resolve for this role/.test(wide.out)
                && /schema version\s+could not verify: ob1_config exists \(schema public\) but does not resolve for this role/.test(wide.out),
              `…and every later direct row runs, the ledger and version rows in their own words (${row(wide.out, "chunk context")} | ${row(wide.out, "schema version")})`);
-      assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(public is not on its search_path, which is nowhere\)\n\s+→ ALTER ROLE pf_reader SET search_path = nowhere, public;/.test(wide.out)
+      assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(public is not on its search_path, which is "nowhere"\)\n\s+→ ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public;/.test(wide.out)
                && !/Apply the migrations: cd db/.test(wide.out),
              `…and the schema row names the path, not the migrate command (${row(wide.out, "schema")})`);
+
+      // The path's statement is rebuilt from the parsed setting, never echoed:
+      // an empty path reads back as "" (a zero-length name, invalid SQL), and
+      // one stored raw (FROM CURRENT, or a connection string) could carry a
+      // statement of its own into the remedy an operator pastes.
+      await claims.unsafe("ALTER ROLE pf_reader SET search_path = ''");
+      const empty = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+      assert(/public is not on its search_path, which is empty\)\n\s+→ ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = public;/.test(empty.out),
+             `an empty path is named empty, and the statement sets public alone (${row(empty.out, "schema")})`);
+      const setter = new SQL({ url: LIVE!, max: 1 });
+      try {
+        await setter.unsafe("SELECT set_config('search_path', 'x;drop/**/table/**/pf_nothing;--', false)");
+        await setter.unsafe("ALTER ROLE pf_reader SET search_path FROM CURRENT");
+      } finally {
+        await setter.close();
+      }
+      const raw = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+      assert(raw.out.includes(`SET search_path = "x;drop/**/table/**/pf_nothing;--", public;`) && !/search_path = x;drop/.test(raw.out),
+             `a raw stored path is quoted in the statement, not pasted into it (${row(raw.out, "schema")})`);
+      await claims.unsafe("ALTER ROLE pf_reader SET search_path = nowhere");
 
       // With no USAGE on public — PUBLIC's taken too, which a fresh database
       // grants — to_regclass('public.…') itself raises. The rows whose reads
@@ -1905,10 +1928,15 @@ else {
                  && /!\s+chunk context\s+could not verify: permission denied for schema public/.test(bare.out)
                  && !/not checked — the direct connection failed before it/.test(bare.out),
                `a role with no USAGE on public: the qualified reads' rows warn, each alone, and every later row runs (${row(bare.out, "write privileges")} | ${row(bare.out, "tier")})`);
-        // The role's path is still `nowhere` from the leg above, so both
+        // The role's path is `nowhere` again, set back above, so both
         // causes hold, and the row names both (review pass 2).
-        assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(no USAGE on schema public; public is not on its search_path, which is nowhere\)\n\s+→ GRANT USAGE ON SCHEMA public TO pf_reader;  then ALTER ROLE pf_reader SET search_path = nowhere, public;/.test(bare.out),
+        assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(no USAGE on schema public; public is not on its search_path, which is "nowhere"\)\n\s+→ GRANT USAGE ON SCHEMA public TO pf_reader;  then ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public;/.test(bare.out),
                `…and the schema row names the missing USAGE and the path, each with its statement (${row(bare.out, "schema")})`);
+        // A path the connection string sets reaches the setting raw, case and
+        // all: an unquoted PUBLIC is public, so USAGE is the one cause.
+        const upper = await run({ ...SQL_ENV, DATABASE_URL: `${LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@")}${LIVE!.includes("?") ? "&" : "?"}options=-csearch_path%3DPUBLIC` });
+        assert(/does not resolve for this role \(no USAGE on schema public\)\n\s+→ GRANT USAGE ON SCHEMA public TO pf_reader;  The table is there/.test(upper.out),
+               `an unquoted PUBLIC on the path is public: the row names the USAGE alone (${row(upper.out, "schema")})`);
       } finally {
         if (publicUsage) await claims.unsafe("GRANT USAGE ON SCHEMA public TO PUBLIC");
       }

@@ -174,6 +174,40 @@ const REAPPLY = `The ledger records that migration but the schema installed is o
 const APPLY_032_POSTGREST = `Apply the migrations through db/migrations/032_update_thought_provenance.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 /** PostgREST's wording for a function it cannot resolve — missing, or not at the argument shape sent. */
 const missing = (msg: string) => /could not find the function|does not exist/i.test(msg);
+/**
+ * A search_path setting's schemas as Postgres reads them: comma-separated, a
+ * quoted name kept as written ("" inside it a quote), an unquoted one folded to
+ * lower case, and the empty name a `''` path is shown as (`""`) dropped. The
+ * setting is the role's own text — a connection string or `SET … FROM CURRENT`
+ * stores it raw — so it is parsed rather than echoed, and a statement built
+ * from it quotes every name (SMD-2062's review pass 3: an echoed path printed
+ * invalid SQL for `""` and `$user`, and pasted a stored `x;drop …;--` into
+ * the remedy).
+ */
+function searchPathSchemas(setting: string): string[] {
+  const names: string[] = [];
+  let i = 0;
+  while (i < setting.length) {
+    while (i < setting.length && /\s/.test(setting[i])) i++;
+    let name = "";
+    if (setting[i] === '"') {
+      for (i++; i < setting.length; i++) {
+        if (setting[i] !== '"') name += setting[i];
+        else if (setting[i + 1] === '"') { name += '"'; i++; }
+        else { i++; break; }
+      }
+    } else {
+      while (i < setting.length && setting[i] !== "," && !/\s/.test(setting[i])) name += setting[i++];
+      name = name.toLowerCase();
+    }
+    while (i < setting.length && setting[i] !== ",") i++;
+    i++;
+    if (name !== "") names.push(name);
+  }
+  return names;
+}
+/** An identifier, always double-quoted: valid for any name, `$user` among them, which a search_path needs quoted. */
+const quoteIdent = (name: string) => `"${name.replaceAll('"', '""')}"`;
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
@@ -757,14 +791,14 @@ if (configFailed) {
       // on public, or public off its search_path, or both — is not a brain
       // to migrate (SMD-2062). public alone, as every direct check judges
       // it: a thoughts in some other schema is another tool's, and an
-      // un-migrated public still wants the migrations (review pass 1). Each
-      // cause is named, both when both hold, and the path's fix is a whole
-      // statement that keeps what the path already has (review pass 2: one
-      // cause named, a "…" to fill in). current_schemas() cannot answer "on
-      // the path": it leaves out a schema the role has no USAGE on, so the
-      // setting is read as written. pg_class answers for any role, whatever
-      // its path; over PostgREST there is no catalog to ask, and a failed
-      // probe asks nothing.
+      // un-migrated public still wants the migrations. Each cause is named
+      // with its statement. current_schemas() cannot say "on the path" — it
+      // leaves out a schema the role has no USAGE on — so the setting is
+      // parsed (searchPathSchemas), and the path's statement is rebuilt from
+      // the parsed names, each quoted, for this database: a role's setting
+      // there outranks its plain ALTER ROLE and the database's. pg_class
+      // answers for any role, whatever its path; over PostgREST there is no
+      // catalog to ask, and a failed probe asks nothing.
       let offPath: { causes: string[]; fixes: string[] } | null = null;
       if (built.kind === "sql" && conn && /does not exist/i.test(msg)) {
         try {
@@ -776,17 +810,18 @@ if (configFailed) {
                               WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present,
                      has_schema_privilege('public', 'USAGE') AS usage,
                      current_setting('search_path') AS path,
-                     quote_ident(current_user::text) AS role`) as { present: boolean; usage: boolean; path: string; role: string }[];
-            const onPath = String(r?.path ?? "").split(",").map((p) => p.trim().replace(/^"(.*)"$/, "$1")).includes("public");
+                     quote_ident(current_user::text) AS role,
+                     quote_ident(current_database()::text) AS db`) as { present: boolean; usage: boolean; path: string; role: string; db: string }[];
+            const schemas = searchPathSchemas(String(r?.path ?? ""));
             const causes: string[] = [];
             const fixes: string[] = [];
             if (r?.present && !r.usage) {
               causes.push("no USAGE on schema public");
               fixes.push(`GRANT USAGE ON SCHEMA public TO ${r.role};`);
             }
-            if (r?.present && !onPath) {
-              causes.push(`public is not on its search_path, which is ${r.path ? r.path : "empty"}`);
-              fixes.push(`ALTER ROLE ${r.role} SET search_path = ${r.path ? `${r.path}, ` : ""}public;  — or wherever this role's path is set instead (ALTER ROLE … IN DATABASE, ALTER DATABASE, the connection string)`);
+            if (r?.present && !schemas.includes("public")) {
+              causes.push(`public is not on its search_path, which is ${schemas.length ? schemas.map(quoteIdent).join(", ") : "empty"}`);
+              fixes.push(`ALTER ROLE ${r.role} IN DATABASE ${r.db} SET search_path = ${[...schemas.map(quoteIdent), "public"].join(", ")};  (a search_path in the connection string outranks it)`);
             }
             if (causes.length) offPath = { causes, fixes };
           } finally {
@@ -1330,7 +1365,7 @@ if (configFailed) {
         // to_regclass('public.…') does for a role with no USAGE on public —
         // is this row's warning, not every later check's skip. The role's
         // name is the vector probe's, outside it: the isolation check's
-        // remedy names it too (review pass 1: it was read a second time).
+        // remedy names it too.
         const { role, role_ident: ident } = vec as { role: string; role_ident: string };
         const { CAPTURE_WRITES, EXTRACTION_TRIGGER_WRITES } = await import("../db/config.mjs");
         try {
