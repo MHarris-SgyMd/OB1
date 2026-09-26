@@ -5409,7 +5409,7 @@ console.log("\n[doc] db/README.md states this suite's assertion total (full runs
     docCheck(claims.length > 0 && claims.every((c) => c === n),
       `db/README.md quotes test-live.ts's ${n} assertions for a full run (found ${[...new Set(claims)].join(", ") || "none"})`);
   } else {
-    console.log(`  ·  (doc) skipped — ${skipped()} group(s) did not run, so this ${n}-assertion run is not the full count the README states`);
+    console.log(`  ·  (doc) skipped — ${skipped()} skip(s), a group or an assertion, so this ${n}-assertion run is not the full count the README states`);
   }
 }
 

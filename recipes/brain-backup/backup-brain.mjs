@@ -23,7 +23,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { createClient } from "../../compat/supabase-sql/index.ts";
 
-const SCRIPT_DIR = process.cwd();
+// The directory the run is started from: the `.env.local` it reads and the `backup/` it writes are here.
+const WORK_DIR = process.cwd();
 
 // ---------------------------------------------------------------------------
 // Config
@@ -53,7 +54,7 @@ const TABLES = [
 // ---------------------------------------------------------------------------
 
 function loadEnvFile() {
-  const envPath = path.join(SCRIPT_DIR, ".env.local");
+  const envPath = path.join(WORK_DIR, ".env.local");
   const vars = {};
   if (fs.existsSync(envPath)) {
     let isFirstLine = true;
@@ -179,7 +180,8 @@ async function fetchPage(table, orderBy, offset, limit) {
     if (result.error.code === "42P01") {
       return { rows: [], total: null, missing: true };
     }
-    throw new Error(`Postgres error ${result.error.code ?? ""} on ${table}: ${result.error.message}`.replace("  ", " "));
+    const code = result.error.code ? `${result.error.code} ` : "";
+    throw new Error(`Postgres error ${code}on ${table}: ${result.error.message}`);
   }
 
   return { rows: result.data ?? [], total: result.count };
@@ -285,7 +287,7 @@ async function exportTable(tableName, orderBy, backupDir, dateStr, required) {
 
 async function main() {
   const dateStr = today();
-  const backupDir = path.join(SCRIPT_DIR, "backup");
+  const backupDir = path.join(WORK_DIR, "backup");
 
   if (!fs.existsSync(backupDir)) {
     fs.mkdirSync(backupDir, { recursive: true });

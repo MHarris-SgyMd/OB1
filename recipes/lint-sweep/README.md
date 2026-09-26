@@ -182,7 +182,7 @@ On brains larger than these caps, Tier 1/2 counts represent a **slice**, not the
 - Low-signal noise (importance ≤2, content <40 chars): **18**
 - Exact-duplicate fingerprint groups: **2**
   - fingerprint a1b2c3d4e5f6… → 2 copies (ids: 11032, 11418)
-- Rows missing content_fingerprint: **0** — consider running the fingerprint-dedup-backfill recipe.
+- Rows missing content_fingerprint: **0** — on this fork migration 023 backfills them (a raw insert leaves the column NULL; a capture through the functions fills it).
 
 ## Tier 2 — Graph-based lint (free)
 

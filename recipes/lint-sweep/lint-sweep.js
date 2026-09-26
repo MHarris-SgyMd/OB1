@@ -10,10 +10,9 @@
 /**
  * lint-sweep.js — Bounded weekly brain-quality audit for Open Brain.
  *
- * ESM module; see the sibling package.json for `"type": "module"`. We use a
- * `.js` extension (rather than `.mjs`) to match the OB1 Rule 6 artifact
- * whitelist in `.github/workflows/ob1-gate.yml`, which only admits
- * `.sql|.ts|.js|.py`.
+ * ESM module; see the sibling package.json for `"type": "module"`. The `.js`
+ * extension (rather than `.mjs`) is upstream's, for a gate that admits only
+ * `.sql|.ts|.js|.py`; this fork's checks do not read the extension.
  *
  * Inspired by Karpathy's "lint" concept and the CRATE CLI. Scans the
  * `public.thoughts` table for quality issues across three cost tiers:
@@ -723,7 +722,7 @@ function renderReport({ args, tier1, tier2, tier3, startedAt, finishedAt }) {
         else lines.push(`  - fingerprint ${d.fingerprint}… → ${d.copies} copies (ids: ${d.ids.join(", ")})`);
       }
     }
-    lines.push(`- Rows missing content_fingerprint: **${tier1.noFingerprint}** — consider running the fingerprint-dedup-backfill recipe.`);
+    lines.push(`- Rows missing content_fingerprint: **${tier1.noFingerprint}** — on this fork migration 023 backfills them (a raw insert leaves the column NULL; a capture through the functions fills it).`);
     lines.push("");
   }
 
@@ -879,12 +878,18 @@ async function main() {
   console.log(`[lint-sweep] report written → ${args.report}`);
 }
 
-main().then(
-  () => activeClient?.close(),
-  async (err) => {
-    console.error("[lint-sweep] FAILED:", err?.message || err);
-    if (process.env.DEBUG) console.error(err);
+main()
+  .then(
+    () => activeClient?.close(),
+    async (err) => {
+      console.error("[lint-sweep] FAILED:", err?.message || err);
+      if (process.env.DEBUG) console.error(err);
+      process.exitCode = 1;
+      await activeClient?.close();
+    }
+  )
+  .catch((err) => {
+    // A close that fails is reported, not left as an unhandled rejection.
+    console.error("[lint-sweep] FAILED to close the pool:", err?.message || err);
     process.exitCode = 1;
-    await activeClient?.close();
-  }
-);
+  });
