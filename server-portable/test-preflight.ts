@@ -297,6 +297,16 @@ else {
   assert(before.code === 1, "an un-migrated database exits 1");
   assert(/bun migrate\.ts/.test(before.out), "…and tells you to run the migrations");
 
+  // The migration ledger row on the empty database names the migrate command,
+  // not --baseline: --baseline records every migration as applied without running
+  // one, and over no schema it leaves a ledger the next plain run reads as done
+  // (SMD-2237). It says what the schema row above it says, and never contradicts
+  // it with an adoption step there is nothing to adopt.
+  assert(/!\s+migration ledger\s+no schema_migrations table and no schema — nothing has been migrated here\n\s+→ Apply the migrations: cd db && bun migrate\.ts/.test(before.out),
+         "…the migration ledger row names the migrate command on an empty database (SMD-2237)");
+  assert(!/the schema was applied by hand/.test(before.out) && !/--baseline/.test(before.out),
+         "…and never tells an empty database to --baseline");
+
   // Another tool's thoughts, in a schema of its own, does not make an
   // un-migrated public read as "exists but does not resolve" (SMD-2062):
   // the schema row still says to migrate. Run with public off the path, so

@@ -2207,4 +2207,40 @@ console.log("\n[21] test-support's schema reset leaves nothing of the fork's in 
   await applyMigrations(URL_, OPTS);
 }
 
+console.log("\n[22] --baseline on an empty database refuses, naming public.thoughts, the plain run and --force; --force records the ledger over it (SMD-2237)");
+{
+  await dropSchema(URL_);
+  // A fresh database with no fork schema. --baseline would record every migration
+  // as applied without running one, leaving a ledger the next plain run reads as
+  // done — so it refuses (exit 2), naming what is missing, the plain run and the
+  // override, and before the ledger table is even created: nothing is written.
+  const refused = await migrate("--baseline");
+  assert(refused.code === 2 &&
+         /--baseline refused: public\.thoughts does not exist/.test(refused.out) &&
+         /Apply the migrations instead: cd db && bun migrate\.ts/.test(refused.out) &&
+         /pass --force/.test(refused.out),
+         `--baseline on an empty database refuses, naming public.thoughts, the plain run and --force (exit ${refused.code})`);
+
+  const sql = new SQL({ url: URL_, max: 1 });
+  const [{ present: ledger }] = (await sql`SELECT to_regclass('public.schema_migrations') IS NOT NULL AS present`) as { present: boolean }[];
+  await sql.close();
+  assert(ledger === false, "…and creates no schema_migrations table — the refusal is before any write");
+
+  // --force is the operator's override: it records every migration over the empty
+  // schema, exactly as --baseline does over a hand-built one.
+  const forced = await migrate("--baseline", "--force");
+  assert(forced.code === 0 && new RegExp(`baselined ${MIGRATIONS.length}, skipped 0`).test(forced.out),
+         `--baseline --force records every migration over an empty database (exit ${forced.code})`);
+
+  // --force without --baseline is refused, not a silent plain run — it exits at
+  // argument parsing, before any connection, whatever the database holds.
+  const forceAlone = await migrate("--force");
+  assert(forceAlone.code === 2 && /--force overrides --baseline's empty-database guard/.test(forceAlone.out),
+         `--force without --baseline is refused (exit ${forceAlone.code})`);
+
+  // Leave the database clean and migrated, as the blocks before this one do.
+  await dropSchema(URL_);
+  await applyMigrations(URL_, OPTS);
+}
+
 report();
