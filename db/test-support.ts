@@ -136,6 +136,12 @@ const FUNCTIONS = [
   // 056 (SMD-1935); record_thought_entities is 016's name.
   "entity_type_gate(text, text)",
   "apply_entity_type_gate()",
+  // 058 (SMD-2074): string bodies, so no dependency orders their drops.
+  "node_state(uuid[])",
+  "node_dependencies()",
+  "node_lifecycle()",
+  "node_settled_types()",
+  "node_lifecycle_types()",
   "consolidation_pool(text)",
   "stale_entities(interval, int)",
   // 032 (SMD-1323)
@@ -490,8 +496,9 @@ export function createAssert(): {
     },
     report(): never {
       console.log(`\n${"─".repeat(52)}`);
-      // Fork Checks' schema step greps this line from each width's log for its
-      // closing summary (`^[0-9]+ assertions: `, SMD-2092): reword it there too.
+      // Fork Checks' schema step and its data-layer pair grep this line from
+      // each log for their closing summaries (`^[0-9]+ assertions: `, SMD-2092,
+      // SMD-2219), as db/ci-parity.sh does for its rows: reword it there too.
       console.log(
         `${passed + failed} assertions: ${passed} passed, ${failed} failed` +
           (skipped ? `, ${skipped} skipped` : "") +

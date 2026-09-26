@@ -102,8 +102,10 @@ export function resolveExtractWindow(
 ): { tokens: number; from: ExtractWindowFrom; window: number | undefined; capped: boolean; unfit: boolean };
 /** The smallest window a served context is derived into, 64; a context that holds less gets the default and `unfit`. */
 export const EXTRACT_MIN_WINDOW_TOKENS: number;
-/** The most windows one thought may be extracted in, 24; over it the thought is recorded failed with the count. */
+/** The most windows one thought is extracted in by default, 24; over it the thought is extracted over its first windows, succeeded with a caveat (SMD-2240). */
 export const EXTRACT_MAX_WINDOWS: number;
+/** OB1_EXTRACT_MAX_WINDOWS when a positive safe integer once floored, else EXTRACT_MAX_WINDOWS; `from` says which. */
+export function resolveExtractMaxWindows(raw: string | undefined): { windows: number; from: "OB1_EXTRACT_MAX_WINDOWS" | "default" };
 
 /** Models whose cards claim Matryoshka training, so truncation is supported. */
 export const MRL_MODELS: Set<string>;
@@ -332,7 +334,7 @@ export function alignVectorSearchPath(sql: import("bun").SQL): Promise<string | 
  */
 export type RoleGrant = { table?: string; view?: string; sequence?: string; function?: string; privileges: readonly string[]; since: string };
 /** The groups ROLE_GRANTS is keyed by. */
-export type RoleGrantGroup = "capture" | "server" | "worker" | "extraction" | "querylog" | "community" | "extensions" | "recipes";
+export type RoleGrantGroup = "capture" | "server" | "worker" | "extraction" | "structure" | "querylog" | "community" | "extensions" | "recipes";
 /**
  * Privileges the fork's SECURITY INVOKER functions need to run as their caller,
  * grouped by the role that needs each group — tables for the migrations' own

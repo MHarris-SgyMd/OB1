@@ -606,6 +606,19 @@ type Op = "select" | "insert" | "update" | "upsert" | "delete";
 /** `error` is a PostgrestError at runtime (change 77); the type stays the structural one migrated files were written against. */
 export type Result<T> = { data: T | null; error: { message: string; code?: string } | null; count: number | null };
 
+/**
+ * A page argument the compiler renders into `LIMIT`/`OFFSET` by interpolation
+ * (not a bound parameter), so a non-integer — NaN, Infinity, a fraction — would
+ * reach Postgres as a bare token and be read as a column name. Refuse it at the
+ * call site with a named RangeError, before any SQL is built: still a 500 for a
+ * caller that passed one, but a legible one, not a generic query failure. A
+ * well-behaved caller clamps to a finite integer first (SMD-2083).
+ */
+function requireIntArg(n: number, where: string): number {
+  if (!Number.isInteger(n)) throw new RangeError(`${where} requires a finite integer, got ${n}`);
+  return n;
+}
+
 export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<Result<T>> {
   private op: Op = "select";
   private items: SelectItem[] = [{ kind: "star" }];
@@ -973,13 +986,14 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
     return this;
   }
 
-  limit(n: number, opts?: { foreignTable?: string; referencedTable?: string }): this { QueryBuilder.onEmbed("limit()", opts); this.limitN = n; return this; }
+  limit(n: number, opts?: { foreignTable?: string; referencedTable?: string }): this { QueryBuilder.onEmbed("limit()", opts); this.limitN = requireIntArg(n, "limit()"); return this; }
 
   /** PostgREST's range is inclusive on both ends. */
   range(from: number, to: number, opts?: { foreignTable?: string; referencedTable?: string }): this {
     QueryBuilder.onEmbed("range()", opts);
-    this.offsetN = from;
-    this.limitN = to - from + 1;
+    const f = requireIntArg(from, "range() from");
+    this.offsetN = f;
+    this.limitN = requireIntArg(to, "range() to") - f + 1;
     return this;
   }
 

@@ -44,7 +44,7 @@ import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, syncIssue, t
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
-import { promote, refresh, refreshToolsReady, replayAndDiff, targetRefusal } from "./tier.ts";
+import { applyDatabaseSettings, databaseSettings, promote, refresh, refreshToolsReady, replayAndDiff, targetRefusal, where } from "./tier.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -413,13 +413,26 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
   // at ten times the exact threshold on eight hits over three pages; 038 draws
   // those pages by TID range, one block per probe, so every draw reaches its
   // pages. The skip needs a table past ten times the threshold, which PGlite's
-  // [8e] cannot hold; this section can. 25,000 rows at the configured width, generated on
-  // the server (a client round trip per row would be the slow part), every row
-  // tagged broad and one in 250 also tagged thin. The HNSW index is dropped for
-  // the load and put back on the emptied table at the end: maintaining it on
-  // 25,000 inserts at the shipped width is a minute the assertions here do not
-  // need, and without it the walk is a GIN bitmap and a sort — exact, and slow
-  // in a way that does not matter to a section about the statement BEFORE it.
+  // [8e] cannot hold; this section can. 15,000 rows at the configured width,
+  // generated on the server (a client round trip per row would be the slow
+  // part), every row tagged broad and one in 250 also tagged thin. The HNSW
+  // index is dropped for the load and put back on the emptied table at the
+  // end: maintaining it on every insert at the shipped width is time the
+  // assertions here do not need, and without it the walk is a GIN bitmap and
+  // a sort — exact, and slow in a way that does not matter to a section about
+  // the statement BEFORE it.
+  //
+  // Why 15,000. The skip needs the sample's scaled estimate at ten times
+  // v_exact, 10,000 here. Every row is broad and every full page holds about
+  // 70, so pages × 70 ≥ N and a draw of d distinct pages estimates at least
+  // (d − 1)/d of N, short only by the last, partly filled page. The gate
+  // admits no draw of fewer than three hit pages (037's condition 3), and
+  // 15,000 is the smallest N two thirds of which is 10,000 (here 2/3 × 215
+  // pages × 70 = 10,033). Over 5,000 draws of the deployed statement each,
+  // 12,000 (safe by the bound from six pages up) missed none, and 11,000
+  // missed 4.9%, each time its 10-row last page was drawn. The bound needs
+  // every page but the last full: the VACUUM below. The section loaded 25,000
+  // before SMD-2135.
   await sql`DELETE FROM thoughts`;
   const [{ hnswDef }] = await sql.unsafe(`SELECT pg_get_indexdef('thoughts_embedding_idx'::regclass) AS "hnswDef"`);
   // Read by the finally block below as well as the section: the last definer
@@ -439,20 +452,27 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
   // The floor lowered to 0 for the section, so the gate runs on this heap.
   // Applied BEFORE the index is dropped and the rows loaded. 039 needed that
   // order — its swap block builds the index when the shipped name is missing,
-  // and a build over 25,000 rows at the shipped width is the minute this
+  // and a build over the loaded rows at the shipped width is the time this
   // section avoids — and 040 and 041, which carry no swap, keep it.
   await applyMigrations(URL_, { ...opts041, routeEstimateMinPages: 0 });
   assert(/IF v_pages >= 0 THEN/.test(await body()) && TID_PROBE.test(await body()) && (await hasClauses()), "041 is installed with its floor at 0 (038's gate, carried through 039), jit = off and both pins on the function: the sample runs on every filtered call to this table");
   await sql.unsafe(`DROP INDEX thoughts_embedding_idx`);
+  // [5b]'s 2,000 rows are dead after the DELETE above. Unvacuumed, their 28
+  // pages stay and the load goes in after them; the sample draws them and
+  // counts them as seen with no hit (041's LEFT join, on purpose): 49 misses
+  // in 5,000 draws at 15,000 rows, about one run in six. The page check after
+  // the load holds this. After the DROP INDEX, so it does not clean an index
+  // about to go.
+  await sql.unsafe(`VACUUM thoughts`);
   // User triggers off for the load, as the bench does: 008's audit trigger
-  // would write a row per row (25,000 here, then 25,000 more for the DELETE)
+  // would write a row per row (15,000 here, then 15,000 more for the DELETE)
   // into a table later sections read differentially — nothing this section
   // measures — and the heap they leave behind moves a timing-sensitive race
   // that follows ([6g]). Re-enabled in the finally block.
   await sql.unsafe(`ALTER TABLE thoughts DISABLE TRIGGER USER`);
   let failure: unknown;
   try {
-    const N = 25_000;
+    const N = 15_000;
     await sql.unsafe(`
       INSERT INTO thoughts (content, metadata, embedding)
       SELECT 'gate ' || r.i,
@@ -464,6 +484,8 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     await sql.unsafe(`VACUUM ANALYZE thoughts`);
     const [{ pages }] = await sql.unsafe(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages`);
     assert(Number(pages) > 0 && Number(pages) < ROUTE_ESTIMATE_MIN_PAGES, `${N.toLocaleString()} rows at ${EMBEDDING_DIM} dimensions are ${pages} heap pages (the vectors are TOASTed), under the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES}`);
+    const [{ used }] = await sql.unsafe(`SELECT count(DISTINCT (ctid::text::point)[0])::int AS used FROM thoughts`);
+    assert(Number(used) === Number(pages), `every one of the ${pages} heap pages holds a live row (${used} do): the VACUUM before the load left no page of [5b]'s dead rows for the sample to draw empty (when it fails: a session holding a snapshot from before the DELETE keeps those rows)`);
 
     // The deployed body — 041, carrying 038's sample — kept for the timing at the end: by then 020's re-apply has replaced it.
     const bodyGate = await body();
@@ -481,10 +503,10 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     const { unitVector } = seededRandom(1463);
     // Twenty calls. Under 037 the gate missed a broad filter when its
     // TABLESAMPLE draw reached fewer than three pages — 17 in 1,000 draws on
-    // this fixture — and the band below was 0.75–1.0; 038 draws eight blocks
-    // and reads each, so a draw reaches fewer than three pages only when all
-    // eight land on one or two of some 400 (about 3e-14), and the band is
-    // exact.
+    // the 25,000-row fixture of the time — and the band below was 0.75–1.0;
+    // 038 draws eight blocks and reads each, so a draw reaches fewer than
+    // three pages only when all eight land on one or two of some 215 (about
+    // 1e-12), and the band is exact.
     const QUERIES = 20;
     const queries = Array.from({ length: QUERIES }, () => `[${unitVector(EMBEDDING_DIM).join(",")}]`);
     const exactTop = (qv: string, filter: string) =>
@@ -552,9 +574,11 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     // 0.9999999999999998), so the property is asserted on the integers
     // (SMD-1526 review pass 3).
     const saved = plainBroad.scans - gatedBroad.scans;
-    // Every draw reads eight pages of some 65 rows each, all broad, so every
-    // call meets the three conditions (condition 1 needs about 200 hits on
-    // this heap; eight pages hold some 500) and skips the collection; the
+    // Every draw reads eight pages of some 70 rows each (seven in about one
+    // draw in eight, when a block comes up twice), all broad, so every call
+    // meets the three conditions (037's condition 1, the ten-times one, needs
+    // about 370 hits on this heap, 330 at seven pages; they hold some 560 and
+    // 490) and skips the collection; the
     // rest of a call's GIN scans (the walk's bitmap) are the same under both
     // bodies and cancel. Exactly one fewer per call is the band — 037's draw
     // could reach fewer than three pages and missed, which is why this
@@ -582,20 +606,20 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     throw e;
   } finally {
     // The shipped state back on every path — a throw above would otherwise
-    // leave 25,000 rows and no HNSW index to [6]..[16] (SMD-1463's first review pass): 041
-    // with its floor, and 027, because 020's file also redefines
-    // search_thoughts_hybrid as 020 had it, without 027's relative floor, and
-    // [15] holds that floor (the first run of this section left 020's hybrid
-    // behind and [15] failed on it); the table emptied; the index rebuilt
-    // (instant on no rows). The table and the index first — they depend on
-    // nothing — so a throw from the re-apply cannot leave them behind (second
-    // review pass); and when the section itself threw, a cleanup that fails
-    // on the same fault is reported, not thrown, so the cause is what the
-    // run shows (SMD-1463's fourth review pass).
+    // leave 15,000 rows and no HNSW index to [6]..[16] (SMD-1463's first
+    // review pass): 041 with its floor, and 027, because 020's file also
+    // redefines search_thoughts_hybrid as 020 had it, without 027's relative
+    // floor, and [15] holds that floor (the first run of this section left
+    // 020's hybrid behind and [15] failed on it); the table emptied; the
+    // index rebuilt (instant on no rows). The table and the index first —
+    // they depend on nothing — so a throw from the re-apply cannot leave them
+    // behind (second review pass); and when the section itself threw, a
+    // cleanup that fails on the same fault is reported, not thrown, so the
+    // cause is what the run shows (SMD-1463's fourth review pass).
     try {
       await sql`DELETE FROM thoughts`;
       await sql.unsafe(`ALTER TABLE thoughts ENABLE TRIGGER USER`);
-      // The 25,000 dead tuples and their pages go too, so the sections after
+      // The 15,000 dead tuples and their pages go too, so the sections after
       // start from the heap they would have had without this one.
       await sql.unsafe(`VACUUM thoughts`);
       await sql.unsafe(String(hnswDef));
@@ -884,11 +908,28 @@ console.log("\n[5f] Every join in the body keeps its nested loop under an operat
   // Hash Join and touches the heap several times over; and through the
   // function the pinned call returns the default's rows. Timing at scale is
   // the bench's and FORK.md change 94's.
-  const N = 12_000;
+  //
+  // Why 6,000. The section's time is the two HNSW builds, and a build grows
+  // faster than its rows (locally, the thoughts index took 9.4 s over 12,000
+  // rows, 3.3 s over 6,000 and 1.1 s over 3,000, with or without parallel
+  // workers). Every assertion here holds down to 2,000, with the mutant's
+  // buffer excess thousands of pages over the heap's size at each. At 6,000
+  // each mutant plan is also the one the header names, at both widths the
+  // suite runs on PostgreSQL 16; below that the unfiltered call's parent
+  // lookup becomes a Hash Join over the heap rather than a Merge Join over
+  // the whole primary key — measured between 5,000 and 5,600 rows at 1,024
+  // dimensions and between 5,500 and 6,000 at 768, so at 768 this count sits
+  // just above the switch. The assertion takes either join, so a switch that
+  // moves costs this paragraph, not the run. The section loaded 12,000
+  // before SMD-2135.
+  const N = 6_000;
   await sql`DELETE FROM thoughts`;
   const defs = (await sql.unsafe(`SELECT indexname AS n, indexdef AS d FROM pg_indexes WHERE indexname IN ('thoughts_embedding_idx', 'thought_chunks_embedding_idx') ORDER BY 1`)) as { n: string; d: string }[];
   assert(defs.length === 2, "both HNSW indexes exist to drop for the load and rebuild after it");
   for (const { n } of defs) await sql.unsafe(`DROP INDEX ${n}`);
+  // User triggers off until the finally block has emptied the table, as in
+  // [5d] and [5e]. They were re-enabled right after the load until SMD-2135,
+  // so the cleanup's DELETE wrote an audit row per loaded row.
   await sql.unsafe(`ALTER TABLE thoughts DISABLE TRIGGER USER`);
   const opts041 = { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f: string) => f.startsWith("041") };
   const proconfig = async () => String((await sql`SELECT array_to_string(proconfig, ',') AS c FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure`)[0].c ?? "");
@@ -905,10 +946,10 @@ console.log("\n[5f] Every join in the body keeps its nested loop under an operat
              (SELECT ('[' || string_agg((random() - 0.5)::text, ',') || ']')::vector FROM generate_series(1, ${EMBEDDING_DIM} + 0 * r.i))
       FROM generate_series(1, ${N}) AS r(i)`);
     await loadChunkRows(sql, 2);
-    await sql.unsafe(`ALTER TABLE thoughts ENABLE TRIGGER USER`);
-    // Both indexes back over the loaded rows, in memory (the graph over
-    // 18,000 vectors at the shipped width wants a few hundred MB; the
-    // server's 64 MB maintenance_work_mem default would build it on disk).
+    // Both indexes back over the loaded rows, in memory. 512 MB is margin:
+    // the ~9,000 vectors here (~2.5 KB each at the shipped width, the figure
+    // db/README.md sizes maintenance_work_mem by) fit the 64 MB default too;
+    // it stays so a larger N does not fall into pgvector's on-disk build.
     await sql.begin(async (tx: SQL) => {
       await tx.unsafe(`SET LOCAL maintenance_work_mem = '512MB'`);
       for (const { d } of defs) await tx.unsafe(d);
@@ -3228,6 +3269,50 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   const [{ actors }] = await sql`SELECT count(*) FILTER (WHERE actor_name = 'entity-worker')::int AS actors FROM thought_audit`;
   assert(Number(actors) === 0, "the worker writes no thought_audit rows — it never mutates thoughts; its rows carry its agent id instead");
 
+  // A thought over the per-thought bound (SMD-2240) is extracted over its
+  // prefix and released succeeded with a caveat — not failed — its prefix's
+  // rows in the graph and its tail's not; --retry-partial under a wider bound
+  // reads it whole. The closing key is listed first: every window after the
+  // first carries the opening line as its header, so the last window's prompt
+  // holds both words and the stub answers the first key it finds.
+  answers["tome-closing"] = { entities: [{ name: "Inkwell", type: "tool", confidence: 0.9 }], relationships: [] };
+  answers["tome-opening"] = {
+    entities: [{ name: "Quill", type: "tool", confidence: 0.9 }, { name: "Quentin", type: "person", confidence: 0.9 }],
+    relationships: [{ from: "Quentin", to: "Quill", relation: "uses", confidence: 0.8 }],
+  };
+  const tomeText = Array.from({ length: 6 }, (_, p) =>
+    `${p === 0 ? "The tome-opening chapter." : p === 5 ? "The tome-closing chapter." : `Chapter ${p}.`} ${Array.from({ length: 24 }, (__, i) => `Quentin noted point ${p}.${i} about the book.`).join(" ")}`).join("\n\n");
+  const tome = await seed(tomeText);
+  const [{ r: ledgerCaveat }] = await sql`SELECT last_error AS r FROM thought_work_claims WHERE thought_id = ${ledger}::uuid AND work_type = ${KEY}`;
+  assert(ledgerCaveat === null, "under the default bound the windowed ledger thought is a clean success, no caveat — the drop-the-env control");
+  const capped = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!], { env: { ...env, OB1_EXTRACT_MAX_WINDOWS: "2" } as Record<string, string>, cwd: HERE });
+  assert(capped.code === 0 && /1 extracted \(1 over a prefix only — past the per-thought bound, OB1_EXTRACT_MAX_WINDOWS \(2\); each row's caveat says how much\), 0 failed/.test(capped.out),
+         `under OB1_EXTRACT_MAX_WINDOWS=2 the long thought is extracted, counted as a prefix, and the run exits 0 (exit ${capped.code}: ${capped.out.split("\n").find((l) => /extracted/.test(l) && /failed/.test(l))?.trim()})`);
+  assert(/window: [^\n]*a thought over 2 windows \(from OB1_EXTRACT_MAX_WINDOWS\), or whose whitespace-free runs take it past 600 estimated tokens, is extracted over its opening/.test(capped.out), "…the banner stating the bound it ran under");
+  const [tomeClaim] = await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${tome}::uuid AND work_type = ${KEY}`;
+  assert(tomeClaim.status === "succeeded" && /^partial: 2 of [3-9] windows extracted, the thought is over OB1_EXTRACT_MAX_WINDOWS \(2\); the rest of the thought is not in the graph$/.test(tomeClaim.last_error),
+         `…its claim succeeded with the coverage as its caveat (${tomeClaim.status}: ${tomeClaim.last_error})`);
+  const tomeTools = async () => (await sql`
+    SELECT e.name FROM thought_entities te JOIN ob1_entities e ON e.id = te.entity_id WHERE te.thought_id = ${tome}::uuid ORDER BY e.name`).map((r: { name: string }) => r.name);
+  const tomeEdges = async () => Number((await sql`SELECT count(*)::int AS c FROM ob1_entity_edges WHERE thought_id = ${tome}::uuid`)[0].c);
+  assert(JSON.stringify(await tomeTools()) === '["Quentin","Quill"]' && (await tomeEdges()) === 1,
+         `…the prefix's entities and its edge are in the graph and the tail's entity is not (${JSON.stringify(await tomeTools())}, ${await tomeEdges()} edge(s))`);
+  const partialStatus = await extract("--status");
+  assert(partialStatus.code === 0 && /12 extracted \(1 over a prefix only\), 0 failed/.test(partialStatus.out)
+         && new RegExp(`extracted over a prefix only \\(1 of 1\\)[^\\n]*--retry-partial re-extracts them over at most 24 windows \\(OB1_EXTRACT_MAX_WINDOWS unset\\)[^\\n]*\\n\\s+${tome}  partial: 2 of`).test(partialStatus.out),
+         `--status counts the partial row apart from the full ones and the failures, and lists it with its caveat (${partialStatus.out.split("\n").filter((l) => /prefix/.test(l)).join(" | ").slice(0, 300)})`);
+  const partialDry = await extract("--dry-run", "--retry-partial");
+  assert(partialDry.code === 0 && /return 1 row\(s\) extracted over a prefix to the pool; /.test(partialDry.out) && /send 1 thought\(s\)/.test(partialDry.out), "--dry-run --retry-partial says it would return the one partial row and send one thought");
+  const widenedRun = await extract("--retry-partial");
+  assert(widenedRun.code === 0 && /--retry-partial: 1 row\(s\) extracted over a prefix returned to the pool, to be extracted over at most 24 window\(s\) \(OB1_EXTRACT_MAX_WINDOWS unset\) — a row read under a smaller bound gains coverage/.test(widenedRun.out)
+         && /1 extracted, 0 failed/.test(widenedRun.out),
+         `--retry-partial under the default bound returns the row and extracts it whole (exit ${widenedRun.code})`);
+  const [tomeAfter] = await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${tome}::uuid AND work_type = ${KEY}`;
+  assert(tomeAfter.status === "succeeded" && tomeAfter.last_error === null && JSON.stringify(await tomeTools()) === '["Inkwell","Quentin","Quill"]',
+         `…the caveat cleared and the tail's entity added to the graph (${tomeAfter.last_error}; ${JSON.stringify(await tomeTools())})`);
+  const noPartial = await extract("--status");
+  assert(/12 extracted, 0 failed/.test(noPartial.out) && !/over a prefix/.test(noPartial.out), "…and --status no longer counts or lists a partial row");
+
   model.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   await sql`DELETE FROM thoughts`;
@@ -4414,7 +4499,7 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`; // per-id: Bun binds a JS array as a comma string, not a {…} literal
 }
 
-console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the same corpus, and a perturbed canary is caught — the live replay gate's engine (SMD-1806)");
+console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the same corpus, and a perturbed canary is caught — the live replay gate's engine (SMD-1806); the CLI reports its window, exits 3 on nothing compared, and names a side that does not answer (SMD-2182)");
 {
   // The live replay gate (SMD-1295's live half): stable logs a search and the ids
   // it returned; the canary, refreshed from stable, replays that search and its
@@ -4472,6 +4557,67 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     const clean = await replayAndDiff(sql, canarySql, { since: null });
     assert(clean.replayed === 2 && clean.skipped === 0, `both logged keyword searches replay model-free (replayed ${clean.replayed}, skipped ${clean.skipped})`);
     assert(clean.changed === 0, "an identical canary reproduces stable's logged rankings — the diff is empty");
+
+    // The CLI's report and verdict (SMD-2182), on the same canary. Both verbs
+    // print the window and the counts, and a window that replayed nothing is
+    // --diff's exit 3, where it used to be the pass "nothing moved".
+    // No model, and no env file to bring one back: tier.ts imports evals/lib.ts,
+    // whose loadEnv() fills a missing OB1_EVAL_EMBED from evals/.env, .env or
+    // deploy/.env, and Bun loads the working directory's .env on its own — so
+    // off, --no-env-file and a directory outside the checkout, as tier.sh does.
+    const tierCli = async (args: string[], extraEnv: Record<string, string> = {}) => {
+      const env: Record<string, string | undefined> = { ...process.env, ...extraEnv, OB1_ENV_FILES: "off" };
+      delete env.OB1_EVAL_EMBED;
+      const p = Bun.spawn(["bun", "--no-env-file", join(HERE, "tier.ts"), ...args], { stdout: "pipe", stderr: "pipe", env, cwd: tmpdir() });
+      const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+      return { code: await p.exited, out, err };
+    };
+    const both = ["--from", URL_!, "--to", canaryUrl];
+    const all = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both]);
+    assert(all.code === 0 && /^replayed 2 of 2 logged searches since 1970-01-01T00:00:00Z \(--since\) \(0 skipped\)$/m.test(all.out) && all.out.includes("what moved: nothing — the canary reproduces stable's rankings on all 2 replayed."),
+      `--diff over both keyword searches prints the window and the counts, and passes (exit ${all.code}: ${all.out.trim()})`);
+    // The server's clock, which stamped the logged rows, not this host's.
+    await canarySql`INSERT INTO ob1_config (key, value) VALUES ('last_refresh', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+    const fresh = await tierCli(["--diff", ...both]);
+    assert(fresh.code === 3 && /^replayed 0 of 0 logged searches since \S+ \(the canary's last refresh\)/m.test(fresh.out) && fresh.out.includes("nothing to compare: stable logged no searches") && fresh.out.includes("an earlier --since widens the window"),
+      `--diff right after a refresh, with no --since, compared nothing and exits 3, not 0 (exit ${fresh.code}: ${fresh.out.trim()})`);
+    const freshReplay = await tierCli(["--replay", ...both]);
+    assert(freshReplay.code === 0 && freshReplay.out.includes("nothing to compare"), `--replay, the report, says the same and exits 0 (exit ${freshReplay.code})`);
+    // A hybrid row, logged after the refresh: with no OB1_EVAL_EMBED it is
+    // skipped, and the report says so on both windows.
+    await sql`
+      INSERT INTO query_log (kind, tool, query, match_count, threshold, recency_weight, filter, result_ids, arm, tier, logged_at)
+      VALUES ('search', 'search_thoughts', 'zqcanary', 10, 0.2, 0, '{}'::jsonb, ${`{${canaryHits.join(",")}}`}::uuid[], 'hybrid', 'stable', now() + interval '1 hour')`;
+    const mixed = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both]);
+    assert(mixed.code === 0 && /^replayed 2 of 3 logged searches .* \(1 skipped\)$/m.test(mixed.out) && mixed.out.includes("skipped 1: hybrid needs a provider (set OB1_EVAL_EMBED)") && mixed.out.includes("on the 2 replayed (1 skipped, not compared)."),
+      `--diff with a hybrid row and no OB1_EVAL_EMBED reports it skipped, and claims only the rows it replayed (exit ${mixed.code}: ${mixed.out.trim()})`);
+    const skippedAll = await tierCli(["--diff", ...both]);
+    assert(skippedAll.code === 3 && /^replayed 0 of 1 logged searches/m.test(skippedAll.out) && skippedAll.out.includes("nothing to compare: every search in the window was skipped."),
+      `--diff whose every row was skipped compared nothing and exits 3 (exit ${skippedAll.code}: ${skippedAll.out.trim()})`);
+    await sql`DELETE FROM query_log WHERE arm = 'hybrid'`;
+    await canarySql`DELETE FROM ob1_config WHERE key = 'last_refresh'`;
+    // A window that is already all of the log: the canary as its own --from
+    // (its query_log is empty, and it records no refresh). No --since can
+    // widen that, so the hint does not offer one.
+    const unbounded = await tierCli(["--diff", "--from", canaryUrl, "--to", canaryUrl]);
+    assert(unbounded.code === 3 && /^replayed 0 of 0 logged searches in all of stable's log \(the canary records no refresh\)/m.test(unbounded.out) && unbounded.out.includes("only with OB1_QUERY_LOG=on.") && !unbounded.out.includes("--since"),
+      `--diff over all of an empty log exits 3 and offers no --since (exit ${unbounded.code}: ${unbounded.out.trim()})`);
+    // A side that does not answer is named, with its host, and never its password.
+    const deadTo = await tierCli(["--diff", "--from", URL_!, "--to", "postgres://postgres:s3cret-2182@127.0.0.1:1/ob1_nowhere"]);
+    assert(deadTo.code === 1 && deadTo.err.includes("could not connect to --to (canary) at 127.0.0.1:1/ob1_nowhere") && !deadTo.err.includes("s3cret"),
+      `--diff's connection failure names --to and its host, not its password (exit ${deadTo.code}: ${deadTo.err.trim()})`);
+    // OB1_ALLOW_REMOTE_DB only so a test server off loopback still reaches the
+    // connection check rather than the loopback refusal; nothing is reset, as
+    // --from never answers.
+    const deadFrom = await tierCli(["--refresh", "--from", "postgres://postgres:s3cret-2182@ob1-no-such-host.invalid:5432/openbrain", "--to", canaryUrl], { OB1_ALLOW_REMOTE_DB: "1" });
+    assert(deadFrom.code === 1 && deadFrom.err.includes("could not connect to --from at ob1-no-such-host.invalid:5432/openbrain") && !deadFrom.err.includes("s3cret"),
+      `--refresh's names --from and its host (exit ${deadFrom.code}: ${deadFrom.err.trim()})`);
+    // A password that is not percent-encoded and holds / # or ? is split into
+    // the host, port or path, and Bun still tries that host. where() shows no
+    // part of such a URL; an encoded one is shown as host:port/db.
+    const unencoded = ["1234/s3cret", "/s3cret", "12#s3cret", "12?s3cret"].map((pw) => where(`postgres://postgres:${pw}@127.0.0.1:5432/openbrain`));
+    assert(unencoded.every((w) => w === "a URL with an @ after its host — is its password percent-encoded?"), `where() shows nothing of a URL whose password was not encoded (got: ${JSON.stringify(unencoded)})`);
+    assert(where("postgres://postgres:1234%2Fs3cret@db.internal:6543/openbrain") === "db.internal:6543/openbrain", "where() shows an encoded URL as host:port/db, without its password");
 
     // Perturb the canary: drop one "zqcanary" row. Now that query — and only that
     // query — moves, and the diff names the dropped id. The gate has teeth.
@@ -4594,6 +4740,52 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
       process.env.PATH = savedPath;
       rmSync(shimDir, { recursive: true, force: true });
       await sql.unsafe(`DROP DATABASE IF EXISTS ${shimDb} WITH (FORCE)`);
+    }
+
+    // The settings a refresh copies (SMD-2037): pg_dump leaves out what
+    // ALTER DATABASE … SET put on the source (014's HNSW bounds), so refresh
+    // writes them onto --to itself. Two scratch databases: the source with
+    // 014's two bounds, a list setting with quoting to survive, a value with a
+    // quote in it, an empty list, and a mark of its own; the target with a
+    // setting the source lacks and its own mark.
+    const setSrc = "ob1_tier_settings_src", setDst = "ob1_tier_settings_dst";
+    const urlOf = (db: string) => { const u = new URL(URL_!); u.pathname = `/${db}`; return u.toString(); };
+    for (const db of [setSrc, setDst]) { await sql.unsafe(`DROP DATABASE IF EXISTS ${db}`); await sql.unsafe(`CREATE DATABASE ${db}`); }
+    try {
+      for (const db of [setSrc, setDst]) {
+        const s = new SQL({ url: urlOf(db), max: 1 });
+        try { await s`CREATE EXTENSION IF NOT EXISTS vector`; } finally { await s.close(); }
+      }
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET hnsw.max_scan_tuples = 100000`);
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET hnsw.scan_mem_multiplier = 8`);
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET search_path = "$user", public, "Odd ""Schema"", with comma"`);
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET statement_timeout = '5min'`);
+      // A value with a quote in it, and a list setting set to the empty list.
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET application_name = 'o''brien'`);
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET temp_tablespaces = ''`);
+      await sql.unsafe(`ALTER DATABASE ${setSrc} SET ob1.refresh_target = 'canary'`);
+      await sql.unsafe(`ALTER DATABASE ${setDst} SET work_mem = '7MB'`);
+      await sql.unsafe(`ALTER DATABASE ${setDst} SET ob1.refresh_target = 'working'`);
+      const rawOf = async (db: string) => { const s = new SQL({ url: urlOf(db), max: 1 }); try { return parseSetConfig((await s.unsafe(DB_LEVEL_SETTINGS_SQL))[0]?.cfg); } finally { await s.close(); } };
+      const srcSql = new SQL({ url: urlOf(setSrc), max: 1 }), dstSql = new SQL({ url: urlOf(setDst), max: 1 });
+      try {
+        const copied = await databaseSettings(srcSql);
+        assert(!("ob1.refresh_target" in copied) && copied["hnsw.max_scan_tuples"] === "100000", `the source's settings are read without its mark (${JSON.stringify(copied)})`);
+        await applyDatabaseSettings(dstSql, copied);
+      } finally { await srcSql.close(); await dstSql.close(); }
+      const [src, dst] = [await rawOf(setSrc), await rawOf(setDst)];
+      const { ["ob1.refresh_target"]: srcMark, ...srcRest } = src;
+      const { ["ob1.refresh_target"]: dstMark, ...dstRest } = dst;
+      assert(JSON.stringify(Object.entries(dstRest).sort()) === JSON.stringify(Object.entries(srcRest).sort()), `the target's database settings now equal the source's, byte for byte — the list setting's quoting included (source ${JSON.stringify(srcRest)}, target ${JSON.stringify(dstRest)})`);
+      assert(!("work_mem" in dst), "a setting the target had and the source lacks is reset");
+      assert(srcMark === "canary" && dstMark === "working", `each keeps its own refresh mark — the source's does not travel (source ${srcMark}, target ${dstMark})`);
+      const fresh = new SQL({ url: urlOf(setDst), max: 1 });
+      try {
+        const [{ tuples }] = await fresh<{ tuples: string }[]>`SELECT current_setting('hnsw.max_scan_tuples') AS tuples FROM (SELECT '[1]'::vector) v`;
+        assert(tuples === "100000", `a new session on the target runs with the source's HNSW bound (got ${tuples})`);
+      } finally { await fresh.close(); }
+    } finally {
+      for (const db of [setSrc, setDst]) await sql.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
     }
 
     // promote's mirror of the same-database guard, the URL respelled.

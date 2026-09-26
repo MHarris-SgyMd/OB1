@@ -396,6 +396,25 @@ console.log("\n[6] thought_stats aggregates the whole corpus");
   assert(/Date range:/.test(out), "date range is reported");
 }
 
+console.log("\n[6b] list_thought_ids returns the id set, its digest and paging over HTTP (SMD-2244)");
+{
+  const page = JSON.parse(await call("list_thought_ids"));
+  assert(page.total === 3 && Array.isArray(page.ids) && page.ids.length === 3, `the whole small corpus and its total (${page.ids?.length}/${page.total})`);
+  assert(typeof page.digest === "string" && /^[0-9a-f]{32}$/.test(page.digest), `a first-page md5 digest (${page.digest})`);
+  assert(page.cursor === null, "a page shorter than the limit ends the walk (null cursor)");
+  assert(page.ids.every((id: string) => /^[0-9a-f-]{36}$/.test(id)), "ids only — uuids, no content");
+  // Keyset paging over HTTP: total and digest ride the first page only.
+  const p1 = JSON.parse(await call("list_thought_ids", { limit: 2 }));
+  assert(p1.ids.length === 2 && p1.cursor === p1.ids[1], "a full page carries a cursor = its last id");
+  const p2 = JSON.parse(await call("list_thought_ids", { limit: 2, after: p1.cursor }));
+  assert(p2.total === 0 && p2.digest === null, "a later page carries no total and no digest");
+  assert([...p1.ids, ...p2.ids].sort().join() === [...page.ids].sort().join(), "the two pages cover the same id set as one");
+  // A malformed cursor is refused by the tool, before any store read.
+  let refused = "";
+  try { await call("list_thought_ids", { after: "not-a-uuid" }); } catch (e) { refused = (e as Error).message; }
+  assert(/must be a thought id/.test(refused), `a non-uuid cursor is refused (${refused})`);
+}
+
 console.log("\n[7] Dedup through the tool surface");
 {
   const before = await call("thought_stats");
@@ -1259,6 +1278,19 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
       const r = await fetch(BASE, { method: "POST", headers: { ...H, "x-brain-key": "op-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id: "busy-7", method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "0" } } }) });
       const busyBody = await r.json() as { id?: unknown; error?: { code?: number; message?: string } };
       assert(r.status === 200 && busyBody.id === "busy-7" && BUSY.test(JSON.stringify(busyBody)), `…and asks the other to retry, with its own code, answering the request's id (${r.status}, ${JSON.stringify(busyBody).slice(0, 110)})`);
+      assert(r.headers.get("retry-after") === "2", `…and the busy REQUEST carries Retry-After, for a client that honours it (${r.headers.get("retry-after")}) (SMD-2106)`);
+      // A NOTIFICATION (no id) gets no JSON-RPC body (SMD-2106): the SDK cancels
+      // the body of a 200 that held no request, so the wrong answer was silently
+      // dropped. Revoked never changes on a retry → a bare 202; busy can → 503
+      // with Retry-After.
+      const NOTIF = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" });
+      const revokedNotif = await fetch(BASE, { method: "POST", headers: { ...H, "x-brain-key": "bot-raw" }, body: NOTIF });
+      assert(revokedNotif.status === 202 && (await revokedNotif.text()) === "" && !revokedNotif.headers.has("retry-after"),
+        `a revoked key's notification → 202 with no body and no Retry-After (${revokedNotif.status})`);
+      const busyNotif = await fetch(BASE, { method: "POST", headers: { ...H, "x-brain-key": "op-raw" }, body: NOTIF });
+      assert(busyNotif.status === 503 && (await busyNotif.text()) === "" && busyNotif.headers.get("retry-after") === "2"
+        && (busyNotif.headers.get("access-control-expose-headers") ?? "").includes("Retry-After"),
+        `a busy key's notification → 503 with no body, Retry-After, and it exposed for a browser to read (${busyNotif.status}, retry-after ${busyNotif.headers.get("retry-after")})`);
     } finally {
       await unlock();
     }

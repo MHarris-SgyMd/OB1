@@ -9,6 +9,11 @@
  *
  * Runs preflight as a subprocess so real exit codes are observed. The connectivity
  * cases need DATABASE_URL; without one they are skipped, not silently passed.
+ *
+ * CI runs this suite beside db/test-upgrade.ts, each in its own database of one
+ * Postgres, as the same role (SMD-2219). What the cluster shares — a role and
+ * its settings, pg_locks, pg_stat_activity — is scoped here to the current
+ * database, or named for this suite (ob1_pf_capture, pf_reader).
  */
 
 import { join, dirname } from "node:path";
@@ -225,12 +230,18 @@ console.log("\n[3c] The extraction window is derived from the METADATA model's s
   // The embedding model is the default here and the metadata model varies, so
   // the row that moves is the extraction window's — and the chunk window row
   // beside it must not move, since the two models are two tables.
-  const base = { ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", OB1_EXTRACT_CHUNK_TOKENS: undefined };
+  const base = { ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", OB1_EXTRACT_CHUNK_TOKENS: undefined, OB1_EXTRACT_MAX_WINDOWS: undefined };
   const qwen = await run({ ...base, OB1_METADATA_MODEL: "qwen2.5:7b" });
+  // The per-thought bound closes the row (SMD-2240): the count, where it came from, and the text it allows.
+  assert(/extraction window\s+[^\n]*, read whole; a thought over 24 windows \(the default; OB1_EXTRACT_MAX_WINDOWS widens it\), or whose whitespace-free runs take it past 28800 estimated tokens, is extracted over its opening and recorded succeeded with a caveat naming the coverage$/m.test(qwen.out),
+         "the row ends with the per-thought bound: 24 windows by default, the runs' text bound at 24 × 1200 tokens, and what a thought over it gets");
+  const widened = await run({ ...base, OB1_METADATA_MODEL: "qwen2.5:7b", OB1_EXTRACT_MAX_WINDOWS: "80" });
+  assert(/extraction window\s+[^\n]*; a thought over 80 windows \(from OB1_EXTRACT_MAX_WINDOWS\), or whose whitespace-free runs take it past 96000 estimated tokens, is extracted over its opening/.test(widened.out),
+         "…and OB1_EXTRACT_MAX_WINDOWS moves both numbers, the row naming the variable");
   assert(/extraction window\s+thoughts over 1200 estimated tokens are extracted in 1200-token windows \(overlap 150\), derived from qwen2\.5:7b's 32768-token served context — held at 1200, the size the default model was measured to finish reliably \(evals\/README\.md, SMD-1879\); the answer is streamed and a call is aborted once it holds 3 copies of one item, and a call aborted so or run to its answer budget is made once more with a 0\.5 frequency penalty, read whole/.test(qwen.out),
          "the default model derives the measured size from its 32,768-token context, the row says the context would have allowed more, and names the stream abort and the runaway retry");
   const unknown = await run({ ...base, OB1_METADATA_MODEL: "some-chat-model" });
-  assert(/extraction window\s+thoughts over 1200 estimated tokens are extracted in 1200-token windows \(overlap 150\), the default for some-chat-model's served context, which db\/config\.mjs's KNOWN_CHAT_MODEL_WINDOW does not list; the answer is streamed and a call is aborted once it holds 3 copies of one item, and a call aborted so or run to its answer budget is made once more with a 0\.5 frequency penalty, read whole — set OB1_EXTRACT_CHUNK_TOKENS if the model serves fewer than 6814 tokens/.test(unknown.out),
+  assert(/extraction window\s+thoughts over 1200 estimated tokens are extracted in 1200-token windows \(overlap 150\), the default for some-chat-model's served context, which db\/config\.mjs's KNOWN_CHAT_MODEL_WINDOW does not list; the answer is streamed and a call is aborted once it holds 3 copies of one item, and a call aborted so or run to its answer budget is made once more with a 0\.5 frequency penalty, read whole; a thought over 24 windows [^\n]* naming the coverage — set OB1_EXTRACT_CHUNK_TOKENS if the model serves fewer than 6814 tokens/.test(unknown.out),
          "an unknown model keeps the default, is told where the table is, and what context the default needs");
   const pinned = await run({ ...base, OB1_METADATA_MODEL: "qwen2.5:7b", OB1_EXTRACT_CHUNK_TOKENS: "600" });
   assert(/extraction window\s+thoughts over 600 estimated tokens are extracted in 600-token windows \(overlap 75\), from OB1_EXTRACT_CHUNK_TOKENS \(qwen2\.5:7b's 32768-token served context\)/.test(pinned.out),
@@ -291,6 +302,22 @@ else {
   const before = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(before.code === 1, "an un-migrated database exits 1");
   assert(/bun migrate\.ts/.test(before.out), "…and tells you to run the migrations");
+
+  // Another tool's thoughts, in a schema of its own, does not make an
+  // un-migrated public read as "exists but does not resolve" (SMD-2062):
+  // the schema row still says to migrate. Run with public off the path, so
+  // a probe that read every schema would find a cause and say otherwise.
+  const otherTool = new SQL({ url: LIVE, max: 1 });
+  let strayRun: { code: number; out: string };
+  try {
+    await otherTool.unsafe("DROP SCHEMA IF EXISTS pf_stray CASCADE; CREATE SCHEMA pf_stray; CREATE TABLE pf_stray.thoughts (id int)");
+    strayRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: `${LIVE}${LIVE.includes("?") ? "&" : "?"}options=-csearch_path%3Dnowhere` });
+  } finally {
+    await otherTool.unsafe("DROP SCHEMA IF EXISTS pf_stray CASCADE");
+    await otherTool.close();
+  }
+  assert(/✗\s+schema\s+relation "thoughts" does not exist\n\s+→ Apply the migrations: cd db && bun migrate\.ts/.test(strayRun.out),
+         `…from the schema row too, with another schema's thoughts beside an empty public off the path (${strayRun.out.split("\n").find((l) => /\bschema\b/.test(l))?.trim()})`);
 
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
 
@@ -1274,16 +1301,37 @@ else {
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("042") });
   // The isolation level every lock-order argument assumes, read from the
   // connection's default: ok at read committed, a warning naming the guarantees
-  // at any other, with the ALTER ROLE that puts it back. Set on the role, so a
-  // fresh session (preflight's) inherits it; reset after.
+  // at any other, with the ALTER ROLE that puts it back. Set on the database,
+  // so a fresh session (preflight's) inherits it; reset after. Not on the role,
+  // which test-upgrade.ts shares beside this suite (the header), nor on the
+  // role in this database, which would outrank the ALTER ROLE the warning names.
   assert(/transaction isolation\s+default_transaction_isolation is read committed/.test((await run(SQL_ENV)).out), "the connection's default isolation is read committed, and the check says which guarantees rest on it");
-  await claims.unsafe("ALTER ROLE current_user SET default_transaction_isolation = 'repeatable read'");
+  const onThisDatabase = (setting: string) => claims.unsafe(`DO $i$ BEGIN EXECUTE format('ALTER DATABASE %I ${setting}', current_database()); END $i$`);
+  await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
   try {
     const rr = await run(SQL_ENV);
     assert(rr.code === 0 && /transaction isolation\s+default_transaction_isolation is repeatable read: the writers' lock order \(018\/033\/036\) and the citation guard \(042\) are argued under read committed/.test(rr.out) && /ALTER ROLE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
-           `a role defaulting to repeatable read starts with a warning naming the guarantees that rest on read committed and the ALTER ROLE that restores it (exit ${rr.code})`);
+           `a connection defaulting to repeatable read starts with a warning naming the guarantees that rest on read committed and the ALTER ROLE that restores it (exit ${rr.code})`);
+    // …and nowhere else: a session as the same role in `postgres` is still at
+    // read committed. The suite's own database is asked of the server, not
+    // read from the URL; a role that may not connect there skips, and any
+    // other error fails.
+    const onlyHere = "…and only this database's sessions start at repeatable read";
+    const [{ db }] = (await claims`SELECT current_database() AS db`) as { db: string }[];
+    if (db === "postgres") skipRaw(onlyHere, "the suite's own database is postgres, the one it would read as another");
+    else {
+      const u = new URL(LIVE);
+      u.pathname = "/postgres";
+      const elsewhere = new SQL({ url: u.toString(), max: 1 });
+      const got = await elsewhere`SELECT current_setting('default_transaction_isolation') AS l`.then(
+        (r: { l: string }[]) => ({ level: r[0].l, err: null }),
+        (e: { errno?: string; message: string }) => ({ level: null, err: e }));
+      await elsewhere.close();
+      if (got.err && /^(42501|3D000|55000|28)/.test(got.err.errno ?? "")) skipRaw(onlyHere, `the role cannot connect to database postgres (${got.err.message})`);
+      else assert(got.level === "read committed", `${onlyHere}: one as the same role in postgres is at ${got.level ?? `— it failed: ${got.err?.message}`}`);
+    }
   } finally {
-    await claims.unsafe("ALTER ROLE current_user RESET default_transaction_isolation");
+    await onThisDatabase("RESET default_transaction_isolation");
   }
   // …and 021's CREATE OR REPLACE put its 3-argument upsert_thought back over
   // 035's: a chunkless re-capture would leave the previous vector's windows
@@ -1861,7 +1909,46 @@ else {
       assert(/!\s+migration ledger\s+schema_migrations exists \(schema public\) but does not resolve for this role/.test(lost.out)
                && !/no schema_migrations table/.test(lost.out) && !/Adopt it with: cd db && bun migrate\.ts --url \$DATABASE_URL --baseline/.test(lost.out),
              `a ledger off the role's search path warns that it does not resolve, and recommends no --baseline (${row(lost.out, "migration ledger")})`);
+
+      // The same role granted SELECT on every table, ob1_config among them,
+      // public still off its path (SMD-2062): the write-privileges check tested
+      // public.ob1_config, then read a bare ob1_config, which does not resolve —
+      // and the raise took every later direct row down as "not checked".
+      // The row now names what the role lacks, every later row runs, and the
+      // schema row — thoughts is there, off the path — does not say migrate.
+      await claims.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO pf_reader");
+      const wide = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+      assert(/✗\s+write privileges\s+this connection's role \(pf_reader\) is missing privileges the capture path's writers need/.test(wide.out),
+             `a role that may read ob1_config without public on its path gets the write-privileges row's own result (${row(wide.out, "write privileges")})`);
+      assert(!/not checked — the direct connection failed before it/.test(wide.out)
+               && /✓\s+chunk context/.test(wide.out)
+               && /migration ledger\s+schema_migrations exists \(schema public\) but does not resolve for this role/.test(wide.out)
+               && /schema version\s+could not verify: ob1_config exists \(schema public\) but does not resolve for this role/.test(wide.out),
+             `…and every later direct row runs, the ledger and version rows in their own words (${row(wide.out, "chunk context")} | ${row(wide.out, "schema version")})`);
+      assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(public is not on its search_path\)\n\s+→ Put public on the role's search_path: ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = <the schemas it has>, public;/.test(wide.out)
+               && !/Apply the migrations: cd db/.test(wide.out),
+             `…and the schema row names the path, not the migrate command (${row(wide.out, "schema")})`);
+
+      // With no USAGE on public — PUBLIC's taken too, which a fresh database
+      // grants — to_regclass('public.…') itself raises. The rows whose reads
+      // are qualified say so each, in their own boundary; none takes the rest.
+      const [{ publicUsage }] = await claims`SELECT has_schema_privilege('public', 'public', 'USAGE') AS "publicUsage"`;
+      await claims.unsafe("REVOKE USAGE ON SCHEMA public FROM pf_reader, PUBLIC");
+      try {
+        const bare = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+        assert(/!\s+write privileges\s+could not verify: permission denied for schema public/.test(bare.out)
+                 && /!\s+chunk context\s+could not verify: permission denied for schema public/.test(bare.out)
+                 && !/not checked — the direct connection failed before it/.test(bare.out),
+               `a role with no USAGE on public: the qualified reads' rows warn, each alone, and every later row runs (${row(bare.out, "write privileges")} | ${row(bare.out, "tier")})`);
+        // Without USAGE the path cannot be read, so the GRANT comes first
+        // and the path second, conditionally.
+        assert(/✗\s+schema\s+relation "thoughts" does not exist — public\.thoughts exists but does not resolve for this role \(no USAGE on schema public\)\n\s+→ GRANT USAGE ON SCHEMA public TO pf_reader;  then, if public is not on the role's search_path, ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = <the schemas it has>, public;/.test(bare.out),
+               `…and the schema row names the missing USAGE, then the path (${row(bare.out, "schema")})`);
+      } finally {
+        if (publicUsage) await claims.unsafe("GRANT USAGE ON SCHEMA public TO PUBLIC");
+      }
     } finally {
+      await claims.unsafe("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM pf_reader");
       await claims.unsafe("REVOKE ALL ON thoughts FROM pf_reader");
       await claims.unsafe("REVOKE USAGE ON SCHEMA public FROM pf_reader");
       await claims.unsafe("DROP ROLE pf_reader");
@@ -2064,8 +2151,8 @@ console.log("\n[8] The egress gate is reported: the mode, and per endpoint what 
   // says deny is the default; the endpoint row warns with the one-line fix.
   const undeclared = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL });
   const sourceTerm = await run({ ...BASE_OK, ...GATE, OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "source:mcp,type:idea" });
-  assert(/!\s+egress policy\s+1 source: term\(s\) \(source:mcp\) gate a label the caller supplies/.test(sourceTerm.out) && /actor:<key name>/.test(sourceTerm.out),
-         "a source: term is warned about — the label is the caller's since capture_thought takes it (ninth review pass)");
+  assert(/!\s+egress policy\s+1 source: term\(s\) \(source:mcp\) do NOT gate a capture/.test(sourceTerm.out) && /actor:<key name>/.test(sourceTerm.out),
+         "a source: term is warned about — it does not gate a capture, whose source is the caller's claim (SMD-1941)");
   assert(/✓\s+egress policy\s+deny \(the default\) — a thought's text reaches an endpoint not declared local only under an OB1_EGRESS_ALLOW term; no terms/.test(undeclared.out),
          "unset: the policy row says deny, the default, no terms");
   assert(new RegExp(String.raw`!\s+embeddings egress\s+${rx(LOCAL)} looks local but is not declared so — the gate treats it as remote, and under deny with no allow term every embeddings and chat call is refused: captures land without a vector`).test(undeclared.out),
@@ -2344,6 +2431,7 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
       const path = new URL(req.url).pathname;
       seen.push(`${req.method} ${path}`);
       if (path === "/info") return Response.json({ contract: JEV_CONTRACT, model: MODEL, kinds: ["binary", "choice"], max_options: 24, max_batch: 64, max_tokens: 512 });
+      if (path !== "/decide") return new Response("not found", { status: 404 });
       const { decisions } = (await req.json()) as { decisions: { id?: string }[] };
       return Response.json({ contract: JEV_CONTRACT, model: MODEL, ms: 1, results: decisions.map((d) => ({ ...(d.id ? { id: d.id } : {}), kind: "binary", probabilities: { true: 0.6, false: 0.2, [INSUFFICIENT_EVIDENCE]: 0.2 }, selected: "true", abstained: false, p_insufficient: 0.2, p_true: 0.75, logits: [1, 0, 0], temperature: 5.0069, tokens: 30, truncated: false })) });
     },

@@ -43,9 +43,10 @@ import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { loadEnv } from "./env.ts";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
-import { callsMadeBy, callsOf, extractEntities, extractionKey, type Extraction, type ExtractWindowing } from "../server-portable/entities.ts";
+import { callsMadeBy, callsOf, extractEntities, extractionKey, type Coverage, type Extraction, type ExtractWindowing } from "../server-portable/entities.ts";
 import { estimateTokens, EXTRACT_OVERLAP_RATIO } from "../server-portable/chunk.ts";
 import { requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
+import { EXTRACT_MAX_WINDOWS } from "../db/config.mjs";
 
 loadEnv();
 const URL_ = requireDatabaseUrl("eval-extract-windows.ts");
@@ -75,7 +76,7 @@ type Arm = { name: string; windowing: ExtractWindowing };
 const overlap = (n: number) => Math.floor(n * EXTRACT_OVERLAP_RATIO);
 const arm = (name: string, windowTokens: number, opts: Partial<ExtractWindowing> = {}): Arm => ({
   name,
-  windowing: { windowTokens, overlapTokens: windowTokens === Number.MAX_SAFE_INTEGER ? 0 : overlap(windowTokens), header: false, outputBudget: true, retryRunaway: false, streamAbort: false, ...opts },
+  windowing: { windowTokens, overlapTokens: windowTokens === Number.MAX_SAFE_INTEGER ? 0 : overlap(windowTokens), maxWindows: EXTRACT_MAX_WINDOWS, header: false, outputBudget: true, retryRunaway: false, streamAbort: false, ...opts },
 });
 const ALL_ARMS: Arm[] = [
   arm("whole", Number.MAX_SAFE_INTEGER, { outputBudget: false }),
@@ -162,7 +163,8 @@ const norm = async (s: string) => ((await sql`SELECT normalize_entity_name(${s})
 
 /** `calls` is every model call the thought cost — entities.ts's callsOf, the worker's own count, or what a thrown thought had made (fourth and fifth review passes). */
 /** `abortedMs` is how far into its call a runaway was aborted on the stream — the longest call's, when several were (SMD-1960); absent when none was. */
-type Outcome = { arm: string; id: string; tokens: number; windows: number; calls: number; ok: boolean; malformed: boolean; timedOut: boolean; error?: string; seconds: number; entities: number; edges: number; retried: boolean; abortedMs?: number };
+/** `partial`: the thought was over the per-thought bound and only its prefix was extracted (SMD-2240) — ok, but its counts are the prefix's. */
+type Outcome = { arm: string; id: string; tokens: number; windows: number; calls: number; ok: boolean; malformed: boolean; timedOut: boolean; error?: string; seconds: number; entities: number; edges: number; retried: boolean; abortedMs?: number; partial?: Coverage };
 const outcomes: Outcome[] = [];
 
 async function runOne(arm: Arm, doc: Doc): Promise<{ thoughtId: string | null; ex: Extraction | null; out: Outcome }> {
@@ -182,7 +184,7 @@ async function runOne(arm: Arm, doc: Doc): Promise<{ thoughtId: string | null; e
     }
     const [{ w }] = await sql`SELECT record_thought_entities(${thoughtId}::uuid, ${key}, ${ex.entities}::jsonb, ${ex.relations}::jsonb) AS w`;
     const res = w as { mentions?: number; edges?: number };
-    const out = { arm: arm.name, id: doc.id, tokens, windows: ex.windows, calls: callsOf(ex), ok: true, malformed: false, timedOut: false, seconds, entities: res.mentions ?? 0, edges: res.edges ?? 0, retried, ...aborted };
+    const out = { arm: arm.name, id: doc.id, tokens, windows: ex.windows, calls: callsOf(ex), ok: true, malformed: false, timedOut: false, seconds, entities: res.mentions ?? 0, edges: res.edges ?? 0, retried, ...aborted, ...(ex.coverage ? { partial: ex.coverage } : {}) };
     outcomes.push(out);
     return { thoughtId, ex, out };
   } catch (e) {
@@ -258,7 +260,7 @@ for (const arm of ARMS) {
   for (const d of docs) {
     process.stderr.write(`  … ${arm.name} ${d.id.slice(0, 8)} (${estimateTokens(d.content)} tokens)\n`);
     const { out } = await runOne(arm, d);
-    console.log(`    ${arm.name.padEnd(13)} ${d.id.slice(0, 8)} ${String(out.tokens).padStart(5)} tok  ${out.ok ? "ok       " : out.malformed ? "malformed" : out.timedOut ? "TIMEOUT  " : "ERROR    "}  ${out.seconds.toFixed(1).padStart(6)} s  windows ${out.windows}  entities ${out.entities}  edges ${out.edges}${out.retried ? "  retried" : ""}${out.abortedMs !== undefined ? `  aborted at ${(out.abortedMs / 1000).toFixed(1)} s` : ""}${out.error ? `  ${out.error}` : ""}`);
+    console.log(`    ${arm.name.padEnd(13)} ${d.id.slice(0, 8)} ${String(out.tokens).padStart(5)} tok  ${out.ok ? "ok       " : out.malformed ? "malformed" : out.timedOut ? "TIMEOUT  " : "ERROR    "}  ${out.seconds.toFixed(1).padStart(6)} s  windows ${out.windows}  entities ${out.entities}  edges ${out.edges}${out.retried ? "  retried" : ""}${out.abortedMs !== undefined ? `  aborted at ${(out.abortedMs / 1000).toFixed(1)} s` : ""}${out.partial ? `  PARTIAL ${out.partial.windows} of ${out.partial.of} windows` : ""}${out.error ? `  ${out.error}` : ""}`);
   }
 }
 
@@ -273,5 +275,11 @@ for (const arm of ARMS) {
     `  ${arm.name.padEnd(14)} ${String(ok.length).padStart(9)}  ${String(os.filter((o) => o.malformed).length).padStart(9)}  ${String(os.filter((o) => o.timedOut).length).padStart(9)}  ` +
       `${median(os.map((o) => o.seconds)).toFixed(1).padStart(8)}  ${os.reduce((n, o) => n + o.seconds, 0).toFixed(0).padStart(7)}  ${mean((o) => o.entities).toFixed(1).padStart(13)}  ${mean((o) => o.edges).toFixed(1).padStart(10)}  ${String(os.reduce((n, o) => n + o.calls, 0)).padStart(5)}  ${String(os.filter((o) => o.retried).length).padStart(16)}  ${String(os.filter((o) => o.abortedMs !== undefined).length).padStart(7)} (${median(os.flatMap((o) => (o.abortedMs !== undefined ? [o.abortedMs / 1000] : []))).toFixed(1)})`
   );
+}
+// Until SMD-2240 a thought over the bound was a failure here; now it is a
+// prefix, extracted — counted in "extracted", so say how many were (review pass 1).
+for (const arm of ARMS) {
+  const partial = outcomes.filter((o) => o.arm === arm.name && o.partial).length;
+  if (partial) console.log(`  ${arm.name}: ${partial} of the extracted thought(s) were over the per-thought bound and read as a prefix only — their entity and edge counts are the prefix's`);
 }
 await sql.close();

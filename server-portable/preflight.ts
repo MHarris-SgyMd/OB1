@@ -521,14 +521,18 @@ if (!egress.problems.length) {
   } else {
     add("egress policy", "ok", `allow — a thought's text reaches an endpoint not declared local unless an OB1_EGRESS_DENY term matches; ${showTerms(egress.deny)}`);
   }
-  // A `source:` term gates a label the caller supplies (capture_thought takes
-  // `source`, SMD-1298), so a capture may name any label and pass it; who
-  // wrote is `actor:`, which the key proves. Said here, where a policy written
-  // before that change is read back (ninth review pass; SMD-1941).
+  // A `source:` term does NOT gate a capture_thought capture: its `source` is
+  // the caller's claim (SMD-1298), dodged by naming another label or none, so
+  // the handler keeps it off the subject and no term can match it (SMD-1941).
+  // It gates the row's OWN label — the value the server wrote — at an edit and
+  // at the re-embed and consolidation passes that read the row back (and at
+  // db/sync-linear.ts's captures, whose `source` is the server's). Who may
+  // capture is `actor:`, which the key proves. Said here, where a policy is
+  // read back (ninth review pass; SMD-1941).
   const sourceTerms = [...egress.allow, ...egress.deny].filter((t) => t.unit === "source");
   if (sourceTerms.length && egress.mode !== "off") {
-    add("egress policy", "warn", `${sourceTerms.length} source: term(s) (${sourceTerms.map((t) => `source:${t.value}`).join(", ")}) gate a label the caller supplies — since SMD-1298 a capture names its own \`source\`, so the term holds only for callers that keep the label`,
-        "Gate who wrote with actor:<key name>; keep source: terms for what a row's label says, not for who may send.");
+    add("egress policy", "warn", `${sourceTerms.length} source: term(s) (${sourceTerms.map((t) => `source:${t.value}`).join(", ")}) do NOT gate a capture_thought capture — its \`source\` is the caller's claim, kept off the gate (SMD-1941); they gate a row's stored label at an edit and the re-embed/consolidation passes, and db/sync-linear.ts's captures`,
+        "Gate who may capture with actor:<key name>; keep source: terms for what a row's label says, not for who may send.");
   }
   // Terms in the knob the mode does not read decide nothing — a natural
   // misreading (deny + OB1_EGRESS_DENY) that fails closed and silently
@@ -749,8 +753,45 @@ if (configFailed) {
       // that holds it here (the alias included), and for PostgREST — which has
       // no connection string of its own — say what to hand it instead.
       const urlArg = conn ? `$${conn.from}` : "<the brain's postgres:// connection string — Supabase's direct connection, not the pooler>";
-      add("schema", "fail", msg,
-          /does not exist|relation/i.test(msg)
+      // public.thoughts present but not resolving for this role — no USAGE
+      // on public, or public off its search_path — is not a brain to
+      // migrate (SMD-2062). public alone, as every direct check judges it:
+      // a thoughts in some other schema is another tool's, and an
+      // un-migrated public still wants the migrations. With USAGE held the
+      // table can only be off the path; without it, whether the path holds
+      // public too cannot be read (current_schemas() leaves out a schema
+      // the role has no USAGE on), so the GRANT comes first and the path
+      // second. The exact path statement is SMD-2242's. pg_class answers
+      // for any role, whatever its path; over PostgREST there is no catalog
+      // to ask, and a failed probe asks nothing.
+      let offPath: { cause: string; fix: string } | null = null;
+      if (built.kind === "sql" && conn && /does not exist/i.test(msg)) {
+        try {
+          const { SQL } = await import("bun");
+          const probe = new SQL({ url: conn.url, max: 1 });
+          try {
+            const [r] = (await probe`
+              SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                              WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present,
+                     has_schema_privilege('public', 'USAGE') AS usage,
+                     quote_ident(current_user::text) AS role,
+                     quote_ident(current_database()::text) AS db`) as { present: boolean; usage: boolean; role: string; db: string }[];
+            if (r?.present) {
+              const putOnPath = `ALTER ROLE ${r.role} IN DATABASE ${r.db} SET search_path = <the schemas it has>, public; (a search_path in the connection string outranks it)`;
+              offPath = r.usage
+                ? { cause: "public is not on its search_path", fix: `Put public on the role's search_path: ${putOnPath}` }
+                : { cause: "no USAGE on schema public", fix: `GRANT USAGE ON SCHEMA public TO ${r.role};  then, if public is not on the role's search_path, ${putOnPath}` };
+            }
+          } finally {
+            await probe.close();
+          }
+        } catch { /* the remedy below stays the migrate command */ }
+      }
+      add("schema", "fail",
+          offPath ? `${msg} — public.thoughts exists but does not resolve for this role (${offPath.cause})` : msg,
+          offPath
+            ? `${offPath.fix}  The table is there, so migrating would not make it resolve.`
+            : /does not exist|relation/i.test(msg)
             ? `Apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
             : "Check credentials and network reachability to the database.");
     }
@@ -1275,121 +1316,134 @@ if (configFailed) {
         // any kind on the audit trigger. CAPTURE_WRITES is db/config.mjs's list,
         // the one shared with `migrate.ts --grant` and db/README.md's grants
         // section. Schema-qualified and gated on presence: the text form of
-        // has_table_privilege RAISES for a relation it cannot see, and a raise
-        // here would land in the catch below and take every later check with it,
-        // so a table absent before its migration is skipped, not failed.
+        // has_table_privilege RAISES for a relation it cannot see, so a table
+        // absent before its migration is skipped, not failed. Its own
+        // boundary all the same (SMD-2062), as the other rows that read a
+        // table rather than the catalog have: a read here that raises anyway —
+        // to_regclass('public.…') does for a role with no USAGE on public —
+        // is this row's warning, not every later check's skip. The role's
+        // name is the vector probe's, outside it: the isolation check's
+        // remedy names it too.
+        const { role, role_ident: ident } = vec as { role: string; role_ident: string };
         const { CAPTURE_WRITES, EXTRACTION_TRIGGER_WRITES } = await import("../db/config.mjs");
-        // 016's enqueue trigger fires AFTER INSERT OR UPDATE OF content on
-        // thoughts and runs as the calling role. It reads ob1_config on EVERY
-        // capture — unconditionally, before it even looks at the key — and, while
-        // entity_extraction_key is set, upserts a thought_work_claims row. So the
-        // trigger's mere presence makes SELECT on ob1_config a hard capture-path
-        // requirement, and a set key adds thought_work_claims INSERT/UPDATE. The
-        // trigger is read via pg_trigger (tgrelid = to_regclass, so an absent
-        // thoughts matches nothing rather than raising); the key inside CASE
-        // guards, so has_table_privilege — which raises for a relation it cannot
-        // see — is reached only when the trigger, hence 006's ob1_config, exists.
-        const [{ role, ident, triggerPresent, canReadConfig }] = (await sql`
-          SELECT current_user::text AS role, quote_ident(current_user::text) AS ident,
-                 EXISTS (SELECT 1 FROM pg_trigger
-                          WHERE tgrelid = to_regclass('public.thoughts')
-                            AND tgname = 'thoughts_entity_extraction' AND NOT tgisinternal) AS "triggerPresent",
-                 CASE WHEN to_regclass('public.ob1_config') IS NOT NULL
-                      THEN has_table_privilege('public.ob1_config', 'SELECT') ELSE false END AS "canReadConfig"`) as
-          { role: string; ident: string; triggerPresent: boolean; canReadConfig: boolean }[];
-        // Read the key in its own statement, run only when the role can SELECT
-        // ob1_config — an uncorrelated `(SELECT … FROM ob1_config)` in the query
-        // above would become an InitPlan Postgres evaluates regardless of any
-        // CASE guard, raising `permission denied` for a role without that SELECT
-        // and taking every later check down with it. When the trigger is present
-        // but the role cannot read the key, extraction is treated as off — but
-        // ob1_config SELECT is still required below (the trigger reads it), so the
-        // role is refused for that, not blessed.
-        let ek: string | null = null;
-        if (canReadConfig) {
-          const [row] = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`) as { value: string | null }[];
-          ek = row?.value ?? null;
-        }
-        const extracting = triggerPresent && canReadConfig && typeof ek === "string" && ek !== "";
-        // What the 016 trigger adds to the capture path when it is present: its
-        // own ob1_config read always, the work-claim upsert while extraction is on.
-        const conditional = triggerPresent
-          ? [{ table: "ob1_config", privilege: "SELECT", since: "016" }, ...(extracting ? EXTRACTION_TRIGGER_WRITES : [])]
-          : [];
-        // 046's audit trigger reads ob1_agents as the caller; 025's does not. The
-        // capture set lists the SELECT (db/README.md's table, --grant), and the
-        // check requires it only while the body that reads it is installed — a
-        // brain still at 044 under this server writes without it, and the
-        // `audit events` check says so (second review pass). Read from pg_proc
-        // by its sentinel, as the capture-body checks read theirs.
-        // Since 055 the rule (and its sentinel) live in ob1_append_thought_event,
-        // which the trigger calls; a brain before 055 has it in the trigger.
-        const auditBodies = (await sql`
-          SELECT p.proname AS name, p.prosrc AS src FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-          WHERE n.nspname = 'public' AND p.proname IN ('thoughts_write_audit', 'ob1_append_thought_event')`) as { name: string; src: string }[];
-        const auditReadsAgents = keyRuleHolds(String(auditBodies.find((b) => b.name === "thoughts_write_audit")?.src ?? ""), String(auditBodies.find((b) => b.name === "ob1_append_thought_event")?.src ?? ""));
-        const required = [...CAPTURE_WRITES.filter((w) => w.table !== "ob1_agents" || auditReadsAgents), ...conditional];
-        const reqTables = required.map((w) => w.table);
-        const reqPrivs = required.map((w) => w.privilege);
-        const privRows = (await sql`
-          WITH req AS (
-            SELECT tbl, priv
-              FROM unnest(${sql.array(reqTables, "TEXT")}::text[], ${sql.array(reqPrivs, "TEXT")}::text[]) AS r(tbl, priv)
-          ), present AS (
-            SELECT DISTINCT tbl, to_regclass('public.' || tbl) IS NOT NULL AS ok FROM req
-          )
-          SELECT req.tbl, req.priv, present.ok AS present,
-                 CASE WHEN present.ok THEN has_table_privilege('public.' || req.tbl, req.priv) END AS granted
-            FROM req JOIN present USING (tbl)`) as { tbl: string; priv: string; present: boolean; granted: boolean | null }[];
-        const grantState = new Map(privRows.map((r) => [`${r.tbl} ${r.priv}`, r.granted]));
-        const presentTables = new Set(privRows.filter((r) => r.present).map((r) => r.tbl));
-        if (!presentTables.has("thoughts")) {
-          add("write privileges", "skip", "not checked — thoughts does not exist (before migration 001)");
-        } else {
-          // Present tables only, in `required` order (SELECT, INSERT, …), so a
-          // GRANT reads the way the guide writes one and names only what is
-          // missing — never what the role already holds. Keyed by table, so a
-          // table's privileges land in one entry (de-duplicated).
-          const missingByTable = new Map<string, string[]>();
-          const heldByTable = new Map<string, string[]>();
-          for (const w of required) {
-            if (!presentTables.has(w.table)) continue;
-            const target = grantState.get(`${w.table} ${w.privilege}`) ? heldByTable : missingByTable;
-            const into = target.get(w.table) ?? [];
-            if (!into.includes(w.privilege)) into.push(w.privilege);
-            target.set(w.table, into);
+        try {
+          // 016's enqueue trigger fires AFTER INSERT OR UPDATE OF content on
+          // thoughts and runs as the calling role. It reads ob1_config on EVERY
+          // capture — unconditionally, before it even looks at the key — and, while
+          // entity_extraction_key is set, upserts a thought_work_claims row. So the
+          // trigger's mere presence makes SELECT on ob1_config a hard capture-path
+          // requirement, and a set key adds thought_work_claims INSERT/UPDATE. The
+          // trigger is read via pg_trigger (tgrelid = to_regclass, so an absent
+          // thoughts matches nothing rather than raising); the key inside CASE
+          // guards, so has_table_privilege — which raises for a relation it cannot
+          // see — is reached only when the trigger, hence 006's ob1_config, exists.
+          const [{ triggerPresent, canReadConfig }] = (await sql`
+            SELECT EXISTS (SELECT 1 FROM pg_trigger
+                            WHERE tgrelid = to_regclass('public.thoughts')
+                              AND tgname = 'thoughts_entity_extraction' AND NOT tgisinternal) AS "triggerPresent",
+                   CASE WHEN to_regclass('public.ob1_config') IS NOT NULL
+                        THEN has_table_privilege('public.ob1_config', 'SELECT') ELSE false END AS "canReadConfig"`) as
+            { triggerPresent: boolean; canReadConfig: boolean }[];
+          // Read the key in its own statement, run only when the role can SELECT
+          // ob1_config — an uncorrelated `(SELECT … FROM ob1_config)` in the query
+          // above would become an InitPlan Postgres evaluates regardless of any
+          // CASE guard, raising `permission denied` for a role without that SELECT
+          // and taking every later check down with it. When the trigger is present
+          // but the role cannot read the key, extraction is treated as off — but
+          // ob1_config SELECT is still required below (the trigger reads it), so the
+          // role is refused for that, not blessed. Schema-qualified, as the
+          // privilege it is gated on was tested: a bare ob1_config resolves
+          // through the role's search_path, and a role that may read the table
+          // without public on its path read "relation does not exist" (SMD-2062).
+          let ek: string | null = null;
+          if (canReadConfig) {
+            const [row] = (await sql`SELECT value FROM public.ob1_config WHERE key = 'entity_extraction_key'`) as { value: string | null }[];
+            ek = row?.value ?? null;
           }
-          const absent = reqTables.filter((t, i) => reqTables.indexOf(t) === i && !presentTables.has(t));
-          const triggerMiss = triggerPresent && (missingByTable.has("ob1_config") || missingByTable.has("thought_work_claims"));
-          // What would fail, by what is missing: the capture path's writers
-          // for any capture-path table, and — 042's guard reads and writes
-          // thought_facets as the caller on every delete — every delete of a
-          // thought for that one, said separately so an operator whose
-          // capture succeeds is not told the check was wrong (seventh pass).
-          const captureMiss = [...missingByTable.keys()].some((t) => t !== "thought_facets");
-          // 046's audit trigger reads the key's kind from ob1_agents as the caller
-          // on every write that carries an actor — captures, edits AND deletes
-          // — so that one is named with the trigger (SMD-1730).
-          const agentsMiss = missingByTable.has("ob1_agents");
-          const fails: string[] = [];
-          if (captureMiss) fails.push((triggerMiss
-            ? "a windowed capture, an edit with content, 008's audit trigger, or 016's enqueue trigger — which as the caller reads ob1_config on every capture, and upserts a work claim while entity extraction is enabled —"
-            : "a windowed capture, an edit with content, or 008's audit trigger")
-            + (agentsMiss ? " (046's audit trigger reads ob1_agents as the caller on every capture, edit and delete that carries an actor)" : ""));
-          if (missingByTable.has("thought_facets")) fails.push("every delete of a thought (042's citation guard reads and writes thought_facets as the caller)");
-          const why = ` — so ${fails.join(", and ")} would fail`;
-          if (missingByTable.size) {
-            const phrase = [...missingByTable].map(([t, ps]) => `${ps.join(", ")} on ${t}`).join("; ");
-            const grants = [...missingByTable].map(([t, ps]) => `GRANT ${ps.join(", ")} ON ${t} TO ${ident};`).join("  ");
-            add("write privileges", "fail",
-                `this connection's role (${role}) is missing privileges the capture path's writers need, run as their caller: ${phrase}${why}`,
-                grants);
+          const extracting = triggerPresent && canReadConfig && typeof ek === "string" && ek !== "";
+          // What the 016 trigger adds to the capture path when it is present: its
+          // own ob1_config read always, the work-claim upsert while extraction is on.
+          const conditional = triggerPresent
+            ? [{ table: "ob1_config", privilege: "SELECT", since: "016" }, ...(extracting ? EXTRACTION_TRIGGER_WRITES : [])]
+            : [];
+          // 046's audit trigger reads ob1_agents as the caller; 025's does not. The
+          // capture set lists the SELECT (db/README.md's table, --grant), and the
+          // check requires it only while the body that reads it is installed — a
+          // brain still at 044 under this server writes without it, and the
+          // `audit events` check says so (second review pass). Read from pg_proc
+          // by its sentinel, as the capture-body checks read theirs.
+          // Since 055 the rule (and its sentinel) live in ob1_append_thought_event,
+          // which the trigger calls; a brain before 055 has it in the trigger.
+          const auditBodies = (await sql`
+            SELECT p.proname AS name, p.prosrc AS src FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = 'public' AND p.proname IN ('thoughts_write_audit', 'ob1_append_thought_event')`) as { name: string; src: string }[];
+          const auditReadsAgents = keyRuleHolds(String(auditBodies.find((b) => b.name === "thoughts_write_audit")?.src ?? ""), String(auditBodies.find((b) => b.name === "ob1_append_thought_event")?.src ?? ""));
+          const required = [...CAPTURE_WRITES.filter((w) => w.table !== "ob1_agents" || auditReadsAgents), ...conditional];
+          const reqTables = required.map((w) => w.table);
+          const reqPrivs = required.map((w) => w.privilege);
+          const privRows = (await sql`
+            WITH req AS (
+              SELECT tbl, priv
+                FROM unnest(${sql.array(reqTables, "TEXT")}::text[], ${sql.array(reqPrivs, "TEXT")}::text[]) AS r(tbl, priv)
+            ), present AS (
+              SELECT DISTINCT tbl, to_regclass('public.' || tbl) IS NOT NULL AS ok FROM req
+            )
+            SELECT req.tbl, req.priv, present.ok AS present,
+                   CASE WHEN present.ok THEN has_table_privilege('public.' || req.tbl, req.priv) END AS granted
+              FROM req JOIN present USING (tbl)`) as { tbl: string; priv: string; present: boolean; granted: boolean | null }[];
+          const grantState = new Map(privRows.map((r) => [`${r.tbl} ${r.priv}`, r.granted]));
+          const presentTables = new Set(privRows.filter((r) => r.present).map((r) => r.tbl));
+          if (!presentTables.has("thoughts")) {
+            add("write privileges", "skip", "not checked — thoughts does not exist (before migration 001)");
           } else {
-            const held = [...heldByTable].map(([t, ps]) => `${ps.join("/")} on ${t}`).join(", ");
-            const note = extracting ? " — entity extraction is enabled, so the enqueue trigger's work-claim writes are included" : "";
-            add("write privileges", "ok",
-                `${role} holds the capture path's privileges — ${held}${note}${absent.length ? ` (${absent.join(", ")} not yet present)` : ""} (the agent, worker and extraction grants are documented and granted separately — see db/README.md)`);
+            // Present tables only, in `required` order (SELECT, INSERT, …), so a
+            // GRANT reads the way the guide writes one and names only what is
+            // missing — never what the role already holds. Keyed by table, so a
+            // table's privileges land in one entry (de-duplicated).
+            const missingByTable = new Map<string, string[]>();
+            const heldByTable = new Map<string, string[]>();
+            for (const w of required) {
+              if (!presentTables.has(w.table)) continue;
+              const target = grantState.get(`${w.table} ${w.privilege}`) ? heldByTable : missingByTable;
+              const into = target.get(w.table) ?? [];
+              if (!into.includes(w.privilege)) into.push(w.privilege);
+              target.set(w.table, into);
+            }
+            const absent = reqTables.filter((t, i) => reqTables.indexOf(t) === i && !presentTables.has(t));
+            const triggerMiss = triggerPresent && (missingByTable.has("ob1_config") || missingByTable.has("thought_work_claims"));
+            // What would fail, by what is missing: the capture path's writers
+            // for any capture-path table, and — 042's guard reads and writes
+            // thought_facets as the caller on every delete — every delete of a
+            // thought for that one, said separately so an operator whose
+            // capture succeeds is not told the check was wrong (seventh pass).
+            const captureMiss = [...missingByTable.keys()].some((t) => t !== "thought_facets");
+            // 046's audit trigger reads the key's kind from ob1_agents as the caller
+            // on every write that carries an actor — captures, edits AND deletes
+            // — so that one is named with the trigger (SMD-1730).
+            const agentsMiss = missingByTable.has("ob1_agents");
+            const fails: string[] = [];
+            if (captureMiss) fails.push((triggerMiss
+              ? "a windowed capture, an edit with content, 008's audit trigger, or 016's enqueue trigger — which as the caller reads ob1_config on every capture, and upserts a work claim while entity extraction is enabled —"
+              : "a windowed capture, an edit with content, or 008's audit trigger")
+              + (agentsMiss ? " (046's audit trigger reads ob1_agents as the caller on every capture, edit and delete that carries an actor)" : ""));
+            if (missingByTable.has("thought_facets")) fails.push("every delete of a thought (042's citation guard reads and writes thought_facets as the caller)");
+            const why = ` — so ${fails.join(", and ")} would fail`;
+            if (missingByTable.size) {
+              const phrase = [...missingByTable].map(([t, ps]) => `${ps.join(", ")} on ${t}`).join("; ");
+              const grants = [...missingByTable].map(([t, ps]) => `GRANT ${ps.join(", ")} ON ${t} TO ${ident};`).join("  ");
+              add("write privileges", "fail",
+                  `this connection's role (${role}) is missing privileges the capture path's writers need, run as their caller: ${phrase}${why}`,
+                  grants);
+            } else {
+              const held = [...heldByTable].map(([t, ps]) => `${ps.join("/")} on ${t}`).join(", ");
+              const note = extracting ? " — entity extraction is enabled, so the enqueue trigger's work-claim writes are included" : "";
+              add("write privileges", "ok",
+                  `${role} holds the capture path's privileges — ${held}${note}${absent.length ? ` (${absent.join(", ")} not yet present)` : ""} (the agent, worker and extraction grants are documented and granted separately — see db/README.md)`);
+            }
           }
+        } catch (e) {
+          // The row's add is its last statement, so a raise here found it unreported.
+          add("write privileges", "warn", `could not verify: ${(e as Error).message}`, "The check reads pg_trigger, pg_proc, ob1_config and the capture path's tables in schema public.");
         }
 
         // 003's missing half (023). A thought without a fingerprint whose key
@@ -2516,48 +2570,55 @@ if (configFailed) {
          * refused: it is what flipping the flag mid-life looks like, and the
          * only way to resolve it is a re-embed of the affected thoughts.
          */
-        const { CHUNK_CONTEXT: wantContext } = await import("../db/config.mjs");
-        const ctxCol = await sql`
-          SELECT count(*)::int AS c FROM information_schema.columns
-          WHERE table_name = 'thought_chunks' AND column_name = 'context'`;
-        const haveCtxCol = Number(ctxCol[0].c) >= 1;
-        if (wantContext && !haveCtxCol) {
-          add("chunk context", "fail",
-              "OB1_CHUNK_CONTEXT is on but thought_chunks.context does not exist — the chunk writers from 007 and 009 do not select the key, so every blurb would reach the VECTOR and none would be recorded: captures would silently become contextualized with nothing able to tell them apart from bare ones afterwards",
-              "Apply db/migrations/013_chunk_context.sql.");
-        } else if (!haveCtxCol) {
-          add("chunk context", "ok", "off (migration 013 not applied)");
-        } else {
-          /**
-           * Counted from the rows rather than read from ob1_config, because the
-           * config row records what was INTENDED at the last migration and the
-           * rows record what actually happened. Only the second one can be wrong
-           * in a way anybody cares about.
-           */
-          const split = await sql`
-            SELECT count(*) FILTER (WHERE context IS NOT NULL)::int AS with_ctx,
-                   count(*)::int AS total
-            FROM thought_chunks`;
-          const withCtx = Number(split[0].with_ctx);
-          const total = Number(split[0].total);
-          const bare = total - withCtx;
-          if (total === 0) {
-            add("chunk context", "ok", `${wantContext ? "on" : "off"}, no chunks stored yet`);
-          } else if (withCtx > 0 && bare > 0) {
-            add("chunk context", "warn",
-                `${withCtx} of ${total} chunks carry a situating context and ${bare} do not — the corpus was captured under both settings, so those thoughts are not ranked on comparable vectors`,
-                "Re-capture the affected thoughts under one setting, or leave it: the effect is a ranking inconsistency, not an error.");
-          } else if (withCtx === total && !wantContext) {
-            add("chunk context", "warn",
-                `all ${total} chunks carry a context but OB1_CHUNK_CONTEXT is off — the next long capture will be inconsistent with everything already stored`,
-                "Set OB1_CHUNK_CONTEXT=on, or re-capture the existing thoughts.");
-          } else if (bare === total && wantContext) {
-            add("chunk context", "warn",
-                `OB1_CHUNK_CONTEXT is on but none of the ${total} stored chunks has one — everything captured so far predates the setting`,
-                "Expected right after turning it on; new captures will differ from old ones until they are re-embedded.");
+        // Its own boundary (SMD-2062): thought_chunks read qualified raises for
+        // a role with no USAGE on public, and a raise in this block with no
+        // boundary of its own took every later check with it.
+        try {
+          const { CHUNK_CONTEXT: wantContext } = await import("../db/config.mjs");
+          const ctxCol = await sql`
+            SELECT count(*)::int AS c FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'thought_chunks' AND column_name = 'context'`;
+          const haveCtxCol = Number(ctxCol[0].c) >= 1;
+          if (wantContext && !haveCtxCol) {
+            add("chunk context", "fail",
+                "OB1_CHUNK_CONTEXT is on but thought_chunks.context does not exist — the chunk writers from 007 and 009 do not select the key, so every blurb would reach the VECTOR and none would be recorded: captures would silently become contextualized with nothing able to tell them apart from bare ones afterwards",
+                "Apply db/migrations/013_chunk_context.sql.");
+          } else if (!haveCtxCol) {
+            add("chunk context", "ok", "off (migration 013 not applied)");
           } else {
-            add("chunk context", "ok", wantContext ? `on, ${withCtx}/${total} chunks` : `off, ${total} bare chunks`);
+            /**
+             * Counted from the rows rather than read from ob1_config, because the
+             * config row records what was INTENDED at the last migration and the
+             * rows record what actually happened. Only the second one can be wrong
+             * in a way anybody cares about.
+             */
+            const split = await sql`
+              SELECT count(*) FILTER (WHERE context IS NOT NULL)::int AS with_ctx,
+                     count(*)::int AS total
+              FROM public.thought_chunks`;
+            const withCtx = Number(split[0].with_ctx);
+            const total = Number(split[0].total);
+            const bare = total - withCtx;
+            if (total === 0) {
+              add("chunk context", "ok", `${wantContext ? "on" : "off"}, no chunks stored yet`);
+            } else if (withCtx > 0 && bare > 0) {
+              add("chunk context", "warn",
+                  `${withCtx} of ${total} chunks carry a situating context and ${bare} do not — the corpus was captured under both settings, so those thoughts are not ranked on comparable vectors`,
+                  "Re-capture the affected thoughts under one setting, or leave it: the effect is a ranking inconsistency, not an error.");
+            } else if (withCtx === total && !wantContext) {
+              add("chunk context", "warn",
+                  `all ${total} chunks carry a context but OB1_CHUNK_CONTEXT is off — the next long capture will be inconsistent with everything already stored`,
+                  "Set OB1_CHUNK_CONTEXT=on, or re-capture the existing thoughts.");
+            } else if (bare === total && wantContext) {
+              add("chunk context", "warn",
+                  `OB1_CHUNK_CONTEXT is on but none of the ${total} stored chunks has one — everything captured so far predates the setting`,
+                  "Expected right after turning it on; new captures will differ from old ones until they are re-embedded.");
+            } else {
+              add("chunk context", "ok", wantContext ? `on, ${withCtx}/${total} chunks` : `off, ${total} bare chunks`);
+            }
           }
+        } catch (e) {
+          add("chunk context", "warn", `could not verify: ${(e as Error).message}`, "The check reads information_schema.columns and thought_chunks.");
         }
 
         /**

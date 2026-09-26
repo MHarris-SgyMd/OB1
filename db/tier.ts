@@ -10,7 +10,10 @@
  *              ingest-records.ts (slice 1). This tool never writes to it except on
  *              --promote.
  *   canary   — main's shadow. On every merge: refresh from stable's dump, migrate
- *              forward with the merged tree, replay the query log and diff the ids.
+ *              forward with the merged tree, replay the query log and diff the ids
+ *              — the searches stable logs over a soak after the refresh, or a
+ *              --since before it: straight after a refresh the default window is
+ *              empty, and --diff exits 3 on it.
  *   working  — a per-worktree disposable copy of stable, migrated by the branch.
  *
  * This is the tooling half (slice 2); ingest-records.ts, OB1_TIER, the
@@ -22,15 +25,20 @@
  *   # replay stable's logged searches against the canary and report the ranking
  *   bun db/tier.ts --replay --from <stable-url> --to <canary-url> [--since <iso-ts>]
  *
- *   # the same, but print ONLY what moved and exit non-zero if anything did (the gate)
+ *   # the same, as a gate: exit 1 if a ranking moved (or a step failed), 3 if nothing was compared
  *   bun db/tier.ts --diff   --from <stable-url> --to <canary-url> [--since <iso-ts>]
  *
  *   # after a soak: stamp the canary's version onto stable
  *   bun db/tier.ts --promote --from <canary-url> --to <stable-url>
  *
+ *   # compare two live brains over HTTP — version/migration/freshness/retrieval —
+ *   # in one report (SMD-2109, db/brain-compare.ts). No Postgres, no writes.
+ *   bun db/tier.ts --compare <a> <b> [--replay [--hybrid]] [--query <q> …] [--json]
+ *
  * --refresh uses pg_dump | pg_restore for a faithful whole-database snapshot
  * (thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
- * migration might touch), then runs migrate.ts against the target. It needs a
+ * migration might touch), copies the source's database-level settings the dump
+ * leaves out (SMD-2037), then runs migrate.ts against the target. It needs a
  * pg_dump / pg_restore whose major version is at least the source server's, AND
  * Bun: no image the stack runs has both, so deploy/tier.sh runs this file in one
  * that does (db/tier.Dockerfile, SMD-2036); a host that runs it directly needs
@@ -51,18 +59,24 @@
  *     text, so it is replayed only when a model is configured (OB1_EVAL_EMBED, as
  *     evals/eval-replay.ts uses) and skipped-with-a-note otherwise.
  * A row logged before migration 045 carries a NULL arm (no way to know which arm
- * produced its ids), so it is skipped rather than guessed.
+ * produced its ids), so it is skipped rather than guessed. Both verbs print how
+ * many rows the window held, replayed and skipped. A window that replayed none
+ * compared nothing, so --diff exits 3 on it rather than passing (SMD-2182):
+ * stable logs nothing unless it runs with OB1_QUERY_LOG=on, and the default
+ * window starts at the canary's last refresh.
  */
 
 import { SQL } from "bun";
 import { mkdtemp, rm } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DB_LEVEL_SETTINGS_SQL, parseSetConfig } from "./config.mjs";
+import { alignVectorSearchPath, DB_LEVEL_SETTINGS_SQL, parseSetConfig } from "./config.mjs";
 import { stampTier, TIERS, type Tier } from "./ingest-records.ts";
 import { parsePgUuidArray } from "../evals/query-log.ts";
 import { embed } from "../evals/lib.ts";
+import { runCompare, type CompareArgs } from "./brain-compare.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -231,6 +245,39 @@ function isLoopback(url: string): boolean {
   }
 }
 
+/**
+ * Where a URL points, for a message: host:port/database, never its user or
+ * password. An `@` after the host means the userinfo was not percent-encoded
+ * and the parse split it early: a password holding `/`, `#` or `?` becomes
+ * the host, port or path (`postgres:1234/secret@db` — host `postgres`, port
+ * 1234), and Bun still tries that host. So no part of such a URL is shown,
+ * and the message asks rather than says: an `@` in a query value or a
+ * database name trips the same rule.
+ */
+export function where(url: string): string {
+  try {
+    const u = new URL(url);
+    if (`${u.pathname}${u.search}${u.hash}`.includes("@")) return "a URL with an @ after its host — is its password percent-encoded?";
+    return `${u.hostname || "localhost"}:${u.port || "5432"}${u.pathname.length > 1 ? u.pathname : ""}`;
+  } catch {
+    return "a URL that does not parse";
+  }
+}
+
+/**
+ * Reach `sql` once, so a failure names the side and the host. Bun's own error
+ * for a host that does not resolve or does not answer is a bare "Failed to
+ * connect" (ERR_POSTGRES_CONNECTION_REFUSED, Bun 1.4), which from inside
+ * deploy/tier.sh leaves a stale container name to guess (SMD-2182).
+ */
+async function reach(sql: SQL, url: string, side: string): Promise<void> {
+  try {
+    await sql`SELECT 1`;
+  } catch (e) {
+    throw new Error(`could not connect to ${side} at ${where(url)}: ${(e as Error).message}`);
+  }
+}
+
 /** The server's major version (16 from 160004), so a pg_dump too old to read it is refused before it half-runs. */
 async function serverMajor(sql: SQL): Promise<number> {
   const [{ n }] = await sql<{ n: string }[]>`SELECT current_setting('server_version_num') AS n`;
@@ -298,6 +345,74 @@ async function refreshMark(sql: SQL): Promise<string | null> {
   const [row] = await sql.unsafe(DB_LEVEL_SETTINGS_SQL);
   const mark = parseSetConfig(row?.cfg)["ob1.refresh_target"];
   return mark === "canary" || mark === "working" ? mark : null;
+}
+
+/**
+ * Settings Postgres stores as a list of quoted names, so that a value is SQL
+ * list syntax (`"$user", public`) rather than one literal. pg_dump's
+ * variable_is_guc_list_quote names the same six.
+ */
+const LIST_SETTINGS = new Set(["local_preload_libraries", "search_path", "session_preload_libraries", "shared_preload_libraries", "temp_tablespaces", "unix_socket_directories"]);
+const SETTING_NAME = /^[a-z_][a-z0-9_$]*(\.[a-z_][a-z0-9_$]*)*$/i;
+
+/**
+ * The database's own settings (`ALTER DATABASE … SET`, pg_db_role_setting
+ * setrole 0) as name → value, the refresh mark left out. pg_dump without
+ * --create carries none of them, so a refresh copies them from --from onto
+ * --to itself (SMD-2037): migration 014 seeds the HNSW walk's bounds there
+ * once, and a copy without them answers a broad filtered search short.
+ */
+export async function databaseSettings(sql: SQL): Promise<Record<string, string>> {
+  const [row] = await sql.unsafe(DB_LEVEL_SETTINGS_SQL);
+  const { ["ob1.refresh_target"]: _mark, ...settings } = parseSetConfig(row?.cfg);
+  for (const name of Object.keys(settings)) {
+    if (!SETTING_NAME.test(name)) throw new Error(`database setting ${JSON.stringify(name)} is not a name this tool can write back`);
+  }
+  return settings;
+}
+
+/** A list setting's stored value (`"$user", public`) as its elements. */
+function listElements(value: string): string[] {
+  const out: string[] = [];
+  let cur = "", quoted = false, inQuotes = false;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if (inQuotes) {
+      if (ch === '"' && value[i + 1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') inQuotes = false;
+      else cur += ch;
+    } else if (ch === '"') { inQuotes = true; quoted = true; }
+    else if (ch === ",") { out.push(cur); cur = ""; quoted = false; }
+    else if (ch !== " ") cur += ch;
+  }
+  if (cur !== "" || quoted || out.length) out.push(cur);
+  return out;
+}
+
+/**
+ * Make `dst`'s own settings equal `settings`, the refresh mark aside: each one
+ * `dst` has that `settings` lacks is reset, and each in `settings` is set.
+ * pgvector is loaded first, as migration 014's remedy does, so `hnsw.*` are
+ * the library's settings, which a database owner may set, rather than
+ * placeholders only a superuser may.
+ */
+export async function applyDatabaseSettings(dst: SQL, settings: Record<string, string>): Promise<void> {
+  const current = await databaseSettings(dst);
+  // A no-op where `vector` already resolves; else the path gains its schema.
+  await alignVectorSearchPath(dst);
+  const [{ db, loadable }] = await dst<{ db: string; loadable: boolean }[]>`SELECT current_database() AS db, to_regtype('vector') IS NOT NULL AS loadable`;
+  if (loadable) await dst`SELECT '[1]'::vector`;
+  const target = `"${db.replaceAll('"', '""')}"`;
+  for (const name of Object.keys(current)) {
+    if (!(name in settings)) await dst.unsafe(`ALTER DATABASE ${target} RESET ${name}`);
+  }
+  for (const [name, value] of Object.entries(settings)) {
+    const elements = LIST_SETTINGS.has(name) ? listElements(value) : null;
+    const rhs = elements === null ? `'${value.replaceAll("'", "''")}'`
+      : elements.length === 0 || (elements.length === 1 && elements[0] === "") ? "''"
+      : elements.map((e) => `"${e.replaceAll('"', '""')}"`).join(", ");
+    await dst.unsafe(`ALTER DATABASE ${target} SET ${name} = ${rhs}`);
+  }
 }
 
 /**
@@ -372,8 +487,10 @@ async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Pr
  *   2. mark the target as a refresh target (refreshMark), then reset its public
  *      schema (the destructive step, guarded by targetRefusal and the loopback check).
  *   3. pg_restore the dump.
- *   4. migrate.ts forward — the point of the canary: a migration meets real data.
- *   5. stamp the tier and this refresh's time in ob1_config.
+ *   4. copy the source's database-level settings (databaseSettings), which the
+ *      dump does not carry — 014's HNSW bounds among them (SMD-2037).
+ *   5. migrate.ts forward — the point of the canary: a migration meets real data.
+ *   6. stamp the tier and this refresh's time in ob1_config.
  * Throws with a plain message on any failed step.
  */
 export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promise<void> {
@@ -383,8 +500,12 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
   const src = new SQL({ url: fromUrl, max: 1 });
   const target = new SQL({ url: toUrl, max: 1 });
   let serverMaj: number;
+  let settings: Record<string, string>;
   try {
+    await reach(src, fromUrl, "--from");
+    await reach(target, toUrl, "--to");
     serverMaj = await serverMajor(src);
+    settings = await databaseSettings(src);
     // The reset below drops --to's schema, so --to must be neither the source
     // nor the record. The loopback guard covers neither — deploy/tier.sh sets
     // OB1_ALLOW_REMOTE_DB, since from its container every database is remote —
@@ -449,6 +570,17 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     // partial restore is not silent.
     if (restored.code !== 0 && restored.err.trim()) console.error(`pg_restore warnings (exit ${restored.code}):\n${restored.err.trim()}`);
 
+    // Before the migration, so a migration that reads a setting sees the
+    // source's; each later session on --to — migrate.ts's, the server's — does.
+    const settle = new SQL({ url: toUrl, max: 1 });
+    try {
+      await applyDatabaseSettings(settle, settings);
+    } catch (e) {
+      throw new Error(`copying --from's database settings onto --to failed: ${(e as Error).message}. --to is restored and still marked, so re-run the refresh once that is fixed.`);
+    } finally {
+      await settle.close();
+    }
+
     const migrated = await run(["bun", join(HERE, "migrate.ts"), "--url", toUrl], { stdio: "inherit" });
     if (migrated.code !== 0) throw new Error(`migrate.ts failed on the refreshed target (exit ${migrated.code})`);
 
@@ -499,6 +631,8 @@ export async function promote(canaryUrl: string, stableUrl: string): Promise<{ v
   const canary = new SQL({ url: canaryUrl, max: 1 });
   const stable = new SQL({ url: stableUrl, max: 1 });
   try {
+    await reach(canary, canaryUrl, "--from (canary)");
+    await reach(stable, stableUrl, "--to (stable)");
     // The mirror of refresh's guard: promote stamps --to as stable, so --to must
     // not be the canary itself, nor a tier — the shape of --from and --to the
     // wrong way round, which would make the canary read as the record.
@@ -527,15 +661,29 @@ export async function promote(canaryUrl: string, stableUrl: string): Promise<{ v
 // Output
 // ---------------------------------------------------------------------------
 
-function printSummary(s: ReplaySummary, onlyChanged: boolean): void {
+/**
+ * Print a replay's report and return its verdict: `empty` when nothing was
+ * replayed, so nothing was compared — a window stable logged nothing in, or
+ * one whose every row was skipped — which --diff must not pass as "nothing
+ * moved" (SMD-2182). `window.words` says which searches were read; `bounded`
+ * is false when that was all of stable's log, which no --since can widen.
+ */
+function printSummary(s: ReplaySummary, gate: boolean, window: { words: string; bounded: boolean }): "moved" | "unmoved" | "empty" {
   const short = (id: string) => id.slice(0, 8);
-  if (!onlyChanged) {
-    console.log(`replayed ${s.replayed} of ${s.total} logged searches (${s.skipped} skipped)`);
-    for (const [reason, n] of Object.entries(s.skips)) console.log(`  skipped ${n}: ${reason}`);
+  console.log(`replayed ${s.replayed} of ${s.total} logged searches ${window.words} (${s.skipped} skipped)`);
+  for (const [reason, n] of Object.entries(s.skips)) console.log(`  skipped ${n}: ${reason}`);
+  if (s.replayed === 0) {
+    console.log(s.total === 0
+      ? `nothing to compare: stable logged no searches in the window. Stable logs them only with OB1_QUERY_LOG=on${window.bounded ? ", and an earlier --since widens the window" : ""}.`
+      : "nothing to compare: every search in the window was skipped.");
+    return "empty";
   }
   if (s.changed === 0) {
-    console.log(onlyChanged ? "what moved: nothing — the canary reproduces stable's rankings." : "no ranking moved.");
-    return;
+    const scope = s.skipped ? `the ${s.replayed} replayed (${s.skipped} skipped, not compared)`
+      : s.replayed === 1 ? "the one replayed"
+      : `all ${s.replayed} replayed`;
+    console.log(gate ? `what moved: nothing — the canary reproduces stable's rankings on ${scope}.` : `no ranking moved on ${scope}.`);
+    return "unmoved";
   }
   console.log(`\nwhat moved — ${s.changed} of ${s.replayed} replayed queries returned different ids:`);
   for (const d of s.diffs) {
@@ -545,11 +693,79 @@ function printSummary(s: ReplaySummary, onlyChanged: boolean): void {
     if (d.reordered) bits.push("reordered");
     console.log(`  • ${JSON.stringify(d.query.slice(0, 70))}: ${bits.join("; ")}`);
   }
+  return "moved";
 }
 
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
+
+/**
+ * Parse the --compare arguments: `--compare <a> <b>` names the two brains (a URL
+ * or a connector name each), then --a-key/--b-key, a repeatable --query and a
+ * --queries-file (a file of one query per line, blanks and #-comments skipped),
+ * and the bare --replay, --hybrid and --json. A read key never rides argv here by
+ * default — it comes from OB1_COMPARE_KEY, the connector, or the URL's ?key= —
+ * but --a-key/--b-key are accepted for a URL that has none.
+ */
+export function parseCompareArgs(args: string[]): CompareArgs {
+  const USAGE =
+    "  db/tier.ts --compare <a> <b> [--replay [--hybrid]] [--query <q> ...] [--queries-file <path>] [--json]\n" +
+    "  <a>/<b>: an http(s):// URL (key from --a-key/--b-key, OB1_COMPARE_KEY, or ?key=) or a connector name (open-brain, open-brain-canary)";
+  const TAKES_ONE = new Set(["a-key", "b-key", "queries-file"]);
+  const TAKES_MANY = new Set(["query"]);
+  const TAKES_NONE = new Set(["compare", "replay", "hybrid", "json"]);
+  const out: CompareArgs = { a: "", b: "", replay: false, hybrid: false, queries: [], json: false };
+  const refs: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const name = a.startsWith("--") ? a.slice(2) : null;
+    if (name === "compare") {
+      // The two tokens after --compare are the brain references.
+      for (let k = 0; k < 2; k++) {
+        const t = args[i + 1];
+        if (t === undefined || t.startsWith("--")) { console.error(`--compare needs two brains: <a> and <b>.\n${USAGE}`); process.exit(2); }
+        refs.push(t);
+        i++;
+      }
+      continue;
+    }
+    if (name !== null && (TAKES_ONE.has(name) || TAKES_MANY.has(name))) {
+      const v = args[i + 1];
+      if (v === undefined || v.startsWith("--")) { console.error(`--${name} takes a value.\n${USAGE}`); process.exit(2); }
+      if (name === "a-key") out.aKey = v;
+      else if (name === "b-key") out.bKey = v;
+      else if (name === "queries-file") out.queries.push(...readQueriesFile(v));
+      else if (name === "query") { if (v.trim().length === 0) { console.error(`--query is empty.\n${USAGE}`); process.exit(2); } out.queries.push(v); }
+      i++;
+      continue;
+    }
+    if (name === "replay") { out.replay = true; continue; }
+    if (name === "hybrid") { out.hybrid = true; continue; }
+    if (name === "json") { out.json = true; continue; }
+    if (name !== null && TAKES_NONE.has(name)) continue;
+    console.error(`unknown argument: ${name !== null ? a : "<a value where no flag takes one>"}\n${USAGE}`);
+    process.exit(2);
+  }
+  if (refs.length !== 2) { console.error(`--compare needs two brains.\n${USAGE}`); process.exit(2); }
+  [out.a, out.b] = refs;
+  if (out.hybrid && !out.replay) { console.error(`--hybrid only applies with --replay.\n${USAGE}`); process.exit(2); }
+  if (out.queries.length > 0 && !out.replay) { console.error(`--query/--queries-file only apply with --replay (without it, no retrieval runs).\n${USAGE}`); process.exit(2); }
+  if (out.replay && out.queries.length === 0) { console.error(`--replay needs a query set: --query <q> (repeatable) or --queries-file <path>. query_log is not reachable over HTTP, so the queries are supplied.\n${USAGE}`); process.exit(2); }
+  return out;
+}
+
+/** A query file: one query per line, blank lines and #-comment lines skipped. */
+function readQueriesFile(path: string): string[] {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (e) {
+    console.error(`--queries-file: cannot read ${path}: ${(e as Error).message}`);
+    process.exit(2);
+  }
+  return text.split("\n").map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith("#"));
+}
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -558,6 +774,17 @@ async function main(): Promise<void> {
     return i >= 0 ? args[i + 1] : undefined;
   };
   const has = (name: string) => args.includes(`--${name}`);
+
+  // --compare is a different animal from the SQL verbs: it reaches two brains over
+  // HTTP as a read client (brain_info + the read tools), never Postgres, so it
+  // takes brain references and its own flags rather than --from/--to. Handled and
+  // returned before the SQL-verb parser ever sees these arguments (SMD-2109).
+  if (has("compare")) {
+    for (const v of ["refresh", "replay", "diff", "promote"]) {
+      if (v !== "replay" && has(v)) { console.error(`--compare does not combine with --${v}.`); process.exit(2); }
+    }
+    process.exit(await runCompare(parseCompareArgs(args)));
+  }
 
   // Every argument accounted for, the way migrate.ts and ingest-records.ts do it.
   {
@@ -622,8 +849,9 @@ async function main(): Promise<void> {
   const stable = new SQL({ url: from, max: 4 });
   const canary = new SQL({ url: to, max: 4 });
   try {
-    // The table must exist on both ends; say so in the reader's words, not a driver trace.
-    for (const [sql, label] of [[stable, "--from (stable)"], [canary, "--to (canary)"]] as const) {
+    // Each side answers and has the table; say so in the reader's words, not a driver trace.
+    for (const [sql, url, label] of [[stable, from, "--from (stable)"], [canary, to, "--to (canary)"]] as const) {
+      await reach(sql, url, label);
       const [{ present }] = await sql<{ present: boolean }[]>`SELECT to_regclass('public.query_log') IS NOT NULL AS present`;
       if (!present) {
         console.error(`tier.ts --${verb}: query_log is not present on ${label} — migration 034 is not applied there.`);
@@ -631,13 +859,20 @@ async function main(): Promise<void> {
       }
     }
     // The default window is since the canary was last refreshed; else everything.
-    const window = since ?? (await readConfig(canary, "last_refresh"));
+    const refreshed = since === null ? await readConfig(canary, "last_refresh") : null;
+    const window = since ?? refreshed;
+    const words = since !== null ? `since ${since} (--since)`
+      : refreshed !== null ? `since ${refreshed} (the canary's last refresh)`
+      : "in all of stable's log (the canary records no refresh)";
     const embedModel = process.env.OB1_EVAL_EMBED;
     const embedFn: EmbedFn | undefined = embedModel ? (q) => embed(embedModel, q, true) : undefined;
     if (!embedFn) console.error(`note: OB1_EVAL_EMBED is not set — hybrid-arm searches will be skipped (keyword arm replays without a model).`);
     const summary = await replayAndDiff(stable, canary, { since: window, embedFn });
-    printSummary(summary, verb === "diff");
-    if (verb === "diff" && summary.changed > 0) process.exit(1);
+    const verdict = printSummary(summary, verb === "diff", { words, bounded: window !== null });
+    // The gate: 1 when a ranking moved, 3 when nothing was compared — not a
+    // pass, and not a move either, so a caller can tell the two apart. (A
+    // failed step is 1 as well, below; a usage error or refusal is 2.)
+    if (verb === "diff" && verdict !== "unmoved") process.exit(verdict === "moved" ? 1 : 3);
   } finally {
     await stable.close();
     await canary.close();
@@ -646,7 +881,7 @@ async function main(): Promise<void> {
 
 // A refusal or a failed step is a sentence for the operator, not a stack trace
 // with Bun's source excerpt around it. Exit 1, as before: --diff's "moved" is
-// also 1, and either one fails a gate.
+// also 1, and either one fails a gate (as does its 3, nothing compared).
 if (import.meta.main) {
   await main().catch((e: unknown) => {
     console.error(`tier.ts: error: ${e instanceof Error ? e.message : String(e)}`);

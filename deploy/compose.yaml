@@ -183,6 +183,9 @@ services:
       # model it came from. The server never extracts — forwarded so preflight,
       # in this container, reports what db/extract-entities.ts will do.
       OB1_EXTRACT_CHUNK_TOKENS: ${OB1_EXTRACT_CHUNK_TOKENS:-}
+      # …and the per-thought bound (SMD-2240): unset, 24 windows. Forwarded
+      # for preflight's row, as the window is.
+      OB1_EXTRACT_MAX_WINDOWS: ${OB1_EXTRACT_MAX_WINDOWS:-}
       OB1_EMBEDDING_DIMENSIONS: ${OB1_EMBEDDING_DIMENSIONS:-}
       OB1_LLM_API_KEY: ${OB1_LLM_API_KEY:-}
       # A chat endpoint of its own, when the two calls are not served by one
