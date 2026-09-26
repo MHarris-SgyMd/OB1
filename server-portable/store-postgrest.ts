@@ -31,6 +31,7 @@ import type {
   SupersessionProposal,
   ThoughtHybridMatch,
   ThoughtKeywordMatch,
+  ThoughtIdPage,
   ThoughtListItem,
   ThoughtMatch,
   RecencyOpts,
@@ -169,6 +170,23 @@ export class PostgrestStore implements ThoughtStore {
       .select("*", { count: "exact", head: true });
     if (error) throw new Error(error.message);
     return count ?? 0;
+  }
+
+  async listThoughtIds(opts: { limit: number; after: string | null }): Promise<ThoughtIdPage> {
+    // Keyset by id, ids only. No server-side digest: PostgREST cannot run the
+    // md5(string_agg(...)) aggregate the SQL store uses, and re-reading the whole
+    // corpus here just to hash it would be a second full walk — so `digest` is
+    // null and the caller enumerates (the shim is not the performance path). The
+    // total (exact count) still rides the first page.
+    const after = opts.after && UUID_RE.test(opts.after) ? opts.after.toLowerCase() : null;
+    let q = this.client.from("thoughts").select("id").order("id", { ascending: true }).limit(opts.limit);
+    if (after) q = q.gt("id", after);
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    const ids = ((data ?? []) as { id: string }[]).map((r) => String(r.id));
+    const cursor = ids.length === opts.limit ? ids[ids.length - 1] : null;
+    const total = after === null ? await this.countThoughts() : 0;
+    return { ids, total, digest: null, cursor };
   }
 
   async pageThoughtMeta(offset: number, limit: number): Promise<ThoughtMeta[]> {

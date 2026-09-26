@@ -1551,6 +1551,42 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
+  // Tool 3b-ii: the corpus's thought ids (SMD-2244) — ids only, in id order, for a
+  // cheap cross-brain id-set diff (db/tier.ts --compare) that the prose read tools
+  // cannot give (they page content, capped). One JSON object per page,
+  // {total, digest, ids, cursor}: total and the whole-corpus md5 digest ride the
+  // first page (SQL store; the PostgREST shim leaves digest null), and `after` =
+  // the previous page's `cursor` pages on until it is null. Read-only, ids only —
+  // no content, no vectors. Gated like the other read tools, so a capture-only key
+  // never sees it.
+  if (canRead(principal)) server.registerTool(
+    "list_thought_ids",
+    {
+      title: "List Thought IDs",
+      description:
+        "List the brain's thought IDs — ids only, no content — in id order, for comparing one brain's corpus against another's cheaply. " +
+        "Returns a JSON object {total, digest, ids, cursor}: on the first page `total` is the whole corpus and `digest` is an md5 of every id (null where the store cannot compute it); page on by passing `after` = the previous page's `cursor` until `cursor` is null.",
+      annotations: {
+        readOnlyHint: true,
+      },
+      inputSchema: {
+        limit: z.number().int().min(1).max(10000).optional().default(1000).describe("IDs per page, 1–10000 (default 1000); ids are small, so pages are large to keep an enumeration to few round-trips"),
+        after: z.string().optional().describe("Keyset cursor — the previous page's `cursor` (a thought id); omit for the first page"),
+      },
+    },
+    async ({ limit, after }) => {
+      if (after !== undefined && !UUID_RE.test(after)) {
+        return { content: [{ type: "text" as const, text: "Error: `after` must be a thought id (a uuid) — pass the previous page's `cursor`." }], isError: true };
+      }
+      try {
+        const page = await (await db()).listThoughtIds({ limit, after: after ?? null });
+        return { content: [{ type: "text" as const, text: JSON.stringify(page) }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
   // Tool 3c: what this brain is (SMD-2041) — version, commit, store, tier, the
   // database's versions, ledger, counts, size and HNSW parameters, one short
   // table. Gated like the other read tools. The same record is the keyed

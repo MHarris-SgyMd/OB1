@@ -33,16 +33,20 @@
  *     running brain can say them, so identity is an HTTP read by nature.
  *   • Freshness — counts.thoughts and the migration delta come from that same body
  *     (machine-readable); newest capture is read best-effort from thought_stats.
+ *   • Id set — list_thought_ids (SMD-2244) enumerates each corpus's ids, id-only,
+ *     with a first-page md5 digest that lets an identical pair skip enumeration;
+ *     the two sets are diffed for the EXACT "which thoughts one holds and the other
+ *     does not", not the thought-count stand-in the count line still shows.
  *   • Retrieval — the two search tools, called against both brains over the same
  *     queries, their returned ids diffed. The VECTOR arm needs no model here: the
  *     brain embeds the query server-side, so search_thoughts (hybrid) replays it.
  *
- * Two signals a compare would ideally carry live only in a brain's Postgres and
- * are NOT reachable over the read surface, so this HTTP-only compare names them as
- * out of reach rather than guessing: the EXACT id-set difference (which thoughts one
- * holds and the other does not — the read tools page prose, they do not enumerate a
- * corpus), and a replay sourced from stable's own query_log (this replays a supplied
- * query set instead). A DB-backed mode can add both (SMD-2109 notes).
+ * One signal a compare would ideally carry lives only in a brain's Postgres and is
+ * NOT reachable over the read surface, so this HTTP-only compare names it as out of
+ * reach rather than guessing: a replay sourced from stable's own query_log (this
+ * replays a supplied query set instead; SMD-2245 adds the surface). The board-sync
+ * watermark is likewise deferred (SMD-2109 notes). The EXACT id-set difference,
+ * once deferred here too, now rides list_thought_ids (SMD-2244).
  *
  * Until SMD-2037 lands, a refreshed brain runs at pgvector's default HNSW scan
  * settings, so a hybrid-arm difference here can be GUC-induced rather than a real
@@ -299,6 +303,91 @@ export function parseResultIds(text: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// The corpus id set — the exact id-set difference (SMD-2244).
+// ---------------------------------------------------------------------------
+
+/** One page of `list_thought_ids`. */
+interface ThoughtIdPage {
+  ids: string[];
+  total: number;
+  /** md5 of all ids (first page, SQL store); null on the PostgREST shim or an empty corpus. */
+  digest: string | null;
+  cursor: string | null;
+}
+
+/** The exact id-set difference between two corpora, or `unavailable` when a brain predates the surface. */
+export interface IdDiff {
+  equal: boolean;
+  /** ids A holds that B does not. */
+  onlyA: string[];
+  /** ids B holds that A does not. */
+  onlyB: string[];
+  /** the whole-corpus totals, from each first page. */
+  totalA: number;
+  totalB: number;
+  /** set when a brain does not expose list_thought_ids (older than SMD-2244) — the count stand-in still stands. */
+  unavailable?: boolean;
+}
+
+/** A safety bound on the enumeration walk — 10M ids at the 1000-default page. */
+const MAX_ID_PAGES = 10_000;
+
+/** Fetch one page of a brain's thought ids. */
+async function fetchIdPage(ep: BrainEndpoint, after: string | null): Promise<ThoughtIdPage> {
+  const text = await callTool(ep, "list_thought_ids", after ? { after } : {});
+  let page: Partial<ThoughtIdPage>;
+  try {
+    page = JSON.parse(text) as Partial<ThoughtIdPage>;
+  } catch {
+    throw new Error(`${ep.label}: list_thought_ids did not return JSON (${text.slice(0, 80)}).`);
+  }
+  return {
+    ids: Array.isArray(page.ids) ? page.ids.map(String) : [],
+    total: Number(page.total ?? 0),
+    digest: page.digest ?? null,
+    cursor: page.cursor ?? null,
+  };
+}
+
+/** Page a brain's whole id set into a Set, starting from an already-read first page. */
+async function collectIds(ep: BrainEndpoint, first: ThoughtIdPage): Promise<Set<string>> {
+  const set = new Set(first.ids);
+  let cursor = first.cursor;
+  for (let guard = 0; cursor && guard < MAX_ID_PAGES; guard++) {
+    const page = await fetchIdPage(ep, cursor);
+    for (const id of page.ids) set.add(id);
+    cursor = page.cursor;
+  }
+  return set;
+}
+
+/**
+ * The exact id-set difference. Reads each brain's first page; when both carry a
+ * digest and the two match, the corpora are identical and neither is enumerated
+ * (the fast path). Otherwise both are paged in full and the sets are diffed. A
+ * brain that does not expose `list_thought_ids` (older than SMD-2244) degrades to
+ * `unavailable` rather than aborting the compare — the thought-count stand-in holds.
+ */
+export async function corpusIdDiff(a: BrainEndpoint, b: BrainEndpoint): Promise<IdDiff> {
+  let pa: ThoughtIdPage;
+  let pb: ThoughtIdPage;
+  try {
+    [pa, pb] = await Promise.all([fetchIdPage(a, null), fetchIdPage(b, null)]);
+  } catch {
+    return { equal: false, onlyA: [], onlyB: [], totalA: 0, totalB: 0, unavailable: true };
+  }
+  // Equal NON-null digests only: two null digests (the shim, or two empty corpora)
+  // must be enumerated, not read as a match.
+  if (pa.digest != null && pa.digest === pb.digest) {
+    return { equal: true, onlyA: [], onlyB: [], totalA: pa.total, totalB: pb.total };
+  }
+  const [setA, setB] = await Promise.all([collectIds(a, pa), collectIds(b, pb)]);
+  const onlyA = [...setA].filter((id) => !setB.has(id));
+  const onlyB = [...setB].filter((id) => !setA.has(id));
+  return { equal: onlyA.length === 0 && onlyB.length === 0, onlyA, onlyB, totalA: pa.total, totalB: pb.total };
+}
+
+// ---------------------------------------------------------------------------
 // The comparison.
 // ---------------------------------------------------------------------------
 
@@ -332,6 +421,8 @@ export interface Comparison {
   migrationDelta: number | null;
   /** a and b thoughts counts. */
   counts: { a: number | null; b: number | null };
+  /** The exact id-set difference (SMD-2244), or unavailable on a brain that predates list_thought_ids. */
+  idDiff: IdDiff;
   /** The retrieval rows, when --replay ran; the arms that ran. */
   retrieval: { rows: RetrievalRow[]; arms: string[]; queries: number } | null;
   /** The one-line verdict. */
@@ -366,7 +457,7 @@ export async function compareBrains(
   b: BrainEndpoint,
   opts: { queries?: string[]; hybrid?: boolean } = {},
 ): Promise<Comparison> {
-  const [ra, rb] = await Promise.all([readBrain(a), readBrain(b)]);
+  const [ra, rb, idDiff] = await Promise.all([readBrain(a), readBrain(b), corpusIdDiff(a, b)]);
 
   const fa = identityFields(ra);
   const fb = identityFields(rb);
@@ -404,6 +495,7 @@ export async function compareBrains(
     identity,
     migrationDelta,
     counts: { a: ra.thoughts, b: rb.thoughts },
+    idDiff,
     retrieval,
     verdict: freshnessVerdict(ra, rb, migrationDelta),
   };
@@ -493,7 +585,17 @@ export function renderComparison(c: Comparison): string {
   lines.push(`  thoughts: a=${ca === null ? "unread" : ca.toLocaleString("en-US")}  b=${cb === null ? "unread" : cb.toLocaleString("en-US")}`);
   lines.push(`  newest capture: a=${c.a.newestCapture ?? "n/a"}  b=${c.b.newestCapture ?? "n/a"}`);
   lines.push(`  migration ledger: a=${c.a.highestMigration ?? "unread"}  b=${c.b.highestMigration ?? "unread"}`);
-  lines.push(`  (board-sync watermark and the exact id-set difference are not on the read surface — a DB-backed compare adds them, SMD-2109.)`);
+  // The exact id-set difference (SMD-2244): which thoughts one holds and the other does not.
+  const d = c.idDiff;
+  if (d.unavailable) {
+    lines.push(`  id-set: unavailable — a brain does not expose list_thought_ids (older than SMD-2244); the thought count above stands in.`);
+  } else if (d.equal) {
+    lines.push(`  id-set: identical — both brains hold the same ${d.totalA.toLocaleString("en-US")} thought ids.`);
+  } else {
+    const ex = (ids: string[]) => (ids.length ? ` (e.g. ${ids.slice(0, 3).map(shortId).join(", ")}${ids.length > 3 ? ", …" : ""})` : "");
+    lines.push(`  id-set: ${d.onlyA.length.toLocaleString("en-US")} only in a${ex(d.onlyA)}; ${d.onlyB.length.toLocaleString("en-US")} only in b${ex(d.onlyB)}.`);
+  }
+  lines.push(`  (board-sync watermark is not on the read surface — a DB-backed compare adds it, SMD-2109.)`);
 
   lines.push("");
   lines.push("Retrieval:");
@@ -564,7 +666,10 @@ export async function runCompare(args: CompareArgs): Promise<number> {
   // (review pass 1: it exited 0 while the verdict printed the count delta).
   const countDelta = c.counts.a !== null && c.counts.b !== null && c.counts.a !== c.counts.b;
   const captureDelta = captureDaysApart(c.a.newestCapture, c.b.newestCapture);
-  const freshDelta = countDelta || (captureDelta !== null && captureDelta !== 0);
+  // An id-set difference is a delta too (a same-count corpus that drifted, SMD-2244);
+  // `unavailable` on an older brain is not — the count stand-in already spoke.
+  const idSetDelta = !c.idDiff.unavailable && !c.idDiff.equal;
+  const freshDelta = countDelta || (captureDelta !== null && captureDelta !== 0) || idSetDelta;
   const anyDelta =
     c.identity.length > 0 ||
     (c.migrationDelta ?? 0) !== 0 ||
