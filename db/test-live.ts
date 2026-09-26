@@ -5541,6 +5541,209 @@ console.log("\n[26] recipes/brain-backup and recipes/lint-sweep on the SQL shim:
   }
 }
 
+console.log("\n[27] recipes/thought-enrichment on the SQL shim: the type and sensitivity backfills write the planted rows' columns and nothing else, the enrichment writes a stub model's answer as metadata objects and checkpoints, a refused write ends a run on its first row, and no URL, a Supabase URL or a refused connection is one line (SMD-2139)");
+{
+  // The three enrichment scripts SMD-2126 sent to compat/supabase-sql — the
+  // class's first writers — driven as deployed: `bun <file>` in a directory
+  // of their own, SUPABASE_URL the one variable beyond PATH and HOME, against
+  // this database carrying enhanced-thoughts ([18] and [26] left the columns;
+  // the file is idempotent). The planted table is the truth every printed
+  // count is held to, and a snapshot of every row's content, fingerprint and
+  // model label is what the writes are held away from. The enrichment's model
+  // is a Bun.serve stub on the loopback that answers one classification for
+  // every request and counts them — OPENROUTER_BASE_URL is the port's own
+  // seam — so the apply path runs without a key and without a byte leaving
+  // the machine. The scripts read `.env.local` from THEIR OWN directory (the
+  // recipe's, not the cwd — `--no-env-file` stops Bun's loader, not theirs),
+  // so on a machine where a developer keeps one there the no-URL refusals,
+  // which that file would defeat, are skipped by name; every other run puts its
+  // URL in the environment, which the scripts prefer. CI has no such file.
+  const sql = new SQL({ url: URL_, max: 2 });
+  const catalog27 = async () => ({
+    tables: new Set(((await sql`SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
+    views: new Set(((await sql`SELECT viewname AS n FROM pg_views WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
+    fns: new Set(((await sql`SELECT p.oid::regprocedure::text AS n FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace`) as { n: string }[]).map((r) => r.n)),
+  });
+  const before27 = await catalog27();
+  const RECIPE = join(CONTRIB_DIR, "recipes", "thought-enrichment");
+  const scratch = join(tmpdir(), `ob1-live-2139-${process.pid}`);
+  mkdirSync(scratch, { recursive: true });
+  const env = (extra: Record<string, string>) => ({ PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...extra });
+  const script = (file: string, extra: Record<string, string>, ...flags: string[]) => runScript(["bun", join(RECIPE, file), ...flags], { cwd: scratch, env: env(extra) });
+  const firstLine = (s: string) => s.trim().split("\n")[0] ?? "";
+  const errorLine = (s: string) => s.split("\n").find((l) => l.startsWith("ERROR:")) ?? firstLine(s);
+  /** One line on stderr and no stack frame: the shape every refusal is held to. */
+  const oneLine = (r: { code: number; out: string }, re: RegExp) => r.code === 1 && re.test(r.out) && !/\n\s+at /.test(r.out);
+  const recipeEnvFile = existsSync(join(RECIPE, ".env.local")) ? "recipes/thought-enrichment/.env.local" : null;
+  // The model: a fixed answer, the requests counted, the last body kept for the prompt's shape.
+  let stubCalls = 0;
+  let stubBody = "";
+  const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
+    stubCalls++;
+    stubBody = await req.text();
+    const content = JSON.stringify({ type: "task", summary: "stub summary", topics: ["stub"], tags: ["t"], people: ["Ada"], action_items: ["do it"], confidence: 0.9, importance: 4, detected_source_type: "generic_import" });
+    return Response.json({ choices: [{ message: { content } }] });
+  } });
+  const model = { OPENROUTER_API_KEY: "stub", OPENROUTER_BASE_URL: `http://127.0.0.1:${stub.port}/v1` };
+  try {
+    await sql`DELETE FROM thoughts`;
+    await sql.unsafe(readFileSync(join(SCHEMAS_DIR, "enhanced-thoughts/schema.sql"), "utf8"));
+    // Twelve rows, every type 'reference': four with a valid different type in
+    // their metadata, one with a type no allowlist has, one with none, one
+    // already 'reference'; one restricted by pattern (a made-up SSN), two
+    // personal (a dosage, a blood-pressure reading), one already personal — not
+    // scanned — and one of whitespace alone, the enrichment's no-model path.
+    // Tiers NULL, '' and 'standard' among them, the three the sensitivity
+    // filter names. Fingerprint and model label set so the writes can be held
+    // away from them (a raw insert leaves both NULL otherwise).
+    await sql.unsafe(`INSERT INTO thoughts (content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model)
+      SELECT c, m::jsonb, 'reference', t, content_fingerprint_of(c), 'planted-model' FROM (VALUES
+        ('a decision was made about the venue', '{"type":"decision","source":"notes"}', 'standard'),
+        ('a lesson learned about batching', '{"type":"lesson"}', NULL),
+        ('the standup, three of us', '{"type":"meeting"}', ''),
+        ('tonight I wrote about the week', '{"type":"journal"}', 'standard'),
+        ('bogus type row', '{"type":"bogus"}', ''),
+        ('no type key here', '{}', 'standard'),
+        ('already reference', '{"type":"reference"}', 'standard'),
+        ('SSN 123-45-6789 appears in this text', '{}', 'standard'),
+        ('took metoprolol 50 mg today', '{}', NULL),
+        ('blood pressure 120 over 80 this morning', '{}', ''),
+        ('already personal, glucose 110 this morning', '{}', 'personal'),
+        ('   ', '{}', 'standard')
+      ) v(c, m, t)`);
+    const N = 12;
+    type Snap = { id: string; content: string; fp: string | null; em: string | null; metadata: Record<string, unknown> };
+    const snapshot = async () => (await sql`SELECT id::text AS id, content, content_fingerprint AS fp, embedding_model AS em, metadata FROM thoughts ORDER BY id`) as Snap[];
+    const planted = await snapshot();
+    const typesNow = async () => (await sql`SELECT id::text AS id, type, metadata->>'type' AS mt FROM thoughts ORDER BY id`) as { id: string; type: string; mt: string | null }[];
+    const tiers = async () => Object.fromEntries(((await sql`SELECT coalesce(sensitivity_tier, '<null>') AS t, count(*)::int AS n FROM thoughts GROUP BY 1`) as { t: string; n: number }[]).map((r) => [r.t, r.n]));
+    const [truth] = (await sql`SELECT count(*)::int AS total, count(*) FILTER (WHERE type = 'reference')::int AS refs,
+      count(*) FILTER (WHERE metadata->>'type' IN ('decision','lesson','meeting','journal'))::int AS valid,
+      count(*) FILTER (WHERE sensitivity_tier IS NULL OR sensitivity_tier IN ('', 'standard'))::int AS scannable,
+      count(*) FILTER (WHERE content_fingerprint IS NULL OR embedding_model IS NULL)::int AS bare FROM thoughts`) as { total: number; refs: number; valid: number; scannable: number; bare: number }[];
+    assert(truth.total === N && truth.refs === N && truth.valid === 4 && truth.scannable === 11 && truth.bare === 0 && planted.length === N,
+      `the planted table: ${N} rows of type 'reference', four with a valid different metadata type, eleven the sensitivity scan reads, every row with a fingerprint and a model label (${JSON.stringify(truth)})`);
+
+    // backfill-type: a dry run reads every page (three rows a page, four pages, the cursor past each) and writes nothing.
+    const dry = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--batch-size", "3");
+    const afterDry = await typesNow();
+    assert(dry.code === 0 && dry.out.includes(`Total rows with type='reference': ${N}`) && dry.out.includes(`Rows processed:              ${N}`) && dry.out.includes("Rows updated:                4 (dry run, not written)") && dry.out.includes("Skipped (already reference): 1") && dry.out.includes("Skipped (null/empty type):   6") && dry.out.includes("Skipped (invalid type):      1") && /\n  bogus: 1\n/.test(dry.out) && afterDry.every((r) => r.type === "reference"),
+      `backfill-type.mjs --dry-run --batch-size 3 on the shim: the exact count on the first page, twelve rows over four pages, four to update and the three skip counts, the bogus type named, and every row still 'reference' (exit ${dry.code}: ${firstLine(dry.out.split("===")[1] ?? dry.out)})`);
+
+    // A refused write ends the run on its first row: a LOGIN role with SELECT on thoughts alone reads the page and is
+    // refused the update — 42501, exit 1, no row changed — where the REST form counted a 403 and went on (the type
+    // script threw; the sensitivity script counted). [18]'s two guards: skipped where the connection cannot create a
+    // role or carries no credentials to swap.
+    const PROBE_ROLE = "ob1_live_enrich_probe";
+    const probeUrl = URL_.replace(/\/\/[^@]*@/, `//${PROBE_ROLE}:ob1probe@`);
+    const [{ mayCreate: mayCreateProbe }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
+    if (probeUrl === URL_ || !mayCreateProbe) {
+      skip("…a role with SELECT alone: both backfills refused on their first write", probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+    } else {
+      const dropProbe = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PROBE_ROLE}') THEN EXECUTE 'DROP OWNED BY ${PROBE_ROLE}'; EXECUTE 'DROP ROLE ${PROBE_ROLE}'; END IF; END $$`);
+      await dropProbe();
+      try {
+        await sql.unsafe(`CREATE ROLE ${PROBE_ROLE} LOGIN PASSWORD 'ob1probe'; GRANT USAGE ON SCHEMA public TO ${PROBE_ROLE}; GRANT SELECT ON thoughts TO ${PROBE_ROLE}`);
+        const deniedType = await script("backfill-type.mjs", { SUPABASE_URL: probeUrl }, "--limit", "1");
+        const deniedTier = await script("backfill-sensitivity.mjs", { SUPABASE_URL: probeUrl }, "--apply");
+        const afterDenied = await typesNow();
+        assert(oneLine(deniedType, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thoughts$/m) && !/Done\./.test(deniedType.out) && oneLine(deniedTier, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thoughts$/m) && !/=== Results ===/.test(deniedTier.out) && afterDenied.every((r) => r.type === "reference") && (await tiers())["personal"] === 1,
+          `…a role with SELECT alone: both backfills read their page and end on the first write with 42501, exit 1, no summary, no row changed (${deniedType.code}: ${errorLine(deniedType.out)}; ${deniedTier.code}: ${errorLine(deniedTier.out)})`);
+      } finally {
+        await dropProbe();
+      }
+    }
+
+    // --limit 1 writes one row — the ticket's Verify — and stops; the rest of the pages are not read.
+    const one = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--limit", "1");
+    const afterOne = await typesNow();
+    const changed = afterOne.filter((r) => r.type !== "reference");
+    assert(one.code === 0 && one.out.includes("=== BACKFILL STOPPED AT --limit 1 ===") && one.out.includes("Rows updated:                1\n") && changed.length === 1 && changed[0].type === changed[0].mt,
+      `backfill-type.mjs --limit 1: one row's type is its metadata's, the run says it stopped at the limit (exit ${one.code}: ${changed.map((r) => r.type).join(",") || "none"} changed)`);
+    const rest = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--batch-size", "3");
+    const afterRest = await typesNow();
+    assert(rest.code === 0 && rest.out.includes(`Total rows with type='reference': ${N - 1}`) && rest.out.includes("Rows updated:                3\n") && rest.out.includes("=== BACKFILL COMPLETE ===") && afterRest.filter((r) => r.type !== "reference").length === 4 && afterRest.every((r) => r.type === (["decision", "lesson", "meeting", "journal"].includes(r.mt ?? "") ? r.mt : "reference")),
+      `…and the full run writes the other three, the bogus type and the typeless rows left 'reference' (exit ${rest.code}: ${afterRest.filter((r) => r.type !== "reference").map((r) => r.type).sort().join(",")})`);
+
+    // backfill-sensitivity: no flag is the usage and no query; the dry run scans the eleven rows at NULL, '' or
+    // 'standard' — the pre-set personal row is not among them — and names the one restricted and the two personal.
+    const usage = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ });
+    const scan = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ }, "--dry-run");
+    const tiersAfterScan = await tiers();
+    assert(usage.code === 0 && /^Usage:\n  bun backfill-sensitivity\.mjs --dry-run/.test(usage.out) && scan.code === 0 && scan.out.includes("Scanned:              11") && scan.out.includes("Upgraded to personal: 2") && scan.out.includes("Upgraded to restricted: 1") && /RESTRICTED #[0-9a-f-]{36}: ssn_pattern/.test(scan.out) && /PERSONAL #[0-9a-f-]{36}: medication_dosage, drug_name/.test(scan.out) && /PERSONAL #[0-9a-f-]{36}: health_measurement/.test(scan.out) && tiersAfterScan["personal"] === 1 && !("restricted" in tiersAfterScan),
+      `backfill-sensitivity.mjs: no flag prints the usage; --dry-run scans the eleven rows the filter names, finds one restricted and two personal by pattern, and writes nothing (${usage.code}/${scan.code}: ${JSON.stringify(tiersAfterScan)})`);
+    const applyTier = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ }, "--apply");
+    const tiersAfterApply = await tiers();
+    const [{ ssn }] = (await sql`SELECT sensitivity_tier AS ssn FROM thoughts WHERE content LIKE 'SSN %'`) as { ssn: string }[];
+    assert(applyTier.code === 0 && applyTier.out.includes("Mode:                 APPLIED") && tiersAfterApply["restricted"] === 1 && tiersAfterApply["personal"] === 3 && tiersAfterApply["standard"] === 5 && tiersAfterApply["<null>"] === 1 && tiersAfterApply[""] === 2 && ssn === "restricted",
+      `…--apply writes the three tiers and leaves the other eight rows as they were — NULL and '' included (exit ${applyTier.code}: ${JSON.stringify(tiersAfterApply)})`);
+
+    // enrich-thoughts: the two exact counts of --status are head queries; the dry run calls the model and writes
+    // neither a row nor the checkpoint.
+    const status0 = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_ }, "--status");
+    const dryEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--dry-run", "--limit", "2", "--provider", "openrouter");
+    const [{ enrichedAfterDry }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedAfterDry" FROM thoughts`) as { enrichedAfterDry: number }[];
+    assert(status0.code === 0 && status0.out.includes(`Total thoughts:     ${N}`) && status0.out.includes("Enriched:           0 (0.0%)") && status0.out.includes(`Remaining:          ${N}`) && dryEnrich.code === 0 && (dryEnrich.out.match(/^  \[DRY\] #[0-9a-f-]{36}: \{"type":"task"/gm) ?? []).length === 2 && stubCalls === 2 && enrichedAfterDry === 0 && !existsSync(join(scratch, "data", "enrichment-state.json")),
+      `enrich-thoughts.mjs --status counts ${N} thoughts, none enriched, through two head queries; --dry-run --limit 2 shows the stub's two classifications, calls it twice, writes no row and no checkpoint (${status0.code}/${dryEnrich.code}: ${stubCalls} calls, ${enrichedAfterDry} enriched)`);
+
+    // --apply --limit 5: five rows in id order — the model's answer as the enhanced columns and a metadata OBJECT
+    // that keeps the row's own keys, the whitespace row marked enriched without a call — and the checkpoint written
+    // under the run's directory, not the recipe's.
+    const applyEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--apply", "--limit", "5", "--concurrency", "2", "--provider", "openrouter", "--model", "stub-model");
+    type Enriched = { id: string; content: string; type: string; importance: number; source_type: string | null; mt: string; metadata: Record<string, unknown> };
+    const enrichedRows = (await sql`SELECT id::text AS id, content, type, importance, source_type, jsonb_typeof(metadata) AS mt, metadata FROM thoughts WHERE enriched ORDER BY id`) as Enriched[];
+    const blankEnriched = enrichedRows.some((r) => r.content.trim() === "");
+    const classified = enrichedRows.filter((r) => r.content.trim() !== "");
+    const keepsOwnKeys = (r: Enriched) => Object.entries(planted.find((p) => p.id === r.id)?.metadata ?? {}).every(([k, v]) => k === "type" || JSON.stringify(r.metadata[k]) === JSON.stringify(v));
+    const statePath = join(scratch, "data", "enrichment-state.json");
+    const state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) as { totalProcessed: number; lastProcessedId: string | null; failedIds: string[] } : null;
+    assert(applyEnrich.code === 0 && applyEnrich.out.includes("Enriched:       5") && applyEnrich.out.includes(`LLM calls made: ${blankEnriched ? 4 : 5} / 10000`) && stubCalls === 2 + (blankEnriched ? 4 : 5) && enrichedRows.length === 5 && enrichedRows.every((r) => r.mt === "object") && classified.every((r) => r.type === "task" && r.importance === 4 && r.source_type === "generic_import" && r.metadata.summary === "stub summary" && JSON.stringify(r.metadata.topics) === '["stub"]' && r.metadata.enriched_provider === "openrouter" && r.metadata.enriched_model === "stub-model" && r.metadata.type === "task" && keepsOwnKeys(r)) && /<thought_content>\\n[^]*<\/thought_content>/.test(stubBody) && state?.totalProcessed === 5 && state.lastProcessedId === enrichedRows[4].id && state.failedIds.length === 0 && !existsSync(join(RECIPE, "data", "enrichment-state.json")),
+      `…--apply --limit 5 --concurrency 2: five rows enriched in id order, each classified row carrying the stub's type, importance, source and a metadata object with its own keys kept, a whitespace row costing no call, the prompt delimited, the checkpoint at the last id under the run's directory (exit ${applyEnrich.code}: ${enrichedRows.length} rows, ${stubCalls} calls, state ${JSON.stringify(state)})`);
+
+    // --status reads the new split; --retry-failed reads its ids back through one .in() query and enriches them.
+    const status1 = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_ }, "--status");
+    const [{ retryId }] = (await sql`SELECT id::text AS "retryId" FROM thoughts WHERE NOT enriched AND btrim(content) <> '' ORDER BY id LIMIT 1`) as { retryId: string }[];
+    writeFileSync(statePath, JSON.stringify({ ...state, failedIds: [retryId], totalFailed: 1 }));
+    const retry = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--apply", "--retry-failed", "--provider", "openrouter", "--model", "stub-model");
+    const [{ retried }] = (await sql`SELECT (enriched AND type = 'task' AND metadata->>'summary' = 'stub summary') AS retried FROM thoughts WHERE id = ${retryId}::uuid`) as { retried: boolean }[];
+    assert(status1.code === 0 && status1.out.includes("Enriched:           5 (41.7%)") && status1.out.includes(`Remaining:          ${N - 5}`) && retry.code === 0 && retry.out.includes(`  OK retry #${retryId} -> task`) && retry.out.includes("Processed: 1, Fixed: 1, Still failing: 0") && retried === true,
+      `…--status reads 5 of ${N}; --apply --retry-failed fetches the checkpoint's failed id by .in() and enriches it (${status1.code}/${retry.code}: ${errorLine(retry.out)})`);
+
+    // What no script may touch: every row's content, fingerprint and model label are the planted ones, the vector
+    // still absent, every metadata an object.
+    const after = await snapshot();
+    const [{ vectors }] = (await sql`SELECT count(*) FILTER (WHERE embedding IS NOT NULL)::int AS vectors FROM thoughts`) as { vectors: number }[];
+    const untouched = after.length === N && after.every((r, i) => r.id === planted[i].id && r.content === planted[i].content && r.fp === planted[i].fp && r.em === planted[i].em && typeof r.metadata === "object" && r.metadata !== null);
+    assert(untouched && vectors === 0,
+      `after every write: all ${N} rows keep their content, fingerprint and model label, no vector appeared, every metadata is an object (${after.filter((r, i) => r.content !== planted[i].content || r.fp !== planted[i].fp || r.em !== planted[i].em).length} rows differ, ${vectors} vectors)`);
+
+    // Refused before any query, one line each, no stack.
+    if (recipeEnvFile) {
+      skip("…no URL: each of the three ends in one line naming the variable", `${recipeEnvFile} exists on this machine and the scripts read it`);
+    } else {
+      const noUrl = await Promise.all([script("backfill-type.mjs", {}, "--dry-run"), script("backfill-sensitivity.mjs", {}, "--dry-run"), script("enrich-thoughts.mjs", {}, "--status")]);
+      const named = /^ERROR: SUPABASE_URL must be set — the brain's postgres:\/\/ connection string on this fork, in the environment or in \.env\.local beside the scripts\.$/m;
+      assert(noUrl.every((r) => oneLine(r, named) && r.out.trim().split("\n").length === 1),
+        `…no URL: each of the three ends in one line naming the variable, exit 1 (${noUrl.map((r) => `${r.code}: ${firstLine(r.out).slice(0, 60)}`).join("; ")})`);
+    }
+    const httpsType = await script("backfill-type.mjs", { SUPABASE_URL: "https://example.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "unused" }, "--dry-run");
+    const httpsEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: "https://example.supabase.co" }, "--status");
+    const refused = await script("backfill-type.mjs", { SUPABASE_URL: "postgres://nobody:nothing@127.0.0.1:1/nowhere" }, "--dry-run");
+    const zero = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--limit", "0");
+    assert(oneLine(httpsType, /^ERROR: compat\/supabase-sql: expected a postgres:\/\/ connection URL/m) && !/Starting type backfill/.test(httpsType.out) && oneLine(httpsEnrich, /^ERROR: compat\/supabase-sql: expected a postgres:\/\/ connection URL/m) && !/Enrichment Status/.test(httpsEnrich.out) && oneLine(refused, /^ERROR: read thoughts after id 0{8}-0{4}-0{4}-0{4}-0{12} → ERR_POSTGRES_CONNECTION_REFUSED /m) && oneLine(zero, /^ERROR: --limit must be a positive integer; got "0"$/m),
+      `…a Supabase URL is the shim's refusal before any query, for a backfill and for --status; a refused connection is one line naming the driver's code; --limit 0 is one line (${httpsType.code}: ${errorLine(httpsType.out).slice(0, 70)}; ${httpsEnrich.code}; ${refused.code}: ${errorLine(refused.out).slice(0, 90)}; ${zero.code})`);
+  } finally {
+    stub.stop(true);
+    rmSync(scratch, { recursive: true, force: true });
+    await sql`DELETE FROM thoughts`;
+    const after27 = await catalog27();
+    for (const v of after27.views) if (!before27.views.has(v)) await sql.unsafe(`DROP VIEW IF EXISTS ${v} CASCADE`);
+    for (const tb of after27.tables) if (!before27.tables.has(tb)) await sql.unsafe(`DROP TABLE IF EXISTS ${tb} CASCADE`);
+    for (const f of after27.fns) if (!before27.fns.has(f)) await sql.unsafe(`DROP FUNCTION IF EXISTS ${f} CASCADE`);
+    await sql.close();
+  }
+}
+
 // db/README.md's Testing block quotes this suite's assertion total. The count
 // is lower when a group is skipped (PostgreSQL 18, or JIT off), so only a full
 // run — as CI's pg16-with-JIT job is — is compared to the headline (SMD-1805).

@@ -1,21 +1,31 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
+// ob1-fork (SMD-2139): this script paged PostgREST's `/thoughts` route and wrote
+// each row's enrichment back through it with a service-role key, and this fork's
+// stack runs no PostgREST. It reads and writes through compat/supabase-sql now —
+// SUPABASE_URL is a postgres:// connection string, SUPABASE_SERVICE_ROLE_KEY is
+// accepted and ignored (the credentials live in the URL). Run it from a
+// checkout: the import is relative. The checkpoint is written under the
+// directory the run starts in (`data/enrichment-state.json` — the recipe's own
+// when you run from it), and OPENROUTER_BASE_URL points the OpenRouter provider
+// at any OpenAI-compatible endpoint, a local one included. The thought text
+// still leaves the box to the provider you choose: the README says so.
 /**
  * enrich-thoughts.mjs
  *
  * Retroactively classifies thoughts via Anthropic API or OpenRouter.
  * Extracts: type, summary, topics, tags, people, action_items, confidence,
  *           importance, detected_source_type.
- * Updates the thought in-place via Supabase REST API.
+ * Updates the thought in place through compat/supabase-sql.
  *
  * Usage:
- *   node enrich-thoughts.mjs --status
- *   node enrich-thoughts.mjs --dry-run --limit 10
- *   node enrich-thoughts.mjs --apply --concurrency 5
- *   node enrich-thoughts.mjs --apply --provider anthropic --concurrency 20
- *   node enrich-thoughts.mjs --apply --retry-failed
+ *   bun enrich-thoughts.mjs --status
+ *   bun enrich-thoughts.mjs --dry-run --limit 10
+ *   bun enrich-thoughts.mjs --apply --concurrency 5
+ *   bun enrich-thoughts.mjs --apply --provider anthropic --concurrency 20
+ *   bun enrich-thoughts.mjs --apply --retry-failed
  *
  * Flags:
- *   --apply              Write enrichment results back to Supabase
+ *   --apply              Write enrichment results back to the brain
  *   --dry-run             Preview classifications without writing
  *   --status              Show enrichment progress stats
  *   --provider <name>     openrouter (default) or anthropic
@@ -35,15 +45,19 @@ import {
   fetchWithTimeout,
   resolveTimeoutMs,
   DEFAULT_LLM_TIMEOUT_MS,
-  DEFAULT_SUPABASE_TIMEOUT_MS,
 } from "./lib/memory-core.mjs";
+import { connect, endWith, failure, isTransientDbError, readEnv } from "./lib/brain.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Per-call fetch timeouts. FETCH_TIMEOUT_MS in .env.local overrides both.
+// The per-call timeout of an LLM request; FETCH_TIMEOUT_MS overrides it. The
+// brain's reads and writes carry none: a Postgres query is not a stalled
+// HTTP body, and a query the server refuses answers at once.
 const LLM_TIMEOUT_MS = resolveTimeoutMs(process.env.FETCH_TIMEOUT_MS, DEFAULT_LLM_TIMEOUT_MS);
-const SUPABASE_TIMEOUT_MS = resolveTimeoutMs(process.env.FETCH_TIMEOUT_MS, DEFAULT_SUPABASE_TIMEOUT_MS);
+
+// The client main() opens, closed at the bottom on both paths (lib/brain.mjs).
+let client = null;
 
 const ALLOWED_TYPES = new Set([
   "idea", "task", "person_note", "reference",
@@ -57,7 +71,7 @@ const ALLOWED_SOURCE_TYPES = new Set([
   "claude_code_import",
 ]);
 
-const STATE_DIR = path.join(__dirname, "data");
+const STATE_DIR = path.join(process.cwd(), "data");
 const STATE_PATH = path.join(STATE_DIR, "enrichment-state.json");
 const BATCH_SIZE = 50;
 
@@ -151,7 +165,7 @@ async function callAnthropic(userInput, config) {
 }
 
 async function callOpenRouter(userInput, config) {
-  const res = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
+  const res = await fetchWithTimeout(`${config.openRouterBaseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${config.openRouterApiKey}`,
@@ -215,21 +229,19 @@ function resolveModelLabel(config) {
 
 // --- Entry Point ---
 
-main().catch((err) => {
-  console.error(err.stack || err.message || String(err));
-  process.exitCode = 1;
-});
+endWith(main(), () => client);
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
   if (args.help) { printUsage(); return; }
 
-  const env = parseEnvFile(path.join(__dirname, ".env.local"));
+  const env = readEnv(__dirname);
   const config = buildConfig(args, env);
+  client = connect(env);
 
   if (args.status) {
-    await showStatus(config);
+    await showStatus();
     return;
   }
 
@@ -242,12 +254,12 @@ async function main() {
 
   // Validate provider config
   if (config.provider === "anthropic" && !config.anthropicApiKey) {
-    console.error("ERROR: --provider anthropic requires ANTHROPIC_API_KEY in .env.local");
+    console.error("ERROR: --provider anthropic requires ANTHROPIC_API_KEY (the environment or .env.local)");
     process.exitCode = 1;
     return;
   }
   if (config.provider === "openrouter" && !config.openRouterApiKey) {
-    console.error("ERROR: --provider openrouter requires OPENROUTER_API_KEY in .env.local");
+    console.error("ERROR: --provider openrouter requires OPENROUTER_API_KEY (the environment or .env.local)");
     process.exitCode = 1;
     return;
   }
@@ -287,7 +299,7 @@ async function main() {
         break;
       }
       const batchIds = failedIds.slice(i, i + Math.min(BATCH_SIZE, (config.limit || Infinity) - processed));
-      const thoughts = await fetchByIds(config, batchIds);
+      const thoughts = await fetchByIds(batchIds);
       if (thoughts.length === 0) continue;
 
       for (let j = 0; j < thoughts.length; j += config.concurrency) {
@@ -366,9 +378,9 @@ async function main() {
     }
 
     const fetchSize = config.limit ? Math.min(BATCH_SIZE, config.limit - processed) : BATCH_SIZE;
-    const thoughts = await fetchUnenriched(config, fetchCursor, fetchSize);
+    const thoughts = await fetchUnenriched(fetchCursor, fetchSize);
     if (thoughts.length === 0) {
-      console.log("No more un-enriched thoughts returned from Supabase.");
+      console.log("No more un-enriched thoughts returned from the brain.");
       break;
     }
 
@@ -437,7 +449,7 @@ async function classifyAndUpdate(thought, config, budget) {
   const content = thought.content || "";
   if (!content.trim()) {
     if (!config.dryRun) {
-      await patchThought(thought.id, { enriched: true }, config);
+      await patchThought(thought.id, { enriched: true });
     }
     return { type: "reference", importance: 1, detected_source_type: "generic_import" };
   }
@@ -519,150 +531,102 @@ async function classifyAndUpdate(thought, config, budget) {
     },
   };
 
-  await patchThought(thought.id, patch, config);
+  await patchThought(thought.id, patch);
   return classified;
 }
 
-// --- Supabase Operations ---
+// --- Brain Operations (compat/supabase-sql) ---
+//
+// The REST idioms, one to one: a paged select is a builder with `.order("id")`
+// and `.limit()` (or `.range()` for --skip's offset), `id=in.(…)` is `.in()`,
+// `Prefer: count=exact` on a HEAD request is `{ count: "exact", head: true }`,
+// and a PATCH is `.update({...}).eq("id", id)` — carrying neither content nor
+// vector, the columns update_thought owns (check 10). A query the database
+// refuses answers `{ error }` with its SQLSTATE; a structural refusal (an
+// undefined column, a denied table) is fatal at once, so the operator sees the
+// real reason on row 1 instead of row N.
 
-async function fetchUnenriched(config, cursor, limit) {
-  const url = new URL(`${config.supabaseUrl}/rest/v1/thoughts`);
-  url.searchParams.set("select", "id,content,source_type,metadata");
-  url.searchParams.set("enriched", "eq.false");
-  url.searchParams.set("order", "id.asc");
-  url.searchParams.set("limit", String(limit));
-
+async function fetchUnenriched(cursor, limit) {
+  let query = client
+    .from("thoughts")
+    .select("id,content,source_type,metadata")
+    .eq("enriched", false)
+    .order("id", { ascending: true });
   if (cursor?.afterId != null) {
-    url.searchParams.set("id", `gt.${cursor.afterId}`);
+    query = query.gt("id", cursor.afterId).limit(limit);
   } else if (cursor?.offset) {
-    url.searchParams.set("offset", String(cursor.offset));
+    query = query.range(cursor.offset, cursor.offset + limit - 1);
+  } else {
+    query = query.limit(limit);
   }
-
-  const res = await fetchWithTimeout(url, { headers: supabaseHeaders(config) }, SUPABASE_TIMEOUT_MS);
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Fetch un-enriched failed (${res.status}): ${body.substring(0, 300)}`);
-  }
-  const rows = await res.json();
-  return Array.isArray(rows) ? rows : [];
+  const { data, error } = await query;
+  if (error) throw failure("read un-enriched thoughts", error);
+  return Array.isArray(data) ? data : [];
 }
 
-async function fetchByIds(config, ids) {
+async function fetchByIds(ids) {
   if (ids.length === 0) return [];
-  // Chunk by count AND by URL length. PostgREST defaults to 8KB URL
-  // limits and proxies in front of it often cap lower. 50 IDs per
-  // request is the hard ceiling; we also bound by ~6000 chars of
-  // comma-joined IDs to stay safe with very large numeric IDs.
-  const MAX_IDS_PER_REQUEST = 50;
-  const MAX_URL_ID_CHARS = 6000;
-  const chunks = [];
-  let current = [];
-  let currentLen = 0;
-  for (const id of ids) {
-    const tokenLen = String(id).length + 1; // +1 for comma
-    if (current.length >= MAX_IDS_PER_REQUEST || currentLen + tokenLen > MAX_URL_ID_CHARS) {
-      if (current.length > 0) chunks.push(current);
-      current = [];
-      currentLen = 0;
-    }
-    current.push(id);
-    currentLen += tokenLen;
-  }
-  if (current.length > 0) chunks.push(current);
-
+  // 50 ids a query, as the REST form sent 50 a request: the list is bound as
+  // one parameter now, so there is no URL to overflow, only a statement to
+  // keep short.
+  const MAX_IDS_PER_QUERY = 50;
   const all = [];
-  for (const chunk of chunks) {
-    const idList = chunk.join(",");
-    const url = `${config.supabaseUrl}/rest/v1/thoughts?select=id,content,source_type,metadata&id=in.(${idList})`;
-    const res = await fetchWithTimeout(url, { headers: supabaseHeaders(config) }, SUPABASE_TIMEOUT_MS);
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Fetch by IDs failed (${res.status}): ${body.substring(0, 300)}`);
-    }
-    const rows = await res.json();
-    if (Array.isArray(rows)) all.push(...rows);
+  for (let i = 0; i < ids.length; i += MAX_IDS_PER_QUERY) {
+    const chunk = ids.slice(i, i + MAX_IDS_PER_QUERY);
+    const { data, error } = await client
+      .from("thoughts")
+      .select("id,content,source_type,metadata")
+      .in("id", chunk);
+    if (error) throw failure(`read ${chunk.length} thoughts by id`, error);
+    if (Array.isArray(data)) all.push(...data);
   }
   return all;
 }
 
-async function patchThought(id, patch, config, retries = 4) {
-  const url = `${config.supabaseUrl}/rest/v1/thoughts?id=eq.${id}`;
-  // Send metadata as a plain object: the request body is JSON.stringify'd
-  // below, so pre-stringifying metadata double-encodes it and PostgREST
-  // stores the jsonb column as a JSON *string* instead of an object,
-  // breaking every metadata->'topics' / @> query downstream.
-  const body = { ...patch };
-  const opts = {
-    method: "PATCH",
-    headers: {
-      ...supabaseHeaders(config),
-      "Content-Type": "application/json",
-      Prefer: "return=minimal",
-    },
-    body: JSON.stringify(body),
-  };
-
-  // Retry only on transient errors (429 + 5xx + AbortError/network).
-  // 4xx (400/401/403/404/422) means the request is structurally wrong —
-  // "column does not exist", bad auth, or RLS denial. Retrying will burn
-  // time + a round trip without ever succeeding, so fail fast so the
-  // operator sees the real reason on row 1 instead of row N.
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    let res;
-    try {
-      res = await fetchWithTimeout(url, opts, SUPABASE_TIMEOUT_MS);
-    } catch (err) {
-      // Network/abort. Treat as transient up to `retries` times.
-      if (attempt === retries) throw err;
-      const delay = Math.min(16000, 1000 * Math.pow(2, attempt));
-      await sleep(delay);
-      continue;
-    }
-    if (res.ok) return;
-    const text = await res.text();
-    const isTransient = [429, 500, 502, 503, 504].includes(res.status);
-    if (!isTransient || attempt === retries) {
-      throw new Error(`PATCH thought ${id} failed (${res.status}): ${text.substring(0, 300)}`);
-    }
+async function patchThought(id, patch, retries = 4) {
+  // `metadata` travels as a plain object: the shim binds it as jsonb. A
+  // pre-stringified value would be stored as a JSON *string* instead of an
+  // object (migration 005 refuses that on the functions' path; here the
+  // column is written directly), breaking every metadata->'topics' / @>
+  // query downstream. The `.select("id")` narrows what the write returns to
+  // the id — without it the shim returns the whole row, its vector included,
+  // on every update (PostgREST's `Prefer: return=minimal` had the same purpose).
+  //
+  // Retry only what is transient in Postgres (a connection lost mid-run, a
+  // serialization failure, a server shutting down). Anything else means the
+  // statement is structurally wrong — "column does not exist", a denied table
+  // — and retrying would burn time without ever succeeding.
+  for (let attempt = 0; ; attempt++) {
+    const { error } = await client.from("thoughts").update({ ...patch }).eq("id", id).select("id");
+    if (!error) return;
+    if (!isTransientDbError(error) || attempt >= retries) throw failure(`update thought ${id}`, error);
     const delay = Math.min(16000, 1000 * Math.pow(2, attempt));
     await sleep(delay);
   }
 }
 
-async function countByEnriched(config) {
-  const countReq = async (enrichedVal) => {
-    const res = await fetchWithTimeout(
-      `${config.supabaseUrl}/rest/v1/thoughts?select=id&enriched=eq.${enrichedVal}`,
-      {
-        method: "HEAD",
-        headers: { ...supabaseHeaders(config), Prefer: "count=exact" },
-      },
-      SUPABASE_TIMEOUT_MS
-    );
-    const range = res.headers.get("content-range");
-    const match = range?.match(/\/(\d+)/);
-    return match ? parseInt(match[1], 10) : -1;
+async function countByEnriched() {
+  const countOf = async (enrichedVal) => {
+    const { count, error } = await client
+      .from("thoughts")
+      .select("id", { count: "exact", head: true })
+      .eq("enriched", enrichedVal);
+    if (error) throw failure(`count thoughts with enriched = ${enrichedVal}`, error);
+    return typeof count === "number" ? count : 0;
   };
 
   const [enrichedCount, unenrichedCount] = await Promise.all([
-    countReq("true"),
-    countReq("false"),
+    countOf(true),
+    countOf(false),
   ]);
 
   return { enrichedCount, unenrichedCount, total: enrichedCount + unenrichedCount };
 }
 
-function supabaseHeaders(config) {
-  return {
-    apikey: config.supabaseServiceRoleKey,
-    Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-  };
-}
-
 // --- Status Display ---
 
-async function showStatus(config) {
-  const { enrichedCount, unenrichedCount, total } = await countByEnriched(config);
+async function showStatus() {
+  const { enrichedCount, unenrichedCount, total } = await countByEnriched();
   const state = loadState();
   const pct = total > 0 ? ((enrichedCount / total) * 100).toFixed(1) : "0.0";
 
@@ -773,8 +737,7 @@ function buildConfig(args, env) {
   if (args.limit !== undefined) {
     const parsed = parseInt(args.limit, 10);
     if (!Number.isInteger(parsed) || parsed < 1) {
-      console.error(`ERROR: --limit must be a positive integer; got "${args.limit}"`);
-      process.exit(1);
+      throw new Error(`--limit must be a positive integer; got "${args.limit}"`);
     }
     limit = parsed;
   }
@@ -792,12 +755,12 @@ function buildConfig(args, env) {
     // Anthropic direct
     anthropicApiKey: env.ANTHROPIC_API_KEY || "",
     anthropicModel: args.model || env.ANTHROPIC_CLASSIFIER_MODEL || "claude-3-5-haiku-20241022",
-    // OpenRouter
+    // OpenRouter — or any OpenAI-compatible endpoint OPENROUTER_BASE_URL names,
+    // a local one included (Ollama's `http://127.0.0.1:11434/v1`).
     openRouterApiKey: env.OPENROUTER_API_KEY || "",
     openRouterModel: args.model || env.OPENROUTER_CLASSIFIER_MODEL || "openai/gpt-4o-mini",
-    // Supabase
-    supabaseUrl: env.SUPABASE_URL || "",
-    supabaseServiceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY || "",
+    openRouterBaseUrl: (env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1").replace(/\/+$/, ""),
+    // The brain: SUPABASE_URL and the ignored key are read by lib/brain.mjs's connect().
   };
 }
 
@@ -821,29 +784,17 @@ function parseArgs(argv) {
   return args;
 }
 
-function parseEnvFile(filePath) {
-  if (!fs.existsSync(filePath)) return {};
-  const env = {};
-  for (const line of fs.readFileSync(filePath, "utf8").split("\n")) {
-    const idx = line.indexOf("=");
-    if (idx > 0 && !line.startsWith("#")) {
-      env[line.slice(0, idx).trim()] = line.slice(idx + 1).trim().replace(/^['"]|['"]$/g, "");
-    }
-  }
-  return env;
-}
-
 function printUsage() {
   console.log(`
 Usage:
-  node enrich-thoughts.mjs --apply --concurrency 5
-  node enrich-thoughts.mjs --apply --provider anthropic --concurrency 20
-  node enrich-thoughts.mjs --dry-run --limit 10
-  node enrich-thoughts.mjs --apply --retry-failed
-  node enrich-thoughts.mjs --status
+  bun enrich-thoughts.mjs --apply --concurrency 5
+  bun enrich-thoughts.mjs --apply --provider anthropic --concurrency 20
+  bun enrich-thoughts.mjs --dry-run --limit 10
+  bun enrich-thoughts.mjs --apply --retry-failed
+  bun enrich-thoughts.mjs --status
 
 Options:
-  --apply              Write enrichment results to Supabase
+  --apply              Write enrichment results to the brain
   --dry-run            Preview classifications without writing
   --status             Show enrichment progress stats
   --provider <name>    openrouter (default) or anthropic

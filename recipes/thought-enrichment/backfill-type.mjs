@@ -1,154 +1,84 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
+// ob1-fork (SMD-2139): this script paged PostgREST's `/thoughts` route and wrote
+// each row's `type` back through it with a service-role key, and this fork's
+// stack runs no PostgREST. It reads and writes through compat/supabase-sql now —
+// SUPABASE_URL is a postgres:// connection string, SUPABASE_SERVICE_ROLE_KEY is
+// accepted and ignored (the credentials live in the URL). Run it from a
+// checkout: the import is relative. One read changed with the transport: a
+// page selects `metadata` whole and reads its `type` key here, since the shim
+// takes no JSON path in a select list. `--limit N` caps the rows written.
 /**
  * backfill-type.mjs
  *
  * Backfills the `type` column in the `thoughts` table from metadata.type,
  * for rows where type = 'reference' but metadata contains a valid different type.
+ * (`schemas/enhanced-thoughts`' backfill_thought_types() does the same in one
+ * statement; this script previews, and reports what it changed.)
  *
- * Usage: node backfill-type.mjs [--dry-run] [--batch-size N]
+ * Usage: bun backfill-type.mjs [--dry-run] [--batch-size N] [--limit N]
  */
 
-import { readFileSync } from "fs";
-import { fileURLToPath } from "url";
-import { dirname, join } from "path";
-import {
-  fetchWithTimeout,
-  resolveTimeoutMs,
-  DEFAULT_SUPABASE_TIMEOUT_MS,
-} from "./lib/memory-core.mjs";
+import { fileURLToPath } from "node:url";
+import { dirname } from "node:path";
+import { connect, endWith, failure, isTransientDbError, readEnv } from "./lib/brain.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const SUPABASE_TIMEOUT_MS = resolveTimeoutMs(process.env.FETCH_TIMEOUT_MS, DEFAULT_SUPABASE_TIMEOUT_MS);
-
-// Load env
-function loadEnv() {
-  const envPath = join(__dirname, ".env.local");
-  if (!readFileSync) return {};
-  let text;
-  try {
-    text = readFileSync(envPath, "utf8");
-  } catch {
-    console.error("Missing .env.local — copy .env.local.example and fill in your values.");
-    process.exit(1);
-  }
-  const env = {};
-  for (const line of text.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const idx = trimmed.indexOf("=");
-    if (idx === -1) continue;
-    env[trimmed.slice(0, idx)] = trimmed.slice(idx + 1).replace(/^['"]|['"]$/g, "");
-  }
-  return env;
-}
-
 const VALID_TYPES = new Set(["idea", "task", "person_note", "reference", "decision", "lesson", "meeting", "journal"]);
+
+/** A positive integer flag, or the default when the flag is absent; anything else is refused by name. */
+function positiveInt(args, flag, fallback) {
+  const at = args.indexOf(flag);
+  if (at === -1) return fallback;
+  const n = parseInt(args[at + 1], 10);
+  if (!Number.isInteger(n) || n < 1) throw new Error(`${flag} must be a positive integer; got "${args[at + 1] ?? ""}"`);
+  return n;
+}
 
 const args = process.argv.slice(2);
 const DRY_RUN = args.includes("--dry-run");
-const batchSizeArg = args.indexOf("--batch-size");
-const BATCH_SIZE = batchSizeArg !== -1 ? parseInt(args[batchSizeArg + 1], 10) : 500;
 
-const env = loadEnv();
-const SUPABASE_URL = env.SUPABASE_URL;
-const SERVICE_ROLE_KEY = env.SUPABASE_SERVICE_ROLE_KEY;
-
-if (!SUPABASE_URL) {
-  console.error("Missing SUPABASE_URL in .env.local");
-  process.exit(1);
-}
-if (!SERVICE_ROLE_KEY) {
-  console.error("Missing SUPABASE_SERVICE_ROLE_KEY in .env.local");
-  process.exit(1);
-}
-
-const BASE = `${SUPABASE_URL}/rest/v1`;
-
-const headers = {
-  apikey: SERVICE_ROLE_KEY,
-  Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
-  "Content-Type": "application/json",
-  Prefer: "return=minimal",
-};
+// The client main() opens, closed at the bottom on both paths (lib/brain.mjs).
+let client = null;
 
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Cursor-based pagination on id. Offset pagination is unsafe here:
-// every successful PATCH removes a row from the `type=eq.reference`
-// filter, so `offset += rows.length` would skip unprocessed rows. The
-// cursor pattern is id > afterId ORDER BY id ASC. `includeCount` is
-// used once on the first call to populate the total for the progress
-// bar — every subsequent call omits the count=exact header so
-// PostgreSQL does not COUNT(*) the filtered set per page (LOW-7).
-async function fetchBatch(afterId, { includeCount = false } = {}, retries = 4) {
-  const url = `${BASE}/thoughts?select=id,metadata->>type&type=eq.reference&id=gt.${afterId}&order=id.asc&limit=${BATCH_SIZE}`;
-  const batchHeaders = includeCount ? { ...headers, Prefer: "count=exact" } : { ...headers };
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    let r;
-    try {
-      r = await fetchWithTimeout(url, { headers: batchHeaders }, SUPABASE_TIMEOUT_MS);
-    } catch (err) {
-      // Treat AbortError/timeouts and other network errors as transient.
-      const msg = err?.message || String(err);
-      if (attempt < retries) {
-        const delay = Math.min(1000 * Math.pow(2, attempt), 16000);
-        process.stderr.write(`\n[retry] fetch afterId ${afterId} ${msg.slice(0, 120)}, waiting ${delay}ms\n`);
-        await sleep(delay);
-        continue;
-      }
-      throw err;
-    }
-    if (r.ok) {
-      const contentRange = r.headers.get("content-range");
-      const total = contentRange ? parseInt(contentRange.split("/")[1], 10) : null;
-      const rows = await r.json();
-      return { rows, total };
-    }
-    const body = await r.text();
-    const isTransient = r.status === 502 || r.status === 503 || r.status === 504 || r.status === 429;
-    if (isTransient && attempt < retries) {
-      const delay = Math.min(1000 * Math.pow(2, attempt), 16000);
-      process.stderr.write(`\n[retry] fetch afterId ${afterId} got ${r.status}, waiting ${delay}ms\n`);
-      await sleep(delay);
-      continue;
-    }
-    throw new Error(`Fetch failed after id ${afterId}: ${r.status} ${body.slice(0, 200)}`);
+// Cursor-based pagination on id. Offset pagination is unsafe here: every
+// successful update removes a row from the `type = 'reference'` filter, so
+// `offset += rows.length` would skip unprocessed rows. The cursor pattern is
+// id > afterId ORDER BY id ASC. `includeCount` is used once on the first call
+// to populate the total for the progress bar — every later call omits the
+// count so Postgres does not COUNT(*) the filtered set per page (LOW-7).
+async function fetchBatch(afterId, batchSize, { includeCount = false } = {}, retries = 4) {
+  for (let attempt = 0; ; attempt++) {
+    const { data, error, count } = await client
+      .from("thoughts")
+      .select("id,metadata", includeCount ? { count: "exact" } : undefined)
+      .eq("type", "reference")
+      .gt("id", afterId)
+      .order("id", { ascending: true })
+      .limit(batchSize);
+    if (!error) return { rows: data ?? [], total: includeCount && typeof count === "number" ? count : null };
+    if (!isTransientDbError(error) || attempt >= retries) throw failure(`read thoughts after id ${afterId}`, error);
+    const delay = Math.min(1000 * Math.pow(2, attempt), 16000);
+    process.stderr.write(`\n[retry] read after id ${afterId} ${error.code}, waiting ${delay}ms\n`);
+    await sleep(delay);
   }
 }
 
+// One row's `type`. The `.select("id")` narrows what the write returns to the
+// id — without it the shim returns the whole row, its vector included, on
+// every update (PostgREST's `Prefer: return=minimal` had the same purpose).
 async function updateRow(id, newType, retries = 6) {
-  const url = `${BASE}/thoughts?id=eq.${id}`;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    let r;
-    try {
-      r = await fetchWithTimeout(url, {
-        method: "PATCH",
-        headers,
-        body: JSON.stringify({ type: newType }),
-      }, SUPABASE_TIMEOUT_MS);
-    } catch (err) {
-      const msg = err?.message || String(err);
-      if (attempt < retries) {
-        const delay = Math.min(1000 * Math.pow(2, attempt), 16000);
-        process.stderr.write(`\n[retry] id ${id} ${msg.slice(0, 120)}, waiting ${delay}ms (attempt ${attempt + 1}/${retries})\n`);
-        await sleep(delay);
-        continue;
-      }
-      throw err;
-    }
-    if (r.ok) return;
-    const body = await r.text();
-    const isTransient = r.status === 502 || r.status === 503 || r.status === 504 || r.status === 429;
-    if (isTransient && attempt < retries) {
-      const delay = Math.min(1000 * Math.pow(2, attempt), 16000);
-      process.stderr.write(`\n[retry] id ${id} got ${r.status}, waiting ${delay}ms (attempt ${attempt + 1}/${retries})\n`);
-      await sleep(delay);
-      continue;
-    }
-    throw new Error(`Update failed for id ${id}: ${r.status} ${body.slice(0, 200)}`);
+  for (let attempt = 0; ; attempt++) {
+    const { error } = await client.from("thoughts").update({ type: newType }).eq("id", id).select("id");
+    if (!error) return;
+    if (!isTransientDbError(error) || attempt >= retries) throw failure(`update thought ${id}`, error);
+    const delay = Math.min(1000 * Math.pow(2, attempt), 16000);
+    process.stderr.write(`\n[retry] id ${id} ${error.code}, waiting ${delay}ms (attempt ${attempt + 1}/${retries})\n`);
+    await sleep(delay);
   }
 }
 
@@ -162,15 +92,18 @@ async function updateBatch(updates) {
 }
 
 async function main() {
+  const BATCH_SIZE = positiveInt(args, "--batch-size", 500);
+  const LIMIT = positiveInt(args, "--limit", 0);
+  client = connect(readEnv(__dirname));
+
   console.log(`Starting type backfill${DRY_RUN ? " (DRY RUN — no writes)" : ""}`);
-  console.log(`Batch size: ${BATCH_SIZE}`);
+  console.log(`Batch size: ${BATCH_SIZE}${LIMIT ? `, limit: ${LIMIT}` : ""}`);
   console.log("");
 
-  // Cursor replaces offset. afterId starts at the zero UUID (thoughts.id
-  // is a UUID on stock Open Brain installs) and advances to the last id
-  // seen in each page, so a PATCH that removes rows from the
-  // `type=eq.reference` filter cannot cause the cursor to skip
-  // un-processed rows.
+  // Cursor replaces offset. afterId starts at the zero UUID (thoughts.id is
+  // a UUID) and advances to the last id seen in each page, so an update that
+  // removes rows from the `type = 'reference'` filter cannot cause the cursor
+  // to skip un-processed rows.
   let afterId = "00000000-0000-0000-0000-000000000000";
   let processedRows = 0;
   let total = null;
@@ -179,12 +112,13 @@ async function main() {
   let totalSkippedInvalidType = 0;
   let totalSkippedAlreadyCorrect = 0;
   let totalSkippedNullType = 0;
+  let limitReached = false;
 
   const invalidTypeLog = {};
   const typeDistribution = {};
 
   while (true) {
-    const { rows, total: fetchedTotal } = await fetchBatch(afterId, {
+    const { rows, total: fetchedTotal } = await fetchBatch(afterId, BATCH_SIZE, {
       includeCount: !firstCountDone,
     });
     firstCountDone = true;
@@ -200,7 +134,7 @@ async function main() {
     const updates = [];
 
     for (const row of rows) {
-      const metaType = row.type; // aliased from metadata->>type
+      const metaType = row.metadata?.type; // the row's metadata, read whole
 
       if (!metaType || metaType === "" || metaType === "null") {
         totalSkippedNullType++;
@@ -218,6 +152,10 @@ async function main() {
         continue;
       }
 
+      if (LIMIT && totalUpdated + updates.length >= LIMIT) {
+        limitReached = true;
+        break;
+      }
       updates.push({ id: row.id, type: metaType });
       typeDistribution[metaType] = (typeDistribution[metaType] || 0) + 1;
     }
@@ -236,11 +174,11 @@ async function main() {
     const pct = total ? ((processedRows / total) * 100).toFixed(1) : "?";
     process.stdout.write(`\rProgress: ${processedRows}/${total ?? "?"} (${pct}%) — updated so far: ${totalUpdated}`);
 
-    if (rows.length < BATCH_SIZE) break;
+    if (limitReached || rows.length < BATCH_SIZE) break;
   }
 
   console.log("\n");
-  console.log("=== BACKFILL COMPLETE ===");
+  console.log(limitReached ? `=== BACKFILL STOPPED AT --limit ${LIMIT} ===` : "=== BACKFILL COMPLETE ===");
   console.log("");
   console.log(`Rows processed:              ${processedRows}`);
   console.log(`Rows updated:                ${totalUpdated}${DRY_RUN ? " (dry run, not written)" : ""}`);
@@ -269,7 +207,4 @@ async function main() {
   console.log("Done.");
 }
 
-main().catch((err) => {
-  console.error("Fatal error:", err);
-  process.exit(1);
-});
+endWith(main(), () => client);

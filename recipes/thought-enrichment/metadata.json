@@ -9,8 +9,13 @@
   "version": "1.0.0",
   "requires": {
     "open_brain": true,
-    "services": ["OpenRouter API", "Anthropic API", "Supabase"],
-    "tools": ["Node.js 18+"]
+    "services": ["OpenRouter API or Anthropic API (enrich-thoughts.mjs only; any OpenAI-compatible endpoint, a local one included)"],
+    "tools": ["Bun 1.4+"],
+    "env": {
+      "required": ["SUPABASE_URL"],
+      "optional": ["OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", "OPENROUTER_CLASSIFIER_MODEL", "ANTHROPIC_API_KEY", "ANTHROPIC_CLASSIFIER_MODEL", "ENRICH_PROVIDER", "ENRICH_MAX_CALLS", "FETCH_TIMEOUT_MS"],
+      "ignored": ["SUPABASE_SERVICE_ROLE_KEY"]
+    }
   },
   "tags": ["enrichment", "classification", "backfill", "metadata", "llm", "openrouter", "anthropic"],
   "difficulty": "intermediate",
