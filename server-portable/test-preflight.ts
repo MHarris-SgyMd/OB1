@@ -1964,6 +1964,8 @@ else {
       // echoed (SMD-2242). An empty path reads back as "" — a zero-length
       // name, invalid SQL if echoed.
       const readerUrl = LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@");
+      /** pf_reader's own setting in this database — a statement the row prints sets one; each leg resets it. */
+      const readerOnThisDatabase = (setting: string) => claims.unsafe(`DO $r$ BEGIN EXECUTE format('ALTER ROLE pf_reader IN DATABASE %I ${setting}', current_database()); END $r$`);
       await claims.unsafe("ALTER ROLE pf_reader SET search_path = ''");
       const empty = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
       assert(/public is not on its search_path, which is empty\)\n\s+→ ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = public;/.test(empty.out),
@@ -1984,7 +1986,7 @@ else {
           } catch (e) {
             refused = (e as Error).message;
           } finally {
-            await claims.unsafe(`DO $r$ BEGIN EXECUTE format('ALTER ROLE pf_reader IN DATABASE %I RESET search_path', current_database()); END $r$`);
+            await readerOnThisDatabase("RESET search_path");
           }
         }
         assert(resolves, `…and run as printed it makes thoughts resolve for the role (${refused ? `refused: ${refused}` : printed ?? "nothing printed"})`);
@@ -1994,7 +1996,6 @@ else {
       // whitespace to Postgres, and a name that is a statement if pasted bare.
       // The printed statement, run as a superuser, leaves the sentinel standing
       // and makes thoughts resolve for the role.
-      const onThisDatabase = (setting: string) => claims.unsafe(`DO $r$ BEGIN EXECUTE format('ALTER ROLE pf_reader IN DATABASE %I ${setting}', current_database()); END $r$`);
       try {
         await claims.unsafe("CREATE TABLE IF NOT EXISTS public.pf_sentinel (id int)");
         const setter = new SQL({ url: LIVE!, max: 1 });
@@ -2027,7 +2028,7 @@ else {
         assert(resolves && standing, `…and run as printed it makes thoughts resolve for the role (${refused ? `refused: ${refused}` : resolves}) and runs nothing else — the sentinel stands (${standing})`);
       } finally {
         try {
-          await onThisDatabase("RESET search_path");
+          await readerOnThisDatabase("RESET search_path");
         } finally {
           await claims.unsafe("DROP TABLE IF EXISTS public.pf_sentinel");
           await claims.unsafe("ALTER ROLE pf_reader SET search_path = nowhere");
@@ -2094,7 +2095,7 @@ else {
         }
         assert(resolves, `…and run as printed by the login role itself it takes (${refused ? `refused: ${refused}` : resolves})`);
       } finally {
-        await claims.unsafe(`DO $r$ BEGIN EXECUTE format('ALTER ROLE pf_reader IN DATABASE %I RESET search_path', current_database()); END $r$`);
+        await readerOnThisDatabase("RESET search_path");
         await claims.unsafe("ALTER ROLE pf_reader RESET role");
         await claims.unsafe("DROP ROLE pf_acting");
       }
