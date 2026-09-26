@@ -485,10 +485,12 @@ recipes/world-model-diagnostic-activation/metadata.json # fix 7
 skills/world-model-diagnostic/metadata.json  # fix 7
 ```
 
-`recipes/lint-sweep`, `recipes/weekly-digest` and `extensions/professional-crm`
-are deliberately **unmodified** — their violations were resolved by widening
+`recipes/weekly-digest` and `extensions/professional-crm` are deliberately
+**unmodified** — their violations were resolved by widening
 `.github/metadata.schema.json` instead, so the contributor credit and env-var
-manifests they carry survive a rebase untouched.
+manifests they carry survive a rebase untouched. `recipes/lint-sweep` was the
+third until SMD-2144 moved its script onto the shim and its manifest to the
+object form the schema had been widened for (`env` grouped, `tools` Bun).
 
 Until SMD-1800 the one file where a conflict was likely to need thought was
 `server/index.ts`, upstream's Edge Function (changed 9 times in upstream's
@@ -933,11 +935,13 @@ Deliberate. Recorded so nobody assumes they were missed.
   machine (measured in change 99's fourth review pass; `OLLAMA_HOST=0.0.0.0`,
   which this bullet used to prescribe, put an unauthenticated model API on the
   LAN for nothing).
-- **The 24 shim-migrated files are not individually tested.** Most need live
+- **The codemod-migrated files are not individually tested.** Most need live
   credentials (Gmail, Slack, Readwise). The shim itself has 61 assertions against
-  real Postgres, and CI checks every migrated file still parses and that the
-  codemod round-trips byte-for-byte — but exercise the ones you actually run
-  before trusting them.
+  real Postgres, and CI checks every banner-carrying file still parses and that
+  the codemod round-trips byte-for-byte — but exercise the ones you actually run
+  before trusting them. The two hand ports (`recipes/brain-backup`,
+  `recipes/lint-sweep`, SMD-2144) carry no banner and are driven instead, as
+  deployed, by `db/test-live.ts` [26].
 - **No file imports supabase-js at runtime any more.** The six servers that
   used resource embedding and nested `.or()` moved with SMD-1798; the
   dashboard's type-only import went with its Supabase sign-in (SMD-1801). Check

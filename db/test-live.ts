@@ -29,7 +29,7 @@
  */
 
 import { SQL } from "bun";
-import { chmodSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5375,6 +5375,172 @@ console.log("\n[25] Migration 055's payload backfill under two connections: a se
   await sql.close();
 }
 
+console.log("\n[26] recipes/brain-backup and recipes/lint-sweep on the SQL shim: the export pages every thought past one page and skips a table that is not there, the sweep's counts are the table's, neither needs a key, and a Supabase URL is refused before any query (SMD-2144)");
+{
+  // The two read-only recipe scripts SMD-2126 sent to compat/supabase-sql,
+  // driven as deployed — `bun <file>` in a directory of their own, SUPABASE_URL
+  // the one variable — against this database carrying the schemas their reads
+  // name: enhanced-thoughts for Tier 1's importance and source_type columns
+  // ([18] left the columns; the file is idempotent); entity-extraction for Tier
+  // 2's entities and edges and the export's three optional tables, applied only
+  // after Tier 2 has seen their absence — the one path the rule tolerates; the
+  // lint views for the record. What the files add is read from the catalog and
+  // dropped in the finally, as [18] does; the columns stay, as there. The
+  // planted table is the truth every printed count is held to. lint-sweep.js
+  // reads `.env` and `.env.local` from ITS OWN directory (the recipe's, not the
+  // cwd — `--no-env-file` stops Bun's loader, not the script's), so on a machine
+  // where a developer keeps one there the four sweep runs it could reach are
+  // skipped: that file's SUPABASE_URL would defeat the refusal case and its
+  // OPENROUTER_API_KEY would pay for Tier 3 (review pass 1, cold read); the two
+  // `--tier=2` runs — absence, the denied role — take their URL from the
+  // environment, which the script prefers, and read no key, so they run
+  // everywhere. CI has no such file. Residue, as [18]'s: entity-extraction's two
+  // indexes on 016's `thought_entities` outlive the catalog diff.
+  const sql = new SQL({ url: URL_, max: 2 });
+  const catalog26 = async () => ({
+    tables: new Set(((await sql`SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
+    views: new Set(((await sql`SELECT viewname AS n FROM pg_views WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
+    fns: new Set(((await sql`SELECT p.oid::regprocedure::text AS n FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace`) as { n: string }[]).map((r) => r.n)),
+  });
+  const before26 = await catalog26();
+  const RECIPES = join(CONTRIB_DIR, "recipes");
+  const scratch = join(tmpdir(), `ob1-live-2144-${process.pid}`);
+  const lintDir = join(scratch, "lint"), backupDir = join(scratch, "backup");
+  mkdirSync(lintDir, { recursive: true });
+  mkdirSync(backupDir, { recursive: true });
+  const env = (extra: Record<string, string>) => ({ PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...extra });
+  const lint = (extra: Record<string, string>, ...flags: string[]) => runScript(["bun", join(RECIPES, "lint-sweep/lint-sweep.js"), ...flags], { cwd: lintDir, env: env(extra) });
+  const backup = (extra: Record<string, string>) => runScript(["bun", join(RECIPES, "brain-backup/backup-brain.mjs")], { cwd: backupDir, env: env(extra) });
+  const firstLine = (s: string) => s.trim().split("\n")[0] ?? "";
+  // The tier lines and the script's own FAILED line, so a failed assertion's message says why (review pass 6, run-it:
+  // under the mutants it read `[tier 2] graph lint…` alone).
+  const tierLines = (out: string) => out.split("\n").filter((l) => /^\[tier|^\[lint-sweep\] FAILED/.test(l)).join(" | ");
+  const recipeEnvFile = [".env", ".env.local"].map((f) => join(RECIPES, "lint-sweep", f)).find((f) => existsSync(f));
+  try {
+    await sql`DELETE FROM thoughts`;
+    await sql.unsafe(readFileSync(join(SCHEMAS_DIR, "enhanced-thoughts/schema.sql"), "utf8"));
+    // 1,050 rows — a page of the export's 1,000 and a partial second — a third
+    // tagged, one over-tagged, importance 0–4 by turn, a second apart so "most
+    // recent" is an order and not a tie; a raw insert leaves the fingerprint
+    // NULL (the functions compute it; 023's backfill is the only other writer),
+    // which the sweep counts. A three-entity graph
+    // with one edge, and one high-importance row linked through 016's
+    // thought_entities.
+    const N = 1050;
+    await sql.unsafe(`INSERT INTO thoughts (content, metadata, importance, created_at)
+      SELECT 'lint row ' || i,
+             CASE WHEN i % 3 = 0 THEN '{"tags":["a"],"topics":["b"]}'::jsonb
+                  WHEN i = 7 THEN jsonb_build_object('tags', (SELECT jsonb_agg('t' || j) FROM generate_series(1, 11) j))
+                  ELSE '{}'::jsonb END,
+             (i % 5)::smallint,
+             now() - (i || ' seconds')::interval
+      FROM generate_series(1, ${N}) i`);
+    // The tolerated absence, before the graph schema lands: a brain without `schemas/entity-extraction` — the README's
+    // optional case — is Tier 2's "absent", exit 0 and a report naming the two tables; 016's `thought_entities` is here,
+    // so it is not among them, and the 210 rows at importance ≥ 4 are all unlinked. A rule that refused everything
+    // aborted here with 42P01 and passed every other assertion (review pass 5, mutant). Outside the env-file guard,
+    // as the probe is: the URL rides in the environment and Tier 2 reads no key (review pass 6, cold read).
+    const absentRun = await lint({ SUPABASE_URL: URL_ }, "--tier=2", `--report=${join(lintDir, "absent.md")}`);
+    let absentReport = "";
+    try { absentReport = readFileSync(join(lintDir, "absent.md"), "utf8"); } catch { /* not written: the assertion says so */ }
+    assert(absentRun.code === 0 && /\[tier 2\] done — 210 high-imp isolated, 0 isolated entities, missing: entities,edges$/m.test(absentRun.out) && /\*Graph tables absent: entities, edges\./.test(absentReport),
+      `…Tier 2 on a brain without entity-extraction: exit 0, the two tables named absent and 016's thought_entities not among them, 210 unlinked high-importance rows (${absentRun.code}: ${tierLines(absentRun.out) || firstLine(absentRun.out)})`);
+    await sql.unsafe(readFileSync(join(SCHEMAS_DIR, "entity-extraction/schema.sql"), "utf8"));
+    await sql.unsafe(readFileSync(join(RECIPES, "lint-sweep/views.sql"), "utf8"));
+    await sql`INSERT INTO entities (entity_type, canonical_name, normalized_name) VALUES ('person', 'Ada', 'ada'), ('person', 'Bob', 'bob'), ('topic', 'Graphs', 'graphs')`;
+    await sql`INSERT INTO edges (from_entity_id, to_entity_id, relation) SELECT a.id, b.id, 'related_to' FROM entities a, entities b WHERE a.normalized_name = 'ada' AND b.normalized_name = 'bob'`;
+    await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('person', 'Ada', 'ada')`;
+    await sql`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) SELECT t.id, e.id, 0.9, 'test-live' FROM thoughts t, ob1_entities e WHERE t.content = 'lint row 4' AND e.normalized_name = 'ada'`;
+    const [truth] = (await sql`SELECT count(*)::int AS total,
+      count(*) FILTER (WHERE COALESCE(jsonb_array_length(metadata->'tags'), 0) = 0 AND COALESCE(jsonb_array_length(metadata->'topics'), 0) = 0 AND COALESCE(jsonb_array_length(metadata->'people'), 0) = 0)::int AS orphans,
+      count(*) FILTER (WHERE importance <= 2 AND length(content) < 40)::int AS low,
+      count(*) FILTER (WHERE importance >= 4)::int AS hi,
+      count(*) FILTER (WHERE content_fingerprint IS NULL)::int AS nofp FROM thoughts`) as { total: number; orphans: number; low: number; hi: number; nofp: number }[];
+    assert(truth.total === N && truth.orphans === 699 && truth.low === 630 && truth.hi === 210 && truth.nofp === N,
+      `the planted table: ${N} rows, 699 orphans by tag, 630 low-signal, 210 at importance ≥ 4, no fingerprint on a raw insert (${JSON.stringify(truth)})`);
+
+    // Every tier, no key in the environment: each count the run prints and the report carries is the table's.
+    if (recipeEnvFile) {
+      for (const label of ["lint-sweep.js --tier=all on the shim", "…its report", "…OPEN_BRAIN_URL alone", "…no URL and a Supabase URL refused"]) skip(label, `${recipeEnvFile.slice(CONTRIB_DIR.length + 1)} exists on this machine and the script reads it`);
+    } else {
+    const sweep = await lint({ SUPABASE_URL: URL_ }, "--tier=all", `--report=${join(lintDir, "sweep.md")}`);
+    let report = "";
+    try { report = readFileSync(join(lintDir, "sweep.md"), "utf8"); } catch { /* not written: the assertion says so */ }
+    assert(sweep.code === 0 && sweep.out.includes(`[tier 1] done — ${N} total thoughts, 699 orphans-by-tag, 0 dup groups, ${N} missing-fingerprint`) && sweep.out.includes("[tier 2] done — 209 high-imp isolated, 1 isolated entities") && sweep.out.includes("[tier 3] skipped — OPENROUTER_API_KEY not set"),
+      `lint-sweep.js --tier=all on the shim, SUPABASE_URL alone: Tier 1's four counts are the table's, Tier 2 finds the 209 unlinked high-importance rows and the one entity without an edge, Tier 3 skips without a key (exit ${sweep.code}: ${tierLines(sweep.out).slice(0, 320) || firstLine(sweep.out)})`);
+    // The `created_at desc` clause holds the report's wording: the query's direction is not observable here — 1,050 rows
+    // fit inside one 2,000-row sample, so no count moves when it flips (review pass 3, mutant).
+    assert(/Total thoughts in table \(exact count, uncapped\): 1050\n/.test(report) && /Low-signal noise candidates \(in recent 2000 sampled\): 630\n/.test(report) && /Over-tagged \(>10 tags\): \*\*1\*\*/.test(report) && /ordered by `created_at desc`/.test(report) && /Entities with zero edges .*: \*\*1\*\*/.test(report),
+      `…and the report carries the exact count, the 630 low-signal rows, the one over-tagged row, recency by created_at and the one isolated entity (${report.length} chars)`);
+    const legacy = await lint({ OPEN_BRAIN_URL: URL_ }, "--tier=1", `--report=${join(lintDir, "legacy.md")}`);
+    assert(legacy.code === 0 && legacy.out.includes(`[tier 1] done — ${N} total thoughts`) && /OPEN_BRAIN_URL is deprecated; prefer SUPABASE_URL/.test(legacy.out),
+      `…OPEN_BRAIN_URL alone runs the same sweep, with the deprecation line (exit ${legacy.code})`);
+    // Refused before any query, the message intact on stderr.
+    const noUrl = await lint({}, "--tier=1");
+    const httpsUrl = await lint({ SUPABASE_URL: "https://example.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "unused" }, "--tier=1");
+    assert(noUrl.code === 1 && /ERROR: SUPABASE_URL must be set/.test(noUrl.out) && httpsUrl.code === 1 && /expected a postgres:\/\/ connection URL/.test(httpsUrl.out) && !/\[tier 1\] done/.test(httpsUrl.out),
+      `…no URL exits 1 naming the variable; a Supabase URL exits 1 with the shim's refusal, before any query (${noUrl.code}: ${firstLine(noUrl.out)}; ${httpsUrl.code}: ${firstLine(httpsUrl.out).slice(0, 120)})`);
+    }
+
+    // A graph table the role may not read is a refusal, not an absence: with SELECT on `thoughts` alone, Tier 2 exits 1
+    // naming 42501 on `entities`, where it had called the three tables absent and exited 0 with a report (review pass 4,
+    // run-it — both readers, from a denied role and from the README's promise). A LOGIN role, so [18]'s two guards:
+    // skipped where the connection cannot create one or carries no credentials to swap. Outside the env-file guard:
+    // the URL rides in the environment, which the script prefers over its files, and Tier 2 reads no key (review
+    // pass 5, cold read — inside the guard it was dropped silently on a machine with such a file).
+    const PROBE_ROLE = "ob1_live_lint_probe";
+    const probeUrl = URL_.replace(/\/\/[^@]*@/, `//${PROBE_ROLE}:ob1probe@`);
+    const [{ mayCreate: mayCreateProbe }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
+    if (probeUrl === URL_ || !mayCreateProbe) {
+      skip("…a role with SELECT on thoughts alone: Tier 2 refuses, not \"absent\"", probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+    } else {
+      const dropProbe = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PROBE_ROLE}') THEN EXECUTE 'DROP OWNED BY ${PROBE_ROLE}'; EXECUTE 'DROP ROLE ${PROBE_ROLE}'; END IF; END $$`);
+      await dropProbe();
+      try {
+        await sql.unsafe(`CREATE ROLE ${PROBE_ROLE} LOGIN PASSWORD 'ob1probe'; GRANT USAGE ON SCHEMA public TO ${PROBE_ROLE}; GRANT SELECT ON thoughts TO ${PROBE_ROLE}`);
+        const denied = await lint({ SUPABASE_URL: probeUrl }, "--tier=2", `--report=${join(lintDir, "denied.md")}`);
+        assert(denied.code === 1 && /\[lint-sweep\] FAILED: entities → 42501 permission denied for table entities/.test(denied.out) && !/Graph tables absent|\[tier 2\] done/.test(denied.out) && !existsSync(join(lintDir, "denied.md")),
+          `…a role with SELECT on thoughts alone: Tier 2 exits 1 naming 42501 on entities and writes no report, rather than calling the three tables absent (${denied.code}: ${firstLine(denied.out.split("\n").filter((l) => /FAILED/.test(l)).join(" ") || denied.out)})`);
+      } finally {
+        await dropProbe();
+      }
+    }
+
+    // The export: every thought, past the first page; the optional tables it
+    // finds; the two smart-ingest tables this database lacks, skipped by name.
+    const dates = new Set([new Date().toISOString().slice(0, 10)]);
+    const exported = await backup({ SUPABASE_URL: URL_ });
+    dates.add(new Date().toISOString().slice(0, 10));
+    const file = (table: string): Record<string, unknown>[] | null => {
+      for (const d of dates) { try { return JSON.parse(readFileSync(join(backupDir, "backup", `${table}-${d}.json`), "utf8")) as Record<string, unknown>[]; } catch { /* the other date, or no file */ } }
+      return null;
+    };
+    const thoughtsOut = file("thoughts"), entitiesOut = file("entities"), edgesOut = file("edges"), linksOut = file("thought_entities");
+    // Postgres orders uuid bytewise, which is the hex text's order; the export's pages are `ORDER BY id`, so the file is.
+    const ascending = <K extends string | number>(rows: Record<string, unknown>[], key: (r: Record<string, unknown>) => K) => rows.every((r, i) => i === 0 || key(rows[i - 1]) < key(r));
+    const ids = new Set(((await sql`SELECT id::text AS id FROM thoughts`) as { id: string }[]).map((r) => r.id));
+    // The progress line is the one trace of `count: "exact"`: without the count the run writes the same files and
+    // summary (review pass 1, cold read — the mutant that dropped it survived every other assertion).
+    assert(exported.code === 0 && /thoughts: 1000\/1050 rows/.test(exported.out) && /thoughts: 1050 rows \(/.test(exported.out) && /ingestion_jobs: skipped \(table not present\)/.test(exported.out) && /ingestion_items: skipped \(table not present\)/.test(exported.out) && /Done\. 6\/6 tables exported successfully/.test(exported.out),
+      `backup-brain.mjs on the shim, SUPABASE_URL alone: 1,050 thoughts over two pages with the exact count on the progress line, the three entity-extraction tables, the two smart-ingest tables skipped as not present, 6/6 (exit ${exported.code}: ${firstLine(exported.out.split("--- Backup Summary ---")[1] ?? exported.out).slice(0, 160)})`);
+    assert(thoughtsOut?.length === N && thoughtsOut.every((r) => ids.has(String(r.id))) && new Set(thoughtsOut.map((r) => r.id)).size === N && ascending(thoughtsOut, (r) => String(r.id)) && ascending(entitiesOut ?? [], (r) => Number(r.id)) && thoughtsOut.every((r) => /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(String(r.created_at)) && typeof r.metadata === "object") && entitiesOut?.length === 3 && edgesOut?.length === 1 && linksOut?.length === 1,
+      `…the thoughts file holds exactly the table's ${N} ids once each and in id order (a page query without its ORDER BY survived every other assertion on a fresh heap — review pass 3, mutant), timestamps as ISO strings and metadata as objects; entities 3, edges 1, thought_entities 1 (${thoughtsOut?.length ?? "no file"}/${entitiesOut?.length ?? "-"}/${edgesOut?.length ?? "-"}/${linksOut?.length ?? "-"})`);
+    const bkNoUrl = await backup({});
+    const bkHttps = await backup({ SUPABASE_URL: "https://example.supabase.co" });
+    assert(bkNoUrl.code === 1 && /ERROR: SUPABASE_URL not found\.\nEither export it/.test(bkNoUrl.out) && bkHttps.code === 1 && /expected a postgres:\/\/ connection URL/.test(bkHttps.out) && !/Open Brain Backup --/.test(bkHttps.out),
+      `…no URL exits 1 with both lines of its message; a Supabase URL exits 1 with the shim's refusal, before any query (${bkNoUrl.code}: ${firstLine(bkNoUrl.out)}; ${bkHttps.code}: ${firstLine(bkHttps.out).slice(0, 120)})`);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+    await sql`DELETE FROM thoughts`;
+    await sql`DELETE FROM ob1_entities`;
+    const after26 = await catalog26();
+    for (const v of after26.views) if (!before26.views.has(v)) await sql.unsafe(`DROP VIEW IF EXISTS ${v} CASCADE`);
+    for (const t of after26.tables) if (!before26.tables.has(t)) await sql.unsafe(`DROP TABLE IF EXISTS ${t} CASCADE`);
+    for (const f of after26.fns) if (!before26.fns.has(f)) await sql.unsafe(`DROP FUNCTION IF EXISTS ${f} CASCADE`);
+    await sql.close();
+  }
+}
+
 // db/README.md's Testing block quotes this suite's assertion total. The count
 // is lower when a group is skipped (PostgreSQL 18, or JIT off), so only a full
 // run — as CI's pg16-with-JIT job is — is compared to the headline (SMD-1805).
@@ -5389,7 +5555,7 @@ console.log("\n[doc] db/README.md states this suite's assertion total (full runs
     docCheck(claims.length > 0 && claims.every((c) => c === n),
       `db/README.md quotes test-live.ts's ${n} assertions for a full run (found ${[...new Set(claims)].join(", ") || "none"})`);
   } else {
-    console.log(`  ·  (doc) skipped — ${skipped()} group(s) did not run, so this ${n}-assertion run is not the full count the README states`);
+    console.log(`  ·  (doc) skipped — ${skipped()} skip(s), a group or an assertion, so this ${n}-assertion run is not the full count the README states`);
   }
 }
 
