@@ -258,9 +258,9 @@ assert(currentExcl.mrr >= currentLabel.mrr - 0.005, "exclusion does not HURT the
 // PRICED BEFORE THE SQL EXISTS, as this file priced exclude: `demote` is a
 // TypeScript oracle over the hybrid's window and node_state's columns, so the
 // numbers decided whether migration 059 was written. It was; the oracle stays,
-// and 059's search_thoughts_current is held to it on every query. Three policies, one query
-// set: off (the hybrid at N, today's order), demote, and exclude (the demoted
-// rows removed from the window). Every row sits at a controlled cosine to its
+// and 059's search_thoughts_current is held to it on every query. Three
+// policies, one query set: off (the hybrid at N, today's order), demote, and
+// exclude (the demoted rows removed from the window). Every row sits at a controlled cosine to its
 // topic's query (the axis), its remainder in axes no topic uses, so another
 // topic's row is at cosine 0 and each topic is its own neighbourhood.
 //

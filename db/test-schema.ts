@@ -8255,11 +8255,14 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
 // for search_thoughts' opt-in prefer_current. Every row sits at a controlled
 // cosine to the query's axis ([21]'s construction), so each rank is known.
 // Held here: the contract (signature, columns, settings, the weight); with
-// nothing to demote, the hybrid's rows row for row over [21]'s grid; the rule
-// — who is demoted and who is not, the weight exactly, once, ties in the
-// hybrid's order; what 0.25 does to an exact-literal hit; the window and its
-// exactness; the coverage columns; node_state's dependency joins dropped from
-// the plan; the grant the server group now holds; a replay over a reshape.
+// nothing to demote, the hybrid's first N at its window, row for row over
+// [21]'s grid; the rule — who is demoted and who is not, the weight exactly,
+// once; ties to the current row, then the hybrid's order (a literal-only
+// query's zeros); what 0.25 does to an exact-literal hit; the window and its
+// exactness, both branches; the clamp; the coverage columns; node_state's
+// dependency joins dropped from the plan; the grant the server group now
+// holds; a replay over a reshape. The tie-break's teeth on real Postgres are
+// test-live [26]'s, where the join does not hand rows over in order.
 console.log("\n[55] Migration 059: search_thoughts_current — the hybrid with settled and superseded thoughts ranked below current ones, on request: the contract, the hybrid's rows when nothing is demoted, who is demoted and by exactly what, an exact-literal hit's cost, the window, and the server group's grant (SMD-2255)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;

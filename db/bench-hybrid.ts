@@ -188,8 +188,9 @@ for (const n of SCALES) {
   // (058: the ids narrow the rows, not the work). Timed after the rows above,
   // so their numbers are what they were: 40% of the rows become ticket rows
   // (tickets of one or two rows, so heads sometimes choose), a quarter of
-  // those settled, and one row in twenty supersedes the row before it. The budget, pre-registered: the
-  // flag adds at most the hybrid's own median at 10,000 rows.
+  // those settled, and one row in twenty supersedes the row before it. The
+  // budget, pre-registered: the flag adds at most the hybrid's own median at
+  // 10,000 rows (missed; SMD-2256).
   await sql.unsafe(`UPDATE thoughts SET metadata = metadata || jsonb_build_object('issue', 'B-' || ((metadata->>'doc')::int / 2),
                       'status_type', CASE WHEN (metadata->>'doc')::int % 20 < 2 THEN 'completed' ELSE 'started' END)
                      WHERE (metadata->>'doc')::int % 5 < 2`);

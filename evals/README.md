@@ -2597,11 +2597,11 @@ window first — and it bites only against an exact-literal hit, so a settled
 ticket looked up by its key drops; the tool says to leave the flag off for that.
 
 **On the dogfood brain** (a read-only dump, 945 thoughts, 315 demotable: 197
-settled ticket rows, 56 notes filed under a settled ticket, 60 superseded, 2 both; 59
-logged hybrid searches replayed with the provider): the top result changed in 20
-of 59, and in 20 the default's top result was settled or superseded (the two
-counted apart); a demoted row sat in 54 of the 59 windows; the window was exact
-on 59 of 59.
+settled ticket rows, 56 notes filed under a settled ticket, 60 superseded, 2
+both; 59 logged hybrid searches replayed with the provider): the top result
+changed in 20 of 59, and in 20 the default's top result was settled or
+superseded (the two counted apart); a demoted row sat in 54 of the 59 windows;
+the window was exact on 59 of 59.
 
 **Latency, and a missed budget.** `db/bench-hybrid.ts`'s prefer_current arm:
 +10.7 ms over the hybrid's 1.1 at 10,000 thoughts, +129 ms at 100,000, and
