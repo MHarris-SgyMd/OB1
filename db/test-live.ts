@@ -5229,6 +5229,113 @@ console.log("\n[25] Migration 055's payload backfill under two connections: a se
   await sql.close();
 }
 
+console.log("\n[26] recipes/brain-backup and recipes/lint-sweep on the SQL shim: the export pages every thought past one page and skips a table that is not there, the sweep's counts are the table's, neither needs a key, and a Supabase URL is refused before any query (SMD-2144)");
+{
+  // The two read-only recipe scripts SMD-2126 sent to compat/supabase-sql,
+  // driven as deployed \u2014 `bun <file>` in a directory of their own, SUPABASE_URL
+  // the one variable \u2014 against this database carrying the schemas their reads
+  // name: enhanced-thoughts for Tier 1's importance and source_type columns
+  // ([18] left the columns; the file is idempotent), entity-extraction for Tier
+  // 2's entities and edges and the export's three optional tables, the lint
+  // views for the record. What the files add is read from the catalog and
+  // dropped in the finally, as [18] does; the columns stay, as there. The
+  // planted table is the truth every printed count is held to.
+  const sql = new SQL({ url: URL_, max: 2 });
+  const catalog26 = async () => ({
+    tables: new Set(((await sql`SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
+    views: new Set(((await sql`SELECT viewname AS n FROM pg_views WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
+    fns: new Set(((await sql`SELECT p.oid::regprocedure::text AS n FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace`) as { n: string }[]).map((r) => r.n)),
+  });
+  const before26 = await catalog26();
+  const RECIPES = join(CONTRIB_DIR, "recipes");
+  const scratch = join(tmpdir(), `ob1-live-2144-${process.pid}`);
+  const lintDir = join(scratch, "lint"), backupDir = join(scratch, "backup");
+  mkdirSync(lintDir, { recursive: true });
+  mkdirSync(backupDir, { recursive: true });
+  const env = (extra: Record<string, string>) => ({ PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...extra });
+  const lint = (extra: Record<string, string>, ...flags: string[]) => runScript(["bun", join(RECIPES, "lint-sweep/lint-sweep.js"), ...flags], { cwd: lintDir, env: env(extra) });
+  const backup = (extra: Record<string, string>) => runScript(["bun", join(RECIPES, "brain-backup/backup-brain.mjs")], { cwd: backupDir, env: env(extra) });
+  const firstLine = (s: string) => s.trim().split("\n")[0] ?? "";
+  try {
+    await sql`DELETE FROM thoughts`;
+    for (const f of ["enhanced-thoughts/schema.sql", "entity-extraction/schema.sql"]) await sql.unsafe(readFileSync(join(SCHEMAS_DIR, f), "utf8"));
+    await sql.unsafe(readFileSync(join(RECIPES, "lint-sweep/views.sql"), "utf8"));
+    // 1,050 rows \u2014 a page and a half of the export's 1,000 \u2014 a third tagged, one
+    // over-tagged, importance 0\u20134 by turn, a second apart so "most recent" is an
+    // order and not a tie; a raw insert leaves the fingerprint NULL (016's
+    // trigger does not fill it), which the sweep counts. A three-entity graph
+    // with one edge, and one high-importance row linked through 016's
+    // thought_entities.
+    const N = 1050;
+    await sql.unsafe(`INSERT INTO thoughts (content, metadata, importance, created_at)
+      SELECT 'lint row ' || i,
+             CASE WHEN i % 3 = 0 THEN '{"tags":["a"],"topics":["b"]}'::jsonb
+                  WHEN i = 7 THEN jsonb_build_object('tags', (SELECT jsonb_agg('t' || j) FROM generate_series(1, 11) j))
+                  ELSE '{}'::jsonb END,
+             (i % 5)::smallint,
+             now() - (i || ' seconds')::interval
+      FROM generate_series(1, ${N}) i`);
+    await sql`INSERT INTO entities (entity_type, canonical_name, normalized_name) VALUES ('person', 'Ada', 'ada'), ('person', 'Bob', 'bob'), ('topic', 'Graphs', 'graphs')`;
+    await sql`INSERT INTO edges (from_entity_id, to_entity_id, relation) SELECT a.id, b.id, 'related_to' FROM entities a, entities b WHERE a.normalized_name = 'ada' AND b.normalized_name = 'bob'`;
+    await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('person', 'Ada', 'ada')`;
+    await sql`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) SELECT t.id, e.id, 0.9, 'test-live' FROM thoughts t, ob1_entities e WHERE t.content = 'lint row 4' AND e.normalized_name = 'ada'`;
+    const [truth] = (await sql`SELECT count(*)::int AS total,
+      count(*) FILTER (WHERE COALESCE(jsonb_array_length(metadata->'tags'), 0) = 0 AND COALESCE(jsonb_array_length(metadata->'topics'), 0) = 0 AND COALESCE(jsonb_array_length(metadata->'people'), 0) = 0)::int AS orphans,
+      count(*) FILTER (WHERE importance <= 2 AND length(content) < 40)::int AS low,
+      count(*) FILTER (WHERE importance >= 4)::int AS hi,
+      count(*) FILTER (WHERE content_fingerprint IS NULL)::int AS nofp FROM thoughts`) as { total: number; orphans: number; low: number; hi: number; nofp: number }[];
+    assert(truth.total === N && truth.orphans === 699 && truth.low === 630 && truth.hi === 210 && truth.nofp === N,
+      `the planted table: ${N} rows, 699 orphans by tag, 630 low-signal, 210 at importance ≥ 4, no fingerprint on a raw insert (${JSON.stringify(truth)})`);
+
+    // Every tier, no key in the environment: each count the run prints and the report carries is the table's.
+    const sweep = await lint({ SUPABASE_URL: URL_ }, "--tier=all", `--report=${join(lintDir, "sweep.md")}`);
+    let report = "";
+    try { report = readFileSync(join(lintDir, "sweep.md"), "utf8"); } catch { /* not written: the assertion says so */ }
+    const tierLines = (out: string) => out.split("\n").filter((l) => /^\[tier/.test(l)).join(" | ");
+    assert(sweep.code === 0 && sweep.out.includes(`[tier 1] done — ${N} total thoughts, 699 orphans-by-tag, 0 dup groups, ${N} missing-fingerprint`) && sweep.out.includes("[tier 2] done \u2014 209 high-imp isolated, 1 isolated entities") && sweep.out.includes("[tier 3] skipped \u2014 OPENROUTER_API_KEY not set"),
+      `lint-sweep.js --tier=all on the shim, SUPABASE_URL alone: Tier 1's four counts are the table's, Tier 2 finds the 209 unlinked high-importance rows and the one entity without an edge, Tier 3 skips without a key (exit ${sweep.code}: ${tierLines(sweep.out).slice(0, 320) || firstLine(sweep.out)})`);
+    assert(/Total thoughts in table \(exact count, uncapped\): 1050\n/.test(report) && /Low-signal noise candidates \(in recent 2000 sampled\): 630\n/.test(report) && /Over-tagged \(>10 tags\): \*\*1\*\*/.test(report) && /ordered by `created_at desc`/.test(report) && /Entities with zero edges .*: \*\*1\*\*/.test(report),
+      `…and the report carries the exact count, the 630 low-signal rows, the one over-tagged row, recency by created_at and the one isolated entity (${report.length} chars)`);
+    const legacy = await lint({ OPEN_BRAIN_URL: URL_ }, "--tier=1", `--report=${join(lintDir, "legacy.md")}`);
+    assert(legacy.code === 0 && legacy.out.includes(`[tier 1] done — ${N} total thoughts`) && /OPEN_BRAIN_URL is deprecated; prefer SUPABASE_URL/.test(legacy.out),
+      `…OPEN_BRAIN_URL alone runs the same sweep, with the deprecation line (exit ${legacy.code})`);
+    // Refused before any query, the message intact on stderr.
+    const noUrl = await lint({}, "--tier=1");
+    const httpsUrl = await lint({ SUPABASE_URL: "https://example.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "unused" }, "--tier=1");
+    assert(noUrl.code === 1 && /ERROR: SUPABASE_URL must be set/.test(noUrl.out) && httpsUrl.code === 1 && /expected a postgres:\/\/ connection URL/.test(httpsUrl.out) && !/\[tier 1\] done/.test(httpsUrl.out),
+      `…no URL exits 1 naming the variable; a Supabase URL exits 1 with the shim's refusal, before any query (${noUrl.code}: ${firstLine(noUrl.out)}; ${httpsUrl.code}: ${firstLine(httpsUrl.out).slice(0, 120)})`);
+
+    // The export: every thought, past the first page; the optional tables it
+    // finds; the two smart-ingest tables this database lacks, skipped by name.
+    const dates = new Set([new Date().toISOString().slice(0, 10)]);
+    const exported = await backup({ SUPABASE_URL: URL_ });
+    dates.add(new Date().toISOString().slice(0, 10));
+    const file = (table: string): Record<string, unknown>[] | null => {
+      for (const d of dates) { try { return JSON.parse(readFileSync(join(backupDir, "backup", `${table}-${d}.json`), "utf8")) as Record<string, unknown>[]; } catch { /* the other date, or no file */ } }
+      return null;
+    };
+    const thoughtsOut = file("thoughts"), entitiesOut = file("entities"), edgesOut = file("edges"), linksOut = file("thought_entities");
+    const ids = new Set(((await sql`SELECT id::text AS id FROM thoughts`) as { id: string }[]).map((r) => r.id));
+    assert(exported.code === 0 && /thoughts: 1050 rows \(/.test(exported.out) && /ingestion_jobs: skipped \(table not present\)/.test(exported.out) && /ingestion_items: skipped \(table not present\)/.test(exported.out) && /Done\. 6\/6 tables exported successfully/.test(exported.out),
+      `backup-brain.mjs on the shim, SUPABASE_URL alone: 1,050 thoughts over two pages, the three entity-extraction tables, the two smart-ingest tables skipped as not present, 6/6 (exit ${exported.code}: ${firstLine(exported.out.split("--- Backup Summary ---")[1] ?? exported.out).slice(0, 160)})`);
+    assert(thoughtsOut?.length === N && thoughtsOut.every((r) => ids.has(String(r.id))) && new Set(thoughtsOut.map((r) => r.id)).size === N && thoughtsOut.every((r) => typeof r.created_at === "string" && typeof r.metadata === "object") && entitiesOut?.length === 3 && edgesOut?.length === 1 && linksOut?.length === 1,
+      `…the thoughts file holds exactly the table's ${N} ids once each, timestamps as ISO strings and metadata as objects; entities 3, edges 1, thought_entities 1 (${thoughtsOut?.length ?? "no file"}/${entitiesOut?.length ?? "-"}/${edgesOut?.length ?? "-"}/${linksOut?.length ?? "-"})`);
+    const bkNoUrl = await backup({});
+    const bkHttps = await backup({ SUPABASE_URL: "https://example.supabase.co" });
+    assert(bkNoUrl.code === 1 && /ERROR: SUPABASE_URL not found\.\nEither export it/.test(bkNoUrl.out) && bkHttps.code === 1 && /expected a postgres:\/\/ connection URL/.test(bkHttps.out) && !/Open Brain Backup --/.test(bkHttps.out),
+      `…no URL exits 1 with both lines of its message; a Supabase URL exits 1 with the shim's refusal, before any query (${bkNoUrl.code}: ${firstLine(bkNoUrl.out)}; ${bkHttps.code}: ${firstLine(bkHttps.out).slice(0, 120)})`);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+    await sql`DELETE FROM thoughts`;
+    await sql`DELETE FROM ob1_entities`;
+    const after26 = await catalog26();
+    for (const v of after26.views) if (!before26.views.has(v)) await sql.unsafe(`DROP VIEW IF EXISTS ${v} CASCADE`);
+    for (const t of after26.tables) if (!before26.tables.has(t)) await sql.unsafe(`DROP TABLE IF EXISTS ${t} CASCADE`);
+    for (const f of after26.fns) if (!before26.fns.has(f)) await sql.unsafe(`DROP FUNCTION IF EXISTS ${f} CASCADE`);
+    await sql.close();
+  }
+}
+
 // db/README.md's Testing block quotes this suite's assertion total. The count
 // is lower when a group is skipped (PostgreSQL 18, or JIT off), so only a full
 // run — as CI's pg16-with-JIT job is — is compared to the headline (SMD-1805).

@@ -1,19 +1,27 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
+// ob1-fork (SMD-2144): this script paged PostgREST's `/<table>` route with a
+// service-role key, and this fork's stack runs no PostgREST. It reads the same
+// pages through compat/supabase-sql now — SUPABASE_URL is a postgres:// connection
+// string, SUPABASE_SERVICE_ROLE_KEY is accepted and ignored (the credentials live
+// in the URL), and a table that is not there is Postgres's 42P01 where PostgREST
+// answered PGRST205. The files it writes are the same. Run it from a checkout:
+// the import below is relative to this file.
 /**
- * backup-brain.mjs -- Export all Open Brain Supabase tables to local JSON files.
+ * backup-brain.mjs -- Export the Open Brain tables to local JSON files.
  *
- * Paginates through PostgREST (1000 rows per request) and writes each table
- * to backup/<table>-YYYY-MM-DD.json. Shows progress and prints a summary.
+ * Paginates through the brain's Postgres (1000 rows per query) and writes each
+ * table to backup/<table>-YYYY-MM-DD.json. Shows progress and prints a summary.
  *
  * Usage:
- *   node backup-brain.mjs
+ *   bun backup-brain.mjs
  *
- * The script reads SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY from
- * environment variables or from a .env.local file in the current directory.
+ * The script reads SUPABASE_URL (a postgres:// connection string) from the
+ * environment or from a .env.local file in the current directory.
  */
 
 import fs from "node:fs";
 import path from "node:path";
+import { createClient } from "../../compat/supabase-sql/index.ts";
 
 const SCRIPT_DIR = process.cwd();
 
@@ -26,6 +34,11 @@ const PAGE_SIZE = 1000;
 // Stock Open Brain only has `thoughts`. The other tables are from optional
 // companion contributions (entity extraction, smart ingest). Missing tables
 // are skipped at runtime so this recipe works against any Open Brain install.
+// On this fork the companions are `schemas/entity-extraction` (entities, edges;
+// thought_entities is migration 016's on a fork brain) and `schemas/smart-ingest`
+// (ingestion_jobs, ingestion_items); the fork's own tables — thought_audit,
+// thought_sources, thought_facets, ob1_entities and the rest — are not in this
+// list, and `pg_dump` is the whole-brain backup (README).
 const TABLES = [
   { name: "thoughts",         orderBy: "id", required: true  },
   { name: "entities",         orderBy: "id", required: false },
@@ -69,37 +82,31 @@ const SUPABASE_URL =
   envVars.SUPABASE_URL ||
   "";
 
+// Read for the callers that still set it; the shim ignores it (SMD-2144).
 const SERVICE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
   envVars.SUPABASE_SERVICE_ROLE_KEY ||
   "";
 
+// A https://….supabase.co URL is refused before any query, with the shim's own
+// explanation. No process.exit() anywhere in this file: the exit code is set
+// and the process ends on its own once the pool is closed (SMD-2144).
+let client = null;
 if (!SUPABASE_URL) {
   console.error(
     "ERROR: SUPABASE_URL not found.\n" +
-    "Either export it or add it to .env.local in the current directory."
+    "Either export it or add it to .env.local in the current directory " +
+    "(a postgres:// connection string on this fork)."
   );
-  process.exit(1);
+} else {
+  try {
+    client = createClient(SUPABASE_URL, SERVICE_KEY || undefined);
+  } catch (err) {
+    console.error(`ERROR: ${err.message}`);
+  }
 }
 
-if (!SERVICE_KEY) {
-  console.error(
-    "ERROR: SUPABASE_SERVICE_ROLE_KEY not found.\n" +
-    "Either export it or add it to .env.local in the current directory."
-  );
-  process.exit(1);
-}
-
-const REST_BASE = `${SUPABASE_URL}/rest/v1`;
-
-const HEADERS = {
-  apikey: SERVICE_KEY,
-  Authorization: `Bearer ${SERVICE_KEY}`,
-  "Content-Type": "application/json",
-  Prefer: "count=exact",
-};
-
-// Bounded per-request timeout. Unattended backup jobs must either finish or
+// Bounded per-query timeout. Unattended backup jobs must either finish or
 // fail within a predictable window -- a hung connection should not keep a
 // cron job alive forever. 60s is generous for a 1000-row page; override with
 // FETCH_TIMEOUT_MS for slow tiers or very large tables.
@@ -129,63 +136,43 @@ function humanSize(bytes) {
 
 /** Fetch a single page of rows from a table. */
 async function fetchPage(table, orderBy, offset, limit) {
-  const url = `${REST_BASE}/${table}?order=${orderBy}&limit=${limit}&offset=${offset}`;
-  const rangeEnd = offset + limit - 1;
+  // One query per page: the rows ordered by the table's key, the window
+  // `range` cuts (inclusive on both ends, as PostgREST's Range was), and the
+  // table's exact count beside them.
+  let query = client.from(table).select("*", { count: "exact" });
+  for (const col of orderBy.split(",")) query = query.order(col.trim());
+  query = query.range(offset, offset + limit - 1);
 
-  // Node 18+ fetch() has no default timeout. Wire up AbortController so a
-  // hung Supabase connection can't hang the whole backup run.
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  let res;
+  // The driver has no per-query timeout. The race below gives up on the page
+  // after FETCH_TIMEOUT_MS; the connection is closed with the pool at exit.
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(
+      `Query for ${table} timed out after ${FETCH_TIMEOUT_MS} ms ` +
+      `(raise FETCH_TIMEOUT_MS if this table is legitimately slow)`
+    )), FETCH_TIMEOUT_MS);
+  });
+  let result;
   try {
-    res = await fetch(url, {
-      headers: {
-        ...HEADERS,
-        Range: `${offset}-${rangeEnd}`,
-      },
-      signal: controller.signal,
-    });
-  } catch (err) {
-    if (err && err.name === "AbortError") {
-      throw new Error(
-        `PostgREST request for ${table} timed out after ${FETCH_TIMEOUT_MS} ms ` +
-        `(raise FETCH_TIMEOUT_MS if this table is legitimately slow)`
-      );
-    }
-    throw err;
+    result = await Promise.race([query, timeout]);
   } finally {
     clearTimeout(timer);
   }
 
-  if (res.status === 404) {
-    // PostgREST returns 404 with `code: "PGRST205"` when the table is not in
-    // the schema cache. Any other 404 (typo in SUPABASE_URL, paused project,
-    // wrong schema, custom API gateway) should surface loudly, not be
-    // silently treated as "table missing" -- that's how backup tools lose
-    // data without anyone noticing.
-    const rawBody = await res.text();
-    let parsed = null;
-    try { parsed = JSON.parse(rawBody); } catch {}
-    if (parsed && parsed.code === "PGRST205") {
+  if (result.error) {
+    // 42P01, "relation does not exist", is the one condition that means "table
+    // not present" — an optional companion table this brain never applied. Any
+    // other error (a role without SELECT on the table, a bad column name, a
+    // dropped connection) should surface loudly, not be silently treated as
+    // "table missing" -- that's how backup tools lose data without anyone
+    // noticing.
+    if (result.error.code === "42P01") {
       return { rows: [], total: null, missing: true };
     }
-    throw new Error(`PostgREST error 404 on ${table}: ${rawBody}`);
+    throw new Error(`Postgres error ${result.error.code ?? ""} on ${table}: ${result.error.message}`.replace("  ", " "));
   }
 
-  if (!res.ok && res.status !== 206) {
-    const body = await res.text();
-    throw new Error(`PostgREST error ${res.status} on ${table}: ${body}`);
-  }
-
-  let total = null;
-  const cr = res.headers.get("content-range");
-  if (cr) {
-    const match = cr.match(/\/(\d+|\*)/);
-    if (match && match[1] !== "*") total = parseInt(match[1], 10);
-  }
-
-  const rows = await res.json();
-  return { rows, total };
+  return { rows: result.data ?? [], total: result.count };
 }
 
 /** Export one table, streaming rows to disk. */
@@ -204,7 +191,7 @@ async function exportTable(tableName, orderBy, backupDir, dateStr, required) {
   const label = `  ${tableName}`;
   if (first.missing) {
     if (required) {
-      throw new Error(`Required table "${tableName}" not found in Supabase project`);
+      throw new Error(`Required table "${tableName}" not found in the database`);
     }
     process.stdout.write(`${label}: skipped (table not present)\n`);
     return { rowCount: 0, filePath: null, fileSize: 0, skipped: true };
@@ -332,9 +319,21 @@ async function main() {
   console.log("-".repeat(38));
   console.log(`${"TOTAL".padEnd(20)}${String(totalRows).padStart(8)}${humanSize(totalSize).padStart(10)}`);
   console.log(`\nDone. ${results.filter(r => !r.error).length}/${results.length} tables exported successfully.`);
+  // A table that failed is in the summary as ERROR; the run says so in its exit code too.
+  return results.some((r) => r.error) ? 1 : 0;
 }
 
-main().catch((err) => {
-  console.error("Fatal error:", err);
-  process.exit(1);
-});
+if (!client) {
+  process.exitCode = 1;
+} else {
+  try {
+    process.exitCode = await main();
+  } catch (err) {
+    console.error("Fatal error:", err);
+    process.exitCode = 1;
+  } finally {
+    // The pool's connections would keep the process alive; closed, it ends
+    // with the code above once every write has drained.
+    await client.close();
+  }
+}

@@ -1,4 +1,12 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
+// ob1-fork (SMD-2144): this script read PostgREST's `/<table>` route with a
+// service-role key, and this fork's stack runs no PostgREST. It reads the same
+// tables through compat/supabase-sql now — SUPABASE_URL is a postgres:// connection
+// string, SUPABASE_SERVICE_ROLE_KEY is accepted and ignored (the credentials live
+// in the URL). Two reads changed with the transport: the "most recent" samples
+// order by created_at, since ids are uuids here and `id desc` orders nothing, and
+// Tier 2 reads `edges` by the columns schemas/entity-extraction gives it
+// (from_entity_id, to_entity_id). Run it from a checkout: the import is relative.
 /**
  * lint-sweep.js — Bounded weekly brain-quality audit for Open Brain.
  *
@@ -24,17 +32,17 @@
  *   gates any destructive action — this script only reports.
  *
  * Usage:
- *   node lint-sweep.js                              # all three tiers, default caps
- *   node lint-sweep.js --tier=1                     # SQL-only sweep
- *   node lint-sweep.js --tier=2                     # graph-based sweep
- *   node lint-sweep.js --tier=3 --max-llm-calls=10  # LLM contradiction sampling
- *   node lint-sweep.js --tier=all --sample-size=200
- *   node lint-sweep.js --report=./out/weekly.md
+ *   bun lint-sweep.js                              # all three tiers, default caps
+ *   bun lint-sweep.js --tier=1                     # SQL-only sweep
+ *   bun lint-sweep.js --tier=2                     # graph-based sweep
+ *   bun lint-sweep.js --tier=3 --max-llm-calls=10  # LLM contradiction sampling
+ *   bun lint-sweep.js --tier=all --sample-size=200
+ *   bun lint-sweep.js --report=./out/weekly.md
  *
  * Environment (loaded from .env or .env.local in the script directory or
  * from process.env):
- *   SUPABASE_URL               — Supabase project URL (e.g., https://xyz.supabase.co)
- *   SUPABASE_SERVICE_ROLE_KEY  — Supabase service role key
+ *   SUPABASE_URL               — the brain's postgres:// connection string
+ *   SUPABASE_SERVICE_ROLE_KEY  — accepted and ignored (the credentials live in the URL)
  *   OPENROUTER_API_KEY         — OpenRouter key (Tier 3 only; omit to skip)
  *
  * Legacy aliases (deprecated, accepted with a warning):
@@ -43,13 +51,14 @@
  *
  * Exit codes:
  *   0 — report generated successfully
- *   1 — fatal error (missing env, HTTP failure, unparseable response)
+ *   1 — fatal error (missing env, a refused query, unparseable response)
  */
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createClient } from "../../compat/supabase-sql/index.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -137,11 +146,9 @@ function parseArgs(argv) {
     else if (a.startsWith("--llm-model=")) args.llmModel = a.slice(12);
     else if (a === "--llm-model") args.llmModel = argv[++i];
     else if (a === "--verbose" || a === "-v") args.verbose = true;
-    else if (a === "--help" || a === "-h") {
-      console.log(HELP);
-      process.exit(0);
-    }
+    else if (a === "--help" || a === "-h") args.help = true;
   }
+  if (args.help) return args;
   if (!["1", "2", "3", "all"].includes(String(args.tier))) {
     throw new Error(`Invalid --tier=${args.tier}. Use 1, 2, 3, or all.`);
   }
@@ -167,7 +174,7 @@ function parseArgs(argv) {
 const HELP = `
 lint-sweep.js — bounded brain-quality audit for Open Brain
 
-Usage: node lint-sweep.js [options]
+Usage: bun lint-sweep.js [options]
 
 Options:
   --tier=<1|2|3|all>      Which tier(s) to run (default: all)
@@ -182,63 +189,39 @@ Options:
   --help, -h              Show this help
 
 Env (from .env, .env.local, or process.env):
-  SUPABASE_URL               Supabase project URL
-  SUPABASE_SERVICE_ROLE_KEY  Supabase service role key
+  SUPABASE_URL               The brain's postgres:// connection string
+  SUPABASE_SERVICE_ROLE_KEY  Accepted and ignored (the credentials live in the URL)
   OPENROUTER_API_KEY         OpenRouter key (Tier 3 only)
 
-Legacy aliases (deprecated, accepted with warning):
+Legacy alias (deprecated, accepted with warning):
   OPEN_BRAIN_URL         → SUPABASE_URL
-  OPEN_BRAIN_SERVICE_KEY → SUPABASE_SERVICE_ROLE_KEY
 `.trim();
 
-// ── Supabase REST helpers ───────────────────────────────────────────────────
+// ── the brain's client (compat/supabase-sql) ────────────────────────────────
 
-function makeRestClient(baseUrl, serviceKey) {
-  const rest = `${baseUrl.replace(/\/$/, "")}/rest/v1`;
-  const headers = {
-    apikey: serviceKey,
-    Authorization: `Bearer ${serviceKey}`,
-    "Content-Type": "application/json",
-  };
+function makeClient(url, serviceKey) {
+  // A https://….supabase.co URL is refused here, before any query, with the
+  // shim's own explanation.
+  const client = createClient(url, serviceKey || undefined);
 
-  async function get(pathAndQuery) {
-    const url = `${rest}${pathAndQuery}`;
-    const res = await fetch(url, { headers });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`GET ${url} → ${res.status} ${body.slice(0, 300)}`);
-    }
-    const text = await res.text();
-    return text ? JSON.parse(text) : [];
+  /** The rows a query answers. A database error is fatal, as an HTTP error was. */
+  async function rows(query, what) {
+    const { data, error } = await query;
+    if (error) throw new Error(`${what} → ${error.code ? `${error.code} ` : ""}${error.message}`);
+    return Array.isArray(data) ? data : [];
   }
 
   /**
-   * Return the exact row count matching `pathAndQuery` (a PostgREST filter
-   * string starting with `/table?...`). Uses `Prefer: count=exact` and
-   * parses the Content-Range header. Avoids pulling rows to disk.
+   * The exact row count of `table` under `where` (a function over the query,
+   * or none): a counted head query — no rows are pulled.
    */
-  async function count(pathAndQuery) {
-    const url = `${rest}${pathAndQuery}${pathAndQuery.includes("?") ? "&" : "?"}select=id&limit=1`;
-    const res = await fetch(url, {
-      headers: { ...headers, Prefer: "count=exact", Range: "0-0" },
-    });
-    if (!res.ok && res.status !== 206) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`COUNT ${url} → ${res.status} ${body.slice(0, 300)}`);
-    }
-    const cr = res.headers.get("content-range") || "";
-    const m = cr.match(/\/(\d+|\*)/);
-    if (m && m[1] !== "*") return Number(m[1]);
-    // TODO(IN-03): If Content-Range is missing entirely (some proxies strip
-    // it on otherwise-OK responses) we fall through to reading the body here,
-    // which may already have been consumed above on the error path. On a
-    // successful response this silently returns 0. Low-risk cosmetic; kept
-    // as-is for now because PostgREST proper always sets the header.
-    const arr = await res.json().catch(() => []);
-    return Array.isArray(arr) ? arr.length : 0;
+  async function count(table, where = (q) => q) {
+    const { count: n, error } = await where(client.from(table).select("*", { count: "exact", head: true }));
+    if (error) throw new Error(`count ${table} → ${error.code ? `${error.code} ` : ""}${error.message}`);
+    return typeof n === "number" ? n : 0;
   }
 
-  return { get, count };
+  return { from: (table) => client.from(table), rows, count, close: () => client.close() };
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -312,8 +295,8 @@ function resolveReportPath(raw) {
 
 // ── Tier 1: SQL-only lint (free) ────────────────────────────────────────────
 //
-// Each check pulls from `public.thoughts` via PostgREST with aggregation
-// done server-side where possible. These are cheap — all run in one second
+// Each check pulls from `public.thoughts` through compat/supabase-sql with
+// aggregation done server-side where possible. These are cheap — all run in one second
 // against a 100K-thought table.
 
 async function tier1SqlLint(db, args) {
@@ -328,18 +311,20 @@ async function tier1SqlLint(db, args) {
     veryLongContent: 0,        // content > 20K chars (usually unchunked dumps)
   };
 
-  // Total row count via Content-Range header — avoids pulling rows
+  // Total row count — a counted head query, no rows pulled
   try {
-    out.totalThoughts = await db.count(`/thoughts`);
+    out.totalThoughts = await db.count("thoughts");
   } catch {
     out.totalThoughts = 0;
   }
 
   // Orphans by tag: metadata.topics and metadata.tags both empty or missing.
-  // PostgREST can filter JSONB with eq.{} but the safer path is to pull a
-  // bounded sample and filter in JS. We look at the most recent 2000 rows.
-  const recent = await db.get(
-    `/thoughts?select=id,content,created_at,metadata,source_type,importance&order=id.desc&limit=2000`
+  // The safer path is to pull a bounded sample and filter in JS. We look at the
+  // most recent 2000 rows — by created_at: ids are uuids on this fork, so
+  // `id desc` would order nothing (SMD-2144).
+  const recent = await db.rows(
+    db.from("thoughts").select("id,content,created_at,metadata,source_type,importance").order("created_at", { ascending: false }).order("id", { ascending: false }).limit(2000),
+    "thoughts (recent 2000)"
   );
 
   for (const t of recent) {
@@ -362,8 +347,9 @@ async function tier1SqlLint(db, args) {
 
   // Exact duplicates — only meaningful if content_fingerprint is populated
   try {
-    const fp = await db.get(
-      `/thoughts?select=id,content_fingerprint&content_fingerprint=not.is.null&order=content_fingerprint.asc&limit=5000`
+    const fp = await db.rows(
+      db.from("thoughts").select("id,content_fingerprint").not("content_fingerprint", "is", null).order("content_fingerprint").limit(5000),
+      "thoughts (fingerprinted)"
     );
     const buckets = new Map();
     for (const row of fp) {
@@ -383,7 +369,7 @@ async function tier1SqlLint(db, args) {
   }
 
   try {
-    out.noFingerprint = await db.count(`/thoughts?content_fingerprint=is.null`);
+    out.noFingerprint = await db.count("thoughts", (q) => q.is("content_fingerprint", null));
   } catch {
     // column missing — already flagged above
     out.noFingerprint = 0;
@@ -410,7 +396,7 @@ async function tier2GraphLint(db, args) {
   // Probe graph tables — they're optional in Open Brain
   for (const t of ["entities", "edges", "thought_entities"]) {
     try {
-      await db.get(`/${t}?select=*&limit=1`);
+      await db.rows(db.from(t).select("*").limit(1), t);
     } catch {
       out.graphTablesMissing.push(t);
     }
@@ -421,18 +407,20 @@ async function tier2GraphLint(db, args) {
 
   // High-importance thoughts with no rows in thought_entities
   if (!out.graphTablesMissing.includes("thought_entities")) {
-    const hi = await db.get(
-      `/thoughts?select=id,content,importance,created_at&importance=gte.4&order=id.desc&limit=500`
+    const hi = await db.rows(
+      db.from("thoughts").select("id,content,importance,created_at").gte("importance", 4).order("created_at", { ascending: false }).order("id", { ascending: false }).limit(500),
+      "thoughts (high importance)"
     );
     // Fetch up to 500 thought_entities rows keyed on those ids.
     const ids = hi.map((r) => r.id).slice(0, 500);
     if (ids.length > 0) {
-      // PostgREST in(...) filter — cap at 100 ids per request.
+      // An IN list of 100 ids per query keeps each statement small.
       const linked = new Set();
       for (let i = 0; i < ids.length; i += 100) {
         const chunk = ids.slice(i, i + 100);
-        const rows = await db.get(
-          `/thought_entities?select=thought_id&thought_id=in.(${chunk.join(",")})`
+        const rows = await db.rows(
+          db.from("thought_entities").select("thought_id").in("thought_id", chunk),
+          "thought_entities"
         );
         for (const r of rows) linked.add(r.thought_id);
       }
@@ -451,12 +439,14 @@ async function tier2GraphLint(db, args) {
 
   // Entities with zero edges
   if (!out.graphTablesMissing.includes("entities") && !out.graphTablesMissing.includes("edges")) {
-    const ents = await db.get(`/entities?select=id&limit=2000`);
-    const edges = await db.get(`/edges?select=src_entity_id,dst_entity_id&limit=5000`);
+    // The columns are schemas/entity-extraction's (from_entity_id, to_entity_id);
+    // the script had read src_/dst_, which no schema in the tree has (SMD-2144).
+    const ents = await db.rows(db.from("entities").select("id").limit(2000), "entities");
+    const edges = await db.rows(db.from("edges").select("from_entity_id,to_entity_id").limit(5000), "edges");
     const touched = new Set();
     for (const e of edges) {
-      if (e.src_entity_id != null) touched.add(e.src_entity_id);
-      if (e.dst_entity_id != null) touched.add(e.dst_entity_id);
+      if (e.from_entity_id != null) touched.add(e.from_entity_id);
+      if (e.to_entity_id != null) touched.add(e.to_entity_id);
     }
     out.entitiesWithNoEdges = ents.filter((e) => !touched.has(e.id)).length;
   }
@@ -505,10 +495,9 @@ async function tier3LlmLint(db, args) {
   // never silently under-sample when the user asks for 500+ thoughts.
   const since = new Date(Date.now() - args.days * 86_400_000).toISOString();
   const fetchLimit = Math.min(args.sampleSize * 2, 1000);
-  const rows = await db.get(
-    `/thoughts?select=id,content,importance,type,source_type,created_at,metadata` +
-      `&created_at=gte.${encodeURIComponent(since)}` +
-      `&order=id.desc&limit=${fetchLimit}`
+  const rows = await db.rows(
+    db.from("thoughts").select("id,content,importance,type,source_type,created_at,metadata").gte("created_at", since).order("created_at", { ascending: false }).order("id", { ascending: false }).limit(fetchLimit),
+    "thoughts (recent sample)"
   );
   const atomic = rows.filter(
     (t) => t?.metadata?.derivation_layer !== "derived" && typeof t.content === "string" && t.content.trim().length >= 20
@@ -651,7 +640,7 @@ function renderReport({ args, tier1, tier2, tier3, startedAt, finishedAt }) {
   lines.push("This run inspects bounded samples, not your entire brain. Counts below are relative to these samples.");
   lines.push("");
   if (tier1) {
-    lines.push("- **Tier 1** — most recent **2000 thoughts** (ordered by `id desc`) for orphan/over-tag/length checks; up to **5000 rows** with a populated `content_fingerprint` for duplicate detection; full-table exact row counts for `thoughts` and `content_fingerprint IS NULL` (no cap).");
+    lines.push("- **Tier 1** — most recent **2000 thoughts** (ordered by `created_at desc`) for orphan/over-tag/length checks; up to **5000 rows** with a populated `content_fingerprint` for duplicate detection; full-table exact row counts for `thoughts` and `content_fingerprint IS NULL` (no cap).");
   }
   if (tier2) {
     lines.push("- **Tier 2** — first **500 high-importance thoughts** (`importance >= 4`), first **2000 entities**, first **5000 edges**.");
@@ -792,19 +781,40 @@ function renderReport({ args, tier1, tier2, tier3, startedAt, finishedAt }) {
 
 // ── main ────────────────────────────────────────────────────────────────────
 
+// The client main() opens, closed at the bottom on both paths: the pool's connections
+// would otherwise keep the process alive after a failure.
+let activeClient = null;
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.help) {
+    console.log(HELP);
+    return;
+  }
 
   const baseUrl = envVarWithLegacy("SUPABASE_URL", "OPEN_BRAIN_URL");
-  const serviceKey = envVarWithLegacy("SUPABASE_SERVICE_ROLE_KEY", "OPEN_BRAIN_SERVICE_KEY");
-  if (!baseUrl || !serviceKey) {
+  // Read for the callers that still set it, under either name and without a
+  // warning; the shim ignores it (SMD-2144).
+  const serviceKey = envVar("SUPABASE_SERVICE_ROLE_KEY") || envVar("OPEN_BRAIN_SERVICE_KEY");
+  if (!baseUrl) {
     console.error(
-      "ERROR: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set (env or .env.local). " +
-        "Legacy OPEN_BRAIN_URL / OPEN_BRAIN_SERVICE_KEY are accepted as fallbacks with a deprecation warning."
+      "ERROR: SUPABASE_URL must be set (env or .env.local) — the brain's postgres:// connection string. " +
+        "Legacy OPEN_BRAIN_URL is accepted as a fallback with a deprecation warning."
     );
-    process.exit(1);
+    // No exit call: the code is set and the process ends on its own once the
+    // client, if any, is closed (SMD-2144).
+    process.exitCode = 1;
+    return;
   }
-  const db = makeRestClient(baseUrl, serviceKey);
+  let db;
+  try {
+    db = makeClient(baseUrl, serviceKey);
+  } catch (err) {
+    console.error(`ERROR: ${err?.message || err}`);
+    process.exitCode = 1;
+    return;
+  }
+  activeClient = db;
 
   const startedAt = new Date().toISOString();
   console.log(`[lint-sweep] tier=${args.tier} sample=${args.sampleSize} max_llm_calls=${args.maxLlmCalls} report=${args.report}`);
@@ -852,8 +862,12 @@ async function main() {
   console.log(`[lint-sweep] report written → ${args.report}`);
 }
 
-main().catch((err) => {
-  console.error("[lint-sweep] FAILED:", err?.message || err);
-  if (process.env.DEBUG) console.error(err);
-  process.exit(1);
-});
+main().then(
+  () => activeClient?.close(),
+  async (err) => {
+    console.error("[lint-sweep] FAILED:", err?.message || err);
+    if (process.env.DEBUG) console.error(err);
+    process.exitCode = 1;
+    await activeClient?.close();
+  }
+);
