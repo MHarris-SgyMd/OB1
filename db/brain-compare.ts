@@ -196,6 +196,10 @@ export async function callTool(ep: BrainEndpoint, name: string, args: Record<str
     headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": ep.key },
     body,
   });
+  // A non-2xx is infrastructure (a gateway/proxy 404, a 502), not the protocol —
+  // classify it as HTTP status, never the body, so a "404 page not found" page can't
+  // be read downstream as an absent tool (review pass 2).
+  if (!r.ok) throw new Error(`${ep.label}: ${name} → HTTP ${r.status}`);
   const raw = await r.text();
   const msg = unwrapRpc(raw);
   if (!msg) throw new Error(`${ep.label}: ${name} returned no JSON-RPC reply (${raw.slice(0, 80)}).`);
@@ -343,8 +347,12 @@ async function fetchIdPage(ep: BrainEndpoint, after: string | null): Promise<Tho
   } catch {
     throw new Error(`${ep.label}: list_thought_ids did not return JSON (${text.slice(0, 80)}).`);
   }
+  // A valid-JSON page whose `ids` is not an array is a broken page, not an empty
+  // corpus — throw so it reads as a failure, never a silent "this brain holds
+  // nothing" that would report the peer's whole corpus as a difference (review pass 2).
+  if (!Array.isArray(page.ids)) throw new Error(`${ep.label}: list_thought_ids returned no ids array.`);
   return {
-    ids: Array.isArray(page.ids) ? page.ids.map(String) : [],
+    ids: page.ids.map(String),
     total: Number(page.total ?? 0),
     digest: page.digest ?? null,
     cursor: page.cursor ?? null,
@@ -357,6 +365,10 @@ async function collectIds(ep: BrainEndpoint, first: ThoughtIdPage): Promise<Set<
   let cursor = first.cursor;
   for (let guard = 0; cursor && guard < MAX_ID_PAGES; guard++) {
     const page = await fetchIdPage(ep, cursor);
+    // A cursor that does not advance would page the same rows until the guard and
+    // return a partial set read as a real diff — throw so a buggy server reads as a
+    // failure, not a wrong answer (review pass 2).
+    if (page.cursor === cursor) throw new Error(`${ep.label}: list_thought_ids cursor did not advance past ${cursor.slice(0, 8)}.`);
     for (const id of page.ids) set.add(id);
     cursor = page.cursor;
   }
@@ -375,9 +387,11 @@ export async function corpusIdDiff(a: BrainEndpoint, b: BrainEndpoint): Promise<
   // An unknown tool is an older brain (degrade to unavailable, the count stands in);
   // anything else is a real failure of the read, kept distinct so the wrong cause
   // is never asserted and — crucially — so the rest of the compare still prints
-  // (review pass 1). The confirmed unknown-tool signal is /not found|unknown tool/i
-  // (test-auth [7b]).
-  const isAbsent = (e: unknown) => /not found|unknown tool/i.test((e as Error).message);
+  // (review pass 1). The MCP SDK answers an unregistered tool with `Tool <name> not
+  // found` (server/mcp.js); others say "unknown tool"/"method not found". Match those
+  // phrasings, NOT a bare "not found" — a proxy's "404 page not found" body is a read
+  // failure, not an absent tool, and callTool's r.ok check keeps it out of here (review pass 2).
+  const isAbsent = (e: unknown) => /\bunknown tool\b|\btool\b[^]*?\bnot found\b|\bmethod not found\b|\bno such tool\b/i.test((e as Error).message);
   let pa: ThoughtIdPage;
   let pb: ThoughtIdPage;
   try {

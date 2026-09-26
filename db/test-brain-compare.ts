@@ -50,7 +50,9 @@ interface FakeConfig {
   /** queries this brain refuses (an egress-gated embedding) — the search tool returns isError. */
   refuse?: string[];
   /** the brain's thought-id set for list_thought_ids; omit to make the tool absent (a brain older than SMD-2244). */
-  corpus?: { ids: string[]; digest?: string | null; pageCap?: number; fail?: string; failAfter?: boolean };
+  corpus?: { ids: string[]; digest?: string | null; pageCap?: number; fail?: string; failAfter?: boolean; badShape?: boolean; stuckCursor?: boolean };
+  /** a gateway/proxy that answers every tools/call POST with a plain 404 body (GET /health still routes). */
+  proxy404?: boolean;
   /** frame the tools/call reply as an SSE stream rather than raw JSON. */
   sse?: boolean;
 }
@@ -101,6 +103,8 @@ function startFake(cfg: FakeConfig): { server: ReturnType<typeof Bun.serve>; ep:
       }
       if (req.method === "POST" && (url.pathname === "/" || url.pathname === "")) {
         if (key !== KEY) return new Response("ok", { status: 200 });
+        // A gateway that 404s the MCP POST while /health still routes.
+        if (cfg.proxy404) return new Response("404 page not found", { status: 404 });
         const body = (await req.json()) as { id: number; params: { name: string; arguments: { query?: string; limit?: number; after?: string } } };
         const name = body.params.name;
         let text = "";
@@ -114,11 +118,15 @@ function startFake(cfg: FakeConfig): { server: ReturnType<typeof Bun.serve>; ep:
           if (cfg.corpus.fail && isFirst) return replyError(body.id, cfg.corpus.fail, cfg.sse);
           if (cfg.corpus.failAfter && !isFirst) return replyError(body.id, "page read timed out", cfg.sse);
           const all = [...cfg.corpus.ids].sort();
+          // A valid-JSON page whose ids is not an array (a broken server).
+          if (cfg.corpus.badShape) { text = JSON.stringify({ total: all.length, digest: null, ids: "not-an-array", cursor: null }); return replyOk(body.id, text, cfg.sse); }
           const cap = cfg.corpus.pageCap ?? 1000;
           const limit = Math.min(Number(body.params.arguments.limit ?? 1000), cap);
           const start = after ? all.findIndex((id) => id > after) : 0;
           const slice = start < 0 ? [] : all.slice(start, start + limit);
-          const cursor = slice.length === limit && slice.length > 0 ? slice[slice.length - 1] : null;
+          let cursor = slice.length === limit && slice.length > 0 ? slice[slice.length - 1] : null;
+          // A cursor that never advances (a buggy server) — always the same value.
+          if (cfg.corpus.stuckCursor) cursor = "ffffffff-0000-0000-0000-000000000000";
           const digest = isFirst ? (cfg.corpus.digest !== undefined ? cfg.corpus.digest : corpusDigest(all)) : null;
           text = JSON.stringify({ total: isFirst ? all.length : 0, digest, ids: slice, cursor });
         } else if (name === "thought_stats") {
@@ -412,6 +420,38 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
     ok(c !== null, "a page-2 failure does not abort the whole compare (it returned)");
     ok(!!c && !!c.idDiff.failed && !c.idDiff.unavailable, `a mid-walk failure is failed-with-reason (${c?.idDiff.failed})`);
     ok(!!c && /current with each other/.test(c.verdict), "the verdict still printed");
+  } finally { a.server.stop(true); b.server.stop(true); }
+}
+
+// A gateway 404 on the MCP POST (while /health still routes) is a read FAILURE, not
+// "an older brain" — the r.ok check + tightened isAbsent keep a "404 page not found"
+// body from being misread as an absent tool (review pass 2).
+{
+  const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, corpus: { ids: [uid(1)] }, proxy404: true });
+  const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, corpus: { ids: [uid(1)] } });
+  try {
+    const c = await compareBrains(a.ep, b.ep, {});
+    ok(!c.idDiff.unavailable && /HTTP 404/.test(c.idDiff.failed ?? ""), `a proxy 404 is failed (HTTP status), not "unavailable" (${c.idDiff.failed})`);
+  } finally { a.server.stop(true); b.server.stop(true); }
+}
+
+// A valid-JSON page whose ids is not an array is a failure, not a silent empty corpus.
+{
+  const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, corpus: { ids: [uid(1)], badShape: true } });
+  const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, corpus: { ids: [uid(1)] } });
+  try {
+    const c = await compareBrains(a.ep, b.ep, {});
+    ok(!!c.idDiff.failed && /no ids array/.test(c.idDiff.failed) && !c.idDiff.equal, `a malformed ids page fails, not a silent empty read (${c.idDiff.failed})`);
+  } finally { a.server.stop(true); b.server.stop(true); }
+}
+
+// A non-advancing cursor is a failure, not a partial diff read as real.
+{
+  const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, corpus: { ids: [uid(1), uid(2)], digest: null, stuckCursor: true } });
+  const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, corpus: { ids: [uid(3), uid(4)], digest: null, stuckCursor: true } });
+  try {
+    const c = await compareBrains(a.ep, b.ep, {});
+    ok(!!c.idDiff.failed && /did not advance/.test(c.idDiff.failed) && !c.idDiff.equal, `a stuck cursor fails, not a partial diff (${c.idDiff.failed})`);
   } finally { a.server.stop(true); b.server.stop(true); }
 }
 
