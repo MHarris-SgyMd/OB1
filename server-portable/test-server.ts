@@ -772,14 +772,16 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
   }
 }
 
-console.log("\n[13d] SIGTERM stops the server once the request in flight is answered, exit 0; SIGINT the same (SMD-2250)");
+console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, exit 0, within OB1_STOP_GRACE less 2 s, and says what it cut; SIGINT the same (SMD-2250)");
 {
-  // A child server again, run the way the image runs it — index.ts the entry,
-  // which is when the handlers go in. The request in flight is a keyed /health
-  // against a database that never replies (13c's), answered at its deadline.
-  // As a child the process is not PID 1, so without the handlers SIGTERM's
-  // default action kills it at once: the request is cut off and there is no
-  // exit code, which is what these rows fail on.
+  // Child servers first, run the way the image runs them — index.ts the entry,
+  // which is when the handlers go in. The first request in flight is a keyed
+  // /health against a database that never replies (13c's), answered at its
+  // deadline; the others stall before any response. As a child the process
+  // is not PID 1, so without the handlers SIGTERM's default action kills it
+  // at once: the request is cut off and there is no exit code, which is what
+  // these rows fail on. Then the bounds against a stand-in server, the call
+  // count, the grace period's parse and where compose and preflight read it.
   const { HEALTH_DEADLINE_MS } = await import("./index.ts");
   const freePort = () => { const p = Bun.serve({ port: 0, fetch: () => new Response() }); const n = p.port!; p.stop(true); return n; };
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });

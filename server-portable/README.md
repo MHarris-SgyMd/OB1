@@ -496,29 +496,30 @@ stored in the same write").
   stuck call produces, long before the ceiling. The call runs to its end on the
   server, and a retry of the same text is `upsert_thought`'s fingerprint no-op
   rather than a second row. The rest of per-request logging is SMD-1849.
-- **A stop finishes what is in flight, for the grace period less 2 s** (SMD-2250). On SIGTERM
-  or SIGINT the server stops accepting, waits for the requests in flight
-  (a tool call's stream included) and for the tool calls still running (one
-  whose client has gone runs on, and a capture may still land), closes the
-  database pool and exits 0: `docker compose stop server` returns in about
-  0.1 s idle, or when the last call ends. The wait is `OB1_STOP_GRACE` less
-  2 s (at least 0.5 s): the platform's grace period in whole seconds from 1 to
-  3600, no unit, 10 unless set (Docker's, so 8 s of drain). Compose appends
-  `s` to the same variable for the server's `stop_grace_period`, so preflight
-  refuses anything else (`30s` would fail compose itself, `1m` would be a
-  1 ms kill); set it to the platform's elsewhere (Kubernetes' and ECS's 30,
-  Fly's `kill_timeout`). A call still running at the bound is cut off, the line says how many, an
-  MCP call's own line says the stop cut it, and the exit is 1; a second signal
-  cuts the wait short. The bounds count from the handler, so the stop inside
-  Docker's 10 s grace period is measured (8.4–8.5 s for a cut at the bound),
-  not guaranteed. Before, the image ignored
-  SIGTERM — the server is the container's PID 1, which has no default action
-  for it — so every stop waited out the grace period and was killed (exit
-  137), cutting off any call in flight. Run with an init as PID 1 (`docker run
-  --init`, compose's `init: true`, Fly), under systemd or in a terminal, Bun
-  died at the signal at once; it now drains the same way, and Ctrl-C exits 0.
-  Only when `index.ts` is Bun's entry: Workers has no signals, and a suite
-  that imports the module keeps its own. What the container's exit code says:
+- **A stop finishes what is in flight, for the grace period less 2 s**
+  (SMD-2250). On SIGTERM or SIGINT the server stops accepting, waits for the
+  requests in flight (a tool call's stream included) and for the tool calls
+  still running (one whose client has gone runs on, and a capture may still
+  land), closes the database pool and exits 0: `docker compose stop server`
+  returns in about 0.1 s idle, or when the last call ends. The wait is
+  `OB1_STOP_GRACE` less 2 s (at least 0.5 s): the platform's grace period in
+  whole seconds from 1 to 3600, no unit, 10 unless set (Docker's, so 8 s of
+  drain). Compose appends `s` to the same variable for the server's
+  `stop_grace_period`, so preflight refuses anything else (`30s` would fail
+  compose itself, `1m` would be a 1 ms kill); set it to the platform's
+  elsewhere (Kubernetes' and ECS's 30, Fly's `kill_timeout`). A call still
+  running at the bound is cut off, the line says how many, an MCP call's own
+  line says the stop cut it, and the exit is 1; a second signal cuts the wait
+  short. The bounds count from the handler, so the stop inside Docker's 10 s
+  grace period is measured (8.4–8.5 s for a cut at the bound), not guaranteed.
+  Before, the image ignored SIGTERM — the server is the container's PID 1,
+  which has no default action for it — so every stop waited out the grace
+  period and was killed (exit 137), cutting off any call in flight. Run with
+  an init as PID 1 (`docker run --init`, compose's `init: true`, Fly), under
+  systemd or in a terminal, Bun died at the signal at once; it now drains the
+  same way, and Ctrl-C exits 0. Only when `index.ts` is Bun's entry: Workers
+  has no signals, and a suite that imports the module keeps its own. What the
+  container's exit code says:
 
   | Exit | Meaning |
   | --- | --- |

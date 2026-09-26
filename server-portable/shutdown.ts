@@ -130,7 +130,7 @@ export interface DrainOptions {
   close: () => Promise<boolean>;
   /** The tool calls still running, waited on with the requests. */
   calls?: CallCount;
-  /** Told just before the requests still in flight at the bound are closed, so the lines they leave say the stop cut them. */
+  /** Told just before what is still in flight is closed — at the bound, or on a second signal — so the lines it leaves say the stop cut it. */
   onCut?: () => void;
   drainBoundMs?: number;
   closeBoundMs?: number;
