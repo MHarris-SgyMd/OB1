@@ -72,8 +72,8 @@ import { fileURLToPath } from "node:url";
 import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, CONTRIB_DIR, CONTRIB_SCHEMA_FILES, createAssert, FUNCTION_COMMENT_SQL, ISO_RE, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
 import {
-  BLOCKED_WEIGHT, DEFAULT_OPTIONS, DONE_WEIGHT, FUZZY_FLOOR, dependencyCaveat, coverage as graphCoverage, lifecycleCaveat, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
-  resolveSubject, subjectThoughts, topEntities, topThoughts, weightsSql, type Options as GraphOptions, type Runner,
+  BLOCKED_WEIGHT, DEFAULT_OPTIONS, DONE_WEIGHT, FUZZY_FLOOR, LIFECYCLE_FILTERS, LIFECYCLE_TYPES, dependencyCaveat, coverage as graphCoverage, lifecycleCaveat, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
+  resolveSubject, schemaProblem, subjectThoughts, topEntities, topThoughts, weightsSql, type Options as GraphOptions, type Runner,
 } from "./graph-centrality.ts";
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { ENTITY_TYPES, NUMERIC_NAME_RE, RELATIONS } from "../server-portable/entities.ts";
@@ -5591,9 +5591,11 @@ console.log("\n[43] Migration 046: the event shape at the write boundary — who
 // the lifecycle block reads the same graph under each filter and under decay.
 // The startability block adds tickets with 053's source rows and link facets
 // (SMD-2061) and reads them under --startable, the reports without the flag
-// compared byte for byte before and after the links are written.
+// compared byte for byte before and after the links are written. Every rule
+// is migration 058's node_state now (SMD-2074), and the block asks it
+// directly beside the reports, on the same fixture; [54] holds its contract.
 
-console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defined; the resolution ladder; numeric names out of every count; edges on vs off is the drop-the-graph control (SMD-1938); a thought's lifecycle is a weight — the filter, the decay, and the unstamped passing every filter (SMD-1994); --startable weighs a thought with an open blocker 0, a settled blocker none (SMD-2061); --decay-blocked weighs it BLOCKED_WEIGHT and names its blockers (SMD-2181); a system that states no lifecycle gates nothing (SMD-2218)");
+console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defined; the resolution ladder; numeric names out of every count; edges on vs off is the drop-the-graph control (SMD-1938); a thought's lifecycle is a weight — the filter, the decay, and the unstamped passing every filter (SMD-1994); --startable weighs a thought with an open blocker 0, a settled blocker none (SMD-2061); --decay-blocked weighs it BLOCKED_WEIGHT and names its blockers (SMD-2181); a system that states no lifecycle gates nothing (SMD-2218); node_state (058) answers alike, asked directly (SMD-2074)");
 {
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`);
@@ -5663,6 +5665,17 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   const on: GraphOptions = { ...DEFAULT_OPTIONS, limit: 10 };
   const off: GraphOptions = { ...on, edges: false };
   const keep: GraphOptions = { ...on, excludeNumeric: false };
+  // node_state (058, SMD-2074), the read the weights below rank by, asked
+  // directly: every thought's row, or those named. `idsAgree` holds a named
+  // read to the whole one, row for row.
+  type NodeRow = { thought_id: string; status: string | null; status_type: string | null; open: boolean | null; blocked: boolean; blockers: string[] | null; unknown_blockers: string[] | null; in_dependencies: boolean; superseded_by: string | null };
+  const nodeState = async (ids?: string[]) =>
+    new Map((await db.query<NodeRow>(ids ? `SELECT * FROM node_state($1::uuid[])` : `SELECT * FROM node_state()`, ids ? [pgArray(ids)] : [])).rows.map((r) => [r.thought_id, r]));
+  const idsAgree = async (ids: string[]) => {
+    const all = await nodeState();
+    const some = await nodeState(ids);
+    return some.size === new Set(ids).size && ids.every((id) => JSON.stringify(some.get(id)) === JSON.stringify(all.get(id)));
+  };
 
   // Coverage: the numbers the caveats print are the fixture's.
   const cov = await graphCoverage(run, on);
@@ -5821,6 +5834,18 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
     `coverage: five thoughts carry a lifecycle, two of them settled, one an unknown status_type; every thought weighs in by default; the latest linear_updated_at is the freshness (${cov.with_lifecycle}/${cov.done}/${cov.unknown_status}/${cov.weighed}, ${cov.last_sync})`);
   assert((await graphCoverage(run, open)).weighed === 5 && (await graphCoverage(run, active)).weighed === 4 && (await graphCoverage(run, doneOnly)).weighed === 4 && (await graphCoverage(run, decay)).weighed === 7,
     "weighed: open drops t1 and t5; active drops t3 too; done keeps t1, t5 and the two without a lifecycle; decay drops none");
+  // The lifecycle is node_lifecycle()'s, and node_state carries it unchanged —
+  // true by construction today (node_state reads node_lifecycle()), held for
+  // the fold, which may give node_state a lifecycle of its own;
+  // `open` is a known, unsettled status — NULL for t6 (no status_type) and t8
+  // (one no set knows), which claim nothing either way.
+  const ns0 = await nodeState();
+  const lifecycleDrift = (await db.query<{ n: number }>(
+    `SELECT ((SELECT count(*) FROM (SELECT * FROM node_lifecycle() EXCEPT ALL SELECT thought_id, status, status_type, synced_at, created_at FROM node_state()) a)
+           + (SELECT count(*) FROM (SELECT thought_id, status, status_type, synced_at, created_at FROM node_state() EXCEPT ALL SELECT * FROM node_lifecycle()) b))::int AS n`)).rows[0].n;
+  assert(ns0.size === 7 && [t1, t2, t3, t4, t5, t6, t8].map((id) => ns0.get(id)?.open).join() === "false,true,true,true,false,," && ns0.get(t2)?.status === "In Progress" && ns0.get(t8)?.status_type === "weird"
+      && [...ns0.values()].every((r) => r.blocked === false && r.blockers === null && r.unknown_blockers === null && r.in_dependencies === false && r.superseded_by === null) && lifecycleDrift === 0,
+    `node_state (058): every thought, its lifecycle node_lifecycle()'s both ways; open false for the settled t1 and t5, true for t2–t4, NULL for t6 and t8; with no link and no pointer, nothing blocked or superseded (${[...ns0.values()].map((r) => r.open).join()}, drift ${lifecycleDrift})`);
   assert(r1.thoughts[0].id === t1 && r1.thoughts[0].status === "Done" && r1.thoughts[0].status_type === "completed" && r1.thoughts[0].weight === 1 && r1.thoughts.find((t) => t.id === t5)!.status === "Canceled",
     "the JSON carries each thought's status, status_type and weight — t1 Done at weight 1 by default");
   assert(text.includes(`latest linear_updated_at ${LATEST}: 5 of 7 thoughts carry a lifecycle, 2 of them completed or canceled, and 1 carries a status_type this tool does not know (weighed 1). Every thought weighs 1: a Done ticket counts as a live one`)
@@ -5931,6 +5956,19 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
     `under open the section row adds nothing to PostgreSQL (co 2, not 3) and Redis is no neighbour; by default the section counts (co 4) and Redis is one (${names(nOpenH).join(",")}; ${nAllH.find((n) => n.name === "PostgreSQL")!.co_mentions})`);
   assert((await topThoughts(run, { ...wide, status: "done" })).map((t) => t.id).sort().join() === [t1, t5, t6, t8, tSec, tDone, tPrev, tOrphan].sort().join(),
     "--status done lists the section row and the earlier row with their Done head, the Done tDone, and — passing every filter — the two without a lifecycle and the row whose ticket no row holds");
+  // superseded_by (058): tPrev's is t1. A second superseder written later is
+  // the one named — the newest, the rule supersededAmong labels search hits
+  // with — and at one created_at the greater id is.
+  const nsH = await nodeState();
+  const tPrev2 = await thought("SMD-1936 — the earlier text, restated.");
+  await db.query(`UPDATE thoughts SET supersedes = $2, created_at = (SELECT created_at FROM thoughts WHERE id = $3) + interval '1 hour' WHERE id = $1`, [tPrev2, tPrev, t1]);
+  const supLater = (await nodeState([tPrev])).get(tPrev)?.superseded_by;
+  await db.query(`UPDATE thoughts SET created_at = (SELECT created_at FROM thoughts WHERE id = $2) WHERE id = $1`, [tPrev2, t1]);
+  const supTie = (await nodeState([tPrev])).get(tPrev)?.superseded_by;
+  assert(nsH.get(tPrev)?.superseded_by === t1 && nsH.get(t1)?.superseded_by === null && [...nsH.values()].filter((r) => r.superseded_by !== null).length === 1
+      && supLater === tPrev2 && supTie === [t1, tPrev2].sort()[1] && nsH.get(tSec)?.open === false && nsH.get(tOrphan)?.open === null && await idsAgree([tPrev, tSec, t1]),
+    `superseded_by: tPrev's is t1 and no other thought has one; a later superseder is named instead, and at one created_at the greater id; the section row reads its head's settled lifecycle, the orphan-ticket row none; a named read is the whole read's rows (${supLater === tPrev2}, ${supTie})`);
+  await drop(tPrev2);
   await db.query(`UPDATE thoughts SET supersedes = NULL, metadata = metadata - 'issue' WHERE id = $1`, [t1]);
   for (const id of [tSec, tDone, tPrev, tOrphan]) await drop(id);
   assert((await graphCoverage(run, on)).thoughts === 7 && (await graphCoverage(run, on)).entities === 4, "the ticket rows are gone again");
@@ -5982,9 +6020,14 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
 
   // The control: without the flag the dependency read is not in the SQL, and
   // the reports are the ones rendered before the links, byte for byte.
-  assert(!weightsSql({ status: "open", decayDone: false }, []).includes("thought_facets") && weightsSql({ status: "open", decayDone: false }, []) === weightsSql({ status: "open", decayDone: false, startable: false }, [])
-      && weightsSql({ status: "open", decayDone: false, startable: true }, []).includes("thought_facets"),
-    "weightsSql without --startable reads no link facet — its text is SMD-1994's — and with it does");
+  // Without it the rows are node_lifecycle()'s, which reads thoughts alone;
+  // with it node_state()'s (058, SMD-2074). One parameter either way.
+  const plainSql = weightsSql({ status: "open", decayDone: false }, []);
+  const boundBy = (o: Partial<GraphOptions>) => { const p: unknown[] = []; weightsSql({ status: "open", decayDone: false, ...o }, p); return p.length; };
+  assert(plainSql.includes("FROM node_lifecycle()") && !/node_state|thought_facets|thought_sources/.test(plainSql) && plainSql === weightsSql({ status: "open", decayDone: false, startable: false }, [])
+      && weightsSql({ status: "open", decayDone: false, startable: true }, []).includes("FROM node_state()") && !weightsSql({ status: "open", decayDone: false, startable: true }, []).includes("node_lifecycle()")
+      && [{}, { startable: true }, { decayBlocked: true }, { status: "all" as const, decayDone: true }, { status: "all" as const, decayDone: true, decayBlocked: true }].every((o) => boundBy(o) === 1),
+    "weightsSql without --startable reads node_lifecycle() and no node_state, link facet or source row, and with it node_state(); it binds one parameter, the kept types, under every flag");
   assert(render(await graphReport(run, null, wide)) === beforeAll && render(await graphReport(run, "Open Brain", { ...wide, status: "open" })) === beforeOpen && !("dependencies" in (await graphCoverage(run, open))),
     "the default and --status open reports are byte-identical before and after the links: the dependency read is additive, and its coverage is absent without the flag");
 
@@ -6006,6 +6049,17 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   const covS = await graphCoverage(run, openStart);
   assert(JSON.stringify({ ...covS.dependencies, last_link_change: null }) === JSON.stringify({ facets: 6, in_dependencies: 7, held: 5, unknown_blockers: 1, last_link_change: null, systems: [{ system: "linear", facets: 6, gates: true }] }) && covS.dependencies!.last_link_change !== null && covS.weighed === 8,
     `coverage: six active dependency facets (tP's, tQ's, tX's and tD's blocked_by, tR's two blocks; the closed one and the child_of links are not); seven thoughts whose ticket a dependency names on either side (tP, tPsec, tQ, tR, tV — named only by tR's blocks, holding no facet — tX, tD; not tS, whose one link is child_of); five held (tP, tPsec, tQ, tV, tX — not the Done tD, which already weighs 0); one blocker nothing settles (SMD-7999); a facet timestamp; eight weigh in (${JSON.stringify(covS.dependencies)}, ${covS.weighed})`);
+  // node_state per ticket (058): what --startable weighed. `blockers` is the
+  // raw fact and `blocked` the rule: the Done tD keeps its ticket's open
+  // blocker and is not blocked (first review pass of SMD-2061, now a column).
+  const nsS = await nodeState();
+  const heldBy = (id: string) => { const r = nsS.get(id)!; return `${r.blocked}:${JSON.stringify(r.blockers)}:${JSON.stringify(r.unknown_blockers)}`; };
+  const linksS = (await db.query<{ system: string; active: boolean; gates: boolean }>(`SELECT system, active, gates FROM node_dependencies()`)).rows;
+  assert([tP, tQ, tPsec, tV, tX].map(heldBy).join(" ") === ['true:["SMD-7002"]:null', 'true:["SMD-7003"]:null', 'true:["SMD-7002"]:null', 'true:["SMD-7003"]:null', 'true:["SMD-7999"]:["SMD-7999"]'].join(" ")
+      && [tR, tS, tW].map(heldBy).join(" ") === "false:null:null false:null:null false:null:null" && heldBy(tD) === 'false:["SMD-7002"]:null'
+      && [...nsS.values()].filter((r) => r.in_dependencies).map((r) => r.thought_id).sort().join() === [tP, tPsec, tQ, tR, tV, tX, tD].sort().join()
+      && linksS.length === 7 && linksS.filter((l) => l.active).length === 6 && linksS.every((l) => l.system === "linear" && l.gates) && await idsAgree([tP, tD, tX, t2]),
+    `node_state: tP, tQ, tPsec, tV and tX blocked by their open blockers, tX's unknown; tR, tS, tW not; tD settled with its blocker kept; the seven named tickets in_dependencies; node_dependencies() the seven blocks/blocked_by facets, six active, the board gating (${[tP, tQ, tPsec, tV, tX, tD].map(heldBy).join(" ")})`);
   // A settled ticket is settled, not blocked: tD passes --status done and the
   // decay exactly as without the flag, and `held` counts only what the flag
   // took from above 0 in the run — under active, tQ alone (tP, tV and tX are backlog, already 0).
@@ -6013,11 +6067,14 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
       && (await graphCoverage(run, { ...wide, status: "done", startable: true })).weighed === (await graphCoverage(run, { ...wide, status: "done" })).weighed,
     "--status done --startable lists the Done tD though its blocker is open, holds nothing back, and weighs in exactly what --status done does");
   assert((await graphCoverage(run, { ...wide, status: "active", startable: true })).dependencies!.held === 1, "under --status active the flag holds back one thought, tQ — the line reports what it did in this run, not every thought with a blocker");
-  // coverage() reads the known types at the slot weightsSql bound last; under
-  // --startable weightsSql binds one more array first, so the lifecycle counts
-  // must be the same with and without the flag (third review pass).
+  // The lifecycle counts read 058's status sets, not a slot: the same under
+  // every filter and either dependency flag (third review pass of SMD-2061
+  // caught a slot miscount; a slot left pointing at the kept types would pass
+  // under `all` alone).
   const lc = (c: Awaited<ReturnType<typeof graphCoverage>>) => [c.with_lifecycle, c.unknown_status, c.done, c.last_sync].join();
-  assert(lc(covS) === lc(await graphCoverage(run, { ...wide, status: "open" })), `the lifecycle counts under --startable are the lifecycle counts without it — the slot arithmetic holds (${lc(covS)})`);
+  const lcs = new Set<string>();
+  for (const status of ["all", "open", "active", "done"] as const) for (const dep of [{}, { startable: true }, { decayBlocked: true }]) lcs.add(lc(await graphCoverage(run, { ...wide, status, ...dep })));
+  assert(lc(covS) === lc(await graphCoverage(run, { ...wide, status: "open" })) && lcs.size === 1, `the lifecycle counts are one set under every filter, with and without either flag (${[...lcs].join(" | ")})`);
   // An unknown blocker is counted where it holds a thought back: under done,
   // tX (backlog) already weighs 0, so SMD-7999 holds nothing (second review pass).
   assert((await graphCoverage(run, { ...wide, status: "done", startable: true })).dependencies!.unknown_blockers === 0 && covS.dependencies!.unknown_blockers === 1,
@@ -6066,6 +6123,14 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   const covD = await graphCoverage(run, openDecay);
   assert(JSON.stringify(covD.dependencies) === JSON.stringify(covS.dependencies) && covD.weighed === (await graphCoverage(run, { ...wide, status: "open" })).weighed && covD.weighed === 13 && lc(covD) === lc(covS),
     `coverage under the decay: the dependency counts are --startable's (five down-weighted, one unknown blocker), thirteen weigh in — --startable's eight and the five it held — and the lifecycle counts are unmoved (${JSON.stringify(covD.dependencies)}, ${covD.weighed})`);
+  // The freshness counts a closed facet (058's changed_at): reopen tW's
+  // blocked_by and close it again, and the latest change is that close.
+  await links(tW, [["blocked_by", "SMD-7003"]]);
+  await links(tW, []);
+  const closedAt = (await db.query<{ at: Date }>(`SELECT max(valid_until) AS at FROM thought_facets WHERE kind = 'link'`)).rows[0].at;
+  const lastChange = (await graphCoverage(run, openStart)).dependencies!.last_link_change;
+  assert(lastChange !== null && new Date(lastChange).getTime() === new Date(closedAt).getTime() && (await nodeState([tW])).get(tW)?.blocked === false,
+    `the dependency line's freshness is the latest write or close of any blocks/blocked_by facet — a close included — and tW stays unblocked (${lastChange}, ${new Date(closedAt).toISOString()})`);
   // Degree counts neighbours, not evidence: an edge a blocked thought alone
   // evidences stays under the decay, at its weight's worth of support.
   await record(tQ, [E("Open Brain", "project"), E("Kafka", "tool")], [R("Kafka", "Open Brain", "depends_on")]);
@@ -6140,6 +6205,10 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   assert((await listed(openStart)).has(tJ1) && covU.dependencies!.held === 5 && covU.dependencies!.facets === 7 && covU.dependencies!.in_dependencies === 7 && decU?.weight === 1 && decU?.blockers === null
       && JSON.stringify(covU.dependencies!.systems) === JSON.stringify([{ system: "jira", facets: 1, gates: false }, { system: "linear", facets: 6, gates: true }]),
     `a system no row of which states a lifecycle gates nothing: tJ1's blocked_by PROJ-2 is read (seven facets) but holds nothing back, names no ticket, and under the decay tJ1 weighs 1 with no blocker (${JSON.stringify(covU.dependencies)})`);
+  const nsJ1 = (await nodeState([tJ1])).get(tJ1)!;
+  const jiraGates = (await db.query<{ gates: boolean }>(`SELECT DISTINCT gates FROM node_dependencies() WHERE system = 'jira'`)).rows;
+  assert(nsJ1.blocked === false && nsJ1.blockers === null && nsJ1.in_dependencies === false && jiraGates.length === 1 && jiraGates[0].gates === false,
+    `node_state: tJ1 unblocked with no blocker and no named ticket; node_dependencies() marks jira's facet not gating (${JSON.stringify(nsJ1)})`);
   // A jira row claiming a Linear ticket borrows that ticket's status in
   // `lifecycle`; the gate reads a row's own statement, so jira still gates
   // nothing (first review pass).
@@ -6160,6 +6229,9 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
       && JSON.stringify(covG.dependencies!.systems) === JSON.stringify([{ system: "jira", facets: 1, gates: true }, { system: "linear", facets: 6, gates: true }])
       && !render(await graphReport(run, null, openStart)).includes("gates nothing"),
     `once a jira row states a lifecycle (tJ2 started), jira gates as the board does: tJ1 is held by the open PROJ-2, named jira:PROJ-2 under the decay, and PROJ-1 and PROJ-2 join the named tickets (${JSON.stringify(covG.dependencies)})`);
+  const nsJ1g = (await nodeState([tJ1])).get(tJ1)!;
+  assert(nsJ1g.blocked && JSON.stringify(nsJ1g.blockers) === '["jira:PROJ-2"]' && nsJ1g.unknown_blockers === null && nsJ1g.in_dependencies,
+    `node_state: once jira gates, tJ1 is blocked by jira:PROJ-2, whose status is known, and its ticket is named (${JSON.stringify(nsJ1g)})`);
   await stateOf(tJ2, "Done", "completed");
   assert((await listed(openStart)).has(tJ1) && (await graphCoverage(run, openStart)).dependencies!.held === 5,
     "a settled jira blocker does not block: tJ2 completed frees tJ1, as a completed Linear blocker frees its ticket");
@@ -8021,6 +8093,148 @@ console.log("\n[53] A role migrate.ts --grant set up runs the entity writer (an 
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`SELECT prune_orphan_entities()`);
   await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
+}
+
+// ── 54. Migration 058: node_state (SMD-2074) ──
+//
+// [44] reads node_state through graph-centrality and asks it directly on that
+// fixture. This section holds what [44] cannot: the signatures and columns a
+// second consumer (search, the ticket's second PR) is written against; the
+// properties that let a caller's planner inline them; the status sets held to
+// the script's; the default read needing `thoughts` alone, so a role without
+// the structure group runs every mode but the dependency read; and the script
+// refusing a brain without 058, or with other status sets.
+console.log("\n[54] Migration 058: node_state — the five functions' columns in order, inlined into a caller's plan, the status sets graph-centrality ranks by, the default read on thoughts alone under a role without thought_sources, and the script refusing a brain without 058 or with other status sets (SMD-2074)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const run: Runner = async (text, params) => (await db.query<Record<string, unknown>>(text, params)).rows;
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT prune_orphan_entities()`);
+
+  const fns = await q<{ sig: string; result: string; vol: string; definer: boolean; strict: boolean; config: string[] | null; lang: string; comment: string | null }>(
+    `SELECT p.oid::regprocedure::text AS sig, pg_get_function_result(p.oid) AS result, p.provolatile::text AS vol, p.prosecdef AS definer, p.proisstrict AS strict,
+            p.proconfig AS config, l.lanname AS lang, obj_description(p.oid, 'pg_proc') AS comment
+       FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'public' AND p.proname LIKE 'node\\_%' ORDER BY 1`);
+  const TS = "timestamp with time zone";
+  const expected: Record<string, [string, string]> = {
+    "node_dependencies()": ["s", `TABLE(system text, blocked text, blocker text, active boolean, changed_at ${TS}, gates boolean)`],
+    "node_lifecycle()": ["s", `TABLE(thought_id uuid, status text, status_type text, synced_at text, created_at ${TS})`],
+    "node_lifecycle_types()": ["i", "text[]"],
+    "node_settled_types()": ["i", "text[]"],
+    "node_state(uuid[])": ["s", `TABLE(thought_id uuid, status text, status_type text, synced_at text, created_at ${TS}, open boolean, blocked boolean, blockers text[], unknown_blockers text[], in_dependencies boolean, superseded_by uuid)`],
+  };
+  const off = fns.filter((f) => expected[f.sig]?.[0] !== f.vol || expected[f.sig]?.[1] !== f.result).map((f) => `${f.sig} ${f.vol} ${f.result}`);
+  assert(fns.length === 5 && fns.map((f) => f.sig).join() === Object.keys(expected).join() && off.length === 0,
+    `five node_* functions, each with the columns and volatility its contract states — node_state's eleven in order (${fns.map((f) => f.sig).join(", ")}; off: ${off.join("; ") || "none"})`);
+  assert(fns.every((f) => f.lang === "sql" && !f.definer && !f.strict && f.config === null && (f.comment ?? "").includes("Migration 058 / SMD-2074")),
+    "each is LANGUAGE sql, SECURITY INVOKER, not STRICT, with no SET — what a caller's planner needs to inline it — and its COMMENT names 058 and SMD-2074");
+  const plan = async (sql: string) => (await q<{ "QUERY PLAN": string }>(`EXPLAIN (COSTS OFF) ${sql}`)).map((r) => r["QUERY PLAN"]).join("\n");
+  const planAll = await plan(`SELECT * FROM node_state()`);
+  const planIds = await plan(`SELECT * FROM node_state('{00000000-0000-0000-0000-000000000000}'::uuid[])`);
+  assert(!/Function Scan on node_/.test(planAll) && !/Function Scan on node_/.test(planIds) && /thoughts/.test(planAll),
+    `node_state() and node_lifecycle() inside it are inlined: the plan scans thoughts and no node_* function, with and without ids (${planAll.split("\n")[0]})`);
+
+  const [sets] = await q<{ known: string[]; settled: string[] }>(`SELECT node_lifecycle_types() AS known, node_settled_types() AS settled`);
+  assert(sets.known.join() === LIFECYCLE_TYPES.join() && sets.settled.join() === LIFECYCLE_FILTERS.done.join() && sets.known.filter((t) => !sets.settled.includes(t)).join() === LIFECYCLE_FILTERS.open.join(),
+    `058's status sets are graph-centrality's: the six known types in order, the two settled, and known less settled is --status open (${sets.known.join()} / ${sets.settled.join()})`);
+
+  // The read on a thought of each shape, named or not.
+  // Stamped as board-sync stamps (an UPDATE of the metadata), as [44] does.
+  const put = async (content: string, metadata: Record<string, unknown>) => {
+    const id = (await q<{ r: { id: string } }>(`SELECT upsert_thought($1, '{}'::jsonb) AS r`, [content]))[0].r.id;
+    await db.query(`UPDATE thoughts SET metadata = metadata || $2::jsonb WHERE id = $1`, [id, JSON.stringify(metadata)]);
+    return id;
+  };
+  const hub = await put("Open Brain runs on PostgreSQL.", { source: "linear", issue: "SMD-8001", status: "Todo", status_type: "unstarted", linear_updated_at: "2026-09-25T00:00:00.000Z" });
+  const note = await put("A hand note about Open Brain.", {});
+  await db.query(`SELECT record_thought_entities($1::uuid, 'extract:stub@p1', $2::jsonb, $3::jsonb, NULL, NULL)`,
+    [hub, JSON.stringify([{ name: "Open Brain", type: "project", confidence: 0.9 }, { name: "PostgreSQL", type: "tool", confidence: 0.9 }]), JSON.stringify([{ from: "Open Brain", to: "PostgreSQL", relation: "depends_on", confidence: 1 }])]);
+  const [counts] = await q<{ all_: number; none: number; nul: number; one: number }>(
+    `SELECT (SELECT count(*) FROM node_state())::int AS all_, (SELECT count(*) FROM node_state('{}'))::int AS none, (SELECT count(*) FROM node_state('{NULL}'))::int AS nul,
+            (SELECT count(*) FROM node_state(ARRAY[$1::uuid]))::int AS one`, [note]);
+  const [hubRow] = await q<{ open: boolean; synced_at: string; blocked: boolean }>(`SELECT open, synced_at, blocked FROM node_state(ARRAY[$1::uuid])`, [hub]);
+  assert(counts.all_ === 2 && counts.none === 0 && counts.nul === 0 && counts.one === 1 && hubRow.open === true && hubRow.synced_at === "2026-09-25T00:00:00.000Z" && hubRow.blocked === false,
+    `node_state(NULL) is every thought, an empty or all-NULL list none, a named id its one row; the ticket open with its own watermark as its freshness (${JSON.stringify(counts)}, ${JSON.stringify(hubRow)})`);
+
+  // The gate projected, as coverage reads it: its reads of thoughts — the
+  // gate's only use of that table — do not grow with the facets, and no
+  // subplan runs per facet (first review pass: a correlated EXISTS ran once per
+  // link; second: a LATERAL aggregate has no SubPlan and ran its scan once per
+  // facet; third: the scan's own loop count is a property of the source rows,
+  // not the gate, so the loops are compared at two facets and at four over the
+  // same source rows).
+  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-8001', 'SMD-8001', 'text/markdown')`, [hub]);
+  const gateReads = async (targets: string[]) => {
+    await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [hub, JSON.stringify(targets.map((target) => ({ relation: "blocked_by", target })))]);
+    const planLines = (await q<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT system, gates FROM node_dependencies()`)).map((r) => r["QUERY PLAN"]);
+    const scans = planLines.filter((l) => /Scan.* on thoughts\b/.test(l));
+    const loops = scans.reduce((a, l) => a + Number(/loops=(\d+)\)/.exec(l)?.[1] ?? NaN), 0);
+    const [{ n }] = await q<{ n: number }>(`SELECT count(*)::int AS n FROM node_dependencies() WHERE active`);
+    return { facets: n, loops, subplan: planLines.some((l) => /SubPlan/.test(l)), scans: scans.map((l) => l.trim()).join(" | ") };
+  };
+  const atTwo = await gateReads(["SMD-8002", "SMD-8003"]);
+  const atFour = await gateReads(["SMD-8002", "SMD-8003", "SMD-8004", "SMD-8005"]);
+  assert(atTwo.facets === 2 && atFour.facets === 4 && atTwo.loops > 0 && atFour.loops === atTwo.loops && !atTwo.subplan && !atFour.subplan,
+    `node_dependencies()' gate is one grouped pass over the source rows: its reads of thoughts are ${atTwo.loops} at two facets and ${atFour.loops} at four, and no subplan runs (${atFour.scans})`);
+  // The role split: every migrations' group but structure — thoughts,
+  // thought_facets and the graph, not thought_sources.
+  const ROLE = "ob1_node_reader";
+  await db.exec(`CREATE ROLE ${ROLE} NOLOGIN`);
+  const groups = ROLE_GRANT_GROUPS.filter((g) => g !== "structure" && ROLE_GRANTS[g].every((r) => /^\d{3}$/.test(r.since)));
+  const present = new Set((await q<{ name: string; present: boolean }>(grantPresenceSql(grantedObjects()))).filter((r) => r.present).map((r) => r.name));
+  for (const s of [`GRANT USAGE ON SCHEMA public TO "${ROLE}";`, ...grantStatements(ROLE, { groups, present })]) await db.exec(s);
+  const [priv] = await q<{ sources: boolean; thoughts: boolean }>(`SELECT has_table_privilege($1, 'thought_sources', 'SELECT') AS sources, has_table_privilege($1, 'thoughts', 'SELECT') AS thoughts`, [ROLE]);
+  const asRole = async (o: GraphOptions): Promise<string> => {
+    await db.exec(`SET ROLE ${ROLE}`);
+    try { return render(await graphReport(run, null, o)); } catch (e) { return `ERROR ${(e as Error).message.split("\n")[0]}`; } finally { await db.exec(`RESET ROLE`); }
+  };
+  const base: GraphOptions = { ...DEFAULT_OPTIONS, limit: 10 };
+  const plainModes: GraphOptions[] = [base, { ...base, status: "open" }, { ...base, status: "active" }, { ...base, status: "done" }, { ...base, decayDone: true }];
+  // One session: the modes run one after another, so a RESET ROLE never lands
+  // under another mode's queries (first review pass).
+  const plainOut: { o: GraphOptions; role: string; owner: string }[] = [];
+  for (const o of plainModes) plainOut.push({ o, role: await asRole(o), owner: render(await graphReport(run, null, o)) });
+  const startOut = await asRole({ ...base, startable: true });
+  const decayOut = await asRole({ ...base, decayBlocked: true });
+  assert(!priv.sources && priv.thoughts && plainOut.every((p) => p.role === p.owner) && plainOut[0].role.includes("PostgreSQL")
+      && /^ERROR permission denied for table thought_sources/.test(startOut) && /^ERROR permission denied for table thought_sources/.test(decayOut),
+    `a role without the structure group runs every mode but the dependency read, each report the owner's exactly — node_lifecycle() reads thoughts alone — and --startable and --decay-blocked are refused on thought_sources (${startOut.slice(0, 80)})`);
+  await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
+
+  // The script's own check, on this brain as it stands, then without 058's
+  // read, then with another status set.
+  const startOpts = { startable: true, decayBlocked: false };
+  const fine = await schemaProblem(run, DEFAULT_OPTIONS);
+  await db.exec(`DROP FUNCTION node_state(uuid[])`);
+  const missing = await schemaProblem(run, DEFAULT_OPTIONS);
+  const missingStart = await schemaProblem(run, startOpts);
+  await reapply("058");
+  await db.exec(`CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{triage,backlog,unstarted,started,completed,canceled,duplicate}'::text[] $$`);
+  const skewKnown = await schemaProblem(run, DEFAULT_OPTIONS);
+  await reapply("058");
+  await db.exec(`CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{completed}'::text[] $$`);
+  const skewSettled = await schemaProblem(run, DEFAULT_OPTIONS);
+  await db.exec(`CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{canceled,completed}'::text[] $$`);
+  const reordered = await schemaProblem(run, DEFAULT_OPTIONS);
+  await reapply("058");
+  // A later migration reshapes node_state by DROP and CREATE; --reapply
+  // replays 058 over that shape, which it drops first (second review pass).
+  await db.exec(`DROP FUNCTION node_state(uuid[]); CREATE FUNCTION node_state(p_ids uuid[] DEFAULT NULL) RETURNS TABLE (thought_id uuid, as_of timestamptz) LANGUAGE sql STABLE AS $$ SELECT id, now() FROM thoughts $$`);
+  let replayError = "";
+  try { await reapply("058"); } catch (e) { replayError = (e as Error).message; }
+  const [shape] = await q<{ result: string }>(`SELECT pg_get_function_result('node_state(uuid[])'::regprocedure) AS result`);
+  assert(replayError === "" && shape.result === expected["node_state(uuid[])"][1],
+    `058 replays over a reshaped node_state — it drops the three table functions before creating them — and leaves its own eleven columns (${replayError || "replayed"})`);
+  assert(fine === null && (await schemaProblem(run, startOpts)) === null
+      && missing === "graph-centrality reads a thought's lifecycle through node_state: migration 058 is not applied. Run db/migrate.ts."
+      && missingStart === "graph-centrality reads a thought's lifecycle and its blockers through node_state: migration 058 is not applied. Run db/migrate.ts."
+      && (skewKnown ?? "").includes("this brain's migration 058 knows triage,backlog,unstarted,started,completed,canceled,duplicate (settled: completed,canceled). Update whichever is behind.")
+      && (skewSettled ?? "").includes("knows triage,backlog,unstarted,started,completed,canceled (settled: completed)") && reordered === null,
+    `schemaProblem: nothing on a migrated brain; without node_state every mode is refused naming 058 (the dependency flags naming the blockers too); a known or settled set that is not the script's is refused naming both, and the same members in another order are not (${skewKnown})`);
+
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT prune_orphan_entities()`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected
