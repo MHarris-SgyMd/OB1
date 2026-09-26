@@ -69,12 +69,8 @@
  *   active  = unstarted, started                    (on the board and moving)
  *   done    = completed, canceled
  *
- * `LIFECYCLE_CTE` is the one place the status comes from. Today it is
- * `thoughts.metadata`, a scalar the sync overwrites each pass; the status
- * transitions themselves are on `thought_audit` (046), and when SMD-2074 folds
- * them into a node-state projection, that CTE reads the projection and nothing
- * downstream changes — `weightsSql`, the counts and the callers see the same
- * three columns.
+ * The status comes from migration 058: `node_lifecycle()` (`LIFECYCLE_CTE`), or
+ * `node_state()` under a dependency flag (`STATE_CTE`) — below, "node_state".
  *
  * ── Startability (SMD-2061) ─────────────────────────────────────────────────
  * The lifecycle says whether a ticket is open; it does not say whether it can
@@ -102,9 +98,8 @@
  * how many one does name. Without the flag (or `--decay-blocked`, below) the
  * dependency read is not in the SQL at all, so every other mode renders
  * SMD-1994's report byte for byte (the JSON's `options` carries two more keys,
- * `startable` and `decayBlocked`, both false) and a brain without 053 runs it.
- * `dependencySql` is the seam, as `LIFECYCLE_CTE` is for the status: SMD-2074's
- * node-state projection replaces it, not its callers.
+ * `startable` and `decayBlocked`, both false) and a role without
+ * `thought_sources` runs it (below).
  *
  * ── Blocked decay (SMD-2181) ────────────────────────────────────────────────
  * `--startable` is a filter: a blocked hub vanishes rather than sinks, the
@@ -114,13 +109,12 @@
  * weight, exact in binary) times its lifecycle weight instead of 0. It stays in
  * the ranking, and where it is listed it names the blockers that hold it — its
  * ticket's open blockers, sorted, an unknown one included, another system's as
- * `system:key` — in a `blocked by` column and the JSON's `blockers`. Like
- * `--startable` it needs 053 (exit 2 without it). The two are two answers to
- * one question, so they are refused together, as `--decay-done` is beside
- * `--status`. The decays never meet on one thought: a blocked thought is
- * unsettled and `DONE_WEIGHT` weighs only settled ones, so under both each
- * thought weighs 1 or 0.25, never their product. Degree counts neighbours, not
- * evidence, and is unchanged by it.
+ * `system:key` — in a `blocked by` column and the JSON's `blockers`. The two
+ * are two answers to one question, so they are refused together, as
+ * `--decay-done` is beside `--status`. The decays never meet on one thought: a
+ * blocked thought is unsettled and `DONE_WEIGHT` weighs only settled ones, so
+ * under both each thought weighs 1 or 0.25, never their product. Degree counts
+ * neighbours, not evidence, and is unchanged by it.
  *
  * ── Sources (SMD-2218) ──────────────────────────────────────────────────────
  * The board is not the only writer of dependencies: SMD-2136's `--items`
@@ -138,6 +132,26 @@
  * the board is the only source and states its lifecycle, the line reads as
  * SMD-2061's; the JSON's `dependencies.systems` lists each system's facets and
  * whether it gates (second review pass: "and states its lifecycle").
+ *
+ * ── node_state (SMD-2074) ──────────────────────────────────────────────────
+ * The rules above are not this file's alone: attention is not actionability
+ * in search either, and the server — which cannot import a db/ script, and
+ * whose PostgREST store reaches only RPCs — ranks by the same read. So they
+ * are SQL, migration 058's five functions: `node_lifecycle()` (a thought's
+ * status, its ticket's head's, and its freshness), `node_dependencies()` (the
+ * blocks / blocked_by facets, active or closed, and whether each system
+ * gates), `node_state()` (per thought, the lifecycle beside `open`,
+ * `blocked`, `blockers`, `unknown_blockers`, `in_dependencies` and
+ * `superseded_by`), and the two status sets, which must equal
+ * `LIFECYCLE_TYPES` and `LIFECYCLE_FILTERS.done` — a brain whose 058 knows
+ * others is refused (exit 2), as is one without 058. This file is their first
+ * reader: without either dependency flag the rows are `node_lifecycle()`'s,
+ * which reads `thoughts` alone, so a role without the `structure` group's
+ * `thought_sources` runs every other mode; the flags read `node_state()`,
+ * which needs it. `metadata.status_type` is a transitional, lossy scalar — the
+ * transitions are `thought_audit`'s (046) — and when SMD-1997 folds them, the
+ * two reads of it change (`node_lifecycle()`'s body and `node_dependencies()`'
+ * gate, which reads a source row's own status) and no caller does.
  *
  * The subject resolves by 016's own rule, one rung at a time: an exact
  * `normalized_name` match (`normalize_entity_name`, so "Open-Brain" finds
@@ -316,155 +330,91 @@ function scopeSql(alias: string, scope: Scope, params: unknown[]): { where: stri
 }
 
 /**
- * Where a thought's lifecycle comes from — the one seam. Today: the three keys
+ * Where a thought's lifecycle comes from — migration 058's `node_lifecycle()`
+ * (SMD-2074), the one definition every ranking surface reads: the three keys
  * board-sync stamps on `thoughts.metadata` (SMD-1954), a scalar the sync
- * overwrites each pass. When SMD-2074's node-state projection folds the
- * transitions `thought_audit` (046) already holds, this reads that instead;
- * `weightsSql` and every count below see the same three columns either way.
+ * overwrites each pass. A row's lifecycle is its TICKET's — one head per issue
+ * (un-superseded first, then the newest sync, then the id), and every row
+ * carrying `issue` or `ticket` reads its head's keys, falling back to its own
+ * (first review pass of SMD-1994; the rule's text is 058's now). When SMD-1997
+ * folds the transitions `thought_audit` (046) already holds, the function's
+ * body changes (and the gate's, in `node_dependencies()`) and this does not.
+ * It reads `thoughts` alone, so a role without `thought_sources` runs every
+ * mode but the dependency read.
  */
-// A row's lifecycle is its TICKET's. board-sync stamps the status on the
-// ticket's head row alone (the `issue` row nothing supersedes); a superseded
-// earlier row keeps the status it froze at, and a row derived from the ticket
-// — SMD-2059's dated sections, carrying `ticket` and no status — has none of
-// its own. So `heads` picks one row per issue (un-superseded first, then the
-// newest sync, then the id) and every row carrying `issue` or `ticket` reads
-// that head's three keys, falling back to its own; a row with no ticket reads
-// its own (first review pass).
-export const LIFECYCLE_CTE = `heads AS (
-            SELECT p.metadata->>'issue' AS issue, p.metadata->>'status' AS status, p.metadata->>'status_type' AS status_type, p.metadata->>'linear_updated_at' AS synced_at,
-                   row_number() OVER (PARTITION BY p.metadata->>'issue'
-                                      ORDER BY (NOT EXISTS (SELECT 1 FROM thoughts s WHERE s.supersedes = p.id)) DESC, p.metadata->>'linear_updated_at' DESC NULLS LAST, p.id) AS rn
-              FROM thoughts p WHERE p.metadata ? 'issue'),
-          lifecycle AS (
-            SELECT t.id AS thought_id,
-                   coalesce(h.status, t.metadata->>'status') AS status,
-                   coalesce(h.status_type, t.metadata->>'status_type') AS status_type,
-                   coalesce(h.synced_at, t.metadata->>'linear_updated_at') AS synced_at
-              FROM thoughts t
-              LEFT JOIN heads h ON h.rn = 1 AND h.issue = coalesce(t.metadata->>'ticket', t.metadata->>'issue'))`;
+export const LIFECYCLE_CTE = `lifecycle AS (SELECT thought_id, status, status_type, synced_at FROM node_lifecycle())`;
 
 /**
- * Where a thought's open blockers come from — the second seam, read after
- * `lifecycle` and only under `--startable` or `--decay-blocked`. Today: 053's
- * active `blocks` / `blocked_by` link facets, each resolved to the (system,
- * blocked, blocker) identities it states; a blocker whose lifecycle is
- * completed or canceled (the types in `$doneSlot`) is dropped. `dependency` is
- * one row per thought with an open blocker, its blockers' identities sorted —
- * a `linear` one bare, as the ticket claim is, and another system's as
- * `system:key`, since SMD-2136's `--items` writes links for any system and a
- * bare key would not say whose it is (fourth review pass). Only a GATING
- * system's links reach `deps`: one with a source row of its own that states,
- * in its own metadata, a status this file knows (the types in `$knownSlot`) —
- * not `lifecycle`, which a row claiming a Linear ticket borrows from the
- * ticket's head, so one cross-reference would make its whole system gate. A
- * system that states no lifecycle anywhere cannot say a blocker is settled, so
- * its links gate nothing rather than block forever, and coverage counts them
- * (SMD-2218; first review pass: the own row). When
- * SMD-2074's node-state projection holds startability, this reads that
- * instead.
+ * The same rows with each thought's dependency state beside them — 058's
+ * `node_state()`, read instead of `LIFECYCLE_CTE` under `--startable` or
+ * `--decay-blocked`. `blockers` is the ticket's open blockers from its gating
+ * systems' active links (a `linear` one bare, another system's `system:key`,
+ * an unknown one kept), `blocked` the rule — blockers, and the thought not
+ * completed or canceled — `unknown_blockers` those no known status settles,
+ * `in_dependencies` whether a gating link names its ticket at all. The
+ * lifecycle columns are node_lifecycle()'s, so every count reads one
+ * lifecycle whichever of the two a run takes. The rules — which link blocks,
+ * which system gates (SMD-2218), what settles a blocker — are the header's,
+ * written once in 058.
  */
-// The identities are the join key, never a thought id: a link names its
-// target by identity (053), and a ticket's rows — its head, its superseded
-// twins, SMD-2059's derived sections — share one. `ticket_of` gives each
-// thought its ticket the way LIFECYCLE_CTE does (the row's own source
-// identity, else its `ticket`, else its `issue` — the board sync's linear
-// claim), and `blockers` resolves a blocker once per edge through
-// source_thought(), the resolver 053 ships for readers, then reads that
-// thought's row of `lifecycle`, so a blocker's status is its ticket head's.
-export const dependencySql = (doneSlot: number, knownSlot: number) => `ticket_of AS (
-            SELECT thought_id, system, identity FROM thought_sources
-            UNION
-            SELECT t.id, 'linear', coalesce(t.metadata->>'ticket', t.metadata->>'issue') FROM thoughts t WHERE t.metadata ? 'ticket' OR t.metadata ? 'issue'),
-          dep_links AS MATERIALIZED (
-            SELECT s.system,
-                   CASE WHEN f.payload->>'relation' = 'blocked_by' THEN s.identity ELSE f.payload->>'target' END AS blocked,
-                   CASE WHEN f.payload->>'relation' = 'blocked_by' THEN f.payload->>'target' ELSE s.identity END AS blocker
-              FROM thought_facets f JOIN thought_sources s ON s.thought_id = f.thought_id AND s.system = f.payload->>'system'
-             WHERE f.kind = 'link' AND f.valid_until IS NULL AND f.payload->>'relation' IN ('blocks', 'blocked_by')),
-          gating AS MATERIALIZED (
-            SELECT s.system FROM (SELECT DISTINCT system FROM dep_links) s
-             WHERE EXISTS (SELECT 1 FROM thought_sources o JOIN thoughts t ON t.id = o.thought_id
-                            WHERE o.system = s.system AND t.metadata->>'status_type' = ANY($${knownSlot}::text[]))),
-          deps AS MATERIALIZED (SELECT DISTINCT system, blocked, blocker FROM dep_links WHERE system IN (SELECT system FROM gating)),
-          blockers AS MATERIALIZED (
-            SELECT d.system, d.blocked, d.blocker, bl.status_type AS blocker_status,
-                   CASE WHEN d.system = 'linear' THEN d.blocker ELSE d.system || ':' || d.blocker END AS shown
-              FROM (SELECT d.system, d.blocked, d.blocker, source_thought(d.system, d.blocker) AS blocker_id FROM deps d) d
-              LEFT JOIN lifecycle bl ON bl.thought_id = d.blocker_id
-             WHERE bl.status_type IS NULL OR NOT bl.status_type = ANY($${doneSlot}::text[])),
-          dependency AS (
-            SELECT k.thought_id, array_agg(DISTINCT b.shown ORDER BY b.shown) AS blockers
-              FROM ticket_of k JOIN blockers b ON b.system = k.system AND b.blocked = k.identity
-             GROUP BY 1)`;
+export const STATE_CTE = `lifecycle AS (SELECT thought_id, status, status_type, synced_at, blocked, blockers, unknown_blockers, in_dependencies FROM node_state())`;
 
 /**
  * The per-thought weight, as the header defines it, with `lifecycle` before it:
  * a kept status 1; another known status 0, or DONE_WEIGHT under decay; no
  * status, or one this file does not know, 1 — and under `--startable`, times 0
- * when the thought is not completed or canceled and its ticket has an open
- * blocker (`held` marks the rows that took from above 0), times BLOCKED_WEIGHT
- * under `--decay-blocked` (`blockers` then names what holds each). Returns the
- * CTE text (lifecycle, the dependency CTEs under either, and weights, no
- * leading comma) with its array parameters appended to `params` — under either
- * flag the done types first, then always the kept types and the known types, so
- * the known types are the last slot and a query places its own after them.
+ * when the thought is blocked (`held` marks the rows that took from above 0),
+ * times BLOCKED_WEIGHT under `--decay-blocked` (`blockers` then names what
+ * holds each). Returns the CTE text (lifecycle — `node_state()`'s rows under
+ * either flag — and weights, no leading comma) with its one parameter, the
+ * kept types, appended to `params`; the known types are 058's
+ * `node_lifecycle_types()`, so a query places its own slots after it.
  */
 export function weightsSql(opts: Pick<Options, "status" | "decayDone"> & Partial<Pick<Options, "startable" | "decayBlocked">>, params: unknown[]): string {
   // The rules parseArgs applies, applied here too for a caller that builds its
   // own Options: decay and a filter are two answers to one question.
   if (opts.decayDone && opts.status !== "all") throw new Error(`weightsSql: --decay-done with --status ${opts.status}; pass one or the other`);
   if (opts.startable && opts.decayBlocked) throw new Error("weightsSql: --startable with --decay-blocked; pass one or the other");
-  let doneSlot = 0; // read only under the dependency read, where it is bound
-  if (readsDependencies(opts)) {
-    params.push(pgArray(LIFECYCLE_FILTERS.done));
-    doneSlot = params.length;
-  }
   params.push(pgArray(opts.decayDone ? LIFECYCLE_FILTERS.open : LIFECYCLE_FILTERS[opts.status]));
   const kept = params.length;
-  params.push(pgArray(LIFECYCLE_TYPES));
-  const known = params.length;
-  // The gate reads the known types, so the dependency text is built once they
-  // are bound; the slots keep their order, the known types last (SMD-2218).
-  const dependency = readsDependencies(opts) ? `,\n          ${dependencySql(doneSlot, known)}` : "";
   // The literal is a float8 written as SQL text — DONE_WEIGHT is a constant of
   // this file, not input — so the type of `w` is float8 in every branch. The
-  // status name is shown only beside a status_type this file knows, so the
-  // column and the "carry a lifecycle" count agree (first review pass).
+  // status name is shown only beside a status_type 058 knows, so the column
+  // and the "carry a lifecycle" count agree (first review pass).
   // MATERIALIZED: a query that reads `weights` once, inside a correlated
   // subquery — the rungs' mention count — would otherwise have the planner
-  // inline heads and lifecycle into it and scan `thoughts` once per candidate
-  // row; materialised, the weights are computed once per statement whatever
-  // the reference count (second review pass).
-  // Without either flag the text is SMD-1994's exactly: the dependency read
-  // adds the CTEs, the factor, `held` and the join, and nothing else moves.
-  // Startability is a question about unsettled work: Linear keeps a relation
-  // after a ticket completes, and a Done ticket whose blocker is still open is
-  // settled, not blocked — so the factor passes a completed or canceled row
-  // untouched, and `--status done` or the decay read it as without the flag
-  // (first review pass). `held` marks the rows the factor took from weight
-  // above 0 to 0, or to BLOCKED_WEIGHT of it under --decay-blocked — what the
-  // flag did in this run, which coverage counts.
+  // inline the lifecycle into it and scan `thoughts` once per candidate row;
+  // materialised, the weights are computed once per statement whatever the
+  // reference count (second review pass).
+  // Without either flag the rows are node_lifecycle()'s, and no link facet or
+  // source row is read: the dependency read swaps in node_state() and adds
+  // the factor and `held`, and nothing else moves. node_state's `blocked` is
+  // unsettled by definition — Linear keeps a relation after a ticket
+  // completes, and a Done ticket whose blocker is still open is settled, not
+  // blocked — so the factor passes a completed or canceled row untouched, and
+  // `--status done` or the decay read it as without the flag (first review
+  // pass). `held` marks the rows the factor took from weight above 0 to 0, or
+  // to BLOCKED_WEIGHT of it under --decay-blocked — what the flag did in this
+  // run, which coverage counts.
   // Under --decay-blocked the factor is BLOCKED_WEIGHT, a constant written as
   // SQL text as DONE_WEIGHT is, and `blockers` is carried for the held rows
   // alone — a settled ticket's leftover relation holds nothing, so it names
   // nothing. The decays never meet: `blocked` is unsettled and DONE_WEIGHT is
   // a settled weight, so no row weighs their product. The column is not in
-  // --startable's text, which is SMD-2061's exactly.
+  // --startable's text.
   const base = `CASE WHEN status_type = ANY($${kept}::text[]) THEN 1.0
-                                   WHEN status_type = ANY($${known}::text[]) THEN ${opts.decayDone ? DONE_WEIGHT : 0}
+                                   WHEN status_type = ANY(node_lifecycle_types()) THEN ${opts.decayDone ? DONE_WEIGHT : 0}
                                    ELSE 1.0 END`;
-  let factor = "", held = "", join = "";
+  let factor = "", held = "";
   if (readsDependencies(opts)) {
-    const blocked = `(blockers IS NOT NULL AND NOT coalesce(status_type = ANY($${doneSlot}::text[]), false))`;
-    factor = ` * CASE WHEN ${blocked} THEN ${opts.decayBlocked ? BLOCKED_WEIGHT : 0} ELSE 1.0 END`;
-    held = `,\n                             (${blocked} AND ${base} > 0) AS held`;
-    if (opts.decayBlocked) held += `,\n                             CASE WHEN ${blocked} THEN blockers END AS blockers`;
-    join = " LEFT JOIN dependency USING (thought_id)";
+    factor = ` * CASE WHEN blocked THEN ${opts.decayBlocked ? BLOCKED_WEIGHT : 0} ELSE 1.0 END`;
+    held = `,\n                             (blocked AND ${base} > 0) AS held`;
+    if (opts.decayBlocked) held += `,\n                             CASE WHEN blocked THEN blockers END AS blockers`;
   }
-  return `${LIFECYCLE_CTE}${dependency},
-          weights AS MATERIALIZED (SELECT thought_id, CASE WHEN status_type = ANY($${known}::text[]) THEN status END AS status, status_type,
+  return `${readsDependencies(opts) ? STATE_CTE : LIFECYCLE_CTE},
+          weights AS MATERIALIZED (SELECT thought_id, CASE WHEN status_type = ANY(node_lifecycle_types()) THEN status END AS status, status_type,
                              (${base}${factor})::float8 AS w${held}
-                        FROM lifecycle${join})`;
+                        FROM lifecycle)`;
 }
 
 /**
@@ -495,41 +445,36 @@ export async function coverage(run: Runner, opts: Options): Promise<Coverage> {
   const sc = scopeSql("e", opts, params);
   const patternSlot = sc.patternSlot ?? params.push(NUMERIC_NAME_RE);
   const weights = weightsSql(opts, params);
-  const knownSlot = params.length;
-  params.push(pgArray(LIFECYCLE_FILTERS.done));
-  const doneSlot = params.length;
-  // The dependency counts read the CTEs weightsSql emitted under either flag.
-  // `facets` counts `dep_links` — every link the read took in, the ungated
-  // systems' among them (the ranking reads the gating ones, through `deps`),
-  // not a second scan with its own predicate (second review pass) — so a
-  // relation the sync stated on both sides is two. `in_dependencies` counts
-  // the thoughts whose ticket a gating dependency names on either side, from
-  // `deps` itself — a link of
-  // another relation (a section's own child_of, a relates_to) says nothing
-  // about blocking, and a ticket blocked only through another's `blocks` is
-  // named here though it holds no facet (first review pass: "any active link
-  // on the holder" counted every synced thought and missed that one). `held`
-  // is what the flag did in this run, not every thought with a blocker;
-  // `unknown_blockers` counts the distinct blockers of held thoughts that no
-  // known status settles or opens — one hanging off a Done ticket blocks
-  // nothing and is not counted (second and third review passes).
+  // The dependency counts read node_state()'s rows, which weightsSql put in
+  // `lifecycle` under either flag, and 058's node_dependencies() for the
+  // facets themselves. `facets` counts the active ones — every link the read
+  // took in, the ungated systems' among them (the ranking reads the gating
+  // ones) — so a relation the sync stated on both sides is two.
+  // `in_dependencies` counts the thoughts whose ticket a gating dependency
+  // names on either side — a link of another relation (a section's own
+  // child_of, a relates_to) says nothing about blocking, and a ticket blocked
+  // only through another's `blocks` is named though it holds no facet (first
+  // review pass: "any active link on the holder" counted every synced thought
+  // and missed that one). `held` is what the flag did in this run, not every
+  // thought with a blocker; `unknown_blockers` counts the distinct blockers of
+  // held thoughts that no known status settles or opens — one hanging off a
+  // Done ticket blocks nothing and is not counted (second and third review
+  // passes). The freshness is the latest write or close of any facet of the
+  // two relations, a closed one included; `systems` the active facets' by
+  // system, with whether it gates (SMD-2218).
   const dependencyCols = readsDependencies(opts)
     ? `,
-            (SELECT count(*) FROM dep_links)::int AS dep_facets,
-            (SELECT count(DISTINCT k.thought_id) FROM ticket_of k
-               JOIN (SELECT system, blocked AS identity FROM deps UNION SELECT system, blocker FROM deps) n ON n.system = k.system AND n.identity = k.identity)::int AS dep_named,
+            (SELECT count(*) FROM links WHERE active)::int AS dep_facets,
+            (SELECT count(*) FROM lifecycle WHERE in_dependencies)::int AS dep_named,
             (SELECT count(*) FROM weights WHERE held)::int AS dep_held,
-            (SELECT count(*) FROM (SELECT DISTINCT b.system, b.blocker FROM blockers b
-                                     JOIN ticket_of k ON k.system = b.system AND k.identity = b.blocked
-                                     JOIN weights w ON w.thought_id = k.thought_id AND w.held
-                                    WHERE b.blocker_status IS NULL OR NOT b.blocker_status = ANY($${knownSlot}::text[])) u)::int AS dep_unknown,
-            (SELECT max(greatest(f.created_at, f.valid_until)) FROM thought_facets f JOIN thought_sources s ON s.thought_id = f.thought_id AND s.system = f.payload->>'system'
-              WHERE f.kind = 'link' AND f.payload->>'relation' IN ('blocks', 'blocked_by')) AS dep_last_change,
-            (SELECT coalesce(jsonb_agg(jsonb_build_array(x.system, x.n, x.system IN (SELECT system FROM gating)) ORDER BY x.system), '[]'::jsonb)
-               FROM (SELECT system, count(*)::int AS n FROM dep_links GROUP BY 1) x) AS dep_systems`
+            (SELECT count(DISTINCT u.shown) FROM weights w JOIN lifecycle l USING (thought_id) CROSS JOIN unnest(l.unknown_blockers) AS u(shown) WHERE w.held)::int AS dep_unknown,
+            (SELECT max(changed_at) FROM links) AS dep_last_change,
+            (SELECT coalesce(jsonb_agg(jsonb_build_array(x.system, x.n, x.gates) ORDER BY x.system), '[]'::jsonb)
+               FROM (SELECT system, count(*)::int AS n, bool_or(gates) AS gates FROM links WHERE active GROUP BY 1) x) AS dep_systems`
     : "";
+  const links = readsDependencies(opts) ? `,\n          links AS (SELECT system, active, changed_at, gates FROM node_dependencies())` : "";
   const [r] = await run(
-    `WITH ${weights}
+    `WITH ${weights}${links}
      SELECT (SELECT count(*) FROM thoughts)::int AS thoughts,
             (SELECT count(DISTINCT thought_id) FROM thought_entities)::int AS extracted,
             (SELECT count(*) FROM ob1_entities e WHERE ${sc.where})::int AS entities,
@@ -537,11 +482,11 @@ export async function coverage(run: Runner, opts: Options): Promise<Coverage> {
             (SELECT count(*) FROM ob1_entity_edges)::int AS edges,
             (SELECT count(*) FROM ob1_entity_edges WHERE confidence = 1)::int AS unit_edges,
             (SELECT value FROM ob1_config WHERE key = 'entity_extraction_key') AS extraction_key,
-            (SELECT count(*) FROM lifecycle WHERE status_type = ANY($${knownSlot}::text[]))::int AS with_lifecycle,
-            (SELECT count(*) FROM lifecycle WHERE status_type IS NOT NULL AND NOT status_type = ANY($${knownSlot}::text[]))::int AS unknown_status,
-            (SELECT count(*) FROM lifecycle WHERE status_type = ANY($${doneSlot}::text[]))::int AS done,
+            (SELECT count(*) FROM lifecycle WHERE status_type = ANY(node_lifecycle_types()))::int AS with_lifecycle,
+            (SELECT count(*) FROM lifecycle WHERE status_type IS NOT NULL AND NOT status_type = ANY(node_lifecycle_types()))::int AS unknown_status,
+            (SELECT count(*) FROM lifecycle WHERE status_type = ANY(node_settled_types()))::int AS done,
             (SELECT count(*) FROM weights WHERE w > 0)::int AS weighed,
-            (SELECT max(synced_at) FROM lifecycle WHERE status_type = ANY($${knownSlot}::text[])) AS last_sync${dependencyCols}`,
+            (SELECT max(synced_at) FROM lifecycle WHERE status_type = ANY(node_lifecycle_types())) AS last_sync${dependencyCols}`,
     params);
   if (!readsDependencies(opts)) return r as Coverage;
   const { dep_facets, dep_named, dep_held, dep_unknown, dep_last_change, dep_systems, ...base } = r;
@@ -1114,6 +1059,31 @@ export function parseArgs(argv: readonly string[]): Parsed | { error: string } {
   return { url, subject: positional[0] ?? null, opts, json };
 }
 
+/**
+ * Why this brain cannot run a report, or null: the entity graph is 016's, and
+ * every mode reads a thought's lifecycle through 058's node_lifecycle() (the
+ * dependency flags its node_state()), so both must be applied — and 058's two
+ * status sets must be the ones this file filters and renders by, or a count
+ * would pair one set's rows with the other's words (a script older or newer
+ * than the brain's migrations, SMD-2158's `duplicate` the case in view). The
+ * sets are compared as sets: their order is no rule (first review pass).
+ */
+export async function schemaProblem(run: Runner, opts: Pick<Options, "startable" | "decayBlocked">): Promise<string | null> {
+  // The tables as this connection resolves them — a same-named table in a
+  // schema off the search_path is not the graph.
+  const [{ n }] = await run(`SELECT (to_regclass('ob1_entities') IS NOT NULL)::int + (to_regclass('thought_entities') IS NOT NULL)::int + (to_regclass('ob1_entity_edges') IS NOT NULL)::int AS n`, []);
+  if (Number(n) !== 3) return "This brain has no entity graph: migration 016 is not applied. Run db/migrate.ts, then db/extract-entities.ts.";
+  const [{ ok }] = await run(`SELECT (to_regprocedure('node_lifecycle_types()') IS NOT NULL AND to_regprocedure('node_settled_types()') IS NOT NULL AND to_regprocedure('node_lifecycle()') IS NOT NULL
+                                      AND to_regprocedure('node_dependencies()') IS NOT NULL AND to_regprocedure('node_state(uuid[])') IS NOT NULL) AS ok`, []);
+  if (!ok) return `graph-centrality reads a thought's lifecycle${readsDependencies(opts) ? " and its blockers" : ""} through node_state: migration 058 is not applied. Run db/migrate.ts.`;
+  const [{ known, settled }] = await run(`SELECT array_to_string(node_lifecycle_types(), ',') AS known, array_to_string(node_settled_types(), ',') AS settled`, []);
+  const same = (sql: unknown, ts: readonly string[]) => String(sql).split(",").sort().join() === [...ts].sort().join();
+  if (!same(known, LIFECYCLE_TYPES) || !same(settled, LIFECYCLE_FILTERS.done)) {
+    return `This script knows the status types ${LIFECYCLE_TYPES.join(",")} (settled: ${LIFECYCLE_FILTERS.done.join(",")}); this brain's migration 058 knows ${known} (settled: ${settled}). Update whichever is behind.`;
+  }
+  return null;
+}
+
 if (import.meta.main) {
   const parsed = parseArgs(process.argv.slice(2));
   if ("error" in parsed) {
@@ -1133,22 +1103,15 @@ if (import.meta.main) {
   // skip the finally, and could cut a piped --json short).
   // 0 ranked; 1 the subject resolved to nothing; 3 the subject IS an entity
   // and the numeric-name rule excluded it (--keep-numeric would rank it); 2 a
-  // usage error, a brain without 016 (053 under --startable or
-  // --decay-blocked), or a query that failed — never 1 for a failure or an
+  // usage error, a brain without 016 or 058 (or whose 058 knows other status
+  // types), or a query that failed — never 1 for a failure or an
   // exclusion, so a caller testing for "not in the graph" is not told that by
   // a connection refused or by SMD-1935's rule.
   let code = 0;
   try {
-    // The three tables as this connection resolves them — a same-named table in
-    // a schema off the search_path is not the graph.
-    const [{ n }] = await run(`SELECT (to_regclass('ob1_entities') IS NOT NULL)::int + (to_regclass('thought_entities') IS NOT NULL)::int + (to_regclass('ob1_entity_edges') IS NOT NULL)::int AS n`, []);
-    if (Number(n) !== 3) {
-      console.error("This brain has no entity graph: migration 016 is not applied. Run db/migrate.ts, then db/extract-entities.ts.");
-      code = 2;
-    } else if (readsDependencies(parsed.opts) && !(await run(`SELECT (to_regclass('thought_sources') IS NOT NULL AND to_regprocedure('source_thought(text, text)') IS NOT NULL) AS ok`, []))[0].ok) {
-      // The dependency read is 053's link facets and resolver; every other
-      // mode runs without them.
-      console.error(`${parsed.opts.startable ? "--startable" : "--decay-blocked"} reads the dependency link facets: migration 053 is not applied. Run db/migrate.ts, or leave the flag out.`);
+    const problem = await schemaProblem(run, parsed.opts);
+    if (problem) {
+      console.error(problem);
       code = 2;
     } else {
       const r = await report(run, parsed.subject, parsed.opts);

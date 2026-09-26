@@ -1,0 +1,39 @@
+# `--with postgres`: the profile's n8n on a Postgres 17 of its own instead of
+# its default SQLite (SMD-2210). This is the store the ADR's decision 3 left
+# to measurement. It runs beside compose.n8n.yaml:
+#
+#   bun evals/eval-orchestration.ts --up n8n --with postgres
+#
+# Its own server, never the brain's. n8n calls the brain's Postgres 16
+# "compatibility support only", and a shared postmaster is one buffer pool
+# and one crash domain. evals/README.md has what each store measured.
+
+services:
+  n8n-db:
+    image: docker.io/library/postgres:17.11-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    profiles: ["orchestration"]
+    environment:
+      POSTGRES_USER: n8n
+      POSTGRES_DB: n8n
+      POSTGRES_PASSWORD: ${ORCH_DB_PASSWORD}
+    volumes:
+      - n8n-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U n8n -d n8n"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  n8n:
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: n8n-db
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: n8n
+      DB_POSTGRESDB_PASSWORD: ${ORCH_DB_PASSWORD}
+    depends_on:
+      n8n-db:
+        condition: service_healthy
+
+volumes:
+  n8n-pgdata:

@@ -13,6 +13,7 @@
  */
 
 import { SqlStore } from "./store-sql.ts";
+import { createHash } from "node:crypto";
 import { createAssert, ISO_RE, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { MATCH_THOUGHTS_SIGNATURE } from "../db/config.mjs";
 import { createStore } from "./store.ts";
@@ -315,6 +316,65 @@ console.log("\n[5b] statsSummary aggregates the whole corpus in one SQL call (mi
   assert(s.people["Ada"] === 1, "people unnest from the array");
   assert(Object.keys(s.topics).length === 2, "a row with no topics array contributes none");
   assert(s.oldest !== null && s.newest !== null && s.oldest <= s.newest, "date range is a real span");
+}
+
+console.log("\n[5c] listThoughtIds — the id set, its digest and keyset paging (SMD-2244)");
+{
+  const total = await store.countThoughts();
+  const first = await store.listThoughtIds({ limit: 100, after: null });
+  assert(first.ids.length === total && first.total === total, `first page returns the whole small corpus and its total (${first.ids.length}/${first.total} of ${total})`);
+  assert(first.cursor === null, "a page shorter than the limit ends the walk (null cursor)");
+  const sorted = [...first.ids].sort();
+  assert(first.ids.join() === sorted.join(), "ids come back in id order");
+  // The digest is md5 of all ids joined by ',' in id order — recompute it to prove it.
+  const want = createHash("md5").update(sorted.join(",")).digest("hex");
+  assert(first.digest === want, `the first-page digest is md5(sorted ids) (${first.digest})`);
+
+  // Keyset paging: two pages of two cover the set with no overlap, and total/digest
+  // ride only the first page.
+  const pa = await store.listThoughtIds({ limit: 2, after: null });
+  assert(pa.ids.length === 2 && pa.cursor === pa.ids[1], "a full page carries a cursor = its last id");
+  assert(pa.total === total && pa.digest !== null, "total and digest ride the first page");
+  const pb = await store.listThoughtIds({ limit: 2, after: pa.cursor });
+  assert(pb.total === 0 && pb.digest === null, "a later page carries no total and no digest");
+  const walked = [...pa.ids, ...pb.ids];
+  assert(new Set(walked).size === Math.min(4, total) && walked.every((id, i) => i === 0 || id > walked[i - 1]), "the walk is strictly increasing and does not repeat");
+
+  // A malformed cursor is treated as the start, not a driver cast error.
+  const bad = await store.listThoughtIds({ limit: 100, after: "not-a-uuid" });
+  assert(bad.ids.length === total, "a non-uuid cursor reads as the first page");
+
+  // limit 0: an empty page whose cursor is null, not undefined (review pass 3).
+  const zero = await store.listThoughtIds({ limit: 0, after: null });
+  assert(zero.ids.length === 0 && zero.cursor === null, "limit 0 yields no ids and a null cursor (not undefined)");
+}
+
+console.log("\n[5d] listLoggedSearches — the search rows of query_log, windowed and bounded (SMD-2245)");
+{
+  const raw = new SQL({ url: URL_, max: 1 });
+  try {
+    await raw`DELETE FROM query_log`; // isolate this section
+    await raw`INSERT INTO query_log (kind, tool, query, arm, match_count, threshold, recency_weight, filter, tier, logged_at) VALUES
+      ('search','search_thoughts_keyword','older query','keyword',25,NULL,NULL,'{}'::jsonb,'stable', now() - interval '2 hours'),
+      ('search','search_thoughts','newer query','hybrid',10,0.5,0.25,'{"type":"note"}'::jsonb,NULL, now() - interval '1 hour')`;
+    await raw`INSERT INTO query_log (kind, tool, target_id) VALUES ('action','fetch', gen_random_uuid())`; // an action row — excluded by kind='search'
+    const all = await store.listLoggedSearches({ since: null, limit: 100 });
+    assert(all.searches.length === 2 && !all.truncated, `two search rows — the action row is excluded (${all.searches.length})`);
+    assert(all.searches[0].query === "newer query" && all.searches[0].arm === "hybrid", "most recent first");
+    assert(all.searches[0].matchCount === 10 && all.searches[0].threshold === 0.5 && all.searches[0].recencyWeight === 0.25, "the search's arguments come back");
+    assert(JSON.stringify(all.searches[0].filter) === JSON.stringify({ type: "note" }), "the filter is an object, not a string");
+    assert(all.searches[1].query === "older query" && all.searches[1].tier === "stable", "the older row, with its tier");
+    assert(all.searches.every((s) => s.loggedAt !== null && ISO_RE.test(s.loggedAt)), "loggedAt is ISO on each");
+    const one = await store.listLoggedSearches({ since: null, limit: 1 });
+    assert(one.searches.length === 1 && one.truncated === true && one.searches[0].query === "newer query", "limit 1 returns the newest and flags truncated");
+    const recent = await store.listLoggedSearches({ since: new Date(Date.now() - 90 * 60 * 1000).toISOString(), limit: 100 });
+    assert(recent.searches.length === 1 && recent.searches[0].query === "newer query", "since excludes the two-hour-old row");
+    const emptySince = await store.listLoggedSearches({ since: "", limit: 100 });
+    assert(emptySince.searches.length === 2, "an empty since is no window, not a ''::timestamptz cast error (review pass 2)");
+    await raw`DELETE FROM query_log`;
+  } finally {
+    await raw.close();
+  }
 }
 
 console.log("\n[6] Dedup and merge behave as the tools expect");

@@ -396,6 +396,41 @@ console.log("\n[6] thought_stats aggregates the whole corpus");
   assert(/Date range:/.test(out), "date range is reported");
 }
 
+console.log("\n[6b] list_thought_ids returns the id set, its digest and paging over HTTP (SMD-2244)");
+{
+  const page = JSON.parse(await call("list_thought_ids"));
+  assert(page.total === 3 && Array.isArray(page.ids) && page.ids.length === 3, `the whole small corpus and its total (${page.ids?.length}/${page.total})`);
+  assert(typeof page.digest === "string" && /^[0-9a-f]{32}$/.test(page.digest), `a first-page md5 digest (${page.digest})`);
+  assert(page.cursor === null, "a page shorter than the limit ends the walk (null cursor)");
+  assert(page.ids.every((id: string) => /^[0-9a-f-]{36}$/.test(id)), "ids only — uuids, no content");
+  // Keyset paging over HTTP: total and digest ride the first page only.
+  const p1 = JSON.parse(await call("list_thought_ids", { limit: 2 }));
+  assert(p1.ids.length === 2 && p1.cursor === p1.ids[1], "a full page carries a cursor = its last id");
+  const p2 = JSON.parse(await call("list_thought_ids", { limit: 2, after: p1.cursor }));
+  assert(p2.total === 0 && p2.digest === null, "a later page carries no total and no digest");
+  assert([...p1.ids, ...p2.ids].sort().join() === [...page.ids].sort().join(), "the two pages cover the same id set as one");
+  // A malformed cursor is refused by the tool, before any store read.
+  let refused = "";
+  try { await call("list_thought_ids", { after: "not-a-uuid" }); } catch (e) { refused = (e as Error).message; }
+  assert(/must be a thought id/.test(refused), `a non-uuid cursor is refused (${refused})`);
+}
+
+console.log("\n[6c] list_logged_searches reads back a logged search over HTTP (SMD-2245)");
+{
+  // e2e runs with OB1_QUERY_LOG on, so a search just made is in the log. Make a
+  // distinctive one, then read it back through the surface, with its arm.
+  await call("search_thoughts_keyword", { query: "zeta-log-probe-xyz" });
+  const page = JSON.parse(await call("list_logged_searches"));
+  assert(Array.isArray(page.searches) && typeof page.truncated === "boolean", `the tool answers with {searches, truncated} (${JSON.stringify(page).slice(0, 60)})`);
+  const hit = page.searches.find((s: { query: string }) => s.query === "zeta-log-probe-xyz");
+  assert(hit && hit.arm === "keyword", "the search just made is in the log, with its arm and no thought content");
+  assert(!("content" in (hit ?? {})) && !("result_ids" in (hit ?? {})), "the row carries no thought content or result ids");
+  // A malformed `since` is refused with a friendly message, before any driver cast.
+  let sinceErr = "";
+  try { await call("list_logged_searches", { since: "not-a-time" }); } catch (e) { sinceErr = (e as Error).message; }
+  assert(/since. must be an ISO-8601 time/.test(sinceErr), `a malformed since is refused, not a cast error (${sinceErr.slice(0, 60)})`);
+}
+
 console.log("\n[7] Dedup through the tool surface");
 {
   const before = await call("thought_stats");

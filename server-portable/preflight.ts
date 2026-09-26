@@ -3089,9 +3089,26 @@ if (configFailed) {
         const tree = pad3(LATEST_MIGRATION);
         const hi = facts.highestMigration;
         const status = ledgerStatus(hi, LATEST_MIGRATION); // brain_info's rule, one definition
-        if (!ledgerPresent)
-          add("migration ledger", "warn", "no schema_migrations table — the schema was applied by hand",
-              "Adopt it with: cd db && bun migrate.ts --url $DATABASE_URL --baseline");
+        if (!ledgerPresent) {
+          // Whether there is a fork schema to adopt: public.thoughts (migration
+          // 001's table), by pg_class so a role's search_path does not hide it —
+          // the predicate the schema row's off-path probe uses, and the basis on
+          // which the ledger's own presence is judged. --baseline records every
+          // migration as applied without running one, so it is adoption only
+          // when the schema is already there; on an empty database it leaves a
+          // ledger over nothing and every later plain run then skips every file
+          // (SMD-2237). There the schema row above says "apply the migrations",
+          // and the ledger row must not contradict it with --baseline.
+          const [{ present: schemaPresent }] = (await sql`
+            SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                            WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present`) as { present: boolean }[];
+          if (schemaPresent)
+            add("migration ledger", "warn", "no schema_migrations table — the schema was applied by hand",
+                "Adopt it with: cd db && bun migrate.ts --url $DATABASE_URL --baseline");
+          else
+            add("migration ledger", "warn", "no schema_migrations table and no schema — nothing has been migrated here",
+                "Apply the migrations: cd db && bun migrate.ts --url $DATABASE_URL");
+        }
         else if (!ledgerRead) {
           // A present ledger with no names always has its reason recorded:
           // every path in readDatabaseFacts that leaves them null writes it.

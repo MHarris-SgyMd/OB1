@@ -474,6 +474,56 @@ console.log("\n[8] statsSummary aggregates the corpus through the page walk this
   assert(s.oldest !== null && s.newest !== null && s.oldest <= s.newest, "date range spans the corpus");
 }
 
+console.log("\n[8c] listThoughtIds — ids in id order, digest null on the shim, keyset paging (SMD-2244)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  try {
+    const total = await store.countThoughts();
+    const first = await store.listThoughtIds({ limit: 100000, after: null });
+    assert(first.total === total && first.ids.length === total, `first page returns the whole corpus and its total (${first.ids.length}/${first.total} of ${total})`);
+    assert(first.digest === null, "the PostgREST shim computes no server-side digest (null) — the caller enumerates instead");
+    const sorted = [...first.ids].sort();
+    assert(first.ids.join() === sorted.join(), "ids come back in id order");
+    const rows = await sql`SELECT id::text AS id FROM thoughts ORDER BY id ASC`;
+    assert(first.ids.join() === rows.map((r: { id: string }) => r.id).join(), "the id set matches a raw SELECT id ORDER BY id");
+    // Keyset paging, defensive to a corpus that may be small.
+    const pa = await store.listThoughtIds({ limit: 3, after: null });
+    assert(pa.cursor === (pa.ids.length === 3 ? pa.ids[2] : null), "a full page carries a cursor = its last id, else null");
+    if (pa.cursor) {
+      const pb = await store.listThoughtIds({ limit: 3, after: pa.cursor });
+      assert(pb.total === 0 && pb.digest === null && pb.ids.every((id) => id > pa.cursor!), "the next page is strictly after the cursor, and carries no total/digest");
+    }
+  } finally {
+    await sql.close();
+  }
+}
+
+console.log("\n[8d] listLoggedSearches over PostgREST — the search rows, windowed and bounded (SMD-2245)");
+{
+  const raw = new SQL({ url: URL_, max: 1 });
+  try {
+    await raw`DELETE FROM query_log`;
+    await raw`INSERT INTO query_log (kind, tool, query, arm, match_count, threshold, recency_weight, filter, tier, logged_at) VALUES
+      ('search','search_thoughts_keyword','older query','keyword',25,NULL,NULL,'{}'::jsonb,'stable', now() - interval '2 hours'),
+      ('search','search_thoughts','newer query','hybrid',10,0.5,0.25,'{"type":"note"}'::jsonb,NULL, now() - interval '1 hour')`;
+    await raw`INSERT INTO query_log (kind, tool, target_id) VALUES ('action','fetch', gen_random_uuid())`;
+    const all = await store.listLoggedSearches({ since: null, limit: 100 });
+    assert(all.searches.length === 2 && !all.truncated, `two search rows — the action row excluded (${all.searches.length})`);
+    assert(all.searches[0].query === "newer query" && all.searches[0].arm === "hybrid" && all.searches[0].matchCount === 10, "most recent first, arguments intact");
+    assert(all.searches[0].threshold === 0.5 && all.searches[0].recencyWeight === 0.25, "threshold and recency_weight map to the right fields (parity with the SQL store)");
+    assert(all.searches[0].tier === null && all.searches[1].tier === "stable", "tier maps through");
+    assert(JSON.stringify(all.searches[0].filter) === JSON.stringify({ type: "note" }), "the filter is an object");
+    assert(all.searches.every((s) => s.loggedAt !== null && isoTimestampOrNull(s.loggedAt) === s.loggedAt), "loggedAt is the shared ISO form");
+    const one = await store.listLoggedSearches({ since: null, limit: 1 });
+    assert(one.searches.length === 1 && one.truncated === true, "limit 1 flags truncated");
+    const recent = await store.listLoggedSearches({ since: new Date(Date.now() - 90 * 60 * 1000).toISOString(), limit: 100 });
+    assert(recent.searches.length === 1 && recent.searches[0].query === "newer query", "since windows out the older row");
+    await raw`DELETE FROM query_log`;
+  } finally {
+    await raw.close();
+  }
+}
+
 console.log("\n[9] Provenance rides the envelope and reads back over PostgREST too (migration 025)");
 {
   const { id: parent } = await store.captureThought({
