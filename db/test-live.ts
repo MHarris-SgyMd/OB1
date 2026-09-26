@@ -424,13 +424,14 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
   // Why 15,000 (SMD-2135 cut it from 25,000). The skip needs the sample's
   // scaled estimate at ten times v_exact (10,000 for these calls). Every full
   // page holds the same number of rows (about 70), so a draw of d distinct
-  // pages estimates at least (d − 1)/d of the table, short only by the last,
-  // partly filled page; the gate's third condition admits no draw of fewer
-  // than three pages, and 15,000 is the smallest table on which even a
-  // three-page draw clears (2/3 of its 215 pages x 70 rows is 10,033). Over
-  // 5,000 draws of the deployed statement, 11,000 missed 4.9% — 7/8 of it is
-  // under 10,000, and its last page held 10 rows — and 12,000, safe on every
-  // draw of six pages or more, missed none.
+  // pages estimates at least (d − 1)/d of the table (pages x rows a page is
+  // at least N), short only by the last, partly filled page. The gate's
+  // three-page condition admits no draw of fewer than three, and 15,000 is
+  // the smallest table two thirds of which is 10,000 (on this heap 2/3 of
+  // 215 pages x 70 rows is 10,033). Over 5,000 draws of the deployed
+  // statement, 11,000 missed 4.9% — 7/8 of it is under 10,000, and its last
+  // page held 10 rows — and 12,000, safe by the bound on every draw of six
+  // pages or more, missed none.
   //
   // That bound assumes every page but the last is full, which holds only on
   // an emptied heap: [5b]'s 2,000 rows are dead after the DELETE, and without
@@ -486,7 +487,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     const [{ pages }] = await sql.unsafe(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages`);
     assert(Number(pages) > 0 && Number(pages) < ROUTE_ESTIMATE_MIN_PAGES, `${N.toLocaleString()} rows at ${EMBEDDING_DIM} dimensions are ${pages} heap pages (the vectors are TOASTed), under the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES}`);
     const [{ used }] = await sql.unsafe(`SELECT count(DISTINCT (ctid::text::point)[0])::int AS used FROM thoughts`);
-    assert(Number(used) === Number(pages), `every one of the ${pages} heap pages holds a live row (${used} do): the VACUUM before the load left no page of [5b]'s dead rows for the sample to draw empty`);
+    assert(Number(used) === Number(pages), `every one of the ${pages} heap pages holds a live row (${used} do): the VACUUM before the load left no page of [5b]'s dead rows for the sample to draw empty (when it fails: a session holding a snapshot from before the DELETE keeps those rows)`);
 
     // The deployed body — 041, carrying 038's sample — kept for the timing at the end: by then 020's re-apply has replaced it.
     const bodyGate = await body();
@@ -946,10 +947,10 @@ console.log("\n[5f] Every join in the body keeps its nested loop under an operat
              (SELECT ('[' || string_agg((random() - 0.5)::text, ',') || ']')::vector FROM generate_series(1, ${EMBEDDING_DIM} + 0 * r.i))
       FROM generate_series(1, ${N}) AS r(i)`);
     await loadChunkRows(sql, 2);
-    // Both indexes back over the loaded rows, in memory: 512 MB holds the
-    // graph at any width HNSW takes, where the server's 64 MB default was
-    // said to build it on disk at the 18,000 vectors this section loaded
-    // before SMD-2135.
+    // Both indexes back over the loaded rows, in memory. 512 MB is margin:
+    // the ~9,000 vectors here (~2.5 KB each at the shipped width, the figure
+    // db/README.md sizes maintenance_work_mem by) fit the 64 MB default too;
+    // it stays so a larger N does not fall into pgvector's on-disk build.
     await sql.begin(async (tx: SQL) => {
       await tx.unsafe(`SET LOCAL maintenance_work_mem = '512MB'`);
       for (const { d } of defs) await tx.unsafe(d);
