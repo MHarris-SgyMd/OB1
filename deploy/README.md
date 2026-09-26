@@ -501,8 +501,12 @@ and workflow calls the step makes, and it expires after `N8N_API_KEY_DAYS`
 (90). A run mints a new key when that one has less than a week left, or on
 `--rotate`. Every run deletes every other key this env file minted, and
 n8n answers a deleted key with 401. A key an interrupted run left behind
-goes on the next run. A second env file provisioning the same n8n (another
-checkout) keeps its own key, since each file tags its keys. Then the step creates or patches each
+goes on the next run. A second env file provisioning the same n8n keeps its
+own key: each file tags its keys, and a tag counts only beside a fingerprint
+of the host and the file's path (`N8N_API_KEY_TAG_OF`). That holds for
+another checkout, and for a copy of `deploy/.env`, which mints under a tag
+of its own on its first run and revokes nothing. The keys a moved file
+leaves behind expire with their `N8N_API_KEY_DAYS`. Then the step creates or patches each
 credential from `orchestration/credentials.template.json` with values from
 the env file, and creates or replaces each template. A replaced workflow
 loses edits made in the editor: the template is the source. Run it again

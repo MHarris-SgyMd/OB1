@@ -5861,7 +5861,7 @@ a brain that does not report the stamp (below, "Found on the way").
   - the replaced API key must answer 401 and the new one 200;
   - the new key's JWT expiry must be `N8N_API_KEY_DAYS` (90) from now,
     within a day;
-  - n8n must hold exactly one `ob1-provision` key.
+  - the env file must hold exactly one key under its tag in n8n.
 
   The kit's key carries the profile's eight scopes plus the two run-history
   reads it needs. The decisions K does not reach are in
@@ -5880,49 +5880,73 @@ a brain that does not report the stamp (below, "Found on the way").
   brain's server joins the sealed network as well as its own. The ingestion
   is a probe workflow of ten fixed captures, since Linear is unreachable by
   design. C3 requires the act tool to fail. E reads the watcher's capture:
-  every UDP datagram (DNS decoded) and every TCP connection attempt. It is
-  judged against facts read live: n8n's resolvers and search domains from
-  its `/etc/resolv.conf`, and the brain's addresses from the engine. Every
-  outbound packet on n8n's interface must be DNS to a listed resolver (UDP,
-  or TCP on 53) or a connection to the brain's `:8000`. Anything else fails
-  as a dial outside, including a packet line the judge cannot read. Every
-  query of any type is read for its name, and a name fails unless it is a
-  service's (bare, or with one of the search domains) or a host the kit's
-  templates name (`api.linear.app`). The brain must have been seen, or the
-  capture proves nothing. Established TCP traffic and ICMP are not recorded.
+  every UDP datagram (DNS decoded), every TCP segment on port 53, every
+  IPv4 TCP connection attempt, and all IPv6 TCP. It is judged against facts
+  read live: n8n's resolvers and search domains from its `/etc/resolv.conf`,
+  and the brain's addresses (v4 and v6) from the engine. Every outbound
+  packet on n8n's interfaces must be one of three things:
+  - a DNS question to a listed resolver whose name is read (UDP or TCP);
+  - an empty TCP segment on such a connection;
+  - a connection attempt to the brain's `:8000`.
+
+  Anything else fails as a dial outside. Data to the resolver with no
+  readable question fails, and so does any packet line the judge cannot
+  read. A question is read in any of tcpdump's shapes: any type, EDNS, the
+  CD flag, a notify opcode, a non-IN class, inside a TCP segment. A name
+  fails unless it is a service's (bare, or with the network's own domain) or
+  a host the kit's templates name (`api.linear.app`). Expansions with the
+  host's own search domains (`server.<isp domain>`) are reported apart and
+  pass: fixed names, carrying nothing. The brain must have been seen, or the
+  capture proves nothing. When the facts cannot be read, or the resolver is
+  on loopback (Docker's embedded DNS, whose questions reach the capture
+  rewritten to another port), E fails with CANNOT JUDGE. E is measured on
+  podman.
+
+  What E cannot see: on an intact internal network, a dial to an address off
+  the subnet fails inside n8n (ENETUNREACH) and sends nothing, so the seal
+  stops it and E catches a seal that leaks. The subnet's gateway is the
+  podman VM and answers on its own ports, and a connection to it is a packet
+  E fails (both measured in review pass 3).
 
   The judge is pure, and `eval-orchestration.ts --self-check` (CI) holds it
-  on 18 crafted logs in the watcher's format. Each way out below fails:
-  - a raw-IP dial;
+  on 31 crafted logs in the watcher's format, tcpdump's own lines from pass
+  3's runs among them. Each way out below fails:
+  - a raw-IP dial, and the same on another interface;
   - `n8n.io`, and `server.9.9.9.9.nip.io`;
-  - EDNS and NS queries;
+  - EDNS, NS, CD-flag, notify, unknown-type, CHAOS and TCP-carried
+    queries;
+  - data to the resolver without a readable question;
+  - the resolver's address on another port;
   - Linear's address answered and dialled;
   - a foreign resolver;
   - NTP and QUIC datagrams tcpdump decodes, and a plain UDP datagram;
-  - port 5678 on another host;
-  - the brain on another port;
+  - port 5678 or 8000 on another host;
+  - the brain on another port, or over UDP;
   - an unreadable line;
-  - a capture without the brain.
+  - a capture without the brain;
+  - a loopback resolver;
+  - unread facts.
 
-  The recorded shape, a search-domain expansion, DNS over TCP and the host's
-  own polls pass. The first two versions of E inferred "inside" from DNS
-  answers and read only the lines they expected. A name starting `server.` or
-  `n8n.` counted as internal, and a decoded NTP datagram went unread. Each
-  of those passed a real escape (review passes 1 and 2).
+  The recorded shape, a host search-domain expansion, an empty TCP DNS
+  connection and the host's own polls pass. Each earlier version of E passed
+  a real escape. The first judged names only. The second inferred "inside"
+  from DNS answers and read only the line shapes it expected. Pass 3 found
+  five query shapes that hid their names from the third, and the resolver
+  forwarded them when the seal leaked.
 
 **The result: every check passes, on both stores and sealed.** One cycle
 each on the dogfood Mac (2026-09-25, the podman VM, the host's Ollama). SQLite
 and Postgres ran with `--wait-schedule`, on the implementation commit.
-Sealed ran without it, by design, on review pass 2's code: the owner set from
-the environment, keys tagged per env file, and E fail-closed. Pass 2 also
-re-ran the plain profile without the wait. It passed C1–C3, K and P: 35.0 s,
-the past run gone after 61 s, n8n 354 MiB.
+Sealed ran without it, by design, on review pass 3's code: the owner set from
+the environment, key tags bound to their file, and E reading a question in
+any shape. Pass 3 also re-ran the plain profile without the wait. It passed
+C1–C3, K and P: 20.3 s, the past run gone after 81 s, n8n 352 MiB.
 
 | run | C1: run 1 / run 2 | C1s | C3 | K | P | E |
 | --- | --- | --- | --- | --- | --- | --- |
 | SQLite (the profile) | PASS: 10, +10 in 20.4 s / 10, +0 | PASS: seen after 811 s | PASS: 403 / 403 | PASS: 403 / 403; replaced key 401 | PASS: gone after 50 s, the one inside kept | — |
 | `--with postgres` | PASS: 10, +10 in 22.8 s / 10, +0 | PASS: seen after 752 s | PASS: 403 / 403 | PASS: the same | PASS: gone after 40 s, kept | — |
-| `--with sealed` | PASS: 10, +10 in 14.2 s / 10, +0 (the probe) | not run | PASS: act fails ("The connection cannot be established") | PASS: the same | PASS: gone after 91 s, kept | PASS: only `api.linear.app` outside, every packet out DNS or the brain |
+| `--with sealed` | PASS: 10, +10 in 12.6 s / 10, +0 (the probe) | not run | PASS: act fails ("The connection cannot be established") | PASS: the same | PASS: gone after 91 s, kept | PASS: only `api.linear.app` outside, every packet out a question to the resolver or the brain |
 
 **The store: SQLite.** Memory is the cgroup's, after the runs, as above:
 
@@ -5952,15 +5976,18 @@ for the editor's catalogue, with an 8-hour refresh (read from the image).
 The profile now sets `N8N_DISABLED_MODULES=mcp-registry`, and the stock MCP
 Client node the templates use works without it (every run above). After
 that, over provisioning, two ingestions, the MCP session and the key and
-pruning checks, the watcher saw (pass 2's run):
+pruning checks, the watcher saw (pass 3's run):
 - DNS: `api.linear.app` (A and AAAA, once; the act tool's call, refused) and
-  `server.dns.podman` ×18 (the brain), all to the network's resolver.
-- TCP: nine connection attempts, every one to the brain's `:8000`.
+  `server.dns.podman` ×14 (the brain), all to the network's resolver, each
+  question read.
+- TCP: seven connection attempts, every one to the brain's `:8000`.
 - UDP: nothing but that DNS.
 - No packet line the judge could not read.
 
-Nothing else was asked for or dialled. The window was 2 minutes 21 seconds,
-from the watcher's start with `--up` to the end of `--verify`. A
+The counts vary from run to run (7–10 attempts, 14–20 lookups across the
+passes' runs). Nothing else was asked for or dialled. The window was about
+2 minutes 15 seconds, from the cycle's start to the end of `--verify` (the
+watcher itself starts a few seconds after). A
 caller on a longer timer (n8n has modules for instance reporting and version
 history) would not show in it. The probe answers "what does n8n dial while
 it works", not "what does it dial in a week".

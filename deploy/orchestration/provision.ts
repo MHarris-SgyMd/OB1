@@ -24,9 +24,9 @@
  * internal endpoints the editor uses (`/rest/login`, `/rest/api-keys`). The
  * key carries the scopes the caller asks for (SCOPES; the eval kit adds its
  * run-history reads). It expires after N8N_API_KEY_DAYS (90). It is kept in
- * the env file with its id, scopes and the file's tag (N8N_API_KEY, _ID,
- * _SCOPES, _TAG), all four written at once. A later run reuses it. It
- * mints again when:
+ * the env file with its id, scopes, the file's tag, and the fingerprint the
+ * tag was made for (N8N_API_KEY, _ID, _SCOPES, _TAG, _TAG_OF), all written
+ * at once. A later run reuses it. It mints again when:
  * - n8n refuses the key;
  * - the key has less than a week left (half its life, for a short one);
  * - its scopes are not exactly the ones asked for;
@@ -35,7 +35,8 @@
  * Every provisioning run deletes every other key THIS env file minted (its
  * tag in the label), which is n8n's revocation: the old key answers 401 from
  * then on. That includes one a previous run failed to delete. A second env
- * file provisioning the same n8n keeps its own key. Every mint signs in as
+ * file provisioning the same n8n keeps its own key, a copy of this one
+ * included (it mints under a tag of its own). Every mint signs in as
  * the owner, so N8N_OWNER_PASSWORD is the profile's standing secret,
  * stronger than the key. A password over 72 bytes is refused: bcrypt reads
  * no further.
@@ -57,8 +58,9 @@
  * Nothing secret is printed. The eval kit imports this module and provisions
  * through it (evals/orchestration/n8n.ts), so the kit tests these bytes.
  */
-import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "../../db/env.ts";
@@ -140,7 +142,8 @@ export function setEnvValues(file: string, values: Record<string, string>): void
 
 /** Is KEY's line in the env file single-quoted? Compose interpolates a bare or double-quoted value, and a bcrypt hash's `$`s are then read as variables. */
 export function singleQuoted(file: string, key: string): boolean {
-  const line = (existsSync(file) ? readFileSync(file, "utf8") : "").split("\n").find((l) => new RegExp(`^\\s*(export\\s+)?${key}\\s*=`).test(l));
+  // The LAST such line, as parseEnv and compose read it (review pass 3: the first was read, and a later bare line won).
+  const line = (existsSync(file) ? readFileSync(file, "utf8") : "").split("\n").filter((l) => new RegExp(`^\\s*(export\\s+)?${key}\\s*=`).test(l)).at(-1);
   return line === undefined || /=\s*'[^']*'\s*$/.test(line);
 }
 
@@ -232,14 +235,26 @@ async function listKeys(base: string, session: Record<string, string>): Promise<
 
 /**
  * Is this key one THIS env file minted? Each file tags its keys
- * (N8N_API_KEY_TAG, made at its first mint). Two files provisioning one n8n
- * — a laptop's checkout and a server's, a copied deploy/.env — would
- * otherwise each revoke the other's key on every run (review pass 2,
- * measured). A key from before tags (`ob1-provision-<date>`) counts as any
- * file's, so it is swept once.
+ * (N8N_API_KEY_TAG). Two files provisioning one n8n would otherwise each
+ * revoke the other's key on every run (review pass 2, measured): a laptop's
+ * checkout and a server's, or a copied deploy/.env. A copy carries the tag,
+ * though (review pass 3, measured). So a tag counts only beside the
+ * fingerprint of the file it was made for (N8N_API_KEY_TAG_OF: the host's
+ * name and the file's real path). A copied or moved file then mints under a
+ * tag of its own and sweeps nothing it inherited. The keys a moved file
+ * leaves behind expire with their N8N_API_KEY_DAYS.
  */
-const mine = (label: string, tag: string | undefined) =>
-  (tag !== undefined && label.startsWith(`${KEY_LABEL}-${tag}-`)) || /^ob1-provision-\d{4}-\d\d-\d\dT/.test(label);
+const mine = (label: string, tag: string | undefined) => tag !== undefined && label.startsWith(`${KEY_LABEL}-${tag}-`);
+
+/** The host's name and the env file's real path, hashed: what a copy of the file does not carry. */
+export function fileFingerprint(envFile: string): string {
+  const path = existsSync(envFile) ? realpathSync(envFile) : resolve(envFile);
+  return createHash("sha256").update(`${hostname()}\0${path}`).digest("hex").slice(0, 12);
+}
+
+/** This file's own tag, or undefined when it has none or carries one made for another file. */
+const ownTag = (o: Options) =>
+  o.env.N8N_API_KEY_TAG && o.env.N8N_API_KEY_TAG_OF === fileFingerprint(o.envFile) ? o.env.N8N_API_KEY_TAG : undefined;
 
 /**
  * Delete every other key this file minted: n8n's revocation. Returns how many
@@ -257,9 +272,10 @@ async function revokeOthers(base: string, session: Record<string, string>, keep:
 }
 
 /** The keys this env file minted that n8n still holds, as the owner sees them: after a run, exactly one. */
-export async function provisionedKeys(base: string, env: Record<string, string>): Promise<ListedKey[]> {
+export async function provisionedKeys(base: string, env: Record<string, string>, envFile: string): Promise<ListedKey[]> {
   const session = { ...JSON_HEADERS, cookie: await ownerSession(base, env) };
-  return (await listKeys(base, session)).filter((k) => mine(k.label, env.N8N_API_KEY_TAG));
+  const tag = env.N8N_API_KEY_TAG_OF === fileFingerprint(envFile) ? env.N8N_API_KEY_TAG : undefined;
+  return (await listKeys(base, session)).filter((k) => mine(k.label, tag));
 }
 
 const wanted = (o: Options) => [...SCOPES, ...(o.extraScopes ?? [])];
@@ -279,7 +295,10 @@ export async function ensureApiKey(o: Options): Promise<KeyResult> {
   if (!Number.isFinite(days) || days <= 0) throw new Error(`N8N_API_KEY_DAYS must be a positive number of days, got "${o.env.N8N_API_KEY_DAYS}"`);
   const stored = o.env.N8N_API_KEY;
   const covers = sameScopes(wanted(o), (o.env.N8N_API_KEY_SCOPES ?? "").split(",").filter(Boolean));
-  if (stored && !o.rotate && covers) {
+  // A file carrying another file's tag (a copy) mints its own key rather than
+  // share one: sharing is what let each file's next mint revoke the other's.
+  const inherited = Boolean(o.env.N8N_API_KEY_TAG) && ownTag(o) === undefined;
+  if (stored && !o.rotate && covers && !inherited) {
     const probe = await fetch(`${o.base}/api/v1/workflows?limit=1`, { headers: { "X-N8N-API-KEY": stored } });
     const exp = keyExpiry(stored);
     // A week, or half the key's life when N8N_API_KEY_DAYS is shorter than two:
@@ -290,12 +309,15 @@ export async function ensureApiKey(o: Options): Promise<KeyResult> {
   }
   const session = { ...JSON_HEADERS, cookie: await ownerSession(o.base, o.env) };
   const expiresAt = Math.floor(Date.now() / 1000 + days * 86400);
-  const tag = o.env.N8N_API_KEY_TAG || randomBytes(4).toString("hex");
+  const tag = ownTag(o) ?? randomBytes(4).toString("hex");
   const minted = await call(o.base, "/rest/api-keys", {
     method: "POST", headers: session,
     body: JSON.stringify({ label: `${KEY_LABEL}-${tag}-${new Date().toISOString()}`, scopes: wanted(o), expiresAt }),
   }, "mint key");
-  const lines = { N8N_API_KEY: String(minted.data.rawApiKey), N8N_API_KEY_ID: String(minted.data.id), N8N_API_KEY_SCOPES: wanted(o).join(","), N8N_API_KEY_TAG: tag };
+  const lines = {
+    N8N_API_KEY: String(minted.data.rawApiKey), N8N_API_KEY_ID: String(minted.data.id), N8N_API_KEY_SCOPES: wanted(o).join(","),
+    N8N_API_KEY_TAG: tag, N8N_API_KEY_TAG_OF: fileFingerprint(o.envFile),
+  };
   setEnvValues(o.envFile, lines);
   Object.assign(o.env, lines);
   const { revoked } = await revokeOthers(o.base, session, lines.N8N_API_KEY_ID, tag);
@@ -387,8 +409,9 @@ export async function provision(o: Options): Promise<{ steps: string[]; key: Key
     // still valid. The stored id must be one n8n lists as this file's key:
     // without it, or with an id the listing lacks, the one to keep is
     // unknown, so the run mints a fresh key, which revokes the rest.
-    const swept = o.env.N8N_API_KEY_ID && o.env.N8N_API_KEY_TAG
-      ? await revokeOthers(o.base, { ...JSON_HEADERS, cookie: await ownerSession(o.base, o.env) }, o.env.N8N_API_KEY_ID, o.env.N8N_API_KEY_TAG)
+    const tag = ownTag(o);
+    const swept = o.env.N8N_API_KEY_ID && tag
+      ? await revokeOthers(o.base, { ...JSON_HEADERS, cookie: await ownerSession(o.base, o.env) }, o.env.N8N_API_KEY_ID, tag)
       : { revoked: 0, kept: false };
     key = swept.kept ? { ...key, revoked: swept.revoked } : await ensureApiKey({ ...o, rotate: true });
     // The listing is redacted, so a hand-edited file whose key and id name two
@@ -559,6 +582,8 @@ async function selfCheck(): Promise<number> {
     expect("--init rewrites a hash line compose would interpolate (double-quoted) single-quoted", (await initSecrets(fresh)).join() === "N8N_OWNER_PASSWORD_HASH" && singleQuoted(fresh, "N8N_OWNER_PASSWORD_HASH"));
     setEnvValue(fresh, "N8N_OWNER_PASSWORD", "Ob1-" + "é".repeat(40));
     expect("--init refuses a password over 72 bytes", await rejects(() => initSecrets(fresh), /over 72 bytes/));
+    writeFileSync(fresh, `N8N_OWNER_PASSWORD_HASH='${good}'\nN8N_OWNER_PASSWORD_HASH=${good}\n`, { mode: 0o600 });
+    expect("singleQuoted reads the last line, as parseEnv and compose do: a later bare hash is caught", !singleQuoted(fresh, "N8N_OWNER_PASSWORD_HASH"));
     writeFileSync(fresh, "export N8N_API_KEY=old\n", { mode: 0o600 });
     setEnvValues(fresh, { N8N_API_KEY: "new", N8N_API_KEY_ID: "k1" });
     expect("setEnvValues replaces an `export` line and writes several at once", readFileSync(fresh, "utf8") === "N8N_API_KEY=new\nN8N_API_KEY_ID=k1\n");
@@ -611,10 +636,10 @@ async function selfCheck(): Promise<number> {
     const r3 = await ensureApiKey(opts({ ...base, ...saved, N8N_API_KEY: "h.e30.forged" }));
     expect("a refused key: a mint, and the file's other keys revoked", r3.minted && f.s.keys.size === 1 && r3.revoked === 1);
     const near = f.s.add(`${KEY_LABEL}-${tag}-near`, now + 3 * 86400);
-    const r4 = await ensureApiKey(opts({ ...base, N8N_API_KEY: near.raw, N8N_API_KEY_ID: near.id, N8N_API_KEY_SCOPES: SCOPES.join(","), N8N_API_KEY_TAG: tag }));
+    const r4 = await ensureApiKey(opts({ ...base, N8N_API_KEY: near.raw, N8N_API_KEY_ID: near.id, N8N_API_KEY_SCOPES: SCOPES.join(","), N8N_API_KEY_TAG: tag, N8N_API_KEY_TAG_OF: saved.N8N_API_KEY_TAG_OF }));
     expect("a key with 3 of 90 days left is renewed", r4.minted);
     const shortKey = f.s.add(`${KEY_LABEL}-${tag}-short`, now + 2.5 * 86400);
-    const r5 = await ensureApiKey(opts({ ...base, N8N_API_KEY_DAYS: "3", N8N_API_KEY: shortKey.raw, N8N_API_KEY_ID: shortKey.id, N8N_API_KEY_SCOPES: SCOPES.join(","), N8N_API_KEY_TAG: tag }));
+    const r5 = await ensureApiKey(opts({ ...base, N8N_API_KEY_DAYS: "3", N8N_API_KEY: shortKey.raw, N8N_API_KEY_ID: shortKey.id, N8N_API_KEY_SCOPES: SCOPES.join(","), N8N_API_KEY_TAG: tag, N8N_API_KEY_TAG_OF: saved.N8N_API_KEY_TAG_OF }));
     expect("a 3-day key with 2.5 days left is kept, not re-minted each run", !r5.minted);
     const KIT = ["execution:list", "execution:read"];
     const r6 = await ensureApiKey(opts({ ...base, ...file() }, { extraScopes: KIT }));
@@ -628,13 +653,43 @@ async function selfCheck(): Promise<number> {
     f.s.probeStatus = 0;
     const r7 = await ensureApiKey(opts({ ...base, ...file() }, { rotate: true }));
     expect("--rotate mints and revokes the key it replaces", r7.minted && r7.revoked >= 1 && f.s.keys.size === 1);
-    // A previous run minted and failed to delete; a key from before tags; a hand-made key; another env file's key.
+    // A previous run minted and failed to delete; a hand-made key; another env file's key.
     f.s.add(`${KEY_LABEL}-${tag}-left-behind`, now + 80 * 86400);
-    f.s.add(`${KEY_LABEL}-2026-09-25T20:00:00.000Z`, now + 80 * 86400);
     const handMade = f.s.add("made-by-hand", now + 80 * 86400);
     const otherFile = f.s.add(`${KEY_LABEL}-0ther0ne-2026-09-26T00:00:00.000Z`, now + 80 * 86400);
     const r8 = await provision(opts({ ...base, ...file() }));
-    expect("a plain run sweeps this file's leftover and an untagged old key, and keeps a hand-made key and another file's", !r8.key.minted && r8.key.revoked === 2 && f.s.keys.size === 3 && f.s.keys.has(handMade.id) && f.s.keys.has(otherFile.id));
+    expect("a plain run sweeps this file's leftover, and keeps a hand-made key and another file's", !r8.key.minted && r8.key.revoked === 1 && f.s.keys.size === 3 && f.s.keys.has(handMade.id) && f.s.keys.has(otherFile.id));
+    // A copy of the file carries its tag. The copy mints under a tag of its own and revokes nothing;
+    // after the original rotates, both keys still answer (review pass 3: they revoked each other).
+    const copyFile = join(HERE, `.self-check.${process.pid}.copy.env`);
+    try {
+      writeFileSync(copyFile, readFileSync(keyFile, "utf8"), { mode: 0o600 });
+      const cp = await ensureApiKey({ ...opts({ ...base, ...parseEnv(readFileSync(copyFile, "utf8")) }), envFile: copyFile });
+      const cpEnv = parseEnv(readFileSync(copyFile, "utf8"));
+      expect("a copied env file mints under a tag of its own and revokes nothing", cp.minted && cp.revoked === 0 && cpEnv.N8N_API_KEY_TAG !== tag);
+      await ensureApiKey(opts({ ...base, ...file() }, { rotate: true }));
+      const answers = async (k: string) => (await fetch(`${f.base}/api/v1/workflows?limit=1`, { headers: { "X-N8N-API-KEY": k } })).status;
+      const again = await provision({ ...opts({ ...base, ...cpEnv }), envFile: copyFile });
+      expect("after the original rotates, the copy's key and the original's both still answer", !again.key.minted && (await answers(cpEnv.N8N_API_KEY)) === 200 && (await answers(file().N8N_API_KEY)) === 200);
+    } finally {
+      rmSync(copyFile, { force: true });
+    }
+    // The mint writes the file before revoking anything. When THIS file's write
+    // fails (its directory read-only, the same tag), the old key still answers.
+    const roDir = mkdtempSync(join(tmpdir(), "ob1-provision-"));
+    const roFile = join(roDir, "deploy.env");
+    try {
+      writeFileSync(roFile, "", { mode: 0o600 });
+      await ensureApiKey({ ...opts({ ...base }), envFile: roFile });
+      const held = parseEnv(readFileSync(roFile, "utf8"));
+      chmodSync(roDir, 0o500);
+      await ensureApiKey({ ...opts({ ...base, ...held }, { rotate: true }), envFile: roFile }).catch(() => {});
+      const oldStill = await fetch(`${f.base}/api/v1/workflows?limit=1`, { headers: { "X-N8N-API-KEY": held.N8N_API_KEY } });
+      expect("a mint whose env write fails revokes nothing: the old key still answers", oldStill.status === 200);
+    } finally {
+      chmodSync(roDir, 0o700);
+      rmSync(roDir, { recursive: true, force: true });
+    }
     const noId = file();
     delete noId.N8N_API_KEY_ID;
     expect("a stored key without its id is replaced, so the sweep knows what to keep", (await provision(opts({ ...base, ...noId }))).key.minted);

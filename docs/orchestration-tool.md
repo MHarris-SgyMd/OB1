@@ -275,12 +275,16 @@ concern SMD-1813's allowlist and SMD-1903's egress policy already name.
    switches. The POC set them and did not probe what the container dials. The
    kit's `--with sealed` puts n8n on an `internal: true` network with a
    tcpdump watcher in its network namespace. The brain-side paths still pass
-   there. The watcher records every name n8n asked for and every packet it
-   sent out. The kit's E check fails closed: every outbound packet must be DNS
-   to the listed resolver, or a connection to the brain. Every name must be
-   the network's own or a template's host (`../evals/README.md`, "The
-   orchestration profile (SMD-2210)"). It was measured on podman. The first run found n8n's MCP registry
-   module calling api.n8n.io, which the profile now switches off.
+   there. The watcher records every DNS question n8n sent, in any shape, and
+   every connection attempt it made. The kit's E check fails closed: every
+   outbound packet must be a readable question to the listed resolver or a
+   connection to the brain, and every name must be the network's own or a
+   template's host (`../evals/README.md`, "The orchestration profile
+   (SMD-2210)"). A dial off the internal subnet sends nothing (ENETUNREACH),
+   so the seal stops it and E catches a seal that leaks. E is measured on
+   podman; with Docker's loopback resolver it cannot judge names and says so.
+   The first run found n8n's MCP registry module calling api.n8n.io, which the
+   profile now switches off.
 
 **On the way in**, the seam's inbound allowlist applies to a template exactly as
 to any fetcher (`docs/connector-taxonomy.md`, "One checkpoint"): the Gmail
@@ -480,14 +484,14 @@ POC's replaced keys staying valid, Activepieces' sync-mode behaviour, and the
 live Claude Code check. Since SMD-2210 `--up n8n` runs the profile as it
 ships, provisioned by its own step. `--verify` adds three checks:
 - K: each inbound key refused on the other's path; after `--rotate` the
-  replaced API key answers 401, the new one carries its expiry, and n8n holds
-  exactly one provisioned key.
+  replaced API key answers 401, the new one carries its expiry, and the env file holds
+  exactly one key of its tag.
 - P: a saved run past the window gone from the API and the store, and one
   inside it kept.
 - E, under `--with sealed`: the egress record, fail-closed. Any outbound
-  packet but DNS to the listed resolver or a connection to the brain fails,
-  as does any name outside the network but a template's host, or a packet
-  line it cannot read.
+  packet but a readable DNS question to the listed resolver or a connection
+  to the brain fails, as does any name outside the network but a template's
+  host, a packet line it cannot read, and facts it cannot read.
 
 `--with postgres` measures the store decision 3 did not take. CI runs
 provisioning's rules against a fake n8n (`provision.ts --self-check`) and E's

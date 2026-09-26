@@ -1,18 +1,26 @@
 # `--with sealed`: the egress probe (SMD-2210). The profile's n8n with no route
-# out of the compose network, and a record of everything it tried to reach.
+# off the compose network, and a record of the packets it sent.
 #
 #   bun evals/eval-orchestration.ts --up n8n --with sealed
 #   bun evals/eval-orchestration.ts --verify n8n     # brain-side C1–C3, then E: the list
 #
-# - `sealed` is an `internal: true` network: no gateway, and no port
-#   published from it. n8n is on it and on nothing else. The brain's server
+# - `sealed` is an `internal: true` network: no default route off its
+#   subnet, and no port published from it. A dial to an address off the
+#   subnet fails in n8n's own stack (ENETUNREACH) and sends no packet (pass 3,
+#   measured), so the seal is what stops it, and E catches a seal that
+#   leaks. The gateway address on the subnet is the podman VM itself and
+#   answers on its own ports: a connection to it is a packet, and E fails it
+#   (measured). n8n is on this network and on nothing else. The brain's server
 #   joins it as well as the default network, which it needs for the model
 #   provider on the host.
 # - `egress-watch` owns the network namespace and n8n joins it
 #   (`network_mode: service:…`). The watcher starts first, so tcpdump is
-#   running before n8n sends its first packet. It records every UDP datagram
-#   (DNS decoded) and every TCP connection attempt: what n8n tried to
-#   reach, answered or not.
+#   running before n8n sends its first packet. It records:
+#   - every UDP datagram, with DNS decoded;
+#   - every TCP segment to or from port 53, so a question over TCP is read;
+#   - every IPv4 TCP connection attempt (a SYN with no ACK);
+#   - all IPv6 TCP, since libpcap's flag test reads IPv4 only.
+#   E judges every outbound line.
 # - `n8n-front` publishes the loopback port the driver and provisioning dial,
 #   and relays HTTP to n8n across `sealed`. It sits on both networks, so
 #   n8n's own egress still has no route out. An internal network publishes
@@ -33,11 +41,10 @@ services:
     profiles: ["orchestration"]
     networks: [sealed]
     cap_add: [NET_RAW, NET_ADMIN]
-    # Every UDP datagram (DNS among them, decoded), and every TCP SYN that
-    # carries no ACK: each one is an attempt, whether or not anything
-    # answered. Established TCP traffic and ICMP are not recorded. Line-buffered so
-    # `compose logs` reads it live.
-    command: ["-l", "-n", "-i", "any", "-tttt", "udp or (tcp[tcpflags] & tcp-syn != 0 and tcp[tcpflags] & tcp-ack == 0)"]
+    # As the header says. Established IPv4 TCP traffic other than DNS, and
+    # ICMP, are not recorded; ICMP cannot be sent from n8n anyway, which lacks
+    # NET_RAW (measured). Line-buffered so `compose logs` reads it live.
+    command: ["-l", "-n", "-i", "any", "-tttt", "udp or tcp port 53 or (tcp[tcpflags] & tcp-syn != 0 and tcp[tcpflags] & tcp-ack == 0) or (ip6 and tcp)"]
 
   n8n:
     network_mode: "service:egress-watch"

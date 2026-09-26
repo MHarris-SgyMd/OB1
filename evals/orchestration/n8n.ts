@@ -15,10 +15,10 @@
  * On top of C1–C3, extraChecks covers what the profile adds:
  *   K  the two inbound keys are not interchangeable. After a rotation
  *      (provision --rotate) the replaced API key answers 401, the new one
- *      works and carries an expiry, and n8n holds exactly one provisioned key.
+ *      works and carries an expiry, and this env file holds exactly one key.
  *   P  a saved run older than the window is gone, from the API and from the
  *      store. One just inside the window is still there.
- *   E  under `--with sealed`: what n8n tried to reach, from the watcher's
+ *   E  under `--with sealed`: the packets n8n sent, judged fail-closed, from the watcher's
  *      capture.
  */
 import { readFileSync } from "node:fs";
@@ -108,12 +108,12 @@ async function keyChecks(env: Record<string, string>, ctx: Ctx): Promise<Check> 
   const exp = keyExpiry(rotated.key.key);
   const days = Number(env.N8N_API_KEY_DAYS || 90);
   const expiryOk = exp !== null && Math.abs(exp - (Date.now() / 1000 + days * 86400)) < 86400;
-  const held = await provisionedKeys(BASE, env);
+  const held = await provisionedKeys(BASE, env, ENV_FILE);
   return {
     id: "K",
     pass: separate && rotated.key.minted && rotated.key.key !== before && oldStatus === 401 && newStatus === 200 && expiryOk && held.length === 1,
     detail: `run webhook with the MCP key → ${runWithMcpKey.status}; MCP endpoint with the run key → ${mcpWithRunKey.refused ? "refused" : "NOT REFUSED"} (${mcpWithRunKey.detail}); `
-      + `--rotate: ${rotated.key.revoked} revoked, the replaced key → ${oldStatus}, the new one → ${newStatus}, expires ${exp ? new Date(exp * 1000).toISOString().slice(0, 10) : "NEVER"} (${days} days asked); n8n holds ${held.length} provisioned key(s)`,
+      + `--rotate: ${rotated.key.revoked} revoked, the replaced key → ${oldStatus}, the new one → ${newStatus}, expires ${exp ? new Date(exp * 1000).toISOString().slice(0, 10) : "NEVER"} (${days} days asked); this env file holds ${held.length} key(s)`,
   };
 }
 
@@ -144,8 +144,8 @@ async function pruningCheck(env: Record<string, string>, ctx: Ctx): Promise<Chec
 /** The compose services whose names are n8n's own network's, bare or with one of its search domains. */
 const SERVICES = ["server", "n8n", "n8n-front", "egress-watch", "postgres"];
 
-/** What the judge is told rather than infers: read from n8n's /etc/resolv.conf and the engine. */
-export type EgressFacts = { resolvers: string[]; searchDomains: string[]; brain: string[] };
+/** What the judge is told rather than infers: read from n8n's /etc/resolv.conf and the engine. `problem` is set when a read failed. */
+export type EgressFacts = { resolvers: string[]; searchDomains: string[]; brain: string[]; problem?: string };
 
 /**
  * The watcher's capture judged, failing closed. Pass 2 found the name-and-answer
@@ -157,69 +157,98 @@ export type EgressFacts = { resolvers: string[]; searchDomains: string[]; brain:
  * - port 5678 was exempt on every address.
  *
  * So the facts come from outside (resolvers, search domains, the brain's
- * addresses), and every OUTBOUND packet line on n8n's network interface
- * (tcpdump's `Out`; loopback stays in the container) must be one of two
- * things:
- * - DNS to a listed resolver (UDP, or TCP port 53 for a truncated answer);
+ * addresses). Every OUTBOUND packet line on n8n's interfaces (tcpdump's `Out`;
+ * loopback stays in the container) must be one of three things:
+ * - a DNS question to a listed resolver whose name is read, over UDP or TCP.
+ *   A packet to the resolver's :53 carrying data but no readable question is
+ *   unreadable (review pass 3: a CD-flag, notify, CHAOS-class, unknown-type
+ *   or TCP query hid its name, and the resolver forwarded it);
+ * - an empty TCP segment on such a connection (the SYN, an ACK, the FIN);
  * - a connection attempt to the brain's :8000.
  * Anything else is a dial outside, including a packet line the judge cannot
- * read. Every DNS query of any type is read for its name, on any interface.
- * A name outside the network — a service name bare, or with one of the
- * search domains the resolver appends — fails unless a kit template names
- * its host. The brain must have been seen, or the capture proves nothing.
+ * read. A resolver on loopback is Docker's embedded DNS: the questions there
+ * are rewritten to another port before the capture sees them, so E cannot
+ * judge names, and says so rather than pass.
+ *
+ * A name is inside when it is a service's, bare or with a search domain.
+ * Expansions with the host's own search domains (`server.<isp domain>`) are
+ * reported apart: fixed names, carrying nothing. Anything else fails unless a
+ * kit template names its host. The brain must have been seen, or the capture
+ * proves nothing.
  * Exported for the self-check: pure over the log and the facts.
  */
 export function judgeEgress(log: string, facts: EgressFacts): Check {
   const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const internal = new RegExp(`^(${SERVICES.map(esc).join("|")})(\\.(${facts.searchDomains.map(esc).join("|") || "(?!)"}))?\\.?$`);
+  // The network's own domain is the first search domain (podman's dns.podman); the rest are the host's.
+  const [own, ...hostDomains] = facts.searchDomains;
+  const bare = new RegExp(`^(${SERVICES.map(esc).join("|")})(${own ? `\\.${esc(own)}` : "(?!)"})?\\.?$`);
+  const expanded = new RegExp(`^(${SERVICES.map(esc).join("|")})\\.(${hostDomains.map(esc).join("|") || "(?!)"})\\.?$`);
   const names = new Map<string, number>();
   const dials = new Map<string, number>();
   const unreadable: string[] = [];
   let toBrain = 0;
   const count = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) ?? 0) + 1);
   const hostPort = (a: string) => { const i = a.lastIndexOf("."); return { host: a.slice(0, i), port: a.slice(i + 1) }; };
+  const loopbackResolver = facts.resolvers.find((r) => /^(127\.|::1$)/.test(r));
   for (const line of log.split("\n")) {
     // tcpdump's own messages carry no timestamp; every packet line does (-tttt).
     if (!/^\d{4}-\d\d-\d\d /.test(line)) continue;
     const p = /^\S+ \S+ (\S+)\s+(\S+)\s+IP6? (\S+) > (\S+): (.*)$/.exec(line);
     if (!p) { unreadable.push(line.slice(0, 120)); continue; }
     const [, iface, dir, , dstRaw, rest] = p;
-    const dst = hostPort(dstRaw);
-    // A query of any type, EDNS flags and all: `4711+ [1au] A? name. (40)`.
-    const q = /^\d+\+?(?: \[[^\]]*\])* [A-Z0-9-]+\? (\S+?)\.? \(\d+\)/.exec(rest);
-    if (q && dst.port === "53" && (dir === "Out" || iface === "lo")) count(names, q[1].toLowerCase());
     if (iface === "lo" || dir !== "Out") continue;
+    const dst = hostPort(dstRaw);
+    const tcp = /^Flags \[/.test(rest);
     const syn = /^Flags \[S\]/.test(rest);
-    if (dst.port === "53" && facts.resolvers.includes(dst.host)) continue;
+    // A question in any of tcpdump's shapes: `4242+ A? x. (29)`, `4242+% A?`,
+    // `4242 notify+ A?`, `4242+ TXT CHAOS? x.`, `Type65400? x.`, `[1au]`, and
+    // inside a TCP segment's decode.
+    const q = /\S+\? (\S+?)\.? \(\d+\)/.exec(rest);
+    if (dst.port === "53" && facts.resolvers.includes(dst.host)) {
+      if (q) { count(names, q[1].toLowerCase()); continue; }
+      if (tcp && / length 0$/.test(rest)) continue;
+      unreadable.push(line.slice(0, 120));
+      continue;
+    }
     if (syn && dst.port === "8000" && facts.brain.includes(dst.host)) { toBrain++; continue; }
-    count(dials, `${dst.host}:${dst.port} (${syn ? "tcp" : rest.split(/[ ,]/)[0] || "udp"})`);
+    count(dials, `${dst.host}:${dst.port} (${tcp ? "tcp" : q ? "dns" : rest.split(/[ ,]/)[0] || "udp"})`);
   }
-  const external = [...names.keys()].filter((n) => !internal.test(n));
+  const outside = [...names.keys()].filter((n) => !bare.test(n) && !expanded.test(n));
+  const expansions = [...names.keys()].filter((n) => !bare.test(n) && expanded.test(n));
   // What the kit's own templates name, and nothing else: n8n itself must
   // dial no one. Before N8N_DISABLED_MODULES=mcp-registry it asked for
   // api.n8n.io at boot (measured), and a bump that adds a caller fails here.
-  const unexpectedNames = external.filter((n) => !TEMPLATE_HOSTS.includes(n));
+  const unexpectedNames = outside.filter((n) => !TEMPLATE_HOSTS.includes(n));
   const fmt = (m: Map<string, number>, keep: (k: string) => boolean) => [...m].filter(([k]) => keep(k)).map(([k, v]) => `${k} ×${v}`).join(", ") || "none";
+  const blocked = facts.problem ?? (loopbackResolver ? `the resolver is on loopback (${loopbackResolver}, Docker's embedded DNS): its questions are rewritten to another port before the capture, so names cannot be judged — E is measured on podman` : undefined);
   return {
     id: "E",
-    pass: toBrain > 0 && unexpectedNames.length === 0 && dials.size === 0 && unreadable.length === 0,
-    detail: `${toBrain ? "" : "NO SYN to the brain's :8000 — the watcher saw nothing; "}`
+    pass: !blocked && toBrain > 0 && unexpectedNames.length === 0 && dials.size === 0 && unreadable.length === 0,
+    detail: `${blocked ? `CANNOT JUDGE: ${blocked}; ` : ""}`
+      + `${toBrain ? "" : "NO SYN to the brain's :8000 — the watcher saw nothing; "}`
       + `${unexpectedNames.length ? `NOT A TEMPLATE'S HOST: ${unexpectedNames.join(", ")}; ` : ""}`
       + `${dials.size ? `DIALLED OUTSIDE THE COMPOSE NETWORK: ${fmt(dials, () => true)}; ` : ""}`
       + `${unreadable.length ? `UNREADABLE PACKET LINES (${unreadable.length}): ${unreadable[0]}; ` : ""}`
-      + `names asked outside the compose network: ${fmt(names, (n) => external.includes(n))} (the templates name ${TEMPLATE_HOSTS.join(", ")}); names inside: ${fmt(names, (n) => !external.includes(n))}; `
+      + `names asked outside the compose network: ${fmt(names, (n) => outside.includes(n))} (the templates name ${TEMPLATE_HOSTS.join(", ")}); `
+      + `the network's own names: ${fmt(names, (n) => bare.test(n))}; `
+      + `search-domain expansions: ${fmt(names, (n) => expansions.includes(n))}; `
       + `connection attempts to the brain (${facts.brain.join(", ")}:8000): ${toBrain}; DNS only to ${facts.resolvers.join(", ")}`,
   };
 }
 
-/** The facts E is judged against, read live: n8n's resolv.conf, and the brain's addresses from the engine. */
+/** The facts E is judged against, read live: n8n's resolv.conf, and the brain's addresses (v4 and v6) from the engine. */
 function egressFacts(): EgressFacts {
-  const conf = compose("n8n", ["exec", "-T", "n8n", "cat", "/etc/resolv.conf"]).out;
-  const resolvers = [...conf.matchAll(/^nameserver\s+(\S+)/gm)].map((m) => m[1]);
-  const searchDomains = conf.match(/^search\s+(.+)$/m)?.[1].trim().split(/\s+/) ?? [];
+  const conf = compose("n8n", ["exec", "-T", "n8n", "cat", "/etc/resolv.conf"]);
+  const resolvers = [...conf.out.matchAll(/^nameserver\s+(\S+)/gm)].map((m) => m[1]);
+  const searchDomains = conf.out.match(/^search\s+(.+)$/m)?.[1].trim().split(/\s+/) ?? [];
   const id = compose("n8n", ["ps", "-q", "server"]).out.trim();
-  const brain = id ? run(["docker", "inspect", id, "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}"]).out.trim().split(/\s+/).filter(Boolean) : [];
-  return { resolvers, searchDomains, brain };
+  const inspect = id ? run(["docker", "inspect", id, "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.GlobalIPv6Address}} {{end}}"]) : null;
+  // Addresses only: podman prints "invalid IP" for an unset IPv6 address (measured).
+  const brain = inspect?.out.trim().split(/\s+/).filter((a) => /^\d+\.\d+\.\d+\.\d+$/.test(a) || /^[0-9a-f]*:[0-9a-f:]+$/i.test(a)) ?? [];
+  const problem = conf.code !== 0 ? `n8n's resolv.conf could not be read (${conf.err.trim().slice(0, 100)})`
+    : !inspect || inspect.code !== 0 ? `the brain's addresses could not be read (${inspect?.err.trim().slice(0, 100) ?? "no server container"})`
+    : !resolvers.length || !brain.length ? `the facts are empty (resolvers: ${resolvers.length}, brain addresses: ${brain.length})` : undefined;
+  return { resolvers, searchDomains, brain, problem };
 }
 
 const egressRecord = (): Check => judgeEgress(compose("n8n", ["logs", "--no-log-prefix", "egress-watch"]).out, egressFacts());

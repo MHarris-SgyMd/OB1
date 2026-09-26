@@ -97,33 +97,48 @@ function selfCheck(): number {
     `${T}eth0  Out IP 10.89.4.2.48800 > 10.89.4.1.53: 9152+ A? api.linear.app. (32)`,
     `${T}eth0  In  IP 10.89.4.1.53 > 10.89.4.2.48800: 9152 NXDomain 0/0/0 (32)`,
   ];
-  const out = (rest: string) => `${T}eth0  Out IP 10.89.4.2.5555 > ${rest}`;
-  const cases: [string, string[], boolean, RegExp][] = [
-    ["the recorded shape passes", base, true, /names inside: server\.dns\.podman/],
-    ["a search-domain expansion of a service name is inside", [...base, out("10.89.4.1.53: 7+ AAAA? server.cerberus-gondola.ts.net. (48)")], true, /server\.cerberus-gondola\.ts\.net ×1; connection/],
-    ["DNS over TCP to the resolver passes", [...base, out("10.89.4.1.53: Flags [S], seq 9, length 0")], true, /DNS only to 10\.89\.4\.1/],
+  const out = (rest: string, iface = "eth0") => `${T}${iface}  Out IP 10.89.4.2.5555 > ${rest}`;
+  // [what, lines, pass, detail must match, facts]
+  const cases: [string, string[], boolean, RegExp, (typeof facts & { problem?: string })?][] = [
+    ["the recorded shape passes", base, true, /the network's own names: server\.dns\.podman ×1/],
+    ["a host search-domain expansion is reported apart, and passes", [...base, out("10.89.4.1.53: 7+ AAAA? server.cerberus-gondola.ts.net. (48)")], true, /search-domain expansions: server\.cerberus-gondola\.ts\.net ×1/],
+    ["a TCP DNS connection to the resolver passes while its segments are empty", [...base, out("10.89.4.1.53: Flags [S], seq 9, length 0"), out("10.89.4.1.53: Flags [.], ack 1, win 63, length 0")], true, /DNS only to 10\.89\.4\.1/],
     ["an inbound SYN to n8n (the host's poll) is not n8n's dial", [...base, `${T}eth0  P   IP 192.168.127.1.62396 > 10.89.4.2.8000: Flags [S], seq 5, length 0`], true, /./],
     ["a raw-IP dial fails", [...base, out("9.9.9.9.443: Flags [S], seq 4, length 0")], false, /DIALLED OUTSIDE THE COMPOSE NETWORK: 9\.9\.9\.9:443 \(tcp\)/],
+    ["a dial on another interface fails", [...base, out("9.9.9.9.443: Flags [S], seq 4, length 0", "eth1")], false, /9\.9\.9\.9:443/],
     ["n8n's own domain fails as a name", [...base, out("10.89.4.1.53: 1+ A? n8n.io. (24)")], false, /NOT A TEMPLATE'S HOST: n8n\.io/],
     ["a name that starts like a service fails", [...base, out("10.89.4.1.53: 2+ A? server.9.9.9.9.nip.io. (39)")], false, /NOT A TEMPLATE'S HOST: server\.9\.9\.9\.9\.nip\.io/],
     ["an EDNS query is read", [...base, out("10.89.4.1.53: 3+ [1au] A? api.n8n.io. (39)")], false, /NOT A TEMPLATE'S HOST: api\.n8n\.io/],
     ["an NS query is read", [...base, out("10.89.4.1.53: 4+ NS? example.com. (29)")], false, /NOT A TEMPLATE'S HOST: example\.com/],
+    // The next four are tcpdump's own lines, from pass 3's run on a sealed network made non-internal, where the resolver forwarded each.
+    ["a CD-flag query is read", [...base, out("10.89.4.1.53: 4242+% A? example.com. (29)")], false, /NOT A TEMPLATE'S HOST: example\.com/],
+    ["a notify query is read", [...base, out("10.89.4.1.53: 4242 notify+ A? example.com. (29)")], false, /NOT A TEMPLATE'S HOST: example\.com/],
+    ["an unknown-type query is read", [...base, out("10.89.4.1.53: 4242+ Type65400? example.com. (29)")], false, /NOT A TEMPLATE'S HOST: example\.com/],
+    ["a CHAOS-class query is read", [...base, out("10.89.4.1.53: 4242+ TXT CHAOS? hidden-chaos-exfil.example.com. (48)")], false, /hidden-chaos-exfil\.example\.com/],
+    ["a TCP DNS segment is read", [...base, out("10.89.4.1.53: Flags [P.], seq 1:32, ack 1, win 63, length 31 4242+ A? example.com. (29)")], false, /NOT A TEMPLATE'S HOST: example\.com/],
+    ["a datagram to the resolver with no readable question fails", [...base, out("10.89.4.1.53: UDP, length 900")], false, /UNREADABLE PACKET LINES \(1\)/],
+    ["a TCP segment to the resolver with no readable question fails", [...base, out("10.89.4.1.53: Flags [P.], seq 1:900, ack 1, win 63, length 899")], false, /UNREADABLE PACKET LINES/],
+    ["the resolver's address on another port fails", [...base, out("10.89.4.1.22: Flags [S], seq 9, length 0")], false, /10\.89\.4\.1:22 \(tcp\)/],
     ["a template's host answered and dialled fails (a leaked seal)", [...base, `${T}eth0  In  IP 10.89.4.1.53 > 10.89.4.2.48800: 9152 1/0/0 A 7.7.7.7 (48)`, out("7.7.7.7.443: Flags [S], seq 6, length 0")], false, /7\.7\.7\.7:443/],
-    ["a foreign resolver fails", [...base, out("8.8.8.8.53: 5+ A? api.linear.app. (32)")], false, /8\.8\.8\.8:53/],
+    ["a foreign resolver fails", [...base, out("8.8.8.8.53: 5+ A? api.linear.app. (32)")], false, /8\.8\.8\.8:53 \(dns\)/],
     ["an NTP datagram tcpdump decodes fails", [...base, out("162.159.200.1.123: NTPv4, Client, length 48")], false, /162\.159\.200\.1:123 \(NTPv4\)/],
     ["a QUIC datagram tcpdump decodes fails", [...base, out("1.1.1.1.443: quic, initial, v1, dcid 0102")], false, /1\.1\.1\.1:443 \(quic\)/],
     ["a plain UDP datagram fails", [...base, out("1.1.1.1.4433: UDP, length 1200")], false, /1\.1\.1\.1:4433 \(UDP\)/],
     ["port 5678 on another host is not exempt", [...base, out("9.9.9.9.5678: Flags [S], seq 7, length 0")], false, /9\.9\.9\.9:5678/],
+    ["port 8000 on another host is not the brain", [...base, out("9.9.9.9.8000: Flags [S], seq 7, length 0")], false, /9\.9\.9\.9:8000/],
     ["the brain on another port fails", [...base, out("10.89.4.3.22: Flags [S], seq 8, length 0")], false, /10\.89\.4\.3:22/],
-    ["a packet line the judge cannot read fails", [...base, `${T}eth0  Out ARP, Request who-has 10.89.4.9 tell 10.89.4.2, length 28`], false, /UNREADABLE PACKET LINES/],
+    ["UDP to the brain's :8000 fails", [...base, out("10.89.4.3.8000: UDP, length 40")], false, /10\.89\.4\.3:8000 \(UDP\)/],
+    ["a packet line the judge cannot read fails", [...base, `${T}eth0  Out IP truncated-ip - 20 bytes missing! 10.89.4.2.5555 > 9.9.9.9.443: Flags [S]`], false, /UNREADABLE PACKET LINES/],
     ["a capture without the brain fails", base.filter((l) => !l.includes(".8000:")), false, /NO SYN to the brain/],
+    ["a loopback resolver (Docker's) cannot be judged, and fails", base, false, /CANNOT JUDGE: the resolver is on loopback/, { ...facts, resolvers: ["127.0.0.11"] }],
+    ["facts that could not be read fail", base, false, /CANNOT JUDGE: n8n's resolv\.conf could not be read/, { ...facts, problem: "n8n's resolv.conf could not be read (exit 1)" }],
   ];
   let failed = 0;
-  for (const [what, lines, pass, re] of cases) {
-    const r = judgeEgress(lines.join("\n"), facts);
+  for (const [what, lines, pass, re, f] of cases) {
+    const r = judgeEgress(lines.join("\n"), f ?? facts);
     if (r.pass !== pass || !re.test(r.detail)) { failed++; console.error(`FAIL ${what}: ${r.pass ? "PASS" : "FAIL"} ${r.detail.slice(0, 220)}`); }
   }
-  console.log(failed ? `eval-orchestration self-check: ${failed} failed` : "eval-orchestration self-check: OK");
+  console.log(failed ? `eval-orchestration self-check: ${failed} failed` : `eval-orchestration self-check: OK (${cases.length} cases)`);
   return failed ? 1 : 0;
 }
 if (process.argv.includes("--self-check")) process.exit(selfCheck());
