@@ -6,7 +6,7 @@
     "name": "Michael Harris",
     "github": "MHarris-SgyMd"
   },
-  "version": "1.4.0",
+  "version": "1.4.1",
   "requires": {
     "open_brain": true,
     "services": [],

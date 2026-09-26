@@ -13,8 +13,8 @@ backups, no resource limits.
 ## Prerequisites
 
 - podman or docker, with compose
-- A model provider: the stack's own Ollama (`--profile local-models`, nothing to
-  set), an Ollama on the host, or an OpenRouter key — the shipped defaults are
+- A model provider: the stack's own Ollama (`--profile local-models`, one line to
+  set: `OB1_LLM_LOCAL=1`), an Ollama on the host, or an OpenRouter key — the shipped defaults are
   local; `deploy/.env.example`, "Model provider", is the one line to choose
 
 ## Steps
