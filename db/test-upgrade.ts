@@ -507,9 +507,11 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // capture event carries the payload — the content, a backdating writer's
   // created_at, an update's key move — 046's rules as functions, the payload
   // amendment and its backfill, SMD-2115), 056 (the entity name gate,
-  // SMD-1935), 057 (the third release's schema_version, 1.2.0) and 058
+  // SMD-1935), 057 (the third release's schema_version, 1.2.0), 058
   // (node_state, the shared read of a thought's lifecycle and blockers,
-  // SMD-2074) stay recorded and are never tried. 030 is the right one to make pending because its
+  // SMD-2074) and 059 (search_thoughts_current, the hybrid with settled and
+  // superseded thoughts ranked below current ones, SMD-2255) stay recorded and
+  // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
   // embedding_model column — are
   // exactly what a through-020 schema lacks, so it fails by name rather than
@@ -546,11 +548,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // body, refusing by name without 016 or 053 ([20j]); 057 upserts
   // ob1_config.schema_version for the 1.2.0 cut, needing only 006's table;
   // 058 adds five read functions over 001's thoughts, 025's supersedes and
-  // 053's tables and resolver, refusing by name without 025 or 053 ([20k]) — all recorded by
+  // 053's tables and resolver, refusing by name without 025 or 053 ([20k]);
+  // 059 adds two functions over 027's hybrid and 058's node_state and widens
+  // 045's query_log.arm CHECK, refusing by name without 027, 058 or 045
+  // ([20l]) — all recorded by
   // the baseline with their prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 29, `030 is among the last twenty-nine migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 30, `030 is among the last thirty migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -2165,6 +2170,40 @@ console.log("\n[20k] Migration 058 on a schema without 025, and on 025's pointer
   await sql.close();
 }
 
+console.log("\n[20l] Migration 059 on a schema without 058, and on 058 without 045's query_log.arm — refused up front, naming the missing migration and --reapply, and applied once both are there (SMD-2255)");
+{
+  // 059's function body is SQL, validated at CREATE: without the guard a schema
+  // stopping before 058 would fail at the wrapper with a bare "function
+  // node_state(unknown) does not exist". 027 is older than every schema that
+  // reaches 058, so the checks that can be reached here are 058 and 045.
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "058" });
+  const baselined = await migrate("--baseline");
+  assert(baselined.code === 0, `--baseline records every migration over the pre-058 schema (exit ${baselined.code})`);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the058 = MIGRATIONS.find((f) => f.startsWith("058_"))!;
+  const the059 = MIGRATIONS.find((f) => f.startsWith("059_"))!;
+  await sql`DELETE FROM schema_migrations WHERE name = ${the059}`;
+  const plain = await migrate();
+  const ok = plain.code === 1 &&
+    /059_search_prefers_current\.sql\s+FAILED: migration 059 needs 058 \(node_state\); this schema lacks it/.test(plain.out) &&
+    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+  assert(ok, `a plain run fails at 059 naming 058 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the059}`)[0].c) === 0, "…059 records nothing");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the058 });
+  await sql`ALTER TABLE query_log DROP COLUMN arm`;
+  const half = await migrate();
+  assert(half.code === 1 && /059_search_prefers_current\.sql\s+FAILED: migration 059 needs 045 \(query_log\.arm\); this schema lacks it/.test(half.out),
+    `…and with 058 but without query_log.arm it names 045 (exit ${half.code})${half.code === 1 ? "" : `:\n${half.out}`}`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "045" && f < "046" });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "059" });
+  // An apply that did not throw is not the function present ([20c]'s lesson): read its signature and the widened CHECK.
+  const [probe] = await sql`SELECT to_regprocedure('search_thoughts_current(vector, text, float, int, jsonb, float, float)') IS NOT NULL AS p,
+                                   pg_get_constraintdef((SELECT oid FROM pg_constraint WHERE conname = 'query_log_arm_check')) AS chk`;
+  assert(probe.p === true && /'current'/.test(String(probe.chk)), `…and applied once both are there: the wrapper is present and query_log.arm admits current (${probe.chk})`);
+  await sql.close();
+}
+
 console.log("\n[21] test-support's schema reset leaves nothing of the fork's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");
 {
   // The reset drops a hand-kept list, and a name a migration added without a
@@ -2238,6 +2277,82 @@ console.log("\n[21] test-support's schema reset leaves nothing of the fork's in 
   assert(fns.ours.length === 0, `no function of the fork's survives the reset (${fns.ours.join(", ") || "none"}${fns.note})`);
   assert(types.ours.length === 0, `no type of the fork's survives the reset (${types.ours.join(", ") || "none"}${types.note})`);
   await sql.close();
+  await applyMigrations(URL_, OPTS);
+}
+
+console.log("\n[22] --baseline on an empty database refuses, naming public.thoughts, the plain run and --force; --force records the ledger over it (SMD-2237)");
+{
+  await dropSchema(URL_);
+  // A fresh database with no fork schema. --baseline would record every migration
+  // as applied without running one, leaving a ledger the next plain run reads as
+  // done — so it refuses (exit 2), naming what is missing, the plain run and the
+  // override, and before the ledger table is even created: nothing is written.
+  const refused = await migrate("--baseline");
+  assert(refused.code === 2 &&
+         /--baseline refused: public\.thoughts does not exist/.test(refused.out) &&
+         /Apply the migrations instead: cd db && bun migrate\.ts/.test(refused.out) &&
+         /pass --force/.test(refused.out),
+         `--baseline on an empty database refuses, naming public.thoughts, the plain run and --force (exit ${refused.code})`);
+
+  const sql = new SQL({ url: URL_, max: 1 });
+  const [{ present: ledger }] = (await sql`SELECT to_regclass('public.schema_migrations') IS NOT NULL AS present`) as { present: boolean }[];
+  await sql.close();
+  assert(ledger === false, "…and creates no schema_migrations table — the refusal is before any write");
+
+  // Another tool's thoughts, in a schema of its own, is not public.thoughts: the
+  // guard reads public alone (pg_class, nspname='public'), so --baseline still
+  // refuses over an empty public. A probe that dropped the schema qualifier would
+  // read the stray table as "present" and let --baseline record the ledger over an
+  // empty public — the exact bricking SMD-2237 prevents. Plant it, prove the
+  // refusal, drop it.
+  const stray = new SQL({ url: URL_, max: 1 });
+  let strayRefused: { code: number; out: string };
+  try {
+    await stray.unsafe("DROP SCHEMA IF EXISTS tu_stray CASCADE; CREATE SCHEMA tu_stray; CREATE TABLE tu_stray.thoughts (id int)");
+    strayRefused = await migrate("--baseline");
+  } finally {
+    await stray.unsafe("DROP SCHEMA IF EXISTS tu_stray CASCADE");
+    await stray.close();
+  }
+  assert(strayRefused.code === 2 && /--baseline refused: public\.thoughts does not exist/.test(strayRefused.out),
+         `--baseline reads public alone: another schema's thoughts over an empty public still refuses (exit ${strayRefused.code})`);
+
+  // --force is the operator's override: it records every migration over the empty
+  // schema, exactly as --baseline does over a hand-built one.
+  const forced = await migrate("--baseline", "--force");
+  assert(forced.code === 0 && new RegExp(`baselined ${MIGRATIONS.length}, skipped 0`).test(forced.out),
+         `--baseline --force records every migration over an empty database (exit ${forced.code})`);
+
+  // --force without --baseline is refused, not a silent plain run — it exits at
+  // the flag-combo check, before any database connection, whatever the DB holds.
+  const forceAlone = await migrate("--force");
+  assert(forceAlone.code === 2 && /--force overrides --baseline's empty-database guard/.test(forceAlone.out),
+         `--force without --baseline is refused (exit ${forceAlone.code})`);
+
+  // Protective direction of the public-qualified guard: a hand-built public
+  // schema present but OFF the migrator role's search_path must still be found
+  // (pg_class, not to_regclass), so --baseline adopts it rather than refusing.
+  // Build a minimal public.thoughts and a separate schema, then run --baseline
+  // with search_path set to that other schema: the guard finds public.thoughts
+  // and records the ledger (into the off-path schema). A to_regclass spelling —
+  // the "obvious" refactor — would miss public.thoughts here and wrongly refuse,
+  // reintroducing the search_path-hiding the pg_class probe exists to avoid
+  // (SMD-2237, and SMD-2062's restricted-role deployments).
+  const offPathSql = new SQL({ url: URL_, max: 1 });
+  let offPathBaseline: { code: number; out: string };
+  try {
+    await offPathSql.unsafe("CREATE TABLE IF NOT EXISTS public.thoughts (id int); DROP SCHEMA IF EXISTS tu_offpath CASCADE; CREATE SCHEMA tu_offpath");
+    const sep = URL_.includes("?") ? "&" : "?";
+    offPathBaseline = await runMigrator(`${URL_}${sep}options=-csearch_path%3Dtu_offpath`, MIGRATOR_ENV, "--baseline");
+  } finally {
+    await offPathSql.unsafe("DROP SCHEMA IF EXISTS tu_offpath CASCADE; DROP TABLE IF EXISTS public.thoughts");
+    await offPathSql.close();
+  }
+  assert(offPathBaseline.code === 0 && new RegExp(`baselined ${MIGRATIONS.length}, skipped 0`).test(offPathBaseline.out),
+         `--baseline finds public.thoughts by pg_class even with public off the role's search_path — adoption holds off-path (exit ${offPathBaseline.code})`);
+
+  // Leave the database clean and migrated, as the blocks before this one do.
+  await dropSchema(URL_);
   await applyMigrations(URL_, OPTS);
 }
 

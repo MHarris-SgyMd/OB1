@@ -166,8 +166,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1834 assertions: 1834 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports fifty-eight (58) migrations applied, and
+`bun test-schema.ts` prints `1850 assertions: 1850 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports fifty-nine (59) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -207,7 +207,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
-058 SMD-2074).
+058 SMD-2074, 059 SMD-2255).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -433,17 +433,54 @@ lifecycle when `open` is not NULL; its freshness is `synced_at`, never
 `updated_at` — so each consumer counts over what it ranks. The ids narrow the
 rows returned, not the work: the whole brain is computed and filtered last.
 `graph-centrality.ts` is the first reader, its reports byte for byte what they
-were; search is the second (SMD-2074's second PR). `metadata.status_type` is a
+were; search is the second (`search_thoughts`' opt-in `prefer_current`, through
+059). `metadata.status_type` is a
 transitional, lossy scalar: when SMD-1997 folds the transitions `thought_audit`
 holds, the two reads of it change — `node_lifecycle()`'s body and
 `node_dependencies()`' gate — and no signature does. Reads only, no grant row
 (EXECUTE is PUBLIC): `node_lifecycle()` needs SELECT on `thoughts`;
 `node_dependencies()` and `node_state()` also need it on `thought_facets` (the
-capture group) and `thought_sources` (the `structure` group). The file drops
+capture group) and `thought_sources` (the `structure` group, and the `server`
+group since 059). The file drops
 its three table functions before creating them, so `--reapply` replays it over
 a later migration's reshape; the price is that a view of an operator's over
 `node_state()` (or any other object that records a dependency on one) stops
 that replay at 058, and a REVOKE on one is not kept.
+
+Migration 059 is `search_thoughts_current` (SMD-2255, SMD-2074's second
+consumer): the hybrid search with settled and superseded thoughts ranked below
+current ones, which `search_thoughts` calls when a caller passes
+`prefer_current` — by default the server calls `search_thoughts_hybrid` itself,
+so the default ranking is unchanged and 025's "labelled, not demoted" stands
+for every caller who does not ask. It reads the hybrid's top min(100, 4N) and
+`node_state` for them; a thought whose ticket is settled (completed or
+canceled, by 058's ticket-head rule — a note filed under a Done ticket
+included) or that a newer thought supersedes weighs `search_demote_weight()`
+(0.25, pre-registered, once) of its fused score, and the window is re-sorted and
+cut to N. Under the hybrid's fusion that is in practice a partition: every
+current match in the window first, then the demoted ones in their own order
+(a demoted exact hit keeps a quarter of its literal bonus, 1/61 per literal it
+holds, so on a query of literals only, or holding several of the query's
+literals, it can still outrank current rows; holding one, only past the vector
+arm's 62nd rank);
+the weight bites only against an exact-literal hit, so a settled ticket looked
+up by its key can drop — to look one up, leave the flag off. A blocked or
+unknown status does not demote a thought (superseded still does); ties go to
+the current row. Once the window holds N current rows a demoted thought is out
+of the top N, which is where the eval's costs grow at threshold −1 (NOTE
+−0.524, PREVIOUS −0.449, a settled key −1.000). Each row carries `fused` (before the
+weight), `demoted` (why) and the window's size, lifecycle coverage, demoted
+count, latest source watermark and whether its top N is exact. Priced first in
+`evals/eval-supersession.ts` against a pre-registered rule (CURRENT-version
+MRR +0.052, live-ticket MRR +0.194; costs disclosed — topical −0.127, a note
+under a Done ticket −0.292, a settled key −0.750); the query log records such a
+search as arm `current` (the CHECK widened), and `db/tier.ts` replays it. The
+server group gains SELECT on `thought_sources`, which `node_state` reads; the
+wrapper is dropped before it is created, as 058's three are. It costs what
+`node_state` costs — the whole brain's lifecycle per call: +10.7 ms at 10,000
+thoughts, +129 ms at 100,000, +2.8 ms on the dogfood brain — past the budget
+pre-registered for it; shipped opt-in on the maintainer's call, and SMD-2256
+narrows it.
 
 ## What changed relative to the guide
 
@@ -502,6 +539,7 @@ issues every group at once.
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
+| | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which reads 058's node_state, which reads the source rows (SMD-2255); without it that search is refused naming this grant, and every other search runs |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `INSERT, UPDATE` |
@@ -1042,6 +1080,7 @@ bun extract-entities.ts --url … --limit 25              # a trial: this many, 
 bun extract-entities.ts --url … --status                # the pass, and the graph so far
 bun extract-entities.ts --url … --dry-run               # what a run would do; writes nothing
 bun extract-entities.ts --url … --retry-failed          # failed rows back into the pool first
+bun extract-entities.ts --url … --retry-partial         # rows extracted over a prefix back into the pool — after raising OB1_EXTRACT_MAX_WINDOWS
 #   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (300, per model call — per window of a long thought)
 bun extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from the recorded key
 ```
@@ -1082,6 +1121,39 @@ characters under p1 — so the first run after upgrading needs `--switch-key`.
 the call a runaway was aborted on the stream — and, for a windowed thought,
 each window's own answer in `parts` beside the merged one. Why, measured:
 `evals/README.md`, "Entity extraction in windows".
+
+**A thought over the bound is extracted over its prefix (SMD-2240).** One
+thought is extracted in at most `OB1_EXTRACT_MAX_WINDOWS` windows (24 unset,
+`db/config.mjs`'s `EXTRACT_MAX_WINDOWS`; a window's runaway retry is a second
+call) — ~29,000 estimated tokens of text at the default window, and under
+twice that at most for a thought of more than one window, since `chunk.ts`
+fills a window with whole words and the last may run past the size. The bound
+was sized at four times the longest thought on the fork's brain; ingested
+documents broke that, and on one pass 8 of 53 thoughts (PDFs and pages of 26
+to 74 windows) were failed before any call with nothing in the graph. A
+thought over it is now extracted over its
+first windows, in order, and its claim is released **succeeded with a caveat**
+— migration 028's rule, `last_error` on a succeeded row — reading
+`partial: N of M windows extracted, …` (`… sent, the last cut short …` when
+the text bound cut the last). The run's summary and `--status` count
+those rows apart from the full ones and the failures (`12 extracted (1 over a
+prefix only), 0 failed`) and list each with its caveat; `--dump`'s line carries
+`coverage`. Raise `OB1_EXTRACT_MAX_WINDOWS` and run `--retry-partial`: the rows
+go back to the pool and `record_thought_entities` replaces the prefix's rows
+with the longer reading's. A row failed by the old rule (`over
+EXTRACT_MAX_WINDOWS (24); not extracted`) comes back with `--retry-failed`. A
+run `chunk.ts` cannot split (SMD-1974) — a whitespace-free blob — is sent
+whole however long, in one window or, carried by the overlap, in two, and
+nothing bounded it until this; the windows now meet a text bound,
+`OB1_EXTRACT_MAX_WINDOWS` windows' worth, in which a window of twice the size
+or more (only such a run makes one) counts its whole length and any other its
+length up to the size (a filling word past it, or unspaced CJK prose just over
+it, is not a run), and the window that passes it is cut there, with a caveat
+saying so. A single call's size over a window stays SMD-1974's. The prompt
+version is unchanged: a whole extraction is what it was. What changes is a
+thought over the count, which stored nothing and now stores its opening, and a
+thought whose runs pass the text bound, which was sent whole and is now cut at
+it.
 
 **What may leave.** The egress gate (SMD-1903) reads each row's own
 `metadata` — `source`, `type`, `topics` — and its text against `OB1_EGRESS_POLICY`
@@ -2349,8 +2421,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1834 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 744 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1850 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 766 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or [26]'s four sweep cases are, on a machine with a recipes/lint-sweep/.env or .env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
@@ -2672,7 +2744,11 @@ first assumed. See FORK.md's SMD-1632 section.
   `update_thought` re-enqueues the thought and the stale entity does not
   survive; a delete leaves no edge citing the thought and the relation another
   thought still evidences keeps that one row; and `--follow` extracts a capture
-  made while it polls, then exits 0 on the first signal.
+  made while it polls, then exits 0 on the first signal. Last, a thought over
+  `OB1_EXTRACT_MAX_WINDOWS=2` is released succeeded with a `partial:` caveat,
+  its opening's entities and edge in the graph and its closing's entity not, `--status` counting
+  and listing it apart; `--retry-partial` under the default bound reads it
+  whole and clears the caveat (SMD-2240).
 
 ### What test-schema.ts asserts
 

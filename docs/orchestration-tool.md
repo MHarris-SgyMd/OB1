@@ -13,6 +13,15 @@ the second review pass to test what C1 already said: "A scheduled workflow"). Th
 page is the pick, the two gates, the boundary, what it declines and what it
 leaves open.
 
+**Amended by SMD-2210** (the profile, built):
+- Decision 3's store is decided (SQLite, measured).
+- Decision 4 gains the import runner's bounded write path, which is decided
+  but not built ("Running a pipeline from a workflow").
+- Decision 6 loses the owner-setup endpoint: n8n sets its owner from the
+  environment.
+- The gates, the boundary and operations now say what the profile does
+  rather than what it would do.
+
 ## The decision
 
 1. **n8n, over Activepieces and Windmill.** n8n and Activepieces passed every
@@ -32,12 +41,20 @@ leaves open.
    supported range and receives compatibility support only. Upgrade to Postgres
    17 or newer" (measured); a shared postmaster is also one buffer pool and one
    crash domain for the brain and a workflow engine. Whether n8n's store is a
-   Postgres 17 of its own or n8n's default SQLite is SMD-2210's to measure and
-   decide — neither shape was run here.
-4. **It reaches the brain through MCP only.** Captures go through n8n's MCP
+   Postgres 17 of its own or n8n's default SQLite was left to SMD-2210 to
+   measure and decide, since neither shape was run here. **It is SQLite**
+   (SMD-2210). Both passed every check of the kit. SQLite is one container
+   fewer, lighter in memory and on disk, and its backup is a copy of one
+   file; Postgres adds a second server to pin and upgrade, for a workload of
+   one operator's schedules (`../evals/README.md`, "The orchestration profile
+   (SMD-2210)", has the numbers).
+4. **It reaches the brain through MCP only** (amended below, for the import
+   runner). Captures go through n8n's MCP
    Client node with a **capture-scope** key (can add a thought, cannot read
    one); no workflow holds a write key. The brain grows no n8n-specific route,
-   and n8n reaches no brain table.
+   and n8n reaches no brain table. Amended in SMD-2210: an import template
+   will hold the key of OB1's own pipeline runner, a bounded write path
+   through OB1's code ("Running a pipeline from a workflow").
 5. **OB1 ships templates, not a runtime and not a node.** Workflow definitions
    (JSON, with placeholder credential ids the provisioning replaces) and the
    provisioning that loads them. No community node: every node the POC used is
@@ -46,10 +63,14 @@ leaves open.
 6. **n8n's public API is the integration contract, with two named gaps.**
    `/api/v1` (OpenAPI, versioned, `X-N8N-API-KEY`) for credentials, workflows,
    publishing and run history. It has no "run now" — an on-demand run is the
-   workflow's own Webhook trigger — and it cannot mint its own key: owner
-   setup, sign-in and key minting go through the editor's internal endpoints
-   (`/rest/owner/setup`, `/rest/login`, `/rest/api-keys`), at provisioning and
-   at every re-mint (key custody below).
+   workflow's own Webhook trigger — and it cannot mint its own key: sign-in
+   and key minting go through the editor's internal endpoints (`/rest/login`,
+   `/rest/api-keys`), at provisioning and at every re-mint (key custody
+   below). The POC also set the owner up through `/rest/owner/setup`. The
+   profile has n8n set the owner from the environment at every start
+   instead (`N8N_INSTANCE_OWNER_MANAGED_BY_ENV`, SMD-2210). That is one
+   internal endpoint fewer, and no window in which whoever reaches a fresh
+   instance first can claim it.
 7. **The dividing line.** n8n when the need is a stateful workflow — a
    schedule, a trigger, a retry, a multi-step fetch, a cursor, a two-way sync.
    The AI client's own MCP connector (the brain's, or a per-service MCP server)
@@ -196,10 +217,16 @@ concern SMD-1813's allowlist and SMD-1903's egress policy already name.
   the brain's for up to a fortnight — outside `delete_thought`, redaction and the
   brain's retention. The same holds for an act tool's arguments: whatever the
   client handed it, brain content included, lingers in n8n's run history.
-  SMD-2210 shortens the window or turns on n8n's execution-data redaction. The
-  POC's verifier reads a run's saved data to count its captures, so the
-  profile's acceptance keeps saving on long enough for the check, or counts
-  another way.
+  The profile shortens the window to 24 hours or 1,000 runs (SMD-2210).
+  n8n's execution-data redaction (a workflow's `redactionPolicy`) is behind
+  an Enterprise licence check (`isDataRedactionLicensed`, read from the
+  2.40.6 image), and the profile turns on no licence-gated feature, so the
+  window is the control. A
+  run's data is deleted up to about 2¼ hours after it leaves the window:
+  n8n marks it at an hourly check, then deletes it at a 15-minute sweep an
+  hour later. Saving stays on, so the kit still counts captures from saved
+  runs, and its P check measures a run past the window gone from the API and
+  the store.
 - **Brain reads do not go through n8n** (decision 7), so no brain search result
   transits it.
 
@@ -217,13 +244,27 @@ concern SMD-1813's allowlist and SMD-1903's egress policy already name.
 3. **Keys are least-privilege and separate** (SMD-2210). Ingestion holds a
    capture-scope brain key; nothing holds a write key. The key an AI client
    presents to n8n's MCP endpoint is not the key that starts an ingestion (the
-   POC shared one).
-4. **Key custody** (SMD-2210). n8n's API key is scoped to eight of ~90 scopes, and
-   the two calls outside them tried in the third review pass answered 403 —
-   though n8n's docs say non-Enterprise keys have full access — but those
-   eight include creating and publishing workflows — so a holder can publish
-   one that sends any unpinned credential anywhere. The key gets an expiry; the
-   key it replaces is revoked (in the POC, replaced keys stayed valid). Every
+   POC shared one). In the profile they are `N8N_MCP_KEY` and
+   `N8N_WEBHOOK_KEY`, and the kit measures each refused (403) on the other's
+   path. Before writing anything, provisioning refuses:
+   - a brain key that `MCP_ACCESS_KEYS` does not list, or one at write scope,
+     wherever in a credential it sits;
+   - a key whose scope differs from the one its credential declares
+     (`brainScope`), so ingestion's credential cannot carry a read key.
+4. **Key custody** (SMD-2210). n8n 2.40.6 offers 106 scopes (measured). The
+   POC's key held eight. The profile's also holds eight, a different eight:
+   it adds `credential:update` and `workflow:update`, so a re-provision
+   patches credentials and replaces workflows in place, and drops the
+   run-history reads, which only the eval kit asks for, on its own key. The
+   two calls outside the POC's scopes tried in the third review pass answered
+   403, though n8n's docs say non-Enterprise keys have full access. But the
+   scopes include creating and publishing workflows, so a holder can publish
+   one that sends any unpinned credential anywhere. The profile's key
+   expires (`N8N_API_KEY_DAYS`, 90). Every run deletes every other key its
+   env file minted, which n8n then answers with 401 (the kit's K measures a
+   rotation; in the POC, replaced keys stayed valid). That includes one a
+   run cut short left behind, which provisioning's self-check holds against
+   a fake n8n. Every
    mint and re-mint signs in as the owner, so the **owner password** is a
    standing secret of the profile, stronger than the key; it lives in
    `deploy/.env` beside `POSTGRES_PASSWORD`. So does **`N8N_ENCRYPTION_KEY`**:
@@ -235,9 +276,19 @@ concern SMD-1813's allowlist and SMD-1903's egress policy already name.
    decides what may leave for a model call (SMD-1903); extending it to a
    workflow's destination is part of the step, not something that exists.
 6. **Telemetry off, and measured** (SMD-2210). The profile sets n8n's documented
-   switches; the POC set them and did not probe what the container dials. An
-   egress probe (the container on an internal network after provisioning) is
-   part of the profile's acceptance.
+   switches. The POC set them and did not probe what the container dials. The
+   kit's `--with sealed` puts n8n on an `internal: true` network with a
+   tcpdump watcher in its network namespace. The brain-side paths still pass
+   there. The watcher records every DNS question n8n sent, in any shape, and
+   every connection attempt that became a packet. The kit's E check fails closed: every
+   outbound packet must be a readable question to the listed resolver or a
+   connection to the brain, and every name must be the network's own or a
+   template's host (`../evals/README.md`, "The orchestration profile
+   (SMD-2210)"). A dial off the internal subnet sends nothing (ENETUNREACH),
+   so the seal stops it and E catches a seal that leaks. E is measured on
+   podman; with Docker's loopback resolver it cannot judge names and says so.
+   The first run found n8n's MCP registry module calling api.n8n.io, which the
+   profile now switches off.
 
 **On the way in**, the seam's inbound allowlist applies to a template exactly as
 to any fetcher (`docs/connector-taxonomy.md`, "One checkpoint"): the Gmail
@@ -247,13 +298,19 @@ not dropped when the recipe retires.
 
 ## The boundary, concretely
 
-- **The profile** (SMD-2210). `n8nio/n8n` pinned by digest (2.40.6 measured), a
-  store of its own (decision 3), one published port on loopback (the house rule,
-  check 13), the telemetry switches, `N8N_BLOCK_ENV_ACCESS_IN_NODE=true` so no
-  workflow reads a secret from the environment, a shorter execution window, and
-  a one-shot provisioning step — owner, key, credentials, templates, publish —
-  the POC's adapter grown up. The eval kit gains a profile-shaped overlay so its
-  checks run against the profile, not against the shape decision 3 rejects.
+- **The profile** (SMD-2210, `../deploy/compose.yaml`'s `n8n` service). It
+  has `n8nio/n8n` pinned by digest (2.40.6 measured), a store of its own
+  (decision 3), and one published port on loopback (the house rule, check
+  13). It sets the telemetry switches and `N8N_BLOCK_ENV_ACCESS_IN_NODE=true`,
+  so no workflow reads a secret from the environment, and a 24-hour
+  execution window. It refuses to start without `N8N_ENCRYPTION_KEY` and the
+  owner's hash, and n8n sets the owner from the environment. The
+  provisioning step is `../deploy/orchestration/provision.ts`, run from a
+  checkout. `--init` writes the secrets once. Each run then handles an
+  expiring key, credentials, templates and publish. It is
+  the POC's adapter grown up, and the eval kit now imports it and runs its
+  checks against the profile as it ships, not against the shape decision 3
+  rejects.
 - **The templates** (SMD-2212). Gmail → brain, once an operator's Google OAuth
   client exists (self-hosted n8n has no managed OAuth; the consent is one
   browser step, outside C4's "no UI step"), gated on SMD-1813; an
@@ -267,14 +324,19 @@ not dropped when the recipe retires.
 ## Operations
 
 - **Footprint.** n8n's container measured 361–575 MiB and a 1.1 GiB image in the
-  POC's shape (a database on the brain's server). The shape decided here — a
-  store of its own — was not run; SMD-2210's acceptance measures it, SQLite and
-  Postgres 17 both.
-- **Upgrades.** The image is pinned by digest and bumped deliberately. Each bump
-  re-runs the eval kit's `--up` and `--verify --wait-schedule` against the
-  profile-shaped overlay, because two things the profile depends on are not
-  n8n's published contract: the internal key-mint endpoints, and the shape of
-  the run data the verifier counts. That is the kit's one operational use.
+  POC's shape (a database on the brain's server). In the profile's shape
+  (SMD-2210): 369 MiB after the runs, on a 6.4 MiB SQLite store. A Postgres
+  17 of its own measured 404 MiB for n8n, plus 52 MiB for its server and a
+  280 MiB image, on a 15.5 MiB store.
+- **Upgrades.** The image is pinned by digest and bumped deliberately, after a
+  backup: n8n migrates its store on the new image and nothing reverses it.
+  Each bump re-runs the eval kit on the profile as it ships, in two cycles.
+  The first is `--up n8n` and `--verify n8n --wait-schedule`. The second is
+  the sealed egress probe, `--up n8n --with sealed` and `--verify n8n`, which
+  is what catches a new image calling out. Two things the profile depends on
+  are not n8n's published contract: the internal key-mint endpoints, and the
+  shape of the run data the verifier counts. That is the kit's one
+  operational use.
 - **Backups.** n8n's store holds workflows, credentials (encrypted with
   `N8N_ENCRYPTION_KEY`), each polling workflow's cursor (its static data) and
   run history. The workflows are the templates in the tree, and an API-key
@@ -282,7 +344,9 @@ not dropped when the recipe retires.
   credential's refresh token (Gmail's) exists only in n8n's store, and losing a
   cursor means re-ingesting from the start. So what needs keeping is
   `deploy/.env` — the owner password and the encryption key with the brain's
-  own secrets — **and** n8n's store.
+  own secrets — **and** n8n's store. The store is one SQLite file, copied
+  while n8n runs (`VACUUM INTO`); `../deploy/README.md`, "Orchestration", has
+  the copy and the restore, both measured.
 
 ## The capture layer's sync trigger
 
@@ -302,6 +366,48 @@ per connector. It is:
   tool to hold. The orchestrator wraps it rather than replacing it: one generic
   import template runs the recipe's emitter and the pipeline on a schedule and
   keeps the credential and the log (SMD-2212).
+
+## Running a pipeline from a workflow
+
+Decided in SMD-2210; built in SMD-2212. The import recipes SMD-2126 routes
+onto the ingestion contract (SMD-2147–2150, SMD-2021) run as instances of one
+generic template: an emitter, then `bun db/ingest-records.ts --source items
+--items -`, then `db/reembed.ts`. Three of the five emitters are Python and the
+pipeline is Bun. n8n's image has neither, and n8n 2.40.6 excludes its Execute
+Command node by default (`NODES_EXCLUDE`, read from the image). So the step
+runs outside n8n:
+
+- **A runner service in the profile.** It is a small HTTP service, built from an
+  image with Bun and python3, and reachable only on the compose network (no
+  published port), behind a key of its own. It runs a fixed allowlist of
+  pipelines by name, with the items in the request body. A workflow calls it
+  with an HTTP Request node, and every import template shares it. This is an
+  amendment to decision 4, not a case of it. The runner writes the way the
+  pipeline writes from a checkout, straight into brain tables
+  (`db/ingest-records.ts` upserts by source). So the runner's key is a
+  write capability, bounded where decision 4's capture key is bounded by
+  scope:
+  - only the allowlisted pipelines;
+  - one source per pipeline;
+  - its own actor on every row it writes.
+
+  n8n itself still holds no brain key above capture scope, and reaches no
+  table directly. But a workflow holding the runner's key can cause writes
+  through it, which is why decision 4 is amended rather than said to hold.
+  The runner's key is not a brain key: MCP_ACCESS_KEYS does not list it, so
+  provisioning's brain-key rule does not govern it. SMD-2212 gives it its
+  own rule when it builds the runner.
+- **Declined: an n8n image with Bun and python3 added**, and Execute Command
+  turned back on. OB1 would then build and distribute an image containing
+  n8n, which is what Gate 1's "OB1 does not distribute n8n" rests on. And
+  Execute Command runs whatever command a workflow names.
+- **Declined: a compose one-off the workflow starts.** It would need the
+  container engine's socket inside n8n, which is root on the host.
+
+The runner is built with SMD-2212's first import template, not before, since
+nothing calls it until then. It publishes no port, where n8n publishes one
+on loopback. SMD-2211's checkpoint covers the two live-API emitters' own
+egress.
 
 ## What moves, what stays
 
@@ -358,7 +464,6 @@ per connector. It is:
 
 ## Not decided here
 
-- **n8n's store**: a Postgres 17 of its own or SQLite (SMD-2210, measured).
 - **Gmail**, until an operator's Google OAuth client exists; the POC's source
   was Linear with an API key.
 - **Two-way sync** — conflict resolution and round-trip fidelity are SMD-1813's
@@ -369,11 +474,11 @@ per connector. It is:
 
 ## Follow-ups
 
-- **SMD-2210** — the `orchestration` compose profile: pinned image, a store of
-  its own (measured), loopback, a shorter execution window, one provisioning
-  step, expiring and separate keys, custody of the owner password, the
-  encryption key and n8n's store, the kit's profile-shaped overlay, the egress
-  probe.
+- **SMD-2210** (done) — the `orchestration` compose profile: pinned image, a
+  store of its own (SQLite, measured), loopback, a shorter execution window,
+  one provisioning step, expiring and separate keys, custody of the owner
+  password, the encryption key and n8n's store, the kit run against the
+  profile, the egress probe.
 - **SMD-2211** — the egress checkpoint: every template credential pinned, the MCP
   Client node's honouring of a pin measured, no sink before the retrieve route
   and the egress decision carry it.
@@ -389,13 +494,30 @@ re-runs the POC's criteria against a throwaway brain: ingestion counted from
 n8n's own run record, the schedule firing, the MCP endpoint's tools and its
 refusal of a missing and a wrong key. The verifier's mechanisms were each killed
 as a mutant in three review passes (PR #173). Measured once by hand and not
-re-run by the kit: the credential domain pin, the key scopes' 403, the webhook's
-refusal, replaced keys staying valid, Activepieces' sync-mode behaviour, and the
-live Claude Code check. SMD-2210's acceptance re-runs the kit against the
-profile through its profile-shaped overlay and adds the egress probe.
+re-run by the kit: the credential domain pin, the key scopes' 403, the
+POC's replaced keys staying valid, Activepieces' sync-mode behaviour, and the
+live Claude Code check. Since SMD-2210 `--up n8n` runs the profile as it
+ships, provisioned by its own step. `--verify` adds three checks:
+- K: each inbound key refused on the other's path; after `--rotate` the
+  replaced API key answers 401, the new one carries its expiry, and the env file holds
+  exactly one key of its tag.
+- P: a saved run past the window gone from the API and the store, and one
+  inside it kept.
+- E, under `--with sealed`: the egress record, fail-closed. Any outbound
+  packet but a readable DNS question to the listed resolver or a connection
+  to the brain fails, as does any name outside the network but a template's
+  host, a packet line it cannot read, and facts it cannot read.
+
+`--with postgres` measures the store decision 3 did not take. CI runs
+provisioning's rules against a fake n8n (`provision.ts --self-check`) and E's
+judge against a crafted watcher log (`eval-orchestration.ts --self-check`).
+It holds the profile's port to loopback, its image to a digest, and a plain
+`config` to the three services it had before.
 
 ## Related
 
 - `../evals/README.md` § "Which orchestration tool?" — the evidence
 - `connector-taxonomy.md` — the seam, the fetcher kinds, the one egress checkpoint
-- `../deploy/compose.yaml` — the `board-sync` and `jev` profiles the orchestration profile sits beside
+- `../deploy/compose.yaml` — the `orchestration` profile's `n8n` service, beside the `board-sync` and `jev` profiles
+- `../deploy/README.md` § "Orchestration" — running it: keys, provisioning, an AI client, backups, upgrades
+- `../deploy/orchestration/provision.ts` — the provisioning step the profile and the eval kit share
