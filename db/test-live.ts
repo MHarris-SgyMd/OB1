@@ -2404,11 +2404,11 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(refusedClaim?.status === "succeeded" && /refused by the provider \(.*413 .*stub: input too long/.test(refusedClaim?.err ?? "") && /--retry-fallbacks/.test(refusedClaim?.err ?? ""),
     `…and its claim is succeeded with the refusal as its caveat, naming the flag (${refusedClaim?.status}: ${refusedClaim?.err})`);
   assert(axisOf(byContent.get(tarpitText)!.e) === 0, "the tarpit row keeps its old vector");
-  // 058 (SMD-2116): a vector onto a row that has one is a projection refresh
+  // 059 (SMD-2116): a vector onto a row that has one is a projection refresh
   // — no event, no updated_at — so the pass moves no stamp; until then every
   // re-embedded row's updated_at moved and a client's if_unchanged_since read
   // it as an edit.
-  assert(shorts.every((s) => byContent.get(s)!.u === updatedBefore.get(s)!), "updated_at moved on no re-embedded row — a vector onto a row that has one is a refresh, not an edit (058)");
+  assert(shorts.every((s) => byContent.get(s)!.u === updatedBefore.get(s)!), "updated_at moved on no re-embedded row — a vector onto a row that has one is a refresh, not an edit (059)");
   assert(byContent.get(poisonText)!.u === updatedBefore.get(poisonText), "…nor on the one that failed");
 
   // The legacy twins: both re-embedded, whichever worker reached which first;
@@ -5187,7 +5187,7 @@ console.log("\n[25] Migration 055's payload backfill under two connections: a se
   await sql.close();
 }
 
-console.log("\n[26] Migration 058 on a real server: the windowed capture and an edit with windows append then project (PGlite cannot drive the chunk INSERT); two identical captures racing serialise on the fingerprint lock into one row and one event; a fold's replay on one connection beside a live capture on another; a delete racing the successor's edit (SMD-2116)");
+console.log("\n[26] Migration 059 on a real server: the windowed capture and an edit with windows append then project (PGlite cannot drive the chunk INSERT); two identical captures racing serialise on the fingerprint lock into one row and one event; a fold's replay on one connection beside a live capture on another; a delete racing the successor's edit (SMD-2116)");
 {
   // Its own pool: the section before closes the shared one.
   const sql = new SQL({ url: URL_, max: 4 });
@@ -5203,13 +5203,13 @@ console.log("\n[26] Migration 058 on a real server: the windowed capture and an 
   // The 4-argument form: one capture event, the row its image, the windows
   // written after it with their context; an edit with windows replaces them.
   const windows = [{ content: "window one", embedding: unit(1), context: "ctx one" }, { content: "window two", embedding: unit(2), context: null }];
-  const w = (await sql`SELECT upsert_thought('058 live: a windowed capture', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(0)}::vector, ${windows}::jsonb) AS r`)[0].r as Cap;
+  const w = (await sql`SELECT upsert_thought('059 live: a windowed capture', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(0)}::vector, ${windows}::jsonb) AS r`)[0].r as Cap;
   const chunks = async (id: string) => (await sql`SELECT content, context FROM thought_chunks WHERE thought_id = ${id}::uuid ORDER BY chunk_index`) as { content: string; context: string | null }[];
   assert(w.chunks === 2 && (await audits(w.id)) === 1 && (await chunks(w.id)).map((c) => `${c.content}/${c.context}`).join(",") === "window one/ctx one,window two/null",
     `the 4-argument form delegates to the appending body — one capture event — and writes the caller's windows after it (${w.chunks} windows, ${await audits(w.id)} event)`);
   const [ev] = await sql`SELECT diff->>'content' AS content, diff->'metadata'->>'actor_kind' AS kind FROM thought_audit WHERE thought_id = ${w.id}::uuid`;
-  assert(ev.content === "058 live: a windowed capture" && ev.kind === "operator" && (await rowOf(w.id))!.content === ev.content, "…the event carrying the content and the stamp, the row its image");
-  const e = (await sql`SELECT update_thought(${w.id}::uuid, '058 live: the windowed capture, edited', NULL, ${unit(3)}::vector, ${[{ content: "window three", embedding: unit(4), context: "ctx three" }]}::jsonb, NULL, ${ACTOR}::jsonb, ${MODEL}, NULL, NULL) AS r`)[0].r as { ok: boolean; updated_at: string };
+  assert(ev.content === "059 live: a windowed capture" && ev.kind === "operator" && (await rowOf(w.id))!.content === ev.content, "…the event carrying the content and the stamp, the row its image");
+  const e = (await sql`SELECT update_thought(${w.id}::uuid, '059 live: the windowed capture, edited', NULL, ${unit(3)}::vector, ${[{ content: "window three", embedding: unit(4), context: "ctx three" }]}::jsonb, NULL, ${ACTOR}::jsonb, ${MODEL}, NULL, NULL) AS r`)[0].r as { ok: boolean; updated_at: string };
   assert(e.ok === true && (await audits(w.id)) === 2 && (await chunks(w.id)).map((c) => `${c.content}/${c.context}`).join(",") === "window three/ctx three" && (await rowOf(w.id))!.vec === unit(3),
     "an edit with windows appends its event, projects the row with the caller's vector, and replaces the windows");
   const snap = Number((await sql`SELECT count(*)::int AS c FROM ob1_embedding_snapshot WHERE embedding_model = ${MODEL}`)[0].c);
@@ -5226,7 +5226,7 @@ console.log("\n[26] Migration 058 on a real server: the windowed capture and an 
   let aResult: Cap | undefined, aPid = 0;
   const aDone = connA.begin(async (tx: SQL) => {
     aPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
-    aResult = ((await tx`SELECT upsert_thought('058 live: the same text twice', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(5)}::vector) AS r`) as { r: Cap }[])[0].r;
+    aResult = ((await tx`SELECT upsert_thought('059 live: the same text twice', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(5)}::vector) AS r`) as { r: Cap }[])[0].r;
     await held;
   });
   for (let i = 0; i < 250 && aResult === undefined; i++) await Bun.sleep(20);
@@ -5234,7 +5234,7 @@ console.log("\n[26] Migration 058 on a real server: the windowed capture and an 
   let bPid = 0;
   const bDone = connB.begin(async (tx: SQL) => {
     bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
-    return ((await tx`SELECT upsert_thought('058 live: the same text twice', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(5)}::vector) AS r`) as { r: Cap }[])[0].r;
+    return ((await tx`SELECT upsert_thought('059 live: the same text twice', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(5)}::vector) AS r`) as { r: Cap }[])[0].r;
   });
   let waitingOnAdvisory = 0;
   for (let i = 0; i < 250 && waitingOnAdvisory === 0; i++) {
@@ -5246,21 +5246,21 @@ console.log("\n[26] Migration 058 on a real server: the windowed capture and an 
   await aDone;
   const bResult = await bDone;
   assert(bResult.existed === true && bResult.id === aResult!.id, "…and once the first commits, the second reads its row and reports existed");
-  assert(Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content = '058 live: the same text twice'`)[0].c) === 1 && (await audits(aResult!.id)) === 1, "one row, one event — the second wrote nothing, not even a bump");
-  // The 2-argument form's row lock is new (058's delta 5): the same race
+  assert(Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content = '059 live: the same text twice'`)[0].c) === 1 && (await audits(aResult!.id)) === 1, "one row, one event — the second wrote nothing, not even a bump");
+  // The 2-argument form's row lock is new (059's delta 5): the same race
   // through it — the waiter seen on the advisory lock, one row, one event
   // (cold read, first review pass: held by a source grep alone until here).
   let releaseA2: () => void = () => {};
   const held2 = new Promise<void>((resolve) => { releaseA2 = resolve; });
   let a2: Cap | undefined, b2Pid = 0;
   const a2Done = connA.begin(async (tx: SQL) => {
-    a2 = ((await tx`SELECT upsert_thought('058 live: the same text twice, no vector', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`) as { r: Cap }[])[0].r;
+    a2 = ((await tx`SELECT upsert_thought('059 live: the same text twice, no vector', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`) as { r: Cap }[])[0].r;
     await held2;
   });
   for (let i = 0; i < 250 && a2 === undefined; i++) await Bun.sleep(20);
   const b2Done = connB.begin(async (tx: SQL) => {
     b2Pid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
-    return ((await tx`SELECT upsert_thought('058 live: the same text twice, no vector', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`) as { r: Cap }[])[0].r;
+    return ((await tx`SELECT upsert_thought('059 live: the same text twice, no vector', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`) as { r: Cap }[])[0].r;
   });
   let waiting2 = 0;
   for (let i = 0; i < 250 && waiting2 === 0; i++) {
@@ -5270,7 +5270,7 @@ console.log("\n[26] Migration 058 on a real server: the windowed capture and an 
   releaseA2();
   await a2Done;
   const b2 = await b2Done;
-  assert(waiting2 === 1 && b2.id === a2!.id && Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content = '058 live: the same text twice, no vector'`)[0].c) === 1 && (await audits(a2!.id)) === 1,
+  assert(waiting2 === 1 && b2.id === a2!.id && Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content = '059 live: the same text twice, no vector'`)[0].c) === 1 && (await audits(a2!.id)) === 1,
     `the 2-argument form: the second capture waits on the lock, reads the first's row, writes nothing — one row, one event (${waiting2} waiting)`);
   await connA.close(); await connB.close();
 
@@ -5282,11 +5282,11 @@ console.log("\n[26] Migration 058 on a real server: the windowed capture and an 
   // arm by a source grep alone, and a grep-satisfying mutant survived).
   const rawer = new SQL({ url: URL_, max: 1 }), capturer = new SQL({ url: URL_, max: 1 });
   await rawer.unsafe(`BEGIN`);
-  const [rawRow] = await rawer`INSERT INTO thoughts (content, content_fingerprint, metadata) VALUES ('058 live: a raw row in the window', content_fingerprint_of('058 live: a raw row in the window'), '{"source": "load"}'::jsonb) RETURNING id`;
+  const [rawRow] = await rawer`INSERT INTO thoughts (content, content_fingerprint, metadata) VALUES ('059 live: a raw row in the window', content_fingerprint_of('059 live: a raw row in the window'), '{"source": "load"}'::jsonb) RETURNING id`;
   let capPid = 0;
   const capturing = capturer.begin(async (tx: SQL) => {
     capPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
-    return ((await tx`SELECT upsert_thought('058 live: a raw row in the window', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`) as { r: Cap }[])[0].r;
+    return ((await tx`SELECT upsert_thought('059 live: a raw row in the window', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`) as { r: Cap }[])[0].r;
   });
   let blocked = 0;
   for (let i = 0; i < 250 && blocked === 0; i++) {
@@ -5295,7 +5295,7 @@ console.log("\n[26] Migration 058 on a real server: the windowed capture and an 
   }
   await rawer.unsafe(`COMMIT`);
   const merged = await capturing;
-  const windowRows = await sql`SELECT id::text AS id, metadata FROM thoughts WHERE content = '058 live: a raw row in the window'`;
+  const windowRows = await sql`SELECT id::text AS id, metadata FROM thoughts WHERE content = '059 live: a raw row in the window'`;
   const windowEvents = (await sql`SELECT action, diff FROM thought_audit WHERE thought_id = ${rawRow.id}::uuid ORDER BY seq`) as { action: string; diff: Record<string, unknown> }[];
   assert(blocked === 1 && merged.id === rawRow.id && windowRows.length === 1 && (windowRows[0].metadata as { source: string }).source === "mcp" && windowEvents.map((e) => e.action).join(",") === "capture,update",
     `the capture blocked on the raw row's transaction, then merged into the row that landed: one row (the raw writer's id), the metadata merged, the raw capture event and the merge's update event in the log (${blocked} blocked, ${windowRows.length} rows, ${windowEvents.map((e) => e.action).join(",")})`);
@@ -5304,8 +5304,8 @@ console.log("\n[26] Migration 058 on a real server: the windowed capture and an 
   // A fold's replay on one connection beside live captures on another: the
   // announcing settings are transaction-local, so the live capture is checked
   // against its own event and the replayed rows against theirs.
-  const p = (await sql`SELECT upsert_thought('058 live: replay P', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(6)}::vector) AS r`)[0].r as Cap;
-  await sql`SELECT update_thought(${p.id}::uuid, '058 live: replay P, edited', NULL, ${unit(7)}::vector, NULL, NULL, ${ACTOR}::jsonb, ${MODEL}, NULL, NULL)`;
+  const p = (await sql`SELECT upsert_thought('059 live: replay P', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(6)}::vector) AS r`)[0].r as Cap;
+  await sql`SELECT update_thought(${p.id}::uuid, '059 live: replay P, edited', NULL, ${unit(7)}::vector, NULL, NULL, ${ACTOR}::jsonb, ${MODEL}, NULL, NULL)`;
   const image = async () => JSON.stringify(await sql`SELECT id, content, content_fingerprint, metadata, embedding::text AS e, embedding_model, supersedes, created_at::text AS c, updated_at::text AS u FROM thoughts WHERE id = ${p.id}::uuid`);
   const before = await image();
   // The log's order (055's rule; the migration's header): seq since the
@@ -5324,12 +5324,12 @@ console.log("\n[26] Migration 058 on a real server: the windowed capture and an 
     for (const ev of evs) {
       await tx`SELECT ob1_project_thought_event(${ev.id}::uuid, NULL, NULL, true)`;
       // A live capture on the other connection while the replay's transaction is open.
-      live.push(sql`SELECT upsert_thought(${`058 live: beside the replay ${live.length}`}, ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(8 + live.length)}::vector)`.execute());
+      live.push(sql`SELECT upsert_thought(${`059 live: beside the replay ${live.length}`}, ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(8 + live.length)}::vector)`.execute());
     }
   });
   await Promise.all(live);
   assert((await image()) === before, "the replay on its own connection rebuilds the row — every column, the vector from the snapshot");
-  assert(Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === auditsBefore + live.length && Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content LIKE '058 live: beside the replay %'`)[0].c) === live.length,
+  assert(Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === auditsBefore + live.length && Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content LIKE '059 live: beside the replay %'`)[0].c) === live.length,
     `…while the live captures beside it were each appended once and projected — the replay's settings never reached their session (${live.length} captures)`);
   await replayer.close();
 
@@ -5338,7 +5338,7 @@ console.log("\n[26] Migration 058 on a real server: the windowed capture and an 
   // and numbered after it. A replay by (created_at, seq) inverts that row's
   // history; by the log's order it rebuilds it (run-it, first review pass:
   // eight connections' log refused at a tombstone under the clock's order).
-  const contested = (await sql`SELECT upsert_thought('058 live: a contested row', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(30)}::vector) AS r`)[0].r as Cap;
+  const contested = (await sql`SELECT upsert_thought('059 live: a contested row', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(30)}::vector) AS r`)[0].r as Cap;
   const early = new SQL({ url: URL_, max: 1 }), late = new SQL({ url: URL_, max: 1 });
   await early.unsafe(`BEGIN`);
   await early.unsafe(`SELECT now()`);  // the transaction's clock is fixed here
@@ -5349,7 +5349,7 @@ console.log("\n[26] Migration 058 on a real server: the windowed capture and an 
   await early.close(); await late.close();
   const bySeq = (await sql`SELECT diff->'metadata'->'after'->>'who' AS who FROM thought_audit WHERE thought_id = ${contested.id}::uuid AND action = 'update' ORDER BY seq`).map((r: { who: string }) => r.who).join(">");
   const byClock = (await sql`SELECT diff->'metadata'->'after'->>'who' AS who FROM thought_audit WHERE thought_id = ${contested.id}::uuid AND action = 'update' ORDER BY created_at, seq`).map((r: { who: string }) => r.who).join(">");
-  assert(bySeq === "late>early" && byClock === "early>late" && (await rowOf(contested.id))!.content === "058 live: a contested row" && (await sql`SELECT metadata->>'who' AS who FROM thoughts WHERE id = ${contested.id}::uuid`)[0].who === "early",
+  assert(bySeq === "late>early" && byClock === "early>late" && (await rowOf(contested.id))!.content === "059 live: a contested row" && (await sql`SELECT metadata->>'who' AS who FROM thoughts WHERE id = ${contested.id}::uuid`)[0].who === "early",
     `the two orders disagree on the contested row: seq says ${bySeq} (the row's history — early won the lock last), the clock says ${byClock}`);
   const cImage = async () => JSON.stringify(await sql`SELECT content, metadata, embedding::text AS e, updated_at::text AS u FROM thoughts WHERE id = ${contested.id}::uuid`);
   const cBefore = await cImage();
@@ -5368,8 +5368,8 @@ console.log("\n[26] Migration 058 on a real server: the windowed capture and an 
   // order, SMD-1462's behaviour): both go through the appending bodies; the
   // edit ends SUPERSEDES_NOT_FOUND or a clean write whose pointer the
   // tombstone's cascade then nulls — never a raw 23503, never a deadlock.
-  const target = (await sql`SELECT upsert_thought('058 live: a target to supersede', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(20)}::vector) AS r`)[0].r as Cap;
-  const editor = (await sql`SELECT upsert_thought('058 live: the editor', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(21)}::vector) AS r`)[0].r as Cap;
+  const target = (await sql`SELECT upsert_thought('059 live: a target to supersede', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(20)}::vector) AS r`)[0].r as Cap;
+  const editor = (await sql`SELECT upsert_thought('059 live: the editor', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(21)}::vector) AS r`)[0].r as Cap;
   const cD = new SQL({ url: URL_, max: 1 }), cE = new SQL({ url: URL_, max: 1 });
   const outcomes: string[] = [];
   const del = cD`SELECT delete_thought(${target.id}::uuid, ${ACTOR}::jsonb, false) AS r`.execute().then((r: { r: { ok: boolean } }[]) => outcomes.push(`delete:${r[0].r.ok}`), (e: Error) => outcomes.push(`delete:ERR:${e.message.slice(0, 40)}`));

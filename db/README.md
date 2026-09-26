@@ -207,7 +207,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935,
-058 SMD-2116).
+059 SMD-2116).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -225,8 +225,8 @@ The decision that `thought_audit` is the write-side source of truth and the
 and one projector writing the row, the audit trigger becoming the check, the
 table kept for the community's DDL — is `../docs/event-log-as-truth.md`
 (SMD-1997). Its three steps are filed (SMD-2115, SMD-2116, SMD-2117); the first
-landed as migration 055 (what the event carries) and the second as 058 (below):
-since 058 the three write functions append the event first and one projector
+landed as migration 055 (what the event carries) and the second as 059 (below):
+since 059 the three write functions append the event first and one projector
 writes the row, the audit trigger checking the row against its event — the
 paragraphs on 046, 050 and 055 below describe the trigger's raw path, which a
 raw writer (`db/ingest-records.ts`, the backfills, a community schema) still
@@ -415,7 +415,7 @@ for the capture-time `people` facet (`metadata.ts`), which never reaches the
 function and keeps only the names the rule keeps as a person; test-schema [52]
 holds the two to one answer.
 
-Migration 058 has the write functions append then project (SMD-2116, step 2 of
+Migration 059 has the write functions append then project (SMD-2116, step 2 of
 `../docs/event-log-as-truth.md`). `upsert_thought` (2- and 3-argument),
 `update_thought` and `delete_thought` keep 046's and 042's bodies up to the
 write — the same locks in the same order, every refusal before any append —
@@ -440,13 +440,13 @@ Six deltas against 055 — five the decision accepted, a sixth the write path fo
 a no-op edit and a vector refresh write nothing and move no stamp; the
 stale-read guard is the pre-check alone; the 2-argument form locks the row it
 lands on; a raw writer committing the same text inside a fresh capture's window
-is merged as a re-capture (046's `ON CONFLICT` did it; 058 catches the unique
+is merged as a re-capture (046's `ON CONFLICT` did it; 059 catches the unique
 violation). A fold replays the log in 055's order — `seq` since
 `ob1_config.audit_seq_exact_since`, `(created_at, seq)` before it — never by
 the clock alone, which inverts a row's history. The capture role gains SELECT
 on `thought_audit` and the snapshot's writes (the grants table). Additive, no
-arity moves, idempotent; a re-apply re-seeds nothing. test-schema [54],
-test-live [26], test-upgrade [20k]; the redaction arm is SMD-1723's, the fold
+arity moves, idempotent; a re-apply re-seeds nothing. test-schema [55],
+test-live [26], test-upgrade [20l]; the redaction arm is SMD-1723's, the fold
 SMD-2117's.
 
 ## What changed relative to the guide
@@ -500,10 +500,10 @@ issues every group at once.
 | --- | --- | --- |
 | **capture** — the server's own connection; preflight refuses a role missing any of it | `thoughts` (001) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_chunks` (007) | `SELECT, INSERT, DELETE` |
-| | `thought_audit` (008) | `SELECT, INSERT` — since 058 the audit trigger, checking a projected row against its event, and the projector read the event (SMD-2116) |
+| | `thought_audit` (008) | `SELECT, INSERT` — since 059 the audit trigger, checking a projected row against its event, and the projector read the event (SMD-2116) |
 | | `thought_facets` (042) | `SELECT, UPDATE` — the delete guard reads the citations that name a thought and, detaching, writes them, on every delete |
 | | `ob1_agents` (046) | `SELECT` — the audit trigger reads the key's kind on every write that carries an actor (SMD-1730) |
-| | `ob1_embedding_snapshot` (058) | `SELECT, INSERT, UPDATE` — the snapshot trigger upserts the row's vector under its key on every write of a vector, a label or a key (SMD-2116). `ob1_project_thought_event` and `ob1_refresh_thought_vector` keep PUBLIC's EXECUTE, as the SECURITY INVOKER writers that call them require; the audit trigger holds what either may do, and a replay is the owner's |
+| | `ob1_embedding_snapshot` (059) | `SELECT, INSERT, UPDATE` — the snapshot trigger upserts the row's vector under its key on every write of a vector, a label or a key (SMD-2116). `ob1_project_thought_event` and `ob1_refresh_thought_vector` keep PUBLIC's EXECUTE, as the SECURITY INVOKER writers that call them require; the audit trigger holds what either may do, and a replay is the owner's |
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |

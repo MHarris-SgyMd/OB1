@@ -1522,7 +1522,7 @@ retry instead of 30 s (median 106 s per straggler against 76). The dogfood
 brain, re-run with `--retry-failed` under the new budget: **366 of 373
 extracted, 7 failed**, from 339 of 363 under the old one and 262 of 295 under
 p1; the graph holds 2,149 entities, 5,272 mentions and 4,563 edges. Those 7 —
-5,058 to 21,345 characters, the brain's longest — all extract on the 27B under
+5,059 to 21,345 characters, the brain's longest — all extract on the 27B under
 the shipped shape (7/7, no retry; 2 to 7 windows each, 66 to 351 s), so the
 7B's residue is the 7B's, and a brain that wants them can point
 `OB1_METADATA_MODEL` at the larger model and re-run with `--switch-key`.
@@ -2780,7 +2780,7 @@ instead, stopping at the edge of the history, and says so.
 | vector@-1 (shipped) | 97.2% / 98.6% | 97.2% / 100% | **52.8% / 45.8%** | 52.8% / 44.4% | 2.8% / 0% | — |
 | recency@0.3, half-life 90d | 97.2% / 98.6% | 97.2% / 100% | 52.8% / 45.8% | 52.8% / 44.4% | 2.8% / 0% | +0 / −0 on both models |
 | recency@0.3, half-life 3,650d | 97.2% / 98.6% | 97.2% / 100% | 54.2% / 47.2% | 52.8% / 45.8% | 2.8% / 0% | +1 / −0, p=1.000 |
-| age@1 | 2.8% / 2.8% | 29.2% / 29.2% | 29.2% / 29.2% | 5.6% / 5.6% | 0% / 0% | +10 / −27, p=0.008 · +11 / −23, p=0.058 |
+| age@1 | 2.8% / 2.8% | 29.2% / 29.2% | 29.2% / 29.2% | 5.6% / 5.6% | 0% / 0% | +10 / −27, p=0.008 · +11 / −23, p=0.059 |
 | resolve (oracle chains) | **0% / 0%** | 100% / 100% | **100% / 100%** | 97.2% / 94.4% | 0% / 0% | +34 / −0 · +39 / −0, p<0.001 |
 
 At k=10 the shipped arm reaches 100% on `both` on both models and
@@ -4894,7 +4894,7 @@ fingerprint on the graph rows, content in the capture event. The record is
 
 ## Does the extension contract survive the move? `thoughts` as a writable projection, prototyped (SMD-1999)
 
-`eval-writable-projection.ts` — RETIRED with migration 058 (SMD-2116), which
+`eval-writable-projection.ts` — RETIRED with migration 059 (SMD-2116), which
 shipped the bodies it prototyped; the record stays here, see the note above
 the results. Spike 2 of the event-sourcing ADR (SMD-1997):
 under CQRS-lite the write-side truth is the event log and the `thoughts` row
@@ -4969,8 +4969,8 @@ their step's letter; the events' stance, cites, valid window and context (its
 `claimed`) are in the comparison. The cost line is the
 median of 200 captures and 200 edits, baseline against option 2.
 
-**The prototype** was SQL in `evals/writable-projection/` (retired with 058;
-the bodies are `db/migrations/058_append_then_project.sql` now), applied on
+**The prototype** was SQL in `evals/writable-projection/` (retired with 059;
+the bodies are `db/migrations/059_append_then_project.sql` now), applied on
 top of 053 and thrown away with the database — where check 7 did not look,
 deliberately: the write functions were redefined for the measurement, not
 shipped. `common.sql` lifts 046's diff rule out of the audit trigger into
@@ -5014,16 +5014,16 @@ running — is named.
 
 (The run below is the run at 053, as it was. Since migration 055 — SMD-2115,
 step 1 of the decision — the shipped capture event carries the content and
-the baseline passed C1. Since migration 058 — SMD-2116, step 2 — the shipped
+the baseline passed C1. Since migration 059 — SMD-2116, step 2 — the shipped
 functions ARE option 2, so the runner's baseline would compare the schema with
 itself and its teardown would drop shipped objects: the runner, its rules
 module and the prototype SQL are retired, and its criteria live on the
-shipped bodies — C1–C6 and C10–C12 in `db/test-schema.ts` [54] (the scripted
+shipped bodies — C1–C6 and C10–C12 in `db/test-schema.ts` [55] (the scripted
 writes, the trigger counts, the forged-row checks, the drop-the-projector
 control, the replay of the log through the projector, the planted community
 triggers), C7–C9 in `db/test-live.ts` (two sessions, read through pg_locks;
-C7 [6f] and 058's section's racing captures, C8 [6d], C9 [6g] and [6h]), C13
-measured in 058's header. This block is
+C7 [6f] and 059's section's racing captures, C8 [6d], C9 [6g] and [6h]), C13
+measured in 059's header. This block is
 the spike's report as it was published, not a description of the tree.)
 
 ```
@@ -5234,7 +5234,7 @@ Not built here: the production projector, a migration, `thought_changes`
 reading the event, the raw in-tree writers (`review_supersession_proposal`,
 the backfills, the guard's bump — trigger-audited as today), the chunk rows.
 The record is `changes/smd-1999.md`. Steps 1 and 2 have since landed as
-migrations 055 (SMD-2115) and 058 (SMD-2116, `changes/smd-2116.md`).
+migrations 055 (SMD-2115) and 059 (SMD-2116, `changes/smd-2116.md`).
 
 ## The typed-decision tier beside Ollama, and the entity gate run against it (SMD-2050)
 
