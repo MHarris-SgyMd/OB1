@@ -754,36 +754,23 @@ if (configFailed) {
       // that holds it here (the alias included), and for PostgREST — which has
       // no connection string of its own — say what to hand it instead.
       const urlArg = conn ? `$${conn.from}` : "<the brain's postgres:// connection string — Supabase's direct connection, not the pooler>";
-      // public.thoughts present but not resolving for this role — no USAGE
-      // on public, or public off its search_path, or both — is not a brain
-      // to migrate (SMD-2062). Only when thoughts itself does not resolve:
-      // the count's error is an undefined table (42P01, in any lc_messages),
-      // and the probe's own to_regclass('thoughts') — same role, same path —
-      // is NULL. An RLS policy whose function reads a missing table, or
-      // reads thoughts under a pinned search_path, fails the same count with
-      // thoughts resolving. public alone, as
-      // every direct check judges it: a thoughts in some other schema is
-      // another tool's, and an un-migrated public still wants the
-      // migrations. Each cause that holds is named with its statement
-      // (SMD-2242). current_schemas() cannot say "on the path" — it leaves
-      // out a schema the role has no USAGE on — so the setting is parsed
-      // (search-path.ts, as this server's version parses it) and the
-      // statement rebuilt from the parsed names, each quoted, never echoed.
-      // With USAGE held, thoughts not resolving means off the path whatever
-      // the parse says. The GRANT names current_user, whose privilege the
-      // count used; the ALTER ROLE names session_user, the login role whose
-      // settings load (a SET ROLE in them leaves the two apart, and then only
-      // the owner can run it). It is for this database — a role's setting
-      // there outranks its plain ALTER ROLE and the database's — unless the
-      // path came from the connection (pg_settings.source `client`: given as
-      // the connection string's options, which Bun and libpq both read) or
-      // was SET after login (`session`: a pooler replaying it, a login
-      // trigger), which outrank it. A role barred from pg_settings gets the
-      // statement with that caveat. pg_class answers for any role,
-      // whatever its path; over PostgREST there is no catalog to ask, and a
+      // public.thoughts present but not resolving for this role — no USAGE on
+      // public, public off its search_path, or both — is not a brain to migrate
+      // (SMD-2062). Probed only when thoughts itself fails: 42P01 on the count
+      // (in any lc_messages) and the probe's own to_regclass('thoughts') NULL —
+      // an RLS function reading some other missing table fails the count the
+      // same way. public alone: a thoughts elsewhere is another tool's. Each
+      // cause is named with its statement (SMD-2242). The path is parsed, never
+      // echoed, and not read from current_schemas(), which hides a schema
+      // without USAGE (search-path.ts); with USAGE held, thoughts not resolving
+      // means off the path whatever the parse says. The GRANT names
+      // current_user, whose privilege the count used; the ALTER ROLE names
+      // session_user, whose settings load. A path from the connection (source
+      // `client`) or SET after login (`session`) outranks it; an unread source
+      // gets that caveat. Over PostgREST there is no catalog to ask, and a
       // failed probe asks nothing.
       let offPath: { causes: string[]; fixes: string[] } | null = null;
-      if (built.kind === "sql" && conn && (String((e as { errno?: unknown }).errno ?? "") === "42P01" || /"thoughts" does not exist/.test(msg))) {
+      if (built.kind === "sql" && conn && String((e as { errno?: unknown }).errno ?? "") === "42P01") {
         try {
           const { SQL } = await import("bun");
           const probe = new SQL({ url: conn.url, max: 1 });
@@ -812,9 +799,14 @@ if (configFailed) {
               }
               if (r.usage || !schemas.includes("public")) {
                 causes.push(`public is not on its search_path, which is ${schemas.length ? schemas.map(quoteIdent).join(", ") : "empty"}`);
-                const alter = `ALTER ROLE ${r.login} IN DATABASE ${r.db} SET search_path = ${withPublic(schemas)};${r.login !== r.role ? ` (as the database owner: ${r.role}, the role this connection SETs, may not alter ${r.login})` : ""}`;
+                // Only a superuser, or the login role itself, may alter it; under a
+                // SET ROLE the login role must drop it first (RESET ROLE returns to
+                // the role its settings SET).
+                const alter = r.login !== r.role
+                  ? `SET ROLE NONE; ALTER ROLE ${r.login} IN DATABASE ${r.db} SET search_path = ${withPublic(schemas)};  (as ${r.login}, or a superuser)`
+                  : `ALTER ROLE ${r.login} IN DATABASE ${r.db} SET search_path = ${withPublic(schemas)};`;
                 fixes.push(source === "client"
-                  ? `Set search_path in the connection string's options, which set it now and outrank any ALTER ROLE (& before it if the URL has a query already): options=${withPublicInOptions(schemas)}`
+                  ? `the connection string sets search_path (a search_path= parameter, or -c search_path= in options=), which outranks any ALTER ROLE: remove that and put this in options=, beside any other -c setting there (separated by %20): ${withPublicInOptions(schemas)}`
                   : source === "session"
                   ? `${alter}  (this session's path was SET after login — by a pooler replaying the connection string's, or a login trigger — which outranks it; change it there)`
                   : source === null
@@ -831,7 +823,7 @@ if (configFailed) {
       add("schema", "fail",
           offPath ? `${msg} — public.thoughts exists but does not resolve for this role (${offPath.causes.join("; ")})` : msg,
           offPath
-            ? `${offPath.fixes.join("  then ")}  The table is there, so migrating would not make it resolve.`
+            ? `${offPath.fixes.join("  then ").replace(/^./, (c) => c.toUpperCase())}  The table is there, so migrating would not make it resolve.`
             : /does not exist|relation/i.test(msg)
             ? `Apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
             : "Check credentials and network reachability to the database.");

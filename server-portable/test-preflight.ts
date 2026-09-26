@@ -317,8 +317,9 @@ console.log("\n[4b] A search_path setting is read as Postgres reads it (SMD-2242
   }
   assert(withPublic([]) === "public" && withPublic(["$user", "public"]) === '"$user", public' && withPublic(['a"b', "x;y"]) === '"a""b", "x;y", public',
          "…and the path with public put on it keeps the rest in order, each quoted, public once and last");
-  assert(withPublicInOptions(["nowhere"]) === "-csearch_path%3D%22nowhere%22%2Cpublic" && decodeURIComponent(withPublicInOptions(["a b,c", "x\\y"])) === '-csearch_path="a\\ b,c","x\\\\y",public',
-         "…and as a connection string's options it has no space between names, escapes a space or backslash inside one, and is percent-encoded");
+  assert(withPublicInOptions(["nowhere"]) === "-csearch_path%3D%22nowhere%22%2Cpublic" && decodeURIComponent(withPublicInOptions(["a b,c", "x\\y"])) === '-csearch_path="a\\ b,c","x\\\\y",public'
+           && withPublicInOptions(["it's!(x)"]) === "-csearch_path%3D%22it%27s%21%28x%29%22%2Cpublic",
+         "…and as a connection string's options it has no space between names, escapes a space or backslash inside one, and is percent-encoded, a shell's characters included");
 }
 
 console.log("\n[5] Against a real database");
@@ -2029,23 +2030,64 @@ else {
           await claims.unsafe("ALTER ROLE pf_reader SET search_path = nowhere");
         }
       }
-      // A path the connection string sets outranks every ALTER ROLE, so the
-      // row says to change it there.
-      const viaUrl = await run({ ...SQL_ENV, DATABASE_URL: `${readerUrl}${readerUrl.includes("?") ? "&" : "?"}options=-csearch_path%3Dnowhere` });
-      assert(/→ Set search_path in the connection string's options, which set it now and outrank any ALTER ROLE \(& before it if the URL has a query already\): options=-csearch_path%3D%22nowhere%22%2Cpublic /.test(viaUrl.out),
-             `a path from the connection string is fixed there, not by ALTER ROLE, in the options form Bun and libpq both read (${row(viaUrl.out, "schema")})`);
+      // A path the connection string sets — in options, or as Bun's own
+      // search_path= parameter — outranks every ALTER ROLE, so the row says to
+      // replace it there. Followed as printed (the setting replaced, not a
+      // second one appended, which Bun joins with a comma and libpq drops),
+      // thoughts resolves.
+      const q = readerUrl.includes("?") ? "&" : "?";
+      const viaUrl = await run({ ...SQL_ENV, DATABASE_URL: `${readerUrl}${q}options=-csearch_path%3Dnowhere` });
+      const viaParam = await run({ ...SQL_ENV, DATABASE_URL: `${readerUrl}${q}search_path=nowhere` });
+      const advice = /→ The connection string sets search_path \(a search_path= parameter, or -c search_path= in options=\), which outranks any ALTER ROLE: remove that and put this in options=, beside any other -c setting there \(separated by %20\): (-csearch_path%3D%22nowhere%22%2Cpublic) /;
+      const token = advice.exec(viaUrl.out)?.[1];
+      assert(token !== undefined && advice.test(viaParam.out),
+             `a path from the connection string, in options or as search_path=, is replaced there, not overridden by ALTER ROLE (${row(viaUrl.out, "schema")} | ${row(viaParam.out, "schema")})`);
+      {
+        let resolves = false;
+        if (token) {
+          const followed = new SQL({ url: `${readerUrl}${q}options=${token}`, max: 1 });
+          try {
+            resolves = ((await followed`SELECT to_regclass('thoughts') IS NOT NULL AS ok`) as { ok: boolean }[])[0].ok;
+          } finally {
+            await followed.close();
+          }
+        }
+        assert(resolves, `…and with the connection string's setting replaced as printed, thoughts resolves (${token ?? "nothing printed"})`);
+      }
       // A login role whose settings SET ROLE: the count runs as the role it
       // becomes, but the settings that load are the login role's, so the
-      // ALTER ROLE names the login role.
+      // ALTER ROLE names the login role — after SET ROLE NONE, since the role
+      // it becomes may not alter it. Run as printed, over the login role's own
+      // connection, it takes, and thoughts resolves on the next.
       await claims.unsafe("DROP ROLE IF EXISTS pf_acting");
       await claims.unsafe("CREATE ROLE pf_acting NOLOGIN");
       try {
         await claims.unsafe("GRANT pf_acting TO pf_reader");
         await claims.unsafe("ALTER ROLE pf_reader SET role = pf_acting");
         const acting = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
-        assert(/public is not on its search_path, which is "nowhere"\)\n\s+→ ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public; \(as the database owner: pf_acting, the role this connection SETs, may not alter pf_reader\)/.test(acting.out),
-               `a login role that SETs ROLE is the one the ALTER ROLE names, run as the owner (${row(acting.out, "schema")})`);
+        const printed = /→ (SET ROLE NONE; ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = "nowhere", public;)  \(as pf_reader, or a superuser\)/.exec(acting.out)?.[1];
+        assert(printed !== undefined, `a login role that SETs ROLE is the one the ALTER ROLE names, after SET ROLE NONE (${row(acting.out, "schema")})`);
+        let resolves = false;
+        let refused = "";
+        if (printed) {
+          const asLogin = new SQL({ url: readerUrl, max: 1 });
+          try {
+            await asLogin.unsafe(printed);
+          } catch (e) {
+            refused = (e as Error).message;
+          } finally {
+            await asLogin.close();
+          }
+          const next = new SQL({ url: readerUrl, max: 1 });
+          try {
+            resolves = ((await next`SELECT to_regclass('thoughts') IS NOT NULL AS ok`) as { ok: boolean }[])[0].ok;
+          } finally {
+            await next.close();
+          }
+        }
+        assert(resolves, `…and run as printed by the login role itself it takes (${refused ? `refused: ${refused}` : resolves})`);
       } finally {
+        await claims.unsafe(`DO $r$ BEGIN EXECUTE format('ALTER ROLE pf_reader IN DATABASE %I RESET search_path', current_database()); END $r$`);
         await claims.unsafe("ALTER ROLE pf_reader RESET role");
         await claims.unsafe("DROP ROLE pf_acting");
       }
