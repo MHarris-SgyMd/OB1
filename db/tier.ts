@@ -736,8 +736,8 @@ export function parseCompareArgs(args: string[]): CompareArgs {
       if (name === "a-key") out.aKey = v;
       else if (name === "b-key") out.bKey = v;
       else if (name === "queries-file") out.queries.push(...readQueriesFile(v));
-      else if (name === "from-log") out.fromLog = v;
-      else if (name === "since") out.since = v;
+      else if (name === "from-log") { if (v.trim().length === 0) { console.error(`--from-log is empty.\n${USAGE}`); process.exit(2); } out.fromLog = v; }
+      else if (name === "since") { if (Number.isNaN(Date.parse(v))) { console.error(`--since must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z).\n${USAGE}`); process.exit(2); } out.since = v; }
       else if (name === "query") { if (v.trim().length === 0) { console.error(`--query is empty.\n${USAGE}`); process.exit(2); } out.queries.push(v); }
       i++;
       continue;

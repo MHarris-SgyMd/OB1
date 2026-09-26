@@ -509,8 +509,8 @@ export interface Comparison {
   counts: { a: number | null; b: number | null };
   /** The exact id-set difference (SMD-2244), or unavailable on a brain that predates list_thought_ids. */
   idDiff: IdDiff;
-  /** The retrieval rows, when --replay ran; the arms that ran, the query count, where the queries came from, and whether a log source was truncated. */
-  retrieval: { rows: RetrievalRow[]; arms: string[]; queries: number; source: string; truncated?: boolean } | null;
+  /** The retrieval rows, when --replay ran; the arms that ran, the replay count, where the queries came from, whether a log source was truncated, and any log-source read failure. */
+  retrieval: { rows: RetrievalRow[]; arms: string[]; queries: number; source: string; truncated?: boolean; sourceError?: string } | null;
   /** The one-line verdict. */
   verdict: string;
 }
@@ -553,10 +553,12 @@ export async function compareBrains(
     hybrid?: boolean;
     /** A resolved plan from a brain's log (`--from-log`) — {query, arm} pairs — used in place of `queries`. */
     fromLog?: ReplayEntry[];
-    /** Where the plan came from, for the report: "queries" or "the log of <label>". */
+    /** Where the plan came from, for the report: "the supplied queries" or "the log of <label>". */
     source?: string;
     /** Whether a `fromLog` source was truncated (more searches in the window than replayed). */
     truncated?: boolean;
+    /** Set when a `fromLog` source could not be READ (the source lacks the tool, or is unreachable) — the reason. The rest of the compare still prints, like the id-set path (review pass 1). */
+    sourceError?: string;
   } = {},
 ): Promise<Comparison> {
   const [ra, rb, idDiff] = await Promise.all([readBrain(a), readBrain(b), corpusIdDiff(a, b)]);
@@ -581,7 +583,7 @@ export async function compareBrains(
     : (opts.queries ?? []).flatMap((query) => suppliedArms.map((arm) => ({ query, arm })));
   // A `fromLog` source with no rows still reports (so the operator learns the log
   // was empty); a supplied set with no queries means retrieval was not asked.
-  if (plan.length || opts.fromLog) {
+  if (plan.length || opts.fromLog || opts.sourceError) {
     const rows: RetrievalRow[] = [];
     for (const { query, arm } of plan) {
       // One query one brain refuses (an egress-gated embedding) or a hybrid arm a
@@ -594,7 +596,7 @@ export async function compareBrains(
         rows.push({ query, arm, a: [], b: [], onlyA: [], onlyB: [], reordered: false, changed: false, skipped: (e as Error).message });
       }
     }
-    retrieval = { rows, arms: [...new Set(plan.map((p) => p.arm))], queries: plan.length, source: opts.source ?? "queries", truncated: opts.truncated };
+    retrieval = { rows, arms: [...new Set(plan.map((p) => p.arm))], queries: plan.length, source: opts.source ?? "the supplied queries", truncated: opts.truncated, sourceError: opts.sourceError };
   }
 
   return {
@@ -711,6 +713,9 @@ export function renderComparison(c: Comparison): string {
   lines.push("Retrieval:");
   if (!c.retrieval) {
     lines.push("  skipped — pass --replay with --query/--queries-file, or --from-log <brain> to source the queries from a brain's own log.");
+  } else if (c.retrieval.sourceError) {
+    // A --from-log source that resolved but whose log could not be read.
+    lines.push(`  could not read ${c.retrieval.source} — ${c.retrieval.sourceError}; identity and freshness above still compare.`);
   } else if (c.retrieval.queries === 0) {
     // A --from-log source that yielded nothing (OB1_QUERY_LOG off, or an empty window).
     lines.push(`  no queries — ${c.retrieval.source} logged no searches (OB1_QUERY_LOG off, or none in the window).`);
@@ -718,7 +723,8 @@ export function renderComparison(c: Comparison): string {
     const moved = c.retrieval.rows.filter((r) => r.changed);
     const skipped = c.retrieval.rows.filter((r) => r.skipped);
     const trunc = c.retrieval.truncated ? " (window truncated — the most recent were replayed)" : "";
-    lines.push(`  arms: ${c.retrieval.arms.join(", ")} over ${c.retrieval.queries} quer${c.retrieval.queries === 1 ? "y" : "ies"} from ${c.retrieval.source}${trunc}${c.retrieval.arms.includes("hybrid") ? " (hybrid = the vector arm, embedded by each brain; until SMD-2037 a hybrid diff can be HNSW-GUC-induced)" : ""}`);
+    // "replays" not "queries": the count is query-arm pairs (a query on two arms is two).
+    lines.push(`  arms: ${c.retrieval.arms.join(", ")} over ${c.retrieval.queries} replay${c.retrieval.queries === 1 ? "" : "s"} from ${c.retrieval.source}${trunc}${c.retrieval.arms.includes("hybrid") ? " (hybrid = the vector arm, embedded by each brain; until SMD-2037 a hybrid diff can be HNSW-GUC-induced)" : ""}`);
     lines.push(`  (these are real searches — a brain running OB1_QUERY_LOG=on records them in query_log, telemetry, not the thoughts corpus.)`);
     for (const r of skipped) lines.push(`  ~ [${r.arm}] ${JSON.stringify(r.query.slice(0, 60))}: skipped — ${r.skipped}`);
     if (moved.length === 0) {
@@ -774,11 +780,19 @@ export async function runCompare(args: CompareArgs): Promise<number> {
   let replayOpts: Parameters<typeof compareBrains>[2] = {};
   if (args.replay) {
     if (args.fromLog) {
+      // A bad --from-log ref aborts (a usage error, as a bad --a/--b does); a source
+      // that resolves but whose log cannot be READ (an older brain without the tool,
+      // an unreachable one) degrades — the id-set/identity/freshness still print
+      // (review pass 1). src.label carries no key, so the reason is safe to show.
       const src = await resolveBrain(args.fromLog, undefined, envKey);
-      const page = await fetchLoggedSearches(src, args.since ?? null);
-      replayOpts = { fromLog: replayPlanFromLog(page.searches), source: `the log of ${src.label}`, truncated: page.truncated };
+      try {
+        const page = await fetchLoggedSearches(src, args.since ?? null);
+        replayOpts = { fromLog: replayPlanFromLog(page.searches), source: `the log of ${src.label}`, truncated: page.truncated };
+      } catch (e) {
+        replayOpts = { fromLog: [], source: `the log of ${src.label}`, sourceError: (e as Error).message };
+      }
     } else {
-      replayOpts = { queries: args.queries, hybrid: args.hybrid };
+      replayOpts = { queries: args.queries, hybrid: args.hybrid, source: "the supplied queries" };
     }
   }
   const c = await compareBrains(a, b, replayOpts);

@@ -425,6 +425,10 @@ console.log("\n[6c] list_logged_searches reads back a logged search over HTTP (S
   const hit = page.searches.find((s: { query: string }) => s.query === "zeta-log-probe-xyz");
   assert(hit && hit.arm === "keyword", "the search just made is in the log, with its arm and no thought content");
   assert(!("content" in (hit ?? {})) && !("result_ids" in (hit ?? {})), "the row carries no thought content or result ids");
+  // A malformed `since` is refused with a friendly message, before any driver cast.
+  let sinceErr = "";
+  try { await call("list_logged_searches", { since: "not-a-time" }); } catch (e) { sinceErr = (e as Error).message; }
+  assert(/since. must be an ISO-8601 time/.test(sinceErr), `a malformed since is refused, not a cast error (${sinceErr.slice(0, 60)})`);
 }
 
 console.log("\n[7] Dedup through the tool surface");

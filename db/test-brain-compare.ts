@@ -602,6 +602,40 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   } finally { a.server.stop(true); b.server.stop(true); }
 }
 
+// A --from-log source that resolves but LACKS the tool (older brain) degrades — the
+// compare still prints identity/freshness, and the retrieval says it could not read.
+{
+  const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {} }); // no `log` → tool absent
+  const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {} });
+  const logFn = console.log;
+  console.log = () => {};
+  let code = -1;
+  let c: Awaited<ReturnType<typeof compareBrains>> | null = null;
+  try {
+    // runCompare degrades a fetch failure; capture the Comparison via a spy on render.
+    code = await runCompare({ a: a.ep.base, b: b.ep.base, aKey: KEY, bKey: KEY, replay: true, hybrid: false, queries: [], fromLog: `${a.ep.base}?key=${KEY}`, json: false });
+  } catch { code = -2; } finally { console.log = logFn; }
+  ok(code === 0 || code === 1, `runCompare --from-log with a tool-absent source does NOT abort (returned ${code}, not a throw)`);
+  // And the degradation shows in the report (drive compareBrains directly for the assert).
+  const a2 = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {} });
+  const b2 = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {} });
+  try {
+    c = await compareBrains(a2.ep, b2.ep, { fromLog: [], source: "the log of open-brain", sourceError: "open-brain: list_logged_searches — Tool list_logged_searches not found" });
+    ok(/could not read the log of open-brain/.test(renderComparison(c!)) && /identity and freshness above still compare/.test(renderComparison(c!)), "the report degrades the log-source failure and keeps the rest");
+  } finally { a2.server.stop(true); b2.server.stop(true); a.server.stop(true); b.server.stop(true); }
+}
+
+// The supplied+hybrid path reports "replays" (query-arm pairs), not "queries".
+{
+  const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: { q: [uid(1)] } });
+  const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: { q: [uid(1)] } });
+  try {
+    const c = await compareBrains(a.ep, b.ep, { queries: ["q"], hybrid: true, source: "the supplied queries" });
+    ok(c.retrieval!.queries === 2, "one query on two arms is two replays");
+    ok(/over 2 replays from the supplied queries/.test(renderComparison(c)), "render says '2 replays', not '2 queries'");
+  } finally { a.server.stop(true); b.server.stop(true); }
+}
+
 // runCompare --from-log end to end: resolves the source, replays its log, exits 1 on a delta.
 {
   const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: { q: [uid(1)] }, log: { searches: [{ query: "q", arm: "keyword" }] } });
@@ -639,6 +673,10 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   ok(logHybrid.exitCode === 2 && /--hybrid does not apply to --from-log/.test(logHybrid.stderr.toString()), `parseCompareArgs: --from-log with --hybrid is refused (${logHybrid.exitCode})`);
   const sinceNoLog = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--since", "2026-01-01"], { cwd: import.meta.dir });
   ok(sinceNoLog.exitCode === 2 && /--since only applies with --from-log/.test(sinceNoLog.stderr.toString()), `parseCompareArgs: --since without --from-log is refused (${sinceNoLog.exitCode})`);
+  const emptyLog = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--replay", "--from-log", ""], { cwd: import.meta.dir });
+  ok(emptyLog.exitCode === 2 && /--from-log is empty/.test(emptyLog.stderr.toString()), `parseCompareArgs: an empty --from-log is refused (${emptyLog.exitCode})`);
+  const badSince = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--replay", "--from-log", "z", "--since", "not-a-time"], { cwd: import.meta.dir });
+  ok(badSince.exitCode === 2 && /--since must be an ISO-8601 time/.test(badSince.stderr.toString()), `parseCompareArgs: a malformed --since is refused (${badSince.exitCode})`);
 }
 
 console.log(`\ntest-brain-compare: ${pass} passed, ${fail} failed`);

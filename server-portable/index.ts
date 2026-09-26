@@ -1610,6 +1610,9 @@ function buildServer(principal: Principal): McpServer {
       },
     },
     async ({ since, limit }) => {
+      if (since !== undefined && Number.isNaN(Date.parse(since))) {
+        return { content: [{ type: "text" as const, text: "Error: `since` must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z)." }], isError: true };
+      }
       try {
         const page = await (await db()).listLoggedSearches({ since: since ?? null, limit });
         return { content: [{ type: "text" as const, text: JSON.stringify(page) }] };
