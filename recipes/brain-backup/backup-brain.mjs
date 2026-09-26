@@ -89,8 +89,9 @@ const SERVICE_KEY =
   "";
 
 // A https://….supabase.co URL is refused before any query, with the shim's own
-// explanation. No process.exit() anywhere in this file: the exit code is set
-// and the process ends on its own once the pool is closed (SMD-2144).
+// explanation. No process.exit() on these paths: the exit code is set and the
+// process ends on its own once the pool is closed; the one exit call is the
+// timed-out run's, at the bottom (SMD-2144).
 let client = null;
 if (!SUPABASE_URL) {
   console.error(
