@@ -1643,8 +1643,8 @@ function buildServer(principal: Principal): McpServer {
     {
       title: "Worker Queue Status",
       description:
-        "Report the background-work pools (entity extraction, consolidation, re-embed) — one row per work_type with pending / claimed (in flight) / succeeded / failed counts, how many are unpooled (not yet queued), the corpus total, how many claimed leases are STALE (a dead worker's lease past its ttl), and whether the pool is the brain's active one. " +
-        "Read-only. Returns a JSON array; empty when nothing has been queued.",
+        "Report the background-work pools (entity extraction, consolidation, re-embed) — one row per work_type that has any claim rows, with pending / claimed (in flight, INCLUDING stale) / succeeded / failed counts, how many thoughts are unpooled (not yet queued), the corpus total, how many claimed leases are STALE (a dead worker's lease past its ttl — healthy in-flight is claimed − stale), and whether the pool is the brain's active one. " +
+        "Read-only. Returns a JSON array; empty when nothing has been queued (a pool appears once it has a claim row).",
       annotations: {
         readOnlyHint: true,
       },

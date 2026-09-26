@@ -381,11 +381,11 @@ console.log("\n[5e] workerStatus — per-work_type counts, stale leases and the 
 {
   const raw = new SQL({ url: URL_, max: 1 });
   try {
-    // Six thoughts of our own to pool, so the counts are exact regardless of the
+    // Ten thoughts of our own to pool, so the counts are exact regardless of the
     // corpus this section inherits. Captured before the key is set, so the capture
     // trigger enqueues nothing; the DELETE then clears the slate.
     const ids: string[] = [];
-    for (let i = 0; i < 6; i++) ids.push((await store.captureThought({ content: `worker-status pool thought ${i}`, payload: { metadata: {} }, embedding: unit(i % EMBEDDING_DIM) })).id);
+    for (let i = 0; i < 10; i++) ids.push((await store.captureThought({ content: `worker-status pool thought ${i}`, payload: { metadata: {} }, embedding: unit(i % EMBEDDING_DIM) })).id);
     await raw`DELETE FROM thought_work_claims`; // isolate this section from any trigger-enqueued rows
     const total = await store.countThoughts();
     const ACTIVE = "extract:test-model@p2";
@@ -393,20 +393,27 @@ console.log("\n[5e] workerStatus — per-work_type counts, stale leases and the 
     const CONSOL = "consolidate:test-judge@p1";
     // Set the active extraction key so ACTIVE reads active:true and ORPHAN false.
     await raw`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${ACTIVE}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
-    // Exact rows for ACTIVE: 2 pending, 1 fresh-claimed, 1 stale-claimed (25h dead), 1 succeeded, 1 failed.
-    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status) VALUES (${ids[0]}::uuid, ${ACTIVE}, 'pending'), (${ids[1]}::uuid, ${ACTIVE}, 'pending')`;
-    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, claimed_at, ttl_expires_at) VALUES (${ids[2]}::uuid, ${ACTIVE}, 'claimed', 'w-fresh', now(), now() + interval '5 minutes')`;
-    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, claimed_at, ttl_expires_at) VALUES (${ids[3]}::uuid, ${ACTIVE}, 'claimed', 'w-dead', now() - interval '25 hours', now() - interval '25 hours')`;
-    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at) VALUES (${ids[4]}::uuid, ${ACTIVE}, 'succeeded', 'w1', now())`;
-    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error) VALUES (${ids[5]}::uuid, ${ACTIVE}, 'failed', 'w1', now(), 'boom')`;
+    // Exact rows for ACTIVE, DISTINCT per status so a swapped filter is caught:
+    // 4 pending, 3 claimed (1 fresh + 2 stale, oldest = w-dead at −26h), 2 succeeded, 1 failed.
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status) VALUES
+      (${ids[0]}::uuid, ${ACTIVE}, 'pending'), (${ids[1]}::uuid, ${ACTIVE}, 'pending'),
+      (${ids[2]}::uuid, ${ACTIVE}, 'pending'), (${ids[3]}::uuid, ${ACTIVE}, 'pending')`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, claimed_at, ttl_expires_at) VALUES
+      (${ids[4]}::uuid, ${ACTIVE}, 'claimed', 'w-fresh', now(), now() + interval '5 minutes'),
+      (${ids[5]}::uuid, ${ACTIVE}, 'claimed', 'w-dead', now() - interval '26 hours', now() - interval '26 hours'),
+      (${ids[6]}::uuid, ${ACTIVE}, 'claimed', 'w-stale2', now() - interval '25 hours', now() - interval '25 hours')`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at) VALUES
+      (${ids[7]}::uuid, ${ACTIVE}, 'succeeded', 'w1', now()), (${ids[8]}::uuid, ${ACTIVE}, 'succeeded', 'w1', now())`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error) VALUES
+      (${ids[9]}::uuid, ${ACTIVE}, 'failed', 'w1', now(), 'boom')`;
     // A superseded pool and a consolidate pool, one pending row each.
     await raw`INSERT INTO thought_work_claims (thought_id, work_type, status) VALUES (${ids[0]}::uuid, ${ORPHAN}, 'pending'), (${ids[0]}::uuid, ${CONSOL}, 'pending')`;
 
     const st = await store.workerStatus();
     const active = st.find((r) => r.workType === ACTIVE);
-    assert(!!active && active.pending === 2 && active.claimed === 2 && active.succeeded === 1 && active.failed === 1, `ACTIVE counts: 2 pending, 2 claimed (fresh+stale), 1 succeeded, 1 failed (${JSON.stringify(active)})`);
-    assert(active!.thoughts === total && active!.unpooled === total - 6, `thoughts is the corpus (${active!.thoughts}), unpooled = corpus − 6 pooled (${active!.unpooled})`);
-    assert(active!.stale === 1 && active!.staleWorkerId === "w-dead" && active!.oldestStaleClaimedAt !== null && ISO_RE.test(active!.oldestStaleClaimedAt), `the stale lease is the dead worker's, with its claimed_at (${active!.stale}, ${active!.staleWorkerId})`);
+    assert(!!active && active.pending === 4 && active.claimed === 3 && active.succeeded === 2 && active.failed === 1, `ACTIVE counts: 4 pending, 3 claimed (1 fresh + 2 stale), 2 succeeded, 1 failed (${JSON.stringify(active)})`);
+    assert(active!.thoughts === total && active!.unpooled === total - 10, `thoughts is the corpus (${active!.thoughts}), unpooled = corpus − 10 pooled (${active!.unpooled})`);
+    assert(active!.stale === 2 && active!.staleWorkerId === "w-dead" && active!.oldestStaleClaimedAt !== null && ISO_RE.test(active!.oldestStaleClaimedAt), `2 stale leases; the OLDEST is the dead worker's, with its claimed_at (${active!.stale}, ${active!.staleWorkerId})`);
     assert(active!.active === true, "the entity_extraction_key work_type reads active: true");
     const orphan = st.find((r) => r.workType === ORPHAN);
     assert(!!orphan && orphan.pending === 1 && orphan.stale === 0 && orphan.active === false, "a superseded extract pool reads active: false");
