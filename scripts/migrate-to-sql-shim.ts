@@ -28,8 +28,10 @@
  * A file on the shim WITHOUT the banner rewrite() writes was written for the shim
  * by hand — a script that spoke PostgREST through `fetch` and was ported
  * (recipes/brain-backup, recipes/lint-sweep; SMD-2144) — and has no supabase-js
- * import to go back to: `--revert` names it and leaves it alone (a revert
- * restores the import the banner recorded), and the report marks it. Without
+ * import to go back to: `--revert`, with or without a path, names it and leaves
+ * it alone (a revert restores the import the banner recorded, or
+ * `@supabase/supabase-js` when the banner lacks that line), and the report
+ * marks it. Without
  * that, CI's round trip (`--revert`, `--apply --all`, a clean diff) swapped its
  * import for one it never had and stamped the banner in.
  *
@@ -212,7 +214,9 @@ const found = walk(ROOT).map(classify).filter((f) => f !== null).sort((a, b) => 
 
 if (doRevert) {
   const byFile = new Map(found.map((f) => [f.file, f]));
-  const list = targets.length ? targets.map((t) => resolve(ROOT, t)) : found.filter((f) => f.already && !f.handPorted).map((f) => f.file);
+  // Hand ports stay in the list so the loop names each one it passes over — CI's no-argument round trip logs them
+  // (review pass 2: filtered out here, they were passed over silently, and the docblock's "names it" was false).
+  const list = targets.length ? targets.map((t) => resolve(ROOT, t)) : found.filter((f) => f.already).map((f) => f.file);
   let n = 0, hand = 0;
   for (const f of list) {
     if (byFile.get(f)?.handPorted) { hand++; console.log(`  left alone ${relative(ROOT, f)} — written for the shim by hand, no supabase-js import to go back to`); continue; }
@@ -234,6 +238,10 @@ if (apply) {
 
   let done = 0, refused = 0;
   for (const f of chosen) {
+    if (f.already) {
+      console.log(`  ·  ${f.rel} — already on the shim${f.handPorted ? " (a hand port)" : ""}, nothing to do`);
+      continue;
+    }
     if (!f.eligible) {
       console.error(`  ✗  ${f.rel}\n     ${f.blockers.join("; ")}`);
       refused++;

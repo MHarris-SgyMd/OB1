@@ -1,6 +1,6 @@
 # Lint Sweep
 
-> **On this fork (SMD-2144).** `lint-sweep.js` reads the brain through `compat/supabase-sql` under `bun`: `SUPABASE_URL` is a `postgres://` connection string, `SUPABASE_SERVICE_ROLE_KEY` is accepted and ignored, and the script runs from a checkout (its import is relative). Until SMD-2144 it reached the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — over a gateway this fork's stack does not run (SETUP.md); the decision for the class is in `docs/vendored-disposition.md`. Two reads changed with the transport: the "most recent" samples order by `created_at` (ids are uuids here, so `id desc` orders nothing), and Tier 2 reads `edges` by the columns `schemas/entity-extraction` gives it. Tier 1 and Tier 2 read `importance` (Tier 1 `source_type` too), Tier 3 `type` — columns `schemas/enhanced-thoughts/schema.sql` adds to `thoughts`; a brain without it stops the sweep at its first read of those columns.
+> **On this fork (SMD-2144).** `lint-sweep.js` reads the brain through `compat/supabase-sql` under `bun`: `SUPABASE_URL` is a `postgres://` connection string, `SUPABASE_SERVICE_ROLE_KEY` is accepted and ignored, and the script runs from a checkout (its import is relative). Until SMD-2144 it reached the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — over a gateway this fork's stack does not run (SETUP.md); the decision for the class is in `docs/vendored-disposition.md`. Two reads changed with the transport: the "most recent" samples order by `created_at` (ids are uuids here, so `id desc` orders nothing), and Tier 2 reads `edges` by the columns `schemas/entity-extraction` gives it. Tier 1 and Tier 2 read `importance` (Tier 1 `source_type` too), Tier 3 all three with `type` — columns `schemas/enhanced-thoughts/schema.sql` adds to `thoughts`; a brain without it stops the sweep at its first read of those columns.
 
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
 
@@ -28,7 +28,7 @@ Tier 1 and Tier 2 run against your brain's Postgres through `compat/supabase-sql
 
 - Working [Open Brain setup](../../docs/01-getting-started.md) with `public.thoughts` populated
 - [Bun](https://bun.sh) 1.4 or later, and a checkout of this repository — the script imports `../../compat/supabase-sql`, so it runs in place, not copied out
-- The `enhanced-thoughts` schema (`schemas/enhanced-thoughts/schema.sql`): Tier 1 reads the `importance` and `source_type` columns it adds to `thoughts`, Tier 2 `importance`, Tier 3 `type`; without it the sweep stops at its first read of those columns
+- The `enhanced-thoughts` schema (`schemas/enhanced-thoughts/schema.sql`): Tier 1 reads the `importance` and `source_type` columns it adds to `thoughts`, Tier 2 `importance`, Tier 3 those two and `type`; without it the sweep stops at its first read of those columns
 - (Optional, Tier 2) The `entity-extraction` schema applied (ships the `entities`, `edges`, and `thought_entities` tables Tier 2 walks). If your brain was set up before that schema landed, see the schema PRs [#197](https://github.com/NateBJones-Projects/OB1/pull/197) and [#199](https://github.com/NateBJones-Projects/OB1/pull/199). Tier 2 is skipped gracefully when these tables are absent — it does NOT use the `ob-graph` recipe's `graph_nodes` / `graph_edges` tables. On a fork brain `thought_entities` is migration 016's (entity ids into `ob1_entities`); Tier 2's link check reads it as it is, and its zero-edge check reads the schema's `entities` and `edges` (`from_entity_id`, `to_entity_id`).
 - (Optional, Tier 3) An OpenRouter API key with credit available
 
@@ -82,7 +82,7 @@ OPTIONAL (TIER 3 ONLY)
 
 3. (Optional) Apply the SQL views if you want to run Tier 1 checks directly in psql without the script:
 
-   Run [`views.sql`](./views.sql) against your brain's database as the role that owns `thoughts` — `psql "$DATABASE_URL" -f recipes/lint-sweep/views.sql` — and grant any other role the views with `bun db/migrate.ts --grant <role>` (the **recipes** group). This creates read-only views (`lint_orphans_by_tag`, `lint_exact_duplicates`, `lint_high_importance_isolated`, etc.) you can query any time.
+   Run [`views.sql`](./views.sql) against your brain's database as the role that owns `thoughts` — `psql "$DATABASE_URL" -f views.sql` — and grant any other role the views with `bun db/migrate.ts --grant <role>` (the **recipes** group). This creates read-only views (`lint_orphans_by_tag`, `lint_exact_duplicates`, `lint_high_importance_isolated`, etc.) you can query any time.
 
 4. Verify the script runs:
 
@@ -273,7 +273,7 @@ Solution: Create `.env.local` in the same directory as `lint-sweep.js` with the 
 Solution: `SUPABASE_URL` still holds a Supabase project URL. On this fork it is the brain's `postgres://` connection string (`SETUP.md`); there is no PostgREST to reach, and the script refuses before any query.
 
 **Issue: `thoughts (recent 2000) → 42703 column "source_type" does not exist`** (under `--tier=2` alone: `thoughts (high importance) → 42703 column "importance" does not exist`)
-Solution: Apply `schemas/enhanced-thoughts/schema.sql` — Tier 1 reads two of the columns it adds to `thoughts` (Postgres names the first missing one), Tier 2 reads `importance`, Tier 3 `type`.
+Solution: Apply `schemas/enhanced-thoughts/schema.sql` — Tier 1 reads two of the columns it adds to `thoughts` (Postgres names the first missing one), Tier 2 reads `importance`, Tier 3 those two and `type`.
 
 **Issue: `42501 permission denied for table thoughts`**
 Solution: The connection's role lacks SELECT. Connect as the brain's owner, or grant the role with `bun db/migrate.ts --grant <role>` (`db/README.md`) — that is the capturing role's grant, SELECT and the writes on every table the sweep reads; a read-only credential is a hand `GRANT SELECT ON thoughts, thought_entities, entities, edges TO <role>` instead.

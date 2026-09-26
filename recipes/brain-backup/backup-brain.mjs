@@ -151,17 +151,19 @@ async function fetchPage(table, orderBy, offset, limit) {
   // after FETCH_TIMEOUT_MS; the connection is closed with the pool at exit.
   let timer;
   const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(
-      `Query for ${table} timed out after ${FETCH_TIMEOUT_MS} ms ` +
-      `(raise FETCH_TIMEOUT_MS if this table is legitimately slow)`
-    )), FETCH_TIMEOUT_MS);
+    timer = setTimeout(() => {
+      // The flag is the timer's alone: a shim refusal (a bad identifier) rejects
+      // the race too, and is not a page left in flight (review pass 2).
+      timedOut = true;
+      reject(new Error(
+        `Query for ${table} timed out after ${FETCH_TIMEOUT_MS} ms ` +
+        `(raise FETCH_TIMEOUT_MS if this table is legitimately slow)`
+      ));
+    }, FETCH_TIMEOUT_MS);
   });
   let result;
   try {
     result = await Promise.race([query, timeout]);
-  } catch (err) {
-    timedOut = true;
-    throw err;
   } finally {
     clearTimeout(timer);
   }

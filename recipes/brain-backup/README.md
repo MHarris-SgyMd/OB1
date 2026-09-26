@@ -21,16 +21,19 @@ Export the Open Brain tables to local JSON files. The script pages each table th
 
 ## Steps
 
-1. From the recipe's directory in your checkout, copy or create a `.env.local` file with the connection string:
+1. In your checkout, go to the recipe's directory and copy or create a `.env.local` file there with the connection string:
+
+   ```bash
+   cd recipes/brain-backup
+   ```
 
    ```
    SUPABASE_URL=postgres://user:password@host:5432/openbrain
    ```
 
-2. Run the backup script:
+2. Run the backup script from that directory:
 
    ```bash
-   cd recipes/brain-backup
    bun backup-brain.mjs
    ```
 
