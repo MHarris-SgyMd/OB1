@@ -20,6 +20,7 @@ import {
   renderComparison,
   resolveBrain,
   runCompare,
+  splitKeyFromUrl,
   trimBase,
   unwrapRpc,
   type BrainEndpoint,
@@ -215,6 +216,14 @@ function frame(msg: unknown, sse?: boolean): Response {
 
 // trimBase: one or many trailing slashes removed.
 ok(trimBase("http://h:1///") === "http://h:1" && trimBase("http://h:1") === "http://h:1", "trimBase strips trailing slashes");
+
+// splitKeyFromUrl: the ?key= comes off the base (trailing slash trimmed); invalid → null.
+{
+  const s = splitKeyFromUrl("http://h:1/mcp/?key=SEKRIT");
+  ok(s?.base === "http://h:1/mcp" && s.urlKey === "SEKRIT", `splitKeyFromUrl lifts ?key= off a trimmed base (${JSON.stringify(s)})`);
+  ok(splitKeyFromUrl("http://h:1/")?.urlKey === undefined, "splitKeyFromUrl: no ?key= → undefined key");
+  ok(splitKeyFromUrl("not a url") === null, "splitKeyFromUrl: an invalid URL → null");
+}
 
 // ---------------------------------------------------------------------------
 // resolveBrain — a URL, its ?key=, a missing key.

@@ -73,6 +73,23 @@ export function trimBase(url: string): string {
 }
 
 /**
+ * Split a `?key=` off a URL: the base with the query cleared and trailing slashes
+ * trimmed, and the key it carried. Null for an unparseable URL. The key travels as
+ * a header, never on the POST/GET target a proxy would log — the one normalization
+ * both the URL and the connector paths use (boyscout: it was inline in each).
+ */
+export function splitKeyFromUrl(url: string): { base: string; urlKey: string | undefined } | null {
+  try {
+    const u = new URL(url);
+    const urlKey = u.searchParams.get("key") ?? undefined;
+    u.search = "";
+    return { base: trimBase(u.toString()), urlKey };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * A reference is a URL or a connector name. A URL carries its key in --*-key, the
  * env, or its own ?key= (which is then taken OFF the base — the key travels as a
  * header, and a ?key= on the POST target would be logged by every proxy). A name
@@ -82,22 +99,15 @@ export function trimBase(url: string): string {
  */
 export async function resolveBrain(ref: string, keyArg: string | undefined, envKey: string | undefined): Promise<BrainEndpoint> {
   if (/^https?:\/\//i.test(ref)) {
-    let base = ref;
-    let urlKey: string | undefined;
-    try {
-      const u = new URL(ref);
-      urlKey = u.searchParams.get("key") ?? undefined;
-      u.search = "";
-      base = u.toString();
-    } catch {
-      throw new Error(`--compare: ${JSON.stringify(ref)} is not a valid URL.`);
-    }
-    const key = keyArg ?? urlKey ?? envKey;
-    if (!key) throw new Error(`--compare: no read key for ${new URL(ref).host}. Pass --a-key/--b-key, set OB1_COMPARE_KEY, or put it in the URL as ?key=.`);
-    return { label: new URL(ref).host, base: trimBase(base), key };
+    const parsed = splitKeyFromUrl(ref);
+    if (!parsed) throw new Error(`--compare: ${JSON.stringify(ref)} is not a valid URL.`);
+    const host = new URL(ref).host;
+    const key = keyArg ?? parsed.urlKey ?? envKey;
+    if (!key) throw new Error(`--compare: no read key for ${host}. Pass --a-key/--b-key, set OB1_COMPARE_KEY, or put it in the URL as ?key=.`);
+    return { label: host, base: parsed.base, key };
   }
-  // A connector name — resolve it the way canary.sh does, reading only Scope/URL
-  // and the x-brain-key header out of `claude mcp get`, and echoing neither back.
+  // A connector name — resolve it the way canary.sh does, reading the URL and the
+  // x-brain-key header out of `claude mcp get`, and echoing neither back.
   return resolveConnector(ref, keyArg, envKey);
 }
 
@@ -116,30 +126,21 @@ export async function resolveConnector(name: string, keyArg: string | undefined,
   if (code !== 0) {
     throw new Error(`--compare: could not resolve the brain named ${JSON.stringify(name)} — \`claude mcp get ${name}\` exited ${code}. Pass an http(s):// URL instead, or register the connector.`);
   }
-  // `URL: http://…` and `x-brain-key: …` (a header line). No -L equivalent here:
-  // the base is taken verbatim.
+  // Read the `URL: http://…` line and the `x-brain-key: …` header line; the URL is
+  // normalized below (a ?key= split off), never followed or rewritten otherwise.
   const urlLine = out.split("\n").find((l) => /^\s*URL:/i.test(l));
   const url = urlLine?.replace(/^\s*URL:\s*/i, "").trim();
   if (!url) throw new Error(`--compare: \`claude mcp get ${name}\` named no URL.`);
   const headerLine = out.split("\n").find((l) => /x-brain-key:/i.test(l));
   const headerKey = headerLine?.replace(/^.*x-brain-key:\s*/i, "").trim() || undefined;
-  // A connector may hold its key as ?key= on the URL rather than a header; take it
-  // off the base (which then has /health appended) and treat it as the key, so the
-  // key never rides the POST target a proxy logs — the same normalization the URL
-  // path does (review pass 1).
-  let base = url;
-  let urlKey: string | undefined;
-  try {
-    const u = new URL(url);
-    urlKey = u.searchParams.get("key") ?? undefined;
-    u.search = "";
-    base = u.toString();
-  } catch {
-    throw new Error(`--compare: the connector ${JSON.stringify(name)} named an invalid URL.`);
-  }
-  const key = keyArg ?? headerKey ?? urlKey ?? envKey;
+  // A connector may hold its key as ?key= on the URL rather than a header; split it
+  // off the base (which then has /health appended) so the key never rides the POST
+  // target a proxy logs — the same normalization the URL path does (review pass 1).
+  const parsed = splitKeyFromUrl(url);
+  if (!parsed) throw new Error(`--compare: the connector ${JSON.stringify(name)} named an invalid URL.`);
+  const key = keyArg ?? headerKey ?? parsed.urlKey ?? envKey;
   if (!key) throw new Error(`--compare: the connector ${JSON.stringify(name)} carries no x-brain-key and none was given. Pass --a-key/--b-key or set OB1_COMPARE_KEY.`);
-  return { label: name, base: trimBase(base), key };
+  return { label: name, base: parsed.base, key };
 }
 
 // ---------------------------------------------------------------------------
