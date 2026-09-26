@@ -322,6 +322,15 @@ else {
   }
   assert(/✗\s+schema\s+relation "thoughts" does not exist\n\s+→ Apply the migrations: cd db && bun migrate\.ts/.test(strayRun.out),
          `…from the schema row too, with another schema's thoughts beside an empty public off the path (${strayRun.out.split("\n").find((l) => /\bschema\b/.test(l))?.trim()})`);
+  // And the migration ledger row reads the SMD-2237 split by public alone: the
+  // probe is pg_class-qualified to schema public, so pf_stray.thoughts (another
+  // tool's, off the path) is not a schema to adopt — the row says "nothing has
+  // been migrated here", never "applied by hand" or --baseline. A probe that
+  // dropped the `nspname = 'public'` qualifier would match the stray table and
+  // offer to --baseline an empty public: the exact wrong advice SMD-2237 removes.
+  assert(/!\s+migration ledger\s+no schema_migrations table and no schema — nothing has been migrated here/.test(strayRun.out) &&
+         !/the schema was applied by hand/.test(strayRun.out) && !/--baseline/.test(strayRun.out),
+         "…and the migration ledger row reads public alone — another schema's thoughts is not a schema to adopt (SMD-2237)");
 
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
 

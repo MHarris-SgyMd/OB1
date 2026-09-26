@@ -2226,6 +2226,24 @@ console.log("\n[22] --baseline on an empty database refuses, naming public.thoug
   await sql.close();
   assert(ledger === false, "…and creates no schema_migrations table — the refusal is before any write");
 
+  // Another tool's thoughts, in a schema of its own, is not public.thoughts: the
+  // guard reads public alone (pg_class, nspname='public'), so --baseline still
+  // refuses over an empty public. A probe that dropped the schema qualifier would
+  // read the stray table as "present" and let --baseline record the ledger over an
+  // empty public — the exact bricking SMD-2237 prevents. Plant it, prove the
+  // refusal, drop it.
+  const stray = new SQL({ url: URL_, max: 1 });
+  let strayRefused: { code: number; out: string };
+  try {
+    await stray.unsafe("DROP SCHEMA IF EXISTS tu_stray CASCADE; CREATE SCHEMA tu_stray; CREATE TABLE tu_stray.thoughts (id int)");
+    strayRefused = await migrate("--baseline");
+  } finally {
+    await stray.unsafe("DROP SCHEMA IF EXISTS tu_stray CASCADE");
+    await stray.close();
+  }
+  assert(strayRefused.code === 2 && /--baseline refused: public\.thoughts does not exist/.test(strayRefused.out),
+         `--baseline reads public alone: another schema's thoughts over an empty public still refuses (exit ${strayRefused.code})`);
+
   // --force is the operator's override: it records every migration over the empty
   // schema, exactly as --baseline does over a hand-built one.
   const forced = await migrate("--baseline", "--force");
