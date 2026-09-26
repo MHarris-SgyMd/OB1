@@ -766,12 +766,30 @@ jobs:
 
       # The other container this repository ships (SMD-1800): kubernetes-deployment's
       # image, Bun's base with its pinned install, built from integrations/ so the
-      # shared auth module is in the context. Built, not run — its database is its
-      # own (k8s/init.sql) and extensions/test-auth.ts starts the server itself.
+      # shared auth module is in the context. Built, and run only to be stopped
+      # (the step after) — its database is its own (k8s/init.sql) and
+      # extensions/test-auth.ts starts the server itself.
       # First, before the compose stack: a bring-up or smoke failure below must not
       # hide whether this image builds.
       - name: The Kubernetes image builds
         run: docker build -f integrations/kubernetes-deployment/Dockerfile -t ob1-k8s-mcp:ci integrations
+
+      # Run for this alone (SMD-2250): the server is the container's PID 1, which
+      # ignores a signal it has no handler for, so before its handler every
+      # `docker stop` and pod deletion waited out the grace period and was
+      # killed (exit 137). Its database is never dialled: the pool opens on the
+      # first query, and the one request made — the one that hands the handler
+      # the server — is an unauthenticated POST, refused before any.
+      - name: The Kubernetes image stops on SIGTERM
+        run: |
+          docker run -d --name ob1-k8s-stop -p 127.0.0.1:8099:8000 -e DB_PASSWORD=unused ob1-k8s-mcp:ci > /dev/null
+          for _ in $(seq 1 40); do curl -s -o /dev/null -X POST -d '{}' http://127.0.0.1:8099/ && break; sleep 0.25; done
+          t0=$(date +%s%3N); docker stop ob1-k8s-stop > /dev/null; ms=$(($(date +%s%3N) - t0))
+          code=$(docker inspect -f '{{.State.ExitCode}}' ob1-k8s-stop)
+          docker logs ob1-k8s-stop
+          docker rm -f ob1-k8s-stop > /dev/null
+          echo "docker stop: ${ms} ms, exit $code"
+          if ! { [ "$code" = 0 ] && [ "$ms" -lt 3000 ]; }; then echo "the Kubernetes image did not stop on SIGTERM (exit $code in ${ms} ms; 137 near 10 s is the grace period's kill)" >&2; exit 1; fi
 
       # The Phase 4 exit test, literally: bring up Postgres, apply the schema and
       # serve MCP, with no Supabase CLI installed and no supabase.com account.
@@ -813,9 +831,12 @@ jobs:
           # /tmp/provider-stub-wrong exists it is a provider serving another
           # model: each vector turned mostly onto dimension 0, which no word
           # reaches, so a text still ranks its own thought first but at about
-          # 30%, under the canary smoke's 50% floor, on every run.
+          # 30%, under the canary smoke's 50% floor, on every run. While
+          # /tmp/provider-stub-slow exists GET /models answers after 2 s, inside
+          # preflight's 2.5 s probe, so a server started then is still in
+          # preflight 2 s on (the SIGTERM step, SMD-2250).
           nohup python3 - <<'PY' > /tmp/provider-stub.log 2>&1 &
-          import json, math, os, re, zlib
+          import json, math, os, re, time, zlib
           from http.server import BaseHTTPRequestHandler, HTTPServer
           def embed(text):
               text = (text or "").split("\nQuery: ", 1)[-1]
@@ -833,6 +854,7 @@ jobs:
               def reply(self, body):
                   self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
               def do_GET(self):
+                  if os.path.exists("/tmp/provider-stub-slow"): time.sleep(2)
                   self.reply(b'{"object":"list","data":[]}')
               def do_POST(self):
                   req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
@@ -1189,6 +1211,32 @@ jobs:
         env:
           MCP_URL: http://127.0.0.1:8010/
         run: bun smoke.ts --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY"
+
+      # SMD-2250. The server stops on SIGTERM once what is in flight is
+      # answered (server-portable/shutdown.ts), and a stop during preflight
+      # ends the container (the Dockerfile's traps): before, each waited out
+      # the 10 s grace period and was killed, exit 137 — about 30 s of this
+      # job, over the canary's stops and the teardown. Last of the steps that
+      # use the server: it is left stopped. The second stop lands inside
+      # preflight because the stub holds GET /models 2 s.
+      - name: The server stops on SIGTERM, serving and in preflight
+        working-directory: deploy
+        run: |
+          stop() {
+            t0=$(date +%s%3N); docker compose -f compose.yaml stop server > /dev/null 2>&1; ms=$(($(date +%s%3N) - t0))
+            code=$(docker inspect -f '{{.State.ExitCode}}' "$(docker compose -f compose.yaml ps -aq server)")
+            echo "$1: stopped in ${ms} ms, exit $code"
+            if ! { [ "$code" = "$2" ] && [ "$ms" -lt 3000 ]; }; then docker compose -f compose.yaml logs --tail 20 server; echo "$1: expected exit $2 within 3 s (137 near 10 s is the grace period's kill)" >&2; exit 1; fi
+          }
+          curl -s --max-time 5 -o /dev/null http://127.0.0.1:8010/health
+          stop serving 0
+          docker compose -f compose.yaml logs --no-log-prefix server | grep '^SIGTERM: ' | tail -2
+          docker compose -f compose.yaml logs --no-log-prefix server | grep -Eq '^SIGTERM: stopped in [0-9.]+ s; database pool closed; exit 0$' || { echo "no shutdown line naming the pool closed" >&2; exit 1; }
+          touch /tmp/provider-stub-slow
+          docker compose -f compose.yaml start server > /dev/null 2>&1
+          sleep 0.5
+          stop "in preflight" 143
+          rm -f /tmp/provider-stub-slow
 
       - name: Logs on failure
         if: failure()

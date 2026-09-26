@@ -14,6 +14,7 @@ import { authenticateRequest, canCapture, canRead, canWrite, SCOPES, type Princi
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "./version.ts";
 import { brainInfo, renderBrainInfo, type BrainInfo, type ReadOptions, type ServerFacts } from "./brain-info.ts";
+import { drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 
 /**
  * Runtime-portable env access.
@@ -2713,11 +2714,27 @@ app.notFound((c) =>
   c.text("Method Not Allowed", 405, HEALTH_PATH.test(c.req.path) ? HEALTH_METHOD_NOT_ALLOWED_HEADERS : METHOD_NOT_ALLOWED_HEADERS),
 );
 
+// Stopping on SIGTERM, what is in flight finished (SMD-2250; shutdown.ts says
+// why the image needs it). Bun serves the default export below itself and
+// hands the server to no one but the fetch handler, as its second argument, so
+// the first request passes it on; before that nothing can be in flight. Only
+// when this module is Bun's entry: never on Workers, whose second argument is
+// its bindings, nor in a suite that imports the module.
+const SERVES_ON_BUN = typeof Bun !== "undefined" && import.meta.main === true;
+let bunServer: Stoppable | undefined;
+if (SERVES_ON_BUN) {
+  // The pool only if a request opened one; a store that failed to build has none to close.
+  drainOnSignal({ server: () => bunServer, close: async () => { await _store?.then((s) => s.close(), () => {}); } });
+}
+
 export default {
   // Workers reads `fetch`; Bun also reads `port`. Node uses @hono/node-server.
   // No `idleTimeout`: a tool call outlives the default by the keepalive above,
   // and the default is the right reaper for a dead socket (SMD-1864).
   // An empty PORT is unset, not port 0 (a random port, silently) — `||`, the rule the vendored servers' tails share (SMD-1799).
   port: Number((globalThis as { process?: { env?: Record<string, string> } }).process?.env?.PORT || 8000),
-  fetch: app.fetch,
+  fetch: (...args: Parameters<typeof app.fetch>) => {
+    if (SERVES_ON_BUN && !bunServer && isStoppable(args[1])) bunServer = args[1];
+    return app.fetch(...args);
+  },
 };

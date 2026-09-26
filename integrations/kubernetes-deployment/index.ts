@@ -606,9 +606,37 @@ app.all("*", async (c) => {
   return response;
 });
 
+// ob1-fork (SMD-2250): stopping on SIGTERM. The image runs this as the container's PID 1,
+// where the kernel gives SIGTERM no default action, so until this handler every rollout and
+// pod deletion waited out terminationGracePeriodSeconds (30 s) and ended in SIGKILL, with
+// requests cut off. server-portable/shutdown.ts is the core server's handler and says more;
+// this is it cut to what this server has. Bun hands the server it serves from the export
+// below to no one but the fetch handler, so the first request passes it on; before that
+// nothing can be in flight. Only as the entry: extensions/test-auth.ts imports the module.
+const DRAIN_BOUND_MS = 20_000; // under the 30 s grace period, with room for the pool to close
+let bunServer: { stop(closeActiveConnections?: boolean): Promise<void>; readonly pendingRequests: number } | undefined;
+if (import.meta.main) {
+  let stopping = false;
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    process.on(signal, async () => {
+      if (stopping) process.exit(1); // a second signal: not waiting for the rest
+      stopping = true;
+      const t0 = performance.now();
+      console.log(`${signal}: no longer accepting; ${bunServer?.pendingRequests ?? 0} in flight, waited on for up to ${DRAIN_BOUND_MS / 1000} s (SMD-2250)`);
+      const drained = await Promise.race([bunServer ? bunServer.stop().then(() => true) : true, Bun.sleep(DRAIN_BOUND_MS).then(() => false)]);
+      await Promise.race([sql.close().catch(() => {}), Bun.sleep(1_000)]);
+      console.log(`${signal}: stopped in ${((performance.now() - t0) / 1000).toFixed(1)} s${drained ? "" : `, ${bunServer?.pendingRequests} cut off at the bound`}; exit ${drained ? 0 : 1}`);
+      process.exit(drained ? 0 : 1);
+    });
+  }
+}
+
 // Bun's entry shape, the core server's (SMD-1799): `bun index.ts` serves it on PORT, default 8000 —
 // what the image runs (SMD-1800), so k8s/openbrain.yml names no PORT.
 export default {
   port: Number(process.env.PORT || 8000),
-  fetch: app.fetch,
+  fetch: (...args: Parameters<typeof app.fetch>) => {
+    if (!bunServer && typeof (args[1] as typeof bunServer)?.stop === "function") bunServer = args[1] as typeof bunServer;
+    return app.fetch(...args);
+  },
 };

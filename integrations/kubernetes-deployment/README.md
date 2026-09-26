@@ -173,6 +173,7 @@ After deployment you should see:
 - PostgreSQL with `thoughts` table and `match_thoughts` function
 - MCP endpoint responding to `tools/list` with 4 tools: `search_thoughts`, `list_thoughts`, `thought_stats`, `capture_thought` (3 for a `read` key — `capture_thought` is registered only for `write`)
 - Thoughts captured via any MCP client are stored in your self-hosted database
+- A pod deletion or rollout stops the server in well under a second when it is idle: on SIGTERM it stops accepting, finishes the requests in flight (up to 20 s, inside the pod's 30 s grace period), closes its pool and exits 0, and the log says `SIGTERM: stopped in …`. Before SMD-2250 it ignored SIGTERM, as the container's PID 1 with no handler, so every stop waited the full 30 s and was killed, mid-request
 
 > **Tool hygiene:** This integration adds MCP tools to your AI's context window. As your deployment grows, the total tool count grows — and with it, the context cost and risk of your AI picking the wrong tool. See the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) for strategies on auditing, merging, and scoping your tools.
 

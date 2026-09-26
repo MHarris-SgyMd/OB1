@@ -61,7 +61,15 @@ USER bun
 # and only fails when a user captures their first thought. A crashloop is visible;
 # a server that looks healthy and is not, is not. preflight exits non-zero on a
 # bad configuration, unreachable database, or missing schema.
-ENTRYPOINT ["/bin/sh", "-c", "bun preflight.ts && exec bun index.ts"]
+#
+# A stop during preflight ends the container (SMD-2250). The shell is PID 1
+# until the `exec`, and PID 1 ignores a signal it has no handler for, so
+# without the traps a stop sent then was lost: preflight finished, the server
+# started, and the stop waited out the grace period and was killed (10.1 s,
+# exit 137, measured). A trap runs only once the foreground command returns,
+# hence preflight in the background and `wait`, which a trapped signal
+# interrupts. From the `exec` on, index.ts's own handlers answer (shutdown.ts).
+ENTRYPOINT ["/bin/sh", "-c", "trap 'exit 143' TERM; trap 'exit 130' INT; bun preflight.ts & wait $! || exit $?; exec bun index.ts"]
 
 # Liveness only. The MCP endpoint requires auth, so a probe cannot exercise a real
 # tool; an unauthenticated POST returns HTTP 200 with a JSON-RPC -32001 envelope,

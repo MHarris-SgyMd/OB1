@@ -404,7 +404,7 @@ says so; see Caveats.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 213 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default and the tool-call keepalive
+bun test-server.ts        # 309 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
 bun test-auth.ts          # 97 — scoped, hashed, named keys
 bun run test:local        # 52 — fully local provider, no credential
 bun run test:sql          # 123 — store conformance, real Postgres in a container
@@ -496,6 +496,19 @@ stored in the same write").
   stuck call produces, long before the ceiling. The call runs to its end on the
   server, and a retry of the same text is `upsert_thought`'s fingerprint no-op
   rather than a second row. The rest of per-request logging is SMD-1849.
+- **A stop finishes what is in flight, for up to 8 s** (SMD-2250). On SIGTERM
+  or SIGINT the server stops accepting, waits for the requests in flight
+  (a tool call's stream included), closes the database pool and exits 0:
+  `docker compose stop server` returns in about 0.1 s idle, or when the last
+  call answers. A call still running at 8 s (`DRAIN_BOUND_MS` in
+  `shutdown.ts`, under Docker's 10 s grace period) is cut off, the line says
+  how many, and the exit is 1; a second signal cuts the wait short. Before,
+  the image ignored SIGTERM — the server is the container's PID 1, which has
+  no default action for it — so every stop waited out the grace period and
+  was killed (exit 137), mid-request. A stop during preflight ends the
+  container at once, exit 143 (the Dockerfile's traps). Only when `index.ts`
+  is Bun's entry: Workers has no signals, and a suite that imports the module
+  keeps its own.
 
 ## Related
 

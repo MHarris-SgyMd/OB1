@@ -772,6 +772,130 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
   }
 }
 
+console.log("\n[13d] SIGTERM stops the server once the request in flight is answered, exit 0; SIGINT the same (SMD-2250)");
+{
+  // A child server again, run the way the image runs it — index.ts the entry,
+  // which is when the handlers go in. The request in flight is a keyed /health
+  // against a database that never replies (13c's), answered at its deadline.
+  // As a child the process is not PID 1, so without the handlers SIGTERM's
+  // default action kills it at once: the request is cut off and there is no
+  // exit code, which is what these rows fail on.
+  const { HEALTH_DEADLINE_MS } = await import("./index.ts");
+  const freePort = () => { const p = Bun.serve({ port: 0, fetch: () => new Response() }); const n = p.port!; p.stop(true); return n; };
+  const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
+  const start = () => {
+    const port = freePort();
+    const proc = Bun.spawn(["bun", "--no-env-file", "index.ts"], {
+      cwd: import.meta.dir,
+      env: { ...process.env, PORT: String(port), DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, MCP_ACCESS_KEY: KEY },
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    return { port, proc, out: new Response(proc.stdout).text() };
+  };
+  const up = async (port: number) => {
+    for (let i = 0; i < 200; i++) {
+      if (await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok, () => false)) return true;
+      await Bun.sleep(50);
+    }
+    return false;
+  };
+  // Bounded, and a child still running is killed, so its stdout ends and the row reads it rather than hanging.
+  const exited = async (proc: ReturnType<typeof Bun.spawn>, ms: number) => {
+    const code = await Promise.race([proc.exited.then(() => proc.exitCode), Bun.sleep(ms).then(() => "still running" as const)]);
+    if (code === "still running") proc.kill("SIGKILL");
+    return code;
+  };
+
+  const busy = start();
+  const idle = start();
+  const ctrlC = start();
+  try {
+    assert(await up(busy.port) && await up(idle.port) && await up(ctrlC.port), "three child servers answer a keyless probe (the first request, which hands the handlers the server)");
+
+    const t0 = performance.now();
+    const inFlight = fetch(`http://127.0.0.1:${busy.port}/health`, { headers: { "x-brain-key": KEY } })
+      .then(async (r) => ({ status: r.status, body: await r.text(), at: performance.now() - t0 }), (e: Error) => ({ status: 0, body: e.message, at: performance.now() - t0 }));
+    await Bun.sleep(300);
+    busy.proc.kill("SIGTERM");
+    await Bun.sleep(100);
+    const late = await fetch(`http://127.0.0.1:${busy.port}/health`).then((r) => `answered ${r.status}`, () => "refused");
+    const answered = await inFlight;
+    const code = await exited(busy.proc, HEALTH_DEADLINE_MS + 5_000);
+    const took = performance.now() - t0;
+    const log = await busy.out;
+    assert(answered.status === 200 && answered.body === "ok" && answered.at >= HEALTH_DEADLINE_MS - 100,
+      `the keyed /health in flight when SIGTERM landed is answered, 200 \`ok\` at its deadline (${Math.round(answered.at)} ms; got ${answered.status} ${answered.body.slice(0, 60)})`);
+    assert(late === "refused", `…a new connection after the signal is refused (${late})`);
+    assert(code === 0 && took < HEALTH_DEADLINE_MS + 2_500, `…and the server exits 0 once it is, not at the drain bound (${code} at ${Math.round(took)} ms)`);
+    assert(/SIGTERM: no longer accepting; 1 request in flight/.test(log) && /SIGTERM: stopped in [\d.]+ s; database pool .*; exit 0/.test(log),
+      `…saying so on stdout, the request counted (${log.split("\n").filter((l) => l.startsWith("SIGTERM")).join(" | ")})`);
+
+    const t1 = performance.now();
+    idle.proc.kill("SIGTERM");
+    const idleCode = await exited(idle.proc, 3_000);
+    const idleLog = await idle.out;
+    assert(idleCode === 0 && performance.now() - t1 < 1_000 && /0 requests in flight/.test(idleLog) && /database pool closed; exit 0/.test(idleLog),
+      `an idle server stops at once, exit 0, no pool to close (${idleCode} in ${Math.round(performance.now() - t1)} ms)`);
+
+    ctrlC.proc.kill("SIGINT");
+    const intCode = await exited(ctrlC.proc, 3_000);
+    assert(intCode === 0 && /SIGINT: stopped in/.test(await ctrlC.out), `SIGINT stops it the same way (${intCode})`);
+  } finally {
+    for (const { proc } of [busy, idle, ctrlC]) proc.kill("SIGKILL");
+    silent.stop(true);
+  }
+
+  // The bounds, against a stand-in server: a request that never finishes is
+  // cut off at the drain bound (exit 1, named), a second signal cuts the wait
+  // short, a pool that will not close is left at its bound, and with no server
+  // yet there is nothing to wait on.
+  const { drainOnSignal, isStoppable } = await import("./shutdown.ts");
+  const stuck = () => {
+    const calls: boolean[] = [];
+    return { calls, server: { pendingRequests: 1, stop: (force?: boolean) => { calls.push(!!force); return force ? Promise.resolve() : new Promise<void>(() => {}); } } };
+  };
+  const harness = (opts: Partial<Parameters<typeof drainOnSignal>[0]> & { server: () => any }) => {
+    const handlers = new Map<string, () => void>();
+    const lines: string[] = [];
+    const exits: number[] = [];
+    const { stopped } = drainOnSignal({ close: async () => {}, drainBoundMs: 200, closeBoundMs: 100, log: (l) => lines.push(l), exit: (c) => exits.push(c), on: (s, h) => handlers.set(s, h), ...opts });
+    return { handlers, lines, exits, stopped };
+  };
+  /** The stop's exit code, or -1 when it has not run to its exit within 3 s: a hang fails its row rather than the suite. */
+  const settled = (p: Promise<number>) => Promise.race([p, Bun.sleep(3_000).then(() => -1)]);
+
+  let s = stuck();
+  let h = harness({ server: () => s.server });
+  const b0 = performance.now();
+  h.handlers.get("SIGTERM")!();
+  let c = await settled(h.stopped);
+  assert(c === 1 && h.exits.join() === "1" && performance.now() - b0 >= 190 && s.calls.join() === "false,true" && h.lines.some((l) => /1 request still in flight after 0\.\d s, closed unfinished/.test(l)),
+    `a request that never finishes is cut off at the drain bound: stop(), then stop(true), exit 1, the line naming it (${h.lines.join(" | ")})`);
+
+  s = stuck();
+  h = harness({ server: () => s.server, drainBoundMs: 60_000 });
+  const b1 = performance.now();
+  h.handlers.get("SIGTERM")!();
+  h.handlers.get("SIGINT")!();
+  c = await settled(h.stopped);
+  assert(c === 1 && performance.now() - b1 < 1_000 && h.lines.some((l) => l === "SIGINT again: not waiting for the rest") && s.calls.join() === "false,true",
+    `a second signal cuts a 60 s wait short (${Math.round(performance.now() - b1)} ms, exit ${c})`);
+
+  h = harness({ server: () => undefined, close: () => new Promise<void>(() => {}) });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 0 && h.lines.some((l) => /0 requests in flight/.test(l)) && h.lines.some((l) => /database pool not closed within 100 ms; exit 0/.test(l)),
+    `no server yet: nothing to wait on, exit 0; a pool that will not close is left at its bound and said (${h.lines.at(-1)})`);
+
+  h = harness({ server: () => undefined, close: () => Promise.reject(new Error("boom")) });
+  h.handlers.get("SIGTERM")!();
+  assert(await settled(h.stopped) === 0 && /database pool not closed: boom; exit 0/.test(h.lines.at(-1) ?? ""), "a pool whose close throws is said, and the stop still exits 0");
+
+  assert(isStoppable({ stop: () => Promise.resolve(), pendingRequests: 0 }) && !isStoppable({ OB1_STORE: "postgrest" }) && !isStoppable(undefined) && !isStoppable(null),
+    "isStoppable: Bun's server shape, not a Workers env, not nothing");
+}
+
 console.log("\n[14] OB1_STORE unset selects the SQL store; PostgREST stays selectable and is said to be retired here (SMD-1797)");
 {
   const { createStore, databaseUrl, DEFAULT_STORE, isPostgresUrl, maskUrl, missingDatabaseUrl, postgrestOnBunNotice, postgrestOverPostgresUrl, storeKind } = await import("./store.ts");
