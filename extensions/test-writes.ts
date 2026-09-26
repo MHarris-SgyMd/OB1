@@ -1063,19 +1063,17 @@ try {
   assert(recent.status === 200 && ids(recent).includes(cid) && !ids(recent).includes(rid) && ids(recentOpen).includes(rid) && ids(recentOpen).includes(cid),
     `GET /recent hides the restricted twin by default and shows it under exclude_restricted=false, as its siblings do — it filtered nothing before (${recent.status}: ${ids(recent).length} rows${ids(recent).includes(rid) ? ", the twin among them" : ""}; open: ${ids(recentOpen).length})`);
   // SMD-2083: no paging parameter reaches SQL non-finite or fractional, and a
-  // non-object JSON body is a named 400 — each a 500 on the pre-fix file.
-  const infOffset = await send(h, "GET", "/recent?offset=Infinity&limit=5");
-  assert(infOffset.status === 200 && infOffset.json?.offset === 0,
-    `GET /recent?offset=Infinity clamps to 0, not LIMIT NaN OFFSET Infinity → 500 (${infOffset.status}: offset ${infOffset.json?.offset})`);
-  const fracLimit = await send(h, "GET", "/recent?limit=2.5");
-  assert(fracLimit.status === 200 && fracLimit.json?.limit === 2,
-    `GET /recent?limit=2.5 truncates to 2, not a fractional LIMIT (${fracLimit.status}: limit ${fracLimit.json?.limit})`);
-  const noLimit = await send(h, "GET", "/recent");
-  assert(noLimit.status === 200 && noLimit.json?.limit === 20,
-    `GET /recent with no limit uses the default 20, not the min (${noLimit.status}: limit ${noLimit.json?.limit})`);
-  const emptyLimit = await send(h, "GET", "/recent?limit=");
-  assert(emptyLimit.status === 200 && emptyLimit.json?.limit === 20,
-    `GET /recent?limit= (empty) uses the default 20, not the min (${emptyLimit.status}: limit ${emptyLimit.json?.limit})`);
+  // non-object JSON body is a named 400 — each a 500 on the pre-fix file. The
+  // GET /recent arms clamp/truncate/default the paging param and echo it back.
+  for (const [path, field, want, note] of [
+    ["/recent?offset=Infinity&limit=5", "offset", 0, "offset=Infinity clamps to 0, not LIMIT NaN OFFSET Infinity → 500"],
+    ["/recent?limit=2.5", "limit", 2, "limit=2.5 truncates to 2, not a fractional LIMIT"],
+    ["/recent", "limit", 20, "no limit uses the default 20, not the min"],
+    ["/recent?limit=", "limit", 20, "?limit= (empty) uses the default 20, not the min"],
+  ] as [string, string, number, string][]) {
+    const r = await send(h, "GET", path);
+    assert(r.status === 200 && r.json?.[field] === want, `GET ${path}: ${note} (${r.status}: ${field} ${r.json?.[field]})`);
+  }
   const bigPage = await send(h, "POST", "/search", { query: captured, mode: "text", page: 1e9 });
   assert(bigPage.status === 200 && Number.isInteger(bigPage.json?.page),
     `POST /search text mode page=1e9 answers a page, not an int4 overflow → 500 (${bigPage.status}: page ${bigPage.json?.page})`);
