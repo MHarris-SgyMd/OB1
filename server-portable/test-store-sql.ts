@@ -237,6 +237,24 @@ console.log("\n[3c] hybridThoughts fuses the two, and maps the fused row's shape
   const filtered = await store.hybridThoughts({ query: "SMD-507", embedding: unit(0), threshold: -1, limit: 10, filter: { kind: "a" } });
   assert(filtered.every((r) => r.matchedNeedles.length === 0), "the jsonb filter reaches the keyword arm");
 
+  // prefer_current (059, SMD-2255): the store calls search_thoughts_current and
+  // maps its three extra fields; without the flag the rows carry fused =
+  // score, nothing demoted and no window. The row nearest the query, stamped a
+  // completed ticket, is demoted: no longer first, weighted exactly 0.25.
+  assert(plain.every((r) => r.fused === r.score && r.demoted.length === 0 && r.window === undefined), "without prefer_current every row carries fused = score, nothing demoted and no window");
+  const stampSql = new SQL({ url: URL_, max: 1 });
+  await stampSql`UPDATE thoughts SET metadata = metadata || ${{ source: "linear", issue: "SMD-9901", status: "Done", status_type: "completed", linear_updated_at: "2026-09-25T00:00:00.000Z" }}::jsonb WHERE id = ${plain[0].id}::uuid`;
+  const offAgain = await store.hybridThoughts({ query: "the exact thing", embedding: unit(0), threshold: -1, limit: 10, filter: {} });
+  const onCurrent = await store.hybridThoughts({ query: "the exact thing", embedding: unit(0), threshold: -1, limit: 10, filter: {}, preferCurrent: true });
+  const demotedRow = onCurrent.find((r) => r.id === plain[0].id);
+  assert(offAgain[0].id === plain[0].id && onCurrent[0].id !== plain[0].id && demotedRow !== undefined && demotedRow.demoted.join() === "completed" && demotedRow.score === demotedRow.fused * 0.25
+      && onCurrent.filter((r) => r.id !== plain[0].id).every((r) => r.demoted.length === 0 && r.score === r.fused)
+      && onCurrent.every((r) => r.window !== undefined && r.window.demoted === 1 && r.window.known === 1 && r.window.syncedAt === "2026-09-25T00:00:00.000Z" && r.window.exact === true)
+      && [...onCurrent.map((r) => r.id)].sort().join() === [...offAgain.map((r) => r.id)].sort().join(),
+    `with preferCurrent the completed row nearest the query is demoted — no longer first, marked completed, 0.25 of its fused score — the rest untouched, the window mapped on every row (${onCurrent.map((r) => r.demoted.join("+") || "-").join(" ")})`);
+  await stampSql`UPDATE thoughts SET metadata = metadata - 'source' - 'issue' - 'status' - 'status_type' - 'linear_updated_at' WHERE id = ${plain[0].id}::uuid`;
+  await stampSql.close();
+
   for (const c of ["ticket SMD-507 came up in the distant note", "ticket SMD-507 with no vector yet"]) {
     await store.deleteThought({ id: (await store.keywordThoughts({ query: c, limit: 1, offset: 0, filter: {} }))[0].id });
   }

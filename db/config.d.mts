@@ -289,6 +289,8 @@ export const ROUTE_ESTIMATE_MIN_PAGES: number;
 export const MATCH_THOUGHTS_SIGNATURE: string;
 /** The signature the servers call, as regprocedure text (020: seven arguments). */
 export const SEARCH_THOUGHTS_HYBRID_SIGNATURE: string;
+/** The signature search_thoughts' prefer_current calls, as regprocedure text (059: the hybrid's seven arguments). */
+export const SEARCH_THOUGHTS_CURRENT_SIGNATURE: string;
 /** The signature the servers and reembed.ts call, as regprocedure text (032: nine arguments). */
 export const UPDATE_THOUGHT_SIGNATURE: string;
 /** 032's nine-argument form, the one 046 replaced (SMD-1730). */

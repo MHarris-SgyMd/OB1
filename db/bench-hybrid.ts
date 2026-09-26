@@ -46,6 +46,12 @@
  * The function no longer joins `thoughts` and runs with `jit = off`; the
  * migration header records the finding, and this bench is what would catch it
  * coming back.
+ *
+ * ── prefer_current (059, SMD-2255) ───────────────────────────────────────────
+ * The last block times search_thoughts_current against the hybrid on the same
+ * rows, after stamping lifecycles and supersession onto them: node_state is
+ * computed over the whole brain per call, and the budget the flag was
+ * pre-registered against is at most the hybrid's own median at 10,000 rows.
  */
 
 import { SQL } from "bun";
@@ -175,6 +181,34 @@ for (const n of SCALES) {
   console.log(`      wrapper overhead                      ${fmt(tHybridPlain - tVectorPlain).padStart(9)}`);
   console.log(`    fused, one needle in 10% of rows        ${fmt(tHybridCommon).padStart(9)}   (probed as common, not paged)`);
   console.log(`      the keyword page it did not fetch     ${fmt(tKeywordCommon).padStart(9)}`);
+
+  // ── prefer_current (059, SMD-2255) ─────────────────────────────────────────
+  // search_thoughts_current reads the hybrid at min(100, 4N) and node_state for
+  // the window — and node_state computes the whole brain's lifecycle per call
+  // (058: the ids narrow the rows, not the work). Timed after the rows above,
+  // so their numbers are what they were: 40% of the rows become ticket rows
+  // (two rows per ticket, so heads choose), a quarter of those settled, and one
+  // row in twenty supersedes the row before it. The budget, pre-registered: the
+  // flag adds at most the hybrid's own median at 10,000 rows.
+  await sql.unsafe(`UPDATE thoughts SET metadata = metadata || jsonb_build_object('issue', 'B-' || ((metadata->>'doc')::int / 2),
+                      'status_type', CASE WHEN (metadata->>'doc')::int % 20 < 2 THEN 'completed' ELSE 'started' END)
+                     WHERE (metadata->>'doc')::int % 5 < 2`);
+  await sql.unsafe(`UPDATE thoughts t SET supersedes = s.id FROM thoughts s
+                     WHERE (t.metadata->>'doc')::int % 20 = 3 AND (s.metadata->>'doc')::int = (t.metadata->>'doc')::int - 1`);
+  await sql.unsafe("VACUUM ANALYZE thoughts");
+  const [st] = await sql`SELECT count(*) FILTER (WHERE open = false)::int AS settled, count(*) FILTER (WHERE superseded_by IS NOT NULL)::int AS superseded FROM node_state()`;
+  const tPlainOff = await time(() => sql`SELECT id FROM search_thoughts_hybrid(${q}::vector, ${plain}, 0.5, 10, '{}'::jsonb)`);
+  const tPlainOn = await time(() => sql`SELECT id FROM search_thoughts_current(${q}::vector, ${plain}, 0.5, 10, '{}'::jsonb)`);
+  const tNeedleOff = await time(hybrid);
+  const tNeedleOn = await time(() => sql`SELECT id FROM search_thoughts_current(${q}::vector, ${text}, 0.0, 10, '{}'::jsonb)`);
+  const tState = await time(() => sql`SELECT count(*) FROM node_state()`);
+  const added = tPlainOn - tPlainOff;
+  console.log(`\n  prefer_current (059), ${st.settled.toLocaleString()} settled and ${st.superseded.toLocaleString()} superseded rows, median of ${REPEATS}:\n`);
+  console.log(`    hybrid, no needle                       ${fmt(tPlainOff).padStart(9)}`);
+  console.log(`    search_thoughts_current, no needle      ${fmt(tPlainOn).padStart(9)}   (+${fmt(added)}${n === 10000 ? `; budget ${fmt(tPlainOff)}: ${added <= tPlainOff ? "within" : "OVER"}` : ""})`);
+  console.log(`    hybrid, one needle                      ${fmt(tNeedleOff).padStart(9)}`);
+  console.log(`    search_thoughts_current, one needle     ${fmt(tNeedleOn).padStart(9)}   (+${fmt(tNeedleOn - tNeedleOff)})`);
+  console.log(`      node_state() over the brain alone     ${fmt(tState).padStart(9)}`);
   await sql.close();
 }
 console.log("");

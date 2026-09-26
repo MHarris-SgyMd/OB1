@@ -88,7 +88,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 export type LoggedSearch = {
   id: string;
   query: string;
-  arm: "hybrid" | "keyword" | null;
+  /** 'current' is search_thoughts with prefer_current (059, SMD-2255): replayed through search_thoughts_current. */
+  arm: "hybrid" | "keyword" | "current" | null;
   matchCount: number | null;
   threshold: number | null;
   recencyWeight: number | null;
@@ -176,15 +177,22 @@ export async function replayOne(
     const rows = await sql`SELECT id FROM search_thoughts_keyword(${row.query}, ${limit}, 0, ${filter}::jsonb)`;
     return { ids: rows.map((r: { id: string }) => r.id), ran: true };
   }
-  if (row.arm === "hybrid") {
-    if (!embedFn) return { ids: [], ran: false, reason: "hybrid needs a provider (set OB1_EVAL_EMBED)" };
+  if (row.arm === "hybrid" || row.arm === "current") {
+    if (!embedFn) return { ids: [], ran: false, reason: `${row.arm} needs a provider (set OB1_EVAL_EMBED)` };
     const qv = await embedFn(row.query);
     const threshold = row.threshold ?? -1;
     const count = row.matchCount ?? 10;
     const recency = row.recencyWeight ?? 0;
-    const rows = await sql`
-      SELECT id FROM search_thoughts_hybrid(
-        ${`[${qv.join(",")}]`}::vector, ${row.query}, ${threshold}, ${count}, ${filter}::jsonb, ${recency})`;
+    // `current` is the same arm through 059's function, the one the server
+    // called (SMD-2255); a function name cannot be a bound parameter, so two
+    // literal statements.
+    const rows = row.arm === "current"
+      ? await sql`
+          SELECT id FROM search_thoughts_current(
+            ${`[${qv.join(",")}]`}::vector, ${row.query}, ${threshold}, ${count}, ${filter}::jsonb, ${recency})`
+      : await sql`
+          SELECT id FROM search_thoughts_hybrid(
+            ${`[${qv.join(",")}]`}::vector, ${row.query}, ${threshold}, ${count}, ${filter}::jsonb, ${recency})`;
     return { ids: rows.map((r: { id: string }) => r.id), ran: true };
   }
   return { ids: [], ran: false, reason: "arm is NULL (logged before migration 045) — which arm produced its ids is unknown" };

@@ -253,7 +253,8 @@ assert(currentExcl.mrr >= currentLabel.mrr - 0.005, "exclusion does not HURT the
 //
 // PRICED BEFORE THE SQL EXISTS, as this file priced exclude: `demote` is a
 // TypeScript oracle over the hybrid's window and node_state's columns, so the
-// numbers decide whether migration 059 is written. Three policies, one query
+// numbers decided whether migration 059 was written. It was; the oracle stays,
+// and 059's search_thoughts_current is held to it on every query. Three policies, one query
 // set: off (the hybrid at N, today's order), demote, and exclude (the demoted
 // rows removed from the window). Every row sits at a controlled cosine to its
 // topic's query (the axis), its remainder in axes no topic uses, so another
@@ -353,7 +354,7 @@ async function nodeFacts(ids: string[]): Promise<Map<string, NodeRow>> {
 }
 const demotable = (f: NodeRow | undefined) => f !== undefined && (f.open === false || f.superseded);
 
-type Ranked = { off: string[]; demote: string[]; exclude: string[]; exactAgrees: boolean | null; windowExact: boolean };
+type Ranked = { off: string[]; demote: string[]; exclude: string[]; exactAgrees: boolean | null; windowExact: boolean; sqlAgrees: boolean };
 /** The three policies for one query, and the window's honesty: the oracle over W against the whole list re-weighted. */
 async function policies(queryVec: string, queryText: string, threshold: number, filter: Record<string, unknown>): Promise<Ranked> {
   const off = (await hybrid(queryVec, queryText, threshold, N, filter)).map((r) => r.id);
@@ -368,7 +369,13 @@ async function policies(queryVec: string, queryText: string, threshold: number, 
   const current = win.filter((r) => !demotable(facts.get(r.id))).length;
   const windowExact = win.length < W || current >= N;
   const exact = weigh(all).slice(0, N);
-  return { off, demote, exclude, windowExact, exactAgrees: all.length <= 100 ? JSON.stringify(exact) === JSON.stringify(demote) : null };
+  // Migration 059's function, the one the tool calls: it must be the oracle,
+  // row for row, and say the same about its window.
+  const sqlRows = await hsql`
+    SELECT id::text AS id, window_exact FROM search_thoughts_current(${queryVec}::vector, ${queryText}, ${threshold}::float, ${N}::int, ${filter}::jsonb, 0.0::float, 90.0::float)`;
+  const sqlAgrees = JSON.stringify(sqlRows.map((r: Record<string, unknown>) => String(r.id))) === JSON.stringify(demote)
+    && sqlRows.every((r: Record<string, unknown>) => r.window_exact === windowExact);
+  return { off, demote, exclude, windowExact, sqlAgrees, exactAgrees: all.length <= 100 ? JSON.stringify(exact) === JSON.stringify(demote) : null };
 }
 
 type Query = { vec: string; text: string; filter: Record<string, unknown>; gold: Record<string, Set<string>> };
@@ -416,13 +423,14 @@ console.log(`\n  ── the down-weight on the hybrid (SMD-2255): N ${N}, window
 
 type Cell = { off: Metrics; demote: Metrics; exclude: Metrics };
 const cells: Record<string, Cell> = {};
-let windowQueries = 0, windowInexact = 0, exactChecked = 0, exactDisagree = 0;
+let windowQueries = 0, windowInexact = 0, exactChecked = 0, exactDisagree = 0, sqlDisagree = 0;
 for (const threshold of [0, -1]) {
   for (const [cls, qs] of Object.entries(queries)) {
     const perRel: Record<string, { off: { ranked: string[]; gold: Set<string> }[]; demote: typeof perRel[string]["off"]; exclude: typeof perRel[string]["off"] }> = {};
     for (const q of qs) {
       const p = await policies(q.vec, q.text, threshold, q.filter);
       windowQueries++;
+      if (!p.sqlAgrees) sqlDisagree++;
       if (!p.windowExact) windowInexact++;
       if (p.windowExact && p.exactAgrees !== null) { exactChecked++; if (!p.exactAgrees) exactDisagree++; }
       for (const [rel, gold] of Object.entries(q.gold)) {
@@ -448,6 +456,7 @@ for (const threshold of [0, -1]) {
 }
 console.log(`  window: ${windowInexact}/${windowQueries} queries held fewer than ${N} current rows in the top ${W}; where it did, the oracle over the window equalled the whole list re-weighted on ${exactChecked - exactDisagree}/${exactChecked}\n`);
 assert(exactDisagree === 0, "WINDOW: wherever the window held N current rows (or the whole list), its top N is the whole admitted list re-weighted");
+assert(sqlDisagree === 0, `SQL: migration 059's search_thoughts_current returns the oracle's rows, in its order, with its window flag, on every query (${windowQueries - sqlDisagree}/${windowQueries})`);
 
 // ── Controls ─────────────────────────────────────────────────────────────────
 // Nothing to demote: a copy of every class with no pointer and no lifecycle.
@@ -460,12 +469,12 @@ for (let t = 0; t < PER_CLASS; t++) {
   plainQs.push({ vec: atCos(t, 1, rand3), text: `plain topic ${t}`, filter: byClass(), gold: {} });
 }
 let plainSame = true;
-for (const q of plainQs) for (const th of [0, -1]) { const p = await policies(q.vec, q.text, th, q.filter); if (JSON.stringify(p.off) !== JSON.stringify(p.demote)) plainSame = false; }
+for (const q of plainQs) for (const th of [0, -1]) { const p = await policies(q.vec, q.text, th, q.filter); if (JSON.stringify(p.off) !== JSON.stringify(p.demote) || !p.sqlAgrees) plainSame = false; }
 assert(plainSame, "CONTROL: with nothing to demote, demote returns the hybrid's rows in the hybrid's order");
 // Every row settled: a uniform multiplier leaves the order alone.
 await hsql`UPDATE thoughts SET metadata = metadata || '{"source": "linear", "status": "Done", "status_type": "completed"}'::jsonb || jsonb_build_object('issue', 'ALL-' || id::text)`;
 let settledSame = true;
-for (const q of plainQs) for (const th of [0, -1]) { const p = await policies(q.vec, q.text, th, q.filter); if (JSON.stringify(p.off) !== JSON.stringify(p.demote)) settledSame = false; }
+for (const q of plainQs) for (const th of [0, -1]) { const p = await policies(q.vec, q.text, th, q.filter); if (JSON.stringify(p.off) !== JSON.stringify(p.demote) || !p.sqlAgrees) settledSame = false; }
 const settledCount = Number((await hsql`SELECT count(*)::int AS c FROM node_state() WHERE open = false`)[0].c);
 assert(settledSame && settledCount === PER_CLASS * 5, `CONTROL: with every row settled (${settledCount}), the uniform multiplier leaves the order as off returns it`);
 
@@ -474,7 +483,7 @@ const at0 = (k: string) => cells[`${k}@0`];
 const liftCurrent = at0("TWIN/CURRENT").demote.mrr - at0("TWIN/CURRENT").off.mrr;
 const liftLive = at0("LIFECYCLE/LIVE").demote.mrr - at0("LIFECYCLE/LIVE").off.mrr;
 const previousOk = at0("TWIN/PREVIOUS").demote.mrr >= at0("TWIN/PREVIOUS").exclude.mrr - 1e-9;
-const controlsOk = plainSame && settledSame && exactDisagree === 0;
+const controlsOk = plainSame && settledSame && exactDisagree === 0 && sqlDisagree === 0;
 const builds = controlsOk && liftCurrent >= 0.05 && liftLive >= 0.05 && previousOk;
 console.log("  ── verdict (SMD-2255, pre-registered) ──");
 console.log(`  CURRENT ${d(at0("TWIN/CURRENT").demote.mrr, at0("TWIN/CURRENT").off.mrr)}, LIVE ${d(at0("LIFECYCLE/LIVE").demote.mrr, at0("LIFECYCLE/LIVE").off.mrr)} (bar: +0.050 each); PREVIOUS demote ${at0("TWIN/PREVIOUS").demote.mrr.toFixed(3)} against exclude ${at0("TWIN/PREVIOUS").exclude.mrr.toFixed(3)}; controls ${controlsOk ? "hold" : "FAIL"}.`);

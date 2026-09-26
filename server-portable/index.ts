@@ -714,6 +714,44 @@ export function actorLine(m: Record<string, unknown>): string | null {
   return `By: ${name ?? "an unnamed key"} (${kind ?? "kind not classified"})`;
 }
 
+/**
+ * The line under a hit prefer_current demoted (059, SMD-2255): the weight it
+ * took and why. The weight is read off the row — score over fused, exact since
+ * 0.25 is a power of two — so this file holds no copy of it. Null for a row
+ * nothing demoted, which is every row without the flag. Exported for the unit
+ * test.
+ */
+export function demotedLine(t: Pick<ThoughtHybridMatch, "demoted" | "score" | "fused">): string | null {
+  if (t.demoted.length === 0) return null;
+  const weight = t.fused > 0 ? `×${Number((t.score / t.fused).toFixed(4))}` : "below current thoughts";
+  return `↓ Ranked ${weight} — ${t.demoted.join(", ")}`;
+}
+
+/**
+ * The header note under prefer_current: what the window held — how many rows
+ * were demoted, how many carry a lifecycle and the latest sync among them —
+ * and, when fewer than `limit` current rows were in the window, that rows past
+ * them are demoted ones and a current row further down was not read. Null
+ * without the flag (no window on the rows). Exported for the unit test.
+ */
+export function currentNote(rows: Pick<ThoughtHybridMatch, "window">[], limit: number): string | null {
+  const w = rows[0]?.window;
+  if (!w) return null;
+  const lifecycle = `${w.known} carr${w.known === 1 ? "ies" : "y"} a lifecycle${w.syncedAt ? ` (latest sync ${w.syncedAt})` : ""}`;
+  const note = `Current first (prefer_current): ${w.demoted} of the top ${w.rows} match${w.rows === 1 ? "" : "es"} ${w.demoted === 1 ? "is" : "are"} settled or superseded and ranked below the current ones; ${lifecycle}.`;
+  return w.exact ? note
+    : `${note} Only ${w.rows - w.demoted} current match${w.rows - w.demoted === 1 ? " was" : "es were"} in the top ${w.rows}, so the rows after ${w.rows - w.demoted === 1 ? "it" : "them"} are demoted ones and a current match further down was not read — raise limit.`;
+}
+
+/** The hint an error from prefer_current's path carries: the migration or the grant it needs. */
+export function currentSearchHint(msg: string): string {
+  return /search_thoughts_current/.test(msg) && /does not exist|could not find/i.test(msg)
+    ? " — migration 059 (db/migrations/059_search_prefers_current.sql) is not applied, or PostgREST has not reloaded its schema cache; search without prefer_current meanwhile"
+    : /permission denied for table thought_sources/i.test(msg)
+    ? " — prefer_current reads node_state, and the server's role needs SELECT on thought_sources (db/README.md, Grants for a capturing role — the server group, which migrate.ts --grant issues); search without prefer_current meanwhile"
+    : "";
+}
+
 function buildServer(principal: Principal): McpServer {
   const server = new McpServer({
     name: SERVER_NAME,
@@ -817,14 +855,14 @@ function buildServer(principal: Principal): McpServer {
     // The hybrid arm hands back the query embedding it computed, so a caller
     // (search_thoughts's zero-result probe) reuses it without a second gate or
     // provider call.
-    (opts: { tool: string; arm: "hybrid"; query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown> }):
+    (opts: { tool: string; arm: "hybrid"; query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown>; preferCurrent?: boolean }):
       Promise<Refused | { refused?: undefined; rows: ThoughtHybridMatch[]; embedding: number[] }>;
     (opts: { tool: string; arm: "keyword"; query: string; limit: number; offset: number; filter: Record<string, unknown> }):
       Promise<{ refused?: undefined; rows: ThoughtKeywordMatch[] }>;
   }
   const runSearch: RunSearch = (async (opts: {
     tool: string; arm: "hybrid" | "keyword"; query: string; limit: number;
-    threshold?: number; recencyWeight?: number; offset?: number; filter: Record<string, unknown>;
+    threshold?: number; recencyWeight?: number; offset?: number; filter: Record<string, unknown>; preferCurrent?: boolean;
   }): Promise<{ refused?: ReturnType<typeof toolError>; rows: (ThoughtHybridMatch | ThoughtKeywordMatch)[]; embedding?: number[] }> => {
     if (opts.arm === "keyword") {
       const rows = await (await db()).keywordThoughts({ query: opts.query, limit: opts.limit, offset: opts.offset ?? 0, filter: opts.filter });
@@ -837,11 +875,14 @@ function buildServer(principal: Principal): McpServer {
     const q = gateQuery(opts.query, principal);
     if (q.refused) return { refused: toolError(q.refused), rows: [] };
     const embedding = await getEmbedding(opts.query, q.subject, "query");
+    // prefer_current (059, SMD-2255) is the same arm through another function,
+    // logged as arm `current` so a replay takes the same one.
+    const preferCurrent = opts.preferCurrent === true;
     const rows = await (await db()).hybridThoughts({
       query: opts.query, embedding, threshold: opts.threshold ?? 0, limit: opts.limit,
-      filter: opts.filter, recencyWeight: opts.recencyWeight ?? 0,
+      filter: opts.filter, recencyWeight: opts.recencyWeight ?? 0, preferCurrent,
     });
-    await logSearchCall(opts.tool, { query: opts.query, limit: opts.limit, threshold: opts.threshold ?? 0, recencyWeight: opts.recencyWeight ?? 0, filter: opts.filter, arm: "hybrid" }, rows);
+    await logSearchCall(opts.tool, { query: opts.query, limit: opts.limit, threshold: opts.threshold ?? 0, recencyWeight: opts.recencyWeight ?? 0, filter: opts.filter, arm: preferCurrent ? "current" : "hybrid" }, rows);
     return { rows, embedding };
   }) as RunSearch;
 
@@ -862,7 +903,13 @@ function buildServer(principal: Principal): McpServer {
   // can turn it off. An operator whose brain is a working log rather than a
   // reference can ask search_thoughts for a weight; this tool stays where
   // every result is the one the query names.
+  //
+  // Nor can it grow `prefer_current` (migration 059, SMD-2255), so it never
+  // demotes: on the topical task the demotion only costs (eval-supersession.ts:
+  // TOPICAL -0.127, a note under a Done ticket -0.292, a settled ticket looked
+  // up by its key -0.750), and this surface has no caller who can ask for it.
   const SEARCH_COMPAT_RECENCY_WEIGHT = 0;
+  const SEARCH_COMPAT_PREFER_CURRENT = false;
   if (canRead(principal)) server.registerTool(
     "search",
     {
@@ -884,7 +931,7 @@ function buildServer(principal: Principal): McpServer {
         // threshold (0, not 0.5, SMD-1300: admission is relative to the top match
         // since 027, so a low absolute floor lets it govern), and the fixed
         // recency weight above. runSearch gates the query (SMD-1903) and logs.
-        const r = await runSearch({ tool: "search", arm: "hybrid", query, limit: 10, threshold: 0, recencyWeight: SEARCH_COMPAT_RECENCY_WEIGHT, filter: {} });
+        const r = await runSearch({ tool: "search", arm: "hybrid", query, limit: 10, threshold: 0, recencyWeight: SEARCH_COMPAT_RECENCY_WEIGHT, preferCurrent: SEARCH_COMPAT_PREFER_CURRENT, filter: {} });
         if (r.refused) return r.refused;
         const data = r.rows;
 
@@ -972,9 +1019,10 @@ function buildServer(principal: Principal): McpServer {
       description:
         "Search captured thoughts by meaning, with exact matching for identifier-shaped tokens in the query (SMD-944, upsert_thought, db/config.mjs, getUserById) and for \"quoted\" spans. " +
         "Use this when the user asks about a topic, person, or idea they've previously captured, including one named by an error code or a ticket key. " +
-        "A thought containing one of those literals is ranked with the strongest results found by meaning, never below them, whatever its own similarity — provided the literal is rare enough to match exactly (found in no more than one keyword page of thoughts) and the result fits within the limit. " +
+        "A thought containing one of those literals is ranked with the strongest results found by meaning, never below them, whatever its own similarity — provided the literal is rare enough to match exactly (found in no more than one keyword page of thoughts) and the result fits within the limit (and prefer_current does not demote it). " +
         "Returns a fixed top-N; to page through every thought containing an exact string, or to match a literal that is too common here, use search_thoughts_keyword. " +
-        "Every hit says who wrote it (`By: <key> (operator|agent|ingested)`); `said_by` keeps only what the operator typed, or only agents' output, and `actor` only one key's.",
+        "Every hit says who wrote it (`By: <key> (operator|agent|ingested)`); `said_by` keeps only what the operator typed, or only agents' output, and `actor` only one key's. " +
+        "`prefer_current` ranks finished and replaced work below live work: off by default.",
       annotations: {
         readOnlyHint: true,
       },
@@ -1011,14 +1059,24 @@ function buildServer(principal: Principal): McpServer {
         // SMD-1726: who wrote it, as two more keys of the same filter.
         said_by: saidByInput,
         actor: actorInput,
+        // Migration 059 (SMD-2255, SMD-2074's second consumer): the hybrid with
+        // settled and superseded thoughts ranked below current ones, through
+        // 058's node_state. Off by default — 025's label, not a demotion, is
+        // every other caller's — and priced in eval-supersession.ts: the
+        // current version and the live ticket found higher (MRR +0.052,
+        // +0.194), the topical answer, a note under a finished ticket and a
+        // finished ticket looked up by its key found lower. The 0.25 below is
+        // held to search_demote_weight() by test-e2e-sql.
+        prefer_current: z.boolean().optional().default(false)
+          .describe("Rank settled and superseded thoughts below current ones. Off (default): by meaning alone. On: a thought whose ticket is completed or canceled (a note filed under such a ticket included), or that a newer thought supersedes, has its score multiplied by 0.25 — in practice every current match among the top candidates comes first, then the rest in their own order, each marked with why. Blocked and unknown-status thoughts are not demoted. An exact identifier hit on a settled thought is demoted too: to look a finished ticket up by its key, leave this off."),
       },
     },
-    async ({ query, limit, threshold, recency_weight, filter, said_by, actor }) => {
+    async ({ query, limit, threshold, recency_weight, filter, said_by, actor, prefer_current }) => {
       try {
         // The one search op, hybrid arm (SMD-1490): it gates the query
         // (SMD-1903), embeds it, runs the filter and logs. parseFilter refuses a
         // shape jsonb should not run; a bad filter falls to the catch below.
-        const r = await runSearch({ tool: "search_thoughts", arm: "hybrid", query, limit, threshold, recencyWeight: recency_weight, filter: withActorFilter(parseFilter(filter), said_by, actor) });
+        const r = await runSearch({ tool: "search_thoughts", arm: "hybrid", query, limit, threshold, recencyWeight: recency_weight, filter: withActorFilter(parseFilter(filter), said_by, actor), preferCurrent: prefer_current });
         if (r.refused) return r.refused;
         const data = r.rows;
 
@@ -1046,9 +1104,10 @@ function buildServer(principal: Principal): McpServer {
 
         // 025 (SMD-1253): which of these hits a newer thought has superseded,
         // and by which. One extra query; the labelling half of the retrieval
-        // decision (the ranking change is gated on eval-supersession.ts). A hit
-        // ranked beside the version that replaced it is the failure this ticket
-        // is about — say so on the row rather than let it pass as current.
+        // decision — the ranking half is prefer_current, opt-in (059,
+        // SMD-2255), priced by eval-supersession.ts. A hit ranked beside the
+        // version that replaced it is the failure this ticket is about — say so
+        // on the row rather than let it pass as current.
         const superseded = await (await db()).supersededAmong(data.map((t) => t.id));
 
         const results = data.map(
@@ -1069,6 +1128,9 @@ function buildServer(principal: Principal): McpServer {
             // 025: mark a hit a newer thought replaces, and name the replacement,
             // so the reader is not left ranking a superseded version as current.
             if (superseded[t.id]) parts.push(`⚠ Superseded by a newer thought — ID ${superseded[t.id]}`);
+            // 059: a row prefer_current demoted says by what and why.
+            const demotion = demotedLine(t);
+            if (demotion) parts.push(demotion);
             // SMD-1328: an undated row shows no Captured line rather than a
             // fabricated 1/1/1970; infinity/a no-ISO-form date shows its text.
             const captured = displayDate(t.created_at);
@@ -1109,8 +1171,10 @@ function buildServer(principal: Principal): McpServer {
         const notes: string[] = [];
         if (head.needles.length) notes.push(`Searched exactly for: ${head.needles.join(", ")}.`);
         if (absent.length) notes.push(`No thought contains: ${absent.join(", ")}.`);
-        if (truncated.length) notes.push(`Outside the top ${data.length}: ${truncated.map((n, ) => `${n} (in ${head.needleCounts[head.needles.indexOf(n)]} thought${head.needleCounts[head.needles.indexOf(n)] === 1 ? "" : "s"})`).join(", ")} — raise limit or use search_thoughts_keyword.`);
+        if (truncated.length) notes.push(`Outside the top ${data.length}${prefer_current ? " (or demoted past it)" : ""}: ${truncated.map((n, ) => `${n} (in ${head.needleCounts[head.needles.indexOf(n)]} thought${head.needleCounts[head.needles.indexOf(n)] === 1 ? "" : "s"})`).join(", ")} — raise limit or use search_thoughts_keyword.`);
         if (head.commonNeedles.length) notes.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${head.commonNeedles.join(", ")}.`);
+        const current = currentNote(data, limit);
+        if (current) notes.push(current);
         if (head.literalOnly) {
           notes.push(matchedAny.size
             ? "The query is only literals, so exact matches are ranked first and the rest by similarity."
@@ -1128,8 +1192,9 @@ function buildServer(principal: Principal): McpServer {
           ],
         };
       } catch (err: unknown) {
+        const msg = (err as Error).message;
         return {
-          content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+          content: [{ type: "text" as const, text: `Error: ${msg}${prefer_current ? currentSearchHint(msg) : ""}` }],
           isError: true,
         };
       }

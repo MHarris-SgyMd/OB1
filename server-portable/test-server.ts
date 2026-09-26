@@ -942,6 +942,31 @@ console.log("\n[16b] said_by and actor fold into the filter, and the By: line re
     "the filter's caps hold over the folded object: twenty keys plus said_by is over the key cap, a filter at the size cap plus actor over the size cap (first review pass)");
 }
 
+console.log("\n[16c] prefer_current's row line, header note and error hint render from the row alone (SMD-2255)");
+{
+  // Pure, exported for this: the weight is read off the row (score over
+  // fused), so the server holds no copy of 059's 0.25.
+  const { demotedLine, currentNote, currentSearchHint } = await import("./index.ts") as {
+    demotedLine: (t: { demoted: string[]; score: number; fused: number }) => string | null;
+    currentNote: (rows: { window?: { rows: number; known: number; demoted: number; syncedAt: string | null; exact: boolean } }[], limit: number) => string | null;
+    currentSearchHint: (msg: string) => string;
+  };
+  assert(demotedLine({ demoted: [], score: 0.016, fused: 0.016 }) === null, "a row nothing demoted has no line — every row without the flag");
+  assert(demotedLine({ demoted: ["completed"], score: 0.004, fused: 0.016 }) === "↓ Ranked ×0.25 — completed", `the weight comes off the row: score over fused (${demotedLine({ demoted: ["completed"], score: 0.004, fused: 0.016 })})`);
+  assert(demotedLine({ demoted: ["completed", "superseded"], score: 0.0041, fused: 0.0164 }) === "↓ Ranked ×0.25 — completed, superseded", "both reasons, in the order the function gives them");
+  assert(demotedLine({ demoted: ["superseded"], score: 0, fused: 0 }) === "↓ Ranked below current thoughts — superseded", "a zero fused score says 'below' rather than dividing by it");
+  const win = { rows: 40, known: 12, demoted: 7, syncedAt: "2026-09-25T00:00:00.000Z", exact: true };
+  assert(currentNote([{}], 10) === null && currentNote([], 10) === null, "no window on the rows (no flag, or no rows): no note");
+  assert(currentNote([{ window: win }], 10) === "Current first (prefer_current): 7 of the top 40 matches are settled or superseded and ranked below the current ones; 12 carry a lifecycle (latest sync 2026-09-25T00:00:00.000Z).",
+    `the note gives the window's demoted count, its lifecycle coverage and freshness (${currentNote([{ window: win }], 10)})`);
+  const thin = currentNote([{ window: { rows: 40, known: 40, demoted: 36, syncedAt: null, exact: false } }], 10) ?? "";
+  assert(thin.includes("36 of the top 40 matches are settled or superseded") && thin.includes("40 carry a lifecycle.") && thin.endsWith("Only 4 current matches were in the top 40, so the rows after them are demoted ones and a current match further down was not read — raise limit."),
+    `a window with fewer current rows than the limit says what that means and what to do (${thin})`);
+  assert(/migration 059 .* is not applied, or PostgREST has not reloaded/.test(currentSearchHint('function search_thoughts_current(vector, unknown) does not exist')) && /could not find/i.test("could not find") && currentSearchHint("Could not find the function public.search_thoughts_current") !== ""
+      && /needs SELECT on thought_sources .* the server group/.test(currentSearchHint("permission denied for table thought_sources")) && currentSearchHint("connection refused") === "",
+    "an error on prefer_current's path names 059 (missing, or the schema cache) or the server group's grant; any other error gets no hint");
+}
+
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");
 {
   const { withSseKeepalive, requestLabel, abandonedRequestLine, stalledRequestLine, SSE_KEEPALIVE_MS } = await import("./index.ts") as {

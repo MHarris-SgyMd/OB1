@@ -2526,6 +2526,72 @@ percent of the table, and the migration's contract is a re-ranking of the
 nearest candidates, not an exact blended ranking. What an opted-in caller pays
 is in `db/bench-plan.ts`'s recency arm.
 
+## Settled and superseded, ranked below on request (SMD-2255)
+
+`eval-supersession.ts`'s second section, run as `bun run supersession` (SMD-2255,
+SMD-2074's second consumer, migration 059). Needs only a throwaway Postgres: a
+seeded corpus through the real write path, no model.
+
+025 kept supersession labelled, not demoted, and named this file the instrument
+any demotion must pass. `search_thoughts`' opt-in `prefer_current` demotes over
+the hybrid's top W = min(100, 4N): a thought `node_state` (058) calls settled
+(its ticket completed or canceled — a note filed under a Done ticket included)
+or superseded weighs 0.25 of its fused score, once; the window is re-sorted, ties
+in the hybrid's order, and cut to N. The rule and the decision were written
+before any number was read, and the demotion was PRICED with a TypeScript oracle
+before 059 existed; 059's function is now held to that oracle on every query.
+
+Every row sits at a controlled cosine to its topic's axis, its remainder in axes
+no topic uses. Three policies — off (the hybrid at N), demote, exclude — at
+N = 10, threshold 0 and −1, over four classes: TWIN (a current row, the row it
+supersedes, three live distractors; TOPICAL / CURRENT / PREVIOUS relevance),
+LIFECYCLE (a live ticket, a settled one, a note filed under the settled one, two
+distractors; LIVE / ANY / SETTLED / NOTE), and LITERAL (a settled ticket's key,
+sparse and dense). Every class is filtered, so match_thoughts answers exactly
+(041's exact branch) and the policies differ by the rule alone.
+
+- **The controls.** Nothing demotable: demote is the hybrid's order. Every row
+  settled: a uniform multiplier, the off order. The window: wherever it held N
+  current rows, its top N is the whole list re-weighted — 288 of 288. The SQL is
+  the oracle on 288 of 288.
+- **Three runs, each on the maintainer's call.** 12 topics per class: CURRENT
+  +0.039, under the +0.05 bar. Replicated once at 48 per class, the same bar:
+  the bars cleared, but the controls failed — the approximate index walk
+  returned different candidates at counts 10, 40 and 100 once the corpus reached
+  1,200 rows. Rerun with every class filtered, so the walk is not taken: the
+  controls hold, and the effect numbers are the second run's.
+
+| threshold 0, 48 per class | off MRR | demote | exclude | Δ demote |
+| --- | ---: | ---: | ---: | ---: |
+| TWIN / CURRENT | 0.495 | 0.547 | 0.547 | +0.052 |
+| LIFECYCLE / LIVE | 0.444 | 0.639 | 0.639 | +0.194 |
+| TWIN / PREVIOUS | 0.449 | 0.200 | 0.000 | −0.249 |
+| TWIN / TOPICAL | 0.674 | 0.547 | 0.547 | −0.127 |
+| LIFECYCLE / NOTE | 0.524 | 0.231 | 0.000 | −0.292 |
+| LIFECYCLE / SETTLED | 0.380 | 0.219 | 0.000 | −0.161 |
+| LITERAL, sparse / dense | 1.000 / 0.500 | 0.250 / 0.000 | 0.000 / 0.000 | −0.750 / −0.500 |
+
+**Decision, by the pre-registered rule:** the controls hold, CURRENT and LIVE
+each gain at least 0.05, and demote beats exclude on PREVIOUS — build, opt-in,
+default off. The costs are disclosed, not vetoes: the caller opts in. Under the
+hybrid's fusion 0.25 is in practice a partition — every current match in the
+window first — and it bites only against an exact-literal hit, so a settled
+ticket looked up by its key drops; the tool says to leave the flag off for that.
+
+**On the dogfood brain** (a read-only dump, 945 thoughts, 315 demotable: 197
+settled ticket rows, 56 notes filed under a settled ticket, 60 superseded, 2 both; 59
+logged hybrid searches replayed with the provider): the top result changed in 20
+of 59, each time because the default's top result was settled or superseded; a
+demoted row sat in 54 of the 59 windows; the window was exact on 59 of 59.
+
+**Latency, and a missed budget.** `db/bench-hybrid.ts`'s prefer_current arm:
++10.7 ms over the hybrid's 1.1 at 10,000 thoughts, +129 ms at 100,000, and
++2.8 ms over 2.4 on the dogfood brain — `node_state` computes the whole brain's
+lifecycle on every call. The budget pre-registered (added cost at most the
+hybrid's own median at 10,000) was missed; the flag shipped opt-in on the
+maintainer's call, the cost stated on the tool, and SMD-2256 narrows `node_state`
+for a list of ids.
+
 ## LongMemEval: the fork on a public benchmark, and the floor it exposed
 
 `eval-longmemeval.ts`, run as `bun run longmemeval` (SMD-1039, the second

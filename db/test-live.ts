@@ -44,7 +44,7 @@ import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, syncIssue, t
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
-import { applyDatabaseSettings, databaseSettings, promote, refresh, refreshToolsReady, replayAndDiff, targetRefusal, where } from "./tier.ts";
+import { applyDatabaseSettings, databaseSettings, promote, refresh, refreshToolsReady, replayAndDiff, replayOne, targetRefusal, where } from "./tier.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -4513,6 +4513,18 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     const clean = await replayAndDiff(sql, canarySql, { since: null });
     assert(clean.replayed === 2 && clean.skipped === 0, `both logged keyword searches replay model-free (replayed ${clean.replayed}, skipped ${clean.skipped})`);
     assert(clean.changed === 0, "an identical canary reproduces stable's logged rankings — the diff is empty");
+
+    // 059 (SMD-2255): a row logged as arm `current` — search_thoughts with
+    // prefer_current — replays through search_thoughts_current. Nothing here is
+    // demotable, so it returns the hybrid's rows; a stub vector stands in for
+    // the provider (the rows carry none, so they rank on the quoted literal alone).
+    const stub = async () => { const v = new Array(EMBEDDING_DIM).fill(0); v[0] = 1; return v; };
+    const logged = { id: "00000000-0000-4000-8000-000000002255", query: "\"zqcanary\"", matchCount: 10, threshold: 0, recencyWeight: 0, filter: {}, resultIds: [] };
+    const asCurrent = await replayOne(canarySql, { ...logged, arm: "current" }, stub);
+    const asHybrid = await replayOne(canarySql, { ...logged, arm: "hybrid" }, stub);
+    const noModel = await replayOne(canarySql, { ...logged, arm: "current" });
+    assert(asCurrent.ran && asCurrent.ids.length === 3 && asCurrent.ids.join() === asHybrid.ids.join() && !noModel.ran && noModel.reason === "current needs a provider (set OB1_EVAL_EMBED)",
+      `a logged prefer_current search replays through search_thoughts_current — the hybrid's three rows, nothing to demote — and without a provider it is skipped with the arm named (${asCurrent.ids.length} rows; ${noModel.reason})`);
 
     // The CLI's report and verdict (SMD-2182), on the same canary. Both verbs
     // print the window and the counts, and a window that replayed nothing is

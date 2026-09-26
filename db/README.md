@@ -166,8 +166,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1834 assertions: 1834 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports fifty-eight (58) migrations applied, and
+`bun test-schema.ts` prints `1847 assertions: 1847 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports fifty-nine (59) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -207,7 +207,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
-058 SMD-2074).
+058 SMD-2074, 059 SMD-2255).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -433,17 +433,47 @@ lifecycle when `open` is not NULL; its freshness is `synced_at`, never
 `updated_at` — so each consumer counts over what it ranks. The ids narrow the
 rows returned, not the work: the whole brain is computed and filtered last.
 `graph-centrality.ts` is the first reader, its reports byte for byte what they
-were; search is the second (SMD-2074's second PR). `metadata.status_type` is a
+were; search is the second (`search_thoughts`' opt-in `prefer_current`, through
+059). `metadata.status_type` is a
 transitional, lossy scalar: when SMD-1997 folds the transitions `thought_audit`
 holds, the two reads of it change — `node_lifecycle()`'s body and
 `node_dependencies()`' gate — and no signature does. Reads only, no grant row
 (EXECUTE is PUBLIC): `node_lifecycle()` needs SELECT on `thoughts`;
 `node_dependencies()` and `node_state()` also need it on `thought_facets` (the
-capture group) and `thought_sources` (the `structure` group). The file drops
+capture group) and `thought_sources` (the `structure` group, and the `server`
+group since 059). The file drops
 its three table functions before creating them, so `--reapply` replays it over
 a later migration's reshape; the price is that a view of an operator's over
 `node_state()` (or any other object that records a dependency on one) stops
 that replay at 058, and a REVOKE on one is not kept.
+
+Migration 059 is `search_thoughts_current` (SMD-2255, SMD-2074's second
+consumer): the hybrid search with settled and superseded thoughts ranked below
+current ones, which `search_thoughts` calls when a caller passes
+`prefer_current` — by default the server calls `search_thoughts_hybrid` itself,
+so the default ranking is unchanged and 025's "labelled, not demoted" stands
+for every caller who does not ask. It reads the hybrid's top min(100, 4N) and
+`node_state` for them; a thought whose ticket is settled (completed or
+canceled, by 058's ticket-head rule — a note filed under a Done ticket
+included) or that a newer thought supersedes weighs `search_demote_weight()`
+(0.25, pre-registered, once) of its fused score, and the window is re-sorted and
+cut to N. Under the hybrid's fusion that is in practice a partition: every
+current match in the window first, then the demoted ones in their own order;
+the weight bites only against an exact-literal hit, so a settled ticket looked
+up by its key can drop — to look one up, leave the flag off. Blocked and
+unknown-status thoughts are never demoted. Each row carries `fused` (before the
+weight), `demoted` (why) and the window's size, lifecycle coverage, demoted
+count, latest source watermark and whether its top N is exact. Priced first in
+`evals/eval-supersession.ts` against a pre-registered rule (CURRENT-version
+MRR +0.052, live-ticket MRR +0.194; costs disclosed — topical −0.127, a note
+under a Done ticket −0.292, a settled key −0.750); the query log records such a
+search as arm `current` (the CHECK widened), and `db/tier.ts` replays it. The
+server group gains SELECT on `thought_sources`, which `node_state` reads; the
+wrapper is dropped before it is created, as 058's three are. It costs what
+`node_state` costs — the whole brain's lifecycle per call: +10.7 ms at 10,000
+thoughts, +129 ms at 100,000, +2.8 ms on the dogfood brain — past the budget
+pre-registered for it; shipped opt-in on the maintainer's call, and SMD-2256
+narrows it.
 
 ## What changed relative to the guide
 
@@ -502,6 +532,7 @@ issues every group at once.
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
+| | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which reads 058's node_state, which reads the source rows (SMD-2255); without it that search is refused naming this grant, and every other search runs |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `INSERT, UPDATE` |
@@ -2349,8 +2380,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1834 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 744 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1847 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 745 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

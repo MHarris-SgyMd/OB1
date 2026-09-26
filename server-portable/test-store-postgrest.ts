@@ -259,6 +259,13 @@ console.log("\n[3c] hybridThoughts over PostgREST — the path every search take
   assert(weighted.length === plain.length && weighted.every((r) => Number.isFinite(r.score)), `recency_weight and half_life_days are accepted as named RPC arguments (${weighted.length} rows)`);
   const filtered = await store.hybridThoughts({ query: "SMD-507", embedding: vec(3), threshold: 0.5, limit: 5, filter: { kind: "nope" } });
   assert(filtered.every((r) => r.matchedNeedles.length === 0), "the jsonb filter is passed as an object and reaches the keyword arm");
+  // prefer_current (059, SMD-2255): the same named arguments reach
+  // search_thoughts_current by RPC, and its extra columns are mapped — here,
+  // with nothing demotable, the hybrid's rows with fused = score and a window.
+  const current = await store.hybridThoughts({ query: "windows", embedding: vec(3), threshold: 0.5, limit: 5, filter: {}, preferCurrent: true });
+  assert(current.map((r) => r.id).join() === plain.map((r) => r.id).join() && current.every((r) => r.fused === r.score && r.demoted.length === 0 && r.window !== undefined && r.window.rows >= current.length && r.window.exact === true)
+      && plain.every((r) => r.window === undefined && r.demoted.length === 0),
+    `preferCurrent reaches search_thoughts_current by RPC: with nothing demotable the hybrid's rows, fused = score, nothing demoted, the window mapped (${current.length} rows; window ${current[0]?.window?.rows})`);
 }
 
 console.log("\n[3d] Every read method returns the SQL store's timestamp form — and a row dated infinity does not throw");
