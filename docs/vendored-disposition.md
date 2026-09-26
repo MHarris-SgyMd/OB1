@@ -174,7 +174,7 @@ script may stop requiring it. The first two ports landed with SMD-2144 — `brai
 `lint-sweep`, both read-only, driven in `db/test-live.ts` [26] against a real Postgres; `weekly-digest`,
 the third read-only script at the decision, left the class instead: it is a sink, posting thought text
 to Telegram, and a shim port would read from below the egress gate (SMD-2239, the rescope of
-2026-09-26; the orchestration ADR's decision 9).
+2026-09-26; the orchestration ADR's decision 9, written for templates, read to cover it).
 
 **The entity tables.** Four scripts — atomizer's, authorship-edges', entity-wiki's,
 typed-edge-classifier's — assume upstream's `schemas/entity-extraction` tables; on a fork

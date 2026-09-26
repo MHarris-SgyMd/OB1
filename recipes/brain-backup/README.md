@@ -57,7 +57,7 @@ The console output shows row counts and file sizes for each table, making it eas
 - Schedule the script with cron or Task Scheduler for automatic daily backups.
 - Commit the `backup/` directory to a private repo for versioned history.
 - The script streams rows to disk, so it handles large tables without running out of memory.
-- Timestamps come out as ISO strings and the `embedding` column as its vector text, as PostgREST's JSON had them. `bigint` and `numeric` columns — the entity tables' ids, `quality_score`, `confidence` — come out as JSON strings (`"1"`), where PostgREST gave numbers; tooling that read the old export as numbers should expect strings here.
+- Timestamps come out as ISO strings — `Z` and milliseconds, where PostgREST spelled `+00:00` and microseconds; both parse to the same instant — and the `embedding` column as its vector text, as PostgREST's JSON had it. `bigint` and `numeric` columns — the entity tables' ids, `quality_score`, `confidence` — come out as JSON strings (`"1"`), where PostgREST gave numbers; tooling that read the old export as numbers should expect strings here.
 
 ## Troubleshooting
 

@@ -5002,7 +5002,8 @@ const POSTGREST_EXCEPTIONS = new Map<string, CountedException>([
   ["recipes/wiki-synthesis/scripts/backfill-gmail-wikis.mjs", POSTGREST(`${SHIM}, its page deletes through delete_thought`, "SMD-2143", 1)],
   ["recipes/entity-wiki/generate-wiki.mjs", POSTGREST(SHIM, "SMD-2143", 1)],
   // Not a maintenance script but a sink: it pages thought text and posts it to Telegram, which a shim
-  // port would do from below the server's egress gate — the orchestration ADR's decision 9 applies. Its
+  // port would do from below the server's egress gate — the orchestration ADR's decision 9, written for
+  // templates, is read to cover it. Its
   // two read-only siblings, brain-backup and lint-sweep, are on the shim (SMD-2144, rescoped 2026-09-26).
   ["recipes/weekly-digest/weekly-digest.mjs", POSTGREST("a sink; an n8n sink template after SMD-2211's egress checkpoint, or a db/ verb behind SMD-2134's gate — not a shim port", "SMD-2239", 1)],
   ["recipes/source-filtering/backfill-metadata.ts", POSTGREST(SHIM, "SMD-2021", 2)],
