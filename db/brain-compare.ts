@@ -726,8 +726,9 @@ export function renderComparison(c: Comparison): string {
     const moved = c.retrieval.rows.filter((r) => r.changed);
     const skipped = c.retrieval.rows.filter((r) => r.skipped);
     const trunc = c.retrieval.truncated ? " (window truncated — the most recent were replayed)" : "";
+    const hybridNote = c.retrieval.arms.includes("hybrid") ? " (hybrid = the vector arm, embedded by each brain; until SMD-2037 a hybrid diff can be HNSW-GUC-induced)" : "";
     // "replays" not "queries": the count is query-arm pairs (a query on two arms is two).
-    lines.push(`  arms: ${c.retrieval.arms.join(", ")} over ${c.retrieval.queries} replay${c.retrieval.queries === 1 ? "" : "s"} from ${c.retrieval.source}${trunc}${c.retrieval.arms.includes("hybrid") ? " (hybrid = the vector arm, embedded by each brain; until SMD-2037 a hybrid diff can be HNSW-GUC-induced)" : ""}`);
+    lines.push(`  arms: ${c.retrieval.arms.join(", ")} over ${c.retrieval.queries} replay${c.retrieval.queries === 1 ? "" : "s"} from ${c.retrieval.source}${trunc}${hybridNote}`);
     lines.push(`  (these are real searches — a brain running OB1_QUERY_LOG=on records them in query_log, telemetry, not the thoughts corpus.)`);
     for (const r of skipped) lines.push(`  ~ [${r.arm}] ${JSON.stringify(r.query.slice(0, 60))}: skipped — ${r.skipped}`);
     if (moved.length === 0) {
