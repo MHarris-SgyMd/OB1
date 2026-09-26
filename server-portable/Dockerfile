@@ -50,7 +50,8 @@ ENV OB1_GIT_SHA=$OB1_GIT_SHA
 #                  SUPABASE_URL holding a postgres:// URL is read as the same thing)
 #   OB1_STORE=postgrest → SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY (kept for
 #                  Cloudflare Workers; preflight reports it as retired on Bun)
-# Optional: OPEN_BRAIN_CITATION_BASE_URL, PORT (default 8000), OB1_PG_POOL
+# Optional: OPEN_BRAIN_CITATION_BASE_URL, PORT (default 8000), OB1_PG_POOL,
+# OB1_STOP_GRACE (the platform's grace period for a stop, seconds; default 10)
 EXPOSE 8000
 USER bun
 

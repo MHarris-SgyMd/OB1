@@ -810,12 +810,15 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
   };
 
   const busy = start();
-  const idle = start();
+  // A malformed grace period: said, and read as the default (8 s of drain).
+  const idle = start({ OB1_STOP_GRACE: "soon" });
   // On the PostgREST store, which holds no pool: its stop must not say it closed one (review pass 2).
   const ctrlC = start({ OB1_STORE: "postgrest", SUPABASE_URL: "https://stub.invalid", SUPABASE_SERVICE_ROLE_KEY: "k" });
   const cutter = start();
+  // OB1_STOP_GRACE=3: the drain's bound is 1 s, so the real bound cuts on real Bun in a second.
+  const graced = start({ OB1_STOP_GRACE: "3" });
   try {
-    assert(await up(busy.port) && await up(idle.port) && await up(ctrlC.port) && await up(cutter.port), "four child servers answer a keyless probe (the first request, which hands the handlers the server)");
+    assert(await up(busy.port) && await up(idle.port) && await up(ctrlC.port) && await up(cutter.port) && await up(graced.port), "five child servers answer a keyless probe (the first request, which hands the handlers the server)");
 
     const t0 = performance.now();
     const inFlight = fetch(`http://127.0.0.1:${busy.port}/health`, { headers: { "x-brain-key": KEY } })
@@ -848,6 +851,8 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
     const idleLog = await idle.out;
     assert(idleCode === 0 && performance.now() - t1 < 1_000 && /0 requests in flight/.test(idleLog) && /no database pool was opened; exit 0/.test(idleLog),
       `an idle server stops at once, exit 0, and says it opened no pool (${idleCode} in ${Math.round(performance.now() - t1)} ms)`);
+    assert(/OB1_STOP_GRACE="soon" is not a positive number of seconds; the stop drains as for 10 s/.test(idleLog) && /waited on for up to 8 s/.test(idleLog),
+      "…and a malformed OB1_STOP_GRACE is said at start-up and read as the default, 8 s of drain");
 
     await fetch(`http://127.0.0.1:${ctrlC.port}/health`, { headers: { "x-brain-key": KEY } }); // builds its store
     ctrlC.proc.kill("SIGINT");
@@ -877,8 +882,23 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
     assert(cutCode === 1 && await stalled === "cut off" && performance.now() - tc < 2_500
       && cutLines.length === 1 && cutLines[0].startsWith("request cut off by the server's stop after 0.") && /SIGTERM: stopped in [\d.]+ s; database pool not closed: a second signal; exit 1|database pool not closed within 250 ms; exit 1/.test(cutLog),
       `a call stalled before its response, cut by a second signal: the cut line and not the client's, exit 1, the close given 250 ms (${cutCode} in ${Math.round(performance.now() - tc)} ms: ${cutLines.join(" | ").slice(0, 90)})`);
+    // One SIGTERM, and the bound OB1_STOP_GRACE sets does the cutting.
+    const tg = performance.now();
+    const graceStalled = fetch(`http://127.0.0.1:${graced.port}/`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": KEY },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    }).then((r) => `answered ${r.status}`, () => "cut off");
+    await Bun.sleep(300);
+    graced.proc.kill("SIGTERM");
+    const graceCode = await exited(graced.proc, 4_000);
+    const graceLog = await graced.out;
+    const graceTook = performance.now() - tg;
+    assert(graceCode === 1 && await graceStalled === "cut off" && graceTook > 1_200 && graceTook < 3_000
+      && /waited on for up to 1 s/.test(graceLog) && /still in flight.* after 1\.\d s, closed unfinished/.test(graceLog) && /^request cut off by the server's stop/m.test(graceLog),
+      `OB1_STOP_GRACE=3 bounds the drain at 1 s: one SIGTERM, the stalled call cut at the bound with its line, exit 1 (${graceCode} in ${Math.round(graceTook)} ms)`);
   } finally {
-    for (const { proc } of [busy, idle, ctrlC, cutter]) proc.kill("SIGKILL");
+    for (const { proc } of [busy, idle, ctrlC, cutter, graced]) proc.kill("SIGKILL");
     silent.stop(true);
   }
 
@@ -887,7 +907,7 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
   // short, a pool that will not close is left at its bound, and with no server
   // yet there is nothing to wait on. The stand-in's stop(true) never resolves
   // either, as Bun's does not while a handler has yet to return (review pass 1).
-  const { drainOnSignal, isStoppable, createCallCount } = await import("./shutdown.ts");
+  const { drainOnSignal, isStoppable, createCallCount, drainBoundFrom } = await import("./shutdown.ts");
   const { cutByStopLine, abandonedRequestLine, toolCallsRunning } = await import("./index.ts");
   const stuck = () => {
     const calls: string[] = [];
@@ -953,6 +973,11 @@ console.log("\n[13d] SIGTERM stops the server once the request in flight is answ
   const cut = cutByStopLine("tools/call capture_thought", 8_400);
   assert(cut.startsWith("request cut off by the server's stop after 8.4 s: tools/call capture_thought — still running when the stop closed it") && !/runs to its end/.test(cut) && cut !== abandonedRequestLine("tools/call capture_thought", 8_400),
     "a request the stop cuts off is said to be the stop's, not the client leaving (SMD-1864's line says the call runs to its end, which it will not)");
+
+  const g = (raw: string | undefined) => { const r = drainBoundFrom(raw); return `${r.graceS}/${r.drainBoundMs}/${r.problem ? "said" : "-"}`; };
+  const graceCases = [g(undefined), g(""), g("30"), g(" 20 "), g("2"), g("0"), g("-5"), g("ten")];
+  assert(graceCases.join(" ") === "10/8000/- 10/8000/- 30/28000/- 20/18000/- 2/500/- 10/8000/said 10/8000/said 10/8000/said",
+    `drainBoundFrom: the grace period less 2 s, at least 0.5 s; unset and "" the default; anything but a positive number the default, said (${graceCases.join(" ")})`);
 
   // A tool call runs on after its client has gone, which Bun's request count
   // does not see (review pass 3: a stop whose only call's client had just left

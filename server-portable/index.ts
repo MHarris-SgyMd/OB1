@@ -14,7 +14,7 @@ import { authenticateRequest, canCapture, canRead, canWrite, SCOPES, type Princi
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "./version.ts";
 import { brainInfo, renderBrainInfo, type BrainInfo, type ReadOptions, type ServerFacts } from "./brain-info.ts";
-import { createCallCount, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
+import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 
 /**
  * Runtime-portable env access.
@@ -42,6 +42,13 @@ type Env = {
   DATABASE_URL?: string;
   /** The SQL store's connection pool size (store-sql.ts); default 10. */
   OB1_PG_POOL?: string;
+  /**
+   * The platform's grace period for a stop, in seconds; the server drains for
+   * 2 s less (shutdown.ts). Default 10, Docker's. Read once, at start-up, from
+   * the process's environment: the handlers go in before the first request
+   * seeds the rest.
+   */
+  OB1_STOP_GRACE?: string;
   /**
    * The opt-in trigram index. The migrator builds it; in the server's process
    * db/config.mjs reads it (TRGM_INDEX), which preflight.ts imports to tell the
@@ -2752,7 +2759,10 @@ let bunServer: Stoppable | undefined;
 /** Set once the stop closes what is still in flight at its bound, so the route's close line names the stop, not the client. */
 let cutByStop = false;
 if (SERVES_ON_BUN) {
+  const grace = drainBoundFrom(process.env.OB1_STOP_GRACE);
+  if (grace.problem) console.warn(grace.problem);
   drainOnSignal({
+    drainBoundMs: grace.drainBoundMs,
     server: () => bunServer,
     calls: toolCalls,
     // The pool only if a request opened one: a store that failed to build has

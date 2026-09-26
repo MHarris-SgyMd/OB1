@@ -17,6 +17,7 @@
  *                     capture_thought is registered only for a write-scoped key
  *   OPEN_BRAIN_CITATION_BASE_URL - Optional base URL for search/fetch citation links
  *   PORT - the port the export at the tail listens on (default 8000; the image and k8s/openbrain.yml leave it)
+ *   OB1_STOP_GRACE - the pod's terminationGracePeriodSeconds (default 30); a stop drains for 2 s less
  */
 
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
@@ -613,7 +614,10 @@ app.all("*", async (c) => {
 // this is it cut to what this server has. Bun hands the server it serves from the export
 // below to no one but the fetch handler, so the first request passes it on; before that
 // nothing can be in flight. Only as the entry: extensions/test-auth.ts imports the module.
-const DRAIN_BOUND_MS = 20_000; // under the 30 s grace period, with room for the pool to close
+// The pod's grace period less 2 s for the pool's close and the exit, as the core server's
+// OB1_STOP_GRACE (server-portable/shutdown.ts drainBoundFrom); k8s/openbrain.yml sets both.
+const STOP_GRACE_S = Number(process.env.OB1_STOP_GRACE) > 0 ? Number(process.env.OB1_STOP_GRACE) : 30;
+const DRAIN_BOUND_MS = Math.max(500, STOP_GRACE_S * 1000 - 2_000);
 let bunServer: { stop(closeActiveConnections?: boolean): Promise<void>; readonly pendingRequests: number } | undefined;
 if (import.meta.main) {
   let stopping = false;

@@ -39,12 +39,39 @@ export function isStoppable(x: unknown): x is Stoppable {
   return typeof (x as Stoppable | null)?.stop === "function" && typeof (x as Stoppable).pendingRequests === "number";
 }
 
+/** The grace period a stop is given when OB1_STOP_GRACE is unset: Docker's default, which compose and `docker stop` use. */
+export const DEFAULT_STOP_GRACE_S = 10;
+
+/** What the drain leaves of the grace period, for the pool's close and the exit. */
+export const STOP_MARGIN_MS = 2_000;
+
+/** The shortest drain a grace period buys, however short it is. */
+export const MIN_DRAIN_MS = 500;
+
 /**
- * How long the requests in flight are waited on. Under Docker's default grace
- * period of 10 s, which compose and `docker stop` use, with room for the pool
- * to close; a platform with a longer one (Kubernetes' 30 s) still stops here.
+ * The drain's bound from OB1_STOP_GRACE, the platform's grace period in
+ * seconds: that less STOP_MARGIN_MS, never under MIN_DRAIN_MS. Unset or "" is
+ * DEFAULT_STOP_GRACE_S (8 s of drain under Docker's 10 s); a value that is not
+ * a positive number is the default too, with a line saying so. Compose reads
+ * the same variable for the server's `stop_grace_period`, so the two cannot
+ * disagree there; elsewhere set it to the platform's (Kubernetes' and ECS's
+ * 30 s, Fly's `kill_timeout`). It was a constant 8 s until review pass 3,
+ * which cut a call a 30 s platform would have let finish.
  */
-export const DRAIN_BOUND_MS = 8_000;
+export function drainBoundFrom(raw: string | undefined, fallbackS = DEFAULT_STOP_GRACE_S): { graceS: number; drainBoundMs: number; problem: string | null } {
+  const text = raw?.trim() ?? "";
+  const n = text ? Number(text) : NaN;
+  const valid = Number.isFinite(n) && n > 0;
+  const graceS = valid ? n : fallbackS;
+  return {
+    graceS,
+    drainBoundMs: Math.max(MIN_DRAIN_MS, Math.round(graceS * 1000 - STOP_MARGIN_MS)),
+    problem: text && !valid ? `OB1_STOP_GRACE="${text}" is not a positive number of seconds; the stop drains as for ${fallbackS} s (SMD-2250)` : null,
+  };
+}
+
+/** How long the requests in flight are waited on by default: under Docker's 10 s, with room for the pool to close. */
+export const DRAIN_BOUND_MS = drainBoundFrom(undefined).drainBoundMs;
 
 /** How long the pool is given to close once nothing is in flight. */
 export const CLOSE_BOUND_MS = 1_000;
