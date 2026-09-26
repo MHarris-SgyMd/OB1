@@ -22,6 +22,13 @@ leaves open.
 - The gates, the boundary and operations now say what the profile does
   rather than what it would do.
 
+**Amended by SMD-2212** (the first templates, built):
+- The import runner is built. It reads each export from a read-only imports
+  directory, so the request names a pipeline and carries no content. The
+  runner's key has its rule ("Running a pipeline from a workflow").
+- An act-tool workflow ships on its own MCP path.
+- Gmail and Linear moved to SMD-2257 and SMD-2258, each behind its gate.
+
 ## The decision
 
 1. **n8n, over Activepieces and Windmill.** n8n and Activepieces passed every
@@ -311,11 +318,18 @@ not dropped when the recipe retires.
   the POC's adapter grown up, and the eval kit now imports it and runs its
   checks against the profile as it ships, not against the shape decision 3
   rejects.
-- **The templates** (SMD-2212). Gmail → brain, once an operator's Google OAuth
-  client exists (self-hosted n8n has no managed OAuth; the consent is one
-  browser step, outside C4's "no UI step"), gated on SMD-1813; an
-  act-tool workflow on n8n's MCP endpoint; the Linear template only on the terms
-  of decision 8.
+- **The templates** (SMD-2212, `../deploy/orchestration/templates/`).
+  - **An act tool on n8n's MCP endpoint:** `/mcp/ob1-act` lists one tool,
+    `linear_file_issue`. It is a multi-step flow in a sub-workflow: it finds
+    the team and label, creates the label if missing, then creates the issue.
+    It holds a Linear key of its own, pinned to `api.linear.app`, and is not
+    loaded without one.
+  - **The generic import template,** one instance per pipeline in the
+    runner's allowlist, below.
+  - **Gmail → brain** is SMD-2257. It waits on an operator's Google OAuth
+    client (self-hosted n8n has no managed OAuth, and the consent is one
+    browser step, outside C4's "no UI step"), and on SMD-1813.
+  - **The Linear template** is SMD-2258, only on the terms of decision 8.
 - **What the brain sees.** A capture from n8n is a capture from a key: its actor
   is the key's name, its trust the key's kind. When SMD-1931's single capture
   route and SMD-1933's family envelope exist, the templates hand over the
@@ -380,8 +394,13 @@ runs outside n8n:
 - **A runner service in the profile.** It is a small HTTP service, built from an
   image with Bun and python3, and reachable only on the compose network (no
   published port), behind a key of its own. It runs a fixed allowlist of
-  pipelines by name, with the items in the request body. A workflow calls it
-  with an HTTP Request node, and every import template shares it. This is an
+  pipelines by name (`../deploy/orchestration/runner.ts`, `pipelines.json`).
+  A workflow calls it with an HTTP Request node, and every import template
+  shares it. Built, the request names the pipeline and nothing else. The
+  runner reads the export from a read-only imports directory, one
+  subdirectory per pipeline, so the export never passes through n8n, and
+  n8n's run history holds the report, not the content. This amends the
+  sentence decided here, which had the items in the request body. This is an
   amendment to decision 4, not a case of it. The runner writes the way the
   pipeline writes from a checkout, straight into brain tables
   (`db/ingest-records.ts` upserts by source). So the runner's key is a
@@ -395,8 +414,19 @@ runs outside n8n:
   table directly. But a workflow holding the runner's key can cause writes
   through it, which is why decision 4 is amended rather than said to hold.
   The runner's key is not a brain key: MCP_ACCESS_KEYS does not list it, so
-  provisioning's brain-key rule does not govern it. SMD-2212 gives it its
-  own rule when it builds the runner.
+  provisioning's brain-key rule does not govern it. Its own rule, built in
+  SMD-2212, holds the key to its one job:
+  - provisioning refuses it in any other credential: an inbound key, the
+    brain's capture key;
+  - the runner answers 401 without it and 403 to a wrong one;
+  - an emitter never sees it or the database URL.
+
+  The three bounds are the runner's own checks:
+  - a pipeline not in the file is a 404;
+  - a batch with one line of another source or scope is refused whole,
+    before the ingester runs;
+  - the ingester writes under the actor `orchestration-runner`
+    (`--actor`).
 - **Declined: an n8n image with Bun and python3 added**, and Execute Command
   turned back on. OB1 would then build and distribute an image containing
   n8n, which is what Gate 1's "OB1 does not distribute n8n" rests on. And
@@ -404,10 +434,13 @@ runs outside n8n:
 - **Declined: a compose one-off the workflow starts.** It would need the
   container engine's socket inside n8n, which is root on the host.
 
-The runner is built with SMD-2212's first import template, not before, since
-nothing calls it until then. It publishes no port, where n8n publishes one
-on loopback. SMD-2211's checkpoint covers the two live-API emitters' own
-egress.
+The runner is built with SMD-2212's generic import template. Its allowlist
+ships empty: each recipe's ticket adds its line, its emitter and the
+emitter's packages when it converts. The eval kit proves the path with a
+fixture emitter in Python. The runner publishes no port, where n8n
+publishes one on loopback. SMD-2211's checkpoint covers the two live-API
+emitters' own egress, and how their vendor credential reaches the runner is
+decided when the first of them converts (SMD-2149, SMD-2021).
 
 ## What moves, what stays
 
@@ -416,7 +449,7 @@ egress.
   an n8n Linear template meets decision 8 — at which point, on a brain that runs
   that template, the template replaces it there.
 - **The recipes stay until a template replaces one.** Of the capture recipes,
-  only `gmail-smart-pull` has a planned template (SMD-2212), and it retires only
+  only `gmail-smart-pull` has a planned template (SMD-2257), and it retires only
   after that template has run unattended — on another brain, or with the recipe
   off (decision 8) — with its sensitivity routing carried over. The import
   recipes (Takeout, exports, vaults) are batch and stay native drivers as the
@@ -482,9 +515,13 @@ egress.
 - **SMD-2211** — the egress checkpoint: every template credential pinned, the MCP
   Client node's honouring of a pin measured, no sink before the retrieve route
   and the egress decision carry it.
-- **SMD-2212** — the first templates: Gmail → brain once an OAuth client exists,
-  the generic import template wrapping the CLI emitters, an act-tool workflow,
-  and the Linear template only on decision 8's terms.
+- **SMD-2212** — the first templates, built: the import runner and the
+  generic import template that wraps the CLI emitters, and an act-tool
+  workflow.
+- **SMD-2257** — Gmail → brain, once an OAuth client exists and SMD-1813's
+  allowlist is at the seam.
+- **SMD-2258** — the Linear template, only on decision 8's terms (SMD-1931's
+  capture route).
 - SMD-949 carries the connector re-scope (a comment on the ticket).
 
 ## Held by

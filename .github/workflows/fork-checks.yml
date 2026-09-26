@@ -260,8 +260,9 @@ jobs:
       #   under any field seen);
       # - --init's secrets and bcrypt hash;
       # - the env writer's quoting and modes;
-      # - every credential a shipped template names declared (the kit's
-      #   templates, until SMD-2212 ships the profile's);
+      # - every credential a shipped template names declared (the profile's
+      #   and the kit's), optional credentials, no key in two credentials,
+      #   workflow references, and the per-pipeline instancing (SMD-2212);
       # - compose's owner block;
       # - the key decisions against a fake n8n on loopback: reuse, renewal,
       #   rotation, the sweep, a copied or moved file (--adopt), a symlinked
@@ -272,6 +273,14 @@ jobs:
       - name: Orchestration provisioning rules
         working-directory: deploy/orchestration
         run: bun provision.ts --self-check
+
+      # SMD-2212: the import runner's rules against stand-in commands, with no
+      # database. The allowlist's checks, the one-source rule, the key's 401
+      # and 403, a stray line refused before the ingester runs, and an emitter
+      # that sees neither the database URL nor the key.
+      - name: Orchestration import runner rules
+        working-directory: deploy/orchestration
+        run: bun runner.ts --self-check
 
       - name: Orchestration egress judge
         working-directory: evals
@@ -953,11 +962,20 @@ jobs:
           SERVER_BIND=0.0.0.0 docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 3) and .services.server.ports[0].host_ip == "0.0.0.0" and ([.services.postgres.ports[].host_ip, .services.ollama.ports[].host_ip] == ["127.0.0.1", "127.0.0.1"])'
           # SMD-2210: the orchestration profile adds n8n's one port, also on
-          # loopback, with its image pinned by digest. Without the profile a
-          # plain config names exactly the three services it did before.
+          # loopback, with its image pinned by digest. Its import runner
+          # (SMD-2212) publishes none. Without the profile a plain config
+          # names exactly the three services it did before.
           docker compose -f compose.yaml --profile orchestration config --format json \
-            | jq -e '([.services[].ports[]?] | length == 2 and all(.host_ip == "127.0.0.1")) and (.services.n8n.image | test("@sha256:[0-9a-f]{64}$"))'
+            | jq -e '([.services[].ports[]?] | length == 2 and all(.host_ip == "127.0.0.1")) and (.services.n8n.image | test("@sha256:[0-9a-f]{64}$")) and (.services["orchestration-runner"] | has("ports") | not)'
           [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "migrate postgres server " ]
+
+      # SMD-2212: the import runner's image copies the ingestion pipeline's
+      # import graph file by file, and its build resolves every import. So a
+      # module the pipeline gains that the Dockerfile does not copy fails
+      # here, not at an operator's first import.
+      - name: The import runner's image builds
+        working-directory: deploy
+        run: docker compose -f compose.yaml --profile orchestration build orchestration-runner
 
       # OB1_SMOKE_COMMIT: check 10 asserts the keyed /health body names the
       # commit the build arg above baked in, beside the version it asserts.

@@ -6015,6 +6015,69 @@ also failed C1–C3 on 23-second captures. The cause was another session's
 jobs on the host's Ollama (a direct capture then took 18.6 s, then timed out
 on embeddings), not the seal: the re-run above has the host quiet.
 
+## The first templates: the import runner and the act tool (SMD-2212)
+
+Since SMD-2212, `--up n8n` also loads the profile's own templates as they
+ship (`deploy/orchestration/templates/`), and starts the import runner
+(`orchestration-runner`) beside n8n. The runner's shipped allowlist is empty
+until an import recipe is converted. So `compose.n8n.yaml` mounts the kit's
+`orchestration/runner/pipelines.json` over it, with two pipelines:
+- **`fixture`:** a Python emitter (`runner/emit-fixture.py`, standard
+  library) over a five-entry export in `runner/imports/fixture/`;
+- **`stray`:** the same emitter, with its third line claiming another
+  source.
+
+The act tool's Linear key is the kit's one Linear key. Two checks join K, P
+and E:
+
+- **A — the act tool.** `/mcp/ob1-act` must:
+  - list exactly `linear_file_issue`;
+  - refuse a session with no key and one whose key differs in its last
+    character (401/403);
+  - answer a call for a team that does not exist (`ZZQNOPE`) with the flow's
+    own "no Linear team with key ZZQNOPE", reached through its Linear
+    lookup, with nothing filed.
+
+  Sealed, the call must fail, and not with that answer: Linear is
+  unreachable. The create path (label, then issue) writes to a real
+  workspace, so the kit does not run it.
+- **I — the import template, through the runner.** The fixture's rows are
+  first deleted through `delete_thought`. Then:
+  - the first on-demand run must report `inserted 5`, and leave five rows
+    labelled `orch-fixture`, all under the actor `orchestration-runner`,
+    each with a vector;
+  - a rerun must report `unchanged 5` and nothing inserted, updated or
+    patched;
+  - `stray` must answer 422 at the one-source check, with no row of the
+    other source written.
+
+  The report is read from n8n's own run record: the runner's answer, as the
+  template's HTTP step received it.
+- **E** admits a connection to the runner's `:8090`, its addresses read from
+  the engine, and nothing else of it. The runner joins the sealed network
+  as the server does. The judge holds 39 crafted logs in CI.
+
+**The result (2026-09-26, the dogfood Mac, SQLite, on the implementation
+commit):**
+- **A passes.** The tools are `["linear_file_issue"]`, no key and a wrong
+  key are both 403, and the call answers "no Linear team with key
+  ZZQNOPE".
+- **I passes.** The first run inserted 5, all 5 under
+  `orchestration-runner` and all with a vector. The rerun found 5 unchanged
+  and inserted nothing. `stray` answered 422 at the one-source check, with
+  no row of the other source written.
+- **K and C3 pass as before.**
+- **The runner** is 11–12 MiB of memory.
+
+On that run, C1, C1s and P did not pass. The host's Ollama held another
+session's 27B model beside the embedder, and allows two loaded models. So
+the capture path's metadata model timed out after 120 s (the server's log),
+four of the ten captures landed, and P had no runs to move. That path is
+unchanged by SMD-2212. An earlier attempt the same afternoon met a wedged
+Ollama, and every check that embeds failed. I's first two runs then
+reported `reembed: exited 2` with the rows written, which is the runner's
+report for a provider outage.
+
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform

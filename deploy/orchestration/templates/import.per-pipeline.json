@@ -1,0 +1,132 @@
+{
+  "name": "OB1 import — {{pipeline}}",
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "id": "7a1f0c2e-0001-4d3b-9e10-000000000001",
+      "name": "Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": "{{pipeline.everyHours}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "7a1f0c2e-0002-4d3b-9e10-000000000002",
+      "name": "On demand",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        200
+      ],
+      "webhookId": "{{pipeline.webhookId}}",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ob1-import-{{pipeline}}",
+        "authentication": "headerAuth",
+        "responseMode": "lastNode",
+        "responseData": "firstEntryJson",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ob1inboundRun001",
+          "name": "OB1 inbound — on-demand runs"
+        }
+      }
+    },
+    {
+      "id": "7a1f0c2e-0003-4d3b-9e10-000000000003",
+      "name": "Run the pipeline",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://orchestration-runner:8090/run/{{pipeline}}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 3600000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ob1runnerKey0001",
+          "name": "OB1 runner — imports"
+        }
+      }
+    },
+    {
+      "id": "7a1f0c2e-0004-4d3b-9e10-000000000004",
+      "name": "Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// The runner's answer is the run's report. A refusal or a failure fails the run, with the runner's reason as the error.\nconst r = $input.first().json;\nlet report = r.body;\nif (typeof report === 'string') { try { report = JSON.parse(report); } catch { report = { why: report.slice(0, 500) }; } }\nif (r.statusCode >= 300) throw new Error(`the runner answered ${r.statusCode}: ${report?.stage ? `${report.stage} — ` : ''}${report?.why ?? 'no reason given'}`);\nreturn [{ json: report }];"
+      }
+    }
+  ],
+  "connections": {
+    "Schedule": {
+      "main": [
+        [
+          {
+            "node": "Run the pipeline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "On demand": {
+      "main": [
+        [
+          {
+            "node": "Run the pipeline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run the pipeline": {
+      "main": [
+        [
+          {
+            "node": "Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

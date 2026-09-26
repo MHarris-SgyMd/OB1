@@ -573,6 +573,57 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  # The import runner (SMD-2212; docs/orchestration-tool.md, "Running a
+  # pipeline from a workflow"). It is part of the `orchestration` profile: the
+  # import templates call it, and nothing else does. n8n's image has neither
+  # Bun nor python3, so an import template's HTTP Request node asks this
+  # service to run one pipeline from its fixed allowlist
+  # (deploy/orchestration/pipelines.json):
+  #   1. the pipeline's emitter over imports/<pipeline>/;
+  #   2. every line held to the pipeline's one source;
+  #   3. `db/ingest-records.ts` under the actor `orchestration-runner`;
+  #   4. `db/reembed.ts`.
+  #
+  # No port. n8n reaches it as `orchestration-runner:8090` on the compose
+  # network, behind OB1_RUNNER_KEY, which `provision.ts --init` writes. The
+  # key is a write capability bounded by the allowlist, not a brain key. It
+  # reaches Postgres as the migrator and board-sync do. It embeds through the
+  # server's knobs, inherited by anchor, as board-sync does.
+  orchestration-runner:
+    build:
+      context: ..
+      dockerfile: deploy/orchestration/runner.Dockerfile
+    profiles: ["orchestration"]
+    volumes:
+      # The exports, read-only: one subdirectory per pipeline. Private data,
+      # which git and every build context ignore (deploy/imports/README.md).
+      - ${IMPORTS_DIR:-./imports}:/imports:ro
+    environment:
+      <<: *server-env
+      # The server's key material stays with the server (board-sync's rule).
+      # The runner reads the database, the embedding knobs and its own key.
+      MCP_ACCESS_KEYS: ""
+      PORT: ""
+      # No `:?`, for the reason n8n's block gives: the runner refuses to
+      # start without it, and says why.
+      OB1_RUNNER_KEY: ${OB1_RUNNER_KEY:-}
+      OB1_RUNNER_TIMEOUT_S: ${OB1_RUNNER_TIMEOUT_S:-}
+    # The server's host alias (SMD-1875): reembed dials OB1_LLM_BASE_URL.
+    extra_hosts: *host-alias
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r = await fetch('http://127.0.0.1:8090/health'); process.exit(r.ok ? 0 : 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # As n8n's: a missing key exits 2 and `ps` shows the service restarting,
+    # with the reason in its log. A server should come back after a reboot.
+    restart: unless-stopped
+
 volumes:
   pgdata:
   ollama:
