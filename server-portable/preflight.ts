@@ -30,6 +30,7 @@ import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEn
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
+import { quoteIdent, searchPathSchemas, withPublic } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
@@ -754,17 +755,21 @@ if (configFailed) {
       // no connection string of its own — say what to hand it instead.
       const urlArg = conn ? `$${conn.from}` : "<the brain's postgres:// connection string — Supabase's direct connection, not the pooler>";
       // public.thoughts present but not resolving for this role — no USAGE
-      // on public, or public off its search_path — is not a brain to
-      // migrate (SMD-2062). public alone, as every direct check judges it:
-      // a thoughts in some other schema is another tool's, and an
-      // un-migrated public still wants the migrations. With USAGE held the
-      // table can only be off the path; without it, whether the path holds
-      // public too cannot be read (current_schemas() leaves out a schema
-      // the role has no USAGE on), so the GRANT comes first and the path
-      // second. The exact path statement is SMD-2242's. pg_class answers
-      // for any role, whatever its path; over PostgREST there is no catalog
-      // to ask, and a failed probe asks nothing.
-      let offPath: { cause: string; fix: string } | null = null;
+      // on public, or public off its search_path, or both — is not a brain
+      // to migrate (SMD-2062). public alone, as every direct check judges
+      // it: a thoughts in some other schema is another tool's, and an
+      // un-migrated public still wants the migrations. Each cause that holds
+      // is named with its statement (SMD-2242). current_schemas() cannot say
+      // "on the path" — it leaves out a schema the role has no USAGE on — so
+      // the setting is parsed (search-path.ts) and the statement rebuilt from
+      // the parsed names, each quoted, never echoed. With USAGE held, a table
+      // that exists and does not resolve is off the path whatever the parse
+      // says. The statement is for this database — a role's setting there
+      // outranks its plain ALTER ROLE and the database's — unless the
+      // connection string sets the path, which outranks them all. pg_class
+      // answers for any role, whatever its path; over PostgREST there is no
+      // catalog to ask, and a failed probe asks nothing.
+      let offPath: { causes: string[]; fixes: string[] } | null = null;
       if (built.kind === "sql" && conn && /does not exist/i.test(msg)) {
         try {
           const { SQL } = await import("bun");
@@ -774,13 +779,25 @@ if (configFailed) {
               SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                               WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present,
                      has_schema_privilege('public', 'USAGE') AS usage,
+                     current_setting('search_path') AS path,
+                     (SELECT source FROM pg_settings WHERE name = 'search_path') AS source,
                      quote_ident(current_user::text) AS role,
-                     quote_ident(current_database()::text) AS db`) as { present: boolean; usage: boolean; role: string; db: string }[];
+                     quote_ident(current_database()::text) AS db`) as { present: boolean; usage: boolean; path: string; source: string; role: string; db: string }[];
             if (r?.present) {
-              const putOnPath = `ALTER ROLE ${r.role} IN DATABASE ${r.db} SET search_path = <the schemas it has>, public; (a search_path in the connection string outranks it)`;
-              offPath = r.usage
-                ? { cause: "public is not on its search_path", fix: `Put public on the role's search_path: ${putOnPath}` }
-                : { cause: "no USAGE on schema public", fix: `GRANT USAGE ON SCHEMA public TO ${r.role};  then, if public is not on the role's search_path, ${putOnPath}` };
+              const schemas = searchPathSchemas(String(r.path ?? ""));
+              const causes: string[] = [];
+              const fixes: string[] = [];
+              if (!r.usage) {
+                causes.push("no USAGE on schema public");
+                fixes.push(`GRANT USAGE ON SCHEMA public TO ${r.role};`);
+              }
+              if (r.usage || !schemas.includes("public")) {
+                causes.push(`public is not on its search_path, which is ${schemas.length ? schemas.map(quoteIdent).join(", ") : "empty"}`);
+                fixes.push(r.source === "client"
+                  ? `the connection string sets the path (options -c search_path=…): set it there to ${withPublic(schemas)}`
+                  : `ALTER ROLE ${r.role} IN DATABASE ${r.db} SET search_path = ${withPublic(schemas)};`);
+              }
+              offPath = { causes, fixes };
             }
           } finally {
             await probe.close();
@@ -788,9 +805,9 @@ if (configFailed) {
         } catch { /* the remedy below stays the migrate command */ }
       }
       add("schema", "fail",
-          offPath ? `${msg} — public.thoughts exists but does not resolve for this role (${offPath.cause})` : msg,
+          offPath ? `${msg} — public.thoughts exists but does not resolve for this role (${offPath.causes.join("; ")})` : msg,
           offPath
-            ? `${offPath.fix}  The table is there, so migrating would not make it resolve.`
+            ? `${offPath.fixes.join("  then ")}  The table is there, so migrating would not make it resolve.`
             : /does not exist|relation/i.test(msg)
             ? `Apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
             : "Check credentials and network reachability to the database.");
