@@ -55,7 +55,7 @@ const TABLES = [
   // schema "without 034" and found the previous section's table standing —
   // the reset had carried it across every boundary since 034 landed.
   "query_log",
-  // 057's vector snapshot (SMD-2116): keyed by (content_fingerprint,
+  // 058's vector snapshot (SMD-2116): keyed by (content_fingerprint,
   // embedding_model), no foreign key either way — a row outlives the
   // thought it came from on purpose — so its place in the order is free.
   "ob1_embedding_snapshot",
@@ -180,7 +180,7 @@ const FUNCTIONS = [
   "ob1_actor_stamp_kept(jsonb, jsonb)",
   "ob1_capture_payload(uuid, timestamptz, bigint)",
   "backfill_thought_payloads(integer)",
-  // 057 (SMD-2116): the projector, the refresh and the snapshot's feeding
+  // 058 (SMD-2116): the projector, the refresh and the snapshot's feeding
   // trigger function; the three write functions and the audit trigger it
   // redefines are named above.
   "ob1_project_thought_event(uuid, vector, text, boolean)",

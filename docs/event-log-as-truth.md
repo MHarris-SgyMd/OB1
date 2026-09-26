@@ -12,7 +12,7 @@ and project the row in the same transaction with an empty contributor delta
 (SMD-1999, § "Does the extension contract survive the move?"). This page is
 the decision, the shape it commits to, what it declines, and the path from
 053 to it in three additive steps (SMD-2115, SMD-2116, SMD-2117). Step 2 is
-migration 057 (SMD-2116): the three write functions append the event and one
+migration 058 (SMD-2116): the three write functions append the event and one
 projector writes the row, the audit trigger the check. Step 1
 is migration 055 (SMD-2115): the capture event carries
 the content and a backdating writer's `created_at`, the update event the
@@ -252,14 +252,14 @@ its stamp is the snapshot's `taken_at`. Today's re-embed goes through
 holding an `if_unchanged_since`; the decision treats that as the defect. The
 snapshot is fed by a trigger on the row store; step 2 makes it record live
 writes only (under `ob1.projecting_replay` it does nothing, so a fold never
-moves a `taken_at` — the prototype's trigger has no such exclusion) and seeds
+moves a `taken_at` — the prototype's trigger had no such exclusion) and seeds
 it once from every row holding key, model and vector. A raw writer's vector
 enters it like any other, since the row store is what the snapshot trusts
 today. What the seed buys, exactly: one pair per thought, for its current
 text. A fold lands each thought's capture text first and its later texts
 after, so an edited thought misses at capture and hits at its final text;
 the fold calls no provider — a miss leaves the vector NULL or keeps the one
-before, as the prototype does — and after the fold each thought's final
+before, as the prototype did — and after the fold each thought's final
 text has the vector the seed held for it, the thoughts with an 018 NULL key
 or no vector re-embed under 015's pass as they would today. Gate 1's reuse
 holds for every thought's final text, not for the intermediate states the
@@ -269,7 +269,7 @@ dump of the log without it is a dump that re-embeds.
 
 **"No event, no write" — the deltas against 053, accepted.** SMD-1999's
 record (`changes/smd-1999.md`) named four and its bodies' header
-(the prototype's `option2-functions.sql`, retired with 057) a fifth; the decision
+(the prototype's `option2-functions.sql`, retired with 058) a fifth; the decision
 takes all five: an
 identical re-capture no longer bumps `updated_at` (053's `ON CONFLICT DO
 UPDATE` does — a write that changes nothing is not a write; `thought_changes`
@@ -292,7 +292,7 @@ step 1, which carries no key move (that is one of the three additions): for
 those the projector derives the key from the content it lands under 018's
 own rule — NULL when another live row already holds it, since 003's partial
 unique index admits one holder — and counts them; this is SMD-2117's arm,
-the prototype keeps the row's key today. A replayed tombstone never refuses
+the prototype kept the row's key. A replayed tombstone never refuses
 (042's guard runs in detach mode; the citations are a projection rebuilt
 apart). A projector that
 corrected the log on the way would make the row disagree with its event and
@@ -303,7 +303,7 @@ the check would refuse it; that is the point of the check.
 | Projection | Table | Key it records at 053 | Rebuild | What the decision requires |
 | --- | --- | --- | --- | --- |
 | the thought row | `thoughts` | `id` — it is the aggregate | the fold: replay the log through the projector (SMD-2117) | steps 1–3 |
-| the vector | `thoughts.embedding`, `embedding_model` | `(content_fingerprint, embedding_model)` — recorded; the prompt template and the requested width ride on the model name by convention (`db/config.mjs`'s `EMBEDDING_PROMPTS` and `KNOWN_MODEL_DIMS`) — code, not data, so a template change under one name invalidates every vector with the key unmoved, and gate 1's cosine bar is the check for that | from the snapshot by key; the fold calls no provider — a miss leaves the vector NULL or keeps the one before (the prototype's rule), and 015's re-embed fills a final state the snapshot lacks afterwards | `ob1_embedding_snapshot (content_fingerprint, embedding_model) → embedding, taken_at` is the prototype's table; step 2 adds the one-time **seed** from every row holding all three (without it a fold wipes the rows the vectors sit on and every thought re-embeds), the replay exclusion on the feeding trigger, and `dims` beside the row (SMD-2116). The seed holds each thought's current text, so gate 1's reuse holds for every thought's final text after a fold, not for the intermediate states; the recipe on the lineage row (SMD-1731) |
+| the vector | `thoughts.embedding`, `embedding_model` | `(content_fingerprint, embedding_model)` — recorded; the prompt template and the requested width ride on the model name by convention (`db/config.mjs`'s `EMBEDDING_PROMPTS` and `KNOWN_MODEL_DIMS`) — code, not data, so a template change under one name invalidates every vector with the key unmoved, and gate 1's cosine bar is the check for that | from the snapshot by key; the fold calls no provider — a miss leaves the vector NULL or keeps the one before (the prototype's rule), and 015's re-embed fills a final state the snapshot lacks afterwards | `ob1_embedding_snapshot (content_fingerprint, embedding_model) → embedding, taken_at` was the prototype's table; step 2 added the one-time **seed** from every row holding all three (without it a fold wipes the rows the vectors sit on and every thought re-embeds), the replay exclusion on the feeding trigger, and `dims` beside the row (SMD-2116). The seed holds each thought's current text, so gate 1's reuse holds for every thought's final text after a fold, not for the intermediate states; the recipe on the lineage row (SMD-1731) |
 | the chunk rows | `thought_chunks` | the parent's label vouches (022); no recipe of their own | re-chunk, re-embed the windows | the recipe (tokens, overlap, context, blurb model) on a lineage row (SMD-1731) |
 | the graph | `thought_entities`, `ob1_entities`, `ob1_entity_edges` | `extraction_key` — half a key: no fingerprint of the input | re-extract from the surviving input — the dearest projection (hours, not minutes) | the input's fingerprint beside the key (SMD-1731); a "done" keyed by the payload's fingerprint, not by the pass (gate 1's staleness pattern) |
 | capture-time metadata | `thoughts.metadata` (`type`, `topics`, `people`) | none — no model, no prompt version | re-run the extractor | a lineage row from the fifth producer (SMD-1731, SMD-1254) |
@@ -334,7 +334,7 @@ honest about it. Zep/Graphiti's four timestamps are these two pairs.
 
 The **as-of read over transaction time** is the replay with a bound: fold the
 log in its order — `seq` since `ob1_config.audit_seq_exact_since`, `(created_at,
-seq)` before it (055's rule, `ob1_thought_events_in_order` since 057; never the
+seq)` before it (055's rule, `ob1_thought_events_in_order` since 058; never the
 clock alone, which inverts a row's history when an older transaction wins the
 row lock later) — to the last event at or before the time asked, and the rows
 are the brain as it stood — the same code as the rebuild,
@@ -542,8 +542,8 @@ Nothing in this page is enforced by this page. What holds the decision:
   job (the pure rules, self-checked) and "Projection-replay fixture" in the
   data-layer job (the rules on a seeded Postgres; drift fails). Gate 2's
   runner was retired when SMD-2116 shipped the bodies it prototyped as
-  migration 057: its contract criteria are `db/test-schema.ts` [53], its
-  behaviours `db/test-live.ts`, its cost line 057's header;
+  migration 058: its contract criteria are `db/test-schema.ts` [54], its
+  behaviours `db/test-live.ts`, its cost line 058's header;
 - test-schema's sentinel reads and preflight's recognisers, which pin the
   write functions' bodies and move with them at every step;
 - the SQL-safety rule (`scripts/check-fork-consistency.ts` check 21): no
@@ -574,7 +574,7 @@ every write and consolidation deciding the row.
 - `evals/README.md` § "Can the read model be rebuilt without re-embedding
   the world?" (SMD-1998) and § "Does the extension contract survive the
   move?" (SMD-1999) — the two gates, their reports verbatim
-- `db/migrations/057_append_then_project.sql` — step 2, the prototype's
+- `db/migrations/058_append_then_project.sql` — step 2, the prototype's
   bodies shipped (the prototype SQL under `evals/writable-projection/` was
   retired with it)
 - `db/migrations/046_thought_audit_event_shape.sql`,
