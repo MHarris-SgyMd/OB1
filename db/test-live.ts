@@ -606,16 +606,16 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     throw e;
   } finally {
     // The shipped state back on every path — a throw above would otherwise
-    // leave 15,000 rows and no HNSW index to [6]..[16] (SMD-1463's first review pass): 041
-    // with its floor, and 027, because 020's file also redefines
-    // search_thoughts_hybrid as 020 had it, without 027's relative floor, and
-    // [15] holds that floor (the first run of this section left 020's hybrid
-    // behind and [15] failed on it); the table emptied; the index rebuilt
-    // (instant on no rows). The table and the index first — they depend on
-    // nothing — so a throw from the re-apply cannot leave them behind (second
-    // review pass); and when the section itself threw, a cleanup that fails
-    // on the same fault is reported, not thrown, so the cause is what the
-    // run shows (SMD-1463's fourth review pass).
+    // leave 15,000 rows and no HNSW index to [6]..[16] (SMD-1463's first
+    // review pass): 041 with its floor, and 027, because 020's file also
+    // redefines search_thoughts_hybrid as 020 had it, without 027's relative
+    // floor, and [15] holds that floor (the first run of this section left
+    // 020's hybrid behind and [15] failed on it); the table emptied; the
+    // index rebuilt (instant on no rows). The table and the index first —
+    // they depend on nothing — so a throw from the re-apply cannot leave them
+    // behind (second review pass); and when the section itself threw, a
+    // cleanup that fails on the same fault is reported, not thrown, so the
+    // cause is what the run shows (SMD-1463's fourth review pass).
     try {
       await sql`DELETE FROM thoughts`;
       await sql.unsafe(`ALTER TABLE thoughts ENABLE TRIGGER USER`);
