@@ -330,7 +330,14 @@ else {
   assert(/thoughts table reachable/.test(after.out), "…and confirms the table is reachable");
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 046's/.test(after.out), "…and that atomic capture is available, with the shipped bodies (a warn would also say \"present\")");
   assert(/✓  audit events\s+046's event shape present — the columns, the trigger that derives the kind from the key, the one lawful amendment — and every key classified/.test(after.out), "…and that 046's event shape is present, with no key waiting on a kind (SMD-1730)");
-  assert(/no schema_migrations table/.test(after.out), "…and warns the schema was applied outside the runner");
+  // The schema is present (applyMigrations installs it) but writes no ledger, so
+  // this is the legitimate adoption case: the row offers --baseline, with the full
+  // "applied by hand" wording and the remedy. Pinning both — not merely "no
+  // schema_migrations table", which the empty-database message also contains —
+  // keeps the SMD-2237 split honest from the other side: a probe that always read
+  // "no schema" would send a hand-applied brain to re-run the migrations.
+  assert(/!\s+migration ledger\s+no schema_migrations table — the schema was applied by hand\n\s+→ Adopt it with: cd db && bun migrate\.ts --url \$DATABASE_URL --baseline/.test(after.out),
+         "…and, with the schema present but no ledger, offers --baseline to adopt it (the legitimate case the empty-database guard must not swallow, SMD-2237)");
   assert(/resolve_agent present/.test(after.out), "…and that the agent registry is available");
 
   /**

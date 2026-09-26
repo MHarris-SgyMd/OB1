@@ -2233,7 +2233,7 @@ console.log("\n[22] --baseline on an empty database refuses, naming public.thoug
          `--baseline --force records every migration over an empty database (exit ${forced.code})`);
 
   // --force without --baseline is refused, not a silent plain run — it exits at
-  // argument parsing, before any connection, whatever the database holds.
+  // the flag-combo check, before any database connection, whatever the DB holds.
   const forceAlone = await migrate("--force");
   assert(forceAlone.code === 2 && /--force overrides --baseline's empty-database guard/.test(forceAlone.out),
          `--force without --baseline is refused (exit ${forceAlone.code})`);
