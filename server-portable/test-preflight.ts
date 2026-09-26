@@ -1971,20 +1971,23 @@ else {
       {
         const printed = /→ (ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = public;)/.exec(empty.out)?.[1];
         let resolves = false;
+        let refused = "";
         if (printed) {
-          await claims.unsafe(printed);
           try {
+            await claims.unsafe(printed);
             const reader = new SQL({ url: readerUrl, max: 1 });
             try {
               resolves = ((await reader`SELECT to_regclass('thoughts') IS NOT NULL AS ok`) as { ok: boolean }[])[0].ok;
             } finally {
               await reader.close();
             }
+          } catch (e) {
+            refused = (e as Error).message;
           } finally {
             await claims.unsafe(`DO $r$ BEGIN EXECUTE format('ALTER ROLE pf_reader IN DATABASE %I RESET search_path', current_database()); END $r$`);
           }
         }
-        assert(resolves, `…and run as printed it makes thoughts resolve for the role (${printed ?? "nothing printed"})`);
+        assert(resolves, `…and run as printed it makes thoughts resolve for the role (${refused ? `refused: ${refused}` : printed ?? "nothing printed"})`);
       }
       // A path stored raw (set_config, then FROM CURRENT): a quoted name with
       // a doubled quote, $user, an unquoted name to fold, an NBSP that is no
@@ -2111,6 +2114,7 @@ else {
       // same undefined-table error (42P01) with thoughts resolving: public is
       // on the path, and the row must not say otherwise.
       await claims.unsafe("ALTER ROLE pf_reader SET search_path = \"$user\", public");
+      const [{ rowSecurity }] = (await claims`SELECT relrowsecurity AS "rowSecurity" FROM pg_class WHERE oid = 'public.thoughts'::regclass`) as { rowSecurity: boolean }[];
       try {
         await claims.unsafe("DROP POLICY IF EXISTS pf_rls ON public.thoughts; DROP FUNCTION IF EXISTS public.pf_rls_missing()");
         await claims.unsafe("CREATE FUNCTION public.pf_rls_missing() RETURNS boolean LANGUAGE plpgsql AS $f$ BEGIN PERFORM 1 FROM pf_no_such_table; RETURN true; END $f$");
@@ -2121,7 +2125,7 @@ else {
                `another relation's "does not exist" is not read as thoughts off the path (${row(rls.out, "schema")})`);
       } finally {
         try {
-          await claims.unsafe("ALTER TABLE public.thoughts DISABLE ROW LEVEL SECURITY");
+          if (!rowSecurity) await claims.unsafe("ALTER TABLE public.thoughts DISABLE ROW LEVEL SECURITY");
         } finally {
           await claims.unsafe("DROP POLICY IF EXISTS pf_rls ON public.thoughts");
           await claims.unsafe("DROP FUNCTION IF EXISTS public.pf_rls_missing()");

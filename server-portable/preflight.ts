@@ -760,8 +760,8 @@ if (configFailed) {
       // (in any lc_messages; any other failure spares the second connection)
       // and the probe's own to_regclass('thoughts') NULL — an RLS function
       // reading some other missing table fails the count the same way. public
-      // alone: a thoughts elsewhere is another tool's. Each
-      // cause is named with its statement (SMD-2242). The path is parsed, never
+      // alone: a thoughts elsewhere is another tool's. Each cause is named with
+      // its statement (SMD-2242). The path is parsed, never
       // echoed, and not read from current_schemas(), which hides a schema
       // without USAGE (search-path.ts); with USAGE held, thoughts not resolving
       // means off the path whatever the parse says. The GRANT names
@@ -804,10 +804,10 @@ if (configFailed) {
               }
               if (r.usage || !schemas.includes("public")) {
                 causes.push(`public is not on its search_path, which is ${schemas.length ? schemas.map(quoteIdent).join(", ") : "empty"}`);
-                // Only a superuser, a CREATEROLE role with ADMIN on it, or the login
-                // role itself may alter it; under a
-                // SET ROLE the login role must drop it first (RESET ROLE returns to
-                // the role its settings SET).
+                // A superuser, a CREATEROLE role (from PostgreSQL 16, one with ADMIN
+                // on it), or the login role itself may alter it; under a SET ROLE the
+                // login role must drop it first (RESET ROLE returns to the role its
+                // settings SET).
                 const alter = r.login !== r.role
                   ? `SET ROLE NONE; ALTER ROLE ${r.login} IN DATABASE ${r.db} SET search_path = ${withPublic(schemas)};  (as ${r.login}, or a superuser)`
                   : `ALTER ROLE ${r.login} IN DATABASE ${r.db} SET search_path = ${withPublic(schemas)};`;
