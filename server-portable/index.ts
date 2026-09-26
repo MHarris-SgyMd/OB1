@@ -730,17 +730,24 @@ export function demotedLine(t: Pick<ThoughtHybridMatch, "demoted" | "score" | "f
 /**
  * The header note under prefer_current: what the window held — how many rows
  * were demoted, how many carry a lifecycle and the latest sync among them —
- * and, when fewer than `limit` current rows were in the window, that rows past
- * them are demoted ones and a current row further down was not read. Null
- * without the flag (no window on the rows). Exported for the unit test.
+ * and, when the window held fewer current rows than `limit` and may not be
+ * the whole list, that the rows after them are demoted ones and a current
+ * match past the window may have been missed. The window is min(100, 4 ×
+ * limit), so a larger limit reads more only below 25 (first review pass: the
+ * note told a caller at 100 to raise it). Null without the flag (no window on
+ * the rows). Exported for the unit test.
  */
 export function currentNote(rows: Pick<ThoughtHybridMatch, "window">[], limit: number): string | null {
   const w = rows[0]?.window;
   if (!w) return null;
   const lifecycle = `${w.known} carr${w.known === 1 ? "ies" : "y"} a lifecycle${w.syncedAt ? ` (latest sync ${w.syncedAt})` : ""}`;
   const note = `Current first (prefer_current): ${w.demoted} of the top ${w.rows} match${w.rows === 1 ? "" : "es"} ${w.demoted === 1 ? "is" : "are"} settled or superseded and ranked below the current ones; ${lifecycle}.`;
-  return w.exact ? note
-    : `${note} Only ${w.rows - w.demoted} current match${w.rows - w.demoted === 1 ? " was" : "es were"} in the top ${w.rows}, so the rows after ${w.rows - w.demoted === 1 ? "it" : "them"} are demoted ones and a current match further down was not read — raise limit.`;
+  if (w.exact) return note;
+  const current = w.rows - w.demoted;
+  const held = current === 0 ? `No current match was in the top ${w.rows}, so every row here is a demoted one`
+    : `Only ${current} current match${current === 1 ? " was" : "es were"} in the top ${w.rows}, so the rows after ${current === 1 ? "it" : "them"} are demoted ones`;
+  const advice = 4 * limit < 100 ? " — raise limit to read further" : ` — the window is capped at ${w.rows}`;
+  return `${note} ${held}, and a current match past the window may have been missed${advice}.`;
 }
 
 /** The hint an error from prefer_current's path carries: the migration or the grant it needs. */
@@ -906,8 +913,9 @@ function buildServer(principal: Principal): McpServer {
   //
   // Nor can it grow `prefer_current` (migration 059, SMD-2255), so it never
   // demotes: on the topical task the demotion only costs (eval-supersession.ts:
-  // TOPICAL -0.127, a note under a Done ticket -0.292, a settled ticket looked
-  // up by its key -0.750), and this surface has no caller who can ask for it.
+  // TOPICAL -0.127, a note under a Done ticket -0.292 and -0.524 once the
+  // window fills, a settled ticket looked up by its key -0.750 to -1.000), and
+  // this surface has no caller who can ask for it.
   const SEARCH_COMPAT_RECENCY_WEIGHT = 0;
   const SEARCH_COMPAT_PREFER_CURRENT = false;
   if (canRead(principal)) server.registerTool(
@@ -1068,7 +1076,7 @@ function buildServer(principal: Principal): McpServer {
         // finished ticket looked up by its key found lower. The 0.25 below is
         // held to search_demote_weight() by test-e2e-sql.
         prefer_current: z.boolean().optional().default(false)
-          .describe("Rank settled and superseded thoughts below current ones. Off (default): by meaning alone. On: a thought whose ticket is completed or canceled (a note filed under such a ticket included), or that a newer thought supersedes, has its score multiplied by 0.25 — in practice every current match among the top candidates comes first, then the rest in their own order, each marked with why. Blocked and unknown-status thoughts are not demoted. An exact identifier hit on a settled thought is demoted too: to look a finished ticket up by its key, leave this off."),
+          .describe("Rank settled and superseded thoughts below current ones. Off (default): by meaning alone. On: a thought whose ticket is completed or canceled (a note filed under such a ticket included), or that a newer thought supersedes, has its score multiplied by 0.25 — in practice every current match among the top candidates comes first, then the rest in their own order, each marked with why, so a demoted thought usually leaves the top results. A blocked or unknown status does not demote a thought (superseded still does). An exact identifier hit on a settled thought is demoted too: to look a finished ticket up by its key, leave this off. It reads every thought's lifecycle per search, so it costs more as the brain grows (milliseconds at a thousand thoughts, over 100 ms at 100,000)."),
       },
     },
     async ({ query, limit, threshold, recency_weight, filter, said_by, actor, prefer_current }) => {

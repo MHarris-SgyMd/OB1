@@ -166,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1847 assertions: 1847 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1850 assertions: 1850 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-nine (59) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -460,8 +460,11 @@ included) or that a newer thought supersedes weighs `search_demote_weight()`
 cut to N. Under the hybrid's fusion that is in practice a partition: every
 current match in the window first, then the demoted ones in their own order;
 the weight bites only against an exact-literal hit, so a settled ticket looked
-up by its key can drop — to look one up, leave the flag off. Blocked and
-unknown-status thoughts are never demoted. Each row carries `fused` (before the
+up by its key can drop — to look one up, leave the flag off. A blocked or
+unknown status does not demote a thought (superseded still does); ties go to
+the current row. Once the window holds N current rows a demoted thought is out
+of the top N, which is where the eval's costs grow at threshold −1 (NOTE
+−0.524, PREVIOUS −0.449). Each row carries `fused` (before the
 weight), `demoted` (why) and the window's size, lifecycle coverage, demoted
 count, latest source watermark and whether its top N is exact. Priced first in
 `evals/eval-supersession.ts` against a pre-registered rule (CURRENT-version
@@ -2380,8 +2383,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1847 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 745 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1850 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 746 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

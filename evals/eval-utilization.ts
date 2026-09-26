@@ -89,7 +89,8 @@ await requireQueryLog(sql, "eval-utilization");
 const searchRows = await sql<SearchDbRow[]>`
   SELECT s.id, s.agent_id, s.logged_at,
          (extract(epoch FROM s.logged_at)::numeric * 1000000)::bigint AS at_us,
-         s.tool, s.query, s.match_count, s.threshold, s.recency_weight, s.arm, s.result_ids,
+         s.tool, s.query, s.match_count, s.threshold, s.recency_weight,
+         to_jsonb(s) ->> 'arm' AS arm, s.result_ids,  -- 045's column; NULL on an older log (SMD-2255)
          c.chars, c.surviving
     FROM query_log s
     CROSS JOIN LATERAL (

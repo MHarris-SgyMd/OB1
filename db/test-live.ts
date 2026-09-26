@@ -4515,16 +4515,24 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     assert(clean.changed === 0, "an identical canary reproduces stable's logged rankings — the diff is empty");
 
     // 059 (SMD-2255): a row logged as arm `current` — search_thoughts with
-    // prefer_current — replays through search_thoughts_current. Nothing here is
-    // demotable, so it returns the hybrid's rows; a stub vector stands in for
-    // the provider (the rows carry none, so they rank on the quoted literal alone).
+    // prefer_current — replays through search_thoughts_current. The canary's
+    // first zqcanary row is stamped a completed ticket, so the two functions
+    // differ: the current replay moves it last, the hybrid keeps it where it
+    // was (first review pass: with nothing demotable the two agreed, and a
+    // replay sending `current` to the hybrid passed). A stub vector stands in
+    // for the provider (the rows carry none, so they rank on the quoted literal).
     const stub = async () => { const v = new Array(EMBEDDING_DIM).fill(0); v[0] = 1; return v; };
     const logged = { id: "00000000-0000-4000-8000-000000002255", query: "\"zqcanary\"", matchCount: 10, threshold: 0, recencyWeight: 0, filter: {}, resultIds: [] };
+    const plainHybrid = await replayOne(canarySql, { ...logged, arm: "hybrid" }, stub);
+    const settledId = plainHybrid.ids[0];
+    await canarySql`UPDATE thoughts SET metadata = metadata || '{"issue": "SMD-9955", "status": "Done", "status_type": "completed"}'::jsonb WHERE id = ${settledId}::uuid`;
     const asCurrent = await replayOne(canarySql, { ...logged, arm: "current" }, stub);
     const asHybrid = await replayOne(canarySql, { ...logged, arm: "hybrid" }, stub);
     const noModel = await replayOne(canarySql, { ...logged, arm: "current" });
-    assert(asCurrent.ran && asCurrent.ids.length === 3 && asCurrent.ids.join() === asHybrid.ids.join() && !noModel.ran && noModel.reason === "current needs a provider (set OB1_EVAL_EMBED)",
-      `a logged prefer_current search replays through search_thoughts_current — the hybrid's three rows, nothing to demote — and without a provider it is skipped with the arm named (${asCurrent.ids.length} rows; ${noModel.reason})`);
+    await canarySql`UPDATE thoughts SET metadata = metadata - 'issue' - 'status' - 'status_type' WHERE id = ${settledId}::uuid`;
+    assert(asCurrent.ran && asCurrent.ids.length === 3 && asHybrid.ids[0] === settledId && asCurrent.ids[2] === settledId
+        && [...asCurrent.ids].sort().join() === [...asHybrid.ids].sort().join() && !noModel.ran && noModel.reason === "current needs a provider (set OB1_EVAL_EMBED)",
+      `a logged prefer_current search replays through search_thoughts_current — the completed row the hybrid ranks first comes last — and without a provider it is skipped with the arm named (${asCurrent.ids.indexOf(settledId) + 1} of ${asCurrent.ids.length}; ${noModel.reason})`);
 
     // The CLI's report and verdict (SMD-2182), on the same canary. Both verbs
     // print the window and the counts, and a window that replayed nothing is
@@ -5346,6 +5354,67 @@ console.log("\n[25] Migration 055's payload backfill under two connections: a se
 // db/README.md's Testing block quotes this suite's assertion total. The count
 // is lower when a group is skipped (PostgreSQL 18, or JIT off), so only a full
 // run — as CI's pg16-with-JIT job is — is compared to the headline (SMD-1805).
+
+console.log("\n[26] search_thoughts_current against a hand oracle on real Postgres: ties in score go to the current row, then to the hybrid's order, whichever order the join hands the rows over in (migration 059, SMD-2255)");
+{
+  // test-schema [55] holds the rule under PGlite, whose small plans hand the
+  // window to the final sort in the hybrid's order, so a tie-break by that
+  // order is invisible there (review pass 1: dropping it survived [55]). Here
+  // the join order is PostgreSQL's own. The fixture ties on purpose — six rows
+  // on one vector, four far rows and two unembedded rows carrying one literal
+  // — with settled rows among each group, and the oracle is 059's rule written
+  // out: the hybrid at the window, node_state's two facts, score × 0.25 for a
+  // demoted row, ties to the current row and then to the hybrid's order.
+  // Its own connection, as [25]'s: the suite's closed after [24].
+  const sql = new SQL({ url: URL_, max: 2 });
+  await sql`DELETE FROM thoughts WHERE metadata->>'kind' = 'tie2255'`;
+  let seed = 2255;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  const at = (cos: number) => {
+    const r = Array.from({ length: 32 }, () => rnd() - 0.5);
+    const n = Math.hypot(...r);
+    const v = new Array(EMBEDDING_DIM).fill(0);
+    for (let k = 0; k < 32; k++) v[40 + k] = (r[k] / n) * Math.sqrt(1 - cos * cos);
+    v[0] = cos;
+    return `[${v.join(",")}]`;
+  };
+  const Q = (() => { const v = new Array(EMBEDDING_DIM).fill(0); v[0] = 1; return `[${v.join(",")}]`; })();
+  const put = async (content: string, vec: string | null) => {
+    // Objects, not strings: Bun binds a JS string to jsonb as a JSON string.
+    const env = { metadata: { type: "note", kind: "tie2255" } };
+    const [r] = vec === null
+      ? await sql`SELECT upsert_thought(${content}, ${env}::jsonb)->>'id' AS id`
+      : await sql`SELECT upsert_thought(${content}, ${env}::jsonb, ${vec}::vector)->>'id' AS id`;
+    return r.id as string;
+  };
+  const done = (id: string, key: string) => sql`UPDATE thoughts SET metadata = metadata || ${{ source: "linear", issue: key, status: "Done", status_type: "completed" }}::jsonb WHERE id = ${id}::uuid`;
+  const tieVec = at(0.9);
+  for (let i = 0; i < 6; i++) { const id = await put(`tie2255 ${i} topic words`, tieVec); if (i % 2 === 0) await done(id, `SMD-81${i}`); }
+  for (let i = 0; i < 4; i++) { const id = await put(`needle ZQX_2255 far ${i}`, at(-0.5)); if (i % 2 === 0) await done(id, `SMD-82${i}`); }
+  for (let i = 0; i < 2; i++) { const id = await put(`needle ZQX_2255 unembedded ${i}`, null); if (i === 0) await done(id, "SMD-830"); }
+  for (let i = 0; i < 60; i++) { const id = await put(`tie2255 filler ${i}`, at(0.5 + 0.35 * rnd())); if (i % 3 === 0) await done(id, `SMD-85${String(i).padStart(2, "0")}`); }
+  const filter = { kind: "tie2255" };
+  const oracle = async (text: string, thr: number, n: number, rw: number) => {
+    const W = Math.min(100, 4 * n);
+    const h = await sql`SELECT h.id::text AS id, h.score, h.ord FROM search_thoughts_hybrid(${Q}::vector, ${text}, ${thr}::float, ${W}::int, ${filter}::jsonb, ${rw}::float, 90.0::float)
+                          WITH ORDINALITY h(id, c, m, ca, s, mn, nd, nc, cn, lo, score, ord)`;
+    const ids = h.map((r: { id: string }) => r.id);
+    const facts = new Map((ids.length ? await sql`SELECT thought_id::text AS id, (open = false OR superseded_by IS NOT NULL) AS d FROM node_state(${sql.array(ids, "TEXT")}::uuid[])` : [])
+      .map((r: { id: string; d: boolean }) => [r.id, r.d]));
+    return h.map((r: { id: string; score: number; ord: number }) => { const d = facts.get(r.id) === true; return { id: r.id, w: Number(r.score) * (d ? 0.25 : 1), d: d ? 1 : 0, ord: Number(r.ord) }; })
+      .sort((a: { w: number; d: number; ord: number }, b: { w: number; d: number; ord: number }) => b.w - a.w || a.d - b.d || a.ord - b.ord).slice(0, n).map((r: { id: string }) => r.id);
+  };
+  let calls = 0, mismatch = 0, first = "";
+  for (const text of ["topic words", "ZQX_2255 topic", "ZQX_2255"]) for (const thr of [-1, 0]) for (const n of [1, 3, 10, 25]) for (const rw of [0, 0.4]) {
+    const got = (await sql`SELECT id::text AS id FROM search_thoughts_current(${Q}::vector, ${text}, ${thr}::float, ${n}::int, ${filter}::jsonb, ${rw}::float, 90.0::float)`).map((r: { id: string }) => r.id);
+    const want = await oracle(text, thr, n, rw);
+    calls++;
+    if (JSON.stringify(got) !== JSON.stringify(want)) { mismatch++; first ||= `"${text}" thr ${thr} n ${n} rw ${rw}`; }
+  }
+  assert(mismatch === 0, `search_thoughts_current is 059's rule written out — ties to the current row, then the hybrid's order — on ${calls - mismatch} of ${calls} calls over tied vectors, tied literal hits and unembedded rows${first ? ` (first miss: ${first})` : ""}`);
+  await sql`DELETE FROM thoughts WHERE metadata->>'kind' = 'tie2255'`;
+  await sql.close();
+}
 
 console.log("\n[doc] db/README.md states this suite's assertion total (full runs only)");
 {

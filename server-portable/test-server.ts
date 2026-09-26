@@ -960,9 +960,14 @@ console.log("\n[16c] prefer_current's row line, header note and error hint rende
   assert(currentNote([{ window: win }], 10) === "Current first (prefer_current): 7 of the top 40 matches are settled or superseded and ranked below the current ones; 12 carry a lifecycle (latest sync 2026-09-25T00:00:00.000Z).",
     `the note gives the window's demoted count, its lifecycle coverage and freshness (${currentNote([{ window: win }], 10)})`);
   const thin = currentNote([{ window: { rows: 40, known: 40, demoted: 36, syncedAt: null, exact: false } }], 10) ?? "";
-  assert(thin.includes("36 of the top 40 matches are settled or superseded") && thin.includes("40 carry a lifecycle.") && thin.endsWith("Only 4 current matches were in the top 40, so the rows after them are demoted ones and a current match further down was not read — raise limit."),
+  assert(thin.includes("36 of the top 40 matches are settled or superseded") && thin.includes("40 carry a lifecycle.") && thin.endsWith("Only 4 current matches were in the top 40, so the rows after them are demoted ones, and a current match past the window may have been missed — raise limit to read further."),
     `a window with fewer current rows than the limit says what that means and what to do (${thin})`);
-  assert(/migration 059 .* is not applied, or PostgREST has not reloaded/.test(currentSearchHint('function search_thoughts_current(vector, unknown) does not exist')) && /could not find/i.test("could not find") && currentSearchHint("Could not find the function public.search_thoughts_current") !== ""
+  const capped = currentNote([{ window: { rows: 100, known: 90, demoted: 30, syncedAt: null, exact: false } }], 100) ?? "";
+  const none = currentNote([{ window: { rows: 40, known: 40, demoted: 40, syncedAt: null, exact: false } }], 10) ?? "";
+  assert(capped.endsWith("may have been missed — the window is capped at 100.") && !capped.includes("raise limit") && none.includes("No current match was in the top 40, so every row here is a demoted one"),
+    `at a limit of 25 or more the window is already 100, so the note says it is capped rather than to raise the limit; a window with no current row says so (first review pass) (${capped})`);
+  assert(/migration 059 .* is not applied, or PostgREST has not reloaded/.test(currentSearchHint('function search_thoughts_current(vector, unknown) does not exist'))
+      && /migration 059 .* is not applied/.test(currentSearchHint("Could not find the function public.search_thoughts_current(filter, half_life_days, match_count, match_threshold, query_embedding, query_text, recency_weight) in the schema cache"))
       && /needs SELECT on thought_sources .* the server group/.test(currentSearchHint("permission denied for table thought_sources")) && currentSearchHint("connection refused") === "",
     "an error on prefer_current's path names 059 (missing, or the schema cache) or the server group's grant; any other error gets no hint");
 }

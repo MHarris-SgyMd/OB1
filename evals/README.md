@@ -2551,15 +2551,18 @@ sparse and dense). Every class is filtered, so match_thoughts answers exactly
 (041's exact branch) and the policies differ by the rule alone.
 
 - **The controls.** Nothing demotable: demote is the hybrid's order. Every row
-  settled: a uniform multiplier, the off order. The window: wherever it held N
-  current rows, its top N is the whole list re-weighted — 288 of 288. The SQL is
-  the oracle on 288 of 288.
+  settled: a uniform multiplier, the off order. The SQL is the oracle on 288 of
+  288 queries, window flag included. The window never held fewer than N current
+  rows here (0 of 288 — test-schema [55] builds that case); of the 168 queries
+  whose whole admitted list fits in 100 rows, the window's top N was that list
+  re-weighted on all 168 (the first review pass found the check had counted
+  every query, the other 120 unverifiable).
 - **Three runs, each on the maintainer's call.** 12 topics per class: CURRENT
   +0.039, under the +0.05 bar. Replicated once at 48 per class, the same bar:
   the bars cleared, but the controls failed — the approximate index walk
   returned different candidates at counts 10, 40 and 100 once the corpus reached
   1,200 rows. Rerun with every class filtered, so the walk is not taken: the
-  controls hold, and the effect numbers are the second run's.
+  controls hold, and the effect numbers are identical to the second run's.
 
 | threshold 0, 48 per class | off MRR | demote | exclude | Δ demote |
 | --- | ---: | ---: | ---: | ---: |
@@ -2571,6 +2574,14 @@ sparse and dense). Every class is filtered, so match_thoughts answers exactly
 | LIFECYCLE / SETTLED | 0.380 | 0.219 | 0.000 | −0.161 |
 | LITERAL, sparse / dense | 1.000 / 0.500 | 0.250 / 0.000 | 0.000 / 0.000 | −0.750 / −0.500 |
 
+At threshold 0 each topic admits about five rows (the relative floor keeps
+only its own), so the window is small and a demoted row drops a rank or two.
+At threshold −1 the window fills, as it does on a real brain, and **demote
+equals exclude for the top N in every cell**: PREVIOUS −0.449, NOTE −0.524,
+SETTLED −0.380, a settled key −1.000 (CURRENT and LIVE are the same gains).
+Once the window holds N current rows, a demoted thought is out of the top N
+(the first review pass: the threshold-0 costs alone understated this).
+
 **Decision, by the pre-registered rule:** the controls hold, CURRENT and LIVE
 each gain at least 0.05, and demote beats exclude on PREVIOUS — build, opt-in,
 default off. The costs are disclosed, not vetoes: the caller opts in. Under the
@@ -2581,16 +2592,25 @@ ticket looked up by its key drops; the tool says to leave the flag off for that.
 **On the dogfood brain** (a read-only dump, 945 thoughts, 315 demotable: 197
 settled ticket rows, 56 notes filed under a settled ticket, 60 superseded, 2 both; 59
 logged hybrid searches replayed with the provider): the top result changed in 20
-of 59, each time because the default's top result was settled or superseded; a
-demoted row sat in 54 of the 59 windows; the window was exact on 59 of 59.
+of 59, and in 20 the default's top result was settled or superseded (the two
+counted apart); a demoted row sat in 54 of the 59 windows; the window was exact
+on 59 of 59.
 
 **Latency, and a missed budget.** `db/bench-hybrid.ts`'s prefer_current arm:
 +10.7 ms over the hybrid's 1.1 at 10,000 thoughts, +129 ms at 100,000, and
 +2.8 ms over 2.4 on the dogfood brain — `node_state` computes the whole brain's
 lifecycle on every call. The budget pre-registered (added cost at most the
 hybrid's own median at 10,000) was missed; the flag shipped opt-in on the
-maintainer's call, the cost stated on the tool, and SMD-2256 narrows `node_state`
-for a list of ids.
+maintainer's call, the cost stated in the flag's description, and SMD-2256
+narrows `node_state` for a list of ids. The numbers are one machine's: a review
+pass measured +18.8 ms over 1.6 at 10,000 — over budget either way.
+
+**A tie-break, after the first review pass.** On a query that is only literals
+every row without one scores 0, and 0 × 0.25 is 0, so the demoted zeros stayed
+among the current ones while each was marked as ranked below them. Ties now go
+to the current row, then to the hybrid's order, in 059 and in the oracle alike;
+the numbers above are unchanged (no eval query is literal-only), and
+test-schema [55] holds the case.
 
 ## LongMemEval: the fork on a public benchmark, and the floor it exposed
 

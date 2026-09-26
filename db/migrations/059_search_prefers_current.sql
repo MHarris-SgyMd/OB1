@@ -21,9 +21,15 @@
 --   section, a TypeScript oracle over the hybrid and node_state; the rule
 --   pre-registered): CURRENT-version MRR +0.052 and LIVE-ticket MRR +0.194
 --   over the default, demote above exclude on the PREVIOUS-version question,
---   every control holding. The costs, disclosed: TOPICAL -0.127, a note filed
---   under a Done ticket -0.292, the settled ticket itself -0.161, a settled
---   ticket looked up by its key -0.750 (sparse) and -0.500 (dense).
+--   every control holding. The costs, disclosed, at the tool's threshold 0:
+--   TOPICAL -0.127, a note filed under a Done ticket -0.292, the settled
+--   ticket itself -0.161, a settled ticket looked up by its key -0.750
+--   (sparse) and -0.500 (dense). Those are small windows — the eval's topics
+--   admit five rows at threshold 0, so a demoted row drops a rank or two. At
+--   threshold -1, where the window fills as it does on a real brain, demote
+--   equals exclude for the top N in every cell (PREVIOUS -0.449, NOTE -0.524,
+--   SETTLED -0.380, a settled key -1.000): once the window holds N current
+--   rows, a demoted one is out of the top N (first review pass).
 --
 -- WHAT
 --   * search_demote_weight() — IMMUTABLE 0.25: what a demoted thought's fused
@@ -45,19 +51,23 @@
 --     false: completed or canceled, by 058's ticket-head rule — a note filed
 --     under a Done ticket reads the ticket's lifecycle) or that a newer
 --     thought supersedes it (superseded_by). The weight applies once when
---     both hold. A blocked row, and one whose status is missing or unknown
---     (open IS NULL), is never demoted.
+--     both hold. Neither blocked nor a missing or unknown status (open IS
+--     NULL) demotes a row — such a row is still demoted if it is superseded.
 --
 --   The window. The hybrid is asked for its top W = min(100, 4N) — N
 --   clamped to 1..100 as 017 clamps it, a second copy test-schema [55]
---   holds to the hybrid's — each row weighted, the window re-sorted (ties in
---   the hybrid's own order: WITH ORDINALITY) and cut to N. The top N equals
+--   holds to the hybrid's — each row weighted, the window re-sorted and cut
+--   to N. Ties go to the current row, then to the hybrid's own order (WITH
+--   ORDINALITY): on a query that is only literals every row without one
+--   scores 0, and 0 × 0.25 is 0, so without that tie-break the demoted rows
+--   stayed among the current ones and were marked as ranked below them
+--   (first review pass). The top N equals
 --   the weight applied over the WHOLE admitted list whenever the window held
 --   that whole list or at least N undemoted rows: every row outside the
 --   window has a fused score at most any row inside it, so it can outrank no
---   undemoted row it follows. window_exact says so on every row; the eval
---   found it true on 288 of 288 queries. "The whole list" is the hybrid's as
---   asked at W, and the hybrid is not the same list at every count: a literal
+--   undemoted row it follows. window_exact says so on every row. "The whole
+--   list" is the hybrid's as asked at W, and the hybrid is not the same list
+--   at every count: a literal
 --   hit the vector arm did not reach is priced without its meaning (017), so
 --   asked at N the hybrid can rank below a row it ranks above at W; and above
 --   041's exact branch (a filter matching at most 1,000 thoughts, or a small
@@ -68,7 +78,7 @@
 --
 --   What 0.25 does under the hybrid's fusion. A vector-only row at rank r
 --   scores 1/(60+r); a demoted row at rank r0 falls below every current row
---   up to rank 4·r0 + 180 — past every rank the window holds. So in practice
+--   up to rank 4·r0 + 179 — past every rank the window holds. So in practice
 --   every current match in the window ranks first, then the demoted ones in
 --   their own order; any weight below about 0.38 would give that order. The
 --   weight bites only against an exact-literal hit: a demoted row carrying
@@ -96,8 +106,10 @@
 --   brain's lifecycle on every call (058: the ids narrow the rows, not the
 --   work). The budget pre-registered for it — at most the hybrid's own median
 --   at 10,000 — was MISSED, and the flag shipped opt-in on the maintainer's
---   call, the cost stated here and on the tool; SMD-2256 narrows node_state
---   for a list of ids under the same signatures.
+--   call, the cost stated here, in the tool's description of the flag and in
+--   both READMEs; SMD-2256 narrows node_state for a list of ids under the same
+--   signatures. The numbers are one machine's: a second run measured +18.8 ms
+--   over 1.6 at 10,000 (first review pass) — over budget either way.
 --
 -- SAFETY
 --   Additive: two functions and a widened CHECK. STABLE; LANGUAGE sql with a
@@ -223,12 +235,12 @@ AS $$
          a.rows_, a.known, a.dem, a.synced,
          (a.rows_ < a.w OR a.rows_ - a.dem >= (SELECT v_count FROM n))
     FROM st CROSS JOIN agg a
-   ORDER BY 11 DESC, st.ord
+   ORDER BY 11 DESC, (st.settled OR st.superseded), st.ord
    LIMIT (SELECT v_count FROM n)
 $$;
 
 COMMENT ON FUNCTION search_thoughts_current(vector, text, float, int, jsonb, float, float) IS
-  'search_thoughts_hybrid with settled and superseded thoughts ranked below current ones, for search_thoughts'' opt-in prefer_current: over the hybrid''s top min(100, 4N), a thought node_state (058) says is settled (its ticket completed or canceled — a note under a Done ticket included) or superseded weighs search_demote_weight() (0.25) of its fused score, once; the window is re-sorted (ties in the hybrid''s order) and cut to N. In practice every current match in the window ranks first; an exact-literal hit on a demoted thought is demoted too. Blocked and unknown-status thoughts are not. Returns the hybrid''s columns, then fused, demoted (why), and on every row the window''s size, lifecycle coverage, demoted count, latest source watermark and whether the top N is exact. Migration 059 / SMD-2255 (SMD-2074).';
+  'search_thoughts_hybrid with settled and superseded thoughts ranked below current ones, for search_thoughts'' opt-in prefer_current: over the hybrid''s top min(100, 4N), a thought node_state (058) says is settled (its ticket completed or canceled — a note under a Done ticket included) or superseded weighs search_demote_weight() (0.25) of its fused score, once; the window is re-sorted (ties to the current row, then the hybrid''s order) and cut to N. In practice every current match in the window ranks first; an exact-literal hit on a demoted thought is demoted too. Blocked or unknown status does not demote a thought (superseded still does). Returns the hybrid''s columns, then fused, demoted (why), and on every row the window''s size, lifecycle coverage, demoted count, latest source watermark and whether the top N is exact. Migration 059 / SMD-2255 (SMD-2074).';
 
 -- ---------------------------------------------------------------------------
 -- The query log: arm 'current'

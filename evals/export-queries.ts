@@ -68,7 +68,10 @@ await requireQueryLog(sql, "export-queries");
 // handed over empty.
 const searchRows = await sql<SearchDbRow[]>`
   SELECT id, agent_id, logged_at, (extract(epoch FROM logged_at)::numeric * 1000000)::bigint AS at_us,
-         tool, query, match_count, threshold, recency_weight, arm, result_ids,
+         tool, query, match_count, threshold, recency_weight,
+         -- arm is 045's column: read through the row's jsonb, a log from
+         -- before 045 reads NULL instead of failing (SMD-2255, first review pass).
+         to_jsonb(query_log) ->> 'arm' AS arm, result_ids,
          NULL::bigint AS chars, 0::int AS surviving
     FROM query_log WHERE kind = 'search'`;
 const actionRows = await sql<ActionDbRow[]>`

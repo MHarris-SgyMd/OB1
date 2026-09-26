@@ -361,9 +361,12 @@ async function policies(queryVec: string, queryText: string, threshold: number, 
   const win = await hybrid(queryVec, queryText, threshold, W, filter);
   const all = await hybrid(queryVec, queryText, threshold, 100, filter);
   const facts = await nodeFacts([...new Set([...win, ...all].map((r) => r.id))]);
+  // Ties go to the current row, then to the hybrid's order — 059's ORDER BY
+  // (first review pass: a literal-only query scores every other row 0, and a
+  // demoted zero stayed among the current zeros).
   const weigh = (rows: HybridRow[]) =>
-    rows.map((r, ord) => ({ id: r.id, w: r.score * (demotable(facts.get(r.id)) ? WEIGHT : 1), ord }))
-      .sort((a, b) => b.w - a.w || a.ord - b.ord).map((r) => r.id);
+    rows.map((r, ord) => { const dem = demotable(facts.get(r.id)); return { id: r.id, w: r.score * (dem ? WEIGHT : 1), dem: dem ? 1 : 0, ord }; })
+      .sort((a, b) => b.w - a.w || a.dem - b.dem || a.ord - b.ord).map((r) => r.id);
   const demote = weigh(win).slice(0, N);
   const exclude = win.filter((r) => !demotable(facts.get(r.id))).map((r) => r.id).slice(0, N);
   const current = win.filter((r) => !demotable(facts.get(r.id))).length;
@@ -375,7 +378,10 @@ async function policies(queryVec: string, queryText: string, threshold: number, 
     SELECT id::text AS id, window_exact FROM search_thoughts_current(${queryVec}::vector, ${queryText}, ${threshold}::float, ${N}::int, ${filter}::jsonb, 0.0::float, 90.0::float)`;
   const sqlAgrees = JSON.stringify(sqlRows.map((r: Record<string, unknown>) => String(r.id))) === JSON.stringify(demote)
     && sqlRows.every((r: Record<string, unknown>) => r.window_exact === windowExact);
-  return { off, demote, exclude, windowExact, sqlAgrees, exactAgrees: all.length <= 100 ? JSON.stringify(exact) === JSON.stringify(demote) : null };
+  // Checkable only where the hybrid at 100 returned its whole list — fewer
+  // than 100 rows; at 100 the list may go on (first review pass: `<= 100`
+  // counted every query as checked).
+  return { off, demote, exclude, windowExact, sqlAgrees, exactAgrees: all.length < 100 ? JSON.stringify(exact) === JSON.stringify(demote) : null };
 }
 
 type Query = { vec: string; text: string; filter: Record<string, unknown>; gold: Record<string, Set<string>> };
@@ -454,7 +460,7 @@ for (const threshold of [0, -1]) {
   }
   console.log("");
 }
-console.log(`  window: ${windowInexact}/${windowQueries} queries held fewer than ${N} current rows in the top ${W}; where it did, the oracle over the window equalled the whole list re-weighted on ${exactChecked - exactDisagree}/${exactChecked}\n`);
+console.log(`  window: ${windowInexact}/${windowQueries} queries held fewer than ${N} current rows in the top ${W}; of the ${exactChecked} whose whole admitted list fits in 100 rows, the window's top ${N} was that list re-weighted on ${exactChecked - exactDisagree}\n`);
 assert(exactDisagree === 0, "WINDOW: wherever the window held N current rows (or the whole list), its top N is the whole admitted list re-weighted");
 assert(sqlDisagree === 0, `SQL: migration 059's search_thoughts_current returns the oracle's rows, in its order, with its window flag, on every query (${windowQueries - sqlDisagree}/${windowQueries})`);
 

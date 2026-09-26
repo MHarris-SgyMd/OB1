@@ -234,10 +234,12 @@ its score multiplied by 0.25. Under the hybrid's fusion that puts every current
 match in the window first, then the demoted ones in their own order; each
 demoted hit says `↓ Ranked ×0.25 — completed` (or `canceled`, `superseded`),
 and the header says how many of the window were demoted, how many carry a
-lifecycle and the latest sync among them — and to raise `limit` when the window
-held fewer current matches than it asked for. Blocked and unknown-status
-thoughts are never demoted. An exact identifier hit on a settled thought is
-demoted too: to look a finished ticket up by its key, leave the flag off. The
+lifecycle and the latest sync among them — and, when the window held fewer
+current matches than asked for, that one past it may have been missed (raise
+`limit` below 25; above, the window is already capped at 100). A blocked or
+unknown status does not demote a thought (superseded still does), and ties go
+to the current one. An exact identifier hit on a settled thought is demoted
+too: to look a finished ticket up by its key, leave the flag off. The
 server's role needs SELECT on `thought_sources` (the server group,
 `db/README.md`); without it, or without 059, that search is refused naming the
 fix and every other search runs. The query log records such a search as arm

@@ -8363,6 +8363,39 @@ console.log("\n[55] Migration 059: search_thoughts_current — the hybrid with s
   assert(partitioned && keptOrder && exactWeight && c10.length === 10,
     "every current row ranks above every demoted one, each group in the hybrid's own order, and a demoted row's score is exactly 0.25 of its fused score — once, when it is both settled and superseded");
 
+  // A query that is only a literal: every row without it scores 0, and 0 ×
+  // 0.25 is 0 — the tie goes to the current row (first review pass: without
+  // that the demoted zeros stayed among the current ones, each marked as
+  // ranked below them). Four rows carry LIT_5599 and no vector, so their
+  // fused scores tie and the hybrid's own order must decide among them.
+  const litKeys: string[] = [];
+  for (let i = 0; i < 4; i++) litKeys.push((await q<{ r: { id: string } }>(`SELECT upsert_thought($1, $2::jsonb) AS r`, [`LIT_5599 — a keyword-only note ${i}`, JSON.stringify({ metadata: { type: "note", kind: "lit" } })]))[0].r.id);
+  await stamp(litKeys[1], { source: "linear", issue: "SMD-5701", status: "Done", status_type: "completed" });
+  const litVec: string[] = [];
+  for (const cos of [0.9, 0.8, 0.7, 0.6]) litVec.push(await put(`a lit neighbour at ${cos}`, cos, { kind: "lit" }));
+  await stamp(litVec[0], { source: "linear", issue: "SMD-5702", status: "Done", status_type: "completed" });
+  await stamp(litVec[2], { source: "linear", issue: "SMD-5703", status: "Done", status_type: "completed" });
+  const litOn = await current("LIT_5599", -1, 8, { kind: "lit" });
+  const litOff = await hybrid("LIT_5599", -1, 8, { kind: "lit" });
+  const zeros = litOn.filter((r) => r.fused === 0);
+  const firstDemotedZero = zeros.findIndex((r) => r.demoted !== null);
+  const hybridOrderOf = (ids: string[]) => litOff.map((r) => r.id).filter((id) => ids.includes(id));
+  const currentKeys = litOn.filter((r) => r.fused > 0 && r.demoted === null).map((r) => r.id);
+  assert(litOn.length === 8 && zeros.length === 4 && firstDemotedZero === 2 && zeros.slice(2).every((r) => r.demoted !== null) && zeros.slice(0, 2).every((r) => r.demoted === null)
+      && JSON.stringify(currentKeys) === JSON.stringify(hybridOrderOf(currentKeys)) && currentKeys.length === 3
+      && litOn.findIndex((r) => r.id === litKeys[1]) === 3,
+    `on a literal-only query the demoted rows that score 0 rank below the current ones that do, the three current literal hits keep the hybrid's order among their tied scores, and the demoted literal hit keeps 0.25 of its needle bonus, above every zero (${litOn.map((r) => `${r.fused > 0 ? "k" : "z"}${r.demoted ? "D" : ""}`).join(" ")})`);
+
+  // window_exact's second branch: a full window (4 rows at N 1) with nothing
+  // demoted holds N current rows, so its top N is exact though the list goes on.
+  const full = await current("alpha beta", -1, 1, { kind: "plain" });
+  assert(full.length === 1 && full[0].window_rows === 4 && full[0].window_demoted === 0 && full[0].window_exact === true,
+    `a full window holding at least N current rows is exact: at N 1 the window is 4 of the 24 plain rows, none demoted (${JSON.stringify(full[0] && [full[0].window_rows, full[0].window_demoted, full[0].window_exact])})`);
+  // The clamp is 017's: 0 and a negative count are 1, over 100 is 100.
+  const clampOk = (await Promise.all([0, -5, 500].map(async (n) => (await current("alpha beta", -1, n, { kind: "plain" })).length === (await hybrid("alpha beta", -1, n, { kind: "plain" })).length))).every(Boolean);
+  const [nullCount] = await q<{ n: number }>(`SELECT count(*)::int AS n FROM search_thoughts_current($1::vector, 'alpha beta', -1, NULL, '{"kind": "plain"}'::jsonb)`, [Q]);
+  assert(clampOk && nullCount.n === 10, `a count of 0, -5 or 500 returns what the hybrid returns for it, and NULL is 10 — 017's clamp, held to the hybrid's (${nullCount.n})`);
+
   // An exact-literal hit on a settled thought is demoted too: off, the key's
   // ticket is first; on, it sinks below the current meaning-matches.
   await db.query(`UPDATE thoughts SET content = 'SMD-5501 — ' || content WHERE id = $1`, [settled]);
