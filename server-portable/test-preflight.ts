@@ -9,6 +9,11 @@
  *
  * Runs preflight as a subprocess so real exit codes are observed. The connectivity
  * cases need DATABASE_URL; without one they are skipped, not silently passed.
+ *
+ * CI runs this suite beside db/test-upgrade.ts, each in its own database of one
+ * Postgres, as the same role (SMD-2219). What the cluster shares — a role and
+ * its settings, pg_locks, pg_stat_activity — is scoped here to the current
+ * database, or named for this suite (ob1_pf_capture, pf_reader).
  */
 
 import { join, dirname } from "node:path";
@@ -1274,16 +1279,37 @@ else {
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("042") });
   // The isolation level every lock-order argument assumes, read from the
   // connection's default: ok at read committed, a warning naming the guarantees
-  // at any other, with the ALTER ROLE that puts it back. Set on the role, so a
-  // fresh session (preflight's) inherits it; reset after.
+  // at any other, with the ALTER ROLE that puts it back. Set on the database,
+  // so a fresh session (preflight's) inherits it; reset after. Not on the role,
+  // which test-upgrade.ts shares beside this suite (the header), nor on the
+  // role in this database, which would outrank the ALTER ROLE the warning names.
   assert(/transaction isolation\s+default_transaction_isolation is read committed/.test((await run(SQL_ENV)).out), "the connection's default isolation is read committed, and the check says which guarantees rest on it");
-  await claims.unsafe("ALTER ROLE current_user SET default_transaction_isolation = 'repeatable read'");
+  const onThisDatabase = (setting: string) => claims.unsafe(`DO $i$ BEGIN EXECUTE format('ALTER DATABASE %I ${setting}', current_database()); END $i$`);
+  await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
   try {
     const rr = await run(SQL_ENV);
     assert(rr.code === 0 && /transaction isolation\s+default_transaction_isolation is repeatable read: the writers' lock order \(018\/033\/036\) and the citation guard \(042\) are argued under read committed/.test(rr.out) && /ALTER ROLE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
-           `a role defaulting to repeatable read starts with a warning naming the guarantees that rest on read committed and the ALTER ROLE that restores it (exit ${rr.code})`);
+           `a connection defaulting to repeatable read starts with a warning naming the guarantees that rest on read committed and the ALTER ROLE that restores it (exit ${rr.code})`);
+    // …and nowhere else: a session as the same role in `postgres` is still at
+    // read committed. The suite's own database is asked of the server, not
+    // read from the URL; a role that may not connect there skips, and any
+    // other error fails.
+    const onlyHere = "…and only this database's sessions start at repeatable read";
+    const [{ db }] = (await claims`SELECT current_database() AS db`) as { db: string }[];
+    if (db === "postgres") skipRaw(onlyHere, "the suite's own database is postgres, the one it would read as another");
+    else {
+      const u = new URL(LIVE);
+      u.pathname = "/postgres";
+      const elsewhere = new SQL({ url: u.toString(), max: 1 });
+      const got = await elsewhere`SELECT current_setting('default_transaction_isolation') AS l`.then(
+        (r: { l: string }[]) => ({ level: r[0].l, err: null }),
+        (e: { errno?: string; message: string }) => ({ level: null, err: e }));
+      await elsewhere.close();
+      if (got.err && /^(42501|3D000|55000|28)/.test(got.err.errno ?? "")) skipRaw(onlyHere, `the role cannot connect to database postgres (${got.err.message})`);
+      else assert(got.level === "read committed", `${onlyHere}: one as the same role in postgres is at ${got.level ?? `— it failed: ${got.err?.message}`}`);
+    }
   } finally {
-    await claims.unsafe("ALTER ROLE current_user RESET default_transaction_isolation");
+    await onThisDatabase("RESET default_transaction_isolation");
   }
   // …and 021's CREATE OR REPLACE put its 3-argument upsert_thought back over
   // 035's: a chunkless re-capture would leave the previous vector's windows
@@ -2064,8 +2090,8 @@ console.log("\n[8] The egress gate is reported: the mode, and per endpoint what 
   // says deny is the default; the endpoint row warns with the one-line fix.
   const undeclared = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL });
   const sourceTerm = await run({ ...BASE_OK, ...GATE, OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "source:mcp,type:idea" });
-  assert(/!\s+egress policy\s+1 source: term\(s\) \(source:mcp\) gate a label the caller supplies/.test(sourceTerm.out) && /actor:<key name>/.test(sourceTerm.out),
-         "a source: term is warned about — the label is the caller's since capture_thought takes it (ninth review pass)");
+  assert(/!\s+egress policy\s+1 source: term\(s\) \(source:mcp\) do NOT gate a capture/.test(sourceTerm.out) && /actor:<key name>/.test(sourceTerm.out),
+         "a source: term is warned about — it does not gate a capture, whose source is the caller's claim (SMD-1941)");
   assert(/✓\s+egress policy\s+deny \(the default\) — a thought's text reaches an endpoint not declared local only under an OB1_EGRESS_ALLOW term; no terms/.test(undeclared.out),
          "unset: the policy row says deny, the default, no terms");
   assert(new RegExp(String.raw`!\s+embeddings egress\s+${rx(LOCAL)} looks local but is not declared so — the gate treats it as remote, and under deny with no allow term every embeddings and chat call is refused: captures land without a vector`).test(undeclared.out),
@@ -2344,6 +2370,7 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
       const path = new URL(req.url).pathname;
       seen.push(`${req.method} ${path}`);
       if (path === "/info") return Response.json({ contract: JEV_CONTRACT, model: MODEL, kinds: ["binary", "choice"], max_options: 24, max_batch: 64, max_tokens: 512 });
+      if (path !== "/decide") return new Response("not found", { status: 404 });
       const { decisions } = (await req.json()) as { decisions: { id?: string }[] };
       return Response.json({ contract: JEV_CONTRACT, model: MODEL, ms: 1, results: decisions.map((d) => ({ ...(d.id ? { id: d.id } : {}), kind: "binary", probabilities: { true: 0.6, false: 0.2, [INSUFFICIENT_EVIDENCE]: 0.2 }, selected: "true", abstained: false, p_insufficient: 0.2, p_true: 0.75, logits: [1, 0, 0], temperature: 5.0069, tokens: 30, truncated: false })) });
     },
