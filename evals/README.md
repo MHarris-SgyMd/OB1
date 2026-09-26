@@ -6078,6 +6078,17 @@ and E:
   - the run key was in 0 of 23 saved import runs.
 - **The runner** used 11–12 MiB.
 
+**Sealed, on the same code (`--with sealed`), every check passes.** C1 took
+12.9 s, P 92 s. C3's and A's Linear calls failed, as sealed they must, and I
+passed as unsealed. For E, every packet n8n sent was one of:
+- a question to the network's resolver: `api.linear.app` ×4 (the act
+  tools' host), `server.dns.podman` ×14, `orchestration-runner.dns.podman`
+  ×8;
+- a connection to the brain's `:8000` (7);
+- a connection to the runner's `:8090` (4).
+
+Nothing else was asked for or dialled.
+
 The implementation commit's first run had passed A, I, K and C3. C1, C1s
 and P failed that time because another session's 27B model held the host's
 Ollama. The capture path's metadata model then timed out (the server's log),
