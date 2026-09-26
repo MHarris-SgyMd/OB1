@@ -415,6 +415,18 @@ console.log("\n[6b] list_thought_ids returns the id set, its digest and paging o
   assert(/must be a thought id/.test(refused), `a non-uuid cursor is refused (${refused})`);
 }
 
+console.log("\n[6c] list_logged_searches reads back a logged search over HTTP (SMD-2245)");
+{
+  // e2e runs with OB1_QUERY_LOG on, so a search just made is in the log. Make a
+  // distinctive one, then read it back through the surface, with its arm.
+  await call("search_thoughts_keyword", { query: "zeta-log-probe-xyz" });
+  const page = JSON.parse(await call("list_logged_searches"));
+  assert(Array.isArray(page.searches) && typeof page.truncated === "boolean", `the tool answers with {searches, truncated} (${JSON.stringify(page).slice(0, 60)})`);
+  const hit = page.searches.find((s: { query: string }) => s.query === "zeta-log-probe-xyz");
+  assert(hit && hit.arm === "keyword", "the search just made is in the log, with its arm and no thought content");
+  assert(!("content" in (hit ?? {})) && !("result_ids" in (hit ?? {})), "the row carries no thought content or result ids");
+}
+
 console.log("\n[7] Dedup through the tool surface");
 {
   const before = await call("thought_stats");
