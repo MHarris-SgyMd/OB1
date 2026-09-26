@@ -166,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1891 assertions: 1891 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1903 assertions: 1903 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-seven (57) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -224,10 +224,13 @@ The decision that `thought_audit` is the write-side source of truth and the
 `thoughts` row its projection — the write functions appending the event first
 and one projector writing the row, the audit trigger becoming the check, the
 table kept for the community's DDL — is `../docs/event-log-as-truth.md`
-(SMD-1997). Its three steps are filed (SMD-2115, SMD-2116, SMD-2117) and the
-first has landed as migration 055 (below); at 055 the row is still written
-first and the trigger derives the event from it, as the paragraphs below
-describe — what 055 changes is what the event carries.
+(SMD-1997). Its three steps are filed (SMD-2115, SMD-2116, SMD-2117); the first
+landed as migration 055 (what the event carries) and the second as 057 (below):
+since 057 the three write functions append the event first and one projector
+writes the row, the audit trigger checking the row against its event — the
+paragraphs on 046, 050 and 055 below describe the trigger's raw path, which a
+raw writer (`db/ingest-records.ts`, the backfills, a community schema) still
+takes, and the event shape every path writes.
 
 Migration 046 makes `thought_audit` the log of record (SMD-1730): eight columns
 beside 008's and 010's — `actor_kind` and `trust` (who holds the key, and the
@@ -411,6 +414,39 @@ keeps only the file's. `server-portable/entity-gate.ts` is its JavaScript twin,
 for the capture-time `people` facet (`metadata.ts`), which never reaches the
 function and keeps only the names the rule keeps as a person; test-schema [52]
 holds the two to one answer.
+
+Migration 057 has the write functions append then project (SMD-2116, step 2 of
+`../docs/event-log-as-truth.md`). `upsert_thought` (2- and 3-argument),
+`update_thought` and `delete_thought` keep 046's and 042's bodies up to the
+write — the same locks in the same order, every refusal before any append —
+then compute the after-image with 055's functions, append the event through
+`ob1_append_thought_event` and call `ob1_project_thought_event(event, vector,
+model, replay)`, which writes the row: capture → INSERT, update → UPDATE by the
+event's afters, delete → DELETE; faithful, not corrective (a key the event does
+not move stays; a capture's key is derived from its content, the one thing the
+event does not carry). `thoughts_write_audit` under `ob1.projecting` is the
+check — the row must be the event's AFTER image, a tombstone's `previous_*`
+included, and move only columns the event names, SQLSTATE `OB002` otherwise; a
+foreign row is accepted as a bump or as a tombstone's nulled successor pointer
+(appended live, skipped on a replay); without the setting it appends as before,
+so a raw write is audited, never refused. Live, the projected event must be the
+thought's latest by `seq`. `ob1_refresh_thought_vector` writes a vector onto a
+row that has one with no event and no `updated_at`; `ob1_embedding_snapshot`
+holds every vector by (key, model), seeded once from the rows and fed by
+`thoughts_snapshot_embedding` on live writes alone, so a fold rebuilds vectors
+without the provider; 001's `update_updated_at` yields for the projected row.
+Six deltas against 055, all accepted by the decision: an identical re-capture,
+a no-op edit and a vector refresh write nothing and move no stamp; the
+stale-read guard is the pre-check alone; the 2-argument form locks the row it
+lands on; a raw writer committing the same text inside a fresh capture's window
+is merged as a re-capture (046's `ON CONFLICT` did it; 057 catches the unique
+violation). A fold replays the log in 055's order — `seq` since
+`ob1_config.audit_seq_exact_since`, `(created_at, seq)` before it — never by
+the clock alone, which inverts a row's history. The capture role gains SELECT
+on `thought_audit` and the snapshot's writes (the grants table). Additive, no
+arity moves, idempotent; a re-apply re-seeds nothing. test-schema [53],
+test-live [26], test-upgrade [20k]; the redaction arm is SMD-1723's, the fold
+SMD-2117's.
 
 ## What changed relative to the guide
 
@@ -2268,8 +2304,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1891 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 743 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1903 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 744 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

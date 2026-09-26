@@ -5274,6 +5274,33 @@ console.log("\n[26] Migration 057 on a real server: the windowed capture and an 
     `the 2-argument form: the second capture waits on the lock, reads the first's row, writes nothing — one row, one event (${waiting2} waiting)`);
   await connA.close(); await connB.close();
 
+  // The raw-writer window, driven: a raw INSERT of the same text left
+  // UNCOMMITTED on another connection blocks the fresh capture's projected
+  // INSERT on the unique index; when it commits, the capture meets the
+  // violation, rolls its event back and merges into the row that landed —
+  // 046's ON CONFLICT, kept (run-it, second review pass: pass 1 could pin the
+  // arm by a source grep alone, and a grep-satisfying mutant survived).
+  const rawer = new SQL({ url: URL_, max: 1 }), capturer = new SQL({ url: URL_, max: 1 });
+  await rawer.unsafe(`BEGIN`);
+  const [rawRow] = await rawer`INSERT INTO thoughts (content, content_fingerprint, metadata) VALUES ('057 live: a raw row in the window', content_fingerprint_of('057 live: a raw row in the window'), '{"source": "load"}'::jsonb) RETURNING id`;
+  let capPid = 0;
+  const capturing = capturer.begin(async (tx: SQL) => {
+    capPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+    return ((await tx`SELECT upsert_thought('057 live: a raw row in the window', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`) as { r: Cap }[])[0].r;
+  });
+  let blocked = 0;
+  for (let i = 0; i < 250 && blocked === 0; i++) {
+    if (capPid) blocked = Number((await sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'transactionid' AND NOT granted AND pid = ${capPid}`)[0].n);
+    if (!blocked) await Bun.sleep(20);
+  }
+  await rawer.unsafe(`COMMIT`);
+  const merged = await capturing;
+  const windowRows = await sql`SELECT id::text AS id, metadata FROM thoughts WHERE content = '057 live: a raw row in the window'`;
+  const windowEvents = (await sql`SELECT action, diff FROM thought_audit WHERE thought_id = ${rawRow.id}::uuid ORDER BY seq`) as { action: string; diff: Record<string, unknown> }[];
+  assert(blocked === 1 && merged.id === rawRow.id && windowRows.length === 1 && (windowRows[0].metadata as { source: string }).source === "mcp" && windowEvents.map((e) => e.action).join(",") === "capture,update",
+    `the capture blocked on the raw row's transaction, then merged into the row that landed: one row (the raw writer's id), the metadata merged, the raw capture event and the merge's update event in the log (${blocked} blocked, ${windowRows.length} rows, ${windowEvents.map((e) => e.action).join(",")})`);
+  await rawer.close(); await capturer.close();
+
   // A fold's replay on one connection beside live captures on another: the
   // announcing settings are transaction-local, so the live capture is checked
   // against its own event and the replayed rows against theirs.
@@ -5283,7 +5310,7 @@ console.log("\n[26] Migration 057 on a real server: the windowed capture and an 
   const before = await image();
   // The log's order (055's rule; the migration's header): seq since the
   // boundary, the clock before it.
-  const ORDERED = (ids: string[]) => sql`SELECT a.id FROM thought_audit a, (SELECT COALESCE((SELECT value::timestamptz FROM ob1_config WHERE key = 'audit_seq_exact_since'), 'infinity') AS b) k WHERE a.thought_id = ANY(${sql.array(ids, "UUID")}::uuid[]) ORDER BY (a.created_at >= k.b), CASE WHEN a.created_at >= k.b THEN NULL ELSE a.created_at END, a.seq`;
+  const ORDERED = (ids: string[]) => sql`SELECT id FROM ob1_thought_events_in_order(${sql.array(ids, "UUID")}::uuid[])`;
   const evs = (await ORDERED([p.id])) as { id: string }[];
   const replayer = new SQL({ url: URL_, max: 1 });
   await replayer.begin(async (tx: SQL) => {

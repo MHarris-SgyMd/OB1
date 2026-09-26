@@ -186,6 +186,7 @@ const FUNCTIONS = [
   "ob1_project_thought_event(uuid, vector, text, boolean)",
   "ob1_refresh_thought_vector(uuid, vector, text)",
   "ob1_snapshot_embedding()",
+  "ob1_thought_events_in_order(uuid[])",
 ];
 
 /**

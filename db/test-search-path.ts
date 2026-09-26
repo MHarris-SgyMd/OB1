@@ -129,9 +129,13 @@ try {
       // here with `type "vector" does not exist` — 057's projector did until
       // its first review pass, and no raw INSERT above could have said so.
       const fn = (await sql`SELECT upsert_thought('written through the functions, off-path', '{"metadata": {"source": "test"}}'::jsonb) AS r`)[0].r as { id: string };
-      const ed = (await sql`SELECT update_thought(${fn.id}::uuid, 'written through the functions, off-path, edited', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL) AS r`)[0].r as { ok: boolean };
+      // The edit carries windows: their vectors are assigned through the
+      // column's type, not cast to `vector` by name (046's cast failed here).
+      const windows = [{ content: "a window", embedding: `[${[1, ...new Array(OPTS.dim - 1).fill(0)].join(",")}]`, context: null }];
+      const ed = (await sql`SELECT update_thought(${fn.id}::uuid, 'written through the functions, off-path, edited', NULL, NULL, ${windows}::jsonb, NULL, NULL, NULL, NULL, NULL) AS r`)[0].r as { ok: boolean };
+      const [{ c: windowRows }] = await sql`SELECT count(*)::int AS c FROM thought_chunks WHERE thought_id = ${fn.id}::uuid`;
       const dl = (await sql`SELECT delete_thought(${fn.id}::uuid, NULL, false) AS r`)[0].r as { ok: boolean };
-      assert(ed.ok === true && dl.ok === true, "a text capture, an edit and a delete through the write functions run in the off-path session — no body names the vector type where the session cannot resolve it");
+      assert(ed.ok === true && Number(windowRows) === 1 && dl.ok === true, "a text capture, an edit with a window and a delete through the write functions run in the off-path session — no body 057 defines names the vector type where the session cannot resolve it (the 4-argument capture's window INSERT is 013's and still does)");
       const [{ c }] = await sql`SELECT count(*)::int AS c FROM thoughts`;
       assert(c === written, `every one of the ${written} rows written between migrations survived (${c})`);
       // The column exists and carries the relocated type — the schema really

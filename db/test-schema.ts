@@ -8053,8 +8053,14 @@ console.log("\n[53] Migration 057: the write functions append then project — t
   const capEv = (await eventsOf(succ.id))[0].id, updEv = (await eventsOf(succ.id))[1].id;
   let msg = await refusedTx([`SELECT set_config('ob1.projecting', '${updEv}', true)`, `UPDATE thoughts SET metadata = metadata || '{"forged": true}' WHERE id = '${succ.id}'`]);
   assert(/moved a column its event does not name/.test(msg), `a move of a column the event does not name, on the event's own row, is OB002 (${msg.slice(0, 80)})`);
+  // The successor's capture is not its latest event (the nulled pointer's
+  // is), so the latest-event rule answers first there; a fresh thought with
+  // its capture alone reaches the action rule.
   msg = await refusedTx([`SELECT set_config('ob1.projecting', '${capEv}', true)`, `UPDATE thoughts SET metadata = metadata || '{"forged": true}' WHERE id = '${succ.id}'`]);
-  assert(/the projected row's action is not the event's/.test(msg), `an UPDATE under a capture event is OB002 (${msg.slice(0, 80)})`);
+  assert(/not the thought's latest/.test(msg), `an UPDATE under a capture event that is not the thought's latest is OB002 by the latest-event rule (${msg.slice(0, 80)})`);
+  const lone = await cap("057: a thought with its capture alone", 40);
+  msg = await refusedTx([`SELECT set_config('ob1.projecting', '${(await eventsOf(lone.id))[0].id}', true)`, `UPDATE thoughts SET metadata = metadata || '{"forged": true}' WHERE id = '${lone.id}'`]);
+  assert(/the projected row's action is not the event's/.test(msg), `an UPDATE under a capture event that is the latest is OB002 by the action rule (${msg.slice(0, 80)})`);
   msg = await refusedTx([`SELECT set_config('ob1.projecting', '${updEv}', true)`, `UPDATE thoughts SET content = content || '!' WHERE id = '${a.id}'`]);
   assert(/a row other than the event's moved under its projection/.test(msg), `another row's content moving under the event is OB002 (${msg.slice(0, 80)})`);
   msg = await refusedTx([`SELECT set_config('ob1.projecting', 'vector', true)`, `UPDATE thoughts SET content = content || '!' WHERE id = '${a.id}'`]);
@@ -8113,25 +8119,103 @@ console.log("\n[53] Migration 057: the write functions append then project — t
     const older = (await eventsOf(rb.id))[1].id;
     msg = await refused(`SELECT ob1_project_thought_event($1::uuid)`, [older]);
     assert(/not the thought's latest/.test(msg) && (await rowOf(rb.id)).metadata?.step === 2 && (await eventsOf(rb.id)).length === 3, `a live re-projection of an earlier event is OB002 and the row stays at its latest (${msg.slice(0, 80)})`);
-    msg = await refused(`SELECT ob1_project_thought_event($1::uuid, NULL, NULL, true)`, [older]);
-    assert(msg === "" && (await rowOf(rb.id)).metadata?.step === 1, "…while a replay — the fold, walking the log in order as the owner — may (and the check holds the row to that event)");
+    // The same rollback by hand — ob1.projecting set to the older event and
+    // the row written to its afters — meets the rule in the trigger, where
+    // pass 1 had it in the projector alone (run-it, second review pass).
+    msg = await refusedTx([`SELECT set_config('ob1.projecting', '${older}', true)`, `UPDATE thoughts SET metadata = metadata || '{"step": 1}' WHERE id = '${rb.id}'`]);
+    assert(/not the thought's latest/.test(msg) && (await rowOf(rb.id)).metadata?.step === 2, `…and a raw write under a hand-set setting naming the older event is refused the same way (${msg.slice(0, 80)})`);
+    msg = await refusedTx([`SELECT set_config('ob1.projecting', '${older}', true), set_config('ob1.projecting_replay', 'on', true)`, `UPDATE thoughts SET metadata = metadata || '{"step": 1}' WHERE id = '${rb.id}'`]);
+    assert(msg === "" && (await rowOf(rb.id)).metadata?.step === 1, "…while the owner, claiming a replay by the setting, may — the fold's terms");
     await db.query(`SELECT ob1_project_thought_event($1::uuid, NULL, NULL, true)`, [(await eventsOf(rb.id))[2].id]);
+    msg = await refused(`SELECT ob1_project_thought_event($1::uuid, NULL, NULL, true)`, [older]);
+    assert(msg === "" && (await rowOf(rb.id)).metadata?.step === 1, "…and so may the owner through the projector's p_replay (and the check holds the row to that event)");
+    await db.query(`SELECT ob1_project_thought_event($1::uuid, NULL, NULL, true)`, [(await eventsOf(rb.id))[2].id]);
+    // A trigger on the LOG that writes the row during a function-borne write
+    // appends a later event inside the window: refused by name, captures
+    // untouched (the trigger's UPDATE meets no row yet).
+    await db.exec(`CREATE OR REPLACE FUNCTION ob1_test_logwatch() RETURNS trigger LANGUAGE plpgsql AS $t$ BEGIN IF NEW.action = 'update' THEN UPDATE thoughts SET metadata = metadata || '{"watched": true}' WHERE id = NEW.thought_id; END IF; RETURN NULL; END $t$`);
+    await db.exec(`CREATE TRIGGER zz_logwatch AFTER INSERT ON thought_audit FOR EACH ROW EXECUTE FUNCTION ob1_test_logwatch()`);
+    msg = await refused(`SELECT update_thought($1::uuid, NULL, '{"step": 3}'::jsonb, NULL, NULL, NULL, $2::jsonb, NULL, NULL, NULL)`, [rb.id, JSON.stringify(ACTOR)]);
+    const watchedCap = await cap("057: captured under a log-watching trigger", 36);
+    assert(/a trigger on the log wrote the row during this write/.test(msg) && (await rowOf(rb.id)).metadata?.step === 2 && !("watched" in ((await rowOf(rb.id)).metadata ?? {})) && (await eventsOf(watchedCap.id)).length === 1,
+      `a trigger on thought_audit that writes the row during an edit is refused by name and the edit rolls back whole; a capture beside it is untouched (${msg.slice(0, 100)})`);
+    await db.exec(`DROP TRIGGER zz_logwatch ON thought_audit; DROP FUNCTION ob1_test_logwatch()`);
+    // 008's tombstone shape — content and metadata, no provenance keys — over
+    // a row that carries provenance: an absent key asserts nothing.
+    const prov = await cap("057: provenance under an old tombstone", 37, { supersedes: watchedCap.id });
+    const oldTomb = (await one<{ e: string }>(`SELECT ob1_append_thought_event($1::uuid, 'delete', 'mcp', $2::jsonb, NULL) AS e`, [prov.id, JSON.stringify({ previous_content: "057: provenance under an old tombstone", previous_metadata: (await rowOf(prov.id)).metadata })])).e;
+    msg = await refused(`SELECT ob1_project_thought_event($1::uuid, NULL, NULL, true)`, [oldTomb]);
+    assert(msg === "" && (await rowOf(prov.id)) === undefined, `a tombstone in 008's shape projects a row that carries 025's provenance away — a key the tombstone does not carry is not asserted (${msg.slice(0, 80)})`);
+    // The payload's metadata must be an object (or the JSON null 046 kept).
+    msg = await refused(`SELECT upsert_thought('057: an array for metadata', $1::jsonb, $2::vector)`, [JSON.stringify({ metadata: ["not", "an", "object"], actor: ACTOR, embedding_model: MODEL }), unit(38)]);
+    const msg3 = await refused(`SELECT upsert_thought('057: a string for metadata', $1::jsonb)`, [JSON.stringify({ metadata: "nope", actor: ACTOR })]);
+    assert(/p_payload\.metadata must be a JSON object, got array/.test(msg) && /p_payload\.metadata must be a JSON object, got string/.test(msg3), `both capture forms refuse a payload whose metadata is no object, as 005 refuses the payload (${msg.slice(0, 60)} | ${msg3.slice(0, 60)})`);
+    const jn = (await one<{ r: { id: string } }>(`SELECT upsert_thought('057: a JSON null for metadata', $1::jsonb) AS r`, [JSON.stringify({ metadata: null, actor: ACTOR })])).r;
+    assert((await one<{ t: string }>(`SELECT jsonb_typeof(metadata) AS t FROM thoughts WHERE id = $1::uuid`, [jn.id])).t === "null", "…while a JSON null stays a JSON null on the row, as 046 kept it");
     // The patch must be an object: `{} || 'null'` is an array.
     msg = await refused(`SELECT update_thought($1::uuid, NULL, 'null'::jsonb, NULL, NULL, NULL, $2::jsonb, NULL, NULL, NULL)`, [rb.id, JSON.stringify(ACTOR)]);
     assert(/p_metadata_patch must be a JSON object, got null/.test(msg) && (await one<{ t: string }>(`SELECT jsonb_typeof(metadata) AS t FROM thoughts WHERE id = $1::uuid`, [rb.id])).t === "object", `a JSON-null patch is refused as 005 refuses a non-object payload, and the row's metadata stays an object (${msg.slice(0, 80)})`);
     // 001's stamp still serves ob1_agents: an update there is bumped (the
     // yield is table-guarded, and `new.id` is read on thoughts alone).
     await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('yield-probe', 'agent')`);
-    const [ag0] = await q<{ u: string }>(`SELECT updated_at::text AS u FROM ob1_agents WHERE label = 'yield-probe'`);
-    await db.exec(`UPDATE ob1_agents SET kind = 'operator' WHERE label = 'yield-probe'`);
+    // Backdated around the stamp (two statements in one millisecond read equal).
+    await db.exec(`ALTER TABLE ob1_agents DISABLE TRIGGER ob1_agents_updated_at; UPDATE ob1_agents SET updated_at = now() - interval '1 hour' WHERE label = 'yield-probe'; ALTER TABLE ob1_agents ENABLE TRIGGER ob1_agents_updated_at`);
+    const [ag0] = await q<{ u: string; id: string }>(`SELECT updated_at::text AS u, canonical_agent_id::text AS id FROM ob1_agents WHERE label = 'yield-probe'`);
+    // Under a setting naming the agent row's own id: the yield is for thoughts
+    // alone, so the stamp still moves, strictly (a `>=` would pass a yield
+    // that fired — cold read, second review pass).
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.projecting_thought', $1, true)`, [ag0.id]);
+      await tx.exec(`UPDATE ob1_agents SET kind = 'operator' WHERE label = 'yield-probe'`);
+    });
     const [ag1] = await q<{ u: string }>(`SELECT updated_at::text AS u FROM ob1_agents WHERE label = 'yield-probe'`);
-    assert(ag1.u >= ag0.u && ag1.u !== null, `an ob1_agents update is stamped by the shared function — the yield reads new.id on thoughts alone (${ag0.u} -> ${ag1.u})`);
+    assert(ag1.u > ag0.u, `an ob1_agents update is stamped strictly later by the shared function, even under a setting naming its own id — the yield reads new.id on thoughts alone (${ag0.u} -> ${ag1.u})`);
     await db.exec(`DELETE FROM ob1_agents WHERE label = 'yield-probe'`);
     // The raw-writer window: both capture forms catch the unique violation
     // 046's ON CONFLICT absorbed, and merge — pinned on the arm, since the
     // window cannot be widened in-suite (run-it drove it with a slowed copy).
     assert(/EXCEPTION WHEN unique_violation THEN/.test(two) && /EXCEPTION WHEN unique_violation THEN/.test(three) && /v_ev := NULL;/.test(two) && /v_ev := NULL;/.test(three),
       "both capture forms catch unique_violation on the fresh-capture arm and fall to the re-capture branch with the rolled-back event forgotten");
+    // The arm's other half, driven: a 23505 that is NOT the fingerprint's — no
+    // row holds the text after it — is re-raised as itself, so a genuine
+    // unique failure keeps its own message rather than returning a null id
+    // (cold read, second review pass). A BEFORE INSERT trigger stands in for
+    // the index; the merge half needs a second connection's committed row
+    // inside a microsecond window, which run-it drove with a slowed copy.
+    await db.exec(`CREATE OR REPLACE FUNCTION ob1_test_23505() RETURNS trigger LANGUAGE plpgsql AS $t$ BEGIN IF NEW.content = '057: a 23505 with no twin' THEN RAISE unique_violation USING MESSAGE = 'planted 23505'; END IF; RETURN NEW; END $t$`);
+    await db.exec(`CREATE TRIGGER zz_23505 BEFORE INSERT ON thoughts FOR EACH ROW EXECUTE FUNCTION ob1_test_23505()`);
+    n = await audits();
+    msg = await refused(`SELECT upsert_thought('057: a 23505 with no twin', $1::jsonb, $2::vector)`, [JSON.stringify({ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }), unit(34)]);
+    const msg2 = await refused(`SELECT upsert_thought('057: a 23505 with no twin', $1::jsonb)`, [JSON.stringify({ metadata: { source: "mcp" }, actor: ACTOR })]);
+    assert(/planted 23505/.test(msg) && /planted 23505/.test(msg2) && (await audits()) === n && (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts WHERE content = '057: a 23505 with no twin'`)).c === 0,
+      `a unique violation that no landed row explains is re-raised as itself by both forms, the event rolled back with it (${msg.slice(0, 60)} | ${msg2.slice(0, 60)})`);
+    await db.exec(`DROP TRIGGER zz_23505 ON thoughts; DROP FUNCTION ob1_test_23505()`);
+    // 018's rule on a replay: a raw twin (the same text, a NULL key, as a raw
+    // load leaves it) replays as the twin it was — a NULL key, no error from
+    // the index — and the check accepts the NULL key under its capture.
+    const holder = await cap("057: a text with a raw twin", 35);
+    const TWIN2 = "57575757-0007-4000-8000-000000000007";
+    await db.exec(`INSERT INTO thoughts (id, content, metadata) VALUES ('${TWIN2}', '057: a text with a raw twin', '{"source":"load"}'::jsonb)`);
+    await db.exec(`UPDATE thoughts SET content_fingerprint = NULL WHERE id = '${TWIN2}'`);
+    const twinCap = (await eventsOf(TWIN2))[0].id;
+    await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER USER`);
+    await db.query(`DELETE FROM thoughts WHERE id = $1::uuid`, [TWIN2]);
+    await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER USER`);
+    msg = await refused(`SELECT ob1_project_thought_event($1::uuid, NULL, NULL, true)`, [twinCap]);
+    assert(msg === "" && (await rowOf(TWIN2)).fp === null && (await rowOf(TWIN2)).content === "057: a text with a raw twin" && (await rowOf(holder.id)).fp !== null,
+      `a replayed capture whose text another row holds lands with a NULL key — 018's rule, the decision's fill — instead of a bare unique violation (${msg.slice(0, 80)})`);
+    // The boundary half of the order: rows before ob1_config.audit_seq_exact_since
+    // sort by the clock, rows since by seq — planted either side with the two
+    // orders disagreeing, read through the one copy of the rule.
+    const ORD = "57575757-0008-4000-8000-000000000008";
+    await db.exec(`INSERT INTO thought_audit (thought_id, action, diff, created_at, seq) OVERRIDING SYSTEM VALUE VALUES
+      ('${ORD}', 'update', '{"metadata": {"before": {}, "after": {"o": "pre-b"}}}'::jsonb, (SELECT value::timestamptz - interval '2 days' FROM ob1_config WHERE key = 'audit_seq_exact_since'), 900000002),
+      ('${ORD}', 'update', '{"metadata": {"before": {}, "after": {"o": "pre-a"}}}'::jsonb, (SELECT value::timestamptz - interval '1 day' FROM ob1_config WHERE key = 'audit_seq_exact_since'), 900000001),
+      ('${ORD}', 'update', '{"metadata": {"before": {}, "after": {"o": "post-b"}}}'::jsonb, now(), 900000005),
+      ('${ORD}', 'update', '{"metadata": {"before": {}, "after": {"o": "post-a"}}}'::jsonb, now() + interval '1 second', 900000004)`);
+    const ordered = (await q<{ o: string }>(`SELECT diff->'metadata'->'after'->>'o' AS o FROM ob1_thought_events_in_order($1::uuid[])`, [[ORD]])).map((r) => r.o).join(",");
+    assert(ordered === "pre-b,pre-a,post-a,post-b", `rows before the boundary order by the clock (seq 2 then 1), rows since by seq alone (4 then 5, though 5 is stamped earlier) — the one copy of the rule (${ordered})`);
+    assert((await q<{ o: string }>(`SELECT diff->'metadata'->'after'->>'o' AS o FROM ob1_thought_events_in_order(NULL)`)).length === (await audits()), "…and without a list it is the whole log");
   }
   msg = await refusedTx([`SELECT set_config('ob1.projecting', '${updEv}', true)`, `UPDATE thoughts SET embedding = NULL WHERE id = '${succ.id}'`]);
   assert(/moved the vector's presence in a way its event does not name/.test(msg), `a vector dropped under an event naming no flip is OB002 live (${msg.slice(0, 80)})`);
@@ -8212,11 +8296,11 @@ console.log("\n[53] Migration 057: the write functions append then project — t
   const ids = [p.id, s2.id, rr.id];
   const image = async () => JSON.stringify(await q(`SELECT id, content, content_fingerprint, metadata, embedding::text AS vec, embedding_model, derived_from, supersedes, created_at::text AS c, updated_at::text AS u FROM thoughts WHERE id = ANY($1::uuid[]) ORDER BY id`, [ids]));
   const before = await image();
-  // The log's order (055's rule): seq since the boundary, (created_at, seq)
-  // before it — never the clock alone, which inverts a row's history when an
-  // older transaction wins the row lock later (test-live [26] makes one).
-  const EVENT_ORDER = `ORDER BY (a.created_at >= k.b), CASE WHEN a.created_at >= k.b THEN NULL ELSE a.created_at END, a.seq`;
-  const evs = await q<{ id: string }>(`SELECT a.id FROM thought_audit a, (SELECT COALESCE((SELECT value::timestamptz FROM ob1_config WHERE key = 'audit_seq_exact_since'), 'infinity') AS b) k WHERE a.thought_id = ANY($1::uuid[]) ${EVENT_ORDER}`, [ids]);
+  // The log's order (055's rule, one copy in 057): seq since the boundary,
+  // (created_at, seq) before it — never the clock alone, which inverts a
+  // row's history when an older transaction wins the row lock later
+  // (test-live [26] makes one).
+  const evs = await q<{ id: string }>(`SELECT id FROM ob1_thought_events_in_order($1::uuid[])`, [ids]);
   n = await audits();
   const takenBefore = JSON.stringify(await q(`SELECT content_fingerprint, taken_at::text AS t FROM ob1_embedding_snapshot ORDER BY 1`));
   await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER USER`);
@@ -8270,6 +8354,20 @@ console.log("\n[53] Migration 057: the write functions append then project — t
   await db.exec(`REVOKE SELECT ON thought_audit FROM ob1_test_capture`);
   msg = await asCapture();
   assert(/permission denied for table thought_audit/.test(msg), `without SELECT on thought_audit the check cannot read the event and the write fails (${msg.slice(0, 80)})`);
+  await db.exec(`GRANT SELECT ON thought_audit TO ob1_test_capture`);
+  // A replay is the owner's: the same role may not pass p_replay, nor claim
+  // it by the setting — under which its raw write reads as live and meets
+  // the latest-event rule (run-it, second review pass).
+  {
+    const rp = await cap("057: a row the capture role would replay", 39);
+    await edit(rp.id, null, { step: 1 });
+    const olderEv = (await eventsOf(rp.id))[0].id;
+    let asReplay = "", byClaim = "";
+    try { await db.transaction(async (tx) => { await tx.exec(`SET LOCAL ROLE ob1_test_capture`); await tx.query(`SELECT ob1_project_thought_event($1::uuid, NULL, NULL, true)`, [olderEv]); }); } catch (e) { asReplay = (e as Error).message; }
+    try { await db.transaction(async (tx) => { await tx.exec(`SET LOCAL ROLE ob1_test_capture`); await tx.exec(`SELECT set_config('ob1.projecting', '${olderEv}', true), set_config('ob1.projecting_replay', 'on', true)`); await tx.query(`UPDATE thoughts SET metadata = metadata - 'step' WHERE id = $1::uuid`, [rp.id]); }); } catch (e) { byClaim = (e as Error).message; }
+    assert(/a replay is the owner's/.test(asReplay) && /not the thought's latest/.test(byClaim) && (await rowOf(rp.id)).metadata?.step === 1,
+      `a role that is not the owner may neither pass p_replay nor claim a replay by the setting — the row stays at its latest (${asReplay.slice(0, 60)} | ${byClaim.slice(0, 60)})`);
+  }
   await db.exec(`DROP OWNED BY ob1_test_capture; DROP ROLE ob1_test_capture`);
   await db.exec(`DELETE FROM thoughts`);
 }
