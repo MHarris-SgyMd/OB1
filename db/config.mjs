@@ -1736,8 +1736,10 @@ export const ROLE_GRANTS = Object.freeze({
   // inserts `link` facets (capture's SELECT, UPDATE on thought_facets cover the
   // reads and the closing). It records its mentions through
   // record_thought_entities, so it needs `extraction` as well (SMD-2216).
-  // graph-centrality.ts's lifecycle rows (--startable) read `thought_sources`
-  // too, so a reader running it needs this group's SELECT.
+  // graph-centrality.ts's dependency read (--startable, --decay-blocked) is
+  // 058's node_state(), which reads `thought_sources` too, so a reader running
+  // it needs this group's SELECT; its default modes read node_lifecycle(),
+  // `thoughts` alone (SMD-2074).
   structure: Object.freeze([
     Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "053" }),
     Object.freeze({ table: "thought_facets",  privileges: Object.freeze(["INSERT"]),                               since: "053" }),

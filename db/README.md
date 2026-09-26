@@ -166,8 +166,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1817 assertions: 1817 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports fifty-seven (57) migrations applied, and
+`bun test-schema.ts` prints `1834 assertions: 1834 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports fifty-eight (58) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -206,7 +206,8 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
-051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804).
+051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
+058 SMD-2074).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -413,6 +414,37 @@ for the capture-time `people` facet (`metadata.ts`), which never reaches the
 function and keeps only the names the rule keeps as a person; test-schema [52]
 holds the two to one answer.
 
+Migration 058 is `node_state` (SMD-2074): one read of a thought's lifecycle,
+blockers and supersession, for every surface that ranks by them. Until it,
+`graph-centrality.ts` held those rules as SQL private to the script, and the
+server — which cannot import a `db/` script, and whose PostgREST store reaches
+only RPCs — could not share them. Five functions, all `LANGUAGE sql`, SECURITY
+INVOKER, no SET, not STRICT, so a caller's planner inlines them:
+`node_lifecycle_types()` and `node_settled_types()` (the six status types this
+schema knows, and the two that settle a node); `node_lifecycle()` (per thought:
+status, status_type, the source watermark `synced_at` and `created_at` — a row
+carrying `ticket` or `issue` reads its ticket's head; it reads `thoughts`
+alone); `node_dependencies()` (one row per `blocks` / `blocked_by` link facet,
+active or closed, with whether its system gates — SMD-2218's rule); and
+`node_state(ids)` (every thought, or those named: the lifecycle beside `open`,
+`blocked`, `blockers`, `unknown_blockers`, `in_dependencies` and
+`superseded_by`). Coverage and freshness are columns — a node carries a
+lifecycle when `open` is not NULL; its freshness is `synced_at`, never
+`updated_at` — so each consumer counts over what it ranks. The ids narrow the
+rows returned, not the work: the whole brain is computed and filtered last.
+`graph-centrality.ts` is the first reader, its reports byte for byte what they
+were; search is the second (SMD-2074's second PR). `metadata.status_type` is a
+transitional, lossy scalar: when SMD-1997 folds the transitions `thought_audit`
+holds, the two reads of it change — `node_lifecycle()`'s body and
+`node_dependencies()`' gate — and no signature does. Reads only, no grant row
+(EXECUTE is PUBLIC): `node_lifecycle()` needs SELECT on `thoughts`;
+`node_dependencies()` and `node_state()` also need it on `thought_facets` (the
+capture group) and `thought_sources` (the `structure` group). The file drops
+its three table functions before creating them, so `--reapply` replays it over
+a later migration's reshape; the price is that a view of an operator's over
+`node_state()` (or any other object that records a dependency on one) stops
+that replay at 058, and a REVOKE on one is not kept.
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -477,7 +509,7 @@ issues every group at once.
 | **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for 016's `merge_entities`, and since 053 for `record_thought_entities`, which upserts (`ON CONFLICT DO UPDATE`): Postgres checks it for every call, conflict or none, so until SMD-2216 a `--grant` role could not record a mention |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
-| **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` reads the source rows too | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
+| **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
 | | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets; capture's `SELECT, UPDATE` cover the reads and the closing |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
@@ -1237,9 +1269,12 @@ construction, so a Done ticket still counts as a live one until a flag says
 otherwise, and the lifecycle caveat says so with the run's numbers: how many
 thoughts carry a status, how many are settled, the latest `linear_updated_at`
 (the status is as fresh as the last sync pass), and under a filter how many
-thoughts weighed in. `LIFECYCLE_CTE` is the one place the status comes from;
-when SMD-2074 folds `thought_audit`'s transitions into a node-state
-projection, that CTE reads it and nothing downstream changes.
+thoughts weighed in. The status, and every rule below, is migration 058's
+`node_state` (SMD-2074): `node_lifecycle()` without a dependency flag, which
+reads `thoughts` alone, and `node_state()` with one, which reads
+`thought_sources` too (the `structure` group); when SMD-1997 folds
+`thought_audit`'s transitions, the functions' bodies change and this script
+does not.
 
 **Startability** (SMD-2061). The lifecycle says a ticket is open, not that it
 can be started. Migration 053 (SMD-1867) stores the board's relations as `link`
@@ -1269,9 +1304,8 @@ effect, blocking where its system gates, until both are re-read. The flag
 composes with `--status` and `--decay-done` (the weights multiply). Without it
 (or `--decay-blocked`, below) the dependency read is not in the SQL, so every
 other mode renders byte for byte what it did (the JSON's `options` carries two
-more keys, `startable` and `decayBlocked`, both false) and a brain without 053
-runs them. With either, a brain without 053 is exit 2. `dependencySql` is the
-seam SMD-2074's node-state projection replaces.
+more keys, `startable` and `decayBlocked`, both false) and a role without
+`thought_sources` runs them.
 
 **Blocked decay** (SMD-2181). `--startable` is a filter, so a blocked hub
 vanishes rather than sinks. `--decay-blocked` reads the same dependencies by the
@@ -1301,14 +1335,16 @@ each source with its facets and says which gate nothing. While the board is the
 only source, and states its lifecycle, the line reads as before. The JSON's
 `dependencies.systems` lists each system's facets and whether it gates.
 
-Exit 0 when ranked, 1 when no
-entity resolves (a near-miss whose only guesses the numeric rule hid is still
-no entity: exit 1, and the line counts the hidden guesses), 3 when the subject
-IS an entity — by id, name, alias or merged-in name — that the numeric rule
-excluded (`--keep-numeric` would rank it), 2 for a usage error, a brain
-without 016 (or, under `--startable` or `--decay-blocked`, without 053) or a query that failed — never 1 for a failure or an exclusion. `test-schema.ts` [44] runs the
-script's own SQL under PGlite over a graph whose every count is known by
-construction, and its edges-on and edges-off orders differ at every position.
+Exit 0 when ranked, 1 when no entity resolves (a near-miss whose only guesses
+the numeric rule hid is still no entity: exit 1, and the line counts the hidden
+guesses), 3 when the subject IS an entity — by id, name, alias or merged-in
+name — that the numeric rule excluded (`--keep-numeric` would rank it), 2 for a
+usage error, a brain without 016 or 058 (or whose 058 knows other status types
+than the script) or a query that failed — never 1 for a failure or an
+exclusion. `test-schema.ts` [44] runs the script's own SQL under PGlite over a
+graph whose every count is known by construction, and its edges-on and
+edges-off orders differ at every position; [54] holds 058's functions to the
+contract a second reader relies on.
 
 ## Consolidation: proposing which thoughts supersede which
 
@@ -2347,8 +2383,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1817 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 753 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1834 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 754 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
@@ -2523,7 +2559,9 @@ first assumed. See FORK.md's SMD-1632 section.
   (no data change), the next such re-capture fills nothing, and no capture
   takes the supersession lock.
 - **The routing count is gated by a sample of the heap, drawn by TID range**
-  (migrations 037 and 038). [5d] loads 25,000 rows at the configured width,
+  (migrations 037 and 038). [5d] loads 15,000 rows at the configured width
+  into a vacuumed heap (asserting every page holds a live row, so no page
+  the sample draws is empty),
   applies the last definer (041 — 039's body, run with `jit = off` and its
   two planner paths pinned) with its
   floor lowered to zero, and counts GIN index scans per call: the broad
@@ -2551,7 +2589,7 @@ first assumed. See FORK.md's SMD-1632 section.
   under the raw column's; [20] compares the candidate CTEs to 014's with the
   cast taken out. [5] holds both plans on a real server; [5d] applies the
   last definer before it drops the index, the order 039's swap needed (it
-  would have built one over its 25,000 rows). `test-upgrade.ts` [17] applies 039 onto a populated 038 — no row,
+  would have built one over its loaded rows). `test-upgrade.ts` [17] applies 039 onto a populated 038 — no row,
   signature or privilege moves, the walk agrees with the exact answer before
   and after, the index OIDs survive a re-apply, and an INVALID staging index
   (an interrupted `CREATE INDEX CONCURRENTLY`) is rebuilt rather than adopted.
@@ -2579,7 +2617,7 @@ first assumed. See FORK.md's SMD-1632 section.
   node on 18, fewer buffers than the heap has pages — and, with the pin RESET (the
   mutant), `disable_cost` back on 14–17 and on 18 the disabled node back and,
   under `enable_tidscan = off`, the probe a sequential scan of the whole heap
-  per block (SMD-1703's state). [5f] loads 12,000 rows with chunks and, under
+  per block (SMD-1703's state). [5f] loads 6,000 rows with chunks and, under
   a session `enable_nestloop = off`, explains the three RETURN QUERY
   statements read out of the body under the function's settings: every join
   a Nested Loop touching the default's buffers; with the pin RESET a Merge or

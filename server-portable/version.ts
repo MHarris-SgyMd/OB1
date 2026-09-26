@@ -10,4 +10,4 @@ export const FORK_VERSION = "1.2.0+upstream.9543c29";
 export const RELEASE_RANGE: readonly [number, number] | null = [52, 57];
 
 /** The highest migration file in the tree this server was built from — what a brain migrated for it has applied. */
-export const LATEST_MIGRATION = 57;
+export const LATEST_MIGRATION = 58;

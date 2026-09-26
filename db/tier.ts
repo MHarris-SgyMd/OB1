@@ -31,6 +31,10 @@
  *   # after a soak: stamp the canary's version onto stable
  *   bun db/tier.ts --promote --from <canary-url> --to <stable-url>
  *
+ *   # compare two live brains over HTTP — version/migration/freshness/retrieval —
+ *   # in one report (SMD-2109, db/brain-compare.ts). No Postgres, no writes.
+ *   bun db/tier.ts --compare <a> <b> [--replay [--hybrid]] [--query <q> …] [--json]
+ *
  * --refresh uses pg_dump | pg_restore for a faithful whole-database snapshot
  * (thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
  * migration might touch), copies the source's database-level settings the dump
@@ -64,6 +68,7 @@
 
 import { SQL } from "bun";
 import { mkdtemp, rm } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,6 +76,7 @@ import { alignVectorSearchPath, DB_LEVEL_SETTINGS_SQL, parseSetConfig } from "./
 import { stampTier, TIERS, type Tier } from "./ingest-records.ts";
 import { parsePgUuidArray } from "../evals/query-log.ts";
 import { embed } from "../evals/lib.ts";
+import { runCompare, type CompareArgs } from "./brain-compare.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -694,6 +700,73 @@ function printSummary(s: ReplaySummary, gate: boolean, window: { words: string; 
 // CLI
 // ---------------------------------------------------------------------------
 
+/**
+ * Parse the --compare arguments: `--compare <a> <b>` names the two brains (a URL
+ * or a connector name each), then --a-key/--b-key, a repeatable --query and a
+ * --queries-file (a file of one query per line, blanks and #-comments skipped),
+ * and the bare --replay, --hybrid and --json. A read key never rides argv here by
+ * default — it comes from OB1_COMPARE_KEY, the connector, or the URL's ?key= —
+ * but --a-key/--b-key are accepted for a URL that has none.
+ */
+export function parseCompareArgs(args: string[]): CompareArgs {
+  const USAGE =
+    "  db/tier.ts --compare <a> <b> [--replay [--hybrid]] [--query <q> ...] [--queries-file <path>] [--json]\n" +
+    "  <a>/<b>: an http(s):// URL (key from --a-key/--b-key, OB1_COMPARE_KEY, or ?key=) or a connector name (open-brain, open-brain-canary)";
+  const TAKES_ONE = new Set(["a-key", "b-key", "queries-file"]);
+  const TAKES_MANY = new Set(["query"]);
+  const TAKES_NONE = new Set(["compare", "replay", "hybrid", "json"]);
+  const out: CompareArgs = { a: "", b: "", replay: false, hybrid: false, queries: [], json: false };
+  const refs: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const name = a.startsWith("--") ? a.slice(2) : null;
+    if (name === "compare") {
+      // The two tokens after --compare are the brain references.
+      for (let k = 0; k < 2; k++) {
+        const t = args[i + 1];
+        if (t === undefined || t.startsWith("--")) { console.error(`--compare needs two brains: <a> and <b>.\n${USAGE}`); process.exit(2); }
+        refs.push(t);
+        i++;
+      }
+      continue;
+    }
+    if (name !== null && (TAKES_ONE.has(name) || TAKES_MANY.has(name))) {
+      const v = args[i + 1];
+      if (v === undefined || v.startsWith("--")) { console.error(`--${name} takes a value.\n${USAGE}`); process.exit(2); }
+      if (name === "a-key") out.aKey = v;
+      else if (name === "b-key") out.bKey = v;
+      else if (name === "queries-file") out.queries.push(...readQueriesFile(v));
+      else if (name === "query") { if (v.trim().length === 0) { console.error(`--query is empty.\n${USAGE}`); process.exit(2); } out.queries.push(v); }
+      i++;
+      continue;
+    }
+    if (name === "replay") { out.replay = true; continue; }
+    if (name === "hybrid") { out.hybrid = true; continue; }
+    if (name === "json") { out.json = true; continue; }
+    if (name !== null && TAKES_NONE.has(name)) continue;
+    console.error(`unknown argument: ${name !== null ? a : "<a value where no flag takes one>"}\n${USAGE}`);
+    process.exit(2);
+  }
+  if (refs.length !== 2) { console.error(`--compare needs two brains.\n${USAGE}`); process.exit(2); }
+  [out.a, out.b] = refs;
+  if (out.hybrid && !out.replay) { console.error(`--hybrid only applies with --replay.\n${USAGE}`); process.exit(2); }
+  if (out.queries.length > 0 && !out.replay) { console.error(`--query/--queries-file only apply with --replay (without it, no retrieval runs).\n${USAGE}`); process.exit(2); }
+  if (out.replay && out.queries.length === 0) { console.error(`--replay needs a query set: --query <q> (repeatable) or --queries-file <path>. query_log is not reachable over HTTP, so the queries are supplied.\n${USAGE}`); process.exit(2); }
+  return out;
+}
+
+/** A query file: one query per line, blank lines and #-comment lines skipped. */
+function readQueriesFile(path: string): string[] {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (e) {
+    console.error(`--queries-file: cannot read ${path}: ${(e as Error).message}`);
+    process.exit(2);
+  }
+  return text.split("\n").map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith("#"));
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const flag = (name: string): string | undefined => {
@@ -701,6 +774,17 @@ async function main(): Promise<void> {
     return i >= 0 ? args[i + 1] : undefined;
   };
   const has = (name: string) => args.includes(`--${name}`);
+
+  // --compare is a different animal from the SQL verbs: it reaches two brains over
+  // HTTP as a read client (brain_info + the read tools), never Postgres, so it
+  // takes brain references and its own flags rather than --from/--to. Handled and
+  // returned before the SQL-verb parser ever sees these arguments (SMD-2109).
+  if (has("compare")) {
+    for (const v of ["refresh", "replay", "diff", "promote"]) {
+      if (v !== "replay" && has(v)) { console.error(`--compare does not combine with --${v}.`); process.exit(2); }
+    }
+    process.exit(await runCompare(parseCompareArgs(args)));
+  }
 
   // Every argument accounted for, the way migrate.ts and ingest-records.ts do it.
   {
