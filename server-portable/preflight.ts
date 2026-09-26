@@ -174,40 +174,6 @@ const REAPPLY = `The ledger records that migration but the schema installed is o
 const APPLY_032_POSTGREST = `Apply the migrations through db/migrations/032_update_thought_provenance.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 /** PostgREST's wording for a function it cannot resolve — missing, or not at the argument shape sent. */
 const missing = (msg: string) => /could not find the function|does not exist/i.test(msg);
-/**
- * A search_path setting's schemas as Postgres reads them: comma-separated, a
- * quoted name kept as written ("" inside it a quote), an unquoted one folded to
- * lower case, and the empty name a `''` path is shown as (`""`) dropped. The
- * setting is the role's own text — a connection string or `SET … FROM CURRENT`
- * stores it raw — so it is parsed rather than echoed, and a statement built
- * from it quotes every name (SMD-2062's review pass 3: an echoed path printed
- * invalid SQL for `""` and `$user`, and pasted a stored `x;drop …;--` into
- * the remedy).
- */
-function searchPathSchemas(setting: string): string[] {
-  const names: string[] = [];
-  let i = 0;
-  while (i < setting.length) {
-    while (i < setting.length && /\s/.test(setting[i])) i++;
-    let name = "";
-    if (setting[i] === '"') {
-      for (i++; i < setting.length; i++) {
-        if (setting[i] !== '"') name += setting[i];
-        else if (setting[i + 1] === '"') { name += '"'; i++; }
-        else { i++; break; }
-      }
-    } else {
-      while (i < setting.length && setting[i] !== "," && !/\s/.test(setting[i])) name += setting[i++];
-      name = name.toLowerCase();
-    }
-    while (i < setting.length && setting[i] !== ",") i++;
-    i++;
-    if (name !== "") names.push(name);
-  }
-  return names;
-}
-/** An identifier, always double-quoted: valid for any name, `$user` among them, which a search_path needs quoted. */
-const quoteIdent = (name: string) => `"${name.replaceAll('"', '""')}"`;
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
@@ -788,18 +754,17 @@ if (configFailed) {
       // no connection string of its own — say what to hand it instead.
       const urlArg = conn ? `$${conn.from}` : "<the brain's postgres:// connection string — Supabase's direct connection, not the pooler>";
       // public.thoughts present but not resolving for this role — no USAGE
-      // on public, or public off its search_path, or both — is not a brain
-      // to migrate (SMD-2062). public alone, as every direct check judges
-      // it: a thoughts in some other schema is another tool's, and an
-      // un-migrated public still wants the migrations. Each cause is named
-      // with its statement. current_schemas() cannot say "on the path" — it
-      // leaves out a schema the role has no USAGE on — so the setting is
-      // parsed (searchPathSchemas), and the path's statement is rebuilt from
-      // the parsed names, each quoted, for this database: a role's setting
-      // there outranks its plain ALTER ROLE and the database's. pg_class
-      // answers for any role, whatever its path; over PostgREST there is no
-      // catalog to ask, and a failed probe asks nothing.
-      let offPath: { causes: string[]; fixes: string[] } | null = null;
+      // on public, or public off its search_path — is not a brain to
+      // migrate (SMD-2062). public alone, as every direct check judges it:
+      // a thoughts in some other schema is another tool's, and an
+      // un-migrated public still wants the migrations. With USAGE held the
+      // table can only be off the path; without it, whether the path holds
+      // public too cannot be read (current_schemas() leaves out a schema
+      // the role has no USAGE on), so the GRANT comes first and the path
+      // second. The exact path statement is SMD-2242's. pg_class answers
+      // for any role, whatever its path; over PostgREST there is no catalog
+      // to ask, and a failed probe asks nothing.
+      let offPath: { cause: string; fix: string } | null = null;
       if (built.kind === "sql" && conn && /does not exist/i.test(msg)) {
         try {
           const { SQL } = await import("bun");
@@ -809,30 +774,21 @@ if (configFailed) {
               SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                               WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present,
                      has_schema_privilege('public', 'USAGE') AS usage,
-                     current_setting('search_path') AS path,
                      quote_ident(current_user::text) AS role,
-                     quote_ident(current_database()::text) AS db`) as { present: boolean; usage: boolean; path: string; role: string; db: string }[];
-            const schemas = searchPathSchemas(String(r?.path ?? ""));
-            const causes: string[] = [];
-            const fixes: string[] = [];
-            if (r?.present && !r.usage) {
-              causes.push("no USAGE on schema public");
-              fixes.push(`GRANT USAGE ON SCHEMA public TO ${r.role};`);
-            }
-            if (r?.present && !schemas.includes("public")) {
-              causes.push(`public is not on its search_path, which is ${schemas.length ? schemas.map(quoteIdent).join(", ") : "empty"}`);
-              fixes.push(`ALTER ROLE ${r.role} IN DATABASE ${r.db} SET search_path = ${[...schemas.map(quoteIdent), "public"].join(", ")};  (a search_path in the connection string outranks it)`);
-            }
-            if (causes.length) offPath = { causes, fixes };
+                     quote_ident(current_database()::text) AS db`) as { present: boolean; usage: boolean; role: string; db: string }[];
+            const putOnPath = `ALTER ROLE ${r?.role} IN DATABASE ${r?.db} SET search_path = <the schemas it has>, public; (a search_path in the connection string outranks it)`;
+            if (r?.present) offPath = r.usage
+              ? { cause: "public is not on its search_path", fix: `Put public on the role's search_path: ${putOnPath}` }
+              : { cause: "no USAGE on schema public", fix: `GRANT USAGE ON SCHEMA public TO ${r.role};  then, if public is not on the role's search_path, ${putOnPath}` };
           } finally {
             await probe.close();
           }
         } catch { /* the remedy below stays the migrate command */ }
       }
       add("schema", "fail",
-          offPath ? `${msg} — public.thoughts exists but does not resolve for this role (${offPath.causes.join("; ")})` : msg,
+          offPath ? `${msg} — public.thoughts exists but does not resolve for this role (${offPath.cause})` : msg,
           offPath
-            ? `${offPath.fixes.join("  then ")}  The table is there, so migrating would not make it resolve.`
+            ? `${offPath.fix}  The table is there, so migrating would not make it resolve.`
             : /does not exist|relation/i.test(msg)
             ? `Apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
             : "Check credentials and network reachability to the database.");
