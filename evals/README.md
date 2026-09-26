@@ -2582,9 +2582,12 @@ equals exclude for the top N in every cell**: PREVIOUS −0.449, NOTE −0.524,
 SETTLED −0.380, a settled key −1.000 (CURRENT and LIVE are the same gains).
 Once the window holds N current rows, a demoted thought is out of the top N —
 a key hit included, which keeps only a quarter of its bonus (the first review
-pass: the threshold-0 costs alone understated this). A demoted exact hit stays
-above current rows only on a query of literals only, or past the vector arm's
-62nd rank (limits over about 15).
+pass: the threshold-0 costs alone understated this). A demoted exact hit keeps
+a quarter of its literal bonus, 1/61 per literal it holds: on a query of
+literals only it stays above every row without one; holding one literal, only
+above current rows past the vector arm's 62nd rank; holding two, past about the
+21st; holding three or more, above nearly every current row without one (the
+eval's key queries hold one, hence −0.750 and −1.000).
 
 **Decision, by the pre-registered rule:** the controls hold, CURRENT and LIVE
 each gain at least 0.05, and demote beats exclude on PREVIOUS — build, opt-in,

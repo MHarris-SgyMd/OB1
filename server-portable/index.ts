@@ -737,19 +737,19 @@ export function demotedLine(t: Pick<ThoughtHybridMatch, "demoted" | "score" | "f
  * pass: the note told a caller at 100 to raise it). Null without the flag (no
  * window on the rows). Exported for the unit test.
  */
-export function currentNote(rows: Pick<ThoughtHybridMatch, "window" | "literalOnly" | "needles">[]): string | null {
+export function currentNote(rows: Pick<ThoughtHybridMatch, "window" | "demoted">[]): string | null {
   const w = rows[0]?.window;
   if (!w) return null;
   const lifecycle = `${w.known} carr${w.known === 1 ? "ies" : "y"} a lifecycle${w.syncedAt ? ` (latest sync ${w.syncedAt})` : ""}`;
-  // A demoted exact hit keeps a quarter of its needle bonus: below every
-  // current row in the vector arm's top 62, so it outranks current rows only on
-  // a query of literals only (every row without one scores 0) or far down by
-  // meaning. Said only where the query has a literal (third review pass: the
-  // second's unconditional "unless holding the literal" was false as a rule).
-  const head = rows[0];
-  const exception = head?.literalOnly ? " — on a query of literals only, a demoted exact hit still ranks above the rows without one"
-    : head?.needles?.length ? " — a demoted exact hit on the query's literal can still outrank current matches far down by meaning"
-    : "";
+  // A demoted exact hit keeps a quarter of its literal bonus (1/61 per literal
+  // it holds), so one can still rank above current rows — on a query of
+  // literals only, or holding several literals. Rather than state when (the
+  // third and fourth review passes each found the rule wrong for some case),
+  // the note counts the returned demoted rows that do sit above a current one.
+  const isDemoted = (r: Pick<ThoughtHybridMatch, "demoted">) => (r.demoted?.length ?? 0) > 0;
+  const above = rows.filter((r, i) => isDemoted(r) && rows.slice(i + 1).some((x) => !isDemoted(x))).length;
+  const exception = above === 0 ? ""
+    : ` — ${above} of the demoted, holding the query's literal, still rank${above === 1 ? "s" : ""} above a current one here`;
   const note = `Current first (prefer_current): ${w.demoted} of the top ${w.rows} match${w.rows === 1 ? "" : "es"} ${w.demoted === 1 ? "is" : "are"} settled or superseded and ranked below the current ones${exception}; ${lifecycle}.`;
   if (w.exact) return note;
   const current = w.rows - w.demoted;
@@ -1200,8 +1200,8 @@ function buildServer(principal: Principal): McpServer {
           notes.push(matchedAny.size
             ? "The query is only literals, so exact matches are ranked first and the rest by similarity."
             : head.commonNeedles.length
-              ? "The query is only literals, and too common to match exactly, so these results are by similarity alone."
-              : "The query is only literals and no thought contains them, so these results are by similarity alone.");
+              ? `The query is only literals, and too common to match exactly, so these results are by similarity alone${prefer_current ? ", current ones first" : ""}.`
+              : `The query is only literals and no thought contains them, so these results are by similarity alone${prefer_current ? ", current ones first" : ""}.`);
         }
 
         return {

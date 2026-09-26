@@ -31,13 +31,13 @@
 --   cell (PREVIOUS -0.449, NOTE -0.524, SETTLED -0.380, a settled key -1.000):
 --   once the window holds N current rows, a demoted row is out of the top N
 --   (first review pass).
---   A demoted exact hit on the query's literal is no exception in
---   the ordinary case: it keeps a quarter of its needle bonus, below every
---   current row the vector arm ranks in its top 62, so it stays above current
---   rows only on a query of literals only (every row without one scores 0) or
---   when the top N reaches current rows past that rank (limits over about 15)
---   (third review pass: the second's "unless it holds the literal" was false
---   for the eval's own key queries, a settled key -1.000).
+--   A demoted exact hit keeps a quarter of its literal bonus — 1/61 for each
+--   of the query's literals it holds. On a query of literals only it stays
+--   above every row without one; holding one literal, only above current rows
+--   past the vector arm's 62nd rank (so only at limits of 16 or more);
+--   holding two, past about the 21st; holding three or more, above nearly
+--   every current row without a literal (third and fourth review passes: each
+--   shorter version was false for some count of literals).
 --
 -- WHAT
 --   * search_demote_weight() — IMMUTABLE 0.25: what a demoted thought's fused
@@ -249,7 +249,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION search_thoughts_current(vector, text, float, int, jsonb, float, float) IS
-  'search_thoughts_hybrid with settled and superseded thoughts ranked below current ones, for search_thoughts'' opt-in prefer_current: over the hybrid''s top min(100, 4N), a thought node_state (058) says is settled (its ticket completed or canceled — a note under a Done ticket included) or superseded weighs search_demote_weight() (0.25) of its fused score, once; the window is re-sorted (ties to the current row, then the hybrid''s order) and cut to N. In practice every current match in the window ranks first; an exact-literal hit on a demoted thought is demoted too, and stays above current rows only on a query of literals only or past the vector arm''s 62nd rank. Blocked or unknown status does not demote a thought (superseded still does). Returns the hybrid''s columns, then fused, demoted (why), and on every row the window''s size, lifecycle coverage, demoted count, latest source watermark and whether the top N is exact. Migration 059 / SMD-2255 (SMD-2074).';
+  'search_thoughts_hybrid with settled and superseded thoughts ranked below current ones, for search_thoughts'' opt-in prefer_current: over the hybrid''s top min(100, 4N), a thought node_state (058) says is settled (its ticket completed or canceled — a note under a Done ticket included) or superseded weighs search_demote_weight() (0.25) of its fused score, once; the window is re-sorted (ties to the current row, then the hybrid''s order) and cut to N. In practice every current match in the window ranks first; an exact-literal hit on a demoted thought is demoted too, keeping a quarter of its literal bonus (1/61 per literal it holds), so on a query of literals only, or holding several literals, it can still outrank current rows. Blocked or unknown status does not demote a thought (superseded still does). Returns the hybrid''s columns, then fused, demoted (why), and on every row the window''s size, lifecycle coverage, demoted count, latest source watermark and whether the top N is exact. Migration 059 / SMD-2255 (SMD-2074).';
 
 -- ---------------------------------------------------------------------------
 -- The query log: arm 'current'

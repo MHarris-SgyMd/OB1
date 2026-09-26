@@ -948,7 +948,7 @@ console.log("\n[16c] prefer_current's row line, header note and error hint rende
   // fused), so the server holds no copy of 059's 0.25.
   const { demotedLine, currentNote, currentSearchHint } = await import("./index.ts") as {
     demotedLine: (t: { demoted: string[]; score: number; fused: number }) => string | null;
-    currentNote: (rows: { window?: { rows: number; known: number; demoted: number; syncedAt: string | null; exact: boolean }; literalOnly?: boolean; needles?: string[] }[]) => string | null;
+    currentNote: (rows: { window?: { rows: number; known: number; demoted: number; syncedAt: string | null; exact: boolean }; demoted?: string[] }[]) => string | null;
     currentSearchHint: (msg: string) => string;
   };
   assert(demotedLine({ demoted: [], score: 0.016, fused: 0.016 }) === null, "a row nothing demoted has no line — every row without the flag");
@@ -959,13 +959,18 @@ console.log("\n[16c] prefer_current's row line, header note and error hint rende
   assert(currentNote([{}]) === null && currentNote([]) === null, "no window on the rows (no flag, or no rows): no note");
   assert(currentNote([{ window: win }]) === "Current first (prefer_current): 7 of the top 40 matches are settled or superseded and ranked below the current ones; 12 carry a lifecycle (latest sync 2026-09-25T00:00:00.000Z).",
     `the note gives the window's demoted count, its lifecycle coverage and freshness (${currentNote([{ window: win }])})`);
-  // The exception is said only where the query has a literal (third review pass).
-  const onLiteral = currentNote([{ window: win, needles: ["SMD-1"], literalOnly: true }]) ?? "";
-  const withLiteral = currentNote([{ window: win, needles: ["SMD-1"], literalOnly: false }]) ?? "";
-  assert(onLiteral.includes("ranked below the current ones — on a query of literals only, a demoted exact hit still ranks above the rows without one;")
-      && withLiteral.includes("ranked below the current ones — a demoted exact hit on the query's literal can still outrank current matches far down by meaning;")
-      && !(currentNote([{ window: win, needles: [] }]) ?? "").includes("exact hit"),
-    "a query with a literal carries the one exception to 'ranked below' — a query of literals only its own — and a query without one carries none");
+  // The exception counts what happened: a returned demoted row above a
+  // current one (a literal hit keeps a quarter of its bonus) — said when there
+  // is one, never as a rule (third and fourth review passes).
+  const cur = { window: win, demoted: [] as string[] };
+  const dem = { window: win, demoted: ["completed"] };
+  const aboveOne = currentNote([cur, dem, cur]) ?? "";
+  const aboveTwo = currentNote([dem, dem, cur]) ?? "";
+  const belowAll = currentNote([cur, cur, dem, dem]) ?? "";
+  assert(aboveOne.includes("ranked below the current ones — 1 of the demoted, holding the query's literal, still ranks above a current one here;")
+      && aboveTwo.includes("— 2 of the demoted, holding the query's literal, still rank above a current one here;")
+      && !belowAll.includes("still rank") && belowAll.includes("ranked below the current ones;"),
+    "the note names how many returned demoted rows sit above a current one, and says nothing when none does");
   const thin = currentNote([{ window: { rows: 40, known: 40, demoted: 36, syncedAt: null, exact: false } }]) ?? "";
   assert(thin.includes("36 of the top 40 matches are settled or superseded") && thin.includes("40 carry a lifecycle.") && thin.endsWith("Only 4 current matches were in the top 40, so the rows after them are demoted ones, and a current match past the window may have been missed — raise limit to read further."),
     `a window with fewer current rows than the limit says what that means and what to do (${thin})`);
