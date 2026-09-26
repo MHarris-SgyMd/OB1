@@ -2256,6 +2256,28 @@ console.log("\n[22] --baseline on an empty database refuses, naming public.thoug
   assert(forceAlone.code === 2 && /--force overrides --baseline's empty-database guard/.test(forceAlone.out),
          `--force without --baseline is refused (exit ${forceAlone.code})`);
 
+  // Protective direction of the public-qualified guard: a hand-built public
+  // schema present but OFF the migrator role's search_path must still be found
+  // (pg_class, not to_regclass), so --baseline adopts it rather than refusing.
+  // Build a minimal public.thoughts and a separate schema, then run --baseline
+  // with search_path set to that other schema: the guard finds public.thoughts
+  // and records the ledger (into the off-path schema). A to_regclass spelling —
+  // the "obvious" refactor — would miss public.thoughts here and wrongly refuse,
+  // reintroducing the search_path-hiding the pg_class probe exists to avoid
+  // (SMD-2237, and SMD-2062's restricted-role deployments).
+  const offPathSql = new SQL({ url: URL_, max: 1 });
+  let offPathBaseline: { code: number; out: string };
+  try {
+    await offPathSql.unsafe("CREATE TABLE IF NOT EXISTS public.thoughts (id int); DROP SCHEMA IF EXISTS tu_offpath CASCADE; CREATE SCHEMA tu_offpath");
+    const sep = URL_.includes("?") ? "&" : "?";
+    offPathBaseline = await runMigrator(`${URL_}${sep}options=-csearch_path%3Dtu_offpath`, MIGRATOR_ENV, "--baseline");
+  } finally {
+    await offPathSql.unsafe("DROP SCHEMA IF EXISTS tu_offpath CASCADE; DROP TABLE IF EXISTS public.thoughts");
+    await offPathSql.close();
+  }
+  assert(offPathBaseline.code === 0 && new RegExp(`baselined ${MIGRATIONS.length}, skipped 0`).test(offPathBaseline.out),
+         `--baseline finds public.thoughts by pg_class even with public off the role's search_path — adoption holds off-path (exit ${offPathBaseline.code})`);
+
   // Leave the database clean and migrated, as the blocks before this one do.
   await dropSchema(URL_);
   await applyMigrations(URL_, OPTS);

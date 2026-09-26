@@ -347,6 +347,15 @@ else {
   // "no schema" would send a hand-applied brain to re-run the migrations.
   assert(/!\s+migration ledger\s+no schema_migrations table — the schema was applied by hand\n\s+→ Adopt it with: cd db && bun migrate\.ts --url \$DATABASE_URL --baseline/.test(after.out),
          "…and, with the schema present but no ledger, offers --baseline to adopt it (the legitimate case the empty-database guard must not swallow, SMD-2237)");
+  // The protective direction of the public-qualified probe: the same
+  // migrated-but-no-ledger brain, read from a role whose search_path excludes
+  // public, still offers --baseline. The probe is pg_class-qualified to public,
+  // so it finds public.thoughts even when the role cannot resolve it by name — the
+  // search_path-independence the probe's comment promises. A to_regclass spelling
+  // would miss it here and wrongly say "nothing has been migrated" (SMD-2237).
+  const afterOffPath = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: `${LIVE}${LIVE.includes("?") ? "&" : "?"}options=-csearch_path%3Dnowhere` });
+  assert(/!\s+migration ledger\s+no schema_migrations table — the schema was applied by hand\n\s+→ Adopt it with: cd db && bun migrate\.ts --url \$DATABASE_URL --baseline/.test(afterOffPath.out),
+         "…and offers --baseline even with public off the role's search_path — the probe finds public.thoughts by pg_class (SMD-2237)");
   assert(/resolve_agent present/.test(after.out), "…and that the agent registry is available");
 
   /**
