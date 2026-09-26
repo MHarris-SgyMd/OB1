@@ -107,9 +107,11 @@ const ALL_ARMS: Arm[] = [
 const wanted = flag("arms")?.split(",").map((s) => s.trim()).filter(Boolean);
 const ARMS = wanted ? ALL_ARMS.filter((a) => wanted.includes(a.name)) : ALL_ARMS;
 if (wanted && ARMS.length !== wanted.length) { console.error(`unknown arm in --arms; known: ${ALL_ARMS.map((a) => a.name).join(", ")}`); process.exit(2); }
-// An `e` arm with no model to escalate to would fall through to the penalised
-// retry and measure the wrong thing (SMD-2000) — refuse it by name.
-if (ARMS.some((a) => a.windowing.retryRunaway && a.name.endsWith("e") && !a.windowing.escalateModel)) { console.error("the w1200e arm escalates a runaway to a larger model — pass --escalate <model> (or set OB1_EXTRACT_ESCALATE_MODEL)"); process.exit(2); }
+// An escalation arm with no model to escalate to would fall through to the
+// penalised retry and measure the wrong thing (SMD-2000) — refuse it by name.
+// Named explicitly, not by an `e` suffix (which "whole" also ends in).
+const ESCALATE_ARM_NAMES = new Set(["w1200e"]);
+if (ARMS.some((a) => ESCALATE_ARM_NAMES.has(a.name) && !a.windowing.escalateModel)) { console.error(`the ${[...ESCALATE_ARM_NAMES].join("/")} arm escalates a runaway to a larger model — pass --escalate <model> (or set OB1_EXTRACT_ESCALATE_MODEL)`); process.exit(2); }
 
 // ── The planted set ──────────────────────────────────────────────────────────
 

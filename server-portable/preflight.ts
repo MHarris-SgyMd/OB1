@@ -74,13 +74,7 @@ const embDim = env.OB1_EMBEDDING_DIM ? Number(env.OB1_EMBEDDING_DIM) : DEF_DIM;
  * probe cannot name a model the worker would not use.
  */
 const resolvedEmbed = resolveEmbedConfig(env);
-const { metadataModel: metaModel, judgeModel, egress, extractEscalateModel } = resolvedEmbed;
-/**
- * The larger model a runaway extraction escalates to (SMD-2000), when it is not
- * the metadata model — the value windowingFor would actually use, so the --deep
- * probe below tests the model the worker would dial, not the raw knob.
- */
-const escalateModel = extractEscalateModel && extractEscalateModel !== metaModel ? extractEscalateModel : "";
+const { metadataModel: metaModel, judgeModel, egress } = resolvedEmbed;
 /**
  * The two endpoints, by embed.ts's rule — the one the server dials by — so the
  * rows below print what a capture will do, not a second opinion of it. Until
@@ -3291,6 +3285,12 @@ if (deep) {
   // and a judge model the endpoint does not serve fails the `judge model` row
   // rather than the first pass of db/consolidate.ts (SMD-1901). One model,
   // one probe: the two rows would otherwise report one call twice.
+  // The escalation target the worker would ACTUALLY dial (SMD-2000): windowingFor
+  // applies the rule — active only with reasoning off (a runaway exists only
+  // under a budget) and when it is not the metadata model — so the probe never
+  // fires for a model the worker would never reach.
+  const { windowingFor } = await import("./entities.ts");
+  const escalateModel = windowingFor(resolvedEmbed).escalateModel ?? "";
   const probes: [row: string, model: string, consequence: string][] = [
     ["metadata model", metaModel, "Capture would still succeed, but every thought would be tagged uncategorized."],
     ...(judgeModel !== metaModel

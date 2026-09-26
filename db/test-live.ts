@@ -3318,6 +3318,67 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   await sql`DELETE FROM thoughts`;
 }
 
+console.log("\n[10e] db/extract-entities.ts: a runaway escalates to the larger model — the dump line and the summary say which (SMD-2000)");
+{
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  const big = { entities: [{ name: "Bigfoot", type: "person", confidence: 0.9 }], relationships: [] };
+  // A runaway on the small model's FIRST call only: the larger model answers
+  // whole, and so does the small model's penalised retry (frequency_penalty
+  // set), so the control run below converges without escalation.
+  const escModel = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { model?: string; frequency_penalty?: number; messages?: { role: string; content: string }[] };
+      const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
+      if (/runaway/.test(prompt) && body.model === "stub-meta" && body.frequency_penalty === undefined) {
+        return Response.json({ choices: [{ message: { content: '{"entities":[{"name":"Loop","type":"tool","confidence":1},{"name":"Loop","type":"tool",' }, finish_reason: "length" }] });
+      }
+      return Response.json({ choices: [{ message: { content: JSON.stringify(big) }, finish_reason: "stop" }] });
+    },
+  });
+  const rawKey = "b".repeat(64);
+  const { hashKey } = await import("../server-portable/auth.ts");
+  const baseEnv: Record<string, string | undefined> = {
+    ...process.env, DATABASE_URL: URL_, OB1_LLM_BASE_URL: `http://127.0.0.1:${escModel.port}/v1`,
+    OB1_LLM_LOCAL: "1", OB1_METADATA_MODEL: "stub-meta", OB1_WORKER_KEY: rawKey,
+    MCP_ACCESS_KEYS: `esc-worker:write:${hashKey(rawKey)}`,
+  };
+  const seedOne = async (content: string) => ((await sql`SELECT upsert_thought(${content}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  type DumpLine = { id: string; escalated?: string; retried?: boolean };
+  const dumpLineFor = async (path: string, id: string): Promise<DumpLine | undefined> =>
+    (await Bun.file(path).text()).trim().split("\n").map((l) => JSON.parse(l) as DumpLine).find((l) => l.id === id);
+
+  // Escalated: the runaway is remade on the larger model, unpenalised.
+  const dumpEsc = join(tmpdir(), `ob1-test-live-esc-${process.pid}.jsonl`);
+  const tEsc = await seedOne("The runaway widget report, for escalation.");
+  const escRun = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--dump", dumpEsc],
+    { env: { ...baseEnv, OB1_EXTRACT_ESCALATE_MODEL: "big-stub" } as Record<string, string>, cwd: HERE });
+  assert(escRun.code === 0 && /1 extracted, 0 failed/.test(escRun.out), `the escalated run extracts the runaway (exit ${escRun.code}: ${escRun.out.split("\n").find((l) => /extracted,/.test(l))?.trim()})`);
+  assert(/1 escalated to big-stub/.test(escRun.out) && !/1 retried after a runaway/.test(escRun.out), `the summary counts it escalated, not retried (${escRun.out.split("\n").find((l) => /model call/.test(l))?.trim()})`);
+  const escLine = await dumpLineFor(dumpEsc, tEsc);
+  assert(escLine?.escalated === "big-stub" && escLine.retried === undefined, `the dump line records escalated: big-stub and NOT retried — the derivation record of which model answered (${JSON.stringify(escLine)})`);
+  assert((await sql`SELECT count(*)::int AS c FROM ob1_entities WHERE normalized_name = normalize_entity_name('Bigfoot')`)[0].c === 1, "the larger model's answer is what landed in the graph");
+  try { unlinkSync(dumpEsc); } catch { /* already gone */ }
+
+  // Control: no escalation model — the same runaway is the penalised same-model
+  // retry, dumped and counted `retried`, never `escalated`.
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  const dumpCtl = join(tmpdir(), `ob1-test-live-ctl-${process.pid}.jsonl`);
+  const tCtl = await seedOne("The runaway widget report, for the retry.");
+  const ctlRun = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--dump", dumpCtl],
+    { env: baseEnv as Record<string, string>, cwd: HERE });
+  assert(ctlRun.code === 0 && /1 retried after a runaway/.test(ctlRun.out) && !/escalated to/.test(ctlRun.out), `without the knob the runaway is the penalised retry, not an escalation (${ctlRun.out.split("\n").find((l) => /model call/.test(l))?.trim()})`);
+  const ctlLine = await dumpLineFor(dumpCtl, tCtl);
+  assert(ctlLine?.retried === true && ctlLine.escalated === undefined, `the dump line records retried and NOT escalated (${JSON.stringify(ctlLine)})`);
+  try { unlinkSync(dumpCtl); } catch { /* already gone */ }
+
+  escModel.stop(true);
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  await sql`DELETE FROM thoughts`;
+}
+
 console.log("\n[11] search_thoughts_hybrid through Bun.sql on real pgvector (migration 017)");
 {
   await sql`DELETE FROM thoughts`;
