@@ -29,7 +29,7 @@
  */
 
 import { SQL } from "bun";
-import { chmodSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5232,14 +5232,19 @@ console.log("\n[25] Migration 055's payload backfill under two connections: a se
 console.log("\n[26] recipes/brain-backup and recipes/lint-sweep on the SQL shim: the export pages every thought past one page and skips a table that is not there, the sweep's counts are the table's, neither needs a key, and a Supabase URL is refused before any query (SMD-2144)");
 {
   // The two read-only recipe scripts SMD-2126 sent to compat/supabase-sql,
-  // driven as deployed \u2014 `bun <file>` in a directory of their own, SUPABASE_URL
-  // the one variable \u2014 against this database carrying the schemas their reads
+  // driven as deployed — `bun <file>` in a directory of their own, SUPABASE_URL
+  // the one variable — against this database carrying the schemas their reads
   // name: enhanced-thoughts for Tier 1's importance and source_type columns
   // ([18] left the columns; the file is idempotent), entity-extraction for Tier
   // 2's entities and edges and the export's three optional tables, the lint
   // views for the record. What the files add is read from the catalog and
   // dropped in the finally, as [18] does; the columns stay, as there. The
-  // planted table is the truth every printed count is held to.
+  // planted table is the truth every printed count is held to. lint-sweep.js
+  // reads `.env` and `.env.local` from ITS OWN directory (the recipe's, not the
+  // cwd — `--no-env-file` stops Bun's loader, not the script's), so on a machine
+  // where a developer keeps one there the sweep runs are skipped: that file's
+  // SUPABASE_URL would defeat the refusal case and its OPENROUTER_API_KEY would
+  // pay for Tier 3 (review pass 1, cold read). CI has no such file.
   const sql = new SQL({ url: URL_, max: 2 });
   const catalog26 = async () => ({
     tables: new Set(((await sql`SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
@@ -5256,14 +5261,16 @@ console.log("\n[26] recipes/brain-backup and recipes/lint-sweep on the SQL shim:
   const lint = (extra: Record<string, string>, ...flags: string[]) => runScript(["bun", join(RECIPES, "lint-sweep/lint-sweep.js"), ...flags], { cwd: lintDir, env: env(extra) });
   const backup = (extra: Record<string, string>) => runScript(["bun", join(RECIPES, "brain-backup/backup-brain.mjs")], { cwd: backupDir, env: env(extra) });
   const firstLine = (s: string) => s.trim().split("\n")[0] ?? "";
+  const recipeEnvFile = [".env", ".env.local"].map((f) => join(RECIPES, "lint-sweep", f)).find((f) => existsSync(f));
   try {
     await sql`DELETE FROM thoughts`;
     for (const f of ["enhanced-thoughts/schema.sql", "entity-extraction/schema.sql"]) await sql.unsafe(readFileSync(join(SCHEMAS_DIR, f), "utf8"));
     await sql.unsafe(readFileSync(join(RECIPES, "lint-sweep/views.sql"), "utf8"));
-    // 1,050 rows \u2014 a page and a half of the export's 1,000 \u2014 a third tagged, one
-    // over-tagged, importance 0\u20134 by turn, a second apart so "most recent" is an
-    // order and not a tie; a raw insert leaves the fingerprint NULL (016's
-    // trigger does not fill it), which the sweep counts. A three-entity graph
+    // 1,050 rows — a page of the export's 1,000 and a partial second — a third
+    // tagged, one over-tagged, importance 0–4 by turn, a second apart so "most
+    // recent" is an order and not a tie; a raw insert leaves the fingerprint
+    // NULL (the functions compute it; 023's backfill is the only other writer),
+    // which the sweep counts. A three-entity graph
     // with one edge, and one high-importance row linked through 016's
     // thought_entities.
     const N = 1050;
@@ -5288,11 +5295,14 @@ console.log("\n[26] recipes/brain-backup and recipes/lint-sweep on the SQL shim:
       `the planted table: ${N} rows, 699 orphans by tag, 630 low-signal, 210 at importance ≥ 4, no fingerprint on a raw insert (${JSON.stringify(truth)})`);
 
     // Every tier, no key in the environment: each count the run prints and the report carries is the table's.
+    if (recipeEnvFile) {
+      for (const label of ["lint-sweep.js --tier=all on the shim", "…its report", "…OPEN_BRAIN_URL alone", "…no URL and a Supabase URL refused"]) skip(label, `${recipeEnvFile.slice(CONTRIB_DIR.length + 1)} exists on this machine and the script reads it`);
+    } else {
     const sweep = await lint({ SUPABASE_URL: URL_ }, "--tier=all", `--report=${join(lintDir, "sweep.md")}`);
     let report = "";
     try { report = readFileSync(join(lintDir, "sweep.md"), "utf8"); } catch { /* not written: the assertion says so */ }
     const tierLines = (out: string) => out.split("\n").filter((l) => /^\[tier/.test(l)).join(" | ");
-    assert(sweep.code === 0 && sweep.out.includes(`[tier 1] done — ${N} total thoughts, 699 orphans-by-tag, 0 dup groups, ${N} missing-fingerprint`) && sweep.out.includes("[tier 2] done \u2014 209 high-imp isolated, 1 isolated entities") && sweep.out.includes("[tier 3] skipped \u2014 OPENROUTER_API_KEY not set"),
+    assert(sweep.code === 0 && sweep.out.includes(`[tier 1] done — ${N} total thoughts, 699 orphans-by-tag, 0 dup groups, ${N} missing-fingerprint`) && sweep.out.includes("[tier 2] done — 209 high-imp isolated, 1 isolated entities") && sweep.out.includes("[tier 3] skipped — OPENROUTER_API_KEY not set"),
       `lint-sweep.js --tier=all on the shim, SUPABASE_URL alone: Tier 1's four counts are the table's, Tier 2 finds the 209 unlinked high-importance rows and the one entity without an edge, Tier 3 skips without a key (exit ${sweep.code}: ${tierLines(sweep.out).slice(0, 320) || firstLine(sweep.out)})`);
     assert(/Total thoughts in table \(exact count, uncapped\): 1050\n/.test(report) && /Low-signal noise candidates \(in recent 2000 sampled\): 630\n/.test(report) && /Over-tagged \(>10 tags\): \*\*1\*\*/.test(report) && /ordered by `created_at desc`/.test(report) && /Entities with zero edges .*: \*\*1\*\*/.test(report),
       `…and the report carries the exact count, the 630 low-signal rows, the one over-tagged row, recency by created_at and the one isolated entity (${report.length} chars)`);
@@ -5304,6 +5314,7 @@ console.log("\n[26] recipes/brain-backup and recipes/lint-sweep on the SQL shim:
     const httpsUrl = await lint({ SUPABASE_URL: "https://example.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "unused" }, "--tier=1");
     assert(noUrl.code === 1 && /ERROR: SUPABASE_URL must be set/.test(noUrl.out) && httpsUrl.code === 1 && /expected a postgres:\/\/ connection URL/.test(httpsUrl.out) && !/\[tier 1\] done/.test(httpsUrl.out),
       `…no URL exits 1 naming the variable; a Supabase URL exits 1 with the shim's refusal, before any query (${noUrl.code}: ${firstLine(noUrl.out)}; ${httpsUrl.code}: ${firstLine(httpsUrl.out).slice(0, 120)})`);
+    }
 
     // The export: every thought, past the first page; the optional tables it
     // finds; the two smart-ingest tables this database lacks, skipped by name.
@@ -5316,8 +5327,10 @@ console.log("\n[26] recipes/brain-backup and recipes/lint-sweep on the SQL shim:
     };
     const thoughtsOut = file("thoughts"), entitiesOut = file("entities"), edgesOut = file("edges"), linksOut = file("thought_entities");
     const ids = new Set(((await sql`SELECT id::text AS id FROM thoughts`) as { id: string }[]).map((r) => r.id));
-    assert(exported.code === 0 && /thoughts: 1050 rows \(/.test(exported.out) && /ingestion_jobs: skipped \(table not present\)/.test(exported.out) && /ingestion_items: skipped \(table not present\)/.test(exported.out) && /Done\. 6\/6 tables exported successfully/.test(exported.out),
-      `backup-brain.mjs on the shim, SUPABASE_URL alone: 1,050 thoughts over two pages, the three entity-extraction tables, the two smart-ingest tables skipped as not present, 6/6 (exit ${exported.code}: ${firstLine(exported.out.split("--- Backup Summary ---")[1] ?? exported.out).slice(0, 160)})`);
+    // The progress line is the one trace of `count: "exact"`: without the count the run writes the same files and
+    // summary (review pass 1, cold read — the mutant that dropped it survived every other assertion).
+    assert(exported.code === 0 && /thoughts: 1000\/1050 rows/.test(exported.out) && /thoughts: 1050 rows \(/.test(exported.out) && /ingestion_jobs: skipped \(table not present\)/.test(exported.out) && /ingestion_items: skipped \(table not present\)/.test(exported.out) && /Done\. 6\/6 tables exported successfully/.test(exported.out),
+      `backup-brain.mjs on the shim, SUPABASE_URL alone: 1,050 thoughts over two pages with the exact count on the progress line, the three entity-extraction tables, the two smart-ingest tables skipped as not present, 6/6 (exit ${exported.code}: ${firstLine(exported.out.split("--- Backup Summary ---")[1] ?? exported.out).slice(0, 160)})`);
     assert(thoughtsOut?.length === N && thoughtsOut.every((r) => ids.has(String(r.id))) && new Set(thoughtsOut.map((r) => r.id)).size === N && thoughtsOut.every((r) => typeof r.created_at === "string" && typeof r.metadata === "object") && entitiesOut?.length === 3 && edgesOut?.length === 1 && linksOut?.length === 1,
       `…the thoughts file holds exactly the table's ${N} ids once each, timestamps as ISO strings and metadata as objects; entities 3, edges 1, thought_entities 1 (${thoughtsOut?.length ?? "no file"}/${entitiesOut?.length ?? "-"}/${edgesOut?.length ?? "-"}/${linksOut?.length ?? "-"})`);
     const bkNoUrl = await backup({});

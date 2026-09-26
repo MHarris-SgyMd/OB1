@@ -37,6 +37,8 @@ The rewrite is one line; a file that still reaches `Deno.*` is refused at triage
 + import { createClient } from "../../compat/supabase-sql/index.ts";
 ```
 
+A file written for the shim by hand — one that spoke PostgREST through `fetch` and was ported, with an `// ob1-fork (SMD-…)` header and no `MIGRATED OFF SUPABASE` banner (`recipes/brain-backup/backup-brain.mjs`, `recipes/lint-sweep/lint-sweep.js`; SMD-2144) — is listed as such by the triage and left alone by `--revert`: it has no supabase-js import to go back to.
+
 ### 2. Point it at Postgres
 
 The environment variable **names do not change**, so the code does not either. Set

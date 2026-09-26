@@ -1,6 +1,6 @@
 # Lint Sweep
 
-> **On this fork (SMD-2144).** `lint-sweep.js` reads the brain through `compat/supabase-sql` under `bun`: `SUPABASE_URL` is a `postgres://` connection string, `SUPABASE_SERVICE_ROLE_KEY` is accepted and ignored, and the script runs from a checkout (its import is relative). Until SMD-2144 it reached the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — over a gateway this fork's stack does not run (SETUP.md); the decision for the class is in `docs/vendored-disposition.md`. Two reads changed with the transport: the "most recent" samples order by `created_at` (ids are uuids here, so `id desc` orders nothing), and Tier 2 reads `edges` by the columns `schemas/entity-extraction` gives it. Tier 1 reads `importance` and `source_type`, Tier 3 `type` — columns `schemas/enhanced-thoughts/schema.sql` adds to `thoughts`; a brain without it stops the sweep at Tier 1's first query.
+> **On this fork (SMD-2144).** `lint-sweep.js` reads the brain through `compat/supabase-sql` under `bun`: `SUPABASE_URL` is a `postgres://` connection string, `SUPABASE_SERVICE_ROLE_KEY` is accepted and ignored, and the script runs from a checkout (its import is relative). Until SMD-2144 it reached the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — over a gateway this fork's stack does not run (SETUP.md); the decision for the class is in `docs/vendored-disposition.md`. Two reads changed with the transport: the "most recent" samples order by `created_at` (ids are uuids here, so `id desc` orders nothing), and Tier 2 reads `edges` by the columns `schemas/entity-extraction` gives it. Tier 1 and Tier 2 read `importance` (Tier 1 `source_type` too), Tier 3 `type` — columns `schemas/enhanced-thoughts/schema.sql` adds to `thoughts`; a brain without it stops the sweep at its first read of those columns.
 
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
 
@@ -28,7 +28,7 @@ Tier 1 and Tier 2 run against your brain's Postgres through `compat/supabase-sql
 
 - Working [Open Brain setup](../../docs/01-getting-started.md) with `public.thoughts` populated
 - [Bun](https://bun.sh) 1.4 or later, and a checkout of this repository — the script imports `../../compat/supabase-sql`, so it runs in place, not copied out
-- The `enhanced-thoughts` schema (`schemas/enhanced-thoughts/schema.sql`): Tier 1 reads the `importance` and `source_type` columns it adds to `thoughts`, Tier 3 its `type`; without it the sweep stops at Tier 1's first query
+- The `enhanced-thoughts` schema (`schemas/enhanced-thoughts/schema.sql`): Tier 1 reads the `importance` and `source_type` columns it adds to `thoughts`, Tier 2 `importance`, Tier 3 `type`; without it the sweep stops at its first read of those columns
 - (Optional, Tier 2) The `entity-extraction` schema applied (ships the `entities`, `edges`, and `thought_entities` tables Tier 2 walks). If your brain was set up before that schema landed, see the schema PRs [#197](https://github.com/NateBJones-Projects/OB1/pull/197) and [#199](https://github.com/NateBJones-Projects/OB1/pull/199). Tier 2 is skipped gracefully when these tables are absent — it does NOT use the `ob-graph` recipe's `graph_nodes` / `graph_edges` tables. On a fork brain `thought_entities` is migration 016's (entity ids into `ob1_entities`); Tier 2's link check reads it as it is, and its zero-edge check reads the schema's `entities` and `edges` (`from_entity_id`, `to_entity_id`).
 - (Optional, Tier 3) An OpenRouter API key with credit available
 
@@ -153,7 +153,7 @@ finished_at: 2026-04-18T14:22:11.031Z
 This run inspects bounded samples, not your entire brain. Counts below are relative to these samples.
 
 - **Tier 1** — most recent **2000 thoughts** (ordered by `created_at desc`) for orphan/over-tag/length checks; up to **5000 rows** with a populated `content_fingerprint` for duplicate detection; full-table exact row counts for `thoughts` and `content_fingerprint IS NULL` (no cap).
-- **Tier 2** — first **500 high-importance thoughts** (`importance >= 4`), first **2000 entities**, first **5000 edges**.
+- **Tier 2** — most recent **500 high-importance thoughts** (`importance >= 4`, ordered by `created_at desc`), first **2000 entities**, first **5000 edges**.
 - **Tier 3** — up to **100 thoughts** from the last **365 days**, batched ~20 per LLM call, hard-capped at **5 LLM calls**.
 
 On brains larger than these caps, Tier 1/2 counts represent a **slice**, not the global total. Example: "Entities with zero edges: 12" under a 2000-entity cap means *12 isolated entities among the first 2000 returned*, not "12 total isolated entities." For whole-brain coverage, run the SQL views in [`views.sql`](./views.sql) directly.
@@ -186,7 +186,7 @@ On brains larger than these caps, Tier 1/2 counts represent a **slice**, not the
 
 ## Tier 2 — Graph-based lint (free)
 
-*Scope: first 500 high-importance thoughts, first 2000 entities, first 5000 edges. Counts below are within that slice, not the whole brain.*
+*Scope: most recent 500 high-importance thoughts (`created_at desc`), first 2000 entities, first 5000 edges. Counts below are within that slice, not the whole brain.*
 
 - High-importance (≥4) thoughts with no entity links (in first 500 high-importance sampled): **7**
   - #12033 (imp=5, 2026-01-14) — Moving biweekly 1:1 from Thursday to Tuesday starting next month…
@@ -267,16 +267,16 @@ After each run, open the latest `lint-report-YYYY-MM-DD.md`, triage the findings
 ## Troubleshooting
 
 **Issue: `ERROR: SUPABASE_URL must be set`**
-Solution: Create `.env.local` in the same directory as `lint-sweep.js` with the connection string, or export it in your shell. Fall-through order is `process.env` → `.env.local` → `.env`. The legacy `OPEN_BRAIN_URL` name is still accepted (with a one-line deprecation warning).
+Solution: Create `.env.local` in the same directory as `lint-sweep.js` with the connection string, or export it in your shell. Fall-through order is `process.env` → `.env.local` → `.env`; under `bun`, an `.env` or `.env.local` in the directory you run from is loaded into `process.env` first, so it wins over the script's own files. The legacy `OPEN_BRAIN_URL` name is still accepted (with a one-line deprecation warning).
 
 **Issue: `expected a postgres:// connection URL`**
 Solution: `SUPABASE_URL` still holds a Supabase project URL. On this fork it is the brain's `postgres://` connection string (`SETUP.md`); there is no PostgREST to reach, and the script refuses before any query.
 
-**Issue: `thoughts (recent 2000) → 42703 column "importance" does not exist`**
-Solution: Apply `schemas/enhanced-thoughts/schema.sql` — Tier 1 reads two of the columns it adds to `thoughts`, Tier 3 a third.
+**Issue: `thoughts (recent 2000) → 42703 column "source_type" does not exist`** (under `--tier=2` alone: `thoughts (high importance) → 42703 column "importance" does not exist`)
+Solution: Apply `schemas/enhanced-thoughts/schema.sql` — Tier 1 reads two of the columns it adds to `thoughts` (Postgres names the first missing one), Tier 2 reads `importance`, Tier 3 `type`.
 
 **Issue: `42501 permission denied for table thoughts`**
-Solution: The connection's role lacks SELECT. Connect as the brain's owner, or grant a reader role with `bun db/migrate.ts --grant <role>` (`db/README.md`).
+Solution: The connection's role lacks SELECT. Connect as the brain's owner, or grant the role with `bun db/migrate.ts --grant <role>` (`db/README.md`) — that is the capturing role's grant, SELECT and the writes on every table the sweep reads; a read-only credential is a hand `GRANT SELECT ON thoughts, thought_entities, entities, edges TO <role>` instead.
 
 **Issue: Tier 1 shows `content_fingerprint column missing — see recipes/content-fingerprint-dedup`**
 Solution: Your brain predates the [content-fingerprint-dedup](../content-fingerprint-dedup/) primitive. Apply that recipe (and the [fingerprint-dedup-backfill](../fingerprint-dedup-backfill/) recipe) to get duplicate detection.

@@ -45,9 +45,9 @@
  *   SUPABASE_SERVICE_ROLE_KEY  — accepted and ignored (the credentials live in the URL)
  *   OPENROUTER_API_KEY         — OpenRouter key (Tier 3 only; omit to skip)
  *
- * Legacy aliases (deprecated, accepted with a warning):
+ * Legacy alias (deprecated, accepted with a warning):
  *   OPEN_BRAIN_URL         → use SUPABASE_URL
- *   OPEN_BRAIN_SERVICE_KEY → use SUPABASE_SERVICE_ROLE_KEY
+ * (OPEN_BRAIN_SERVICE_KEY is read and ignored, as SUPABASE_SERVICE_ROLE_KEY is.)
  *
  * Exit codes:
  *   0 — report generated successfully
@@ -643,7 +643,7 @@ function renderReport({ args, tier1, tier2, tier3, startedAt, finishedAt }) {
     lines.push("- **Tier 1** — most recent **2000 thoughts** (ordered by `created_at desc`) for orphan/over-tag/length checks; up to **5000 rows** with a populated `content_fingerprint` for duplicate detection; full-table exact row counts for `thoughts` and `content_fingerprint IS NULL` (no cap).");
   }
   if (tier2) {
-    lines.push("- **Tier 2** — first **500 high-importance thoughts** (`importance >= 4`), first **2000 entities**, first **5000 edges**.");
+    lines.push("- **Tier 2** — most recent **500 high-importance thoughts** (`importance >= 4`, ordered by `created_at desc`), first **2000 entities**, first **5000 edges**.");
   }
   if (tier3) {
     if (tier3.enabled) {
@@ -714,7 +714,7 @@ function renderReport({ args, tier1, tier2, tier3, startedAt, finishedAt }) {
   if (tier2) {
     lines.push("## Tier 2 — Graph-based lint (free)");
     lines.push("");
-    lines.push("*Scope: first 500 high-importance thoughts, first 2000 entities, first 5000 edges. Counts below are within that slice, not the whole brain.*");
+    lines.push("*Scope: most recent 500 high-importance thoughts (`created_at desc`), first 2000 entities, first 5000 edges. Counts below are within that slice, not the whole brain.*");
     lines.push("");
     if (tier2.graphTablesMissing.length > 0) {
       lines.push(`*Graph tables absent: ${tier2.graphTablesMissing.join(", ")}. Tier 2 requires the \`entity-extraction\` schema (which ships \`entities\`, \`edges\`, \`thought_entities\`) — see PRs #197 and #199. The \`ob-graph\` recipe uses different table names and does NOT satisfy this dependency.*`);

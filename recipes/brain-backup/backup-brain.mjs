@@ -109,7 +109,11 @@ if (!SUPABASE_URL) {
 // Bounded per-query timeout. Unattended backup jobs must either finish or
 // fail within a predictable window -- a hung connection should not keep a
 // cron job alive forever. 60s is generous for a 1000-row page; override with
-// FETCH_TIMEOUT_MS for slow tiers or very large tables.
+// FETCH_TIMEOUT_MS for slow tiers or very large tables. A page that times out
+// is abandoned, not cancelled: the query stays in flight on its connection, so
+// the run ends the process itself at the end rather than waiting on the pool
+// (review pass 1, cold read).
+let timedOut = false;
 const FETCH_TIMEOUT_MS = (() => {
   const raw =
     process.env.FETCH_TIMEOUT_MS ||
@@ -155,6 +159,9 @@ async function fetchPage(table, orderBy, offset, limit) {
   let result;
   try {
     result = await Promise.race([query, timeout]);
+  } catch (err) {
+    timedOut = true;
+    throw err;
   } finally {
     clearTimeout(timer);
   }
@@ -333,7 +340,13 @@ if (!client) {
     process.exitCode = 1;
   } finally {
     // The pool's connections would keep the process alive; closed, it ends
-    // with the code above once every write has drained.
+    // with the code above once every write has drained. After a timed-out page
+    // close() would wait on the abandoned query, so that run gives the pool a
+    // few seconds and then ends the process with the code already set.
+    if (timedOut) {
+      await Promise.race([client.close(), new Promise((resolve) => setTimeout(resolve, 5_000))]);
+      process.exit(process.exitCode ?? 1);
+    }
     await client.close();
   }
 }

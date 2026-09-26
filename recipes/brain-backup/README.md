@@ -54,12 +54,12 @@ The console output shows row counts and file sizes for each table, making it eas
 - Schedule the script with cron or Task Scheduler for automatic daily backups.
 - Commit the `backup/` directory to a private repo for versioned history.
 - The script streams rows to disk, so it handles large tables without running out of memory.
-- Timestamps come out as ISO strings and the `embedding` column as its vector text, the shapes PostgREST's JSON had.
+- Timestamps come out as ISO strings and the `embedding` column as its vector text, as PostgREST's JSON had them. `bigint` and `numeric` columns — the entity tables' ids, `quality_score`, `confidence` — come out as JSON strings (`"1"`), where PostgREST gave numbers; tooling that read the old export as numbers should expect strings here.
 
 ## Troubleshooting
 
 - **`expected a postgres:// connection URL`** -- `SUPABASE_URL` still holds a Supabase project URL. On this fork it is the brain's `postgres://` connection string (`SETUP.md`); the script refuses before any query.
 - **`Required table "thoughts" not found in the database`** -- the connection reached a database without the Open Brain schema: the wrong database name in the URL, or a brain whose migrations have not run (`bun db/migrate.ts`). Only Postgres's "relation does not exist" (`42P01`) is treated as "table not present"; everything else is surfaced so you can diagnose it.
-- **`Postgres error 42501 on thoughts: permission denied`** -- the connection's role has no SELECT on the table. Connect as the brain's owner, or grant a reader role with `bun db/migrate.ts --grant <role>` (`db/README.md`).
+- **`Postgres error 42501 on thoughts: permission denied for table thoughts`** -- the connection's role has no SELECT on the table. Connect as the brain's owner, or grant the role with `bun db/migrate.ts --grant <role>` (`db/README.md`) — that is the capturing role's grant, SELECT and the writes on every table the export reads; a read-only credential is a hand `GRANT SELECT ON thoughts, entities, edges, thought_entities, ingestion_jobs, ingestion_items TO <role>` instead.
 - **`skipped (table not present)` for optional tables** -- expected on a brain without the companion schemas (`schemas/entity-extraction`, `schemas/smart-ingest`).
-- **Script hangs or aborts after ~60s** -- set `FETCH_TIMEOUT_MS` to a larger value (milliseconds) if the database is slow or a table very large.
+- **A table shows `ERROR … timed out after 60000 ms`** -- set `FETCH_TIMEOUT_MS` to a larger value (milliseconds) if the database is slow or a table very large. The page is abandoned, not cancelled: the other tables still export, the run exits 1, and it ends within a few seconds of its summary rather than waiting for the abandoned query.
