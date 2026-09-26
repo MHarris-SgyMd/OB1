@@ -289,6 +289,10 @@ console.log("\n[5] Against a real database");
 if (!LIVE) { skip("healthy configuration passes"); skip("missing schema is distinguished from bad credentials"); }
 else {
   const { SQL } = await import("bun");
+  // Shared by the SMD-2237 ledger-row checks below: a connection whose search_path
+  // excludes public, and the adoption row a schema-present/no-ledger brain shows.
+  const offPathUrl = `${LIVE}${LIVE.includes("?") ? "&" : "?"}options=-csearch_path%3Dnowhere`;
+  const adoptRow = /!\s+migration ledger\s+no schema_migrations table — the schema was applied by hand\n\s+→ Adopt it with: cd db && bun migrate\.ts --url \$DATABASE_URL --baseline/;
   // Drop and apply are separate calls on purpose: the two assertions between them
   // observe the un-migrated state, which is the thing this section tests.
   await dropSchema(LIVE);
@@ -315,7 +319,7 @@ else {
   let strayRun: { code: number; out: string };
   try {
     await otherTool.unsafe("DROP SCHEMA IF EXISTS pf_stray CASCADE; CREATE SCHEMA pf_stray; CREATE TABLE pf_stray.thoughts (id int)");
-    strayRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: `${LIVE}${LIVE.includes("?") ? "&" : "?"}options=-csearch_path%3Dnowhere` });
+    strayRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: offPathUrl });
   } finally {
     await otherTool.unsafe("DROP SCHEMA IF EXISTS pf_stray CASCADE");
     await otherTool.close();
@@ -345,7 +349,7 @@ else {
   // schema_migrations table", which the empty-database message also contains —
   // keeps the SMD-2237 split honest from the other side: a probe that always read
   // "no schema" would send a hand-applied brain to re-run the migrations.
-  assert(/!\s+migration ledger\s+no schema_migrations table — the schema was applied by hand\n\s+→ Adopt it with: cd db && bun migrate\.ts --url \$DATABASE_URL --baseline/.test(after.out),
+  assert(adoptRow.test(after.out),
          "…and, with the schema present but no ledger, offers --baseline to adopt it (the legitimate case the empty-database guard must not swallow, SMD-2237)");
   // The protective direction of the public-qualified probe: the same
   // migrated-but-no-ledger brain, read from a role whose search_path excludes
@@ -353,8 +357,8 @@ else {
   // so it finds public.thoughts even when the role cannot resolve it by name — the
   // search_path-independence the probe's comment promises. A to_regclass spelling
   // would miss it here and wrongly say "nothing has been migrated" (SMD-2237).
-  const afterOffPath = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: `${LIVE}${LIVE.includes("?") ? "&" : "?"}options=-csearch_path%3Dnowhere` });
-  assert(/!\s+migration ledger\s+no schema_migrations table — the schema was applied by hand\n\s+→ Adopt it with: cd db && bun migrate\.ts --url \$DATABASE_URL --baseline/.test(afterOffPath.out),
+  const afterOffPath = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: offPathUrl });
+  assert(adoptRow.test(afterOffPath.out),
          "…and offers --baseline even with public off the role's search_path — the probe finds public.thoughts by pg_class (SMD-2237)");
   assert(/resolve_agent present/.test(after.out), "…and that the agent registry is available");
 
