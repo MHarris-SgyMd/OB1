@@ -4414,7 +4414,7 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`; // per-id: Bun binds a JS array as a comma string, not a {…} literal
 }
 
-console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the same corpus, and a perturbed canary is caught — the live replay gate's engine (SMD-1806)");
+console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the same corpus, and a perturbed canary is caught — the live replay gate's engine (SMD-1806); the CLI reports its window, exits 3 on nothing compared, and names a side that does not answer (SMD-2182)");
 {
   // The live replay gate (SMD-1295's live half): stable logs a search and the ids
   // it returned; the canary, refreshed from stable, replays that search and its

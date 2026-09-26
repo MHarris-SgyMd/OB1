@@ -673,7 +673,9 @@ function printSummary(s: ReplaySummary, gate: boolean, window: { words: string; 
     return "empty";
   }
   if (s.changed === 0) {
-    const scope = s.skipped ? `the ${s.replayed} replayed (${s.skipped} skipped, not compared)` : s.replayed === 1 ? "the one replayed" : `all ${s.replayed} replayed`;
+    const scope = s.skipped ? `the ${s.replayed} replayed (${s.skipped} skipped, not compared)`
+      : s.replayed === 1 ? "the one replayed"
+      : `all ${s.replayed} replayed`;
     console.log(gate ? `what moved: nothing — the canary reproduces stable's rankings on ${scope}.` : `no ranking moved on ${scope}.`);
     return "unmoved";
   }
