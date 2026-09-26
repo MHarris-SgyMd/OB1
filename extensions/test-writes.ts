@@ -1062,6 +1062,24 @@ try {
   const recentOpen = await send(h, "GET", "/recent?limit=50&exclude_restricted=false");
   assert(recent.status === 200 && ids(recent).includes(cid) && !ids(recent).includes(rid) && ids(recentOpen).includes(rid) && ids(recentOpen).includes(cid),
     `GET /recent hides the restricted twin by default and shows it under exclude_restricted=false, as its siblings do — it filtered nothing before (${recent.status}: ${ids(recent).length} rows${ids(recent).includes(rid) ? ", the twin among them" : ""}; open: ${ids(recentOpen).length})`);
+  // SMD-2083: no paging parameter reaches SQL non-finite or fractional, and a
+  // non-object JSON body is a named 400 — each a 500 on the pre-fix file.
+  const infOffset = await send(h, "GET", "/recent?offset=Infinity&limit=5");
+  assert(infOffset.status === 200 && infOffset.json?.offset === 0,
+    `GET /recent?offset=Infinity clamps to 0, not LIMIT NaN OFFSET Infinity → 500 (${infOffset.status}: offset ${infOffset.json?.offset})`);
+  const fracLimit = await send(h, "GET", "/recent?limit=2.5");
+  assert(fracLimit.status === 200 && fracLimit.json?.limit === 2,
+    `GET /recent?limit=2.5 truncates to 2, not a fractional LIMIT (${fracLimit.status}: limit ${fracLimit.json?.limit})`);
+  const bigPage = await send(h, "POST", "/search", { query: captured, mode: "text", page: 1e9 });
+  assert(bigPage.status === 200 && Number.isInteger(bigPage.json?.page),
+    `POST /search text mode page=1e9 answers a page, not an int4 overflow → 500 (${bigPage.status}: page ${bigPage.json?.page})`);
+  const fracSearch = await send(h, "POST", "/search", { query: captured, limit: 2.5 });
+  assert(fracSearch.status === 200 && fracSearch.json?.per_page === 2,
+    `POST /search limit=2.5 reports an integer per_page (${fracSearch.status}: per_page ${fracSearch.json?.per_page})`);
+  const nullBody = await send(h, "POST", "/search", null);
+  assert(nullBody.status === 400 && /object/i.test(String(nullBody.json?.error)),
+    `POST /search with a JSON null body is a named 400, not a TypeError → 500 (${nullBody.status}: ${nullBody.json?.error})`);
+
   // Every answer of the gateway carries the request's CORS headers (SMD-2079): json() built them only when handed `req`,
   // and forty-five of the file's sixty-two answers were not, so under an allowlist a browser could read /search (SMD-2054)
   // and no other route's page. Set once now, on the way out of the main handler; an unlisted origin gets NO allow-origin
