@@ -1070,6 +1070,12 @@ try {
   const fracLimit = await send(h, "GET", "/recent?limit=2.5");
   assert(fracLimit.status === 200 && fracLimit.json?.limit === 2,
     `GET /recent?limit=2.5 truncates to 2, not a fractional LIMIT (${fracLimit.status}: limit ${fracLimit.json?.limit})`);
+  const noLimit = await send(h, "GET", "/recent");
+  assert(noLimit.status === 200 && noLimit.json?.limit === 20,
+    `GET /recent with no limit uses the default 20, not the min (${noLimit.status}: limit ${noLimit.json?.limit})`);
+  const emptyLimit = await send(h, "GET", "/recent?limit=");
+  assert(emptyLimit.status === 200 && emptyLimit.json?.limit === 20,
+    `GET /recent?limit= (empty) uses the default 20, not the min (${emptyLimit.status}: limit ${emptyLimit.json?.limit})`);
   const bigPage = await send(h, "POST", "/search", { query: captured, mode: "text", page: 1e9 });
   assert(bigPage.status === 200 && Number.isInteger(bigPage.json?.page),
     `POST /search text mode page=1e9 answers a page, not an int4 overflow → 500 (${bigPage.status}: page ${bigPage.json?.page})`);
