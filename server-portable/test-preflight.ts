@@ -2057,9 +2057,29 @@ else {
       // as the table's grant (review pass 2).
       await claims.unsafe("ALTER ROLE pf_nologin LOGIN");
       const noConnect = await run({ ...SQL_ENV, DATABASE_URL: `${LIVE!.replace(/\/\/[^@]*@/, "//pf_nologin:nologin@")}${LIVE!.includes("?") ? "&" : "?"}options=-crole%3Dpg_monitor` });
-      assert(/✗\s+schema\s+permission denied to set role "pg_monitor"\n\s+→ The server refused this role at connection, before any query: grant it CONNECT on the database .* or take out the setting in the connection string's options= it may not make\./.test(noConnect.out)
+      assert(/✗\s+schema\s+permission denied to set role "pg_monitor"\n\s+→ The server refused this role at connection, before any query: grant it CONNECT on the database \(GRANT CONNECT ON DATABASE "[^"]+" TO "pf_nologin";  as its owner\), take out a setting \$DATABASE_URL makes that the role may not \(a parameter, or -c in options=\), or, on PostgreSQL 17, see the login event triggers\./.test(noConnect.out)
                && !/GRANT SELECT ON public\.thoughts|Grant this role SELECT/.test(fix(noConnect.out, "schema")),
              `a 42501 at connection names the connection, not the table's grant (${row(noConnect.out, "schema")} ${fix(noConnect.out, "schema")})`);
+      // No CONNECT on the database, told by the probe meeting the same
+      // refusal, never by the error's severity, which a translated
+      // lc_messages changes (review pass 3). The printed GRANT CONNECT, run,
+      // lets the role in: its next failure is the table's grant.
+      const [{ publicConnect }] = await claims`SELECT has_database_privilege('public', current_database(), 'CONNECT') AS "publicConnect"`;
+      await claims.unsafe(`DO $r$ BEGIN EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC, pf_nologin', current_database()); END $r$`);
+      try {
+        const nologinUrl = LIVE!.replace(/\/\/[^@]*@/, "//pf_nologin:nologin@");
+        const barredDb = await run({ ...SQL_ENV, DATABASE_URL: nologinUrl });
+        const printedConnect = /\((GRANT CONNECT ON DATABASE "[^"]+" TO "pf_nologin";)  as its owner\)/.exec(barredDb.out)?.[1];
+        assert(!!printedConnect && /✗\s+schema\s+permission denied for database/.test(barredDb.out),
+               `no CONNECT on the database names the GRANT CONNECT (${row(barredDb.out, "schema")} ${fix(barredDb.out, "schema")})`);
+        if (printedConnect) await claims.unsafe(printedConnect);
+        const connected = await run({ ...SQL_ENV, DATABASE_URL: nologinUrl });
+        assert(!!printedConnect && /✗\s+schema\s+permission denied for table thoughts — role pf_nologin has no SELECT on public\.thoughts/.test(connected.out),
+               `…and that GRANT, run as printed, lets the role in: what fails next is the table's grant (${row(connected.out, "schema")})`);
+      } finally {
+        await claims.unsafe(`DO $r$ BEGIN EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM pf_nologin', current_database()); END $r$`);
+        if (publicConnect) await claims.unsafe(`DO $r$ BEGIN EXECUTE format('GRANT CONNECT ON DATABASE %I TO PUBLIC', current_database()); END $r$`);
+      }
     } finally {
       await claims.unsafe("DROP ROLE pf_nologin");
     }
@@ -2115,7 +2135,7 @@ else {
       const granted = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
       assert(!!printedGrant && /✓\s+schema\s+thoughts table reachable/.test(granted.out),
              `…and that GRANT, run as printed, makes thoughts readable (${row(granted.out, "schema")})`);
-      // Restored whatever was printed, so a broken grant branch fails one assertion, not the legs after it.
+      // Restored whatever was printed, so a broken grant branch fails its own assertions, not the legs after it.
       await claims.unsafe("GRANT SELECT ON thoughts TO pf_reader");
       // Another schema's thoughts ahead of public on the path, which the role
       // may not read: another tool's table, never a GRANT on it — that GRANT,
@@ -2130,6 +2150,13 @@ else {
         assert(/✗\s+schema\s+permission denied for table thoughts — thoughts resolves to pf_reader\.thoughts, not the brain's public\.thoughts\n\s+→ Put public ahead of "pf_reader" \(the path's "\$user"\) on this connection's search_path — the role's setting, or the connection string's where it sets one — or take "pf_reader" off it: the server reads/.test(shadowed.out)
                  && !/GRANT SELECT ON pf_reader\./.test(shadowed.out),
                `another schema's thoughts first on the path is named, never granted on (${row(shadowed.out, "schema")} ${fix(shadowed.out, "schema")})`);
+        // The path naming the schema itself, not through "$user": no "$user"
+        // note, which would be untrue (review pass 3).
+        await claims.unsafe("ALTER ROLE pf_reader SET search_path = pf_reader, public");
+        const literal = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+        assert(/→ Put public ahead of "pf_reader" on this connection's search_path/.test(literal.out),
+               `…and with the path naming it, not "$user", no "$user" note (${fix(literal.out, "schema")})`);
+        await claims.unsafe("ALTER ROLE pf_reader SET search_path = \"$user\", public");
         // With no USAGE on public too, the GRANT comes first; both, run, read it.
         const [{ shadowPublicUsage }] = await claims`SELECT has_schema_privilege('public', 'public', 'USAGE') AS "shadowPublicUsage"`;
         await claims.unsafe("REVOKE USAGE ON SCHEMA public FROM pf_reader, PUBLIC");

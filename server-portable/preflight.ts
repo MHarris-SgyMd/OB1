@@ -778,38 +778,50 @@ if (configFailed) {
       // that holds it here (the alias included), and for PostgREST — which has
       // no connection string of its own — say what to hand it instead.
       const urlArg = conn ? `$${conn.from}` : "<the brain's postgres:// connection string — Supabase's direct connection, not the pooler>";
-      // public.thoughts present but not resolving for this role — no USAGE on
-      // public, public off its search_path, or both — is not a brain to migrate
-      // (SMD-2062). Probed only when thoughts itself fails: 42P01 on the count
-      // (in any lc_messages; any other failure spares the second connection)
-      // and the probe's own to_regclass('thoughts') NULL — an RLS function
-      // reading some other missing table fails the count the same way. public
-      // alone: a thoughts elsewhere is another tool's. Each cause is named with
-      // its statement (SMD-2242). The path is parsed, never
-      // echoed, and not read from current_schemas(), which hides a schema
-      // without USAGE (search-path.ts); with USAGE held, thoughts not resolving
-      // means off the path whatever the parse says. The GRANT names
-      // current_user, whose privilege the count used; the ALTER ROLE names
-      // session_user, whose settings load, IN DATABASE since a role's setting
-      // there outranks its plain one and the database's. A path from the
-      // connection (source `client`) or SET after login (`session`) outranks
-      // it; an unread source gets that caveat. The connection's path is
-      // replaced, never appended to: Bun joins two options with a comma, libpq
-      // keeps the last, and Bun's search_path= parameter outranks options.
-      // Over PostgREST there is no catalog to ask, and a failed probe asks
-      // nothing.
-      // The same probe answers the count's other failures with thoughts
-      // resolving (SMD-2238): 42501 without SELECT on it is the grant; 42P01,
-      // or 42501 with SELECT held, is a read something the count reaches makes
-      // — a row-level security policy on the table — and none of them is
-      // fixed by migrating. The SQLSTATE picks the case, never the message.
+      /** GRANT CONNECT for the connection string's database and user, each as the server reads it (no case folding); placeholders where the URL names none. */
+      const connectGrant = (url: string) => {
+        let db = "<the database>", user = "<the role>";
+        try {
+          const u = new URL(url);
+          if (u.username) user = quoteIdent(decodeURIComponent(u.username));
+          if (u.pathname.length > 1) db = quoteIdent(decodeURIComponent(u.pathname.slice(1)));
+          else if (u.username) db = user;
+        } catch { /* placeholders stand */ }
+        return `GRANT CONNECT ON DATABASE ${db} TO ${user};`;
+      };
+      // The count's failure, by SQLSTATE — never the message or severity,
+      // which a server's lc_messages translates (review pass 3). On 42P01 or
+      // 42501 a probe on a second connection reads the catalog, and the
+      // remedy is the first of these that holds:
+      // - public.thoughts present and not resolving (SMD-2062): no USAGE on
+      //   public, public off the path, or both, each named with its statement
+      //   (SMD-2242). The path is parsed, never echoed, and not read from
+      //   current_schemas(), which hides a schema without USAGE
+      //   (search-path.ts); with USAGE held, thoughts not resolving means off
+      //   the path whatever the parse says. The GRANT names current_user,
+      //   whose privilege the count used; the ALTER ROLE names session_user,
+      //   whose settings load, IN DATABASE since a role's setting there
+      //   outranks its plain one and the database's. A path from the
+      //   connection (source `client`) or SET after login (`session`)
+      //   outranks it; an unread source gets that caveat. The connection's
+      //   path is replaced, never appended to: Bun joins two options with a
+      //   comma, libpq keeps the last, and Bun's search_path= outranks options.
+      // - thoughts resolving to another schema's table: another tool's, never
+      //   granted on; public goes ahead of it, and then, if the brain's table
+      //   is missing, the migrations.
+      // - 42501 without SELECT on public.thoughts: the grant.
+      // - 42501 with row_security off on a table with row-level security.
+      // - otherwise (42P01, or 42501 with SELECT held): a read the count
+      //   reaches, the row-level security policies a SELECT by this role meets.
+      // The probe's query needs no privilege, so a 42501 on it is a refusal
+      // at connection (no CONNECT, a connection-string setting the role may
+      // not make, a login trigger), which the count met too. Over PostgREST
+      // there is no catalog to ask; a probe that fails otherwise (no
+      // connection slot) leaves the SQLSTATE's own remedy below.
       const errno = String((e as { errno?: unknown }).errno ?? "");
-      // FATAL is a refusal at connection (no CONNECT, a setting in the
-      // connection string this role may not make, ...), before any query:
-      // a probe would meet it too (review pass 2).
-      const atConnect = String((e as { severity?: unknown }).severity ?? "") === "FATAL";
+      let probeErrno = "";
       let found: { detail: string; remedy: string } | null = null;
-      if (built.kind === "sql" && conn && !atConnect && (errno === "42P01" || errno === "42501")) {
+      if (built.kind === "sql" && conn && (errno === "42P01" || errno === "42501")) {
         try {
           const { SQL } = await import("bun");
           const probe = new SQL({ url: conn.url, max: 1 });
@@ -831,7 +843,6 @@ if (configFailed) {
                      quote_ident(session_user::text) AS login,
                      quote_ident(current_database()::text) AS db,
                      current_user::text AS "roleName",
-                     session_user::text AS "loginName",
                      (SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                        WHERE c.oid = to_regclass('thoughts')) AS resolved,
                      (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -842,7 +853,7 @@ if (configFailed) {
                      (SELECT string_agg(name, ', ' ORDER BY name) FROM pol) AS policies,
                      (SELECT count(*)::int FROM pol) AS "policyCount"`) as {
               present: boolean; unresolved: boolean; usage: boolean; path: string; version: number; role: string; login: string; db: string;
-              roleName: string; loginName: string; resolved: string | null; resolvedSchema: string | null; canSelect: boolean | null;
+              roleName: string; resolved: string | null; resolvedSchema: string | null; canSelect: boolean | null;
               rls: boolean | null; rowSecurity: string; policies: string | null; policyCount: number;
             }[];
             if (r?.present && r.unresolved) {
@@ -889,12 +900,12 @@ if (configFailed) {
               // comes first either way. A schema named for the role is the
               // default path's "$user".
               const other = quoteIdent(String(r.resolvedSchema));
-              const named = r.resolvedSchema === r.loginName || r.resolvedSchema === r.roleName ? ` (the path's "$user")` : "";
+              const named = r.resolvedSchema === r.roleName && searchPathSchemas(String(r.path ?? ""), Number(r.version)).includes("$user") ? ` (the path's "$user")` : "";
               const putAhead = `put public ahead of ${other}${named} on this connection's search_path — the role's setting, or the connection string's where it sets one — or take ${other} off it`;
               found = r.present
                 ? {
                     detail: `thoughts resolves to ${r.resolved}, not the brain's public.thoughts`,
-                    remedy: `${r.usage ? "" : `GRANT USAGE ON SCHEMA public TO ${r.role};  then `}${putAhead}: the server reads the first thoughts on the path. The brain's table is there, so migrating would not change it.`.replace(/^./, (c) => c.toUpperCase()),
+                    remedy: `${r.usage ? "" : `GRANT USAGE ON SCHEMA public TO ${r.role};  then `}${putAhead}: the server reads the first thoughts on the path.  The brain's table is there, so migrating would not change it.`.replace(/^./, (c) => c.toUpperCase()),
                   }
                 : {
                     detail: `thoughts resolves to ${r.resolved}, another tool's table; the brain's public.thoughts does not exist`,
@@ -913,7 +924,7 @@ if (configFailed) {
               // change fixes that.
               found = {
                 detail: `row_security is off for this session and ${r.resolved} has row-level security, so Postgres refuses the read rather than skip its policies`,
-                remedy: `Turn row_security back on for this connection (it is off in a role's or the database's settings, or the connection string), or, for a role that should read every row, ALTER ROLE ${r.role} BYPASSRLS;  (as a superuser). The table is there, so migrating would not change it.`,
+                remedy: `Turn row_security back on for this connection (it is off in a role's or the database's settings, or the connection string), or, for a role that should read every row, ALTER ROLE ${r.role} BYPASSRLS;  (as a superuser).  The table is there, so migrating would not change it.`,
               };
             } else if (r?.resolved) {
               const whence = errno === "42501"
@@ -933,7 +944,7 @@ if (configFailed) {
           } finally {
             await probe.close();
           }
-        } catch { /* the remedy below stays the one the SQLSTATE names */ }
+        } catch (pe) { probeErrno = String((pe as { errno?: unknown }).errno ?? ""); }
       }
       add("schema", "fail",
           found ? `${msg} — ${found.detail}` : msg,
@@ -947,13 +958,13 @@ if (configFailed) {
             ? `Correct the database name in $${conn.from} — or, for a new brain, create it (CREATE DATABASE, as a role that may) and apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
             : conn && errno === "28000"
             ? `Check the role in $${conn.from}: the server refused it before any query — it must exist, be allowed to log in (LOGIN), and be admitted by pg_hba.conf from this host.`
-            : conn && errno === "42501" && atConnect
-            ? `The server refused this role at connection, before any query: grant it CONNECT on the database (GRANT CONNECT ON DATABASE <the database> TO <the role>;, as its owner), or take out the setting in the connection string's options= it may not make.`
+            : conn && errno === "42501" && probeErrno === "42501"
+            ? `The server refused this role at connection, before any query: grant it CONNECT on the database (${connectGrant(conn.url)}  as its owner), take out a setting $${conn.from} makes that the role may not (a parameter, or -c in options=), or, on PostgreSQL 17, see the login event triggers.`
             // A query's refusal the probe could not explain (it failed, or
             // opened no connection): the table's privilege, or a policy.
             : conn && errno === "42501"
             ? `Grant this role SELECT on public.thoughts — or, for the server's role, every privilege the capture path needs, as the tables' owner: cd db && bun migrate.ts --url <the owner's connection string> --grant <the role> — or, if it holds that, fix the row-level security policy on thoughts that refuses it.`
-            : /does not exist|relation/i.test(msg)
+            : errno === "42P01" || /does not exist|relation/i.test(msg)
             ? `Apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
             : "Check credentials and network reachability to the database.");
     }
