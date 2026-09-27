@@ -781,11 +781,43 @@ jobs:
         with:
           persist-credentials: false
 
-      # For the three dashboards at the end of this job (SMD-1801): Bun installs
-      # and builds them, and drives the SvelteKit one against the stack.
+      # For the three dashboards (SMD-1801): Bun installs and builds them, and
+      # drives the SvelteKit one against the stack at the end of this job.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.0"
+
+      # SMD-2251. The three dashboards need nothing from the stack, and built in
+      # series after it they added 35 s to the run's critical path. So they
+      # build here, in the background, one after another while the stack comes
+      # up (most of which is waiting on health checks, not CPU), and "The three
+      # dashboards build" below waits for them and reports each. Each
+      # dashboard writes its own log and exit code under $RUNNER_TEMP, and has
+      # its own time limit: a hang ends as 124 (137 when TERM is ignored) and
+      # the next dashboard still builds. The subshell's output goes to files
+      # and its stdin is /dev/null, so this step ends at once; it ignores HUP,
+      # as nohup would. The SvelteKit one builds first: the smoke needs it.
+      - name: The three dashboards start building, in the background
+        id: dashboards
+        env:
+          NEXT_PUBLIC_API_URL: http://127.0.0.1:8787
+          SESSION_SECRET: build-time-only-0123456789abcdef0123456789
+        run: |
+          out="$RUNNER_TEMP/dashboards"
+          mkdir -p "$out"
+          (
+            trap '' HUP
+            for d in open-brain-dashboard open-brain-dashboard-next open-brain-dashboard-pro; do
+              check=""
+              if [ "$d" = open-brain-dashboard ]; then check=" && bun run check"; fi
+              start=$SECONDS
+              rc=0
+              (cd "dashboards/$d" && exec timeout --kill-after=10s 4m sh -c "bun install --frozen-lockfile && bun run build$check") > "$out/$d.log" 2>&1 || rc=$?
+              echo "$rc $((SECONDS - start))" > "$out/$d.rc"
+            done
+            touch "$out/done"
+          ) > "$out/runner.log" 2>&1 < /dev/null &
+          echo "$!" > "$out/pid"
 
       # The other container this repository ships (SMD-1800): kubernetes-deployment's
       # image, Bun's base with its pinned install, built from integrations/ so the
@@ -1234,18 +1266,47 @@ jobs:
       # they speak to the open-brain-rest gateway, which this stack does not
       # serve (extensions/test-auth.ts starts it). The SvelteKit one speaks MCP
       # to the server this stack serves, so it is driven too, below.
+      # They build in the background from the job's start (SMD-2251); this step
+      # waits for that and reports it — each dashboard's log folded when it
+      # passed and open under an error when it failed, and a line of exit codes
+      # and times. It runs when a stack step failed too, so a broken build is
+      # never hidden behind one. The wait ends when the background shell
+      # writes its done mark, or dies without it, or at 15 min; each
+      # dashboard's own 4 min limit should end it well before then.
       - name: The three dashboards build
-        env:
-          NEXT_PUBLIC_API_URL: http://127.0.0.1:8787
-          SESSION_SECRET: build-time-only-0123456789abcdef0123456789
+        if: ${{ !cancelled() && steps.dashboards.outcome == 'success' }}
         run: |
+          out="$RUNNER_TEMP/dashboards"
+          pid=$(cat "$out/pid")
+          start=$SECONDS
+          while [ ! -e "$out/done" ] && kill -0 "$pid" 2> /dev/null && [ $((SECONDS - start)) -lt 900 ]; do sleep 1; done
+          echo "waited $((SECONDS - start)) s for the background build"
+          if [ ! -e "$out/done" ]; then
+            echo "::error title=The three dashboards build::the background build did not finish (its shell died, or it ran past 15 min) — its logs follow"
+            for log in "$out"/*.log; do echo "--- $log"; cat "$log"; done
+            exit 1
+          fi
+          failed=0
+          summaries=""
           for d in open-brain-dashboard open-brain-dashboard-next open-brain-dashboard-pro; do
-            echo "::group::$d"
-            # The group closed on failure too, or the rest of the log nests under it.
-            if ! ( cd "dashboards/$d" && bun install --frozen-lockfile && bun run build ); then echo "::endgroup::"; exit 1; fi
-            echo "::endgroup::"
+            read -r rc secs < "$out/$d.rc"
+            case $rc in
+              124) rc="124, over the 4 min limit" ;;
+              137) rc="137, killed: over the 4 min limit with TERM ignored, or out of memory" ;;
+            esac
+            if [ "$rc" = 0 ]; then
+              echo "::group::$d — built"
+              cat "$out/$d.log"
+              echo "::endgroup::"
+            else
+              echo "::error title=The three dashboards build::$d failed (exit $rc) — its log follows"
+              cat "$out/$d.log"
+              failed=1
+            fi
+            summaries+="  $d: exit $rc in $secs s"$'\n'
           done
-          ( cd dashboards/open-brain-dashboard && bun run check )
+          printf '\n%s' "$summaries"
+          [ "$failed" = 0 ]
 
       # The SvelteKit dashboard as a browser uses it, against the stack that is
       # up: a wrong key refused at /signin, the write key signed in and the JSON
