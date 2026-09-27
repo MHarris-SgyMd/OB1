@@ -59,7 +59,7 @@ export const PIPELINES_FILE = join(HERE, "pipelines.json");
 /** The actor every row the runner writes carries (ingest-records.ts --actor). */
 export const RUNNER_ACTOR = "orchestration-runner";
 /** The user the image runs the ingester and reembed as (runner.Dockerfile). */
-export const PIPELINE_USER = "bun";
+const PIPELINE_USER = "bun";
 
 /**
  * Each pipeline's emitter runs as a uid of its own (review pass 2: with one
@@ -74,7 +74,7 @@ export const PIPELINE_USER = "bun";
 export function emitterUid(name: string): number {
   return 20000 + (parseInt(createHash("sha256").update(name).digest("hex").slice(0, 8), 16) % 40000);
 }
-export const DEFAULT_PORT = 8090;
+const DEFAULT_PORT = 8090;
 export const DEFAULT_TIMEOUT_S = 3600;
 /** After a step's first SIGTERM, how long before SIGKILL. */
 const KILL_GRACE_MS = 6000;
@@ -92,7 +92,7 @@ const live = new Set<{ stop: () => void; exited: Promise<number> }>();
  * rebuild, a key rotation) killed its reembed outright, and the rows it had
  * claimed stayed leased for 900 s (review pass 4).
  */
-export async function stopLive(waitMs = 5000): Promise<void> {
+async function stopLive(waitMs = 5000): Promise<void> {
   for (const x of live) x.stop();
   await Promise.race([Promise.all([...live].map((x) => x.exited)), Bun.sleep(waitMs)]);
 }
@@ -115,7 +115,7 @@ const NAME_RE = /^[a-z][a-z0-9-]{0,39}$/;
 const INTERPRETERS = ["python3", "bun"];
 
 /** Parse and check the allowlist. Throws, naming the entry and the field, on anything it would not run. */
-export function parsePipelines(text: string, file = "pipelines.json"): Pipeline[] {
+function parsePipelines(text: string, file = "pipelines.json"): Pipeline[] {
   let raw: unknown;
   try { raw = JSON.parse(text); } catch (e) { throw new Error(`${file}: not JSON (${(e as Error).message})`); }
   if (!Array.isArray(raw)) throw new Error(`${file}: must be a JSON array of pipelines`);
@@ -192,7 +192,7 @@ export function missingEmitters(pipelines: Pipeline[], root: string): string[] {
  * whose identity.system or scope is not the pipeline's is named. A line that
  * is not JSON is left to the ingester, which refuses the whole batch for it.
  */
-export function strayLines(bytes: Uint8Array, p: Pipeline): string[] {
+function strayLines(bytes: Uint8Array, p: Pipeline): string[] {
   const out: string[] = [];
   const lines = new TextDecoder().decode(bytes).split("\n");
   lines.forEach((line, i) => {
@@ -211,7 +211,7 @@ export function strayLines(bytes: Uint8Array, p: Pipeline): string[] {
 const TALLY_KEYS = ["inserted", "updated", "patched", "unchanged", "skipped", "held", "stale"] as const;
 export type Tally = Record<(typeof TALLY_KEYS)[number], number>;
 /** The ingester's count line (`tier=stable  inserted 5  updated 0 …`), or null when it printed none. */
-export function parseTally(stdout: string): Tally | null {
+function parseTally(stdout: string): Tally | null {
   const line = stdout.split("\n").find((l) => /^\s*tier=\S+\s+inserted \d+/.test(l));
   if (!line) return null;
   return Object.fromEntries(TALLY_KEYS.map((k) => [k, Number(new RegExp(`\\b${k} (\\d+)`).exec(line)?.[1] ?? NaN)])) as Tally;
@@ -223,7 +223,7 @@ export type Commands = {
   reembed: () => string[];
   unembedded: (p: Pipeline) => Promise<number>;
 };
-export const PIPELINE_COMMANDS = (env: Record<string, string | undefined>): Commands => ({
+const PIPELINE_COMMANDS = (env: Record<string, string | undefined>): Commands => ({
   ingest: (p) => ["bun", "db/ingest-records.ts", "--source", "items", "--items", "-", "--allow", p.scope, "--actor", RUNNER_ACTOR],
   reembed: () => ["bun", "db/reembed.ts"],
   // The rows this pipeline's source holds with no vector. The ingester labels
@@ -363,7 +363,7 @@ export function statusOf(r: Report): number {
 let reembedTurn: Promise<unknown> = Promise.resolve();
 
 /** One run of one pipeline, start to report, within one deadline. */
-export async function runPipeline(c: Config, p: Pipeline): Promise<Report> {
+async function runPipeline(c: Config, p: Pipeline): Promise<Report> {
   const deadline = Date.now() + c.timeoutS * 1000;
   const past = `ran past the run's ${c.timeoutS} s and was stopped`;
   const input = join(c.importsDir, p.name);
@@ -506,7 +506,7 @@ const SU_EXEC = ["/sbin/su-exec", "/usr/bin/su-exec"].find((f) => existsSync(f))
  * The self-check fails when one disappears from their source, so a reworded
  * message cannot silently change a refusal's kind (review pass 6).
  */
-export const REEMBED_PHRASES = {
+const REEMBED_PHRASES = {
   retryable: ["The embedding provider is not usable", "Could not start the pass"],
   // reembed's own configShaped rule for a provider failure (db/reembed.ts), as the embedder words each case (server-portable/embed.ts).
   configShaped: ["Embedding width mismatch", "returned no embedding", "with a body that is not JSON", "refused by the egress gate"],
@@ -523,7 +523,7 @@ export const REEMBED_PHRASES = {
  * the other way round, an unusable embedding configuration and a missing
  * migration were promised a retry).
  */
-export function reembedRefusal(stderr: string): { reason: string; configuration: boolean } {
+function reembedRefusal(stderr: string): { reason: string; configuration: boolean } {
   const paragraphs = redact(stderr).split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean);
   const last = paragraphs.at(-1) ?? "";
   const reason = (last.startsWith("✗")
@@ -541,7 +541,7 @@ const sentence = (t: string) => (/[.!?)]$/.test(t) ? t : `${t}.`);
 const rowsLack = (n: number, system: string) => `${n} of ${system}'s rows ${n === 1 ? "has" : "have"}`;
 
 /** Where a pipeline's imports directory stands, as the runner sees it: there, not there, behind a directory the runner cannot search, or something else that is not a directory it can reach (a file where the directory should be, a loop). */
-export function inputState(dir: string): "present" | "absent" | "blocked" | { code: string } {
+function inputState(dir: string): "present" | "absent" | "blocked" | { code: string } {
   try { statSync(dir); return "present"; } catch (e) {
     const code = (e as NodeJS.ErrnoException).code ?? "unknown";
     return code === "ENOENT" ? "absent" : code === "EACCES" || code === "EPERM" ? "blocked" : { code };
@@ -554,10 +554,10 @@ function canRead(dir: string): boolean {
 }
 
 /** What a missing emitter needs, said the same way at build and at start (review pass 4: "rebuild" was the advice at both, and a rebuild can never add it). */
-export const missingEmitterHelp = (missing: string[]) => `pipelines.json names an emitter the image does not hold (${missing.join("; ")}). Copy it into the image: a COPY line in deploy/orchestration/runner.Dockerfile, and a \`!<its path>\` line in the repo root's .dockerignore (which keeps recipes/ and evals/ out); then rebuild the runner: compose --profile orchestration up -d --build orchestration-runner`;
+const missingEmitterHelp = (missing: string[]) => `pipelines.json names an emitter the image does not hold (${missing.join("; ")}). Copy it into the image: a COPY line in deploy/orchestration/runner.Dockerfile, and a \`!<its path>\` line in the repo root's .dockerignore (which keeps recipes/ and evals/ out); then rebuild the runner: compose --profile orchestration up -d --build orchestration-runner`;
 
 /** The service's configuration from its environment; throws with the reason. */
-export function configFrom(env: Record<string, string | undefined>, uid = process.getuid?.() ?? -1, file = PIPELINES_FILE): Config {
+function configFrom(env: Record<string, string | undefined>, uid = process.getuid?.() ?? -1, file = PIPELINES_FILE): Config {
   const key = env.OB1_RUNNER_KEY?.trim() ?? "";
   if (key.length < 32) throw new Error("OB1_RUNNER_KEY is not set, or shorter than 32 characters — run `bun deploy/orchestration/provision.ts --init`, which writes it into deploy/.env");
   const timeoutS = Number(env.OB1_RUNNER_TIMEOUT_S?.trim() || DEFAULT_TIMEOUT_S);

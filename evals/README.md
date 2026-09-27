@@ -6078,83 +6078,49 @@ and E:
   the engine, and nothing else of it. The runner joins the sealed network
   as the server does. The judge holds 39 crafted logs in CI.
 
-**On review pass 7's code (`--wait-schedule`), every check passes.**
-- **C1:** 29.0 s. **C1s:** seen after 331 s. **P:** gone after 91 s.
-- **K, A, C3 and I** pass. The runner is bounded to 512 processes and 2 GB,
-  and `ingest-items` refuses a facet naming another source's ticket.
+**The results** (the dogfood Mac, SQLite, `--wait-schedule`, 2026-09-26/27).
+Every check passed on each review pass's code:
 
-**On review pass 6's code (`--wait-schedule`), every check passes.**
-- **C1:** 20.7 s. **C1s:** seen after 811 s. **P:** gone after 40 s.
-- **K, A, C3 and I** pass.
-- The runner's image now carries pip for a recipe's pinned packages.
-- A reviewer ran CI's steps from a clean clone: the self-checks, the
-  typechecks, the loopback step, and the runner image's build. All passed.
+| Code | C1 | C1s seen after | P gone after | Also |
+|---|---|---|---|---|
+| pass 1 | 20.9 s | 601 s | 51 s | I: 5 inserted, all with vectors, then `unchanged 5`; the run key in 0 of 23 saved runs; the runner at 11–12 MiB |
+| pass 2 | 35.4 s (Ollama shared) | 481 s | 61 s | I: `stray` 422 with its line; `snoop` read nothing, none of its children survived; the schedule `days 1` |
+| pass 3 | 22.2 s | 451 s | 40 s | I: `snoop` found its HOME unwritable and the user site off; the runner down answered 502 |
+| pass 4 | 23.3 s | 271 s | 101 s | sealed too (below); an operator walk |
+| pass 5 | 19.8 s | 631 s | 30 s | a walk of adding a pipeline; reembed stopped mid-lease |
+| pass 6 | 20.7 s | 811 s | 40 s | CI's steps from a clean clone |
+| pass 7 | 29.0 s | 331 s | 91 s | the runner bounded (512 processes, 2 GB) |
 
-**On review pass 5's code (`--wait-schedule`), every check passes.**
-- **C1:** 19.8 s. **C1s:** seen after 631 s. **P:** gone after 30 s.
-- **K, A, C3 and I** pass.
+C1s's wait is where the verify began against the schedule, not a speed.
 
-A reviewer walked the add-a-pipeline sequence the README documents, and
-stopped the runner mid-reembed against a provider that hangs. The leased
-rows came back pending, and the next run embedded them. Before that run, a
-fresh kit project could not reach the host's Ollama through the podman VM's
-gateway (192.168.127.254) at all, though another project on the same VM
-could. Recreating the project's network cleared it, and nothing in this
-change touches it. Two cycles on the same project also overlapped: one's K
-check rotated the key the other's C1 was using, so the verify was re-run
-alone. Cycles on one project must not overlap.
-
-**On review pass 4's code, every check passes, plain and sealed.**
-- **Plain:** C1s was seen after 271 s, and P was gone after 101 s.
-- **Sealed:**
-  - C1 took 12.5 s and P 92 s;
-  - I passed without its runner-down leg;
-  - E saw only `api.linear.app` outside, 7 connections to the brain's
-    `:8000`, and 4 to the runner's `:8090`.
-- **Operator walk:** a reviewer followed `deploy/README.md` on a throwaway
-  stack. It covered init, an empty allowlist, a pipeline added and removed,
-  the Linear key set and unset, and an upgrade without `OB1_RUNNER_KEY`.
-
-**On review pass 3's code (`--wait-schedule`), every check passes again.**
-- **C1** took 22.2 s.
-- **C1s** was seen after 451 s, and **P** was gone after 40 s.
-- **I:**
-  - `snoop` found its HOME unwritable and the user site off;
-  - the runner down answered 502;
-  - no key was in any saved run.
-
-**On review pass 2's code (`--wait-schedule`), every check passes again.**
-- **C1** took 35.4 s, with the host's Ollama shared.
-- **C1s** was seen after 481 s, and **P** was gone after 61 s.
-- **I:**
-  - `stray` answered 422 with its line;
-  - `snoop` read nothing, and none of its children survived;
-  - the schedule was `days 1`;
-  - no key was in the saved runs.
-
-**The result (2026-09-26, the dogfood Mac, SQLite, on review pass 1's code,
-`--wait-schedule`): every check passes.**
-- **C1:** 10, +10 in 20.9 s, then 10, +0.
-- **C1s:** the schedule seen after 601 s.
-- **P:** the past run was gone after 51 s.
-- **K, A and C3** pass.
-- **I:**
-  - inserted 5, all with vectors, then `unchanged 5`;
-  - `stray` refused with its reason;
-  - `snoop` found the environment unreadable;
-  - the run key was in 0 of 23 saved import runs.
-- **The runner** used 11–12 MiB.
-
-**Sealed, on the same code (`--with sealed`), every check passes.** C1 took
-12.9 s, P 92 s. C3's and A's Linear calls failed, as sealed they must, and I
-passed as unsealed. For E, every packet n8n sent was one of:
+**Sealed (`--with sealed`), on pass 1's and pass 4's code, every check
+passes.** C1 took 12.9 s and 12.5 s, P 92 s both times. C3's and A's Linear
+calls failed, as sealed they must. I passed as unsealed, and on pass 4
+without its runner-down leg. For E, every packet n8n sent was one of:
 - a question to the network's resolver: `api.linear.app` ×4 (the act
   tools' host), `server.dns.podman` ×14, `orchestration-runner.dns.podman`
-  ×8;
+  ×8 (pass 1);
 - a connection to the brain's `:8000` (7);
 - a connection to the runner's `:8090` (4).
 
 Nothing else was asked for or dialled.
+
+**Walks.** On pass 4's code a reviewer followed `deploy/README.md` on a
+throwaway stack: init, an empty allowlist, a pipeline added and removed, the
+Linear key set and unset, and an upgrade without `OB1_RUNNER_KEY`. On pass
+5's, a reviewer walked the add-a-pipeline sequence, and stopped the runner
+mid-reembed against a provider that hangs: the leased rows came back
+pending, and the next run embedded them. On pass 6's, a reviewer ran CI's
+steps from a clean clone (the self-checks, the typechecks, the loopback
+step, the runner image's build), and all passed.
+
+**What got in the way.** Before pass 5's run, a fresh kit project could not
+reach the host's Ollama through the podman VM's gateway (192.168.127.254)
+at all, though another project on the same VM could. Recreating the
+project's network cleared it, and nothing in this change touches it. Two
+cycles on the same project also overlapped: one's K check rotated the key
+the other's C1 was using, so the verify was re-run alone. Cycles on one
+project must not overlap.
 
 The implementation commit's first run had passed A, I, K and C3. C1, C1s
 and P failed that time because another session's 27B model held the host's
