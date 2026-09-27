@@ -1752,8 +1752,9 @@ export const ROLE_GRANTS = Object.freeze({
   // graph-centrality.ts's dependency read (--startable, --decay-blocked) is
   // 058's node_state(), which reads `thought_sources` too, so a reader running
   // it needs SELECT on it — this group's, or the server group's since 059
-  // (SMD-2255); its default modes read node_lifecycle(), `thoughts` alone
-  // (SMD-2074).
+  // (SMD-2255); its default modes read node_lifecycle() — `thoughts` and,
+  // since 060, `ob1_ticket_head`, both the capture group's (SMD-2074,
+  // SMD-2256).
   structure: Object.freeze([
     Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "053" }),
     Object.freeze({ table: "thought_facets",  privileges: Object.freeze(["INSERT"]),                               since: "053" }),

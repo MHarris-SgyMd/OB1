@@ -5629,7 +5629,7 @@ console.log("\n[27] search_thoughts_current against a hand oracle on real Postgr
   await sql.close();
 }
 
-console.log("\n[28] Migration 060's projection under two connections: writers of one ticket serialise on its key and the later one recomputes from the earlier's commit; a pointer write re-reads its target's issue after a concurrent move; two successors at once; a ticket write reads no whole table; the suite leaves no drift (SMD-2256)");
+console.log("\n[28] Migration 060's projection under two connections: writers of one ticket serialise on its key and the later one recomputes from the earlier's commit; a row gaining a key while it is superseded holds its own pointer lock; a pointer write waits for a concurrent move of its target's issue; two successors at once; a ticket write reads no whole table; the suite leaves no drift (SMD-2256)");
 {
   // test-schema [56] holds the rules on one connection; what it cannot hold is
   // a second writer's uncommitted row. Each race below goes stale without the
@@ -5678,12 +5678,47 @@ console.log("\n[28] Migration 060's projection under two connections: writers of
       `a second writer of R-1 waits on its key (class 22561) until the first commits, then recomputes from it: the head is X1 with the first writer's status, and no drift (${JSON.stringify(h)}; ${aError || bError || "clean"})`);
   }
 
-  // A pointer write whose target's issue is moving. C holds M-1's key; A moves
-  // P from M-1 to M-2 and queues on it; B points Y at P, reads P's issue as
-  // M-1 (A has not committed) and queues behind A. C lets go: A recomputes
-  // M-2 with P live (B's pointer is not committed) and commits; B takes M-1,
-  // re-reads P's issue — now M-2 — locks it and recomputes it with P
-  // superseded, so M-2's head is Q. Without the re-read M-2 kept P.
+  // A row gaining an issue key while a new row supersedes it (first review
+  // pass). X, newer than R but without a key, joins A-1 in an open
+  // transaction; Y points at X. Without a lock on X itself, Y read X's issue
+  // as none (not yet committed) and reconciled nothing of A-1, while X's own
+  // recompute had not seen Y: A-1's head stayed X, completed. Now X's write
+  // holds X's pointer bucket (class 22562), Y waits on it, and after X commits
+  // Y reads X's issue and recomputes A-1 with X superseded: the head is R.
+  const r1 = await row("[28] A-1's older row", { kind: "race2256", issue: "A-1", status_type: "started", linear_updated_at: "2026-01-01" });
+  const xk = await row("[28] X, joining A-1", { kind: "race2256", status_type: "completed", linear_updated_at: "2026-09-01" });
+  {
+    const connA = racer(), connB = racer();
+    const { p: doneP, open: done } = gate();
+    let aHolding = false, bPid = -1, errors = "";
+    const aDone = connA.begin(async (tx: SQL) => {
+      await tx`UPDATE thoughts SET metadata = metadata || '{"issue": "A-1"}' WHERE id = ${xk}::uuid`;
+      aHolding = true;
+      await doneP;
+    }).catch((e: Error) => { errors += e.message; });
+    await waitFor(() => aHolding || errors !== "");
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`INSERT INTO thoughts (content, metadata, supersedes) VALUES ('[28] Y, superseding X', ${{ kind: "race2256" }}::jsonb, ${xk}::uuid)`;
+    }).catch((e: Error) => { errors += e.message; });
+    await waitFor(async () => bPid > 0 && (await waitingOn(bPid, 22562)) === 1);
+    const bWaited = bPid > 0 && (await waitingOn(bPid, 22562)) === 1;
+    done();
+    await aDone; await bDone;
+    await connA.close(); await connB.close();
+    const h = await head("A-1");
+    assert(aHolding && bWaited && errors === "" && h?.id === r1 && h.status_type === "started" && (await drift()) === 0,
+      `a row gaining an issue key holds its own pointer bucket, so a concurrent row superseding it waits (class 22562) and then recomputes the issue with it superseded: A-1's head is R, started, and no drift (${JSON.stringify(h)}; ${errors || "clean"})`);
+  }
+
+  // A pointer write whose target's issue is moving. C holds M-1's bucket; A
+  // moves P from M-1 to M-2, takes P's pointer bucket and queues on M-1's; B
+  // points Y at P and queues on P's pointer bucket, which A holds, before it
+  // reads P's issue. C lets go: A recomputes M-2 with P live (B's pointer is
+  // not committed) and commits; B reads P's issue — now M-2 — and recomputes
+  // it with P superseded, so M-2's head is Q. Before the first review pass B
+  // read P's issue as M-1 and needed a re-read after the grant to find M-2.
   const p = await row("[28] P, moving to M-2", { kind: "race2256", issue: "M-1", status_type: "started", linear_updated_at: "2026-09-05" });
   const qRow = await row("[28] Q, M-2's older row", { kind: "race2256", issue: "M-2", status_type: "completed", linear_updated_at: "2026-09-01" });
   const y = await row("[28] Y, P's successor", { kind: "race2256" });
@@ -5692,7 +5727,7 @@ console.log("\n[28] Migration 060's projection under two connections: writers of
     const { p: releaseP, open: release } = gate();
     let cHolding = false, aPid = -1, bPid = -1, errors = "";
     const cDone = connC.begin(async (tx: SQL) => {
-      await tx`SELECT pg_advisory_xact_lock(22561, hashtext('M-1'))`;
+      await tx`SELECT pg_advisory_xact_lock(22561, hashtext('M-1') & 255)`;  // M-1's bucket, as the trigger takes it
       cHolding = true;
       await releaseP;
     }).catch((e: Error) => { errors += e.message; });
@@ -5709,14 +5744,14 @@ console.log("\n[28] Migration 060's projection under two connections: writers of
       bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
       await tx`UPDATE thoughts SET supersedes = ${p}::uuid WHERE id = ${y}::uuid`;
     }).catch((e: Error) => { errors += e.message; });
-    await waitFor(async () => bPid > 0 && (await waitingOn(bPid, 22561)) === 1);
-    const bQueued = bPid > 0 && (await waitingOn(bPid, 22561)) === 1;
+    await waitFor(async () => bPid > 0 && (await waitingOn(bPid, 22562)) === 1);
+    const bQueued = bPid > 0 && (await waitingOn(bPid, 22562)) === 1;
     release();
     await cDone; await aDone; await bDone;
     await connC.close(); await connA.close(); await connB.close();
     const h = await head("M-2");
     assert(aQueued && bQueued && errors === "" && h?.id === qRow && (await head("M-1")) === undefined && (await drift()) === 0,
-      `a pointer write that read its target's issue before a concurrent move re-reads it after the grant: M-2's head is Q, M-1 has none, and no drift (${JSON.stringify(h)}; ${errors || "clean"})`);
+      `a pointer write waits on its target's pointer bucket (class 22562) while a concurrent write moves the target's issue, then reads it: M-2's head is Q, M-1 has none, and no drift (${JSON.stringify(h)}; ${errors || "clean"})`);
   }
 
   // Two successors of one thought written at once: both take its superseder
@@ -5775,7 +5810,7 @@ console.log("\n[28] Migration 060's projection under two connections: writers of
     `a ticket's status write and a pointer write on twenty thousand thoughts, five thousand of them pointers, scan thoughts no times and read ${rowsRead} of its rows (under 100), and no drift`);
 
   await db`DELETE FROM thoughts WHERE metadata->>'kind' = 'race2256'`;
-  const [left] = await db`SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift, (SELECT count(*)::int FROM ob1_ticket_head WHERE issue IN ('R-1', 'M-1', 'M-2')) AS heads`;
+  const [left] = await db`SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift, (SELECT count(*)::int FROM ob1_ticket_head WHERE issue IN ('R-1', 'A-1', 'M-1', 'M-2')) AS heads`;
   assert(suiteDrift === 0 && left.drift === 0 && left.heads === 0,
     `every section before this one left the projection exact (${suiteDrift}), and deleting this section's rows takes their heads with them (${left.heads} left, drift ${left.drift})`);
   await db.close();

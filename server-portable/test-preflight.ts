@@ -1677,15 +1677,25 @@ else {
              `with the audit INSERT granted and extraction off, the base capture set is ok and says nothing of thought_work_claims (exit ${baseOk.code})`);
 
       // 060's triggers reconcile the node_state projection as the caller on a
-      // write of a ticket row or a pointer: without its writes the check names
-      // those writes and lifecycle reads — not a capture, not a delete.
+      // write that moves a key, a status, a watermark or a pointer, and the
+      // lifecycle reads read it. Split by privilege (first review pass): with
+      // SELECT held and the writes missing, the check names those writes and
+      // not the reads (which still work), nor a plain capture or every delete;
+      // with SELECT missing too, it names the reads as well.
       await claims.unsafe("REVOKE INSERT, UPDATE, DELETE ON ob1_ticket_head, ob1_superseded_by FROM ob1_pf_capture");
-      const projectionMiss = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
-      assert(projectionMiss.code === 1 &&
-             /INSERT, UPDATE, DELETE on ob1_ticket_head; INSERT, UPDATE, DELETE on ob1_superseded_by — so a write of a row carrying an issue key or a supersedes pointer, and every lifecycle read \(060's triggers keep the node_state projection as the caller\) would fail/.test(writeLine(projectionMiss.out)) &&
-             !/windowed capture|every delete/.test(writeLine(projectionMiss.out)) &&
-             /GRANT INSERT, UPDATE, DELETE ON ob1_ticket_head TO ob1_pf_capture;\s+GRANT INSERT, UPDATE, DELETE ON ob1_superseded_by TO ob1_pf_capture;/.test(projectionMiss.out),
-             `without 060's projection writes the check names ticket and pointer writes and lifecycle reads, not captures or deletes, each table with its GRANT (exit ${projectionMiss.code})`);
+      const projectionWrites = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(projectionWrites.code === 1 &&
+             /INSERT, UPDATE, DELETE on ob1_ticket_head; INSERT, UPDATE, DELETE on ob1_superseded_by — so a write that moves an issue key, a ticket's status or watermark, or a supersedes pointer — a capture naming supersedes and a delete of such a row included \(060's triggers keep the node_state projection as the caller\) would fail/.test(writeLine(projectionWrites.out)) &&
+             !/windowed capture|every delete|lifecycle read/.test(writeLine(projectionWrites.out)) &&
+             /GRANT INSERT, UPDATE, DELETE ON ob1_ticket_head TO ob1_pf_capture;\s+GRANT INSERT, UPDATE, DELETE ON ob1_superseded_by TO ob1_pf_capture;/.test(projectionWrites.out),
+             `without 060's projection writes the check names the writes that move a key or a pointer — not lifecycle reads, not a plain capture, not every delete — each table with its GRANT (exit ${projectionWrites.code})`);
+      await claims.unsafe("REVOKE SELECT ON ob1_ticket_head, ob1_superseded_by FROM ob1_pf_capture");
+      const projectionAll = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(projectionAll.code === 1 &&
+             /every lifecycle read \(node_lifecycle, node_state, search_thoughts' prefer_current\) and a write that moves an issue key/.test(writeLine(projectionAll.out)) &&
+             /GRANT SELECT, INSERT, UPDATE, DELETE ON ob1_ticket_head TO ob1_pf_capture;/.test(projectionAll.out),
+             `with SELECT missing as well it names every lifecycle read beside those writes, and the GRANT carries SELECT (exit ${projectionAll.code})`);
+      await claims.unsafe("GRANT SELECT ON ob1_ticket_head, ob1_superseded_by TO ob1_pf_capture");
       await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON ob1_ticket_head, ob1_superseded_by TO ob1_pf_capture");
 
       // 016's trigger reads ob1_config as the caller on EVERY capture (before it

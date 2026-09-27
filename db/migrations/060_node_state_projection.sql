@@ -22,9 +22,10 @@
 --   raw upsert, 029's raw supersedes, 025's ON DELETE SET NULL, every test's
 --   raw UPDATE — and the log misses what the superseder rule reads (an update
 --   event carries no created_at move) and a load with triggers disabled.
---   SMD-1997's fold of status transitions from thought_audit later replaces
---   what feeds these tables, not the tables or the node_* signatures
---   (docs/event-log-as-truth.md).
+--   SMD-1997's fold of status transitions from thought_audit can later feed
+--   ob1_ticket_head's status (not ob1_superseded_by, which reads created_at),
+--   under the same tables and node_* signatures (docs/event-log-as-truth.md).
+--   A fold that rebuilds thoughts rows fires these triggers like any writer.
 --
 -- WHAT
 --   * ob1_ticket_head — one row per issue key a row carries: its head (the
@@ -32,7 +33,9 @@
 --     then the id — 058's rule) and the head's status, status_type and
 --     synced_at. Keyed by md5(issue)::uuid with the issue beside it, so a key
 --     of any length never fails a write that succeeds without this file (a
---     btree entry is capped near 2.7 kB); every read rechecks the issue.
+--     btree entry is capped near 2.7 kB); every read rechecks the issue. Two
+--     issues whose md5 collide keep one head (the lesser issue's) and the
+--     other reads its own keys — drift() names it; nothing fails.
 --   * ob1_superseded_by — one row per thought some row's supersedes names:
 --     the newest successor by (created_at, id) descending — 058's rule.
 --   * ob1_superseders_of(uuid[]) and ob1_ticket_heads_of(text[]) — the two
@@ -56,8 +59,10 @@
 --     carrying an issue key or a supersedes pointer returns at once (a plain
 --     capture needs no privilege here); otherwise the keys it moved — both
 --     sides of an issue key's move, the targets of a pointer's move and their
---     issues, a successor's created_at — are locked and reconciled. None
---     writes thoughts.
+--     issues, a successor's created_at — are locked and reconciled. A fourth,
+--     AFTER TRUNCATE, empties both tables. None writes thoughts.
+--   * search_thoughts_current (059) re-created in plpgsql, body, columns and
+--     settings unchanged, so its plan is cached rather than made per call.
 --   * node_lifecycle() and node_state() read the tables, same signatures,
 --     same rows. node_state has no top-level WITH: PostgreSQL does not pull a
 --     subquery holding one up into its caller, so 059's join computed the
@@ -65,46 +70,61 @@
 --     (still reads — blockers, unknown_blockers, in_dependencies and
 --     node_dependencies()' gate over the status scalar, SMD-2267) are
 --     removed from a plan that does not read them, and the rest is driven by
---     primary key from the caller's ids. The tables of a removed join are
---     not permission-checked either, so the search's columns no longer need
---     SELECT on thought_sources.
+--     primary key from the caller's ids. On PostgreSQL 16 and 17 the tables
+--     of a removed join are not permission-checked either, so the search runs
+--     without SELECT on thought_sources — observed, not documented behaviour,
+--     so the server group keeps that grant.
 --
 --   Concurrency. Under READ COMMITTED two writers of one ticket's rows would
 --   each recompute from a snapshot without the other's row, and the later
 --   upsert would keep a stale head. So before it recomputes, the trigger takes
---   transaction advisory locks — a shared global (22560, 0), then each
---   superseder key (22562, hashtext(id)) and each issue key (22561,
---   hashtext(issue)), in hash order — and re-reads the pointer targets' issues
---   until no new key appears; each recompute is a statement after the grant,
---   so it sees every write committed before it. Writers of one ticket
---   serialise until commit. A statement moving more keys than
---   ob1.node_projection_bulk_keys (256) takes the global lock exclusively
---   instead, so a whole-table UPDATE cannot fill the lock table. Under
---   REPEATABLE READ or SERIALIZABLE every key is rewritten, so a concurrent
---   writer of the same key raises a serialization failure rather than skew.
+--   transaction advisory locks — a shared global (22560, 0), then buckets of
+--   the keys' hashes, 256 per class, in bucket order: 22562 for the
+--   superseded thoughts and for the rows whose head fields moved (a
+--   concurrent pointer write to such a row reads its issue), 22561 for the
+--   issues, the pointer targets' issues read once the pointer buckets are held
+--   (a write moving a target's issue holds that target's bucket too); each
+--   recompute is a statement after the grant, so it sees every write committed
+--   before it. So statements moving one ticket's key, status,
+--   watermark or pointers serialise until commit (a content-only edit takes
+--   no lock), and a transaction holds at most 513 of these locks however many
+--   keys it writes. Two new costs of that: a multi-statement transaction
+--   writing tickets in one order can deadlock (40P01) with one writing them in
+--   another, where before it waited — retry it (the repo's writers make one
+--   statement per transaction); and ob1_rebuild_node_projection() takes 22560
+--   exclusively. REPEATABLE READ is refused for such a statement: its snapshot
+--   predates the lock, so a concurrent commit would be lost without a
+--   conflict. SERIALIZABLE is left to SSI, which keeps the tables exact only
+--   when every writer of ticket rows is serializable; a mix needs a rebuild.
 --
 -- SAFETY
---   Additive: two tables, one index, six functions, three triggers, and two
---   bodies redefined with their signatures, columns and rows unchanged.
+--   Additive: two tables, one index, seven functions, four triggers; two
+--   bodies redefined with their signatures, columns and rows unchanged, and
+--   059's wrapper re-created in plpgsql the same way; the hybrid's row
+--   estimate. Every write to thoughts now also materialises
+--   its transition tables (whole rows, the vector included): a plain capture
+--   measured under 0.1 ms, a whole-table stamp at 100,000 rows about +10%.
 --   SECURITY INVOKER throughout (no SECURITY DEFINER in this repo), so the
 --   triggers run as the writing role: db/config.mjs ROLE_GRANTS gives the
 --   capture group SELECT, INSERT, UPDATE and DELETE on both tables, and a
 --   role granted before this file fails preflight's write-privileges check
 --   with the exact GRANT until `migrate.ts --grant` runs again — until then a
---   write of a ticket row or a pointer, and every lifecycle read, is refused
---   on the new tables. Idempotent: IF NOT EXISTS, DROP TRIGGER IF EXISTS,
+--   write that moves an issue key, a ticket's status or watermark, or a
+--   pointer, and every lifecycle read, is refused on the new tables. A reader
+--   of node_lifecycle() — graph-centrality's default modes — needs SELECT on
+--   ob1_ticket_head now, beside thoughts. Idempotent: IF NOT EXISTS, DROP TRIGGER IF EXISTS,
 --   CREATE OR REPLACE, and the seed is a reconcile, not a wipe. The seed runs
 --   after the triggers exist; CREATE TRIGGER holds writers off until commit.
---   A write made with thoughts' user triggers disabled bypasses the
---   projection: run SELECT * FROM ob1_rebuild_node_projection() after it
---   (drift() says whether one is needed). MINOR under the version rules.
+--   A write made with thoughts' user triggers disabled — ALTER TABLE ...
+--   DISABLE TRIGGER, session_replication_role = replica (logical replication's
+--   apply, pg_restore --disable-triggers) — bypasses the projection: run
+--   SELECT * FROM ob1_rebuild_node_projection() after it (drift() says
+--   whether one is needed). MINOR under the version rules.
 --
 -- Expected outcome
 --   SELECT count(*) FROM ob1_node_projection_drift() is 0, node_state() lists
 --   what 058's did, and search_thoughts_current adds node_state's lookups to
---   the hybrid's own cost at its wider window (bench-hybrid.ts: +1.05 to +1.86
---   ms at 10,000 thoughts, inside the budget 059 missed; +2.4 to +3.2 ms at
---   100,000, about 1.6 of it the window).
+--   the hybrid's own cost at its wider window (bench-hybrid.ts reports both).
 -- Dependencies: 025 (thoughts.supersedes), 058 (node_state).
 -- =============================================================================
 
@@ -181,7 +201,7 @@ RETURNS TABLE (issue_key uuid, issue text, head_id uuid, status text, status_typ
 LANGUAGE sql
 STABLE
 AS $$
-  SELECT DISTINCT ON (c.issue) md5(c.issue)::uuid, c.issue, c.id, c.status, c.status_type, c.synced_at
+  SELECT DISTINCT ON (md5(c.issue)::uuid) md5(c.issue)::uuid, c.issue, c.id, c.status, c.status_type, c.synced_at
     FROM (SELECT p.metadata->>'issue' AS issue, p.id, p.metadata->>'status' AS status,
                  p.metadata->>'status_type' AS status_type, p.metadata->>'linear_updated_at' AS synced_at
             FROM thoughts p
@@ -192,22 +212,20 @@ AS $$
             JOIN thoughts p ON p.metadata ? 'issue' AND md5(p.metadata->>'issue')::uuid = md5(u.k)::uuid
                            AND p.metadata->>'issue' = u.k) c
     LEFT JOIN ob1_superseded_by x ON x.old_id = c.id
-   ORDER BY c.issue, (x.old_id IS NULL) DESC, c.synced_at DESC NULLS LAST, c.id
+   ORDER BY md5(c.issue)::uuid, c.issue, (x.old_id IS NULL) DESC, c.synced_at DESC NULLS LAST, c.id
 $$;
 COMMENT ON FUNCTION ob1_ticket_heads_of(text[]) IS
   'The ticket-head rule, once: for each issue key named (every key a row carries when NULL), the issue row nothing supersedes, then the newest linear_updated_at, then the id — 058''s — with its status, status_type and synced_at. Reads ob1_superseded_by for "nothing supersedes it", so it is reconciled first. What ob1_ticket_head holds. Migration 060 / SMD-2256.';
 
 -- ---------------------------------------------------------------------------
 -- Reconcile: superseders, then heads. Keyed when given keys, every key when
--- NULL. Outside READ COMMITTED every key is rewritten (see WHY).
+-- NULL.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION ob1_node_projection_reconcile(p_issues text[], p_ids uuid[])
 RETURNS TABLE (heads_written int, heads_deleted int, superseders_written int, superseders_deleted int)
 LANGUAGE plpgsql
 SET jit = off
 AS $$
-DECLARE
-  v_force boolean := current_setting('transaction_isolation') <> 'read committed';
 BEGIN
   heads_written := 0; heads_deleted := 0; superseders_written := 0; superseders_deleted := 0;
   IF p_ids IS NULL THEN
@@ -215,7 +233,7 @@ BEGIN
          d AS (DELETE FROM ob1_superseded_by s WHERE NOT EXISTS (SELECT 1 FROM f WHERE f.old_id = s.old_id) RETURNING 1),
          w AS (INSERT INTO ob1_superseded_by AS s (old_id, new_id) SELECT f.old_id, f.new_id FROM f
                  ON CONFLICT (old_id) DO UPDATE SET new_id = EXCLUDED.new_id
-                 WHERE v_force OR s.new_id IS DISTINCT FROM EXCLUDED.new_id
+                 WHERE s.new_id IS DISTINCT FROM EXCLUDED.new_id
                RETURNING 1)
     SELECT (SELECT count(*) FROM w), (SELECT count(*) FROM d) INTO superseders_written, superseders_deleted;
   ELSIF cardinality(p_ids) > 0 THEN
@@ -224,7 +242,7 @@ BEGIN
                  AND NOT EXISTS (SELECT 1 FROM f WHERE f.old_id = s.old_id) RETURNING 1),
          w AS (INSERT INTO ob1_superseded_by AS s (old_id, new_id) SELECT f.old_id, f.new_id FROM f
                  ON CONFLICT (old_id) DO UPDATE SET new_id = EXCLUDED.new_id
-                 WHERE v_force OR s.new_id IS DISTINCT FROM EXCLUDED.new_id
+                 WHERE s.new_id IS DISTINCT FROM EXCLUDED.new_id
                RETURNING 1)
     SELECT (SELECT count(*) FROM w), (SELECT count(*) FROM d) INTO superseders_written, superseders_deleted;
   END IF;
@@ -236,7 +254,7 @@ BEGIN
                  SELECT f.issue_key, f.issue, f.head_id, f.status, f.status_type, f.synced_at FROM f
                  ON CONFLICT (issue_key) DO UPDATE SET issue = EXCLUDED.issue, head_id = EXCLUDED.head_id, status = EXCLUDED.status,
                                                        status_type = EXCLUDED.status_type, synced_at = EXCLUDED.synced_at
-                 WHERE v_force OR (h.issue, h.head_id, h.status, h.status_type, h.synced_at)
+                 WHERE (h.issue, h.head_id, h.status, h.status_type, h.synced_at)
                           IS DISTINCT FROM (EXCLUDED.issue, EXCLUDED.head_id, EXCLUDED.status, EXCLUDED.status_type, EXCLUDED.synced_at)
                RETURNING 1)
     SELECT (SELECT count(*) FROM w), (SELECT count(*) FROM d) INTO heads_written, heads_deleted;
@@ -248,7 +266,7 @@ BEGIN
                  SELECT f.issue_key, f.issue, f.head_id, f.status, f.status_type, f.synced_at FROM f
                  ON CONFLICT (issue_key) DO UPDATE SET issue = EXCLUDED.issue, head_id = EXCLUDED.head_id, status = EXCLUDED.status,
                                                        status_type = EXCLUDED.status_type, synced_at = EXCLUDED.synced_at
-                 WHERE v_force OR (h.issue, h.head_id, h.status, h.status_type, h.synced_at)
+                 WHERE (h.issue, h.head_id, h.status, h.status_type, h.synced_at)
                           IS DISTINCT FROM (EXCLUDED.issue, EXCLUDED.head_id, EXCLUDED.status, EXCLUDED.status_type, EXCLUDED.synced_at)
                RETURNING 1)
     SELECT (SELECT count(*) FROM w), (SELECT count(*) FROM d) INTO heads_written, heads_deleted;
@@ -314,22 +332,22 @@ DECLARE
   v_issues  text[];   -- issue keys whose head may have moved
   v_ids     uuid[];   -- superseded thoughts whose newest successor may have moved
   v_targets uuid[];   -- thoughts whose superseded-ness may have moved (their issue's head with it)
-  v_locked  text[] := '{}';
-  v_more    text[];
-  v_bulk    int := coalesce(nullif(current_setting('ob1.node_projection_bulk_keys', true), '')::int, 256);
-  k         text;
-  i         uuid;
+  v_rows    uuid[];   -- rows whose head fields moved: a concurrent pointer write to one of them
+                      -- reads its issue, so it takes the same pointer bucket (first review pass)
+  b         int;
 BEGIN
   IF TG_OP = 'INSERT' THEN
     SELECT array_agg(DISTINCT n.metadata->>'issue') FILTER (WHERE n.metadata->>'issue' IS NOT NULL),
-           array_agg(DISTINCT n.supersedes) FILTER (WHERE n.supersedes IS NOT NULL)
-      INTO v_issues, v_ids
+           array_agg(DISTINCT n.supersedes) FILTER (WHERE n.supersedes IS NOT NULL),
+           array_agg(n.id) FILTER (WHERE n.metadata->>'issue' IS NOT NULL)
+      INTO v_issues, v_ids, v_rows
       FROM new_rows n WHERE n.metadata ? 'issue' OR n.supersedes IS NOT NULL;
     v_targets := v_ids;
   ELSIF TG_OP = 'DELETE' THEN
     SELECT array_agg(DISTINCT o.metadata->>'issue') FILTER (WHERE o.metadata->>'issue' IS NOT NULL),
-           array_agg(DISTINCT o.supersedes) FILTER (WHERE o.supersedes IS NOT NULL)
-      INTO v_issues, v_ids
+           array_agg(DISTINCT o.supersedes) FILTER (WHERE o.supersedes IS NOT NULL),
+           array_agg(o.id) FILTER (WHERE o.metadata->>'issue' IS NOT NULL)
+      INTO v_issues, v_ids, v_rows
       FROM old_rows o WHERE o.metadata ? 'issue' OR o.supersedes IS NOT NULL;
     v_targets := v_ids;
   ELSE
@@ -337,8 +355,9 @@ BEGIN
     -- the key and the pointer) moved everything it names.
     SELECT array_agg(DISTINCT m.issue) FILTER (WHERE m.issue IS NOT NULL),
            array_agg(DISTINCT m.sb) FILTER (WHERE m.sb IS NOT NULL),
-           array_agg(DISTINCT m.target) FILTER (WHERE m.target IS NOT NULL)
-      INTO v_issues, v_ids, v_targets
+           array_agg(DISTINCT m.target) FILTER (WHERE m.target IS NOT NULL),
+           array_agg(DISTINCT m.moved) FILTER (WHERE m.moved IS NOT NULL)
+      INTO v_issues, v_ids, v_targets, v_rows
       FROM (SELECT o.id AS oid, n.id AS nid, o.metadata AS om, n.metadata AS nm,
                    o.supersedes AS os, n.supersedes AS ns, o.created_at AS oc, n.created_at AS nc
               FROM (SELECT r.id, r.metadata, r.supersedes, r.created_at FROM old_rows r
@@ -351,58 +370,73 @@ BEGIN
                     IS DISTINCT FROM (r.nm->>'issue', r.nm->>'status', r.nm->>'status_type', r.nm->>'linear_updated_at') AS head_moved,
                r.oid IS NULL OR r.nid IS NULL OR r.os IS DISTINCT FROM r.ns AS pointer_moved,
                r.oid IS NULL OR r.nid IS NULL OR r.os IS DISTINCT FROM r.ns OR r.oc IS DISTINCT FROM r.nc AS successor_moved) f
-      CROSS JOIN LATERAL (VALUES (r.om->>'issue', r.os), (r.nm->>'issue', r.ns)) v(issue, pointer)
+      CROSS JOIN LATERAL (VALUES (r.om->>'issue', r.os, r.oid), (r.nm->>'issue', r.ns, r.nid)) v(issue, pointer, id)
       CROSS JOIN LATERAL (SELECT CASE WHEN f.head_moved THEN v.issue END AS issue,
                                  CASE WHEN f.successor_moved THEN v.pointer END AS sb,
-                                 CASE WHEN f.pointer_moved THEN v.pointer END AS target) m;
+                                 CASE WHEN f.pointer_moved THEN v.pointer END AS target,
+                                 CASE WHEN f.head_moved AND v.issue IS NOT NULL THEN v.id END AS moved) m;
   END IF;
 
   IF v_issues IS NULL AND v_ids IS NULL THEN
     RETURN NULL;
   END IF;
+  -- REPEATABLE READ recomputes from the transaction's snapshot, after a lock
+  -- that cannot refresh it: a concurrent move committed since would be lost
+  -- without a conflict (first review pass). SERIALIZABLE is left to SSI.
+  IF current_setting('transaction_isolation') = 'repeatable read' THEN
+    RAISE EXCEPTION USING
+      MESSAGE = 'this write moves an issue key, a ticket''s status or watermark, or a supersedes pointer, and node_state''s projection (migration 060) cannot be kept under REPEATABLE READ',
+      HINT = 'Run it under READ COMMITTED (the default) or SERIALIZABLE.',
+      ERRCODE = 'feature_not_supported';
+  END IF;
   -- Never NULL past here: NULL means every key to the rules.
   v_issues := coalesce(v_issues, '{}');
   v_ids := coalesce(v_ids, '{}');
   v_targets := coalesce(v_targets, '{}');
+  v_rows := coalesce(v_rows, '{}');
 
-  IF cardinality(v_issues) + cardinality(v_ids) > v_bulk THEN
-    PERFORM pg_advisory_xact_lock(22560, 0);
-    v_issues := v_issues || coalesce((SELECT array_agg(DISTINCT t.metadata->>'issue') FROM thoughts t
-                                       WHERE t.id = ANY(v_targets) AND t.metadata->>'issue' IS NOT NULL), '{}');
-  ELSE
-    PERFORM pg_advisory_xact_lock_shared(22560, 0);
-    FOR i IN SELECT x FROM unnest(v_ids) x ORDER BY hashtext(x::text), x LOOP
-      PERFORM pg_advisory_xact_lock(22562, hashtext(i::text));
-    END LOOP;
-    -- With no pointer moved there is no target to read: lock the keys and go.
-    -- Otherwise read the targets' issues, lock every key not yet locked, and
-    -- read them again in a statement after the grant, until no new key
-    -- appears: a concurrent move of a target's key is seen once its writer
-    -- commits.
-    IF cardinality(v_targets) = 0 THEN
-      FOR k IN SELECT x FROM unnest(v_issues) x ORDER BY hashtext(x), x LOOP
-        PERFORM pg_advisory_xact_lock(22561, hashtext(k));
-      END LOOP;
-    ELSE LOOP
-      v_issues := ARRAY(SELECT DISTINCT x FROM unnest(v_issues || coalesce(
-                    (SELECT array_agg(t.metadata->>'issue') FROM thoughts t
-                      WHERE t.id = ANY(v_targets) AND t.metadata->>'issue' IS NOT NULL), '{}')) x);
-      v_more := ARRAY(SELECT x FROM unnest(v_issues) x WHERE NOT x = ANY(v_locked) ORDER BY hashtext(x), x);
-      EXIT WHEN cardinality(v_more) = 0;
-      FOREACH k IN ARRAY v_more LOOP
-        PERFORM pg_advisory_xact_lock(22561, hashtext(k));
-      END LOOP;
-      v_locked := v_locked || v_more;
-    END LOOP;
-    END IF;
+  -- The locks are buckets of the key's hash, 256 per class, so a transaction
+  -- holds at most 513 however many keys it writes (first review pass: one lock
+  -- per key filled the shared lock table at about twenty thousand); two keys
+  -- sharing a bucket only serialise more than they must.
+  PERFORM pg_advisory_xact_lock_shared(22560, 0);
+  FOR b IN SELECT DISTINCT hashtext(x::text) & 255 FROM unnest(v_ids || v_rows) x ORDER BY 1 LOOP
+    PERFORM pg_advisory_xact_lock(22562, b);
+  END LOOP;
+  -- The pointer targets' issues, read once the pointer buckets are held: a
+  -- write that moves a target's issue holds that target's bucket too (it is
+  -- in v_rows), so this read comes after it commits, or that write waits for
+  -- this one — no re-read is needed (first review pass: a row gaining a key
+  -- while newly superseded went stale without it).
+  IF cardinality(v_targets) > 0 THEN
+    v_issues := ARRAY(SELECT DISTINCT x FROM unnest(v_issues || coalesce(
+                  (SELECT array_agg(t.metadata->>'issue') FROM thoughts t
+                    WHERE t.id = ANY(v_targets) AND t.metadata->>'issue' IS NOT NULL), '{}')) x);
   END IF;
+  FOR b IN SELECT DISTINCT hashtext(x) & 255 FROM unnest(v_issues) x ORDER BY 1 LOOP
+    PERFORM pg_advisory_xact_lock(22561, b);
+  END LOOP;
 
   PERFORM ob1_node_projection_reconcile(v_issues, v_ids);
   RETURN NULL;
 END
 $$;
 COMMENT ON FUNCTION ob1_node_projection_sync() IS
-  'The thoughts_node_projection_* triggers'' body: from a statement''s transition tables, the issue keys whose head may have moved (both sides of a key''s move, the issues of every pointer target) and the thoughts whose newest successor may have moved; returns at once when the statement touched no row carrying an issue key or a supersedes pointer; otherwise takes the advisory locks (22560 shared, 22562 per superseder, 22561 per issue, in hash order; 22560 exclusive past ob1.node_projection_bulk_keys, default 256) and reconciles. Never writes thoughts. Migration 060 / SMD-2256.';
+  'The thoughts_node_projection_* row-change triggers'' body: from a statement''s transition tables, the issue keys whose head may have moved (both sides of a key''s move, the issues of every pointer target) and the thoughts whose newest successor may have moved; returns at once when the statement touched no row carrying an issue key or a supersedes pointer; refuses under REPEATABLE READ; otherwise takes the advisory locks — 22560 shared, then buckets of 256 per class: 22562 for the superseded thoughts and the rows whose head fields moved, then 22561 for the issues, the pointer targets'' issues read after the pointer buckets are held — and reconciles. Never writes thoughts. Migration 060 / SMD-2256.';
+
+CREATE OR REPLACE FUNCTION ob1_node_projection_truncate()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  PERFORM pg_advisory_xact_lock(22560, 0);
+  DELETE FROM ob1_ticket_head WHERE true;
+  DELETE FROM ob1_superseded_by WHERE true;
+  RETURN NULL;
+END
+$$;
+COMMENT ON FUNCTION ob1_node_projection_truncate() IS
+  'thoughts_node_projection_truncate''s body: emptying thoughts leaves no head and no superseder, so both tables are emptied under the exclusive lock (first review pass: a cascading truncation left them stale). Migration 060 / SMD-2256.';
 
 DROP TRIGGER IF EXISTS thoughts_node_projection_insert ON thoughts;
 CREATE TRIGGER thoughts_node_projection_insert
@@ -416,6 +450,10 @@ DROP TRIGGER IF EXISTS thoughts_node_projection_delete ON thoughts;
 CREATE TRIGGER thoughts_node_projection_delete
   AFTER DELETE ON thoughts REFERENCING OLD TABLE AS old_rows
   FOR EACH STATEMENT EXECUTE FUNCTION ob1_node_projection_sync();
+DROP TRIGGER IF EXISTS thoughts_node_projection_truncate ON thoughts;
+CREATE TRIGGER thoughts_node_projection_truncate
+  AFTER TRUNCATE ON thoughts
+  FOR EACH STATEMENT EXECUTE FUNCTION ob1_node_projection_truncate();
 
 -- The seed: a reconcile of every key, so a replay over a current projection
 -- writes nothing.
@@ -489,6 +527,83 @@ AS $$
 $$;
 COMMENT ON FUNCTION node_state(uuid[]) IS
   'Per thought (every thought when p_ids is NULL, else those named): node_lifecycle()''s columns; open (known and not settled, NULL when the status_type is missing or unknown); blocked (open blockers, and the thought itself not settled); blockers (its ticket''s open blockers from gating active links, a blocker settled only by its own known lifecycle, sorted, linear bare and another system''s as system:key, NULL when none — kept on a settled thought); unknown_blockers (those with no known status); in_dependencies (a gating active link names its ticket); superseded_by (the newest thought superseding it, NULL when current — ob1_superseded_by''s). Coverage is open IS NOT NULL; freshness is synced_at and created_at, never updated_at. No top-level WITH, so a caller''s planner pulls it up: a read of the lifecycle and superseded_by columns is primary-key lookups from the caller''s ids, and the dependency joins run only when their columns are read (they still compute every link — SMD-2267). The one read graph-centrality and search rank by. Migration 058 / SMD-2074; stored, 060 / SMD-2256.';
+
+-- ---------------------------------------------------------------------------
+-- search_thoughts_current in plpgsql: 059's body, columns and settings,
+-- unchanged, in a language whose plan is cached. As LANGUAGE sql with a SET
+-- clause it was planned afresh on every call, most of what the flag still
+-- added beyond the wider window once node_state was a lookup (first review
+-- pass: +1.11 ms at 10,000 thoughts against a budget of 1.10 as sql, +0.84 as
+-- plpgsql). CREATE OR REPLACE keeps its signature, columns, COMMENT and ACL;
+-- --reapply replays 059's sql body and then this one. The body is still a
+-- string, so it records no dependency on node_state.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION search_thoughts_current(
+  query_embedding  vector({{EMBEDDING_DIM}}),
+  query_text       text,
+  match_threshold  float   DEFAULT 0.7,
+  match_count      int     DEFAULT 10,
+  filter           jsonb   DEFAULT '{}'::jsonb,
+  recency_weight   float   DEFAULT 0.0,
+  half_life_days   float   DEFAULT 90.0
+)
+RETURNS TABLE (
+  id               uuid,
+  content          text,
+  metadata         jsonb,
+  created_at       timestamptz,
+  similarity       float,
+  matched_needles  text[],
+  needles          text[],
+  needle_counts    int[],
+  common_needles   text[],
+  literal_only     boolean,
+  score            float,     -- fused × the weight: the rank's own score
+  fused            float,     -- the hybrid's score, before the weight
+  demoted          text[],    -- the status_type and/or 'superseded' that weighted it; NULL when not
+  window_rows      int,       -- every row: the window's size
+  window_known     int,       -- every row: how many in the window carry a lifecycle
+  window_demoted   int,       -- every row: how many in the window were demoted
+  window_synced_at text,      -- every row: the latest source watermark in the window
+  window_exact     boolean    -- every row: the top N is the whole admitted list, weighted
+)
+LANGUAGE plpgsql
+STABLE
+SET jit = off
+AS $$
+#variable_conflict use_column
+BEGIN
+  RETURN QUERY
+  WITH n AS (SELECT least(greatest(coalesce(match_count, 10), 1), 100) AS v_count),
+  win AS (
+    SELECT h.*, least(100, 4 * n.v_count) AS w
+      FROM n, search_thoughts_hybrid(query_embedding, query_text, match_threshold, least(100, 4 * n.v_count),
+                                     filter, recency_weight, half_life_days)
+           WITH ORDINALITY AS h(hid, hcontent, hmetadata, hcreated_at, hsim, hmatched, hneedles, hcounts, hcommon, hliteral, hfused, ord)),
+  st AS (
+    SELECT win.*, s.status_type, s.synced_at, s.open,
+           coalesce(s.open = false, false) AS settled,
+           s.superseded_by IS NOT NULL AS superseded
+      FROM win LEFT JOIN node_state(NULL) s ON s.thought_id = win.hid),
+  agg AS (
+    SELECT count(*)::int AS rows_,
+           count(*) FILTER (WHERE open IS NOT NULL)::int AS known,
+           count(*) FILTER (WHERE settled OR superseded)::int AS dem,
+           max(synced_at) FILTER (WHERE open IS NOT NULL) AS synced,
+           max(w) AS w
+      FROM st)
+  SELECT st.hid, st.hcontent, st.hmetadata, st.hcreated_at, st.hsim, st.hmatched, st.hneedles, st.hcounts, st.hcommon, st.hliteral,
+         (st.hfused * CASE WHEN st.settled OR st.superseded THEN search_demote_weight() ELSE 1 END)::float,
+         st.hfused::float,
+         nullif(array_remove(ARRAY[CASE WHEN st.settled THEN st.status_type END,
+                                   CASE WHEN st.superseded THEN 'superseded' END], NULL), '{}'),
+         a.rows_, a.known, a.dem, a.synced,
+         (a.rows_ < a.w OR a.rows_ - a.dem >= (SELECT v_count FROM n))
+    FROM st CROSS JOIN agg a
+   ORDER BY 11 DESC, (st.settled OR st.superseded), st.ord
+   LIMIT (SELECT v_count FROM n);
+END
+$$;
 
 -- The window search_thoughts_current reads is at most 100 rows; without the
 -- estimate the planner assumes a set-returning function's 1,000 and, on a

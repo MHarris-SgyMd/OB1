@@ -190,16 +190,20 @@ for (const n of SCALES) {
   // rows above, so their numbers are what they were: 40% of the rows become
   // ticket rows (tickets of one or two rows, so heads sometimes choose), a
   // quarter of those settled, and one row in twenty supersedes the row before
-  // it. The budget, pre-registered: the flag adds at most the hybrid's own
-  // median at 10,000 rows (missed at 059; SMD-2256). The two are timed
-  // interleaved, a call of each per round, and the added cost is the median of
-  // the paired differences — a busy machine slows both halves of a pair alike.
+  // it. The budget, pre-registered at 059: the flag adds at most the hybrid's
+  // own median at 10,000 rows, read as the difference of the two medians
+  // (missed at 059; SMD-2256). The two are timed interleaved, a call of each
+  // per round, the order alternating round by round (first review pass: always
+  // hybrid first handed the flag warm pages), and the median of the paired
+  // differences is printed beside it — a busy machine slows both halves of a
+  // pair alike. The hybrid at the flag's window, min(100, 4N) = 40, is timed
+  // too: that much of the added cost is the wider read, not node_state.
   const stampTickets = (settled: string, live: string) =>
     sql.unsafe(`UPDATE thoughts SET metadata = metadata || jsonb_build_object('issue', 'B-' || ((metadata->>'doc')::int / 2),
                   'status_type', CASE WHEN (metadata->>'doc')::int % 20 < 2 THEN '${settled}' ELSE '${live}' END)
                  WHERE (metadata->>'doc')::int % 5 < 2`);
   const timed = async (fn: () => Promise<unknown>) => { const t = performance.now(); await fn(); return performance.now() - t; };
-  const tStampOn = await timed(() => stampTickets("completed", "started"));
+  await stampTickets("completed", "started");
   await sql.unsafe(`UPDATE thoughts t SET supersedes = s.id FROM thoughts s
                      WHERE (t.metadata->>'doc')::int % 20 = 3 AND (s.metadata->>'doc')::int = (t.metadata->>'doc')::int - 1`);
   await sql.unsafe("VACUUM ANALYZE thoughts");
@@ -208,20 +212,30 @@ for (const n of SCALES) {
   const paired = async (off: () => Promise<unknown>, on: () => Promise<unknown>) => {
     await off(); await on();
     const a: number[] = [], b: number[] = [];
-    for (let i = 0; i < ROUNDS; i++) { a.push(await timed(off)); b.push(await timed(on)); }
-    return { off: median(a), on: median(b), added: median(b.map((x, i) => x - a[i])) };
+    for (let i = 0; i < ROUNDS; i++) {
+      if (i % 2 === 0) { a.push(await timed(off)); b.push(await timed(on)); }
+      else { b.push(await timed(on)); a.push(await timed(off)); }
+    }
+    return { off: median(a), on: median(b), added: median(b) - median(a), pairedAdded: median(b.map((x, i) => x - a[i])) };
   };
   const plainP = await paired(() => sql`SELECT id FROM search_thoughts_hybrid(${q}::vector, ${plain}, 0.5, 10, '{}'::jsonb)`,
                               () => sql`SELECT id FROM search_thoughts_current(${q}::vector, ${plain}, 0.5, 10, '{}'::jsonb)`);
   const needleP = await paired(hybrid, () => sql`SELECT id FROM search_thoughts_current(${q}::vector, ${text}, 0.0, 10, '{}'::jsonb)`);
-  const tState = await time(() => sql`SELECT count(*) FROM node_state()`);
+  const windowP = await paired(() => sql`SELECT id FROM search_thoughts_hybrid(${q}::vector, ${plain}, 0.5, 10, '{}'::jsonb)`,
+                               () => sql`SELECT id FROM search_thoughts_hybrid(${q}::vector, ${plain}, 0.5, 40, '{}'::jsonb)`);
+  // A read of the columns, not count(*): since 060 count(*) reads none, and
+  // the planner drops every join (first review pass).
+  const tState = await time(() => sql`SELECT count(open) + count(superseded_by) FROM node_state()`);
+  const tStateAll = await time(() => sql`SELECT count(blockers) + count(open) + count(superseded_by) FROM node_state()`);
   const verdict = (p: { off: number; added: number }) => (n === 10000 ? `; budget ${fmt(p.off)}: ${p.added <= p.off ? "within" : "OVER"}` : "");
   console.log(`\n  prefer_current (059, stored since 060), ${st.settled.toLocaleString()} settled and ${st.superseded.toLocaleString()} superseded rows, ${ROUNDS} interleaved rounds:\n`);
   console.log(`    hybrid, no needle                       ${fmt(plainP.off).padStart(9)}`);
-  console.log(`    search_thoughts_current, no needle      ${fmt(plainP.on).padStart(9)}   (+${fmt(plainP.added)} paired${verdict(plainP)})`);
+  console.log(`    search_thoughts_current, no needle      ${fmt(plainP.on).padStart(9)}   (+${fmt(plainP.added)}; paired +${fmt(plainP.pairedAdded)}${verdict(plainP)})`);
+  console.log(`      of which the hybrid at the window (40) ${fmt(windowP.on).padStart(8)}   (+${fmt(windowP.added)}; paired +${fmt(windowP.pairedAdded)})`);
   console.log(`    hybrid, one needle                      ${fmt(needleP.off).padStart(9)}`);
-  console.log(`    search_thoughts_current, one needle     ${fmt(needleP.on).padStart(9)}   (+${fmt(needleP.added)} paired${verdict(needleP)})`);
-  console.log(`      node_state() over the brain alone     ${fmt(tState).padStart(9)}`);
+  console.log(`    search_thoughts_current, one needle     ${fmt(needleP.on).padStart(9)}   (+${fmt(needleP.added)}; paired +${fmt(needleP.pairedAdded)}${verdict(needleP)})`);
+  console.log(`      node_state()'s lifecycle and superseded_by, every thought ${fmt(tState)}`);
+  console.log(`      node_state(), every column (the dependency read too)      ${fmt(tStateAll)}`);
 
   // What 060's triggers cost a writer, pre-registered: a plain capture at most
   // +0.1 ms, a ticket's status update at most +0.5 ms, a bulk stamp of 40% of
@@ -249,16 +263,19 @@ for (const n of SCALES) {
     return sql`UPDATE thoughts SET metadata = metadata || jsonb_build_object('status_type', ${i % 2 ? "completed" : "started"}::text,
                  'linear_updated_at', ${`2026-10-01T00:00:${String(i % 60).padStart(2, "0")}Z`}::text) WHERE id = ${tickets[i % tickets.length]}`;
   });
-  // The bulk stamp, three times each way, alternating, every run a real change
-  // of status (the first, above, counts among the on runs).
-  const stampsOn = [tStampOn], stampsOff: number[] = [];
+  // The bulk stamp, three times each way, alternating. An off run leaves the
+  // projection behind the rows, so an untimed rebuild follows it: every on run
+  // then moves the projection too, not only the rows (first review pass: the
+  // on runs flipped back to what the tables already held, and wrote nothing
+  // there).
+  const stampsOn: number[] = [], stampsOff: number[] = [];
   for (let k = 0; k < 3; k++) {
     await projectionTriggers(false);
     stampsOff.push(await timed(() => stampTickets("canceled", "unstarted")));
     await projectionTriggers(true);
-    if (k < 2) stampsOn.push(await timed(() => stampTickets("completed", "started")));
+    await sql`SELECT * FROM ob1_rebuild_node_projection()`;
+    stampsOn.push(await timed(() => stampTickets("completed", "started")));
   }
-  await stampTickets("completed", "started");
   await sql`SELECT * FROM ob1_rebuild_node_projection()`;
   const [{ drift }] = await sql`SELECT count(*)::int AS drift FROM ob1_node_projection_drift()`;
   const stampOn = median(stampsOn), tStampOff = median(stampsOff);

@@ -1431,7 +1431,16 @@ if (configFailed) {
             // 060's triggers reconcile the node_state projection as the caller on
             // a write of a ticket row or a pointer, and node_lifecycle() reads it:
             // a plain capture returns before touching it (SMD-2256).
-            if (PROJECTION.some((t) => missingByTable.has(t))) fails.push("a write of a row carrying an issue key or a supersedes pointer, and every lifecycle read (060's triggers keep the node_state projection as the caller)");
+            const projectionMiss = PROJECTION.flatMap((t) => missingByTable.get(t) ?? []);
+            if (projectionMiss.length) {
+              // Split by privilege (first review pass): SELECT alone keeps every
+              // lifecycle read working; the writes break only writes that move a
+              // key, a status, a watermark or a pointer.
+              const writesMiss = projectionMiss.some((p) => p !== "SELECT");
+              fails.push((projectionMiss.includes("SELECT") ? "every lifecycle read (node_lifecycle, node_state, search_thoughts' prefer_current)" + (writesMiss ? " and " : "") : "")
+                + (writesMiss ? "a write that moves an issue key, a ticket's status or watermark, or a supersedes pointer — a capture naming supersedes and a delete of such a row included" : "")
+                + " (060's triggers keep the node_state projection as the caller)");
+            }
             const why = ` — so ${fails.join(", and ")} would fail`;
             if (missingByTable.size) {
               const phrase = [...missingByTable].map(([t, ps]) => `${ps.join(", ")} on ${t}`).join("; ");

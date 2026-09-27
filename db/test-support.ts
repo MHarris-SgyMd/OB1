@@ -151,6 +151,7 @@ const FUNCTIONS = [
   "search_demote_weight()",
   // 060 (SMD-2256): the triggers go with thoughts; their function is named here.
   "ob1_node_projection_sync()",
+  "ob1_node_projection_truncate()",
   "ob1_node_projection_drift()",
   "ob1_rebuild_node_projection()",
   "ob1_node_projection_reconcile(text[], uuid[])",
