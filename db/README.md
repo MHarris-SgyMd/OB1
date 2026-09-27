@@ -710,10 +710,11 @@ until SMD-2314 lands, a reviewer reads `trace_provenance(newer)` and rejects
 it. Siblings — two pages from one evidence — are still judged (a page
 superseding a page is 064's designed state; the archive takes a page's
 human-owned sections, so weigh them). Both sides stay in the pool: the rule
-filters pairs, not membership. The body carries `ob1:lineage-excludes-the-pair`, which preflight's
-`lineage` check reads: 063 re-applied by hand over 066 warns naming 066
-(029 re-applied is caught earlier, by the producer-count arm; the remedies
-run 061, 063, 066 in turn). One body redefined on its own text with no arity change; nothing runs at
+filters pairs, not membership. The body carries
+`ob1:lineage-excludes-the-pair`, which preflight's `lineage` check reads: 063
+re-applied by hand over 066 warns naming 066 (029 re-applied is caught
+earlier, by the producer-count arm; the remedies run 061, 063, 066 in turn).
+One body redefined on its own text with no arity change; nothing runs at
 apply time but the DDL; a pair proposed before the file stands for its
 reviewer (`consolidate.ts --list pending`) and is NOT marked as a lineage
 pair — the listing reads nothing of `derived_from`, the pass never replaces
@@ -1745,14 +1746,14 @@ judge cost is per pair. It also means a thought with no extracted entities has
 no candidates, which is why the pool is **thoughts with entities, a vector,
 that nothing supersedes, and no row under the key** (`consolidation_pool()`,
 one definition read by the worker, its `--status` and preflight) — extraction
-first, then consolidation, made
-structural rather than left to a trigger that would judge a capture before
+first, then consolidation, made structural rather than left to a trigger that
+would judge a capture before
 016's worker reached it and leave a terminal claim row behind. The gate cannot
 see the other side of a pair: a newer thought judged while an older neighbour
 is still unextracted is judged without it, and the pair is not revisited, so
-run the pass after extraction has finished rather than beside it. k and the floor were chosen by
-measurement (`evals/eval-consolidate.ts`; `evals/README.md` has the table) and
-are the worker's `--k` and `--min-sim`.
+run the pass after extraction has finished rather than beside it. k and the
+floor were chosen by measurement (`evals/eval-consolidate.ts`;
+`evals/README.md` has the table) and are the worker's `--k` and `--min-sim`.
 
 **The judge.** One call per pair to the judge model — `OB1_JUDGE_MODEL`, else
 the metadata model, so the harder task can run on a stronger model than every

@@ -3159,7 +3159,7 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
     `the reversal's candidates are the older thoughts sharing an entity, nearest first: the decision (cosine 1) then the far one (${c1.map((c) => `${c.older_id === decision ? "decision" : c.older_id === farAxis ? "far" : "?"}@${Number(c.similarity).toFixed(2)}`).join(", ")})`);
   assert(!c1.some((c) => c.older_id === sameDay), "…a thought captured the same day is not a candidate");
   assert(!c1.some((c) => c.older_id === noShare), "…nor one sharing no entity, however near");
-  assert(Number(c1[0].shared_entities) === 1, "…and the count of shared entities rides along");
+  assert(Number(c1[0]?.shared_entities) === 1, "…and the count of shared entities rides along");
   assert((await candidates(reversal, 5, 0.5)).length === 1, "a similarity floor drops the far one");
   assert((await candidates(reversal, 1)).length === 1 && (await candidates(reversal, 1))[0].older_id === decision, "k bounds the list, nearest kept");
   assert((await candidates(decision)).length === 0, "the OLDER thought has no candidates: a pair is reached from its newer side only");
