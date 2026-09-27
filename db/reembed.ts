@@ -426,7 +426,7 @@ const cli = commandLine("reembed.ts", {
   url: "one", workers: "one", batch: "one", ttl: "one", heartbeat: "one", job: "one", retire: "one",
   "accept-failed": "many",
   status: "none", "dry-run": "none", "switch-model": "none", "retry-failed": "none", "retry-fallbacks": "none", all: "none",
-}, { hints: { url: "<postgres://…>", job: "<reembed:model@dim[:suffix]>", retire: "<reembed:model@dim[:suffix] — preflight prints it>", "accept-failed": "<thought-id …>", all: "(with --accept-failed)" } });
+}, { hints: { url: "<postgres://…>", job: "<reembed:model@dim[:suffix]>", retire: "<reembed:model@dim[:suffix] — preflight prints it>", "accept-failed": "<thought-id …>", all: "(with --accept-failed)" }, showStrays: true });
 
 const url = cli.value("url") ?? process.env.DATABASE_URL;
 if (!url) {

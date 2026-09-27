@@ -89,7 +89,7 @@ const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "migrations
 // named by its shape, never echoed: it may carry a password.
 const cli = commandLine("migrate.ts", {
   url: "one", grant: "one", "dry-run": "none", baseline: "none", reapply: "none", force: "none",
-}, { hints: { url: "<postgres://…>", grant: "<role>", force: "(with --baseline)" } });
+}, { hints: { url: "<postgres://…>", grant: "<role>", force: "(with --baseline)" }, showStrays: true });
 
 const url = cli.value("url") ?? process.env.DATABASE_URL;
 const dryRun = cli.has("dry-run");

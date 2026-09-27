@@ -23,8 +23,8 @@ function ok(cond: boolean, msg: string): void {
 
 const SPEC = { url: "one", compare: "two", follow: "optional", ids: "many", query: "repeated", "dry-run": "none" } as const satisfies FlagSpec;
 type Name = keyof typeof SPEC;
-const scan = (argv: string[], positionals = 0): Args<Name> | { error: string } => scanArgs(argv, SPEC, { positionals });
-const refusal = (argv: string[], positionals = 0): string => { const r = scan(argv, positionals); return "error" in r ? r.error : ""; };
+const scan = (argv: string[], positionals = 0, showStrays = false): Args<Name> | { error: string } => scanArgs(argv, SPEC, { positionals, showStrays });
+const refusal = (argv: string[], positionals = 0, showStrays = false): string => { const r = scan(argv, positionals, showStrays); return "error" in r ? r.error : ""; };
 
 // ---------------------------------------------------------------------------
 // The scanner, pure.
@@ -57,13 +57,21 @@ const refusal = (argv: string[], positionals = 0): string => { const r = scan(ar
   const joined = refusal(["--url=postgres://u:s3cret@h/db"]);
   ok(/^unknown argument: --url=… \(a value joined with "="; give it as --url <value>\)$/.test(joined) && !joined.includes("s3cret"), "a value joined with = is named by its flag and never echoed");
   ok(/^unknown argument: --nope=…/.test(refusal(["--nope=1"])), "…a flag the spec does not have, likewise");
-  ok(/^unknown argument: stray \(a value where no flag takes one\)$/.test(refusal(["stray"])), "a value where no flag takes one is refused");
-  ok(/^unknown argument: <a URL> \(a value where no flag takes one\)$/.test(refusal(["postgres://u:s3cret@h/db"])), "…a bare URL shown by its shape, never echoed");
-  ok(/^unknown argument: b c \(values where no flag takes one\)$/.test(refusal(["--ids", "a", "--dry-run", "b", "c"])), "…every stray value named, the ids after another flag among them");
-  ok(/^unknown argument: -- /.test(refusal(["--"])), "a bare -- is not a flag and not silently a separator");
+  const hidden = refusal(["sk-not-a-real-key"]);
+  ok(/^unknown argument: a value where no flag takes one \(not shown: it may be a key\)$/.test(hidden) && !hidden.includes("sk-not-a-real-key"), "a value where no flag takes one is refused, and not echoed by default — a key has no shape to mask it by");
+  ok(/^unknown argument: 2 values where no flag takes one/.test(refusal(["--ids", "a", "--dry-run", "b", "c"])), "…counted when there are several");
+  ok(/^unknown argument: stray \(a value where no flag takes one\)$/.test(refusal(["stray"], 0, true)), "with showStrays, the stray is named");
+  ok(/^unknown argument: <a URL> \(a value where no flag takes one\)$/.test(refusal(["postgres://u:s3cret@h/db"], 0, true)), "…a bare URL still shown by its shape, never echoed");
+  ok(/^unknown argument: b c \(values where no flag takes one\)$/.test(refusal(["--ids", "a", "--dry-run", "b", "c"], 0, true)), "…every stray value named, the ids after another flag among them");
+  ok(/^unknown argument: -- \(no script/.test(refusal(["--"])), "a bare -- is refused, not read as a separator");
+  ok("error" in scanArgs(["--"], SPEC, { positionals: Infinity }) && "error" in scanArgs(["--", "Open Brain"], SPEC, { positionals: Infinity }), "…even where positionals are declared, so it never becomes graph-centrality's subject");
+  const after = refusal(["--url", "--compare=postgres://u:s3cret@h/db"]);
+  ok(/^--url needs a value; what follows it is --compare=…$/.test(after) && !after.includes("s3cret"), "the flag after a missing value is shown by its name when it carries a joined value");
+  ok(/what follows it is <a URL>$/.test(refusal(["--compare", "a", "--x://s3cret"])) && !refusal(["--compare", "a", "--x://s3cret"]).includes("s3cret"), "…and by its shape when it looks like a URL");
+  ok(/^--ids is given an empty value$/.test(refusal(["--ids", "a", ""])), "a many flag's empty value is refused, as every other kind's is");
   const two = scan(["x", "--dry-run", "y"], 2);
   ok(!("error" in two) && two.positionals.join() === "x,y", "declared positionals are kept, in order, around flags");
-  ok(/^unknown argument: z/.test(refusal(["x", "y", "z"], 2)), "…and one more than declared is refused");
+  ok(/^unknown argument: z \(a value/.test(refusal(["x", "y", "z"], 2, true)), "…and one more than declared is refused, the extra one named");
   ok(refusal(["--url", "-1"]) === "" && refusal(["--url", "-"]) === "", "a value beginning with one dash is a value (a negative number, stdin)");
 
   ok(flagList(SPEC) === "  flags: --url <value>, --compare <a> <b>, --follow [value], --ids <value> …, --query <value> (repeatable), --dry-run", "the flag list shows what each flag takes");
@@ -83,6 +91,9 @@ const refusal = (argv: string[], positionals = 0): string => { const r = scan(ar
     ok(typeof r !== "number" && /must be a decimal integer >= 1/.test(r.error), `an integer flag refuses ${JSON.stringify(raw)} — Number() would read some of these`);
   }
   ok(typeof int("0") !== "number" && typeof int("501", 1, 500) !== "number", "…and one out of range");
+  ok(int("9007199254740991") === 9007199254740991, "the largest exact integer reads");
+  const big = int("9007199254740993");
+  ok(typeof big !== "number" && /too large to read exactly/.test(big.error), "…one past it is refused, not rounded to 9007199254740992");
   ok(/must be a decimal integer >= 1 and <= 500, got "501"/.test((int("501", 1, 500) as { error: string }).error), "…saying the range and what it got");
   ok(num("0.5") === 0.5 && num("-0.5") === -0.5 && num(".5") === 0.5 && num("1") === 1 && num("0.") === 0, "a fraction flag reads decimals, signed");
   for (const raw of ["1e-1", "0x1", " .5", "1.5", "-1.5", ".", "-"]) ok(typeof num(raw) !== "number", `a fraction flag refuses ${JSON.stringify(raw)}`);
@@ -156,6 +167,14 @@ const entries = sources.filter((f) => {
   ok(hex.code === 2 && /--workers must be a decimal integer >= 1, got "0x10"/.test(hex.err), `extract-entities.ts refuses a hex --workers, which Number() read as 16 (exit ${hex.code})`);
   const dump = run("extract-entities.ts", "--dump");
   ok(dump.code === 2 && /^--dump needs a value/m.test(dump.err), `extract-entities.ts refuses a bare --dump, which read as no dump (exit ${dump.code})`);
+  // A key typed where no flag takes it is not echoed by a script that has not opted in.
+  const strayKey = run("tier.ts", "--compare", "a", "b", "sk-not-a-real-key");
+  ok(strayKey.code === 2 && /where no flag takes one/.test(strayKey.err) && !strayKey.err.includes("sk-not-a-real-key"), `tier.ts --compare refuses a stray value without echoing it (exit ${strayKey.code})`);
+  const grant = run("migrate.ts", "--grant", "--url=postgres://u:s3cret@h/db");
+  ok(grant.code === 2 && /--grant needs a value; what follows it is --url=…/.test(grant.err) && !grant.err.includes("s3cret"), `migrate.ts --grant with a joined --url after it does not echo the password (exit ${grant.code})`);
+  // sync-linear's interval, from the flag or the environment, by the digits rule; the key and URL only get it past the checks before.
+  const interval = Bun.spawnSync(["bun", "--no-env-file", "sync-linear.ts", "--url", "postgres://127.0.0.1:1/none", "--interval", "0x10"], { cwd: HERE, env: { ...env, LINEAR_API_KEY: "not-a-real-key" } });
+  ok(interval.exitCode === 2 && /--interval \/ OB1_BOARD_SYNC_INTERVAL must be a decimal integer >= 10, got "0x10"/.test(interval.stderr.toString()), `sync-linear.ts refuses a hex --interval, which Number() read as 16 (exit ${interval.exitCode})`);
   // Past the scanner, a well-formed command reaches the script's own first need.
   const reached = run("extract-entities.ts", "--workers", "1", "--dry-run");
   ok(reached.code === 2 && /No database URL/.test(reached.err), `a command the scanner accepts reaches the script's own first check (exit ${reached.code}: ${reached.err.split("\n")[0]})`);

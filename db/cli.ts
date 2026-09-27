@@ -32,7 +32,12 @@
  *   - a value joined with "=" — named by its flag, the value never echoed:
  *     `--url=postgres://user:PASSWORD@…` would otherwise put a password in a log;
  *   - a value where no flag takes one, beyond the positionals the script
- *     declares — a bare URL shown as `<a URL>`, for the same reason.
+ *     declares — counted, not shown, unless the script's strays are ids or
+ *     words (`showStrays`), and a URL shown as `<a URL>` even then: a key typed
+ *     where no flag takes it has no shape to mask it by;
+ *   - a bare `--`, which no script here reads as the end of its flags.
+ * A refusal that names the argument after a flag (`--grant needs a value; what
+ * follows it is --url=…`) shows it by the same rules.
  * `--help` anywhere prints the flag list and exits 0, before any of the above.
  *
  * A number is read by `int` / `number`, which accept decimal digits only —
@@ -56,6 +61,13 @@ export interface ScanOptions<K extends string = string> {
   positionals?: number;
   /** A word shown after a flag in the list: `<postgres://…>` for a value, `(with --baseline)` for a switch. */
   hints?: Partial<Record<K, string>>;
+  /**
+   * Name a stray value in the refusal (a URL still shown by its shape). Off by
+   * default: a key given where no flag takes it has no shape to mask it, so a
+   * script opts in only where its strays are ids or words (reembed's ids,
+   * migrate's `--reapply 021`).
+   */
+  showStrays?: boolean;
 }
 
 /** What argv said, read by flag name. */
@@ -89,8 +101,12 @@ export interface CommandLine<K extends string = string> extends Args<K> {
   number(name: K, rule: NumberRule): number;
 }
 
-/** A value as the refusal may show it: a URL may carry a password. */
+/**
+ * An argument as a refusal may show it: a flag with a value joined by "=" by
+ * its flag alone, a URL by its shape — either may carry a password.
+ */
 function shown(v: string): string {
+  if (v.startsWith("--") && v.includes("=")) return `${v.slice(0, v.indexOf("="))}=…`;
   return /:\/\//.test(v) ? "<a URL>" : v;
 }
 
@@ -117,13 +133,14 @@ export function scanArgs<K extends string>(argv: readonly string[], spec: FlagSp
   /** The value at argv[i] for `flag`, or the refusal: `wanted` is "a value" or "two values". */
   const valueAt = (flag: string, i: number, wanted = "a value"): string | { error: string } => {
     const v = argv[i];
-    if (v === undefined || v.startsWith("--")) return { error: `${flag} needs ${wanted}; what follows it is ${v === undefined ? "nothing" : v}` };
+    if (v === undefined || v.startsWith("--")) return { error: `${flag} needs ${wanted}; what follows it is ${v === undefined ? "nothing" : shown(v)}` };
     if (v === "") return { error: `${flag} is empty; give it ${wanted}` };
     return v;
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (!a.startsWith("--") || a === "--") {
+    if (a === "--") return { error: `unknown argument: -- (no script here reads a bare "--" as the end of its flags)` };
+    if (!a.startsWith("--")) {
       positionals.push(a);
       continue;
     }
@@ -157,13 +174,18 @@ export function scanArgs<K extends string>(argv: readonly string[], spec: FlagSp
         i++;
       }
     } else if (takes === "many") {
-      while (i + 1 < argv.length && !argv[i + 1].startsWith("--")) got.push(argv[++i]);
+      while (i + 1 < argv.length && !argv[i + 1].startsWith("--")) {
+        if (argv[i + 1] === "") return { error: `${a} is given an empty value` };
+        got.push(argv[++i]);
+      }
     }
   }
   const allowed = options.positionals ?? 0;
   if (positionals.length > allowed) {
-    const stray = positionals.slice(allowed).map(shown);
-    return { error: `unknown argument: ${stray.join(" ")} (${stray.length === 1 ? "a value" : "values"} where no flag takes one)` };
+    const stray = positionals.slice(allowed);
+    const what = stray.length === 1 ? "a value" : `${stray.length} values`;
+    if (!options.showStrays) return { error: `unknown argument: ${what} where no flag takes one (not shown: it may be a key)` };
+    return { error: `unknown argument: ${stray.map(shown).join(" ")} (${stray.length === 1 ? "a value" : "values"} where no flag takes one)` };
   }
   return {
     positionals,
@@ -180,6 +202,8 @@ export function scanArgs<K extends string>(argv: readonly string[], spec: FlagSp
 export function readNumber(flag: string, raw: string, rule: { min: number; max?: number; fraction?: boolean }): number | { error: string } {
   const shape = rule.fraction ? /^-?(\d+(\.\d*)?|\.\d+)$/ : /^-?\d+$/;
   const n = shape.test(raw) ? Number(raw) : NaN;
+  // Past 2^53 an integer is not read exactly: "9007199254740993" is 9007199254740992.
+  if (!rule.fraction && Number.isFinite(n) && !Number.isSafeInteger(n)) return { error: `${flag} is too large to read exactly, got ${JSON.stringify(raw)}` };
   if (!Number.isFinite(n) || n < rule.min || (rule.max !== undefined && n > rule.max)) {
     const kind = rule.fraction ? "a decimal number" : "a decimal integer";
     return { error: `${flag} must be ${kind} >= ${rule.min}${rule.max !== undefined ? ` and <= ${rule.max}` : ""}, got ${JSON.stringify(raw)}` };

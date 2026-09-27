@@ -115,7 +115,7 @@ import type { Derived } from "./ingest-contract.ts";
 // pass; the self-check holds this file's import closure to db/ and
 // server-portable/).
 import { recordStructure, runName, type Structure } from "./ingest-structure.ts";
-import { commandLine } from "./cli.ts";
+import { commandLine, readNumber } from "./cli.ts";
 
 // The Linear adapter's pure rules, re-exported: the renderer, the facets and
 // the markup strip moved to db/ingest-linear.ts (SMD-1867) so the sync and
@@ -1585,8 +1585,10 @@ async function main(): Promise<void> {
   if (!url) { console.error("No database URL. Pass --url or set DATABASE_URL."); process.exit(2); }
   const initiative = cli.value("initiative")?.trim() || process.env.OB1_LINEAR_INITIATIVE?.trim() || DEFAULT_INITIATIVE;
   const intervalRaw = cli.value("interval")?.trim() || process.env.OB1_BOARD_SYNC_INTERVAL?.trim();
-  const interval = intervalRaw ? Number(intervalRaw) : DEFAULT_INTERVAL_S;
-  if (!Number.isInteger(interval) || interval < 10) { console.error(`--interval / OB1_BOARD_SYNC_INTERVAL must be a whole number of seconds, at least 10 (got "${intervalRaw}").`); process.exit(2); }
+  // Seconds as decimal digits, by the scanner's rule: Number() read "0x10" as 16 and "1e3" as 1000.
+  const intervalRead = intervalRaw ? readNumber("--interval / OB1_BOARD_SYNC_INTERVAL", intervalRaw, { min: 10 }) : DEFAULT_INTERVAL_S;
+  if (typeof intervalRead !== "number") { console.error(`${intervalRead.error} (whole seconds).`); process.exit(2); }
+  const interval = intervalRead;
   const dryRun = cli.has("dry-run");
   const quiet = cli.has("quiet");
   const only = cli.value("only")?.split(",").map((s) => s.trim()).filter(Boolean);
