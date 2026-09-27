@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 065: a stale proposal the consolidation pass no longer finds in
+-- Migration 066: a stale proposal the consolidation pass no longer finds in
 --                conflict is the pass's to settle, and a pass-settled row is
 --                the pass's to reopen — rebuild_derived redefined on 063's
 --                body (SMD-2297)
@@ -70,6 +70,14 @@
 --      063 re-applied by hand over this file (whose rebuild_derived keeps
 --      every rejected row) is a WARN, not a silent regression — 063's own
 --      lesson about 061 over 063.
+--      The same body gains an arm 063 could not have: 064's sixth lineage
+--      kind, `section` (a generated page section, SMD-1812), fell to the
+--      kept arm on a text move — unmarked, and the kept count explained it
+--      as a structured pass or a person's decision. No pool regenerates a
+--      section (its generator calls write_page_section, whose lineage
+--      upsert clears the mark), so it is marked and counted unqueued, as the
+--      tags are — the mark waits for a generator, as the tags' waits for a
+--      retag pool (found by the post-merge review pass, run-it).
 --   3. THE RECORD. The status column's COMMENT and 029's table COMMENT
 --      ("a rejected pair is never proposed again") re-issued to say so.
 --
@@ -111,7 +119,7 @@ BEGIN
   IF to_regprocedure('review_supersession_proposal(uuid, text, text, text, jsonb, boolean)') IS NULL
      OR to_regprocedure('ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 065 needs 036 (review_supersession_proposal) and 061 (ob1_record_derivation); this schema lacks them',
+      MESSAGE = 'migration 066 needs 036 (review_supersession_proposal) and 061 (ob1_record_derivation); this schema lacks them',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -120,7 +128,7 @@ BEGIN
      OR NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'derivations' AND column_name = 'stale_since')
      OR NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'supersession_proposals'::regclass AND conname = 'supersession_proposals_unreviewed_check') THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 065 needs 063 (rebuild_derived, the mark''s columns, the stale proposal status); this schema lacks it',
+      MESSAGE = 'migration 066 needs 063 (rebuild_derived, the mark''s columns, the stale proposal status); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -132,10 +140,10 @@ $qc$;
 -- 1. The record: what a stale row is now, and what a rejected one may be.
 -- ---------------------------------------------------------------------------
 COMMENT ON COLUMN supersession_proposals.status IS
-  'pending: the judge''s verdict awaits a reviewer. accepted / rejected: a decision (review_supersession_proposal) — a person''s, or since 065 the consolidation pass''s own when its review_note begins ''settled by the pass:'' (the pass re-judged a stale pair and found no conflict, or the pair no longer meets the candidate rule). stale (063, SMD-1732): rebuild_derived found one of the pair''s texts moved since the judge saw them — the verdict is about texts that no longer stand; the pair is judged again by the next consolidation pass, whose record_supersession_proposal replaces this row in place (back to pending) when it finds the conflict again and which rejects it with its own note when it does not (065, SMD-2297). A text move under a pass-settled rejection sets the row stale again; a person''s decision stands. A reviewer may still accept a stale row with p_force or reject it. Migrations 029, 063, 065.';
+  'pending: the judge''s verdict awaits a reviewer. accepted / rejected: a decision (review_supersession_proposal) — a person''s, or since 066 the consolidation pass''s own when its review_note begins ''settled by the pass:'' (the pass re-judged a stale pair and found no conflict, or the pair no longer meets the candidate rule). stale (063, SMD-1732): rebuild_derived found one of the pair''s texts moved since the judge saw them — the verdict is about texts that no longer stand; the pair is judged again by the next consolidation pass, whose record_supersession_proposal replaces this row in place (back to pending) when it finds the conflict again and which rejects it with its own note when it does not (066, SMD-2297). A text move under a pass-settled rejection sets the row stale again; a person''s decision stands. A reviewer may still accept a stale row with p_force or reject it. Migrations 029, 063, 066.';
 
 COMMENT ON TABLE supersession_proposals IS
-  'One row per pair of thoughts a consolidation pass judged to CONFLICT, with the judge''s verdict on which is current. Written by db/consolidate.ts; thoughts.supersedes is written only when a reviewer accepts a row through review_supersession_proposal. A pair is recorded once whatever its later status, so a pair a person rejected is never proposed again; a pair the pass itself settled (review_note beginning ''settled by the pass:'', 065) is judged again when a text moves under it, through the stale status (063). Migrations 029, 063, 065 / SMD-1294, SMD-1732, SMD-2297.';
+  'One row per pair of thoughts a consolidation pass judged to CONFLICT, with the judge''s verdict on which is current. Written by db/consolidate.ts; thoughts.supersedes is written only when a reviewer accepts a row through review_supersession_proposal. A pair is recorded once whatever its later status, so a pair a person rejected is never proposed again; a pair the pass itself settled (review_note beginning ''settled by the pass:'', 066) is judged again when a text moves under it, through the stale status (063). Migrations 029, 063, 066 / SMD-1294, SMD-1732, SMD-2297.';
 
 -- ---------------------------------------------------------------------------
 -- 2. The settle: the pass's rejection of a stale row it no longer finds in
@@ -204,7 +212,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid) IS
-  'The consolidation pass''s settle of a STALE proposal it re-judged and no longer finds in conflict (065, SMD-2297): rejects the row through review_supersession_proposal with p_note — which must begin ''settled by the pass:'', the marker rebuild_derived reads to reopen the row on a later text move — and re-records the proposal''s lineage row at the fingerprints the pass judged, under the pass''s key (the older rows dropped first). Refuses a note without the marker and missing fingerprints (invalid_parameter_value); answers NOT_FOUND and NOT_STALE as values — a pending row is a reviewer''s, a decided one is decided. Takes the supersession advisory lock, then the row. Returns the review''s jsonb plus settled, older_id, newer_id. Called by db/consolidate.ts; a person uses consolidate.ts --reject. Migration 065 / SMD-2297.';
+  'The consolidation pass''s settle of a STALE proposal it re-judged and no longer finds in conflict (066, SMD-2297): rejects the row through review_supersession_proposal with p_note — which must begin ''settled by the pass:'', the marker rebuild_derived reads to reopen the row on a later text move — and re-records the proposal''s lineage row at the fingerprints the pass judged, under the pass''s key (the older rows dropped first). Refuses a note without the marker and missing fingerprints (invalid_parameter_value); answers NOT_FOUND and NOT_STALE as values — a pending row is a reviewer''s, a decided one is decided. Takes the supersession advisory lock, then the row. Returns the review''s jsonb plus settled, older_id, newer_id. Called by db/consolidate.ts; a person uses consolidate.ts --reject. Migration 066 / SMD-2297.';
 
 -- ---------------------------------------------------------------------------
 -- 3. The primitive: 063's body verbatim, the proposal arm reopening a
@@ -547,7 +555,7 @@ BEGIN
         -- rejected row whose review_note begins 'settled by the pass:' was
         -- decided by db/consolidate.ts about texts that have now moved, so a
         -- text move makes it stale again as it makes a pending one; a
-        -- person's decision stands (065, SMD-2297). The literal is
+        -- person's decision stands (066, SMD-2297). The literal is
         -- server-portable/consolidate.ts's PASS_SETTLED_PREFIX; test-schema
         -- holds the two to one string.
         IF v_p.status IN ('pending', 'stale')
@@ -559,7 +567,7 @@ BEGIN
           -- read, 063's first review pass). The judge's key is the pool by
           -- construction (029: db/consolidate.ts writes its job as the key);
           -- no config records the current one, so the claim written here
-          -- sits under the ROW's key — and since 065 the pass re-pools every
+          -- sits under the ROW's key — and since 066 the pass re-pools every
           -- stale row's newer thought under its OWN key at the start of a
           -- run, so a judge-model change no longer strands the pair (a
           -- stray pending row under the old key is what --status shows).
@@ -586,6 +594,15 @@ BEGIN
           -- whose note is not the pass's; the queue says edited-since.
           v_kept := v_kept + 1;
         END IF;
+      WHEN 'section' THEN
+        -- 064's generated page section (SMD-1812): no pool regenerates it —
+        -- its generator calls write_page_section, whose lineage upsert
+        -- clears the mark — so it is marked for the operator, as the tags
+        -- are. Before this file the row fell to the kept arm below, unmarked
+        -- and uncounted as waiting (066's post-merge review pass, run-it).
+        UPDATE derivations SET stale_since = COALESCE(stale_since, now()), stale_reason = COALESCE(stale_reason, p_reason) WHERE id = v_row.derivation_id;
+        v_marked   := v_marked + 1;
+        v_unqueued := v_unqueued + 1;
       WHEN 'metadata' THEN
         -- No pool re-tags a thought: marked for the operator, nothing more.
         UPDATE derivations SET stale_since = COALESCE(stale_since, now()), stale_reason = COALESCE(stale_reason, p_reason) WHERE id = v_row.derivation_id;
@@ -655,4 +672,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION rebuild_derived(uuid, text, boolean, text[], boolean, boolean) IS
-  'The one primitive over the lineage table (SMD-1732, Phase 1c of SMD-1729): walks `derivations` forward from p_input (derivation_descendants) and acts on every descendant. A row whose artifact is gone is deleted. With the input standing, a row whose inputs'' fingerprints moved (or p_force) is: re-derived when the database can — a vector whose current text has a snapshot row at the model, by ob1_refresh_thought_vector (rebuilt); otherwise handed to the worker that owns the recipe through requeue_thought_work under the worker''s current key — the reembed pool for a vector or the windows, the extraction key for an extract: pass, the judge''s key — with stale_since/stale_reason set on the lineage row (marked; the tags have no pool: unqueued; the first request standing is kept) — and, for a pending proposal or one the consolidation pass itself rejected (a review_note beginning ''settled by the pass:'', 065), its status set stale with reviewed_at and the note cleared (the status is the mark; stale_proposals; the next pass replaces the row when it finds the conflict again and settles it when it does not); under p_force a vector whose text did not move, at the configured model, is re-recorded, not re-embedded (one at another model goes to the pool); a source: pass and a person''s decision on a proposal are kept; an unmoved row is current. With p_input_gone (SMD-1723''s forget, called BEFORE the row delete in its transaction): the windows, the input''s mentions and edges (entities locked first, orphans pruned) and their lineage rows are deleted, the snapshot rows at the input''s own fingerprints and p_fingerprints removed where no standing thought holds them, the proposals and the vector''s and tags'' rows counted for the cascade. derived_from children are listed as irreproducible. Refuses an empty reason; answers a replay with REPLAYING and a missing input with NOT_FOUND. Takes the supersession advisory lock, then the input''s row. With p_orphans_only (the sweep''s mode) only the orphan rule runs. Returns {ok, input, reason, input_gone, force, orphans_only, walked, depth, at_cap, rebuilt, enqueued, deleted, marked, unqueued, stale_proposals, kept, current, legacy, irreproducible, cascading, pools}. Migrations 063, 065 / SMD-1732, SMD-2297.';
+  'The one primitive over the lineage table (SMD-1732, Phase 1c of SMD-1729): walks `derivations` forward from p_input (derivation_descendants) and acts on every descendant. A row whose artifact is gone is deleted. With the input standing, a row whose inputs'' fingerprints moved (or p_force) is: re-derived when the database can — a vector whose current text has a snapshot row at the model, by ob1_refresh_thought_vector (rebuilt); otherwise handed to the worker that owns the recipe through requeue_thought_work under the worker''s current key — the reembed pool for a vector or the windows, the extraction key for an extract: pass, the judge''s key — with stale_since/stale_reason set on the lineage row (marked; the tags have no pool: unqueued; the first request standing is kept) — and, for a pending proposal or one the consolidation pass itself rejected (a review_note beginning ''settled by the pass:'', 066), its status set stale with reviewed_at and the note cleared (the status is the mark; stale_proposals; the next pass replaces the row when it finds the conflict again and settles it when it does not); under p_force a vector whose text did not move, at the configured model, is re-recorded, not re-embedded (one at another model goes to the pool); a source: pass and a person''s decision on a proposal are kept; a generated page section (064) is marked with no pool, as the tags are; an unmoved row is current. With p_input_gone (SMD-1723''s forget, called BEFORE the row delete in its transaction): the windows, the input''s mentions and edges (entities locked first, orphans pruned) and their lineage rows are deleted, the snapshot rows at the input''s own fingerprints and p_fingerprints removed where no standing thought holds them, the proposals and the vector''s and tags'' rows counted for the cascade. derived_from children are listed as irreproducible. Refuses an empty reason; answers a replay with REPLAYING and a missing input with NOT_FOUND. Takes the supersession advisory lock, then the input''s row. With p_orphans_only (the sweep''s mode) only the orphan rule runs. Returns {ok, input, reason, input_gone, force, orphans_only, walked, depth, at_cap, rebuilt, enqueued, deleted, marked, unqueued, stale_proposals, kept, current, legacy, irreproducible, cascading, pools}. Migrations 063, 066 / SMD-1732, SMD-2297.';

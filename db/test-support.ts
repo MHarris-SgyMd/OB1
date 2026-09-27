@@ -245,7 +245,7 @@ const FUNCTIONS = [
   "ob1_page_recipe(jsonb, text)",
   "page_section_revisions_refuse_mutation()",
   "ob1_drop_section_derivations()",
-  // 065 (SMD-2297): the pass's settle of a stale proposal; rebuild_derived
+  // 066 (SMD-2297): the pass's settle of a stale proposal; rebuild_derived
   // keeps its signature and is named above.
   "settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)",
 ];
