@@ -323,6 +323,9 @@ console.log("\n[10] Read tools are annotated read-only, capture is not");
     assert(byName[t]?.annotations?.readOnlyHint === true, `"${t}" is readOnlyHint: true`);
   }
   assert(byName["capture_thought"]?.annotations?.readOnlyHint === false, `"capture_thought" is readOnlyHint: false`);
+  // The worker-action tools mutate the queue, so they too are not read-only (SMD-2132).
+  assert(byName["retry_failed"]?.annotations?.readOnlyHint === false, `"retry_failed" is readOnlyHint: false`);
+  assert(byName["release_stale_leases"]?.annotations?.readOnlyHint === false, `"release_stale_leases" is readOnlyHint: false`);
 }
 
 console.log("\n[10b] brain_info answers with no database, and says why that half is missing (SMD-2041)");

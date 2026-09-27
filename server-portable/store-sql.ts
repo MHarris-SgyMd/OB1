@@ -43,6 +43,9 @@ import type {
   ThoughtKeywordMatch,
   LoggedSearchPage,
   WorkerStatusRow,
+  RetryFailedResult,
+  ReleaseLeasesOpts,
+  ReleaseLeasesResult,
   ThoughtIdPage,
   ThoughtListItem,
   ThoughtMatch,
@@ -356,6 +359,52 @@ export class SqlStore implements ThoughtStore {
         active: activeOf(String(r.work_type)),
       };
     });
+  }
+
+  async retryFailed(workType: string): Promise<RetryFailedResult> {
+    // The write half of workerStatus, over thought_work_claims (SMD-2132): the
+    // db/*.ts --retry-failed path (extract-entities.ts:413-420) as one statement.
+    // Scoped to the one pool — WHERE work_type = $1 AND status = 'failed' — so a
+    // sibling pool's failures are untouched; a fresh attempt clears the recorded
+    // error, the finish time and the count (015's REQUEUE_SET_SQL shape). The
+    // caller has already gated the write scope. RETURNING the ids feeds the audit.
+    const rows = await this.sql`
+      UPDATE thought_work_claims
+         SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0
+       WHERE work_type = ${workType} AND status = 'failed'
+      RETURNING thought_id`;
+    const ids = rows.map((r: { thought_id: string }) => String(r.thought_id));
+    return { workType, retried: ids.length, ids };
+  }
+
+  async releaseStaleLeases(opts: ReleaseLeasesOpts): Promise<ReleaseLeasesResult> {
+    // The write half of workerStatus (SMD-2132): return `claimed` rows to the
+    // pool, the release_claims_for_worker(...) path (migration 015:362-382) over a
+    // tool. The SET mirrors that function — pending, TTL cleared, attempt
+    // decremented (an un-run lease is not penalised, so a released row is not one
+    // attempt closer to 'failed'). One static statement; the optional scoping and
+    // the live-lease switch ride as parameters rather than composed SQL, so there
+    // is no interpolation to escape (see the bun-sql template rules). Without
+    // includeLive only past-ttl_expires_at leases match — a live lease is left for
+    // its holder. The caller has gated the write scope and refused includeLive
+    // without a workerId; this method trusts that and does the mutation.
+    const workType = opts.workType ?? null;
+    const workerId = opts.workerId ?? null;
+    const includeLive = opts.includeLive === true;
+    const rows = await this.sql`
+      UPDATE thought_work_claims
+         SET status = 'pending', ttl_expires_at = NULL, attempt_count = GREATEST(attempt_count - 1, 0)
+       WHERE status = 'claimed'
+         AND (${workType}::text IS NULL OR work_type = ${workType})
+         AND (${workerId}::text IS NULL OR worker_id = ${workerId})
+         AND (${includeLive} OR ttl_expires_at < now())
+      RETURNING thought_id, worker_id`;
+    const claimed = rows as Record<string, unknown>[];
+    const ids = claimed.map((r) => String(r.thought_id));
+    const workers = Array.from(new Set(
+      claimed.map((r) => r.worker_id).filter((w): w is string => typeof w === "string"),
+    ));
+    return { released: ids.length, ids, workers };
   }
 
   async databaseFacts(opts?: ReadOptions, progress?: ReadProgress): Promise<DatabaseFacts> {
