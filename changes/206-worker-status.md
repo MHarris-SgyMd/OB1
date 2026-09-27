@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2131]
-migrations: []
----
-
-## Changelog
-
-A keyed, read-only `worker_status` MCP tool (and a matching keyed `GET /worker-status`) reports the background-work pools over `thought_work_claims` — per `work_type`: pending / claimed (in flight) / succeeded / failed counts, how many thoughts are unpooled, the corpus total, how many claimed leases are STALE (a dead worker's lease past its `ttl_expires_at`) with the oldest one's time and holder, and whether the pool is the brain's active one — so an operator or agent can ask a running brain about its queues without shelling into Postgres (SMD-2131).
-
-## FORK
-
-`worker_status` — a read surface for the extraction / consolidation / re-embed queues (SMD-2131)
+# 206. `worker_status` — a read surface for the extraction / consolidation / re-embed queues (SMD-2131)
 
 **What changed.** Since SMD-1844 closed the host Postgres port, the only way to see
 queue depth was `podman exec … psql` or a worker's `--status` from inside a

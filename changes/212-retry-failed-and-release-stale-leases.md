@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2132]
-migrations: []
----
-
-## Changelog
-
-Two write-scoped MCP tools (and matching keyed `POST` routes) act on the background-work queues over `thought_work_claims` — `retry_failed(work_type)` requeues a pool's `failed` rows to `pending`, and `release_stale_leases(work_type?, worker_id?, include_live?)` returns a dead worker's lapsed leases to the pool — so an operator can retry a failed pass or free a stalled lease from a running brain without shelling into Postgres; the LLM drain stays a follow-up (SMD-2132).
-
-## FORK
-
-`retry_failed` and `release_stale_leases` — the write half of `worker_status` (SMD-2132)
+# 212. `retry_failed` and `release_stale_leases` — the write half of `worker_status` (SMD-2132)
 
 **What changed.** SMD-2131 shipped the read surface (`worker_status` + `GET
 /worker-status`) and deferred the actions. This adds the two pure-SQL, write-scoped

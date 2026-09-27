@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2210]
-migrations: []
----
-
-## Changelog
-
-An opt-in `orchestration` compose profile runs n8n beside the brain: pinned by digest, a SQLite store of its own (measured against a Postgres 17), loopback only, a 24-hour run-history window, its owner set from the environment; `deploy/orchestration/provision.ts --init` writes the profile's secrets and a provisioning run keeps an expiring API key in `deploy/.env` that later runs revoke when replaced, loads credentials and templates, and refuses a brain key at write scope or the wrong scope; the eval kit now runs its checks against the profile as it ships, with key, pruning and egress-probe checks (SMD-2210).
-
-## FORK
-
-n8n as an opt-in `orchestration` profile — pinned, its own store, expiring and separate keys, a short run-history window, and the eval kit re-run against what ships (SMD-2210)
+# 199. n8n as an opt-in `orchestration` profile — pinned, its own store, expiring and separate keys, a short run-history window, and the eval kit re-run against what ships (SMD-2210)
 
 **What changed.** `deploy/compose.yaml` gains an `n8n` service under
 `profiles: ["orchestration"]`, beside `board-sync` and `jev`:

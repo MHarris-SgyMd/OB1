@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2062]
-migrations: []
----
-
-## Changelog
-
-Preflight's `write privileges` row reads `ob1_config` schema-qualified, as its privilege test was, so a role with `public` off its search path no longer takes 27 later rows down as "not checked"; that row and `chunk context` each get their own try/catch, and the `schema` row stops saying to migrate a brain whose `public.thoughts` exists but does not resolve for the role, and names the missing USAGE or search path instead (SMD-2062).
-
-## FORK
-
-Preflight reads a table off the role's path in one row, not the block — `write privileges` qualified and bounded, `chunk context` too, and the `schema` row names the missing USAGE or path (SMD-2062)
+# 193. Preflight reads a table off the role's path in one row, not the block — `write privileges` qualified and bounded, `chunk context` too, and the `schema` row names the missing USAGE or path (SMD-2062)
 
 **What changed.** `server-portable/preflight.ts`, two rows of the direct-connection block and the `schema` row before it:
 

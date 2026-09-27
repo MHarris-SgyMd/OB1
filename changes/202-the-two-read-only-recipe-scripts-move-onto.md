@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-2144]
-migrations: []
----
-
-## Changelog
-
-`recipes/brain-backup/backup-brain.mjs` and `recipes/lint-sweep/lint-sweep.js` read the brain through `compat/supabase-sql` under `bun` — `SUPABASE_URL` a `postgres://` string, the key ignored — where both paged a PostgREST the stack does not run; check 24 loses their two entries and `db/test-live.ts` [26] drives both against a real Postgres, `weekly-digest`'s entry moves to its rescope ticket as a sink, and `brain-backup`'s README names `pg_dump` as the whole-brain backup (SMD-2144).
-
-## FORK
-
-The two read-only recipe scripts move onto the SQL shim — brain-backup and lint-sweep read a Postgres instead of a PostgREST the fork does not run, and the live suite drives both (SMD-2144)
+# 202. The two read-only recipe scripts move onto the SQL shim — brain-backup and lint-sweep read a Postgres instead of a PostgREST the fork does not run, and the live suite drives both (SMD-2144)
 
 **What changed.** SMD-2126 sent every maintenance script onto
 `compat/supabase-sql`; these two are the first to land, the class's simplest —

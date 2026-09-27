@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2109]
-migrations: []
----
-
-## Changelog
-
-`db/tier.ts --compare <a> <b>` composes `brain_info` and the search tools into one "how do these two live brains differ" report over HTTP — identity (version, commit, tier, release range, the tree's latest migration against the ledger's highest, schema version, embedding, Postgres/pgvector, counts), freshness (thought count, newest capture, migration delta), an opt-in retrieval diff (`--replay` replays a supplied query set through each brain's own `search_thoughts`/`search_thoughts_keyword`, the vector arm embedded server-side), and a one-line freshness verdict — reading each brain as a keyed client, writing to neither, printing no key, and exiting non-zero when anything differs (SMD-2109).
-
-## FORK
-
-a cross-brain compare — `tier.ts --compare` answers "do these two brains agree, and if not why" in one HTTP call (SMD-2109)
+# 192. a cross-brain compare — `tier.ts --compare` answers "do these two brains agree, and if not why" in one HTTP call (SMD-2109)
 
 **What changed.** Running the fork as three brains (stable, canary, working;
 SMD-1806) only pays off if you can answer, in one step, whether two of them agree

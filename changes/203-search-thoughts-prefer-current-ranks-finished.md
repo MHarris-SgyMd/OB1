@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2255]
-migrations: [059]
----
-
-## Changelog
-
-`search_thoughts` takes an opt-in `prefer_current`: migration 059's `search_thoughts_current` ranks settled (a ticket completed or canceled, a note filed under one included) and superseded thoughts below current ones, by 058's `node_state`, at 0.25 of their fused score — priced first in `eval-supersession.ts`; off by default, so the default ranking is unchanged; the query log records it as arm `current`, and the server group reads `thought_sources` (SMD-2255).
-
-## FORK
-
-search_thoughts' prefer_current ranks finished and replaced work below live work, opt-in, priced before it was built (SMD-2255)
+# 203. search_thoughts' prefer_current ranks finished and replaced work below live work, opt-in, priced before it was built (SMD-2255)
 
 **What changed.** SMD-2074's second consumer of 058's `node_state` (its first
 PR moved graph-centrality onto it). `db/migrations/059_search_prefers_current.sql`:

@@ -1,17 +1,4 @@
----
-type: removed
-bump: patch
-tickets: [SMD-2138]
-migrations: []
----
-
-## Changelog
-
-`recipes/local-ollama-embeddings` is gone: capture without a cloud embedding key is the fork's default shape — the server embeds through `OB1_LLM_BASE_URL`, a local Ollama unless overridden and `--profile local-models` runs it, once the operator declares it local; `db/reembed.ts` walks existing rows — and `embed-local.py` reached `upsert_thought` only over a PostgREST the stack does not run; its two test-writes guards and its check 24 entry go with it, the two models it named that the table lacked become rows of `SETUP.md`'s table, and `db/README.md` carries the operator's paragraph (SMD-2138).
-
-## FORK
-
-The local-Ollama embedding recipe retires — the fork's default endpoint is a local Ollama, one declaration from a working capture, so the recipe's whole story is a paragraph of `db/README.md` and two rows of `SETUP.md`'s model table (SMD-2138)
+# 189. The local-Ollama embedding recipe retires — the fork's default endpoint is a local Ollama, one declaration from a working capture, so the recipe's whole story is a paragraph of `db/README.md` and two rows of `SETUP.md`'s model table (SMD-2138)
 
 **What changed.** `recipes/local-ollama-embeddings` — `embed-local.py` (376
 lines), its README, `metadata.json`, `.env.example`, `requirements.txt` and

@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2244]
-migrations: []
----
-
-## Changelog
-
-A keyed, read-only `list_thought_ids` MCP tool returns a brain's thought-id set — ids only, in id order, paged by a keyset cursor, with the corpus total and (on the SQL store) an md5 digest of all ids on the first page — and `db/tier.ts --compare` uses it to report the EXACT id-set difference between two brains (which thoughts one holds and the other does not), no longer the thought-count stand-in, so a same-count corpus that has drifted is now caught (SMD-2244).
-
-## FORK
-
-`list_thought_ids` — a read surface for a brain's id set, so the cross-brain compare reports the exact id-set difference (SMD-2244)
+# 197. `list_thought_ids` — a read surface for a brain's id set, so the cross-brain compare reports the exact id-set difference (SMD-2244)
 
 **What changed.** `tier.ts --compare` (SMD-2109) is HTTP-only, and no read tool
 returned a corpus's ids cheaply (`list_thoughts` pages prose, capped and

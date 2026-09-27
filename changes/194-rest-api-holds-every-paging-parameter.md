@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2083]
-migrations: []
----
-
-## Changelog
-
-`integrations/rest-api`'s paging parameters (`limit`, `offset`, `page`, `per_page`) are each held to a finite integer in range before they reach SQL, so `GET /recent?offset=Infinity` (which rendered `LIMIT NaN OFFSET Infinity` and answered 500), a fractional `limit`, and a `page` past int4 no longer 500 — they clamp. A JSON body that is `null` (or any non-object) is a named 400 on every JSON route, where before a valid-JSON `null` was a 500 (SMD-2083).
-
-## FORK
-
-rest-api holds every paging parameter to a finite integer, and a non-object body to a 400 (SMD-2083)
+# 194. rest-api holds every paging parameter to a finite integer, and a non-object body to a 400 (SMD-2083)
 
 **What changed.** `integrations/rest-api/index.ts`: one `intParam(value, { min,
 max, default })` — `Number.isFinite`, `Math.trunc`, clamp; a missing, empty or

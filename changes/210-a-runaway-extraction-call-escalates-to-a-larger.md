@@ -1,17 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-2000]
-migrations: []
----
-
-## Changelog
-
-`OB1_EXTRACT_ESCALATE_MODEL` remakes a runaway entity-extraction call once on a larger local model with no penalty, instead of the penalised same-model retry (SMD-2000); unset, the retry is unchanged. The row's pass key stays the first model's and the dump line records `escalated: <model>`; the worker banner, preflight's `extraction window` row and `--deep` probe name the model, and `evals/eval-extract-windows.ts` gains a `w1200e` arm.
-
-## FORK
-
-A runaway extraction call escalates to a larger local model instead of the penalised retry — one knob, the escalation model, spent only where the small model failed (SMD-2000)
+# 210. A runaway extraction call escalates to a larger local model instead of the penalised retry — one knob, the escalation model, spent only where the small model failed (SMD-2000)
 
 **What changed.** The runaway retry (`ExtractWindowing.retryRunaway`) gains an
 escalation target. `ExtractWindowing.escalateModel`, from

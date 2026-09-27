@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2245]
-migrations: []
----
-
-## Changelog
-
-A keyed, read-only `list_logged_searches` MCP tool returns a brain's logged searches from `query_log` — the query text, which arm ran it, the tier, when, and its arguments — windowed by `since` and bounded — and `db/tier.ts --compare --replay --from-log <brain>` sources its replay from a brain's own log, replaying each logged search on the arm that ran it against both brains, instead of only a supplied query set (SMD-2245).
-
-## FORK
-
-`list_logged_searches` — a read surface for a brain's query_log, so the cross-brain compare replays what a brain actually searched (SMD-2245)
+# 201. `list_logged_searches` — a read surface for a brain's query_log, so the cross-brain compare replays what a brain actually searched (SMD-2245)
 
 **What changed.** `tier.ts --compare --replay` (SMD-2109) was HTTP-only and
 `query_log` was not on the read surface, so its retrieval diff replayed only a
