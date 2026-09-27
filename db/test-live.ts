@@ -5603,24 +5603,29 @@ console.log("\n[27] recipes/thought-enrichment on the SQL shim: the type and sen
     // already 'reference'; one restricted by pattern (a made-up SSN), two
     // personal (a dosage, a blood-pressure reading), one already personal — not
     // scanned — and one of whitespace alone, the enrichment's no-model path, at
-    // the lowest id so it is the first row every enrichment run meets. Tiers
-    // NULL, '' and 'standard' among them, the three the sensitivity filter
+    // the lowest id so it is the first row every enrichment run meets. The four
+    // candidates of the type backfill sit at known ids — the decision second
+    // from the bottom, the other three at the top — with the seven non-candidates
+    // at random ids between, so a run stopped by `--limit 1` on pages of one
+    // has read exactly two rows, and a run that scans on to the next candidate
+    // has read nine (review pass 2, mutant: a bound alone let it through).
+    // Tiers NULL, '' and 'standard' among them, the three the sensitivity filter
     // names. Fingerprint and model label set so the writes can be held away
     // from them (a raw insert leaves both NULL otherwise).
-    await sql.unsafe(`INSERT INTO thoughts (content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model)
-      SELECT c, m::jsonb, 'reference', t, content_fingerprint_of(c), 'planted-model' FROM (VALUES
-        ('a decision was made about the venue', '{"type":"decision","source":"notes"}', 'standard'),
-        ('a lesson learned about batching', '{"type":"lesson"}', NULL),
-        ('the standup, three of us', '{"type":"meeting"}', ''),
-        ('tonight I wrote about the week', '{"type":"journal"}', 'standard'),
-        ('bogus type row', '{"type":"bogus"}', ''),
-        ('no type key here', '{}', 'standard'),
-        ('already reference', '{"type":"reference"}', 'standard'),
-        ('SSN 123-45-6789 appears in this text', '{}', 'standard'),
-        ('took metoprolol 50 mg today', '{}', NULL),
-        ('blood pressure 120 over 80 this morning', '{}', ''),
-        ('already personal, glucose 110 this morning', '{}', 'personal')
-      ) v(c, m, t)`);
+    await sql.unsafe(`INSERT INTO thoughts (id, content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model)
+      SELECT COALESCE(i::uuid, gen_random_uuid()), c, m::jsonb, 'reference', t, content_fingerprint_of(c), 'planted-model' FROM (VALUES
+        ('00000000-0000-0000-0000-000000000002', 'a decision was made about the venue', '{"type":"decision","source":"notes"}', 'standard'),
+        ('ffffffff-ffff-ffff-ffff-fffffffffff1', 'a lesson learned about batching', '{"type":"lesson"}', NULL),
+        ('ffffffff-ffff-ffff-ffff-fffffffffff2', 'the standup, three of us', '{"type":"meeting"}', ''),
+        ('ffffffff-ffff-ffff-ffff-fffffffffff3', 'tonight I wrote about the week', '{"type":"journal"}', 'standard'),
+        (NULL, 'bogus type row', '{"type":"bogus"}', ''),
+        (NULL, 'no type key here', '{}', 'standard'),
+        (NULL, 'already reference', '{"type":"reference"}', 'standard'),
+        (NULL, 'SSN 123-45-6789 appears in this text', '{}', 'standard'),
+        (NULL, 'took metoprolol 50 mg today', '{}', NULL),
+        (NULL, 'blood pressure 120 over 80 this morning', '{}', ''),
+        (NULL, 'already personal, glucose 110 this morning', '{}', 'personal')
+      ) v(i, c, m, t)`);
     await sql`INSERT INTO thoughts (id, content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model) VALUES (${BLANK_ID}::uuid, '   ', '{}', 'reference', 'standard', content_fingerprint_of('   '), 'planted-model')`;
     const N = 12;
     type Snap = { id: string; content: string; fp: string | null; em: string | null; metadata: Record<string, unknown> };
@@ -5675,12 +5680,15 @@ console.log("\n[27] recipes/thought-enrichment on the SQL shim: the type and sen
       }
     }
 
-    // --limit 1 writes one row — the ticket's Verify — and stops; the rest of the pages are not read.
-    const one = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--limit", "1");
+    // --limit 1 writes one row — the ticket's Verify — and stops: with a page of one, the rows processed are the
+    // blank row and the decision at the second id, exactly two, never a page more (it had scanned on to the next
+    // candidate, every page between read for nothing — review pass 2, run-it; here that would be nine rows).
+    const one = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--limit", "1", "--batch-size", "1");
     const afterOne = await typesNow();
     const changed = afterOne.filter((r) => r.type !== "reference");
-    assert(one.code === 0 && one.out.includes("=== BACKFILL STOPPED AT --limit 1 ===") && one.out.includes("Rows updated:                1\n") && changed.length === 1 && changed[0].type === changed[0].mt,
-      `backfill-type.mjs --limit 1: one row's type is its metadata's, the run says it stopped at the limit (exit ${one.code}: ${changed.map((r) => r.type).join(",") || "none"} changed)`);
+    const processedOne = Number(/Rows processed:\s+(\d+)/.exec(one.out)?.[1] ?? -1);
+    assert(one.code === 0 && one.out.includes("=== BACKFILL STOPPED AT --limit 1 ===") && one.out.includes("Rows updated:                1\n") && changed.length === 1 && changed[0].type === "decision" && changed[0].mt === "decision" && processedOne === 2,
+      `backfill-type.mjs --limit 1 --batch-size 1: the decision at the second id is written, the run says it stopped at the limit and processed exactly two rows — no page past the write (exit ${one.code}: ${changed.map((r) => r.type).join(",") || "none"} changed, ${processedOne} processed)`);
     const rest = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--batch-size", "3");
     const afterRest = await typesNow();
     assert(rest.code === 0 && rest.out.includes(`Total rows with type='reference': ${N - 1}`) && rest.out.includes("Rows updated:                3\n") && rest.out.includes("=== BACKFILL COMPLETE ===") && afterRest.filter((r) => r.type !== "reference").length === 4 && afterRest.every((r) => r.type === (["decision", "lesson", "meeting", "journal"].includes(r.mt ?? "") ? r.mt : "reference")),
@@ -5732,6 +5740,20 @@ console.log("\n[27] recipes/thought-enrichment on the SQL shim: the type and sen
     assert(status1.code === 0 && status1.out.includes("Enriched:           5 (41.7%)") && status1.out.includes(`Remaining:          ${N - 5}`) && retry.code === 0 && retry.out.includes(`  OK retry #${retryId} -> task`) && retry.out.includes("Processed: 1, Fixed: 1, Still failing: 0") && retried === true,
       `…--status reads 5 of ${N}; --apply --retry-failed fetches the checkpoint's failed id by .in() and enriches it (${status1.code}/${retry.code}: ${errorLine(retry.out)})`);
 
+    // A model at a closed port is a per-row failure, not a refusal: one FAIL line, exit 1 with the summary, the id in the
+    // checkpoint's failedIds for --retry-failed, no ERROR line, no row written. Bun's fetch gives that error a code
+    // (ConnectionRefused), and pass 1's rule — "a rejection with a code ends the run" — ended the run on it (review
+    // pass 2, both readers). A fresh state directory, so no resume point applies.
+    const dead = { ...model, OPENROUTER_BASE_URL: "http://127.0.0.1:1/v1", ENRICH_STATE_DIR: join(scratch, "state-dead") };
+    const [{ enrichedBeforeDead }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedBeforeDead" FROM thoughts`) as { enrichedBeforeDead: number }[];
+    const deadRun = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...dead }, "--apply", "--limit", "1", "--concurrency", "1", ...ENRICH_FLAGS);
+    const [{ enrichedAfterDead }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedAfterDead" FROM thoughts`) as { enrichedAfterDead: number }[];
+    const deadStatePath = join(scratch, "state-dead", "enrichment-state.json");
+    const deadState = existsSync(deadStatePath) ? JSON.parse(readFileSync(deadStatePath, "utf8")) as { failedIds: string[]; totalFailed: number } : null;
+    const failedLine = /^  FAIL #([0-9a-f-]{36}): /m.exec(deadRun.out);
+    assert(deadRun.code === 1 && failedLine !== null && !/^ERROR:/m.test(deadRun.out) && deadRun.out.includes("Failed:         1") && enrichedAfterDead === enrichedBeforeDead && deadState?.totalFailed === 1 && deadState.failedIds.length === 1 && deadState.failedIds[0] === failedLine?.[1],
+      `…a model at a closed port: the row fails with a FAIL line, the run ends with its summary and exit 1, no ERROR line, no row written, the id in the checkpoint's failedIds (${deadRun.code}: ${firstLine(deadRun.out.split("\n").filter((l) => /FAIL|ERROR/.test(l)).join(" | ") || deadRun.out).slice(0, 160)}; state ${JSON.stringify(deadState)})`);
+
     // What no script may touch: every row's content, fingerprint and model label are the planted ones, the vector
     // still absent, every metadata an object.
     const after = await snapshot();
@@ -5759,9 +5781,13 @@ console.log("\n[27] recipes/thought-enrichment on the SQL shim: the type and sen
     const zero = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...stateEnv }, "--dry-run", "--limit", "0");
     const typo = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ }, "--dryrun");
     const both = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--apply");
+    // The = form and a trailing value flag passed the refusal and were then ignored — `--limit=2` ran the whole table
+    // (review pass 2, both readers).
+    const eqForm = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--dry-run", "--limit=1", ...ENRICH_FLAGS);
+    const trailing = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--limit");
     const scheme = /^ERROR: SUPABASE_URL must be a postgres:\/\/ connection string; the value's scheme is "(https|mysql):"/m;
-    assert(oneLine(httpsType, scheme) && !/Starting type backfill|example\.supabase/.test(httpsType.out) && oneLine(mistyped, scheme) && !/pw-not-real|127\.0\.0\.1/.test(mistyped.out) && oneLine(httpsEnrich, scheme) && !/Enrichment Status/.test(httpsEnrich.out) && oneLine(refused, /^ERROR: read thoughts after id 0{8}-0{4}-0{4}-0{4}-0{12} → ERR_POSTGRES_CONNECTION_REFUSED /m) && oneLine(zero, /^ERROR: --limit must be an integer of at least 1; got "0"$/m) && oneLine(typo, /^ERROR: unknown flag "--dryrun" \(flags: --dry-run, --apply\)$/m) && (await tiers())["restricted"] === 1 && oneLine(both, /^ERROR: --dry-run and --apply are exclusive/m),
-      `…a Supabase URL and a mistyped scheme are refused before any query by a line naming the scheme and not the value (the password token appears nowhere); a refused connection is one line naming the driver's code; --limit 0, an unknown flag (--dryrun, which wrote a row) and --dry-run beside --apply (which wrote under a DRY RUN banner) are one line each (${httpsType.code}: ${errorLine(httpsType.out).slice(0, 80)}; ${mistyped.code}; ${httpsEnrich.code}; ${refused.code}: ${errorLine(refused.out).slice(0, 90)}; ${zero.code}; ${typo.code}: ${errorLine(typo.out)}; ${both.code})`);
+    assert(oneLine(httpsType, scheme) && !/Starting type backfill|example\.supabase/.test(httpsType.out) && oneLine(mistyped, scheme) && !/pw-not-real|127\.0\.0\.1/.test(mistyped.out) && oneLine(httpsEnrich, scheme) && !/Enrichment Status/.test(httpsEnrich.out) && oneLine(refused, /^ERROR: read thoughts after id 0{8}-0{4}-0{4}-0{4}-0{12} → ERR_POSTGRES_CONNECTION_REFUSED /m) && oneLine(zero, /^ERROR: --limit must be an integer of at least 1; got "0"$/m) && oneLine(typo, /^ERROR: unknown flag "--dryrun" \(flags: --dry-run, --apply\)$/m) && (await tiers())["restricted"] === 1 && oneLine(both, /^ERROR: --dry-run and --apply are exclusive/m) && oneLine(eqForm, /^ERROR: --limit takes its value as the next argument, not after "="$/m) && !/\[DRY\]/.test(eqForm.out) && oneLine(trailing, /^ERROR: --limit needs a value$/m) && !/Starting type backfill/.test(trailing.out),
+      `…a Supabase URL and a mistyped scheme are refused before any query by a line naming the scheme and not the value (the password token appears nowhere); a refused connection is one line naming the driver's code; --limit 0, an unknown flag (--dryrun, which wrote a row) and --dry-run beside --apply (which wrote under a DRY RUN banner), --limit=1 and a trailing --limit (both ran unbounded) are one line each (${httpsType.code}: ${errorLine(httpsType.out).slice(0, 80)}; ${mistyped.code}; ${httpsEnrich.code}; ${refused.code}: ${errorLine(refused.out).slice(0, 90)}; ${zero.code}; ${typo.code}: ${errorLine(typo.out)}; ${both.code}; ${eqForm.code}; ${trailing.code})`);
 
     // The README's grants, proved: SELECT and UPDATE on thoughts write `type` (the audit trigger records no event for it);
     // a metadata change fires 008/055's audit trigger, which needs SELECT and INSERT on thought_audit — the message

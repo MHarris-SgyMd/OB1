@@ -118,6 +118,13 @@ async function main() {
   const typeDistribution = {};
 
   while (true) {
+    // The limit met, no page is read: the scan had gone on to the next row it
+    // would have written, every page between read for nothing (review pass 2,
+    // run-it — `--limit 1` on a smoke test scanned the whole set).
+    if (LIMIT && totalUpdated >= LIMIT) {
+      limitReached = true;
+      break;
+    }
     const { rows, total: fetchedTotal } = await fetchBatch(afterId, BATCH_SIZE, {
       includeCount: !firstCountDone,
     });

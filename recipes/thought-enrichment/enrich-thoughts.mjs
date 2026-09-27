@@ -215,7 +215,11 @@ async function withRetry(fn, maxRetries = 3) {
       const is429 = msg.includes("429");
       const is5xx = /\b5\d{2}\b/.test(msg);
       const isAbort = name === "AbortError" || msg.includes("Timeout after") || msg.includes("aborted");
-      const retriable = is429 || is5xx || isAbort;
+      // A socket the provider reset or that timed out is worth another try; a
+      // refused connection or an unknown host is not — the row fails at once
+      // (review pass 2, run-it).
+      const isSocket = ["ECONNRESET", "ETIMEDOUT", "EPIPE", "UND_ERR_SOCKET"].includes(String(err.code ?? ""));
+      const retriable = is429 || is5xx || isAbort || isSocket;
       if (attempt === maxRetries || !retriable) throw err;
       const delay = is429
         ? Math.min(30000, 2000 * Math.pow(2, attempt))
@@ -245,6 +249,19 @@ async function main() {
   STATE_DIR = path.resolve(env.ENRICH_STATE_DIR || path.join(__dirname, "data"));
   STATE_PATH = path.join(STATE_DIR, "enrichment-state.json");
   if (args.dryRun && args.apply) throw new Error("--dry-run and --apply are exclusive: one previews, the other writes");
+  if (args.apply) {
+    // The checkpoint's directory, made and proven writable before a row is
+    // written or a model paid: a directory that is a file failed after the
+    // first chunk (review pass 2, run-it). A relative ENRICH_STATE_DIR
+    // resolves against the current directory.
+    try {
+      fs.mkdirSync(STATE_DIR, { recursive: true });
+      fs.writeFileSync(path.join(STATE_DIR, ".probe"), "");
+      fs.unlinkSync(path.join(STATE_DIR, ".probe"));
+    } catch (err) {
+      throw new Error(`the checkpoint directory ${STATE_DIR} is not writable (${err?.code || err?.message || err}); set ENRICH_STATE_DIR to one that is`);
+    }
+  }
   client = connect(env);
 
   if (args.status) {
@@ -383,7 +400,9 @@ async function main() {
   while (true) {
     if (config.limit && processed >= config.limit) break;
     if (config.maxCalls > 0 && budget.calls >= config.maxCalls) {
-      budgetExceeded = true;
+      // ABORTED only when a row was left: a budget met as the table completed
+      // read as an abort (review pass 2, run-it).
+      budgetExceeded = (await fetchUnenriched(fetchCursor, 1)).length > 0;
       break;
     }
 
@@ -471,14 +490,17 @@ function chunkWidth(config, budget) {
 
 /**
  * A write the database refused for a structural reason — a denied table, an
- * undefined column: a failure() carrying a SQLSTATE that is not transient —
- * ends the run here, on the row it happened on, as the two backfills do.
- * Under Promise.allSettled it was one FAIL line per row while every later row
- * still paid its model call and the run exited 0 (review pass 1, both
- * readers). A model's error carries no code and stays a per-row failure.
+ * undefined column: a failure() (marked `brain`) whose SQLSTATE is not
+ * transient — ends the run here, on the row it happened on, as the two
+ * backfills do. Under Promise.allSettled it was one FAIL line per row while
+ * every later row still paid its model call and the run exited 0 (review pass
+ * 1, both readers). A model's error — a 5xx, bad JSON, a timeout, a closed
+ * port (Bun's fetch gives that one a code, ConnectionRefused, which a test on
+ * the code alone read as a refusal — review pass 2, both readers) — stays a
+ * per-row FAIL, recorded for --retry-failed.
  */
 function refusedWrite(reason) {
-  if (reason?.code && !isTransientDbError(reason)) throw reason;
+  if (reason?.brain && !isTransientDbError(reason)) throw reason;
 }
 
 // --- Classification ---
@@ -601,7 +623,10 @@ async function fetchUnenriched(cursor, limit) {
     query = query.limit(limit);
   }
   const { data, error } = await query;
-  if (error) throw failure("read un-enriched thoughts", error);
+  if (error) {
+    const hint = error.code === "22P02" && cursor?.afterId != null ? " (the checkpoint's lastProcessedId is not a uuid — --reset-state starts over)" : "";
+    throw failure(`read un-enriched thoughts${hint}`, error);
+  }
   return Array.isArray(data) ? data : [];
 }
 
@@ -818,13 +843,15 @@ function parseArgs(argv) {
     else if (a === "--dry-run") args.dryRun = true;
     else if (a === "--apply") args.apply = true;
     else if (a === "--status") args.status = true;
-    else if (a === "--concurrency" && argv[i + 1]) args.concurrency = argv[++i];
-    else if (a === "--skip" && argv[i + 1]) args.skip = argv[++i];
-    else if (a === "--limit" && argv[i + 1]) args.limit = argv[++i];
-    else if (a === "--model" && argv[i + 1]) args.model = argv[++i];
-    else if (a === "--provider" && argv[i + 1]) args.provider = argv[++i];
+    // The value is taken whatever it is: refuseUnknownFlags has required one,
+    // so a trailing `--limit` is refused there rather than read as "no limit".
+    else if (a === "--concurrency") args.concurrency = argv[++i];
+    else if (a === "--skip") args.skip = argv[++i];
+    else if (a === "--limit") args.limit = argv[++i];
+    else if (a === "--model") args.model = argv[++i];
+    else if (a === "--provider") args.provider = argv[++i];
     else if (a === "--retry-failed") args.retryFailed = true;
-    else if (a === "--max-calls" && argv[i + 1]) args.maxCalls = argv[++i];
+    else if (a === "--max-calls") args.maxCalls = argv[++i];
     else if (a === "--reset-state") args.resetState = true;
   }
   return args;

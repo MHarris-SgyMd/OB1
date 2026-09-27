@@ -62,7 +62,10 @@ export function connect(env) {
     );
   }
   if (!/^postgres(ql)?:\/\//.test(url)) {
-    const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(url)?.[1];
+    // A scheme is named only when `://` follows it: the first colon-delimited
+    // token of a value pasted without its scheme is the user name, or the
+    // password (review pass 2, run-it).
+    const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(url)?.[1];
     throw new Error(
       `SUPABASE_URL must be a postgres:// connection string; the value's scheme is ${scheme ? `"${scheme}:"` : "missing"} ` +
         "(a Supabase project URL from an older .env.local is not this fork's value). " +
@@ -79,7 +82,11 @@ export function connect(env) {
  */
 export function failure(what, error) {
   const code = error?.code ? `${error.code} ` : "";
-  return Object.assign(new Error(`${what} → ${code}${error?.message || error}`), { code: error?.code });
+  // `brain: true` marks the error as the database's: a caller that ends a run
+  // on a structural refusal tests the mark, not the code — Bun's fetch errors
+  // carry codes too (ConnectionRefused, ENOTFOUND), and a model outage is a
+  // per-row failure, not a refusal (review pass 2, both readers).
+  return Object.assign(new Error(`${what} → ${code}${error?.message || error}`), { code: error?.code, brain: true });
 }
 
 /**
@@ -91,12 +98,16 @@ export function failure(what, error) {
  * connection that way, with no SQLSTATE; review pass 1, cold read). A refused
  * connection is not among them — an operator with the wrong port reads one
  * line now, not after the ladder's half minute — and a 42xxx (an undefined
- * column, a denied table) is structural and never is. The closed-socket case
- * is not driven by the live suite: it would take killing a backend mid-run.
+ * column, a denied table) is structural and never is. A pool reconnecting to
+ * a server that is still starting answers ERR_POSTGRES_CONNECTION_FAILED
+ * ("closed before the connection was established"), which follows a 57P01 on
+ * the next query, so it rides with it (review pass 2, cold read). Neither
+ * closed-socket case is driven by the live suite: it would take killing a
+ * backend mid-run.
  */
 export function isTransientDbError(error) {
   const code = String(error?.code ?? "");
-  return code.startsWith("08") || code === "40001" || code === "40P01" || code === "57P01" || code === "ERR_POSTGRES_CONNECTION_CLOSED";
+  return code.startsWith("08") || code === "40001" || code === "40P01" || code === "57P01" || code === "ERR_POSTGRES_CONNECTION_CLOSED" || code === "ERR_POSTGRES_CONNECTION_FAILED";
 }
 
 /**
@@ -105,7 +116,7 @@ export function isTransientDbError(error) {
  * `--concurrency 0` spun forever — review pass 1, run-it).
  */
 export function intFlag(raw, flag, min = 0) {
-  if (raw === undefined || !/^\d+$/.test(String(raw)) || Number(raw) < min) {
+  if (raw === undefined || !/^\d+$/.test(String(raw)) || !Number.isSafeInteger(Number(raw)) || Number(raw) < min) {
     throw new Error(`${flag} must be an integer${min > 0 ? ` of at least ${min}` : ""}; got "${raw ?? ""}"`);
   }
   return Number(raw);
@@ -114,15 +125,28 @@ export function intFlag(raw, flag, min = 0) {
 /**
  * A flag no script knows is refused, not ignored: `--dryrun` for `--dry-run`
  * would have written every row (review pass 1, run-it). `known` names the
- * flags; `withValue` the ones whose next token is a value, skipped here.
+ * flags; `withValue` the ones whose next token is their value — which must be
+ * there and not another flag, and is never given as `--flag=value`: both
+ * forms passed this check and were then ignored by the scripts' parsers, so
+ * `--limit=2` and a trailing `--limit` ran unbounded (review pass 2, both
+ * readers).
  */
 export function refuseUnknownFlags(argv, known, withValue = []) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    const name = a.includes("=") ? a.slice(0, a.indexOf("=")) : a;
-    if (known.includes(name)) { if (withValue.includes(name) && !a.includes("=")) i++; continue; }
-    if (!name.startsWith("--")) throw new Error(`unexpected argument "${a}" (flags: ${known.join(", ")})`);
-    throw new Error(`unknown flag "${name}" (flags: ${known.join(", ")})`);
+    if (a.includes("=") && a.startsWith("--")) {
+      const name = a.slice(0, a.indexOf("="));
+      throw new Error(known.includes(name) ? `${name} takes its value as the next argument, not after "="` : `unknown flag "${name}" (flags: ${known.join(", ")})`);
+    }
+    if (known.includes(a)) {
+      if (withValue.includes(a)) {
+        if (i + 1 >= argv.length || argv[i + 1].startsWith("--")) throw new Error(`${a} needs a value`);
+        i++;
+      }
+      continue;
+    }
+    if (!a.startsWith("--")) throw new Error(`unexpected argument "${a}" (flags: ${known.join(", ")})`);
+    throw new Error(`unknown flag "${a}" (flags: ${known.join(", ")})`);
   }
 }
 

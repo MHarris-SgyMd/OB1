@@ -69,11 +69,11 @@ Classifies each thought using an LLM and writes structured metadata back to the 
    bun enrich-thoughts.mjs --apply --retry-failed
    ```
 
-**Flags:** `--provider` (openrouter or anthropic), `--concurrency`, `--limit`, `--skip`, `--model`, `--max-calls`, `--reset-state`.
+**Flags:** `--apply`, `--dry-run`, `--status`, `--retry-failed`, `--provider` (openrouter or anthropic), `--concurrency`, `--limit`, `--skip`, `--model`, `--max-calls`, `--reset-state`, `--help`. A value follows its flag as the next argument (`--limit 10`, never `--limit=10`); a flag without its value, or one the script does not know, is refused. The preview prints a `[DRY]` line with the classification and then the same `OK #id -> type` line the live run prints; nothing is written.
 
 The `--max-calls` flag is a hard ceiling on the number of LLM calls per run. The default is `10000`; pass `--max-calls 0` to disable the cap. When the limit is hit the script aborts cleanly, prints a summary, and leaves remaining rows with `enriched=false` so you can resume later. This protects against a shell typo (e.g. dropping `--limit`) burning unbounded spend against a large un-enriched table.
 
-**Resume.** The script checkpoints `lastProcessedId` to `data/enrichment-state.json` beside the script — or under `ENRICH_STATE_DIR`, if set — after each concurrency chunk. On startup, if a checkpoint exists and neither `--skip` nor `--reset-state` was passed, the run resumes from `id > lastProcessedId` (ids are uuids on this fork, so the order is the uuid's, not the order of capture). The `enriched=false` filter is still applied as a second layer of defense. Pass `--reset-state` to ignore the checkpoint and start from scratch. A row whose `enriched` is `NULL` rather than `false` is neither counted by `--status` nor picked up — the schema's default is `false`, so only a raw writer leaves one; `UPDATE thoughts SET enriched = false WHERE enriched IS NULL` brings them in. A run that left rows failed exits 1 with its summary, so a scheduler can tell.
+**Resume.** The script checkpoints `lastProcessedId` to `data/enrichment-state.json` beside the script — or under `ENRICH_STATE_DIR`, if set (a relative path resolves against the directory you run from; `--apply` makes the directory and proves it writable before any row is written) — after each concurrency chunk. On startup, if a checkpoint exists and neither `--skip` nor `--reset-state` was passed, the run resumes from `id > lastProcessedId` (ids are uuids on this fork, so the order is the uuid's, not the order of capture). The `enriched=false` filter is still applied as a second layer of defense. Pass `--reset-state` to ignore the checkpoint and start from scratch. A row whose `enriched` is `NULL` rather than `false` is neither counted by `--status` nor picked up — the schema's default is `false`, so only a raw writer leaves one; `UPDATE thoughts SET enriched = false WHERE enriched IS NULL` brings them in. A run that left rows failed exits 1 with its summary, so a scheduler can tell. A model that cannot be reached — a closed port, an unknown host, a 5xx after its retries — is such a failure: one `FAIL #id: …` line per row, the id kept for `--retry-failed`; only a write the *database* refuses ends the run (Troubleshooting).
 
 ### backfill-type.mjs -- Type canonicalization
 
@@ -134,16 +134,18 @@ Every failure is one line on stderr, `ERROR: <what> → <code> <message>`, and e
 - `ERROR: unknown flag "--dryrun" (flags: --dry-run, --apply)` — a flag the script does not know is refused rather than ignored (the typo would otherwise have run the write). `--dry-run` beside `--apply` is refused the same way, and a numeric flag must be an integer (`--limit 1.5`, `--concurrency 0` and `--concurrency x` are refused by name).
 - `… → ERR_POSTGRES_CONNECTION_REFUSED Failed to connect` — nothing listens at the host and port in the URL (a stopped container, or `5432` where the compose stack publishes another port).
 - `… → 3D000 database "…" does not exist` — the URL's path names a database the server does not have.
-- `… → 42703 column "type" does not exist` (or `sensitivity_tier`, `enriched`, `source_type` — the first column the script reads) — `schemas/enhanced-thoughts/schema.sql` has not been applied to this brain: `psql "$SUPABASE_URL" -f schemas/enhanced-thoughts/schema.sql` from the checkout's root.
+- `… → 28P01 password authentication failed for user "…"` — the URL's password is not the role's.
+- `… → 42703 column "type" does not exist` (or `sensitivity_tier`, `enriched`, `source_type` — the first column the script reads) — `schemas/enhanced-thoughts/schema.sql` has not been applied to this brain: `psql "$SUPABASE_URL" -f schemas/enhanced-thoughts/schema.sql` from the checkout's root, or paste the file into any SQL client connected to the brain.
 - `… → 42501 permission denied for table thoughts` — the role in the URL may not read or write `thoughts`: `GRANT SELECT, UPDATE ON thoughts TO <role>`.
 - `… → 42501 permission denied for table thought_audit` — `enrich-thoughts.mjs` changed a row's `metadata` and the audit trigger, running as your role, could not record it: `GRANT SELECT, INSERT ON thought_audit TO <role>`. The two backfills never meet this (a `type` or `sensitivity_tier` change records no event).
+- `FAIL #…: Unable to connect. Is the computer able to access the url?` (or `getaddrinfo ENOTFOUND …`) — `enrich-thoughts.mjs` could not reach the model at `OPENROUTER_BASE_URL` (or the Anthropic API); each row fails, the run exits 1, and `--retry-failed` picks them up once the endpoint answers. A 5xx or a 429 is retried a few times first.
 - `--dry-run` reads the brain, so it needs the URL too; only `--help` and `backfill-sensitivity.mjs` without a flag run without one.
 
 ## Repairing double-encoded metadata (versions before this fix)
 
 Earlier versions of `enrich-thoughts.mjs` pre-stringified `metadata` before the request body was itself stringified, so the `metadata` jsonb column was stored as a JSON *string* instead of an object on every enriched row. Symptoms: `metadata->'topics'` returns NULL everywhere, `metadata @>` filters stop matching, and stats/dashboard topic lists go empty, while the raw value looks like `"{\"type\":...}"`. (On this fork the shim binds the object as jsonb, and migration 005 refuses a string payload on the functions' path.)
 
-The inner string is the complete, valid metadata — nothing is lost. Repair in one transactional statement (`psql "$SUPABASE_URL"`):
+The inner string is the complete, valid metadata — nothing is lost. Repair in one transactional statement (`psql "$SUPABASE_URL"`, or any SQL client):
 
 ```sql
 UPDATE thoughts
