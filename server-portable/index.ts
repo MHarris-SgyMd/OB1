@@ -2401,7 +2401,10 @@ function buildServer(principal: Principal): McpServer {
         await logActionCalls(result.ids.map((id) => ({ tool: "retry_failed", targetId: id })));
         return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
       } catch (e) {
-        return toolError(`retry_failed failed: ${(e as Error).message}`, { code: "STORE_UNAVAILABLE", retryable: true });
+        // Codeless, as delete_thought/update_thought and worker_status are: on a
+        // PostgREST (Workers) deploy the store throws the SQL-only reason, which is
+        // permanent, not the transient STORE_UNAVAILABLE a code would imply.
+        return toolError(`retry_failed failed: ${(e as Error).message}`);
       }
     }
   );
@@ -2434,7 +2437,7 @@ function buildServer(principal: Principal): McpServer {
         await logActionCalls(result.ids.map((id) => ({ tool: "release_stale_leases", targetId: id })));
         return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
       } catch (e) {
-        return toolError(`release_stale_leases failed: ${(e as Error).message}`, { code: "STORE_UNAVAILABLE", retryable: true });
+        return toolError(`release_stale_leases failed: ${(e as Error).message}`);
       }
     }
   );

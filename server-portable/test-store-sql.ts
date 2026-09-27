@@ -512,6 +512,12 @@ console.log("\n[5f] retryFailed and releaseStaleLeases — the write half of wor
     assert(rlLive.released === 1 && rlLive.ids[0] === ids[0] && rlLive.workers[0] === "w-live", "include_live with a worker_id releases that holder's live lease alone");
     const other = await raw`SELECT status FROM thought_work_claims WHERE thought_id = ${ids[1]}::uuid AND work_type = ${A}`;
     assert(other[0].status === "claimed", "another holder's live lease is untouched");
+    // Backstop: includeLive without a workerId throws rather than releasing every live lease.
+    let threw = "";
+    try { await store.releaseStaleLeases({ includeLive: true }); } catch (e) { threw = (e as Error).message; }
+    assert(/includeLive requires a workerId/.test(threw), `includeLive with no workerId is refused at the store (${threw.slice(0, 60)})`);
+    const stillClaimed = await raw`SELECT count(*)::int AS n FROM thought_work_claims WHERE status = 'claimed'`;
+    assert(stillClaimed[0].n === 1, "…and released nothing (the w-other live lease still stands)");
 
     await raw`DELETE FROM thought_work_claims`;
   } finally {

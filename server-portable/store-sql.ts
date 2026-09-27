@@ -391,6 +391,12 @@ export class SqlStore implements ThoughtStore {
     const workType = opts.workType ?? null;
     const workerId = opts.workerId ?? null;
     const includeLive = opts.includeLive === true;
+    // Defense in depth: the surfaces refuse includeLive without a workerId as a
+    // value (with a code), and never reach here without one — but a direct caller
+    // must not be able to release EVERY live lease across every pool by omitting it.
+    if (includeLive && (workerId === null || workerId.trim() === "")) {
+      throw new Error("releaseStaleLeases: includeLive requires a workerId — refusing to release every live lease");
+    }
     const rows = await this.sql`
       UPDATE thought_work_claims
          SET status = 'pending', ttl_expires_at = NULL, attempt_count = GREATEST(attempt_count - 1, 0)
