@@ -750,7 +750,7 @@ if (configFailed) {
   if (built) {
     /**
      * Every schema check below is gated on the SQL store, because they read
-     * pg_proc and information_schema over a direct connection that the PostgREST
+     * pg_proc and pg_attribute over a direct connection that the PostgREST
      * path does not have. That has been true since migration 004's check and is
      * a limitation of the deployment shape rather than of any one migration.
      *
@@ -779,33 +779,61 @@ if (configFailed) {
       // that holds it here (the alias included), and for PostgREST — which has
       // no connection string of its own — say what to hand it instead.
       const urlArg = conn ? `$${conn.from}` : "<the brain's postgres:// connection string — Supabase's direct connection, not the pooler>";
-      // public.thoughts present but not resolving for this role — no USAGE on
-      // public, public off its search_path, or both — is not a brain to migrate
-      // (SMD-2062). Probed only when thoughts itself fails: 42P01 on the count
-      // (in any lc_messages; any other failure spares the second connection)
-      // and the probe's own to_regclass('thoughts') NULL — an RLS function
-      // reading some other missing table fails the count the same way. public
-      // alone: a thoughts elsewhere is another tool's. Each cause is named with
-      // its statement (SMD-2242). The path is parsed, never
-      // echoed, and not read from current_schemas(), which hides a schema
-      // without USAGE (search-path.ts); with USAGE held, thoughts not resolving
-      // means off the path whatever the parse says. The GRANT names
-      // current_user, whose privilege the count used; the ALTER ROLE names
-      // session_user, whose settings load, IN DATABASE since a role's setting
-      // there outranks its plain one and the database's. A path from the
-      // connection (source `client`) or SET after login (`session`) outranks
-      // it; an unread source gets that caveat. The connection's path is
-      // replaced, never appended to: Bun joins two options with a comma, libpq
-      // keeps the last, and Bun's search_path= parameter outranks options.
-      // Over PostgREST there is no catalog to ask, and a failed probe asks
-      // nothing.
-      let offPath: { causes: string[]; fixes: string[] } | null = null;
-      if (built.kind === "sql" && conn && String((e as { errno?: unknown }).errno ?? "") === "42P01") {
+      /** GRANT CONNECT for the connection string's database and user, each as the server reads it (no case folding); placeholders where the URL names none. */
+      const connectGrant = (url: string) => {
+        let db = "<the database>", user = "<the role>";
+        try {
+          const u = new URL(url);
+          if (u.username) user = quoteIdent(decodeURIComponent(u.username));
+          if (u.pathname.length > 1) db = quoteIdent(decodeURIComponent(u.pathname.slice(1)));
+          else if (u.username) db = user;
+        } catch { /* placeholders stand */ }
+        return `GRANT CONNECT ON DATABASE ${db} TO ${user};`;
+      };
+      // The count's failure, by SQLSTATE — never the message or severity,
+      // which a server's lc_messages translates (review pass 3). On 42P01 or
+      // 42501 a probe on a second connection reads the catalog, and the
+      // remedy is the first of these that holds:
+      // - public.thoughts present and not resolving (SMD-2062): no USAGE on
+      //   public, public off the path, or both, each named with its statement
+      //   (SMD-2242). The path is parsed, never echoed, and not read from
+      //   current_schemas(), which hides a schema without USAGE
+      //   (search-path.ts); with USAGE held, thoughts not resolving means off
+      //   the path whatever the parse says. The GRANT names current_user,
+      //   whose privilege the count used; the ALTER ROLE names session_user,
+      //   whose settings load, IN DATABASE since a role's setting there
+      //   outranks its plain one and the database's. A path from the
+      //   connection (source `client`) or SET after login (`session`)
+      //   outranks it; an unread source gets that caveat. The connection's
+      //   path is replaced, never appended to: Bun joins two options with a
+      //   comma, libpq keeps the last, and Bun's search_path= outranks options.
+      // - thoughts resolving to another schema's table: another tool's, never
+      //   granted on; public goes ahead of it, and then, if the brain's table
+      //   is missing, the migrations.
+      // - 42501 without SELECT on public.thoughts: the grant.
+      // - 42501 with row_security off on a table with row-level security.
+      // - otherwise (42P01, or 42501 with SELECT held): a read the count
+      //   reaches, the row-level security policies a SELECT by this role meets.
+      // The probe's query needs no privilege, so a 42501 on it is a refusal
+      // at connection (no CONNECT, a connection-string setting the role may
+      // not make, a login trigger), which the count met too. Over PostgREST
+      // there is no catalog to ask; a probe that fails otherwise (no
+      // connection slot) leaves the SQLSTATE's own remedy below.
+      const errno = String((e as { errno?: unknown }).errno ?? "");
+      let probeErrno = "";
+      let found: { detail: string; remedy: string } | null = null;
+      if (built.kind === "sql" && conn && (errno === "42P01" || errno === "42501")) {
         try {
           const { SQL } = await import("bun");
           const probe = new SQL({ url: conn.url, max: 1 });
           try {
+            // The policies a SELECT by this role meets: FOR SELECT or ALL, TO
+            // PUBLIC or a role whose privileges it has.
             const [r] = (await probe`
+              WITH pol AS (
+                SELECT quote_ident(p.polname) AS name FROM pg_policy p
+                 WHERE p.polrelid = to_regclass('thoughts') AND p.polcmd IN ('r', '*')
+                   AND (0 = ANY (p.polroles) OR EXISTS (SELECT 1 FROM unnest(p.polroles) g WHERE g <> 0 AND pg_has_role(current_user, g, 'USAGE'))))
               SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                               WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present,
                      to_regclass('thoughts') IS NULL AS unresolved,
@@ -814,7 +842,21 @@ if (configFailed) {
                      current_setting('server_version_num')::int AS version,
                      quote_ident(current_user::text) AS role,
                      quote_ident(session_user::text) AS login,
-                     quote_ident(current_database()::text) AS db`) as { present: boolean; unresolved: boolean; usage: boolean; path: string; version: number; role: string; login: string; db: string }[];
+                     quote_ident(current_database()::text) AS db,
+                     current_user::text AS "roleName",
+                     (SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                       WHERE c.oid = to_regclass('thoughts')) AS resolved,
+                     (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                       WHERE c.oid = to_regclass('thoughts')) AS "resolvedSchema",
+                     has_table_privilege(to_regclass('thoughts'), 'SELECT') AS "canSelect",
+                     (SELECT c.relrowsecurity FROM pg_class c WHERE c.oid = to_regclass('thoughts')) AS rls,
+                     current_setting('row_security') AS "rowSecurity",
+                     (SELECT string_agg(name, ', ' ORDER BY name) FROM pol) AS policies,
+                     (SELECT count(*)::int FROM pol) AS "policyCount"`) as {
+              present: boolean; unresolved: boolean; usage: boolean; path: string; version: number; role: string; login: string; db: string;
+              roleName: string; resolved: string | null; resolvedSchema: string | null; canSelect: boolean | null;
+              rls: boolean | null; rowSecurity: string; policies: string | null; policyCount: number;
+            }[];
             if (r?.present && r.unresolved) {
               let source: string | null = null;
               try {
@@ -844,18 +886,86 @@ if (configFailed) {
                   ? `${alter}  (unless the connection string sets search_path, which outranks it)`
                   : alter);
               }
-              offPath = { causes, fixes };
+              found = {
+                detail: `public.thoughts exists but does not resolve for this role (${causes.join("; ")})`,
+                remedy: `${fixes.join("  then ").replace(/^./, (c) => c.toUpperCase())}  The table is there, so migrating would not make it resolve.`,
+              };
+            } else if (r?.resolved && r.resolvedSchema !== "public") {
+              // Another schema's thoughts, first on the path: another tool's
+              // table, never one to grant on or to call the brain's (review
+              // pass 1: the GRANT printed for it, run, passed this row against
+              // it). The brain's table missing is still a brain to migrate.
+              // The migrator's CREATE TABLE IF NOT EXISTS thoughts is
+              // unqualified too: run with that schema first on the path, it
+              // finds the other table and fails (review pass 2), so the path
+              // comes first either way. A schema named for the role is the
+              // default path's "$user".
+              const other = quoteIdent(String(r.resolvedSchema));
+              const named = r.resolvedSchema === r.roleName && searchPathSchemas(String(r.path ?? ""), Number(r.version)).includes("$user") ? ` (the path's "$user")` : "";
+              const putAhead = `put public ahead of ${other}${named} on this connection's search_path — the role's setting, or the connection string's where it sets one — or take ${other} off it`;
+              found = r.present
+                ? {
+                    detail: `thoughts resolves to ${r.resolved}, not the brain's public.thoughts`,
+                    remedy: `${r.usage ? "" : `GRANT USAGE ON SCHEMA public TO ${r.role};  then `}${putAhead}: the server reads the first thoughts on the path.  The brain's table is there, so migrating would not change it.`.replace(/^./, (c) => c.toUpperCase()),
+                  }
+                : {
+                    detail: `thoughts resolves to ${r.resolved}, another tool's table; the brain's public.thoughts does not exist`,
+                    remedy: `${putAhead.replace(/^./, (c) => c.toUpperCase())}, then apply the migrations: cd db && bun migrate.ts --url ${urlArg}  — the migrator's CREATE TABLE IF NOT EXISTS thoughts would otherwise find ${r.resolved}.`,
+                  };
+            } else if (r?.resolved && errno === "42501" && r.canSelect === false) {
+              // --grant takes the name raw, so it goes to the shell quoted.
+              const grantArg = /^[A-Za-z0-9_.-]+$/.test(r.roleName) ? r.roleName : `'${r.roleName.replaceAll("'", `'\\''`)}'`;
+              found = {
+                detail: `role ${r.role} has no SELECT on ${r.resolved}`,
+                remedy: `GRANT SELECT ON ${r.resolved} TO ${r.role};  — or, for the server's role, every privilege the capture path needs, as the tables' owner: cd db && bun migrate.ts --url <the owner's connection string> --grant ${grantArg}  (db/README.md, Grants for a capturing role)`,
+              };
+            } else if (r?.resolved && errno === "42501" && r.rls && r.rowSecurity === "off") {
+              // row_security off: Postgres refuses a read a policy would
+              // filter rather than skip the policies — no grant or policy
+              // change fixes that.
+              found = {
+                detail: `row_security is off for this session and ${r.resolved} has row-level security, so Postgres refuses the read rather than skip its policies`,
+                remedy: `Turn row_security back on for this connection (it is off in a role's or the database's settings, or the connection string), or, for a role that should read every row, ALTER ROLE ${r.role} BYPASSRLS;  (as a superuser).  The table is there, so migrating would not change it.`,
+              };
+            } else if (r?.resolved) {
+              const whence = errno === "42501"
+                ? `thoughts resolves (${r.resolved}) and this role may read it, so the refusal comes from`
+                : `thoughts resolves (${r.resolved}), so the missing relation is read by`;
+              const plural = r.policyCount > 1;
+              const where = r.policies ? (plural ? "the policies" : "the policy") : "what the count reaches";
+              found = {
+                detail: r.policies
+                  ? `${whence} what the count reaches: row-level security ${plural ? "policies" : "policy"} ${r.policies} on it`
+                  : `${whence} something the count reaches, not the table itself`,
+                remedy: `${errno === "42501"
+                  ? `Grant this role what the error names, or change ${where} to use only what the role may.`
+                  : `Fix ${where}, or a function called there, so nothing reads a relation that does not exist.`}  The table is there, so migrating would not change it.`,
+              };
             }
           } finally {
             await probe.close();
           }
-        } catch { /* the remedy below stays the migrate command */ }
+        } catch (pe) { probeErrno = String((pe as { errno?: unknown }).errno ?? ""); }
       }
       add("schema", "fail",
-          offPath ? `${msg} — public.thoughts exists but does not resolve for this role (${offPath.causes.join("; ")})` : msg,
-          offPath
-            ? `${offPath.fixes.join("  then ").replace(/^./, (c) => c.toUpperCase())}  The table is there, so migrating would not make it resolve.`
-            : /does not exist|relation/i.test(msg)
+          found ? `${msg} — ${found.detail}` : msg,
+          found
+            ? found.remedy
+            // A connection refused before any query: the database it names is
+            // not there (3D000), or the role is refused (28000: it does not
+            // exist under trust auth — under a password, 28P01 hides that — it
+            // may not log in, or pg_hba.conf has no line for it).
+            : conn && errno === "3D000"
+            ? `Correct the database name in $${conn.from} — or, for a new brain, create it (CREATE DATABASE, as a role that may) and apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
+            : conn && errno === "28000"
+            ? `Check the role in $${conn.from}: the server refused it before any query — it must exist, be allowed to log in (LOGIN), and be admitted by pg_hba.conf from this host.`
+            : conn && errno === "42501" && probeErrno === "42501"
+            ? `The server refused this role at connection, before any query: grant it CONNECT on the database (${connectGrant(conn.url)}  as its owner), take out a setting $${conn.from} makes that the role may not (a parameter, or -c in options=), or, on PostgreSQL 17, see the login event triggers.`
+            // A query's refusal the probe could not explain (it failed, or
+            // opened no connection): the table's privilege, or a policy.
+            : conn && errno === "42501"
+            ? `Grant this role SELECT on public.thoughts — or, for the server's role, every privilege the capture path needs, as the tables' owner: cd db && bun migrate.ts --url <the owner's connection string> --grant <the role> — or, if it holds that, fix the row-level security policy on thoughts that refuses it.`
+            : errno === "42P01" || /does not exist|relation/i.test(msg)
             ? `Apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
             : "Check credentials and network reachability to the database.");
     }
@@ -1679,10 +1789,14 @@ if (configFailed) {
           const EVENT_COLUMNS = ["actor_kind", "trust", "origin", "stance", "cites", "valid_from", "valid_until", "backfilled_at"];
           // The eight names spelled into the query, not bound as an array: Bun's
           // SQL binds a JS array to ANY() as one text value (SMD-1803's trap).
+          // From pg_attribute, which shows every role the columns:
+          // information_schema shows a role none of a table it holds no
+          // privilege on, and told a reader to re-apply 046 (SMD-2238).
           const evCols = (await sql`
-            SELECT column_name AS c FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = 'thought_audit'
-              AND column_name IN ('actor_kind', 'trust', 'origin', 'stance', 'cites', 'valid_from', 'valid_until', 'backfilled_at')`) as { c: string }[];
+            SELECT a.attname AS c FROM pg_attribute a
+              JOIN pg_class r ON r.oid = a.attrelid JOIN pg_namespace n ON n.oid = r.relnamespace
+            WHERE n.nspname = 'public' AND r.relname = 'thought_audit' AND a.attnum > 0 AND NOT a.attisdropped
+              AND a.attname IN ('actor_kind', 'trust', 'origin', 'stance', 'cites', 'valid_from', 'valid_until', 'backfilled_at')`) as { c: string }[];
           const missingCols = EVENT_COLUMNS.filter((c) => !evCols.some((r) => r.c === c));
           const bodies = (await sql`
             SELECT p.proname AS name, p.prosrc AS src
@@ -1902,7 +2016,7 @@ if (configFailed) {
             add("audit events", "skip", `not checked — this role cannot read the census (${msg}); the shape is checked, the waiting keys are not`,
                 `GRANT SELECT ON ${denied} TO <the connector's role>; — ${group}, which migrate.ts --grant issues (db/README.md, Grants for a capturing role).`);
           } else {
-            add("audit events", "warn", `could not verify: ${msg}`, "The check reads information_schema.columns, pg_proc, ob1_agents and thought_audit.");
+            add("audit events", "warn", `could not verify: ${msg}`, "The check reads pg_attribute, pg_proc, ob1_agents and thought_audit.");
           }
         }
 
@@ -2866,9 +2980,12 @@ if (configFailed) {
         // boundary of its own took every later check with it.
         try {
           const { CHUNK_CONTEXT: wantContext } = await import("../db/config.mjs");
+          // pg_attribute, not information_schema, which hides the column from a
+          // role with no privilege on the table and said "apply 013" (SMD-2238).
           const ctxCol = await sql`
-            SELECT count(*)::int AS c FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = 'thought_chunks' AND column_name = 'context'`;
+            SELECT count(*)::int AS c FROM pg_attribute a
+              JOIN pg_class r ON r.oid = a.attrelid JOIN pg_namespace n ON n.oid = r.relnamespace
+            WHERE n.nspname = 'public' AND r.relname = 'thought_chunks' AND a.attname = 'context' AND a.attnum > 0 AND NOT a.attisdropped`;
           const haveCtxCol = Number(ctxCol[0].c) >= 1;
           if (wantContext && !haveCtxCol) {
             add("chunk context", "fail",
@@ -2909,7 +3026,7 @@ if (configFailed) {
             }
           }
         } catch (e) {
-          add("chunk context", "warn", `could not verify: ${(e as Error).message}`, "The check reads information_schema.columns and thought_chunks.");
+          add("chunk context", "warn", `could not verify: ${(e as Error).message}`, "The check reads pg_attribute and thought_chunks.");
         }
 
         /**
@@ -3016,9 +3133,12 @@ if (configFailed) {
          */
         let haveLabel = false;
         try {
+          // pg_attribute: information_schema hides the column from a role with
+          // no privilege on thoughts, and said --reapply 021 (SMD-2238).
           const labelCol = await sql`
-            SELECT count(*)::int AS c FROM information_schema.columns
-            WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`;
+            SELECT count(*)::int AS c FROM pg_attribute a
+              JOIN pg_class r ON r.oid = a.attrelid JOIN pg_namespace n ON n.oid = r.relnamespace
+            WHERE n.nspname = 'public' AND r.relname = 'thoughts' AND a.attname = 'embedding_model' AND a.attnum > 0 AND NOT a.attisdropped`;
           haveLabel = Number(labelCol[0].c) >= 1;
           if (!haveLabel) {
             add("vector models", "fail",
