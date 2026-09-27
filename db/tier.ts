@@ -80,7 +80,7 @@ import { parsePgUuidArray } from "../evals/query-log.ts";
 import { embed } from "../evals/lib.ts";
 import { runCompare, type CompareArgs } from "./brain-compare.ts";
 import { commandLine, scriptArgv } from "./cli.ts";
-import { closeThenExit, mayReset, openSql } from "./connect.ts";
+import { closeThenExit, openSql, resetRefusal } from "./connect.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -260,7 +260,8 @@ export function where(url: string): string {
   try {
     const u = new URL(url);
     if (`${u.pathname}${u.search}${u.hash}`.includes("@")) return "a URL with an @ after its host — is its password percent-encoded?";
-    return `${u.hostname || "localhost"}:${u.port || "5432"}${u.pathname.length > 1 ? u.pathname : ""}`;
+    // No host is PGHOST's to decide (Bun's client and libpq both read it), not localhost.
+    return `${u.hostname || "$PGHOST"}:${u.port || "5432"}${u.pathname.length > 1 ? u.pathname : ""}`;
   } catch {
     return "a URL that does not parse";
   }
@@ -497,9 +498,11 @@ async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Pr
  */
 export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promise<void> {
   // connect.ts's one rule, the test scaffolding's too: loopback by name, not an
-  // empty host (it resolves through PGHOST), or the override.
-  if (!mayReset(toUrl)) {
-    throw new Error(`--to is not a loopback host and OB1_ALLOW_REMOTE_DB is not 1. Refusing to reset a remote database. (--refresh drops the target's schema.)`);
+  // empty host (it resolves through PGHOST), nothing pg_restore would follow
+  // elsewhere, or the override.
+  const refusal = resetRefusal(toUrl);
+  if (refusal !== null) {
+    throw new Error(`--to is not plainly this machine — ${refusal} — and OB1_ALLOW_REMOTE_DB is not 1. Refusing to reset it. (--refresh drops the target's schema.)`);
   }
   const src = openSql(fromUrl);
   const target = openSql(toUrl);

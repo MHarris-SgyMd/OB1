@@ -5032,8 +5032,8 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     // tier.ts's own rule trusted an empty host, which resolves through PGHOST (SMD-2302).
     refusedEmptyHost = await refreshRefusal("postgres:///b");
   } finally { if (savedAllow !== undefined) process.env[REMOTE_DB_FLAG] = savedAllow; }
-  assert(/^--to is not a loopback host and OB1_ALLOW_REMOTE_DB is not 1/.test(refusedRemote), `refresh refuses a non-loopback target unless OB1_ALLOW_REMOTE_DB=1 (it drops the target's schema) — got: ${refusedRemote}`);
-  assert(/^--to is not a loopback host/.test(refusedEmptyHost), `…and a target with no host, which resolves through PGHOST — got: ${refusedEmptyHost}`);
+  assert(/^--to is not plainly this machine — example\.com is not a loopback host — and OB1_ALLOW_REMOTE_DB is not 1/.test(refusedRemote), `refresh refuses a non-loopback target unless OB1_ALLOW_REMOTE_DB=1 (it drops the target's schema) — got: ${refusedRemote}`);
+  assert(/^--to is not plainly this machine — the URL has no host/.test(refusedEmptyHost), `…and a target with no host, which resolves through PGHOST — got: ${refusedEmptyHost}`);
   // And a --to that is the --from database under another spelling (SMD-2036):
   // deploy/tier.sh sets OB1_ALLOW_REMOTE_DB, so this is the guard it runs
   // under. The second URL differs as a string (a parameter only), so string

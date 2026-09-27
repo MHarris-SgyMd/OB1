@@ -18,7 +18,7 @@ import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, hostOf, mayReset } from "./connect.ts";
+import { REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, resetRefusal } from "./connect.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS = join(HERE, "migrations");
@@ -316,15 +316,14 @@ export { REMOTE_DB_FLAG };
  * to mean. `OB1_EVAL_ALLOW_REMOTE_DB`, the name the eval-local copy used, is no
  * longer read (connect.ts says why); a refusal names it when it is set.
  *
- * The rule is connect.ts's mayReset, which tier.ts's --refresh asks too
+ * The rule is connect.ts's resetRefusal, which tier.ts's --refresh asks too
  * (SMD-2302); this is its refusal for a suite.
  */
 export function assertThrowawayDatabase(url: string): void {
-  if (mayReset(url)) return;
-  const host = hostOf(url);
-  const shown = host === null ? "an unparseable URL" : host === "" ? "a URL with no host (the client would resolve PGHOST)" : host;
+  const refusal = resetRefusal(url);
+  if (refusal === null) return;
   console.error(
-    `  Refusing to drop the schema at ${shown}.\n\n` +
+    `  Refusing to drop the schema: ${refusal}.\n\n` +
       `  This command DROPS every table Open Brain owns in that database. That is\n` +
       `  safe against a throwaway container and destructive against anything else.\n` +
       `  Run it under db/with-postgres.sh, name a loopback host explicitly, or set\n` +
@@ -547,7 +546,6 @@ export function createAssert(): {
   };
 }
 
-/** The DATABASE_URL check every suite opens with. */
 /**
  * A stub provider's answer that never comes: the request stays open until the
  * client's own deadline (OB1_LLM_TIMEOUT) abandons it. Two things follow for
@@ -710,9 +708,10 @@ export async function ledgerNames(sql: SQL): Promise<string[] | null> {
   return (await sql`SELECT name FROM schema_migrations ORDER BY name`).map((r: { name: string }) => r.name);
 }
 
+/** The DATABASE_URL check every suite opens with. Blank is unset, as connect.ts's databaseUrl has it. */
 export function requireDatabaseUrl(script: string): string {
   const url = process.env.DATABASE_URL;
-  if (!url) {
+  if (url === undefined || url.trim() === "") {
     console.error(`DATABASE_URL is not set. Try: ../db/with-postgres.sh bun ${script}`);
     process.exit(2);
   }

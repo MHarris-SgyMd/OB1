@@ -202,7 +202,6 @@
  * Pure reads, one connection, no writes. The SQL is built by exported functions
  * over a `Runner` so db/test-schema.ts [44] runs the same text under PGlite.
  */
-import { SQL } from "bun";
 import { ENTITY_TYPES, NUMERIC_NAME_RE, type EntityType } from "../server-portable/entities.ts";
 import { isoTimestampOrNull, UUID_RE } from "../server-portable/store.ts";
 import { cleanForDisplay } from "../server-portable/consolidate.ts";

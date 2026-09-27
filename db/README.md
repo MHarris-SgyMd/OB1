@@ -2710,14 +2710,18 @@ that every entry point imports `cli.ts` and nothing else reads `process.argv`,
 and runs each entry point with a flag it does not have and with `--help`.
 
 Every script reaches its database through `connect.ts` (SMD-2302): `--url`, else
-`DATABASE_URL`, else exit 2 with one refusal; one client constructor; and one
-answer to "may this database be reset?" — a loopback host by name
-(`localhost`, `127.0.0.1`, `[::1]`, `0.0.0.0`), not an empty host (it resolves
-through `PGHOST`), or `OB1_ALLOW_REMOTE_DB=1`. `tier.ts --refresh` and the
-suites' `dropSchema` both ask it. A script that exits with a code of its own
-returns it from `closeThenExit`, which closes the pool first. `test-connect.ts`
-holds the rule as a truth table, runs the door, and checks that no other file
-reads `DATABASE_URL`, builds a client or exits inside the door.
+`DATABASE_URL`, else exit 2 with one refusal (a URL that does not parse is
+refused too, and never printed); one client constructor; and one answer to "may
+this database be reset?" — a loopback host by name (`localhost`, `127.0.0.1`,
+`[::1]`, `0.0.0.0`), not an empty host (it resolves through `PGHOST`), with no
+`host=`/`hostaddr=`/`service=` in the URL's query and no `PGHOSTADDR`/`PGSERVICE`
+set (`pg_restore` follows those elsewhere), or `OB1_ALLOW_REMOTE_DB=1`.
+`tier.ts --refresh` and the suites' `dropSchema` both ask it, and print why
+not. A script that exits with a code of its own returns it from
+`closeThenExit`, which closes the pool and flushes its output first.
+`test-connect.ts` holds the rule as a truth table, runs the door, and checks
+that no script outside the suites reads `DATABASE_URL`, builds a client or
+exits inside the door.
 
 The last line is the type check CI runs in the portable-server job (SMD-1932):
 `tsconfig.json` here mirrors `server-portable/tsconfig.json`, and `package.json`
