@@ -546,11 +546,11 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // body, refusing by name without 016 or 053 ([20j]); 057 upserts
   // ob1_config.schema_version for the 1.2.0 cut, needing only 006's table;
   // 058 adds five read functions over 001's thoughts, 025's supersedes and
-  // 053's tables and resolver, refusing by name without 025 or 053 ([20k]); 059
+  // 053's tables and resolver, refusing by name without 025 or 053 ([20k]); 060
   // redefines the three write functions, 046's audit trigger and 001's
   // updated_at trigger on their own bodies, adds the projector, the refresh
   // and the vector snapshot with its trigger on 001's table, refusing by name
-  // without 042, 050 or 055 ([20l]) — all recorded by the baseline with their
+  // without 042, 050 or 055 ([20m]) — all recorded by the baseline with their
   // prerequisites present, so none becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
   assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 30, `030 is among the last thirty migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
@@ -2168,10 +2168,10 @@ console.log("\n[20k] Migration 058 on a schema without 025, and on 025's pointer
   await sql.close();
 }
 
-console.log("\n[20l] Migration 059 onto a populated brain at the file before it — the snapshot seeded from every row holding key, model and vector and no other, no audit row written, no row moved, the writers redefined; a re-apply a no-op; refused up front without 042, 050 or 055, naming the migration and --reapply (SMD-2116)");
+console.log("\n[20m] Migration 060 onto a populated brain at the file before it — the snapshot seeded from every row holding key, model and vector and no other, no audit row written, no row moved, the writers redefined; a re-apply a no-op; refused up front without 042, 050 or 055, naming the migration and --reapply (SMD-2116)");
 {
   await dropSchema(URL_);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "059" });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "060" });
   const sql = new SQL({ url: URL_, max: 1 });
   const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
   await sql`SELECT set_agent_kind('laptop', 'operator')`;
@@ -2180,21 +2180,21 @@ console.log("\n[20l] Migration 059 onto a populated brain at the file before it 
   // A corpus at 058, the file before this one: a labelled vector, an unlabelled one (021: a vector of
   // unknown model), a row without a vector, a raw row with a NULL key, and
   // one edited so its stamp differs from its clock.
-  const labelled = (await sql`SELECT upsert_thought('upgrade 059: labelled', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
-  const unlabelled = (await sql`SELECT upsert_thought('upgrade 059: unlabelled', ${{ metadata: { source: "mcp" }, actor }}::jsonb, ${vec(1)}::vector) AS r`)[0].r as { id: string };
-  const bare = (await sql`SELECT upsert_thought('upgrade 059: no vector', ${{ metadata: { source: "mcp" }, actor }}::jsonb) AS r`)[0].r as { id: string };
+  const labelled = (await sql`SELECT upsert_thought('upgrade 060: labelled', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
+  const unlabelled = (await sql`SELECT upsert_thought('upgrade 060: unlabelled', ${{ metadata: { source: "mcp" }, actor }}::jsonb, ${vec(1)}::vector) AS r`)[0].r as { id: string };
+  const bare = (await sql`SELECT upsert_thought('upgrade 060: no vector', ${{ metadata: { source: "mcp" }, actor }}::jsonb) AS r`)[0].r as { id: string };
   const RAW = "57575757-2057-4057-8057-000000000001";
-  await sql.unsafe(`INSERT INTO thoughts (id, content, metadata, embedding, embedding_model) VALUES ('${RAW}', 'upgrade 059: raw, no key', '{"source": "load"}'::jsonb, '${vec(2)}'::vector, '${OPTS.model}')`);
+  await sql.unsafe(`INSERT INTO thoughts (id, content, metadata, embedding, embedding_model) VALUES ('${RAW}', 'upgrade 060: raw, no key', '{"source": "load"}'::jsonb, '${vec(2)}'::vector, '${OPTS.model}')`);
   await sql.unsafe(`UPDATE thoughts SET content_fingerprint = NULL WHERE id = '${RAW}'`);
-  const edited = (await sql`SELECT upsert_thought('upgrade 059: edited once', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(3)}::vector) AS r`)[0].r as { id: string };
+  const edited = (await sql`SELECT upsert_thought('upgrade 060: edited once', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(3)}::vector) AS r`)[0].r as { id: string };
   await sql`SELECT update_thought(${edited.id}::uuid, NULL, '{"k": 1}'::jsonb, NULL, NULL, NULL, ${actor}::jsonb, NULL, NULL, NULL)`;
-  assert((await sql`SELECT to_regclass('ob1_embedding_snapshot') IS NULL AS none`)[0].none === true, "before 059 there is no snapshot table");
+  assert((await sql`SELECT to_regclass('ob1_embedding_snapshot') IS NULL AS none`)[0].none === true, "before 060 there is no snapshot table");
   const stamps = async () => JSON.stringify(await sql`SELECT id, content, content_fingerprint, metadata, embedding::text AS e, embedding_model, updated_at::text AS u FROM thoughts ORDER BY id`);
   const before = await stamps();
   const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
   const shapeBefore = await shape(sql);
 
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("059") });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("060") });
 
   const snap = await sql`SELECT s.content_fingerprint AS fp, s.embedding_model AS m, s.embedding::text AS e, s.dims, s.taken_at::text AS t, t.id::text AS id, COALESCE(t.updated_at, t.created_at)::text AS stamp FROM ob1_embedding_snapshot s JOIN thoughts t ON t.content_fingerprint = s.content_fingerprint ORDER BY t.id` as { fp: string; m: string; e: string; dims: number; t: string; id: string; stamp: string }[];
   assert(snap.length === 2 && snap.every((r) => r.m === OPTS.model && r.dims === OPTS.dim && r.t === r.stamp) && snap.some((r) => r.id === labelled.id && r.e === vec(0)) && snap.some((r) => r.id === edited.id && r.e === vec(3)),
@@ -2203,46 +2203,46 @@ console.log("\n[20l] Migration 059 onto a populated brain at the file before it 
   assert(Number(auditAfter) === Number(auditBefore) && (await stamps()) === before, "the seed is a read of the rows: no audit row written, no thought's content, key, vector or updated_at moved");
   for (const [fn, sig] of [["upsert_thought", "upsert_thought(text, jsonb, vector)"], ["update_thought", "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb, jsonb)"], ["delete_thought", "delete_thought(uuid, jsonb, boolean)"]]) {
     const [body] = await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure(${sig})`;
-    assert(/ob1:capture-appends-then-projects/.test(String(body?.s ?? "")), `${fn} is 059's body`);
+    assert(/ob1:capture-appends-then-projects/.test(String(body?.s ?? "")), `${fn} is 060's body`);
   }
   const [trigBody] = await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure('thoughts_write_audit()')`;
-  assert(/ob1:projection-checked-against-its-event/.test(String(trigBody?.s ?? "")) && /ob1:capture-event-carries-content/.test(String(trigBody?.s ?? "")), "the audit trigger is 059's check, carrying 055's sentinel");
+  assert(/ob1:projection-checked-against-its-event/.test(String(trigBody?.s ?? "")) && /ob1:capture-event-carries-content/.test(String(trigBody?.s ?? "")), "the audit trigger is 060's check, carrying 055's sentinel");
   // The mirror: the day after, a capture is an event first and its row the
   // projection; an identical re-capture writes nothing; the snapshot follows.
-  const fresh = (await sql`SELECT upsert_thought('upgrade 059: captured after', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(4)}::vector) AS r`)[0].r as { id: string };
+  const fresh = (await sql`SELECT upsert_thought('upgrade 060: captured after', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(4)}::vector) AS r`)[0].r as { id: string };
   const [freshEv] = await sql`SELECT count(*)::int AS c, min(diff->>'content') AS content FROM thought_audit WHERE thought_id = ${fresh.id}::uuid`;
   const [freshRow] = await sql`SELECT content, updated_at = created_at AS same FROM thoughts WHERE id = ${fresh.id}::uuid`;
-  assert(Number(freshEv.c) === 1 && freshEv.content === "upgrade 059: captured after" && freshRow.content === freshEv.content && freshRow.same === true && Number((await sql`SELECT count(*)::int AS c FROM ob1_embedding_snapshot WHERE embedding_model = ${OPTS.model}`)[0].c) === 3,
-    "after 059 a capture's event carries the content, the row is its image and the snapshot gains the vector");
+  assert(Number(freshEv.c) === 1 && freshEv.content === "upgrade 060: captured after" && freshRow.content === freshEv.content && freshRow.same === true && Number((await sql`SELECT count(*)::int AS c FROM ob1_embedding_snapshot WHERE embedding_model = ${OPTS.model}`)[0].c) === 3,
+    "after 060 a capture's event carries the content, the row is its image and the snapshot gains the vector");
   const [{ u: stampBefore }] = await sql`SELECT updated_at::text AS u FROM thoughts WHERE id = ${fresh.id}::uuid`;
-  await sql`SELECT upsert_thought('upgrade 059: captured after', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(4)}::vector)`;
+  await sql`SELECT upsert_thought('upgrade 060: captured after', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(4)}::vector)`;
   const [{ u: stampAfter }] = await sql`SELECT updated_at::text AS u FROM thoughts WHERE id = ${fresh.id}::uuid`;
   assert(stampAfter === stampBefore && Number((await sql`SELECT count(*)::int AS c FROM thought_audit WHERE thought_id = ${fresh.id}::uuid`)[0].c) === 1, "…and an identical re-capture writes no event and moves no updated_at (the accepted delta)");
   // Re-apply: a no-op — the seed's ON CONFLICT DO NOTHING keeps the trigger's rows.
   const shapeAfter = await shape(sql), again = await stamps();
   const snapAfter = JSON.stringify(await sql`SELECT content_fingerprint, embedding_model, embedding::text AS e, taken_at::text AS t FROM ob1_embedding_snapshot ORDER BY 1, 2`);
   const [{ c: auditAgain }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("059") });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("060") });
   assert(JSON.stringify(await shape(sql)) === JSON.stringify(shapeAfter) && (await stamps()) === again && Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === Number(auditAgain)
     && JSON.stringify(await sql`SELECT content_fingerprint, embedding_model, embedding::text AS e, taken_at::text AS t FROM ob1_embedding_snapshot ORDER BY 1, 2`) === snapAfter && JSON.stringify(shapeAfter) !== JSON.stringify(shapeBefore),
-    "re-applying 059 is a no-op: the shape as it left it (four functions and a table more than 058), no row moved, no audit row added, no snapshot row re-seeded");
+    "re-applying 060 is a no-op: the shape as it left it (four functions and a table more than 058), no row moved, no audit row added, no snapshot row re-seeded");
   await sql.close();
 
   // The guard, driven ([20g]'s shape): a brain baselined at a ledger through
-  // 059 whose schema stops before 042, then before 050, then before 055.
-  for (const [stop, needs] of [["042", "migration 059 needs 042 \\(delete_thought\\(uuid, jsonb, boolean\\), thoughts_guard_citation_sources\\); this schema lacks it"], ["050", "migration 059 needs 050 \\(ob1_stamp_actor, thought_audit\\.seq\\); this schema lacks it"], ["055", "migration 059 needs 055 \\(ob1_thought_diff, ob1_append_thought_event, ob1_actor_stamp, ob1_actor_stamp_kept\\); this schema lacks it"]] as const) {
+  // 060 whose schema stops before 042, then before 050, then before 055.
+  for (const [stop, needs] of [["042", "migration 060 needs 042 \\(delete_thought\\(uuid, jsonb, boolean\\), thoughts_guard_citation_sources\\); this schema lacks it"], ["050", "migration 060 needs 050 \\(ob1_stamp_actor, thought_audit\\.seq\\); this schema lacks it"], ["055", "migration 060 needs 055 \\(ob1_thought_diff, ob1_append_thought_event, ob1_actor_stamp, ob1_actor_stamp_kept\\); this schema lacks it"]] as const) {
     await dropSchema(URL_);
     await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
     const baselined = await migrate("--baseline");
     assert(baselined.code === 0, `--baseline records every migration over the pre-${stop} schema (exit ${baselined.code})`);
     const sql2 = new SQL({ url: URL_, max: 1 });
-    const the059 = MIGRATIONS.find((f) => f.startsWith("059_"))!;
-    await sql2`DELETE FROM schema_migrations WHERE name = ${the059}`;
+    const the060 = MIGRATIONS.find((f) => f.startsWith("060_"))!;
+    await sql2`DELETE FROM schema_migrations WHERE name = ${the060}`;
     const plain = await migrate();
-    const ok = plain.code === 1 && new RegExp(`059_append_then_project\\.sql\\s+FAILED: ${needs}`).test(plain.out) &&
+    const ok = plain.code === 1 && new RegExp(`060_append_then_project\\.sql\\s+FAILED: ${needs}`).test(plain.out) &&
       /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
-    assert(ok, `a plain run fails at 059 naming ${stop} and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
-    assert(Number((await sql2`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the059}`)[0].c) === 0, `…059 records nothing without ${stop}`);
+    assert(ok, `a plain run fails at 060 naming ${stop} and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+    assert(Number((await sql2`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the060}`)[0].c) === 0, `…060 records nothing without ${stop}`);
     await sql2.close();
   }
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "055" });

@@ -126,7 +126,7 @@ try {
       // …and the last write through the FUNCTIONS, in this off-path session:
       // a text capture, an edit and a delete. A plpgsql body that declares a
       // `vector` local by name compiles in the caller's session and fails
-      // here with `type "vector" does not exist` — 059's projector did until
+      // here with `type "vector" does not exist` — 060's projector did until
       // its first review pass, and no raw INSERT above could have said so.
       const fn = (await sql`SELECT upsert_thought('written through the functions, off-path', '{"metadata": {"source": "test"}}'::jsonb) AS r`)[0].r as { id: string };
       // The edit carries windows: their vectors are assigned through the
@@ -135,7 +135,7 @@ try {
       const ed = (await sql`SELECT update_thought(${fn.id}::uuid, 'written through the functions, off-path, edited', NULL, NULL, ${windows}::jsonb, NULL, NULL, NULL, NULL, NULL) AS r`)[0].r as { ok: boolean };
       const [{ c: windowRows }] = await sql`SELECT count(*)::int AS c FROM thought_chunks WHERE thought_id = ${fn.id}::uuid`;
       const dl = (await sql`SELECT delete_thought(${fn.id}::uuid, NULL, false) AS r`)[0].r as { ok: boolean };
-      assert(ed.ok === true && Number(windowRows) === 1 && dl.ok === true, "a text capture, an edit with a window and a delete through the write functions run in the off-path session — no body 059 defines names the vector type where the session cannot resolve it (the 4-argument capture's window INSERT is 013's and still does)");
+      assert(ed.ok === true && Number(windowRows) === 1 && dl.ok === true, "a text capture, an edit with a window and a delete through the write functions run in the off-path session — no body 060 defines names the vector type where the session cannot resolve it (the 4-argument capture's window INSERT is 013's and still does)");
       // …and a capture WITH a vector, bound through the relocated type's own
       // schema: the snapshot trigger's write runs in this session too.
       const withVec = (await sql.unsafe(`SELECT upsert_thought('written with a vector, off-path', '{"metadata": {"source": "test"}, "embedding_model": "${OPTS.model}"}'::jsonb, '[${[1, ...new Array(OPTS.dim - 1).fill(0)].join(",")}]'::${SCHEMA}.vector) AS r`))[0].r as { id: string };
@@ -192,7 +192,7 @@ try {
     // The two capture forms are matched by a signature built from pg_type's
     // names; regprocedure's text would spell `ext.vector` here and call the
     // present 3-argument form missing (SMD-1250, second review pass).
-    assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 059's/.test(r.out),
+    assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 060's/.test(r.out),
            "…while atomic capture still finds both upsert_thought forms with pgvector off the path");
   }
 

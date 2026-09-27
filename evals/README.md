@@ -4894,7 +4894,7 @@ fingerprint on the graph rows, content in the capture event. The record is
 
 ## Does the extension contract survive the move? `thoughts` as a writable projection, prototyped (SMD-1999)
 
-`eval-writable-projection.ts` — RETIRED with migration 059 (SMD-2116), which
+`eval-writable-projection.ts` — RETIRED with migration 060 (SMD-2116), which
 shipped the bodies it prototyped; the record stays here, see the note above
 the results. Spike 2 of the event-sourcing ADR (SMD-1997):
 under CQRS-lite the write-side truth is the event log and the `thoughts` row
@@ -4969,8 +4969,8 @@ their step's letter; the events' stance, cites, valid window and context (its
 `claimed`) are in the comparison. The cost line is the
 median of 200 captures and 200 edits, baseline against option 2.
 
-**The prototype** was SQL in `evals/writable-projection/` (retired with 059;
-the bodies are `db/migrations/059_append_then_project.sql` now), applied on
+**The prototype** was SQL in `evals/writable-projection/` (retired with 060;
+the bodies are `db/migrations/060_append_then_project.sql` now), applied on
 top of 053 and thrown away with the database — where check 7 did not look,
 deliberately: the write functions were redefined for the measurement, not
 shipped. `common.sql` lifted 046's diff rule out of the audit trigger into
@@ -5014,16 +5014,16 @@ running — is named.
 
 (The run below is the run at 053, as it was. Since migration 055 — SMD-2115,
 step 1 of the decision — the shipped capture event carries the content and
-the baseline passed C1. Since migration 059 — SMD-2116, step 2 — the shipped
+the baseline passed C1. Since migration 060 — SMD-2116, step 2 — the shipped
 functions ARE option 2, so the runner's baseline would compare the schema with
 itself and its teardown would drop shipped objects: the runner, its rules
 module and the prototype SQL are retired, and its criteria live on the
-shipped bodies — C1–C6 and C10–C12 in `db/test-schema.ts` [55] (the scripted
+shipped bodies — C1–C6 and C10–C12 in `db/test-schema.ts` [56] (the scripted
 writes, the trigger counts, the forged-row checks, the drop-the-projector
 control, the replay of the log through the projector, the planted community
 triggers), C7–C9 in `db/test-live.ts` (two sessions, read through pg_locks;
-C7 [6f] and 059's section's racing captures, C8 [6d], C9 [6g] and [6h]), C13
-measured in 059's header. This block is
+C7 [6f] and 060's section's racing captures, C8 [6d], C9 [6g] and [6h]), C13
+measured in 060's header. This block is
 the spike's report as it was published, not a description of the tree.)
 
 ```
@@ -5234,7 +5234,7 @@ Not built here: the production projector, a migration, `thought_changes`
 reading the event, the raw in-tree writers (`review_supersession_proposal`,
 the backfills, the guard's bump — trigger-audited as today), the chunk rows.
 The record is `changes/smd-1999.md`. Steps 1 and 2 have since landed as
-migrations 055 (SMD-2115) and 059 (SMD-2116, `changes/smd-2116.md`).
+migrations 055 (SMD-2115) and 060 (SMD-2116, `changes/smd-2116.md`).
 
 ## The typed-decision tier beside Ollama, and the entity gate run against it (SMD-2050)
 

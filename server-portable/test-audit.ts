@@ -107,7 +107,7 @@ console.log("\n[2] The row records WHICH key wrote it");
 console.log("\n[2b] A duplicate re-capture is not an event");
 {
   // The fingerprint dedup exists so a bulk re-import is idempotent. A re-capture
-  // of identical content moved `updated_at` and nothing else until 059 (since
+  // of identical content moved `updated_at` and nothing else until 060 (since
   // which it writes nothing at all) — and before 008's guard produced an audit
   // row with an empty diff per duplicate, so re-running a large import wrote
   // thousands of rows saying nothing happened.
