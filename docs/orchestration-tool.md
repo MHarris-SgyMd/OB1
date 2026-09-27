@@ -430,7 +430,8 @@ runs outside n8n:
   owns one source: two on the same `system` are refused. Two limits are
   named rather than closed:
   - every emitter can read every pipeline's world-readable exports, unless
-    the operator gives each directory to its pipeline's uid;
+    the operator gives each directory to its pipeline's uid, on an engine
+    that enforces host file modes (Docker Desktop and podman-machine do not);
   - emitters have the runner's network, which the live-API emitters need,
     and SMD-2211 covers their egress.
 

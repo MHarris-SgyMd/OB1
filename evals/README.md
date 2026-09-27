@@ -6067,13 +6067,27 @@ and E:
     With a shared writable HOME, one emitter planted code another ran
     (review pass 3). Each kit pipeline owns its own source;
   - with the runner stopped, the door must answer 502, "did not answer",
-    and the import's saved run of it may hold neither key (review pass 3);
+    and the import's saved run of it may hold neither key (review pass 3).
+    Not under `--with sealed`: a restart can give the runner a new address
+    inside E's window, and E would count the old one as a dial (review
+    pass 4);
   - neither the run key nor the runner's key may appear in any saved run of
     the import workflows, the data included. Before the door, the webhook
     saved its request headers, the run key among them (review pass 1).
 - **E** admits a connection to the runner's `:8090`, its addresses read from
   the engine, and nothing else of it. The runner joins the sealed network
   as the server does. The judge holds 39 crafted logs in CI.
+
+**On review pass 4's code, every check passes, plain and sealed.**
+- **Plain:** C1s was seen after 271 s, and P was gone after 101 s.
+- **Sealed:**
+  - C1 took 12.5 s and P 92 s;
+  - I passed without its runner-down leg;
+  - E saw only `api.linear.app` outside, 7 connections to the brain's
+    `:8000`, and 4 to the runner's `:8090`.
+- **Operator walk:** a reviewer followed `deploy/README.md` on a throwaway
+  stack. It covered init, an empty allowlist, a pipeline added and removed,
+  the Linear key set and unset, and an upgrade without `OB1_RUNNER_KEY`.
 
 **On review pass 3's code (`--wait-schedule`), every check passes again.**
 - **C1** took 22.2 s.

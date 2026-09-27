@@ -495,8 +495,10 @@ new thought's id, which is what the other two take.
 
 For ingestion that runs on its own — a mailbox polled on a schedule, a
 tracker synced — the `orchestration` profile runs n8n beside the stack
-(`docs/orchestration-tool.md`). Its workflows capture through the brain's
-MCP endpoint with a capture-scope key. Two kinds of template ship (SMD-2212):
+(`docs/orchestration-tool.md`). n8n reaches the brain through its MCP
+endpoint, with no write key. The profile's import runner is the one part that
+writes brain tables, as the pipeline does from a checkout, behind a key its
+allowlist bounds. Two kinds of template ship (SMD-2212):
 - **An act tool:** `linear_file_issue` on `/mcp/ob1-act`. It loads when
   `N8N_LINEAR_API_KEY` is set.
 - **The import template:** one instance per pipeline in
@@ -504,9 +506,10 @@ MCP endpoint with a capture-scope key. Two kinds of template ship (SMD-2212):
   over `deploy/imports/<pipeline>/`. The allowlist is empty until the
   first import recipe is converted.
 
-Once, `--init` writes its secrets into `deploy/.env`. The capture key is yours to mint (`bun keygen.ts --name
-n8n --scope capture`: the key as `N8N_BRAIN_CAPTURE_KEY`, the line it prints
-into `MCP_ACCESS_KEYS`). Then:
+Once, `--init` writes its secrets into `deploy/.env`. A capture key
+(`bun keygen.ts --name n8n --scope capture`: the key as
+`N8N_BRAIN_CAPTURE_KEY`, the line it prints into `MCP_ACCESS_KEYS`) is
+optional until a template captures into the brain; none ships yet. Then:
 
 ```bash
 bun deploy/orchestration/provision.ts --init

@@ -597,12 +597,17 @@ services:
     volumes:
       # The exports, read-only: one subdirectory per pipeline. Private data,
       # which git and every build context ignore (deploy/imports/README.md).
-      - ${IMPORTS_DIR:-./imports}:/imports:ro
+      # `z` relabels both mounts for a container on an SELinux host, where the
+      # runner otherwise meets EACCES and restarts (review pass 4); elsewhere
+      # it is a no-op.
+      - ${IMPORTS_DIR:-./imports}:/imports:ro,z
       # The allowlist provisioning reads, so the two cannot disagree: a line
       # the runner does not hold would load an import that fails every run
       # (review pass 1). The runner reads it at start, so recreate it after an
-      # edit. It refuses to start on a line whose emitter the image lacks.
-      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro
+      # edit (`up -d --force-recreate orchestration-runner`; a plain `up -d`
+      # sees no change). It refuses to start on a line whose emitter the image
+      # lacks.
+      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z
     # It starts as root only to hand each step to its own user (su-exec: each
     # pipeline's emitter as a uid of its own, the pipeline as bun). These are
     # the only capabilities it keeps: changing user, and signalling a step's
@@ -635,8 +640,12 @@ services:
       migrate:
         condition: service_completed_successfully
     # As n8n's: a missing key exits 2 and `ps` shows the service restarting,
-    # with the reason in its log. A server should come back after a reboot.
+    # with the reason in its log. The runner waits 30 s before that exit, so
+    # the restarts are not a hot loop. A server should come back after a reboot.
     restart: unless-stopped
+    # A stop waits for a running step to hand back what it holds: the runner
+    # gives it two SIGTERMs and up to 5 s (review pass 4).
+    stop_grace_period: 15s
 
 volumes:
   pgdata:

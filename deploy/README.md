@@ -667,20 +667,29 @@ the same contract on the same port.
 
 The fork's orchestration tool is n8n (`../docs/orchestration-tool.md`,
 SMD-1863). It runs workflows that need state — a schedule, a trigger, a retry,
-a cursor — and captures through the brain's MCP endpoint with a capture-scope
-key, never a table and never a write key. The `orchestration` profile runs it
-beside the stack (SMD-2210). The image is n8n's, pinned by digest and never
-vendored. OB1's part is the provisioning step in `orchestration/`, the
-templates it loads from `orchestration/templates/`, and the import runner
-beside n8n (SMD-2212, below).
+a cursor. The `orchestration` profile runs it beside the stack (SMD-2210).
+The image is n8n's, pinned by digest and never vendored.
+
+n8n itself reaches the brain only through its MCP endpoint, with a
+capture-scope key, and holds no write key. The one exception is the profile's
+import runner (SMD-2212, below). It writes brain tables directly, the way the
+pipeline does from a checkout, and a workflow holding its key can cause those
+writes. That is the ADR's decision 4, amended, and the runner's key is
+bounded by its allowlist. OB1's part is the provisioning step in
+`orchestration/`, the templates it loads from `orchestration/templates/`, and
+the runner.
+
+Below, `compose` stands for `podman compose -f deploy/compose.yaml --profile
+orchestration`, or docker compose.
 
 ```bash
 bun deploy/orchestration/provision.ts --init   # once: the profile's secrets into deploy/.env (it never replaces one)
-# the brain key n8n captures with, a CAPTURE key:
-cd server-portable && bun keygen.ts --name n8n --scope capture && cd ..
-#   the key into deploy/.env as N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS
-podman compose -f deploy/compose.yaml --profile orchestration up -d   # restart the server too, for the new key
+podman compose -f deploy/compose.yaml --profile orchestration up -d
 bun deploy/orchestration/provision.ts        # --env-file for another file; --rotate for a new API key
+# Optional, for a template that captures into the brain (none ships yet): a CAPTURE key
+cd server-portable && bun keygen.ts --name n8n --scope capture && cd ..
+#   the key into deploy/.env as N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS,
+#   then recreate the server (compose up -d server; a restart keeps the old keys) and provision again
 ```
 
 `--init` writes `N8N_ENCRYPTION_KEY`, `N8N_OWNER_PASSWORD` and its bcrypt
@@ -797,38 +806,57 @@ lines naming the same one are refused.
   `OB1_RUNNER_KEY`. The runner publishes no port, and it:
   1. runs the pipeline's emitter over `deploy/imports/<pipeline>/`, mounted
      read-only (`IMPORTS_DIR` moves it). Each pipeline's emitter runs as a
-     uid of its own, with no database URL or key in its environment. Its
+     uid of its own, derived from the pipeline's name (so a renamed pipeline
+     has a new one), with no database URL or key in its environment. Its
      HOME is `/`, which it cannot write, and Python's user site is off.
      - It cannot read the runner's, the ingester's or another emitter's
        environment, or reach another emitter's process.
      - Whatever it leaves running is killed when it finishes.
      - A parser an export exploits holds no secret, and cannot plant code
        for, or lines into, another pipeline's emitter.
+     - The export must be readable by the pipeline's uid. A directory it
+       cannot read is refused as that (422, naming the uid and the path),
+       not taken for an empty export.
      - Two limits:
        - Every emitter can read every pipeline's exports that are
-         world-readable. The runner logs each pipeline's uid at start;
-         `chown` the pipeline's directory to it with mode 700, and only
-         that pipeline's emitter can read it.
+         world-readable. `deploy/imports/README.md` has how to keep one
+         pipeline's to its own uid, on a host that enforces file modes.
+         Docker Desktop and podman-machine do not.
        - Emitters have the runner's network, which the live-API emitters
          need (SMD-2211 covers their egress);
   2. refuses the whole batch if any line is not the pipeline's one source
      and scope;
   3. runs `db/ingest-records.ts --source items --items -` under the actor
      `orchestration-runner`, then `db/reembed.ts`, both as `bun`, without
-     the runner's key. reembed embeds every row the brain holds without a
-     vector at its model, not only this run's (normally just this run's).
+     the runner's key.
+     - reembed embeds every row the brain holds without a vector at its
+       model, oldest first, not only this run's. That is normally just this
+       run's. After a model switch it is the whole brain, and imports then
+       run to their deadline for as long as that takes.
 - **Success** means every row of the pipeline's source has a vector.
   reembed's own exit code (1 for any failed row in its job, or another
-  pass's leases) does not decide it. A row the provider refused waits for a
-  retry, run in the runner: `compose exec orchestration-runner su-exec bun
-  bun db/reembed.ts --retry-failed`. A row it refuses every time is an item
-  to fix or remove in the export, and then its thought to delete.
+  pass's leases) does not decide it.
+  - A row still pending is embedded by the next run.
+  - A row the provider refused waits for a retry, run in the runner:
+    `compose exec orchestration-runner su-exec bun bun db/reembed.ts
+    --retry-failed`.
+  - A row it refuses every time is an item to fix or remove in the export,
+    and then its thought to delete.
+  - When reembed refuses to run at all (a model switch it was not told of,
+    a width that does not match, an egress policy refusing everything), the
+    report says so, with reembed's reason. No run embeds anything until
+    that is fixed.
+  - The runner takes the server's model and egress settings when it is
+    created. After changing them, recreate it with the server: `compose up
+    -d --force-recreate server orchestration-runner`.
 - **The deadline.** One run, emitter to reembed, is bounded by
   `OB1_RUNNER_TIMEOUT_S` (3600), the wait for another pipeline's reembed
   included. n8n waits that long and a minute more. The runner reads the
   knob at start, and provisioning reads it from `deploy/.env`. After
   changing it, recreate the runner (`compose up -d orchestration-runner`),
-  then provision.
+  then provision. A step past the deadline, or running when the runner is
+  stopped or recreated, gets two SIGTERMs and then SIGKILL, so reembed hands
+  back the rows it was holding.
 
 The run's answer is the ingester's count line and the items it named
 (skipped, stale, held). A URL's password in anything a step printed is
@@ -843,11 +871,25 @@ decision 4, amended), and not a brain key. To change it, edit
 `OB1_RUNNER_KEY`, recreate the runner (`compose up -d orchestration-runner`),
 and provision, which patches n8n's copy.
 
-The runner reads `pipelines.json` at start, from the same file provisioning
-reads. After adding a line, rebuild the runner with the recipe's emitter
-(`compose up -d --build orchestration-runner`), then provision. A line whose
-emitter the image lacks stops the runner at start with the name, rather than
-failing every run.
+**Adding a pipeline.** A pipeline is a line in `pipelines.json` plus its
+emitter, and the emitter has to be in the runner's image. For a converted
+recipe, its conversion ships the pieces (SMD-2147–2150, SMD-2021):
+1. the emitter under `recipes/<recipe>/`;
+2. a `COPY` of it in `orchestration/runner.Dockerfile`, beside its pinned
+   packages (the file shows the lines);
+3. a `!recipes/<recipe>/<emitter>` line in the repo root's `.dockerignore`,
+   which otherwise keeps `recipes/` out of every image;
+4. its line in `pipelines.json`.
+
+Then rebuild the runner (`compose up -d --build orchestration-runner`), put
+the export in `imports/<pipeline>/`, and provision. A line whose emitter the
+image lacks fails that build, naming the two files. An image started with
+such a line refuses to start, which stops every pipeline, not just that
+one: every door answers 502 until it is fixed.
+
+**Removing a pipeline.** Take its line out, recreate the runner (`compose up
+-d --force-recreate orchestration-runner`; a plain `up -d` sees no change
+in a mounted file), and provision, which unpublishes its instance.
 
 **Custody and backups.**
 - **The owner password** is the profile's standing secret, stronger than the

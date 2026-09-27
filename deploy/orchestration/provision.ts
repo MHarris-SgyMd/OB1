@@ -382,7 +382,7 @@ const INIT_WRITES = ["N8N_ENCRYPTION_KEY", "N8N_OWNER_PASSWORD", "N8N_OWNER_PASS
 function render(template: string, env: Record<string, string>, file: string): string {
   return template.replace(/\$\{([A-Z0-9_]+)\}/g, (_, k: string) => {
     const v = env[k];
-    if (!v) throw new Error(`${file} names ${k}, which the env file does not set${INIT_WRITES.includes(k) ? " — run `bun deploy/orchestration/provision.ts --init`, which writes it" : ""}`);
+    if (!v) throw new Error(`${file} names ${k}, which the env file does not set${INIT_WRITES.includes(k) ? " — run `bun deploy/orchestration/provision.ts --init` (with the same --env-file), which writes it" : ""}`);
     return JSON.stringify(v).slice(1, -1);
   });
 }
@@ -664,15 +664,17 @@ export async function provision(o: Options): Promise<{ steps: string[]; key: Key
   const produced = new Set(ordered.map((f) => nameOf(f.text)));
   const skippedByName = new Map(flows.filter((f) => skippedFlows.has(f.stem)).map((f) => [nameOf(f.text), nodeIds(f.text)] as const));
   const instanceMatchers = o.workflows.filter((f) => f.endsWith(PER_PIPELINE)).map((f) => { const text = readFileSync(f, "utf8"); return { re: instanceNamePattern(nameOf(text)), ids: nodeIds(text) }; });
-  const unpublished: string[] = [];
+  const unpublished: { name: string; why: string }[] = [];
   for (const w of await listAll(o.base, k, "/workflows")) {
     if (produced.has(w.name) || w.active === false) continue;
     const skipped = skippedByName.get(w.name);
-    const ours = (skipped !== undefined && shares(w, skipped)) || instanceMatchers.some((m) => m.re.test(w.name) && shares(w, m.ids));
+    const asSkipped = skipped !== undefined && shares(w, skipped);
+    const ours = asSkipped || instanceMatchers.some((m) => m.re.test(w.name) && shares(w, m.ids));
     if (!ours) continue;
     // /unpublish, not the deprecated /deactivate; both take workflow:deactivate, the scope n8n offers keys (review pass 2).
     await api(o.base, k, "POST", `/workflows/${w.id}/unpublish`, {});
-    unpublished.push(w.name);
+    // Said by kind (review pass 4: "no template produces it" was said of a workflow whose credential's value was unset).
+    unpublished.push({ name: w.name, why: asSkipped ? "its template was skipped this run (above)" : "its pipeline is not in pipelines.json" });
   }
   const deletedCreds: string[] = [];
   for (const name of skippedCredNames) {
@@ -702,7 +704,8 @@ export async function provision(o: Options): Promise<{ steps: string[]; key: Key
       `credentials: ${n.created} created, ${n.patched} patched${skippedCreds.size ? `, ${skippedCreds.size} optional skipped` : ""}`,
       `workflows: ${n.workflowsCreated} created, ${n.workflowsReplaced} replaced, ${ordered.length} published`,
       ...[...skippedFlows].map(([stem, why]) => `skipped workflow ${stem}: it ${why}`),
-      ...unpublished.map((name) => `unpublished "${name}": no template produces it now`),
+      ...unpublished.map(({ name, why }) => `unpublished "${name}": ${why}`),
+      ...(o.workflows.some((f) => f.endsWith(PER_PIPELINE)) && !(o.pipelines ?? []).length ? ["import template: no pipelines in pipelines.json yet, so no import is loaded"] : []),
       ...deletedCreds.map((name) => `deleted credential "${name}": its value is unset`),
     ],
   };
@@ -1056,10 +1059,12 @@ async function selfCheck(): Promise<number> {
       // Review pass 1: unsetting the key, or dropping a pipeline, left the old workflows published.
       f.s.unpublished.length = 0; f.s.deletedCreds.length = 0;
       const unset = await run(keys16);
-      expect(`unsetting the optional key again unpublishes its workflows and deletes its credential (${f.s.unpublished.join(",")}; ${f.s.deletedCreds.join(",")})`, f.s.unpublished.sort().join() === "Sub,Top" && f.s.deletedCreds.join() === "vendor" && unset.steps.some((l) => /unpublished "Top"/.test(l)) && unset.steps.some((l) => /deleted credential "vendor"/.test(l)));
+      expect(`unsetting the optional key again unpublishes its workflows and deletes its credential (${f.s.unpublished.join(",")}; ${f.s.deletedCreds.join(",")})`, f.s.unpublished.sort().join() === "Sub,Top" && f.s.deletedCreds.join() === "vendor" && unset.steps.some((l) => /unpublished "Top": its template was skipped this run/.test(l)) && unset.steps.some((l) => /deleted credential "vendor"/.test(l)));
       f.s.unpublished.length = 0;
-      await provision(opts({ ...base, ...file(), ...keys16 }, { credentials: [credFile], workflows: templatesIn(tdir), pipelines: [pipes[0]] }));
-      expect(`a pipeline taken out of the allowlist has its instance unpublished, and nothing else (${f.s.unpublished.join(",")})`, f.s.unpublished.join() === "Import beta");
+      const dropped = await provision(opts({ ...base, ...file(), ...keys16 }, { credentials: [credFile], workflows: templatesIn(tdir), pipelines: [pipes[0]] }));
+      expect(`a pipeline taken out of the allowlist has its instance unpublished, and nothing else, saying why (${f.s.unpublished.join(",")})`, f.s.unpublished.join() === "Import beta" && dropped.steps.some((l) => /unpublished "Import beta": its pipeline is not in pipelines\.json/.test(l)));
+      const none = await provision(opts({ ...base, ...file(), ...keys16 }, { credentials: [credFile], workflows: templatesIn(tdir), pipelines: [] }));
+      expect("an empty allowlist is said, not left as \"0 created\"", none.steps.some((l) => /^import template: no pipelines in pipelines\.json yet/.test(l)));
       // An operator's own workflow whose name fits the pattern, without the template's node ids, is left alone (review pass 2).
       f.s.workflows.set("hand", { name: "Import gamma", nodes: [{ id: "operator-node", name: "x" }] });
       f.s.active.add("hand");
@@ -1069,7 +1074,7 @@ async function selfCheck(): Promise<number> {
       f.s.workflows.delete("hand"); f.s.active.delete("hand");
       expect("the listing is read to its last page (the fake answers three per page)", f.s.workflows.size > 3);
       expect("a Basic credential's user name is not a secret: two may share one", sharedSecrets([{ name: "a", type: "httpBasicAuth", data: { user: "operator-account-1", password: "p".repeat(32) } }, { name: "b", type: "httpBasicAuth", data: { user: "operator-account-1", password: "q".repeat(32) } }]).length === 0);
-      expect("a key --init writes, unset, is named with --init as the remedy", throws(() => render('"${OB1_RUNNER_KEY}"', {}, "t"), /OB1_RUNNER_KEY, which the env file does not set — run `bun deploy\/orchestration\/provision.ts --init`/));
+      expect("a key --init writes, unset, is named with --init as the remedy", throws(() => render('"${OB1_RUNNER_KEY}"', {}, "t"), /OB1_RUNNER_KEY, which the env file does not set — run `bun deploy\/orchestration\/provision.ts --init` \(with the same --env-file\)/));
       expect("a schedule placeholder becomes n8n's hours or days", JSON.stringify(instanceFor({ i: "{{pipeline.schedule}}" }, pipes[0], "imp").i) === JSON.stringify({ field: "hours", hoursInterval: 6 }) && JSON.stringify(instanceFor({ i: "{{pipeline.schedule}}" }, pipes[1], "imp").i) === JSON.stringify({ field: "days", daysInterval: 1 }));
       expect("a typed placeholder in a key is refused, and an embedded one is told where it may stand", throws(() => instanceFor({ "{{pipeline.schedule}}": 1 }, pipes[0], "imp"), /cannot be a key/) && throws(() => instanceFor({ x: "every {{pipeline.schedule}}" }, pipes[0], "imp"), /as a whole value/));
       expect("a placeholder in a key is filled too (connections are keyed by node name)", JSON.stringify(instanceFor({ "Run {{pipeline}}": 1 }, pipes[0], "imp")) === JSON.stringify({ "Run alpha": 1 }) && throws(() => instanceFor({ "{{pipeline.nmae}}": 1 }, pipes[0], "imp"), /not a pipeline placeholder/));
@@ -1145,7 +1150,7 @@ if (import.meta.main) {
     const written = await initSecrets(envFile);
     console.log(written.length ? `wrote ${written.join(", ")} to ${envFile}` : `${envFile} already holds the profile's secrets`);
     const env = parseEnv(readFileSync(envFile, "utf8"));
-    if (!env.N8N_BRAIN_CAPTURE_KEY) console.log("still needed: N8N_BRAIN_CAPTURE_KEY — cd server-portable && bun keygen.ts --name n8n --scope capture; the key into N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS (and restart the server)");
+    if (!env.N8N_BRAIN_CAPTURE_KEY) console.log("optional: N8N_BRAIN_CAPTURE_KEY, for a template that captures into the brain (none ships yet) — cd server-portable && bun keygen.ts --name n8n --scope capture; the key into N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS, then recreate the server (compose up -d server; a restart keeps the old keys)");
     console.log("back up N8N_ENCRYPTION_KEY and N8N_OWNER_PASSWORD with POSTGRES_PASSWORD; if n8n was running, recreate it (compose --profile orchestration up -d n8n; not `compose restart`, which keeps the old values)");
     process.exit(0);
   }

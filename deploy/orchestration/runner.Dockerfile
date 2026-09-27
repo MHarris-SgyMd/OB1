@@ -21,8 +21,15 @@ COPY db/config.mjs db/config.d.mts db/version.mjs db/version.d.mts db/ingest-*.t
 COPY server-portable/*.ts /app/server-portable/
 COPY scripts/fragments.ts scripts/fork-index.ts /app/scripts/
 COPY evals/linear-corpus.ts /app/evals/
-# pipelines.json is copied for the build-time self-check below; compose mounts
-# the checkout's copy over it, the one provisioning reads.
+# The emitters. A pipeline's emitter is copied here, at the path its line in
+# pipelines.json names, and let through the repo root's .dockerignore, which
+# keeps recipes/ and evals/ out. For a converted recipe, both lines ship with
+# its conversion (SMD-2147–2150, SMD-2021), with its pinned packages:
+#   .dockerignore:      !recipes/<recipe>/emit.py
+#   here:               COPY recipes/<recipe>/emit.py /app/recipes/<recipe>/
+#                       RUN pip install --no-cache-dir --break-system-packages <package>==<version>
+# pipelines.json is copied for the check below; compose mounts the checkout's
+# copy over it, the one provisioning reads.
 COPY deploy/orchestration/runner.ts deploy/orchestration/pipelines.json /app/deploy/orchestration/
 # A module the graph gained and this file does not copy, or an npm package (the
 # image installs none), fails the build here, not the first run: every import
@@ -31,7 +38,8 @@ COPY deploy/orchestration/runner.ts deploy/orchestration/pipelines.json /app/dep
 # imported lazily, for Workers); the bundler follows it anyway.
 RUN bun build db/ingest-records.ts db/reembed.ts deploy/orchestration/runner.ts --target=bun --external @supabase/supabase-js --outdir=/tmp/resolve \
  && rm -rf /tmp/resolve \
- && bun deploy/orchestration/runner.ts --self-check
+ && bun deploy/orchestration/runner.ts --self-check \
+ && bun deploy/orchestration/runner.ts --check-emitters
 # Root, so that it can hand each step to its own user; compose drops every
 # capability but those two and the one that signals a step's process. The
 # runner refuses to start as root without su-exec.

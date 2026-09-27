@@ -72,6 +72,11 @@ def main() -> int:
     if not root.is_dir():
         print(f"no export directory at {root}", file=sys.stderr)
         return 3
+    # An unreadable directory globs to nothing, which would read as "no export"
+    # (review pass 4); a converted recipe copying this should refuse it too.
+    if not os.access(root, os.R_OK | os.X_OK):
+        print(f"cannot read the export directory {root} as uid {os.getuid()}", file=sys.stderr)
+        return 3
     n = 0
     for path in sorted(root.glob("*.json")):
         for entry in json.loads(path.read_text(encoding="utf-8")):
