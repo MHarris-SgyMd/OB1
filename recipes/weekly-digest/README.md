@@ -1,6 +1,6 @@
 # Weekly Digest
 
-> **On this fork (SMD-2126).** `weekly-digest.mjs` reaches the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and this fork's stack runs no PostgREST (SETUP.md), so it fails at its first request, `--dry-run` included (it reads the brain first). The port onto `compat/supabase-sql` under `bun` (`SUPABASE_URL` a `postgres://` string; the `node` commands below become `bun`) is SMD-2144; the decision for the class is in `docs/vendored-disposition.md`.
+> **On this fork (SMD-2126, SMD-2239).** `weekly-digest.mjs` reaches the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and this fork's stack runs no PostgREST (SETUP.md), so it fails at its first request, `--dry-run` included (it reads the brain first). It is not ported onto `compat/supabase-sql` as its two read-only siblings were (SMD-2144: `brain-backup`, `lint-sweep`): the digest is a sink — it pages thought text and posts it to Telegram — and a shim port would read the database from below the server's egress gate, which the orchestration ADR's decision 9 is read to cover (`docs/orchestration-tool.md`: no template delivers thoughts to an outside system until SMD-2211's checkpoint — the same boundary for a `bun` script). SMD-2239 carries it — an n8n sink template after SMD-2211, or a `db/` verb behind SMD-2134's gate. The decision for the class is in `docs/vendored-disposition.md`.
 
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
 

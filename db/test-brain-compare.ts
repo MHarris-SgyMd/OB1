@@ -54,7 +54,7 @@ interface FakeConfig {
   /** the brain's thought-id set for list_thought_ids; omit to make the tool absent (a brain older than SMD-2244). */
   corpus?: { ids: string[]; digest?: string | null; pageCap?: number; fail?: string; failAfter?: boolean; badShape?: boolean; stuckCursor?: boolean; fakeTotal?: number };
   /** the brain's logged searches for list_logged_searches; omit to make the tool absent. */
-  log?: { searches: { query: string; arm: "keyword" | "hybrid" | null }[]; truncated?: boolean };
+  log?: { searches: { query: string; arm: "keyword" | "hybrid" | "current" | null }[]; truncated?: boolean };
   /** a gateway/proxy that answers every tools/call POST with a plain 404 body (GET /health still routes). */
   proxy404?: boolean;
   /** frame the tools/call reply as an SSE stream rather than raw JSON. */
@@ -109,7 +109,7 @@ function startFake(cfg: FakeConfig): { server: ReturnType<typeof Bun.serve>; ep:
         if (key !== KEY) return new Response("ok", { status: 200 });
         // A gateway that 404s the MCP POST while /health still routes.
         if (cfg.proxy404) return new Response("404 page not found", { status: 404 });
-        const body = (await req.json()) as { id: number; params: { name: string; arguments: { query?: string; limit?: number; after?: string } } };
+        const body = (await req.json()) as { id: number; params: { name: string; arguments: { query?: string; limit?: number; after?: string; prefer_current?: boolean } } };
         const name = body.params.name;
         let text = "";
         if (name === "list_thought_ids") {
@@ -144,7 +144,9 @@ function startFake(cfg: FakeConfig): { server: ReturnType<typeof Bun.serve>; ep:
         } else if (name === "search_thoughts_keyword" || name === "search_thoughts") {
           const q = body.params.arguments.query ?? "";
           if (cfg.refuse?.includes(q)) return replyError(body.id, `Refused: the query may not leave the box`, cfg.sse);
-          const ids = cfg.hits[q] ?? [];
+          // prefer_current (059, SMD-2255) answers from `<q>#current` when given,
+          // so a test can see the flag was sent.
+          const ids = (body.params.arguments.prefer_current === true ? cfg.hits[`${q}#current`] : undefined) ?? cfg.hits[q] ?? [];
           // The real result format: a "--- Result N ---" header, ID: as the first
           // field, then the hit's raw content — which here itself quotes an ID: line,
           // so a content-blind parse would over-count (the parseResultIds tooth).
@@ -564,6 +566,22 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
     { query: "c", arm: "hybrid" },
   ]);
   ok(plan.length === 2 && plan[0].query === "a" && plan[0].arm === "keyword" && plan[1].query === "c" && plan[1].arm === "hybrid", `replayPlanFromLog dedups, skips null-arm and empty (${JSON.stringify(plan)})`);
+  // 059's arm (SMD-2255): a prefer_current search is replayed as one, not dropped.
+  const withCurrent = replayPlanFromLog([{ query: "d", arm: "current" }, { query: "d", arm: "hybrid" }]);
+  ok(withCurrent.length === 2 && withCurrent[0].arm === "current" && withCurrent[1].arm === "hybrid", `a logged current search is its own replay entry beside the hybrid one (${JSON.stringify(withCurrent)})`);
+}
+
+// A current-arm row replays as search_thoughts with prefer_current: the fake
+// answers from `<q>#current` only when the flag is sent, so a replay that dropped
+// it would read q's plain hits on both brains and see no change.
+{
+  const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: { q3: [uid(1)], "q3#current": [uid(3)] } });
+  const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: { q3: [uid(1)] } });
+  try {
+    const c = await compareBrains(a.ep, b.ep, { fromLog: replayPlanFromLog([{ query: "q3", arm: "current" }]), source: "the log of open-brain" });
+    const row = c.retrieval!.rows[0];
+    ok(row?.arm === "current" && row.changed && row.a.join() === uid(3) && row.b.join() === uid(1), `a current-arm row replays with prefer_current on both brains (${JSON.stringify(row && [row.a, row.b])})`);
+  } finally { a.server.stop(true); b.server.stop(true); }
 }
 
 // fetchLoggedSearches + a from-log plan: each logged search replays on ITS arm, the

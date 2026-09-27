@@ -42,6 +42,7 @@ import type {
   ThoughtHybridMatch,
   ThoughtKeywordMatch,
   LoggedSearchPage,
+  WorkerStatusRow,
   ThoughtIdPage,
   ThoughtListItem,
   ThoughtMatch,
@@ -157,22 +158,41 @@ export class SqlStore implements ThoughtStore {
     threshold: number;
     limit: number;
     filter: Record<string, unknown>;
+    preferCurrent?: boolean;
   } & RecencyOpts): Promise<ThoughtHybridMatch[]> {
     // The function extracts the needles and does the fusion, so neither store
     // has a copy of either rule to get out of step — the same reason the two
-    // methods above call their functions rather than inlining them.
-    const rows = await this.sql`
-      SELECT id, content, metadata, created_at, similarity,
-             matched_needles, needles, needle_counts, common_needles, literal_only, score
-      FROM search_thoughts_hybrid(
-        ${toVector(opts.embedding)}::vector,
-        ${opts.query}::text,
-        ${opts.threshold}::float,
-        ${opts.limit}::int,
-        ${opts.filter}::jsonb,
-        ${opts.recencyWeight ?? RECENCY_DEFAULTS.weight}::float,
-        ${opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays}::float
-      )`;
+    // methods above call their functions rather than inlining them. Under
+    // prefer_current the demotion is 059's function's too (SMD-2255); a tagged
+    // template cannot bind a function name, so the two calls are two literals.
+    const weight = opts.recencyWeight ?? RECENCY_DEFAULTS.weight;
+    const halfLife = opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays;
+    const rows = opts.preferCurrent === true
+      ? await this.sql`
+          SELECT id, content, metadata, created_at, similarity,
+                 matched_needles, needles, needle_counts, common_needles, literal_only, score,
+                 fused, demoted, window_rows, window_known, window_demoted, window_synced_at, window_exact
+          FROM search_thoughts_current(
+            ${toVector(opts.embedding)}::vector,
+            ${opts.query}::text,
+            ${opts.threshold}::float,
+            ${opts.limit}::int,
+            ${opts.filter}::jsonb,
+            ${weight}::float,
+            ${halfLife}::float
+          )`
+      : await this.sql`
+          SELECT id, content, metadata, created_at, similarity,
+                 matched_needles, needles, needle_counts, common_needles, literal_only, score
+          FROM search_thoughts_hybrid(
+            ${toVector(opts.embedding)}::vector,
+            ${opts.query}::text,
+            ${opts.threshold}::float,
+            ${opts.limit}::int,
+            ${opts.filter}::jsonb,
+            ${weight}::float,
+            ${halfLife}::float
+          )`;
     return rows.map((r: Record<string, unknown>) => normaliseHybridRow(r));
   }
 
@@ -274,6 +294,68 @@ export class SqlStore implements ThoughtStore {
       filter: (r.filter as Record<string, unknown> | null) ?? {},
     }));
     return { searches, truncated };
+  }
+
+  async workerStatus(): Promise<WorkerStatusRow[]> {
+    // Per work_type: the four status counts as the workers count them — a stale
+    // lease stays 'claimed' until the next claim_thoughts() reaps it, so it is in
+    // `claimed`, not `pending` (migration 015). `stale` is the derived subset, with
+    // the oldest lease's time and holder. One GROUP BY, read-only, no lock, no write.
+    // `thoughts` (the corpus total) rides the SAME statement as the per-work_type
+    // counts, so both come from one snapshot: pooled ≤ total always, and `unpooled`
+    // can never read negative under a concurrent delete of a pooled thought (a
+    // separate count query is a torn read that could — review pass 2). `unpooled` =
+    // corpus − pooled; the PK (thought_id, work_type) makes a work_type's claim rows
+    // exactly its pooled thoughts, so this equals db/extract-entities.ts counts()'s
+    // `NOT EXISTS` without the correlated scan. (reembed/consolidate keys pool by
+    // model-aware rules; this generic definition matches extraction — fragment.)
+    const rows = await this.sql`
+      SELECT work_type,
+             count(*) FILTER (WHERE status = 'pending')::int   AS pending,
+             count(*) FILTER (WHERE status = 'claimed')::int   AS claimed,
+             count(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
+             count(*) FILTER (WHERE status = 'failed')::int    AS failed,
+             count(*) FILTER (WHERE status = 'claimed' AND ttl_expires_at < now())::int AS stale,
+             min(claimed_at) FILTER (WHERE status = 'claimed' AND ttl_expires_at < now()) AS oldest_stale_claimed_at,
+             (array_agg(worker_id ORDER BY claimed_at) FILTER (WHERE status = 'claimed' AND ttl_expires_at < now()))[1] AS stale_worker_id,
+             (SELECT count(*)::int FROM thoughts) AS thoughts
+      FROM thought_work_claims
+      GROUP BY work_type
+      ORDER BY work_type`;
+    // The active pools, from ob1_config: the extraction key verbatim, and the reembed
+    // key built from the recorded embedding model and dim. consolidate records no key,
+    // so its work_types report active: null rather than a false negative.
+    const cfg = Object.fromEntries(
+      (await this.sql`SELECT key, value FROM ob1_config WHERE key IN ('entity_extraction_key', 'embedding_model', 'embedding_dim')`)
+        .map((r: { key: string; value: string }) => [r.key, r.value]),
+    ) as Record<string, string | undefined>;
+    const reembedKey = cfg.embedding_model && cfg.embedding_dim ? `reembed:${cfg.embedding_model}@${cfg.embedding_dim}` : null;
+    const activeOf = (wt: string): boolean | null => {
+      if (wt === cfg.entity_extraction_key) return true;
+      if (reembedKey !== null && wt === reembedKey) return true;
+      if (wt.startsWith("consolidate:")) return null;
+      return false;
+    };
+    return rows.map((r: Record<string, unknown>) => {
+      const pending = Number(r.pending);
+      const claimed = Number(r.claimed);
+      const succeeded = Number(r.succeeded);
+      const failed = Number(r.failed);
+      const total = Number(r.thoughts);
+      return {
+        workType: String(r.work_type),
+        pending,
+        claimed,
+        succeeded,
+        failed,
+        unpooled: total - (pending + claimed + succeeded + failed),
+        thoughts: total,
+        stale: Number(r.stale),
+        oldestStaleClaimedAt: isoTimestampOrNull(r.oldest_stale_claimed_at as string | null),
+        staleWorkerId: (r.stale_worker_id as string | null) ?? null,
+        active: activeOf(String(r.work_type)),
+      };
+    });
   }
 
   async databaseFacts(opts?: ReadOptions, progress?: ReadProgress): Promise<DatabaseFacts> {

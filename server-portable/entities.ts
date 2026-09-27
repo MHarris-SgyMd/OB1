@@ -106,7 +106,7 @@ export const MAX_NAME_CHARS = 200;
 export type ExtractedEntity = { name: string; type: EntityType; confidence: number; aliases: string[] };
 export type ExtractedRelation = { from: string; to: string; relation: Relation; confidence: number };
 /** One window's own answer, kept beside the merged result: the derivation record (SMD-1731) the worker dumps. */
-export type ExtractionWindow = Pick<Extraction, "entities" | "relations" | "rejected" | "malformed" | "retried" | "abortedMs"> & {
+export type ExtractionWindow = Pick<Extraction, "entities" | "relations" | "rejected" | "malformed" | "retried" | "escalated" | "abortedMs"> & {
   index: number;
   /** chunk.ts's estimate of the text sent. */
   tokens: number;
@@ -135,6 +135,16 @@ export type Extraction = {
   parts?: ExtractionWindow[];
   /** Set when any call ran to its budget and was made again with the penalty (ExtractWindowing.retryRunaway). */
   retried?: true;
+  /**
+   * Set when a runaway call was remade on OB1_EXTRACT_ESCALATE_MODEL instead of
+   * the penalised same-model retry (SMD-2000): the model that answered. The
+   * pass key on the row stays the FIRST model's — the pass is the small
+   * model's, the escalation is its retry mechanism — so this is the derivation
+   * record of which model actually produced the escalated answer (the dump line
+   * reads it; durable per-row lineage is SMD-1731's). `retried` is set too: a
+   * second call was made, and callsOf counts it as the retry it is.
+   */
+  escalated?: string;
   /**
    * Set when a call's streamed answer was aborted as a runaway
    * (ExtractWindowing.streamAbort): how many milliseconds into the first
@@ -272,6 +282,19 @@ export type ExtractWindowing = {
    * shipped price, and none of 20 did.
    */
   streamAbort: boolean;
+  /**
+   * A larger model to remake a runaway call on — the same messages, NO penalty
+   * — instead of the penalised same-model retry (SMD-2000). Set, a call that
+   * ran to its budget (or aborted on the stream) is sent once to this model
+   * rather than once more to `metadataModel` under RUNAWAY_PENALTY: the 27B
+   * that never looped resolves the thoughts the 7B could not finish, and the
+   * penalty that thins a rescued answer is not spent. Undefined keeps the
+   * penalised retry. It is a second call either way — gated by `retryRunaway`,
+   * counted by callsOf, read whole (never aborted) — so this only changes WHICH
+   * model the retry dials and whether it carries the penalty. windowingFor
+   * leaves it undefined when it would equal `metadataModel`.
+   */
+  escalateModel?: string;
 };
 
 /**
@@ -467,9 +490,14 @@ export function reasoningOn(cfg: EmbedConfig): boolean {
  */
 export function windowingFor(cfg: EmbedConfig): ExtractWindowing {
   const budgeted = !reasoningOn(cfg);
+  // The escalation is a variant of the runaway retry, so it lives where the
+  // retry does — only a budgeted call has a runaway to escalate (SMD-2000).
+  // Ignored when it names the metadata model: a same-model retry with no
+  // penalty is strictly weaker than the penalised one it would replace.
+  const escalateModel = budgeted && cfg.extractEscalateModel && cfg.extractEscalateModel !== cfg.metadataModel ? cfg.extractEscalateModel : undefined;
   // The stream abort follows the budget too: it makes a runaway of a call,
   // and only a budgeted call has a retry to send one to (SMD-1960).
-  return { windowTokens: cfg.extractChunkTokens, overlapTokens: cfg.extractChunkOverlap, maxWindows: cfg.extractMaxWindows, header: cfg.extractHeader, outputBudget: budgeted, retryRunaway: budgeted && cfg.extractRetryRunaway, streamAbort: budgeted && cfg.extractStreamAbort };
+  return { windowTokens: cfg.extractChunkTokens, overlapTokens: cfg.extractChunkOverlap, maxWindows: cfg.extractMaxWindows, header: cfg.extractHeader, outputBudget: budgeted, retryRunaway: budgeted && cfg.extractRetryRunaway, streamAbort: budgeted && cfg.extractStreamAbort, ...(escalateModel ? { escalateModel } : {}) };
 }
 
 /**
@@ -489,7 +517,7 @@ export function describeExtractWindow(cfg: EmbedConfig): string {
   const retry = !w.outputBudget
     ? "; no answer budget and no runaway retry — reasoning is on (OB1_METADATA_REASONING), and a budget would cap the thinking, so a call that does not converge ends at the context or the caller's deadline"
     : w.retryRunaway
-      ? `${abort}${w.streamAbort ? ", and a call aborted so or run to its answer budget" : "; a call that runs to its answer budget"} is made once more with a ${RUNAWAY_PENALTY} frequency penalty${w.streamAbort ? ", read whole" : ""}`
+      ? `${abort}${w.streamAbort ? ", and a call aborted so or run to its answer budget" : "; a call that runs to its answer budget"} is ${w.escalateModel ? `made once more on ${w.escalateModel} (OB1_EXTRACT_ESCALATE_MODEL), unpenalised` : `made once more with a ${RUNAWAY_PENALTY} frequency penalty`}${w.streamAbort ? ", read whole" : ""}`
       // Reachable with EXTRACT_RETRY_RUNAWAY flipped and the abort on: the
       // consequence named, as the worker's failed-row note names it.
       : abort ? `${abort}, and is the thought's answer, malformed — no retry` : "";
@@ -715,9 +743,13 @@ export function extractionKey(model: string): string {
  * (SMD-1879): an answer that does not converge ends at the budget as a
  * malformed answer — visible, retryable — not at the context's end.
  */
-async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: Pick<ExtractWindowing, "outputBudget" | "streamAbort">, retry = false): Promise<Extraction & { runaway: boolean }> {
+async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: Pick<ExtractWindowing, "outputBudget" | "streamAbort">, second: { penalty?: boolean; model?: string } = {}): Promise<Extraction & { runaway: boolean }> {
   // Named by the windowing, not positional booleans (second review pass).
   const { outputBudget: budget, streamAbort: stream } = w;
+  // The retry dials the escalation model when given (SMD-2000), the metadata
+  // model otherwise; the penalty rides the SAME-model retry, never the
+  // escalation (the larger model answers unpenalised, the same messages).
+  const model = second.model ?? cfg.metadataModel;
   const t0 = Date.now();
   const r = await fetch(`${cfg.chat.base}/chat/completions`, {
     method: "POST",
@@ -732,12 +764,12 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, pa
     // the one deadline.
     timeout: false,
     body: JSON.stringify({
-      model: cfg.metadataModel,
+      model,
       response_format: { type: "json_object" },
       temperature: cfg.metadataTemperature,
       ...cfg.metadataReasoning,
       ...(budget ? { max_tokens: extractOutputBudget(estimateTokens(text)) } : {}),
-      ...(retry ? { frequency_penalty: RUNAWAY_PENALTY } : {}),
+      ...(second.penalty ? { frequency_penalty: RUNAWAY_PENALTY } : {}),
       ...(stream ? { stream: true } : {}),
       messages: buildMessages(text, part),
     }),
@@ -930,20 +962,27 @@ async function readStreamedAnswer(body: ReadableStream<Uint8Array>, base: string
 }
 
 /**
- * extractOnce, and once more with the penalty when the windowing says so and
- * the first answer ran to its budget or was aborted on the stream — the retry
- * read WHOLE, never aborted (ExtractWindowing.streamAbort says why). `onCall`
- * is told of every call BEFORE it is made, so a retry that throws is still
- * counted (third review pass).
+ * extractOnce, and once more when the windowing says so and the first answer
+ * ran to its budget or was aborted on the stream — on the escalation model with
+ * no penalty when `escalateModel` is set (SMD-2000), else once more on the same
+ * model under RUNAWAY_PENALTY. The retry is read WHOLE, never aborted
+ * (ExtractWindowing.streamAbort says why). `onCall` is told of every call
+ * BEFORE it is made, so a retry that throws is still counted (third review pass).
  */
 async function extractCall(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: ExtractWindowing, onCall: () => void): Promise<Omit<Extraction, "retried"> & { runaway: boolean; retried: boolean }> {
   onCall();
   const first = await extractOnce(text, cfg, timeoutMs, part, w);
   if (!(w.retryRunaway && first.runaway && first.malformed)) return { ...first, retried: false };
   onCall();
-  const second = await extractOnce(text, cfg, timeoutMs, part, { outputBudget: w.outputBudget, streamAbort: false }, true);
+  // The retry dials the larger model unpenalised when one is set, else the same
+  // model under the penalty — the same messages either way.
+  const retryW = { outputBudget: w.outputBudget, streamAbort: false };
+  const second = w.escalateModel
+    ? await extractOnce(text, cfg, timeoutMs, part, retryW, { model: w.escalateModel })
+    : await extractOnce(text, cfg, timeoutMs, part, retryW, { penalty: true });
   // The first call's abort rides on the thought's answer; the retry has none.
-  return { ...second, ...(first.abortedMs !== undefined ? { abortedMs: first.abortedMs } : {}), retried: true };
+  // `escalated` names the model that answered when it was the larger one.
+  return { ...second, ...(first.abortedMs !== undefined ? { abortedMs: first.abortedMs } : {}), retried: true, ...(w.escalateModel ? { escalated: w.escalateModel } : {}) };
 }
 
 /**
@@ -1126,11 +1165,16 @@ export async function extractEntities(content: string, cfg: EmbedConfig, timeout
     const header = windowing.header ? documentHeader(content) : undefined;
     const parts: ExtractionWindow[] = [];
     let retriedAny = false;
+    // The model that answered an escalated window (SMD-2000), for the thought's
+    // dump line; windowingFor gives one escalation target, so any window that
+    // escalated names the same model.
+    let escalatedModel: string | undefined;
     for (const w of windows) {
       const t0 = Date.now();
       const ex = await extractCall(w.content, cfg, deadline, { index: w.index, of, header }, windowing, onCall);
       retriedAny ||= ex.retried;
-      parts.push({ index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, retried: ex.retried || undefined, ...(ex.abortedMs !== undefined ? { abortedMs: ex.abortedMs } : {}), ms: Date.now() - t0 });
+      if (ex.escalated) escalatedModel = ex.escalated;
+      parts.push({ index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, retried: ex.retried || undefined, ...(ex.escalated ? { escalated: ex.escalated } : {}), ...(ex.abortedMs !== undefined ? { abortedMs: ex.abortedMs } : {}), ms: Date.now() - t0 });
     }
     const merged = mergeExtractions(parts);
     // The windows that parsed are the answer and the rest are named on it, as
@@ -1138,7 +1182,7 @@ export async function extractEntities(content: string, cfg: EmbedConfig, timeout
     // which already names its windows in `parts`.
     const bad = merged.malformed ? [] : parts.filter((p) => p.malformed).map((p) => p.index);
     const covered = bad.length ? { ...(coverage ?? { windows: windows.length, of, cut: false }), malformed: bad } : coverage;
-    return { ...merged, retried: retriedAny || undefined, ...(covered ? { coverage: covered } : {}) };
+    return { ...merged, retried: retriedAny || undefined, ...(escalatedModel ? { escalated: escalatedModel } : {}), ...(covered ? { coverage: covered } : {}) };
   } catch (e) {
     (e as Error & { callsMade?: number }).callsMade = made;
     throw e;

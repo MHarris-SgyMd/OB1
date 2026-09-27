@@ -520,6 +520,8 @@ let llmMs = 0;
 /** Thoughts extracted in more than one window, thoughts a runaway call was retried for, and model calls made in all (SMD-1879). */
 let windowed = 0;
 let retried = 0;
+/** Thoughts a runaway was escalated to OB1_EXTRACT_ESCALATE_MODEL for, rather than retried under the penalty (SMD-2000). */
+let escalated = 0;
 /** Thoughts a runaway was aborted on the stream for, before its budget (SMD-1960). */
 let aborted = 0;
 let calls = 0;
@@ -571,7 +573,10 @@ async function processRow(row: Row): Promise<Outcome> {
   // A per-window record, not a count over one: a prefix of one window of a
   // longer thought is windowed — sent "Part 1 of N" (review pass 2).
   if (extraction.parts) windowed++;
-  if (extraction.retried) retried++;
+  // A runaway escalated to the larger model is counted as an escalation, not a
+  // penalised retry, though it is both a runaway and a second call (SMD-2000).
+  if (extraction.escalated) escalated++;
+  else if (extraction.retried) retried++;
   if (extraction.abortedMs !== undefined) aborted++;
   if (extraction.malformed) {
     malformed++;
@@ -585,10 +590,15 @@ async function processRow(row: Row): Promise<Outcome> {
     // the retry may have rescued), and "the retry did not converge" only when
     // a retry was made (review passes one to four). Only a first call is ever
     // aborted — the retry is read whole — so the note names it.
-    const abortedParts: { abortedMs?: number; retried?: true }[] = extraction.parts ? extraction.parts.filter((p) => p.malformed && p.abortedMs !== undefined) : extraction.abortedMs !== undefined ? [extraction] : [];
+    const abortedParts: { abortedMs?: number; retried?: true; escalated?: string }[] = extraction.parts ? extraction.parts.filter((p) => p.malformed && p.abortedMs !== undefined) : extraction.abortedMs !== undefined ? [extraction] : [];
     const abortedMs = Math.max(...abortedParts.map((p) => p.abortedMs as number));
     const retriedToo = abortedParts.some((p) => p.retried);
-    const abortedNote = abortedParts.length ? `; the first call was aborted on the stream ${(abortedMs / 1000).toFixed(1)} s in — the answer went on past a third copy of one item — ${retriedToo ? "and the penalised retry, read whole, did not converge either" : "and no retry was made"}` : "";
+    // When the second call was an escalation (SMD-2000), name the model that
+    // still could not answer — the operator sorting the failed rows for a
+    // larger model is told the larger model already ran.
+    const escalatedTo = abortedParts.map((p) => p.escalated).find(Boolean);
+    const secondNote = escalatedTo ? `and the escalation to ${escalatedTo}, read whole, did not converge either` : "and the penalised retry, read whole, did not converge either";
+    const abortedNote = abortedParts.length ? `; the first call was aborted on the stream ${(abortedMs / 1000).toFixed(1)} s in — the answer went on past a third copy of one item — ${retriedToo ? secondNote : "and no retry was made"}` : "";
     return { outcome: "failed", error: `the model's answer was not JSON of the expected shape${where}${abortedNote}` };
   }
   if (DUMP) {
@@ -596,7 +606,11 @@ async function processRow(row: Row): Promise<Outcome> {
     // what a replay needs to re-score a rule change without the model — and,
     // for a windowed thought, each window's own answer beside the merged one:
     // the derivation record (SMD-1731) until a lineage table holds it.
-    appendFileSync(DUMP, JSON.stringify({ id: row.id, fingerprint: row.fingerprint, key: JOB, entities: extraction.entities, relations: extraction.relations, windows: extraction.windows, ...(extraction.retried ? { retried: true } : {}), ...(extraction.abortedMs !== undefined ? { abortedMs: extraction.abortedMs } : {}), ...(extraction.coverage ? { coverage: extraction.coverage } : {}), ...(extraction.parts ? { parts: extraction.parts } : {}) }) + "\n");
+    // `escalated: <model>` where a runaway went to the larger model, `retried:
+    // true` where it took the penalised same-model retry — the derivation
+    // record of which model produced the answer (SMD-2000), the pass key on the
+    // row itself staying the first model's.
+    appendFileSync(DUMP, JSON.stringify({ id: row.id, fingerprint: row.fingerprint, key: JOB, entities: extraction.entities, relations: extraction.relations, windows: extraction.windows, ...(extraction.escalated ? { escalated: extraction.escalated } : extraction.retried ? { retried: true } : {}), ...(extraction.abortedMs !== undefined ? { abortedMs: extraction.abortedMs } : {}), ...(extraction.coverage ? { coverage: extraction.coverage } : {}), ...(extraction.parts ? { parts: extraction.parts } : {}) }) + "\n");
   }
   const [r] = await sql`
     SELECT record_thought_entities(
@@ -904,12 +918,18 @@ if (FOLLOW) {
 }
 
 const elapsed = ((Date.now() - started) / 1000).toFixed(1);
+// How the runaways were handled: a penalised same-model retry, an escalation to
+// the larger model (SMD-2000), or both. A count is named only when it happened,
+// so an escalation pass does not read "0 retried … , N escalated".
+const runawayNote = escalated
+  ? `${retried ? `${retried} retried and ` : ""}${escalated} escalated to ${WINDOWING.escalateModel} after a runaway answer`
+  : `${retried} retried after a runaway answer`;
 console.log(
   `\n  ${done} extracted${partial || leftOut ? ` (${[
     partial ? `${partial} over a prefix only — past the per-thought bound, OB1_EXTRACT_MAX_WINDOWS (${cfg.extractMaxWindows}); each row's caveat says how much` : "",
     leftOut ? `${leftOut} with ${leftOutWindows} window(s) left out, the model's answers for them ${MALFORMED_WINDOWS_MARK}; each row's caveat names them` : "",
   ].filter(Boolean).join("; ")})` : ""}, ${failed} failed, ${superseded} edited mid-extraction and re-queued, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}, in ${elapsed}s ` +
-    `(${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s) across ${WORKERS} worker(s), ${windowed} thought(s) in windows, ${retried} retried after a runaway answer (${aborted} aborted on the stream before the budget), ${beats} heartbeat(s))`
+    `(${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s) across ${WORKERS} worker(s), ${windowed} thought(s) in windows, ${runawayNote} (${aborted} aborted on the stream before the budget), ${beats} heartbeat(s))`
 );
 console.log(
   `  wrote ${totals.mentions} mentions of ${totals.newEntities} new entities, ${totals.edges} edges; ` +

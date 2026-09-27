@@ -238,6 +238,24 @@ console.log("\n[3c] hybridThoughts fuses the two, and maps the fused row's shape
   const filtered = await store.hybridThoughts({ query: "SMD-507", embedding: unit(0), threshold: -1, limit: 10, filter: { kind: "a" } });
   assert(filtered.every((r) => r.matchedNeedles.length === 0), "the jsonb filter reaches the keyword arm");
 
+  // prefer_current (059, SMD-2255): the store calls search_thoughts_current and
+  // maps its three extra fields; without the flag the rows carry fused =
+  // score, nothing demoted and no window. The row nearest the query, stamped a
+  // completed ticket, is demoted: no longer first, weighted exactly 0.25.
+  assert(plain.every((r) => r.fused === r.score && r.demoted.length === 0 && r.window === undefined), "without prefer_current every row carries fused = score, nothing demoted and no window");
+  const stampSql = new SQL({ url: URL_, max: 1 });
+  await stampSql`UPDATE thoughts SET metadata = metadata || ${{ source: "linear", issue: "SMD-9901", status: "Done", status_type: "completed", linear_updated_at: "2026-09-25T00:00:00.000Z" }}::jsonb WHERE id = ${plain[0].id}::uuid`;
+  const offAgain = await store.hybridThoughts({ query: "the exact thing", embedding: unit(0), threshold: -1, limit: 10, filter: {} });
+  const onCurrent = await store.hybridThoughts({ query: "the exact thing", embedding: unit(0), threshold: -1, limit: 10, filter: {}, preferCurrent: true });
+  const demotedRow = onCurrent.find((r) => r.id === plain[0].id);
+  assert(offAgain[0].id === plain[0].id && onCurrent[0].id !== plain[0].id && demotedRow !== undefined && demotedRow.demoted.join() === "completed" && demotedRow.score === demotedRow.fused * 0.25
+      && onCurrent.filter((r) => r.id !== plain[0].id).every((r) => r.demoted.length === 0 && r.score === r.fused)
+      && onCurrent.every((r) => r.window !== undefined && r.window.demoted === 1 && r.window.known === 1 && r.window.syncedAt === "2026-09-25T00:00:00.000Z" && r.window.exact === true)
+      && [...onCurrent.map((r) => r.id)].sort().join() === [...offAgain.map((r) => r.id)].sort().join(),
+    `with preferCurrent the completed row nearest the query is demoted — no longer first, marked completed, 0.25 of its fused score — the rest untouched, the window mapped on every row (${onCurrent.map((r) => r.demoted.join("+") || "-").join(" ")})`);
+  await stampSql`UPDATE thoughts SET metadata = metadata - 'source' - 'issue' - 'status' - 'status_type' - 'linear_updated_at' WHERE id = ${plain[0].id}::uuid`;
+  await stampSql.close();
+
   for (const c of ["ticket SMD-507 came up in the distant note", "ticket SMD-507 with no vector yet"]) {
     await store.deleteThought({ id: (await store.keywordThoughts({ query: c, limit: 1, offset: 0, filter: {} }))[0].id });
   }
@@ -372,6 +390,56 @@ console.log("\n[5d] listLoggedSearches — the search rows of query_log, windowe
     const emptySince = await store.listLoggedSearches({ since: "", limit: 100 });
     assert(emptySince.searches.length === 2, "an empty since is no window, not a ''::timestamptz cast error (review pass 2)");
     await raw`DELETE FROM query_log`;
+  } finally {
+    await raw.close();
+  }
+}
+
+console.log("\n[5e] workerStatus — per-work_type counts, stale leases and the active flag (SMD-2131)");
+{
+  const raw = new SQL({ url: URL_, max: 1 });
+  try {
+    // Ten thoughts of our own to pool, so the counts are exact regardless of the
+    // corpus this section inherits. Captured before the key is set, so the capture
+    // trigger enqueues nothing; the DELETE then clears the slate.
+    const ids: string[] = [];
+    for (let i = 0; i < 10; i++) ids.push((await store.captureThought({ content: `worker-status pool thought ${i}`, payload: { metadata: {} }, embedding: unit(i % EMBEDDING_DIM) })).id);
+    await raw`DELETE FROM thought_work_claims`; // isolate this section from any trigger-enqueued rows
+    const total = await store.countThoughts();
+    const ACTIVE = "extract:test-model@p2";
+    const ORPHAN = "extract:test-model@p1";
+    const CONSOL = "consolidate:test-judge@p1";
+    // Set the active extraction key so ACTIVE reads active:true and ORPHAN false.
+    await raw`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${ACTIVE}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+    // Exact rows for ACTIVE, DISTINCT per status so a swapped filter is caught:
+    // 4 pending, 3 claimed (1 fresh + 2 stale, oldest = w-dead at −26h), 2 succeeded, 1 failed.
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status) VALUES
+      (${ids[0]}::uuid, ${ACTIVE}, 'pending'), (${ids[1]}::uuid, ${ACTIVE}, 'pending'),
+      (${ids[2]}::uuid, ${ACTIVE}, 'pending'), (${ids[3]}::uuid, ${ACTIVE}, 'pending')`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, claimed_at, ttl_expires_at) VALUES
+      (${ids[4]}::uuid, ${ACTIVE}, 'claimed', 'w-fresh', now(), now() + interval '5 minutes'),
+      (${ids[5]}::uuid, ${ACTIVE}, 'claimed', 'w-dead', now() - interval '26 hours', now() - interval '26 hours'),
+      (${ids[6]}::uuid, ${ACTIVE}, 'claimed', 'w-stale2', now() - interval '25 hours', now() - interval '25 hours')`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at) VALUES
+      (${ids[7]}::uuid, ${ACTIVE}, 'succeeded', 'w1', now()), (${ids[8]}::uuid, ${ACTIVE}, 'succeeded', 'w1', now())`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error) VALUES
+      (${ids[9]}::uuid, ${ACTIVE}, 'failed', 'w1', now(), 'boom')`;
+    // A superseded pool and a consolidate pool, one pending row each.
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status) VALUES (${ids[0]}::uuid, ${ORPHAN}, 'pending'), (${ids[0]}::uuid, ${CONSOL}, 'pending')`;
+
+    const st = await store.workerStatus();
+    const active = st.find((r) => r.workType === ACTIVE);
+    assert(!!active && active.pending === 4 && active.claimed === 3 && active.succeeded === 2 && active.failed === 1, `ACTIVE counts: 4 pending, 3 claimed (1 fresh + 2 stale), 2 succeeded, 1 failed (${JSON.stringify(active)})`);
+    assert(active!.thoughts === total && active!.unpooled === total - 10, `thoughts is the corpus (${active!.thoughts}), unpooled = corpus − 10 pooled (${active!.unpooled})`);
+    assert(active!.stale === 2 && active!.staleWorkerId === "w-dead" && active!.oldestStaleClaimedAt !== null && ISO_RE.test(active!.oldestStaleClaimedAt), `2 stale leases; the OLDEST is the dead worker's, with its claimed_at (${active!.stale}, ${active!.staleWorkerId})`);
+    assert(active!.active === true, "the entity_extraction_key work_type reads active: true");
+    const orphan = st.find((r) => r.workType === ORPHAN);
+    assert(!!orphan && orphan.pending === 1 && orphan.stale === 0 && orphan.active === false, "a superseded extract pool reads active: false");
+    const consol = st.find((r) => r.workType === CONSOL);
+    assert(!!consol && consol.active === null, "a consolidate pool (no recorded active key) reads active: null");
+    // Cleanup so later sections and their capture trigger are not polluted.
+    await raw`DELETE FROM thought_work_claims`;
+    await raw`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   } finally {
     await raw.close();
   }
