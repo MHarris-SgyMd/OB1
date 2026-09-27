@@ -2093,8 +2093,9 @@ else {
     await claims.unsafe("CREATE ROLE pf_reader LOGIN PASSWORD 'reader'");
     await claims.unsafe("GRANT USAGE ON SCHEMA public TO pf_reader");
     await claims.unsafe("GRANT SELECT ON thoughts TO pf_reader");
+    const readerUrl = LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@");
     try {
-      const asReader = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+      const asReader = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
       assert(/migration ledger\s+schema_migrations present, not readable by this role \(permission denied for table schema_migrations\)/.test(asReader.out) && !/no schema_migrations table/.test(asReader.out),
              `a role without SELECT on the ledger is told it is unreadable, not absent (${row(asReader.out, "migration ledger")})`);
       assert(/schema version\s+could not verify: permission denied for table ob1_config/.test(asReader.out),
@@ -2106,7 +2107,7 @@ else {
              `…the audit row finds 046's columns and names the refused census read, not a --reapply (${row(asReader.out, "audit events")})`);
       assert(!/embedding_model does not exist/.test(asReader.out) && /[✓!]\s+vector models/.test(asReader.out),
              `…the vector-models row finds 021's column (${row(asReader.out, "vector models")})`);
-      const ctxReader = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@"), OB1_CHUNK_CONTEXT: "on" });
+      const ctxReader = await run({ ...SQL_ENV, DATABASE_URL: readerUrl, OB1_CHUNK_CONTEXT: "on" });
       assert(/!\s+chunk context\s+could not verify: permission denied for table thought_chunks/.test(ctxReader.out) && !/013_chunk_context/.test(ctxReader.out),
              `…and with OB1_CHUNK_CONTEXT on, the chunk-context row names the refused read, not 013 (${row(ctxReader.out, "chunk context")})`);
 
@@ -2114,7 +2115,7 @@ else {
       // count names the grant, never the network. The printed GRANT, run,
       // makes the row pass.
       await claims.unsafe("REVOKE SELECT ON thoughts FROM pf_reader");
-      const noSelect = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+      const noSelect = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
       assert(/✗\s+schema\s+permission denied for table thoughts — role pf_reader has no SELECT on public\.thoughts\n\s+→ GRANT SELECT ON public\.thoughts TO pf_reader;  — or, for the server's role, every privilege the capture path needs, as the tables' owner: cd db && bun migrate\.ts --url <the owner's connection string> --grant pf_reader /.test(noSelect.out)
                && !/Check credentials and network/.test(fix(noSelect.out, "schema")),
              `a role without SELECT on thoughts is told the grant (${row(noSelect.out, "schema")} ${fix(noSelect.out, "schema")})`);
@@ -2124,7 +2125,7 @@ else {
       // slot), the refusal still names the grant, not the network (review pass 1).
       await claims.unsafe("ALTER ROLE pf_reader CONNECTION LIMIT 1");
       try {
-        const oneSlot = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+        const oneSlot = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
         assert(/✗\s+schema\s+permission denied for table thoughts\n\s+→ Grant this role SELECT on public\.thoughts — or, for the server's role/.test(oneSlot.out),
                `…and with no connection for the probe, the refusal still names the grant (${fix(oneSlot.out, "schema")})`);
       } finally {
@@ -2132,7 +2133,7 @@ else {
       }
       const printedGrant = /→ (GRANT SELECT ON public\.thoughts TO pf_reader;)/.exec(noSelect.out)?.[1];
       if (printedGrant) await claims.unsafe(printedGrant);
-      const granted = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+      const granted = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
       assert(!!printedGrant && /✓\s+schema\s+thoughts table reachable/.test(granted.out),
              `…and that GRANT, run as printed, makes thoughts readable (${row(granted.out, "schema")})`);
       // Restored whatever was printed, so a broken grant branch fails its own assertions, not the legs after it.
@@ -2146,14 +2147,14 @@ else {
         await claims.unsafe("DROP SCHEMA IF EXISTS pf_reader CASCADE; CREATE SCHEMA pf_reader; CREATE TABLE pf_reader.thoughts (id int)");
         await claims.unsafe("GRANT USAGE ON SCHEMA pf_reader TO pf_reader");
         await claims.unsafe("ALTER ROLE pf_reader SET search_path = \"$user\", public");
-        const shadowed = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+        const shadowed = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
         assert(/✗\s+schema\s+permission denied for table thoughts — thoughts resolves to pf_reader\.thoughts, not the brain's public\.thoughts\n\s+→ Put public ahead of "pf_reader" \(the path's "\$user"\) on this connection's search_path — the role's setting, or the connection string's where it sets one — or take "pf_reader" off it: the server reads/.test(shadowed.out)
                  && !/GRANT SELECT ON pf_reader\./.test(shadowed.out),
                `another schema's thoughts first on the path is named, never granted on (${row(shadowed.out, "schema")} ${fix(shadowed.out, "schema")})`);
         // The path naming the schema itself, not through "$user": no "$user"
         // note, which would be untrue (review pass 3).
         await claims.unsafe("ALTER ROLE pf_reader SET search_path = pf_reader, public");
-        const literal = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+        const literal = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
         assert(/→ Put public ahead of "pf_reader" on this connection's search_path/.test(literal.out),
                `…and with the path naming it, not "$user", no "$user" note (${fix(literal.out, "schema")})`);
         await claims.unsafe("ALTER ROLE pf_reader SET search_path = \"$user\", public");
@@ -2161,12 +2162,12 @@ else {
         const [{ shadowPublicUsage }] = await claims`SELECT has_schema_privilege('public', 'public', 'USAGE') AS "shadowPublicUsage"`;
         await claims.unsafe("REVOKE USAGE ON SCHEMA public FROM pf_reader, PUBLIC");
         try {
-          const barred = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+          const barred = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
           const usageGrant = /→ (GRANT USAGE ON SCHEMA public TO pf_reader;)  then put public ahead of "pf_reader"/.exec(barred.out)?.[1];
           assert(!!usageGrant, `…and with no USAGE on public, the GRANT USAGE comes first (${fix(barred.out, "schema")})`);
           if (usageGrant) await claims.unsafe(usageGrant);
           await claims.unsafe("ALTER ROLE pf_reader SET search_path = public, \"$user\"");
-          const unshadowed = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+          const unshadowed = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
           assert(/✓\s+schema\s+thoughts table reachable/.test(unshadowed.out),
                  `…and that GRANT, with public put ahead of it as printed, reads the brain's table (${row(unshadowed.out, "schema")})`);
         } finally {
@@ -2205,7 +2206,7 @@ else {
       // table" and never the --baseline remedy, which on a partly migrated
       // brain would record pending migrations as applied.
       await claims.unsafe("ALTER ROLE pf_reader SET search_path = nowhere");
-      const lost = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+      const lost = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
       assert(/!\s+migration ledger\s+schema_migrations exists \(schema public\) but does not resolve for this role/.test(lost.out)
                && !/no schema_migrations table/.test(lost.out) && !/Adopt it with: cd db && bun migrate\.ts --url \$DATABASE_URL --baseline/.test(lost.out),
              `a ledger off the role's search path warns that it does not resolve, and recommends no --baseline (${row(lost.out, "migration ledger")})`);
@@ -2217,7 +2218,7 @@ else {
       // The row now names what the role lacks, every later row runs, and the
       // schema row — thoughts is there, off the path — does not say migrate.
       await claims.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO pf_reader");
-      const wide = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+      const wide = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
       assert(/✗\s+write privileges\s+this connection's role \(pf_reader\) is missing privileges the capture path's writers need/.test(wide.out),
              `a role that may read ob1_config without public on its path gets the write-privileges row's own result (${row(wide.out, "write privileges")})`);
       assert(!/not checked — the direct connection failed before it/.test(wide.out)
@@ -2232,7 +2233,6 @@ else {
       // The path's statement is rebuilt from the parsed setting, never
       // echoed (SMD-2242). An empty path reads back as "" — a zero-length
       // name, invalid SQL if echoed.
-      const readerUrl = LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@");
       /** pf_reader's own setting in this database — a statement the row prints sets one; each leg resets it. */
       const readerOnThisDatabase = (setting: string) => claims.unsafe(`DO $r$ BEGIN EXECUTE format('ALTER ROLE pf_reader IN DATABASE %I ${setting}', current_database()); END $r$`);
       await claims.unsafe("ALTER ROLE pf_reader SET search_path = ''");
