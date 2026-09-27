@@ -804,8 +804,12 @@ if (configFailed) {
       // — a row-level security policy on the table — and none of them is
       // fixed by migrating. The SQLSTATE picks the case, never the message.
       const errno = String((e as { errno?: unknown }).errno ?? "");
+      // FATAL is a refusal at connection (no CONNECT, a setting in the
+      // connection string this role may not make, ...), before any query:
+      // a probe would meet it too (review pass 2).
+      const atConnect = String((e as { severity?: unknown }).severity ?? "") === "FATAL";
       let found: { detail: string; remedy: string } | null = null;
-      if (built.kind === "sql" && conn && (errno === "42P01" || errno === "42501")) {
+      if (built.kind === "sql" && conn && !atConnect && (errno === "42P01" || errno === "42501")) {
         try {
           const { SQL } = await import("bun");
           const probe = new SQL({ url: conn.url, max: 1 });
@@ -827,6 +831,7 @@ if (configFailed) {
                      quote_ident(session_user::text) AS login,
                      quote_ident(current_database()::text) AS db,
                      current_user::text AS "roleName",
+                     session_user::text AS "loginName",
                      (SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                        WHERE c.oid = to_regclass('thoughts')) AS resolved,
                      (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -837,7 +842,7 @@ if (configFailed) {
                      (SELECT string_agg(name, ', ' ORDER BY name) FROM pol) AS policies,
                      (SELECT count(*)::int FROM pol) AS "policyCount"`) as {
               present: boolean; unresolved: boolean; usage: boolean; path: string; version: number; role: string; login: string; db: string;
-              roleName: string; resolved: string | null; resolvedSchema: string | null; canSelect: boolean | null;
+              roleName: string; loginName: string; resolved: string | null; resolvedSchema: string | null; canSelect: boolean | null;
               rls: boolean | null; rowSecurity: string; policies: string | null; policyCount: number;
             }[];
             if (r?.present && r.unresolved) {
@@ -878,15 +883,22 @@ if (configFailed) {
               // table, never one to grant on or to call the brain's (review
               // pass 1: the GRANT printed for it, run, passed this row against
               // it). The brain's table missing is still a brain to migrate.
+              // The migrator's CREATE TABLE IF NOT EXISTS thoughts is
+              // unqualified too: run with that schema first on the path, it
+              // finds the other table and fails (review pass 2), so the path
+              // comes first either way. A schema named for the role is the
+              // default path's "$user".
               const other = quoteIdent(String(r.resolvedSchema));
+              const named = r.resolvedSchema === r.loginName || r.resolvedSchema === r.roleName ? ` (the path's "$user")` : "";
+              const putAhead = `put public ahead of ${other}${named} on this connection's search_path — the role's setting, or the connection string's where it sets one — or take ${other} off it`;
               found = r.present
                 ? {
-                    detail: `thoughts resolves to ${r.resolved}, ahead of the brain's public.thoughts on this role's search_path`,
-                    remedy: `${r.usage ? "" : `GRANT USAGE ON SCHEMA public TO ${r.role};  then `}put public ahead of ${other} on this role's search_path, or take ${other} off it — the server reads the first thoughts on the path. The brain's table is there, so migrating would not change it.`.replace(/^./, (c) => c.toUpperCase()),
+                    detail: `thoughts resolves to ${r.resolved}, not the brain's public.thoughts`,
+                    remedy: `${r.usage ? "" : `GRANT USAGE ON SCHEMA public TO ${r.role};  then `}${putAhead}: the server reads the first thoughts on the path. The brain's table is there, so migrating would not change it.`.replace(/^./, (c) => c.toUpperCase()),
                   }
                 : {
                     detail: `thoughts resolves to ${r.resolved}, another tool's table; the brain's public.thoughts does not exist`,
-                    remedy: `Apply the migrations: cd db && bun migrate.ts --url ${urlArg}`,
+                    remedy: `${putAhead.replace(/^./, (c) => c.toUpperCase())}, then apply the migrations: cd db && bun migrate.ts --url ${urlArg}  — the migrator's CREATE TABLE IF NOT EXISTS thoughts would otherwise find ${r.resolved}.`,
                   };
             } else if (r?.resolved && errno === "42501" && r.canSelect === false) {
               // --grant takes the name raw, so it goes to the shell quoted.
@@ -901,7 +913,7 @@ if (configFailed) {
               // change fixes that.
               found = {
                 detail: `row_security is off for this session and ${r.resolved} has row-level security, so Postgres refuses the read rather than skip its policies`,
-                remedy: `Leave row_security on for this role (it is off in its settings or the connection string), or, for a role that should read every row, ALTER ROLE ${r.role} BYPASSRLS;  (as a superuser). The table is there, so migrating would not change it.`,
+                remedy: `Turn row_security back on for this connection (it is off in a role's or the database's settings, or the connection string), or, for a role that should read every row, ALTER ROLE ${r.role} BYPASSRLS;  (as a superuser). The table is there, so migrating would not change it.`,
               };
             } else if (r?.resolved) {
               const whence = errno === "42501"
@@ -935,8 +947,10 @@ if (configFailed) {
             ? `Correct the database name in $${conn.from} — or, for a new brain, create it (CREATE DATABASE, as a role that may) and apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
             : conn && errno === "28000"
             ? `Check the role in $${conn.from}: the server refused it before any query — it must exist, be allowed to log in (LOGIN), and be admitted by pg_hba.conf from this host.`
-            // A refusal the probe could not explain (it failed, or opened no
-            // connection): the table's privilege, or a policy.
+            : conn && errno === "42501" && atConnect
+            ? `The server refused this role at connection, before any query: grant it CONNECT on the database (GRANT CONNECT ON DATABASE <the database> TO <the role>;, as its owner), or take out the setting in the connection string's options= it may not make.`
+            // A query's refusal the probe could not explain (it failed, or
+            // opened no connection): the table's privilege, or a policy.
             : conn && errno === "42501"
             ? `Grant this role SELECT on public.thoughts — or, for the server's role, every privilege the capture path needs, as the tables' owner: cd db && bun migrate.ts --url <the owner's connection string> --grant <the role> — or, if it holds that, fix the row-level security policy on thoughts that refuses it.`
             : /does not exist|relation/i.test(msg)
