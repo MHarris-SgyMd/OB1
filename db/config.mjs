@@ -437,13 +437,36 @@ export function extractOutputBudget(inputTokens) {
 export const EXTRACT_MIN_WINDOW_TOKENS = 64;
 
 /**
- * The most windows one thought may be extracted in — the per-thought cost
- * bound the 8,000-character cut used to be (fifth review pass). At the default
- * window that is ~29,000 estimated tokens, ~115,000 characters, four times the
- * longest thought on the fork's brain; a thought over it is recorded failed
- * with the count, not extracted for hours or billed for hundreds of calls.
+ * The most windows one thought is extracted in, by default — the per-thought
+ * cost bound the 8,000-character cut used to be (fifth review pass of
+ * SMD-1879). At the default window that is ~29,000 estimated tokens, ~115,000
+ * characters. It was sized as four times the longest thought on the fork's
+ * brain, and a thought over it was recorded failed with the count; ingested
+ * documents broke the sizing (8 of 53 thoughts on one pass, 26 to 74 windows),
+ * so a thought over it is now extracted over its first windows and recorded
+ * succeeded with a caveat naming the coverage (SMD-2240,
+ * server-portable/entities.ts). OB1_EXTRACT_MAX_WINDOWS overrides it
+ * (resolveExtractMaxWindows).
  */
 export const EXTRACT_MAX_WINDOWS = 24;
+
+/**
+ * The window count one thought is extracted in at most: OB1_EXTRACT_MAX_WINDOWS
+ * when it is a positive safe integer once floored, else EXTRACT_MAX_WINDOWS.
+ * It sets the text bound a run chunk.ts cannot split meets too, so widening
+ * it widens both. Empty, non-numeric and non-positive mean unset, as for every
+ * numeric variable server-portable/embed.ts reads, and so does a number past
+ * the safe integers, which that rule alone would admit. `from` says which,
+ * for the banner and preflight.
+ */
+export function resolveExtractMaxWindows(raw) {
+  // Floored before the positivity test, resolveExtractWindow's rule: 0.5 is unset, not a cap of 0.
+  const n = raw ? Math.floor(Number(raw)) : NaN;
+  // A safe integer, not merely finite: 1e308 windows made the text bound
+  // Infinity and the banner print "past Infinity estimated tokens" (review pass 2).
+  if (Number.isSafeInteger(n) && n > 0) return { windows: n, from: "OB1_EXTRACT_MAX_WINDOWS" };
+  return { windows: EXTRACT_MAX_WINDOWS, from: "default" };
+}
 
 export function resolveExtractWindow(raw, model, fallback) {
   // Floored BEFORE the positivity test (fifth review pass): 0.5 passed `n > 0`
@@ -1419,6 +1442,7 @@ export const ROUTE_ESTIMATE_MIN_PAGES = 8192;
  */
 export const MATCH_THOUGHTS_SIGNATURE = "match_thoughts(vector, float, int, jsonb, float, float)";
 export const SEARCH_THOUGHTS_HYBRID_SIGNATURE = "search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)";
+export const SEARCH_THOUGHTS_CURRENT_SIGNATURE = "search_thoughts_current(vector, text, float, int, jsonb, float, float)";
 /**
  * update_thought's signature since migration 046 (SMD-1730): a tenth,
  * defaulted parameter, `p_event`, the write event {stance, cites, valid_from,
@@ -1680,6 +1704,11 @@ export const ROLE_GRANTS = Object.freeze({
     // this grant named, and captures on (second review pass: the capture group
     // holds INSERT alone, and the read failed under the documented role).
     Object.freeze({ table: "thought_audit",  privileges: Object.freeze(["SELECT"]),                    since: "008" }),
+    // search_thoughts' opt-in prefer_current calls 059's search_thoughts_current,
+    // which reads 058's node_state(), which reads the source rows (SMD-2255).
+    // Soft as the rest of this group — without it that search is refused with
+    // this grant named, and every other search runs.
+    Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT"]),                   since: "053" }),
   ]),
   // A worker role — reembed.ts, consolidate.ts, extract-entities.ts — claims and
   // releases work, upserts its job key into `ob1_config` (reembed's
@@ -1713,8 +1742,11 @@ export const ROLE_GRANTS = Object.freeze({
   // inserts `link` facets (capture's SELECT, UPDATE on thought_facets cover the
   // reads and the closing). It records its mentions through
   // record_thought_entities, so it needs `extraction` as well (SMD-2216).
-  // graph-centrality.ts's lifecycle rows (--startable) read `thought_sources`
-  // too, so a reader running it needs this group's SELECT.
+  // graph-centrality.ts's dependency read (--startable, --decay-blocked) is
+  // 058's node_state(), which reads `thought_sources` too, so a reader running
+  // it needs SELECT on it — this group's, or the server group's since 059
+  // (SMD-2255); its default modes read node_lifecycle(), `thoughts` alone
+  // (SMD-2074).
   structure: Object.freeze([
     Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "053" }),
     Object.freeze({ table: "thought_facets",  privileges: Object.freeze(["INSERT"]),                               since: "053" }),

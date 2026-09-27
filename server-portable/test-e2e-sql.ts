@@ -239,6 +239,29 @@ console.log("\n[3] search_thoughts ranks over real pgvector");
   const firstUnweighted = unweighted.split("--- Result ")[1] ?? "";
   assert(/^1 \(100\.0% match\) ---/.test(firstUnweighted) && /alpha thought about migrations/.test(firstUnweighted), "without a weight the exact match is first again — the default is the ranking by meaning alone");
   await sql`UPDATE thoughts SET created_at = now() WHERE content LIKE 'alpha%'`;
+
+  // Migration 059 over MCP (SMD-2255): prefer_current reaches
+  // search_thoughts_current. The alpha thought, stamped a completed ticket, is
+  // demoted — its block says by what and why, the header states the window —
+  // and without the flag it is first and unmarked, as before.
+  await sql`UPDATE thoughts SET metadata = metadata || ${{ source: "linear", issue: "SMD-9902", status: "Done", status_type: "completed", linear_updated_at: "2026-09-25T00:00:00.000Z" }}::jsonb WHERE content LIKE 'alpha%'`;
+  const preferred = await call("search_thoughts", { query: "alpha", limit: 5, threshold: -1, prefer_current: true });
+  const preferredFirst = preferred.split("--- Result ")[1] ?? "";
+  const demotedBlock = preferred.split("--- Result ").find((b) => /alpha thought about migrations/.test(b)) ?? "";
+  const plainAgain = await call("search_thoughts", { query: "alpha", limit: 5, threshold: -1 });
+  assert(!/alpha thought about migrations/.test(preferredFirst) && /\n↓ Ranked ×0\.25 — completed\n/.test(demotedBlock) && /^\d+ \(100\.0% match\) ---/.test(demotedBlock)
+      && /Current first \(prefer_current\): 1 of the top \d+ matches is settled or superseded and ranked below the current ones; 1 carries a lifecycle \(latest sync 2026-09-25T00:00:00\.000Z\)\./.test(preferred)
+      && /^1 \(100\.0% match\) ---/.test(plainAgain.split("--- Result ")[1] ?? "") && !/↓ Ranked|Current first/.test(plainAgain),
+    `prefer_current demotes the completed alpha ticket below the current rows, says ×0.25 — completed on its block (its similarity still the cosine) and the window in the header; without it the ticket is first and unmarked (${demotedBlock.split("\n").slice(0, 3).join(" / ")})`);
+  // The tool's description states the weight 059 applies, and they agree.
+  const listed = await fetch(BASE, { method: "POST", headers: H, body: JSON.stringify({ jsonrpc: "2.0", id: 0, method: "tools/list", params: {} }) });
+  const listedText = await listed.text();
+  const listedBody = JSON.parse(listedText.startsWith("{") ? listedText : (listedText.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
+  const preferDesc = String(listedBody.result?.tools?.find((t: { name: string }) => t.name === "search_thoughts")?.inputSchema?.properties?.prefer_current?.description ?? "");
+  const [{ w }] = await sql`SELECT search_demote_weight() AS w`;
+  assert(Number(/multiplied by ([0-9.]+)/.exec(preferDesc)?.[1]) === Number(w) && /off \(default\)/i.test(preferDesc),
+    `prefer_current's description names the weight search_demote_weight() applies (${/multiplied by ([0-9.]+)/.exec(preferDesc)?.[1]} = ${w}) and says it is off by default`);
+  await sql`UPDATE thoughts SET metadata = metadata - 'source' - 'issue' - 'status' - 'status_type' - 'linear_updated_at' WHERE content LIKE 'alpha%'`;
   await sql.close();
 }
 
@@ -394,6 +417,41 @@ console.log("\n[6] thought_stats aggregates the whole corpus");
   assert(/stubbed: 3/.test(out), "topic tally is present");
   assert(!/Note: breakdowns below cover/.test(out), "no truncation note below the cap");
   assert(/Date range:/.test(out), "date range is reported");
+}
+
+console.log("\n[6b] list_thought_ids returns the id set, its digest and paging over HTTP (SMD-2244)");
+{
+  const page = JSON.parse(await call("list_thought_ids"));
+  assert(page.total === 3 && Array.isArray(page.ids) && page.ids.length === 3, `the whole small corpus and its total (${page.ids?.length}/${page.total})`);
+  assert(typeof page.digest === "string" && /^[0-9a-f]{32}$/.test(page.digest), `a first-page md5 digest (${page.digest})`);
+  assert(page.cursor === null, "a page shorter than the limit ends the walk (null cursor)");
+  assert(page.ids.every((id: string) => /^[0-9a-f-]{36}$/.test(id)), "ids only — uuids, no content");
+  // Keyset paging over HTTP: total and digest ride the first page only.
+  const p1 = JSON.parse(await call("list_thought_ids", { limit: 2 }));
+  assert(p1.ids.length === 2 && p1.cursor === p1.ids[1], "a full page carries a cursor = its last id");
+  const p2 = JSON.parse(await call("list_thought_ids", { limit: 2, after: p1.cursor }));
+  assert(p2.total === 0 && p2.digest === null, "a later page carries no total and no digest");
+  assert([...p1.ids, ...p2.ids].sort().join() === [...page.ids].sort().join(), "the two pages cover the same id set as one");
+  // A malformed cursor is refused by the tool, before any store read.
+  let refused = "";
+  try { await call("list_thought_ids", { after: "not-a-uuid" }); } catch (e) { refused = (e as Error).message; }
+  assert(/must be a thought id/.test(refused), `a non-uuid cursor is refused (${refused})`);
+}
+
+console.log("\n[6c] list_logged_searches reads back a logged search over HTTP (SMD-2245)");
+{
+  // e2e runs with OB1_QUERY_LOG on, so a search just made is in the log. Make a
+  // distinctive one, then read it back through the surface, with its arm.
+  await call("search_thoughts_keyword", { query: "zeta-log-probe-xyz" });
+  const page = JSON.parse(await call("list_logged_searches"));
+  assert(Array.isArray(page.searches) && typeof page.truncated === "boolean", `the tool answers with {searches, truncated} (${JSON.stringify(page).slice(0, 60)})`);
+  const hit = page.searches.find((s: { query: string }) => s.query === "zeta-log-probe-xyz");
+  assert(hit && hit.arm === "keyword", "the search just made is in the log, with its arm and no thought content");
+  assert(!("content" in (hit ?? {})) && !("result_ids" in (hit ?? {})), "the row carries no thought content or result ids");
+  // A malformed `since` is refused with a friendly message, before any driver cast.
+  let sinceErr = "";
+  try { await call("list_logged_searches", { since: "not-a-time" }); } catch (e) { sinceErr = (e as Error).message; }
+  assert(/since. must be an ISO-8601 time/.test(sinceErr), `a malformed since is refused, not a cast error (${sinceErr.slice(0, 60)})`);
 }
 
 console.log("\n[7] Dedup through the tool surface");
@@ -631,6 +689,11 @@ console.log("\n[10b] query log: the filter a search ran, the arm that served it 
     `keyword search is logged now (034 logged none), arm=keyword, unfiltered {} (${JSON.stringify(kwPlain)})`);
   assert(kwFiltered.arm === "keyword" && JSON.stringify(kwFiltered.filter) === JSON.stringify({ type: "idea" }),
     `a filtered keyword search records its filter (${JSON.stringify(kwFiltered)})`);
+  // 059 (SMD-2255): a search with prefer_current is the arm `current`, so a
+  // replay takes search_thoughts_current too.
+  await call("search_thoughts", { query: "zeta", limit: 5, threshold: -1, prefer_current: true });
+  const [preferRow] = await qlog<{ tool: string; arm: string | null }[]>`SELECT tool, arm FROM query_log WHERE kind = 'search' ORDER BY logged_at DESC LIMIT 1`;
+  assert(preferRow?.tool === "search_thoughts" && preferRow.arm === "current", `search_thoughts with prefer_current is logged as arm=current (${JSON.stringify(preferRow)})`);
 
   // The boundary refuses a shape jsonb should not run: a nested object. call()
   // throws on the tool error (or the schema rejection) — either way the bad

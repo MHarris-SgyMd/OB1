@@ -254,6 +254,29 @@ jobs:
         working-directory: evals
         run: bun eval-jev-gate.ts --self-check
 
+      # The orchestration profile's provisioning rules (SMD-2210), with no real
+      # n8n:
+      # - the brain-key rule (write refused, the declared scope held, a key
+      #   under any field seen);
+      # - --init's secrets and bcrypt hash;
+      # - the env writer's quoting and modes;
+      # - every credential a shipped template names declared (the kit's
+      #   templates, until SMD-2212 ships the profile's);
+      # - compose's owner block;
+      # - the key decisions against a fake n8n on loopback: reuse, renewal,
+      #   rotation, the sweep, a copied or moved file (--adopt), a symlinked
+      #   env file, a failed env write, and a rate-limited sign-in.
+      # Then the eval kit's egress judge (E) on crafted watcher logs, the
+      # parsing of the engine's facts, and the watcher's filter. The kit runs
+      # the rest against a live profile (evals/README.md).
+      - name: Orchestration provisioning rules
+        working-directory: deploy/orchestration
+        run: bun provision.ts --self-check
+
+      - name: Orchestration egress judge
+        working-directory: evals
+        run: bun eval-orchestration.ts --self-check
+
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
       - name: Cloudflare Workers build
@@ -766,12 +789,48 @@ jobs:
 
       # The other container this repository ships (SMD-1800): kubernetes-deployment's
       # image, Bun's base with its pinned install, built from integrations/ so the
-      # shared auth module is in the context. Built, not run — its database is its
-      # own (k8s/init.sql) and extensions/test-auth.ts starts the server itself.
+      # shared auth module is in the context. Built, and run only to be stopped
+      # (the step after) — its database is its own (k8s/init.sql) and
+      # extensions/test-auth.ts starts the server itself.
       # First, before the compose stack: a bring-up or smoke failure below must not
       # hide whether this image builds.
       - name: The Kubernetes image builds
         run: docker build -f integrations/kubernetes-deployment/Dockerfile -t ob1-k8s-mcp:ci integrations
+
+      # Run for this alone (SMD-2250): the server is the container's PID 1, which
+      # ignores a signal it has no handler for, so before its handler every
+      # `docker stop` and pod deletion waited out the grace period and was
+      # killed (exit 137). A search is in flight when the stop lands: its
+      # embedding endpoint is a stub that answers 503 after 2 s, so the call
+      # ends with the tool's error and never reaches the database, which is
+      # never dialled. The stop has to wait for it and count it — an idle stop
+      # passed a handler that exits at once, or that never got the server
+      # (review pass 1). The stub runs from the image just built, which has
+      # Bun, so nothing is pulled.
+      - name: The Kubernetes image stops on SIGTERM, finishing a call in flight
+        run: |
+          KEY=$(openssl rand -hex 32)
+          HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
+          docker network create ob1-k8s-stop > /dev/null
+          docker run -d --name ob1-k8s-embed --network ob1-k8s-stop ob1-k8s-mcp:ci bun -e 'Bun.serve({ port: 8080, async fetch() { await Bun.sleep(2000); return new Response("stub", { status: 503 }); } })' > /dev/null
+          docker run -d --name ob1-k8s-stop --network ob1-k8s-stop -p 127.0.0.1:8099:8000 -e DB_PASSWORD=unused -e EMBEDDING_API_BASE=http://ob1-k8s-embed:8080 -e "MCP_ACCESS_KEYS=ci:read:$HASH" ob1-k8s-mcp:ci > /dev/null
+          up=""
+          for _ in $(seq 1 40); do curl -s -m 2 -o /dev/null -X POST -d '{}' http://127.0.0.1:8099/ && { up=1; break; }; sleep 0.25; done
+          curl -s -N --max-time 10 -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $KEY" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_thoughts","arguments":{"query":"stop probe"}}}' http://127.0.0.1:8099/ > /tmp/k8s-call.out &
+          sleep 0.5
+          t0=$(date +%s%3N); docker stop ob1-k8s-stop > /dev/null; ms=$(($(date +%s%3N) - t0))
+          wait
+          code=$(docker inspect -f '{{.State.ExitCode}}' ob1-k8s-stop)
+          log=$(docker logs ob1-k8s-stop 2>&1)
+          docker rm -f ob1-k8s-stop ob1-k8s-embed > /dev/null
+          docker network rm ob1-k8s-stop > /dev/null
+          echo "$log"
+          echo "docker stop: ${ms} ms, exit $code; the call in flight answered: $(head -c 300 /tmp/k8s-call.out)"
+          [ -n "$up" ] || { echo "the Kubernetes image never answered" >&2; exit 1; }
+          if ! { [ "$code" = 0 ] && [ "$ms" -ge 1000 ] && [ "$ms" -lt 5000 ]; }; then echo "expected exit 0 once the call in flight answered, in 1–5 s (137 near 10 s is the grace period's kill; under 1 s it did not wait)" >&2; exit 1; fi
+          grep -q '^SIGTERM: no longer accepting; 1 in flight' <<< "$log" || { echo "the handler did not count the call in flight" >&2; exit 1; }
+          grep -q '"id":1' /tmp/k8s-call.out || { echo "the call in flight got no answer" >&2; exit 1; }
 
       # The Phase 4 exit test, literally: bring up Postgres, apply the schema and
       # serve MCP, with no Supabase CLI installed and no supabase.com account.
@@ -813,9 +872,12 @@ jobs:
           # /tmp/provider-stub-wrong exists it is a provider serving another
           # model: each vector turned mostly onto dimension 0, which no word
           # reaches, so a text still ranks its own thought first but at about
-          # 30%, under the canary smoke's 50% floor, on every run.
+          # 30%, under the canary smoke's 50% floor, on every run. While
+          # /tmp/provider-stub-slow exists GET /models answers after 2 s, inside
+          # preflight's 2.5 s probe, so a server started then is still in
+          # preflight 2 s on (the SIGTERM step, SMD-2250).
           nohup python3 - <<'PY' > /tmp/provider-stub.log 2>&1 &
-          import json, math, os, re, zlib
+          import json, math, os, re, time, zlib
           from http.server import BaseHTTPRequestHandler, HTTPServer
           def embed(text):
               text = (text or "").split("\nQuery: ", 1)[-1]
@@ -833,6 +895,7 @@ jobs:
               def reply(self, body):
                   self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
               def do_GET(self):
+                  if os.path.exists("/tmp/provider-stub-slow"): time.sleep(2)
                   self.reply(b'{"object":"list","data":[]}')
               def do_POST(self):
                   req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
@@ -887,8 +950,9 @@ jobs:
       # to say `preflight OK` and fail the first capture on it (getaddrinfo
       # ENOTFOUND ollama). The
       # built image, the running database, one environment line changed, and
-      # preflight alone (the image's entrypoint is `sh -c "bun preflight.ts &&
-      # exec bun index.ts"`, so the command is replaced through --entrypoint).
+      # preflight alone (the image's entrypoint is an `sh -c` that runs
+      # preflight and then execs the server, so the command is replaced
+      # through --entrypoint).
       # Exit 1, the `provider endpoint` row failed, the remedy naming the
       # profile; and the same run with the reachable address (the runner's
       # listener from the first step, still up) passes, so the step proves
@@ -929,6 +993,12 @@ jobs:
             | jq -e '([.services[].ports[]?] | length == 3 and all(.host_ip == "127.0.0.1")) and ([.services[] | select(.network_mode != null)] | length == 0)'
           SERVER_BIND=0.0.0.0 docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 3) and .services.server.ports[0].host_ip == "0.0.0.0" and ([.services.postgres.ports[].host_ip, .services.ollama.ports[].host_ip] == ["127.0.0.1", "127.0.0.1"])'
+          # SMD-2210: the orchestration profile adds n8n's one port, also on
+          # loopback, with its image pinned by digest. Without the profile a
+          # plain config names exactly the three services it did before.
+          docker compose -f compose.yaml --profile orchestration config --format json \
+            | jq -e '([.services[].ports[]?] | length == 2 and all(.host_ip == "127.0.0.1")) and (.services.n8n.image | test("@sha256:[0-9a-f]{64}$"))'
+          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "migrate postgres server " ]
 
       # OB1_SMOKE_COMMIT: check 10 asserts the keyed /health body names the
       # commit the build arg above baked in, beside the version it asserts.
@@ -1190,6 +1260,42 @@ jobs:
           MCP_URL: http://127.0.0.1:8010/
         run: bun smoke.ts --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY"
 
+      # SMD-2250. The server stops on SIGTERM once what is in flight is
+      # answered (server-portable/shutdown.ts), and a stop during preflight
+      # ends the container (the Dockerfile's traps): before, each waited out
+      # the 10 s grace period and was killed, exit 137 — about 30 s of this
+      # job, over the canary's stops and the teardown. Last of the steps that
+      # use the server: it is left stopped. The serving stop is given 5 s:
+      # on the PR's first run the server logged `stopped in 0.0 s` and
+      # `docker compose stop` still took 2,476 ms on the runner, against a
+      # 10 s kill the gate exists to tell apart. The second stop lands inside
+      # preflight because the stub holds GET /models 2 s, and must end inside
+      # 1 s: the traps alone, with preflight in the foreground, end it only
+      # when the 2 s hold does (review pass 1). The log is read once, into a
+      # variable: `grep -q` on a pipe closes it early, which pipefail fails.
+      - name: The server stops on SIGTERM, serving and in preflight
+        working-directory: deploy
+        run: |
+          stop() {
+            t0=$(date +%s%3N); docker compose -f compose.yaml stop server > /dev/null 2>&1; ms=$(($(date +%s%3N) - t0))
+            code=$(docker inspect -f '{{.State.ExitCode}}' "$(docker compose -f compose.yaml ps -aq server)")
+            echo "$1: stopped in ${ms} ms, exit $code"
+            if ! { [ "$code" = "$2" ] && [ "$ms" -lt "$3" ]; }; then docker compose -f compose.yaml logs --tail 20 server; echo "$1: expected exit $2 within $3 ms (137 near 10 s is the grace period's kill)" >&2; exit 1; fi
+          }
+          # A keyed call first, so the pool this stop closes is this step's to
+          # open, whatever ran before it (review pass 2).
+          curl -s --max-time 10 -o /dev/null -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' http://127.0.0.1:8010/
+          stop serving 0 5000
+          last=$(docker compose -f compose.yaml logs --no-log-prefix server | grep '^SIGTERM: stopped' | tail -1 || true)
+          echo "$last"
+          [[ "$last" =~ ^SIGTERM:\ stopped\ in\ [0-9.]+\ s\;\ database\ pool\ closed\;\ exit\ 0$ ]] || { echo "the stop's line does not say the pool closed and exit 0" >&2; exit 1; }
+          touch /tmp/provider-stub-slow
+          docker compose -f compose.yaml start server > /dev/null 2>&1
+          sleep 0.5
+          stop "in preflight" 143 1000
+          rm -f /tmp/provider-stub-slow
+
       - name: Logs on failure
         if: failure()
         working-directory: deploy
@@ -1240,7 +1346,7 @@ jobs:
         working-directory: compat/supabase-sql
         run: bunx tsc --noEmit
 
-      # 29 files depend on this behaving exactly like supabase-js. A shim that is
+      # Every file the codemod lists depends on this behaving exactly like supabase-js. A shim that is
       # merely close is worse than none — they would inherit the differences with
       # no failing test to find them.
       - name: Conformance against real Postgres

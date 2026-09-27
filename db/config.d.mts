@@ -102,8 +102,10 @@ export function resolveExtractWindow(
 ): { tokens: number; from: ExtractWindowFrom; window: number | undefined; capped: boolean; unfit: boolean };
 /** The smallest window a served context is derived into, 64; a context that holds less gets the default and `unfit`. */
 export const EXTRACT_MIN_WINDOW_TOKENS: number;
-/** The most windows one thought may be extracted in, 24; over it the thought is recorded failed with the count. */
+/** The most windows one thought is extracted in by default, 24; over it the thought is extracted over its first windows, succeeded with a caveat (SMD-2240). */
 export const EXTRACT_MAX_WINDOWS: number;
+/** OB1_EXTRACT_MAX_WINDOWS when a positive safe integer once floored, else EXTRACT_MAX_WINDOWS; `from` says which. */
+export function resolveExtractMaxWindows(raw: string | undefined): { windows: number; from: "OB1_EXTRACT_MAX_WINDOWS" | "default" };
 
 /** Models whose cards claim Matryoshka training, so truncation is supported. */
 export const MRL_MODELS: Set<string>;
@@ -289,6 +291,8 @@ export const ROUTE_ESTIMATE_MIN_PAGES: number;
 export const MATCH_THOUGHTS_SIGNATURE: string;
 /** The signature the servers call, as regprocedure text (020: seven arguments). */
 export const SEARCH_THOUGHTS_HYBRID_SIGNATURE: string;
+/** The signature search_thoughts' prefer_current calls, as regprocedure text (059: the hybrid's seven arguments). */
+export const SEARCH_THOUGHTS_CURRENT_SIGNATURE: string;
 /** The signature the servers and reembed.ts call, as regprocedure text (032: nine arguments). */
 export const UPDATE_THOUGHT_SIGNATURE: string;
 /** 032's nine-argument form, the one 046 replaced (SMD-1730). */

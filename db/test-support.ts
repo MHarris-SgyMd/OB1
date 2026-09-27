@@ -136,6 +136,15 @@ const FUNCTIONS = [
   // 056 (SMD-1935); record_thought_entities is 016's name.
   "entity_type_gate(text, text)",
   "apply_entity_type_gate()",
+  // 058 (SMD-2074): string bodies, so no dependency orders their drops.
+  "node_state(uuid[])",
+  "node_dependencies()",
+  "node_lifecycle()",
+  "node_settled_types()",
+  "node_lifecycle_types()",
+  // 059 (SMD-2255)
+  "search_thoughts_current(vector, text, float, int, jsonb, float, float)",
+  "search_demote_weight()",
   "consolidation_pool(text)",
   "stale_entities(interval, int)",
   // 032 (SMD-1323)
