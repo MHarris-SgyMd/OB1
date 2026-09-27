@@ -482,11 +482,11 @@ SQL store.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 338 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
-bun test-auth.ts          # 97 — scoped, hashed, named keys
+bun test-server.ts        # 344 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default, the tool-call keepalive and the stop on SIGTERM
+bun test-auth.ts          # 120 — scoped, hashed, named keys
 bun run test:local        # 52 — fully local provider, no credential
-bun run test:sql          # 123 — store conformance, real Postgres in a container
-bun run test:e2e          # 162 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run test:sql          # 180 — store conformance, real Postgres in a container
+bun run test:e2e          # 265 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 bun run cf:build          # ~342 KiB gzipped (measured 2026-09-20 at change 97; the PostgREST store and supabase-js are in it)
 ```
 
