@@ -30,6 +30,10 @@
       "scope": "read"
     },
     {
+      "name": "worker_status",
+      "scope": "read"
+    },
+    {
       "name": "list_supersession_proposals",
       "scope": "read"
     },

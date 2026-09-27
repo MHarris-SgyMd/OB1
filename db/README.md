@@ -700,6 +700,17 @@ these when they apply, so the gap surfaces at start-up rather than on the first
 capture. The simplest answer is to grant the server role the **worker** group as
 well on an extraction brain.
 
+**Another cross-cutting exception (055's capture read).** Migration 055 (SMD-2115)
+makes the write functions read `thought_audit` — they append the capture event and
+derive its diff before the row exists — so from 055 on a capturing role needs
+`SELECT` on `thought_audit`, not only the `INSERT` the capture path always had.
+`--grant` issues both, but a role provisioned by `--grant` **before** 055 was
+granted only the `INSERT`: **after upgrading a brain past 055, run
+`bun migrate.ts --grant <role>` again for every role that captures, or its writes
+fail on the audit table's `SELECT`.** The role `migrate.ts` and the reference
+deploy connect as is the objects' owner, which holds it already — only a
+separately `--grant`-provisioned scoped role is affected.
+
 ## Chunk context, and why it is off
 
 Migration 013 adds `thought_chunks.context`: a short generated blurb naming what
