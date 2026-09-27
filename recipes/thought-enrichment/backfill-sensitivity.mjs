@@ -6,7 +6,8 @@
 // SUPABASE_SERVICE_ROLE_KEY is accepted and ignored (the credentials live in the
 // URL). Run it from a checkout: the import is relative. A refused read or write
 // ends the run with the database's reason, where a failed write was counted and
-// the scan went on.
+// the scan went on; `--dry-run` beside `--apply` is refused, where the pair
+// announced a dry run and wrote; a flag the script does not know is refused.
 /**
  * Backfill sensitivity_tier for existing thoughts.
  * Scans thoughts with sensitivity_tier = 'standard' (or null/empty),
@@ -20,7 +21,7 @@
 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { connect, endWith, failure, readEnv } from "./lib/brain.mjs";
+import { connect, endWith, failure, readEnv, refuseUnknownFlags } from "./lib/brain.mjs";
 
 // --- Sensitivity detection (shared patterns from sensitivity-patterns.json) ---
 
@@ -63,6 +64,8 @@ const PROGRESS_EVERY = 5000;
 let client = null;
 
 async function main() {
+  refuseUnknownFlags(process.argv.slice(2), ["--dry-run", "--apply"]);
+  if (dryRun && apply) throw new Error("--dry-run and --apply are exclusive: one scans, the other writes");
   if (!dryRun && !apply) {
     console.log("Usage:");
     console.log("  bun backfill-sensitivity.mjs --dry-run    # scan only");

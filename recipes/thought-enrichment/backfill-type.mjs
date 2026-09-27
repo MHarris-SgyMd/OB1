@@ -6,21 +6,23 @@
 // accepted and ignored (the credentials live in the URL). Run it from a
 // checkout: the import is relative. One read changed with the transport: a
 // page selects `metadata` whole and reads its `type` key here, since the shim
-// takes no JSON path in a select list. `--limit N` caps the rows written.
+// takes no JSON path in a select list. `--limit N` caps the rows written. A
+// flag the script does not know is refused, not ignored.
 /**
  * backfill-type.mjs
  *
  * Backfills the `type` column in the `thoughts` table from metadata.type,
  * for rows where type = 'reference' but metadata contains a valid different type.
- * (`schemas/enhanced-thoughts`' backfill_thought_types() does the same in one
- * statement; this script previews, and reports what it changed.)
+ * (`schemas/enhanced-thoughts`' backfill_thought_types() covers the OTHER
+ * rows — those whose `type` is NULL, a table that got the column after its
+ * rows; this script reads the rows stamped 'reference'.)
  *
  * Usage: bun backfill-type.mjs [--dry-run] [--batch-size N] [--limit N]
  */
 
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
-import { connect, endWith, failure, isTransientDbError, readEnv } from "./lib/brain.mjs";
+import { connect, endWith, failure, intFlag, isTransientDbError, readEnv, refuseUnknownFlags } from "./lib/brain.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -29,10 +31,7 @@ const VALID_TYPES = new Set(["idea", "task", "person_note", "reference", "decisi
 /** A positive integer flag, or the default when the flag is absent; anything else is refused by name. */
 function positiveInt(args, flag, fallback) {
   const at = args.indexOf(flag);
-  if (at === -1) return fallback;
-  const n = parseInt(args[at + 1], 10);
-  if (!Number.isInteger(n) || n < 1) throw new Error(`${flag} must be a positive integer; got "${args[at + 1] ?? ""}"`);
-  return n;
+  return at === -1 ? fallback : intFlag(args[at + 1], flag, 1);
 }
 
 const args = process.argv.slice(2);
@@ -92,6 +91,7 @@ async function updateBatch(updates) {
 }
 
 async function main() {
+  refuseUnknownFlags(args, ["--dry-run", "--batch-size", "--limit"], ["--batch-size", "--limit"]);
   const BATCH_SIZE = positiveInt(args, "--batch-size", 500);
   const LIMIT = positiveInt(args, "--limit", 0);
   client = connect(readEnv(__dirname));
@@ -132,9 +132,14 @@ async function main() {
     if (!rows || rows.length === 0) break;
 
     const updates = [];
+    let examined = 0;
 
     for (const row of rows) {
-      const metaType = row.metadata?.type; // the row's metadata, read whole
+      // The row's metadata, read whole; a non-string type is its JSON text, as
+      // PostgREST's `->>` gave it.
+      const rawType = row.metadata?.type;
+      const metaType = typeof rawType === "string" ? rawType : rawType == null ? "" : JSON.stringify(rawType);
+      examined++;
 
       if (!metaType || metaType === "" || metaType === "null") {
         totalSkippedNullType++;
@@ -154,6 +159,7 @@ async function main() {
 
       if (LIMIT && totalUpdated + updates.length >= LIMIT) {
         limitReached = true;
+        examined--; // not classified: the limit stopped the scan at this row
         break;
       }
       updates.push({ id: row.id, type: metaType });
@@ -167,7 +173,10 @@ async function main() {
       totalUpdated += updates.length;
     }
 
-    processedRows += rows.length;
+    // The rows examined — every row of the page, unless the limit stopped the
+    // scan inside it (review pass 1, cold read: the rest of the page was counted
+    // as processed and classified nowhere).
+    processedRows += examined;
     // Advance cursor past the highest id seen (rows are ordered by id ASC).
     afterId = rows[rows.length - 1].id;
 

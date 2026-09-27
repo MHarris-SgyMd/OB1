@@ -29,7 +29,7 @@
  */
 
 import { SQL } from "bun";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5541,7 +5541,7 @@ console.log("\n[26] recipes/brain-backup and recipes/lint-sweep on the SQL shim:
   }
 }
 
-console.log("\n[27] recipes/thought-enrichment on the SQL shim: the type and sensitivity backfills write the planted rows' columns and nothing else, the enrichment writes a stub model's answer as metadata objects and checkpoints, a refused write ends a run on its first row, and no URL, a Supabase URL or a refused connection is one line (SMD-2139)");
+console.log("\n[27] recipes/thought-enrichment on the SQL shim: the type and sensitivity backfills write the planted rows' columns and nothing else, the enrichment writes a stub model's answer as metadata objects and checkpoints, a refused write ends a run on its first row, a role granted the README's privileges writes, and no URL, a Supabase URL or a refused connection is one line naming no value (SMD-2139)");
 {
   // The three enrichment scripts SMD-2126 sent to compat/supabase-sql — the
   // class's first writers — driven as deployed: `bun <file>` in a directory
@@ -5557,7 +5557,10 @@ console.log("\n[27] recipes/thought-enrichment on the SQL shim: the type and sen
   // recipe's, not the cwd — `--no-env-file` stops Bun's loader, not theirs),
   // so on a machine where a developer keeps one there the no-URL refusals,
   // which that file would defeat, are skipped by name; every other run puts its
-  // URL in the environment, which the scripts prefer. CI has no such file.
+  // URL in the environment, which the scripts prefer. CI has no such file. The
+  // enrichment's checkpoint goes under ENRICH_STATE_DIR in the scratch, never
+  // the recipe's own data/ (an operator's checkpoint there is left as found —
+  // held by its mtime; review pass 1, cold read).
   const sql = new SQL({ url: URL_, max: 2 });
   const catalog27 = async () => ({
     tables: new Set(((await sql`SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
@@ -5584,7 +5587,14 @@ console.log("\n[27] recipes/thought-enrichment on the SQL shim: the type and sen
     const content = JSON.stringify({ type: "task", summary: "stub summary", topics: ["stub"], tags: ["t"], people: ["Ada"], action_items: ["do it"], confidence: 0.9, importance: 4, detected_source_type: "generic_import" });
     return Response.json({ choices: [{ message: { content } }] });
   } });
-  const model = { OPENROUTER_API_KEY: "stub", OPENROUTER_BASE_URL: `http://127.0.0.1:${stub.port}/v1` };
+  const stateEnv = { ENRICH_STATE_DIR: join(scratch, "state") };
+  const statePath = join(scratch, "state", "enrichment-state.json");
+  const model = { OPENROUTER_API_KEY: "stub", OPENROUTER_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, ...stateEnv };
+  const recipeState = join(RECIPE, "data", "enrichment-state.json");
+  const recipeStateBefore = existsSync(recipeState) ? statSync(recipeState).mtimeMs : null;
+  /** The blank row's id: the lowest uuid, so the enrichment meets it first on every run (review pass 1, cold read — a random id made the dry run's call count a coin toss). */
+  const BLANK_ID = "00000000-0000-0000-0000-000000000001";
+  const ENRICH_FLAGS = ["--provider", "openrouter", "--model", "stub-model", "--max-calls", "10000"];
   try {
     await sql`DELETE FROM thoughts`;
     await sql.unsafe(readFileSync(join(SCHEMAS_DIR, "enhanced-thoughts/schema.sql"), "utf8"));
@@ -5592,10 +5602,11 @@ console.log("\n[27] recipes/thought-enrichment on the SQL shim: the type and sen
     // their metadata, one with a type no allowlist has, one with none, one
     // already 'reference'; one restricted by pattern (a made-up SSN), two
     // personal (a dosage, a blood-pressure reading), one already personal — not
-    // scanned — and one of whitespace alone, the enrichment's no-model path.
-    // Tiers NULL, '' and 'standard' among them, the three the sensitivity
-    // filter names. Fingerprint and model label set so the writes can be held
-    // away from them (a raw insert leaves both NULL otherwise).
+    // scanned — and one of whitespace alone, the enrichment's no-model path, at
+    // the lowest id so it is the first row every enrichment run meets. Tiers
+    // NULL, '' and 'standard' among them, the three the sensitivity filter
+    // names. Fingerprint and model label set so the writes can be held away
+    // from them (a raw insert leaves both NULL otherwise).
     await sql.unsafe(`INSERT INTO thoughts (content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model)
       SELECT c, m::jsonb, 'reference', t, content_fingerprint_of(c), 'planted-model' FROM (VALUES
         ('a decision was made about the venue', '{"type":"decision","source":"notes"}', 'standard'),
@@ -5608,9 +5619,9 @@ console.log("\n[27] recipes/thought-enrichment on the SQL shim: the type and sen
         ('SSN 123-45-6789 appears in this text', '{}', 'standard'),
         ('took metoprolol 50 mg today', '{}', NULL),
         ('blood pressure 120 over 80 this morning', '{}', ''),
-        ('already personal, glucose 110 this morning', '{}', 'personal'),
-        ('   ', '{}', 'standard')
+        ('already personal, glucose 110 this morning', '{}', 'personal')
       ) v(c, m, t)`);
+    await sql`INSERT INTO thoughts (id, content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model) VALUES (${BLANK_ID}::uuid, '   ', '{}', 'reference', 'standard', content_fingerprint_of('   '), 'planted-model')`;
     const N = 12;
     type Snap = { id: string; content: string; fp: string | null; em: string | null; metadata: Record<string, unknown> };
     const snapshot = async () => (await sql`SELECT id::text AS id, content, content_fingerprint AS fp, embedding_model AS em, metadata FROM thoughts ORDER BY id`) as Snap[];
@@ -5637,10 +5648,11 @@ console.log("\n[27] recipes/thought-enrichment on the SQL shim: the type and sen
     const PROBE_ROLE = "ob1_live_enrich_probe";
     const probeUrl = URL_.replace(/\/\/[^@]*@/, `//${PROBE_ROLE}:ob1probe@`);
     const [{ mayCreate: mayCreateProbe }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
+    /** The probe role, gone: before each guarded block and in its finally (used twice — the denied cases here, the grant ladder at the end). */
+    const dropProbe = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PROBE_ROLE}') THEN EXECUTE 'DROP OWNED BY ${PROBE_ROLE}'; EXECUTE 'DROP ROLE ${PROBE_ROLE}'; END IF; END $$`);
     if (probeUrl === URL_ || !mayCreateProbe) {
       skip("…a role with SELECT alone: both backfills refused on their first write", probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
     } else {
-      const dropProbe = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PROBE_ROLE}') THEN EXECUTE 'DROP OWNED BY ${PROBE_ROLE}'; EXECUTE 'DROP ROLE ${PROBE_ROLE}'; END IF; END $$`);
       await dropProbe();
       try {
         await sql.unsafe(`CREATE ROLE ${PROBE_ROLE} LOGIN PASSWORD 'ob1probe'; GRANT USAGE ON SCHEMA public TO ${PROBE_ROLE}; GRANT SELECT ON thoughts TO ${PROBE_ROLE}`);
@@ -5649,6 +5661,15 @@ console.log("\n[27] recipes/thought-enrichment on the SQL shim: the type and sen
         const afterDenied = await typesNow();
         assert(oneLine(deniedType, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thoughts$/m) && !/Done\./.test(deniedType.out) && oneLine(deniedTier, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thoughts$/m) && !/=== Results ===/.test(deniedTier.out) && afterDenied.every((r) => r.type === "reference") && (await tiers())["personal"] === 1,
           `…a role with SELECT alone: both backfills read their page and end on the first write with 42501, exit 1, no summary, no row changed (${deniedType.code}: ${errorLine(deniedType.out)}; ${deniedTier.code}: ${errorLine(deniedTier.out)})`);
+        // The enrichment too: past the blank row (--skip 1, the .range() path), one row is classified — one paid call
+        // — and its write is refused, which ends the run: exit 1, one ERROR line, no summary, no checkpoint, no row
+        // enriched. Under Promise.allSettled it was a FAIL line per row while every later row still paid its call and
+        // the run exited 0 (review pass 1, both readers).
+        const mark = stubCalls;
+        const deniedEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: probeUrl, ...model }, "--apply", "--skip", "1", "--limit", "2", "--concurrency", "1", ...ENRICH_FLAGS);
+        const [{ enrichedDenied }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedDenied" FROM thoughts`) as { enrichedDenied: number }[];
+        assert(oneLine(deniedEnrich, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thoughts$/m) && !/=== ENRICHMENT|FAIL #/.test(deniedEnrich.out) && stubCalls - mark === 1 && enrichedDenied === 0 && !existsSync(statePath),
+          `…and the enrichment ends on its first refused write after one model call: exit 1, one ERROR line, no FAIL lines, no summary, no checkpoint, no row enriched (${deniedEnrich.code}: ${errorLine(deniedEnrich.out)}; ${stubCalls - mark} call(s), ${enrichedDenied} enriched)`);
       } finally {
         await dropProbe();
       }
@@ -5680,31 +5701,33 @@ console.log("\n[27] recipes/thought-enrichment on the SQL shim: the type and sen
 
     // enrich-thoughts: the two exact counts of --status are head queries; the dry run calls the model and writes
     // neither a row nor the checkpoint.
-    const status0 = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_ }, "--status");
-    const dryEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--dry-run", "--limit", "2", "--provider", "openrouter");
+    const status0 = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...stateEnv }, "--status");
+    const markDry = stubCalls;
+    const dryEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--dry-run", "--limit", "2", ...ENRICH_FLAGS);
     const [{ enrichedAfterDry }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedAfterDry" FROM thoughts`) as { enrichedAfterDry: number }[];
-    assert(status0.code === 0 && status0.out.includes(`Total thoughts:     ${N}`) && status0.out.includes("Enriched:           0 (0.0%)") && status0.out.includes(`Remaining:          ${N}`) && dryEnrich.code === 0 && (dryEnrich.out.match(/^  \[DRY\] #[0-9a-f-]{36}: \{"type":"task"/gm) ?? []).length === 2 && stubCalls === 2 && enrichedAfterDry === 0 && !existsSync(join(scratch, "data", "enrichment-state.json")),
-      `enrich-thoughts.mjs --status counts ${N} thoughts, none enriched, through two head queries; --dry-run --limit 2 shows the stub's two classifications, calls it twice, writes no row and no checkpoint (${status0.code}/${dryEnrich.code}: ${stubCalls} calls, ${enrichedAfterDry} enriched)`);
+    assert(status0.code === 0 && status0.out.includes(`Total thoughts:     ${N}`) && status0.out.includes("Enriched:           0 (0.0%)") && status0.out.includes(`Remaining:          ${N}`) && dryEnrich.code === 0 && (dryEnrich.out.match(/^  \[DRY\] #[0-9a-f-]{36}: \{"type":"task"/gm) ?? []).length === 1 && stubCalls - markDry === 1 && enrichedAfterDry === 0 && !existsSync(statePath),
+      `enrich-thoughts.mjs --status counts ${N} thoughts, none enriched, through two head queries; --dry-run --limit 2 meets the blank row and one more — one [DRY] line, one call — and writes no row and no checkpoint (${status0.code}/${dryEnrich.code}: ${stubCalls - markDry} call(s), ${enrichedAfterDry} enriched)`);
 
     // --apply --limit 5: five rows in id order — the model's answer as the enhanced columns and a metadata OBJECT
     // that keeps the row's own keys, the whitespace row marked enriched without a call — and the checkpoint written
     // under the run's directory, not the recipe's.
-    const applyEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--apply", "--limit", "5", "--concurrency", "2", "--provider", "openrouter", "--model", "stub-model");
+    const markApply = stubCalls;
+    const applyEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--apply", "--limit", "5", "--concurrency", "2", ...ENRICH_FLAGS);
     type Enriched = { id: string; content: string; type: string; importance: number; source_type: string | null; mt: string; metadata: Record<string, unknown> };
     const enrichedRows = (await sql`SELECT id::text AS id, content, type, importance, source_type, jsonb_typeof(metadata) AS mt, metadata FROM thoughts WHERE enriched ORDER BY id`) as Enriched[];
-    const blankEnriched = enrichedRows.some((r) => r.content.trim() === "");
-    const classified = enrichedRows.filter((r) => r.content.trim() !== "");
+    const blank = enrichedRows[0];
+    const classified = enrichedRows.slice(1);
     const keepsOwnKeys = (r: Enriched) => Object.entries(planted.find((p) => p.id === r.id)?.metadata ?? {}).every(([k, v]) => k === "type" || JSON.stringify(r.metadata[k]) === JSON.stringify(v));
-    const statePath = join(scratch, "data", "enrichment-state.json");
     const state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) as { totalProcessed: number; lastProcessedId: string | null; failedIds: string[] } : null;
-    assert(applyEnrich.code === 0 && applyEnrich.out.includes("Enriched:       5") && applyEnrich.out.includes(`LLM calls made: ${blankEnriched ? 4 : 5} / 10000`) && stubCalls === 2 + (blankEnriched ? 4 : 5) && enrichedRows.length === 5 && enrichedRows.every((r) => r.mt === "object") && classified.every((r) => r.type === "task" && r.importance === 4 && r.source_type === "generic_import" && r.metadata.summary === "stub summary" && JSON.stringify(r.metadata.topics) === '["stub"]' && r.metadata.enriched_provider === "openrouter" && r.metadata.enriched_model === "stub-model" && r.metadata.type === "task" && keepsOwnKeys(r)) && /<thought_content>\\n[^]*<\/thought_content>/.test(stubBody) && state?.totalProcessed === 5 && state.lastProcessedId === enrichedRows[4].id && state.failedIds.length === 0 && !existsSync(join(RECIPE, "data", "enrichment-state.json")),
-      `…--apply --limit 5 --concurrency 2: five rows enriched in id order, each classified row carrying the stub's type, importance, source and a metadata object with its own keys kept, a whitespace row costing no call, the prompt delimited, the checkpoint at the last id under the run's directory (exit ${applyEnrich.code}: ${enrichedRows.length} rows, ${stubCalls} calls, state ${JSON.stringify(state)})`);
+    const recipeStateAfter = existsSync(recipeState) ? statSync(recipeState).mtimeMs : null;
+    assert(applyEnrich.code === 0 && applyEnrich.out.includes("Enriched:       5") && applyEnrich.out.includes("LLM calls made: 4 / 10000") && stubCalls - markApply === 4 && enrichedRows.length === 5 && blank?.id === BLANK_ID && blank.type === "reference" && JSON.stringify(blank.metadata) === "{}" && enrichedRows.every((r) => r.mt === "object") && classified.every((r) => r.type === "task" && r.importance === 4 && r.source_type === "generic_import" && r.metadata.summary === "stub summary" && JSON.stringify(r.metadata.topics) === '["stub"]' && r.metadata.enriched_provider === "openrouter" && r.metadata.enriched_model === "stub-model" && r.metadata.type === "task" && keepsOwnKeys(r)) && /<thought_content>\\n[^]*<\/thought_content>/.test(stubBody) && state?.totalProcessed === 5 && state.lastProcessedId === enrichedRows[4].id && state.failedIds.length === 0 && recipeStateAfter === recipeStateBefore,
+      `…--apply --limit 5 --concurrency 2: the blank row and four more enriched in id order — four calls, the blank row marked with its type and metadata untouched — each classified row carrying the stub's type, importance, source and a metadata object with its own keys kept, the prompt delimited, the checkpoint at the last id under ENRICH_STATE_DIR and the recipe's own left as found (exit ${applyEnrich.code}: ${enrichedRows.length} rows, ${stubCalls - markApply} calls, state ${JSON.stringify(state)})`);
 
     // --status reads the new split; --retry-failed reads its ids back through one .in() query and enriches them.
-    const status1 = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_ }, "--status");
+    const status1 = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...stateEnv }, "--status");
     const [{ retryId }] = (await sql`SELECT id::text AS "retryId" FROM thoughts WHERE NOT enriched AND btrim(content) <> '' ORDER BY id LIMIT 1`) as { retryId: string }[];
     writeFileSync(statePath, JSON.stringify({ ...state, failedIds: [retryId], totalFailed: 1 }));
-    const retry = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--apply", "--retry-failed", "--provider", "openrouter", "--model", "stub-model");
+    const retry = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--apply", "--retry-failed", ...ENRICH_FLAGS);
     const [{ retried }] = (await sql`SELECT (enriched AND type = 'task' AND metadata->>'summary' = 'stub summary') AS retried FROM thoughts WHERE id = ${retryId}::uuid`) as { retried: boolean }[];
     assert(status1.code === 0 && status1.out.includes("Enriched:           5 (41.7%)") && status1.out.includes(`Remaining:          ${N - 5}`) && retry.code === 0 && retry.out.includes(`  OK retry #${retryId} -> task`) && retry.out.includes("Processed: 1, Fixed: 1, Still failing: 0") && retried === true,
       `…--status reads 5 of ${N}; --apply --retry-failed fetches the checkpoint's failed id by .in() and enriches it (${status1.code}/${retry.code}: ${errorLine(retry.out)})`);
@@ -5726,12 +5749,49 @@ console.log("\n[27] recipes/thought-enrichment on the SQL shim: the type and sen
       assert(noUrl.every((r) => oneLine(r, named) && r.out.trim().split("\n").length === 1),
         `…no URL: each of the three ends in one line naming the variable, exit 1 (${noUrl.map((r) => `${r.code}: ${firstLine(r.out).slice(0, 60)}`).join("; ")})`);
     }
+    // A value that is not postgres:// is refused by the recipe's own line, which names the scheme and never the value:
+    // the shim's refusal quotes the first forty characters, which since this port carry the password (review pass 1,
+    // run-it). The mistyped scheme below carries a token that must appear nowhere in the output.
     const httpsType = await script("backfill-type.mjs", { SUPABASE_URL: "https://example.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "unused" }, "--dry-run");
-    const httpsEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: "https://example.supabase.co" }, "--status");
+    const mistyped = await script("backfill-sensitivity.mjs", { SUPABASE_URL: "mysql://brain:pw-not-real@127.0.0.1:5432/x" }, "--dry-run");
+    const httpsEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: "https://example.supabase.co", ...stateEnv }, "--status");
     const refused = await script("backfill-type.mjs", { SUPABASE_URL: "postgres://nobody:nothing@127.0.0.1:1/nowhere" }, "--dry-run");
-    const zero = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--limit", "0");
-    assert(oneLine(httpsType, /^ERROR: compat\/supabase-sql: expected a postgres:\/\/ connection URL/m) && !/Starting type backfill/.test(httpsType.out) && oneLine(httpsEnrich, /^ERROR: compat\/supabase-sql: expected a postgres:\/\/ connection URL/m) && !/Enrichment Status/.test(httpsEnrich.out) && oneLine(refused, /^ERROR: read thoughts after id 0{8}-0{4}-0{4}-0{4}-0{12} → ERR_POSTGRES_CONNECTION_REFUSED /m) && oneLine(zero, /^ERROR: --limit must be a positive integer; got "0"$/m),
-      `…a Supabase URL is the shim's refusal before any query, for a backfill and for --status; a refused connection is one line naming the driver's code; --limit 0 is one line (${httpsType.code}: ${errorLine(httpsType.out).slice(0, 70)}; ${httpsEnrich.code}; ${refused.code}: ${errorLine(refused.out).slice(0, 90)}; ${zero.code})`);
+    const zero = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...stateEnv }, "--dry-run", "--limit", "0");
+    const typo = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ }, "--dryrun");
+    const both = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--apply");
+    const scheme = /^ERROR: SUPABASE_URL must be a postgres:\/\/ connection string; the value's scheme is "(https|mysql):"/m;
+    assert(oneLine(httpsType, scheme) && !/Starting type backfill|example\.supabase/.test(httpsType.out) && oneLine(mistyped, scheme) && !/pw-not-real|127\.0\.0\.1/.test(mistyped.out) && oneLine(httpsEnrich, scheme) && !/Enrichment Status/.test(httpsEnrich.out) && oneLine(refused, /^ERROR: read thoughts after id 0{8}-0{4}-0{4}-0{4}-0{12} → ERR_POSTGRES_CONNECTION_REFUSED /m) && oneLine(zero, /^ERROR: --limit must be an integer of at least 1; got "0"$/m) && oneLine(typo, /^ERROR: unknown flag "--dryrun" \(flags: --dry-run, --apply\)$/m) && (await tiers())["restricted"] === 1 && oneLine(both, /^ERROR: --dry-run and --apply are exclusive/m),
+      `…a Supabase URL and a mistyped scheme are refused before any query by a line naming the scheme and not the value (the password token appears nowhere); a refused connection is one line naming the driver's code; --limit 0, an unknown flag (--dryrun, which wrote a row) and --dry-run beside --apply (which wrote under a DRY RUN banner) are one line each (${httpsType.code}: ${errorLine(httpsType.out).slice(0, 80)}; ${mistyped.code}; ${httpsEnrich.code}; ${refused.code}: ${errorLine(refused.out).slice(0, 90)}; ${zero.code}; ${typo.code}: ${errorLine(typo.out)}; ${both.code})`);
+
+    // The README's grants, proved: SELECT and UPDATE on thoughts write `type` (the audit trigger records no event for it);
+    // a metadata change fires 008/055's audit trigger, which needs SELECT and INSERT on thought_audit — the message
+    // names that table, the README's entry for it, and the grant cures it (review pass 1, cold read: the README had
+    // promised SELECT, UPDATE on thoughts alone; probed, then held here). A thirteenth row, planted after the snapshot
+    // above. The same two guards as the denied block.
+    if (probeUrl === URL_ || !mayCreateProbe) {
+      skip("…a role with the README's grants writes type alone, is refused metadata until thought_audit is granted", probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+    } else {
+      await dropProbe();
+      try {
+        await sql.unsafe(`CREATE ROLE ${PROBE_ROLE} LOGIN PASSWORD 'ob1probe'; GRANT USAGE ON SCHEMA public TO ${PROBE_ROLE}; GRANT SELECT, UPDATE ON thoughts TO ${PROBE_ROLE}`);
+        await sql`INSERT INTO thoughts (content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model) VALUES ('granted row: a decision', '{"type":"decision"}', 'reference', 'standard', content_fingerprint_of('granted row: a decision'), 'planted-model')`;
+        const enrichedCount = async () => ((await sql`SELECT count(*) FILTER (WHERE enriched)::int AS n FROM thoughts`) as { n: number }[])[0].n;
+        const grantedType = await script("backfill-type.mjs", { SUPABASE_URL: probeUrl }, "--limit", "1");
+        const [{ granted }] = (await sql`SELECT type AS granted FROM thoughts WHERE content LIKE 'granted row%'`) as { granted: string }[];
+        const state2 = { ...model, ENRICH_STATE_DIR: join(scratch, "state2") };
+        const markAudit = stubCalls;
+        const before = await enrichedCount();
+        const auditDenied = await script("enrich-thoughts.mjs", { SUPABASE_URL: probeUrl, ...state2 }, "--apply", "--limit", "1", "--concurrency", "1", ...ENRICH_FLAGS);
+        const mid = await enrichedCount();
+        await sql.unsafe(`GRANT SELECT, INSERT ON thought_audit TO ${PROBE_ROLE}`);
+        const auditOk = await script("enrich-thoughts.mjs", { SUPABASE_URL: probeUrl, ...state2 }, "--apply", "--limit", "1", "--concurrency", "1", ...ENRICH_FLAGS);
+        const after = await enrichedCount();
+        assert(grantedType.code === 0 && granted === "decision" && oneLine(auditDenied, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thought_audit$/m) && mid === before && stubCalls - markAudit === 2 && auditOk.code === 0 && auditOk.out.includes("Enriched:       1") && after === before + 1,
+          `…a role with SELECT, UPDATE on thoughts writes a type; its first metadata write is refused with 42501 on thought_audit (the audit trigger's table), exit 1; with SELECT, INSERT on thought_audit the same run enriches the row (${grantedType.code}: ${granted}; ${auditDenied.code}: ${errorLine(auditDenied.out).slice(0, 110)}; ${auditOk.code}: ${before} → ${mid} → ${after})`);
+      } finally {
+        await dropProbe();
+      }
+    }
   } finally {
     stub.stop(true);
     rmSync(scratch, { recursive: true, force: true });

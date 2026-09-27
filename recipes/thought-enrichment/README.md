@@ -1,6 +1,6 @@
 # Thought Enrichment Pipeline
 
-> **On this fork (SMD-2139).** `enrich-thoughts.mjs`, `backfill-type.mjs` and `backfill-sensitivity.mjs` read and write the brain through `compat/supabase-sql` under `bun`: `SUPABASE_URL` is a `postgres://` connection string, `SUPABASE_SERVICE_ROLE_KEY` is accepted and ignored, and the scripts run from a checkout (their import is relative). Until SMD-2139 they reached the brain as PostgREST clients — `${SUPABASE_URL}/rest/v1/…` with a service-role key — over a gateway this fork's stack does not run (SETUP.md); the decision for the class is in `docs/vendored-disposition.md`. Their writes are `type`, `sensitivity_tier`, `importance`, `source_type`, `enriched` and `metadata`, never content or vector — the columns `update_thought` owns stay its. Two things changed with the transport: a refused read or write ends the run with the database's reason, one line and exit 1, where a failed write was counted and the scan went on; and `enrich-thoughts.mjs` keeps its checkpoint under the directory you run from. The port is a stopgap by design: SMD-1930 re-expresses these backfills as transforms over the worker-claim runner, and the client goes with it.
+> **On this fork (SMD-2139).** `enrich-thoughts.mjs`, `backfill-type.mjs` and `backfill-sensitivity.mjs` read and write the brain through `compat/supabase-sql` under `bun`: `SUPABASE_URL` is a `postgres://` connection string, `SUPABASE_SERVICE_ROLE_KEY` is accepted and ignored, and the scripts run from a checkout (their import is relative). Until SMD-2139 they reached the brain as PostgREST clients — `${SUPABASE_URL}/rest/v1/…` with a service-role key — over a gateway this fork's stack does not run (SETUP.md); the decision for the class is in `docs/vendored-disposition.md`. Their writes are `type`, `sensitivity_tier`, `importance`, `source_type`, `enriched` and `metadata`, never content or vector — the columns `update_thought` owns stay its. Three things changed with the transport: a refused read or write ends the run with the database's reason, one line and exit 1, where a failed write was counted and the scan went on (and an enrichment run that left rows failed exits 1); a flag no script knows is refused, and so is `--dry-run` beside `--apply`; and every numeric flag must be an integer. The port is a stopgap by design: SMD-1930 re-expresses these backfills as transforms over the worker-claim runner, and the client goes with it.
 
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
 
@@ -10,8 +10,8 @@ Retroactively classify and enrich your existing thoughts with structured metadat
 
 ## Prerequisites
 
-- A brain built by `db/migrate.ts` (SETUP.md) and its `postgres://` connection string, for a role that may `SELECT` and `UPDATE` `thoughts`
-- The **enhanced thoughts schema** applied (`schemas/enhanced-thoughts/schema.sql`) — the scripts read and write the columns it adds to `thoughts`: `type`, `importance`, `source_type`, `enriched`, `sensitivity_tier` (and `metadata`, which is core). Without it a run stops at its first read (`42703 column "enriched" does not exist`)
+- A brain built by `db/migrate.ts` (SETUP.md) and its `postgres://` connection string, for a role with the grants under Security notes — `SELECT, UPDATE` on `thoughts` for the two backfills; `enrich-thoughts.mjs` changes `metadata`, which the audit trigger records, so it needs `SELECT, INSERT` on `thought_audit` too
+- The **enhanced thoughts schema** applied (`schemas/enhanced-thoughts/schema.sql`) — the scripts read and write the columns it adds to `thoughts`: `type`, `importance`, `source_type`, `enriched`, `sensitivity_tier` (and `metadata`, which is core). Without it a run stops at its first read with `42703 column "…" does not exist`, naming the first column the script reads (`type`, `sensitivity_tier`, `enriched` or `source_type`)
 - [Bun 1.4+](https://bun.sh/) and a checkout of this repository — the scripts import `compat/supabase-sql` by relative path
 - For `enrich-thoughts.mjs` alone: an [OpenRouter](https://openrouter.ai/) API key (the default provider), an [Anthropic](https://console.anthropic.com/) API key, or a local OpenAI-compatible endpoint (Setup, step 3). The two backfills call no model.
 
@@ -27,7 +27,7 @@ Retroactively classify and enrich your existing thoughts with structured metadat
    ENV
    ```
 
-   `.env.local` is gitignored. A `SUPABASE_SERVICE_ROLE_KEY` line from an older setup may stay; it is read and ignored.
+   `.env.local` is gitignored. A `SUPABASE_SERVICE_ROLE_KEY` line from an older setup may stay; it is read and ignored. The file takes `KEY=value` lines, a leading `export`, quotes around a value, and a `# comment` after an unquoted one.
 
 2. If using Anthropic directly instead of OpenRouter, add `ANTHROPIC_API_KEY` and pass `--provider anthropic` when running.
 
@@ -73,7 +73,7 @@ Classifies each thought using an LLM and writes structured metadata back to the 
 
 The `--max-calls` flag is a hard ceiling on the number of LLM calls per run. The default is `10000`; pass `--max-calls 0` to disable the cap. When the limit is hit the script aborts cleanly, prints a summary, and leaves remaining rows with `enriched=false` so you can resume later. This protects against a shell typo (e.g. dropping `--limit`) burning unbounded spend against a large un-enriched table.
 
-**Resume.** The script checkpoints `lastProcessedId` to `data/enrichment-state.json` under the directory you run from — the recipe's own when you run from it, as above — after each concurrency chunk. On startup, if a checkpoint exists and neither `--skip` nor `--reset-state` was passed, the run resumes from `id > lastProcessedId` (ids are uuids on this fork, so the order is the uuid's, not the order of capture). The `enriched=false` filter is still applied as a second layer of defense. Pass `--reset-state` to ignore the checkpoint and start from scratch.
+**Resume.** The script checkpoints `lastProcessedId` to `data/enrichment-state.json` beside the script — or under `ENRICH_STATE_DIR`, if set — after each concurrency chunk. On startup, if a checkpoint exists and neither `--skip` nor `--reset-state` was passed, the run resumes from `id > lastProcessedId` (ids are uuids on this fork, so the order is the uuid's, not the order of capture). The `enriched=false` filter is still applied as a second layer of defense. Pass `--reset-state` to ignore the checkpoint and start from scratch. A row whose `enriched` is `NULL` rather than `false` is neither counted by `--status` nor picked up — the schema's default is `false`, so only a raw writer leaves one; `UPDATE thoughts SET enriched = false WHERE enriched IS NULL` brings them in. A run that left rows failed exits 1 with its summary, so a scheduler can tell.
 
 ### backfill-type.mjs -- Type canonicalization
 
@@ -94,7 +94,7 @@ Fixes thoughts where the top-level `type` column is still `reference` but `metad
 
 **Flags:** `--dry-run`, `--limit N` (stop after N rows written), `--batch-size N` (rows per page, default 500).
 
-The same backfill in one statement is `schemas/enhanced-thoughts`' own function: `SELECT backfill_thought_types();` with its canonical allowlist. The script is the version that previews, stops at a limit, and reports what it changed per type and what it skipped.
+`schemas/enhanced-thoughts`' own `SELECT backfill_thought_types();` covers the *other* rows: those whose `type` is `NULL` — a table that got the column after its rows were captured (`ADD COLUMN` leaves every existing row `NULL`, so on a brain that applied the schema late this script sees no candidates and the function sees them all). This script reads the rows stamped `reference`, previews, stops at a limit, and reports what it changed per type and what it skipped.
 
 ### backfill-sensitivity.mjs -- Regex-based sensitivity detection
 
@@ -123,18 +123,20 @@ Scans thought content for patterns matching SSNs, credit cards, API keys, passwo
 
 - **Prompt injection:** thought content is wrapped in `<thought_content>` tags and the system prompt instructs the model to treat everything inside as untrusted data. Any literal tag occurrences in content are escaped. Output fields (`summary`, `topics`, `tags`, `people`, `action_items`) are length-capped and control-char-stripped before they are written to `metadata`. Even so, enriching hostile third-party imports (shared chat exports, scraped feeds) can still influence classification labels — review before trusting them as ground truth.
 - **Thought text leaves the box.** `enrich-thoughts.mjs` sends each thought's first 4,000 characters to the provider you choose. The fork's own server keeps its model calls local by default (`OB1_LLM_BASE_URL`, SETUP.md) and gates what leaves through its egress policy; this script runs outside that gate, so choose the endpoint deliberately — `OPENROUTER_BASE_URL` at a local OpenAI-compatible server (Setup, step 3) keeps the text on the machine. A brain holding health or financial detail should not be enriched through a cloud provider without that decision. The two backfills send nothing anywhere.
-- **The connection string is the credential.** It carries the role's password: keep it in the environment or the gitignored `.env.local`, never in a file you commit, and if the role is for these scripts alone grant it `SELECT, UPDATE ON thoughts` and nothing more.
+- **The connection string is the credential.** It carries the role's password: keep it in the environment or the gitignored `.env.local`, never in a file you commit. A value that is not a `postgres://` string is refused by a line that names its scheme and never repeats the value. If the role is for these scripts alone, grant it exactly what they write — `GRANT USAGE ON SCHEMA public TO <role>; GRANT SELECT, UPDATE ON thoughts TO <role>;` for the two backfills, and for `enrich-thoughts.mjs` also `GRANT SELECT, INSERT ON thought_audit TO <role>;` (a metadata change is recorded by the audit trigger, which runs as the connecting role). The server's own role has these through `bun db/migrate.ts --grant` (`db/README.md`, "Grants for a capturing role").
 
 ## Troubleshooting
 
 Every failure is one line on stderr, `ERROR: <what> → <code> <message>`, and exit 1 (`DEBUG=1` adds the stack).
 
 - `ERROR: SUPABASE_URL must be set …` — the variable is neither in the environment nor in `.env.local` beside the scripts.
-- `ERROR: compat/supabase-sql: expected a postgres:// connection URL, got "https://…"` — an older `.env.local` still names a Supabase project; the fork's value is the database's connection string.
+- `ERROR: SUPABASE_URL must be a postgres:// connection string; the value's scheme is "https:" …` — an older `.env.local` still names a Supabase project; the fork's value is the database's connection string. The value itself is never printed.
+- `ERROR: unknown flag "--dryrun" (flags: --dry-run, --apply)` — a flag the script does not know is refused rather than ignored (the typo would otherwise have run the write). `--dry-run` beside `--apply` is refused the same way, and a numeric flag must be an integer (`--limit 1.5`, `--concurrency 0` and `--concurrency x` are refused by name).
 - `… → ERR_POSTGRES_CONNECTION_REFUSED Failed to connect` — nothing listens at the host and port in the URL (a stopped container, or `5432` where the compose stack publishes another port).
 - `… → 3D000 database "…" does not exist` — the URL's path names a database the server does not have.
-- `… → 42703 column "enriched" does not exist` (or `type`, `sensitivity_tier`) — `schemas/enhanced-thoughts/schema.sql` has not been applied to this brain: `psql "$SUPABASE_URL" -f schemas/enhanced-thoughts/schema.sql` from the checkout's root.
+- `… → 42703 column "type" does not exist` (or `sensitivity_tier`, `enriched`, `source_type` — the first column the script reads) — `schemas/enhanced-thoughts/schema.sql` has not been applied to this brain: `psql "$SUPABASE_URL" -f schemas/enhanced-thoughts/schema.sql` from the checkout's root.
 - `… → 42501 permission denied for table thoughts` — the role in the URL may not read or write `thoughts`: `GRANT SELECT, UPDATE ON thoughts TO <role>`.
+- `… → 42501 permission denied for table thought_audit` — `enrich-thoughts.mjs` changed a row's `metadata` and the audit trigger, running as your role, could not record it: `GRANT SELECT, INSERT ON thought_audit TO <role>`. The two backfills never meet this (a `type` or `sensitivity_tier` change records no event).
 - `--dry-run` reads the brain, so it needs the URL too; only `--help` and `backfill-sensitivity.mjs` without a flag run without one.
 
 ## Repairing double-encoded metadata (versions before this fix)

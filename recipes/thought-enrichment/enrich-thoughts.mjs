@@ -4,11 +4,13 @@
 // stack runs no PostgREST. It reads and writes through compat/supabase-sql now —
 // SUPABASE_URL is a postgres:// connection string, SUPABASE_SERVICE_ROLE_KEY is
 // accepted and ignored (the credentials live in the URL). Run it from a
-// checkout: the import is relative. The checkpoint is written under the
-// directory the run starts in (`data/enrichment-state.json` — the recipe's own
-// when you run from it), and OPENROUTER_BASE_URL points the OpenRouter provider
-// at any OpenAI-compatible endpoint, a local one included. The thought text
-// still leaves the box to the provider you choose: the README says so.
+// checkout: the import is relative. The checkpoint stays at
+// `data/enrichment-state.json` beside the script unless ENRICH_STATE_DIR names
+// another directory (the live suite's runs keep theirs out of the checkout), and
+// OPENROUTER_BASE_URL points the OpenRouter provider at any OpenAI-compatible
+// endpoint, a local one included. The thought text still leaves the box to the
+// provider you choose: the README says so. A write the database refuses ends
+// the run on that row, and a run with failed rows exits 1.
 /**
  * enrich-thoughts.mjs
  *
@@ -46,7 +48,7 @@ import {
   resolveTimeoutMs,
   DEFAULT_LLM_TIMEOUT_MS,
 } from "./lib/memory-core.mjs";
-import { connect, endWith, failure, isTransientDbError, readEnv } from "./lib/brain.mjs";
+import { connect, endWith, failure, intFlag, isTransientDbError, readEnv, refuseUnknownFlags } from "./lib/brain.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -71,8 +73,10 @@ const ALLOWED_SOURCE_TYPES = new Set([
   "claude_code_import",
 ]);
 
-const STATE_DIR = path.join(process.cwd(), "data");
-const STATE_PATH = path.join(STATE_DIR, "enrichment-state.json");
+// The checkpoint's directory: beside the script, or ENRICH_STATE_DIR; set by
+// main() once the environment is read.
+let STATE_DIR = path.join(__dirname, "data");
+let STATE_PATH = path.join(STATE_DIR, "enrichment-state.json");
 const BATCH_SIZE = 50;
 
 // --- Classification Prompt ---
@@ -238,6 +242,9 @@ async function main() {
 
   const env = readEnv(__dirname);
   const config = buildConfig(args, env);
+  STATE_DIR = path.resolve(env.ENRICH_STATE_DIR || path.join(__dirname, "data"));
+  STATE_PATH = path.join(STATE_DIR, "enrichment-state.json");
+  if (args.dryRun && args.apply) throw new Error("--dry-run and --apply are exclusive: one previews, the other writes");
   client = connect(env);
 
   if (args.status) {
@@ -302,18 +309,20 @@ async function main() {
       const thoughts = await fetchByIds(batchIds);
       if (thoughts.length === 0) continue;
 
-      for (let j = 0; j < thoughts.length; j += config.concurrency) {
+      for (let j = 0; j < thoughts.length; ) {
         if (config.maxCalls > 0 && budget.calls >= config.maxCalls) {
           budgetExceeded = true;
           break;
         }
-        const chunk = thoughts.slice(j, j + config.concurrency);
+        const chunk = thoughts.slice(j, j + chunkWidth(config, budget));
+        j += chunk.length;
         const results = await Promise.allSettled(
           chunk.map((t) => classifyAndUpdate(t, config, budget))
         );
         for (let k = 0; k < results.length; k++) {
           processed++;
           const t = chunk[k];
+          if (results[k].status === "rejected") refusedWrite(results[k].reason);
           if (results[k].status === "fulfilled") {
             enriched++;
             if (!config.dryRun) {
@@ -343,6 +352,7 @@ async function main() {
     console.log(budgetExceeded ? "=== RETRY ABORTED (--max-calls reached) ===" : "=== RETRY COMPLETE ===");
     console.log(`Processed: ${processed}, Fixed: ${enriched}, Still failing: ${failed}`);
     console.log(`LLM calls made: ${budget.calls}${config.maxCalls > 0 ? " / " + config.maxCalls : ""}`);
+    if (failed > 0) process.exitCode = 1;
     return;
   }
 
@@ -384,13 +394,16 @@ async function main() {
       break;
     }
 
-    // API mode: one thought per call, high concurrency
-    for (let i = 0; i < thoughts.length; i += config.concurrency) {
+    // API mode: one thought per call, high concurrency — a chunk no wider than
+    // the budget left, so --max-calls is the ceiling it says it is (review
+    // pass 1, run-it: --max-calls 1 at concurrency 20 made three calls).
+    for (let i = 0; i < thoughts.length; ) {
       if (config.maxCalls > 0 && budget.calls >= config.maxCalls) {
         budgetExceeded = true;
         break;
       }
-      const chunk = thoughts.slice(i, i + config.concurrency);
+      const chunk = thoughts.slice(i, i + chunkWidth(config, budget));
+      i += chunk.length;
 
       const results = await Promise.allSettled(
         chunk.map((t) => classifyAndUpdate(t, config, budget))
@@ -399,6 +412,7 @@ async function main() {
       for (let j = 0; j < results.length; j++) {
         processed++;
         const t = chunk[j];
+        if (results[j].status === "rejected") refusedWrite(results[j].reason);
         if (results[j].status === "fulfilled") {
           enriched++;
           if (!config.dryRun) {
@@ -441,6 +455,30 @@ async function main() {
   console.log(`Enriched:       ${enriched}`);
   console.log(`Failed:         ${failed}`);
   console.log(`LLM calls made: ${budget.calls}${config.maxCalls > 0 ? " / " + config.maxCalls : ""}`);
+  // A run that left rows failed exits 1, so a scheduler can tell (review pass 1,
+  // run-it: five failed rows exited 0).
+  if (failed > 0) process.exitCode = 1;
+}
+
+/**
+ * The rows one chunk classifies at once: the concurrency, cut to the calls
+ * --max-calls still allows (at least one, so a chunk always advances).
+ */
+function chunkWidth(config, budget) {
+  if (config.maxCalls <= 0) return config.concurrency;
+  return Math.max(1, Math.min(config.concurrency, config.maxCalls - budget.calls));
+}
+
+/**
+ * A write the database refused for a structural reason — a denied table, an
+ * undefined column: a failure() carrying a SQLSTATE that is not transient —
+ * ends the run here, on the row it happened on, as the two backfills do.
+ * Under Promise.allSettled it was one FAIL line per row while every later row
+ * still paid its model call and the run exited 0 (review pass 1, both
+ * readers). A model's error carries no code and stays a per-row failure.
+ */
+function refusedWrite(reason) {
+  if (reason?.code && !isTransientDbError(reason)) throw reason;
 }
 
 // --- Classification ---
@@ -459,7 +497,11 @@ async function classifyAndUpdate(thought, config, budget) {
   // those tags in the content are escaped so an attacker cannot break
   // out of the delimited block. The system prompt tells the model this
   // block is untrusted data.
-  const existingSource = thought.source_type || thought.metadata?.source || "";
+  // A row's metadata is an object on every path the functions write; a raw
+  // writer may have left a scalar or an array, which a spread would turn into
+  // digit keys and lose (review pass 1, run-it). It is kept under one key.
+  const existingMetadata = isPlainObject(thought.metadata) ? thought.metadata : thought.metadata == null ? {} : { prior_metadata: thought.metadata };
+  const existingSource = thought.source_type || existingMetadata.source || "";
   const safeContent = escapeThoughtTags(content.substring(0, 4000));
   const inputLines = [];
   if (existingSource) inputLines.push(`Existing source_type: ${existingSource}`);
@@ -509,7 +551,6 @@ async function classifyAndUpdate(thought, config, budget) {
   }
 
   // Build update payload
-  const existingMetadata = thought.metadata || {};
   const patch = {
     type: classified.type,
     importance: classified.importance,
@@ -657,14 +698,7 @@ async function showStatus() {
 // --- State Management ---
 
 function loadState() {
-  if (fs.existsSync(STATE_PATH)) {
-    try {
-      return JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
-    } catch {
-      console.warn("State file corrupt, starting fresh");
-    }
-  }
-  return {
+  const fresh = {
     totalProcessed: 0,
     totalFailed: 0,
     failedIds: [],
@@ -672,6 +706,22 @@ function loadState() {
     startedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+  if (!fs.existsSync(STATE_PATH)) return fresh;
+  try {
+    // A checkpoint missing a key — an older shape, a hand edit — takes the
+    // default for it rather than a TypeError (review pass 1, run-it).
+    const saved = JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
+    const state = { ...fresh, ...(isPlainObject(saved) ? saved : {}) };
+    if (!Array.isArray(state.failedIds)) state.failedIds = [];
+    return state;
+  } catch {
+    console.warn("State file corrupt, starting fresh");
+    return fresh;
+  }
+}
+
+function isPlainObject(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 function saveState(state) {
@@ -721,31 +771,26 @@ function nextFetchCursor(currentCursor, thoughts) {
 
 function buildConfig(args, env) {
   const provider = args.provider || env.ENRICH_PROVIDER || "openrouter";
+  if (!["openrouter", "anthropic"].includes(provider)) {
+    throw new Error(`--provider must be openrouter or anthropic; got "${provider}"`);
+  }
   // --max-calls: hard ceiling on LLM calls per run. Default 10000 so a
   // shell typo (`--limit` dropped, bad `--model`) can't silently burn
   // through the whole table. Pass `--max-calls 0` to disable the cap.
-  const rawMaxCalls = args.maxCalls !== undefined
-    ? parseInt(args.maxCalls, 10)
-    : parseInt(env.ENRICH_MAX_CALLS || "10000", 10);
-  const maxCalls = Number.isFinite(rawMaxCalls) && rawMaxCalls >= 0 ? rawMaxCalls : 10000;
+  const maxCalls = args.maxCalls !== undefined
+    ? intFlag(args.maxCalls, "--max-calls", 0)
+    : intFlag(env.ENRICH_MAX_CALLS || "10000", "ENRICH_MAX_CALLS", 0);
 
   // --limit: positive integer, or omitted for unlimited. Reject 0 /
   // NaN / negatives so `--limit 0` or `--limit foo` does not silently
   // mean "unlimited" (LOW-5). Combined with BLOCKER-1's --max-calls
   // this closes the "shell typo = unbounded spend" class of failures.
-  let limit = 0;
-  if (args.limit !== undefined) {
-    const parsed = parseInt(args.limit, 10);
-    if (!Number.isInteger(parsed) || parsed < 1) {
-      throw new Error(`--limit must be a positive integer; got "${args.limit}"`);
-    }
-    limit = parsed;
-  }
+  const limit = args.limit !== undefined ? intFlag(args.limit, "--limit", 1) : 0;
 
   return {
     provider,
-    concurrency: parseInt(args.concurrency || "20", 10),
-    skip: parseInt(args.skip || "0", 10),
+    concurrency: intFlag(args.concurrency ?? "20", "--concurrency", 1),
+    skip: intFlag(args.skip ?? "0", "--skip", 0),
     limit,
     maxCalls,
     dryRun: !!args.dryRun,
@@ -765,6 +810,7 @@ function buildConfig(args, env) {
 }
 
 function parseArgs(argv) {
+  refuseUnknownFlags(argv, ["--help", "-h", "--dry-run", "--apply", "--status", "--concurrency", "--skip", "--limit", "--model", "--provider", "--retry-failed", "--max-calls", "--reset-state"], ["--concurrency", "--skip", "--limit", "--model", "--provider", "--max-calls"]);
   const args = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
