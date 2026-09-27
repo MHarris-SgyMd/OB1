@@ -1,0 +1,119 @@
+{
+  "name": "OB1 import — {{pipeline}}",
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "nodes": [
+    {
+      "id": "7a1f0c2e-0001-4d3b-9e10-000000000001",
+      "name": "Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            "{{pipeline.schedule}}"
+          ]
+        }
+      }
+    },
+    {
+      "id": "7a1f0c2e-0002-4d3b-9e10-000000000002",
+      "name": "Called on demand",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "7a1f0c2e-0003-4d3b-9e10-000000000003",
+      "name": "Run the pipeline",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://orchestration-runner:8090/run/{{pipeline}}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": "{{pipeline.timeoutMs}}",
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ob1runnerKey0001",
+          "name": "OB1 runner — imports"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "7a1f0c2e-0004-4d3b-9e10-000000000004",
+      "name": "Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// The runner's answer is the run's report. A refusal or a failure fails the run, and the error\n// carries the runner's status and reason, which the on-demand door answers with.\nconst r = $input.first().json;\nif (r.error !== undefined && r.statusCode === undefined) throw new Error(`the runner (orchestration-runner:8090) did not answer: ${String(r.error?.message ?? r.error).slice(0, 300)}`);\nlet report = r.body;\nif (typeof report === 'string') { try { report = JSON.parse(report); } catch { report = { why: report.slice(0, 500) }; } }\nif (r.statusCode >= 300) {\n  const notes = Array.isArray(report?.notes) && report.notes.length ? ` (${(report.stage === 'one-source' ? report.notes.slice(0, 5) : report.notes.slice(-5)).join('; ')})` : '';\n  throw new Error(`the runner answered ${r.statusCode}: ${report?.stage ? `${report.stage} — ` : ''}${report?.why ?? 'no reason given'}${notes}`);\n}\nreturn [{ json: report }];"
+      }
+    }
+  ],
+  "connections": {
+    "Schedule": {
+      "main": [
+        [
+          {
+            "node": "Run the pipeline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Called on demand": {
+      "main": [
+        [
+          {
+            "node": "Run the pipeline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run the pipeline": {
+      "main": [
+        [
+          {
+            "node": "Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

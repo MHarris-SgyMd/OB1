@@ -2308,7 +2308,11 @@ the row's value newer, or the same and written after `asOf`) or `held`
 (another thought is this identity) is named the same way. A facet under
 `actor_kind` or `actor_name` is refused — those are 050's trigger's, stamped
 from the ingester's envelope — and a `facets.source` is overwritten with the
-system. A facet integer at or past 2^53, or a magnitude JSON cannot hold, is
+system. So is a facet naming another source's ticket (`issue`, `ticket`,
+`linear_updated_at`): node_state, `source_thought` and the board sync read a
+row carrying one as that ticket's, whatever its source, so an item names a
+ticket as a link or a mention instead. A `createdAt` more than a day ahead of
+now is refused too (SMD-2212). A facet integer at or past 2^53, or a magnitude JSON cannot hold, is
 refused rather than stored as its neighbour or as `null`: write it as a
 string (a Python emitter's `json.dumps` writes a snowflake id exactly;
 `JSON.parse` does not read it so). The emitter an
@@ -2686,7 +2690,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2114 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 847 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 849 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

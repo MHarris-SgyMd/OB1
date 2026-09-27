@@ -57,6 +57,7 @@
  *   bun db/ingest-records.ts --url … --source markdown --markdown ~/vault --allow ~/vault
  *   bun db/ingest-records.ts --url … --source items --items out.jsonl --allow chatgpt:export
  *   python3 import-x.py export.zip | bun db/ingest-records.ts --url … --source items --items - --allow x:export
+ *   … --source items --items - --allow x:export --actor orchestration-runner   # writes under another tool's name (the import runner, SMD-2212)
  *   bun db/ingest-records.ts --url … --memory-dir ~/.claude/…/memory
  *   bun db/ingest-records.ts --url … --since <ref>         # commit range start (default the pin tag)
  *   bun db/ingest-records.ts --self-check                  # the pure parsers, no DB
@@ -445,6 +446,22 @@ function isFingerprintCollision(e: unknown): boolean {
  */
 export const INGEST_ACTOR = { name: "ingest-records", via: "ingest-records" } as const;
 
+/**
+ * `--actor <name>`: the envelope's name when a tool runs the ingester on its
+ * own behalf. The orchestration profile's import runner writes as
+ * `orchestration-runner` (SMD-2212), so its rows are told apart from an
+ * operator's run from a checkout. The door stays the ingester's: 046's audit
+ * rows still say which code wrote the row. The name is a label the operator
+ * classifies with set_agent_kind, so it is lower-case and short.
+ */
+export const ACTOR_NAME_RE = /^[a-z][a-z0-9._:-]{0,62}$/;
+export type IngestActor = { readonly name: string; readonly via: string };
+export function ingestActor(name?: string): IngestActor {
+  if (name === undefined) return INGEST_ACTOR;
+  if (!ACTOR_NAME_RE.test(name)) throw new Error(`--actor must be a lower-case label of up to 63 characters (${ACTOR_NAME_RE.source}), got ${JSON.stringify(name.slice(0, 80))}`);
+  return { name, via: INGEST_ACTOR.via };
+}
+
 /** The two keys 050's trigger owns: never compared, never merged — the trigger stamps them from the envelope. */
 const ACTOR_KEYS = ["actor_kind", "actor_name"] as const;
 
@@ -502,7 +519,7 @@ export type RecordResult = {
  * sync's next pass lands the rename from its census, so the cost is a delay
  * and an overstated count, never a lost write (second review pass).
  */
-export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()): Promise<RecordResult> {
+export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName(), actor: IngestActor = INGEST_ACTOR): Promise<RecordResult> {
   const meta = { ...doc.meta, source: doc.source };
   for (const k of ACTOR_KEYS) delete (meta as Record<string, unknown>)[k];
   const created = doc.createdAt ?? null;
@@ -511,7 +528,7 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()):
   const asOf = doc.watermark?.asOf ?? null;
   try {
     return await sql.begin(async (tx) => {
-      await tx`SELECT set_config('ob1.actor', ${JSON.stringify(INGEST_ACTOR)}, true)`;
+      await tx`SELECT set_config('ob1.actor', ${JSON.stringify(actor)}, true)`;
       // Another thought already IS this item — the board sync's row for a
       // ticket, found by identity (thought_sources; on a brain the sync filled
       // before 053, its metadata.issue claim). Asked BEFORE the write: with one
@@ -720,6 +737,11 @@ function selfCheck(): number {
   ok(applyAllowlist([{ ...doc, source: "future" }], allowlistFrom("")).docs.length === 0, "a record an adapter mapped is gated whatever its source label — the structure is the tell, not a list of names");
   ok(allowlistOf("./vault, linear:corpus").has(resolve("./vault")) && allowlistOf("./vault, linear:corpus").has("linear:corpus"), "an allow entry that names a path is resolved as the markdown scope is; the rest are taken as written");
   ok(runName("t", new Date("2026-09-23T00:00:00.000Z")) === "t@2026-09-23T00:00:00.000Z", "a run is named by tool and moment");
+  const runner = ingestActor("orchestration-runner");
+  ok(ingestActor() === INGEST_ACTOR && runner.name === "orchestration-runner" && runner.via === INGEST_ACTOR.via, "--actor names the envelope, and the door stays the ingester's");
+  let actorRefusal = "";
+  try { ingestActor("Runner; DROP"); } catch (e) { actorRefusal = (e as Error).message; }
+  ok(/^--actor must be a lower-case label/.test(actorRefusal) && !ACTOR_NAME_RE.test("") && !ACTOR_NAME_RE.test(`a${"b".repeat(63)}`), `--actor refuses a name that is not a short lower-case label (${actorRefusal.slice(0, 50)})`);
 
   if (bad === 0) console.log("ingest-records.ts self-check PASS");
   return bad === 0 ? 0 : 1;
@@ -741,9 +763,9 @@ async function main(): Promise<void> {
   // does not have, a value where none is expected, a one-value flag with nothing
   // after it, or a flag given twice, is refused rather than silently dropped.
   {
-    const TAKES_ONE = new Set(["url", "source", "linear", "memory-dir", "markdown", "items", "allow", "tier", "since"]);
+    const TAKES_ONE = new Set(["url", "source", "linear", "memory-dir", "markdown", "items", "allow", "tier", "since", "actor"]);
     const TAKES_NONE = new Set(["dry-run", "self-check"]);
-    const USAGE = "  flags: --url <postgres://…>, --source <all|fork|commit|linear|memory|markdown|items>, --linear <dump.json>, --memory-dir <path>, --markdown <vault root>, --items <file.jsonl | ->, --allow <scope,scope> (or OB1_INGEST_ALLOW), --tier <stable|canary|working>, --since <ref>, --dry-run, --self-check";
+    const USAGE = "  flags: --url <postgres://…>, --source <all|fork|commit|linear|memory|markdown|items>, --linear <dump.json>, --memory-dir <path>, --markdown <vault root>, --items <file.jsonl | ->, --allow <scope,scope> (or OB1_INGEST_ALLOW), --actor <name>, --tier <stable|canary|working>, --since <ref>, --dry-run, --self-check";
     const seen = new Set<string>();
     for (let i = 0; i < args.length; i++) {
       const a = args[i];
@@ -789,6 +811,9 @@ async function main(): Promise<void> {
   const itemsPath = flag("items");
   // SMD-1813's allowlist: the flag, else the environment; empty clears nothing.
   const allow = allowlistOf(flag("allow") ?? process.env.OB1_INGEST_ALLOW);
+  let actor: IngestActor;
+  try { actor = ingestActor(flag("actor")); }
+  catch (e) { console.error((e as Error).message); process.exit(2); }
 
   // Gather. A source in the wanted set with no input to read is skipped with a
   // word on stderr, not an error — `--source all` on a bare checkout ingests
@@ -921,7 +946,7 @@ async function main(): Promise<void> {
   const ITEM_OUTCOME_WHY = { skipped: "another row already holds this text", stale: "the row carries a newer watermark, or the same one written after this view was taken" } as const;
   try {
     for (const doc of docs) {
-      const r = await upsertRecord(sql, doc, run);
+      const r = await upsertRecord(sql, doc, run, actor);
       tally[r.outcome]++;
       if (r.outcome === "held") heldBy.set(doc.source, (heldBy.get(doc.source) ?? 0) + 1);
       // An item counted but not named is a line the emitter cannot find (fifth review pass, run-it).
