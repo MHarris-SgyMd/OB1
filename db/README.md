@@ -1137,7 +1137,9 @@ bun extract-entities.ts --url … --limit 25              # a trial: this many, 
 bun extract-entities.ts --url … --status                # the pass, and the graph so far
 bun extract-entities.ts --url … --dry-run               # what a run would do; writes nothing
 bun extract-entities.ts --url … --retry-failed          # failed rows back into the pool first
-bun extract-entities.ts --url … --retry-partial         # rows extracted over a prefix back into the pool — after raising OB1_EXTRACT_MAX_WINDOWS
+bun extract-entities.ts --url … --retry-partial         # rows extracted in part back into the pool — after raising OB1_EXTRACT_MAX_WINDOWS
+bun extract-entities.ts --url … --retry-left-out        # …only those with windows left out as malformed — after a change of model, kept to this pool with --job (below)
+OB1_METADATA_MODEL=<larger> bun extract-entities.ts --url … --job <the recorded key> --retry-left-out --limit N   # a larger model over those N rows, the key and trigger left as they are (--status prints it)
 #   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (300, per model call — per window of a long thought)
 bun extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from the recorded key
 ```
@@ -1155,7 +1157,14 @@ running to the model's context and the worker's timeout — and a call cut that
 way is made once more with a frequency penalty (`RUNAWAY_PENALTY`, 0.5), which
 taxes the repetition the runaways were measured to be: on the fork's brain that
 retry, with the budget sized to both measured models, extracted all 32 thoughts
-one call could not finish, where windows alone reached 10 to 13. The answer is
+one call could not finish, where windows alone reached 10 to 13. Set
+`OB1_EXTRACT_ESCALATE_MODEL` and a runaway is instead remade once on that larger
+local model with no penalty (SMD-2000) — the pass key on the rows stays the
+first model's, and the dump line records which model answered. The 27B never
+looped on the thoughts the 7B could not finish, so the escalation spends the
+large model only where the small one has failed; it loads it beside the embedder
+(28 GB on the dogfood Mac, and `OLLAMA_MAX_LOADED_MODELS=2` can evict the
+embedder mid-pass), so it is a per-brain choice, not the default. The answer is
 streamed, and a call is aborted the moment its answer holds three copies of one
 item (`RunawayDetector`, `RUNAWAY_REPEATS`; SMD-1960) — the loop is visible on
 the stream long before the budget, so a runaway costs seconds rather than the
@@ -1165,8 +1174,11 @@ retry rule, so 32 of 32 is derived, not re-measured whole) — and a call
 aborted so is retried as a cut one is, the retry read whole, since a penalised
 answer was measured to repeat an item three times and recover; an
 answer that enumerates distinct ids is not a loop by that rule and runs to the
-budget, which stays the bound. A thought whose retry also runs away is recorded
-failed, retryable. The window is the **metadata model's**, not the embedding
+budget, which stays the bound. A call whose retry also runs away is a
+malformed answer: a window's is left out of a thought at least one of whose
+other windows parsed (SMD-2260, below), and a thought none of whose windows
+parsed is recorded failed, retryable.
+The window is the **metadata model's**, not the embedding
 model's: `OB1_EXTRACT_CHUNK_TOKENS` when set, else derived from the model's
 served context (`KNOWN_CHAT_MODEL_WINDOW`, measured as `KNOWN_MODEL_WINDOW` is)
 and held at the size the default model was measured to finish reliably; a model
@@ -1174,7 +1186,8 @@ the table does not list gets that default. The banner's `window:` line and
 preflight's `extraction window` row print the same sentence. The prompt version
 is 2 — a pass under it re-extracts a brain whose thoughts were cut at 8,000
 characters under p1 — so the first run after upgrading needs `--switch-key`.
-`--dump`'s line carries `windows`, `retried` and `abortedMs` — how far into
+`--dump`'s line carries `windows`, `retried` (or `escalated: <model>` when the
+runaway went to the larger model, SMD-2000) and `abortedMs` — how far into
 the call a runaway was aborted on the stream — and, for a windowed thought,
 each window's own answer in `parts` beside the merged one. Why, measured:
 `evals/README.md`, "Entity extraction in windows".
@@ -1211,6 +1224,44 @@ version is unchanged: a whole extraction is what it was. What changes is a
 thought over the count, which stored nothing and now stores its opening, and a
 thought whose runs pass the text bound, which was sent whole and is now cut at
 it.
+
+**A malformed window is left out, not the thought (SMD-2260).** A windowed
+thought some of whose windows the model answers with something other than JSON
+of the expected shape is written from the windows that parsed, and its claim is
+released succeeded with a caveat naming the rest: `partial: 2 of 3 windows
+extracted; the model's answer for window 2 was not JSON of the expected shape,
+and its text is not in the graph` (`… of the N sent …`, and the bound, for a
+prefix with windows left out). Only a thought none of whose windows parsed — a
+one-window thought's one answer included — is failed as malformed, as before; a
+window that times out still fails its thought. Until this,
+one malformed window failed the thought, its parsed windows with it: on the
+stable brain three research papers kept nothing because the model could not
+answer their reference lists, 15 to 22 of 24 windows parsed, and a larger model
+mangled the same windows. These rows are the second kind of partial row, which
+the summary and `--status` count and list apart from a prefix
+(`13 extracted (1 over a prefix only, 1 with windows left out as malformed), 1
+failed`) — a row with windows left out is closer to a failure, since the model
+decided it, not the bound; a row of both kinds, a prefix with windows left out
+as the papers were, counts with the windows left out, and the counts say how
+many of those are over the bound too. `--retry-partial` returns every partial
+row and `--retry-left-out` those with windows left out alone — the lever for
+them is the model, and re-reading every prefix to the place it already reached
+under a larger model would cost up to the bound's calls each for nothing. A
+changed `OB1_METADATA_MODEL` is another extraction key, so the retry keeps to
+this pool with `--job`, and to the returned rows with `--limit` and no other
+worker of the pool running, since the workers claim pending rows by queue time
+and a returned row keeps its own, so an older pending row is claimed in its
+place (`--status` prints the command, and the pool's pending count beside it).
+`OB1_EXTRACT_ESCALATE_MODEL` (SMD-2000, above) is not this: it remakes a call
+that ran away, within the pass, and a window answered in prose never ran away,
+so a window left out beside it was either not a runaway or failed the larger
+model too. Either
+flag reads a row again under the bound and the model in force: whole, or, over
+the bound, to it; a reading that fails outright — a window timing out, none
+parsing — records the row failed, and the earlier reading's entities stay in
+the graph until a later reading succeeds, since a failure writes nothing. A run that leaves partial rows and
+no failure exits 0, the partial rows listed on stdout: a job watching the exit
+code or stderr sees them only as `--status` counts them.
 
 **What may leave.** The egress gate (SMD-1903) reads each row's own
 `metadata` — `source`, `type`, `topics` — and its text against `OB1_EGRESS_POLICY`
@@ -2479,7 +2530,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1960 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 782 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+./with-postgres.sh bun test-live.ts         # 799 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
@@ -2805,7 +2856,17 @@ first assumed. See FORK.md's SMD-1632 section.
   `OB1_EXTRACT_MAX_WINDOWS=2` is released succeeded with a `partial:` caveat,
   its opening's entities and edge in the graph and its closing's entity not, `--status` counting
   and listing it apart; `--retry-partial` under the default bound reads it
-  whole and clears the caveat (SMD-2240).
+  whole and clears the caveat (SMD-2240). Then, under a bound of two, a
+  two-window thought whose second window the stub answers in prose is released
+  succeeded with that window named in its caveat, the other window's entities
+  and edge in the graph, a three-window thought so is released with the window
+  and the bound both named, and a two-window thought answered in prose
+  throughout is failed; `--status` counts and lists the two kinds of partial
+  row apart, the row of both among the windows left out and counted over the
+  bound too; `--retry-left-out`, run as `--status` advises — another model,
+  `--job` this pool's key — the stub answering now, takes those two and not the prefix, saying one is a
+  prefix too, and clears their caveats and adds the windows' entities, and
+  `--retry-partial` then takes the prefix (SMD-2260).
 
 ### What test-schema.ts asserts
 

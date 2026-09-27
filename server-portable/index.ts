@@ -95,6 +95,13 @@ type Env = {
    */
   OB1_EXTRACT_MAX_WINDOWS?: string;
   /**
+   * The larger local model a runaway extraction call escalates to instead of the
+   * penalised same-model retry (SMD-2000). Read here only by preflight, which
+   * names it on the extraction window row and probes it with --deep; the server
+   * never extracts. Unset (or equal to the metadata model): the retry is unchanged.
+   */
+  OB1_EXTRACT_ESCALATE_MODEL?: string;
+  /**
    * "on" to record the opt-in query log (migration 034, SMD-1295): one row per
    * search and one per follow-up fetch/edit/delete of a returned id — or, since
    * SMD-1719, per id a write cited as its source — so a

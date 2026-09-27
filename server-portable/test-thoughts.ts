@@ -396,7 +396,9 @@ console.log("\n[8b] A long thought's windows merge to one answer, the window fol
   assert(works.length === 1 && works[0].confidence === 0.9, "a relation stated in two windows is one edge at the higher confidence, whatever the case of the names");
   assert(merged.relations.length === 2, "…and the relation only the third window saw is kept");
   const half = mergeExtractions([part(0, [{ name: "Anita", type: "person", confidence: 0.9 }]), part(1, [], [], true)]);
-  assert(half.malformed && half.entities.length === 1 && half.windows === 2, "one malformed window makes the thought's answer malformed — a thought is not recorded terminal on a partial reading — and the read windows are still there for the record");
+  assert(!half.malformed && half.entities.length === 1 && half.windows === 2 && half.parts?.[1].malformed === true, "one malformed window beside a parsed one leaves the answer the parsed window's, not malformed (SMD-2260) — the malformed window still in the record");
+  const none = mergeExtractions([part(0, [], [], true), part(1, [], [], true)]);
+  assert(none.malformed && none.entities.length === 0 && none.windows === 2, "…while every window malformed is a malformed answer, recorded failed");
   const counted = mergeExtractions([part(0, [{ name: "x", type: "vegetable", confidence: 1 }]), part(1, [{ name: "y", type: "tool", confidence: 0.2 }], [{ from: "a", to: "b", relation: "loves", confidence: 1 }])]);
   assert(counted.rejected.entities === 2 && counted.rejected.relations === 1, "rejected counts add up across windows");
 
