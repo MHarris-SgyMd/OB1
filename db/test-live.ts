@@ -3285,23 +3285,24 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     entities: [{ name: "Quill", type: "tool", confidence: 0.9 }, { name: "Quentin", type: "person", confidence: 0.9 }],
     relationships: [{ from: "Quentin", to: "Quill", relation: "uses", confidence: 0.8 }],
   };
-  const tomeText = Array.from({ length: 6 }, (_, p) =>
-    `${p === 0 ? "The tome-opening chapter." : p === 5 ? "The tome-closing chapter." : `Chapter ${p}.`} ${Array.from({ length: 24 }, (__, i) => `Quentin noted point ${p}.${i} about the book.`).join(" ")}`).join("\n\n");
-  const tome = await seed(tomeText);
+  // A paragraph of ~130 estimated tokens led by its key: a 300-token window each.
+  const chapter = (lead: string, who: string, p: number) => `${lead} ${Array.from({ length: 24 }, (__, i) => `${who} noted point ${p}.${i} about the book.`).join(" ")}`;
+  const tome = await seed(Array.from({ length: 6 }, (_, p) => chapter(p === 0 ? "The tome-opening chapter." : p === 5 ? "The tome-closing chapter." : `Chapter ${p}.`, "Quentin", p)).join("\n\n"));
+  const claimOf = async (id: string) => (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null };
+  const namesOf = async (id: string) => (await sql`
+    SELECT e.name FROM thought_entities te JOIN ob1_entities e ON e.id = te.entity_id WHERE te.thought_id = ${id}::uuid ORDER BY e.name`).map((r: { name: string }) => r.name);
+  const edgesOf = async (id: string) => Number((await sql`SELECT count(*)::int AS c FROM ob1_entity_edges WHERE thought_id = ${id}::uuid`)[0].c);
   const [{ r: ledgerCaveat }] = await sql`SELECT last_error AS r FROM thought_work_claims WHERE thought_id = ${ledger}::uuid AND work_type = ${KEY}`;
   assert(ledgerCaveat === null, "under the default bound the windowed ledger thought is a clean success, no caveat — the drop-the-env control");
   const capped = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!], { env: { ...env, OB1_EXTRACT_MAX_WINDOWS: "2" } as Record<string, string>, cwd: HERE });
   assert(capped.code === 0 && /1 extracted \(1 over a prefix only — past the per-thought bound, OB1_EXTRACT_MAX_WINDOWS \(2\); each row's caveat says how much\), 0 failed/.test(capped.out),
          `under OB1_EXTRACT_MAX_WINDOWS=2 the long thought is extracted, counted as a prefix, and the run exits 0 (exit ${capped.code}: ${capped.out.split("\n").find((l) => /extracted/.test(l) && /failed/.test(l))?.trim()})`);
   assert(/window: [^\n]*a thought over 2 windows \(from OB1_EXTRACT_MAX_WINDOWS\), or whose whitespace-free runs take it past 600 estimated tokens, is extracted over its opening/.test(capped.out), "…the banner stating the bound it ran under");
-  const [tomeClaim] = await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${tome}::uuid AND work_type = ${KEY}`;
-  assert(tomeClaim.status === "succeeded" && /^partial: 2 of [3-9] windows extracted, the thought is over OB1_EXTRACT_MAX_WINDOWS \(2\); the rest of the thought is not in the graph$/.test(tomeClaim.last_error),
+  const tomeClaim = await claimOf(tome);
+  assert(tomeClaim.status === "succeeded" && /^partial: 2 of [3-9] windows extracted, the thought is over OB1_EXTRACT_MAX_WINDOWS \(2\); the rest of the thought is not in the graph$/.test(tomeClaim.last_error ?? ""),
          `…its claim succeeded with the coverage as its caveat (${tomeClaim.status}: ${tomeClaim.last_error})`);
-  const tomeTools = async () => (await sql`
-    SELECT e.name FROM thought_entities te JOIN ob1_entities e ON e.id = te.entity_id WHERE te.thought_id = ${tome}::uuid ORDER BY e.name`).map((r: { name: string }) => r.name);
-  const tomeEdges = async () => Number((await sql`SELECT count(*)::int AS c FROM ob1_entity_edges WHERE thought_id = ${tome}::uuid`)[0].c);
-  assert(JSON.stringify(await tomeTools()) === '["Quentin","Quill"]' && (await tomeEdges()) === 1,
-         `…the prefix's entities and its edge are in the graph and the tail's entity is not (${JSON.stringify(await tomeTools())}, ${await tomeEdges()} edge(s))`);
+  assert(JSON.stringify(await namesOf(tome)) === '["Quentin","Quill"]' && (await edgesOf(tome)) === 1,
+         `…the prefix's entities and its edge are in the graph and the tail's entity is not (${JSON.stringify(await namesOf(tome))}, ${await edgesOf(tome)} edge(s))`);
   const partialStatus = await extract("--status");
   assert(partialStatus.code === 0 && /12 extracted \(1 over a prefix only\), 0 failed/.test(partialStatus.out)
          && new RegExp(`extracted over a prefix only \\(1 of 1\\)[^\\n]*--retry-partial re-extracts them over at most 24 windows \\(OB1_EXTRACT_MAX_WINDOWS unset\\)[^\\n]*\\n\\s+${tome}  partial: 2 of`).test(partialStatus.out),
@@ -3312,9 +3313,9 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   assert(widenedRun.code === 0 && /--retry-partial: 1 row\(s\) extracted in part returned to the pool \(1 over a prefix only\); a prefix is extracted over at most 24 window\(s\) \(OB1_EXTRACT_MAX_WINDOWS unset\) — a row read under a smaller bound gains coverage/.test(widenedRun.out) && !/sent again/.test(widenedRun.out)
          && /1 extracted, 0 failed/.test(widenedRun.out),
          `--retry-partial under the default bound returns the row and extracts it whole (exit ${widenedRun.code})`);
-  const [tomeAfter] = await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${tome}::uuid AND work_type = ${KEY}`;
-  assert(tomeAfter.status === "succeeded" && tomeAfter.last_error === null && JSON.stringify(await tomeTools()) === '["Inkwell","Quentin","Quill"]',
-         `…the caveat cleared and the tail's entity added to the graph (${tomeAfter.last_error}; ${JSON.stringify(await tomeTools())})`);
+  const tomeAfter = await claimOf(tome);
+  assert(tomeAfter.status === "succeeded" && tomeAfter.last_error === null && JSON.stringify(await namesOf(tome)) === '["Inkwell","Quentin","Quill"]',
+         `…the caveat cleared and the tail's entity added to the graph (${tomeAfter.last_error}; ${JSON.stringify(await namesOf(tome))})`);
   const noPartial = await extract("--status");
   assert(/12 extracted, 0 failed/.test(noPartial.out) && !/over a prefix/.test(noPartial.out), "…and --status no longer counts or lists a partial row");
 
@@ -3341,24 +3342,19 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   proseKeys.add("codex-references");
   proseKeys.add("folio-references");
   proseKeys.add("codex-garbled");
-  const codexPara = (lead: string, who: string, p: number) => `${lead} ${Array.from({ length: 24 }, (__, i) => `${who} noted point ${p}.${i} about the book.`).join(" ")}`;
-  const codex = await seed([codexPara("The codex-opening chapter.", "Cora", 0), codexPara("The codex-references list.", "Cora", 1), codexPara("Chapter 2.", "Cora", 2)].join("\n\n"));
-  const folio = await seed([codexPara("The folio-opening chapter.", "Pell", 0), codexPara("The folio-references list.", "Pell", 1)].join("\n\n"));
-  const garbled = await seed([codexPara("The codex-garbled note.", "Gil", 0), codexPara("More codex-garbled text.", "Gil", 1)].join("\n\n"));
+  const codex = await seed([chapter("The codex-opening chapter.", "Cora", 0), chapter("The codex-references list.", "Cora", 1), chapter("Chapter 2.", "Cora", 2)].join("\n\n"));
+  const folio = await seed([chapter("The folio-opening chapter.", "Pell", 0), chapter("The folio-references list.", "Pell", 1)].join("\n\n"));
+  const garbled = await seed([chapter("The codex-garbled note.", "Gil", 0), chapter("More codex-garbled text.", "Gil", 1)].join("\n\n"));
   await sql`SELECT requeue_thought_work(${KEY}, ${tome}::uuid)`;
   const mixed = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!], { env: { ...env, OB1_EXTRACT_MAX_WINDOWS: "2" } as Record<string, string>, cwd: HERE });
   assert(mixed.code === 1 && /\n  3 extracted \(1 over a prefix only — past the per-thought bound, OB1_EXTRACT_MAX_WINDOWS \(2\); each row's caveat says how much; 2 with 2 window\(s\) left out, the model's answers for them not JSON of the expected shape; each row's caveat names them\), 1 failed/.test(mixed.out),
          `the run extracts the tome's prefix and the folio's and codex's parsed windows, counts each kind apart, and fails the garbled note (exit ${mixed.code}: ${mixed.out.split("\n").find((l) => /extracted/.test(l) && /failed/.test(l))?.trim()})`);
-  const claimOf = async (id: string) => (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null };
   const folioClaim = await claimOf(folio);
   assert(folioClaim.status === "succeeded" && folioClaim.last_error === "partial: 1 of 2 windows extracted; the model's answer for window 2 was not JSON of the expected shape, and its text is not in the graph",
          `…the folio's claim succeeded with the window left out as its caveat (${folioClaim.status}: ${folioClaim.last_error})`);
   const codexClaim = await claimOf(codex);
   assert(codexClaim.status === "succeeded" && codexClaim.last_error === "partial: 1 of 3 windows extracted; the model's answer for window 2 of the 2 sent was not JSON of the expected shape, and the thought is over OB1_EXTRACT_MAX_WINDOWS (2); the rest of the thought is not in the graph",
          `…and the codex's with both, the window left out and the bound (${codexClaim.status}: ${codexClaim.last_error})`);
-  const namesOf = async (id: string) => (await sql`
-    SELECT e.name FROM thought_entities te JOIN ob1_entities e ON e.id = te.entity_id WHERE te.thought_id = ${id}::uuid ORDER BY e.name`).map((r: { name: string }) => r.name);
-  const edgesOf = async (id: string) => Number((await sql`SELECT count(*)::int AS c FROM ob1_entity_edges WHERE thought_id = ${id}::uuid`)[0].c);
   assert(JSON.stringify(await namesOf(folio)) === '["Parchment","Pell"]' && (await edgesOf(folio)) === 1 && JSON.stringify(await namesOf(codex)) === '["Cora","Vellum"]',
          `…the parsed windows' entities and edge are in the graph, and the prose windows' are not (${JSON.stringify(await namesOf(folio))}, ${await edgesOf(folio)} edge(s); ${JSON.stringify(await namesOf(codex))})`);
   const garbledClaim = await claimOf(garbled);

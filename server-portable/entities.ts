@@ -1057,7 +1057,7 @@ export function partialCaveat(c: Coverage, w: Pick<ExtractWindowing, "windowToke
   // Only large windows use the text bound up (boundedWindows), and the window
   // cut or stopped at need not be one of them: say what used it (review pass 3).
   const text = `the text bound, ${w.maxWindows * w.windowTokens} estimated tokens (${w.maxWindows} windows' worth under ${bound}), which runs chunk.ts cannot split (SMD-1974) used up`;
-  const of = `${c.of} window${c.of === 1 ? "" : "s"}`;
+  const ofWindows = `${c.of} window${c.of === 1 ? "" : "s"}`;
   const bad = c.malformed ?? [];
   if (!bad.length) {
     // A cut window was sent in part, so it is "sent", not "extracted" — "24 of
@@ -1065,7 +1065,7 @@ export function partialCaveat(c: Coverage, w: Pick<ExtractWindowing, "windowToke
     // (review pass 2). A prefix that ended short of the count ended at the text
     // bound, whether or not anything of the next window fitted.
     const how = c.cut ? `sent, the last cut short at ${text}` : c.windows < w.maxWindows ? `extracted, stopped at ${text}` : `extracted, the thought is over ${bound}`;
-    return `${PARTIAL_CAVEAT_PREFIX}${c.windows} of ${of} ${how}; the rest of the thought is not in the graph`;
+    return `${PARTIAL_CAVEAT_PREFIX}${c.windows} of ${ofWindows} ${how}; the rest of the thought is not in the graph`;
   }
   // The count is of the windows whose answers are in the graph; a cut window
   // that parsed is one of them.
@@ -1073,7 +1073,7 @@ export function partialCaveat(c: Coverage, w: Pick<ExtractWindowing, "windowToke
   const were = bad.length === 1 ? "was" : "were";
   // A cut window that parsed is in the count, and only in part (review pass 1).
   const inPart = c.cut && !bad.includes(c.windows - 1) ? ", the last of them in part" : "";
-  const head = `${PARTIAL_CAVEAT_PREFIX}${c.windows - bad.length} of ${of} extracted${inPart}; ${answers}`;
+  const head = `${PARTIAL_CAVEAT_PREFIX}${c.windows - bad.length} of ${ofWindows} extracted${inPart}; ${answers}`;
   if (c.windows === c.of && !c.cut) return `${head} ${were} ${MALFORMED_WINDOWS_MARK}, and ${bad.length === 1 ? "its" : "their"} text is not in the graph`;
   const over = c.cut ? `the last sent was cut short at ${text}` : c.windows < w.maxWindows ? `the prefix stopped at ${text}` : `the thought is over ${bound}`;
   return `${head} of the ${c.windows} sent ${were} ${MALFORMED_WINDOWS_MARK}, and ${over}; the rest of the thought is not in the graph`;
