@@ -439,7 +439,8 @@ runs outside n8n:
   starts and then beyond the runner's reach, refuse every packet, DNS and
   loopback included. A live-API emitter's pipeline names its hosts
   (`network`), and the emitter reaches them only through a proxy the runner
-  keeps for it, which tunnels HTTPS to those hosts and nothing else. Before
+  keeps for it, which tunnels TLS naming those hosts (their ClientHello's
+  server name) and nothing else. Before
   that, an emitter an export had taken over could reach the host's Ollama,
   admin API and all, Postgres, and on a VPS the cloud metadata endpoint.
   Two limits are named rather than closed:

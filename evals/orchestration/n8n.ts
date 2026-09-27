@@ -229,8 +229,10 @@ async function inRunData(env: Record<string, string>, names: string[], value: st
  *   no DNS answer, not the host alias, Postgres, n8n, the internet or the
  *   runner's own port (SMD-2289);
  * - `vendor`'s pipeline names one host, server:8000. Its emitter reaches that
- *   host through its proxy, has a CONNECT to Postgres refused, and opens no
- *   direct connection. The report names the one refusal (SMD-2289);
+ *   host through its proxy with TLS naming it, is cut off when TLS through
+ *   the same tunnel names another server (review pass 1), has a CONNECT to
+ *   Postgres refused, and opens no direct connection. The report names the
+ *   two refusals (SMD-2289);
  * - the instance's schedule is n8n days for 24 hours (review pass 2: an
  *   hourly 24 fires once, then never);
  * - neither the run key nor the runner's key is anywhere in n8n's saved runs
@@ -276,7 +278,8 @@ async function importChecks(env: Record<string, string>, ctx: Ctx): Promise<Chec
     && second.status === 200 && c2?.inserted === 0 && c2?.updated === 0 && c2?.patched === 0 && c2?.unchanged === IMPORT.rows && n2 === IMPORT.rows
     && stray.status === 422 && /the runner answered 422: one-source/.test(stray.report?.why ?? "") && /identity\.system "gmail"/.test(stray.report?.why ?? "") && n3 === IMPORT.rows && leaked === 0
     && snoop.status === 200 && snoop.report?.emitted === 0 && leftovers === 0 && daily
-    && vendor.status === 200 && vendor.report?.emitted === 0 && vendor.report?.egress?.length === 1 && /^CONNECT postgres:5432: not a host vendor names \(network: server:8000\)$/.test(vendor.report.egress[0])
+    && vendor.status === 200 && vendor.report?.emitted === 0 && vendor.report?.egress?.length === 2
+    && /^CONNECT server:8000: the TLS ClientHello names other\.example, not server$/.test(vendor.report.egress[0]) && /^CONNECT postgres:5432: not a host vendor names \(network: server:8000\)$/.test(vendor.report.egress[1])
     && (down === null || (down.status === 502 && /did not answer/.test(down.report?.why ?? "")))
     && runKey.runs > 0 && runKey.holding === 0 && runnerKey.holding === 0;
   const fmt = (r: { status: number; report: any }) => `${r.status}${r.report?.counts ? ` inserted ${r.report.counts.inserted} unchanged ${r.report.counts.unchanged}` : ""}${r.report?.ok === false ? ` ${r.report.why}` : ""}`;

@@ -54,11 +54,13 @@ RUN bun deploy/orchestration/runner.ts --check-emitters
 # 1. `--egress`, with NET_ADMIN, sets the rules that give every emitter uid no
 #    network, but for a networked pipeline's own proxy port on loopback
 #    (runner.ts egressRules);
-# 2. setpriv drops NET_ADMIN and SETPCAP from the bounding set and runs the
+# 2. setpriv drops NET_ADMIN and SETPCAP from the bounding and inheritable
+#    sets (an engine before Docker 20.10.14 or podman 4.0.3 filled the
+#    inheritable one, which a root exec keeps; review pass 1) and runs the
 #    runner, which keeps only the capabilities that change user and signal a
 #    step's processes (compose cap_add), so nothing it runs can change the
 #    rules.
 # The runner refuses to start as root without su-exec, holding either of the
-# two, or with an emitter uid able to reach its own port.
+# two, or with an emitter uid able to reach a port of its on 127.0.0.1.
 EXPOSE 8090
-CMD ["sh", "-c", "bun deploy/orchestration/runner.ts --egress && exec setpriv --bounding-set=-net_admin,-setpcap -- bun deploy/orchestration/runner.ts"]
+CMD ["sh", "-c", "bun deploy/orchestration/runner.ts --egress && exec setpriv --bounding-set=-net_admin,-setpcap --inh-caps=-net_admin,-setpcap -- bun deploy/orchestration/runner.ts"]

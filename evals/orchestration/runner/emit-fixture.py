@@ -20,10 +20,12 @@ ran (review pass 3). And it fails if it can reach anything on the network
 (SMD-2289): a DNS answer, the host's Ollama through the host alias, Postgres,
 n8n, the internet, or the runner's own port.
 `--vendor` is a live-API emitter whose pipeline names one host, server:8000
-(SMD-2289). Through the proxy the runner puts in HTTPS_PROXY it must reach
-that host, and have a CONNECT to Postgres refused, which the run's report
-names; a direct connection must fail. It prints nothing either way, and
-exits 3 naming what went wrong.
+(SMD-2289). Through the proxy the runner puts in HTTPS_PROXY, TLS naming that
+host must reach it (the brain answers a ClientHello with plain HTTP, which is
+proof enough); TLS naming another server through the same tunnel must be
+cut off before it reaches anything, and a CONNECT to Postgres refused, both
+named in the run's report; a direct connection must fail. It prints nothing
+either way, and exits 3 naming what went wrong.
 Standard library only, as a recipe's emitter should be where it can.
 """
 import json
@@ -91,24 +93,43 @@ def reachable() -> list:
     return found
 
 
-def tunnel(proxy: str, target: str, then: bytes = b"") -> bytes:
-    """A CONNECT through the proxy, and what came back (after `then`, sent in the same write)."""
+def tunnel(proxy: str, target: str):
+    """A CONNECT through the proxy: the socket, and the proxy's answer line."""
     import socket
     import urllib.parse
     u = urllib.parse.urlsplit(proxy)
     s = socket.create_connection((u.hostname, u.port), timeout=10)
-    s.sendall(f"CONNECT {target} HTTP/1.1\r\nhost: {target}\r\n\r\n".encode() + then)
-    out = b""
+    s.sendall(f"CONNECT {target} HTTP/1.1\r\nhost: {target}\r\n\r\n".encode())
+    head = b""
+    while not head.endswith(b"\r\n\r\n"):
+        c = s.recv(1)
+        if not c:
+            break
+        head += c
+    return s, head.split(b"\r\n")[0]
+
+
+def tls_through(proxy: str, target: str, server_name: str) -> str:
+    """TLS naming server_name through a tunnel to target: "answered" when the far end
+    answered (the brain answers in plain HTTP, which fails the handshake as a wrong
+    version), "cut" when the tunnel closed first, else the proxy's refusal line."""
+    import ssl
+    s, line = tunnel(proxy, target)
+    if not line.startswith(b"HTTP/1.1 200"):
+        s.close()
+        return line.decode(errors="replace")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
     try:
-        while True:
-            chunk = s.recv(65536)
-            if not chunk:
-                break
-            out += chunk
-    except OSError:
-        pass
-    s.close()
-    return out
+        ctx.wrap_socket(s, server_hostname=server_name).close()
+        return "answered"
+    except (ssl.SSLEOFError, ssl.SSLZeroReturnError, ConnectionError):
+        return "cut"
+    except ssl.SSLError as e:
+        return "answered" if "WRONG_VERSION_NUMBER" in str(e) else f"cut ({e})"
+    finally:
+        s.close()
 
 
 def vendor() -> int:
@@ -117,13 +138,17 @@ def vendor() -> int:
     if not proxy:
         wrong.append("no HTTPS_PROXY in the environment")
     else:
-        named = tunnel(proxy, "server:8000", b"GET /health HTTP/1.1\r\nhost: server\r\nconnection: close\r\n\r\n")
-        if not named.startswith(b"HTTP/1.1 200") or named.count(b"HTTP/1.1 ") < 2:
-            wrong.append(f"the named host through the proxy: {named[:120]!r}")
-        other = tunnel(proxy, "postgres:5432")
+        named = tls_through(proxy, "server:8000", "server")
+        if named != "answered":
+            wrong.append(f"TLS naming the named host did not reach it: {named}")
+        fronted = tls_through(proxy, "server:8000", "other.example")
+        if fronted != "cut":
+            wrong.append(f"TLS naming another server through the named host's tunnel was not cut off: {fronted}")
+        s, other = tunnel(proxy, "postgres:5432")
+        s.close()
         if not other.startswith(b"HTTP/1.1 403"):
             wrong.append(f"a CONNECT to a host it does not name was not refused: {other[:120]!r}")
-    hit = connects("host.docker.internal", 11434) or connects("1.1.1.1", 443)
+    hit = connects("host.docker.internal", 11434) or connects("1.1.1.1", 443) or connects("127.0.0.1", 8090)
     if hit:
         wrong.append(f"a direct connection opened: {hit}")
     if wrong:

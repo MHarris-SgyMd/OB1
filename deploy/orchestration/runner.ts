@@ -54,8 +54,9 @@ import { SQL } from "bun";
 import { timingSafeEqual, createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { connect as tcpConnect, createServer } from "node:net";
+import { BlockList, connect as tcpConnect, createServer, isIP } from "node:net";
 import { tmpdir } from "node:os";
+import { connect as tlsConnect } from "node:tls";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SYSTEM_RE } from "../../db/ingest-contract.ts";
@@ -179,6 +180,9 @@ function parseNetwork(v: unknown, at: string): Host[] {
     const m = typeof h === "string" ? HOST_RE.exec(h.toLowerCase()) : null;
     const port = m ? Number(m[2] ?? 443) : NaN;
     if (!m || m[1].length > 253 || !(port >= 1 && port <= 65535)) throw new Error(`${at}: network entry ${JSON.stringify(h)} must be "host" or "host:port" (a DNS name or IPv4 address, a port 1 to 65535)`);
+    // A numeric last label is an address, and only its dotted-quad spelling is read here: `127.1`, `2130706433` and `0x7f.1` are loopback too, which the proxy would refuse on every run (review pass 1).
+    const last = m[1].split(".").at(-1)!;
+    if ((/^\d+$/.test(last) || /^0x[0-9a-f]+$/.test(last)) && isIP(m[1]) !== 4) throw new Error(`${at}: network entry ${JSON.stringify(h)} is neither a DNS name nor an IPv4 address in dotted-quad form`);
     if (m[1] === "localhost" || m[1].endsWith(".localhost") || isLocalAddress(m[1])) throw new Error(`${at}: network entry ${JSON.stringify(h)} is a loopback or link-local address, which no emitter may reach`);
     const key = `${m[1]}:${port}`;
     if (seen.has(key)) throw new Error(`${at}: network names ${key} twice`);
@@ -187,12 +191,24 @@ function parseNetwork(v: unknown, at: string): Host[] {
   });
 }
 
-/** A loopback, unspecified or link-local address (a cloud metadata endpoint is 169.254.169.254), IPv4 or IPv6, an IPv4-mapped one included. Anything else, a name included, is not. */
+/**
+ * The addresses no emitter may reach, even under a name it names: loopback,
+ * unspecified, link-local (169.254.169.254 among them), IPv4-compatible
+ * IPv6, and the cloud metadata endpoints outside those (AWS's IPv6 one,
+ * Alibaba's). An IPv4-mapped IPv6 address is read as its IPv4 address, in
+ * either spelling. A private address is not among them: a compose service is
+ * one (review pass 1 widened this from a pattern over the dotted spellings).
+ */
+const LOCAL = (() => {
+  const b = new BlockList();
+  for (const [a, bits] of [["127.0.0.0", 8], ["0.0.0.0", 8], ["169.254.0.0", 16], ["100.100.100.200", 32]] as const) b.addSubnet(a, bits, "ipv4");
+  for (const [a, bits] of [["::", 96], ["fe80::", 10], ["fd00:ec2::254", 128]] as const) b.addSubnet(a, bits, "ipv6");
+  return b;
+})();
+/** Whether an address is one LOCAL holds; a name, or anything that is not an address, is not. */
 export function isLocalAddress(a: string): boolean {
-  const v4 = /^(?:::ffff:)?(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/i.exec(a);
-  if (v4) return v4[1] === "127" || v4[1] === "0" || (v4[1] === "169" && v4[2] === "254");
-  const v6 = a.toLowerCase();
-  return v6 === "::1" || v6 === "::" || /^fe[89ab][0-9a-f]:/.test(v6);
+  const kind = isIP(a);
+  return kind !== 0 && LOCAL.check(a, kind === 6 ? "ipv6" : "ipv4");
 }
 
 export const loadPipelines = (file = PIPELINES_FILE) => parsePipelines(readFileSync(file, "utf8"), file);
@@ -428,26 +444,96 @@ export type Proxy = { url: string; port: number; take: () => string[]; close: ()
 const REFUSALS_SHOWN = 20;
 
 /**
- * A pipeline's proxy (SMD-2289): CONNECT to one of the hosts it names, on
- * that port, and nothing else. It resolves the host itself, refuses one that
- * resolves to a loopback or link-local address (the runner's own ports, a
- * metadata endpoint), and dials the address it checked. Any other request is
- * answered 405, another host 403, and each is kept for the run's report. It
- * listens on 127.0.0.1 only, and in the image the egress rules let the
- * pipeline's uid reach this port and nothing else.
+ * The server name a TLS ClientHello asks for (SNI), read from the first TLS
+ * record: "more" until that record is whole, null when the hello names no
+ * server, and an Error when the bytes are not one ClientHello in one record
+ * (a hello split across records, which the TLS clients an emitter uses do not
+ * send, is refused rather than followed).
  */
-export function startProxy(p: Pipeline, port: number, o: { allowLocal?: boolean } = {}): Promise<Proxy> {
+export function helloName(b: Buffer): string | null | "more" | Error {
+  if (b.length < 5) return "more";
+  if (b[0] !== 0x16 || b[1] !== 3) return new Error("not a TLS handshake");
+  const len = b.readUInt16BE(3);
+  if (len > 16384) return new Error("a TLS record past its maximum length");
+  if (b.length < 5 + len) return "more";
+  const r = b.subarray(5, 5 + len);
+  try {
+    if (r[0] !== 1) return new Error("a TLS handshake that is not a ClientHello");
+    const end = 4 + r.readUIntBE(1, 3);
+    if (end > r.length) return new Error("a ClientHello split across TLS records");
+    let i = 4 + 2 + 32;
+    i += 1 + r[i];
+    i += 2 + r.readUInt16BE(i);
+    i += 1 + r[i];
+    if (i === end) return null;
+    const extEnd = i + 2 + r.readUInt16BE(i);
+    if (extEnd > end) return new Error("a malformed ClientHello");
+    for (i += 2; i + 4 <= extEnd;) {
+      const [type, size] = [r.readUInt16BE(i), r.readUInt16BE(i + 2)];
+      i += 4;
+      if (i + size > extEnd) return new Error("a malformed ClientHello");
+      if (type === 0) {
+        const listEnd = i + 2 + r.readUInt16BE(i);
+        for (let j = i + 2; j + 3 <= listEnd;) {
+          const n = r.readUInt16BE(j + 1);
+          if (r[j] === 0 && j + 3 + n <= listEnd) return r.subarray(j + 3, j + 3 + n).toString("latin1").toLowerCase().replace(/\.$/, "");
+          j += 3 + n;
+        }
+        return new Error("a server_name extension naming no host");
+      }
+      i += size;
+    }
+    return null;
+  } catch {
+    return new Error("a malformed ClientHello");
+  }
+}
+
+/** The proxy's bounds; the self-check shortens them, and stands in for DNS. */
+export type ProxyOptions = {
+  /** Whether a named host may resolve to a LOCAL address: only the self-check's stand-in upstream, on 127.0.0.1. */
+  allowLocal?: boolean;
+  lookup?: (host: string) => Promise<string>;
+  /** How long a connection has to send its request, and then its ClientHello. */
+  headMs?: number;
+  /** How long the named host has to answer the dial. */
+  dialMs?: number;
+  /** The most connections the proxy holds at once. */
+  maxConnections?: number;
+};
+
+/**
+ * A pipeline's proxy (SMD-2289): TLS to one of the hosts it names, on that
+ * port, and nothing else.
+ * - `CONNECT host:port` for a named host on its named port; another is 403, a
+ *   request that is not CONNECT 405. It resolves the host itself, refuses one
+ *   that resolves to a LOCAL address (the runner's own ports, a metadata
+ *   endpoint), and dials the address it checked. A host that refuses the
+ *   dial is 502, one that does not answer 504.
+ * - The tunnel's first bytes must be a TLS ClientHello whose server name is
+ *   the named host (for a named IPv4 address, that address or none). Without
+ *   this, a host behind a CDN that routes by server name made the tunnel a
+ *   way to any site on that CDN (review pass 1).
+ * Each refusal is kept for the run's report. It listens on 127.0.0.1 only,
+ * and in the image the egress rules let the pipeline's uid reach this port
+ * and nothing else.
+ */
+export function startProxy(p: Pipeline, port: number, o: ProxyOptions = {}): Promise<Proxy> {
   const refused: string[] = [];
   let dropped = 0;
   const cut = (s: string) => (s.length > 120 ? `${s.slice(0, 120)}…` : s);
   const named = p.network.map((h) => `${h.host}:${h.port}`).join(", ");
-  const server = createServer((client) => {
+  const resolve = o.lookup ?? (async (host: string) => (await lookup(host)).address);
+  const [headMs, dialMs] = [o.headMs ?? 30_000, o.dialMs ?? 10_000];
+  const note = (why: string) => { if (refused.length < REFUSALS_SHOWN) refused.push(why); else dropped++; };
+  // Half-open on both sides: a client that sends and then shuts its write side still gets the answer (review pass 1).
+  const server = createServer({ allowHalfOpen: true }, (client) => {
     let head = Buffer.alloc(0);
-    // Until the request arrives; a tunnel, once open, lasts as long as its emitter.
-    client.setTimeout(30_000, () => client.destroy());
+    // Until the request and the ClientHello arrive; a tunnel, once open, lasts as long as its emitter.
+    client.setTimeout(headMs, () => client.destroy());
     client.on("error", () => {});
     const answer = (status: string, why: string) => {
-      if (refused.length < REFUSALS_SHOWN) refused.push(why); else dropped++;
+      note(why);
       client.end(`HTTP/1.1 ${status}\r\ncontent-type: text/plain\r\nconnection: close\r\n\r\n${why}\n`);
     };
     const onData = async (chunk: Buffer) => {
@@ -463,33 +549,54 @@ export function startProxy(p: Pipeline, port: number, o: { allowLocal?: boolean 
       const [host, want] = [m[1].toLowerCase(), Number(m[2])];
       if (!p.network.some((h) => h.host === host && h.port === want)) return answer("403 Forbidden", `CONNECT ${cut(`${host}:${want}`)}: not a host ${p.name} names (network: ${named})`);
       let address: string;
-      try { address = (await lookup(host)).address; } catch { return answer("502 Bad Gateway", `CONNECT ${host}:${want}: ${host} did not resolve`); }
-      if (!o.allowLocal && isLocalAddress(address)) return answer("403 Forbidden", `CONNECT ${host}:${want}: ${host} resolves to ${address}, a loopback or link-local address, which no emitter may reach`);
+      try { address = await resolve(host); } catch { return answer("502 Bad Gateway", `CONNECT ${host}:${want}: ${host} did not resolve`); }
+      if (!o.allowLocal && isLocalAddress(address)) return answer("403 Forbidden", `CONNECT ${host}:${want}: ${host} resolves to ${address}, a loopback, link-local or metadata address, which no emitter may reach`);
       // Gone while the name resolved (its emitter stopped, the request timed out): nothing to tunnel for.
       if (client.destroyed) return;
-      const up = tcpConnect({ host: address, port: want });
-      let open = false;
+      const up = tcpConnect({ host: address, port: want, allowHalfOpen: true });
+      let connected = false;
+      const dialing = setTimeout(() => { up.destroy(); answer("504 Gateway Timeout", `CONNECT ${host}:${want}: ${address} did not answer within ${dialMs / 1000} s`); }, dialMs);
       up.once("connect", () => {
-        open = true;
-        client.setTimeout(0);
+        connected = true;
+        clearTimeout(dialing);
         client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-        if (rest.length) up.write(rest);
-        client.pipe(up);
-        up.pipe(client);
+        let hello = rest;
+        const check = () => {
+          const name = helloName(hello);
+          if (name === "more") return;
+          client.off("data", onHello);
+          const fits = isIP(host) ? name === null || name === host : name === host;
+          if (name instanceof Error || !fits) {
+            note(`CONNECT ${host}:${want}: ${name instanceof Error ? `the tunnel did not begin with a TLS ClientHello (${name.message}); the proxy carries TLS to the named host only` : `the TLS ClientHello names ${name === null ? "no server" : cut(name)}, not ${host}`}`);
+            up.destroy();
+            client.destroy();
+            return;
+          }
+          client.setTimeout(0);
+          up.write(hello);
+          client.pipe(up);
+          up.pipe(client);
+        };
+        const onHello = (c: Buffer) => { hello = Buffer.concat([hello, c]); check(); };
+        client.on("data", onHello);
         client.resume();
+        if (hello.length) check();
       });
-      up.on("error", (e) => (open ? client.destroy() : answer("502 Bad Gateway", `CONNECT ${host}:${want}: ${(e as Error).message}`)));
-      client.once("close", () => up.destroy());
-      up.once("close", () => { if (open) client.destroy(); });
+      up.on("error", (e) => { clearTimeout(dialing); if (connected) client.destroy(); else answer("502 Bad Gateway", `CONNECT ${host}:${want}: ${(e as Error).message}`); });
+      // A side that closes cleanly has ended the other through pipe; one that failed takes the other with it.
+      client.once("close", () => { clearTimeout(dialing); up.destroy(); });
+      up.once("close", (failed) => { if (failed) client.destroy(); });
     };
     client.on("data", onData);
   });
+  // Bounded: a networked emitter an export has taken over cannot hold the runner's descriptors (review pass 1).
+  server.maxConnections = o.maxConnections ?? 64;
   return new Promise((ok, fail) => {
     server.once("error", fail);
     server.listen(port, "127.0.0.1", () => {
-      const at = (server.address() as { port: number }).port;
+      const at = server.address() as { address: string; port: number };
       ok({
-        url: `http://127.0.0.1:${at}`, port: at,
+        url: `http://${at.address}:${at.port}`, port: at.port,
         take: () => { const out = refused.splice(0); const more = dropped; dropped = 0; return more ? [...out, `…and ${more} more`] : out; },
         close: () => server.close(),
       });
@@ -793,15 +900,35 @@ function heldEgressCaps(status = existsSync("/proc/self/status") ? readFileSync(
 }
 
 /**
- * Whether an emitter uid can reach the runner's own port on 127.0.0.1, asked
- * as that uid (the range's last): true means the egress rules are not in
- * place. The image's command sets them; a runner started another way, or an
- * engine that dropped them, would otherwise give every emitter the network.
+ * Whether an emitter uid can reach a port of the runner's on 127.0.0.1,
+ * asked as that uid (the range's last) before the service listens, against a
+ * listener opened for the question: "reached" means the egress rules are not
+ * in place. The image's command sets them; a runner started another way, or
+ * an engine that dropped them, would otherwise give every emitter the
+ * network. Only a refusal counts as refused; a probe that could not ask (su-exec
+ * or python failing, a timeout) is its own answer, and the start is refused
+ * for it too (review pass 1: any failure read as refused, and the service was
+ * already listening).
  */
-async function emittersReach(port: number): Promise<boolean> {
-  const r = await step([SU_EXEC!, `${EMITTER_UIDS[1]}:${EMITTER_UIDS[1]}`, "python3", "-c", "import socket, sys; socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=3)", String(port)], { cwd: "/", env: EMITTER_ENV(process.env), deadline: Date.now() + 10_000 });
-  return r.code === 0;
+async function emittersReach(): Promise<"reached" | "refused" | Error> {
+  const listener = createServer((s) => s.destroy());
+  await new Promise<void>((ok) => listener.listen(0, "127.0.0.1", ok));
+  try {
+    const port = (listener.address() as { port: number }).port;
+    const r = await step([SU_EXEC!, `${EMITTER_UIDS[1]}:${EMITTER_UIDS[1]}`, "python3", "-c", EMITTER_PROBE, String(port)], { cwd: "/", env: EMITTER_ENV(process.env), deadline: Date.now() + 10_000 });
+    return r.code === 0 ? "reached" : r.code === 3 ? "refused" : new Error(`the probe as uid ${EMITTER_UIDS[1]} exited ${r.code}${r.timedOut ? " (timed out)" : ""}: ${tail(r.err, 300).trim()}`);
+  } finally {
+    listener.close();
+  }
 }
+/** Exits 0 when the connection opens, 3 when it is refused or reset, as the egress rules refuse it; anything else is a traceback. */
+const EMITTER_PROBE = [
+  "import socket, sys",
+  "try:",
+  "    socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=3).close()",
+  "except (ConnectionRefusedError, ConnectionResetError, PermissionError):",
+  "    sys.exit(3)",
+].join("\n");
 
 /**
  * `--self-check`: the allowlist's rules, the one-source rule, the count line,
@@ -1104,7 +1231,10 @@ async function selfCheck(): Promise<number> {
   expect("an empty list, a malformed host and a port out of range are refused", throws(() => net([]), /non-empty list/) && throws(() => net(["a b"]), /"host" or "host:port"/) && throws(() => net(["h:0"]), /port 1 to 65535/) && throws(() => net(["h:70000"]), /port 1 to 65535/) && throws(() => net([7]), /"host" or "host:port"/));
   expect("a loopback or link-local name is refused (the runner's own ports, a metadata endpoint)", ["localhost", "x.localhost", "127.0.0.1:8090", "169.254.169.254", "0.0.0.0"].every((h) => throws(() => net([h]), /loopback or link-local/)));
   expect("a host named twice is refused", throws(() => net(["h.example", "H.example:443"]), /names h\.example:443 twice/));
-  expect("loopback, unspecified and link-local addresses are local, v4, v6 and v4-mapped; others are not", ["127.0.0.1", "127.9.9.9", "0.0.0.0", "169.254.169.254", "::1", "::", "fe80::1", "FEBF::1", "::ffff:127.0.0.1", "::ffff:169.254.1.1"].every(isLocalAddress) && !["10.0.0.1", "172.17.0.1", "8.8.8.8", "fec0::1", "2001:db8::1", "api.example.com"].some(isLocalAddress));
+  expect("an address spelled other than as a dotted quad is refused (127.1 and 0x7f.1 are loopback); a dotted quad and a private address are not", ["127.1:8090", "2130706433", "0x7f.1", "0x7f000001", "1.2.3", "0"].every((h) => throws(() => net([h]), /neither a DNS name nor an IPv4 address/)) && net(["10.0.0.1", "1.2.3.4:8443", "api2.example"]).length === 3);
+  expect("loopback, unspecified, link-local, IPv4-compatible and metadata addresses are local, in every IPv4-mapped spelling; private and public ones are not",
+    ["127.0.0.1", "127.9.9.9", "0.0.0.0", "169.254.169.254", "::1", "::", "fe80::1", "FEBF::1", "::ffff:127.0.0.1", "::ffff:7f00:1", "::ffff:a9fe:a9fe", "::127.0.0.1", "fd00:ec2::254", "100.100.100.200"].every(isLocalAddress)
+    && !["10.0.0.1", "172.17.0.1", "192.168.1.1", "100.100.100.201", "8.8.8.8", "fec0::1", "fd00:ec2::253", "2001:db8::1", "api.example.com", ""].some(isLocalAddress));
   const onNet = parsePipelines(JSON.stringify([{ ...good, name: "online", system: "online", network: ["h.example"] }, { ...good, name: "offline", system: "offline" }]));
   const rules = egressRules(onNet);
   const [uOn, uOff] = [emitterUid("online"), emitterUid("offline")];
@@ -1116,53 +1246,124 @@ async function selfCheck(): Promise<number> {
   expect("every emitter uid is inside the range the rules close", [uOn, uOff, emitterUid("x"), emitterUid("fixture")].every((u) => u >= EMITTER_UIDS[0] && u <= EMITTER_UIDS[1]));
   expect("the capabilities the image's command drops are read from CapEff", heldEgressCaps("CapEff:\t00000000000000e0\n").length === 0 && JSON.stringify(heldEgressCaps("CapPrm:\t0\nCapEff:\t00000000000011e0\n")) === JSON.stringify(["NET_ADMIN", "SETPCAP"]) && heldEgressCaps("") .length === 0);
 
-  // The proxy, through the service: a networked pipeline's emitter reaches
-  // its named host by CONNECT and nothing else, and the run's report names
-  // what was refused. The named host is a stand-in on 127.0.0.1, which only
-  // the self-check's allowLocal lets through.
-  const upstream = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("upstream ok") });
+  // The proxy. Its upstream stand-in echoes what it gets, and says BYE when
+  // the client has shut its write side, so a tunnel that drops a half-closed
+  // client's answer is seen (review pass 1).
+  const u16 = (n: number) => Buffer.from([n >> 8, n & 255]);
+  const clientHello = (sni: string | null) => {
+    const name = sni === null ? Buffer.alloc(0) : Buffer.from(sni);
+    const entry = Buffer.concat([Buffer.from([0]), u16(name.length), name]);
+    const ext = sni === null ? Buffer.alloc(0) : Buffer.concat([u16(0), u16(entry.length + 2), u16(entry.length), entry]);
+    const body = Buffer.concat([Buffer.from([3, 3]), Buffer.alloc(32), Buffer.from([0]), u16(2), Buffer.from([0x13, 0x01]), Buffer.from([1, 0]), u16(ext.length), ext]);
+    const hs = Buffer.concat([Buffer.from([1, 0]), u16(body.length), body]);
+    return Buffer.concat([Buffer.from([0x16, 3, 1]), u16(hs.length), hs]);
+  };
+  // A real ClientHello, as Bun's TLS client sends it, captured by a listener that never answers.
+  const captured = await new Promise<Buffer>((ok) => {
+    const cap = createServer((s) => { let b = Buffer.alloc(0); s.on("data", (d: Buffer) => { b = Buffer.concat([b, d]); if (helloName(b) !== "more") { ok(b); s.destroy(); cap.close(); } }); });
+    cap.listen(0, "127.0.0.1", () => { const t = tlsConnect({ host: "127.0.0.1", port: (cap.address() as { port: number }).port, servername: "api.example.com", rejectUnauthorized: false }); t.on("error", () => {}); });
+  });
+  const split = clientHello("x.example");
+  split.writeUInt16BE(split.readUInt16BE(3) - 4, 3);
+  expect(`a ClientHello's server name is read: Bun's own, one naming none, one not yet whole; a non-TLS start, a hello split across records and a truncated one are refused (${helloName(captured)})`,
+    helloName(captured) === "api.example.com" && helloName(clientHello("API.Example.com.")) === "api.example.com" && helloName(clientHello(null)) === null
+    && helloName(captured.subarray(0, 20)) === "more" && helloName(Buffer.from("GET / HTTP/1.1\r\n\r\n")) instanceof Error
+    && String(helloName(split.subarray(0, split.length - 4))).includes("split across") && helloName(Buffer.concat([Buffer.from([0x16, 3, 1, 0, 6]), Buffer.from([1, 0, 0, 40, 3, 3])])) instanceof Error);
+
+  const echo = createServer({ allowHalfOpen: true }, (s) => { s.on("data", (d) => s.write(d)); s.on("end", () => s.end("BYE")); s.on("error", () => {}); });
+  await new Promise<void>((ok) => echo.listen(0, "127.0.0.1", ok));
+  const echoPort = (echo.address() as { port: number }).port;
   const closed = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
   const gonePort = closed.port!;
   closed.stop(true);
-  const raw = `const net = require("node:net"); const u = new URL(process.env.HTTPS_PROXY ?? "http://127.0.0.1:1"); const ask = (req) => new Promise((ok) => { let b = ""; const s = net.connect(Number(u.port), u.hostname, () => s.write(req)); s.on("data", (d) => (b += d)); s.on("close", () => ok(b)); s.on("error", () => ok(b)); });`;
+  const helloHex = (sni: string | null) => clientHello(sni).toString("hex");
+
+  // Through the service: a networked pipeline's emitter reaches its named
+  // host (127.0.0.1 here, which only the self-check's allowLocal lets
+  // through) with TLS, and nothing else; the run's report names what was refused.
+  const raw = `const net = require("node:net"); const u = new URL(process.env.HTTPS_PROXY ?? "http://127.0.0.1:1"); const ask = (req) => new Promise((ok) => { let b = ""; const s = net.connect(Number(u.port), u.hostname, () => s.end(req)); s.on("data", (d) => (b += d.toString("latin1"))); s.on("close", () => ok(b)); s.on("error", () => ok(b)); });`;
   const reachesEmitter = emit(`${raw} if (!process.env.HTTPS_PROXY || process.env.https_proxy !== process.env.HTTPS_PROXY) { console.error("no proxy in the environment"); process.exit(6); }
-    const t = await ask("CONNECT 127.0.0.1:${upstream.port} HTTP/1.1\\r\\nhost: 127.0.0.1\\r\\n\\r\\nGET / HTTP/1.1\\r\\nhost: x\\r\\nconnection: close\\r\\n\\r\\n");
+    const t = await ask(Buffer.concat([Buffer.from("CONNECT 127.0.0.1:${echoPort} HTTP/1.1\\r\\nhost: 127.0.0.1\\r\\n\\r\\n"), Buffer.from("${helloHex(null)}", "hex"), Buffer.from("ping")]));
     const f = await ask("CONNECT elsewhere.example:443 HTTP/1.1\\r\\n\\r\\n");
-    const g = await ask("GET http://127.0.0.1:${upstream.port}/ HTTP/1.1\\r\\n\\r\\n");
-    if (!t.startsWith("HTTP/1.1 200") || !t.includes("upstream ok") || !f.startsWith("HTTP/1.1 403") || !g.startsWith("HTTP/1.1 405")) { console.error(JSON.stringify([t, f, g].map((x) => x.slice(0, 90)))); process.exit(7); }
+    const g = await ask("GET http://127.0.0.1:${echoPort}/ HTTP/1.1\\r\\n\\r\\n");
+    const h = await ask("CONNECT 127.0.0.1:${echoPort} HTTP/1.1\\r\\n\\r\\nGET / HTTP/1.1\\r\\nhost: x\\r\\n\\r\\n");
+    const ok = t.startsWith("HTTP/1.1 200") && t.endsWith("pingBYE") && f.startsWith("HTTP/1.1 403") && g.startsWith("HTTP/1.1 405") && h === "HTTP/1.1 200 Connection Established\\r\\n\\r\\n";
+    if (!ok) { console.error(JSON.stringify([t, f, g, h].map((x) => x.slice(-90)))); process.exit(7); }
     console.log(${JSON.stringify(item("fixture"))})`);
-  const reaches: Pipeline = { ...parsePipelines(one({ name: "reaches", emitter: reachesEmitter }))[0], network: [{ host: "127.0.0.1", port: upstream.port! }] };
+  const reaches: Pipeline = { ...parsePipelines(one({ name: "reaches", emitter: reachesEmitter }))[0], network: [{ host: "127.0.0.1", port: echoPort }] };
   const netted = await serve(config({ pipelines: [reaches], env: process.env }), 0);
   try {
     const rr = await fetch(`http://127.0.0.1:${netted.port}/run/reaches`, { method: "POST", headers: { "x-runner-key": key } });
     const rrr = await rr.json() as Report;
-    expect(`a networked pipeline's emitter reaches its named host through its proxy, a CONNECT elsewhere is 403 and a plain request 405, and the report names both refusals (${rr.status} ${rrr.why ?? ""} ${JSON.stringify(rrr.notes ?? []).slice(0, 200)} ${JSON.stringify(rrr.egress)})`,
-      rr.status === 200 && rrr.ok && rrr.emitted === 1 && rrr.egress?.length === 2
-      && /^CONNECT elsewhere\.example:443: not a host reaches names \(network: 127\.0\.0\.1:\d+\)$/.test(rrr.egress[0]) && /^GET http:\/\/127\.0\.0\.1:\d+\/ HTTP\/1\.1: the runner's proxy tunnels HTTPS only/.test(rrr.egress[1]));
+    expect(`a networked pipeline's emitter reaches its named host through its proxy with TLS, and the report names what was refused: a CONNECT elsewhere (403), a plain request (405), a tunnel that did not begin with a ClientHello (${rr.status} ${rrr.why ?? ""} ${JSON.stringify(rrr.notes ?? []).slice(0, 200)} ${JSON.stringify(rrr.egress)})`,
+      rr.status === 200 && rrr.ok && rrr.emitted === 1 && rrr.egress?.length === 3
+      && /^CONNECT elsewhere\.example:443: not a host reaches names \(network: 127\.0\.0\.1:\d+\)$/.test(rrr.egress[0]) && /^GET http:\/\/127\.0\.0\.1:\d+\/ HTTP\/1\.1: the runner's proxy tunnels HTTPS only/.test(rrr.egress[1])
+      && /^CONNECT 127\.0\.0\.1:\d+: the tunnel did not begin with a TLS ClientHello \(not a TLS handshake\)/.test(rrr.egress[2]));
     const again = await (await fetch(`http://127.0.0.1:${netted.port}/run/reaches`, { method: "POST", headers: { "x-runner-key": key } })).json() as Report;
-    expect(`each run's report names its own refusals, not an earlier run's (${again.egress?.length})`, again.egress?.length === 2);
+    expect(`each run's report names its own refusals, not an earlier run's (${again.egress?.length})`, again.egress?.length === 3);
   } finally {
     netted.stop(true);
   }
-  // The proxy on its own: a named host resolving to a loopback address, one
-  // that does not answer, and the cap on what one report lists.
-  const ask = (port: number, req: string) => new Promise<string>((ok) => { let b = ""; const s = tcpConnect(port, "127.0.0.1", () => s.write(req)); s.on("data", (d) => (b += d)); s.on("close", () => ok(b)); s.on("error", () => ok(b)); });
-  const strict = await startProxy({ ...reaches, network: [{ host: "localhost", port: upstream.port! }] }, 0);
+
+  // The proxy on its own. `up.test` resolves, through the stand-in for DNS,
+  // to the echo on 127.0.0.1, after 100 ms; a proxy dialling the name rather
+  // than the address it checked finds no such host.
+  type Say = [number, Buffer | string | "END"];
+  const session = (port: number, says: Say[], waitMs = 3000) => new Promise<{ text: string; closedAt: number }>((ok) => {
+    const t0 = Date.now();
+    let b = "";
+    const s = tcpConnect(port, "127.0.0.1", async () => { for (const [ms, what] of says) { await Bun.sleep(ms); if (s.destroyed) break; if (what === "END") s.end(); else s.write(what); } });
+    const done = () => ok({ text: b, closedAt: Date.now() - t0 });
+    s.on("data", (d) => (b += d.toString("latin1")));
+    s.on("close", done);
+    s.on("error", () => {});
+    setTimeout(() => { s.destroy(); }, waitMs);
+  });
+  const connectTo = (host: string, port = echoPort) => `CONNECT ${host}:${port} HTTP/1.1\r\n\r\n`;
+  const dns: Record<string, string> = { "up.test": "127.0.0.1", "10.9.9.9": "127.0.0.1", "dark.test": "192.0.2.1" };
+  const own = await startProxy({ ...reaches, network: [{ host: "up.test", port: echoPort }, { host: "10.9.9.9", port: echoPort }, { host: "dark.test", port: echoPort }] }, 0,
+    { allowLocal: true, lookup: async (h) => { await Bun.sleep(100); if (!dns[h]) throw new Error("no such host"); return dns[h]; }, headMs: 400, dialMs: 200, maxConnections: 4 });
+  const strict = await startProxy({ ...reaches, network: [{ host: "localhost", port: echoPort }] }, 0);
   const loose = await startProxy({ ...reaches, network: [{ host: "127.0.0.1", port: gonePort }] }, 0, { allowLocal: true });
+  const ok200 = "HTTP/1.1 200 Connection Established\r\n\r\n";
   try {
-    const lo = await ask(strict.port, `CONNECT localhost:${upstream.port} HTTP/1.1\r\n\r\n`);
-    expect(`a named host that resolves to a loopback address is refused (${lo.split("\r\n")[0]})`, lo.startsWith("HTTP/1.1 403") && /resolves to (127\.0\.0\.1|::1), a loopback or link-local address/.test(strict.take()[0] ?? ""));
-    const down = await ask(loose.port, `CONNECT 127.0.0.1:${gonePort} HTTP/1.1\r\n\r\n`);
-    expect(`a named host that does not answer is 502, named (${down.split("\r\n")[0]})`, down.startsWith("HTTP/1.1 502") && /^CONNECT 127\.0\.0\.1:\d+: /.test(loose.take()[0] ?? ""));
-    for (let i = 0; i < REFUSALS_SHOWN + 5; i++) await ask(strict.port, `CONNECT x${i}.example:443 HTTP/1.1\r\n\r\n`);
+    expect(`the proxy listens on 127.0.0.1 alone (${own.url})`, own.url === `http://127.0.0.1:${own.port}`);
+    const named = await session(own.port, [[0, connectTo("up.test")], [0, clientHello("up.test")], [0, "ping"], [50, "END"]]);
+    expect(`TLS naming the named host reaches it, at the address checked, and a client that shuts its write side still gets the answer (${JSON.stringify(named.text.slice(-12))})`, named.text.startsWith(ok200) && named.text.endsWith("pingBYE") && own.take().length === 0);
+    const early = await session(own.port, [[0, connectTo("up.test")], [30, clientHello("up.test")], [0, "ping"], [0, "END"]]);
+    expect(`a ClientHello sent while the name is still resolving is kept, not dropped (${JSON.stringify(early.text.slice(-12))})`, early.text.endsWith("pingBYE"));
+    const other = await session(own.port, [[0, connectTo("up.test")], [0, clientHello("other.example")], [0, "ping"], [0, "END"]]);
+    const none = await session(own.port, [[0, connectTo("up.test")], [0, clientHello(null)], [0, "END"]]);
+    const refusedSni = own.take();
+    expect(`a ClientHello naming another server, or none, closes the tunnel before anything reaches the host, and is named (${JSON.stringify(refusedSni)})`,
+      other.text === ok200 && none.text === ok200 && refusedSni.length === 2 && /^CONNECT up\.test:\d+: the TLS ClientHello names other\.example, not up\.test$/.test(refusedSni[0]) && /names no server, not up\.test$/.test(refusedSni[1]));
+    const literal = await session(own.port, [[0, connectTo("10.9.9.9")], [0, clientHello(null)], [0, "ping"], [0, "END"]]);
+    expect(`a named IPv4 address takes a ClientHello naming no server (${JSON.stringify(literal.text.slice(-12))})`, literal.text.endsWith("pingBYE"));
+    const port2 = await session(own.port, [[0, connectTo("up.test", echoPort + 1)]]);
+    expect(`a named host on a port it does not name is 403 (${port2.text.split("\r\n")[0]})`, port2.text.startsWith("HTTP/1.1 403") && /not a host reaches names/.test(own.take()[0] ?? ""));
+    const idle = await session(own.port, [[0, connectTo("up.test")], [0, clientHello("up.test")], [700, "late"], [0, "END"]]);
+    expect(`an open tunnel outlives the request's 400 ms bound (${JSON.stringify(idle.text.slice(-12))})`, idle.text.endsWith("lateBYE"));
+    const mute = await session(own.port, []);
+    expect(`a connection that sends no request is closed at the bound (${mute.closedAt} ms)`, mute.text === "" && mute.closedAt >= 350 && mute.closedAt < 1500);
+    const dark = await session(own.port, [[0, connectTo("dark.test")]]);
+    const darkNote = own.take()[0] ?? "";
+    expect(`a named host that does not answer the dial is 504, named (${dark.text.split("\r\n")[0]}; ${darkNote})`, (dark.text.startsWith("HTTP/1.1 504") && /did not answer within 0\.2 s/.test(darkNote)) || (dark.text.startsWith("HTTP/1.1 502") && /unreachable/i.test(darkNote)));
+    const held = await Promise.all([0, 1, 2, 3, 4].map((i) => session(own.port, [[i * 20, ""]], 250)));
+    expect(`the proxy holds ${4} connections at once and closes the next (${held.map((h) => h.closedAt).join(", ")} ms)`, held.filter((h) => h.closedAt < 150).length === 1 && held.filter((h) => h.closedAt >= 240).length === 4);
+    const lo = await session(strict.port, [[0, connectTo("localhost")]]);
+    expect(`a named host that resolves to a loopback address is refused (${lo.text.split("\r\n")[0]})`, lo.text.startsWith("HTTP/1.1 403") && /resolves to (127\.0\.0\.1|::1), a loopback, link-local or metadata address/.test(strict.take()[0] ?? ""));
+    const down = await session(loose.port, [[0, connectTo("127.0.0.1", gonePort)]]);
+    expect(`a named host that refuses the dial is 502, named (${down.text.split("\r\n")[0]})`, down.text.startsWith("HTTP/1.1 502") && /^CONNECT 127\.0\.0\.1:\d+: /.test(loose.take()[0] ?? ""));
+    for (let i = 0; i < REFUSALS_SHOWN + 5; i++) await session(strict.port, [[0, connectTo(`x${i}.example`, 443)]]);
     const many = strict.take();
     expect(`one report lists ${REFUSALS_SHOWN} refusals and counts the rest, and take() clears them (${many.length}: ${many.at(-1)})`, many.length === REFUSALS_SHOWN + 1 && many.at(-1) === "…and 5 more" && strict.take().length === 0);
-    const long = await ask(strict.port, `${"A".repeat(9000)}`);
-    expect(`a request past 8 KB of headers is refused, not buffered (${long.split("\r\n")[0]})`, long.startsWith("HTTP/1.1 431"));
+    const long = await session(strict.port, [[0, "A".repeat(9000)]]);
+    expect(`a request past 8 KB of headers is refused, not buffered (${long.text.split("\r\n")[0]})`, long.text.startsWith("HTTP/1.1 431"));
   } finally {
+    own.close();
     strict.close();
     loose.close();
-    upstream.stop(true);
+    echo.close();
   }
 
   for (const x of fails) console.error(`FAIL ${x}`);
@@ -1206,14 +1407,13 @@ if (import.meta.main) {
   if (root) {
     const held = heldEgressCaps();
     if (held.length) await refuseStart(`started holding ${held.join(" and ")}, which the image's command drops once it has closed emitters' network: start the runner with its image's command (runner.Dockerfile), not another`);
+    const reach = await emittersReach();
+    if (reach instanceof Error) await refuseStart(`could not ask whether an emitter uid has network: ${reach.message}`);
+    if (reach === "reached") await refuseStart(`an emitter uid reached a port of the runner's on 127.0.0.1: the egress rules that close emitters' network are not in place. The image's command sets them (runner.Dockerfile); start the runner with it`);
   }
   if (!existsSync(c.importsDir)) console.error(`runner: ${c.importsDir} does not exist; every emitter will find no export`);
   let s!: Awaited<ReturnType<typeof serve>>;
   try { s = await serve(c); } catch (e) { await refuseStart(`could not listen: ${(e as Error).message}`); }
-  if (root && await emittersReach(s.port)) {
-    s.stop(true);
-    await refuseStart(`an emitter uid reached the runner's own port: the egress rules that close emitters' network are not in place. The image's command sets them (runner.Dockerfile); start the runner with it`);
-  }
   console.log(`runner: listening on :${s.port}, ${c.pipelines.length} pipeline(s)${c.pipelines.length ? `: ${c.pipelines.map((p) => `${p.name} (uid ${emitterUid(p.name)}${p.network.length ? `, network ${p.network.map((h) => `${h.host}:${h.port}`).join(", ")} through its proxy` : ""})`).join(", ")}` : " (none converted yet — deploy/orchestration/pipelines.json)"}`);
   if (root) {
     // An emitter's files in /tmp are its own.

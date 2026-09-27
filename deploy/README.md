@@ -837,14 +837,22 @@ lines naming the same one are refused.
          The emitter reaches them only through a proxy the runner keeps
          for that pipeline, at `HTTPS_PROXY` in its environment, which
          Python's urllib and requests and Bun's fetch read. The proxy
-         tunnels HTTPS (CONNECT) to a named host on its named port and
-         refuses anything else. The run's report lists what it refused
-         under `egress`. A name that is a loopback or link-local address,
-         or resolves to one, is refused, and so is `true`: a pipeline
-         cannot ask for the whole network. SMD-2211's egress checkpoint
-         governs the hosts a pipeline names.
+         tunnels TLS (CONNECT) to a named host on its named port, and the
+         tunnel's first bytes must be a ClientHello whose server name is
+         that host, so a vendor behind a CDN is not a way to every site on
+         it. Anything else is refused, and the run's report lists what was
+         under `egress`. `true` is refused: a pipeline cannot ask for the
+         whole network. So is a host that names or resolves to a loopback,
+         link-local or cloud metadata address; a private address is not
+         refused, since a compose service has one. A proxy holds 64
+         connections at once. SMD-2211's egress checkpoint governs the
+         hosts a pipeline names.
        - The ingester and reembed run as `bun` and keep the runner's
          network: Postgres and the model provider.
+       - The container's init process keeps the two capabilities, which
+         no emitter can reach. A `compose exec` as root inherits them, so
+         an operator there can change the rules; the rules are set afresh
+         each time the container starts.
      - A limit: every emitter can read every pipeline's exports that are
        world-readable. `deploy/imports/README.md` has how to keep one
        pipeline's to its own uid, on a host that enforces file modes.
