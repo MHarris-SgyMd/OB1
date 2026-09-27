@@ -269,13 +269,26 @@ console.log("\n[7] initialize");
   assert(info?.version === FORK_VERSION, `serverInfo.version is FORK_VERSION ${FORK_VERSION} (${info?.version})`);
 
   // @hono/mcp 0.1.x wanted both Accept tokens on a POST and the server patched
-  // whichever was missing; 0.3.x takes either, or none, and the patch is gone
-  // (change 84) — a connector's `application/json`, an SSE-only Accept (the SDK
-  // client's GET form) and no Accept at all reach the transport as sent.
-  for (const [label, headers] of [["text/event-stream alone", { Accept: "text/event-stream" }], ["application/json alone", { Accept: "application/json" }], ["no Accept header", {}]] as [string, Record<string, string>][]) {
-    const r = await fetch(BASE, { method: "POST", headers: { ...AUTH, ...headers }, body: INIT });
-    assert(r.status === 200 && (await mcpBody(r))?.result != null, `Accept: ${label} reaches the transport unpatched → 200 (${r.status})`);
+  // whichever was missing; 0.3.x took either, or none, and the patch went (change
+  // 84). v2's transport is spec-strict (SMD-2278): a POST must accept BOTH
+  // application/json and text/event-stream. Anything short of both — a single
+  // explicit token, or no Accept header at all (Bun's default `*/*` does not
+  // satisfy it either) — is 406 Not Acceptable; only both tokens get through. The
+  // official clients (Claude Desktop / claude.ai, the SDK client) send both; a
+  // bespoke client that sends less now gets a clear 406, not a silent patch.
+  const noAccept = { "Content-Type": "application/json", "x-brain-key": KEY };
+  for (const [label, accept] of [
+    ["text/event-stream alone", "text/event-stream"],
+    ["application/json alone", "application/json"],
+    ["no Accept header", undefined],
+  ] as [string, string | undefined][]) {
+    const headers = accept === undefined ? noAccept : { ...noAccept, Accept: accept };
+    const r = await fetch(BASE, { method: "POST", headers, body: INIT });
+    assert(r.status === 406, `Accept: ${label} → 406 Not Acceptable, v2 requires both tokens (${r.status})`);
   }
+  // The control: both tokens (as every other test here sends) get through.
+  const bothTokens = await fetch(BASE, { method: "POST", headers: AUTH, body: INIT });
+  assert(bothTokens.status === 200 && (await mcpBody(bothTokens))?.result != null, `Accept: both tokens → 200 with a result (${bothTokens.status})`);
 }
 
 console.log("\n[8] Per-request isolation — a fresh McpServer each time");

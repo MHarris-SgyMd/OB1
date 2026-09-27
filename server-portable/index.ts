@@ -5,8 +5,7 @@ import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedKind, t
 import { extractMetadata as extractMetadataWith, metadataRefused, TAG_KEYS } from "./metadata.ts";
 import { captureLineage } from "./lineage.ts";
 import { decideCalls, mayLeaveBox, type EgressDecision, type EgressSubject } from "./egress.ts";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPTransport } from "@hono/mcp";
+import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono } from "hono";
 import { z } from "zod";
 import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type AuditChange, type Citation, type ThoughtStore, type ThoughtHybridMatch, type ThoughtKeywordMatch } from "./store.ts";
@@ -3088,16 +3087,26 @@ app.on(MCP_METHODS, "*", async (c) => {
   principal.agentId = identity.agentId;
   principal.agentUnresolved = identity.unresolved;
 
-  // The label, read through Hono's request, which caches the body for the
-  // transport's own read of it — the same text, the same rejection: a body
-  // that cannot be read (the client gone mid-upload) is `?` here and the
-  // transport's 400 there, as before this read existed.
-  label = requestLabel(await c.req.text().catch(() => null));
+  // The label, read once from the request body. v2's transport reads the raw
+  // Request stream (v1's @hono/mcp read Hono's cached body, so a double-read was
+  // harmless), so we cache the text here and hand a reconstructed Request to the
+  // transport below — otherwise its parse sees an empty stream and every call
+  // returns -32700 (SMD-2278). A body that cannot be read (the client gone
+  // mid-upload) is `?` here and the transport's 400 there, as before.
+  const rawBody = await c.req.text().catch(() => null);
+  label = requestLabel(rawBody);
 
   const server = buildServer(principal);
-  const transport = new StreamableHTTPTransport();
+  const transport = new WebStandardStreamableHTTPServerTransport();
   await server.connect(transport);
-  const response = await transport.handleRequest(c);
+  // Reconstruct the Request from the cached body so the raw-stream read above
+  // does not leave the transport an empty body (SMD-2278).
+  const mcpRequest = new Request(c.req.raw.url, {
+    method: c.req.raw.method,
+    headers: c.req.raw.headers,
+    body: rawBody ?? undefined,
+  });
+  const response = await transport.handleRequest(mcpRequest);
   if (!response) {
     settled = true;
     return c.json({ error: "No response from MCP transport" }, 500, corsHeaders);
