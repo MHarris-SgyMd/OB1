@@ -608,6 +608,92 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   const clean = await extractEntities(short, cfgE, undefined, { kind: "extraction" });
   assert(!clean.malformed && clean.retried === undefined && penalties.length === 1, "…and an answer that converges is never retried");
 
+  // SMD-2000: with OB1_EXTRACT_ESCALATE_MODEL set, a runaway is remade on the
+  // LARGER model with no penalty — not once more on the same model under one —
+  // and `escalated` names the model that answered; the pass key stays the
+  // first model's (record_thought_entities' key, unchanged). The stub runs a
+  // runaway on the small model only; the large model answers whole.
+  let runawayOnceX = false;
+  const modelsX: string[] = [];
+  const penaltiesX: (number | undefined)[] = [];
+  const providerX = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { model?: string; frequency_penalty?: number };
+      modelsX.push(body.model ?? "");
+      penaltiesX.push(body.frequency_penalty);
+      if (runawayOnceX && body.model === "small-chat") {
+        runawayOnceX = false;
+        return Response.json({ choices: [{ message: { content: '{"entities":[{"name":"Loop","type":"tool","confidence":1},{"name":"Loop","type":"tool",' }, finish_reason: "length" }] });
+      }
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "Big", type: "person", confidence: 0.9 }], relationships: [] }) }, finish_reason: "stop" }] });
+    },
+  });
+  const cfgX = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${providerX.port}/v1`, OB1_METADATA_MODEL: "small-chat", OB1_EXTRACT_ESCALATE_MODEL: "big-chat" });
+  assert(windowingFor(cfgX).escalateModel === "big-chat", "OB1_EXTRACT_ESCALATE_MODEL sets the windowing's escalation target");
+  runawayOnceX = true;
+  const esc = await extractEntities(short, cfgX, undefined, { kind: "extraction" });
+  assert(!esc.malformed && esc.retried === true && esc.escalated === "big-chat" && esc.entities[0]?.name === "Big", "a runaway is escalated to the larger model, which answers, and `escalated` names it");
+  assert(modelsX.length === 2 && modelsX[0] === "small-chat" && modelsX[1] === "big-chat", `the first call is the metadata model, the second the escalation model (${modelsX.join(",")})`);
+  assert(penaltiesX.every((p) => p === undefined), `neither call carries a penalty — the escalation answers unpenalised (${penaltiesX.join(",")})`);
+  // The mutant the ticket names: a converged first answer is NEVER escalated —
+  // one call, the metadata model, no second call.
+  modelsX.length = 0;
+  const conv = await extractEntities(short, cfgX, undefined, { kind: "extraction" });
+  assert(!conv.malformed && conv.escalated === undefined && conv.retried === undefined && modelsX.length === 1 && modelsX[0] === "small-chat", "an answer that converges first time is never escalated — one call on the metadata model");
+  // An escalation model equal to the metadata model is ignored: a same-model
+  // unpenalised retry is strictly weaker than the penalised one it would
+  // replace, so windowingFor drops it and the penalised retry stands.
+  const cfgSame = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${providerX.port}/v1`, OB1_METADATA_MODEL: "small-chat", OB1_EXTRACT_ESCALATE_MODEL: "small-chat" });
+  assert(windowingFor(cfgSame).escalateModel === undefined, "an escalation model equal to the metadata model is ignored — the penalised retry stands");
+  providerX.stop(true);
+
+  // SMD-2000, the MULTI-WINDOW path: a runaway in ONE window of a long thought
+  // escalates, and the merged answer AND that window's part carry `escalated`
+  // (the single-window case above and test-live [10e] never take the of>1 path).
+  // Only the first window (the "alpha-marker" it alone holds — at its head, so
+  // the overlap never carries it on) runs away on the small model's first,
+  // unpenalised call; the larger model and the other window converge.
+  const providerMW = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { model?: string; frequency_penalty?: number; messages: { content: string }[] };
+      const user = body.messages[0].content;
+      if (/alpha-marker/.test(user) && body.model === "small-mw" && body.frequency_penalty === undefined) {
+        return Response.json({ choices: [{ message: { content: '{"entities":[{"name":"Loop","type":"tool","confidence":1},{"name":"Loop","type":"tool",' }, finish_reason: "length" }] });
+      }
+      const name = body.model === "big-mw" ? "Bigfoot" : "Anita";
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name, type: "person", confidence: 0.9 }], relationships: [] }) }, finish_reason: "stop" }] });
+    },
+  });
+  const cfgMW = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${providerMW.port}/v1`, OB1_METADATA_MODEL: "small-mw", OB1_EXTRACT_ESCALATE_MODEL: "big-mw", OB1_EXTRACT_CHUNK_TOKENS: "300" });
+  const twoWindow = `alpha-marker heads the first window. ${"Anita noted the ledger. ".repeat(120)}\n\nbeta opens the second. ${"Dev used the index. ".repeat(120)}`;
+  const mw = await extractEntities(twoWindow, cfgMW, undefined, { kind: "extraction" });
+  assert(mw.parts !== undefined && mw.parts.length >= 2, `the thought went in multiple windows (${mw.parts?.length} parts)`);
+  assert(mw.escalated === "big-mw" && mw.retried === true, `the merged multi-window answer names the escalation model — the of>1 path propagates it (escalated=${mw.escalated})`);
+  assert(mw.parts!.some((p) => p.escalated === "big-mw") && mw.parts!.some((p) => p.escalated === undefined), "only the runaway window's part carries the escalation model; a window that converged first time does not");
+  assert(mw.entities.some((e) => e.name === "Bigfoot"), "the escalation model's answer merged into the thought's entities");
+  providerMW.stop(true);
+
+  // The `first.malformed` guard (SMD-1879, shared by the SMD-2000 escalation): a
+  // budgeted answer that PARSES cleanly but happens to finish at `length` is the
+  // thought's answer, not a runaway — so it is neither retried NOR escalated, and
+  // costs one call. Without the conjunct a complete answer that closed exactly at
+  // the budget would be re-called and overwritten by the retry/escalation.
+  let lenCalls = 0;
+  const providerLen = Bun.serve({
+    port: 0,
+    fetch() {
+      lenCalls++;
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "Complete", type: "person", confidence: 0.9 }], relationships: [] }) }, finish_reason: "length" }] });
+    },
+  });
+  const cfgLen = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${providerLen.port}/v1`, OB1_METADATA_MODEL: "small-len", OB1_EXTRACT_ESCALATE_MODEL: "big-len" });
+  const lenEx = await extractEntities(short, cfgLen, undefined, { kind: "extraction" });
+  assert(!lenEx.malformed && lenEx.retried === undefined && lenEx.escalated === undefined && lenCalls === 1 && lenEx.entities[0]?.name === "Complete",
+    `a budgeted answer that parses but finished at 'length' is kept — not retried, not escalated, one call (${lenCalls})`);
+  providerLen.stop(true);
+
   // SMD-1960: the answer is streamed and a runaway is aborted at the third copy
   // of one item, before its budget, then retried under the penalty as a cut
   // one is. The stub streams a loop one item per frame and records, per

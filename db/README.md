@@ -1155,7 +1155,14 @@ running to the model's context and the worker's timeout — and a call cut that
 way is made once more with a frequency penalty (`RUNAWAY_PENALTY`, 0.5), which
 taxes the repetition the runaways were measured to be: on the fork's brain that
 retry, with the budget sized to both measured models, extracted all 32 thoughts
-one call could not finish, where windows alone reached 10 to 13. The answer is
+one call could not finish, where windows alone reached 10 to 13. Set
+`OB1_EXTRACT_ESCALATE_MODEL` and a runaway is instead remade once on that larger
+local model with no penalty (SMD-2000) — the pass key on the rows stays the
+first model's, and the dump line records which model answered. The 27B never
+looped on the thoughts the 7B could not finish, so the escalation spends the
+large model only where the small one has failed; it loads it beside the embedder
+(28 GB on the dogfood Mac, and `OLLAMA_MAX_LOADED_MODELS=2` can evict the
+embedder mid-pass), so it is a per-brain choice, not the default. The answer is
 streamed, and a call is aborted the moment its answer holds three copies of one
 item (`RunawayDetector`, `RUNAWAY_REPEATS`; SMD-1960) — the loop is visible on
 the stream long before the budget, so a runaway costs seconds rather than the
@@ -1174,7 +1181,8 @@ the table does not list gets that default. The banner's `window:` line and
 preflight's `extraction window` row print the same sentence. The prompt version
 is 2 — a pass under it re-extracts a brain whose thoughts were cut at 8,000
 characters under p1 — so the first run after upgrading needs `--switch-key`.
-`--dump`'s line carries `windows`, `retried` and `abortedMs` — how far into
+`--dump`'s line carries `windows`, `retried` (or `escalated: <model>` when the
+runaway went to the larger model, SMD-2000) and `abortedMs` — how far into
 the call a runaway was aborted on the stream — and, for a windowed thought,
 each window's own answer in `parts` beside the merged one. Why, measured:
 `evals/README.md`, "Entity extraction in windows".
@@ -2479,7 +2487,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1960 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 782 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+./with-postgres.sh bun test-live.ts         # 788 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

@@ -3409,10 +3409,22 @@ if (deep) {
   // and a judge model the endpoint does not serve fails the `judge model` row
   // rather than the first pass of db/consolidate.ts (SMD-1901). One model,
   // one probe: the two rows would otherwise report one call twice.
+  // The escalation target the worker would ACTUALLY dial (SMD-2000): windowingFor
+  // applies the rule — active only with reasoning off (a runaway exists only
+  // under a budget) and when it is not the metadata model — so the probe never
+  // fires for a model the worker would never reach.
+  const { windowingFor } = await import("./entities.ts");
+  const escalateModel = windowingFor(resolvedEmbed).escalateModel ?? "";
   const probes: [row: string, model: string, consequence: string][] = [
     ["metadata model", metaModel, "Capture would still succeed, but every thought would be tagged uncategorized."],
     ...(judgeModel !== metaModel
       ? [["judge model", judgeModel, "Capture is unaffected; db/consolidate.ts would fail every pair it judges."] as [string, string, string]]
+      : []),
+    // The escalation target (SMD-2000), when it is a third distinct model: a
+    // runaway is remade on it, so it must honour JSON mode too, or the answer
+    // it was meant to rescue is malformed and the thought fails.
+    ...(escalateModel && escalateModel !== judgeModel
+      ? [["extraction escalation model", escalateModel, "Capture and the judge are unaffected; a runaway extraction escalated to it would fail rather than be rescued."] as [string, string, string]]
       : []),
   ];
   for (const [row, model, consequence] of probes) {
