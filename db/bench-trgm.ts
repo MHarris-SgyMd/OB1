@@ -35,7 +35,9 @@
 import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { requireDatabaseUrl, resetSchema } from "./test-support.ts";
+import { commandLine } from "./cli.ts";
 
+commandLine("bench-trgm.ts", {}, { note: "its knobs are OB1_BENCH_* environment variables" });
 const URL_ = requireDatabaseUrl("bench-trgm.ts");
 
 /** Small enough that HNSW build time does not dominate; ILIKE plans ignore it. */

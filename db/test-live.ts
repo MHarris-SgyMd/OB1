@@ -41,7 +41,7 @@ import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-porta
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash } from "../server-portable/lineage.ts";
 import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
-import { corpusIngested, docOf, docsOf, INGEST_ACTOR, recordId, recordStructure, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
+import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
@@ -2567,9 +2567,9 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const combined = await reembed("--accept-failed", poisonId, "--retry-failed");
   assert(combined.code === 2 && /do not combine/.test(combined.out), "…and it does not combine with a run's flags");
   const stray = await reembed("--accept-failed", poisonId, "--dry-run", lateId);
-  assert(stray.code === 2 && /not understood: /.test(stray.out) && stray.out.includes(lateId), "…and an id after another flag is refused rather than dropped");
+  assert(stray.code === 2 && /unknown argument \d+: a value where no flag takes one/.test(stray.out) && /--accept-failed <thought-id …> \(right after it, before any other flag\)/.test(stray.out), "…and an id after another flag is refused rather than dropped");
   const twice = await reembed("--accept-failed", poisonId, "--accept-failed", lateId);
-  assert(twice.code === 2 && /--accept-failed is given twice/.test(twice.out), "…as is the flag given twice, whose second list would otherwise be dropped");
+  assert(twice.code === 2 && /--accept-failed given twice/.test(twice.out), "…as is the flag given twice, whose second list would otherwise be dropped");
   const jobless = await reembedIn({}, "--job", "--switch-model");
   assert(jobless.code === 2 && /--job needs a value/.test(jobless.out) && (await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = '--switch-model'`)[0].c === 0,
     `a flag that takes a value followed by another flag is refused, not read as the value — no pass runs under the key "--switch-model" (exit ${jobless.code})`);
@@ -2603,7 +2603,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     `…and --all passes over it, saying so (exit ${allDry.code})`);
   await sql`DELETE FROM thoughts WHERE id = ${vectorlessId}::uuid`;
   const allAndIds = await reembed("--accept-failed", "--all", poisonId);
-  assert(allAndIds.code === 2 && /not understood: /.test(allAndIds.out) && allAndIds.out.includes(poisonId) && (await claimCounts()).failed === 3,
+  assert(allAndIds.code === 2 && /unknown argument \d+: a value where no flag takes one/.test(allAndIds.out) && (await claimCounts()).failed === 3,
     `…nor does --all take ids beside it — an id after it is a stray argument, refused (exit ${allAndIds.code})`);
   const idsAndAll = await reembed("--accept-failed", poisonId, "--all");
   assert(idsAndAll.code === 2 && /--all takes no ids beside it/.test(idsAndAll.out) && (await claimCounts()).failed === 3,
@@ -4389,7 +4389,7 @@ console.log("\n[18] Every schemas/*.sql, then every extension and recipe schema,
         try { await sql.unsafe(readFileSync(join(SCHEMAS, f), "utf8")); }
         catch (e) { failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); await sql.unsafe("ROLLBACK").catch(() => {}); }
       }
-      assert(schemaFiles.length >= 14 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files; failed: ${failed.join(" | ") || "none"})`);
+      assert(schemaFiles.length >= 13 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files — 13 since SMD-1812 moved wiki-pages into core; failed: ${failed.join(" | ") || "none"})`);
       const contribFailed: string[] = [];
       for (const f of contribFiles) {
         try { await sql.unsafe(readFileSync(join(CONTRIB_DIR, f), "utf8")); }
@@ -4403,7 +4403,7 @@ console.log("\n[18] Every schemas/*.sql, then every extension and recipe schema,
       const grant = await migrate("--grant", ROLE);
       assert(grant.code === 0 && !/not yet present/.test(grant.out) && /over \d+ object\(s\)/.test(grant.out),
              `--grant issues everything, nothing skipped (exit ${grant.code}: ${grant.out.trim().split("\n").find((l) => /Granted/.test(l)) ?? grant.out.trim().split("\n").slice(-1)[0]})`);
-      assert(/GRANT USAGE, SELECT ON SEQUENCE ingestion_jobs_id_seq TO "ob1_live_community";/.test(grant.out) && /GRANT EXECUTE ON FUNCTION wiki_accept_pending\(uuid, text\) TO "ob1_live_community";/.test(grant.out) && /GRANT SELECT, INSERT ON thought_audit TO "ob1_live_community";/.test(grant.out),
+      assert(/GRANT USAGE, SELECT ON SEQUENCE ingestion_jobs_id_seq TO "ob1_live_community";/.test(grant.out) && /GRANT EXECUTE ON FUNCTION lookup_agent_memory_key\(text\) TO "ob1_live_community";/.test(grant.out) && /GRANT SELECT, INSERT ON thought_audit TO "ob1_live_community";/.test(grant.out),
              "…a sequence, a function with its argument types, and thought_audit's merged capture + community privileges among them");
 
       // The role, connecting as itself. An INSERT of DEFAULT VALUES asks for
@@ -4435,13 +4435,12 @@ console.log("\n[18] Every schemas/*.sql, then every extension and recipe schema,
         if (!ok) fnDenied.push(n);
       }
       assert(fnDenied.length === 0, `…and may EXECUTE each of the ${grantedFunctions(["community"]).length} listed functions (denied: ${fnDenied.join(", ") || "none"})`);
-      // and the one call a community RPC makes for real: wiki_upsert_page, as
-      // the role — SECURITY INVOKER, REVOKEd FROM PUBLIC, writing wiki_pages
-      const page = (await asRole.unsafe(`SELECT wiki_upsert_page('smd-1796', 'Granted', 'topic', '{}'::jsonb, 'test-live') AS r`)) as { r: { page_id: string; created: boolean } }[];
-      assert(typeof page[0]?.r?.page_id === "string", `…and calls wiki_upsert_page through its grant, writing wiki_pages as itself (${JSON.stringify(page[0]?.r)})`);
-      let rewrite = "";
-      try { await asRole.unsafe(`UPDATE wiki_section_revisions SET body_md = '' WHERE false`); } catch (e) { rewrite = (e as Error).message; }
-      assert(/permission denied/.test(rewrite), `…but cannot UPDATE wiki_section_revisions — append-only, as upstream had it (${rewrite.split("\n")[0] || "the UPDATE was allowed"})`);
+      // and the one call a community RPC makes for real: lookup_agent_memory_key,
+      // as the role — SECURITY DEFINER, REVOKEd FROM PUBLIC, reading and touching
+      // agent_memory_keys (the wiki RPCs were this probe until SMD-1812 moved
+      // the page store into core: test-live [32])
+      const lookup = (await asRole.unsafe(`SELECT count(*)::int AS n FROM lookup_agent_memory_key('${"a".repeat(64)}')`)) as { n: number }[];
+      assert(lookup[0]?.n === 0, `…and calls lookup_agent_memory_key through its grant, an unknown hash answering no row (${JSON.stringify(lookup[0])})`);
 
       // The rollback path, over TCP: --grant connected as THIS role — every
       // privilege held, none with grant option — granting a third role. Every
@@ -4586,6 +4585,13 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   assert(namedAudit?.origin === INGEST_ACTOR.via && namedAudit.actor_name === INGEST_ACTOR.name, "…and its audit row names the ingester as writer and door");
   assert((await sql`SELECT current_setting('ob1.actor', true) AS a`)[0].a === "" || (await sql`SELECT current_setting('ob1.actor', true) AS a`)[0].a === null, "…and the envelope does not outlive the record's transaction on the connection");
   ids.push(named.id);
+  // SMD-2212: `--actor` — the import runner's rows carry its own name, through the ingester's door.
+  const byRunner = mk("memory", "test-note-r", "Test note R: written by the import runner under its own name.");
+  assert((await upsertRecord(sql, byRunner, runName(), ingestActor("orchestration-runner"))).outcome === "inserted", "a record under another tool's actor name inserts");
+  const [runnerRow] = await sql`SELECT metadata->>'actor_name' AS n FROM thoughts WHERE id = ${byRunner.id}::uuid`;
+  const [runnerAudit] = await sql`SELECT origin, actor_name FROM thought_audit WHERE thought_id = ${byRunner.id}::uuid AND action = 'capture'`;
+  assert(runnerRow.n === "orchestration-runner" && runnerAudit?.actor_name === "orchestration-runner" && runnerAudit.origin === INGEST_ACTOR.via, `…stamped with that name, and its audit row keeps the ingester as the door (${runnerRow.n}/${runnerAudit?.origin})`);
+  ids.push(byRunner.id);
 
   // A record an adapter mapped (SMD-1867): the row, and in its transaction the
   // canonical, the links and the structured mentions; the same record again
@@ -6420,6 +6426,271 @@ console.log("\n[30] Migration 061 on a real server: the windowed capture's linea
     const lineage = ((await sql`SELECT produced_by AS by FROM derivations WHERE artifact_kind = 'entities' AND artifact_id = ${race.id}::uuid ORDER BY 1`) as { by: string }[]).map((r) => r.by);
     assert(waited === 1 && standing.join() === "extract:a@p1,extract:b@p1" && lineage.join() === standing.join(),
       `two extractions racing under different keys: B waited on A's open transaction, both mentions stand (016's race), and each standing key has its lineage row (waited ${waited}; standing ${standing.join()}; lineage ${lineage.join()})`);
+  } finally {
+    await cA.close();
+    await cB.close();
+  }
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM derivations`;
+  await sql.close();
+}
+
+console.log("\n[31] Migration 063 on a real server: db/rebuild.ts drives rebuild_derived — a dry run keeps nothing, a run feeds the three pools and sets the proposal stale, --status reads the census, --orphans sweeps a row whose windows a raw delete removed; the walk rides the GIN index; two sessions racing — a rebuild against a reviewer's accept (serialised by the supersession lock), a forget-arm rebuild against a worker's extraction (the entity lock, no deadlock) (SMD-1732)");
+{
+  // Its own pool, as [30] has.
+  const sql = new SQL({ url: URL_, max: 2 });
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM derivations`;
+  await sql`DELETE FROM ob1_entities`;
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  await sql`SELECT set_agent_kind('op-key', 'operator')`;
+  const ACTOR = { name: "op-key", via: "live-door" };
+  const MODEL = EMBEDDING_MODEL;
+  const cfg = Object.fromEntries(((await sql`SELECT key, value FROM ob1_config WHERE key IN ('embedding_model', 'embedding_dim')`) as { key: string; value: string }[]).map((r) => [r.key, r.value]));
+  const REEMBED = `reembed:${cfg.embedding_model}@${cfg.embedding_dim}`;
+  const CUR_KEY = "extract:live@p2", JUDGE = "consolidate:live@p1";
+  const rebuildTs = (...extra: string[]) => runScript(["bun", join(HERE, "rebuild.ts"), "--url", URL_!, ...extra], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" }, cwd: HERE });
+  const claimsOf = async (id: string) => ((await sql`SELECT work_type AS w, status AS s FROM thought_work_claims WHERE thought_id = ${id}::uuid ORDER BY 1`) as { w: string; s: string }[]).map((c) => `${c.w}:${c.s}`).join();
+  const marksOf = async (id: string) => ((await sql`SELECT artifact_kind AS k, stale_reason AS r FROM derivations WHERE artifact_id = ${id}::uuid ORDER BY 1`) as { k: string; r: string | null }[]).map((m) => `${m.k}:${m.r ?? "-"}`).join();
+  const status = async (pid: string) => ((await sql`SELECT status FROM supersession_proposals WHERE id = ${pid}::uuid`) as { status: string }[])[0]?.status;
+
+  // The fixture: an older and a newer thought sharing Alice, the newer with
+  // real windows through the 4-argument form (its chunks row from the
+  // envelope's recipe), a pending proposal; the configured extraction key set
+  // after the captures (016's trigger would enqueue them under it).
+  const older = (await sql`SELECT upsert_thought('063 live: the older note about Alice', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(1)}::vector) AS r`)[0].r as { id: string; fingerprint: string };
+  await sql`UPDATE thoughts SET created_at = now() - interval '3 days' WHERE id = ${older.id}::uuid`;
+  const windows = [{ content: "window one", embedding: unit(2) }, { content: "window two", embedding: unit(3) }];
+  const newer = (await sql`SELECT upsert_thought('063 live: the newer note about Alice and Bob', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL, lineage: { chunks: { deterministic: true, model: MODEL, params: { tokens: 300 }, count: 2 } } }}::jsonb, ${unit(2)}::vector, ${windows}::jsonb) AS r`)[0].r as { id: string; fingerprint: string };
+  for (const [id, ents] of [[older.id, [{ name: "Alice", type: "person", confidence: 0.9 }]], [newer.id, [{ name: "Alice", type: "person", confidence: 0.9 }, { name: "Bob", type: "person", confidence: 0.9 }]]] as const) {
+    const e = (await sql`SELECT record_thought_entities(${id}::uuid, 'extract:old@p1', ${JSON.stringify(ents)}::text::jsonb, '[]'::jsonb, NULL, NULL, '{"deterministic": false, "model": "stub"}'::jsonb) AS r`)[0].r as { ok: boolean };
+    assert(e.ok === true, "the fixture's extractions stand");
+  }
+  const pid = (await sql`SELECT record_supersession_proposal(${older.id}::uuid, ${newer.id}::uuid, 'newer_supersedes_older', 0.9, 'because', 0.8, ${JUDGE}::text, NULL, NULL, NULL, '{"deterministic": false}'::jsonb) AS id`)[0].id as string;
+  await sql`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${CUR_KEY}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+  assert((await marksOf(newer.id)) === "chunks:-,entities:-,vector:-" && Number((await sql`SELECT count(*)::int AS c FROM thought_chunks WHERE thought_id = ${newer.id}::uuid`)[0].c) === 2, `the newer thought's three rows, none marked, two windows (${await marksOf(newer.id)})`);
+
+  // The walk rides the GIN index (a small table would seq-scan; the planner
+  // is asked with the scan off, as [15]'s plan check does for its index).
+  const plan = JSON.stringify(await sql.unsafe(`SET enable_seqscan = off; EXPLAIN (FORMAT JSON) SELECT * FROM derivations WHERE input_ids && ARRAY['${newer.id}'::uuid]; RESET enable_seqscan`).simple());
+  assert(/idx_derivations_inputs/.test(plan), `the forward probe uses the GIN index on input_ids (${plan.slice(0, 200)})`);
+
+  // A raw text move, then the door: a dry run reports and keeps nothing; a
+  // run feeds the three pools under the workers' keys and sets the proposal
+  // stale; --status reads it back.
+  await sql`UPDATE thoughts SET content = '063 live: the newer note about Alice and Bob, rewritten', content_fingerprint = content_fingerprint_of('063 live: the newer note about Alice and Bob, rewritten') WHERE id = ${newer.id}::uuid`;
+  await sql`DELETE FROM thought_work_claims WHERE thought_id = ${newer.id}::uuid`;
+  const dry = await rebuildTs("--input", newer.id, "--reason", "live: edit", "--dry-run");
+  assert(dry.code === 0 && /dry run: the call runs and rolls back/.test(dry.out) && /enqueued:\s+3 \(thought, pool\) claim\(s\)/.test(dry.out) && (await claimsOf(newer.id)) === "" && (await status(pid)) === "pending" && (await marksOf(newer.id)) === "chunks:-,entities:-,vector:-",
+    `a dry run prints the report the function would give and keeps nothing (exit ${dry.code}: ${dry.out.split("\n").find((l) => /enqueued/.test(l))?.trim()}; claims "${await claimsOf(newer.id)}")`);
+  const live = await rebuildTs("--input", newer.id, "--reason", "live: edit");
+  assert(live.code === 0 && /rebuilt:\s+0/.test(live.out) && /enqueued:\s+3/.test(live.out) && /marked:\s+3 lineage row\(s\)[^\n]*1 pending proposal\(s\) set stale/.test(live.out) && new RegExp(`${REEMBED.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+→\\s+bun db/reembed\\.ts --url <url>`).test(live.out) && /extract:live@p2\s+→\s+bun db\/extract-entities\.ts/.test(live.out) && /consolidate:live@p1\s+→\s+bun db\/consolidate\.ts/.test(live.out),
+    `a run hands the windows and the vector to the reembed pool, the extraction to the configured key, the pair to the judge's, and names the command that drains each (exit ${live.code}: ${live.out.trim().split("\n").slice(2, 6).join(" / ").slice(0, 300)})`);
+  assert((await claimsOf(newer.id)) === `${JUDGE}:pending,${CUR_KEY}:pending,${REEMBED}:pending` && (await status(pid)) === "stale" && (await marksOf(newer.id)) === "chunks:live: edit,entities:live: edit,vector:live: edit",
+    `…the claims stand under the three keys, the proposal is stale, the reason is on every row (${await claimsOf(newer.id)}; ${await marksOf(newer.id)})`);
+  const st = await rebuildTs("--status");
+  assert(st.code === 0 && /marked:\s+3 row\(s\) await a re-run/.test(st.out) && /proposals:\s+1 stale/.test(st.out) && /orphans:\s+0 row\(s\)/.test(st.out) && new RegExp(`${CUR_KEY} \\(1 pending\\)`).test(st.out),
+    `--status reads the census back: the marks, the stale proposal, the pools (${st.out.trim().split("\n").slice(0, 7).join(" / ").slice(0, 300)})`);
+  // A raw delete of the windows leaves an orphan row: the sweep deletes it.
+  await sql`DELETE FROM thought_chunks WHERE thought_id = ${newer.id}::uuid`;
+  const sweep = await rebuildTs("--orphans");
+  assert(sweep.code === 0 && /orphans:\s+1 thought\(s\)/.test(sweep.out) && /deleted:\s+1 lineage row\(s\) over 1 thought\(s\)/.test(sweep.out) && (await marksOf(newer.id)) === "entities:live: edit,vector:live: edit",
+    `--orphans deletes the chunks row whose windows are gone and leaves the rest (exit ${sweep.code}: ${sweep.out.trim().split("\n").slice(0, 2).join(" / ")})`);
+  assert(/orphans: none/.test((await rebuildTs("--orphans")).out), "…and a second sweep finds none");
+  // The door's array bind (first review pass: Bun bound a string[] as the
+  // bare text "a,b" — malformed array literal), and a fresh process on a
+  // thought whose only lineage row is a proposal (the record variable with
+  // no shape, same pass).
+  const gone = await rebuildTs("--input", newer.id, "--gone", "--fingerprints", "live-old-fp,live-\"quoted\"-fp", "--dry-run");
+  assert(gone.code === 0 && /input:\s+[0-9a-f-]{36} \(leaving/.test(gone.out) && /cascade:\s+1 proposal\(s\)/.test(gone.out), `the forget arm through the door with two fingerprints, one carrying a quote, runs dry and reports the cascade (exit ${gone.code}: ${gone.out.trim().split("\n").slice(0, 3).join(" / ").slice(0, 240)})`);
+  const P0 = (await sql`SELECT upsert_thought('063 live: a vectorless older note', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`)[0].r as { id: string };
+  await sql`UPDATE thoughts SET created_at = now() - interval '4 days' WHERE id = ${P0.id}::uuid`;
+  const Q0 = (await sql`SELECT upsert_thought('063 live: a vectorless newer note', ${{ metadata: { source: "mcp" }, actor: ACTOR }}::jsonb) AS r`)[0].r as { id: string };
+  await sql`SELECT record_supersession_proposal(${P0.id}::uuid, ${Q0.id}::uuid, 'conflict_undirected', 0.5, 'first', 0.5, ${JUDGE}::text)`;
+  const firstRow = await rebuildTs("--input", Q0.id, "--reason", "live: first");
+  assert(firstRow.code === 0 && /walked:\s+1 lineage row/.test(firstRow.out) && /current:\s+1/.test(firstRow.out), `a fresh process's first rebuild on a thought whose only row is a proposal runs (exit ${firstRow.code}: ${firstRow.out.trim().split("\n").slice(0, 3).join(" / ").slice(0, 200)})`);
+  // The fingerprints reach the function for real: two planted snapshot rows
+  // — one with a quote, one with a backslash — go with Q0's forget; a third,
+  // not passed, stays (second review pass: the dry run above proved only the
+  // exit code).
+  for (const f of ['live-"quoted"-fp', "live-back\\slash-fp", "live-unpassed-fp"]) await sql`INSERT INTO ob1_embedding_snapshot (content_fingerprint, embedding_model, embedding, dims) VALUES (${f}, ${MODEL}, ${unit(4)}::vector, ${EMBEDDING_DIM}) ON CONFLICT DO NOTHING`;
+  const goneReal = await rebuildTs("--input", Q0.id, "--gone", "--fingerprints", 'live-"quoted"-fp,live-back\\slash-fp');
+  const snapLeft = ((await sql`SELECT content_fingerprint AS f FROM ob1_embedding_snapshot WHERE content_fingerprint LIKE 'live-%' ORDER BY 1`) as { f: string }[]).map((r) => r.f).join();
+  assert(goneReal.code === 0 && /deleted:\s+2 /.test(goneReal.out) && snapLeft === "live-unpassed-fp", `a real forget through the door deletes the snapshot rows at the passed fingerprints, quotes and backslashes intact, and leaves the one not passed (exit ${goneReal.code}; left: ${snapLeft})`);
+  await sql`DELETE FROM ob1_embedding_snapshot WHERE content_fingerprint LIKE 'live-%'`;
+
+  // Two sessions: a rebuild inside an open transaction against a reviewer
+  // accepting the same proposal — the reviewer waits on the supersession
+  // lock the rebuild took first (036's order), then acts on the row the
+  // rebuild left. Bun's SQL is lazy: the blocked call is dispatched with
+  // execute() (test-live [30]'s lesson).
+  await sql`UPDATE supersession_proposals SET status = 'pending' WHERE id = ${pid}::uuid`;
+  const cA = new SQL({ url: URL_, max: 1 }), cB = new SQL({ url: URL_, max: 1 });
+  try {
+    await cA`BEGIN`;
+    const rA = (await cA`SELECT rebuild_derived(${newer.id}::uuid, 'race: rebuild') AS r`)[0].r as { ok: boolean; marked: number };
+    const pB = cB`SELECT review_supersession_proposal(${pid}::uuid, 'accept', 'raced', NULL, ${JSON.stringify(ACTOR)}::text::jsonb, true) AS r`.execute();
+    let waited = 0;
+    for (let i = 0; i < 40 && !waited; i++) {
+      await Bun.sleep(50);
+      waited = Number((await cA`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`)[0].n);
+    }
+    await cA`COMMIT`;
+    const rB = (await pB)[0].r as { ok: boolean; status?: string; error?: string };
+    assert(rA.ok === true && waited === 1 && rB.ok === true && rB.status === "accepted" && (await status(pid)) === "accepted",
+      `the reviewer waited on the rebuild's lock and then accepted the stale row with p_force (waited ${waited}; ${JSON.stringify(rB)})`);
+
+    // A forget-arm rebuild against a worker writing the same thought's
+    // extraction: the worker holds the entity from its upsert; the rebuild
+    // locks the entities FIRST (016's order) and waits, then deletes the
+    // mentions the worker wrote — no 40P01, the graph empty at the end.
+    await cA`BEGIN`;
+    const eA = (await cA`SELECT record_thought_entities(${newer.id}::uuid, ${CUR_KEY}::text, '[{"name": "Alice", "type": "person", "confidence": 0.9}, {"name": "Carol", "type": "person", "confidence": 0.9}]'::jsonb, '[]'::jsonb, NULL, NULL, '{"deterministic": false}'::jsonb) AS r`)[0].r as { ok: boolean };
+    const pF = cB`SELECT rebuild_derived(${newer.id}::uuid, 'race: forget', true) AS r`.execute();
+    waited = 0;
+    for (let i = 0; i < 40 && !waited; i++) {
+      await Bun.sleep(50);
+      waited = Number((await cA`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`)[0].n);
+    }
+    await cA`COMMIT`;
+    const rF = (await pF)[0].r as { ok: boolean; deleted: number; cascading: { proposals: number } };
+    const ents = ((await sql`SELECT name FROM ob1_entities ORDER BY name`) as { name: string }[]).map((e) => e.name).join();
+    assert(eA.ok === true && waited === 1 && rF.ok === true && Number((await sql`SELECT count(*)::int AS c FROM thought_entities WHERE thought_id = ${newer.id}::uuid`)[0].c) === 0 && ents === "Alice" && rF.cascading.proposals === 1,
+      `the forget arm waited on the worker's entity lock, then removed the mentions the worker had just written — Carol pruned, Alice (the older's) kept, the proposal counted for the cascade (waited ${waited}; entities ${ents}; ${JSON.stringify(rF)})`);
+  } finally {
+    await cA.close();
+    await cB.close();
+  }
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM derivations`;
+  await sql`DELETE FROM ob1_entities`;
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  await sql.close();
+}
+
+console.log("\n[32] Migration 064 on a real server: the page store under concurrency — two sessions' first write of one section serialise on the page (one created, one updated), two sessions on two sections of one page leave the render the thought's content, a human's edit and a machine's regeneration racing leave the human's text live whichever commits first, a section write racing delete_thought of the page waits and finds no page (no deadlock), two creates of one slug — one title or two — leave one page and one refusal by name (SMD-1812)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM derivations`;
+  await sql`SELECT set_agent_kind('op-key', 'operator')`;
+  const ACTOR = { name: "op-key", via: "live-door" };
+  const cA = new SQL({ url: URL_, max: 1 }), cB = new SQL({ url: URL_, max: 1 });
+  try {
+    type R = { action?: string; section_id?: string; page_id?: string; created?: boolean };
+    type Sec = { origin: string; body_md: string; pending: string | null };
+    const e = (await sql`SELECT upsert_thought('064 live: the evidence', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: EMBEDDING_MODEL }}::jsonb, ${unit(0)}::vector) AS r`)[0].r as { id: string };
+    const P = ((await sql`SELECT upsert_page('live-runbook', 'Live runbook', 'topic', '{}'::jsonb, 'alice') AS r`)[0].r as { page_id: string }).page_id;
+    const write = async (c: SQL, key: string, body: string, origin: string, actor: string): Promise<R> =>
+      ((await c`SELECT write_page_section(${P}::uuid, ${key}, ${body}, ${origin}, NULL, '{}'::jsonb, ${origin === "generated" ? sql.array([e.id], "TEXT") : null}::uuid[], NULL, ${actor}) AS r`) as { r: R }[])[0].r;
+    const secOf = async (key: string) => (await sql`SELECT origin, body_md, pending_body_md AS pending FROM page_sections WHERE page_id = ${P}::uuid AND section_key = ${key}`)[0] as Sec | undefined;
+    const revisions = async (key: string) => Number((await sql`SELECT count(*)::int AS c FROM page_section_revisions r JOIN page_sections s ON s.id = r.section_id WHERE s.page_id = ${P}::uuid AND s.section_key = ${key}`)[0].c);
+    const consistent = async () => { const [x] = await sql`SELECT render_page(${P}::uuid) = (SELECT content FROM thoughts WHERE id = ${P}::uuid) AS same`; return x.same === true; };
+
+    // Two first writes of one key, at once: the page lock and the unique key
+    // serialise them — one created, the other falls through to the
+    // existing-section path and updates; one section, two revisions (the
+    // bodies differ), the render the thought's content.
+    const [a1, b1] = await Promise.all([write(cA, "steps", "Machine A's text.", "generated", "gen-a"), write(cB, "steps", "Machine B's text.", "generated", "gen-b")]);
+    const actions = [a1.action, b1.action].sort().join();
+    const sections = Number((await sql`SELECT count(*)::int AS c FROM page_sections WHERE page_id = ${P}::uuid`)[0].c);
+    assert(actions === "created,updated" && a1.section_id === b1.section_id && sections === 1 && (await revisions("steps")) === 2 && (await consistent()),
+      `two sessions' first write of one section: one created, one updated, one section, two revisions, the render the thought's content (${actions}; ${sections} section)`);
+
+    // A human's edit and a machine's regeneration, at once, on the section
+    // the machine owns: if the human commits first the machine parks, if the
+    // machine commits first the human takes ownership over it — the live text
+    // is the human's either way, and the section is the human's.
+    const HUMAN = "The human's text, kept.";
+    const [h, m] = await Promise.all([write(cA, "steps", HUMAN, "manual", "alice"), write(cB, "steps", "The machine's regeneration.", "generated", "gen-b")]);
+    const after = (await secOf("steps"))!;
+    assert(h.action === "updated" && (m.action === "pending" || m.action === "updated") && after.body_md === HUMAN && after.origin === "manual" && (m.action === "pending" ? after.pending === "The machine's regeneration." : after.pending === null) && (await consistent()),
+      `a human and a machine racing on one section: the human's text is live and the section the human's whichever committed first (the machine's write ${m.action}${m.action === "pending" ? ", its draft parked" : ", overtaken"})`);
+    // …and the machine racing the human again now parks: human-owned.
+    // …and again on the now human-owned section: the machine parks whichever
+    // order the lock hands out — parked and left when the machine went first
+    // and the human's in-place write then cleared the buffer, parked and
+    // waiting when the human went first (run-it, first review pass: 17 of 40
+    // rounds took the first branch and a single-outcome assertion flaked).
+    const [h2, m2] = await Promise.all([write(cA, "steps", "The human's second text.", "manual", "alice"), write(cB, "steps", "The machine, again.", "generated", "gen-b")]);
+    const after2 = (await secOf("steps"))!;
+    assert(h2.action === "updated" && m2.action === "pending" && after2.body_md === "The human's second text." && after2.origin === "manual" && (after2.pending === "The machine, again." || after2.pending === null) && (await consistent()),
+      `…on a human-owned section the machine parks in either order and the human's text is live (the draft ${after2.pending === null ? "cleared by the human's later write" : "still waiting"})`);
+    // Two sessions on two DIFFERENT sections of one page: without the page lock
+    // the second writes the render it computed before the first committed, and
+    // the thought holds one section (run-it, first review pass: the mutant
+    // survived every suite). With it, B waits and the render is the content.
+    const t0 = Date.now();
+    const [d1, d2] = await Promise.all([write(cA, "left", "The left column.", "generated", "gen-a"), write(cB, "right", "The right column.", "generated", "gen-b")]);
+    const bothIn = (await sql`SELECT content FROM thoughts WHERE id = ${P}::uuid`)[0].content as string;
+    assert(d1.action === "created" && d2.action === "created" && /The left column\./.test(bothIn) && /The right column\./.test(bothIn) && (await consistent()),
+      `two sections written at once on one page: both in the thought, the render its content (${Date.now() - t0} ms for the pair)`);
+    // A section write racing delete_thought of the page: the writer locks the
+    // thought first, as the delete does, so one waits for the other — the
+    // write lands and the delete takes it, or the delete lands and the write
+    // finds no page — never a deadlock (run-it, first review pass: the
+    // page-first order deadlocked 38 of 40 races).
+    let deadlocks = 0, noPage = 0, landed = 0;
+    for (let i = 0; i < 12; i++) {
+      const pi = ((await sql`SELECT upsert_page(${`raced-delete-${i}`}, ${`Raced delete ${i}`}) AS r`)[0].r as { page_id: string }).page_id;
+      await sql`SELECT write_page_section(${pi}::uuid, 'first', 'Standing.', 'generated', NULL, '{}'::jsonb, ${sql.array([e.id], "TEXT")}::uuid[], NULL, 'gen')`;
+      const w = cA`SELECT write_page_section(${pi}::uuid, 'second', 'Racing the delete.', 'generated', NULL, '{}'::jsonb, ${sql.array([e.id], "TEXT")}::uuid[], NULL, 'gen') AS r`.then(() => "landed", (err: Error) => err.message);
+      const dl = cB`SELECT delete_thought(${pi}::uuid, NULL::jsonb) AS r`.then(() => "deleted", (err: Error) => err.message);
+      const [wr, dr] = await Promise.all([w, dl]);
+      if (/deadlock/.test(wr) || /deadlock/.test(dr)) deadlocks++;
+      else if (/no page/.test(wr)) noPage++;
+      else if (wr === "landed") landed++;
+      if (dr !== "deleted") deadlocks++;
+    }
+    const pagesLeft = Number((await sql`SELECT count(*)::int AS c FROM pages WHERE slug LIKE 'raced-delete-%'`)[0].c);
+    assert(deadlocks === 0 && noPage + landed === 12 && pagesLeft === 0, `twelve section writes racing delete_thought of their page: no deadlock, each write landed first or found no page, every page gone (landed ${landed}, no page ${noPage}, deadlocks ${deadlocks})`);
+
+    // Two creates of one slug, at once: one page, the other refused by name —
+    // the loser's capture waits on 033's fingerprint lock, merges into the
+    // winner's thought, and is refused before it can take the slug.
+    const create = async (c: SQL) => { try { return { ok: ((await c`SELECT upsert_page('raced', 'A raced page') AS r`) as { r: R }[])[0].r, err: "" }; } catch (err) { return { ok: null as R | null, err: (err as Error).message }; } };
+    const [ra, rb] = await Promise.all([create(cA), create(cB)]);
+    const created = [ra, rb].filter((x) => x.ok?.created === true), refusedOne = [ra, rb].filter((x) => x.ok === null);
+    const pagesRaced = Number((await sql`SELECT count(*)::int AS c FROM pages WHERE slug = 'raced'`)[0].c);
+    const thoughtsRaced = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content = '# A raced page'`)[0].c);
+    assert(created.length === 1 && refusedOne.length === 1 && /another writer created with this text meanwhile|holds this page's exact text/.test(refusedOne[0].err) && pagesRaced === 1 && thoughtsRaced === 1,
+      `two creates of one slug: one page, one thought, the other refused by name (${refusedOne[0]?.err.split("\n")[0].slice(0, 110) ?? "neither refused"})`);
+    // Two pages superseding each other at once, and a supersede racing its
+    // target's delete: upsert_page takes 029's supersession lock before any
+    // row, as delete_thought does — the loser of the loop is WOULD_CYCLE by
+    // name, the delete's loser finds no slug and creates the page anew; no
+    // deadlock (run-it, second review pass: 39 of 40 and 7 of 40 deadlocked).
+    const supA = ((await sql`SELECT upsert_page('sup-a', 'Supersedes A') AS r`)[0].r as { page_id: string }).page_id;
+    const supB = ((await sql`SELECT upsert_page('sup-b', 'Supersedes B') AS r`)[0].r as { page_id: string }).page_id;
+    const sup = async (c: SQL, slug: string, title: string, target: string) => { try { await c`SELECT upsert_page(${slug}, ${title}, 'topic', '{}'::jsonb, NULL, ${target}::uuid)`; return "ok"; } catch (err) { return (err as Error).message; } };
+    let loopDeadlocks = 0, loopCycles = 0;
+    for (let i = 0; i < 8; i++) {
+      const [ra2, rb2] = await Promise.all([sup(cA, "sup-a", "Supersedes A", supB), sup(cB, "sup-b", "Supersedes B", supA)]);
+      for (const r of [ra2, rb2]) { if (/deadlock/.test(r)) loopDeadlocks++; else if (/WOULD_CYCLE/.test(r)) loopCycles++; }
+      await sql`SELECT update_thought(${supA}::uuid, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '{"supersedes": null}'::jsonb, NULL, NULL)`;
+      await sql`SELECT update_thought(${supB}::uuid, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '{"supersedes": null}'::jsonb, NULL, NULL)`;
+    }
+    assert(loopDeadlocks === 0 && loopCycles >= 1, `two pages superseding each other, eight rounds: no deadlock, the loser refused as WOULD_CYCLE by name (${loopCycles} refused)`);
+    let supDeadlocks = 0, recreated = 0, updated = 0;
+    for (let i = 0; i < 8; i++) {
+      const tgt = ((await sql`SELECT upsert_page(${`sup-target-${i}`}, ${`Target ${i}`}) AS r`)[0].r as { page_id: string }).page_id;
+      const own = ((await sql`SELECT upsert_page(${`sup-owner-${i}`}, ${`Owner ${i}`}) AS r`)[0].r as { page_id: string }).page_id;
+      const s1 = cA`SELECT upsert_page(${`sup-owner-${i}`}, ${`Owner ${i} (second edition)`}, 'topic', '{}'::jsonb, NULL, ${tgt}::uuid) AS r`.then((r) => JSON.stringify((r[0] as { r: unknown }).r), (err: Error) => err.message);
+      const s2 = cB`SELECT delete_thought(${own}::uuid, NULL::jsonb) AS r`.then(() => "deleted", (err: Error) => err.message);
+      const [o1, o2] = await Promise.all([s1, s2]);
+      if (/deadlock/.test(o1) || /deadlock/.test(o2)) supDeadlocks++;
+      else if (/"created":true/.test(o1)) recreated++;
+      else if (/"created":false/.test(o1)) updated++;
+    }
+    assert(supDeadlocks === 0 && recreated + updated === 8, `a supersede racing its own page's delete, eight rounds: no deadlock — the page updated before the delete took it, or created anew after (${updated} updated, ${recreated} created anew)`);
+    // …and under two titles the slug's own unique index is what the loser meets,
+    // said by name rather than as the constraint's error (run-it, first review pass).
+    const createTitled = async (c: SQL, title: string) => { try { return { ok: ((await c`SELECT upsert_page('raced-titles', ${title}) AS r`) as { r: R }[])[0].r, err: "" }; } catch (err) { return { ok: null as R | null, err: (err as Error).message }; } };
+    const [ta, tb] = await Promise.all([createTitled(cA, "Title A"), createTitled(cB, "Title B")]);
+    const titledOk = [ta, tb].filter((x) => x.ok?.created === true), titledNo = [ta, tb].filter((x) => x.ok === null);
+    const titledThoughts = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content IN ('# Title A', '# Title B')`)[0].c);
+    assert(titledOk.length === 1 && titledNo.length === 1 && /upsert_page: another writer created page 'raced-titles' meanwhile — retry, and the call will update it/.test(titledNo[0].err) && titledThoughts === 1,
+      `two creates of one slug under two titles: one page, the loser refused by name and its thought rolled back (${titledNo[0]?.err.split("\n")[0].slice(0, 110) ?? "neither refused"})`);
   } finally {
     await cA.close();
     await cB.close();

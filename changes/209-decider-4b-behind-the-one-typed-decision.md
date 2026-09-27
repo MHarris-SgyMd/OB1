@@ -1,0 +1,6 @@
+# 209. decider-4b behind the one typed-decision contract, and the tooling to compare Jev-class models on the same client (SMD-2052)
+
+**What changed.**
+- **`jev/decider/serve.py`, new.** A Python FastAPI adapter over the `decider-ai` runtime serving `ob1-jev/1` (binary + choice, the tier's `__insufficient_evidence__` on every decision, the same validation, 409 model-mismatch and 413 body cap as `jev/serve.ts`). A host process on MPS; not wired into the default deploy — a spike/eval tier. Honest gaps vs Verdict's onnx path: `logits = ln(p)` at `temperature 1.0` (decider hides raw logits), `weights_sha256` pins the safetensors index, `tokens` reported 0.
+- **`jev/decider/jev-compare.ts`, `jev-reliability.ts`, new.** Score any `ob1-jev/1` base on the SMD-1961 gold (accuracy + latency) and probe whether a model's validity confidence separates its correct calls; read the gold via `OB1_JEV_GOLD_DIR`.
+- Measured through the contract (SMD-1961 gold, κ=0.931): decider-4b 82.2% valid / 76.8% type / 66.9% exact vs Verdict-v1.4 55.3 / 20.8 / 17.2; Verdict's validity confidence is anti-informative (AUC 0.441), so decider replaces it for entity work rather than cascading with it. Eval/adapter only; no server, contract or migration change.

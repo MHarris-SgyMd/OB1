@@ -5,10 +5,12 @@
  * imported here so the kit tests the same code. SMD-1863's POC ran n8n on
  * the brain's database server, and had its own copy of that step.
  *
- * Provisioning loads the profile's credentials (the brain's capture key, and
- * separate inbound keys for the MCP endpoint and for on-demand runs), then
- * the kit's two extra credentials (Linear, and a read key for the eval's
- * brain tool), then the kit's workflows. On-demand runs go through a
+ * Provisioning loads the profile's credentials (the brain's capture key,
+ * separate inbound keys for the MCP endpoint and for on-demand runs, the
+ * runner's key, and the act tool's Linear key, which here is the kit's one
+ * Linear key), then the kit's two extra credentials (Linear, and a read key
+ * for the eval's brain tool). Then come the profile's own templates,
+ * instanced for the kit's runner pipelines, then the kit's workflows. On-demand runs go through a
  * workflow's own Webhook trigger, which takes the run key, never the MCP one.
  * What a run did is read back from `GET /executions`.
  *
@@ -20,15 +22,24 @@
  *      store. One just inside the window is still there.
  *   E  under `--with sealed`: the packets n8n sent, judged fail-closed, from the watcher's
  *      capture.
+ * and what its first templates add (SMD-2212), loaded as they ship:
+ *   A  the act endpoint lists exactly its tools, refuses a missing and a
+ *      wrong key, and its tool runs its flow to Linear's own answer.
+ *   I  the import template, through the runner, over the kit's fixture
+ *      pipeline: five rows once, under the runner's actor, each with a
+ *      vector; nothing on a rerun; a batch with a stray source refused whole.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { api, ensureApiKey, keyExpiry, PROFILE_CREDENTIALS, provision, provisionedKeys, type Options } from "../../deploy/orchestration/provision.ts";
-import { refuses } from "./mcp-client.ts";
-import { compose, ENV_FILE, HERE, N8N_KIT_PORT, run } from "./stack.ts";
+import { api, ensureApiKey, keyExpiry, PROFILE_CREDENTIALS, PROFILE_TEMPLATES, provision, provisionedKeys, templatesIn, type Options } from "../../deploy/orchestration/provision.ts";
+import { loadPipelines, RUNNER_ACTOR } from "../../deploy/orchestration/runner.ts";
+import { callTool, listTools, refuses } from "./mcp-client.ts";
+import { brainSql, compose, ENV_FILE, HERE, N8N_KIT_PORT, run } from "./stack.ts";
 import type { Adapter, Check, Ctx } from "./adapter.ts";
 
 const DIR = join(HERE, "n8n");
+/** The kit's runner allowlist, which compose.n8n.yaml mounts over the shipped (empty) one. */
+const KIT_PIPELINES = join(HERE, "runner", "pipelines.json");
 const BASE = `http://127.0.0.1:${N8N_KIT_PORT}`;
 const INGEST = { name: "OB1 — Linear issues into the brain", path: "ob1-ingest" };
 const PROBE = { name: "OB1 — egress probe captures", path: "ob1-probe" };
@@ -38,13 +49,21 @@ const TEMPLATE_HOSTS = ["api.linear.app"];
 /** The profile's image, read from deploy/compose.yaml: the one place it is pinned. */
 const IMAGE: string = (Bun.YAML.parse(readFileSync(join(HERE, "..", "..", "deploy", "compose.yaml"), "utf8")) as any).services.n8n.image;
 
-const options = (env: Record<string, string>, rotate = false): Options => ({
-  base: BASE, env, envFile: ENV_FILE, rotate,
-  // The kit reads run history (C1, C1s, P); an operator's key does not carry these.
-  extraScopes: ["execution:list", "execution:read"],
-  credentials: [PROFILE_CREDENTIALS, join(DIR, "credentials.template.json")],
-  workflows: ["linear-ingest.json", "brain-tools.json", "probe-capture.json"].map((f) => join(DIR, f)),
-});
+const options = (env: Record<string, string>, rotate = false): Options => {
+  // The act tool's Linear key is the kit's one Linear key. Set on the env
+  // itself, not a copy: provisioning writes a minted API key back into it.
+  env.N8N_LINEAR_API_KEY ||= env.LINEAR_API_KEY ?? "";
+  return {
+    base: BASE, env, envFile: ENV_FILE, rotate,
+    // The kit reads run history (C1, C1s, P); an operator's key does not carry these.
+    extraScopes: ["execution:list", "execution:read"],
+    credentials: [PROFILE_CREDENTIALS, join(DIR, "credentials.template.json")],
+    // The profile's own templates as they ship (SMD-2212), instanced for the
+    // kit's pipelines, then the POC's workflows the C checks run.
+    workflows: [...templatesIn(PROFILE_TEMPLATES), ...["linear-ingest.json", "brain-tools.json", "probe-capture.json"].map((f) => join(DIR, f))],
+    pipelines: loadPipelines(KIT_PIPELINES),
+  };
+};
 const apiKey = async (env: Record<string, string>) => (await ensureApiKey(options(env))).key;
 const sealed = (ctx: Ctx) => ctx.with.includes(SEALED);
 
@@ -141,11 +160,135 @@ async function pruningCheck(env: Record<string, string>, ctx: Ctx): Promise<Chec
   };
 }
 
+/** The profile's act tools as the template ships them (SMD-2212): the MCP endpoint must list exactly these. */
+const ACT = { path: "ob1-act", tools: ["linear_file_issue"] };
+/** The kit's import pipelines (runner/pipelines.json): the fixture's five rows, a batch the runner must refuse, and an emitter that tries to read the runner's secrets. */
+const IMPORT = { pipeline: "fixture", stray: "stray", snoop: "snoop", system: "orch-fixture", rows: 5, actor: RUNNER_ACTOR };
+
+/**
+ * A: the act endpoint lists exactly the template's tools and refuses a
+ * missing key and a wrong one. The tool runs its multi-step flow: asked for
+ * a team that does not exist, it answers Linear's own "no team" and files
+ * nothing. Sealed, Linear is unreachable and the call must fail on that.
+ */
+async function actChecks(env: Record<string, string>, ctx: Ctx): Promise<Check> {
+  const url = `${BASE}/mcp/${ACT.path}`;
+  const key = { "x-n8n-key": env.N8N_MCP_KEY };
+  const [none, wrong] = [await refuses(url, {}), await refuses(url, { "x-n8n-key": env.N8N_MCP_KEY.slice(0, -1) + (env.N8N_MCP_KEY.endsWith("a") ? "b" : "a") })];
+  const tools = (await listTools(url, key).catch(() => [])).map((t) => t.name).sort();
+  const exact = JSON.stringify(tools) === JSON.stringify([...ACT.tools].sort());
+  const call = await callTool(url, key, "linear_file_issue", { team: "ZZQNOPE", title: "orchestration kit probe — never created", description: "", label: "" }, 120_000).catch((e) => ({ isError: true, text: String(e) }));
+  const noTeam = /no Linear team with key ZZQNOPE/.test(call.text);
+  const flowOk = sealed(ctx) ? call.isError && !noTeam : call.isError && noTeam;
+  return {
+    id: "A",
+    pass: none.refused && wrong.refused && exact && flowOk,
+    detail: `/mcp/${ACT.path}: no key → ${none.detail}; wrong key → ${wrong.detail}; tools ${JSON.stringify(tools)} (the template ships ${JSON.stringify(ACT.tools)}); `
+      + `linear_file_issue for an absent team → ${call.text.slice(0, 160)}${sealed(ctx) ? " (sealed: Linear must be unreachable)" : ""}`,
+  };
+}
+
+/** One on-demand run of an import instance: the door's answer, which is the runner's report, or the reason the run failed. */
+async function importRun(env: Record<string, string>, pipeline: string): Promise<{ status: number; report: any }> {
+  const r = await fetch(`${BASE}/webhook/ob1-import-${pipeline}`, { method: "POST", headers: { "x-n8n-run-key": env.N8N_WEBHOOK_KEY, "content-type": "application/json" }, body: "{}" });
+  const text = await r.text();
+  let report: any;
+  try { report = JSON.parse(text); } catch { report = { ok: false, why: text.slice(0, 300) }; }
+  return { status: r.status, report };
+}
+
+/**
+ * Whether a value appears anywhere in the saved runs of the given workflows,
+ * the data included. Returns how many runs were read and how many held it.
+ * The value is never printed.
+ */
+async function inRunData(env: Record<string, string>, names: string[], value: string): Promise<{ runs: number; holding: number }> {
+  const key = await apiKey(env);
+  let runs = 0, holding = 0;
+  for (const name of names) {
+    const id = await workflowId(key, name);
+    if (!id) continue;
+    const page = await api(BASE, key, "GET", `/executions?workflowId=${id}&includeData=true&limit=50`);
+    for (const e of page.data as any[]) { runs++; if (JSON.stringify(e).includes(value)) holding++; }
+  }
+  return { runs, holding };
+}
+
+/**
+ * I: the import template, through the runner. The fixture's rows are deleted
+ * through the brain's own delete path first, so the first run proves itself.
+ * Then:
+ * - the first run inserts the five, under the runner's actor, each with a
+ *   vector, and the door answers the report;
+ * - a rerun writes nothing;
+ * - `stray`, whose third line claims another source, is refused whole with
+ *   nothing written, and the door answers the runner's reason;
+ * - `snoop`'s emitter cannot read any process's environment: it runs as its
+ *   pipeline's own uid (review pass 1). The child it leaves behind is gone
+ *   once the run answers (review pass 2);
+ * - the instance's schedule is n8n days for 24 hours (review pass 2: an
+ *   hourly 24 fires once, then never);
+ * - neither the run key nor the runner's key is anywhere in n8n's saved runs
+ *   of the import workflows (review pass 1: the webhook saved its headers).
+ */
+async function importChecks(env: Record<string, string>, ctx: Ctx): Promise<Check> {
+  const rows = () => brainSql("n8n", `SELECT count(*), count(*) FILTER (WHERE metadata->>'actor_name' = '${IMPORT.actor}'), count(*) FILTER (WHERE embedding IS NOT NULL) FROM thoughts WHERE metadata->>'source' = '${IMPORT.system}'`).split("|").map(Number);
+  const reset = brainSql("n8n", `SELECT count(*) FILTER (WHERE (r->>'ok')::boolean) FROM (SELECT delete_thought(id) AS r FROM thoughts WHERE metadata->>'source' = '${IMPORT.system}') d`);
+  const first = await importRun(env, IMPORT.pipeline);
+  const [n1, byRunner, embedded] = rows();
+  const second = await importRun(env, IMPORT.pipeline);
+  const [n2] = rows();
+  const stray = await importRun(env, IMPORT.stray);
+  const [n3] = rows();
+  const snoop = await importRun(env, IMPORT.snoop);
+  // The listing must be read: a failed exec read as "no leftovers" (review pass 3).
+  const ps = compose("n8n", ["exec", "-T", "orchestration-runner", "ps", "-o", "args"]);
+  const leftovers = ps.code === 0 && /runner\.ts/.test(ps.out) ? ps.out.split("\n").filter((l) => /sleep 900/.test(l)).length : NaN;
+  // The runner down: the door answers 502, and the import's saved run holds
+  // neither its key nor the header (review pass 3). Not under sealed: a
+  // restart can give the runner a new address inside E's window, and E would
+  // count the old one as a dial outside (review pass 4). The plain run holds it.
+  let down: { status: number; report: any } | null = null;
+  if (!sealed(ctx)) {
+    compose("n8n", ["stop", "orchestration-runner"]);
+    down = await importRun(env, IMPORT.pipeline).finally(() => compose("n8n", ["start", "orchestration-runner"]));
+    const runnerUp = async () => (await importRun(env, IMPORT.snoop)).status === 200;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 60_000 && !(await runnerUp().catch(() => false))) await Bun.sleep(2000);
+  }
+  const key = await apiKey(env);
+  const fixtureId = await workflowId(key, `OB1 import — ${IMPORT.pipeline}`);
+  const fixtureFlow = fixtureId ? await api(BASE, key, "GET", `/workflows/${fixtureId}`) : null;
+  const schedule = fixtureFlow?.nodes?.find((n: any) => n.name === "Schedule")?.parameters?.rule?.interval?.[0];
+  const daily = schedule?.field === "days" && schedule?.daysInterval === 1;
+  const leaked = Number(brainSql("n8n", `SELECT count(*) FROM thoughts WHERE metadata->>'source' = 'gmail' AND metadata->>'actor_name' = '${IMPORT.actor}'`));
+  // Read after the runner-down run, so its saved error is among them.
+  const flows = [IMPORT.pipeline, IMPORT.stray, IMPORT.snoop].flatMap((p) => [`OB1 import — ${p}`, `OB1 import — ${p} (on demand)`]);
+  const [runKey, runnerKey] = [await inRunData(env, flows, env.N8N_WEBHOOK_KEY), await inRunData(env, flows, env.OB1_RUNNER_KEY)];
+  const c1 = first.report?.counts, c2 = second.report?.counts;
+  const pass = first.status === 200 && c1?.inserted === IMPORT.rows && n1 === IMPORT.rows && byRunner === IMPORT.rows && embedded === IMPORT.rows
+    && second.status === 200 && c2?.inserted === 0 && c2?.updated === 0 && c2?.patched === 0 && c2?.unchanged === IMPORT.rows && n2 === IMPORT.rows
+    && stray.status === 422 && /the runner answered 422: one-source/.test(stray.report?.why ?? "") && /identity\.system "gmail"/.test(stray.report?.why ?? "") && n3 === IMPORT.rows && leaked === 0
+    && snoop.status === 200 && snoop.report?.emitted === 0 && leftovers === 0 && daily
+    && (down === null || (down.status === 502 && /did not answer/.test(down.report?.why ?? "")))
+    && runKey.runs > 0 && runKey.holding === 0 && runnerKey.holding === 0;
+  const fmt = (r: { status: number; report: any }) => `${r.status}${r.report?.counts ? ` inserted ${r.report.counts.inserted} unchanged ${r.report.counts.unchanged}` : ""}${r.report?.ok === false ? ` ${r.report.why}` : ""}`;
+  return {
+    id: "I",
+    pass,
+    detail: `${reset} earlier fixture row(s) deleted; first run → ${fmt(first)}: ${n1} rows, ${byRunner} by ${IMPORT.actor}, ${embedded} with a vector; `
+      + `rerun → ${fmt(second)}, ${n2} rows; stray → ${fmt(stray)}, ${n3} rows, ${leaked} of another source; `
+      + `snoop → ${snoop.status}, ${snoop.report?.emitted === 0 ? "no environment readable" : `READABLE: ${JSON.stringify(snoop.report).slice(0, 200)}`}, ${leftovers} of its leftover children still running; `
+      + `the fixture's schedule ${JSON.stringify(schedule)}; runner down → ${down ? `${down.status} ${String(down.report?.why ?? "").slice(0, 80)}` : "not run (sealed)"}; `
+      + `the run key in ${runKey.holding} of ${runKey.runs} saved import runs, the runner's key in ${runnerKey.holding}`,
+  };
+}
+
 /** The compose services whose names are n8n's own network's, bare or with one of its search domains. */
-const SERVICES = ["server", "n8n", "n8n-front", "egress-watch", "postgres"];
+const SERVICES = ["server", "n8n", "n8n-front", "egress-watch", "postgres", "orchestration-runner"];
 
 /** What the judge is told rather than infers: read from n8n's /etc/resolv.conf and the engine. `problem` is set when a read failed. */
-export type EgressFacts = { resolvers: string[]; searchDomains: string[]; brain: string[]; problem?: string };
+export type EgressFacts = { resolvers: string[]; searchDomains: string[]; brain: string[]; runner?: string[]; problem?: string };
 
 /**
  * The watcher's capture judged, failing closed. Pass 2 found the name-and-answer
@@ -186,7 +329,7 @@ export function judgeEgress(log: string, facts: EgressFacts): Check {
   const names = new Map<string, number>();
   const dials = new Map<string, number>();
   const unreadable: string[] = [];
-  let toBrain = 0;
+  let toBrain = 0, toRunner = 0;
   const count = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) ?? 0) + 1);
   const hostPort = (a: string) => { const i = a.lastIndexOf("."); return { host: a.slice(0, i), port: a.slice(i + 1) }; };
   const loopbackResolver = facts.resolvers.find((r) => /^(127\.|::1$)/.test(r));
@@ -211,6 +354,8 @@ export function judgeEgress(log: string, facts: EgressFacts): Check {
       continue;
     }
     if (syn && dst.port === "8000" && facts.brain.includes(dst.host)) { toBrain++; continue; }
+    // The import runner (SMD-2212) is the profile's own service on the same network: an import template dials it and nothing else.
+    if (syn && dst.port === "8090" && (facts.runner ?? []).includes(dst.host)) { toRunner++; continue; }
     count(dials, `${dst.host}:${dst.port} (${tcp ? "tcp" : q ? "dns" : rest.split(/[ ,]/)[0] || "udp"})`);
   }
   const outside = [...names.keys()].filter((n) => !bare.test(n) && !expanded.test(n));
@@ -238,7 +383,7 @@ export function judgeEgress(log: string, facts: EgressFacts): Check {
       + `names asked outside the compose network: ${fmt(names, (n) => outside.includes(n))} (the templates name ${TEMPLATE_HOSTS.join(", ")}); `
       + `the network's own names: ${fmt(names, (n) => bare.test(n))}; `
       + `search-domain expansions: ${fmt(names, (n) => expansions.includes(n))}; `
-      + `connection attempts to the brain (${facts.brain.join(", ")}:8000): ${toBrain}; DNS only to ${facts.resolvers.join(", ")}`,
+      + `connection attempts to the brain (${facts.brain.join(", ")}:8000): ${toBrain}; to the import runner (${(facts.runner ?? []).join(", ") || "not running"}:8090): ${toRunner}; DNS only to ${facts.resolvers.join(", ")}`,
   };
 }
 
@@ -246,6 +391,8 @@ export function judgeEgress(log: string, facts: EgressFacts): Check {
 export type RawFacts = {
   resolv: { out: string; code: number };
   brain: { out: string; code: number } | null;
+  /** The import runner's addresses, when it runs. */
+  runner?: { out: string; code: number } | null;
   watcher: { out: string; code: number } | null;
   n8nStarted: string;
 };
@@ -270,7 +417,9 @@ export function factsFrom(raw: RawFacts): EgressFacts {
   const resolvers = [...raw.resolv.out.matchAll(/^nameserver\s+(\S+)/gm)].map((m) => m[1]);
   const searchDomains = raw.resolv.out.match(/^search\s+(.+)$/m)?.[1].trim().split(/\s+/) ?? [];
   // Addresses only: podman prints "invalid IP" for an unset IPv6 address (measured).
-  const brain = raw.brain?.out.trim().split(/\s+/).filter((a) => /^\d+\.\d+\.\d+\.\d+$/.test(a) || /^[0-9a-f]*:[0-9a-f:]+$/i.test(a)) ?? [];
+  const addresses = (r: { out: string } | null | undefined) => r?.out.trim().split(/\s+/).filter((a) => /^\d+\.\d+\.\d+\.\d+$/.test(a) || /^[0-9a-f]*:[0-9a-f:]+$/i.test(a)) ?? [];
+  const brain = addresses(raw.brain);
+  const runner = raw.runner?.code === 0 ? addresses(raw.runner) : [];
   const [running, ...startedWords] = (raw.watcher?.out.trim() ?? "").split(/\s+/);
   const watcherStarted = startedWords.join(" ");
   const problem = raw.resolv.code !== 0 ? "n8n's resolv.conf could not be read"
@@ -280,17 +429,18 @@ export function factsFrom(raw: RawFacts): EgressFacts {
     : running !== "true" ? "the watcher is not running: the capture stopped before it was read"
     : !(engineTime(watcherStarted) <= engineTime(raw.n8nStarted)) ? `the watcher started (${watcherStarted}) after n8n (${raw.n8nStarted}): the capture missed n8n's start`
     : undefined;
-  return { resolvers, searchDomains, brain, problem };
+  return { resolvers, searchDomains, brain, runner, problem };
 }
 
 /** The facts E is judged against, read live: n8n's resolv.conf, the brain's addresses (v4 and v6), and the watcher's and n8n's state, from the engine. */
 function egressFacts(): EgressFacts {
   const idOf = (service: string) => compose("n8n", ["ps", "-q", service]).out.trim();
   const inspect = (id: string, format: string) => (id ? run(["docker", "inspect", id, "--format", format]) : null);
-  const [server, watcher, n8nId] = [idOf("server"), idOf("egress-watch"), idOf("n8n")];
+  const [server, watcher, n8nId, runnerId] = [idOf("server"), idOf("egress-watch"), idOf("n8n"), idOf("orchestration-runner")];
   return factsFrom({
     resolv: compose("n8n", ["exec", "-T", "n8n", "cat", "/etc/resolv.conf"]),
     brain: inspect(server, "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.GlobalIPv6Address}} {{end}}"),
+    runner: inspect(runnerId, "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.GlobalIPv6Address}} {{end}}"),
     watcher: inspect(watcher, "{{.State.Running}} {{.State.StartedAt}}"),
     n8nStarted: inspect(n8nId, "{{.State.StartedAt}}")?.out.trim() ?? "",
   });
@@ -300,7 +450,7 @@ const egressRecord = (): Check => judgeEgress(compose("n8n", ["logs", "--no-log-
 
 export const n8n: Adapter = {
   tool: "n8n",
-  services: ["n8n"],
+  services: ["n8n", "orchestration-runner"],
   image: IMAGE,
   profile: "orchestration",
   variants: {
@@ -362,7 +512,7 @@ export const n8n: Adapter = {
     runtimeFetch: "none: 918 node types ship in the image; community nodes install only when an owner asks",
   },
   async extraChecks(env, ctx) {
-    const checks = [await keyChecks(env, ctx), await pruningCheck(env, ctx)];
+    const checks = [await keyChecks(env, ctx), await pruningCheck(env, ctx), await actChecks(env, ctx), await importChecks(env, ctx)];
     if (sealed(ctx)) checks.push(egressRecord());
     return checks;
   },
