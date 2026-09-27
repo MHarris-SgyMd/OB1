@@ -99,7 +99,7 @@
 --      every real row today: a thought's own rows name the thought as their
 --      input — the self-loop the set guards.
 --   4. THE PRIMITIVE. rebuild_derived(input, reason, input_gone, fingerprints,
---      force) → jsonb. SECURITY INVOKER as every function here. Refuses an
+--      force, orphans_only) → jsonb. SECURITY INVOKER as every function here. Refuses an
 --      empty reason (invalid_parameter_value); answers a replay
 --      (ob1.projecting_replay = 'on') with {ok:false, error:'REPLAYING'} — a
 --      rebuild is a live operation, and SMD-2117's fold copies this table
@@ -138,11 +138,13 @@
 --      width: marked alone, the reason named); an extraction under an
 --      `extract:` key is enqueued under the configured extraction key and
 --      marked, a `source:` pass is KEPT (its input is the external record, not
---      the text); under --force a vector whose text did not move is
---      re-RECORDED rather than re-embedded (a deterministic model at the
---      fingerprint the row carries: the record is what force renews, and a
---      pool could not clear the mark — the trigger records nothing when the
---      re-embedding reproduces the vector; second review pass); a pending
+--      the text); under --force a vector whose text did not move and whose
+--      model is the configured one is re-RECORDED rather than re-embedded (a
+--      deterministic model at the fingerprint the row carries: the record is
+--      what force renews, and a pool could not clear the mark — the trigger
+--      records nothing when the re-embedding reproduces the vector under the
+--      same label; second review pass), while one at another model goes to
+--      the pool, whose write moves the label and so records (third); a pending
 --      proposal is set stale — its status is its mark,
 --      its lineage row left alone, since only the pass's replacement writes
 --      that row again and a reviewer's decision would otherwise leave a mark
@@ -858,19 +860,26 @@ BEGIN
       WHEN 'vector' THEN
         v_cur   := COALESCE(v_a.content_fingerprint, content_fingerprint_of(v_a.content));
         v_model := COALESCE(v_row.recipe->>'model', v_a.embedding_model, v_cfg_model);
-        IF NOT v_fp_stale THEN
-          -- --force on a vector whose text did not move: the vector IS the
-          -- current text's (a deterministic model, the fingerprint the row
-          -- carries), so what force renews is the RECORD — the row is written
-          -- again under the recipe as it stands, which drops `legacy` and
-          -- clears the mark. Sending it to the pool would mark a row no worker
-          -- could clear: the re-embedding reproduces the vector, and the
-          -- trigger returns before recording when nothing moved (second
-          -- review pass, cold read and run-it).
+        IF NOT v_fp_stale AND (v_cfg_model IS NULL OR v_model IS NOT DISTINCT FROM v_cfg_model) THEN
+          -- --force on a vector whose text did not move, AT THE CONFIGURED
+          -- MODEL: the vector IS the current text's (a deterministic model,
+          -- the fingerprint the row carries), so what force renews is the
+          -- RECORD — the row is written again under the recipe as it stands,
+          -- which drops `legacy` and clears the mark. Sending it to the pool
+          -- would mark a row no worker could clear: the re-embedding
+          -- reproduces the vector, and the trigger returns before recording
+          -- when neither the vector nor its label moved (second review pass,
+          -- cold read and run-it). A vector at ANOTHER model — a corpus
+          -- mid-switch — takes the pool path below: the re-embed moves the
+          -- label, the trigger records, the mark clears (third review pass,
+          -- cold read: the re-record left such rows at the old model and
+          -- called them rebuilt). The row's agent stands when the session
+          -- sets no actor: the vector did not change, its writer's word does
+          -- (third pass, run-it).
           PERFORM ob1_record_derivation('vector', v_a.id, ARRAY[v_a.id], ARRAY[v_cur], v_row.produced_by,
                                         jsonb_build_object('deterministic', true, 'dims', array_length(v_a.embedding::real[], 1))
                                           || jsonb_strip_nulls(jsonb_build_object('model', v_model)),
-                                        ob1_actor_agent_id());
+                                        COALESCE(ob1_actor_agent_id(), (SELECT d.canonical_agent_id FROM derivations d WHERE d.id = v_row.derivation_id)));
           v_rebuilt := v_rebuilt + 1;
         ELSE
         -- A usable snapshot row: the current text at the model, holding a
@@ -1046,4 +1055,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION rebuild_derived(uuid, text, boolean, text[], boolean, boolean) IS
-  'The one primitive over the lineage table (SMD-1732, Phase 1c of SMD-1729): walks `derivations` forward from p_input (derivation_descendants) and acts on every descendant. A row whose artifact is gone is deleted. With the input standing, a row whose inputs'' fingerprints moved (or p_force) is: re-derived when the database can — a vector whose current text has a snapshot row at the model, by ob1_refresh_thought_vector (rebuilt); otherwise handed to the worker that owns the recipe through requeue_thought_work under the worker''s current key — the reembed pool for a vector or the windows, the extraction key for an extract: pass, the judge''s key — with stale_since/stale_reason set on the lineage row (marked; the tags have no pool: unqueued; the first request standing is kept) — and, for a pending proposal, its status set stale (the status is the mark; stale_proposals; the next judgement replaces the row when it finds the conflict again, a reviewer settles one it does not); under p_force a vector whose text did not move is re-recorded, not re-embedded; a source: pass and a decided proposal are kept; an unmoved row is current. With p_input_gone (SMD-1723''s forget, called BEFORE the row delete in its transaction): the windows, the input''s mentions and edges (entities locked first, orphans pruned) and their lineage rows are deleted, the snapshot rows at the input''s own fingerprints and p_fingerprints removed where no standing thought holds them, the proposals and the vector''s and tags'' rows counted for the cascade. derived_from children are listed as irreproducible. Refuses an empty reason; answers a replay with REPLAYING and a missing input with NOT_FOUND. Takes the supersession advisory lock, then the input''s row. With p_orphans_only (the sweep''s mode) only the orphan rule runs. Returns {ok, input, reason, input_gone, force, orphans_only, walked, depth, at_cap, rebuilt, enqueued, deleted, marked, unqueued, stale_proposals, kept, current, legacy, irreproducible, cascading, pools}. Migration 063 / SMD-1732.';
+  'The one primitive over the lineage table (SMD-1732, Phase 1c of SMD-1729): walks `derivations` forward from p_input (derivation_descendants) and acts on every descendant. A row whose artifact is gone is deleted. With the input standing, a row whose inputs'' fingerprints moved (or p_force) is: re-derived when the database can — a vector whose current text has a snapshot row at the model, by ob1_refresh_thought_vector (rebuilt); otherwise handed to the worker that owns the recipe through requeue_thought_work under the worker''s current key — the reembed pool for a vector or the windows, the extraction key for an extract: pass, the judge''s key — with stale_since/stale_reason set on the lineage row (marked; the tags have no pool: unqueued; the first request standing is kept) — and, for a pending proposal, its status set stale (the status is the mark; stale_proposals; the next judgement replaces the row when it finds the conflict again, a reviewer settles one it does not); under p_force a vector whose text did not move, at the configured model, is re-recorded, not re-embedded (one at another model goes to the pool); a source: pass and a decided proposal are kept; an unmoved row is current. With p_input_gone (SMD-1723''s forget, called BEFORE the row delete in its transaction): the windows, the input''s mentions and edges (entities locked first, orphans pruned) and their lineage rows are deleted, the snapshot rows at the input''s own fingerprints and p_fingerprints removed where no standing thought holds them, the proposals and the vector''s and tags'' rows counted for the cascade. derived_from children are listed as irreproducible. Refuses an empty reason; answers a replay with REPLAYING and a missing input with NOT_FOUND. Takes the supersession advisory lock, then the input''s row. With p_orphans_only (the sweep''s mode) only the orphan rule runs. Returns {ok, input, reason, input_gone, force, orphans_only, walked, depth, at_cap, rebuilt, enqueued, deleted, marked, unqueued, stale_proposals, kept, current, legacy, irreproducible, cascading, pools}. Migration 063 / SMD-1732.';

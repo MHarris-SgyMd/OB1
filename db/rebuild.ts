@@ -11,7 +11,8 @@
  *   bun db/rebuild.ts --url … --status
  *
  * ── What a run does ─────────────────────────────────────────────────────────
- * --input calls rebuild_derived(id, reason, gone, fingerprints, force) once and
+ * --input calls rebuild_derived(id, reason, gone, fingerprints, force,
+ * orphans_only => false) once and
  * prints its report: what was rebuilt (a vector restored from 060's snapshot —
  * the one re-derivation the database owns), enqueued (handed to the workers'
  * pools under their CURRENT keys, the reason marked on each lineage row),
@@ -152,7 +153,7 @@ function printReport(r: Report): void {
   console.log(`  input:       ${r.input}${r.input_gone ? " (leaving — the row still stands; the caller deletes it)" : ""}`);
   console.log(`  reason:      ${r.reason}${r.force ? " (--force: every row treated as stale)" : ""}`);
   console.log(`  walked:      ${r.walked} lineage row(s) to depth ${r.depth}${r.at_cap ? " — the walk's cap; whatever stood beyond it is the next call's" : ""}`);
-  console.log(`  rebuilt:     ${r.rebuilt} (a vector restored from the snapshot at the model — the one re-derivation the database owns)`);
+  console.log(`  rebuilt:     ${r.rebuilt} (a vector restored from the snapshot at the model — the one re-derivation the database owns${r.force ? "; or, under --force, a vector at the configured model whose text did not move, its record renewed" : ""})`);
   console.log(`  enqueued:    ${r.enqueued} (thought, pool) claim(s) for the workers`);
   console.log(`  deleted:     ${r.deleted} (lineage rows whose artifact is gone${r.input_gone ? "; the windows, the graph and the snapshot rows the input keyed" : ""})`);
   console.log(`  marked:      ${r.marked} lineage row(s) carry the reason until their producer writes again${r.unqueued ? `; ${r.unqueued} of them wait for no pool (the tags, or no configured model)` : ""}${r.stale_proposals ? `; ${r.stale_proposals} pending proposal(s) set stale (their status is the mark; the next consolidate pass replaces one it finds in conflict again, a reviewer settles one it does not)` : ""}`);

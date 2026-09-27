@@ -9361,8 +9361,8 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
   const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
   const MODEL = EMBEDDING_MODEL;
   const ACTOR = { name: "op-key", via: "test-door" };
-  type Lin = { id: string; kind: string; artifact: string; inputs: string[]; fps: string[]; by: string; recipe: Record<string, unknown>; at: string; since: string | null; why: string | null };
-  const rowsOf = async (artifact: string) => q<Lin>(`SELECT id::text AS id, artifact_kind AS kind, artifact_id::text AS artifact, input_ids::text[] AS inputs, input_fingerprints AS fps, produced_by AS by, recipe, produced_at::text AS at, stale_since::text AS since, stale_reason AS why FROM derivations WHERE artifact_id = $1::uuid ORDER BY artifact_kind, produced_by`, [artifact]);
+  type Lin = { id: string; kind: string; artifact: string; inputs: string[]; fps: string[]; by: string; recipe: Record<string, unknown>; at: string; since: string | null; why: string | null; agent: string | null };
+  const rowsOf = async (artifact: string) => q<Lin>(`SELECT id::text AS id, artifact_kind AS kind, artifact_id::text AS artifact, input_ids::text[] AS inputs, input_fingerprints AS fps, produced_by AS by, recipe, produced_at::text AS at, stale_since::text AS since, stale_reason AS why, canonical_agent_id::text AS agent FROM derivations WHERE artifact_id = $1::uuid ORDER BY artifact_kind, produced_by`, [artifact]);
   const rowOf = async (artifact: string, kind: string, by?: string) => (await rowsOf(artifact)).find((r) => r.kind === kind && (by === undefined || r.by === by));
   const fp = async (content: string) => (await one<{ f: string }>(`SELECT content_fingerprint_of($1) AS f`, [content])).f;
   const cap = async (content: string, at: number | null, extra: Record<string, unknown> = {}) =>
@@ -9545,8 +9545,21 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
   const bVec = (await rowOf(B.id, "vector"))!;
   assert(r.current === 0 && r.rebuilt === 1 && r.enqueued === 2 && r.marked === 2 && r.stale_proposals === 1 && r.unqueued === 1 && (await claimsOf(B.id)) === `${OLD_KEY}:pending` && (await claimsOf(A.id)).includes("consolidate:stub@p2:pending") && (await proposal(pid)).status === "stale",
     `--force re-runs every row: the vector, current by fingerprint, re-RECORDED rather than sent to a pool that could not clear its mark, the extraction to the row's own key (the configured one is empty, so unset), the tags marked, the proposal stale and its newer side requeued under the judge's key (${counts(r)})`);
-  assert(bVec.recipe.legacy === undefined && bVec.since === null && bVec.at > bVecBefore.at && bVec.fps.join() === B.fingerprint && bVec.recipe.model === MODEL && bVec.recipe.dims === EMBEDDING_DIM,
-    `…the re-recorded vector row: no longer legacy, unmarked, produced_at moved, the same fingerprint, the recipe as the trigger writes it (${JSON.stringify(bVec.recipe)})`);
+  assert(bVec.recipe.legacy === undefined && bVec.since === null && bVec.at > bVecBefore.at && bVec.fps.join() === B.fingerprint && bVec.recipe.model === MODEL && bVec.recipe.dims === EMBEDDING_DIM && bVec.agent === bVecBefore.agent,
+    `…the re-recorded vector row: no longer legacy, unmarked, produced_at moved, the same fingerprint, the recipe as the trigger writes it, the writer's agent kept when the session sets no actor (${JSON.stringify(bVec.recipe)}; agent ${bVecBefore.agent} → ${bVec.agent})`);
+  // A vector at ANOTHER model than the configured one — a corpus mid-switch
+  // — is not re-recorded under force: the pool re-embeds it under the
+  // configured model, the label moves and the trigger records (third review
+  // pass, cold read: the re-record left such rows at the old model, called
+  // rebuilt). The label moved raw here; 061's trigger re-records the row at
+  // the old label first.
+  await db.query(`UPDATE thoughts SET embedding_model = 'old-model' WHERE id = $1::uuid`, [B.id]);
+  assert((await rowOf(B.id, "vector"))!.recipe.model === "old-model", "the label move re-recorded the vector row at the old model (061's trigger)");
+  r = await rebuild(B.id, "force mid-switch", false, null, true);
+  assert(r.rebuilt === 0 && (await claimsOf(B.id)).includes(`${REEMBED}:pending`) && (await rowOf(B.id, "vector"))!.why === "force mid-switch",
+    `under force a vector at another model than the configured one goes to the reembed pool, marked, not re-recorded at the old model (${counts(r)})`);
+  await db.query(`UPDATE thoughts SET embedding_model = $2 WHERE id = $1::uuid`, [B.id, MODEL]);
+  await db.query(`DELETE FROM thought_work_claims WHERE thought_id = $1::uuid AND work_type = $2`, [B.id, REEMBED]);
   r = await rebuild(B.id, "force again", false, null, true);
   assert(r.rebuilt === 1 && r.stale_proposals === 0 && (await proposal(pid)).status === "stale" && (await rowOf(B.id, "entities"))!.why === "force", `a second force re-records the vector again, requeues the already-stale proposal without counting it again, and leaves the first reason on the marked rows (${counts(r)})`);
   await db.exec(`UPDATE ob1_config SET value = '${CUR_KEY}' WHERE key = 'entity_extraction_key'`);

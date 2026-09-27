@@ -3338,8 +3338,15 @@ if (configFailed) {
                      (SELECT count(*)::int FROM consolidation_pool(NULL)) AS thoughts
               FROM thought_work_claims WHERE work_type LIKE ${CONSOLIDATE_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
               { work_type: string; status: string; c: number; thoughts: number }[];
-            const [{ pending: queued }] = await sql`SELECT count(*)::int AS pending FROM supersession_proposals WHERE status = 'pending'`;
-            const queue = Number(queued) > 0 ? `${queued} proposal(s) pending review — cd db && bun consolidate.ts --url $DATABASE_URL --list` : "";
+            // 063 (SMD-1732): a stale row is a pending verdict whose texts
+            // moved; the next pass replaces one it finds in conflict again,
+            // and one it does not is the reviewer's — said here, since no
+            // other row counts them (third review pass, cold read).
+            const [{ pending: queued, stale: staleQueued }] = await sql`SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending, count(*) FILTER (WHERE status = 'stale')::int AS stale FROM supersession_proposals`;
+            const queue = [
+              Number(queued) > 0 ? `${queued} proposal(s) pending review — cd db && bun consolidate.ts --url $DATABASE_URL --list` : "",
+              Number(staleQueued) > 0 ? `${staleQueued} stale (a text moved under the verdict; the next pass replaces one it finds in conflict again, a reviewer settles one it does not — --list stale)` : "",
+            ].filter(Boolean).join("; ");
             const byKey = new Map<string, PassCounts>();
             for (const r of rows) {
               const c = byKey.get(r.work_type) ?? { thoughts: Number(r.thoughts), succeeded: 0, fellBack: 0, accepted: 0, failed: 0, claimed: 0, pending: 0, unpooled: Number(r.thoughts) };

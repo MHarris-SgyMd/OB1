@@ -2459,7 +2459,7 @@ console.log("\n[20o] Migration 063 onto a populated brain at the file before it 
   assert(Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === Number(auditBefore) && (await stamps()) === before && (await lineage()) === lineageBefore, "the file is DDL alone: no audit row, no thought moved, no lineage row moved");
   // The rebuild on the corpus as it stands: the orphan chunks row deleted,
   // the stale extraction handed on under its own key (ob1_config records no
-  // extraction key on this brain), the stale vector to the reembed pool 006
+  // extraction key on this brain), the stale vector to the reembed pool under the model 006
   // recorded, the pending proposal set stale and the pair requeued.
   const r = (await sql`SELECT rebuild_derived(${newer.id}::uuid, 'upgrade') AS r`)[0].r as { ok: boolean; deleted: number; enqueued: number; marked: number; rebuilt: number; pools: string[]; current: number };
   const claims = (await sql`SELECT work_type AS w FROM thought_work_claims WHERE thought_id = ${newer.id}::uuid AND status = 'pending' ORDER BY 1`).map((c: { w: string }) => c.w).join();

@@ -23,7 +23,7 @@
  *   bun db/consolidate.ts --url … --dry-run               # what a run would do; writes nothing
  *   bun db/consolidate.ts --url … --retry-failed          # failed rows back into the pool first
  *   bun db/consolidate.ts --url … --dump verdicts.jsonl   # also append every verdict, for evals/eval-consolidate.ts
- *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|all]   # the queue, with both thoughts
+ *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|stale|all]   # the queue, with both thoughts
  *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"] [--force]   # --force: a text edited since judged
  *   bun db/consolidate.ts --url … --reject <proposal-id> [--note "…"]
  *   bun db/consolidate.ts --url … --stale [DAYS]          # entities nothing has mentioned within DAYS (90)
@@ -339,11 +339,13 @@ async function printList(status: string | undefined, limit = 50): Promise<number
     console.log(`     newer [${day(p.newer_created_at)}]${p.newer_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.newer_content)}\n        ID: ${p.newer_id}`);
     console.log(`     older [${day(p.older_created_at)}]${p.older_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.older_content)}\n        ID: ${p.older_id}`);
     console.log(`     proposal ${p.id}  cosine ${p.similarity === null ? "?" : Number(p.similarity).toFixed(3)}  judged by ${p.judge_key} on ${day(p.judged_at)}`);
-    if (p.status === "pending") {
+    if (p.status === "pending" || p.status === "stale") {
       // Commands as they run: a placeholder the shell cannot parse rather
       // than `newer|older`, which it would read as a pipe (review pass 3).
+      // A stale row (063: a text moved under the verdict) is the reviewer's
+      // too — its texts moved, so an accept takes --force.
       const dir = p.verdict === "conflict_undirected" ? " --direction <newer|older>" : "";
-      const force = p.older_edited || p.newer_edited ? " --force" : "";
+      const force = p.older_edited || p.newer_edited || p.status === "stale" ? " --force" : "";
       console.log(`     --accept ${p.id}${dir}${force}    --reject ${p.id}`);
     }
     console.log("");

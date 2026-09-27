@@ -166,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2109 assertions: 2109 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2111 assertions: 2111 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports sixty-three (63) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -573,7 +573,7 @@ arities move under their own DROP; a re-apply re-seeds nothing. test-schema
 063's (below), the forget SMD-1723's.
 
 Migration 063 is the rebuild (SMD-1732, Phase 1c of SMD-1729):
-`rebuild_derived(p_input, p_reason, p_input_gone, p_fingerprints, p_force)`
+`rebuild_derived(p_input, p_reason, p_input_gone, p_fingerprints, p_force, p_orphans_only)`
 walks `derivations` forward from a thought (`derivation_descendants`, 026's
 iterative walk with a walk-global seen set — one GIN probe per level, the
 `derived_from` children listed as prose and not expanded) and acts on every
@@ -2685,7 +2685,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2109 assertions, PGlite, no container
+bun test-schema.ts                          # 2111 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 847 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
