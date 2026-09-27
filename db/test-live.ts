@@ -4389,7 +4389,7 @@ console.log("\n[18] Every schemas/*.sql, then every extension and recipe schema,
         try { await sql.unsafe(readFileSync(join(SCHEMAS, f), "utf8")); }
         catch (e) { failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); await sql.unsafe("ROLLBACK").catch(() => {}); }
       }
-      assert(schemaFiles.length >= 14 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files; failed: ${failed.join(" | ") || "none"})`);
+      assert(schemaFiles.length >= 13 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files — 13 since SMD-1812 moved wiki-pages into core; failed: ${failed.join(" | ") || "none"})`);
       const contribFailed: string[] = [];
       for (const f of contribFiles) {
         try { await sql.unsafe(readFileSync(join(CONTRIB_DIR, f), "utf8")); }
@@ -4403,7 +4403,7 @@ console.log("\n[18] Every schemas/*.sql, then every extension and recipe schema,
       const grant = await migrate("--grant", ROLE);
       assert(grant.code === 0 && !/not yet present/.test(grant.out) && /over \d+ object\(s\)/.test(grant.out),
              `--grant issues everything, nothing skipped (exit ${grant.code}: ${grant.out.trim().split("\n").find((l) => /Granted/.test(l)) ?? grant.out.trim().split("\n").slice(-1)[0]})`);
-      assert(/GRANT USAGE, SELECT ON SEQUENCE ingestion_jobs_id_seq TO "ob1_live_community";/.test(grant.out) && /GRANT EXECUTE ON FUNCTION wiki_accept_pending\(uuid, text\) TO "ob1_live_community";/.test(grant.out) && /GRANT SELECT, INSERT ON thought_audit TO "ob1_live_community";/.test(grant.out),
+      assert(/GRANT USAGE, SELECT ON SEQUENCE ingestion_jobs_id_seq TO "ob1_live_community";/.test(grant.out) && /GRANT EXECUTE ON FUNCTION lookup_agent_memory_key\(text\) TO "ob1_live_community";/.test(grant.out) && /GRANT SELECT, INSERT ON thought_audit TO "ob1_live_community";/.test(grant.out),
              "…a sequence, a function with its argument types, and thought_audit's merged capture + community privileges among them");
 
       // The role, connecting as itself. An INSERT of DEFAULT VALUES asks for
@@ -4435,13 +4435,12 @@ console.log("\n[18] Every schemas/*.sql, then every extension and recipe schema,
         if (!ok) fnDenied.push(n);
       }
       assert(fnDenied.length === 0, `…and may EXECUTE each of the ${grantedFunctions(["community"]).length} listed functions (denied: ${fnDenied.join(", ") || "none"})`);
-      // and the one call a community RPC makes for real: wiki_upsert_page, as
-      // the role — SECURITY INVOKER, REVOKEd FROM PUBLIC, writing wiki_pages
-      const page = (await asRole.unsafe(`SELECT wiki_upsert_page('smd-1796', 'Granted', 'topic', '{}'::jsonb, 'test-live') AS r`)) as { r: { page_id: string; created: boolean } }[];
-      assert(typeof page[0]?.r?.page_id === "string", `…and calls wiki_upsert_page through its grant, writing wiki_pages as itself (${JSON.stringify(page[0]?.r)})`);
-      let rewrite = "";
-      try { await asRole.unsafe(`UPDATE wiki_section_revisions SET body_md = '' WHERE false`); } catch (e) { rewrite = (e as Error).message; }
-      assert(/permission denied/.test(rewrite), `…but cannot UPDATE wiki_section_revisions — append-only, as upstream had it (${rewrite.split("\n")[0] || "the UPDATE was allowed"})`);
+      // and the one call a community RPC makes for real: lookup_agent_memory_key,
+      // as the role — SECURITY DEFINER, REVOKEd FROM PUBLIC, reading and touching
+      // agent_memory_keys (the wiki RPCs were this probe until SMD-1812 moved
+      // the page store into core: test-live [31])
+      const lookup = (await asRole.unsafe(`SELECT count(*)::int AS n FROM lookup_agent_memory_key('${"a".repeat(64)}')`)) as { n: number }[];
+      assert(lookup[0]?.n === 0, `…and calls lookup_agent_memory_key through its grant, an unknown hash answering no row (${JSON.stringify(lookup[0])})`);
 
       // The rollback path, over TCP: --grant connected as THIS role — every
       // privilege held, none with grant option — granting a third role. Every
@@ -6420,6 +6419,69 @@ console.log("\n[30] Migration 061 on a real server: the windowed capture's linea
     const lineage = ((await sql`SELECT produced_by AS by FROM derivations WHERE artifact_kind = 'entities' AND artifact_id = ${race.id}::uuid ORDER BY 1`) as { by: string }[]).map((r) => r.by);
     assert(waited === 1 && standing.join() === "extract:a@p1,extract:b@p1" && lineage.join() === standing.join(),
       `two extractions racing under different keys: B waited on A's open transaction, both mentions stand (016's race), and each standing key has its lineage row (waited ${waited}; standing ${standing.join()}; lineage ${lineage.join()})`);
+  } finally {
+    await cA.close();
+    await cB.close();
+  }
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM derivations`;
+  await sql.close();
+}
+
+console.log("\n[31] Migration 063 on a real server: the page store under concurrency — two sessions' first write of one section serialise on the page (one created, one updated); a human's edit and a machine's regeneration racing leave the human's text live whichever commits first; two creates of one slug leave one page and one refusal by name; after every race the render is the thought's content (SMD-1812)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM derivations`;
+  await sql`SELECT set_agent_kind('op-key', 'operator')`;
+  const ACTOR = { name: "op-key", via: "live-door" };
+  const cA = new SQL({ url: URL_, max: 1 }), cB = new SQL({ url: URL_, max: 1 });
+  try {
+    type R = { action?: string; section_id?: string; page_id?: string; created?: boolean };
+    type Sec = { origin: string; body_md: string; pending: string | null };
+    const e = (await sql`SELECT upsert_thought('063 live: the evidence', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: EMBEDDING_MODEL }}::jsonb, ${unit(0)}::vector) AS r`)[0].r as { id: string };
+    const P = ((await sql`SELECT upsert_page('live-runbook', 'Live runbook', 'topic', '{}'::jsonb, 'alice') AS r`)[0].r as { page_id: string }).page_id;
+    const write = async (c: SQL, key: string, body: string, origin: string, actor: string): Promise<R> =>
+      ((await c`SELECT write_page_section(${P}::uuid, ${key}, ${body}, ${origin}, NULL, '{}'::jsonb, ${origin === "generated" ? sql.array([e.id], "TEXT") : null}::uuid[], NULL, ${actor}) AS r`) as { r: R }[])[0].r;
+    const secOf = async (key: string) => (await sql`SELECT origin, body_md, pending_body_md AS pending FROM page_sections WHERE page_id = ${P}::uuid AND section_key = ${key}`)[0] as Sec | undefined;
+    const revisions = async (key: string) => Number((await sql`SELECT count(*)::int AS c FROM page_section_revisions r JOIN page_sections s ON s.id = r.section_id WHERE s.page_id = ${P}::uuid AND s.section_key = ${key}`)[0].c);
+    const consistent = async () => { const [x] = await sql`SELECT render_page(${P}::uuid) = (SELECT content FROM thoughts WHERE id = ${P}::uuid) AS same`; return x.same === true; };
+
+    // Two first writes of one key, at once: the page lock and the unique key
+    // serialise them — one created, the other falls through to the
+    // existing-section path and updates; one section, two revisions (the
+    // bodies differ), the render the thought's content.
+    const [a1, b1] = await Promise.all([write(cA, "steps", "Machine A's text.", "generated", "gen-a"), write(cB, "steps", "Machine B's text.", "generated", "gen-b")]);
+    const actions = [a1.action, b1.action].sort().join();
+    const sections = Number((await sql`SELECT count(*)::int AS c FROM page_sections WHERE page_id = ${P}::uuid`)[0].c);
+    assert(actions === "created,updated" && a1.section_id === b1.section_id && sections === 1 && (await revisions("steps")) === 2 && (await consistent()),
+      `two sessions' first write of one section: one created, one updated, one section, two revisions, the render the thought's content (${actions}; ${sections} section)`);
+
+    // A human's edit and a machine's regeneration, at once, on the section
+    // the machine owns: if the human commits first the machine parks, if the
+    // machine commits first the human takes ownership over it — the live text
+    // is the human's either way, and the section is the human's.
+    const HUMAN = "The human's text, kept.";
+    const [h, m] = await Promise.all([write(cA, "steps", HUMAN, "manual", "alice"), write(cB, "steps", "The machine's regeneration.", "generated", "gen-b")]);
+    const after = (await secOf("steps"))!;
+    assert(h.action === "updated" && (m.action === "pending" || m.action === "updated") && after.body_md === HUMAN && after.origin === "manual" && (m.action === "pending" ? after.pending === "The machine's regeneration." : after.pending === null) && (await consistent()),
+      `a human and a machine racing on one section: the human's text is live and the section the human's whichever committed first (the machine's write ${m.action}${m.action === "pending" ? ", its draft parked" : ", overtaken"})`);
+    // …and the machine racing the human again now parks: human-owned.
+    const [h2, m2] = await Promise.all([write(cA, "steps", "The human's second text.", "manual", "alice"), write(cB, "steps", "The machine, again.", "generated", "gen-b")]);
+    const after2 = (await secOf("steps"))!;
+    assert(h2.action === "updated" && m2.action === "pending" && after2.body_md === "The human's second text." && after2.pending === "The machine, again." && (await consistent()),
+      "…on a human-owned section the race has one outcome: the human's text live, the machine's parked");
+
+    // Two creates of one slug, at once: one page, the other refused by name —
+    // the loser's capture waits on 033's fingerprint lock, merges into the
+    // winner's thought, and is refused before it can take the slug.
+    const create = async (c: SQL) => { try { return { ok: ((await c`SELECT upsert_page('raced', 'A raced page') AS r`) as { r: R }[])[0].r, err: "" }; } catch (err) { return { ok: null as R | null, err: (err as Error).message }; } };
+    const [ra, rb] = await Promise.all([create(cA), create(cB)]);
+    const created = [ra, rb].filter((x) => x.ok?.created === true), refusedOne = [ra, rb].filter((x) => x.ok === null);
+    const pagesRaced = Number((await sql`SELECT count(*)::int AS c FROM pages WHERE slug = 'raced'`)[0].c);
+    const thoughtsRaced = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content = '# A raced page'`)[0].c);
+    assert(created.length === 1 && refusedOne.length === 1 && /another writer created with this text meanwhile|holds this page's exact text/.test(refusedOne[0].err) && pagesRaced === 1 && thoughtsRaced === 1,
+      `two creates of one slug: one page, one thought, the other refused by name (${refusedOne[0]?.err.split("\n")[0].slice(0, 110) ?? "neither refused"})`);
   } finally {
     await cA.close();
     await cB.close();

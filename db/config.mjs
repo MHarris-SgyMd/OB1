@@ -1792,6 +1792,22 @@ export const ROLE_GRANTS = Object.freeze({
   querylog: Object.freeze([
     Object.freeze({ table: "query_log", privileges: Object.freeze(["INSERT"]), since: "034" }),
   ]),
+  // The page store (063, SMD-1812): a page is a thought (its id, its render as
+  // the content — written through the capture group's functions, so a role
+  // that writes pages holds `capture` too), and the sections, their pending
+  // drafts and their revisions are these three tables, written only through
+  // upsert_page, write_page_section, accept_page_section and
+  // release_page_section (SECURITY INVOKER, PUBLIC's EXECUTE as every core
+  // function). No DELETE: a section and its revisions go only with the page
+  // thought's delete, whose cascade runs as the tables' owner; the revisions
+  // take INSERT alone — append-only, and a trigger refuses UPDATE and TRUNCATE
+  // for the owner too. The identity column needs no sequence grant
+  // (test-schema [58] measures it).
+  pages: Object.freeze([
+    Object.freeze({ table: "pages",                  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "063" }),
+    Object.freeze({ table: "page_sections",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "063" }),
+    Object.freeze({ table: "page_section_revisions", privileges: Object.freeze(["SELECT", "INSERT"]),           since: "063" }),
+  ]),
   // The community schemas under schemas/ (SMD-1796), applied by hand beside the
   // migrations. Upstream's files granted these to Supabase's `service_role`
   // (and enabled RLS with a policy for it) — a role that does not exist on plain
@@ -1857,13 +1873,6 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "thought_edges", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/typed-reasoning-edges" }),
     Object.freeze({ sequence: "thought_edges_id_seq", privileges: Object.freeze(["USAGE", "SELECT"]), since: "schemas/typed-reasoning-edges" }),
     Object.freeze({ function: "thought_edges_upsert(uuid, uuid, text, numeric, integer, text, timestamptz, timestamptz, jsonb)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/typed-reasoning-edges" }),
-    // schemas/wiki-pages (revisions are append-only; the three RPCs are REVOKEd FROM PUBLIC; the identity id needs no sequence grant)
-    Object.freeze({ table: "wiki_pages",             privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/wiki-pages" }),
-    Object.freeze({ table: "wiki_sections",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/wiki-pages" }),
-    Object.freeze({ table: "wiki_section_revisions", privileges: Object.freeze(["SELECT", "INSERT"]),                     since: "schemas/wiki-pages" }),
-    Object.freeze({ function: "wiki_upsert_page(text, text, text, jsonb, text)",                               privileges: Object.freeze(["EXECUTE"]), since: "schemas/wiki-pages" }),
-    Object.freeze({ function: "wiki_write_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/wiki-pages" }),
-    Object.freeze({ function: "wiki_accept_pending(uuid, text)",                                                privileges: Object.freeze(["EXECUTE"]), since: "schemas/wiki-pages" }),
     // schemas/crm-person-tiers
     Object.freeze({ table: "crm_persons",         privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/crm-person-tiers" }),
     Object.freeze({ table: "crm_person_mentions", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/crm-person-tiers" }),
@@ -1970,7 +1979,7 @@ export const ROLE_GRANTS = Object.freeze({
 });
 
 /** The order groups are issued and documented in. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "community", "extensions", "recipes"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "pages", "community", "extensions", "recipes"]);
 
 /**
  * The (table, privilege) pairs the core capture/edit/search path needs

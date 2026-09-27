@@ -55,7 +55,7 @@ exactly one disposition.
   cross-schema deps). The seed "remove" list did not survive the gate — every seed-remove
   integration/schema is load-bearing today (the SMD-1228/1524/1544/1798 audit wired them
   into CI + the shim after the seed was written).
-- **remove: 8.**
+- **remove: 9.**
   - `schemas/text-search-trgm` — index verbatim in migration 011; no fork-side dep.
   - `schemas/recency-boosted-match-thoughts` — `match_thoughts_recency` has zero callers; 020 folded recency into core `match_thoughts`.
   - `schemas/thought-work-claims` — comment-only stub; 015 owns the table.
@@ -64,6 +64,7 @@ exactly one disposition.
   - `docs/drafts/discord-chunking-discussion.md` — resolved (proposals landed in 003/007/011).
   - `recipes/obsidian-vault-import` — `db/ingest-markdown.ts` is the fork's Obsidian import (SMD-2126 → SMD-2137).
   - `recipes/local-ollama-embeddings` — the fork embeds locally by default; `db/reembed.ts` for existing rows (SMD-2126 → SMD-2138).
+  - `schemas/wiki-pages` — the page store is core, migration 063 (SMD-949 → SMD-1812).
 - **sub-file removal: 2.** `recipes/email-history-import/rollback-chunking-columns.sql`
   — undoes abandoned upstream PR #27 column-chunking; no-op on the fork; and
   `recipes/fingerprint-dedup-backfill/backfill-fingerprints.mjs` — migration 023 backfills the
@@ -80,7 +81,7 @@ exactly one disposition.
   / `google-activity` / `grok` / `instagram` / `journals-blogger` / ~~`obsidian`~~ (retired — SMD-2126 → SMD-2137) / `perplexity`
   / `readwise` / `x-twitter`).
 - **rebuild-tickets linked (kept + tracked):** `enhanced-mcp` → SMD-1525 + SMD-1798;
-  `schemas/typed-reasoning-edges` → SMD-1253; `schemas/wiki-pages` → SMD-949;
+  `schemas/typed-reasoning-edges` → SMD-1253; ~~`schemas/wiki-pages` → SMD-949~~ (rebuilt in core as migration 063 and retired, SMD-1812);
   `schemas/smart-ingest` → SMD-1253.
 - **SMD-1798 portability (runtime supabase-js), kept:** `agent-memory-api`, `enhanced-mcp`,
   `open-brain-rest`, `rest-api`, `ob-graph`, `repo-learning-coach`, `schema-aware-routing`,
@@ -294,7 +295,7 @@ excluding `_shared/` / `_template/` scaffolding and `README.md` indexes. 87 arti
 | `thought-audit` | keep + audited *(revises seed "remove")* | Own `thought_audit` table (granted by `db/config.mjs`, with the `thought_provenance` view); referenced by `delete-thought-mcp` / `update-thought-mcp`. Migration 008 is "Ported from schemas/thought-audit" with departures; community origin held to the delta. |
 | `thought-work-claims` | **remove** *(no-parity posture)* | Already a **comment-only stub** — all upstream DDL was stripped under SMD-1250 (it would have clobbered 015's `release_thought` / `release_claims_for_worker`). Migration 015 owns the real `thought_work_claims` (evals + `db/config.mjs` grants use it). The stub's only content is upstream documentation. Removal PR: delete the folder; guard check 7 still fences the function names regardless. |
 | `typed-reasoning-edges` | keep + audited + rebuild-ticket **SMD-1253** | Own `thought_edges` table + upsert RPC (granted by `db/config.mjs`); required by `recipes/typed-edge-classifier` (matches its CHECK constraint). Requires `entity-extraction`. Not rebuilt in core; rebuild tracked under SMD-1253. |
-| `wiki-pages` | keep + audited + rebuild-ticket **SMD-949** | Own `wiki_pages` / `wiki_sections` / `wiki_section_revisions` + RPCs (granted by `db/config.mjs`); README index row; feeds the wiki recipes. Not rebuilt in core; rebuild tracked under SMD-949. |
+| `wiki-pages` | ~~keep + audited + rebuild-ticket SMD-949~~ → **retired (SMD-1812)** *(no-parity posture; rebuilt in core)* | Was upstream's `wiki_pages` / `wiki_sections` / `wiki_section_revisions` + three RPCs. Migration 063 is the fork's page store — `pages` (a page is a thought: its id, its render as the content), `page_sections`, `page_section_revisions`, `write_page_section`'s regen guard, lineage rows for generated sections — under names of its own, so a brain that applied the file by hand keeps its tables untouched. Directory removed, README index row → core, community grant rows out (`pages` group instead). The wiki recipes' pages belong there (SMD-2143). |
 | `workflow-status` | keep + audited | Minimal "add `status` / `status_updated_at` + `idx_thoughts_status`" migration; `migration.sql` uses `ADD COLUMN IF NOT EXISTS` on both columns (idempotent, re-runnable — no install-order collision with `enhanced-thoughts`). Live consumers: `dashboards/open-brain-dashboard-next` (Workflow board requires the columns) and `open-brain-rest`. Distinct from the heavier `enhanced-thoughts`. |
 
 ### `docs/drafts/` (3)
