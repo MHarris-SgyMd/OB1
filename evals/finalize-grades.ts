@@ -27,7 +27,8 @@ for (const id of Object.keys(key)) {
   else if (av[0] === bv[0] && (av[0] === 0 || av[1] === bv[1])) { valid = av[0]; type = av[0] === 0 ? "none" : av[1]; }
   else { throw new Error(`unadjudicated disagreement ${id}`); }
 
-  mentions.push({ thought: key[id].thought, entity: key[id].entity, valid, type: valid ? TYPES.indexOf(type) : -1, grader_a: av, grader_b: bv });
+  // grader arrays as [valid, type-index] numbers (check 9: ids + numbers only, no type-name strings)
+  mentions.push({ thought: key[id].thought, entity: key[id].entity, valid, type: valid ? TYPES.indexOf(type) : -1, grader_a: [av[0], av[0] ? TYPES.indexOf(av[1]) : -1], grader_b: [bv[0], bv[0] ? TYPES.indexOf(bv[1]) : -1] });
   valDist[valid ? "valid" : "invalid"]++;
   if (valid) typeDist[type] = (typeDist[type] ?? 0) + 1;
 
@@ -39,10 +40,8 @@ for (const id of Object.keys(key)) {
 const precision = tp / (tp + fp);
 writeFileSync(`${HERE}/fixtures/longdoc-grades.json`, JSON.stringify({
   generated: new Date().toISOString(),
-  origin: "SMD-1961 long-document corpus (longest thoughts on the dogfood stable brain, mixed 7B/27B extraction incl. SMD-2240 partial prefixes); one mention per entity per doc, sampled by hash, the entity's first-occurrence window. Two blind Claude graders + maintainer adjudication; grader_a/grader_b are [valid,type-string], valid + type (index in types, -1 for none) are the adjudication. ids + numbers only (check 9).",
-  types: TYPES,
-  count: mentions.length,
-  interannotator: "valid kappa 0.931 (97.5% raw); type agreement 90.8% among both-valid",
+  origin: "SMD-1961 long-document corpus (longest thoughts on the dogfood stable brain, mixed 7B/27B extraction incl. SMD-2240 partial prefixes); one mention per entity per doc, sampled by hash, the entity's first-occurrence window. Two blind Claude graders + maintainer adjudication.",
+  note: "Fields are ids and numbers only (check 9, SMD-1295). type is the index in [tool, topic, project, person, organization, place], -1 for not a valid entity; valid is 1/0. grader_a and grader_b are each blind grader's [valid, type-index]; valid and type are the adjudication. Inter-annotator agreement: valid kappa 0.931 (97.5% raw), type agreement 90.8% among both-valid.",
   mentions,
 }, null, 1));
 
