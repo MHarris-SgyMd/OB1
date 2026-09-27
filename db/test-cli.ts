@@ -233,6 +233,15 @@ const entries = sources.filter((f) => {
   ok(ids.code === 2 && /^unknown argument 4: a value where no flag takes one$/m.test(ids.err) && /--accept-failed <thought-id …> \(right after it, before any other flag\)/.test(ids.err), `reembed.ts says where ids go when one is stray (exit ${ids.code})`);
   const subjects = run("graph-centrality.ts", "postgres://u:s3cret@h/db", "Open Brain");
   ok(subjects.code === 2 && /one subject at a time; got 2/.test(subjects.err) && !subjects.err.includes("s3cret"), `graph-centrality.ts counts two subjects, a URL given without --url among them, without repeating them (exit ${subjects.code})`);
+  // rebuild.ts (SMD-1732's door, moved onto the scanner at the merge of main): a typo refused, a value repeated nowhere.
+  const rebuildTypo = run("rebuild.ts", "--url", DEAD, "--orphan");
+  ok(rebuildTypo.code === 2 && /^unknown argument 3: not a flag this script has$/m.test(rebuildTypo.err), `rebuild.ts refuses --orphan for --orphans rather than ignoring it (exit ${rebuildTypo.code})`);
+  const rebuildInput = run("rebuild.ts", "--url", DEAD, "--input", "postgres://u:s3cret@h/db");
+  ok(rebuildInput.code === 2 && /--input takes a thought id \(a UUID\)/.test(rebuildInput.err) && !rebuildInput.err.includes("s3cret"), `rebuild.ts refuses a non-id --input without repeating it (exit ${rebuildInput.code})`);
+  const rebuildLimit = run("rebuild.ts", "--url", DEAD, "--orphans", "--limit", "1e3");
+  ok(rebuildLimit.code === 2 && /--limit must be a decimal integer >= 0/.test(rebuildLimit.err), `rebuild.ts refuses --limit 1e3 by the digits rule (exit ${rebuildLimit.code})`);
+  const rebuildReason = run("rebuild.ts", "--url", DEAD, "--input", "00000000-0000-0000-0000-000000000000", "--reason", "  ");
+  ok(rebuildReason.code === 2 && /^--reason is empty/m.test(rebuildReason.err), `rebuild.ts refuses a blank --reason (exit ${rebuildReason.code})`);
   // sync-linear's interval, from the flag or the environment, by the digits rule; the key and URL only get it past the checks before.
   const interval = Bun.spawnSync(["bun", "--no-env-file", "sync-linear.ts", "--url", DEAD, "--interval", "0x10"], { cwd: HERE, env: { ...env, LINEAR_API_KEY: "not-a-real-key" } });
   ok(interval.exitCode === 2 && /--interval \/ OB1_BOARD_SYNC_INTERVAL must be a decimal integer >= 10/.test(interval.stderr.toString()), `sync-linear.ts refuses a hex --interval, which Number() read as 16 (exit ${interval.exitCode})`);

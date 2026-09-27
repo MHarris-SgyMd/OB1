@@ -54,45 +54,38 @@
  */
 
 import { SQL } from "bun";
+import { commandLine } from "./cli.ts";
 
-const args = process.argv.slice(2);
-const flag = (name: string): string | undefined => {
-  const i = args.indexOf(`--${name}`);
-  if (i < 0) return undefined;
-  const v = args[i + 1];
-  if (v === undefined || v.startsWith("--")) {
-    console.error(`--${name} needs a value`);
-    process.exit(2);
-  }
-  return v;
-};
-const has = (name: string) => args.includes(`--${name}`);
+// Every argument accounted for (db/cli.ts, SMD-2134): a flag this door does not
+// have is refused rather than ignored, and a blank --reason is refused as every
+// flag's blank value is (it is recorded on every row marked).
+const cli = commandLine("rebuild.ts", {
+  url: "one", input: "one", reason: "one", fingerprints: "one", limit: "one",
+  gone: "none", force: "none", orphans: "none", status: "none", "dry-run": "none",
+}, { hints: { url: "<postgres://…>", input: "<thought id>", reason: "<text> (with --input)", fingerprints: "<fp1,fp2> (with --gone)", limit: "<N> (with --orphans)", gone: "(with --input)", force: "(with --input)" } });
 
-const url = flag("url") ?? process.env.DATABASE_URL;
+const url = cli.value("url") ?? process.env.DATABASE_URL;
 if (!url) {
   console.error("No database URL. Pass --url or set DATABASE_URL.");
   process.exit(2);
 }
-const INPUT = flag("input");
-const ORPHANS = has("orphans");
-const STATUS = has("status");
-const GONE = has("gone");
-const FORCE = has("force");
-const DRY = has("dry-run");
-const limitRaw = flag("limit");
-if (limitRaw !== undefined && !/^\d+$/.test(limitRaw)) {
-  console.error(`--limit takes a whole number, got "${limitRaw}"`);
-  process.exit(2);
-}
-const LIMIT = Math.max(1, Math.min(Number(limitRaw ?? 500), 10000));
-const FINGERPRINTS = flag("fingerprints")?.split(",").map((s) => s.trim()).filter(Boolean) ?? null;
+const INPUT = cli.value("input");
+const ORPHANS = cli.has("orphans");
+const STATUS = cli.has("status");
+const GONE = cli.has("gone");
+const FORCE = cli.has("force");
+const DRY = cli.has("dry-run");
+// Decimal digits (cli.ts's rule), then held to 1..10,000 as before: 0 reads as 1.
+const LIMIT = Math.max(1, Math.min(cli.int("limit", { absent: 500, min: 0 }), 10000));
+const FINGERPRINTS = cli.value("fingerprints")?.split(",").map((s) => s.trim()).filter(Boolean) ?? null;
 const modes = [INPUT !== undefined, ORPHANS, STATUS].filter(Boolean).length;
 if (modes !== 1) {
   console.error("Say one thing: --input <id> [--reason …] [--gone [--fingerprints …]] [--force] [--dry-run] | --orphans [--limit N] [--dry-run] | --status");
   process.exit(2);
 }
+// What is allowed, not what was given (cli.ts's rule): the value may be a URL given without --url.
 if (INPUT !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(INPUT)) {
-  console.error(`--input takes a thought id (a UUID), got "${INPUT}"`);
+  console.error("--input takes a thought id (a UUID)");
   process.exit(2);
 }
 if ((GONE || FORCE || FINGERPRINTS) && INPUT === undefined) {
@@ -103,18 +96,14 @@ if (FINGERPRINTS && !GONE) {
   console.error("--fingerprints goes with --gone: the earlier texts' fingerprints are what a leaving thought's snapshot rows are found by");
   process.exit(2);
 }
-const reasonRaw = flag("reason");
-if (reasonRaw !== undefined && reasonRaw.trim() === "") {
-  console.error("--reason needs words: it is recorded on every row marked");
-  process.exit(2);
-}
+const reasonRaw = cli.value("reason");
 // A flag outside its mode is a usage error, not a silent no-op (second
 // review pass: --reason on the sweep landed nowhere — the sweep marks no row).
 if (reasonRaw !== undefined && INPUT === undefined) {
   console.error("--reason goes with --input: the sweep marks no row and --status writes nothing, so there is nothing to record it on");
   process.exit(2);
 }
-if (limitRaw !== undefined && !ORPHANS) {
+if (cli.has("limit") && !ORPHANS) {
   console.error("--limit goes with --orphans");
   process.exit(2);
 }
