@@ -38,12 +38,17 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
                  │   /auth       → auth.ob1.internal       │
                  │   /grafana    → lgtm (SMD-1849 profile) │
                  │   /api        → api.ob1.internal  (opt-in, off by default)
+                 │   /health     → mcp.ob1.internal  (keyed; plain "ok" without a key)
+                 │   /ext/<name> → per SMD-1931's dispositions
                  └───────────────┬────────────────────────┘
-                                 │  internal network (internal: true)
+                                 │  mesh network (internal: true, no outbound route)
    mcp ──token exchange──▶ auth  │
    mcp ─────REST client──▶ api ◀──── REST client ── app
-   n8n ─────REST──────────▶ api ──▶ postgres, egress (Ollama / Jev / OpenRouter)
+   n8n ─────REST──────────▶ api ──▶ postgres
    db/ workers (core codebase, separate processes) ──▶ postgres
+
+   egress network (outbound allowed): api → Ollama / Jev / OpenRouter;
+                                      n8n → Linear, Gmail; auth → client metadata fetches
 ```
 
 - **Public routes:**
@@ -55,9 +60,19 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
   | `/auth` | authorization server (SMD-2285) |
   | `/grafana` | SMD-1849 |
   | `/api` | REST core (SMD-2284), off by default |
-  | `/canary/...` | the canary tier's equivalents |
+  | `/health` | MCP server: keyed BrainInfo JSON read from the REST core, plain `ok` without a key (today's contract) |
+  | `/ext/<name>` | extension servers that SMD-1931's dispositions keep; removed if none survive |
+  | `/canary/...` | the canary tier's equivalents (SMD-2294) |
 
-- **Internal names** are network aliases on a compose network with `internal: true`: `api.ob1.internal`, `mcp.ob1.internal`, `app.ob1.internal`, `auth.ob1.internal`. Only the proxy also joins the edge network. Calls between services still authenticate; being on the network is not trust.
+- **Two networks.**
+  - **Mesh network.** Internal names are network aliases on a compose network with `internal: true`: `api.ob1.internal`, `mcp.ob1.internal`, `app.ob1.internal`, `auth.ob1.internal`. Postgres and every service join it. Calls between services still authenticate; being on the network is not trust.
+  - **Egress network.** An `internal: true` network has no outbound route, to the internet or to the host. So the services that must reach out also join an ordinary network:
+    - the REST core, for Ollama (host Ollama on the dogfood stack), Jev and OpenRouter;
+    - n8n, for Linear and Gmail;
+    - the authorization server, if its client registration fetches metadata documents.
+
+    The MCP server and the GUI stay mesh-only. The proxy joins the edge network and the mesh.
+- **The REST core's own `/health` is internal only.** Brain identity and ledger freshness reach the public side through the MCP server's `/health`, the one probe URL for `smoke.sh`, the image healthcheck and `db/brain-compare.ts`.
 - **`/.well-known/` stays a 404 except two routed paths:**
   - `/.well-known/oauth-protected-resource/mcp` goes to the MCP server (RFC 9728).
   - `/.well-known/oauth-authorization-server/auth` goes to the authorization server (RFC 8414).
@@ -78,7 +93,10 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
   - It exchanges each incoming token (audience = the public `/mcp` resource) for a REST-core token under its own client credentials.
   - The MCP authorization spec forbids passing the received token upstream; exchange is how the hop keeps both the subject and the delegating service.
 - **GUI:** a confidential client using authorization code with PKCE, asking for the REST core as the resource (RFC 8707). Tokens live in the sealed server-side session and never reach the browser, the same pattern the SvelteKit dashboard uses for the key today.
-- **Access-key clients** (n8n, the session hook, the CLI, `?key=` connectors) call the REST core directly on the internal network. Whether a key-authenticated MCP client exchanges its key at the authorization server, or has it forwarded, depends on whether the chosen server supports custom subject-token types (SMD-2285 criterion 8, SMD-2286 step 4).
+- **Clients inside compose** (n8n, the `db/` worker containers) call the REST core directly on the mesh with an access key.
+- **Clients on the host** cannot reach the mesh: the session-capture hook (`OB1_BRAIN_URL`), `db/brain-compare.ts`, Claude Code's MCP entries and `db/` scripts run from the host. They use `https://<host>/mcp`, or `/api` where the operator has turned it on.
+  - The hook stays an MCP client. It reads the SMD-1978 refusal codes from `structuredContent`, which SMD-2287 must carry over exactly.
+- **Access-key MCP clients** (the hook, `?key=` connectors) either exchange the key at the authorization server or have it forwarded to the REST core. Which one depends on whether the chosen server supports custom subject-token types (SMD-2285 criterion 8, SMD-2286 step 4).
 - **Multi-user isolation stays deferred** (SMD-1716). The authorization server introduces identities, not tenants.
 
 ## Where everything else lives
@@ -88,7 +106,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
 - **Destructive-verb guards** live in the REST core, so every client gets them. These are the bulk cap, re-verify before delete, and restricted state from the principal, which `-pro` put in its route handlers.
 - **Prose, `structuredContent`, refusal envelopes, SSE keepalive, notification handling and the scope-filtered `tools/list`** belong to the MCP server alone.
 - **Telemetry:** each server emits OTLP spans with the SMD-1849 allow-list. The MCP span is the parent of the REST span through `traceparent`. Grafana owns storage and presentation.
-- **Brain tiers** (stable / canary / working): one REST core per tier, with the MCP server and the GUI per tier behind `/canary/...`. The exact split is settled with SMD-1846.
+- **Brain tiers** (stable / canary / working): one REST core per tier, with the MCP server and the GUI per tier behind `/canary/...`. The exact split is settled in SMD-2294.
 
 ## Migration order
 
@@ -101,8 +119,28 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
 | 5 | SMD-2287: the MCP server on v2 as a REST client; parity, then canary, then cutover | The suites pass against it; `index.ts` registers no tools |
 | 6 | SMD-2285, then SMD-2286: authorization server and identity chain. Selection starts now, in parallel | A claude.ai connector signs in and its audit row names the subject and `act` |
 | 7 | SMD-2288: compose-only; retire the Workers target; rewrite the guard rail and SETUP.md | No doc names a non-compose deployment |
+| with 2, 5 | SMD-2296: release images per server, the CI full-stack job through the proxy, the landing check and counted surfaces | A release rehearsal smokes every pulled image |
+| after 5 | SMD-2294: the tier stack (`compose.tiers.yaml`, `canary.sh`, `tier.sh`, `--compare`) on proxy paths | No `:8010`–`:8012` left in `deploy/` or `db/` |
+| after 2 | SMD-2295: n8n reaches the brain through the REST core; the orchestration ADR's boundary amended | A template's brain call audits as n8n's key |
 
 SMD-2278 (server-portable to SDK v2) goes ahead as written, since the current server stays in service through step 5. SMD-2279 (vendored servers to v2) mostly becomes retirement under SMD-1931.
+
+## What else this touches
+
+Read against the tree on 2026-09-27.
+
+| System | Change | Ticket |
+|---|---|---|
+| Tier stack (stable / canary / working on 8010–8012) | Each tier is a REST core plus an MCP server on proxy paths | SMD-2294 |
+| MCP clients (Claude Code entries, claude.ai / Desktop connectors) | URLs become `https://<host>/mcp` and `/canary/mcp`; keys keep working; OAuth becomes available | SMD-2294, SMD-2286 |
+| Session-capture hook | New URL; stays an MCP client; refusal codes carried over exactly | SMD-2287 |
+| board-sync and the `db/` scripts | 35 files import `server-portable` modules (`entities`, `embed`, `chunk`, `egress`, `store`, …) and none import `index.ts`. SMD-2283 keeps those paths. The one-off worker containers join the mesh | SMD-2283, SMD-2134 |
+| n8n | Brain calls move from MCP to the REST core. SMD-2212 lands as is: its import runs `db/ingest-records.ts` and its act tool is n8n's own endpoint | SMD-2295 |
+| Jev, the LLM env forwarding, the preflight entrypoint | Move from the `server` service to the REST core | SMD-2284 |
+| Release images and CI | `ob1-server` becomes one image per server; the full-stack job goes through the proxy; the Workers build retires | SMD-2296, SMD-2288 |
+| Docs and skills with the one-process `?key=` URL shape | One bring-up path and the new URLs | SMD-2288 |
+| `chrome-capture-extension`, `recipes/*` MCP callers, agent-memory plugins | New URLs; the extension needs `/api` or a move to `/mcp` once `rest-api` retires | SMD-1931 |
+| Secrets in `deploy/.env` | The authorization server's signing key and each service's client secret, with the backup note | SMD-2285 |
 
 ## Retirement conditions
 
