@@ -457,6 +457,41 @@ export type WorkerStatusRow = {
   active: boolean | null;
 };
 
+/** The result of `retryFailed` (SMD-2132) — the `failed` rows of one work_type requeued to `pending`. */
+export type RetryFailedResult = {
+  /** The pool acted on, echoed back. */
+  workType: string;
+  /** How many `failed` rows moved to `pending`. */
+  retried: number;
+  /** The thought ids requeued. */
+  ids: string[];
+};
+
+/** How `releaseStaleLeases` (SMD-2132) is aimed — the optional scoping, and the live-lease escape hatch. */
+export type ReleaseLeasesOpts = {
+  /** Restrict to one pool; omit to reap stale leases across every work_type (the reaper's own cross-pool reach). */
+  workType?: string;
+  /** Restrict to one holder's leases. Required when `includeLive` is set. */
+  workerId?: string;
+  /**
+   * Release a holder's leases even when the TTL has NOT lapsed — a live lease.
+   * Off by default (only past-`ttl_expires_at` leases are touched), because
+   * releasing a live lease risks the holder double-processing; the caller must
+   * name the `workerId` to reach one.
+   */
+  includeLive?: boolean;
+};
+
+/** The result of `releaseStaleLeases` (SMD-2132) — the `claimed` rows returned to the pool. */
+export type ReleaseLeasesResult = {
+  /** How many `claimed` rows moved back to `pending`. */
+  released: number;
+  /** The thought ids released. */
+  ids: string[];
+  /** The distinct `worker_id`s whose leases were released. */
+  workers: string[];
+};
+
 export type ListFilters = {
   limit: number;
   type?: string;
@@ -1044,6 +1079,29 @@ export interface ThoughtStore {
    * throws. Read-only: no lock, no reaper, no write.
    */
   workerStatus(): Promise<WorkerStatusRow[]>;
+
+  /**
+   * Requeue a pool's `failed` claim rows to `pending` (SMD-2132) — the write
+   * half of `worker_status`, the `db/*.ts --retry-failed` path over a tool. One
+   * statement, scoped to `workType` alone (`WHERE work_type = $1 AND status =
+   * 'failed'`), resetting `last_error`, `finished_at` and `attempt_count`. Like
+   * `workerStatus`, SQL-backend only — the shim throws (migration 015 does not
+   * publish `thought_work_claims`). The caller has already been gated to a write
+   * key; this method does the mutation and returns the ids for the audit log.
+   */
+  retryFailed(workType: string): Promise<RetryFailedResult>;
+
+  /**
+   * Return `claimed` rows to the pool (SMD-2132) — the write half of
+   * `worker_status`, the `SELECT release_claims_for_worker(...)` path over a
+   * tool. By default only leases past `ttl_expires_at` (a dead worker's) are
+   * released; `includeLive` (which requires a `workerId`) reaches a live lease.
+   * Mirrors migration 015's release SET — `status='pending'`, TTL cleared,
+   * `attempt_count` decremented (an un-run lease is not penalised). SQL-backend
+   * only — the shim throws. The caller gates the write scope; the live-lease
+   * refusal is the caller's (a store method cannot answer as a value).
+   */
+  releaseStaleLeases(opts: ReleaseLeasesOpts): Promise<ReleaseLeasesResult>;
 
   /**
    * Everything thought_stats needs, aggregated by the store. The two backends
