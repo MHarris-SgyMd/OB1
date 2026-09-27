@@ -210,7 +210,7 @@ const entries = sources.filter((f) => {
   const noteAlone = run("consolidate.ts", "--url", DEAD, "--list", "--note", "why");
   ok(noteAlone.code === 2 && /--note goes with --accept or --reject/.test(noteAlone.err), `consolidate.ts refuses --note without a decision (exit ${noteAlone.code})`);
   const listWord = run("consolidate.ts", "--url", DEAD, "--list", "postgres://u:s3cret@h/db");
-  ok(listWord.code === 2 && /--list takes pending, accepted, rejected or all/.test(listWord.err) && !listWord.err.includes("s3cret"), `consolidate.ts refuses a --list value by the words it takes, not repeating it (exit ${listWord.code})`);
+  ok(listWord.code === 2 && /--list takes pending, accepted, rejected, stale or all/.test(listWord.err) && !listWord.err.includes("s3cret"), `consolidate.ts refuses a --list value by the words it takes, not repeating it (exit ${listWord.code})`);
   const hex = run("extract-entities.ts", "--url", DEAD, "--workers", "0x10");
   ok(hex.code === 2 && /--workers must be a decimal integer >= 1$/m.test(hex.err), `extract-entities.ts refuses a hex --workers, which Number() read as 16 (exit ${hex.code})`);
   const dump = run("extract-entities.ts", "--dump");
