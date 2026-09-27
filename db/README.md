@@ -700,15 +700,28 @@ derivation supersedes its input, and a reviewer's accept would have archived
 the evidence while the page still named it. The file redefines the candidate
 filter on 063's body plus two NULL-safe conditions: a candidate the judged
 thought's `derived_from` names is left out, and so is a candidate whose own
-`derived_from` names the judged thought (a derivation whose input was captured
-later, or a `created_at` moved by hand). Direct members only (the array is one
-level; a deeper read belongs to `derivations` once every derived thought has a
-row there). The body carries `ob1:lineage-excludes-the-pair`, which preflight's
-`lineage` check reads: 029 or 063 re-applied by hand over 065 warns naming
-065. One body redefined on its own text with no arity change; nothing runs at
+`derived_from` names the judged thought (an older note re-cited through
+`update_thought`'s provenance envelope, an ingester's backdated part row, a
+derivation whose input was captured later, or a `created_at` moved by hand).
+Direct members only, and expect the transitive shape from SMD-2143's writers:
+a page citing an earlier page or a digest on the same entity (064 admits a
+page as evidence) is judged against that page's evidence at cosine near 1 —
+until SMD-2314 lands, a reviewer reads `trace_provenance(newer)` and rejects
+it. Siblings — two pages from one evidence — are still judged (a page
+superseding a page is 064's designed state; the archive takes a page's
+human-owned sections, so weigh them). Both sides stay in the pool: the rule
+filters pairs, not membership. The body carries `ob1:lineage-excludes-the-pair`, which preflight's
+`lineage` check reads: 063 re-applied by hand over 065 warns naming 065
+(029 re-applied is caught earlier, by the producer-count arm; the remedies
+run 061, 063, 065 in turn). One body redefined on its own text with no arity change; nothing runs at
 apply time but the DDL; a pair proposed before the file stands for its
-reviewer (`consolidate.ts --list pending`). test-schema [60], test-upgrade
-[20q]; `server-portable/test-preflight.ts` drives the re-applied-body arm.
+reviewer (`consolidate.ts --list pending`) and is NOT marked as a lineage
+pair — the listing reads nothing of `derived_from`, the pass never replaces
+it (a text move leaves it `stale` for a reviewer), and the recorder has no
+lineage guard; reject it by hand, and SMD-2313 counts and flags such rows.
+test-schema [60], test-upgrade [20q] (a proposal planted on the pair before
+the file is pending and unmoved after it); `server-portable/test-preflight.ts`
+drives the re-applied-body arm.
 
 ## What changed relative to the guide
 

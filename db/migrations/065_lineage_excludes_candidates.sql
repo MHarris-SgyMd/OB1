@@ -8,8 +8,9 @@
 --   064 (SMD-1812) makes a page a thought whose content is the render of its
 --   sections and whose derived_from names the evidence the sections were
 --   generated from. Once the re-embed worker gives the page thought a vector
---   and the extractor gives it entities, 029's consolidation_candidates(page)
---   returns the page's own evidence as a supersession candidate: measured on
+--   and the extractor gives it entities, consolidation_candidates(page) —
+--   029's function, 063's body — returns the page's own evidence as a
+--   supersession candidate: measured on
 --   PGlite in SMD-1812's third review pass — a one-section page paraphrasing
 --   its evidence, after a re-embed and one shared entity, yielded its own
 --   evidence at cosine 1. The judge (db/consolidate.ts) would then be asked
@@ -29,13 +30,29 @@
 --   supersession is for two claims about one subject that disagree. So the
 --   candidate filter leaves the pair out — the newer side's derived_from
 --   naming the older (the page and its evidence), and the older side's
---   naming the newer (a derivation whose input was captured later, or whose
---   created_at was moved back by hand). DIRECT members only: a page derived
---   from a digest derived from E is paired with E if they share an entity —
---   the array is one level, and walking it here would put 026's iterative
---   walk in a STABLE function every judged thought calls (stated, not
---   hidden; the derivations table, once every derived thought has a row
---   there, is where a deeper read belongs — SMD-1731). This is the fifth
+--   naming the newer (an older note re-cited through update_thought's
+--   provenance envelope to name a newer one, an ingester's backdated part
+--   row naming its parent — SMD-2059 — a derivation whose input was captured
+--   later, or a created_at moved back by hand; each measured, second review
+--   pass). DIRECT members only: a page derived from a digest derived from E
+--   is paired with E if they share an entity — the array is one level, and
+--   walking it here would put 026's iterative walk in a STABLE function
+--   every judged thought calls. Expect that shape from SMD-2143's writers,
+--   not as an edge case: they pick evidence by topic and by entity, a page
+--   thought is re-embedded and extracted like any thought (064), and 064
+--   admits a page as another page's evidence, so a page citing an earlier
+--   page or digest on the same entity is judged against that page's evidence
+--   at cosine near 1. Until SMD-2314 lands (ancestors through a bounded
+--   trace, or a derivations walk once every derived thought has a row there
+--   — SMD-1731), a reviewer reads trace_provenance(newer) and rejects such
+--   a proposal. Siblings — two derivations of one input, two pages from one
+--   evidence — ARE still judged: they may disagree, and a page superseding
+--   a page is 064's designed state; a reviewer weighs a page's human-owned
+--   sections before accepting, since the archive takes them. The rule
+--   filters pairs, not membership: both sides stay in consolidation_pool().
+--   A self-reference or a cycle in derived_from (032 stores both — SMD-2315)
+--   is harmless here: a thought is never its own candidate by the entity
+--   join, and the two conditions read each side once. This is the fifth
 --   restriction beside 029's four (SHARES AN ENTITY, OLDER, NEAREST, NOT
 --   ALREADY DECIDED); it is stated here and in db/README.md because 029 is
 --   frozen by release 1.0.0 — a released migration is append-only, its
@@ -46,9 +63,12 @@
 --   derived_from in the `me` row and two conditions on the pair, NULL-safe
 --   (a thought with no derived_from has NULL there, and `NOT NULL` would
 --   drop every row): the sentinel `ob1:lineage-excludes-the-pair` marks the
---   body for preflight, which warns when 029 or 063 is re-applied by hand
---   over this file (the exclusion gone, the pass would propose the pairs
---   again). Neither condition needs an index: o is reached by primary key
+--   body for preflight, which warns naming this file when 063 is re-applied
+--   by hand over it (the exclusion gone, the pass would propose the pairs
+--   again). 029 re-applied by hand is caught earlier: its 8-argument
+--   record_supersession_proposal lands beside 061's, the producer-count arm
+--   fires first, and the remedies run 061, 063, 065 in turn (measured, first
+--   review pass). Neither condition needs an index: o is reached by primary key
 --   from the shared-entity join (tens of rows), and both containments are
 --   per-row reads of rows already fetched. The containment is byte-exact, as
 --   025's find_derivatives is: every function write since 025 stores the
@@ -63,8 +83,19 @@
 --   REPLACE keeps the ACL). Nothing runs at apply time but the DDL; no row
 --   moves; no table is touched. A pair already proposed before this file is
 --   left as it stands — a proposal is a reviewer's to decide, and
---   `bun db/consolidate.ts --list pending` shows it with both texts. MINOR
---   under FORK.md's version rules.
+--   `bun db/consolidate.ts --list pending` shows it with both texts. It is
+--   NOT marked: the listing reads nothing of derived_from, so a reviewer sees
+--   "page supersedes its evidence" as any other row and must reject it by
+--   hand; the pass never replaces it (a text move on either side marks it
+--   stale through rebuild_derived, and the next pass does not re-find a pair
+--   this file excludes, so the row stays stale for a reviewer — 063's
+--   generic case, systematic for pages); and record_supersession_proposal
+--   itself has no lineage guard — the rule lives in the candidate filter,
+--   which is the worker's one source of pairs. SMD-2313 counts and flags
+--   such rows (preflight, --list); no verdict is written at apply time — a
+--   rejection is a reviewer's, with a name on it. test-upgrade [20q] pins
+--   the standing row: planted before this file, pending and unmoved after
+--   it. MINOR under FORK.md's version rules.
 --
 -- Prerequisites
 --   025 (thoughts.derived_from), 029 (consolidation_candidates,
