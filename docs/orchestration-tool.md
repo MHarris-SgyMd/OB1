@@ -419,9 +419,15 @@ runs outside n8n:
   - provisioning refuses it in any other credential (an inbound key, the
     brain's capture key, a vendor's), and inside a longer value;
   - the runner answers 401 without it and 403 to a wrong one;
-  - an emitter runs as a user of its own, with neither the key nor the
-    database URL in its environment, and it cannot read the runner's
-    (review pass 1 found a same-user emitter reading both from `/proc`).
+  - each pipeline's emitter runs as a uid of its own, with neither the key
+    nor the database URL in its environment. It cannot read the runner's
+    (review pass 1 found a same-user emitter reading both from `/proc`), or
+    reach another pipeline's emitter, and whatever it leaves running is
+    killed (review pass 2).
+
+  Two limits are named rather than closed. Every emitter can read every
+  pipeline's world-readable exports. Emitters have the runner's network,
+  which the live-API emitters need, and SMD-2211 covers their egress.
 
   The three bounds are the runner's own checks:
   - a pipeline not in the file is a 404;

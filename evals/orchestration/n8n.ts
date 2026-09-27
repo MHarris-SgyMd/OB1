@@ -223,8 +223,11 @@ async function inRunData(env: Record<string, string>, names: string[], value: st
  * - a rerun writes nothing;
  * - `stray`, whose third line claims another source, is refused whole with
  *   nothing written, and the door answers the runner's reason;
- * - `snoop`'s emitter cannot read the runner's environment (/proc/1/environ)
- *   or its parent's: it runs as a user of its own (review pass 1);
+ * - `snoop`'s emitter cannot read any process's environment: it runs as its
+ *   pipeline's own uid (review pass 1). The child it leaves behind is gone
+ *   once the run answers (review pass 2);
+ * - the instance's schedule is n8n days for 24 hours (review pass 2: an
+ *   hourly 24 fires once, then never);
  * - neither the run key nor the runner's key is anywhere in n8n's saved runs
  *   of the import workflows (review pass 1: the webhook saved its headers).
  */
@@ -238,14 +241,20 @@ async function importChecks(env: Record<string, string>): Promise<Check> {
   const stray = await importRun(env, IMPORT.stray);
   const [n3] = rows();
   const snoop = await importRun(env, IMPORT.snoop);
+  const leftovers = compose("n8n", ["exec", "-T", "orchestration-runner", "ps", "-o", "args"]).out.split("\n").filter((l) => /sleep 900/.test(l)).length;
+  const key = await apiKey(env);
+  const fixtureId = await workflowId(key, `OB1 import — ${IMPORT.pipeline}`);
+  const fixtureFlow = fixtureId ? await api(BASE, key, "GET", `/workflows/${fixtureId}`) : null;
+  const schedule = fixtureFlow?.nodes?.find((n: any) => n.name === "Schedule")?.parameters?.rule?.interval?.[0];
+  const daily = schedule?.field === "days" && schedule?.daysInterval === 1;
   const leaked = Number(brainSql("n8n", `SELECT count(*) FROM thoughts WHERE metadata->>'source' = 'gmail' AND metadata->>'actor_name' = '${IMPORT.actor}'`));
   const flows = [IMPORT.pipeline, IMPORT.stray, IMPORT.snoop].flatMap((p) => [`OB1 import — ${p}`, `OB1 import — ${p} (on demand)`]);
   const [runKey, runnerKey] = [await inRunData(env, flows, env.N8N_WEBHOOK_KEY), await inRunData(env, flows, env.OB1_RUNNER_KEY)];
   const c1 = first.report?.counts, c2 = second.report?.counts;
   const pass = first.status === 200 && c1?.inserted === IMPORT.rows && n1 === IMPORT.rows && byRunner === IMPORT.rows && embedded === IMPORT.rows
     && second.status === 200 && c2?.inserted === 0 && c2?.updated === 0 && c2?.patched === 0 && c2?.unchanged === IMPORT.rows && n2 === IMPORT.rows
-    && stray.status === 500 && /the runner answered 422: one-source/.test(stray.report?.why ?? "") && n3 === IMPORT.rows && leaked === 0
-    && snoop.status === 200 && snoop.report?.emitted === 0
+    && stray.status === 422 && /the runner answered 422: one-source/.test(stray.report?.why ?? "") && /identity\.system "gmail"/.test(stray.report?.why ?? "") && n3 === IMPORT.rows && leaked === 0
+    && snoop.status === 200 && snoop.report?.emitted === 0 && leftovers === 0 && daily
     && runKey.runs > 0 && runKey.holding === 0 && runnerKey.holding === 0;
   const fmt = (r: { status: number; report: any }) => `${r.status}${r.report?.counts ? ` inserted ${r.report.counts.inserted} unchanged ${r.report.counts.unchanged}` : ""}${r.report?.ok === false ? ` ${r.report.why}` : ""}`;
   return {
@@ -253,7 +262,8 @@ async function importChecks(env: Record<string, string>): Promise<Check> {
     pass,
     detail: `${reset} earlier fixture row(s) deleted; first run → ${fmt(first)}: ${n1} rows, ${byRunner} by ${IMPORT.actor}, ${embedded} with a vector; `
       + `rerun → ${fmt(second)}, ${n2} rows; stray → ${fmt(stray)}, ${n3} rows, ${leaked} of another source; `
-      + `snoop → ${snoop.status}, ${snoop.report?.emitted === 0 ? "the runner's environment unreadable" : `READABLE: ${JSON.stringify(snoop.report).slice(0, 200)}`}; `
+      + `snoop → ${snoop.status}, ${snoop.report?.emitted === 0 ? "no environment readable" : `READABLE: ${JSON.stringify(snoop.report).slice(0, 200)}`}, ${leftovers} of its leftover children still running; `
+      + `the fixture's schedule ${JSON.stringify(schedule)}; `
       + `the run key in ${runKey.holding} of ${runKey.runs} saved import runs, the runner's key in ${runnerKey.holding}`,
   };
 }

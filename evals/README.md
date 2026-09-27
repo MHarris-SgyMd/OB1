@@ -6053,17 +6053,31 @@ and E:
     a vector;
   - a rerun must report `unchanged 5` and nothing inserted, updated or
     patched;
-  - `stray` must fail with "the runner answered 422: one-source", with no
-    row of the other source written;
-  - `snoop` must emit nothing, because the emitter runs as `ob1-emitter`
-    and cannot read either environment. Run as root in the same container,
-    it reports both (measured, names only);
+  - `stray` must answer 422, "the runner answered 422: one-source", naming
+    the stray line, with no row of the other source written;
+  - `snoop` must emit nothing, because the emitter runs as its pipeline's
+    uid and can read no process's environment. Run as root in the same
+    container, it reports the runner's (measured, names only);
+  - the child `snoop` leaves (`sleep 900`) must be gone when the run
+    answers. Run unswept, as a spare uid, it stays (measured) (review
+    pass 2);
+  - the fixture instance's schedule must be n8n `days 1`: an hourly 24
+    fires once, then never (review pass 2);
   - neither the run key nor the runner's key may appear in any saved run of
     the import workflows, the data included. Before the door, the webhook
     saved its request headers, the run key among them (review pass 1).
 - **E** admits a connection to the runner's `:8090`, its addresses read from
   the engine, and nothing else of it. The runner joins the sealed network
   as the server does. The judge holds 39 crafted logs in CI.
+
+**On review pass 2's code (`--wait-schedule`), every check passes again.**
+- **C1** took 35.4 s, with the host's Ollama shared.
+- **C1s** was seen after 481 s, and **P** was gone after 61 s.
+- **I:**
+  - `stray` answered 422 with its line;
+  - `snoop` read nothing, and none of its children survived;
+  - the schedule was `days 1`;
+  - no key was in the saved runs.
 
 **The result (2026-09-26, the dogfood Mac, SQLite, on review pass 1's code,
 `--wait-schedule`): every check passes.**

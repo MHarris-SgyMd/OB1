@@ -45,7 +45,7 @@
  */
 import { SQL } from "bun";
 import { timingSafeEqual, createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SYSTEM_RE } from "../../db/ingest-contract.ts";
@@ -57,9 +57,21 @@ const REPO = resolve(HERE, "..", "..");
 export const PIPELINES_FILE = join(HERE, "pipelines.json");
 /** The actor every row the runner writes carries (ingest-records.ts --actor). */
 export const RUNNER_ACTOR = "orchestration-runner";
-/** The users the image runs an emitter and the pipeline as (runner.Dockerfile). */
-export const EMITTER_USER = "ob1-emitter";
+/** The user the image runs the ingester and reembed as (runner.Dockerfile). */
 export const PIPELINE_USER = "bun";
+
+/**
+ * Each pipeline's emitter runs as a uid of its own (review pass 2: with one
+ * shared uid, an emitter an export had taken over could stay behind and write
+ * lines, in the other's source, into another pipeline's batch through
+ * /proc/<pid>/fd, or ptrace it). su-exec takes a numeric uid:gid with no
+ * passwd entry, so HOME stays the emitter environment's /tmp. Derived from
+ * the name, so it survives edits to the allowlist; the runner refuses two
+ * that collide.
+ */
+export function emitterUid(name: string): number {
+  return 20000 + (parseInt(createHash("sha256").update(name).digest("hex").slice(0, 8), 16) % 40000);
+}
 export const DEFAULT_PORT = 8090;
 export const DEFAULT_TIMEOUT_S = 3600;
 /** After SIGTERM, how long a step has before SIGKILL; after it exits, how long its pipes may stay open (a child it left holding them). */
@@ -104,7 +116,7 @@ export function parsePipelines(text: string, file = "pipelines.json"): Pipeline[
     if (scopeWhy) throw new Error(`${at}: scope ${JSON.stringify(p.scope)}: ${scopeWhy}`);
     if (!Array.isArray(p.emitter) || !p.emitter.length || !p.emitter.every((a: unknown) => typeof a === "string" && a.length)) throw new Error(`${at}: emitter must be a non-empty argv of strings`);
     if (!INTERPRETERS.includes(p.emitter[0])) throw new Error(`${at}: emitter must start with ${INTERPRETERS.join(" or ")}, the interpreters the image has`);
-    if (!Number.isInteger(p.everyHours) || p.everyHours < 1 || p.everyHours > 168) throw new Error(`${at}: everyHours must be a whole number from 1 to 168`);
+    if (!Number.isInteger(p.everyHours) || p.everyHours < 1 || (p.everyHours > 23 && (p.everyHours % 24 !== 0 || p.everyHours > 168))) throw new Error(`${at}: everyHours must be 1 to 23, or whole days in hours (24, 48, … 168): n8n counts an hourly schedule within one day, and ran a 24-hour one once, then never`);
     return { name: p.name, system: p.system, scope: p.scope, emitter: p.emitter, everyHours: p.everyHours };
   });
 }
@@ -112,14 +124,29 @@ export function parsePipelines(text: string, file = "pipelines.json"): Pipeline[
 export const loadPipelines = (file = PIPELINES_FILE) => parsePipelines(readFileSync(file, "utf8"), file);
 
 /**
+ * The import template's schedule for a pipeline, as n8n's Schedule Trigger
+ * reads it: hours up to 23, whole days beyond. n8n 2.40.6 tests an hourly
+ * interval as `(hour - last + 24) % 24 >= interval`, which a 24-hour or longer
+ * interval never meets after its first run (review pass 2, read from the
+ * image); its day interval counts days of the year.
+ */
+export function scheduleOf(everyHours: number): { field: "hours"; hoursInterval: number } | { field: "days"; daysInterval: number } {
+  return everyHours < 24 ? { field: "hours", hoursInterval: everyHours } : { field: "days", daysInterval: everyHours / 24 };
+}
+
+/**
  * The emitter scripts an allowlist names that the image does not hold: a
  * line added to pipelines.json before the image was rebuilt with its emitter.
- * The script is argv[1] when it is a relative path.
+ * The script is the first argument that is not a flag (`python3 -u x.py`,
+ * `bun run x.ts`, a bare `x.py` all count; review pass 2). A module or code
+ * given by flag (`-m`, `-c`, `-e`) names no file, and is not checked.
  */
 export function missingEmitters(pipelines: Pipeline[], root: string): string[] {
   return pipelines.flatMap((p) => {
-    const script = p.emitter[1];
-    return script && !script.startsWith("-") && script.includes("/") && !script.includes("{input}") && !existsSync(resolve(root, script)) ? [`${p.name}: ${script}`] : [];
+    const args = p.emitter.slice(1);
+    if (args.some((a) => ["-m", "-c", "-e", "--eval"].includes(a))) return [];
+    const script = args.find((a, i) => !a.startsWith("-") && !(a === "run" && i === 0 && p.emitter[0] === "bun"));
+    return script && !script.includes("{input}") && !existsSync(resolve(root, script)) ? [`${p.name}: ${script}`] : [];
   });
 }
 
@@ -166,6 +193,8 @@ export const PIPELINE_COMMANDS = (env: Record<string, string | undefined>): Comm
   async unembedded(p) {
     const sql = new SQL({ url: env.DATABASE_URL ?? "", max: 1 });
     try {
+      // Bounded: the count runs inside the run's reembed turn (review pass 2).
+      await sql`SELECT set_config('statement_timeout', '30000', false)`;
       const [row] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE metadata->>'source' = ${p.system} AND embedding IS NULL`;
       return Number(row.n);
     } finally {
@@ -187,9 +216,11 @@ export type Config = {
   maxBytes: number;
   /** The environment the ingester and reembed get: the database and the model knobs. The emitter gets none of it. */
   env: Record<string, string | undefined>;
-  /** Prefixes that run the emitter and the pipeline as their own users (su-exec in the image); empty elsewhere. */
-  asEmitter: string[];
+  /** Prefixes that run a pipeline's emitter and the pipeline as their own users (su-exec in the image); empty elsewhere. */
+  asEmitter: (p: Pipeline) => string[];
   asPipeline: string[];
+  /** After a pipeline's emitter step, the command that stops whatever its uid still runs (a child it left); null where emitters have no uid of their own. */
+  sweep: (p: Pipeline) => string[] | null;
 };
 
 /** Whatever a step printed, cut to its end: enough to say why, not a copy of what it read. */
@@ -243,6 +274,14 @@ async function step(argv: string[], o: { cwd: string; env: Record<string, string
   return { code, bytes, out: new TextDecoder().decode(bytes), err: errTail, timedOut, overflow };
 }
 
+/**
+ * A URL's userinfo, masked, in anything a step printed: reembed and the
+ * ingester name the provider's URL, and an operator's may carry a password
+ * (review pass 2). The report is saved in n8n's run history.
+ */
+export const redact = (text: string) => text.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s@]*@/gi, (_m, scheme: string) => `${scheme}***@`);
+const redactAll = (xs: string[]) => xs.map(redact);
+
 /** The emitter's environment: enough to run, nothing the runner holds. */
 const EMITTER_ENV = (env: Record<string, string | undefined>) => ({ PATH: env.PATH ?? "/usr/local/bin:/usr/bin:/bin", HOME: "/tmp", LANG: "C.UTF-8", PYTHONDONTWRITEBYTECODE: "1" });
 
@@ -278,11 +317,14 @@ export async function runPipeline(c: Config, p: Pipeline): Promise<Report> {
   const deadline = Date.now() + c.timeoutS * 1000;
   const past = `ran past the run's ${c.timeoutS} s and was stopped`;
   const input = join(c.importsDir, p.name);
-  const argv = [...c.asEmitter, ...p.emitter.map((a) => a.replaceAll("{input}", input))];
+  const argv = [...c.asEmitter(p), ...p.emitter.map((a) => a.replaceAll("{input}", input))];
   const e = await step(argv, { cwd: c.cwd, env: EMITTER_ENV(c.env), deadline, maxBytes: c.maxBytes });
+  // Whatever the emitter left running as its uid is stopped, whether it exited well or not (review pass 2).
+  const sweep = c.sweep(p);
+  if (sweep) await step(sweep, { cwd: c.cwd, env: EMITTER_ENV(c.env), deadline: Date.now() + 5000 });
   if (e.timedOut || e.overflow || e.code !== 0) {
     const why = e.timedOut ? `the emitter ${past}` : e.overflow ? `the emitter printed more than ${c.maxBytes} bytes and was stopped` : `the emitter exited ${e.code}`;
-    return { pipeline: p.name, ok: false, stage: "emitter", exit: e.timedOut || e.overflow ? null : e.code, why, emitted: 0, notes: lines(tail(e.err)) };
+    return { pipeline: p.name, ok: false, stage: "emitter", exit: e.timedOut || e.overflow ? null : e.code, why, emitted: 0, notes: redactAll(lines(tail(e.err))) };
   }
   const emitted = lines(e.out).length;
   const stray = strayLines(e.bytes, p);
@@ -290,28 +332,34 @@ export async function runPipeline(c: Config, p: Pipeline): Promise<Report> {
   if (emitted === 0) return { pipeline: p.name, ok: true, emitted, counts: null, report: [`${p.name}: the emitter printed nothing — no export under ${input}?`] };
   const ing = await step([...c.asPipeline, ...c.commands.ingest(p)], { cwd: c.cwd, env: c.env, stdin: e.bytes, deadline });
   // The ingester's own "next: bun db/reembed.ts" is the runner's next step, not the reader's.
-  const base = { pipeline: p.name, emitted, counts: parseTally(ing.out), report: lines(ing.out).filter((l) => !/^\s*next: /.test(l)), notes: lines(tail(ing.err, 8000)) };
+  const base = { pipeline: p.name, emitted, counts: parseTally(ing.out), report: redactAll(lines(ing.out).filter((l) => !/^\s*next: /.test(l))), notes: redactAll(lines(tail(ing.err, 8000))) };
   if (ing.timedOut || ing.code !== 0) return { ...base, ok: false, stage: "ingest", exit: ing.timedOut ? null : ing.code, why: ing.timedOut ? `the ingester ${past}` : `the ingester exited ${ing.code}${ing.code === 2 ? " (it refused the batch or its configuration; nothing written — the notes say which)" : ""}` };
-  const turn = reembedTurn.then(async () => {
-    const re = await step([...c.asPipeline, ...c.commands.reembed()], { cwd: c.cwd, env: c.env, deadline });
+  // One reembed pass at a time. The wait for another pipeline's pass counts
+  // against this run's deadline too (review pass 2: two overlapping runs could
+  // take nearly twice it, and n8n gave up first).
+  const before = reembedTurn;
+  let release!: () => void;
+  reembedTurn = before.then(() => new Promise<void>((r) => { release = r; }));
+  const ours = await Promise.race([before.then(() => true), Bun.sleep(Math.max(0, deadline - Date.now())).then(() => false)]);
+  let re: Step, unembedded: number;
+  try {
+    if (!ours) return { ...base, ok: false, stage: "reembed", exit: null, why: `the rows are written; the run's ${c.timeoutS} s ran out waiting for another pipeline's reembed, and the next run embeds them` };
+    re = await step([...c.asPipeline, ...c.commands.reembed()], { cwd: c.cwd, env: c.env, deadline });
     // reembed exits 1 for any failed row it holds from any earlier pass, and
     // for another pass's leases (review pass 1: every import then failed for
     // good). What this run owes is its own source's rows with a vector.
-    const unembedded = await c.commands.unembedded(p).catch((err) => { throw new Error(`the rows are written, and counting ${p.system}'s rows without a vector failed: ${(err as Error).message}`); });
-    return { re, unembedded };
-  });
-  reembedTurn = turn.catch(() => {});
-  let re: Step, unembedded: number;
-  try {
-    ({ re, unembedded } = await turn);
+    unembedded = await c.commands.unembedded(p);
   } catch (err) {
-    return { ...base, ok: false, stage: "reembed", exit: null, why: (err as Error).message };
+    return { ...base, ok: false, stage: "reembed", exit: null, why: `the rows are written, and counting ${p.system}'s rows without a vector failed: ${(err as Error).message}` };
+  } finally {
+    // Released once the chain reaches this run, whether it ran, gave up, or failed.
+    before.then(() => release());
   }
-  const reembed = { exit: re.code, tail: lines(tail(`${re.out}\n${re.err}`, 1500)), unembedded };
+  const reembed = { exit: re.code, tail: redactAll(lines(tail(`${re.out}\n${re.err}`, 1500))), unembedded };
   if (unembedded > 0) {
     return {
       ...base, ok: false, stage: "reembed", exit: re.timedOut ? null : re.code, reembed,
-      why: `the rows are written, and ${unembedded} of ${p.system}'s rows have no vector (reembed ${re.timedOut ? past : `exited ${re.code}`}). A row the provider refused waits for \`bun db/reembed.ts --retry-failed\`; one still pending is embedded by the next run`,
+      why: `the rows are written, and ${unembedded} of ${p.system}'s rows have no vector (reembed ${re.timedOut ? past : `exited ${re.code}`}). One still pending is embedded by the next run. One the provider refused waits for a retry, run in the runner: compose exec orchestration-runner su-exec bun bun db/reembed.ts --retry-failed. One it refuses every time is an item to fix or remove in the export, then delete its thought`,
     };
   }
   return { ...base, ok: true, reembed };
@@ -379,6 +427,12 @@ export function configFrom(env: Record<string, string | undefined>, uid = proces
   // As root (the image), nothing runs as root: without su-exec the runner refuses to start.
   if (uid === 0 && !SU_EXEC) throw new Error("running as root without su-exec: an emitter would run as root and could read every secret — use the runner's image (deploy/orchestration/runner.Dockerfile)");
   const pipelines = loadPipelines(PIPELINES_FILE);
+  const byUid = new Map<number, string>();
+  for (const p of pipelines) {
+    const other = byUid.get(emitterUid(p.name));
+    if (other) throw new Error(`pipelines ${other} and ${p.name} would share an emitter uid (${emitterUid(p.name)}) — rename one`);
+    byUid.set(emitterUid(p.name), p.name);
+  }
   const missing = missingEmitters(pipelines, REPO);
   if (missing.length) throw new Error(`pipelines.json names an emitter the image does not hold (${missing.join("; ")}) — rebuild the runner: compose --profile orchestration up -d --build orchestration-runner`);
   return {
@@ -390,9 +444,11 @@ export function configFrom(env: Record<string, string | undefined>, uid = proces
     commands: PIPELINE_COMMANDS(env),
     timeoutS,
     maxBytes: 256 * 1024 * 1024,
-    env: uid === 0 ? { ...env, HOME: `/home/${PIPELINE_USER}` } : env,
-    asEmitter: uid === 0 ? [SU_EXEC!, EMITTER_USER] : [],
+    // The ingester and reembed need the database and the model knobs, not the runner's own key (review pass 2).
+    env: { ...env, OB1_RUNNER_KEY: undefined, ...(uid === 0 ? { HOME: `/home/${PIPELINE_USER}` } : {}) },
+    asEmitter: (p) => (uid === 0 ? [SU_EXEC!, `${emitterUid(p.name)}:${emitterUid(p.name)}`] : []),
     asPipeline: uid === 0 ? [SU_EXEC!, PIPELINE_USER] : [],
+    sweep: (p) => (uid === 0 ? [SU_EXEC!, `${emitterUid(p.name)}:${emitterUid(p.name)}`, "kill", "-9", "-1"] : null),
   };
 }
 
@@ -428,11 +484,21 @@ async function selfCheck(): Promise<number> {
   expect("an interpreter the image lacks is refused", throws(() => parsePipelines(one({ emitter: ["sh", "-c", "x"] })), /must start with python3 or bun/));
   expect("an unknown field is refused", throws(() => parsePipelines(one({ env: ["TOKEN"] })), /unknown field env/));
   expect("a schedule past a week is refused", throws(() => parsePipelines(one({ everyHours: 200 })), /everyHours/));
-  expect("an emitter script the image lacks is named; an inline one and a present one are not", JSON.stringify(missingEmitters(parsePipelines(JSON.stringify([
+  expect("a schedule of 24 hours or more that is not whole days is refused", throws(() => parsePipelines(one({ everyHours: 25 })), /whole days/) && parsePipelines(one({ everyHours: 23 })).length === 1 && parsePipelines(one({ everyHours: 168 })).length === 1);
+  expect("hours up to 23 are n8n hours, whole days are n8n days (an hourly 24 fires once, then never)", JSON.stringify([scheduleOf(1), scheduleOf(23), scheduleOf(24), scheduleOf(168)]) === JSON.stringify([{ field: "hours", hoursInterval: 1 }, { field: "hours", hoursInterval: 23 }, { field: "days", daysInterval: 1 }, { field: "days", daysInterval: 7 }]));
+  expect("an emitter uid is its pipeline's own, stable, and outside the image's users", emitterUid("fixture") === emitterUid("fixture") && emitterUid("fixture") !== emitterUid("stray") && emitterUid("x") >= 20000 && emitterUid("x") < 60000);
+  expect("a URL's userinfo is masked in anything a step printed", redact("via https://u:SECRET@host/v1, postgres://p:q@db/x, https://plain/") === "via https://***@host/v1, postgres://***@db/x, https://plain/");
+  const shipped = configFrom({ OB1_RUNNER_KEY: "k".repeat(40), DATABASE_URL: "postgres://x" }, 1000);
+  expect("the ingester and reembed get the database, not the runner's own key", shipped.env.OB1_RUNNER_KEY === undefined && shipped.env.DATABASE_URL === "postgres://x" && shipped.asEmitter(parsePipelines(one({}))[0]).length === 0 && shipped.sweep(parsePipelines(one({}))[0]) === null);
+  expect("an emitter script the image lacks is named, after a flag, after `bun run`, or bare; an inline one, a module and a present one are not", JSON.stringify(missingEmitters(parsePipelines(JSON.stringify([
     { ...good, name: "gone", emitter: ["python3", "recipes/nowhere/emit.py", "{input}"] },
+    { ...good, name: "flagged", emitter: ["python3", "-u", "recipes/nowhere/emit.py"] },
+    { ...good, name: "run", emitter: ["bun", "run", "nowhere.ts"] },
+    { ...good, name: "bare", emitter: ["python3", "emit.py"] },
     { ...good, name: "here", emitter: ["bun", "deploy/orchestration/runner.ts"] },
     { ...good, name: "inline", emitter: ["bun", "-e", "1"] },
-  ])), REPO)) === JSON.stringify(["gone: recipes/nowhere/emit.py"]));
+    { ...good, name: "module", emitter: ["python3", "-m", "json.tool"] },
+  ])), REPO)) === JSON.stringify(["gone: recipes/nowhere/emit.py", "flagged: recipes/nowhere/emit.py", "run: nowhere.ts", "bare: emit.py"]));
   const item = (system: string, scope = "fixture:export") => JSON.stringify({ identity: { system, key: "k" }, scope, text: "t" });
   const p = parsePipelines(one({}))[0];
   expect("the pipeline's own lines are not stray", strayLines(new TextEncoder().encode(`${item("fixture")}\n\n${item("fixture")}\n`), p).length === 0);
@@ -467,7 +533,7 @@ async function selfCheck(): Promise<number> {
     reembed: () => ["bun", "-e", `console.log("reembed ran"); process.exit(${reembedExit})`],
     unembedded: async (x) => leftWithout.get(x.name) ?? 0,
   };
-  const config = (over: Partial<Config>): Config => ({ key, pipelines, importsDir: dir, cwd: REPO, commands, timeoutS: 30, maxBytes: 1 << 20, env: { ...process.env, DATABASE_URL: "postgres://secret@db/x", OB1_RUNNER_KEY: key }, asEmitter: [], asPipeline: [], ...over });
+  const config = (over: Partial<Config>): Config => ({ key, pipelines, importsDir: dir, cwd: REPO, commands, timeoutS: 30, maxBytes: 1 << 20, env: { ...process.env, DATABASE_URL: "postgres://secret@db/x", OB1_RUNNER_KEY: key }, asEmitter: () => [], asPipeline: [], sweep: () => null, ...over });
   const server = serve(config({}), 0);
   const url = (path: string) => `http://127.0.0.1:${server.port}${path}`;
   const post = (path: string, headers: Record<string, string> = { "x-runner-key": key }) => fetch(url(path), { method: "POST", headers });
@@ -539,6 +605,36 @@ async function selfCheck(): Promise<number> {
     small.stop(true);
   }
 
+  // After every emitter step, its uid's leftovers are swept (the image kills
+  // them; here a stand-in records that it ran), whether the emitter
+  // succeeded or failed. And a run waiting on another pipeline's reembed
+  // gives up at its own deadline (review pass 2).
+  const marker = `${dir}.swept`;
+  const swept = () => (existsSync(marker) ? readFileSync(marker, "utf8").split("\n").filter(Boolean) : []);
+  const two = parsePipelines(JSON.stringify([
+    { ...good, name: "first", emitter: emit(`console.log(${JSON.stringify(item("fixture"))})`) },
+    { ...good, name: "second", emitter: emit(`await Bun.sleep(200); console.log(${JSON.stringify(item("fixture"))})`) },
+    { ...good, name: "broken", emitter: emit(`process.exit(4)`) },
+  ]));
+  const waits = serve(config({
+    pipelines: two, timeoutS: 3, env: process.env,
+    // A reembed that outlasts the other run's deadline: it ignores SIGTERM, so it holds the turn until SIGKILL.
+    commands: { ...commands, reembed: () => ["bun", "-e", "process.on('SIGTERM', () => {}); await Bun.sleep(20000)"] },
+    sweep: (x) => ["bun", "-e", `require("fs").appendFileSync(${JSON.stringify(marker)}, ${JSON.stringify(`${x.name}\n`)})`],
+  }), 0);
+  const on = (path: string) => fetch(`http://127.0.0.1:${waits.port}${path}`, { method: "POST", headers: { "x-runner-key": key } });
+  try {
+    await on("/run/broken");
+    const t0 = Date.now();
+    const timedOn = async (path: string) => { const res = await on(path); return { res, rep: await res.json() as Report, s: (Date.now() - t0) / 1000 }; };
+    const [{ res: a, rep: ar }, { res: b, rep: br, s }] = await Promise.all([timedOn("/run/first"), timedOn("/run/second")]);
+    expect(`the sweep runs after every emitter step, a failed one included (${swept().join(",")})`, ["broken", "first", "second"].every((n) => swept().includes(n)));
+    expect(`a run waiting on another pipeline's reembed gives up at its own deadline, and says so (${b.status}: ${br.why}; ${s.toFixed(1)} s)`, /ran out waiting for another pipeline's reembed/.test(br.why ?? "") && s < 3 + 2 && a.status === 200 && ar.ok);
+  } finally {
+    waits.stop(true);
+    rmSync(marker, { force: true });
+  }
+
   for (const x of fails) console.error(`FAIL ${x}`);
   console.log(fails.length ? `runner self-check: ${fails.length} failed` : "runner self-check: OK");
   return fails.length ? 1 : 0;
@@ -556,7 +652,14 @@ if (import.meta.main) {
   }
   if (!existsSync(c.importsDir)) console.error(`runner: ${c.importsDir} does not exist; every emitter will find no export`);
   const s = serve(c);
-  console.log(`runner: listening on :${s.port}, ${c.pipelines.length} pipeline(s)${c.pipelines.length ? `: ${c.pipelines.map((p) => p.name).join(", ")}` : " (none converted yet — deploy/orchestration/pipelines.json)"}${c.asEmitter.length ? `; emitters run as ${EMITTER_USER}, the pipeline as ${PIPELINE_USER}` : ""}`);
+  console.log(`runner: listening on :${s.port}, ${c.pipelines.length} pipeline(s)${c.pipelines.length ? `: ${c.pipelines.map((p) => `${p.name} (uid ${emitterUid(p.name)})`).join(", ")}` : " (none converted yet — deploy/orchestration/pipelines.json)"}`);
+  if (process.getuid?.() === 0) {
+    // An emitter's files in /tmp are its own.
+    process.umask(0o077);
+    console.log(`runner: each emitter runs as its pipeline's uid, the pipeline as ${PIPELINE_USER}`);
+  } else {
+    console.error("runner: not root, so every emitter runs as this user and can read the runner's environment — the runner's image runs it as root to separate them");
+  }
   const stop = () => { s.stop(true); process.exit(0); };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);

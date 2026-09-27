@@ -773,43 +773,57 @@ An import recipe converted to an emitter of ingestion-contract items
 (SMD-2147–2150, SMD-2021) runs as one instance of the import template, one
 per line of `orchestration/pipelines.json`. That file is empty until the
 first recipe is converted.
-- **Triggers.** Each instance runs on a schedule of the pipeline's own
-  (`everyHours`), and on demand as a POST to `/webhook/ob1-import-<pipeline>`
-  with the run key.
-- **The on-demand door** is a workflow of its own that saves no runs. It
-  drops the request, headers and all, and calls the import. So the run key
-  never lands in n8n's store, and the caller gets the report back, or the
-  runner's reason with a 500.
+- **The schedule.** Each instance runs on a schedule of the pipeline's own,
+  `everyHours`: 1 to 23 hours, or whole days (24, 48, … 168), since n8n
+  counts an hourly schedule within one day. An hourly 24 ran once and never
+  again (measured in n8n 2.40.6's own code).
+- **On demand**, an instance runs through a POST to
+  `/webhook/ob1-import-<pipeline>` with the run key. The door is a workflow
+  of its own that saves no runs. It drops the request, headers and all, and
+  calls the import, so the run key never lands in n8n's store. It answers
+  the report with 200, or the runner's reason with the runner's status (409
+  when a run of that pipeline is already going, 422 refused, 500 failed),
+  or 502 when the runner did not answer.
 - **The runner.** n8n's image has neither Bun nor python3, so the import asks
   the runner, `orchestration-runner`, over the compose network, with
   `OB1_RUNNER_KEY`. The runner publishes no port, and it:
   1. runs the pipeline's emitter over `deploy/imports/<pipeline>/`, mounted
-     read-only (`IMPORTS_DIR` moves it). The emitter runs as a user of its
-     own, `ob1-emitter`, with no database URL or key in its environment, and
-     it cannot read the runner's or the ingester's. A parser an export
-     exploits holds nothing. Emitters share that user, so one can read
-     another pipeline's exports;
+     read-only (`IMPORTS_DIR` moves it). Each pipeline's emitter runs as a
+     uid of its own, with no database URL or key in its environment.
+     - It cannot read the runner's, the ingester's or another emitter's
+       environment, or reach another emitter's process.
+     - Whatever it leaves running is killed when it finishes.
+     - A parser an export exploits holds no secret and cannot touch another
+       pipeline's batch.
+     - Two limits: every emitter can read every pipeline's exports that are
+       world-readable, and emitters have the runner's network, which the
+       live-API emitters need (SMD-2211 covers their egress);
   2. refuses the whole batch if any line is not the pipeline's one source
      and scope;
   3. runs `db/ingest-records.ts --source items --items -` under the actor
-     `orchestration-runner`, then `db/reembed.ts`, both as `bun`. reembed
-     embeds every row the brain holds without a vector at its model, not
-     only this run's (normally just this run's).
+     `orchestration-runner`, then `db/reembed.ts`, both as `bun`, without
+     the runner's key. reembed embeds every row the brain holds without a
+     vector at its model, not only this run's (normally just this run's).
 - **Success** means every row of the pipeline's source has a vector.
   reembed's own exit code (1 for any failed row in its job, or another
-  pass's leases) does not decide it. A row the provider refused fails every
-  run until `bun db/reembed.ts --retry-failed` embeds it.
+  pass's leases) does not decide it. A row the provider refused waits for a
+  retry, run in the runner: `compose exec orchestration-runner su-exec bun
+  bun db/reembed.ts --retry-failed`. A row it refuses every time is an item
+  to fix or remove in the export, and then its thought to delete.
 - **The deadline.** One run, emitter to reembed, is bounded by
-  `OB1_RUNNER_TIMEOUT_S` (3600). n8n waits that long and a minute more:
-  provisioning reads the same value, so run it again after changing the
-  knob.
+  `OB1_RUNNER_TIMEOUT_S` (3600), the wait for another pipeline's reembed
+  included. n8n waits that long and a minute more. The runner reads the
+  knob at start, and provisioning reads it from `deploy/.env`. After
+  changing it, recreate the runner (`compose up -d orchestration-runner`),
+  then provision.
 
 The run's answer is the ingester's count line and the items it named
-(skipped, stale, held). Drop an export into the pipeline's directory and the
-next run ingests it, and a rerun writes nothing. The export never passes
-through n8n. The request names the pipeline and nothing else, so n8n's run
-history holds the report, not the export. The report does name items by
-identity, and a refusal can quote the value it refused.
+(skipped, stale, held). A URL's password in anything a step printed is
+masked. Drop an export into the pipeline's directory and the next run
+ingests it, and a rerun writes nothing. The export never passes through
+n8n. The request names the pipeline and nothing else, so n8n's run history
+holds the report, not the export. The report does name items by identity,
+and a refusal can quote the value it refused.
 
 The runner's key is a write capability bounded by the allowlist (the ADR's
 decision 4, amended), and not a brain key. To change it, edit
