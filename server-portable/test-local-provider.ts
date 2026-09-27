@@ -648,6 +648,33 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   assert(windowingFor(cfgSame).escalateModel === undefined, "an escalation model equal to the metadata model is ignored — the penalised retry stands");
   providerX.stop(true);
 
+  // SMD-2000, the MULTI-WINDOW path: a runaway in ONE window of a long thought
+  // escalates, and the merged answer AND that window's part carry `escalated`
+  // (the single-window case above and test-live [10e] never take the of>1 path).
+  // Only the first window (the "alpha-marker" it alone holds — at its head, so
+  // the overlap never carries it on) runs away on the small model's first,
+  // unpenalised call; the larger model and the other window converge.
+  const providerMW = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { model?: string; frequency_penalty?: number; messages: { content: string }[] };
+      const user = body.messages[0].content;
+      if (/alpha-marker/.test(user) && body.model === "small-mw" && body.frequency_penalty === undefined) {
+        return Response.json({ choices: [{ message: { content: '{"entities":[{"name":"Loop","type":"tool","confidence":1},{"name":"Loop","type":"tool",' }, finish_reason: "length" }] });
+      }
+      const name = body.model === "big-mw" ? "Bigfoot" : "Anita";
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name, type: "person", confidence: 0.9 }], relationships: [] }) }, finish_reason: "stop" }] });
+    },
+  });
+  const cfgMW = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${providerMW.port}/v1`, OB1_METADATA_MODEL: "small-mw", OB1_EXTRACT_ESCALATE_MODEL: "big-mw", OB1_EXTRACT_CHUNK_TOKENS: "300" });
+  const twoWindow = `alpha-marker heads the first window. ${"Anita noted the ledger. ".repeat(120)}\n\nbeta opens the second. ${"Dev used the index. ".repeat(120)}`;
+  const mw = await extractEntities(twoWindow, cfgMW, undefined, { kind: "extraction" });
+  assert(mw.parts !== undefined && mw.parts.length >= 2, `the thought went in multiple windows (${mw.parts?.length} parts)`);
+  assert(mw.escalated === "big-mw" && mw.retried === true, `the merged multi-window answer names the escalation model — the of>1 path propagates it (escalated=${mw.escalated})`);
+  assert(mw.parts!.some((p) => p.escalated === "big-mw") && mw.parts!.some((p) => p.escalated === undefined), "only the runaway window's part carries the escalation model; a window that converged first time does not");
+  assert(mw.entities.some((e) => e.name === "Bigfoot"), "the escalation model's answer merged into the thought's entities");
+  providerMW.stop(true);
+
   // SMD-1960: the answer is streamed and a runaway is aborted at the third copy
   // of one item, before its budget, then retried under the penalty as a cut
   // one is. The stub streams a loop one item per frame and records, per

@@ -2179,6 +2179,53 @@ console.log("\n[7] The supersession judge's model is reported, and probed under 
   stub.stop();
 }
 
+console.log("\n[7b] The extraction escalation model is probed under its own --deep row when it is a third distinct model the worker would dial (SMD-2000)");
+{
+  const chatModels: string[] = [];
+  let refuse = "";
+  const stub = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      if (req.method === "GET") return Response.json({ object: "list", data: [] });
+      const body = (await req.json()) as { model: string };
+      if (new URL(req.url).pathname.endsWith("/embeddings")) return Response.json({ data: [{ embedding: new Array(EMBEDDING_DIM).fill(0) }] });
+      chatModels.push(body.model);
+      if (body.model === refuse) return new Response(`model "${body.model}" not found`, { status: 404 });
+      return Response.json({ choices: [{ message: { content: '{"ok":true}' } }] });
+    },
+  });
+  const ENV = { ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_METADATA_MODEL: "meta-7b" };
+
+  // Set to a third distinct model, reasoning off: its own row and its own probe,
+  // and the extraction window row names it as the unpenalised retry target.
+  const own = await run({ ...ENV, OB1_EXTRACT_ESCALATE_MODEL: "big-esc" }, "--deep");
+  assert(/✓\s+extraction escalation model\s+big-esc honours JSON mode at/.test(own.out), "OB1_EXTRACT_ESCALATE_MODEL set: the escalation model is probed under its own row");
+  assert(chatModels.length === 2 && chatModels.includes("meta-7b") && chatModels.includes("big-esc"), `…two probes, one per model, judge sharing the metadata model (${chatModels.join(", ")})`);
+  assert(/made once more on big-esc \(OB1_EXTRACT_ESCALATE_MODEL\), unpenalised/.test(own.out), "…and the extraction window row names it as the unpenalised retry target (describeExtractWindow)");
+
+  // Equal to the metadata model: windowingFor drops it — no row, no probe.
+  chatModels.length = 0;
+  const same = await run({ ...ENV, OB1_EXTRACT_ESCALATE_MODEL: "meta-7b" }, "--deep");
+  assert(!/extraction escalation model/.test(same.out) && chatModels.length === 1 && chatModels[0] === "meta-7b",
+         `escalate == metadata: no escalation row and no extra probe (${chatModels.join(", ")})`);
+
+  // Reasoning on: no budget, so no runaway to escalate — windowingFor returns
+  // none, and the probe does not fire for a model the worker would never dial.
+  chatModels.length = 0;
+  const reasoning = await run({ ...ENV, OB1_EXTRACT_ESCALATE_MODEL: "big-esc", OB1_METADATA_REASONING: "on" }, "--deep");
+  assert(!/extraction escalation model/.test(reasoning.out) && !chatModels.includes("big-esc"),
+         `reasoning on: the escalation probe does not fire (${chatModels.join(", ")})`);
+
+  // Named in both the judge's and the escalation's knobs: one model, one probe —
+  // the escalation row dedups against the judge's (escalateModel !== judgeModel).
+  chatModels.length = 0;
+  const dedup = await run({ ...ENV, OB1_JUDGE_MODEL: "big-esc", OB1_EXTRACT_ESCALATE_MODEL: "big-esc" }, "--deep");
+  assert(/✓\s+judge model\s+big-esc honours JSON mode at/.test(dedup.out) && !/extraction escalation model\s+big-esc honours/.test(dedup.out),
+         "escalate == judge: big-esc is probed under the judge row, not a second escalation row");
+  assert(chatModels.filter((m) => m === "big-esc").length === 1, `…and big-esc is probed once, not twice (${chatModels.join(", ")})`);
+  stub.stop();
+}
+
 console.log("\n[8] The egress gate is reported: the mode, and per endpoint what leaves — declared local, the upgrade case, or refused (SMD-1903)");
 {
   const LOCAL = LOCAL_STUB;
