@@ -791,12 +791,13 @@ jobs:
       # series after it they added 35 s to the run's critical path. So they
       # build here, in the background, one after another while the stack comes
       # up (most of which is waiting on health checks, not CPU), and "The three
-      # dashboards build" below waits for them and reports each. Each
-      # dashboard writes its own log and exit code under $RUNNER_TEMP, and has
-      # its own time limit: a hang ends as 124 (137 when TERM is ignored) and
-      # the next dashboard still builds. The subshell's output goes to files
-      # and its stdin is /dev/null, so this step ends at once; it ignores HUP,
-      # as nohup would. The SvelteKit one builds first: the smoke needs it.
+      # dashboards build" below waits for them and reports each. The two Next
+      # dashboards read their env at build time — the gateway URL and a session
+      # secret, any values. Each dashboard writes its own log and exit code
+      # under $RUNNER_TEMP, and has its own time limit, which the wait step
+      # reads from there: a hang ends as 124 (137 when TERM is ignored) and the
+      # next dashboard still builds. The subshell's output goes to files, so
+      # this step does not wait on it and ends at once; its stdin is /dev/null.
       - name: The three dashboards start building, in the background
         id: dashboards
         env:
@@ -805,14 +806,15 @@ jobs:
         run: |
           out="$RUNNER_TEMP/dashboards"
           mkdir -p "$out"
+          limit_s=240
+          echo "$limit_s" > "$out/limit"
           (
-            trap '' HUP
             for d in open-brain-dashboard open-brain-dashboard-next open-brain-dashboard-pro; do
               check=""
               if [ "$d" = open-brain-dashboard ]; then check=" && bun run check"; fi
               start=$SECONDS
               rc=0
-              (cd "dashboards/$d" && exec timeout --kill-after=10s 4m sh -c "bun install --frozen-lockfile && bun run build$check") > "$out/$d.log" 2>&1 || rc=$?
+              (cd "dashboards/$d" && exec timeout --kill-after=10s "${limit_s}s" sh -c "bun install --frozen-lockfile && bun run build$check") > "$out/$d.log" 2>&1 || rc=$?
               echo "$rc $((SECONDS - start))" > "$out/$d.rc"
             done
             touch "$out/done"
@@ -1261,8 +1263,7 @@ jobs:
 
       # SMD-1801. The three dashboards build from their pinned installs, with no
       # Supabase package among them (check 22 holds the imports; this holds the
-      # builds). The two Next dashboards read their env at build time — the
-      # gateway URL and a session secret, any values — and are built, not run:
+      # builds). The two Next dashboards are built, not run:
       # they speak to the open-brain-rest gateway, which this stack does not
       # serve (extensions/test-auth.ts starts it). The SvelteKit one speaks MCP
       # to the server this stack serves, so it is driven too, below.
@@ -1271,18 +1272,23 @@ jobs:
       # passed and open under an error when it failed, and a line of exit codes
       # and times. It runs when a stack step failed too, so a broken build is
       # never hidden behind one. The wait ends when the background shell
-      # writes its done mark, or dies without it, or at 15 min; each
-      # dashboard's own 4 min limit should end it well before then.
+      # writes its done mark or dies without it, or at a cap a minute past
+      # the three limits' sum. A dead shell nothing has reaped yet is a zombie,
+      # which `kill -0` counts as alive, so its state is read instead (a
+      # never-reaped zombie held the wait to the cap; review pass 1).
       - name: The three dashboards build
         if: ${{ !cancelled() && steps.dashboards.outcome == 'success' }}
         run: |
           out="$RUNNER_TEMP/dashboards"
           pid=$(cat "$out/pid")
+          limit_s=$(cat "$out/limit")
+          cap=$((3 * (limit_s + 10) + 60))
+          running() { local state; state=$(cut -d' ' -f3 "/proc/$1/stat" 2> /dev/null) && [ -n "$state" ] && [ "$state" != Z ]; }
           start=$SECONDS
-          while [ ! -e "$out/done" ] && kill -0 "$pid" 2> /dev/null && [ $((SECONDS - start)) -lt 900 ]; do sleep 1; done
+          while [ ! -e "$out/done" ] && running "$pid" && [ $((SECONDS - start)) -lt "$cap" ]; do sleep 1; done
           echo "waited $((SECONDS - start)) s for the background build"
           if [ ! -e "$out/done" ]; then
-            echo "::error title=The three dashboards build::the background build did not finish (its shell died, or it ran past 15 min) — its logs follow"
+            echo "::error title=The three dashboards build::the background build did not finish (its shell died, or it ran past $cap s) — its logs follow"
             for log in "$out"/*.log; do echo "--- $log"; cat "$log"; done
             exit 1
           fi
@@ -1290,16 +1296,17 @@ jobs:
           summaries=""
           for d in open-brain-dashboard open-brain-dashboard-next open-brain-dashboard-pro; do
             read -r rc secs < "$out/$d.rc"
+            why=$rc
             case $rc in
-              124) rc="124, over the 4 min limit" ;;
-              137) rc="137, killed: over the 4 min limit with TERM ignored, or out of memory" ;;
+              124) why="124, over the $limit_s s limit" ;;
+              137) why="137, killed: over the $limit_s s limit with TERM ignored, or out of memory" ;;
             esac
             if [ "$rc" = 0 ]; then
               echo "::group::$d — built"
               cat "$out/$d.log"
               echo "::endgroup::"
             else
-              echo "::error title=The three dashboards build::$d failed (exit $rc) — its log follows"
+              echo "::error title=The three dashboards build::$d failed (exit $why) — its log follows"
               cat "$out/$d.log"
               failed=1
             fi
