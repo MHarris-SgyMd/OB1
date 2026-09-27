@@ -29,7 +29,7 @@
  */
 
 import { SQL } from "bun";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5942,74 +5942,6 @@ console.log("\n[28] Migration 060 on a real server: the windowed capture and an 
   await sql.close();
 }
 
-console.log("\n[29] Migration 061 on a real server: the windowed capture's lineage (PGlite cannot drive the chunk INSERT) — the 4-argument form records the chunk set from the envelope's recipe, or the label alone marked undeclared; an edit with windows replaces the row under 'edit' at the new text, an edit without windows drops it, a re-capture under another label drops it with the windows (022); lineage.ts's recipe builder is the one spelling the server sends (SMD-1731)");
-{
-  // Its own pool, as [28] has: the sections before close the shared one.
-  const sql = new SQL({ url: URL_, max: 2 });
-  await sql`DELETE FROM thoughts`;
-  await sql`DELETE FROM derivations`;
-  await sql`SELECT set_agent_kind('op-key', 'operator')`;
-  const ACTOR = { name: "op-key", via: "live-door" };
-  const MODEL = EMBEDDING_MODEL;
-  type Lin = { kind: string; by: string; fps: string[]; recipe: Record<string, unknown>; at: string };
-  const rowsOf = async (id: string) => (await sql`SELECT artifact_kind AS kind, produced_by AS by, input_fingerprints AS fps, recipe, produced_at::text AS at FROM derivations WHERE artifact_id = ${id}::uuid ORDER BY artifact_kind`) as Lin[];
-  const chunkRow = async (id: string) => (await rowsOf(id)).find((r) => r.kind === "chunks");
-  const windowsOf = async (id: string) => Number((await sql`SELECT count(*)::int AS c FROM thought_chunks WHERE thought_id = ${id}::uuid`)[0].c);
-  const params = (r: Record<string, unknown> | undefined) => (r?.params ?? {}) as Record<string, unknown>;
-  const windows = [{ content: "window one", embedding: unit(1), context: "ctx one" }, { content: "window two", embedding: unit(2), context: null }];
-
-  // The recipe as the server's embedder would build it — lineage.ts's one
-  // spelling — from the configuration the windows were made under.
-  const cfg = { chunkTokens: 300, chunkOverlap: 37, chunkThreshold: 300, chunkTokensFrom: "flag", chunkContext: true, metadataModel: "stub-meta" } as unknown as Parameters<typeof chunkRecipe>[0];
-  const recipe = chunkRecipe(cfg, { model: MODEL, chunks: windows.map((w) => ({ content: w.content, embedding: [] as number[], ...(w.context ? { context: w.context } : {}) })) });
-  assert(recipe !== undefined && recipe.deterministic === false && recipe.blurbs === 1 && recipe.blurb_model === "stub-meta" && /^sha256:[0-9a-f]{64}$/.test(String(recipe.prompt_hash)) && params(recipe).tokens === 300 && params(recipe).overlap === 37 && params(recipe).estimator === CHUNK_ESTIMATOR && recipe.model === MODEL,
-    `lineage.ts builds the window set's recipe: non-deterministic while a blurb rides a window, the blurb model and its prompt's hash, the split's parameters and estimator, the model (${JSON.stringify(recipe)})`);
-  const bare = chunkRecipe({ ...cfg, chunkContext: false }, { model: MODEL, chunks: [{ content: "w", embedding: [] as number[] }] });
-  assert(bare !== undefined && bare.deterministic === true && !("blurb_model" in bare) && !("prompt_hash" in bare), "…deterministic, with no blurb model and no prompt hash, when the blurbs are off");
-  assert(chunkRecipe(cfg, { model: MODEL, chunks: [] }) === undefined, "…and nothing for a capture that made no windows — no artifact, no recipe");
-  // The tags' recipe over the board sync's shape: tagsOverExisting clears an
-  // earlier marker with `metadata_extraction_failed: null` on a successful
-  // answer — a recipe still; a failure (a string reason) or an egress refusal —
-  // none (cold read, second review pass: the presence test recorded nothing
-  // for every ticket edit).
-  const metaCfg = { metadataModel: "stub-meta", metadataTemperature: 0 };
-  assert(metadataRecipe(metaCfg, tagsOverExisting({ people: [], topics: ["a"], type: "observation" }))?.model === "stub-meta"
-      && metadataRecipe(metaCfg, tagsOverExisting({ topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" })) === undefined
-      && metadataRecipe(metaCfg, metadataRefused()) === undefined
-      && metadataRecipe(metaCfg, { source: "mcp" }) === undefined,
-    "the tags' recipe reads the marker's value: a cleared marker (null) beside the extractor's tags is a recipe, a failure reason or a refusal is none, and tags with none of the extractor's keys are none");
-
-  // The 4-argument form with the envelope: the set's row carries the recipe
-  // as sent plus the count, at the capture's fingerprint; the vector's row beside it.
-  const w = (await sql`SELECT upsert_thought('061 live: a windowed capture', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL, lineage: { chunks: recipe } }}::jsonb, ${unit(0)}::vector, ${windows}::jsonb) AS r`)[0].r as { id: string; fingerprint: string; chunks: number };
-  let c = await chunkRow(w.id);
-  assert(w.chunks === 2 && c !== undefined && c.by === "capture" && c.recipe.count === 2 && c.recipe.blurbs === 1 && params(c.recipe).tokens === 300 && c.fps.join() === w.fingerprint && (await rowsOf(w.id)).map((r) => r.kind).join() === "chunks,vector",
-    `the windowed capture records its chunk set from the envelope — the recipe as sent plus the count — and the vector's row beside it (${JSON.stringify(c?.recipe)})`);
-  // Without the envelope: the label alone, marked undeclared.
-  const w2 = (await sql`SELECT upsert_thought('061 live: windows without a recipe', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(3)}::vector, ${windows}::jsonb) AS r`)[0].r as { id: string };
-  c = await chunkRow(w2.id);
-  assert(c !== undefined && c.recipe.deterministic === true && c.recipe.declared === false && c.recipe.model === MODEL && c.recipe.count === 2 && !("params" in c.recipe), `a 4-argument caller that declares no recipe gets the label alone, marked undeclared (${JSON.stringify(c?.recipe)})`);
-  // An edit with windows and the envelope replaces the row under 'edit', at the new text.
-  const e = (await sql`SELECT update_thought(${w.id}::uuid, '061 live: the windowed capture, edited', NULL, ${unit(4)}::vector, ${[{ content: "window three", embedding: unit(5), context: null }]}::jsonb, NULL, ${ACTOR}::jsonb, ${MODEL}, NULL, NULL, ${{ chunks: bare }}::jsonb) AS r`)[0].r as { ok: boolean };
-  c = await chunkRow(w.id);
-  const fpE = (await sql`SELECT content_fingerprint_of('061 live: the windowed capture, edited') AS f`)[0].f as string;
-  assert(e.ok === true && c !== undefined && c.by === "edit" && c.recipe.count === 1 && c.recipe.deterministic === true && c.fps.join() === fpE && (await rowsOf(w.id)).length === 2 && (await windowsOf(w.id)) === 1,
-    `an edit with windows replaces the set and its row under 'edit', at the new text (${JSON.stringify(c)})`);
-  // An edit with content and no windows drops the set and its row; the vector's stands.
-  const e2 = (await sql`SELECT update_thought(${w.id}::uuid, '061 live: edited to one window-less text', NULL, ${unit(6)}::vector, NULL, NULL, ${ACTOR}::jsonb, ${MODEL}, NULL, NULL, NULL) AS r`)[0].r as { ok: boolean };
-  assert(e2.ok === true && (await chunkRow(w.id)) === undefined && (await windowsOf(w.id)) === 0 && (await rowsOf(w.id)).map((r) => r.kind).join() === "vector", "an edit with content and no windows drops the set and its row; the vector's stands");
-  // 022's rule: a re-capture under the same label keeps the windows and their
-  // row; under another label both go, and the vector's row follows the label.
-  const same = (await sql`SELECT upsert_thought('061 live: windows without a recipe', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(3)}::vector) AS r`)[0].r as { existed: boolean };
-  assert(same.existed === true && (await chunkRow(w2.id)) !== undefined && (await windowsOf(w2.id)) === 2, "a re-capture under the same label keeps the windows and their row");
-  const other = (await sql`SELECT upsert_thought('061 live: windows without a recipe', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: "other-model" }}::jsonb, ${unit(7)}::vector) AS r`)[0].r as { existed: boolean };
-  assert(other.existed === true && (await chunkRow(w2.id)) === undefined && (await windowsOf(w2.id)) === 0 && (await rowsOf(w2.id)).find((r) => r.kind === "vector")?.recipe.model === "other-model",
-    "a re-capture under another label drops the windows and their row (022), and the vector's row follows the new label");
-  await sql`DELETE FROM thoughts`;
-  await sql`DELETE FROM derivations`;
-  await sql.close();
-}
-
 // db/README.md's Testing block quotes this suite's assertion total. The count
 // is lower when a group is skipped (PostgreSQL 18, or JIT off), so only a full
 // run — as CI's pg16-with-JIT job is — is compared to the headline (SMD-1805).
@@ -6075,6 +6007,383 @@ console.log("\n[27] search_thoughts_current against a hand oracle on real Postgr
   }
   assert(mismatch === 0, `search_thoughts_current is 059's rule written out — ties to the current row, then the hybrid's order — on ${calls - mismatch} of ${calls} calls over tied vectors, tied literal hits and unembedded rows${first ? ` (first miss: ${first})` : ""}`);
   await sql`DELETE FROM thoughts WHERE metadata->>'kind' = 'tie2255'`;
+  await sql.close();
+}
+
+console.log("\n[29] recipes/thought-enrichment on the SQL shim: the type and sensitivity backfills write the planted rows' columns and nothing else, the enrichment writes a stub model's answer as metadata objects and checkpoints, a refused write ends a run on its first row, a role granted the README's privileges writes, and no URL, a Supabase URL or a refused connection is one line naming no value (SMD-2139)");
+{
+  // The three enrichment scripts SMD-2126 sent to compat/supabase-sql — the
+  // class's first writers — driven as deployed: `bun <file>` in a directory
+  // of their own, SUPABASE_URL the one variable beyond PATH and HOME, against
+  // this database carrying enhanced-thoughts ([18] and [26] left the columns;
+  // the file is idempotent). The planted table is the truth every printed
+  // count is held to, and a snapshot of every row's content, fingerprint and
+  // model label is what the writes are held away from. The enrichment's model
+  // is a Bun.serve stub on the loopback that answers one classification for
+  // every request and counts them — OPENROUTER_BASE_URL is the port's own
+  // seam — so the apply path runs without a key and without a byte leaving
+  // the machine. The scripts read `.env.local` from THEIR OWN directory (the
+  // recipe's, not the cwd — `--no-env-file` stops Bun's loader, not theirs),
+  // so on a machine where a developer keeps one there the no-URL refusals,
+  // which that file would defeat, are skipped by name; every other run puts its
+  // URL in the environment, which the scripts prefer. CI has no such file. The
+  // enrichment's checkpoint goes under ENRICH_STATE_DIR in the scratch, never
+  // the recipe's own data/ (an operator's checkpoint there is left as found —
+  // held by its mtime; review pass 1, cold read).
+  const sql = new SQL({ url: URL_, max: 2 });
+  const catalog27 = async () => ({
+    tables: new Set(((await sql`SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
+    views: new Set(((await sql`SELECT viewname AS n FROM pg_views WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
+    fns: new Set(((await sql`SELECT p.oid::regprocedure::text AS n FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace`) as { n: string }[]).map((r) => r.n)),
+  });
+  const before27 = await catalog27();
+  const RECIPE = join(CONTRIB_DIR, "recipes", "thought-enrichment");
+  const scratch = join(tmpdir(), `ob1-live-2139-${process.pid}`);
+  mkdirSync(scratch, { recursive: true });
+  const env = (extra: Record<string, string>) => ({ PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...extra });
+  const script = (file: string, extra: Record<string, string>, ...flags: string[]) => runScript(["bun", join(RECIPE, file), ...flags], { cwd: scratch, env: env(extra) });
+  const firstLine = (s: string) => s.trim().split("\n")[0] ?? "";
+  const errorLine = (s: string) => s.split("\n").find((l) => l.startsWith("ERROR:")) ?? firstLine(s);
+  /** Exactly one ERROR line on stderr and no stack frame: the shape every refusal is held to (a second ERROR line, or a retry ladder's lines, fail it). */
+  const errorLines = (s: string) => (s.match(/^ERROR:/gm) ?? []).length;
+  const oneLine = (r: { code: number; out: string }, re: RegExp) => r.code === 1 && re.test(r.out) && !/\n\s+at /.test(r.out) && errorLines(r.out) === 1;
+  const recipeEnvFile = existsSync(join(RECIPE, ".env.local")) ? "recipes/thought-enrichment/.env.local" : null;
+  // The model: a fixed answer, the requests counted, the last body kept for the prompt's shape.
+  let stubCalls = 0;
+  let stubBody = "";
+  const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
+    stubCalls++;
+    stubBody = await req.text();
+    const content = JSON.stringify({ type: "task", summary: "stub summary", topics: ["stub"], tags: ["t"], people: ["Ada"], action_items: ["do it"], confidence: 0.9, importance: 4, detected_source_type: "generic_import" });
+    return Response.json({ choices: [{ message: { content } }] });
+  } });
+  const stateEnv = { ENRICH_STATE_DIR: join(scratch, "state") };
+  const statePath = join(scratch, "state", "enrichment-state.json");
+  const model = { OPENROUTER_API_KEY: "stub", OPENROUTER_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, ...stateEnv };
+  const recipeState = join(RECIPE, "data", "enrichment-state.json");
+  const recipeStateBefore = existsSync(recipeState) ? statSync(recipeState).mtimeMs : null;
+  /** The blank row's id: the lowest uuid, so the enrichment meets it first on every run (review pass 1, cold read — a random id made the dry run's call count a coin toss). */
+  const BLANK_ID = "00000000-0000-0000-0000-000000000001";
+  const ENRICH_FLAGS = ["--provider", "openrouter", "--model", "stub-model", "--max-calls", "10000"];
+  try {
+    await sql`DELETE FROM thoughts`;
+    await sql.unsafe(readFileSync(join(SCHEMAS_DIR, "enhanced-thoughts/schema.sql"), "utf8"));
+    // Thirteen rows, every type 'reference': four with a valid different type in
+    // their metadata, one with a type no allowlist has, one with none, one
+    // already 'reference'; one restricted by pattern (a made-up SSN), one
+    // matching a restricted and a personal pattern (the restricted match must
+    // win alone), two personal (a dosage, a blood-pressure reading), one already
+    // personal — not scanned — and one of whitespace alone, the enrichment's no-model path, at
+    // the lowest id so it is the first row every enrichment run meets. The four
+    // candidates of the type backfill sit at known ids — the decision second
+    // from the bottom, the other three at the top — with the seven non-candidates
+    // at random ids between, so a run stopped by `--limit 1` on pages of one
+    // has read exactly two rows, and a run that scans on to the next candidate
+    // has read ten (review pass 2, mutant: a bound alone let it through).
+    // Tiers NULL, '' and 'standard' among them, the three the sensitivity filter
+    // names. Fingerprint and model label set so the writes can be held away
+    // from them (a raw insert leaves both NULL otherwise).
+    await sql.unsafe(`INSERT INTO thoughts (id, content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model)
+      SELECT COALESCE(i::uuid, gen_random_uuid()), c, m::jsonb, 'reference', t, content_fingerprint_of(c), 'planted-model' FROM (VALUES
+        ('00000000-0000-0000-0000-000000000002', 'a decision was made about the venue', '{"type":"decision","source":"notes"}', 'standard'),
+        ('ffffffff-ffff-ffff-ffff-fffffffffff1', 'a lesson learned about batching', '{"type":"lesson"}', NULL),
+        ('ffffffff-ffff-ffff-ffff-fffffffffff2', 'the standup, three of us', '{"type":"meeting"}', ''),
+        ('ffffffff-ffff-ffff-ffff-fffffffffff3', 'tonight I wrote about the week', '{"type":"journal"}', 'standard'),
+        (NULL, 'bogus type row', '{"type":"bogus"}', ''),
+        (NULL, 'no type key here', '{}', 'standard'),
+        (NULL, 'already reference', '{"type":"reference"}', 'standard'),
+        (NULL, 'SSN 123-45-6789 appears in this text', '{}', 'standard'),
+        (NULL, 'SSN 987-65-4321 on the form, took 50 mg after', '{}', 'standard'),
+        (NULL, 'took metoprolol 50 mg today', '{}', NULL),
+        (NULL, 'blood pressure 120 over 80 this morning', '{}', ''),
+        (NULL, 'already personal, glucose 110 this morning', '{}', 'personal')
+      ) v(i, c, m, t)`);
+    await sql`INSERT INTO thoughts (id, content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model) VALUES (${BLANK_ID}::uuid, '   ', '{}', 'reference', 'standard', content_fingerprint_of('   '), 'planted-model')`;
+    const N = 13;
+    type Snap = { id: string; content: string; fp: string | null; em: string | null; metadata: Record<string, unknown> };
+    const snapshot = async () => (await sql`SELECT id::text AS id, content, content_fingerprint AS fp, embedding_model AS em, metadata FROM thoughts ORDER BY id`) as Snap[];
+    const planted = await snapshot();
+    const typesNow = async () => (await sql`SELECT id::text AS id, type, metadata->>'type' AS mt FROM thoughts ORDER BY id`) as { id: string; type: string; mt: string | null }[];
+    const tiers = async () => Object.fromEntries(((await sql`SELECT coalesce(sensitivity_tier, '<null>') AS t, count(*)::int AS n FROM thoughts GROUP BY 1`) as { t: string; n: number }[]).map((r) => [r.t, r.n]));
+    const [truth] = (await sql`SELECT count(*)::int AS total, count(*) FILTER (WHERE type = 'reference')::int AS refs,
+      count(*) FILTER (WHERE metadata->>'type' IN ('decision','lesson','meeting','journal'))::int AS valid,
+      count(*) FILTER (WHERE sensitivity_tier IS NULL OR sensitivity_tier IN ('', 'standard'))::int AS scannable,
+      count(*) FILTER (WHERE content_fingerprint IS NULL OR embedding_model IS NULL)::int AS bare FROM thoughts`) as { total: number; refs: number; valid: number; scannable: number; bare: number }[];
+    assert(truth.total === N && truth.refs === N && truth.valid === 4 && truth.scannable === 12 && truth.bare === 0 && planted.length === N,
+      `the planted table: ${N} rows of type 'reference', four with a valid different metadata type, twelve the sensitivity scan reads, every row with a fingerprint and a model label (${JSON.stringify(truth)})`);
+
+    // backfill-type: a dry run reads every page (three rows a page, five pages — one progress line each — the cursor
+    // past each) and writes nothing; a dry run with the limit on one page of thirteen examines the rows up to the
+    // candidate that trips it, ten, and counts those (the row that tripped it counted eleven — review pass 4, mutant).
+    const dry = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--batch-size", "3");
+    const afterDry = await typesNow();
+    const pages = (dry.out.match(/Progress: /g) ?? []).length;
+    const dryLimit = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--limit", "1", "--batch-size", "13");
+    assert(dry.code === 0 && dry.out.includes(`Total rows with type='reference': ${N}`) && dry.out.includes(`Rows processed:              ${N}`) && dry.out.includes("Rows updated:                4 (dry run, not written)") && dry.out.includes("Skipped (already reference): 1") && dry.out.includes("Skipped (null/empty type):   7") && dry.out.includes("Skipped (invalid type):      1") && /\n  bogus: 1\n/.test(dry.out) && pages === 5 && afterDry.every((r) => r.type === "reference") && dryLimit.code === 0 && dryLimit.out.includes("Rows processed:              10\n") && dryLimit.out.includes("=== BACKFILL STOPPED AT --limit 1 ==="),
+      `backfill-type.mjs --dry-run --batch-size 3 on the shim: the exact count, thirteen rows over five pages, four to update and the three skip counts, the bogus type named, every row still 'reference'; --limit 1 on one page of thirteen examines ten rows (exit ${dry.code}: ${pages} pages; ${dryLimit.code}: ${/Rows processed:\s+\d+/.exec(dryLimit.out)?.[0]})`);
+
+    // A refused write ends the run on its first row: a LOGIN role with SELECT on thoughts alone reads the page and is
+    // refused the update — 42501, exit 1, no row changed — where the REST form counted a 403 and went on (the type
+    // script threw; the sensitivity script counted). [18]'s two guards: skipped where the connection cannot create a
+    // role or carries no credentials to swap.
+    const PROBE_ROLE = "ob1_live_enrich_probe";
+    const probeUrl = URL_.replace(/\/\/[^@]*@/, `//${PROBE_ROLE}:ob1probe@`);
+    const [{ mayCreate: mayCreateProbe }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
+    /** The probe role, gone: before each guarded block and in its finally (used twice — the denied cases here, the grant ladder at the end). */
+    const dropProbe = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PROBE_ROLE}') THEN EXECUTE 'DROP OWNED BY ${PROBE_ROLE}'; EXECUTE 'DROP ROLE ${PROBE_ROLE}'; END IF; END $$`);
+    if (probeUrl === URL_ || !mayCreateProbe) {
+      skip("…a role with SELECT alone: both backfills refused on their first write", probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+    } else {
+      await dropProbe();
+      try {
+        await sql.unsafe(`CREATE ROLE ${PROBE_ROLE} LOGIN PASSWORD 'ob1probe'; GRANT USAGE ON SCHEMA public TO ${PROBE_ROLE}; GRANT SELECT ON thoughts TO ${PROBE_ROLE}`);
+        const deniedType = await script("backfill-type.mjs", { SUPABASE_URL: probeUrl }, "--limit", "1");
+        const deniedTier = await script("backfill-sensitivity.mjs", { SUPABASE_URL: probeUrl }, "--apply");
+        const afterDenied = await typesNow();
+        assert(oneLine(deniedType, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thoughts$/m) && !/Done\./.test(deniedType.out) && oneLine(deniedTier, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thoughts$/m) && !/=== Results ===/.test(deniedTier.out) && afterDenied.every((r) => r.type === "reference") && (await tiers())["personal"] === 1,
+          `…a role with SELECT alone: both backfills read their page and end on the first write with 42501, exit 1, no summary, no row changed (${deniedType.code}: ${errorLine(deniedType.out)}; ${deniedTier.code}: ${errorLine(deniedTier.out)})`);
+        // The enrichment too: past the blank row (--skip 1, the .range() path), one row is classified — one paid call
+        // — and its write is refused, which ends the run: exit 1, one ERROR line, no summary, no row enriched, and a
+        // checkpoint that records nothing (written before the refusal ends the run, so the rows a chunk handled before
+        // it are not lost). Under Promise.allSettled it was a FAIL line per row while every later row still paid its
+        // call and the run exited 0 (review pass 1, both readers). Its own state directory, so the dry run below still
+        // meets none.
+        const mark = stubCalls;
+        const deniedEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: probeUrl, ...model, ENRICH_STATE_DIR: join(scratch, "state-denied") }, "--apply", "--skip", "1", "--limit", "2", "--concurrency", "1", ...ENRICH_FLAGS);
+        const [{ enrichedDenied }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedDenied" FROM thoughts`) as { enrichedDenied: number }[];
+        const deniedStatePath = join(scratch, "state-denied", "enrichment-state.json");
+        const deniedState = existsSync(deniedStatePath) ? JSON.parse(readFileSync(deniedStatePath, "utf8")) as { totalProcessed: number; failedIds: string[]; lastProcessedId: string | null } : null;
+        assert(oneLine(deniedEnrich, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thoughts$/m) && !/=== ENRICHMENT|FAIL #/.test(deniedEnrich.out) && stubCalls - mark === 1 && enrichedDenied === 0 && deniedState?.totalProcessed === 0 && deniedState.failedIds.length === 0 && deniedState.lastProcessedId === null,
+          `…and the enrichment ends on its first refused write after one model call: exit 1, one ERROR line, no FAIL lines, no summary, no row enriched, a checkpoint recording nothing (${deniedEnrich.code}: ${errorLine(deniedEnrich.out)}; ${stubCalls - mark} call(s), ${enrichedDenied} enriched, state ${JSON.stringify(deniedState)})`);
+      } finally {
+        await dropProbe();
+      }
+    }
+
+    // --limit 1 writes one row — the ticket's Verify — and stops: with a page of one, the rows processed are the
+    // blank row and the decision at the second id, exactly two, never a page more (it had scanned on to the next
+    // candidate, every page between read for nothing — review pass 2, run-it; here that would be ten rows).
+    const one = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--limit", "1", "--batch-size", "1");
+    const afterOne = await typesNow();
+    const changed = afterOne.filter((r) => r.type !== "reference");
+    const processedOne = Number(/Rows processed:\s+(\d+)/.exec(one.out)?.[1] ?? -1);
+    assert(one.code === 0 && one.out.includes("=== BACKFILL STOPPED AT --limit 1 ===") && one.out.includes("Rows updated:                1\n") && changed.length === 1 && changed[0].type === "decision" && changed[0].mt === "decision" && processedOne === 2,
+      `backfill-type.mjs --limit 1 --batch-size 1: the decision at the second id is written, the run says it stopped at the limit and processed exactly two rows — no page past the write (exit ${one.code}: ${changed.map((r) => r.type).join(",") || "none"} changed, ${processedOne} processed)`);
+    const rest = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--batch-size", "3");
+    const afterRest = await typesNow();
+    assert(rest.code === 0 && rest.out.includes(`Total rows with type='reference': ${N - 1}`) && rest.out.includes("Rows updated:                3\n") && rest.out.includes("=== BACKFILL COMPLETE ===") && afterRest.filter((r) => r.type !== "reference").length === 4 && afterRest.every((r) => r.type === (["decision", "lesson", "meeting", "journal"].includes(r.mt ?? "") ? r.mt : "reference")),
+      `…and the full run writes the other three, the bogus type and the typeless rows left 'reference' (exit ${rest.code}: ${afterRest.filter((r) => r.type !== "reference").map((r) => r.type).sort().join(",")})`);
+
+    // backfill-sensitivity: no flag is the usage and no query; the dry run scans the twelve rows at NULL, '' or
+    // 'standard' — the pre-set personal row is not among them — and names the two restricted (the row matching a
+    // dosage too by its SSN alone: the restricted match returns first) and the two personal.
+    const usage = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ });
+    const scan = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ }, "--dry-run");
+    const tiersAfterScan = await tiers();
+    assert(usage.code === 0 && /^Usage:\n  bun backfill-sensitivity\.mjs --dry-run/.test(usage.out) && scan.code === 0 && scan.out.includes("Scanned:              12") && scan.out.includes("Upgraded to personal: 2") && scan.out.includes("Upgraded to restricted: 2") && (scan.out.match(/RESTRICTED #[0-9a-f-]{36}: ssn_pattern — /g) ?? []).length === 2 && !/RESTRICTED #[0-9a-f-]{36}: ssn_pattern, /.test(scan.out) && /PERSONAL #[0-9a-f-]{36}: medication_dosage, drug_name/.test(scan.out) && /PERSONAL #[0-9a-f-]{36}: health_measurement/.test(scan.out) && tiersAfterScan["personal"] === 1 && !("restricted" in tiersAfterScan),
+      `backfill-sensitivity.mjs: no flag prints the usage; --dry-run scans the twelve rows the filter names, finds two restricted (each by the SSN alone) and two personal by pattern, and writes nothing (${usage.code}/${scan.code}: ${JSON.stringify(tiersAfterScan)})`);
+    const applyTier = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ }, "--apply");
+    const tiersAfterApply = await tiers();
+    const [{ ssn }] = (await sql`SELECT sensitivity_tier AS ssn FROM thoughts WHERE content LIKE 'SSN 123%'`) as { ssn: string }[];
+    assert(applyTier.code === 0 && applyTier.out.includes("Mode:                 APPLIED") && tiersAfterApply["restricted"] === 2 && tiersAfterApply["personal"] === 3 && tiersAfterApply["standard"] === 5 && tiersAfterApply["<null>"] === 1 && tiersAfterApply[""] === 2 && ssn === "restricted",
+      `…--apply writes the four rows' tiers and leaves the other eight as they were — NULL and '' included (exit ${applyTier.code}: ${JSON.stringify(tiersAfterApply)})`);
+
+    // enrich-thoughts: the two exact counts of --status are head queries; the dry run calls the model and writes
+    // neither a row nor the checkpoint.
+    const status0 = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...stateEnv }, "--status");
+    const markDry = stubCalls;
+    const dryEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--dry-run", "--limit", "2", ...ENRICH_FLAGS);
+    const [{ enrichedAfterDry }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedAfterDry" FROM thoughts`) as { enrichedAfterDry: number }[];
+    assert(status0.code === 0 && status0.out.includes(`Total thoughts:     ${N}`) && status0.out.includes("Enriched:           0 (0.0%)") && status0.out.includes(`Remaining:          ${N}`) && dryEnrich.code === 0 && (dryEnrich.out.match(/^  \[DRY\] #[0-9a-f-]{36}: \{"type":"task"/gm) ?? []).length === 1 && stubCalls - markDry === 1 && enrichedAfterDry === 0 && !existsSync(statePath),
+      `enrich-thoughts.mjs --status counts ${N} thoughts, none enriched; --dry-run --limit 2 meets the blank row and one more — one [DRY] line, one call — and writes no row and no checkpoint (${status0.code}/${dryEnrich.code}: ${stubCalls - markDry} call(s), ${enrichedAfterDry} enriched)`);
+
+    // --apply --limit 5: five rows in id order — the model's answer as the enhanced columns and a metadata OBJECT
+    // that keeps the row's own keys, the whitespace row marked enriched without a call — and the checkpoint written
+    // under the run's directory, not the recipe's.
+    const markApply = stubCalls;
+    const applyEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--apply", "--limit", "5", "--concurrency", "2", ...ENRICH_FLAGS);
+    type Enriched = { id: string; content: string; type: string; importance: number; source_type: string | null; mt: string; metadata: Record<string, unknown> };
+    const enrichedRows = (await sql`SELECT id::text AS id, content, type, importance, source_type, jsonb_typeof(metadata) AS mt, metadata FROM thoughts WHERE enriched ORDER BY id`) as Enriched[];
+    const blank = enrichedRows[0];
+    const classified = enrichedRows.slice(1);
+    const keepsOwnKeys = (r: Enriched) => Object.entries(planted.find((p) => p.id === r.id)?.metadata ?? {}).every(([k, v]) => k === "type" || JSON.stringify(r.metadata[k]) === JSON.stringify(v));
+    const state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) as { totalProcessed: number; lastProcessedId: string | null; failedIds: string[] } : null;
+    const recipeStateAfter = existsSync(recipeState) ? statSync(recipeState).mtimeMs : null;
+    assert(applyEnrich.code === 0 && applyEnrich.out.includes("Enriched:       5") && applyEnrich.out.includes("LLM calls made: 4 / 10000") && stubCalls - markApply === 4 && enrichedRows.length === 5 && blank?.id === BLANK_ID && blank.type === "reference" && JSON.stringify(blank.metadata) === "{}" && enrichedRows.every((r) => r.mt === "object") && classified.every((r) => r.type === "task" && r.importance === 4 && r.source_type === "generic_import" && r.metadata.summary === "stub summary" && JSON.stringify(r.metadata.topics) === '["stub"]' && r.metadata.enriched_provider === "openrouter" && r.metadata.enriched_model === "stub-model" && r.metadata.type === "task" && keepsOwnKeys(r)) && /<thought_content>\\n[^]*<\/thought_content>/.test(stubBody) && state?.totalProcessed === 5 && state.lastProcessedId === enrichedRows[4].id && state.failedIds.length === 0 && recipeStateAfter === recipeStateBefore,
+      `…--apply --limit 5 --concurrency 2: the blank row and four more enriched in id order — four calls, the blank row marked with its type and metadata untouched — each classified row carrying the stub's type, importance, source and a metadata object with its own keys kept, the prompt delimited, the checkpoint at the last id under ENRICH_STATE_DIR and the recipe's own left as found (exit ${applyEnrich.code}: ${enrichedRows.length} rows, ${stubCalls - markApply} calls, state ${JSON.stringify(state)})`);
+
+    // --max-calls 1 at concurrency 2 over two rows is one call and the ABORTED banner: the chunk is cut to the calls left
+    // (a chunk of the full concurrency made three calls on a budget of one — review pass 1, run-it; unheld until pass 4).
+    const markBudget = stubCalls;
+    const budget = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model, ENRICH_STATE_DIR: join(scratch, "state-budget") }, "--dry-run", "--skip", "1", "--limit", "2", "--max-calls", "1", "--concurrency", "2", "--provider", "openrouter", "--model", "stub-model");
+    const budgetCalls = stubCalls - markBudget;
+    // --status reads the new split; --retry-failed reads its ids back through one .in() query, enriches them and drops
+    // them from the checkpoint's failedIds.
+    const status1 = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...stateEnv }, "--status");
+    const [{ retryId }] = (await sql`SELECT id::text AS "retryId" FROM thoughts WHERE NOT enriched AND btrim(content) <> '' ORDER BY id LIMIT 1`) as { retryId: string }[];
+    writeFileSync(statePath, JSON.stringify({ ...state, failedIds: [retryId], totalFailed: 1 }));
+    const retry = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--apply", "--retry-failed", ...ENRICH_FLAGS);
+    const [{ retried }] = (await sql`SELECT (enriched AND type = 'task' AND metadata->>'summary' = 'stub summary') AS retried FROM thoughts WHERE id = ${retryId}::uuid`) as { retried: boolean }[];
+    const stateAfterRetry = JSON.parse(readFileSync(statePath, "utf8")) as { totalProcessed: number; failedIds: string[] };
+    assert(budget.code === 0 && budgetCalls === 1 && /=== ENRICHMENT ABORTED \(--max-calls reached\) ===/.test(budget.out) && status1.code === 0 && status1.out.includes("Enriched:           5 (38.5%)") && status1.out.includes(`Remaining:          ${N - 5}`) && retry.code === 0 && retry.out.includes(`  OK retry #${retryId} -> task`) && retry.out.includes("Processed: 1, Fixed: 1, Still failing: 0") && retried === true && stateAfterRetry.failedIds.length === 0 && stateAfterRetry.totalProcessed === 6,
+      `…--max-calls 1 at concurrency 2 makes one call and aborts; --status reads 5 of ${N}; --apply --retry-failed fetches the checkpoint's failed id by .in(), enriches it and drops it from failedIds (${budget.code}: ${budgetCalls} call(s); ${status1.code}/${retry.code}: ${errorLine(retry.out)}; state ${JSON.stringify(stateAfterRetry)})`);
+
+    // A model at a closed port is a per-row failure, not a refusal: one FAIL line, exit 1 with the summary, the id in the
+    // checkpoint's failedIds for --retry-failed, no ERROR line, no row written. Bun's fetch gives that error a code
+    // (ConnectionRefused), and pass 1's rule — "a rejection with a code ends the run" — ended the run on it (review
+    // pass 2, both readers). A fresh state directory, so no resume point applies.
+    const dead = { ...model, OPENROUTER_BASE_URL: "http://127.0.0.1:1/v1", ENRICH_STATE_DIR: join(scratch, "state-dead") };
+    const [{ enrichedBeforeDead }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedBeforeDead" FROM thoughts`) as { enrichedBeforeDead: number }[];
+    const deadRun = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...dead }, "--apply", "--limit", "1", "--concurrency", "1", ...ENRICH_FLAGS);
+    const [{ enrichedAfterDead }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedAfterDead" FROM thoughts`) as { enrichedAfterDead: number }[];
+    const deadStatePath = join(scratch, "state-dead", "enrichment-state.json");
+    const deadState = existsSync(deadStatePath) ? JSON.parse(readFileSync(deadStatePath, "utf8")) as { failedIds: string[]; totalFailed: number } : null;
+    const failedLine = /^  FAIL #([0-9a-f-]{36}): /m.exec(deadRun.out);
+    assert(deadRun.code === 1 && failedLine !== null && !/^ERROR:/m.test(deadRun.out) && deadRun.out.includes("Failed:         1") && enrichedAfterDead === enrichedBeforeDead && deadState?.totalFailed === 1 && deadState.failedIds.length === 1 && deadState.failedIds[0] === failedLine?.[1],
+      `…a model at a closed port: the row fails with a FAIL line, the run ends with its summary and exit 1, no ERROR line, no row written, the id in the checkpoint's failedIds (${deadRun.code}: ${firstLine(deadRun.out.split("\n").filter((l) => /FAIL|ERROR/.test(l)).join(" | ") || deadRun.out).slice(0, 160)}; state ${JSON.stringify(deadState)})`);
+
+    // What no script may touch: every row's content, fingerprint and model label are the planted ones, the vector
+    // still absent, every metadata an object.
+    const after = await snapshot();
+    const [{ vectors }] = (await sql`SELECT count(*) FILTER (WHERE embedding IS NOT NULL)::int AS vectors FROM thoughts`) as { vectors: number }[];
+    const untouched = after.length === N && after.every((r, i) => r.id === planted[i].id && r.content === planted[i].content && r.fp === planted[i].fp && r.em === planted[i].em && typeof r.metadata === "object" && r.metadata !== null);
+    assert(untouched && vectors === 0,
+      `after every write: all ${N} rows keep their content, fingerprint and model label, no vector appeared, every metadata is an object (${after.filter((r, i) => r.content !== planted[i].content || r.fp !== planted[i].fp || r.em !== planted[i].em).length} rows differ, ${vectors} vectors)`);
+
+    // Refused before any query, one line each, no stack.
+    if (recipeEnvFile) {
+      skip("…no URL: each of the three ends in one line naming the variable", `${recipeEnvFile} exists on this machine and the scripts read it`);
+    } else {
+      const noUrl = await Promise.all([script("backfill-type.mjs", {}, "--dry-run"), script("backfill-sensitivity.mjs", {}, "--dry-run"), script("enrich-thoughts.mjs", {}, "--status")]);
+      const named = /^ERROR: SUPABASE_URL must be set — the brain's postgres:\/\/ connection string on this fork, in the environment or in \.env\.local beside the scripts\.$/m;
+      assert(noUrl.every((r) => oneLine(r, named) && r.out.trim().split("\n").length === 1),
+        `…no URL: each of the three ends in one line naming the variable, exit 1 (${noUrl.map((r) => `${r.code}: ${firstLine(r.out).slice(0, 60)}`).join("; ")})`);
+    }
+    // A value that is not postgres:// is refused by the recipe's own line, which names the scheme and never the value:
+    // the shim's refusal quotes the first forty characters, which since this port carry the password (review pass 1,
+    // run-it). The mistyped scheme below carries a token that must appear nowhere in the output.
+    const httpsType = await script("backfill-type.mjs", { SUPABASE_URL: "https://example.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "unused" }, "--dry-run");
+    const mistyped = await script("backfill-sensitivity.mjs", { SUPABASE_URL: "mysql://brain:pw-not-real@127.0.0.1:5432/x" }, "--dry-run");
+    const httpsEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: "https://example.supabase.co", ...stateEnv }, "--status");
+    const refused = await script("backfill-type.mjs", { SUPABASE_URL: "postgres://nobody:nothing@127.0.0.1:1/nowhere" }, "--dry-run");
+    const zero = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...stateEnv }, "--dry-run", "--limit", "0");
+    const typo = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ }, "--dryrun");
+    const both = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--apply");
+    // The = form and a trailing value flag passed the refusal and were then ignored — `--limit=2` ran the whole table
+    // (review pass 2, both readers).
+    const eqForm = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--dry-run", "--limit=1", ...ENRICH_FLAGS);
+    const trailing = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--limit");
+    const fraction = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--limit", "1.5");
+    const scheme = /^ERROR: SUPABASE_URL must be a postgres:\/\/ connection string; the value's scheme is "(https|mysql):"/m;
+    assert(oneLine(httpsType, scheme) && !/Starting type backfill|example\.supabase/.test(httpsType.out) && oneLine(mistyped, scheme) && !/pw-not-real|127\.0\.0\.1/.test(mistyped.out) && oneLine(httpsEnrich, scheme) && !/Enrichment Status/.test(httpsEnrich.out) && oneLine(refused, /^ERROR: read thoughts after id 0{8}-0{4}-0{4}-0{4}-0{12} → ERR_POSTGRES_CONNECTION_REFUSED /m) && !/\[retry\]/.test(refused.out) && oneLine(fraction, /^ERROR: --limit must be an integer of at least 1; got "1\.5"$/m) && oneLine(zero, /^ERROR: --limit must be an integer of at least 1; got "0"$/m) && oneLine(typo, /^ERROR: unknown flag "--dryrun" \(flags: --dry-run, --apply\)$/m) && (await tiers())["restricted"] === 2 && oneLine(both, /^ERROR: --dry-run and --apply are exclusive/m) && oneLine(eqForm, /^ERROR: --limit takes its value as the next argument, not after "="$/m) && !/\[DRY\]/.test(eqForm.out) && oneLine(trailing, /^ERROR: --limit needs a value$/m) && !/Starting type backfill/.test(trailing.out),
+      `…a Supabase URL and a mistyped scheme are refused before any query by a line naming the scheme and not the value (the password token appears nowhere); a refused connection is one line naming the driver's code with no retry ladder before it; --limit 0 and --limit 1.5, an unknown flag (--dryrun, which wrote a row) and --dry-run beside --apply (which wrote under a DRY RUN banner), --limit=1 and a trailing --limit (both ran unbounded) are one line each (${httpsType.code}: ${errorLine(httpsType.out).slice(0, 80)}; ${mistyped.code}; ${httpsEnrich.code}; ${refused.code}: ${errorLine(refused.out).slice(0, 90)}; ${zero.code}; ${fraction.code}; ${typo.code}: ${errorLine(typo.out)}; ${both.code}; ${eqForm.code}; ${trailing.code})`);
+
+    // The README's grants, proved: SELECT and UPDATE on thoughts write `type` (the audit trigger records no event for it);
+    // a metadata change fires 008/055's audit trigger, which needs SELECT and INSERT on thought_audit — the message
+    // names that table, the README's entry for it, and the grant cures it (review pass 1, cold read: the README had
+    // promised SELECT, UPDATE on thoughts alone; probed, then held here). A fourteenth row, planted after the snapshot
+    // above. The same two guards as the denied block.
+    if (probeUrl === URL_ || !mayCreateProbe) {
+      skip("…a role with the README's grants writes type alone, is refused metadata until thought_audit is granted", probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+    } else {
+      await dropProbe();
+      try {
+        await sql.unsafe(`CREATE ROLE ${PROBE_ROLE} LOGIN PASSWORD 'ob1probe'; GRANT USAGE ON SCHEMA public TO ${PROBE_ROLE}; GRANT SELECT, UPDATE ON thoughts TO ${PROBE_ROLE}`);
+        await sql`INSERT INTO thoughts (content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model) VALUES ('granted row: a decision', '{"type":"decision"}', 'reference', 'standard', content_fingerprint_of('granted row: a decision'), 'planted-model')`;
+        const enrichedCount = async () => ((await sql`SELECT count(*) FILTER (WHERE enriched)::int AS n FROM thoughts`) as { n: number }[])[0].n;
+        const grantedType = await script("backfill-type.mjs", { SUPABASE_URL: probeUrl }, "--limit", "1");
+        const [{ granted }] = (await sql`SELECT type AS granted FROM thoughts WHERE content LIKE 'granted row%'`) as { granted: string }[];
+        const state2 = { ...model, ENRICH_STATE_DIR: join(scratch, "state2") };
+        const markAudit = stubCalls;
+        const before = await enrichedCount();
+        const auditDenied = await script("enrich-thoughts.mjs", { SUPABASE_URL: probeUrl, ...state2 }, "--apply", "--limit", "1", "--concurrency", "1", ...ENRICH_FLAGS);
+        const mid = await enrichedCount();
+        await sql.unsafe(`GRANT SELECT, INSERT ON thought_audit TO ${PROBE_ROLE}`);
+        const auditOk = await script("enrich-thoughts.mjs", { SUPABASE_URL: probeUrl, ...state2 }, "--apply", "--limit", "1", "--concurrency", "1", ...ENRICH_FLAGS);
+        const after = await enrichedCount();
+        assert(grantedType.code === 0 && granted === "decision" && oneLine(auditDenied, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thought_audit$/m) && mid === before && stubCalls - markAudit === 2 && auditOk.code === 0 && auditOk.out.includes("Enriched:       1") && after === before + 1,
+          `…a role with SELECT, UPDATE on thoughts writes a type; its first metadata write is refused with 42501 on thought_audit (the audit trigger's table), exit 1; with SELECT, INSERT on thought_audit the same run enriches the row (${grantedType.code}: ${granted}; ${auditDenied.code}: ${errorLine(auditDenied.out).slice(0, 110)}; ${auditOk.code}: ${before} → ${mid} → ${after})`);
+      } finally {
+        await dropProbe();
+      }
+    }
+  } finally {
+    stub.stop(true);
+    rmSync(scratch, { recursive: true, force: true });
+    await sql`DELETE FROM thoughts`;
+    const after27 = await catalog27();
+    for (const v of after27.views) if (!before27.views.has(v)) await sql.unsafe(`DROP VIEW IF EXISTS ${v} CASCADE`);
+    for (const tb of after27.tables) if (!before27.tables.has(tb)) await sql.unsafe(`DROP TABLE IF EXISTS ${tb} CASCADE`);
+    for (const f of after27.fns) if (!before27.fns.has(f)) await sql.unsafe(`DROP FUNCTION IF EXISTS ${f} CASCADE`);
+    await sql.close();
+  }
+}
+
+console.log("\n[30] Migration 061 on a real server: the windowed capture's lineage (PGlite cannot drive the chunk INSERT) — the 4-argument form records the chunk set from the envelope's recipe, or the label alone marked undeclared; an edit with windows replaces the row under 'edit' at the new text, an edit without windows drops it, a re-capture under another label drops it with the windows (022); lineage.ts's recipe builder is the one spelling the server sends (SMD-1731)");
+{
+  // Its own pool, as [28] has: the sections before close the shared one.
+  const sql = new SQL({ url: URL_, max: 2 });
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM derivations`;
+  await sql`SELECT set_agent_kind('op-key', 'operator')`;
+  const ACTOR = { name: "op-key", via: "live-door" };
+  const MODEL = EMBEDDING_MODEL;
+  type Lin = { kind: string; by: string; fps: string[]; recipe: Record<string, unknown>; at: string };
+  const rowsOf = async (id: string) => (await sql`SELECT artifact_kind AS kind, produced_by AS by, input_fingerprints AS fps, recipe, produced_at::text AS at FROM derivations WHERE artifact_id = ${id}::uuid ORDER BY artifact_kind`) as Lin[];
+  const chunkRow = async (id: string) => (await rowsOf(id)).find((r) => r.kind === "chunks");
+  const windowsOf = async (id: string) => Number((await sql`SELECT count(*)::int AS c FROM thought_chunks WHERE thought_id = ${id}::uuid`)[0].c);
+  const params = (r: Record<string, unknown> | undefined) => (r?.params ?? {}) as Record<string, unknown>;
+  const windows = [{ content: "window one", embedding: unit(1), context: "ctx one" }, { content: "window two", embedding: unit(2), context: null }];
+
+  // The recipe as the server's embedder would build it — lineage.ts's one
+  // spelling — from the configuration the windows were made under.
+  const cfg = { chunkTokens: 300, chunkOverlap: 37, chunkThreshold: 300, chunkTokensFrom: "flag", chunkContext: true, metadataModel: "stub-meta" } as unknown as Parameters<typeof chunkRecipe>[0];
+  const recipe = chunkRecipe(cfg, { model: MODEL, chunks: windows.map((w) => ({ content: w.content, embedding: [] as number[], ...(w.context ? { context: w.context } : {}) })) });
+  assert(recipe !== undefined && recipe.deterministic === false && recipe.blurbs === 1 && recipe.blurb_model === "stub-meta" && /^sha256:[0-9a-f]{64}$/.test(String(recipe.prompt_hash)) && params(recipe).tokens === 300 && params(recipe).overlap === 37 && params(recipe).estimator === CHUNK_ESTIMATOR && recipe.model === MODEL,
+    `lineage.ts builds the window set's recipe: non-deterministic while a blurb rides a window, the blurb model and its prompt's hash, the split's parameters and estimator, the model (${JSON.stringify(recipe)})`);
+  const bare = chunkRecipe({ ...cfg, chunkContext: false }, { model: MODEL, chunks: [{ content: "w", embedding: [] as number[] }] });
+  assert(bare !== undefined && bare.deterministic === true && !("blurb_model" in bare) && !("prompt_hash" in bare), "…deterministic, with no blurb model and no prompt hash, when the blurbs are off");
+  assert(chunkRecipe(cfg, { model: MODEL, chunks: [] }) === undefined, "…and nothing for a capture that made no windows — no artifact, no recipe");
+  // The tags' recipe over the board sync's shape: tagsOverExisting clears an
+  // earlier marker with `metadata_extraction_failed: null` on a successful
+  // answer — a recipe still; a failure (a string reason) or an egress refusal —
+  // none (cold read, second review pass: the presence test recorded nothing
+  // for every ticket edit).
+  const metaCfg = { metadataModel: "stub-meta", metadataTemperature: 0 };
+  assert(metadataRecipe(metaCfg, tagsOverExisting({ people: [], topics: ["a"], type: "observation" }))?.model === "stub-meta"
+      && metadataRecipe(metaCfg, tagsOverExisting({ topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" })) === undefined
+      && metadataRecipe(metaCfg, metadataRefused()) === undefined
+      && metadataRecipe(metaCfg, { source: "mcp" }) === undefined,
+    "the tags' recipe reads the marker's value: a cleared marker (null) beside the extractor's tags is a recipe, a failure reason or a refusal is none, and tags with none of the extractor's keys are none");
+
+  // The 4-argument form with the envelope: the set's row carries the recipe
+  // as sent plus the count, at the capture's fingerprint; the vector's row beside it.
+  const w = (await sql`SELECT upsert_thought('061 live: a windowed capture', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL, lineage: { chunks: recipe } }}::jsonb, ${unit(0)}::vector, ${windows}::jsonb) AS r`)[0].r as { id: string; fingerprint: string; chunks: number };
+  let c = await chunkRow(w.id);
+  assert(w.chunks === 2 && c !== undefined && c.by === "capture" && c.recipe.count === 2 && c.recipe.blurbs === 1 && params(c.recipe).tokens === 300 && c.fps.join() === w.fingerprint && (await rowsOf(w.id)).map((r) => r.kind).join() === "chunks,vector",
+    `the windowed capture records its chunk set from the envelope — the recipe as sent plus the count — and the vector's row beside it (${JSON.stringify(c?.recipe)})`);
+  // Without the envelope: the label alone, marked undeclared.
+  const w2 = (await sql`SELECT upsert_thought('061 live: windows without a recipe', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(3)}::vector, ${windows}::jsonb) AS r`)[0].r as { id: string };
+  c = await chunkRow(w2.id);
+  assert(c !== undefined && c.recipe.deterministic === true && c.recipe.declared === false && c.recipe.model === MODEL && c.recipe.count === 2 && !("params" in c.recipe), `a 4-argument caller that declares no recipe gets the label alone, marked undeclared (${JSON.stringify(c?.recipe)})`);
+  // An edit with windows and the envelope replaces the row under 'edit', at the new text.
+  const e = (await sql`SELECT update_thought(${w.id}::uuid, '061 live: the windowed capture, edited', NULL, ${unit(4)}::vector, ${[{ content: "window three", embedding: unit(5), context: null }]}::jsonb, NULL, ${ACTOR}::jsonb, ${MODEL}, NULL, NULL, ${{ chunks: bare }}::jsonb) AS r`)[0].r as { ok: boolean };
+  c = await chunkRow(w.id);
+  const fpE = (await sql`SELECT content_fingerprint_of('061 live: the windowed capture, edited') AS f`)[0].f as string;
+  assert(e.ok === true && c !== undefined && c.by === "edit" && c.recipe.count === 1 && c.recipe.deterministic === true && c.fps.join() === fpE && (await rowsOf(w.id)).length === 2 && (await windowsOf(w.id)) === 1,
+    `an edit with windows replaces the set and its row under 'edit', at the new text (${JSON.stringify(c)})`);
+  // An edit with content and no windows drops the set and its row; the vector's stands.
+  const e2 = (await sql`SELECT update_thought(${w.id}::uuid, '061 live: edited to one window-less text', NULL, ${unit(6)}::vector, NULL, NULL, ${ACTOR}::jsonb, ${MODEL}, NULL, NULL, NULL) AS r`)[0].r as { ok: boolean };
+  assert(e2.ok === true && (await chunkRow(w.id)) === undefined && (await windowsOf(w.id)) === 0 && (await rowsOf(w.id)).map((r) => r.kind).join() === "vector", "an edit with content and no windows drops the set and its row; the vector's stands");
+  // 022's rule: a re-capture under the same label keeps the windows and their
+  // row; under another label both go, and the vector's row follows the label.
+  const same = (await sql`SELECT upsert_thought('061 live: windows without a recipe', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(3)}::vector) AS r`)[0].r as { existed: boolean };
+  assert(same.existed === true && (await chunkRow(w2.id)) !== undefined && (await windowsOf(w2.id)) === 2, "a re-capture under the same label keeps the windows and their row");
+  const other = (await sql`SELECT upsert_thought('061 live: windows without a recipe', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: "other-model" }}::jsonb, ${unit(7)}::vector) AS r`)[0].r as { existed: boolean };
+  assert(other.existed === true && (await chunkRow(w2.id)) === undefined && (await windowsOf(w2.id)) === 0 && (await rowsOf(w2.id)).find((r) => r.kind === "vector")?.recipe.model === "other-model",
+    "a re-capture under another label drops the windows and their row (022), and the vector's row follows the new label");
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM derivations`;
   await sql.close();
 }
 

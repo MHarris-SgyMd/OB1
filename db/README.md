@@ -566,7 +566,7 @@ check counts them as coverage, fails on a derived row without a lineage row
 capture role gains every privilege on `derivations` (the grants table): run
 `migrate.ts --grant` again for a role granted before this file. Additive; three
 arities move under their own DROP; a re-apply re-seeds nothing. test-schema
-[57], test-live [29], test-upgrade [20n]; the rebuild that walks the table is
+[57], test-live [30], test-upgrade [20n]; the rebuild that walks the table is
 SMD-1732's, the forget SMD-1723's.
 
 ## What changed relative to the guide
@@ -2582,7 +2582,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2036 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 813 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+./with-postgres.sh bun test-live.ts         # 829 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
