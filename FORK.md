@@ -942,7 +942,7 @@ Deliberate. Recorded so nobody assumes they were missed.
   before trusting them. The hand ports (`recipes/brain-backup` and
   `recipes/lint-sweep`, SMD-2144; `recipes/thought-enrichment`'s three scripts,
   SMD-2139) carry no banner and are driven instead, as deployed, by
-  `db/test-live.ts` [26] and [27].
+  `db/test-live.ts` [26] and [29].
 - **No file imports supabase-js at runtime any more.** The six servers that
   used resource embedding and nested `.or()` moved with SMD-1798; the
   dashboard's type-only import went with its Supabase sign-in (SMD-1801). Check

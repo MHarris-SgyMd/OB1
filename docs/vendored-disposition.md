@@ -173,7 +173,7 @@ actor a JSON object naming the script; a `CITED` answer arrives as `data.ok === 
 script may stop requiring it. The first two ports landed with SMD-2144 — `brain-backup` and
 `lint-sweep`, both read-only, driven in `db/test-live.ts` [26] against a real Postgres; the first
 writers with SMD-2139 — `thought-enrichment`'s three backfills, `type`, `sensitivity_tier` and
-metadata through `.update().eq()`, never content or vector, driven in [27]; `weekly-digest`,
+metadata through `.update().eq()`, never content or vector, driven in [29]; `weekly-digest`,
 the third read-only script at the decision, left the class instead: it is a sink, posting thought text
 to Telegram, and a shim port would read from below the egress gate (SMD-2239, the rescope of
 2026-09-26; the orchestration ADR's decision 9, written for templates, read to cover it).

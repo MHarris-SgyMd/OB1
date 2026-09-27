@@ -259,6 +259,13 @@ console.log("\n[3c] hybridThoughts over PostgREST — the path every search take
   assert(weighted.length === plain.length && weighted.every((r) => Number.isFinite(r.score)), `recency_weight and half_life_days are accepted as named RPC arguments (${weighted.length} rows)`);
   const filtered = await store.hybridThoughts({ query: "SMD-507", embedding: vec(3), threshold: 0.5, limit: 5, filter: { kind: "nope" } });
   assert(filtered.every((r) => r.matchedNeedles.length === 0), "the jsonb filter is passed as an object and reaches the keyword arm");
+  // prefer_current (059, SMD-2255): the same named arguments reach
+  // search_thoughts_current by RPC, and its extra columns are mapped — here,
+  // with nothing demotable, the hybrid's rows with fused = score and a window.
+  const current = await store.hybridThoughts({ query: "windows", embedding: vec(3), threshold: 0.5, limit: 5, filter: {}, preferCurrent: true });
+  assert(current.map((r) => r.id).join() === plain.map((r) => r.id).join() && current.every((r) => r.fused === r.score && r.demoted.length === 0 && r.window !== undefined && r.window.rows >= current.length && r.window.exact === true)
+      && plain.every((r) => r.window === undefined && r.demoted.length === 0),
+    `preferCurrent reaches search_thoughts_current by RPC: with nothing demotable the hybrid's rows, fused = score, nothing demoted, the window mapped (${current.length} rows; window ${current[0]?.window?.rows})`);
 }
 
 console.log("\n[3d] Every read method returns the SQL store's timestamp form — and a row dated infinity does not throw");
@@ -522,6 +529,23 @@ console.log("\n[8d] listLoggedSearches over PostgREST — the search rows, windo
   } finally {
     await raw.close();
   }
+}
+
+console.log("\n[8e] workerStatus is SQL-backend only over the PostgREST shim (SMD-2131)");
+{
+  let threw = "";
+  try { await store.workerStatus(); } catch (e) { threw = (e as Error).message; }
+  assert(/requires the SQL backend/.test(threw) && /thought_work_claims/.test(threw), `the shim says worker_status needs the SQL backend, not a bare error (${threw.slice(0, 80)})`);
+}
+
+console.log("\n[8f] retryFailed and releaseStaleLeases are SQL-backend only over the PostgREST shim (SMD-2132)");
+{
+  let rf = "";
+  try { await store.retryFailed("extract:whatever@p2"); } catch (e) { rf = (e as Error).message; }
+  assert(/requires the SQL backend/.test(rf) && /thought_work_claims/.test(rf), `the shim says retry_failed needs the SQL backend (${rf.slice(0, 80)})`);
+  let rl = "";
+  try { await store.releaseStaleLeases({}); } catch (e) { rl = (e as Error).message; }
+  assert(/requires the SQL backend/.test(rl) && /thought_work_claims/.test(rl), `the shim says release_stale_leases needs the SQL backend (${rl.slice(0, 80)})`);
 }
 
 console.log("\n[9] Provenance rides the envelope and reads back over PostgREST too (migration 025)");

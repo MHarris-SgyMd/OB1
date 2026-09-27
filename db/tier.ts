@@ -57,7 +57,9 @@
  *     end-to-end (test-live [20]) exercises;
  *   • the hybrid arm (search_thoughts_hybrid) needs a provider to embed the query
  *     text, so it is replayed only when a model is configured (OB1_EVAL_EMBED, as
- *     evals/eval-replay.ts uses) and skipped-with-a-note otherwise.
+ *     evals/eval-replay.ts uses) and skipped-with-a-note otherwise;
+ *   • the current arm (search_thoughts with prefer_current, 059) is the hybrid's
+ *     through search_thoughts_current, with the same provider rule.
  * A row logged before migration 045 carries a NULL arm (no way to know which arm
  * produced its ids), so it is skipped rather than guessed. Both verbs print how
  * many rows the window held, replayed and skipped. A window that replayed none
@@ -88,7 +90,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 export type LoggedSearch = {
   id: string;
   query: string;
-  arm: "hybrid" | "keyword" | null;
+  /** 'current' is search_thoughts with prefer_current (059, SMD-2255): replayed through search_thoughts_current. */
+  arm: "hybrid" | "keyword" | "current" | null;
   matchCount: number | null;
   threshold: number | null;
   recencyWeight: number | null;
@@ -176,15 +179,22 @@ export async function replayOne(
     const rows = await sql`SELECT id FROM search_thoughts_keyword(${row.query}, ${limit}, 0, ${filter}::jsonb)`;
     return { ids: rows.map((r: { id: string }) => r.id), ran: true };
   }
-  if (row.arm === "hybrid") {
-    if (!embedFn) return { ids: [], ran: false, reason: "hybrid needs a provider (set OB1_EVAL_EMBED)" };
+  if (row.arm === "hybrid" || row.arm === "current") {
+    if (!embedFn) return { ids: [], ran: false, reason: `${row.arm} needs a provider (set OB1_EVAL_EMBED)` };
     const qv = await embedFn(row.query);
     const threshold = row.threshold ?? -1;
     const count = row.matchCount ?? 10;
     const recency = row.recencyWeight ?? 0;
-    const rows = await sql`
-      SELECT id FROM search_thoughts_hybrid(
-        ${`[${qv.join(",")}]`}::vector, ${row.query}, ${threshold}, ${count}, ${filter}::jsonb, ${recency})`;
+    // `current` is the same arm through 059's function, the one the server
+    // called (SMD-2255); a function name cannot be a bound parameter, so two
+    // literal statements.
+    const rows = row.arm === "current"
+      ? await sql`
+          SELECT id FROM search_thoughts_current(
+            ${`[${qv.join(",")}]`}::vector, ${row.query}, ${threshold}, ${count}, ${filter}::jsonb, ${recency})`
+      : await sql`
+          SELECT id FROM search_thoughts_hybrid(
+            ${`[${qv.join(",")}]`}::vector, ${row.query}, ${threshold}, ${count}, ${filter}::jsonb, ${recency})`;
     return { ids: rows.map((r: { id: string }) => r.id), ran: true };
   }
   return { ids: [], ran: false, reason: "arm is NULL (logged before migration 045) — which arm produced its ids is unknown" };
@@ -874,7 +884,7 @@ async function main(): Promise<void> {
       : "in all of stable's log (the canary records no refresh)";
     const embedModel = process.env.OB1_EVAL_EMBED;
     const embedFn: EmbedFn | undefined = embedModel ? (q) => embed(embedModel, q, true) : undefined;
-    if (!embedFn) console.error(`note: OB1_EVAL_EMBED is not set — hybrid-arm searches will be skipped (keyword arm replays without a model).`);
+    if (!embedFn) console.error(`note: OB1_EVAL_EMBED is not set — hybrid- and current-arm searches will be skipped (keyword arm replays without a model).`);
     const summary = await replayAndDiff(stable, canary, { since: window, embedFn });
     const verdict = printSummary(summary, verb === "diff", { words, bounded: window !== null });
     // The gate: 1 when a ranking moved, 3 when nothing was compared — not a

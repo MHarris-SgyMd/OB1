@@ -239,6 +239,29 @@ console.log("\n[3] search_thoughts ranks over real pgvector");
   const firstUnweighted = unweighted.split("--- Result ")[1] ?? "";
   assert(/^1 \(100\.0% match\) ---/.test(firstUnweighted) && /alpha thought about migrations/.test(firstUnweighted), "without a weight the exact match is first again — the default is the ranking by meaning alone");
   await sql`UPDATE thoughts SET created_at = now() WHERE content LIKE 'alpha%'`;
+
+  // Migration 059 over MCP (SMD-2255): prefer_current reaches
+  // search_thoughts_current. The alpha thought, stamped a completed ticket, is
+  // demoted — its block says by what and why, the header states the window —
+  // and without the flag it is first and unmarked, as before.
+  await sql`UPDATE thoughts SET metadata = metadata || ${{ source: "linear", issue: "SMD-9902", status: "Done", status_type: "completed", linear_updated_at: "2026-09-25T00:00:00.000Z" }}::jsonb WHERE content LIKE 'alpha%'`;
+  const preferred = await call("search_thoughts", { query: "alpha", limit: 5, threshold: -1, prefer_current: true });
+  const preferredFirst = preferred.split("--- Result ")[1] ?? "";
+  const demotedBlock = preferred.split("--- Result ").find((b) => /alpha thought about migrations/.test(b)) ?? "";
+  const plainAgain = await call("search_thoughts", { query: "alpha", limit: 5, threshold: -1 });
+  assert(!/alpha thought about migrations/.test(preferredFirst) && /\n↓ Ranked ×0\.25 — completed\n/.test(demotedBlock) && /^\d+ \(100\.0% match\) ---/.test(demotedBlock)
+      && /Current first \(prefer_current\): 1 of the top \d+ matches is settled or superseded and ranked below the current ones; 1 carries a lifecycle \(latest sync 2026-09-25T00:00:00\.000Z\)\./.test(preferred)
+      && /^1 \(100\.0% match\) ---/.test(plainAgain.split("--- Result ")[1] ?? "") && !/↓ Ranked|Current first/.test(plainAgain),
+    `prefer_current demotes the completed alpha ticket below the current rows, says ×0.25 — completed on its block (its similarity still the cosine) and the window in the header; without it the ticket is first and unmarked (${demotedBlock.split("\n").slice(0, 3).join(" / ")})`);
+  // The tool's description states the weight 059 applies, and they agree.
+  const listed = await fetch(BASE, { method: "POST", headers: H, body: JSON.stringify({ jsonrpc: "2.0", id: 0, method: "tools/list", params: {} }) });
+  const listedText = await listed.text();
+  const listedBody = JSON.parse(listedText.startsWith("{") ? listedText : (listedText.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
+  const preferDesc = String(listedBody.result?.tools?.find((t: { name: string }) => t.name === "search_thoughts")?.inputSchema?.properties?.prefer_current?.description ?? "");
+  const [{ w }] = await sql`SELECT search_demote_weight() AS w`;
+  assert(Number(/multiplied by ([0-9.]+)/.exec(preferDesc)?.[1]) === Number(w) && /off \(default\)/i.test(preferDesc),
+    `prefer_current's description names the weight search_demote_weight() applies (${/multiplied by ([0-9.]+)/.exec(preferDesc)?.[1]} = ${w}) and says it is off by default`);
+  await sql`UPDATE thoughts SET metadata = metadata - 'source' - 'issue' - 'status' - 'status_type' - 'linear_updated_at' WHERE content LIKE 'alpha%'`;
   await sql.close();
 }
 
@@ -429,6 +452,116 @@ console.log("\n[6c] list_logged_searches reads back a logged search over HTTP (S
   let sinceErr = "";
   try { await call("list_logged_searches", { since: "not-a-time" }); } catch (e) { sinceErr = (e as Error).message; }
   assert(/since. must be an ISO-8601 time/.test(sinceErr), `a malformed since is refused, not a cast error (${sinceErr.slice(0, 60)})`);
+}
+
+console.log("\n[6d] worker_status over HTTP — the tool and the keyed GET mirror (SMD-2131)");
+{
+  // No claims are seeded over HTTP (nothing here sets ob1_config.entity_extraction_key),
+  // so this is the empty case — an array, not an error — plus the tool/route/auth
+  // wiring. Exact counts are proven in test-store-sql [5e].
+  const viaTool = JSON.parse(await call("worker_status"));
+  assert(Array.isArray(viaTool), `worker_status returns a JSON array (${JSON.stringify(viaTool).slice(0, 40)})`);
+  assert(viaTool.every((r: { workType?: unknown; pending?: unknown }) => typeof r.workType === "string" && typeof r.pending === "number" && "active" in r && "stale" in r), "each row carries the counts, stale and active");
+  // The keyed GET mirror: a read key gets the same array; no key gets plain "ok".
+  const keyed = await fetch(`${BASE}/worker-status`, { headers: { "x-brain-key": "e2e-key" } });
+  assert(Array.isArray(await keyed.json()), "GET /worker-status with a read key returns the JSON array");
+  const bare = await fetch(`${BASE}/worker-status`);
+  assert((await bare.text()) === "ok", "GET /worker-status without a key is plain ok");
+
+  // Now a POPULATED brain end to end: seed a pool over raw SQL, set it active, and
+  // read it back through BOTH the tool and the keyed GET (the empty case above misses
+  // that a populated array serializes right over each surface). Cleaned up so the
+  // capture trigger and later sections stay unaffected.
+  const sql = new SQL({ url: URL_, max: 1 });
+  try {
+    const ids = (await sql`SELECT id::text AS id FROM thoughts ORDER BY id LIMIT 2`).map((r: { id: string }) => r.id);
+    const WT = "extract:e2e-probe@p1";
+    await sql`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${WT}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+    await sql`INSERT INTO thought_work_claims (thought_id, work_type, status) VALUES (${ids[0]}::uuid, ${WT}, 'pending')`;
+    await sql`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at) VALUES (${ids[1]}::uuid, ${WT}, 'succeeded', 'w', now())`;
+    const toolRow = (JSON.parse(await call("worker_status")) as { workType: string }[]).find((r) => r.workType === WT) as Record<string, unknown> | undefined;
+    assert(!!toolRow && toolRow.pending === 1 && toolRow.succeeded === 1 && toolRow.active === true, `the tool returns the populated pool, active (${JSON.stringify(toolRow)})`);
+    const getRow = ((await (await fetch(`${BASE}/worker-status`, { headers: { "x-brain-key": "e2e-key" } })).json()) as { workType: string }[]).find((r) => r.workType === WT);
+    assert(!!getRow && (getRow as Record<string, unknown>).pending === 1, "the keyed GET returns the same populated pool");
+  } finally {
+    await sql`DELETE FROM thought_work_claims WHERE work_type = 'extract:e2e-probe@p1'`;
+    await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+    await sql.close();
+  }
+}
+
+console.log("\n[6e] retry_failed and release_stale_leases over HTTP — tools, keyed POSTs, audit and refusals (SMD-2132)");
+{
+  // The corpus is exactly two thoughts here ([7] asserts Total: 3 after one
+  // capture), so this reuses those two across sequential scenarios rather than
+  // adding rows. Exact per-pool transitions are proven in test-store-sql [5f];
+  // this proves the tool/route/scope/audit wiring end to end.
+  const sql = new SQL({ url: URL_, max: 1 });
+  const qlog = new SQL({ url: URL_, max: 1 });
+  const WT = "extract:e2e-action@p1";
+  const post = (path: string, body: unknown, key = "e2e-key") =>
+    fetch(`${BASE}${path}`, { method: "POST", headers: { ...H, "x-brain-key": key }, body: JSON.stringify(body) });
+  try {
+    const ids = (await sql`SELECT id::text AS id FROM thoughts ORDER BY id LIMIT 2`).map((r: { id: string }) => r.id);
+    assert(ids.length === 2, "two corpus thoughts to pool");
+    await sql`DELETE FROM thought_work_claims WHERE work_type = ${WT}`;
+    await qlog`DELETE FROM query_log WHERE tool IN ('retry_failed', 'release_stale_leases')`;
+
+    // ── retry_failed: both thoughts failed in WT.
+    await sql`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error) VALUES
+      (${ids[0]}::uuid, ${WT}, 'failed', 'w', now(), 'boom'),
+      (${ids[1]}::uuid, ${WT}, 'failed', 'w', now(), 'boom')`;
+    const rf = JSON.parse(await call("retry_failed", { work_type: WT }));
+    assert(rf.workType === WT && rf.retried === 2 && rf.ids.length === 2, `retry_failed tool requeues the 2 failed rows (${JSON.stringify(rf)})`);
+    assert((await sql`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${WT} AND status = 'failed'`)[0].n === 0, "no failed rows remain after retry_failed");
+    const rfRows = await qlog<{ tool: string; target_id: string }[]>`SELECT tool, target_id FROM query_log WHERE kind = 'action' AND tool = 'retry_failed' ORDER BY target_id`;
+    assert(rfRows.length === 2 && [ids[0], ids[1]].every((id) => rfRows.some((r) => r.target_id === id)), `retry_failed stamped one action-log row per requeued thought (${JSON.stringify(rfRows)})`);
+    // The keyed POST mirror — idempotent: nothing failed now.
+    const rfPost = await post("/worker-retry-failed", { work_type: WT });
+    const rfPostBody = await rfPost.json() as { retried: number };
+    assert(rfPost.status === 200 && rfPostBody.retried === 0, `POST /worker-retry-failed returns JSON, 0 now (${JSON.stringify(rfPostBody)})`);
+
+    // ── release_stale_leases: thought 0 stale (w-dead), thought 1 live (w-live).
+    await sql`DELETE FROM thought_work_claims WHERE work_type = ${WT}`;
+    await sql`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, claimed_at, ttl_expires_at) VALUES
+      (${ids[0]}::uuid, ${WT}, 'claimed', 'w-dead', now() - interval '2 hours', now() - interval '2 hours'),
+      (${ids[1]}::uuid, ${WT}, 'claimed', 'w-live', now(), now() + interval '10 minutes')`;
+    const rl = JSON.parse(await call("release_stale_leases", {}));
+    assert(rl.released === 1 && rl.ids[0] === ids[0] && rl.workers.includes("w-dead"), `release_stale_leases (default) releases the dead lease alone (${JSON.stringify(rl)})`);
+    assert((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${ids[1]}::uuid AND work_type = ${WT}`)[0].status === "claimed", "the live lease is untouched by a default release");
+    assert((await qlog`SELECT count(*)::int AS n FROM query_log WHERE kind = 'action' AND tool = 'release_stale_leases'`)[0].n === 1, "release_stale_leases stamped one action-log row");
+    // The keyed POST mirror — re-stale thought 0 (now pending) and release via REST.
+    await sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = 'w-dead2', claimed_at = now() - interval '3 hours', ttl_expires_at = now() - interval '3 hours' WHERE work_type = ${WT} AND thought_id = ${ids[0]}::uuid`;
+    const rlPost = await post("/worker-release-leases", { work_type: WT });
+    const rlPostBody = await rlPost.json() as { released: number; ids: string[] };
+    assert(rlPost.status === 200 && rlPostBody.released === 1 && rlPostBody.ids[0] === ids[0], `POST /worker-release-leases releases the re-staled lease (${JSON.stringify(rlPostBody)})`);
+
+    // ── Refusals-as-values: include_live without worker_id (tool errors, POST 400s with the code).
+    let liveRefusal = "";
+    try { await call("release_stale_leases", { include_live: true }); } catch (e) { liveRefusal = (e as Error).message; }
+    assert(/worker_id/.test(liveRefusal) && /double-processing/.test(liveRefusal), `include_live without worker_id is refused as a value (${liveRefusal.slice(0, 80)})`);
+    const badPost = await post("/worker-release-leases", { include_live: true });
+    const badPostBody = await badPost.json() as { code?: string };
+    assert(badPost.status === 400 && badPostBody.code === "REFUSED_LIVE_LEASE_NEEDS_WORKER", `POST include_live without worker_id is a 400 with the code (${badPost.status}, ${JSON.stringify(badPostBody)})`);
+    // A blank work_type is refused.
+    let emptyRefusal = "";
+    try { await call("retry_failed", { work_type: "  " }); } catch (e) { emptyRefusal = (e as Error).message; }
+    assert(/work_type is required/.test(emptyRefusal), `a blank work_type is refused (${emptyRefusal.slice(0, 60)})`);
+
+    // ── A non-write key cannot act: the tool is not registered (call throws), the POST is plain "ok".
+    let capRefusal = "";
+    try { await call("retry_failed", { work_type: WT }, CAPTURE_KEY); } catch (e) { capRefusal = (e as Error).message; }
+    assert(/JSON-RPC error|tool/.test(capRefusal), `a capture key does not see retry_failed (${capRefusal.slice(0, 80)})`);
+    const capPost = await post("/worker-retry-failed", { work_type: WT }, CAPTURE_KEY);
+    assert((await capPost.text()) === "ok", "POST /worker-retry-failed with a capture key is plain ok — no action");
+    const noKeyPost = await fetch(`${BASE}/worker-release-leases`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ work_type: WT }) });
+    assert((await noKeyPost.text()) === "ok", "POST /worker-release-leases with no key is plain ok");
+  } finally {
+    await sql`DELETE FROM thought_work_claims WHERE work_type = 'extract:e2e-action@p1'`;
+    await qlog`DELETE FROM query_log WHERE tool IN ('retry_failed', 'release_stale_leases')`;
+    await sql.close();
+    await qlog.close();
+  }
 }
 
 console.log("\n[7] Dedup through the tool surface");
@@ -666,6 +799,11 @@ console.log("\n[10b] query log: the filter a search ran, the arm that served it 
     `keyword search is logged now (034 logged none), arm=keyword, unfiltered {} (${JSON.stringify(kwPlain)})`);
   assert(kwFiltered.arm === "keyword" && JSON.stringify(kwFiltered.filter) === JSON.stringify({ type: "idea" }),
     `a filtered keyword search records its filter (${JSON.stringify(kwFiltered)})`);
+  // 059 (SMD-2255): a search with prefer_current is the arm `current`, so a
+  // replay takes search_thoughts_current too.
+  await call("search_thoughts", { query: "zeta", limit: 5, threshold: -1, prefer_current: true });
+  const [preferRow] = await qlog<{ tool: string; arm: string | null }[]>`SELECT tool, arm FROM query_log WHERE kind = 'search' ORDER BY logged_at DESC LIMIT 1`;
+  assert(preferRow?.tool === "search_thoughts" && preferRow.arm === "current", `search_thoughts with prefer_current is logged as arm=current (${JSON.stringify(preferRow)})`);
 
   // The boundary refuses a shape jsonb should not run: a nested object. call()
   // throws on the tool error (or the schema rejection) — either way the bad

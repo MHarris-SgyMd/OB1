@@ -166,8 +166,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1834 assertions: 1834 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports fifty-eight (58) migrations applied, and
+`bun test-schema.ts` prints `1960 assertions: 1960 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports sixty (60) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -207,7 +207,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
-058 SMD-2074).
+058 SMD-2074, 059 SMD-2255, 060 SMD-2116).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -225,10 +225,13 @@ The decision that `thought_audit` is the write-side source of truth and the
 `thoughts` row its projection — the write functions appending the event first
 and one projector writing the row, the audit trigger becoming the check, the
 table kept for the community's DDL — is `../docs/event-log-as-truth.md`
-(SMD-1997). Its three steps are filed (SMD-2115, SMD-2116, SMD-2117) and the
-first has landed as migration 055 (below); at 055 the row is still written
-first and the trigger derives the event from it, as the paragraphs below
-describe — what 055 changes is what the event carries.
+(SMD-1997). Its three steps are filed (SMD-2115, SMD-2116, SMD-2117); the first
+landed as migration 055 (what the event carries) and the second as 060 (below):
+since 060 the three write functions append the event first and one projector
+writes the row, the audit trigger checking the row against its event — the
+paragraphs on 046, 050 and 055 below describe the trigger's raw path, which a
+raw writer (`db/ingest-records.ts`, the backfills, a community schema) still
+takes, and the event shape every path writes.
 
 Migration 046 makes `thought_audit` the log of record (SMD-1730): eight columns
 beside 008's and 010's — `actor_kind` and `trust` (who holds the key, and the
@@ -433,17 +436,96 @@ lifecycle when `open` is not NULL; its freshness is `synced_at`, never
 `updated_at` — so each consumer counts over what it ranks. The ids narrow the
 rows returned, not the work: the whole brain is computed and filtered last.
 `graph-centrality.ts` is the first reader, its reports byte for byte what they
-were; search is the second (SMD-2074's second PR). `metadata.status_type` is a
+were; search is the second (`search_thoughts`' opt-in `prefer_current`, through
+059). `metadata.status_type` is a
 transitional, lossy scalar: when SMD-1997 folds the transitions `thought_audit`
 holds, the two reads of it change — `node_lifecycle()`'s body and
 `node_dependencies()`' gate — and no signature does. Reads only, no grant row
 (EXECUTE is PUBLIC): `node_lifecycle()` needs SELECT on `thoughts`;
 `node_dependencies()` and `node_state()` also need it on `thought_facets` (the
-capture group) and `thought_sources` (the `structure` group). The file drops
+capture group) and `thought_sources` (the `structure` group, and the `server`
+group since 059). The file drops
 its three table functions before creating them, so `--reapply` replays it over
 a later migration's reshape; the price is that a view of an operator's over
 `node_state()` (or any other object that records a dependency on one) stops
 that replay at 058, and a REVOKE on one is not kept.
+
+Migration 059 is `search_thoughts_current` (SMD-2255, SMD-2074's second
+consumer): the hybrid search with settled and superseded thoughts ranked below
+current ones, which `search_thoughts` calls when a caller passes
+`prefer_current` — by default the server calls `search_thoughts_hybrid` itself,
+so the default ranking is unchanged and 025's "labelled, not demoted" stands
+for every caller who does not ask. It reads the hybrid's top min(100, 4N) and
+`node_state` for them; a thought whose ticket is settled (completed or
+canceled, by 058's ticket-head rule — a note filed under a Done ticket
+included) or that a newer thought supersedes weighs `search_demote_weight()`
+(0.25, pre-registered, once) of its fused score, and the window is re-sorted and
+cut to N. Under the hybrid's fusion that is in practice a partition: every
+current match in the window first, then the demoted ones in their own order
+(a demoted exact hit keeps a quarter of its literal bonus, 1/61 per literal it
+holds, so on a query of literals only, or holding several of the query's
+literals, it can still outrank current rows; holding one, only past the vector
+arm's 62nd rank);
+the weight bites only against an exact-literal hit, so a settled ticket looked
+up by its key can drop — to look one up, leave the flag off. A blocked or
+unknown status does not demote a thought (superseded still does); ties go to
+the current row. Once the window holds N current rows a demoted thought is out
+of the top N, which is where the eval's costs grow at threshold −1 (NOTE
+−0.524, PREVIOUS −0.449, a settled key −1.000). Each row carries `fused` (before the
+weight), `demoted` (why) and the window's size, lifecycle coverage, demoted
+count, latest source watermark and whether its top N is exact. Priced first in
+`evals/eval-supersession.ts` against a pre-registered rule (CURRENT-version
+MRR +0.052, live-ticket MRR +0.194; costs disclosed — topical −0.127, a note
+under a Done ticket −0.292, a settled key −0.750); the query log records such a
+search as arm `current` (the CHECK widened), and `db/tier.ts` replays it. The
+server group gains SELECT on `thought_sources`, which `node_state` reads; the
+wrapper is dropped before it is created, as 058's three are. It costs what
+`node_state` costs — the whole brain's lifecycle per call: +10.7 ms at 10,000
+thoughts, +129 ms at 100,000, +2.8 ms on the dogfood brain — past the budget
+pre-registered for it; shipped opt-in on the maintainer's call, and SMD-2256
+narrows it.
+
+Migration 060 has the write functions append then project (SMD-2116, step 2 of
+`../docs/event-log-as-truth.md`). `upsert_thought` (2- and 3-argument),
+`update_thought` and `delete_thought` keep 046's and 042's bodies up to the
+write — the same locks in the same order, every refusal before any append —
+then compute the after-image with 055's functions, append the event through
+`ob1_append_thought_event` and call `ob1_project_thought_event(event, vector,
+model, replay)`, which writes the row: capture → INSERT, update → UPDATE by the
+event's afters, delete → DELETE; faithful, not corrective (a key the event does
+not move stays; a capture's key is derived from its content, the one thing the
+event does not carry). `thoughts_write_audit` under `ob1.projecting` is the
+check — the row must be the event's AFTER image, a tombstone's `previous_*`
+included, and move only columns the event names, SQLSTATE `OB002` otherwise; a
+foreign row is accepted as a bump or as a tombstone's nulled successor pointer
+(appended live, skipped on a replay); without the setting it appends as before,
+so a raw write is audited, never refused. Live, the projected event must be the
+thought's latest by `seq`. `ob1_refresh_thought_vector` writes a vector onto a
+row that has one with no event and no `updated_at`; `ob1_embedding_snapshot`
+holds every vector by (key, model), seeded once from the rows and fed by
+`thoughts_snapshot_embedding` on live writes alone, so a fold rebuilds vectors
+without the provider (no row leaves it by itself — the decision's forgetting
+rule, SMD-1723 then SMD-1732, is the removal path, not built); 001's
+`update_updated_at` yields for the projected row. A role granted before this
+file lacks `SELECT` on `thought_audit` and every privilege on the snapshot:
+run `migrate.ts --grant` for it again before the server writes, as
+SMD-2216's note above says for its rows (preflight refuses, naming them).
+The `SELECT` has been needed since 055 — `ob1_append_thought_event` reads the
+row it inserts (`INSERT … RETURNING`) — and the grant set had no row for it
+from 055 to 058, so a role granted then could not write at all; the row lands
+here (SMD-2116's fourth review pass).
+Six deltas against 055 — five the decision accepted, a sixth the write path
+forced: an identical re-capture, a no-op edit and a vector refresh write nothing and move no stamp; the
+stale-read guard is the pre-check alone; the 2-argument form locks the row it
+lands on; a raw writer committing the same text inside a fresh capture's window
+is merged as a re-capture (046's `ON CONFLICT` did it; 060 catches the unique
+violation). A fold replays the log in 055's order — `seq` since
+`ob1_config.audit_seq_exact_since`, `(created_at, seq)` before it — never by
+the clock alone, which inverts a row's history. The capture role gains SELECT
+on `thought_audit` and the snapshot's writes (the grants table). Additive, no
+arity moves, idempotent; a re-apply re-seeds nothing. test-schema [56],
+test-live [28], test-upgrade [20m]; the redaction arm is SMD-1723's, the fold
+SMD-2117's.
 
 ## What changed relative to the guide
 
@@ -496,12 +578,14 @@ issues every group at once.
 | --- | --- | --- |
 | **capture** — the server's own connection; preflight refuses a role missing any of it | `thoughts` (001) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_chunks` (007) | `SELECT, INSERT, DELETE` |
-| | `thought_audit` (008) | `INSERT` |
+| | `thought_audit` (008) | `SELECT, INSERT` — since 055 `ob1_append_thought_event` reads the row it inserts (`INSERT … RETURNING`), and since 060 the audit trigger's check and the projector read the event; the row lacked `SELECT` from 055 to 058 (SMD-2116) |
 | | `thought_facets` (042) | `SELECT, UPDATE` — the delete guard reads the citations that name a thought and, detaching, writes them, on every delete |
 | | `ob1_agents` (046) | `SELECT` — the audit trigger reads the key's kind on every write that carries an actor (SMD-1730) |
+| | `ob1_embedding_snapshot` (060) | `SELECT, INSERT, UPDATE` — the snapshot trigger upserts the row's vector under its key on every write of a vector, a label or a key (SMD-2116). `ob1_project_thought_event` and `ob1_refresh_thought_vector` keep PUBLIC's EXECUTE, as the SECURITY INVOKER writers that call them require; the audit trigger holds what either may do, and a replay is the owner's |
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
+| | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which reads 058's node_state, which reads the source rows (SMD-2255); without it that search is refused naming this grant, and every other search runs |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `INSERT, UPDATE` |
@@ -615,6 +699,17 @@ privileges` check detects the trigger (and reads the key) and enforces exactly
 these when they apply, so the gap surfaces at start-up rather than on the first
 capture. The simplest answer is to grant the server role the **worker** group as
 well on an extraction brain.
+
+**Another cross-cutting exception (055's capture read).** Migration 055 (SMD-2115)
+makes the write functions read `thought_audit` — they append the capture event and
+derive its diff before the row exists — so from 055 on a capturing role needs
+`SELECT` on `thought_audit`, not only the `INSERT` the capture path always had.
+`--grant` issues both, but a role provisioned by `--grant` **before** 055 was
+granted only the `INSERT`: **after upgrading a brain past 055, run
+`bun migrate.ts --grant <role>` again for every role that captures, or its writes
+fail on the audit table's `SELECT`.** The role `migrate.ts` and the reference
+deploy connect as is the objects' owner, which holds it already — only a
+separately `--grant`-provisioned scoped role is affected.
 
 ## Chunk context, and why it is off
 
@@ -1042,7 +1137,9 @@ bun extract-entities.ts --url … --limit 25              # a trial: this many, 
 bun extract-entities.ts --url … --status                # the pass, and the graph so far
 bun extract-entities.ts --url … --dry-run               # what a run would do; writes nothing
 bun extract-entities.ts --url … --retry-failed          # failed rows back into the pool first
-bun extract-entities.ts --url … --retry-partial         # rows extracted over a prefix back into the pool — after raising OB1_EXTRACT_MAX_WINDOWS
+bun extract-entities.ts --url … --retry-partial         # rows extracted in part back into the pool — after raising OB1_EXTRACT_MAX_WINDOWS
+bun extract-entities.ts --url … --retry-left-out        # …only those with windows left out as malformed — after a change of model, kept to this pool with --job (below)
+OB1_METADATA_MODEL=<larger> bun extract-entities.ts --url … --job <the recorded key> --retry-left-out --limit N   # a larger model over those N rows, the key and trigger left as they are (--status prints it)
 #   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (300, per model call — per window of a long thought)
 bun extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from the recorded key
 ```
@@ -1060,7 +1157,14 @@ running to the model's context and the worker's timeout — and a call cut that
 way is made once more with a frequency penalty (`RUNAWAY_PENALTY`, 0.5), which
 taxes the repetition the runaways were measured to be: on the fork's brain that
 retry, with the budget sized to both measured models, extracted all 32 thoughts
-one call could not finish, where windows alone reached 10 to 13. The answer is
+one call could not finish, where windows alone reached 10 to 13. Set
+`OB1_EXTRACT_ESCALATE_MODEL` and a runaway is instead remade once on that larger
+local model with no penalty (SMD-2000) — the pass key on the rows stays the
+first model's, and the dump line records which model answered. The 27B never
+looped on the thoughts the 7B could not finish, so the escalation spends the
+large model only where the small one has failed; it loads it beside the embedder
+(28 GB on the dogfood Mac, and `OLLAMA_MAX_LOADED_MODELS=2` can evict the
+embedder mid-pass), so it is a per-brain choice, not the default. The answer is
 streamed, and a call is aborted the moment its answer holds three copies of one
 item (`RunawayDetector`, `RUNAWAY_REPEATS`; SMD-1960) — the loop is visible on
 the stream long before the budget, so a runaway costs seconds rather than the
@@ -1070,8 +1174,11 @@ retry rule, so 32 of 32 is derived, not re-measured whole) — and a call
 aborted so is retried as a cut one is, the retry read whole, since a penalised
 answer was measured to repeat an item three times and recover; an
 answer that enumerates distinct ids is not a loop by that rule and runs to the
-budget, which stays the bound. A thought whose retry also runs away is recorded
-failed, retryable. The window is the **metadata model's**, not the embedding
+budget, which stays the bound. A call whose retry also runs away is a
+malformed answer: a window's is left out of a thought at least one of whose
+other windows parsed (SMD-2260, below), and a thought none of whose windows
+parsed is recorded failed, retryable.
+The window is the **metadata model's**, not the embedding
 model's: `OB1_EXTRACT_CHUNK_TOKENS` when set, else derived from the model's
 served context (`KNOWN_CHAT_MODEL_WINDOW`, measured as `KNOWN_MODEL_WINDOW` is)
 and held at the size the default model was measured to finish reliably; a model
@@ -1079,7 +1186,8 @@ the table does not list gets that default. The banner's `window:` line and
 preflight's `extraction window` row print the same sentence. The prompt version
 is 2 — a pass under it re-extracts a brain whose thoughts were cut at 8,000
 characters under p1 — so the first run after upgrading needs `--switch-key`.
-`--dump`'s line carries `windows`, `retried` and `abortedMs` — how far into
+`--dump`'s line carries `windows`, `retried` (or `escalated: <model>` when the
+runaway went to the larger model, SMD-2000) and `abortedMs` — how far into
 the call a runaway was aborted on the stream — and, for a windowed thought,
 each window's own answer in `parts` beside the merged one. Why, measured:
 `evals/README.md`, "Entity extraction in windows".
@@ -1116,6 +1224,44 @@ version is unchanged: a whole extraction is what it was. What changes is a
 thought over the count, which stored nothing and now stores its opening, and a
 thought whose runs pass the text bound, which was sent whole and is now cut at
 it.
+
+**A malformed window is left out, not the thought (SMD-2260).** A windowed
+thought some of whose windows the model answers with something other than JSON
+of the expected shape is written from the windows that parsed, and its claim is
+released succeeded with a caveat naming the rest: `partial: 2 of 3 windows
+extracted; the model's answer for window 2 was not JSON of the expected shape,
+and its text is not in the graph` (`… of the N sent …`, and the bound, for a
+prefix with windows left out). Only a thought none of whose windows parsed — a
+one-window thought's one answer included — is failed as malformed, as before; a
+window that times out still fails its thought. Until this,
+one malformed window failed the thought, its parsed windows with it: on the
+stable brain three research papers kept nothing because the model could not
+answer their reference lists, 15 to 22 of 24 windows parsed, and a larger model
+mangled the same windows. These rows are the second kind of partial row, which
+the summary and `--status` count and list apart from a prefix
+(`13 extracted (1 over a prefix only, 1 with windows left out as malformed), 1
+failed`) — a row with windows left out is closer to a failure, since the model
+decided it, not the bound; a row of both kinds, a prefix with windows left out
+as the papers were, counts with the windows left out, and the counts say how
+many of those are over the bound too. `--retry-partial` returns every partial
+row and `--retry-left-out` those with windows left out alone — the lever for
+them is the model, and re-reading every prefix to the place it already reached
+under a larger model would cost up to the bound's calls each for nothing. A
+changed `OB1_METADATA_MODEL` is another extraction key, so the retry keeps to
+this pool with `--job`, and to the returned rows with `--limit` and no other
+worker of the pool running, since the workers claim pending rows by queue time
+and a returned row keeps its own, so an older pending row is claimed in its
+place (`--status` prints the command, and the pool's pending count beside it).
+`OB1_EXTRACT_ESCALATE_MODEL` (SMD-2000, above) is not this: it remakes a call
+that ran away, within the pass, and a window answered in prose never ran away,
+so a window left out beside it was either not a runaway or failed the larger
+model too. Either
+flag reads a row again under the bound and the model in force: whole, or, over
+the bound, to it; a reading that fails outright — a window timing out, none
+parsing — records the row failed, and the earlier reading's entities stay in
+the graph until a later reading succeeds, since a failure writes nothing. A run that leaves partial rows and
+no failure exits 0, the partial rows listed on stdout: a job watching the exit
+code or stderr sees them only as `--status` counts them.
 
 **What may leave.** The egress gate (SMD-1903) reads each row's own
 `metadata` — `source`, `type`, `topics` — and its text against `OB1_EGRESS_POLICY`
@@ -2383,8 +2529,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1834 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 780 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [27]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 1960 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 815 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
@@ -2710,7 +2856,17 @@ first assumed. See FORK.md's SMD-1632 section.
   `OB1_EXTRACT_MAX_WINDOWS=2` is released succeeded with a `partial:` caveat,
   its opening's entities and edge in the graph and its closing's entity not, `--status` counting
   and listing it apart; `--retry-partial` under the default bound reads it
-  whole and clears the caveat (SMD-2240).
+  whole and clears the caveat (SMD-2240). Then, under a bound of two, a
+  two-window thought whose second window the stub answers in prose is released
+  succeeded with that window named in its caveat, the other window's entities
+  and edge in the graph, a three-window thought so is released with the window
+  and the bound both named, and a two-window thought answered in prose
+  throughout is failed; `--status` counts and lists the two kinds of partial
+  row apart, the row of both among the windows left out and counted over the
+  bound too; `--retry-left-out`, run as `--status` advises — another model,
+  `--job` this pool's key — the stub answering now, takes those two and not the prefix, saying one is a
+  prefix too, and clears their caveats and adds the windows' entities, and
+  `--retry-partial` then takes the prefix (SMD-2260).
 
 ### What test-schema.ts asserts
 

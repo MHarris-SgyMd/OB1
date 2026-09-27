@@ -111,8 +111,19 @@ export type ThoughtHybridMatch = {
   commonNeedles: string[];
   /** Every row: the query had nothing to embed, so exact hits were ranked ahead of the vector arm. */
   literalOnly: boolean;
-  /** The fused score; monotone in the rank the function returned. Not for display. */
+  /** The fused score — times 0.25 for a demoted row under prefer_current (059) — monotone in the rank the function returned. Not for display. */
   score: number;
+  /** The hybrid's fused score before any weight; equal to `score` when nothing demoted the row. */
+  fused: number;
+  /** Why prefer_current weighted the row: its ticket's status_type (completed, canceled) and/or "superseded". Empty when it did not (and always without the flag). */
+  demoted: string[];
+  /**
+   * Under prefer_current only (059, SMD-2255): the window the function re-ranked
+   * — its size, how many rows in it carry a lifecycle, how many were demoted,
+   * the latest source watermark among them, and whether its top N is the
+   * whole list re-weighted. The same on every row; absent without the flag.
+   */
+  window?: { rows: number; known: number; demoted: number; syncedAt: string | null; exact: boolean };
 };
 
 /**
@@ -236,6 +247,19 @@ export function normaliseHybridRow(r: Record<string, unknown>): ThoughtHybridMat
     commonNeedles: strings(r.common_needles),
     literalOnly: r.literal_only === true,
     score: Number(r.score),
+    // search_thoughts_hybrid has no fused, demoted or window columns; only 059's
+    // search_thoughts_current does, so a row without them is an undemoted one.
+    fused: r.fused == null ? Number(r.score) : Number(r.fused),
+    demoted: strings(r.demoted),
+    ...(r.window_rows == null ? {} : {
+      window: {
+        rows: Number(r.window_rows),
+        known: Number(r.window_known),
+        demoted: Number(r.window_demoted),
+        syncedAt: r.window_synced_at == null ? null : String(r.window_synced_at),
+        exact: r.window_exact === true,
+      },
+    }),
   };
 }
 
@@ -403,6 +427,70 @@ export type LoggedSearchRow = {
  * is never streamed; a window is the unit.
  */
 export type LoggedSearchPage = { searches: LoggedSearchRow[]; truncated: boolean };
+
+/**
+ * One background-work pool's state (SMD-2131) — the counts the workers compute over
+ * `thought_work_claims` (migration 015), per `work_type`, so an operator or agent can
+ * ask a running brain "what is queued / in flight / failed / stalled" without SQL.
+ * The four status counts and `thoughts`/`unpooled` match `db/extract-entities.ts`'s
+ * `counts()`; `stale` and `active` are added on top.
+ */
+export type WorkerStatusRow = {
+  /** The pass and its target, e.g. "extract:qwen2.5:7b@p2". */
+  workType: string;
+  pending: number;
+  /** status='claimed' — in flight, INCLUDING stale leases, as the workers count it (the reaper is lazy). */
+  claimed: number;
+  succeeded: number;
+  failed: number;
+  /** Thoughts with no claim row for this work_type — what a run would enqueue. The generic definition (exact for extraction; reembed/consolidate have model-aware pool rules). */
+  unpooled: number;
+  /** The whole corpus's thought count — the same for every row. */
+  thoughts: number;
+  /** Of `claimed`, how many are past `ttl_expires_at` — a dead worker's lease the reaper has not yet reclaimed. */
+  stale: number;
+  /** The oldest stale lease's `claimed_at`, or null when none is stale. */
+  oldestStaleClaimedAt: string | null;
+  /** The `worker_id` holding that oldest stale lease, or null. */
+  staleWorkerId: string | null;
+  /** Whether this work_type is the brain's active pool (`ob1_config.entity_extraction_key`, or `reembed:<model>@<dim>`); null when the kind records no active key (consolidate). */
+  active: boolean | null;
+};
+
+/** The result of `retryFailed` (SMD-2132) — the `failed` rows of one work_type requeued to `pending`. */
+export type RetryFailedResult = {
+  /** The pool acted on, echoed back. */
+  workType: string;
+  /** How many `failed` rows moved to `pending`. */
+  retried: number;
+  /** The thought ids requeued. */
+  ids: string[];
+};
+
+/** How `releaseStaleLeases` (SMD-2132) is aimed — the optional scoping, and the live-lease escape hatch. */
+export type ReleaseLeasesOpts = {
+  /** Restrict to one pool; omit to reap stale leases across every work_type (the reaper's own cross-pool reach). */
+  workType?: string;
+  /** Restrict to one holder's leases. Required when `includeLive` is set. */
+  workerId?: string;
+  /**
+   * Release a holder's leases even when the TTL has NOT lapsed — a live lease.
+   * Off by default (only past-`ttl_expires_at` leases are touched), because
+   * releasing a live lease risks the holder double-processing; the caller must
+   * name the `workerId` to reach one.
+   */
+  includeLive?: boolean;
+};
+
+/** The result of `releaseStaleLeases` (SMD-2132) — the `claimed` rows returned to the pool. */
+export type ReleaseLeasesResult = {
+  /** How many `claimed` rows moved back to `pending`. */
+  released: number;
+  /** The thought ids released. */
+  ids: string[];
+  /** The distinct `worker_id`s whose leases were released. */
+  workers: string[];
+};
 
 export type ListFilters = {
   limit: number;
@@ -895,7 +983,7 @@ export type QuerySearchLog = {
   filter: Record<string, unknown>;
   resultIds: string[];
   resultScores: (number | null)[];
-  /** Which retrieval arm served the row: 'hybrid' or 'keyword' (SMD-1490). */
+  /** Which retrieval arm served the row: 'hybrid', 'keyword' (SMD-1490) or 'current' — search_thoughts with prefer_current (059, SMD-2255). */
   arm?: string;
   /** The tier the writing server runs as: stable|canary|working, else absent (SMD-1806). */
   tier?: string;
@@ -951,6 +1039,13 @@ export interface ThoughtStore {
     threshold: number;
     limit: number;
     filter: Record<string, unknown>;
+    /**
+     * search_thoughts' opt-in prefer_current (SMD-2255): call 059's
+     * search_thoughts_current, which ranks settled and superseded thoughts
+     * below current ones, instead of search_thoughts_hybrid. Off (absent or
+     * false) is today's function, and today's order.
+     */
+    preferCurrent?: boolean;
   } & RecencyOpts): Promise<ThoughtHybridMatch[]>;
 
   getThought(id: string): Promise<ThoughtRecord | null>;
@@ -976,6 +1071,37 @@ export interface ThoughtStore {
    * or the window holds none. Telemetry only — no thought content, no keys.
    */
   listLoggedSearches(opts: { since: string | null; limit: number }): Promise<LoggedSearchPage>;
+
+  /**
+   * The background-work pools' state (SMD-2131), one row per `work_type` over
+   * `thought_work_claims`, for a read-only queue view over MCP/REST. SQL-backend
+   * only — the table is not published to PostgREST (migration 015), so the shim
+   * throws. Read-only: no lock, no reaper, no write.
+   */
+  workerStatus(): Promise<WorkerStatusRow[]>;
+
+  /**
+   * Requeue a pool's `failed` claim rows to `pending` (SMD-2132) — the write
+   * half of `worker_status`, the `db/*.ts --retry-failed` path over a tool. One
+   * statement, scoped to `workType` alone (`WHERE work_type = $1 AND status =
+   * 'failed'`), resetting `last_error`, `finished_at` and `attempt_count`. Like
+   * `workerStatus`, SQL-backend only — the shim throws (migration 015 does not
+   * publish `thought_work_claims`). The caller has already been gated to a write
+   * key; this method does the mutation and returns the ids for the audit log.
+   */
+  retryFailed(workType: string): Promise<RetryFailedResult>;
+
+  /**
+   * Return `claimed` rows to the pool (SMD-2132) — the write half of
+   * `worker_status`, the `SELECT release_claims_for_worker(...)` path over a
+   * tool. By default only leases past `ttl_expires_at` (a dead worker's) are
+   * released; `includeLive` (which requires a `workerId`) reaches a live lease.
+   * Mirrors migration 015's release SET — `status='pending'`, TTL cleared,
+   * `attempt_count` decremented (an un-run lease is not penalised). SQL-backend
+   * only — the shim throws. The caller gates the write scope; the live-lease
+   * refusal is the caller's (a store method cannot answer as a value).
+   */
+  releaseStaleLeases(opts: ReleaseLeasesOpts): Promise<ReleaseLeasesResult>;
 
   /**
    * Everything thought_stats needs, aggregated by the store. The two backends
@@ -1149,7 +1275,8 @@ export interface ThoughtStore {
    * thought that supersedes each. One query over the `supersedes` column (025).
    * The read tools use it to LABEL a search hit a newer thought has replaced —
    * the guaranteed-shipping half of the retrieval decision (SMD-1253); the
-   * ranking change is gated on eval-supersession.ts. Empty when nothing given or
+   * ranking half is search_thoughts' opt-in prefer_current (059, SMD-2255),
+   * priced by eval-supersession.ts. Empty when nothing given or
    * nothing superseded; best-effort, so a pre-025 database returns an empty map
    * rather than breaking search — preflight's `provenance` check names the fix.
    */
