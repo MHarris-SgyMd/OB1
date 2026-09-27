@@ -11,6 +11,8 @@ The brain's deployed surface becomes three servers and an authorization server, 
 
 Internal names are subdomains; public routes are paths. The stack deploys by compose only.
 
+Contributions (decided 2026-09-27, SMD-2308) are curated **plugins inside the REST core**, not servers of their own. A plugin's operations join the shared contract, its tables join a plugin ledger, and its UI is pages in the canonical GUI.
+
 This revises SMD-2133's target of "two interfaces over one contract". That target made MCP canonical, with REST derived from it. Here **REST is the contract, and MCP is one of its clients.**
 
 The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analysis.md`, SMD-2280). It found that a GUI over today's MCP server has to scrape prose. None of the three dashboards shows the operator's own tools (13 of the 17 core tools are unused). And the two Next dashboards sit on a REST gateway that is not deployed and cannot run on the default brain.
@@ -27,6 +29,10 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
 | 6 | **An authorization server now, as its own service.** | inside the GUI server; OAuth later |
 | 7 | **Token exchange (RFC 8693)** carries identity across the MCP→REST hop. | a service credential plus an asserted user |
 | 8 | **Compose-only deployment.** | keeping a single-process mode |
+| 9 | **A contributed server (an extension or an integration) folds into the REST core as a plugin** (SMD-2308, 2026-09-27). Its operations join the shared contract, and REST and MCP expose them from one process. | a REST-core client of its own at `/ext/<name>`; unchanged standalone servers |
+| 10 | **The six curated `extensions/` port to plugins** (SMD-2311). | keeping them as an undeployed learning path; retiring them |
+| 11 | **`dashboards/` becomes extension pages in the canonical GUI**, registered through its nav registry. There are no standalone dashboard apps. | an open category of REST-client apps behind `/api` |
+| 12 | **Extensions use the brain's identity**: keys or authorization-server tokens, checked by the REST core. There is no key list per extension. | a key list per extension |
 
 ## The shape
 
@@ -39,7 +45,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
                  │   /grafana    → lgtm (SMD-1849 profile) │
                  │   /api        → api.ob1.internal  (opt-in, off by default)
                  │   /health     → mcp.ob1.internal  (keyed; plain "ok" without a key)
-                 │   /ext/<name> → per SMD-1931's dispositions
+                 │   /hooks/<name> → api.ob1.internal (a plugin's webhook; off by default, per plugin)
                  └───────────────┬────────────────────────┘
                                  │  mesh network (internal: true, no outbound route)
    mcp ──token exchange──▶ auth  │
@@ -63,7 +69,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
   | `/grafana` | SMD-1849 |
   | `/api` | REST core (SMD-2284), off by default |
   | `/health` | MCP server: keyed BrainInfo JSON read from the REST core, plain `ok` without a key (today's contract) |
-  | `/ext/<name>` | extension servers that SMD-1931's dispositions keep; removed if none survive |
+  | `/hooks/<name>` | a plugin's inbound webhook, served by the REST core. Off by default and turned on per plugin, like `/api` (decision 9). There is no `/ext/<name>`: extensions are plugins, not servers |
   | `/canary/...` | the canary tier's equivalents (SMD-2294) |
 
 - **Two networks.**
@@ -113,6 +119,28 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
 - **Telemetry:** each server emits OTLP spans with the SMD-1849 allow-list. The MCP span is the parent of the REST span through `traceparent`. Grafana owns storage and presentation.
 - **Brain tiers** (stable / canary / working): one REST core per tier, with the MCP server and the GUI per tier behind `/canary/...`. The exact split is settled in SMD-2294.
 
+## Contributions and plugins
+
+Decided 2026-09-27 (SMD-2308, decisions 9–12).
+
+- **A plugin is a directory with a manifest** (SMD-2310) that declares:
+  - its operations (zod in and out, a handler given the principal and the core services);
+  - its tables, as migrations in a plugin-scoped ledger that `db/migrate.ts` applies and reports;
+  - its grants;
+  - its optional GUI pages, with a nav entry for the GUI's registry;
+  - the scope each operation needs.
+- **Plugins are enabled per deployment by config.** A disabled plugin registers nothing, and its tables are left alone, never dropped.
+- **Enabled plugins join the shared contract.** REST routes are namespaced, MCP tools prefixed, and OpenAPI lists them. `whoami` scope checks apply as for core operations.
+- **Boundaries inside the process:**
+  - a plugin reaches core data only through core operations and services, never raw SQL on `thoughts` or other core tables (the checker holds this);
+  - its own tables come through a plugin-scoped handle;
+  - egress goes through the shared gate.
+- **A plugin that needs an inbound webhook** (a capture source) is exposed at `/hooks/<name>`, off by default and turned on per plugin.
+- **Plugins are curated.** They run in the REST core's process with the brain's privileges, so every plugin is maintainer-reviewed. `integrations/` stops being an open category for anything that touches the brain. Contributions that never touch the brain are out of this repo's surface.
+- **The six curated extensions port to plugins** (SMD-2311). Each tool becomes an operation. Each `schema.sql` becomes plugin migrations that adopt existing tables. professional-crm's direct `thoughts` read (`extensions/professional-crm/index.ts:480-485`) becomes a core-operation call. Upstream's multi-user `user_id` columns get a decision for each plugin (SMD-1716 stays deferred).
+- **Community UI** is a plugin's GUI pages in the canonical GUI (decision 11). The Next dashboards' snippets (`schemas/*/dashboard-snippets`, `recipes/wiki-synthesis/dashboard-snippets`) are ported that way or retired (SMD-2280).
+- **Identity** is the REST core's (decision 12). No plugin mints or checks its own keys.
+
 ## Migration order
 
 | Step | Ticket | Done when |
@@ -127,10 +155,12 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
 | with 2, 5 | SMD-2296: release images per server, the CI full-stack job through the proxy, the landing check and counted surfaces | A release rehearsal smokes every pulled image |
 | after 5 | SMD-2294: the tier stack (`compose.tiers.yaml`, `canary.sh`, `tier.sh`, `--compare`) on proxy paths | No `:8010`–`:8012` left in `deploy/` or `db/` |
 | after 2 | SMD-2295: n8n reaches the brain through the REST core; the orchestration ADR's boundary amended | A template's brain call audits as n8n's key |
+| after 2 | SMD-2310: the plugin mechanism; CONTRIBUTING, the PR template and CLAUDE.md's repo-structure lines describe it | A sample plugin appears in OpenAPI, `tools/list` and the GUI nav only when enabled |
+| after SMD-2310 | SMD-2311: the six curated extensions become plugins; their standalone servers retire | No `extensions/*/index.ts` server remains |
 
 SMD-2278 (server-portable to SDK v2) has landed (#226), so the current server is on v2 through the transition. SMD-2279 (vendored servers to v2) mostly becomes retirement under SMD-1931.
 
-**Rule for new work while the migration runs:** a new brain operation (SMD-1715's deliverables, SMD-1723's forget, SMD-2272's drain, SMD-2273's jobs, SMD-2261's watermark, SMD-1812's page store) is written as a core operation in the shared zod contract (SMD-2283 / SMD-1931), exposed by the REST core and projected to MCP. It is never an MCP-only tool. Until SMD-2283 lands, it may still land in `index.ts`, but its logic goes in a module the core can import.
+**Rule for new work while the migration runs:** a new brain operation (SMD-1715's deliverables, SMD-1723's forget, SMD-2272's drain, SMD-2273's jobs, SMD-2261's watermark, SMD-1812's page store, and any contributed capability as a plugin, SMD-2310) is written as a core operation in the shared zod contract (SMD-2283 / SMD-1931), exposed by the REST core and projected to MCP. It is never an MCP-only tool. Until SMD-2283 lands, it may still land in `index.ts`, but its logic goes in a module the core can import.
 
 ## What else this touches
 
@@ -171,10 +201,12 @@ Read against the tree on 2026-09-27.
 - **`docs/mcp-sdk-v2-migration.md` (SMD-2275):** it calls server-portable "the canonical one-HTTP-process server". Its staging still holds, but the long-term MCP surface is SMD-2287's server, a client of the REST core.
 - **`integrations/kubernetes-deployment`:** under compose-only it has no deployment target. It retires, with SMD-1931 recording the disposition and SMD-2288 the removal. SMD-2259, the Kubernetes step of SMD-2080 and the Kubernetes outlier in SMD-2281 are held for that.
 
+- **CONTRIBUTING.md's "Remote MCP pattern" (`:132`, `:382`), the PR template's server checkbox and the `dashboards/` and `integrations/` category rows** (CLAUDE.md, CONTRIBUTING.md) describe standalone `bun <file>` servers with their own keys. Decisions 9–12 replace them with the curated plugin pattern (SMD-2310 rewrites them). SMD-1846's `/ext/<name>` row becomes `/hooks/<name>`.
+
 ## Not decided here
 
 - **Which authorization server.** SMD-2285 selects it against eight criteria: token exchange, resource indicators, MCP client registration, PKCE, an issuer under a path, one compose service, licence, custom subject-token types.
-- **Whether agent-memory-api, smart-ingest and the `/ext/<name>` extension servers** fold into the core or retire. SMD-1931 gives the dispositions, and the GUI's agent-memory and kanban views follow from them.
+- **Which vendored integrations become plugins and which retire** (agent-memory-api, smart-ingest, the capture sources in SMD-2101). SMD-1931 gives the dispositions under decision 9. The GUI's agent-memory and kanban views follow from them.
 - **The importance scale, the restricted-content lock and kanban's status column.** Each is non-core schema today (`schemas/enhanced-thoughts`, `schemas/workflow-status`); adopting one is a migration decision of its own.
 - **Operations that exist only on the command line or not at all**, needed by the GUI's later views, filed when the GUI reaches them:
   - supersession accept/reject (`db/consolidate.ts --accept/--reject`), where the list tool now also has a `stale` status (migration 063);
