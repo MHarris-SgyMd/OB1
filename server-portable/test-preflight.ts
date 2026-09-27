@@ -1021,6 +1021,17 @@ else {
   // identical regeneration recorded nothing, and the remedy was false).
   await ctx.unsafe(`SELECT write_page_section('${pg063.page_id}'::uuid, 'body', 'A generated body.', 'generated', NULL, '{"model": "stub"}'::jsonb, ARRAY['${tid}']::uuid[]) AS r`);
   assert(/✓  lineage\s+every derived row has its lineage row — 2 lineage row\(s\)/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and following the remedy — regenerating the section unchanged — records the row: ok again on two rows");
+  // The second fail branch — a producer body from before 061 beside a section
+  // missing its row — names the section's remedy too (run-it, third review
+  // pass: pass 1 put it in the first branch alone). The vector trigger
+  // disabled is the cheapest "not current" producer; its row deleted raw.
+  await ctx.unsafe(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_record_vector_lineage`);
+  await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'section' AND artifact_id = '${sec063.section_id}'::uuid`);
+  const olderProducer = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(olderProducer.code === 1 && /✗  lineage\s+derived rows without a lineage row — 1 page section\(s\) carrying a recipe/.test(olderProducer.out) && /Apply db\/migrations\/061_derivations\.sql\./.test(olderProducer.out) && /A page section's row is written by 063's write_page_section/.test(olderProducer.out),
+         `with a producer from before 061 beside it, a section missing its row still gets the store's remedy beside the ledger's (exit ${olderProducer.code}: ${olderProducer.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 160)})`);
+  await ctx.unsafe(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_record_vector_lineage`);
+  await ctx.unsafe(`SELECT write_page_section('${pg063.page_id}'::uuid, 'body', 'A generated body.', 'generated', NULL, '{"model": "stub"}'::jsonb, ARRAY['${tid}']::uuid[]) AS r`);
   // A human's section is not a derivation: a manual write that moved the body
   // emptied the recipe, so releasing it back to the machine leaves nothing
   // for the census to count (cold read, first review pass: the origin-keyed

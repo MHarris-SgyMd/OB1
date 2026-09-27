@@ -9408,8 +9408,8 @@ console.log("\n[58] Migration 063: the page store — a page is a thought whose 
   const RD = "ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)";
   assert(lastDefinerOf("ob1_record_derivation").startsWith("063") && (await functionsNamed("ob1_record_derivation")) === 1 && /'section'/.test(await src(RD)) && /ON CONFLICT \(artifact_kind, artifact_id, produced_by\) DO UPDATE/.test(await src(RD)),
     "063 is the last definer of ob1_record_derivation — 061's body, one form, the section kind admitted, the upsert kept");
-  for (const fn of ["upsert_page", "write_page_section", "accept_page_section", "release_page_section", "lock_page_section", "delete_page_section", "render_page", "page_sections_as_of", "ob1_render_page_thought", "ob1_page_lock", "ob1_page_evidence", "ob1_page_recipe"]) assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("063"), `one ${fn}, 063's`);
-  const immutableDef = (await one<{ d: string }>(`SELECT pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgname = 'page_section_revisions_immutable'`)).d;
+  for (const fn of ["upsert_page", "write_page_section", "accept_page_section", "release_page_section", "lock_page_section", "delete_page_section", "render_page", "page_sections_as_of", "ob1_render_page_thought", "ob1_page_actor", "ob1_page_lock", "ob1_page_evidence", "ob1_page_recipe", "page_section_revisions_refuse_mutation", "ob1_drop_section_derivations"]) assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("063"), `one ${fn}, 063's`);
+  const immutableDef = (await one<{ d: string }>(`SELECT pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgname = 'page_section_revisions_immutable'`))?.d ?? "";
   assert(/BEFORE (UPDATE OR DELETE|DELETE OR UPDATE) ON (public\.)?page_section_revisions FOR EACH ROW/.test(immutableDef), `the revisions' row trigger refuses UPDATE and DELETE (${immutableDef})`);
   assert(/NOT EXISTS \(SELECT 1 FROM page_sections WHERE id = OLD\.section_id\)/.test(await src("page_section_revisions_refuse_mutation()")) && /FOR NO KEY UPDATE/.test(await src("ob1_page_lock(uuid, text)")) && /pg_advisory_xact_lock\(hashtext\('ob1:supersession-review'\)\)/.test(await src("upsert_page(text, text, text, jsonb, text, uuid)")) && [await src("write_page_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)"), await src("accept_page_section(uuid, text)"), await src("release_page_section(uuid, text)"), await src("lock_page_section(uuid, boolean, text)"), await src("delete_page_section(uuid, text)"), await src("upsert_page(text, text, text, jsonb, text, uuid)")].every((b) => /ob1_page_lock\(/.test(b)),
     "the DELETE refusal reads whether the section stands (a cascade passes), every writer takes ob1_page_lock — the thought FOR NO KEY UPDATE, then the page — and upsert_page takes 029's supersession lock before any row");
@@ -9613,8 +9613,15 @@ console.log("\n[58] Migration 063: the page store — a page is a thought whose 
   const dl0 = await refused(`DELETE FROM page_section_revisions WHERE section_id = $1::uuid`, [S]);
   const tr = await refused(`TRUNCATE page_section_revisions`);
   assert(/page_section_revisions is append-only: UPDATE is not permitted/.test(upd) && /page_section_revisions is append-only: DELETE is not permitted/.test(dl0) && /page_section_revisions is append-only: TRUNCATE is not permitted/.test(tr) && /DROP TRIGGER page_section_revisions_immutable_truncate/.test(tr), `the revisions refuse UPDATE, a hand DELETE and TRUNCATE by trigger, for the owner too (${upd.slice(0, 60)} | ${dl0.slice(0, 60)} | ${tr.slice(0, 60)})`);
+  // …and a DELETE issued from inside another trigger, which a rule reading the
+  // trigger depth let through as a cascade (run-it, second review pass; the
+  // tooth from the third): the section stands, so the revision stays.
+  await db.exec(`CREATE TABLE ob1_test_history_eater (id int); CREATE OR REPLACE FUNCTION ob1_test_eat_history() RETURNS trigger LANGUAGE plpgsql AS $t$ BEGIN DELETE FROM page_section_revisions WHERE section_id = '${S}'::uuid; RETURN NULL; END $t$; CREATE TRIGGER eat AFTER INSERT ON ob1_test_history_eater FOR EACH ROW EXECUTE FUNCTION ob1_test_eat_history()`);
+  const eaten = await refused(`INSERT INTO ob1_test_history_eater VALUES (1)`);
+  assert(/page_section_revisions is append-only: DELETE is not permitted/.test(eaten) && (await revsOf(S)).length > 0, `a DELETE from inside another trigger is refused too — the rule reads whether the section stands, not the trigger depth (${eaten.slice(0, 70)})`);
+  await db.exec(`DROP TRIGGER eat ON ob1_test_history_eater; DROP FUNCTION ob1_test_eat_history(); DROP TABLE ob1_test_history_eater`);
   // delete_page_section: the section, its revisions (the cascade the trigger
-  // allows by its depth) and its lineage go, the render follows.
+  // allows because the section row is gone) and its lineage go, the render follows.
   const rlEvBefore = (await eventsOf(P)).length;
   const dsec = await del(r.section_id!, "alice");
   assert(dsec.action === "deleted" && dsec.section_key === "rollback" && (await count(`SELECT count(*)::int AS c FROM page_sections WHERE id = $1::uuid`, [r.section_id])) === 0 && (await count(`SELECT count(*)::int AS c FROM page_section_revisions WHERE section_id = $1::uuid`, [r.section_id])) === 0 && !/One command, by hand\./.test((await rowOf(P)).content) && (await rowOf(P)).content === (await render(P)) && (await eventsOf(P)).length === rlEvBefore + 1,
@@ -9664,10 +9671,15 @@ console.log("\n[58] Migration 063: the page store — a page is a thought whose 
   const tomb = await one<{ prev: string }>(`SELECT diff->>'previous_content' AS prev FROM thought_audit WHERE thought_id = $1::uuid AND action = 'delete'`, [P]);
   assert(dl.ok === true && Number(left.p) === 0 && Number(left.s) === 0 && Number(left.r) === 0 && Number(left.d) === 0 && tomb.prev === lastRender, "delete_thought takes the page, its sections, their revisions (the cascade passes the trigger that refuses a hand DELETE) and the sections' lineage; the tombstone holds the last render");
   assert((await rowOf(p3.page_id!)).supersedes === null, "…and the successor's pointer is cleared, as 025 has it (ON DELETE SET NULL)");
-  // A re-apply is a no-op.
+  // A re-apply moves nothing — and drops only the kind CHECK it replaces: a
+  // CHECK of someone else's that mentions the column stands (run-it, second
+  // review pass: a LIKE on the column name took two such; the tooth from the third).
   const pagesBefore = await count(`SELECT count(*)::int AS c FROM pages`), revsAll = await count(`SELECT count(*)::int AS c FROM page_section_revisions`);
+  await db.exec(`ALTER TABLE derivations ADD CONSTRAINT ob1_test_foreign_kind CHECK (artifact_kind <> 'never')`);
   await reapply("063");
-  assert((await count(`SELECT count(*)::int AS c FROM pages`)) === pagesBefore && (await count(`SELECT count(*)::int AS c FROM page_section_revisions`)) === revsAll && (await functionsNamed("write_page_section")) === 1, "re-applying 063 is a no-op: no seed row, no duplicate function");
+  const kindChecks = (await q<{ n: string }>(`SELECT conname AS n FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%artifact_kind%' ORDER BY 1`)).map((x) => x.n).join();
+  assert((await count(`SELECT count(*)::int AS c FROM pages`)) === pagesBefore && (await count(`SELECT count(*)::int AS c FROM page_section_revisions`)) === revsAll && (await functionsNamed("write_page_section")) === 1 && kindChecks === "derivations_artifact_kind_check,ob1_test_foreign_kind", `re-applying 063 moves no row and no function, and drops only its own kind CHECK — a foreign CHECK on the column stands (${kindChecks})`);
+  await db.exec(`ALTER TABLE derivations DROP CONSTRAINT ob1_test_foreign_kind`);
   await db.exec(`SELECT set_config('ob1.actor', '', false)`);
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM derivations`);

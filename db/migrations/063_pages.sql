@@ -122,8 +122,9 @@
 --   thought directly to the very text the render is moving to holds the
 --   fingerprint lock while waiting on the row (run-it, second review pass:
 --   25 of 30 such races) — a raw edit of a page thought, which nothing in the
---   store does, and whose loser is one refused statement. No arity moves, no return shape moves. No seed
---   row: core ships no fixture. Idempotent under --reapply. MINOR under FORK.md's
+--   store does, and whose loser is one refused statement. No arity moves, no
+--   return shape moves. No seed row: core ships no fixture. Idempotent under
+--   --reapply. MINOR under FORK.md's
 --   version rules. A role provisioned by --grant before this file lacks every
 --   privilege on the three tables: run `migrate.ts --grant` for it again
 --   (db/config.mjs's `pages` group); the store's functions run as the caller
@@ -403,7 +404,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_drop_section_derivations() IS
-  'AFTER DELETE on page_sections (page_sections_drop_derivations, 063): drops the `derivations` rows the section keyed — the machine''s lineage for its body. A section goes only with its page (the page''s cascade, from the page thought''s delete), so this fires under delete_thought and under a replayed tombstone alike (061''s rule). Migration 063 / SMD-1812.';
+  'AFTER DELETE on page_sections (page_sections_drop_derivations, 063): drops the `derivations` rows the section keyed — the machine''s lineage for its body. A section goes with its page''s cascade (the page thought''s delete, or a replayed tombstone — 061''s rule) or through delete_page_section, and this fires under each alike. Migration 063 / SMD-1812.';
 
 DROP TRIGGER IF EXISTS page_sections_drop_derivations ON page_sections;
 CREATE TRIGGER page_sections_drop_derivations
@@ -699,12 +700,6 @@ BEGIN
       MESSAGE = format('upsert_page: metadata must be a JSON object, got %s', jsonb_typeof(v_meta)),
       ERRCODE = 'invalid_parameter_value';
   END IF;
-  IF p_supersedes IS NOT NULL AND NOT EXISTS (SELECT 1 FROM thoughts WHERE id = p_supersedes) THEN
-    RAISE EXCEPTION USING
-      MESSAGE = format('upsert_page: supersedes names no thought (%s)', p_supersedes),
-      ERRCODE = 'invalid_parameter_value';
-  END IF;
-
   -- ob1:supersession-review (032/036): a supersedes write is serialised with
   -- every other on 029's lock, taken BEFORE any row — 033's order, which
   -- delete_thought keeps and update_thought would take inside the render,
@@ -713,6 +708,15 @@ BEGIN
   -- review pass). Re-entrant: update_thought takes it again below.
   IF p_supersedes IS NOT NULL THEN
     PERFORM pg_advisory_xact_lock(hashtext('ob1:supersession-review'));
+    -- The target's existence, read under the lock: delete_thought holds the
+    -- same lock to its commit, so a target it is removing is gone here and
+    -- refused by name — checked before the lock, a new page's INSERT met the
+    -- foreign key's own error instead (definitions trace, third review pass).
+    IF NOT EXISTS (SELECT 1 FROM thoughts WHERE id = p_supersedes) THEN
+      RAISE EXCEPTION USING
+        MESSAGE = format('upsert_page: supersedes names no thought (%s)', p_supersedes),
+        ERRCODE = 'invalid_parameter_value';
+    END IF;
   END IF;
   -- An existing page: found by slug unlocked, then locked in the writers'
   -- order (the thought, then the page — ob1_page_lock); the title and the
@@ -1109,7 +1113,7 @@ BEGIN
   END IF;
   PERFORM ob1_page_lock(v_page, 'delete_page_section');
   -- The section goes with its revisions (the cascade, which the revisions'
-  -- trigger allows by its depth) and its lineage rows (the drop trigger); the
+  -- trigger allows because the section row is gone) and its lineage rows (the drop trigger); the
   -- page thought's audit log keeps every render the section was part of, and
   -- the render moves through update_thought as for any live change. p_actor
   -- is read for the thought's updated_by through the render's event alone —
