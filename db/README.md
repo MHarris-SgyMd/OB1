@@ -207,7 +207,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
-058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2292).
+058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 066 SMD-2292).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -691,7 +691,7 @@ test-schema [59], test-live [32], test-upgrade [20p];
 `server-portable/test-preflight.ts` drives the census, the remedy and the
 repair arms.
 
-Migration 065 (SMD-2292) closes a pairing 064 made routine: a page is a
+Migration 066 (SMD-2292) closes a pairing 064 made routine: a page is a
 thought whose `derived_from` names the evidence its sections were generated
 from, and once the re-embed worker gave the page thought a vector and the
 extractor gave it entities, `consolidation_candidates(page)` returned that
@@ -711,16 +711,16 @@ it. Siblings — two pages from one evidence — are still judged (a page
 superseding a page is 064's designed state; the archive takes a page's
 human-owned sections, so weigh them). Both sides stay in the pool: the rule
 filters pairs, not membership. The body carries `ob1:lineage-excludes-the-pair`, which preflight's
-`lineage` check reads: 063 re-applied by hand over 065 warns naming 065
+`lineage` check reads: 063 re-applied by hand over 066 warns naming 066
 (029 re-applied is caught earlier, by the producer-count arm; the remedies
-run 061, 063, 065 in turn). One body redefined on its own text with no arity change; nothing runs at
+run 061, 063, 066 in turn). One body redefined on its own text with no arity change; nothing runs at
 apply time but the DDL; a pair proposed before the file stands for its
 reviewer (`consolidate.ts --list pending`) and is NOT marked as a lineage
 pair — the listing reads nothing of `derived_from`, the pass never replaces
 it (a text move, once `rebuild_derived` runs — `db/rebuild.ts` — leaves it
 `stale` for a reviewer), and the recorder has no
 lineage guard; reject it by hand, and SMD-2313 counts and flags such rows.
-test-schema [60], test-upgrade [20q] (a proposal planted on the pair before
+test-schema [60], test-upgrade [20r] (a proposal planted on the pair before
 the file is pending and unmoved after it); `server-portable/test-preflight.ts`
 drives the re-applied-body arm.
 
@@ -1731,7 +1731,7 @@ same rule.
 thoughts that share at least one extracted entity with it, captured at least a
 calendar day (UTC) earlier, nearest by exact cosine over that join, at or above
 a floor, at most k — with pairs already proposed (in any state but 063's
-`stale`) and thoughts already superseded left out, and, since 065, a pair one
+`stale`) and thoughts already superseded left out, and, since 066, a pair one
 side of which names the other in `derived_from` (a page and the evidence its
 sections were generated from, a digest and its sources) never judged: a
 derivation says what its input says by construction, and re-deriving is

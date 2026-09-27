@@ -163,7 +163,7 @@ const APPLY_055 = "Apply db/migrations/055_capture_event_payload.sql.";
 const APPLY_060 = "Apply db/migrations/060_append_then_project.sql.";
 const APPLY_061 = "Apply db/migrations/061_derivations.sql.";
 const APPLY_063 = "Apply db/migrations/063_rebuild_derived.sql.";
-const APPLY_065 = "Apply db/migrations/065_lineage_excludes_candidates.sql.";
+const APPLY_066 = "Apply db/migrations/066_lineage_excludes_candidates.sql.";
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
@@ -2202,12 +2202,12 @@ if (configFailed) {
                   `every derived row has its lineage row, but ${rebuildOlder.length === 3 ? "the three bodies 063 redefines are" : `${rebuildOlder.join(" and ")} ${rebuildOlder.length === 1 ? "is" : "are"}`} from before 063 (061 or 029 re-applied by hand over it): a rebuild's mark is never cleared by the producer's next write, and a stale proposal is never replaced by the next judgement (SMD-1732). ${coverage}`,
                   ledgerRemedy("063", APPLY_063));
             } else if (bodies.has_063 && bodies.excludes_lineage !== true) {
-              // 065 (SMD-2292): 029's or 063's candidate body over 065's — the
+              // 066 (SMD-2292): 029's or 063's candidate body over 066's — the
               // exclusion of a thought's derived_from members gone, the pass
               // asks the judge whether a page supersedes its own evidence.
               add("lineage", "warn",
-                  `every derived row has its lineage row, but consolidation_candidates is from before 065 (migration 065 not yet applied, or 063 re-applied by hand over it): the judge is asked whether a page supersedes its own evidence, and a digest its sources (SMD-2292). ${coverage}`,
-                  ledgerRemedy("065", APPLY_065));
+                  `every derived row has its lineage row, but consolidation_candidates is from before 066 (migration 066 not yet applied, or 063 re-applied by hand over it): the judge is asked whether a page supersedes its own evidence, and a digest its sources (SMD-2292). ${coverage}`,
+                  ledgerRemedy("066", APPLY_066));
             } else if (Number(c.orphans)) {
               // The other direction (063): a row whose artifact is gone while
               // its thought stands — nothing it describes exists, and the

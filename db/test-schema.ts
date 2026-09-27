@@ -7565,7 +7565,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   const under046 = await script("under 046");
   assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
   const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
-  assert(restored.length === 6 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("061") && restored[3].startsWith("063") && restored[4].startsWith("064") && restored[5].startsWith("065") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
+  assert(restored.length === 6 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("061") && restored[3].startsWith("063") && restored[4].startsWith("064") && restored[5].startsWith("066") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
   const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
   assert(under046.events.length === 7 && mismatches.length === 0,
     `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
@@ -9396,8 +9396,8 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
     `029's two status CHECKs replaced by 063's named pair: four statuses, and unreviewed = pending or stale (${pcons.join(" | ")})`);
   for (const fn of ["rebuild_derived", "derivation_descendants", "record_supersession_proposal"])
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("063"), `one ${fn}, 063 its last definer (${lastDefinerOf(fn)})`);
-  assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("065"),
-    `one consolidation_candidates, 065 its last definer — 063's body, the stale clause kept, plus the lineage exclusion ([60]) (${lastDefinerOf("consolidation_candidates")})`);
+  assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("066"),
+    `one consolidation_candidates, 066 its last definer — 063's body, the stale clause kept, plus the lineage exclusion ([60]) (${lastDefinerOf("consolidation_candidates")})`);
   assert((await functionsNamed("ob1_record_derivation")) === 1 && lastDefinerOf("ob1_record_derivation").startsWith("064") && /ob1:rerun-clears-the-mark/.test(await src("ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)")),
     `one ob1_record_derivation, 064 its last definer — 063's body, the mark's clearing and its sentinel kept, plus the section kind ([59]) (${lastDefinerOf("ob1_record_derivation")})`);
   const REBUILD_SIG = "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)", WALK_SIG = "derivation_descendants(uuid, int, int)";
@@ -10018,7 +10018,7 @@ console.log("\n[59] Migration 064: the page store — a page is a thought whose 
   await db.exec(`DELETE FROM derivations`);
 }
 
-console.log("\n[60] Migration 065: a derivation and its inputs are never paired for judgement — consolidation_candidates leaves out every thought a thought's derived_from names, from either side (a page and its evidence, a digest and its sources); an unrelated near-duplicate is still listed (SMD-2292)");
+console.log("\n[60] Migration 066: a derivation and its inputs are never paired for judgement — consolidation_candidates leaves out every thought a thought's derived_from names, from either side (a page and its evidence, a digest and its sources); an unrelated near-duplicate is still listed (SMD-2292)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -10045,10 +10045,10 @@ console.log("\n[60] Migration 065: a derivation and its inputs are never paired 
   await db.exec(`SELECT set_agent_kind('op-key', 'operator')`);
   await db.exec(`SELECT set_config('ob1.actor', '${JSON.stringify(ACTOR)}', false)`);
 
-  // The shape: one body, 065's, on 063's text.
+  // The shape: one body, 066's, on 063's text.
   const body = await src(SIG);
-  assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("065") && /ob1:lineage-excludes-the-pair/.test(body) && /p\.status <> 'stale'/.test(body),
-    `one consolidation_candidates, 065 its last definer, the sentinel and 063's stale clause in the body (${lastDefinerOf("consolidation_candidates")})`);
+  assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("066") && /ob1:lineage-excludes-the-pair/.test(body) && /p\.status <> 'stale'/.test(body),
+    `one consolidation_candidates, 066 its last definer, the sentinel and 063's stale clause in the body (${lastDefinerOf("consolidation_candidates")})`);
   // The spelling, not only the behaviour: `'["a"]'::jsonb @> '"a"'` is TRUE
   // in Postgres (array-contains-scalar is membership), so to_jsonb(id::text)
   // would be the same rule and every behavioural assertion below would pass
@@ -10057,7 +10057,7 @@ console.log("\n[60] Migration 065: a derivation and its inputs are never paired 
   assert(/NOT COALESCE\(me\.derived_from @> jsonb_build_array\(o\.id::text\), false\)/.test(body) && /NOT COALESCE\(o\.derived_from @> jsonb_build_array\(me\.id::text\), false\)/.test(body),
     "both directions read, NULL-safe — a thought naming nothing holds NULL there, and NOT NULL would drop every row");
   const comment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [SIG])).c ?? "";
-  assert(/029/.test(comment) && /063/.test(comment) && /065/.test(comment) && /derived_from/.test(comment), "the comment names 029, 063 and 065 and the rule");
+  assert(/029/.test(comment) && /063/.test(comment) && /066/.test(comment) && /derived_from/.test(comment), "the comment names 029, 063 and 066 and the rule");
 
   // The corpus, ten days old: E, the evidence; D, an unrelated note near E
   // in vector space (the same axis); X, a second source on another axis.
@@ -10116,7 +10116,7 @@ console.log("\n[60] Migration 065: a derivation and its inputs are never paired 
   assert(sorted((await derivedOf(G)).d) === sorted([E, X]) && ids(await cands(G)) === D, "with the evidence deleted the digest still names it (025's historical record) and its other source is still not a candidate");
 
   // A re-apply is a no-op: one body, the rule standing.
-  await reapply("065");
+  await reapply("066");
   assert((await functionsNamed("consolidation_candidates")) === 1 && /ob1:lineage-excludes-the-pair/.test(await src(SIG)) && ids(await cands(G)) === D, "a re-apply leaves one body carrying the rule");
   await db.exec(`SELECT set_config('ob1.actor', '', false)`);
   await db.exec(`DELETE FROM thoughts`);

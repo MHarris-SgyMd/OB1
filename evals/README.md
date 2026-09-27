@@ -3199,7 +3199,7 @@ They matter here because the labelled conflicts live in exactly those documents
 
 `consolidation_candidates` restricts to older thoughts (by a UTC calendar day)
 sharing an entity, nearest by exact cosine, at most k, at or above a floor
-(since migration 065 it also leaves out a pair one side of which names the
+(since migration 066 it also leaves out a pair one side of which names the
 other in `derived_from`; the table below was measured under 029's rule alone).
 The judge cost is one call per pair, so the table is what k and the floor were
 chosen from:

@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 065: a derivation and its inputs are never paired for judgement —
+-- Migration 066: a derivation and its inputs are never paired for judgement —
 --                consolidation_candidates leaves out every thought a
 --                thought's derived_from names, in both directions (SMD-2292)
 -- =============================================================================
@@ -69,7 +69,7 @@
 --   by hand over it (the exclusion gone, the pass would propose the pairs
 --   again). 029 re-applied by hand is caught earlier: its 8-argument
 --   record_supersession_proposal lands beside 061's, the producer-count arm
---   fires first, and the remedies run 061, 063, 065 in turn (measured, first
+--   fires first, and the remedies run 061, 063, 066 in turn (measured, first
 --   review pass). Neither condition needs an index: o is reached by primary key
 --   from the shared-entity join (tens of rows), and both containments are
 --   per-row reads of rows already fetched. The containment is byte-exact, as
@@ -98,7 +98,7 @@
 --   rejection is a reviewer's, with a name on it. Until SMD-2314 lands, a
 --   reviewer handed a proposal whose newer side is a page or a digest reads
 --   trace_provenance(newer) and rejects the pair when it appears there: the
---   transitive shape THE RULE leaves in. test-upgrade [20q] pins
+--   transitive shape THE RULE leaves in. test-upgrade [20r] pins
 --   the standing row: planted before this file, pending and unmoved after
 --   it. MINOR under FORK.md's version rules.
 --
@@ -116,21 +116,21 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                   WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name = 'derived_from') THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 065 needs 025 (thoughts.derived_from); this schema lacks it',
+      MESSAGE = 'migration 066 needs 025 (thoughts.derived_from); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF to_regclass('supersession_proposals') IS NULL OR to_regprocedure('consolidation_candidates(uuid, int, float)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 065 needs 029 (supersession_proposals, consolidation_candidates); this schema lacks it',
+      MESSAGE = 'migration 066 needs 029 (supersession_proposals, consolidation_candidates); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint
                   WHERE conname = 'supersession_proposals_status_check' AND pg_get_constraintdef(oid) LIKE '%''stale''%') THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 065 needs 063 (the stale proposal status this body reads); this schema lacks it',
+      MESSAGE = 'migration 066 needs 063 (the stale proposal status this body reads); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -177,7 +177,7 @@ AS $$
      AND NOT EXISTS (SELECT 1 FROM thoughts s WHERE s.supersedes = o.id)
      -- 063: a stale proposal does not hold the pair — the pass judges it again.
      AND NOT EXISTS (SELECT 1 FROM supersession_proposals p WHERE p.older_id = o.id AND p.newer_id = me.id AND p.status <> 'stale')
-     -- 065 (ob1:lineage-excludes-the-pair): a derivation and its input are
+     -- 066 (ob1:lineage-excludes-the-pair): a derivation and its input are
      -- never paired — the newer side naming the older (a page and its
      -- evidence) or the older naming the newer. COALESCE: a NULL derived_from
      -- is "names nothing", not unknown.
@@ -189,4 +189,4 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION consolidation_candidates(uuid, int, float) IS
-  'The older thoughts a thought is judged against for a supersession: sharing at least one entity (016), captured at least a calendar day (UTC) earlier, nearest by exact cosine, at or above p_min_similarity, at most p_k; pairs already proposed and thoughts already superseded are left out — since 063 a pair whose proposal is stale (rebuild_derived found a text moved) is judged again; since 065 a pair one side of which names the other in derived_from (a page and its evidence, a digest and its sources) is never judged: re-deriving is rebuild_derived''s door, not supersession''s. Migrations 029, 063, 065.';
+  'The older thoughts a thought is judged against for a supersession: sharing at least one entity (016), captured at least a calendar day (UTC) earlier, nearest by exact cosine, at or above p_min_similarity, at most p_k; pairs already proposed and thoughts already superseded are left out — since 063 a pair whose proposal is stale (rebuild_derived found a text moved) is judged again; since 066 a pair one side of which names the other in derived_from (a page and its evidence, a digest and its sources) is never judged: re-deriving is rebuild_derived''s door, not supersession''s. Migrations 029, 063, 066.';

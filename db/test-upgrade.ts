@@ -570,9 +570,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // kind CHECK and redefines its writer on 063's body, and adds the store's
   // functions over 025's derived_from, 032's validator, 060's write functions
   // and 061's lineage, refusing by name without 025, 032, 060, 061 or 063
-  // ([20p]); 065 redefines 029's consolidation_candidates on 063's body
+  // ([20p]); 066 redefines 029's consolidation_candidates on 063's body
   // over 025's derived_from, refusing by name without 025, 029 or 063
-  // ([20q]) — all recorded by the baseline with their prerequisites present,
+  // ([20r]) — all recorded by the baseline with their prerequisites present,
   // so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
@@ -2586,10 +2586,10 @@ console.log("\n[20p] Migration 064 onto a populated brain at the file before it 
   await sql3.close();
 }
 
-console.log("\n[20q] Migration 065 onto a populated brain at the file before it — the candidate filter redefined on 063's body, no audit row written, no row moved, no lineage row moved; a page re-embedded and extracted at 064 listed its own evidence as a candidate before the file and lists the unrelated note alone after it; a re-apply a no-op; refused by name without 025, 029 or 063 (SMD-2292)");
+console.log("\n[20r] Migration 066 onto a populated brain at the file before it — the candidate filter redefined on 063's body, no audit row written, no row moved, no lineage row moved; a page re-embedded and extracted at 064 listed its own evidence as a candidate before the file and lists the unrelated note alone after it; a re-apply a no-op; refused by name without 025, 029 or 063 (SMD-2292)");
 {
   await dropSchema(URL_);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "065" });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "066" });
   const sql = new SQL({ url: URL_, max: 1 });
   const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
   await sql`SELECT set_agent_kind('laptop', 'operator')`;
@@ -2599,22 +2599,22 @@ console.log("\n[20q] Migration 065 onto a populated brain at the file before it 
   // days old, both mentioning Alice; a page generated from E, re-embedded
   // through the 11-argument update_thought and extracted — the state
   // SMD-2292 measured.
-  const e = (await sql`SELECT upsert_thought('upgrade 065: the evidence', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
-  const d = (await sql`SELECT upsert_thought('upgrade 065: an unrelated note', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
+  const e = (await sql`SELECT upsert_thought('upgrade 066: the evidence', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
+  const d = (await sql`SELECT upsert_thought('upgrade 066: an unrelated note', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
   await sql`UPDATE thoughts SET created_at = now() - interval '10 days' WHERE id IN (${e.id}::uuid, ${d.id}::uuid)`;
   // A second evidence thought, e2: the page cites both, and a proposal on
-  // (e2, page) is planted under 063's body before the file — the row 065
+  // (e2, page) is planted under 063's body before the file — the row 066
   // leaves standing (second review pass: "left as it stands" was unpinned).
-  const e2 = (await sql`SELECT upsert_thought('upgrade 065: the second evidence', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
+  const e2 = (await sql`SELECT upsert_thought('upgrade 066: the second evidence', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
   // A third, e3, whose proposal is set stale raw (063's status; the table's
   // one trigger is 061's lineage drop) — under 063's body a stale pair is
   // re-found, the consequence measured before the file; and the table is
   // read whole beside stamps(), so "no row moves" is pinned for every row,
   // not the pending one alone (run-it, third review pass: an auto-reject of
   // stale rows survived this suite).
-  const e3 = (await sql`SELECT upsert_thought('upgrade 065: the third evidence', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
+  const e3 = (await sql`SELECT upsert_thought('upgrade 066: the third evidence', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
   await sql`UPDATE thoughts SET created_at = now() - interval '10 days' WHERE id IN (${e2.id}::uuid, ${e3.id}::uuid)`;
-  const pg = (await sql`SELECT upsert_page('upgrade-065', 'Upgrade 065', 'topic', '{}'::jsonb, 'alice') AS r`)[0].r as { page_id: string };
+  const pg = (await sql`SELECT upsert_page('upgrade-066', 'Upgrade 066', 'topic', '{}'::jsonb, 'alice') AS r`)[0].r as { page_id: string };
   const sec = (await sql`SELECT write_page_section(${pg.page_id}::uuid, 'body', 'Generated from the evidence.', 'generated', 'Body', '{"model": "stub"}'::jsonb, ${sql.array([e.id, e2.id, e3.id], "TEXT")}::uuid[], 10, 'gen') AS r`)[0].r as { action: string };
   const [{ content }] = await sql`SELECT content FROM thoughts WHERE id = ${pg.page_id}::uuid`;
   const re = (await sql`SELECT update_thought(${pg.page_id}::uuid, ${content}::text, NULL::jsonb, ${vec(0)}::vector, NULL::jsonb, NULL::timestamptz, ${actor}::jsonb, ${OPTS.model}::text, NULL::jsonb, NULL::jsonb, NULL::jsonb) AS r`)[0].r as { ok: boolean };
@@ -2636,13 +2636,13 @@ console.log("\n[20q] Migration 065 onto a populated brain at the file before it 
   const pre = await excludes();
   const name = (o: string) => (o === e.id ? "E" : o === d.id ? "D" : o === e2.id ? "E2" : o === e3.id ? "E3" : o);
   assert(sec.action === "created" && re.ok === true && pre.x === false && Number(pre.n) === 1 && (await cands()) === [d.id, e.id, e3.id].sort().join(),
-    `before 065 the page's candidates are its own evidence, the unrelated note and the third evidence whose pair is stale (063 re-finds it) — the pairs SMD-2292 measured — and not the second evidence, whose pending proposal holds the pair (029's rule) (${(await cands()).split(",").map(name).join()})`);
+    `before 066 the page's candidates are its own evidence, the unrelated note and the third evidence whose pair is stale (063 re-finds it) — the pairs SMD-2292 measured — and not the second evidence, whose pending proposal holds the pair (029's rule) (${(await cands()).split(",").map(name).join()})`);
   const stamps = async () => JSON.stringify(await sql`SELECT id, content, content_fingerprint, metadata, embedding::text AS e, embedding_model, derived_from, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
   const lineage = async () => JSON.stringify(await sql`SELECT artifact_kind, artifact_id, produced_by, produced_at::text AS at, recipe FROM derivations ORDER BY 1, 2, 3`);
   const before = await stamps(), lineageBefore = await lineage();
   const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
 
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("065") });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("066") });
 
   const post = await excludes();
   assert(post.x === true && Number(post.n) === 1 && (await cands()) === d.id, "…and after: one consolidation_candidates carrying the rule, and the page's candidates are the unrelated note alone");
@@ -2666,7 +2666,7 @@ console.log("\n[20q] Migration 065 onto a populated brain at the file before it 
   // brain has its ledger). Each condition named on failure: a bundled
   // assertion said only "no".
   const baseline = await migrate("--baseline");
-  assert(baseline.code === 0, `--baseline records the ledger over the schema at 065 (exit ${baseline.code})`);
+  assert(baseline.code === 0, `--baseline records the ledger over the schema at 066 (exit ${baseline.code})`);
   const shapeAfter = await shape(sql), stampsAfter = await stamps(), proposalsAfter = await proposals();
   const re2 = await migrate("--reapply");
   const firstDiff = (a: string, b: string) => { const x = JSON.parse(a) as Record<string, unknown>[], y = JSON.parse(b) as Record<string, unknown>[]; for (let i = 0; i < Math.max(x.length, y.length); i++) for (const k of new Set([...Object.keys(x[i] ?? {}), ...Object.keys(y[i] ?? {})])) if (JSON.stringify(x[i]?.[k]) !== JSON.stringify(y[i]?.[k])) return `row ${i} ${k}: ${JSON.stringify(x[i]?.[k])} -> ${JSON.stringify(y[i]?.[k])}`; return ""; };
@@ -2676,24 +2676,24 @@ console.log("\n[20q] Migration 065 onto a populated brain at the file before it 
   await sql.close();
 
   // The guard, driven ([20p]'s shape): a brain baselined at a ledger through
-  // 065 whose schema stops before 025, then 029, then 063.
+  // 066 whose schema stops before 025, then 029, then 063.
   for (const [stop, needs] of [
-    ["025", "migration 065 needs 025 \\(thoughts\\.derived_from\\); this schema lacks it"],
-    ["029", "migration 065 needs 029 \\(supersession_proposals, consolidation_candidates\\); this schema lacks it"],
-    ["063", "migration 065 needs 063 \\(the stale proposal status this body reads\\); this schema lacks it"],
+    ["025", "migration 066 needs 025 \\(thoughts\\.derived_from\\); this schema lacks it"],
+    ["029", "migration 066 needs 029 \\(supersession_proposals, consolidation_candidates\\); this schema lacks it"],
+    ["063", "migration 066 needs 063 \\(the stale proposal status this body reads\\); this schema lacks it"],
   ] as const) {
     await dropSchema(URL_);
     await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
     const baselined = await migrate("--baseline");
     assert(baselined.code === 0, `--baseline records every migration over the pre-${stop} schema (exit ${baselined.code})`);
     const sql2 = new SQL({ url: URL_, max: 1 });
-    const the065 = MIGRATIONS.find((f) => f.startsWith("065_"))!;
-    await sql2`DELETE FROM schema_migrations WHERE name = ${the065}`;
+    const the066 = MIGRATIONS.find((f) => f.startsWith("066_"))!;
+    await sql2`DELETE FROM schema_migrations WHERE name = ${the066}`;
     const plain = await migrate();
-    const ok = plain.code === 1 && new RegExp(`065_lineage_excludes_candidates\\.sql\\s+FAILED: ${needs}`).test(plain.out) &&
+    const ok = plain.code === 1 && new RegExp(`066_lineage_excludes_candidates\\.sql\\s+FAILED: ${needs}`).test(plain.out) &&
       /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
-    assert(ok, `a plain run fails at 065 naming ${stop} and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
-    assert(Number((await sql2`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the065}`)[0].c) === 0, `…065 records nothing without ${stop}`);
+    assert(ok, `a plain run fails at 066 naming ${stop} and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+    assert(Number((await sql2`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the066}`)[0].c) === 0, `…066 records nothing without ${stop}`);
     await sql2.close();
   }
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "063" });

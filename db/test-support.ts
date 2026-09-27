@@ -226,7 +226,7 @@ const FUNCTIONS = [
   // record_supersession_proposal) keep their signatures and are named above.
   "derivation_descendants(uuid, int, int)",
   "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)",
-  // 065 (SMD-2292): consolidation_candidates redefined on 063's body — the
+  // 066 (SMD-2292): consolidation_candidates redefined on 063's body — the
   // signature above, no new name.
   // 064 (SMD-1812): the page store's nine functions, its four helpers, the
   // page-thought writer, the revisions' refusal trigger and the section drop
