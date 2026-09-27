@@ -7565,7 +7565,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   const under046 = await script("under 046");
   assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
   const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
-  assert(restored.length === 5 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("061") && restored[3].startsWith("063") && restored[4].startsWith("064") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
+  assert(restored.length === 6 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("061") && restored[3].startsWith("063") && restored[4].startsWith("064") && restored[5].startsWith("065") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
   const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
   assert(under046.events.length === 7 && mismatches.length === 0,
     `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
@@ -9394,8 +9394,10 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
   assert(pcons.some((d) => /supersession_proposals_status_check=.*'pending'.*'accepted'.*'rejected'.*'stale'/.test(d)) && pcons.some((d) => /supersession_proposals_unreviewed_check=.*'pending'.*'stale'.*reviewed_at IS NULL/.test(d))
       && !pcons.some((d) => /\(status = 'pending'::text\) = \(reviewed_at IS NULL\)/.test(d)) && pcons.filter((d) => /status = ANY/.test(d) && !/reviewed_at/.test(d)).length === 1,
     `029's two status CHECKs replaced by 063's named pair: four statuses, and unreviewed = pending or stale (${pcons.join(" | ")})`);
-  for (const fn of ["rebuild_derived", "derivation_descendants", "consolidation_candidates", "record_supersession_proposal"])
+  for (const fn of ["rebuild_derived", "derivation_descendants", "record_supersession_proposal"])
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("063"), `one ${fn}, 063 its last definer (${lastDefinerOf(fn)})`);
+  assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("065"),
+    `one consolidation_candidates, 065 its last definer — 063's body, the stale clause kept, plus the lineage exclusion ([60]) (${lastDefinerOf("consolidation_candidates")})`);
   assert((await functionsNamed("ob1_record_derivation")) === 1 && lastDefinerOf("ob1_record_derivation").startsWith("064") && /ob1:rerun-clears-the-mark/.test(await src("ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)")),
     `one ob1_record_derivation, 064 its last definer — 063's body, the mark's clearing and its sentinel kept, plus the section kind ([59]) (${lastDefinerOf("ob1_record_derivation")})`);
   const REBUILD_SIG = "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)", WALK_SIG = "derivation_descendants(uuid, int, int)";
@@ -10014,6 +10016,107 @@ console.log("\n[59] Migration 064: the page store — a page is a thought whose 
   await db.exec(`SELECT set_config('ob1.actor', '', false)`);
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM derivations`);
+}
+
+console.log("\n[60] Migration 065: a derivation and its inputs are never paired for judgement — consolidation_candidates leaves out every thought a thought's derived_from names, from either side (a page and its evidence, a digest and its sources); an unrelated near-duplicate is still listed (SMD-2292)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  const SIG = "consolidation_candidates(uuid, int, float)";
+  const MODEL = EMBEDDING_MODEL;
+  const ACTOR = { name: "op-key", via: "test-door" };
+  const EXTRACT = "extract:stub@p1";
+  type Cand = { o: string; similarity: number; shared: number };
+  const cap = async (content: string, at: number, extra: Record<string, unknown> = {}) =>
+    (await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify({ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL, ...extra }), unit(at)])).r.id;
+  const age = (id: string, days: number) => db.query(`UPDATE thoughts SET created_at = now() - make_interval(days => $2) WHERE id = $1::uuid`, [id, days]);
+  const mention = (id: string, names: string[]) => db.query(`SELECT record_thought_entities($1::uuid, $2, $3::jsonb, '[]'::jsonb, NULL, NULL)`, [id, EXTRACT, JSON.stringify(names.map((n) => ({ name: n, type: "topic", confidence: 0.9 })))]);
+  const cands = async (id: string) => q<Cand>(`SELECT older_id::text AS o, similarity, shared_entities AS shared FROM consolidation_candidates($1::uuid, 5, 0)`, [id]);
+  const ids = (cs: Cand[]) => cs.map((c) => c.o).sort().join();
+  const derivedOf = async (id: string) => one<{ d: string[] | null; novec: boolean; label: string | null }>(`SELECT derived_from AS d, embedding IS NULL AS novec, embedding_model AS label FROM thoughts WHERE id = $1::uuid`, [id]);
+  const sorted = (a: string[] | null) => JSON.stringify([...(a ?? [])].sort());
+
+  await restoreShipped("consolidation_candidates");
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM derivations`);
+  await db.exec(`DELETE FROM ob1_entities`);
+  await db.exec(`DELETE FROM ob1_agents`);
+  await db.exec(`SELECT set_agent_kind('op-key', 'operator')`);
+  await db.exec(`SELECT set_config('ob1.actor', '${JSON.stringify(ACTOR)}', false)`);
+
+  // The shape: one body, 065's, on 063's text.
+  const body = await src(SIG);
+  assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("065") && /ob1:lineage-excludes-the-pair/.test(body) && /p\.status <> 'stale'/.test(body),
+    `one consolidation_candidates, 065 its last definer, the sentinel and 063's stale clause in the body (${lastDefinerOf("consolidation_candidates")})`);
+  assert(/NOT COALESCE\(me\.derived_from @> jsonb_build_array\(o\.id::text\), false\)/.test(body) && /NOT COALESCE\(o\.derived_from @> jsonb_build_array\(me\.id::text\), false\)/.test(body),
+    "both directions read, NULL-safe — a thought naming nothing holds NULL there, and NOT NULL would drop every row");
+  const comment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [SIG])).c ?? "";
+  assert(/065/.test(comment) && /063/.test(comment) && /derived_from/.test(comment), "the comment names 029, 063 and 065 and the rule");
+
+  // The corpus, ten days old: E, the evidence; D, an unrelated note near E
+  // in vector space (the same axis); X, a second source on another axis.
+  // Every one mentions billing.
+  const E = await cap("the evidence: we bill monthly", 0); await age(E, 10);
+  const D = await cap("an unrelated note: we bill monthly too", 0); await age(D, 10);
+  const X = await cap("a second source: invoices go out on the first", 2); await age(X, 10);
+  for (const id of [E, D, X]) await mention(id, ["billing"]);
+
+  // The page: one generated section from E, so the page thought's
+  // derived_from is [E]; then the re-embed worker's write (the render back
+  // through the 11-argument update_thought with a vector and its label) and
+  // the extractor's (billing) — the state SMD-2292 measured, in which 063's
+  // body listed E at cosine 1 as the page's first candidate.
+  const P = (await one<{ r: { page_id: string } }>(`SELECT upsert_page('billing', 'Billing', 'topic', '{}'::jsonb, 'alice') AS r`)).r.page_id;
+  const sec = (await one<{ r: { action: string } }>(`SELECT write_page_section($1::uuid, 'body', 'We bill monthly, per the evidence.', 'generated', 'Body', '{"model": "stub"}'::jsonb, $2::uuid[], 10, 'gen') AS r`, [P, [E]])).r;
+  let pt = await derivedOf(P);
+  assert(sec.action === "created" && sorted(pt.d) === sorted([E]) && pt.novec === true, `the page thought names its evidence and waits for a vector (${JSON.stringify(pt)})`);
+  const render = (await one<{ c: string }>(`SELECT content AS c FROM thoughts WHERE id = $1::uuid`, [P])).c;
+  const re = (await one<{ r: { ok: boolean; error?: string } }>(`SELECT update_thought($1::uuid, $2::text, NULL::jsonb, $3::vector, NULL::jsonb, NULL::timestamptz, $4::jsonb, $5::text, NULL::jsonb, NULL::jsonb, NULL::jsonb) AS r`, [P, render, unit(0), JSON.stringify(ACTOR), MODEL])).r;
+  pt = await derivedOf(P);
+  assert(re.ok === true && pt.novec === false && pt.label === MODEL && sorted(pt.d) === sorted([E]), `the re-embed writes the vector and its label through update_thought and leaves derived_from (${JSON.stringify(re)})`);
+  await mention(P, ["billing"]);
+
+  // THE ASSERTION THE FILE EXISTS FOR: the page's candidates are the
+  // unrelated near-duplicate first (cosine 1) and the far source (cosine 0,
+  // at the floor) — never its own evidence, which 063's body listed first.
+  const cp = await cands(P);
+  const name = (o: string) => (o === E ? "E" : o === D ? "D" : o === X ? "X" : o);
+  assert(ids(cp) === [D, X].sort().join() && cp[0].o === D && Math.abs(Number(cp[0].similarity) - 1) < 1e-6 && Number(cp[0].shared) === 1,
+    `the page is judged against the unrelated near-duplicate (cosine 1, one shared entity) and the far source, never against its own evidence (${cp.map((c) => name(c.o)).join()})`);
+  // The reverse. By the day rule the evidence could not list today's page;
+  // moved twenty days back — a derivation whose input was captured later, or
+  // a created_at set by hand — the page is the older side, and only the
+  // second condition keeps it out of E's list, while D, which the page does
+  // not name, lists it.
+  await age(P, 20);
+  assert(!(await cands(E)).some((c) => c.o === P) && (await cands(D)).some((c) => c.o === P),
+    "…and from the other side: the evidence is never judged against the page that names it, while a thought the page does not name is");
+  await db.query(`UPDATE thoughts SET created_at = now() WHERE id = $1::uuid`, [P]);
+
+  // Any derived thought: a digest captured with derived_from [E, X] through
+  // upsert_thought is judged against D alone; a thought naming nothing is
+  // judged against every older thought sharing the entity, as 063 had it
+  // (the page and the digest are today's).
+  const G = await cap("digest: monthly billing, invoices on the first", 0, { derived_from: [E, X] });
+  await mention(G, ["billing"]);
+  assert(ids(await cands(G)) === D, `a digest captured with derived_from is judged against the note it does not name, and against neither source (${(await cands(G)).map((c) => name(c.o)).join()})`);
+  const N = await cap("a plain newer note on billing", 0);
+  await mention(N, ["billing"]);
+  assert(ids(await cands(N)) === [D, E, X].sort().join(), "a thought with no derived_from is judged against every older thought sharing the entity — the rule adds nothing to 063's for it");
+  // The evidence deleted: 025 keeps the id in derived_from (a historical
+  // record), the pair is gone with the row, and the digest's other source
+  // stays out — the array's other member still holds.
+  await db.query(`SELECT delete_thought($1::uuid, $2::jsonb)`, [E, JSON.stringify(ACTOR)]);
+  assert(sorted((await derivedOf(G)).d) === sorted([E, X]) && ids(await cands(G)) === D, "with the evidence deleted the digest still names it (025's historical record) and its other source is still not a candidate");
+
+  // A re-apply is a no-op: one body, the rule standing.
+  await reapply("065");
+  assert((await functionsNamed("consolidation_candidates")) === 1 && /ob1:lineage-excludes-the-pair/.test(await src(SIG)) && ids(await cands(G)) === D, "a re-apply leaves one body carrying the rule");
+  await db.exec(`SELECT set_config('ob1.actor', '', false)`);
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM derivations`);
+  await db.exec(`DELETE FROM ob1_entities`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

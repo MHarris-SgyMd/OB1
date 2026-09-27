@@ -570,11 +570,13 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // kind CHECK and redefines its writer on 063's body, and adds the store's
   // functions over 025's derived_from, 032's validator, 060's write functions
   // and 061's lineage, refusing by name without 025, 032, 060, 061 or 063
-  // ([20p]) — all recorded by the baseline with their prerequisites present,
+  // ([20p]); 065 redefines 029's consolidation_candidates on 063's body
+  // over 025's derived_from, refusing by name without 025, 029 or 063
+  // ([20q]) — all recorded by the baseline with their prerequisites present,
   // so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 35, `030 is among the last thirty-five migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 36, `030 is among the last thirty-six migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -2581,6 +2583,89 @@ console.log("\n[20p] Migration 064 onto a populated brain at the file before it 
   const sql3 = new SQL({ url: URL_, max: 1 });
   const [present] = await sql3`SELECT to_regclass('pages') IS NOT NULL AS t, to_regprocedure('write_page_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)') IS NOT NULL AS w`;
   assert(present.t === true && present.w === true, "…and applied once every prerequisite is there: the table and the guard are present");
+  await sql3.close();
+}
+
+console.log("\n[20q] Migration 065 onto a populated brain at the file before it — the candidate filter redefined on 063's body, no audit row written, no row moved, no lineage row moved; a page re-embedded and extracted at 064 listed its own evidence as a candidate before the file and lists the unrelated note alone after it; a re-apply a no-op; refused by name without 025, 029 or 063 (SMD-2292)");
+{
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "065" });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  await sql`SELECT set_agent_kind('laptop', 'operator')`;
+  const actor = { name: "laptop", via: "open-brain" };
+  const SIG = "consolidation_candidates(uuid, int, float)";
+  // A corpus at 064: the evidence E and an unrelated note D on E's axis, ten
+  // days old, both mentioning Alice; a page generated from E, re-embedded
+  // through the 11-argument update_thought and extracted — the state
+  // SMD-2292 measured.
+  const e = (await sql`SELECT upsert_thought('upgrade 065: the evidence', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
+  const d = (await sql`SELECT upsert_thought('upgrade 065: an unrelated note', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
+  await sql`UPDATE thoughts SET created_at = now() - interval '10 days' WHERE id IN (${e.id}::uuid, ${d.id}::uuid)`;
+  const pg = (await sql`SELECT upsert_page('upgrade-065', 'Upgrade 065', 'topic', '{}'::jsonb, 'alice') AS r`)[0].r as { page_id: string };
+  const sec = (await sql`SELECT write_page_section(${pg.page_id}::uuid, 'body', 'Generated from the evidence.', 'generated', 'Body', '{"model": "stub"}'::jsonb, ${sql.array([e.id], "TEXT")}::uuid[], 10, 'gen') AS r`)[0].r as { action: string };
+  const [{ content }] = await sql`SELECT content FROM thoughts WHERE id = ${pg.page_id}::uuid`;
+  const re = (await sql`SELECT update_thought(${pg.page_id}::uuid, ${content}::text, NULL::jsonb, ${vec(0)}::vector, NULL::jsonb, NULL::timestamptz, ${actor}::jsonb, ${OPTS.model}::text, NULL::jsonb, NULL::jsonb, NULL::jsonb) AS r`)[0].r as { ok: boolean };
+  for (const id of [e.id, d.id, pg.page_id]) {
+    const x = (await sql`SELECT record_thought_entities(${id}::uuid, 'extract:m@p2', '[{"name": "Alice", "type": "person", "confidence": 0.9}]'::jsonb, '[]'::jsonb, NULL, NULL) AS r`)[0].r as { ok: boolean };
+    assert(x.ok === true, "the corpus at 064 carries an extraction on each thought");
+  }
+  const cands = async (): Promise<string> => (await sql`SELECT older_id::text AS o FROM consolidation_candidates(${pg.page_id}::uuid, 5, 0) ORDER BY 1`).map((r: { o: string }) => r.o).join();
+  const excludes = async () => (await sql`SELECT prosrc LIKE '%ob1:lineage-excludes-the-pair%' AS x, (SELECT count(*)::int FROM pg_proc WHERE proname = 'consolidation_candidates') AS n FROM pg_proc WHERE oid = to_regprocedure(${SIG})`)[0] as { x: boolean; n: number };
+  const pre = await excludes();
+  assert(sec.action === "created" && re.ok === true && pre.x === false && Number(pre.n) === 1 && (await cands()) === [d.id, e.id].sort().join(),
+    `before 065 the page's candidates are its own evidence and the unrelated note — the pair SMD-2292 measured (${(await cands()).split(",").map((o) => (o === e.id ? "E" : o === d.id ? "D" : o)).join()})`);
+  const stamps = async () => JSON.stringify(await sql`SELECT id, content, content_fingerprint, metadata, embedding::text AS e, embedding_model, derived_from, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const lineage = async () => JSON.stringify(await sql`SELECT artifact_kind, artifact_id, produced_by, produced_at::text AS at, recipe FROM derivations ORDER BY 1, 2, 3`);
+  const before = await stamps(), lineageBefore = await lineage();
+  const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("065") });
+
+  const post = await excludes();
+  assert(post.x === true && Number(post.n) === 1 && (await cands()) === d.id, "…and after: one consolidation_candidates carrying the rule, and the page's candidates are the unrelated note alone");
+  const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  assert(Number(auditAfter) === Number(auditBefore) && (await stamps()) === before && (await lineage()) === lineageBefore, "the file is DDL alone: no audit row written, no thought moved, no lineage row moved");
+  // A re-apply moves nothing. The ledger first: the suite's applier writes
+  // none, and the migrator's first run would create schema_migrations — a
+  // shape move that is the ledger's, not the file's (run-it, the build; a
+  // brain has its ledger). Each condition named on failure: a bundled
+  // assertion said only "no".
+  const baseline = await migrate("--baseline");
+  assert(baseline.code === 0, `--baseline records the ledger over the schema at 065 (exit ${baseline.code})`);
+  const shapeAfter = await shape(sql), stampsAfter = await stamps();
+  const re2 = await migrate("--reapply");
+  const firstDiff = (a: string, b: string) => { const x = JSON.parse(a) as Record<string, unknown>[], y = JSON.parse(b) as Record<string, unknown>[]; for (let i = 0; i < Math.max(x.length, y.length); i++) for (const k of new Set([...Object.keys(x[i] ?? {}), ...Object.keys(y[i] ?? {})])) if (JSON.stringify(x[i]?.[k]) !== JSON.stringify(y[i]?.[k])) return `row ${i} ${k}: ${JSON.stringify(x[i]?.[k])} -> ${JSON.stringify(y[i]?.[k])}`; return ""; };
+  const stampsRe = await stamps();
+  const failed = [re2.code !== 0 && `exit ${re2.code}`, JSON.stringify(await shape(sql)) !== JSON.stringify(shapeAfter) && "shape moved", stampsRe !== stampsAfter && `a thought moved (${firstDiff(stampsAfter, stampsRe)})`, (await excludes()).x !== true && "the rule gone", (await cands()) !== d.id && `candidates ${await cands()}`].filter(Boolean);
+  assert(failed.length === 0, `a re-apply is a no-op: the shape as it left it, no thought moved, the rule standing (${failed.join("; ") || "exit 0"})`);
+  await sql.close();
+
+  // The guard, driven ([20p]'s shape): a brain baselined at a ledger through
+  // 065 whose schema stops before 025, then 029, then 063.
+  for (const [stop, needs] of [
+    ["025", "migration 065 needs 025 \\(thoughts\\.derived_from\\); this schema lacks it"],
+    ["029", "migration 065 needs 029 \\(supersession_proposals, consolidation_candidates\\); this schema lacks it"],
+    ["063", "migration 065 needs 063 \\(the stale proposal status this body reads\\); this schema lacks it"],
+  ] as const) {
+    await dropSchema(URL_);
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
+    const baselined = await migrate("--baseline");
+    assert(baselined.code === 0, `--baseline records every migration over the pre-${stop} schema (exit ${baselined.code})`);
+    const sql2 = new SQL({ url: URL_, max: 1 });
+    const the065 = MIGRATIONS.find((f) => f.startsWith("065_"))!;
+    await sql2`DELETE FROM schema_migrations WHERE name = ${the065}`;
+    const plain = await migrate();
+    const ok = plain.code === 1 && new RegExp(`065_lineage_excludes_candidates\\.sql\\s+FAILED: ${needs}`).test(plain.out) &&
+      /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+    assert(ok, `a plain run fails at 065 naming ${stop} and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+    assert(Number((await sql2`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the065}`)[0].c) === 0, `…065 records nothing without ${stop}`);
+    await sql2.close();
+  }
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "063" });
+  const sql3 = new SQL({ url: URL_, max: 1 });
+  const [present] = await sql3`SELECT prosrc LIKE '%ob1:lineage-excludes-the-pair%' AS x FROM pg_proc WHERE oid = to_regprocedure(${SIG})`;
+  assert(present.x === true, "…and applied once every prerequisite is there: the body carries the rule");
   await sql3.close();
 }
 

@@ -166,8 +166,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2198 assertions: 2198 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports sixty-four (64) migrations applied, and
+`bun test-schema.ts` prints `2211 assertions: 2211 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports sixty-five (65) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -207,7 +207,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
-058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812).
+058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2292).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -690,6 +690,25 @@ re-apply is idempotent (it re-validates the kind CHECK and moves no row).
 test-schema [59], test-live [32], test-upgrade [20p];
 `server-portable/test-preflight.ts` drives the census, the remedy and the
 repair arms.
+
+Migration 065 (SMD-2292) closes a pairing 064 made routine: a page is a
+thought whose `derived_from` names the evidence its sections were generated
+from, and once the re-embed worker gave the page thought a vector and the
+extractor gave it entities, `consolidation_candidates(page)` returned that
+evidence as the page's first candidate at cosine 1 — the judge asked whether a
+derivation supersedes its input, and a reviewer's accept would have archived
+the evidence while the page still named it. The file redefines the candidate
+filter on 063's body plus two NULL-safe conditions: a candidate the judged
+thought's `derived_from` names is left out, and so is a candidate whose own
+`derived_from` names the judged thought (a derivation whose input was captured
+later, or a `created_at` moved by hand). Direct members only (the array is one
+level; a deeper read belongs to `derivations` once every derived thought has a
+row there). The body carries `ob1:lineage-excludes-the-pair`, which preflight's
+`lineage` check reads: 029 or 063 re-applied by hand over 065 warns naming
+065. One body redefined on its own text with no arity change; nothing runs at
+apply time but the DDL; a pair proposed before the file stands for its
+reviewer (`consolidate.ts --list pending`). test-schema [60], test-upgrade
+[20q]; `server-portable/test-preflight.ts` drives the re-applied-body arm.
 
 ## What changed relative to the guide
 
@@ -1697,8 +1716,13 @@ same rule.
 **Which pairs are judged.** `consolidation_candidates(thought)`: the older
 thoughts that share at least one extracted entity with it, captured at least a
 calendar day (UTC) earlier, nearest by exact cosine over that join, at or above
-a floor, at most k — with pairs already proposed (in any state) and thoughts
-already superseded left out. Older-only means a pair is reached from its newer
+a floor, at most k — with pairs already proposed (in any state but 063's
+`stale`) and thoughts already superseded left out, and, since 065, a pair one
+side of which names the other in `derived_from` (a page and the evidence its
+sections were generated from, a digest and its sources) never judged: a
+derivation says what its input says by construction, and re-deriving is
+`rebuild_derived`'s door, not supersession's (SMD-2292; direct members only,
+the array is one level). Older-only means a pair is reached from its newer
 side once, with no memory needed; the day rule keeps an import's burst from
 being compared with itself (and means a same-day contradiction is not found,
 stated rather than hidden). The shared-entity restriction is the cheap signal
@@ -2763,7 +2787,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2198 assertions, PGlite, no container
+bun test-schema.ts                          # 2211 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 857 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
