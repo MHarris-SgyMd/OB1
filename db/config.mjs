@@ -1383,6 +1383,63 @@ export function quoteIdent(name) {
 }
 
 /**
+ * A search_path setting's schemas, in order, as Postgres resolves them — its
+ * SplitIdentifierString (SMD-2242, fuzzed against Postgres there). Here, not in
+ * server-portable/search-path.ts, which re-exports it: the migrator's image
+ * copies db/ files alone, and the migrator (the path it gives 021's
+ * transaction) and tier.ts (a list setting a refresh copies) read a path as
+ * preflight does (SMD-2247).
+ *
+ * `current_setting('search_path')` is the session's own text, from the role,
+ * the database or the connection. `SET` and `ALTER ROLE … SET` store it
+ * re-quoted, but a connection string's `options`, `set_config` and `SET …
+ * FROM CURRENT` store it as written, so it is parsed, never echoed. Names are
+ * separated by commas; whitespace around each, as scanner_isspace sees it —
+ * space, tab, newline, carriage return and form feed, and from PostgreSQL 17
+ * vertical tab, nothing outside ASCII, so JavaScript's trim() is wrong here;
+ * a quoted name kept as written, `""` inside it a quote; an unquoted name
+ * folded A–Z only, as downcase_identifier does in a UTF-8 database. The empty
+ * name a `''` path reads back as is dropped. Settings Postgres rejects (`a,,b`,
+ * `a b`, an unterminated quote) never reach here: its check hook refuses them
+ * on every route. `serverVersionNum` is the server's `server_version_num`.
+ */
+export function searchPathSchemas(setting, serverVersionNum) {
+  const isSpace = (c) =>
+    c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\f" || (c === "\v" && serverVersionNum >= 170000);
+  const names = [];
+  let i = 0;
+  while (i < setting.length) {
+    while (isSpace(setting[i])) i++;
+    let name = "";
+    if (setting[i] === '"') {
+      for (i++; i < setting.length; i++) {
+        if (setting[i] !== '"') name += setting[i];
+        else if (setting[i + 1] === '"') { name += '"'; i++; }
+        else { i++; break; }
+      }
+    } else {
+      while (i < setting.length && setting[i] !== "," && !isSpace(setting[i])) name += setting[i++];
+      name = name.replace(/[A-Z]+/g, (m) => m.toLowerCase());
+    }
+    while (i < setting.length && setting[i] !== ",") i++;
+    i++;
+    if (name !== "") names.push(name);
+  }
+  return names;
+}
+
+/**
+ * The setting without the temp schema, as a search_path value: each name
+ * quoted, `pg_temp` dropped by its parsed name — Postgres's own test, so an
+ * unquoted `PG_TEMP` and a quoted `"pg_temp"` go and a quoted `"PG_TEMP"`, a
+ * schema of that name, stays. `"$user"` quoted is still the role's schema. ""
+ * when nothing is left, which set_config takes as the empty path.
+ */
+export function searchPathWithoutTemp(setting, serverVersionNum) {
+  return searchPathSchemas(setting, serverVersionNum).filter((s) => s !== "pg_temp").map(quoteIdent).join(", ");
+}
+
+/**
  * The bounds as this session sees them: `current_setting` per name, NULL for
  * a placeholder pgvector has not defined yet. One SQL text, with the names
  * inlined as literals (they are this module's constants, not input), so a

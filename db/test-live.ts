@@ -4995,6 +4995,22 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
         const [{ tuples }] = await fresh<{ tuples: string }[]>`SELECT current_setting('hnsw.max_scan_tuples') AS tuples FROM (SELECT '[1]'::vector) v`;
         assert(tuples === "100000", `a new session on the target runs with the source's HNSW bound (got ${tuples})`);
       } finally { await fresh.close(); }
+      // A path stored raw (SET … FROM CURRENT keeps the text as written) is
+      // read as Postgres reads it (SMD-2247): NoWhere folds to nowhere, a tab
+      // separates, a quoted name keeps its case. Kept literally it came back
+      // as "NoWhere" and "\tpublic", two other schemas.
+      const rawSrc = new SQL({ url: urlOf(setSrc), max: 1 }), rawDst = new SQL({ url: urlOf(setDst), max: 1 });
+      let read: string | undefined;
+      try {
+        await rawSrc`SELECT set_config('search_path', ${'NoWhere,\tpublic, "Kept"'}, false)`;
+        await rawSrc.unsafe(`ALTER DATABASE ${setSrc} SET search_path FROM CURRENT`);
+        read = (await databaseSettings(rawSrc)).search_path;
+        await applyDatabaseSettings(rawDst, await databaseSettings(rawSrc));
+      } finally { await rawSrc.close(); await rawDst.close(); }
+      const [rawStored, copiedPath] = [(await rawOf(setSrc)).search_path, (await rawOf(setDst)).search_path];
+      assert(rawStored === 'NoWhere,\tpublic, "Kept"' && copiedPath === 'nowhere, public, "Kept"',
+             `a raw path on the source is copied as the schemas it names (source ${JSON.stringify(rawStored)}, target ${JSON.stringify(copiedPath)})`);
+      assert(read === '"nowhere", "public", "Kept"', `…read on the source, as its server reads it, each name quoted (${JSON.stringify(read)})`);
     } finally {
       for (const db of [setSrc, setDst]) await sql.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
     }

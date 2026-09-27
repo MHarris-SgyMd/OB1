@@ -2764,7 +2764,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2200 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 857 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 859 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
@@ -2803,7 +2803,9 @@ how SMD-1806's ingester met the step when it imported two `scripts/*.mjs`
 not resolve — and asserts the runner heals its own session while preflight names
 the persistent fix. The test container installs pgvector into `public`, on the
 path, so nothing else in the matrix sees this; the suite restores it afterward,
-which `ci-parity.sh` needs since it shares one Postgres.
+which `ci-parity.sh` needs since it shares one Postgres. Its [7] holds the path
+the migrator gives migration 021's transaction, `pg_temp` taken out, to the
+schemas Postgres reads in the raw path (SMD-2247).
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
 the command and removes the container on exit. It prefers podman (including the

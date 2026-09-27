@@ -280,6 +280,10 @@ export const HNSW_SEED_SCAN_MEM_MULTIPLIER: number;
 export const HNSW_BOUNDS: string[];
 /** A database name as an SQL identifier. */
 export function quoteIdent(name: unknown): string;
+/** A search_path setting's schemas, in order, as Postgres resolves them; `serverVersionNum` is `server_version_num` (17 counts a vertical tab as whitespace). */
+export function searchPathSchemas(setting: string, serverVersionNum: number): string[];
+/** The setting without the temp schema (dropped by parsed name), each name quoted, as a search_path value; "" when nothing is left. */
+export function searchPathWithoutTemp(setting: string, serverVersionNum: number): string;
 /** `SELECT name, value` of each bound as this session sees it (value NULL when pgvector is not loaded). */
 export const BOUNDS_IN_FORCE_SQL: string;
 /** match_thoughts clamps match_count to this inside the function (014). */
