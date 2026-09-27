@@ -18,6 +18,7 @@ import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, hostOf, mayReset } from "./connect.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS = join(HERE, "migrations");
@@ -284,8 +285,8 @@ export function substitute(sql: string, opts: SchemaOptions): string {
   );
 }
 
-/** The deliberate overrides of the loopback rule below, named once so a suite that spawns another checked script can pass them on. */
-export const REMOTE_DB_FLAGS = ["OB1_ALLOW_REMOTE_DB", "OB1_EVAL_ALLOW_REMOTE_DB"] as const;
+/** The deliberate override of the loopback rule below (connect.ts names it), for a suite that spawns another checked script and passes it on. */
+export { REMOTE_DB_FLAG };
 
 /**
  * Refuse to drop a database that is not obviously a throwaway.
@@ -312,26 +313,23 @@ export const REMOTE_DB_FLAGS = ["OB1_ALLOW_REMOTE_DB", "OB1_EVAL_ALLOW_REMOTE_DB
  * is the way through for it.
  *
  * `OB1_ALLOW_REMOTE_DB=1` is the deliberate override, which is a thing you have
- * to mean. `OB1_EVAL_ALLOW_REMOTE_DB=1`, the name the eval-local copy used, is
- * honoured too so a shell profile that set it keeps working.
+ * to mean. `OB1_EVAL_ALLOW_REMOTE_DB`, the name the eval-local copy used, is no
+ * longer read (connect.ts says why); a refusal names it when it is set.
+ *
+ * The rule is connect.ts's mayReset, which tier.ts's --refresh asks too
+ * (SMD-2302); this is its refusal for a suite.
  */
 export function assertThrowawayDatabase(url: string): void {
-  if (REMOTE_DB_FLAGS.some((flag) => process.env[flag] === "1")) return;
-  let host: string | null = null;
-  try {
-    host = new URL(url).hostname.toLowerCase();
-  } catch {
-    /* unparseable: refuse below */
-  }
-  const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]);
-  if (host !== null && LOOPBACK.has(host)) return;
+  if (mayReset(url)) return;
+  const host = hostOf(url);
   const shown = host === null ? "an unparseable URL" : host === "" ? "a URL with no host (the client would resolve PGHOST)" : host;
   console.error(
     `  Refusing to drop the schema at ${shown}.\n\n` +
       `  This command DROPS every table Open Brain owns in that database. That is\n` +
       `  safe against a throwaway container and destructive against anything else.\n` +
       `  Run it under db/with-postgres.sh, name a loopback host explicitly, or set\n` +
-      `  OB1_ALLOW_REMOTE_DB=1 if you are certain.`
+      `  OB1_ALLOW_REMOTE_DB=1 if you are certain.` +
+      (process.env[RETIRED_REMOTE_DB_FLAG] !== undefined ? `\n  (${RETIRED_REMOTE_DB_FLAG} is set, and is no longer read: the name is ${REMOTE_DB_FLAG}.)` : "")
   );
   process.exit(2);
 }

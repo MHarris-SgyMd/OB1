@@ -34,7 +34,7 @@ import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MO
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES } from "../server-portable/consolidate.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-portable/entities.ts";
@@ -5017,13 +5017,23 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
   // The refresh guards, without needing client tools: a pg_dump older than the
   // server is refused, and a non-loopback target is refused without the opt-in.
   assert((await refreshToolsReady(9999)).ready === false, "refreshToolsReady refuses when pg_dump cannot read the server's major version");
-  const savedAllow = process.env.OB1_ALLOW_REMOTE_DB;
-  delete process.env.OB1_ALLOW_REMOTE_DB;
-  let refusedRemote = false;
-  try { await refresh("postgres://u@example.com:5432/a", "postgres://u@example.com:5432/b", "canary"); }
-  catch { refusedRemote = true; }
-  finally { if (savedAllow !== undefined) process.env.OB1_ALLOW_REMOTE_DB = savedAllow; }
-  assert(refusedRemote, "refresh refuses a non-loopback target unless OB1_ALLOW_REMOTE_DB=1 (it drops the target's schema)");
+  // The refusal by its words, not any throw: an unreachable example.com threw
+  // too, so a guard removed still passed. The rule's rows are test-connect.ts's;
+  // this holds that --refresh asks it, before it reaches either side.
+  const savedAllow = process.env[REMOTE_DB_FLAG];
+  delete process.env[REMOTE_DB_FLAG];
+  const refreshRefusal = async (to: string): Promise<string> => {
+    try { await refresh("postgres://u@example.com:5432/a", to, "canary"); return "no refusal"; }
+    catch (e) { return (e as Error).message; }
+  };
+  let refusedRemote: string, refusedEmptyHost: string;
+  try {
+    refusedRemote = await refreshRefusal("postgres://u@example.com:5432/b");
+    // tier.ts's own rule trusted an empty host, which resolves through PGHOST (SMD-2302).
+    refusedEmptyHost = await refreshRefusal("postgres:///b");
+  } finally { if (savedAllow !== undefined) process.env[REMOTE_DB_FLAG] = savedAllow; }
+  assert(/^--to is not a loopback host and OB1_ALLOW_REMOTE_DB is not 1/.test(refusedRemote), `refresh refuses a non-loopback target unless OB1_ALLOW_REMOTE_DB=1 (it drops the target's schema) — got: ${refusedRemote}`);
+  assert(/^--to is not a loopback host/.test(refusedEmptyHost), `…and a target with no host, which resolves through PGHOST — got: ${refusedEmptyHost}`);
   // And a --to that is the --from database under another spelling (SMD-2036):
   // deploy/tier.sh sets OB1_ALLOW_REMOTE_DB, so this is the guard it runs
   // under. The second URL differs as a string (a parameter only), so string

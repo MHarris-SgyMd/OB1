@@ -54,7 +54,7 @@
 import { SQL } from "bun";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BENCH_MARKER, REMOTE_DB_FLAGS, assertThrowawayDatabase, createAssert, hasKeptCorpus, requireDatabaseUrl, runScript, shellWithoutOb1 } from "./test-support.ts";
+import { BENCH_MARKER, REMOTE_DB_FLAG, assertThrowawayDatabase, createAssert, hasKeptCorpus, requireDatabaseUrl, runScript, shellWithoutOb1 } from "./test-support.ts";
 
 const { assert, report } = createAssert();
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -69,7 +69,7 @@ const SCALE = 150_000;
  * stripped (a width or a query count from the shell would change what is
  * measured), and runScript keeps db/.env out of the spawned bun too.
  */
-const PASS_THROUGH = ["OB1_BENCH_BUILD_WORKERS", "OB1_BENCH_MAINTENANCE_MEM", ...REMOTE_DB_FLAGS];
+const PASS_THROUGH = ["OB1_BENCH_BUILD_WORKERS", "OB1_BENCH_MAINTENANCE_MEM", REMOTE_DB_FLAG];
 
 /** The exit code a signal asked for, once one has arrived: no further run starts (a run in flight ends as the signal reached it — with the process group under a terminal's Ctrl-C, or on its own if the signal came to this process alone), and `finally` drops the marker. */
 let interrupted: number | null = null;

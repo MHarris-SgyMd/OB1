@@ -2690,9 +2690,10 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2115 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 849 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 850 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
+bun test-connect.ts                         # every script's connection through connect.ts — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
 
@@ -2707,6 +2708,16 @@ and `extract-entities.ts` ignored a flag they did not know, so `--K 10` ran the
 default `--k` and exited 0 (SMD-2015). `test-cli.ts` holds the scanner's rules,
 that every entry point imports `cli.ts` and nothing else reads `process.argv`,
 and runs each entry point with a flag it does not have and with `--help`.
+
+Every script reaches its database through `connect.ts` (SMD-2302): `--url`, else
+`DATABASE_URL`, else exit 2 with one refusal; one client constructor; and one
+answer to "may this database be reset?" — a loopback host by name
+(`localhost`, `127.0.0.1`, `[::1]`, `0.0.0.0`), not an empty host (it resolves
+through `PGHOST`), or `OB1_ALLOW_REMOTE_DB=1`. `tier.ts --refresh` and the
+suites' `dropSchema` both ask it. A script that exits with a code of its own
+returns it from `closeThenExit`, which closes the pool first. `test-connect.ts`
+holds the rule as a truth table, runs the door, and checks that no other file
+reads `DATABASE_URL`, builds a client or exits inside the door.
 
 The last line is the type check CI runs in the portable-server job (SMD-1932):
 `tsconfig.json` here mirrors `server-portable/tsconfig.json`, and `package.json`

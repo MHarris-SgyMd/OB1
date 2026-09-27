@@ -208,6 +208,7 @@ import { isoTimestampOrNull, UUID_RE } from "../server-portable/store.ts";
 import { cleanForDisplay } from "../server-portable/consolidate.ts";
 import { RESERVED_SYSTEMS } from "./ingest-items.ts";
 import { readNumber, scanArgs, scriptArgv } from "./cli.ts";
+import { closeThenExit, databaseUrl, openSql } from "./connect.ts";
 
 /** `(text, params) → rows` — Bun's `sql.unsafe` or PGlite's `query(...).rows`. */
 export type Runner = (text: string, params: unknown[]) => Promise<Record<string, unknown>[]>;
@@ -1079,39 +1080,32 @@ if (import.meta.main) {
     console.error(USAGE);
     process.exit(2);
   }
-  const url = parsed.url ?? process.env.DATABASE_URL;
-  if (!url) {
-    console.error("No database URL. Pass --url or set DATABASE_URL.");
-    process.exit(2);
-  }
-  const sql = new SQL({ url, max: 1 });
+  const url = databaseUrl(parsed.url);
+  const sql = openSql(url);
   const run: Runner = async (text, params) => (await sql.unsafe(text, params as never[])) as unknown as Record<string, unknown>[];
   // The exit code is decided inside and applied after the connection has
-  // closed and the output has been written (process.exit inside the try would
-  // skip the finally, and could cut a piped --json short).
+  // closed and the output has been written (process.exit inside the body
+  // would skip the close, and could cut a piped --json short).
   // 0 ranked; 1 the subject resolved to nothing; 3 the subject IS an entity
   // and the numeric-name rule excluded it (--keep-numeric would rank it); 2 a
   // usage error, a brain without 016 or 058 (or whose 058 knows other status
   // types), or a query that failed — never 1 for a failure or an
   // exclusion, so a caller testing for "not in the graph" is not told that by
   // a connection refused or by SMD-1935's rule.
-  let code = 0;
-  try {
-    const problem = await schemaProblem(run, parsed.opts);
-    if (problem) {
-      console.error(problem);
-      code = 2;
-    } else {
+  await closeThenExit(sql, async () => {
+    try {
+      const problem = await schemaProblem(run, parsed.opts);
+      if (problem) {
+        console.error(problem);
+        return 2;
+      }
       const r = await report(run, parsed.subject, parsed.opts);
       if (parsed.json) console.log(JSON.stringify(r, null, 2));
       else console.log(render(r));
-      code = r.resolution && r.resolution.how === "none" ? (r.resolution.excluded ? 3 : 1) : 0;
+      return r.resolution && r.resolution.how === "none" ? (r.resolution.excluded ? 3 : 1) : 0;
+    } catch (e) {
+      console.error(`graph-centrality failed: ${(e as Error).message}`);
+      return 2;
     }
-  } catch (e) {
-    console.error(`graph-centrality failed: ${(e as Error).message}`);
-    code = 2;
-  } finally {
-    await sql.close();
-  }
-  process.exit(code);
+  });
 }
