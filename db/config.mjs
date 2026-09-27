@@ -1442,6 +1442,7 @@ export const ROUTE_ESTIMATE_MIN_PAGES = 8192;
  */
 export const MATCH_THOUGHTS_SIGNATURE = "match_thoughts(vector, float, int, jsonb, float, float)";
 export const SEARCH_THOUGHTS_HYBRID_SIGNATURE = "search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)";
+export const SEARCH_THOUGHTS_CURRENT_SIGNATURE = "search_thoughts_current(vector, text, float, int, jsonb, float, float)";
 /**
  * update_thought's signature since migration 046 (SMD-1730): a tenth,
  * defaulted parameter, `p_event`, the write event {stance, cites, valid_from,
@@ -1669,7 +1670,14 @@ export const ROLE_GRANTS = Object.freeze({
   capture: Object.freeze([
     Object.freeze({ table: "thoughts",       privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "001" }),
     Object.freeze({ table: "thought_chunks", privileges: Object.freeze(["SELECT", "INSERT", "DELETE"]),           since: "007" }),
-    Object.freeze({ table: "thought_audit",  privileges: Object.freeze(["INSERT"]),                                since: "008" }),
+    // 055's ob1_append_thought_event reads the audit row it inserts (INSERT
+    // ... RETURNING needs SELECT on the returned column) on every write, so
+    // SELECT has been a hard capture privilege since 055 — this list had no
+    // row for it from 055 to 058, and a role granted then could not write at
+    // all (run-it, SMD-2116's fourth review pass); since 060 the audit
+    // trigger's check and the projector read the event too. INSERT alone
+    // before 055 (008).
+    Object.freeze({ table: "thought_audit",  privileges: Object.freeze(["SELECT", "INSERT"]),                      since: "008" }),
     // 042's guard runs as the caller on EVERY delete of a thought: it reads the
     // citations that name the row and, detaching, writes them. A role without
     // these cannot delete any thought, cited or not.
@@ -1680,6 +1688,11 @@ export const ROLE_GRANTS = Object.freeze({
     // trigger — so SELECT is hard here, while the writes resolve_agent makes
     // stay soft, in `server` below (SMD-1730, first review pass).
     Object.freeze({ table: "ob1_agents",     privileges: Object.freeze(["SELECT"]),                               since: "046" }),
+    // 060's snapshot trigger runs as the caller on EVERY write of a vector,
+    // a label or a key: it upserts the row's vector under its key. A role
+    // without these fails every capture that carries a vector inside the
+    // trigger — so the writes are hard here (SMD-2116).
+    Object.freeze({ table: "ob1_embedding_snapshot", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "060" }),
   ]),
   // The server's soft extras, beyond the hard capture set: preflight reads its
   // own `ob1_config` as this role, and `resolve_agent` (010, SECURITY INVOKER)
@@ -1703,6 +1716,11 @@ export const ROLE_GRANTS = Object.freeze({
     // this grant named, and captures on (second review pass: the capture group
     // holds INSERT alone, and the read failed under the documented role).
     Object.freeze({ table: "thought_audit",  privileges: Object.freeze(["SELECT"]),                    since: "008" }),
+    // search_thoughts' opt-in prefer_current calls 059's search_thoughts_current,
+    // which reads 058's node_state(), which reads the source rows (SMD-2255).
+    // Soft as the rest of this group — without it that search is refused with
+    // this grant named, and every other search runs.
+    Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT"]),                   since: "053" }),
   ]),
   // A worker role — reembed.ts, consolidate.ts, extract-entities.ts — claims and
   // releases work, upserts its job key into `ob1_config` (reembed's
@@ -1738,8 +1756,9 @@ export const ROLE_GRANTS = Object.freeze({
   // record_thought_entities, so it needs `extraction` as well (SMD-2216).
   // graph-centrality.ts's dependency read (--startable, --decay-blocked) is
   // 058's node_state(), which reads `thought_sources` too, so a reader running
-  // it needs this group's SELECT; its default modes read node_lifecycle(),
-  // `thoughts` alone (SMD-2074).
+  // it needs SELECT on it — this group's, or the server group's since 059
+  // (SMD-2255); its default modes read node_lifecycle(), `thoughts` alone
+  // (SMD-2074).
   structure: Object.freeze([
     Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "053" }),
     Object.freeze({ table: "thought_facets",  privileges: Object.freeze(["INSERT"]),                               since: "053" }),

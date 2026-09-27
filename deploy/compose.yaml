@@ -271,7 +271,12 @@ services:
       # construction, so the server would have failed preflight at the data
       # layer, loudly, over a default that should have been 10).
       OB1_PG_POOL: ${OB1_PG_POOL:-}
+      # The grace period a stop gives the server, in seconds; it drains for 2 s
+      # less (SMD-2250). Unset, 10 — and stop_grace_period below reads the same
+      # variable, so compose waits exactly what the server plans for.
+      OB1_STOP_GRACE: ${OB1_STOP_GRACE:-}
       PORT: "8000"
+    stop_grace_period: ${OB1_STOP_GRACE:-10}s
     ports:
       # Loopback unless SERVER_BIND says otherwise. The one published port of the
       # stack without its opt-in profiles. A remote client — a claude.ai connector, another machine — goes
