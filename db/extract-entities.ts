@@ -843,9 +843,15 @@ if (FOLLOW) {
 }
 
 const elapsed = ((Date.now() - started) / 1000).toFixed(1);
+// How the runaways were handled: a penalised same-model retry, an escalation to
+// the larger model (SMD-2000), or both. A count is named only when it happened,
+// so an escalation pass does not read "0 retried … , N escalated".
+const runawayNote = escalated
+  ? `${retried ? `${retried} retried and ` : ""}${escalated} escalated to ${WINDOWING.escalateModel} after a runaway answer`
+  : `${retried} retried after a runaway answer`;
 console.log(
   `\n  ${done} extracted${partial ? ` (${partial} over a prefix only — past the per-thought bound, OB1_EXTRACT_MAX_WINDOWS (${cfg.extractMaxWindows}); each row's caveat says how much)` : ""}, ${failed} failed, ${superseded} edited mid-extraction and re-queued, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}, in ${elapsed}s ` +
-    `(${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s) across ${WORKERS} worker(s), ${windowed} thought(s) in windows, ${retried} retried after a runaway answer${escalated ? `, ${escalated} escalated to ${WINDOWING.escalateModel}` : ""} (${aborted} aborted on the stream before the budget), ${beats} heartbeat(s))`
+    `(${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s) across ${WORKERS} worker(s), ${windowed} thought(s) in windows, ${runawayNote} (${aborted} aborted on the stream before the budget), ${beats} heartbeat(s))`
 );
 console.log(
   `  wrote ${totals.mentions} mentions of ${totals.newEntities} new entities, ${totals.edges} edges; ` +
