@@ -1,21 +1,33 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
+// ob1-fork (SMD-2139): this script paged PostgREST's `/thoughts` route and wrote
+// each row's enrichment back through it with a service-role key, and this fork's
+// stack runs no PostgREST. It reads and writes through compat/supabase-sql now —
+// SUPABASE_URL is a postgres:// connection string, SUPABASE_SERVICE_ROLE_KEY is
+// accepted and ignored (the credentials live in the URL). Run it from a
+// checkout: the import is relative. The checkpoint stays at
+// `data/enrichment-state.json` beside the script unless ENRICH_STATE_DIR names
+// another directory (the live suite's runs keep theirs out of the checkout), and
+// OPENROUTER_BASE_URL points the OpenRouter provider at any OpenAI-compatible
+// endpoint, a local one included. The thought text still leaves the box to the
+// provider you choose: the README says so. A write the database refuses ends
+// the run on that row, and a run with failed rows exits 1.
 /**
  * enrich-thoughts.mjs
  *
  * Retroactively classifies thoughts via Anthropic API or OpenRouter.
  * Extracts: type, summary, topics, tags, people, action_items, confidence,
  *           importance, detected_source_type.
- * Updates the thought in-place via Supabase REST API.
+ * Updates the thought in place through compat/supabase-sql.
  *
  * Usage:
- *   node enrich-thoughts.mjs --status
- *   node enrich-thoughts.mjs --dry-run --limit 10
- *   node enrich-thoughts.mjs --apply --concurrency 5
- *   node enrich-thoughts.mjs --apply --provider anthropic --concurrency 20
- *   node enrich-thoughts.mjs --apply --retry-failed
+ *   bun enrich-thoughts.mjs --status
+ *   bun enrich-thoughts.mjs --dry-run --limit 10
+ *   bun enrich-thoughts.mjs --apply --concurrency 5
+ *   bun enrich-thoughts.mjs --apply --provider anthropic --concurrency 20
+ *   bun enrich-thoughts.mjs --apply --retry-failed
  *
  * Flags:
- *   --apply              Write enrichment results back to Supabase
+ *   --apply              Write enrichment results back to the brain
  *   --dry-run             Preview classifications without writing
  *   --status              Show enrichment progress stats
  *   --provider <name>     openrouter (default) or anthropic
@@ -35,15 +47,19 @@ import {
   fetchWithTimeout,
   resolveTimeoutMs,
   DEFAULT_LLM_TIMEOUT_MS,
-  DEFAULT_SUPABASE_TIMEOUT_MS,
 } from "./lib/memory-core.mjs";
+import { connect, endWith, failure, intFlag, isTransientDbError, readEnv, refuseUnknownFlags } from "./lib/brain.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Per-call fetch timeouts. FETCH_TIMEOUT_MS in .env.local overrides both.
+// The per-call timeout of an LLM request; FETCH_TIMEOUT_MS overrides it. The
+// brain's reads and writes carry none: a Postgres query is not a stalled
+// HTTP body, and a query the server refuses answers at once.
 const LLM_TIMEOUT_MS = resolveTimeoutMs(process.env.FETCH_TIMEOUT_MS, DEFAULT_LLM_TIMEOUT_MS);
-const SUPABASE_TIMEOUT_MS = resolveTimeoutMs(process.env.FETCH_TIMEOUT_MS, DEFAULT_SUPABASE_TIMEOUT_MS);
+
+// The client main() opens, closed at the bottom on both paths (lib/brain.mjs).
+let client = null;
 
 const ALLOWED_TYPES = new Set([
   "idea", "task", "person_note", "reference",
@@ -57,8 +73,10 @@ const ALLOWED_SOURCE_TYPES = new Set([
   "claude_code_import",
 ]);
 
-const STATE_DIR = path.join(__dirname, "data");
-const STATE_PATH = path.join(STATE_DIR, "enrichment-state.json");
+// The checkpoint's directory: beside the script, or ENRICH_STATE_DIR; set by
+// main() once the environment is read.
+let STATE_DIR = path.join(__dirname, "data");
+let STATE_PATH = path.join(STATE_DIR, "enrichment-state.json");
 const BATCH_SIZE = 50;
 
 // --- Classification Prompt ---
@@ -151,7 +169,7 @@ async function callAnthropic(userInput, config) {
 }
 
 async function callOpenRouter(userInput, config) {
-  const res = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
+  const res = await fetchWithTimeout(`${config.openRouterBaseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${config.openRouterApiKey}`,
@@ -197,7 +215,10 @@ async function withRetry(fn, maxRetries = 3) {
       const is429 = msg.includes("429");
       const is5xx = /\b5\d{2}\b/.test(msg);
       const isAbort = name === "AbortError" || msg.includes("Timeout after") || msg.includes("aborted");
-      const retriable = is429 || is5xx || isAbort;
+      // A socket the provider reset or that timed out is worth another try; a
+      // refused connection or an unknown host is not — the row fails at once.
+      const isSocket = ["ECONNRESET", "ETIMEDOUT", "EPIPE", "UND_ERR_SOCKET"].includes(String(err.code ?? ""));
+      const retriable = is429 || is5xx || isAbort || isSocket;
       if (attempt === maxRetries || !retriable) throw err;
       const delay = is429
         ? Math.min(30000, 2000 * Math.pow(2, attempt))
@@ -215,21 +236,35 @@ function resolveModelLabel(config) {
 
 // --- Entry Point ---
 
-main().catch((err) => {
-  console.error(err.stack || err.message || String(err));
-  process.exitCode = 1;
-});
+endWith(main(), () => client);
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
   if (args.help) { printUsage(); return; }
 
-  const env = parseEnvFile(path.join(__dirname, ".env.local"));
+  const env = readEnv(__dirname);
   const config = buildConfig(args, env);
+  STATE_DIR = path.resolve(env.ENRICH_STATE_DIR || path.join(__dirname, "data"));
+  STATE_PATH = path.join(STATE_DIR, "enrichment-state.json");
+  if (args.dryRun && args.apply) throw new Error("--dry-run and --apply are exclusive: one previews, the other writes");
+  if (args.apply) {
+    // The checkpoint's directory, made and proven writable before a row is
+    // written or a model paid: a directory that is a file failed after the
+    // first chunk. A relative ENRICH_STATE_DIR resolves against the current
+    // directory.
+    try {
+      fs.mkdirSync(STATE_DIR, { recursive: true });
+      fs.writeFileSync(path.join(STATE_DIR, ".probe"), "");
+      fs.unlinkSync(path.join(STATE_DIR, ".probe"));
+    } catch (err) {
+      throw new Error(`the checkpoint directory ${STATE_DIR} is not writable (${err?.code || err?.message || err}); set ENRICH_STATE_DIR to one that is`);
+    }
+  }
+  client = connect(env);
 
   if (args.status) {
-    await showStatus(config);
+    await showStatus();
     return;
   }
 
@@ -242,12 +277,12 @@ async function main() {
 
   // Validate provider config
   if (config.provider === "anthropic" && !config.anthropicApiKey) {
-    console.error("ERROR: --provider anthropic requires ANTHROPIC_API_KEY in .env.local");
+    console.error("ERROR: --provider anthropic requires ANTHROPIC_API_KEY (the environment or .env.local)");
     process.exitCode = 1;
     return;
   }
   if (config.provider === "openrouter" && !config.openRouterApiKey) {
-    console.error("ERROR: --provider openrouter requires OPENROUTER_API_KEY in .env.local");
+    console.error("ERROR: --provider openrouter requires OPENROUTER_API_KEY (the environment or .env.local)");
     process.exitCode = 1;
     return;
   }
@@ -287,21 +322,23 @@ async function main() {
         break;
       }
       const batchIds = failedIds.slice(i, i + Math.min(BATCH_SIZE, (config.limit || Infinity) - processed));
-      const thoughts = await fetchByIds(config, batchIds);
+      const thoughts = await fetchByIds(batchIds);
       if (thoughts.length === 0) continue;
 
-      for (let j = 0; j < thoughts.length; j += config.concurrency) {
+      for (let j = 0; j < thoughts.length; ) {
         if (config.maxCalls > 0 && budget.calls >= config.maxCalls) {
           budgetExceeded = true;
           break;
         }
-        const chunk = thoughts.slice(j, j + config.concurrency);
+        const chunk = thoughts.slice(j, j + chunkWidth(config, budget));
+        j += chunk.length;
         const results = await Promise.allSettled(
           chunk.map((t) => classifyAndUpdate(t, config, budget))
         );
         for (let k = 0; k < results.length; k++) {
           processed++;
           const t = chunk[k];
+          if (results[k].status === "rejected") refusedWrite(results[k].reason, state, config);
           if (results[k].status === "fulfilled") {
             enriched++;
             if (!config.dryRun) {
@@ -331,6 +368,7 @@ async function main() {
     console.log(budgetExceeded ? "=== RETRY ABORTED (--max-calls reached) ===" : "=== RETRY COMPLETE ===");
     console.log(`Processed: ${processed}, Fixed: ${enriched}, Still failing: ${failed}`);
     console.log(`LLM calls made: ${budget.calls}${config.maxCalls > 0 ? " / " + config.maxCalls : ""}`);
+    if (failed > 0) process.exitCode = 1;
     return;
   }
 
@@ -361,24 +399,29 @@ async function main() {
   while (true) {
     if (config.limit && processed >= config.limit) break;
     if (config.maxCalls > 0 && budget.calls >= config.maxCalls) {
-      budgetExceeded = true;
+      // ABORTED only when a row was left: a budget met as the table completed
+      // read as an abort.
+      budgetExceeded = (await fetchUnenriched(fetchCursor, 1)).length > 0;
       break;
     }
 
     const fetchSize = config.limit ? Math.min(BATCH_SIZE, config.limit - processed) : BATCH_SIZE;
-    const thoughts = await fetchUnenriched(config, fetchCursor, fetchSize);
+    const thoughts = await fetchUnenriched(fetchCursor, fetchSize);
     if (thoughts.length === 0) {
-      console.log("No more un-enriched thoughts returned from Supabase.");
+      console.log("No more un-enriched thoughts returned from the brain.");
       break;
     }
 
-    // API mode: one thought per call, high concurrency
-    for (let i = 0; i < thoughts.length; i += config.concurrency) {
+    // API mode: one thought per call, high concurrency — a chunk no wider than
+    // the budget left, so --max-calls is the ceiling it says it is (review
+    // pass 1, run-it: --max-calls 1 at concurrency 20 made three calls).
+    for (let i = 0; i < thoughts.length; ) {
       if (config.maxCalls > 0 && budget.calls >= config.maxCalls) {
         budgetExceeded = true;
         break;
       }
-      const chunk = thoughts.slice(i, i + config.concurrency);
+      const chunk = thoughts.slice(i, i + chunkWidth(config, budget));
+      i += chunk.length;
 
       const results = await Promise.allSettled(
         chunk.map((t) => classifyAndUpdate(t, config, budget))
@@ -387,6 +430,7 @@ async function main() {
       for (let j = 0; j < results.length; j++) {
         processed++;
         const t = chunk[j];
+        if (results[j].status === "rejected") refusedWrite(results[j].reason, state, config);
         if (results[j].status === "fulfilled") {
           enriched++;
           if (!config.dryRun) {
@@ -429,6 +473,36 @@ async function main() {
   console.log(`Enriched:       ${enriched}`);
   console.log(`Failed:         ${failed}`);
   console.log(`LLM calls made: ${budget.calls}${config.maxCalls > 0 ? " / " + config.maxCalls : ""}`);
+  // A run that left rows failed exits 1, so a scheduler can tell (five failed
+  // rows exited 0).
+  if (failed > 0) process.exitCode = 1;
+}
+
+/**
+ * The rows one chunk classifies at once: the concurrency, cut to the calls
+ * --max-calls still allows (at least one, so a chunk always advances).
+ */
+function chunkWidth(config, budget) {
+  if (config.maxCalls <= 0) return config.concurrency;
+  return Math.max(1, Math.min(config.concurrency, config.maxCalls - budget.calls));
+}
+
+/**
+ * A write the database refused for a structural reason — a denied table, an
+ * undefined column: a failure() (marked `brain`) whose SQLSTATE is not
+ * transient — ends the run here, on the row it happened on, as the two
+ * backfills do. Under Promise.allSettled it was one FAIL line per row while
+ * every later row still paid its model call and the run exited 0. A model's
+ * error — a 5xx, bad JSON, a timeout, a closed port (Bun's fetch gives that
+ * one a code, ConnectionRefused, which a test on the code alone read as a
+ * refusal) — stays a per-row FAIL, recorded for --retry-failed. The chunk's
+ * checkpoint is written first, so the rows before the refused one — written,
+ * or failed on the model — are not lost to the next run's --retry-failed.
+ */
+function refusedWrite(reason, state, config) {
+  if (!(reason?.brain && !isTransientDbError(reason))) return;
+  if (!config.dryRun) checkpointState(state);
+  throw reason;
 }
 
 // --- Classification ---
@@ -437,7 +511,7 @@ async function classifyAndUpdate(thought, config, budget) {
   const content = thought.content || "";
   if (!content.trim()) {
     if (!config.dryRun) {
-      await patchThought(thought.id, { enriched: true }, config);
+      await patchThought(thought.id, { enriched: true });
     }
     return { type: "reference", importance: 1, detected_source_type: "generic_import" };
   }
@@ -447,7 +521,11 @@ async function classifyAndUpdate(thought, config, budget) {
   // those tags in the content are escaped so an attacker cannot break
   // out of the delimited block. The system prompt tells the model this
   // block is untrusted data.
-  const existingSource = thought.source_type || thought.metadata?.source || "";
+  // A row's metadata is an object on every path the functions write; a raw
+  // writer may have left a scalar or an array, which a spread would turn into
+  // digit keys and lose. It is kept under one key.
+  const existingMetadata = isPlainObject(thought.metadata) ? thought.metadata : thought.metadata == null ? {} : { prior_metadata: thought.metadata };
+  const existingSource = thought.source_type || existingMetadata.source || "";
   const safeContent = escapeThoughtTags(content.substring(0, 4000));
   const inputLines = [];
   if (existingSource) inputLines.push(`Existing source_type: ${existingSource}`);
@@ -497,7 +575,6 @@ async function classifyAndUpdate(thought, config, budget) {
   }
 
   // Build update payload
-  const existingMetadata = thought.metadata || {};
   const patch = {
     type: classified.type,
     importance: classified.importance,
@@ -519,150 +596,105 @@ async function classifyAndUpdate(thought, config, budget) {
     },
   };
 
-  await patchThought(thought.id, patch, config);
+  await patchThought(thought.id, patch);
   return classified;
 }
 
-// --- Supabase Operations ---
+// --- Brain Operations (compat/supabase-sql) ---
+//
+// The REST idioms, one to one: a paged select is a builder with `.order("id")`
+// and `.limit()` (or `.range()` for --skip's offset), `id=in.(…)` is `.in()`,
+// `Prefer: count=exact` on a HEAD request is `{ count: "exact", head: true }`,
+// and a PATCH is `.update({...}).eq("id", id)` — carrying neither content nor
+// vector, the columns update_thought owns (check 10). A query the database
+// refuses answers `{ error }` with its SQLSTATE; a structural refusal (an
+// undefined column, a denied table) is fatal at once, so the operator sees the
+// real reason on row 1 instead of row N.
 
-async function fetchUnenriched(config, cursor, limit) {
-  const url = new URL(`${config.supabaseUrl}/rest/v1/thoughts`);
-  url.searchParams.set("select", "id,content,source_type,metadata");
-  url.searchParams.set("enriched", "eq.false");
-  url.searchParams.set("order", "id.asc");
-  url.searchParams.set("limit", String(limit));
-
+async function fetchUnenriched(cursor, limit) {
+  let query = client
+    .from("thoughts")
+    .select("id,content,source_type,metadata")
+    .eq("enriched", false)
+    .order("id", { ascending: true });
   if (cursor?.afterId != null) {
-    url.searchParams.set("id", `gt.${cursor.afterId}`);
+    query = query.gt("id", cursor.afterId).limit(limit);
   } else if (cursor?.offset) {
-    url.searchParams.set("offset", String(cursor.offset));
+    query = query.range(cursor.offset, cursor.offset + limit - 1);
+  } else {
+    query = query.limit(limit);
   }
-
-  const res = await fetchWithTimeout(url, { headers: supabaseHeaders(config) }, SUPABASE_TIMEOUT_MS);
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Fetch un-enriched failed (${res.status}): ${body.substring(0, 300)}`);
+  const { data, error } = await query;
+  if (error) {
+    const hint = error.code === "22P02" && cursor?.afterId != null ? " (the checkpoint's lastProcessedId is not a uuid — --reset-state starts over)" : "";
+    throw failure(`read un-enriched thoughts${hint}`, error);
   }
-  const rows = await res.json();
-  return Array.isArray(rows) ? rows : [];
+  return Array.isArray(data) ? data : [];
 }
 
-async function fetchByIds(config, ids) {
+async function fetchByIds(ids) {
   if (ids.length === 0) return [];
-  // Chunk by count AND by URL length. PostgREST defaults to 8KB URL
-  // limits and proxies in front of it often cap lower. 50 IDs per
-  // request is the hard ceiling; we also bound by ~6000 chars of
-  // comma-joined IDs to stay safe with very large numeric IDs.
-  const MAX_IDS_PER_REQUEST = 50;
-  const MAX_URL_ID_CHARS = 6000;
-  const chunks = [];
-  let current = [];
-  let currentLen = 0;
-  for (const id of ids) {
-    const tokenLen = String(id).length + 1; // +1 for comma
-    if (current.length >= MAX_IDS_PER_REQUEST || currentLen + tokenLen > MAX_URL_ID_CHARS) {
-      if (current.length > 0) chunks.push(current);
-      current = [];
-      currentLen = 0;
-    }
-    current.push(id);
-    currentLen += tokenLen;
-  }
-  if (current.length > 0) chunks.push(current);
-
+  // 50 ids a query, as the REST form sent 50 a request: the list is bound as
+  // one parameter now, so there is no URL to overflow, only a statement to
+  // keep short.
+  const MAX_IDS_PER_QUERY = 50;
   const all = [];
-  for (const chunk of chunks) {
-    const idList = chunk.join(",");
-    const url = `${config.supabaseUrl}/rest/v1/thoughts?select=id,content,source_type,metadata&id=in.(${idList})`;
-    const res = await fetchWithTimeout(url, { headers: supabaseHeaders(config) }, SUPABASE_TIMEOUT_MS);
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Fetch by IDs failed (${res.status}): ${body.substring(0, 300)}`);
-    }
-    const rows = await res.json();
-    if (Array.isArray(rows)) all.push(...rows);
+  for (let i = 0; i < ids.length; i += MAX_IDS_PER_QUERY) {
+    const chunk = ids.slice(i, i + MAX_IDS_PER_QUERY);
+    const { data, error } = await client
+      .from("thoughts")
+      .select("id,content,source_type,metadata")
+      .in("id", chunk);
+    if (error) throw failure(`read ${chunk.length} thoughts by id`, error);
+    if (Array.isArray(data)) all.push(...data);
   }
   return all;
 }
 
-async function patchThought(id, patch, config, retries = 4) {
-  const url = `${config.supabaseUrl}/rest/v1/thoughts?id=eq.${id}`;
-  // Send metadata as a plain object: the request body is JSON.stringify'd
-  // below, so pre-stringifying metadata double-encodes it and PostgREST
-  // stores the jsonb column as a JSON *string* instead of an object,
-  // breaking every metadata->'topics' / @> query downstream.
-  const body = { ...patch };
-  const opts = {
-    method: "PATCH",
-    headers: {
-      ...supabaseHeaders(config),
-      "Content-Type": "application/json",
-      Prefer: "return=minimal",
-    },
-    body: JSON.stringify(body),
-  };
-
-  // Retry only on transient errors (429 + 5xx + AbortError/network).
-  // 4xx (400/401/403/404/422) means the request is structurally wrong —
-  // "column does not exist", bad auth, or RLS denial. Retrying will burn
-  // time + a round trip without ever succeeding, so fail fast so the
-  // operator sees the real reason on row 1 instead of row N.
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    let res;
-    try {
-      res = await fetchWithTimeout(url, opts, SUPABASE_TIMEOUT_MS);
-    } catch (err) {
-      // Network/abort. Treat as transient up to `retries` times.
-      if (attempt === retries) throw err;
-      const delay = Math.min(16000, 1000 * Math.pow(2, attempt));
-      await sleep(delay);
-      continue;
-    }
-    if (res.ok) return;
-    const text = await res.text();
-    const isTransient = [429, 500, 502, 503, 504].includes(res.status);
-    if (!isTransient || attempt === retries) {
-      throw new Error(`PATCH thought ${id} failed (${res.status}): ${text.substring(0, 300)}`);
-    }
+async function patchThought(id, patch, retries = 4) {
+  // `metadata` travels as a plain object: the shim binds it as jsonb. A
+  // pre-stringified value would be stored as a JSON *string* instead of an
+  // object (migration 005 refuses that on the functions' path; here the
+  // column is written directly), breaking every metadata->'topics' / @>
+  // query downstream. The `.select("id")` narrows what the write returns to
+  // the id — without it the shim returns the whole row, its vector included,
+  // on every update (PostgREST's `Prefer: return=minimal` had the same purpose).
+  //
+  // Retry only what is transient in Postgres (a connection lost mid-run, a
+  // serialization failure, a server shutting down). Anything else means the
+  // statement is structurally wrong — "column does not exist", a denied table
+  // — and retrying would burn time without ever succeeding.
+  for (let attempt = 0; ; attempt++) {
+    const { error } = await client.from("thoughts").update({ ...patch }).eq("id", id).select("id");
+    if (!error) return;
+    if (!isTransientDbError(error) || attempt >= retries) throw failure(`update thought ${id}`, error);
     const delay = Math.min(16000, 1000 * Math.pow(2, attempt));
     await sleep(delay);
   }
 }
 
-async function countByEnriched(config) {
-  const countReq = async (enrichedVal) => {
-    const res = await fetchWithTimeout(
-      `${config.supabaseUrl}/rest/v1/thoughts?select=id&enriched=eq.${enrichedVal}`,
-      {
-        method: "HEAD",
-        headers: { ...supabaseHeaders(config), Prefer: "count=exact" },
-      },
-      SUPABASE_TIMEOUT_MS
-    );
-    const range = res.headers.get("content-range");
-    const match = range?.match(/\/(\d+)/);
-    return match ? parseInt(match[1], 10) : -1;
+async function countByEnriched() {
+  const countOf = async (enrichedVal) => {
+    const { count, error } = await client
+      .from("thoughts")
+      .select("id", { count: "exact", head: true })
+      .eq("enriched", enrichedVal);
+    if (error) throw failure(`count thoughts with enriched = ${enrichedVal}`, error);
+    return typeof count === "number" ? count : 0;
   };
 
   const [enrichedCount, unenrichedCount] = await Promise.all([
-    countReq("true"),
-    countReq("false"),
+    countOf(true),
+    countOf(false),
   ]);
 
   return { enrichedCount, unenrichedCount, total: enrichedCount + unenrichedCount };
 }
 
-function supabaseHeaders(config) {
-  return {
-    apikey: config.supabaseServiceRoleKey,
-    Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-  };
-}
-
 // --- Status Display ---
 
-async function showStatus(config) {
-  const { enrichedCount, unenrichedCount, total } = await countByEnriched(config);
+async function showStatus() {
+  const { enrichedCount, unenrichedCount, total } = await countByEnriched();
   const state = loadState();
   const pct = total > 0 ? ((enrichedCount / total) * 100).toFixed(1) : "0.0";
 
@@ -693,14 +725,7 @@ async function showStatus(config) {
 // --- State Management ---
 
 function loadState() {
-  if (fs.existsSync(STATE_PATH)) {
-    try {
-      return JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
-    } catch {
-      console.warn("State file corrupt, starting fresh");
-    }
-  }
-  return {
+  const fresh = {
     totalProcessed: 0,
     totalFailed: 0,
     failedIds: [],
@@ -708,6 +733,22 @@ function loadState() {
     startedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+  if (!fs.existsSync(STATE_PATH)) return fresh;
+  try {
+    // A checkpoint missing a key — an older shape, a hand edit — takes the
+    // default for it rather than a TypeError.
+    const saved = JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
+    const state = { ...fresh, ...(isPlainObject(saved) ? saved : {}) };
+    if (!Array.isArray(state.failedIds)) state.failedIds = [];
+    return state;
+  } catch {
+    console.warn("State file corrupt, starting fresh");
+    return fresh;
+  }
+}
+
+function isPlainObject(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 function saveState(state) {
@@ -757,32 +798,26 @@ function nextFetchCursor(currentCursor, thoughts) {
 
 function buildConfig(args, env) {
   const provider = args.provider || env.ENRICH_PROVIDER || "openrouter";
+  if (!["openrouter", "anthropic"].includes(provider)) {
+    throw new Error(`--provider must be openrouter or anthropic; got "${provider}"`);
+  }
   // --max-calls: hard ceiling on LLM calls per run. Default 10000 so a
   // shell typo (`--limit` dropped, bad `--model`) can't silently burn
   // through the whole table. Pass `--max-calls 0` to disable the cap.
-  const rawMaxCalls = args.maxCalls !== undefined
-    ? parseInt(args.maxCalls, 10)
-    : parseInt(env.ENRICH_MAX_CALLS || "10000", 10);
-  const maxCalls = Number.isFinite(rawMaxCalls) && rawMaxCalls >= 0 ? rawMaxCalls : 10000;
+  const maxCalls = args.maxCalls !== undefined
+    ? intFlag(args.maxCalls, "--max-calls", 0)
+    : intFlag(env.ENRICH_MAX_CALLS || "10000", "ENRICH_MAX_CALLS", 0);
 
   // --limit: positive integer, or omitted for unlimited. Reject 0 /
   // NaN / negatives so `--limit 0` or `--limit foo` does not silently
   // mean "unlimited" (LOW-5). Combined with BLOCKER-1's --max-calls
   // this closes the "shell typo = unbounded spend" class of failures.
-  let limit = 0;
-  if (args.limit !== undefined) {
-    const parsed = parseInt(args.limit, 10);
-    if (!Number.isInteger(parsed) || parsed < 1) {
-      console.error(`ERROR: --limit must be a positive integer; got "${args.limit}"`);
-      process.exit(1);
-    }
-    limit = parsed;
-  }
+  const limit = args.limit !== undefined ? intFlag(args.limit, "--limit", 1) : 0;
 
   return {
     provider,
-    concurrency: parseInt(args.concurrency || "20", 10),
-    skip: parseInt(args.skip || "0", 10),
+    concurrency: intFlag(args.concurrency ?? "20", "--concurrency", 1),
+    skip: intFlag(args.skip ?? "0", "--skip", 0),
     limit,
     maxCalls,
     dryRun: !!args.dryRun,
@@ -792,16 +827,17 @@ function buildConfig(args, env) {
     // Anthropic direct
     anthropicApiKey: env.ANTHROPIC_API_KEY || "",
     anthropicModel: args.model || env.ANTHROPIC_CLASSIFIER_MODEL || "claude-3-5-haiku-20241022",
-    // OpenRouter
+    // OpenRouter — or any OpenAI-compatible endpoint OPENROUTER_BASE_URL names,
+    // a local one included (Ollama's `http://127.0.0.1:11434/v1`).
     openRouterApiKey: env.OPENROUTER_API_KEY || "",
     openRouterModel: args.model || env.OPENROUTER_CLASSIFIER_MODEL || "openai/gpt-4o-mini",
-    // Supabase
-    supabaseUrl: env.SUPABASE_URL || "",
-    supabaseServiceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY || "",
+    openRouterBaseUrl: (env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1").replace(/\/+$/, ""),
+    // The brain: SUPABASE_URL and the ignored key are read by lib/brain.mjs's connect().
   };
 }
 
 function parseArgs(argv) {
+  refuseUnknownFlags(argv, ["--help", "-h", "--dry-run", "--apply", "--status", "--concurrency", "--skip", "--limit", "--model", "--provider", "--retry-failed", "--max-calls", "--reset-state"], ["--concurrency", "--skip", "--limit", "--model", "--provider", "--max-calls"]);
   const args = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -809,41 +845,31 @@ function parseArgs(argv) {
     else if (a === "--dry-run") args.dryRun = true;
     else if (a === "--apply") args.apply = true;
     else if (a === "--status") args.status = true;
-    else if (a === "--concurrency" && argv[i + 1]) args.concurrency = argv[++i];
-    else if (a === "--skip" && argv[i + 1]) args.skip = argv[++i];
-    else if (a === "--limit" && argv[i + 1]) args.limit = argv[++i];
-    else if (a === "--model" && argv[i + 1]) args.model = argv[++i];
-    else if (a === "--provider" && argv[i + 1]) args.provider = argv[++i];
+    // The value is taken whatever it is: refuseUnknownFlags has required one,
+    // so a trailing `--limit` is refused there rather than read as "no limit".
+    else if (a === "--concurrency") args.concurrency = argv[++i];
+    else if (a === "--skip") args.skip = argv[++i];
+    else if (a === "--limit") args.limit = argv[++i];
+    else if (a === "--model") args.model = argv[++i];
+    else if (a === "--provider") args.provider = argv[++i];
     else if (a === "--retry-failed") args.retryFailed = true;
-    else if (a === "--max-calls" && argv[i + 1]) args.maxCalls = argv[++i];
+    else if (a === "--max-calls") args.maxCalls = argv[++i];
     else if (a === "--reset-state") args.resetState = true;
   }
   return args;
 }
 
-function parseEnvFile(filePath) {
-  if (!fs.existsSync(filePath)) return {};
-  const env = {};
-  for (const line of fs.readFileSync(filePath, "utf8").split("\n")) {
-    const idx = line.indexOf("=");
-    if (idx > 0 && !line.startsWith("#")) {
-      env[line.slice(0, idx).trim()] = line.slice(idx + 1).trim().replace(/^['"]|['"]$/g, "");
-    }
-  }
-  return env;
-}
-
 function printUsage() {
   console.log(`
 Usage:
-  node enrich-thoughts.mjs --apply --concurrency 5
-  node enrich-thoughts.mjs --apply --provider anthropic --concurrency 20
-  node enrich-thoughts.mjs --dry-run --limit 10
-  node enrich-thoughts.mjs --apply --retry-failed
-  node enrich-thoughts.mjs --status
+  bun enrich-thoughts.mjs --apply --concurrency 5
+  bun enrich-thoughts.mjs --apply --provider anthropic --concurrency 20
+  bun enrich-thoughts.mjs --dry-run --limit 10
+  bun enrich-thoughts.mjs --apply --retry-failed
+  bun enrich-thoughts.mjs --status
 
 Options:
-  --apply              Write enrichment results to Supabase
+  --apply              Write enrichment results to the brain
   --dry-run            Preview classifications without writing
   --status             Show enrichment progress stats
   --provider <name>    openrouter (default) or anthropic

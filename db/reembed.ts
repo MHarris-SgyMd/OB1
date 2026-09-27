@@ -159,9 +159,14 @@
  * tool as the actor. The per-thought record of the pass is the claim row.
  * db/test-live.ts [9] asserts both counts.
  *
- * Every re-embedded row's `updated_at` moves, because the row was updated. A
- * client holding an `if_unchanged_since` from before the pass gets STALE_READ
- * on its next edit, once, and refetches — the behaviour that guard exists for.
+ * Since migration 060 (SMD-2116) a re-embedded row's `updated_at` does NOT
+ * move: a vector onto a row that has one is a projection refresh inside
+ * update_thought — no event, no stamp — so a client holding an
+ * `if_unchanged_since` from before the pass is not told STALE_READ for it.
+ * (Until 060 every re-embedded row's stamp moved, because the row was
+ * updated, and the client refetched once.) The stale-read guard, the chunk
+ * rewrite and 018's duplicate reports are why this tool still calls
+ * update_thought rather than the refresh function directly.
  *
  * ── Duplicates from before the fingerprint ──────────────────────────────────
  * Migration 003 added content_fingerprint without a backfill, so a brain that
@@ -401,11 +406,13 @@ import {
   summariseCorpusByModel,
   UPDATE_THOUGHT_SIGNATURE,
   UPDATE_THOUGHT_SIGNATURE_9,
+  UPDATE_THOUGHT_SIGNATURE_10,
   validateEmbeddingConfig,
 } from "./config.mjs";
 import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { describeEgress, localKnob, mayLeaveBox, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
 import { maskUrl, UUID_RE } from "../server-portable/store.ts";
+import { chunkRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 
 const args = process.argv.slice(2);
@@ -681,25 +688,30 @@ const [fn] = await sql`
     -- missing piece is 046, not 032 (SMD-1730, fourth review pass).
     EXISTS (SELECT 1 FROM pg_proc
             WHERE oid = to_regprocedure(${"public." + UPDATE_THOUGHT_SIGNATURE_9})) AS nine,
+    -- 046's ten-argument form alone: a brain at 060, whose missing piece is
+    -- 061 — the lineage envelope this pass sends (SMD-1731).
+    EXISTS (SELECT 1 FROM pg_proc
+            WHERE oid = to_regprocedure(${"public." + UPDATE_THOUGHT_SIGNATURE_10})) AS ten,
     to_regclass('schema_migrations') IS NOT NULL AS has_ledger`;
 // Asked separately: a relation named in a statement is resolved when the
 // statement is parsed, whatever the AND before it would have short-circuited,
 // so a schema applied by hand — no ledger — must not be asked about its ledger.
 // Which migration the missing piece belongs to: the column is 021's, the
-// ten-argument body 046's when 032's nine-argument one is there, 032's when
-// neither is. The ledger is asked about that one.
-const missingMigration = !fn.labelled ? "021" : fn.nine ? "046" : "032";
+// eleven-argument body 061's when 046's ten-argument one is there, 046's when
+// 032's nine-argument one is, 032's when none is. The ledger is asked about
+// that one.
+const missingMigration = !fn.labelled ? "021" : fn.ten ? "061" : fn.nine ? "046" : "032";
 fn.ledgered = fn.has_ledger ? (await sql`SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name LIKE ${missingMigration + "%"}) AS l`)[0].l : false;
 /** Whether thoughts.embedding_model exists — the read-only modes answer without it. */
 const HAS_LABEL: boolean = Boolean(fn.labelled);
 const refusalSchema: string | null = fn.present && fn.labelled
   ? null
   : ` ${fn.labelled ? "update_thought" : "the schema"} predates migration ${missingMigration}: this pass writes the model beside every vector it stores and builds\n` +
-    "  its pool from the rows not at that model, which needs thoughts.embedding_model (021) and the ten-argument update_thought\n" +
-    "  (046, carrying 032's envelope and 018's rule, without which a pair from before the fingerprint fails on every run). " +
+    "  its pool from the rows not at that model, which needs thoughts.embedding_model (021) and the eleven-argument update_thought\n" +
+    "  (061, carrying 046's event, 032's envelope and 018's rule — without which a pair from before the fingerprint fails on every run — and taking the lineage envelope this pass sends). " +
     (fn.ledgered
       ? `schema_migrations records ${missingMigration} as\n  applied (--baseline?) but the schema installed is older. Re-apply the recorded migrations with the migrator: it re-runs\n  every migration, pending ones included, in one transaction, and runs 021's backfill with the operator's acceptances out of its sight, so it labels\n  from real passes alone (a paste of 021's body alone labels from the acceptances too).\n  Run it from a shell configured as this brain is, with the server and every worker stopped:\n    ${REAPPLY_COMMAND}`
-      : `Apply the pending migrations first (every file through ${fn.labelled ? "046" : "021"}, in order — a plain run does exactly that; ${missingMigration} alone would not):\n    cd db && bun migrate.ts --url …`);
+      : `Apply the pending migrations first (every file through ${fn.labelled ? "061" : "021"}, in order — a plain run does exactly that; ${missingMigration} alone would not):\n    cd db && bun migrate.ts --url …`);
 /**
  * What a run would refuse on, in the order a run judges them — the job, the
  * lease, the schema — spelled once for --status, --dry-run and the run.
@@ -1532,7 +1544,10 @@ async function processRow(row: Row): Promise<Outcome> {
         ${chunks.length ? chunks : null}::jsonb,
         ${current.updated_at}::timestamptz,
         ${actor}::jsonb,
-        ${embedded.model}::text
+        ${embedded.model}::text,
+        NULL::jsonb,
+        NULL::jsonb,
+        ${chunks.length ? { chunks: chunkRecipe(embedConfig, embedded) } : null}::jsonb
       ) AS r`;
     const result = r.r as { ok: boolean; error?: string; duplicate_of?: string; fingerprint_held_by?: string };
     if (result.ok) {

@@ -21,13 +21,13 @@ export function buildContentFingerprint(text) {
 }
 
 /**
- * Default fetch timeouts (ms). Configurable via FETCH_TIMEOUT_MS env var
- * as a single override for all calls. LLM calls default to 60s because
- * providers can legitimately stream for tens of seconds; Supabase calls
- * default to 30s.
+ * Default fetch timeout (ms) of an LLM call; FETCH_TIMEOUT_MS overrides it.
+ * 60s because providers can legitimately stream for tens of seconds. The
+ * brain's reads and writes go through compat/supabase-sql (lib/brain.mjs,
+ * SMD-2139) and carry no fetch timeout: a Postgres query is not a stalled
+ * HTTP body.
  */
 export const DEFAULT_LLM_TIMEOUT_MS = 60_000;
-export const DEFAULT_SUPABASE_TIMEOUT_MS = 30_000;
 
 /**
  * Wrap fetch with an AbortController-based timeout. Node 18+'s undici

@@ -25,6 +25,16 @@
  * is refused here (BLOCKERS) and ported by hand, not patched. `bun <file>`
  * serves a migrated file.
  *
+ * A file on the shim WITHOUT the banner rewrite() writes was written for the shim
+ * by hand — a script that spoke PostgREST through `fetch` and was ported
+ * (recipes/brain-backup, recipes/lint-sweep; SMD-2144 — and recipes/thought-enrichment through its lib/brain.mjs, SMD-2139) — and has no supabase-js
+ * import to go back to: `--revert`, with or without a path, names it and leaves
+ * it alone (a revert restores the import the banner recorded, or
+ * `@supabase/supabase-js` when the banner lacks that line), and the report
+ * marks it. Without
+ * that, CI's round trip (`--revert`, `--apply --all`, a clean diff) swapped its
+ * import for one it never had and stamped the banner in.
+ *
  * A file is INELIGIBLE when it uses something the shim deliberately does not
  * implement, or when it deploys somewhere the shim cannot follow (KEEP below).
  * Those need a human, and the report says which and why. The blockers are the
@@ -88,8 +98,11 @@ const KEEP = new Map<string, string>([
   // left with the recipe (SMD-1800). An entry is a file that deploys where bun is not and PostgREST is.
 ]);
 
-/** One file the scan found — on supabase-js, or already on the shim — with the reasons it cannot move. */
-type Finding = { file: string; rel: string; already: boolean; blockers: string[]; eligible: boolean };
+/** The first line of the banner rewrite() writes; a file on the shim without it was written for the shim by hand. */
+const BANNER = "// MIGRATED OFF SUPABASE";
+
+/** One file the scan found — on supabase-js, or already on the shim (by the codemod, or by hand) — with the reasons it cannot move. */
+type Finding = { file: string; rel: string; already: boolean; handPorted: boolean; blockers: string[]; eligible: boolean };
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -120,9 +133,10 @@ function classify(file: string): Finding | null {
 
   const rel = relative(ROOT, file).split("\\").join("/");
   const already = onShim;
+  const handPorted = onShim && !text.includes(BANNER);
   const blockers = BLOCKERS.filter((b) => b.re.test(text)).map((b) => b.why);
   if (KEEP.has(rel)) blockers.push(`kept on supabase-js: ${KEEP.get(rel)}`);
-  return { file, rel, already, blockers, eligible: blockers.length === 0 };
+  return { file, rel, already, handPorted, blockers, eligible: blockers.length === 0 };
 }
 
 /** Relative specifier from the file back to compat/supabase-sql/index.ts. */
@@ -199,17 +213,23 @@ const targets = argv.filter((a) => !a.startsWith("--"));
 const found = walk(ROOT).map(classify).filter((f) => f !== null).sort((a, b) => a.rel.localeCompare(b.rel));
 
 if (doRevert) {
+  const byFile = new Map(found.map((f) => [f.file, f]));
+  // Hand ports stay in the list so the loop names each one it passes over — CI's no-argument round trip logs them
+  // (review pass 2: filtered out here, they were passed over silently, and the docblock's "names it" was false).
   const list = targets.length ? targets.map((t) => resolve(ROOT, t)) : found.filter((f) => f.already).map((f) => f.file);
-  let n = 0;
-  for (const f of list) if (revert(f).changed) { n++; console.log(`  reverted ${relative(ROOT, f)}`); }
-  console.log(`\nreverted ${n} file(s)`);
+  let n = 0, hand = 0;
+  for (const f of list) {
+    if (byFile.get(f)?.handPorted) { hand++; console.log(`  left alone ${relative(ROOT, f)} — written for the shim by hand, no supabase-js import to go back to`); continue; }
+    if (revert(f).changed) { n++; console.log(`  reverted ${relative(ROOT, f)}`); }
+  }
+  console.log(`\nreverted ${n} file(s)${hand ? `, left ${hand} hand port(s) alone` : ""}`);
   process.exit(0);
 }
 
 if (apply) {
   const chosen = all
     ? found.filter((f) => f.eligible && !f.already)
-    : targets.map((t) => found.find((f) => f.file === resolve(ROOT, t)) ?? { file: resolve(ROOT, t), rel: t, eligible: false, blockers: ["not found in the scan"], already: false });
+    : targets.map((t) => found.find((f) => f.file === resolve(ROOT, t)) ?? { file: resolve(ROOT, t), rel: t, eligible: false, blockers: ["not found in the scan"], already: false, handPorted: false });
 
   if (chosen.length === 0) {
     console.log("Nothing to do. Run without --apply for the triage report.");
@@ -218,6 +238,10 @@ if (apply) {
 
   let done = 0, refused = 0;
   for (const f of chosen) {
+    if (f.already) {
+      console.log(`  ·  ${f.rel} — already on the shim${f.handPorted ? " (a hand port)" : ""}, nothing to do`);
+      continue;
+    }
     if (!f.eligible) {
       console.error(`  ✗  ${f.rel}\n     ${f.blockers.join("; ")}`);
       refused++;
@@ -234,11 +258,12 @@ const eligible = found.filter((f) => f.eligible && !f.already);
 const blocked = found.filter((f) => !f.eligible);
 const migrated = found.filter((f) => f.already);
 
-console.log(`Scanned ${found.length} file(s) importing @supabase/supabase-js.\n`);
+console.log(`Scanned ${found.length} file(s) importing @supabase/supabase-js or compat/supabase-sql.\n`);
 
 if (migrated.length) {
-  console.log(`Already on the shim (${migrated.length}):`);
-  for (const f of migrated) console.log(`  ·  ${f.rel}`);
+  const hand = migrated.filter((f) => f.handPorted).length;
+  console.log(`Already on the shim (${migrated.length}${hand ? `, ${hand} written for it by hand` : ""}):`);
+  for (const f of migrated) console.log(`  ·  ${f.rel}${f.handPorted ? "  (hand port — --revert leaves it alone)" : ""}`);
   console.log();
 }
 

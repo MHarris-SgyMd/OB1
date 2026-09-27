@@ -69,7 +69,7 @@ exactly one disposition.
   `recipes/fingerprint-dedup-backfill/backfill-fingerprints.mjs` — migration 023 backfills the
   fingerprint server-side (SMD-2126 → SMD-2145).
 - **PostgREST-speaking scripts (SMD-2126, decided 2026-09-24): 30 files in 21 recipes at the
-  decision (28 in 19 after SMD-2137 and SMD-2138)**, one fate each — an import onto the ingestion contract, a
+  decision (28 in 19 after SMD-2137 and SMD-2138; 26 in 17 with SMD-2144's two on the shim; 23 in 16 with SMD-2139's three)**, one fate each — an import onto the ingestion contract, a
   maintenance script onto the shim, the two smoke harnesses to their own tickets, the three above
   retire (`obsidian-vault-import` and `local-ollama-embeddings` done, SMD-2137 and SMD-2138) — in
   the section below;
@@ -118,8 +118,9 @@ fails CI"):**
 ## PostgREST-speaking scripts (decided 2026-09-24, SMD-2126)
 
 Thirty scripts in twenty-one recipes reached the brain as PostgREST clients at the decision
-(twenty-eight in nineteen remain — `obsidian-vault-import`'s and `local-ollama-embeddings`'
-retired, SMD-2137 and SMD-2138, their rows kept as the record) —
+(twenty-three in sixteen remain — `obsidian-vault-import`'s and `local-ollama-embeddings`'
+retired, SMD-2137 and SMD-2138, `brain-backup`'s and `lint-sweep`'s on the shim, SMD-2144, and
+`thought-enrichment`'s three, SMD-2139, their rows kept as the record) —
 `${SUPABASE_URL}/rest/v1/<table>` or `/rest/v1/rpc/<fn>` with a service-role `apikey`
 from a `.mjs` / `.js` / `.ts` `fetch`, or supabase-py's `create_client` from a `.py` — and
 none imports `compat/supabase-sql`. The fork's stack (SETUP.md) runs no PostgREST, so on
@@ -169,7 +170,13 @@ and a thought a script deletes goes through `.rpc("delete_thought", { p_id, p_ac
 actor a JSON object naming the script; a `CITED` answer arrives as `data.ok === false`, not in
 `error`, and each ticket says whether a cited row stays or `p_detach` goes. The key variable
 (`SUPABASE_SERVICE_ROLE_KEY`, `OPEN_BRAIN_SERVICE_KEY`) is read and ignored by the shim, so a
-script may stop requiring it.
+script may stop requiring it. The first two ports landed with SMD-2144 — `brain-backup` and
+`lint-sweep`, both read-only, driven in `db/test-live.ts` [26] against a real Postgres; the first
+writers with SMD-2139 — `thought-enrichment`'s three backfills, `type`, `sensitivity_tier` and
+metadata through `.update().eq()`, never content or vector, driven in [29]; `weekly-digest`,
+the third read-only script at the decision, left the class instead: it is a sink, posting thought text
+to Telegram, and a shim port would read from below the egress gate (SMD-2239, the rescope of
+2026-09-26; the orchestration ADR's decision 9, written for templates, read to cover it).
 
 **The entity tables.** Four scripts — atomizer's, authorship-edges', entity-wiki's,
 typed-edge-classifier's — assume upstream's `schemas/entity-extraction` tables; on a fork
@@ -202,14 +209,14 @@ nothing.
 |---|---|---|---|---|
 | `atomizer` | `audit-gmail-pipeline.mjs` (2), `lib/entity-resolver.mjs` (2), `re-atomize-gmail-thought.mjs` (2); `backfill-gmail-correspondents.mjs` through the lib | `thoughts`, `entities`, `thought_entities` (016's on a fork brain — above), `thought_edges` | port onto the shim; thought writes through `upsert_thought` / `delete_thought` | SMD-2140 |
 | `authorship-edges` | `lib/author-edges.mjs` (2); `backfill-authorship.mjs` through the lib | `thoughts`, `entities`, `thought_entities` (016's on a fork brain — above) | port onto the shim | SMD-2141 |
-| `brain-backup` | `backup-brain.mjs` (1) | `thoughts` (read) | port onto the shim; read-only | SMD-2144 |
+| `brain-backup` | `backup-brain.mjs` (0; was 1) | `thoughts` and five optional companion tables (read) | on the shim since SMD-2144; read-only — `SUPABASE_URL` a `postgres://` string, the key ignored, a missing table 42P01; `pg_dump` named as the whole-brain backup | SMD-2144 |
 | `brain-smoke-test` | `smoke-all.js` (1) | `thoughts`, `graph_*`, `ingestion_jobs`, four RPCs | its own ticket: the harness takes the fork's shape or `deploy/smoke.sh` absorbs it | SMD-2103 |
 | `chatgpt-conversation-import` | `import-chatgpt.py` (3) | `thoughts` (raw POST with a vector), `match_thoughts`, `chatgpt_conversations` | port onto the ingestion contract; SMD-2147 decides its `match_thoughts` dedup and `chatgpt_conversations` sidecar | SMD-2147 |
 | `email-history-import` | `pull-gmail.ts` (2) | `thoughts` (raw POST with a vector) | port onto the ingestion contract | SMD-2021 |
 | `entity-wiki` | `generate-wiki.mjs` (1) | `thoughts`, `entities`, `thought_entities` (016's on a fork brain — above), `edges`; `match_thoughts`, `upsert_thought` (reads `OPEN_BRAIN_URL`) | port onto the shim | SMD-2143 |
 | `fingerprint-dedup-backfill` | `delete-duplicates.mjs` (1), `backfill-fingerprints.mjs` (1) | `thoughts` (PATCH, DELETE) | `delete-duplicates.mjs` onto the shim, its deletes through `delete_thought`; `backfill-fingerprints.mjs` removed (migration 023) | SMD-2145 |
 | `google-activity-import` | `import-google-activity.mjs` (1) | `thoughts` (raw POST with a vector) | port onto the ingestion contract | SMD-2150 |
-| `lint-sweep` | `lint-sweep.js` (1) | `thoughts`, the entity tables, the seven `lint_*` views (read; either URL name) | port onto the shim; read-only | SMD-2144 |
+| `lint-sweep` | `lint-sweep.js` (0; was 1) | `thoughts`, `entities`, `edges`, `thought_entities` (read; either URL name; the seven `lint_*` views are psql's, the script reads none) | on the shim since SMD-2144; read-only — recency by `created_at` (uuid ids), `edges` by entity-extraction's columns | SMD-2144 |
 | `local-ollama-embeddings` | `embed-local.py` (2) | `upsert_thought` over `/rest/v1/rpc/` | retired: the server embeds locally (`OB1_LLM_BASE_URL`), `db/reembed.ts` for existing rows; the directory, its two test-writes guards and its check 24 entry are gone | SMD-2138 |
 | `ob-graph` | `smoke-graph-rpcs.mjs` (1); `index.ts` is on the shim since SMD-1798 | `graph_nodes`, `graph_edges`; `traverse_graph`, `find_shortest_path` | the smoke onto the shim or into `extensions/test-tools.ts` | SMD-2146 |
 | `obsidian-vault-import` | `import-obsidian.py` (3) | `thoughts` (raw POST with a vector) | retired: `db/ingest-markdown.ts` is the fork's Obsidian import (`ingest-records.ts --source markdown --markdown`); the directory, its registry rows and its check 24 entry are gone | SMD-2137 |
@@ -217,9 +224,9 @@ nothing.
 | `provenance-chains` | `backfill.mjs` (1), `eval.mjs` (1); `mcp-tools.ts` takes an injected client and test-writes drives it on the shim (SMD-1524) | `thoughts` (PATCH); `merge_thought_provenance_metadata` and `merge_thought_eval_metadata` (`schemas/provenance-chains`' functions) over `/rpc/`; `eval.mjs` writes metadata (reads either URL name) | port onto the shim | SMD-2142 |
 | `readwise-import` | `import-readwise.py` (2, supabase-py) | `upsert_thought`, `readwise_books`, `thoughts` (UPDATE of two columns) | port onto the ingestion contract | SMD-2149 |
 | `source-filtering` | `backfill-metadata.ts` (2) | `thoughts` (PATCH of metadata) | port onto the shim | SMD-2021 |
-| `thought-enrichment` | `enrich-thoughts.mjs` (4), `backfill-type.mjs` (1), `backfill-sensitivity.mjs` (1) | `thoughts` (PATCH of metadata, `type`, `sensitivity_tier`) | port onto the shim | SMD-2139 |
+| `thought-enrichment` | `enrich-thoughts.mjs` (0; was 4), `backfill-type.mjs` (0; was 1), `backfill-sensitivity.mjs` (0; was 1) | `thoughts` (an update of metadata, `type`, `sensitivity_tier`) | on the shim since SMD-2139; the first writers — `SUPABASE_URL` a `postgres://` string, the key ignored, a refused write ends the run; a stopgap until SMD-1930's runner | SMD-2139 |
 | `typed-edge-classifier` | `classify-edges.mjs` (1) | `thoughts`, `thought_entities` (016's on a fork brain — above), `thought_edges`; `thought_edges_upsert` (reads `OPEN_BRAIN_URL`) | port onto the shim | SMD-2141 |
-| `weekly-digest` | `weekly-digest.mjs` (1) | `thoughts` (read; either URL name) | port onto the shim; read-only | SMD-2144 |
+| `weekly-digest` | `weekly-digest.mjs` (1) | `thoughts` (read; either URL name) → Telegram | a sink, not a maintenance script: an n8n sink template after SMD-2211's checkpoint, or a `db/` verb behind SMD-2134's gate — not a shim port (rescoped 2026-09-26) | SMD-2239 |
 | `wiki-synthesis` | `scripts/synthesize-wiki.mjs` (1), `scripts/backfill-gmail-wikis.mjs` (1) | `synthesize-wiki.mjs` reads `thoughts` and writes files; `backfill-gmail-wikis.mjs` reads `thoughts` and `thought_edges`, captures through `upsert_thought` — a raw `POST /thoughts` when the function is absent — and DELETEs pages (both read `OPEN_BRAIN_URL`) | port onto the shim; page deletes through `delete_thought` | SMD-2143 |
 
 ## How the "verified no references" gate is applied
@@ -310,7 +317,7 @@ remaining drafts are unreferenced markdown working-notes.
 | `atomizer` | keep + audited → **SMD-2126**: port onto the shim (SMD-2140) | Standalone LLM compound→atomic splitter + Gmail re-atomization tooling; writes through the core capture path. |
 | `authorship-edges` | keep + audited → **SMD-2126**: port onto the shim (SMD-2141) | Standalone speaker-attribution recipe writing `thought_entities` author edges (no LLM, no hardcoded ids); consumes existing entity tables. |
 | `auto-capture` | keep + audited | Workflow-guidance recipe paired with the reusable auto-capture skill. |
-| `brain-backup` | keep + audited → **SMD-2126**: port onto the shim (SMD-2144) | Standalone export-to-JSON backup utility (`backup-brain.mjs`). |
+| `brain-backup` | keep + audited → **on the shim (SMD-2144)** | Standalone export-to-JSON backup utility (`backup-brain.mjs`), read-only; its README names `pg_dump` as the whole-brain backup. |
 | `brain-health-monitoring` | keep + audited | Ops SQL views + runbook (`ops-views.sql`, no core clobber); optionally reads the kept `entity-extraction` / `smart-ingest` tables. |
 | `brain-smoke-test` | keep + audited → **SMD-2126**: SMD-2103 | Fresh-install smoke harness (`smoke-all.js`); exercises REST/MCP/DB/auth across kept artifacts. |
 | `bring-your-own-context` | keep + audited | Portable context workflow (extraction prompts + Work Operating Model flow + remote MCP deploy). |
@@ -331,7 +338,7 @@ remaining drafts are unreferenced markdown working-notes.
 | `journals-blogger-import` | keep + audited → SMD-1867 candidate | Blogger Atom-XML import. SMD-1867 candidate. |
 | `life-engine` | keep + audited | Background `/loop` personal-assistant recipe; own `schema.sql` (no core clobber). |
 | `life-engine-video` | keep + audited | Remotion + ElevenLabs video-briefing add-on for `life-engine`. |
-| `lint-sweep` | keep + audited → **SMD-2126**: port onto the shim (SMD-2144) | Read-only three-tier quality audit (`views.sql` + `lint-sweep.js`); never mutates thoughts. |
+| `lint-sweep` | keep + audited → **on the shim (SMD-2144)** | Read-only three-tier quality audit (`views.sql` + `lint-sweep.js`); never mutates thoughts. Tier 1 needs `schemas/enhanced-thoughts`' columns. |
 | `live-retrieval` | keep + audited | Read-side "flywheel" workflow that surfaces thoughts on topic shifts. |
 | `local-brain-no-mcp` | ~~keep + audited *(own-database)*~~ → **retired (SMD-1800)** | Was a self-hosted LAN Supabase stack with three Edge Functions for curl-only capture/search/list where MCP is blocked. The fork's stack (`SETUP.md`) already runs without a cloud, and `integrations/open-brain-rest` is the HTTP surface without MCP; the companion `skills/ob1-local-http` now calls it. Its check 7/10/11/22 exceptions went with it. |
 | `local-ollama-embeddings` | ~~keep + audited~~ → **retired (SMD-2138)** *(no-parity posture; SMD-2126 → SMD-2138)* | Was the capture-without-a-cloud-key recipe. The `ALTER COLUMN embedding TYPE` was a README example explicitly annotated "not altered by hand on this fork — build at `db/config.mjs`'s width; `upsert_thought` refuses another width."; the example was CI-held (`test-writes.ts`, SMD-1524; its two guards went with it). **SMD-2126:** the fork embeds locally by default (`OB1_LLM_BASE_URL`, `deploy/compose.yaml --profile local-models`) and `db/reembed.ts` re-embeds existing rows, so the recipe's capability is core and its only transport is one the stack lacks; it retired in SMD-2138 (test-writes' two text assertions on it went with it; the two models it named that `SETUP.md`'s table lacked are rows there — mxbai with the fork's own 0.882 MRR, gte-qwen2 unmeasured here). |
@@ -348,10 +355,10 @@ remaining drafts are unreferenced markdown working-notes.
 | `research-to-decision-workflow` | keep + audited | Workflow composing canonical OB1 skills into decision pipelines. |
 | `schema-aware-routing` | keep + audited *(own-project)* + SMD-1798 | Metadata-routing pattern that creates **its own five tables in its own project** (README-annotated; guard check 10 counted exception; CI BYPASS_1524, SMD-1524). Its `alter column embedding` / raw inserts target its own `thoughts`, not core. README uses supabase-js → SMD-1798. |
 | `source-filtering` | keep + audited → **SMD-2126**: port onto the shim (SMD-2021) | Source-tag filtering + metadata backfill for early imports. |
-| `thought-enrichment` | keep + audited → **SMD-2126**: port onto the shim (SMD-2139) | Retroactive LLM classification + sensitivity backfills; writes through the core path. |
+| `thought-enrichment` | keep + audited → **on the shim (SMD-2139)** | Retroactive LLM classification + sensitivity backfills; `type`, `sensitivity_tier` and metadata through the shim, never content or vector; SMD-1930 re-expresses them as transforms. |
 | `typed-edge-classifier` | keep + audited → **SMD-2126**: port onto the shim (SMD-2141) | Opus/Haiku classifier populating the kept `thought_edges` (`typed-reasoning-edges`); SMD-1253 lineage. |
 | `vercel-neon-telegram` | keep + audited *(own-database)* | Alternative Vercel + Neon + Telegram stack building **its own Neon brain** (guard OWN_DATABASE line 1409; `sql/001`/`002` owned as NEON). Its `match_thoughts` is its own install, not a clobber. Uses the Vercel AI SDK (no supabase-js). |
-| `weekly-digest` | keep + audited → **SMD-2126**: port onto the shim (SMD-2144) | Scheduled importance-ranked digest to Telegram. |
+| `weekly-digest` | keep + audited → **SMD-2126 → SMD-2239**: a sink, not a shim port | Scheduled importance-ranked digest to Telegram — brain content leaves the box, so it waits for SMD-2211's egress checkpoint (an n8n sink template) or a `db/` verb behind SMD-2134's gate. |
 | `wiki-compiler` | keep + audited | Orchestrates graph extraction + typed edges + entity/topic synthesis into scheduled wiki refreshes; wires the kept entity worker + edge tables. |
 | `wiki-synthesis` | keep + audited → **SMD-2126**: port onto the shim (SMD-2143) | Topic/email-thread wiki synthesis from atomic thoughts via any OpenAI-compatible LLM. |
 | `work-operating-model-activation` | keep + audited + SMD-1798 | Operating-model elicitation workflow; own `schema.sql`; `index.ts` uses supabase-js → SMD-1798. |

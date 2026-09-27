@@ -40,13 +40,16 @@
  *   • Retrieval — the two search tools, called against both brains over the same
  *     queries, their returned ids diffed. The VECTOR arm needs no model here: the
  *     brain embeds the query server-side, so search_thoughts (hybrid) replays it.
+ *     The query set is supplied (--query/--queries-file) or drawn from a brain's own
+ *     log (--from-log, via list_logged_searches, SMD-2245) — each logged search on
+ *     the arm that ran it, `current` as search_thoughts with prefer_current (059,
+ *     SMD-2255).
  *
- * One signal a compare would ideally carry lives only in a brain's Postgres and is
- * NOT reachable over the read surface, so this HTTP-only compare names it as out of
- * reach rather than guessing: a replay sourced from stable's own query_log (this
- * replays a supplied query set instead; SMD-2245 adds the surface). The board-sync
- * watermark is likewise deferred (SMD-2109 notes). The EXACT id-set difference,
- * once deferred here too, now rides list_thought_ids (SMD-2244).
+ * Both of SMD-2109's once-deferred limits are now closed over the read surface: the
+ * EXACT id-set difference rides list_thought_ids (SMD-2244), and a replay sourced
+ * from a brain's own query_log rides list_logged_searches (SMD-2245). One signal is
+ * still deferred — the board-sync watermark (max metadata.linear_updated_at), which
+ * no read tool exposes; the compare names it rather than guessing (SMD-2109 notes).
  *
  * Until SMD-2037 lands, a refreshed brain runs at pgvector's default HNSW scan
  * settings, so a hybrid-arm difference here can be GUC-induced rather than a real
@@ -104,7 +107,10 @@ export function splitKeyFromUrl(url: string): { base: string; urlKey: string | u
 export async function resolveBrain(ref: string, keyArg: string | undefined, envKey: string | undefined): Promise<BrainEndpoint> {
   if (/^https?:\/\//i.test(ref)) {
     const parsed = splitKeyFromUrl(ref);
-    if (!parsed) throw new Error(`--compare: ${JSON.stringify(ref)} is not a valid URL.`);
+    // Never echo the raw ref: an invalid URL cannot be parsed to strip a ?key=, so
+    // show only the part before any query string (review pass 2 — a key-safety tidy
+    // in already-merged code, reachable via --a/--b too).
+    if (!parsed) throw new Error(`--compare: ${JSON.stringify(ref.split("?")[0])} is not a valid URL.`);
     const host = new URL(ref).host;
     const key = keyArg ?? parsed.urlKey ?? envKey;
     if (!key) throw new Error(`--compare: no read key for ${host}. Pass --a-key/--b-key, set OB1_COMPARE_KEY, or put it in the URL as ?key=.`);
@@ -281,10 +287,17 @@ export async function newestCapture(ep: BrainEndpoint): Promise<string | null> {
   }
 }
 
+/**
+ * The arms a replay knows: keyword and hybrid, and current — search_thoughts
+ * with prefer_current (migration 059, SMD-2255), the hybrid with settled and
+ * superseded thoughts ranked below current ones.
+ */
+export type ReplayArm = "keyword" | "hybrid" | "current";
+
 /** The ids a brain returns for one query on one arm, in rank order (parsed from the `ID:` lines). */
-export async function searchIds(ep: BrainEndpoint, arm: "keyword" | "hybrid", query: string): Promise<string[]> {
+export async function searchIds(ep: BrainEndpoint, arm: ReplayArm, query: string): Promise<string[]> {
   const tool = arm === "keyword" ? "search_thoughts_keyword" : "search_thoughts";
-  const text = await callTool(ep, tool, { query });
+  const text = await callTool(ep, tool, arm === "current" ? { query, prefer_current: true } : { query });
   return parseResultIds(text);
 }
 
@@ -428,6 +441,50 @@ export async function corpusIdDiff(a: BrainEndpoint, b: BrainEndpoint): Promise<
 }
 
 // ---------------------------------------------------------------------------
+// The log-sourced replay plan (SMD-2245).
+// ---------------------------------------------------------------------------
+
+/** A brain's logged searches, as list_logged_searches returns them. */
+interface LoggedSearchPage {
+  searches: { query: string; arm: ReplayArm | null }[];
+  truncated: boolean;
+}
+
+/** Fetch a window of a brain's logged searches — the queries a log-sourced replay draws from. */
+export async function fetchLoggedSearches(ep: BrainEndpoint, since: string | null): Promise<LoggedSearchPage> {
+  const args: Record<string, unknown> = {};
+  if (since) args.since = since;
+  const text = await callTool(ep, "list_logged_searches", args);
+  let page: Partial<LoggedSearchPage>;
+  try {
+    page = JSON.parse(text) as Partial<LoggedSearchPage>;
+  } catch {
+    throw new Error(`${ep.label}: list_logged_searches did not return JSON (${text.slice(0, 80)}).`);
+  }
+  return { searches: Array.isArray(page.searches) ? page.searches : [], truncated: page.truncated === true };
+}
+
+/**
+ * A replay plan from logged searches: each search on the arm that ran it, a
+ * null-arm row skipped (pre-045 rows carry no arm, so which one produced the ids
+ * is unknown — as the SQL replay skips them), an empty query skipped, and identical
+ * (query, arm) pairs collapsed so a query logged a hundred times replays once.
+ */
+export function replayPlanFromLog(searches: { query: string; arm: string | null }[]): ReplayEntry[] {
+  const seen = new Set<string>();
+  const plan: ReplayEntry[] = [];
+  for (const s of searches) {
+    if (s.arm !== "keyword" && s.arm !== "hybrid" && s.arm !== "current") continue;
+    if (typeof s.query !== "string" || s.query.length === 0) continue;
+    const key = `${s.arm}\u0000${s.query}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    plan.push({ query: s.query, arm: s.arm });
+  }
+  return plan;
+}
+
+// ---------------------------------------------------------------------------
 // The comparison.
 // ---------------------------------------------------------------------------
 
@@ -439,7 +496,7 @@ export interface FieldDelta {
 
 export interface RetrievalRow {
   query: string;
-  arm: "keyword" | "hybrid";
+  arm: ReplayArm;
   a: string[];
   b: string[];
   /** ids b returned that a did not. */
@@ -463,8 +520,8 @@ export interface Comparison {
   counts: { a: number | null; b: number | null };
   /** The exact id-set difference (SMD-2244), or unavailable on a brain that predates list_thought_ids. */
   idDiff: IdDiff;
-  /** The retrieval rows, when --replay ran; the arms that ran. */
-  retrieval: { rows: RetrievalRow[]; arms: string[]; queries: number } | null;
+  /** The retrieval rows, when --replay ran; the arms that ran, the replay count, where the queries came from, whether a log source was truncated, and any log-source read failure. */
+  retrieval: { rows: RetrievalRow[]; arms: string[]; queries: number; source: string; truncated?: boolean; sourceError?: string } | null;
   /** The one-line verdict. */
   verdict: string;
 }
@@ -492,10 +549,28 @@ function identityFields(r: BrainReading): Record<string, string> {
 }
 
 /** Compose the two readings into a comparison, optionally replaying a query set. */
+/** One entry of a retrieval plan: a query and the arm to replay it on. */
+export interface ReplayEntry {
+  query: string;
+  arm: ReplayArm;
+}
+
 export async function compareBrains(
   a: BrainEndpoint,
   b: BrainEndpoint,
-  opts: { queries?: string[]; hybrid?: boolean } = {},
+  opts: {
+    /** A supplied query set (replayed on keyword, plus hybrid when `hybrid`). */
+    queries?: string[];
+    hybrid?: boolean;
+    /** A resolved plan from a brain's log (`--from-log`) — {query, arm} pairs — used in place of `queries`. */
+    fromLog?: ReplayEntry[];
+    /** Where the plan came from, for the report: "the supplied queries" or "the log of <label>". */
+    source?: string;
+    /** Whether a `fromLog` source was truncated (more searches in the window than replayed). */
+    truncated?: boolean;
+    /** Set when a `fromLog` source could not be READ (the source lacks the tool, or is unreachable) — the reason. The rest of the compare still prints, like the id-set path (review pass 1). */
+    sourceError?: string;
+  } = {},
 ): Promise<Comparison> {
   const [ra, rb, idDiff] = await Promise.all([readBrain(a), readBrain(b), corpusIdDiff(a, b)]);
 
@@ -509,24 +584,30 @@ export async function compareBrains(
   const migrationDelta =
     ra.highestMigration === null || rb.highestMigration === null ? null : rb.highestMigration - ra.highestMigration;
 
+  // The replay plan — {query, arm} pairs — from a supplied set (each query on the
+  // keyword arm, and hybrid when asked) or from a brain's log (each logged search on
+  // its OWN arm). One loop replays either against both brains.
   let retrieval: Comparison["retrieval"] = null;
-  if (opts.queries && opts.queries.length) {
-    const arms: ("keyword" | "hybrid")[] = opts.hybrid ? ["keyword", "hybrid"] : ["keyword"];
+  const suppliedArms: ("keyword" | "hybrid")[] = opts.hybrid ? ["keyword", "hybrid"] : ["keyword"];
+  const plan: ReplayEntry[] = opts.fromLog
+    ? opts.fromLog
+    : (opts.queries ?? []).flatMap((query) => suppliedArms.map((arm) => ({ query, arm })));
+  // A `fromLog` source with no rows still reports (so the operator learns the log
+  // was empty); a supplied set with no queries means retrieval was not asked.
+  if (plan.length || opts.fromLog || opts.sourceError) {
     const rows: RetrievalRow[] = [];
-    for (const query of opts.queries) {
-      for (const arm of arms) {
-        // One query one brain refuses (an egress-gated embedding) or a hybrid arm a
-        // peer has no provider for must not abort the whole compare — mark the row
-        // skipped-with-reason and go on, the way newestCapture degrades (review pass 1).
-        try {
-          const [ida, idb] = await Promise.all([searchIds(a, arm, query), searchIds(b, arm, query)]);
-          rows.push(diffRow(query, arm, ida, idb));
-        } catch (e) {
-          rows.push({ query, arm, a: [], b: [], onlyA: [], onlyB: [], reordered: false, changed: false, skipped: (e as Error).message });
-        }
+    for (const { query, arm } of plan) {
+      // One query one brain refuses (an egress-gated embedding) or a hybrid arm a
+      // peer has no provider for must not abort the whole compare — mark the row
+      // skipped-with-reason and go on, the way newestCapture degrades (review pass 1).
+      try {
+        const [ida, idb] = await Promise.all([searchIds(a, arm, query), searchIds(b, arm, query)]);
+        rows.push(diffRow(query, arm, ida, idb));
+      } catch (e) {
+        rows.push({ query, arm, a: [], b: [], onlyA: [], onlyB: [], reordered: false, changed: false, skipped: (e as Error).message });
       }
     }
-    retrieval = { rows, arms, queries: opts.queries.length };
+    retrieval = { rows, arms: [...new Set(plan.map((p) => p.arm))], queries: plan.length, source: opts.source ?? "the supplied queries", truncated: opts.truncated, sourceError: opts.sourceError };
   }
 
   return {
@@ -542,7 +623,7 @@ export async function compareBrains(
 }
 
 /** One retrieval row: what b returned against what a returned for the same query and arm. */
-export function diffRow(query: string, arm: "keyword" | "hybrid", a: string[], b: string[]): RetrievalRow {
+export function diffRow(query: string, arm: ReplayArm, a: string[], b: string[]): RetrievalRow {
   const aSet = new Set(a);
   const bSet = new Set(b);
   const onlyB = b.filter((id) => !aSet.has(id));
@@ -642,19 +723,28 @@ export function renderComparison(c: Comparison): string {
   lines.push("");
   lines.push("Retrieval:");
   if (!c.retrieval) {
-    lines.push("  skipped — pass --replay with --query/--queries-file (query_log is not reachable over HTTP, so the query set is supplied).");
+    lines.push("  skipped — pass --replay with --query/--queries-file, or --from-log <brain> to source the queries from a brain's own log.");
+  } else if (c.retrieval.sourceError) {
+    // A --from-log source that resolved but whose log could not be read.
+    lines.push(`  could not read ${c.retrieval.source} — ${c.retrieval.sourceError}; identity and freshness above still compare.`);
+  } else if (c.retrieval.queries === 0) {
+    // A --from-log source that yielded nothing (OB1_QUERY_LOG off, or an empty window).
+    lines.push(`  no queries — ${c.retrieval.source} logged no searches (OB1_QUERY_LOG off, or none in the window).`);
   } else {
     const moved = c.retrieval.rows.filter((r) => r.changed);
     const skipped = c.retrieval.rows.filter((r) => r.skipped);
-    lines.push(`  arms: ${c.retrieval.arms.join(", ")} over ${c.retrieval.queries} quer${c.retrieval.queries === 1 ? "y" : "ies"}${c.retrieval.arms.includes("hybrid") ? " (hybrid = the vector arm, embedded by each brain; until SMD-2037 a hybrid diff can be HNSW-GUC-induced)" : ""}`);
+    const trunc = c.retrieval.truncated ? " (window truncated — the most recent were replayed)" : "";
+    const hybridNote = c.retrieval.arms.includes("hybrid") ? " (hybrid = the vector arm, embedded by each brain; until SMD-2037 a hybrid diff can be HNSW-GUC-induced)" : "";
+    // "replays" not "queries": the count is query-arm pairs (a query on two arms is two).
+    lines.push(`  arms: ${c.retrieval.arms.join(", ")} over ${c.retrieval.queries} replay${c.retrieval.queries === 1 ? "" : "s"} from ${c.retrieval.source}${trunc}${hybridNote}`);
     lines.push(`  (these are real searches — a brain running OB1_QUERY_LOG=on records them in query_log, telemetry, not the thoughts corpus.)`);
     for (const r of skipped) lines.push(`  ~ [${r.arm}] ${JSON.stringify(r.query.slice(0, 60))}: skipped — ${r.skipped}`);
     if (moved.length === 0) {
       // All rows skipped is not "no delta" — nothing was compared (review pass 3).
       const allSkipped = skipped.length > 0 && skipped.length === c.retrieval.rows.length;
       lines.push(allSkipped
-        ? `  nothing compared — all ${skipped.length} quer${skipped.length === 1 ? "y" : "ies"} were skipped.`
-        : `  no delta — b returns the same ids as a for every query and arm${skipped.length ? ` (${skipped.length} skipped)` : ""}.`);
+        ? `  nothing compared — all ${skipped.length} replay${skipped.length === 1 ? "" : "s"} were skipped.`
+        : `  no delta — b returns the same ids as a for every replay${skipped.length ? ` (${skipped.length} skipped)` : ""}.`);
     } else {
       for (const r of moved) {
         const bits: string[] = [];
@@ -683,6 +773,10 @@ export interface CompareArgs {
   replay: boolean;
   hybrid: boolean;
   queries: string[];
+  /** A brain reference whose logged searches source the replay (--from-log), in place of `queries` (SMD-2245). */
+  fromLog?: string;
+  /** The window for --from-log's logged searches (ISO-8601). */
+  since?: string;
   json: boolean;
 }
 
@@ -693,7 +787,27 @@ export async function runCompare(args: CompareArgs): Promise<number> {
     resolveBrain(args.a, args.aKey, envKey),
     resolveBrain(args.b, args.bKey, envKey),
   ]);
-  const c = await compareBrains(a, b, { queries: args.replay ? args.queries : undefined, hybrid: args.hybrid });
+  // The retrieval source, resolved: a supplied query set, or a brain's own log
+  // (--from-log), or nothing when --replay was not asked.
+  let replayOpts: Parameters<typeof compareBrains>[2] = {};
+  if (args.replay) {
+    if (args.fromLog) {
+      // A bad --from-log ref aborts (a usage error, as a bad --a/--b does); a source
+      // that resolves but whose log cannot be READ (an older brain without the tool,
+      // an unreachable one) degrades — the id-set/identity/freshness still print
+      // (review pass 1). src.label carries no key, so the reason is safe to show.
+      const src = await resolveBrain(args.fromLog, undefined, envKey);
+      try {
+        const page = await fetchLoggedSearches(src, args.since ?? null);
+        replayOpts = { fromLog: replayPlanFromLog(page.searches), source: `the log of ${src.label}`, truncated: page.truncated };
+      } catch (e) {
+        replayOpts = { fromLog: [], source: `the log of ${src.label}`, sourceError: (e as Error).message };
+      }
+    } else {
+      replayOpts = { queries: args.queries, hybrid: args.hybrid, source: "the supplied queries" };
+    }
+  }
+  const c = await compareBrains(a, b, replayOpts);
   if (args.json) {
     // The endpoints (and their keys) are never in the Comparison — only labels.
     console.log(JSON.stringify(c, null, 2));

@@ -257,7 +257,7 @@ their first thought, with the real error buried inside a tool response.
 On Supabase this mattered less: the platform injected the database credentials, so
 they could not be wrong. Off Supabase every one is hand-written.
 
-So the container's entrypoint is `bun preflight.ts && exec bun index.ts`. A
+So the container's entrypoint runs `bun preflight.ts` and, only if it passes, `exec bun index.ts`. A
 misconfigured deployment crashloops, which is visible, instead of looking healthy,
 which is not. `preflight.ts --json` suits a pipeline gate; `--deep` also calls
 OpenRouter and checks the embedding width still matches the schema.
@@ -369,23 +369,30 @@ point them at each other over HTTP (SMD-2109):
 # each brain is a connector name (claude mcp get resolves the URL + key) or an
 # http(s):// URL with its key in --a-key/--b-key, OB1_COMPARE_KEY, or ?key=
 bun db/tier.ts --compare open-brain open-brain-canary
+# replay a supplied query set…
 bun db/tier.ts --compare open-brain open-brain-canary --replay --hybrid \
   --query "highest value open ticket" --queries-file deploy/compare-queries.txt --json
+# …or replay what a brain actually searched, from its own query_log
+bun db/tier.ts --compare open-brain open-brain-canary --replay \
+  --from-log open-brain --since 2026-09-24T00:00:00Z
 ```
 
 It reads each brain as a client — the keyed `GET /health` record (version,
 commit, tier, the tree's latest migration against the ledger's highest, schema
-version, embedding, counts) and, with `--replay`, the two search tools over a
-supplied query set (the vector arm needs no local model — each brain embeds its
-own query). It never prints a key and prints a one-line verdict ("current with
-each other" / "canary is 1 migration behind; 407 vs 597 thoughts"). It exits
-non-zero when anything differs. The default compare writes nothing; `--replay`
-issues real searches, which a brain running `OB1_QUERY_LOG=on` records in
-`query_log` (telemetry, migration 034, never the thoughts corpus), as any client
-search does. Because it is HTTP-only, the exact id-set difference and a replay
-sourced from stable's `query_log` are out of reach and named as such; a DB-backed
-mode can add them. Until SMD-2037 lands, a
-refreshed brain runs at pgvector's default HNSW settings, so a hybrid-arm
+version, embedding, counts); the **exact id-set difference** (which thoughts one
+brain holds and the other does not, via `list_thought_ids`, SMD-2244); and, with
+`--replay`, the two search tools over a query set that is either supplied
+(`--query`/`--queries-file`) or drawn from a brain's own `query_log`
+(`--from-log`, SMD-2245 — each logged search replayed on the arm that ran it).
+The vector arm needs no local model — each brain embeds its own query. It never
+prints a key and prints a one-line verdict ("current with each other" / "canary
+is 1 migration behind; 407 vs 597 thoughts"), and exits non-zero when anything
+differs. The default compare writes nothing; `--replay` issues real searches,
+which a brain running `OB1_QUERY_LOG=on` records in `query_log` (telemetry,
+migration 034, never the thoughts corpus), as any client search does. The one
+signal still out of reach over HTTP is the board-sync watermark (max
+`metadata.linear_updated_at`); a DB-backed mode can add it. Until SMD-2037 lands,
+a refreshed brain runs at pgvector's default HNSW settings, so a hybrid-arm
 difference can be GUC-induced — the retrieval section says so.
 
 `--from` and `--to` name a database on the network as `HOST[:PORT][/DB]`
