@@ -167,7 +167,7 @@ back and corrects the own-key labels an earlier paste of the body left
 ## Expected outcome
 
 `bun test-schema.ts` prints `2146 assertions: 2146 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports sixty-four (64) migrations applied, and
+Against a real database, `bun migrate.ts` reports sixty-five (65) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -207,7 +207,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
-058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-2297).
+058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 065 SMD-2297).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -595,7 +595,7 @@ left alone — and its newer thought is requeued under the judge's key (029's
 CHECKs widened; `consolidation_candidates` yields the pair again;
 `record_supersession_proposal` replaces the stale row in place, back to
 pending, when the pass finds the conflict again; a pair the pass no longer
-finds in conflict is the pass's to settle since 064, below; a reviewer may
+finds in conflict is the pass's to settle since 065, below; a reviewer may
 decide a stale row sooner, accepting it with `p_force` or rejecting it —
 `consolidate.ts --list stale`); the
 tags are marked with no pool to feed (no worker re-tags a thought). With
@@ -620,12 +620,12 @@ gains `DELETE` on the snapshot (the grants table). Additive; three bodies
 redefined on their own text with no arity change. test-schema [58], test-live
 [31], test-upgrade [20o].
 
-**064 — the consolidation pass settles a stale proposal it no longer finds in
+**065 — the consolidation pass settles a stale proposal it no longer finds in
 conflict, and a pass-settled row is the pass's to reopen (SMD-2297).** 063
 left a dead end: `consolidate.ts` writes a proposal only for a conflict at its
 confidence floor, so when the edit that made a row stale had resolved the
 conflict — the likely outcome — the pass judged the pair, found none, wrote
-nothing, and the row stayed `stale` for a reviewer for ever. 064 adds
+nothing, and the row stayed `stale` for a reviewer for ever. 065 adds
 `settle_supersession_proposal(id, note, actor, judge_key, older_fingerprint,
 newer_fingerprint, recipe, agent)`: the pass's rejection of a stale row —
 through `review_supersession_proposal`'s reject arm, which checks no status
@@ -648,10 +648,10 @@ thought under its own key, judges a stale pair the top-k left out when it
 still meets the candidate rule, replaces a conflict found again, settles a
 judgement of no conflict or a pair the rule no longer admits, and waits on a
 side without a vector. Preflight's `lineage` check warns when 063 is
-re-applied by hand over 064 (rebuild_derived's reopen sentinel gone where the
+re-applied by hand over 065 (rebuild_derived's reopen sentinel gone where the
 settle function stands). The status column's and the table's comments are
 re-issued. Additive: one function, one body redefined with no arity change,
-no grant moves. test-schema [59], test-live [16], test-upgrade [20p].
+no grant moves. test-schema [60], test-live [16], test-upgrade [20q].
 
 ## What changed relative to the guide
 
@@ -1747,7 +1747,7 @@ trigger fires on any column), which two readers take as an edit: a client's
 `if_unchanged_since` from before the acceptance is refused, and 021's evidence
 rule stops vouching for that thought's vector, as after any edit.
 
-**Stale rows (063, 064).** A pending proposal whose text moved under the
+**Stale rows (063, 065).** A pending proposal whose text moved under the
 verdict is set `stale` by `rebuild_derived` (an edit, a supersession, a
 forget) and its newer thought requeued under the key that judged it. A stale
 row is the next pass's work whatever key wrote it: every run re-pools each
@@ -1838,7 +1838,7 @@ gone while the thought stands — preflight's `lineage` WARN names this flag —
 and calls the function once per thought. `--status` is the census: rows per
 kind, the stale-by-fingerprint count, the marked count, the orphans, the
 legacy rows, the stale proposals and where each stands against the judge
-pools (064), and the pools with pending rows.
+pools (065), and the pools with pending rows.
 `--dry-run` runs the call inside a transaction and rolls it back: the report
 is the function's own and nothing is kept. The tool calls no model and holds
 no lease. Exit 0 ran; 1 the function refused as a value (`NOT_FOUND`,

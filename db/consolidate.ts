@@ -66,7 +66,7 @@
  * A pending proposal whose text moved under the verdict is set `stale` by
  * migration 063's rebuild_derived (a text edit, a supersession, a forget) and
  * its newer thought requeued under the key that judged it. A stale row is
- * THIS pass's work, whatever key wrote it (migration 064, SMD-2297): every
+ * THIS pass's work, whatever key wrote it (migration 065, SMD-2297): every
  * run first re-pools each stale row's newer thought under its own key (a pair
  * both sides of which have a vector, with no live or failed claim here — a
  * failed claim is --retry-failed's, 015's rule), then judges the thought's
@@ -223,11 +223,11 @@ if (FORCE && !ACCEPT) {
   console.error("--force goes with --accept: it accepts a proposal whose thought was edited after it was judged.");
   process.exit(2);
 }
-// 064: the marker is the pass's own — a person's note beginning with it would
+// 065: the marker is the pass's own — a person's note beginning with it would
 // be read by rebuild_derived as the pass's decision and reopened on a text
 // move (second review pass's brief, cold read: the door admitted it).
 if (NOTE !== undefined && NOTE.trimStart().startsWith(PASS_SETTLED_PREFIX)) {
-  console.error(`--note may not begin with "${PASS_SETTLED_PREFIX}": that marker is the pass's own (migration 064) — rebuild_derived reads a rejection carrying it as the pass's and sets it stale again when a text moves.`);
+  console.error(`--note may not begin with "${PASS_SETTLED_PREFIX}": that marker is the pass's own (migration 065) — rebuild_derived reads a rejection carrying it as the pass's and sets it stale again when a text moves.`);
   process.exit(2);
 }
 const REVIEW_ONLY = LIST !== undefined || ACCEPT !== undefined || REJECT !== undefined || STALE_DAYS > 0;
@@ -342,13 +342,13 @@ if (WRITES) {
 
 /**
  * The pass as an actor for review_supersession_proposal — a person's review
- * through --accept/--reject, or the pass's own settle of a stale row (064).
+ * through --accept/--reject, or the pass's own settle of a stale row (065).
  * `via`, the door (046's origin column) — `source` until SMD-1730, when the
  * trigger stopped reading an actor's source.
  */
 const passActor = () => ({ name: actorName, via: "consolidate", session: JOB, ...(agentId ? { agent_id: agentId } : {}) });
 
-/** 064: the stale rows' standings against the pools under THIS key, as --status prints them (server-portable/consolidate.ts holds the one read, the rank and the words; db/rebuild.ts reads the same, keyless). */
+/** 065: the stale rows' standings against the pools under THIS key, as --status prints them (server-portable/consolidate.ts holds the one read, the rank and the words; db/rebuild.ts reads the same, keyless). */
 const readStaleStandings = async () => staleStandings((await sql.unsafe(STALE_STANDING_ROWS_SQL)) as StaleStandingRow[], JOB);
 const staleClause = (st: ReturnType<typeof staleStandings>): string =>
   `${st.total} stale (a text moved under the verdict: ${staleStandingsText(st, JOB)}; the pass replaces one it finds in conflict again and settles one it does not)`;
@@ -385,7 +385,7 @@ async function printList(status: string | undefined, limit = 50): Promise<number
     return 0;
   }
   console.log(`  ${rows.length} ${status ?? ""} proposal(s), most confident first:\n`);
-  // 064: a stale row's standing against the pools, beside its status. (A
+  // 065: a stale row's standing against the pools, beside its status. (A
   // row the pass settled needs no tag: its note begins with the marker.)
   const standing = rows.some((p) => p.status === "stale") ? (await readStaleStandings()).byId : new Map<string, never>();
   rows.forEach((p, i) => {
@@ -398,7 +398,7 @@ async function printList(status: string | undefined, limit = 50): Promise<number
       // Commands as they run: a placeholder the shell cannot parse rather
       // than `newer|older`, which it would read as a pipe (review pass 3).
       // A stale row (063: a text moved under the verdict) is the next pass's
-      // to replace or settle (064), and a reviewer's to decide sooner — its
+      // to replace or settle (065), and a reviewer's to decide sooner — its
       // texts moved, so an accept takes --force.
       const dir = p.verdict === "conflict_undirected" ? " --direction <newer|older>" : "";
       const force = p.older_edited || p.newer_edited || p.status === "stale" ? " --force" : "";
@@ -484,7 +484,7 @@ function printCounts(c: Counts, label: string): void {
 
 async function printQueue(): Promise<void> {
   // 063 (SMD-1732): a stale row is a pending verdict whose texts moved under
-  // it; 064 (SMD-2297): the next pass judges the pair again and REPLACES the
+  // it; 065 (SMD-2297): the next pass judges the pair again and REPLACES the
   // row when it finds the conflict again, and SETTLES it — a rejection with
   // the pass's note — when it does not. The rejected count says how many are
   // the pass's; each stale row is placed against the pools (see the header).
@@ -500,7 +500,7 @@ async function printQueue(): Promise<void> {
 }
 
 /**
- * 064: the newer thoughts of stale proposals this run must re-pool under its
+ * 065: the newer thoughts of stale proposals this run must re-pool under its
  * own key — those of a pair BOTH sides of which have a vector (without one
  * the pair cannot be judged; the reembed pool writes it, and the run after
  * sees the thought here — the older side too, or a row whose older thought
@@ -580,12 +580,12 @@ let beats = 0;
 let judged = 0;
 let llmMs = 0;
 const totals = { pairs: 0, agree: 0, unrelated: 0, conflict: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0,
-  // 064: the stale rows this run met — replaced in place (a conflict found
+  // 065: the stale rows this run met — replaced in place (a conflict found
   // again), settled after a judgement of no conflict, settled because the
   // pair no longer meets the candidate rule, left waiting for a vector, or
   // decided by a reviewer or another pass between the read and the write.
 };
-/** 064: the stale rows this run met, by proposal id — a row met on several polls of --follow (waiting, then settled) counts once per outcome (second review pass, cold read). */
+/** 065: the stale rows this run met, by proposal id — a row met on several polls of --follow (waiting, then settled) counts once per outcome (second review pass, cold read). */
 const staleMet = { replaced: new Set<string>(), settled: new Set<string>(), settledOut: new Set<string>(), wait: new Set<string>(), raced: new Set<string>(), gone: new Set<string>() };
 const activeWorkers = new Set<string>();
 const started = Date.now();
@@ -612,11 +612,11 @@ function progress(force = false): void {
 type Row = { id: string; content: string; created_at: string | null; fingerprint: string; metadata: Record<string, unknown> | null; has_vector: boolean };
 type Candidate = { older_id: string; similarity: number; shared_entities: number };
 type Outcome = { outcome: "succeeded" } | { outcome: "failed"; error: string } | { outcome: "vanished" };
-/** 064: a stale proposal on the thought in hand (its newer side), with what the leftover rule needs of the older side. */
+/** 065: a stale proposal on the thought in hand (its newer side), with what the leftover rule needs of the older side. */
 type StaleRow = { id: string; older_id: string; older_fingerprint: string; older_vectorless: boolean; newer_vectorless: boolean; similarity: number | null; shared: number; superseded: boolean };
 
 /**
- * 064: the pass settles a stale row — rejected with the marker note, its
+ * 065: the pass settles a stale row — rejected with the marker note, its
  * lineage re-recorded at the texts judged under this key — through
  * settle_supersession_proposal. NOT_STALE and NOT_FOUND are facts about the
  * row (a reviewer decided it, another pass replaced it, its thought is gone
@@ -644,7 +644,7 @@ async function settleStale(s: StaleRow, why: string, olderFp: string, newerFp: s
 }
 
 async function processRow(row: Row): Promise<Outcome> {
-  // 064: the stale rows on this thought — 063's rebuild set them stale when
+  // 065: the stale rows on this thought — 063's rebuild set them stale when
   // a text moved under the verdict, and this pass replaces or settles each
   // (see the header). Read before the candidates so a stale pair the top-k
   // leaves out is judged anyway when it still meets the candidate rule.
@@ -677,7 +677,7 @@ async function processRow(row: Row): Promise<Outcome> {
     WHERE id = ANY(${sql.array(candidates.map((c) => c.older_id), "TEXT")}::uuid[])`) as Row[];
   const byId = new Map(olders.map((o) => [o.id, o]));
   const problems: string[] = [];
-  // 064: every candidate the loop REACHED — judged, or attempted and left in
+  // 065: every candidate the loop REACHED — judged, or attempted and left in
   // `problems` (a timeout, an egress refusal, a malformed answer). A stale
   // row on a reached pair is never a leftover: the leftover rule below reads
   // "the candidate rule no longer admits the pair", and a pair the judge was
@@ -734,7 +734,7 @@ async function processRow(row: Row): Promise<Outcome> {
         totals.underConfidence++;
         recorded = "under-confidence";
       }
-      // 064: no conflict at the floor on a pair whose proposal is stale — the
+      // 065: no conflict at the floor on a pair whose proposal is stale — the
       // pass settles it, at the fingerprints the judge was sent.
       // (The older's fingerprint from the read the judge was sent, not the
       // stale read before the candidates — a move between the two would
@@ -756,7 +756,7 @@ async function processRow(row: Row): Promise<Outcome> {
                                             ${JOB}::text, ${agentId}::uuid, ${older.fingerprint}::text, ${row.fingerprint}::text,
                                             ${proposalRecipe(cfg, { similarity: c.similarity, candidates: K, minSimilarity: MIN_SIM })}::jsonb) AS id`;
       proposalId = (id as string | null) ?? null;
-      // 064: the same id back on a stale pair is 063's replacement in place.
+      // 065: the same id back on a stale pair is 063's replacement in place.
       if (proposalId && staleRow && proposalId === staleRow.id) { staleMet.replaced.add(staleRow.id); recorded = "replaced"; if (verdict === "conflict_undirected") totals.undirected++; }
       else if (proposalId) { totals.proposed++; recorded = "proposed"; if (verdict === "conflict_undirected") totals.undirected++; }
       else { totals.alreadyProposed++; recorded = "already"; }
@@ -769,7 +769,7 @@ async function processRow(row: Row): Promise<Outcome> {
       }) + "\n");
     }
   }
-  // 064: the stale rows no candidate reached — pairs the candidate rule no
+  // 065: the stale rows no candidate reached — pairs the candidate rule no
   // longer admits. A side without a vector is "not yet" (the reembed pool
   // writes it; the run after that re-pools this thought); the rest — no
   // shared entity, under the similarity floor, a side superseded — mean no
@@ -994,7 +994,7 @@ async function pass(): Promise<Counts> {
   // against the entity table, which is what it costs to be sure a thought is
   // judged only once extraction has reached it.
   const added = Number((await sql`SELECT enqueue_thoughts(${JOB}, ARRAY(SELECT consolidation_pool(${JOB}))) AS added`)[0].added);
-  // 064: a stale proposal is this pass's work whatever key wrote it — its
+  // 065: a stale proposal is this pass's work whatever key wrote it — its
   // newer thought re-pooled here where the pool rule above could not add it
   // (a terminal claim under this key, or a claim 063 left under the row's
   // key, which is another pool).
@@ -1038,7 +1038,7 @@ console.log(
     `${totals.malformed ? `, ${totals.malformed} answer(s) not JSON of the expected shape` : ""}`
 );
 if (totals.pairs > 0) console.log(`  model time per pair: ${(llmMs / totals.pairs / 1000).toFixed(1)}s`);
-// 064: what became of the stale proposals this run met (a line only when it met one).
+// 065: what became of the stale proposals this run met (a line only when it met one).
 {
   // A row that waited on one poll and was settled, replaced, decided or deleted on a later one waits no more.
   const decided = (id: string) => staleMet.settled.has(id) || staleMet.settledOut.has(id) || staleMet.replaced.has(id) || staleMet.raced.has(id) || staleMet.gone.has(id);

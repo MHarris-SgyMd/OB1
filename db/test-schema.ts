@@ -7572,7 +7572,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   const under046 = await script("under 046");
   assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
   const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
-  assert(restored.length === 5 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("061") && restored[3].startsWith("063") && restored[4].startsWith("064") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
+  assert(restored.length === 5 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("061") && restored[3].startsWith("063") && restored[4].startsWith("065") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
   const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
   assert(under046.events.length === 7 && mismatches.length === 0,
     `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
@@ -9403,8 +9403,8 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
     `029's two status CHECKs replaced by 063's named pair: four statuses, and unreviewed = pending or stale (${pcons.join(" | ")})`);
   for (const fn of ["derivation_descendants", "consolidation_candidates", "record_supersession_proposal", "ob1_record_derivation"])
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("063"), `one ${fn}, 063 its last definer (${lastDefinerOf(fn)})`);
-  // rebuild_derived's last definer is 064 (SMD-2297: the proposal arm reopens a pass-settled row); [59] asserts it.
-  assert((await functionsNamed("rebuild_derived")) === 1 && lastDefinerOf("rebuild_derived").startsWith("064"), `one rebuild_derived, 064 its last definer (${lastDefinerOf("rebuild_derived")})`);
+  // rebuild_derived's last definer is 065 (SMD-2297: the proposal arm reopens a pass-settled row); [59] asserts it.
+  assert((await functionsNamed("rebuild_derived")) === 1 && lastDefinerOf("rebuild_derived").startsWith("065"), `one rebuild_derived, 065 its last definer (${lastDefinerOf("rebuild_derived")})`);
   const REBUILD_SIG = "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)", WALK_SIG = "derivation_descendants(uuid, int, int)";
   assert(/ob1:rebuild-acts-on-a-held-frontier/.test(await src(REBUILD_SIG)) && /pg_advisory_xact_lock\(hashtext\('ob1:supersession-review'\)\)/.test(await src(REBUILD_SIG)) && /FOR NO KEY UPDATE/.test(await src(REBUILD_SIG)),
     "the primitive carries its sentinel, takes the supersession lock and the row lock in delete_thought's order");
@@ -9669,7 +9669,7 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
   await db.exec(`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`);
 }
 
-console.log("\n[59] Migration 064: the consolidation pass settles a stale proposal it no longer finds in conflict — settle_supersession_proposal rejects the row with the pass's marker note and re-records its lineage at the texts judged; rebuild_derived (063's body) sets a pass-settled row stale again on a later text move and keeps a person's decision; the marker is one string in the SQL and the TypeScript (SMD-2297)");
+console.log("\n[60] Migration 065: the consolidation pass settles a stale proposal it no longer finds in conflict — settle_supersession_proposal rejects the row with the pass's marker note and re-records its lineage at the texts judged; rebuild_derived (063's body) sets a pass-settled row stale again on a later text move and keeps a person's decision; the marker is one string in the SQL and the TypeScript (SMD-2297)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -9707,27 +9707,27 @@ console.log("\n[59] Migration 064: the consolidation pass settles a stale propos
   const KEY = "extract:stub@p1", JUDGE = "consolidate:stub@p1", JUDGE2 = "consolidate:stub@p2";
   const SETTLE_SIG = "settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)", REBUILD_SIG = "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)";
 
-  // The shape: one settle function, 064 the last definer of both, the two
+  // The shape: one settle function, 065 the last definer of both, the two
   // sentinels, the marker literal held to the TypeScript constant, the
-  // comments naming 064.
-  assert((await functionsNamed("settle_supersession_proposal")) === 1 && lastDefinerOf("settle_supersession_proposal").startsWith("064") && lastDefinerOf("rebuild_derived").startsWith("064"),
-    `one settle function; 064 is the last definer of it and of rebuild_derived (${lastDefinerOf("rebuild_derived")})`);
+  // comments naming 065.
+  assert((await functionsNamed("settle_supersession_proposal")) === 1 && lastDefinerOf("settle_supersession_proposal").startsWith("065") && lastDefinerOf("rebuild_derived").startsWith("065"),
+    `one settle function; 065 is the last definer of it and of rebuild_derived (${lastDefinerOf("rebuild_derived")})`);
   const rebuildSrc = await src(REBUILD_SIG), settleSrc = await src(SETTLE_SIG);
   assert(/ob1:pass-settled-is-the-pass-to-reopen/.test(rebuildSrc) && /ob1:rebuild-acts-on-a-held-frontier/.test(rebuildSrc) && /ob1:settle-records-the-texts-it-judged/.test(settleSrc),
     "the reopen and the settle carry their sentinels; 063's frontier sentinel stands");
   assert(rebuildSrc.includes(`review_note LIKE '${PASS_SETTLED_PREFIX}%'`) && settleSrc.includes(`NOT LIKE '${PASS_SETTLED_PREFIX}%'`) && PASS_SETTLED_PREFIX === "settled by the pass:",
     `the marker is one string in rebuild_derived, settle_supersession_proposal and server-portable/consolidate.ts (${PASS_SETTLED_PREFIX})`);
   assert(/reviewed_at = NULL, review_note = NULL/.test(rebuildSrc) && /status IN \('pending', 'rejected'\)/.test(rebuildSrc), "the reopen clears reviewed_at and the note as 063's replacement does, from pending or from the pass's rejection");
-  for (const sig of [REBUILD_SIG, SETTLE_SIG]) assert(/064/.test((await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? ""), `${sig}'s comment names 064`);
+  for (const sig of [REBUILD_SIG, SETTLE_SIG]) assert(/065/.test((await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? ""), `${sig}'s comment names 065`);
   const statusComment = (await one<{ c: string | null }>(COLUMN_COMMENT_SQL, ["supersession_proposals", "status"])).c ?? "";
-  assert(/064/.test(statusComment) && statusComment.includes(PASS_SETTLED_PREFIX) && /064/.test((await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["supersession_proposals"])).c ?? ""),
-    "the status column's and the table's comments, re-issued, name 064 and the marker");
+  assert(/065/.test(statusComment) && statusComment.includes(PASS_SETTLED_PREFIX) && /065/.test((await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["supersession_proposals"])).c ?? ""),
+    "the status column's and the table's comments, re-issued, name 065 and the marker");
 
   // The fixture: B older by three days, A newer, sharing Alice; a pending
   // proposal on the pair under the first judge's key.
-  const B = await cap("064: the older note about Alice", 1);
+  const B = await cap("065: the older note about Alice", 1);
   await db.query(`UPDATE thoughts SET created_at = now() - interval '3 days' WHERE id = $1::uuid`, [B.id]);
-  const A = await cap("064: the newer note about Alice", 2);
+  const A = await cap("065: the newer note about Alice", 2);
   assert((await rte(B.id, KEY, [{ name: "Alice", type: "person", confidence: 0.9 }])).ok && (await rte(A.id, KEY, [{ name: "Alice", type: "person", confidence: 0.9 }])).ok, "the extractions stand");
   const pid = (await one<{ id: string | null }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', 0.9, 'because', 0.8, $3::text, NULL, NULL, NULL, '{"deterministic": false, "model": "stub-judge"}'::jsonb) AS id`, [B.id, A.id, JUDGE])).id!;
   const bFp = B.fingerprint;
@@ -9744,7 +9744,7 @@ console.log("\n[59] Migration 064: the consolidation pass settles a stale propos
   // finds no conflict, and settles: rejected with the marker note,
   // reviewed_at set, the lineage row rewritten at the texts judged under
   // the settling pass's key.
-  const aFp2 = await move(A.id, "064: the newer note about Alice, rewritten so the two agree");
+  const aFp2 = await move(A.id, "065: the newer note about Alice, rewritten so the two agree");
   let r = await rebuild(A.id, "edit");
   assert(r.ok === true && r.stale_proposals === 1 && (await proposal(pid)).status === "stale" && (await cands(A.id)) === B.id, `the move sets the proposal stale and the pair is a candidate again (${counts(r)})`);
   const note = `${PASS_SETTLED_PREFIX} judged again after a text moved — unrelated at ${JUDGE2}`;
@@ -9782,7 +9782,7 @@ console.log("\n[59] Migration 064: the consolidation pass settles a stale propos
   // choice, 2026-09-27): stale again, unreviewed, the note cleared, the pair
   // requeued; the next judgement may replace it in place (063) or settle it
   // again.
-  const aFp3 = await move(A.id, "064: the newer note about Alice, rewritten a second time");
+  const aFp3 = await move(A.id, "065: the newer note about Alice, rewritten a second time");
   const auditD = await auditOf();
   r = await rebuild(A.id, "edit again");
   const p2 = await proposal(pid);
@@ -9799,21 +9799,21 @@ console.log("\n[59] Migration 064: the consolidation pass settles a stale propos
   // marker, and one that mentions the marker mid-sentence; an accepted row
   // too.
   assert((await one<{ r: { ok: boolean } }>(`SELECT review_supersession_proposal($1::uuid, 'reject', 'no: the operator read both', NULL, $2::jsonb, false) AS r`, [pid, JSON.stringify(ACTOR)])).r.ok === true, "a person rejects the pending row");
-  await move(A.id, "064: the newer note about Alice, rewritten a third time");
+  await move(A.id, "065: the newer note about Alice, rewritten a third time");
   r = await rebuild(A.id, "edit once more");
   assert(r.kept === 1 && r.stale_proposals === 0 && (await proposal(pid)).status === "rejected" && (await proposal(pid)).review_note === "no: the operator read both", `a person's rejection is kept as decided on a text move (${counts(r)})`);
   await db.query(`UPDATE supersession_proposals SET review_note = $2 WHERE id = $1::uuid`, [pid, `the operator wrote: ${PASS_SETTLED_PREFIX} is what the pass would say`]);
-  await move(A.id, "064: the newer note about Alice, rewritten a fourth time");
+  await move(A.id, "065: the newer note about Alice, rewritten a fourth time");
   r = await rebuild(A.id, "edit yet again");
   assert(r.kept === 1 && (await proposal(pid)).status === "rejected", `a note that mentions the marker mid-sentence is a person's — the marker is a prefix (${counts(r)})`);
   assert((await settle(pid, note, JUDGE2, bFp, aFp3)).error === "NOT_STALE", "…and the pass cannot settle a person's rejection");
-  const D = await cap("064: a note to accept", 5);
+  const D = await cap("065: a note to accept", 5);
   await db.query(`UPDATE thoughts SET created_at = now() - interval '2 days' WHERE id = $1::uuid`, [D.id]);
-  const E = await cap("064: a newer note to accept", 6);
+  const E = await cap("065: a newer note to accept", 6);
   const pd = (await one<{ id: string }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', 0.9, 'accept', 0.8, $3::text) AS id`, [D.id, E.id, JUDGE])).id;
   const acc = await one<{ r: { ok: boolean; error?: string } }>(`SELECT review_supersession_proposal($1::uuid, 'accept', NULL, NULL, $2::jsonb, false) AS r`, [pd, JSON.stringify(ACTOR)]);
   assert(acc.r.ok === true, `the proposal is accepted (${JSON.stringify(acc.r)})`);
-  await move(E.id, "064: a newer note to accept, rewritten");
+  await move(E.id, "065: a newer note to accept, rewritten");
   r = await rebuild(E.id, "edit");
   assert(r.kept === 1 && (await proposal(pd)).status === "accepted", `an accepted row is kept on a text move (${counts(r)})`);
 
