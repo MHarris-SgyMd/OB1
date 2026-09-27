@@ -2040,11 +2040,12 @@ if (configFailed) {
                   `derived rows without a lineage row — ${missing.join("; ")} — written by a producer from before 061 (a write function, record_thought_entities or record_supersession_proposal re-applied by hand) or by a raw writer of the artifact tables; nothing can say what they were computed from (SMD-1731). ${coverage}`,
                   producersCurrent
                     ? `Every producer is 061's, so these rows came from a raw writer of the artifact tables (a hand INSERT, a community schema, a bulk load) or a write skipped: re-apply the recorded migrations — ${REAPPLY_COMMAND} — and 061's backfill records every artifact standing, at the thought's current text, marked legacy; or record the rows' lineage yourself through ob1_record_derivation.${sectionRemedy}`
-                    : ledgerRemedy("061", `${APPLY_061} Its backfill records every artifact standing, at the thought's current text, marked legacy.`, "Re-applied, 061's backfill records every artifact standing, at the thought's current text, marked legacy."));
+                    : ledgerRemedy("061", `${APPLY_061} Its backfill records every artifact standing, at the thought's current text, marked legacy.`, "Re-applied, 061's backfill records every artifact standing, at the thought's current text, marked legacy.") + sectionRemedy);
             } else if (Number(c.stale_pages)) {
               // 063: a page thought that does not hold its render — a raw write
-              // of page_sections or of the thought (run-it, first review pass:
-              // nothing saw it). The store's own door repairs it.
+              // of page_sections or of the thought (first review pass, both
+              // readers: nothing saw it). Reported when no row is missing — the
+              // fail above comes first. The store's own door repairs it.
               add("lineage", "warn",
                   `every derived row has its lineage row, but ${n(c.stale_pages)} page(s) whose thought does not hold their render (${(c.stale_page_ids ?? []).join(", ")}) — a raw write of page_sections or of the page thought since the last live change; readers of the thought see a stale page — ${coverage}`,
                   "For each page: SELECT ob1_render_page_thought('<page id>'); — re-renders the thought from its sections (an audited event). The store's own writers (write_page_section, delete_page_section, upsert_page) keep the two together.");

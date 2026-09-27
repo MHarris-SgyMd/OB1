@@ -1799,10 +1799,11 @@ export const ROLE_GRANTS = Object.freeze({
   // upsert_page, write_page_section, accept_page_section and
   // release_page_section, lock_page_section and delete_page_section
   // (SECURITY INVOKER, PUBLIC's EXECUTE as every core function). No DELETE
-  // on the tables: a section goes through delete_page_section, whose DELETE
-  // runs as the caller — so page_sections carries DELETE — and its revisions
-  // by the cascade, which runs as the tables' owner; the revisions take INSERT
-  // alone, and a trigger refuses UPDATE, a hand DELETE and TRUNCATE for the
+  // on pages (a page goes with its thought's delete, the capture group's) or
+  // on the revisions (they go with their section's cascade, which runs as the
+  // tables' owner); DELETE on page_sections, since delete_page_section deletes
+  // the row as the caller. The revisions take INSERT alone, and a trigger
+  // refuses UPDATE, a DELETE while the section stands, and TRUNCATE, for the
   // owner too. The identity column needs no sequence grant (test-schema [58]
   // measures it).
   pages: Object.freeze([

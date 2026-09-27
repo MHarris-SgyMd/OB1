@@ -6515,6 +6515,34 @@ console.log("\n[31] Migration 063 on a real server: the page store under concurr
     const thoughtsRaced = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content = '# A raced page'`)[0].c);
     assert(created.length === 1 && refusedOne.length === 1 && /another writer created with this text meanwhile|holds this page's exact text/.test(refusedOne[0].err) && pagesRaced === 1 && thoughtsRaced === 1,
       `two creates of one slug: one page, one thought, the other refused by name (${refusedOne[0]?.err.split("\n")[0].slice(0, 110) ?? "neither refused"})`);
+    // Two pages superseding each other at once, and a supersede racing its
+    // target's delete: upsert_page takes 029's supersession lock before any
+    // row, as delete_thought does — the loser of the loop is WOULD_CYCLE by
+    // name, the delete's loser finds no slug and creates the page anew; no
+    // deadlock (run-it, second review pass: 39 of 40 and 7 of 40 deadlocked).
+    const supA = ((await sql`SELECT upsert_page('sup-a', 'Supersedes A') AS r`)[0].r as { page_id: string }).page_id;
+    const supB = ((await sql`SELECT upsert_page('sup-b', 'Supersedes B') AS r`)[0].r as { page_id: string }).page_id;
+    const sup = async (c: SQL, slug: string, title: string, target: string) => { try { await c`SELECT upsert_page(${slug}, ${title}, 'topic', '{}'::jsonb, NULL, ${target}::uuid)`; return "ok"; } catch (err) { return (err as Error).message; } };
+    let loopDeadlocks = 0, loopCycles = 0;
+    for (let i = 0; i < 8; i++) {
+      const [ra2, rb2] = await Promise.all([sup(cA, "sup-a", "Supersedes A", supB), sup(cB, "sup-b", "Supersedes B", supA)]);
+      for (const r of [ra2, rb2]) { if (/deadlock/.test(r)) loopDeadlocks++; else if (/WOULD_CYCLE/.test(r)) loopCycles++; }
+      await sql`SELECT update_thought(${supA}::uuid, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '{"supersedes": null}'::jsonb, NULL, NULL)`;
+      await sql`SELECT update_thought(${supB}::uuid, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '{"supersedes": null}'::jsonb, NULL, NULL)`;
+    }
+    assert(loopDeadlocks === 0 && loopCycles >= 1, `two pages superseding each other, eight rounds: no deadlock, the loser refused as WOULD_CYCLE by name (${loopCycles} refused)`);
+    let supDeadlocks = 0, recreated = 0, updated = 0;
+    for (let i = 0; i < 8; i++) {
+      const tgt = ((await sql`SELECT upsert_page(${`sup-target-${i}`}, ${`Target ${i}`}) AS r`)[0].r as { page_id: string }).page_id;
+      const own = ((await sql`SELECT upsert_page(${`sup-owner-${i}`}, ${`Owner ${i}`}) AS r`)[0].r as { page_id: string }).page_id;
+      const s1 = cA`SELECT upsert_page(${`sup-owner-${i}`}, ${`Owner ${i} (second edition)`}, 'topic', '{}'::jsonb, NULL, ${tgt}::uuid) AS r`.then((r) => JSON.stringify((r[0] as { r: unknown }).r), (err: Error) => err.message);
+      const s2 = cB`SELECT delete_thought(${own}::uuid, NULL::jsonb) AS r`.then(() => "deleted", (err: Error) => err.message);
+      const [o1, o2] = await Promise.all([s1, s2]);
+      if (/deadlock/.test(o1) || /deadlock/.test(o2)) supDeadlocks++;
+      else if (/"created":true/.test(o1)) recreated++;
+      else if (/"created":false/.test(o1)) updated++;
+    }
+    assert(supDeadlocks === 0 && recreated + updated === 8, `a supersede racing its own page's delete, eight rounds: no deadlock — the page updated before the delete took it, or created anew after (${updated} updated, ${recreated} created anew)`);
     // …and under two titles the slug's own unique index is what the loser meets,
     // said by name rather than as the constraint's error (run-it, first review pass).
     const createTitled = async (c: SQL, title: string) => { try { return { ok: ((await c`SELECT upsert_page('raced-titles', ${title}) AS r`) as { r: R }[])[0].r, err: "" }; } catch (err) { return { ok: null as R | null, err: (err as Error).message }; } };

@@ -9411,8 +9411,8 @@ console.log("\n[58] Migration 063: the page store — a page is a thought whose 
   for (const fn of ["upsert_page", "write_page_section", "accept_page_section", "release_page_section", "lock_page_section", "delete_page_section", "render_page", "page_sections_as_of", "ob1_render_page_thought", "ob1_page_lock", "ob1_page_evidence", "ob1_page_recipe"]) assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("063"), `one ${fn}, 063's`);
   const immutableDef = (await one<{ d: string }>(`SELECT pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgname = 'page_section_revisions_immutable'`)).d;
   assert(/BEFORE (UPDATE OR DELETE|DELETE OR UPDATE) ON (public\.)?page_section_revisions FOR EACH ROW/.test(immutableDef), `the revisions' row trigger refuses UPDATE and DELETE (${immutableDef})`);
-  assert(/pg_trigger_depth\(\) > 1/.test(await src("page_section_revisions_refuse_mutation()")) && /FOR NO KEY UPDATE/.test(await src("ob1_page_lock(uuid, text)")) && [await src("write_page_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)"), await src("accept_page_section(uuid, text)"), await src("release_page_section(uuid, text)"), await src("lock_page_section(uuid, boolean, text)"), await src("delete_page_section(uuid, text)"), await src("upsert_page(text, text, text, jsonb, text, uuid)")].every((b) => /ob1_page_lock\(/.test(b)),
-    "the DELETE refusal reads the trigger depth (a cascade passes), and every writer takes ob1_page_lock — the thought FOR NO KEY UPDATE, then the page");
+  assert(/NOT EXISTS \(SELECT 1 FROM page_sections WHERE id = OLD\.section_id\)/.test(await src("page_section_revisions_refuse_mutation()")) && /FOR NO KEY UPDATE/.test(await src("ob1_page_lock(uuid, text)")) && /pg_advisory_xact_lock\(hashtext\('ob1:supersession-review'\)\)/.test(await src("upsert_page(text, text, text, jsonb, text, uuid)")) && [await src("write_page_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)"), await src("accept_page_section(uuid, text)"), await src("release_page_section(uuid, text)"), await src("lock_page_section(uuid, boolean, text)"), await src("delete_page_section(uuid, text)"), await src("upsert_page(text, text, text, jsonb, text, uuid)")].every((b) => /ob1_page_lock\(/.test(b)),
+    "the DELETE refusal reads whether the section stands (a cascade passes), every writer takes ob1_page_lock — the thought FOR NO KEY UPDATE, then the page — and upsert_page takes 029's supersession lock before any row");
   assert(/ob1:page-regen-guard/.test(await src("write_page_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)")) && /ob1:page-render/.test(await src("render_page(uuid, timestamptz)")) && /ob1:derivation-recorded-with-its-artifact/.test(await src("accept_page_section(uuid, text)")),
     "the sentinels stand where the readers look: the guard in write_page_section, the render in render_page, 061's in accept_page_section");
   const trig = (await q<{ t: string }>(`SELECT tgname AS t FROM pg_trigger WHERE NOT tgisinternal AND tgrelid IN ('page_sections'::regclass, 'page_section_revisions'::regclass) ORDER BY 1`)).map((x) => x.t).join();
@@ -9551,6 +9551,12 @@ console.log("\n[58] Migration 063: the page store — a page is a thought whose 
   const before4 = { revs: (await revsOf(S)).length, ev: (await eventsOf(P)).length, at: lin!.at };
   const same = await write(P, "steps", "Generated, version 4.", "generated", { source: { model: "stub", prompt_hash: "sha256:04" }, evidence: [e1.id, e3.id] });
   assert(same.action === "updated" && (await revsOf(S)).length === before4.revs && (await eventsOf(P)).length === before4.ev && (await linOf(S))!.at === before4.at, "an identical regeneration is updated and moves nothing — no revision, no event, no produced_at");
+  // …unless the row is missing: preflight's remedy for a section without its
+  // lineage row is to regenerate it, so an identical regeneration records the
+  // row then (walkthrough, second review pass: it recorded nothing).
+  await db.query(`DELETE FROM derivations WHERE artifact_kind = 'section' AND artifact_id = $1::uuid`, [S]);
+  const again = await write(P, "steps", "Generated, version 4.", "generated", { source: { model: "stub", prompt_hash: "sha256:04" }, evidence: [e1.id, e3.id] });
+  assert(again.action === "updated" && (await linOf(S)) !== undefined && (await linOf(S))!.inputs.join() === [e1.id, e3.id].join() && (await revsOf(S)).length === before4.revs, "…and an identical regeneration of a section that lost its row records the row and nothing else");
   const dd = await write(P, "steps", "Generated, version 5.", "generated", { evidence: [e1.id, e1.id, e3.id, e1.id] });
   assert(dd.action === "updated" && (await secOf(S)).evidence.join() === [e1.id, e3.id].join() && (await linOf(S))!.inputs.length === 2 && (await linOf(S))!.recipe.declared === false, "duplicate evidence ids are one input each, the first occurrence's order kept; a write with no recipe is marked undeclared");
   // An ownership move alone — a manual write of the very body the machine wrote —
@@ -9574,6 +9580,7 @@ console.log("\n[58] Migration 063: the page store — a page is a thought whose 
     [await refused(`SELECT upsert_page('s', 'T', 'blog')`), "page_kind must be topic, entity, autobiography or custom, got 'blog'"],
     [await refused(`SELECT upsert_page('s', 'T', 'topic', '[]'::jsonb)`), "metadata must be a JSON object, got array"],
     [await refused(`SELECT upsert_page('s', 'T', 'topic', '{}'::jsonb, NULL, '00000000-0000-4000-8000-000000000009'::uuid)`), "supersedes names no thought (00000000-0000-4000-8000-000000000009)"],
+    [await refused(`SELECT upsert_page('runbook', 'Deploy runbook', 'topic', '{}'::jsonb, NULL, $1::uuid)`, [P]), `page ${P}: supersedes ${P} is refused — WOULD_CYCLE`],
     [await refused(`SELECT accept_page_section('00000000-0000-4000-8000-000000000009'::uuid)`), "accept_page_section: no section"],
     [await refused(`SELECT release_page_section('00000000-0000-4000-8000-000000000009'::uuid)`), "release_page_section: no section"],
     [await refused(`SELECT lock_page_section('00000000-0000-4000-8000-000000000009'::uuid, true)`), "lock_page_section: no section"],
@@ -9583,7 +9590,7 @@ console.log("\n[58] Migration 063: the page store — a page is a thought whose 
     [await writeRefused(P, "steps", "x", "manual", { source: { deterministic: 1 } }), "generation_source.deterministic must be a boolean, got number"],
   ];
   const missed = refusals.filter(([m, want]) => !m.includes(want)).map(([m, want]) => `${want} ← ${m.slice(0, 80)}`);
-  assert(missed.length === 0, `nineteen refusals, each by name (${missed.join("; ") || "all named"})`);
+  assert(missed.length === 0, `twenty refusals, each by name (${missed.join("; ") || "all named"})`);
   assert((await count(`SELECT count(*)::int AS c FROM pages`)) === 1 && (await count(`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'source' = 'pages'`)) === 1, "…and none of them left a page or a page thought behind");
   // …and a full page by its render, through update_thought's DUPLICATE_CONTENT.
   const p2 = await page("runbook-copy", "Deploy runbook copy");

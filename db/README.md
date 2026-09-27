@@ -166,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2118 assertions: 2118 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2119 assertions: 2119 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports sixty-three (63) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -597,27 +597,44 @@ human-owned: the machine proposes next time too); `release_page_section` hands
 one back; `lock_page_section` sets the lock; `delete_page_section` removes a
 section, the render following. `render_page(page, at)` and
 `page_sections_as_of(page, at)` render any prior state byte for byte from the
-revisions. A generated section is a derived artifact under SMD-1729's rule: its
-`derivations` row (the sixth kind, `section` — 061's CHECK widened, its writer
-redefined on its own body plus the value) names the evidence at the
-fingerprints read and the generator's recipe, in the section's transaction; the
-section's `generation_source` holds the same recipe, so "a machine wrote this
-text" is one predicate whatever the owner. A generated write without evidence
-is refused (and a page is never its own evidence); a parked draft parks its
-evidence's fingerprints as generated from, and accept records those; a manual
-write that moves the body drops the row and empties the recipe; a deleted
-section's rows go by trigger; preflight's `lineage` check counts sections
-carrying a recipe without a row and warns on a page whose thought does not hold
-its render (a raw write; `ob1_render_page_thought(page)` repairs it). Every
-writer locks the page thought, then the page, then the section — the order
-`delete_thought`'s cascade takes, so a write racing a page's delete waits
-rather than deadlocking. Names differ from upstream's `schemas/wiki-pages`
-(`pages`, not `wiki_pages`), whose directory retires with this file: a brain
-that applied it by hand keeps its tables untouched. The new `pages` grant group
-is what a role needs beside `capture` (the grants table). Additive; no arity
-moves; no seed row; a re-apply a no-op. test-schema [58], test-live [31],
-test-upgrade [20o]; `server-portable/test-preflight.ts` drives the census and
-the repair arms.
+revisions (a revision is written per change to body, heading or order and per
+ownership or lock move). A generated section is a derived artifact under
+SMD-1729's rule: its `derivations` row (the sixth kind, `section` — 061's CHECK
+widened, its writer redefined on its own body plus the value) names the
+evidence at the fingerprints read and the generator's recipe, in the section's
+transaction; the section's `generation_source` holds the same recipe, so "a
+machine wrote this text" is one predicate whatever the owner. A generated write
+without evidence is refused (and a page is never its own evidence); a parked
+draft parks its evidence's fingerprints as generated from, and accept records
+those; a manual write that moves the body drops the row and empties the recipe;
+a deleted section's rows go by trigger; preflight's `lineage` check counts
+sections carrying a recipe without a row (regenerating such a section records
+it, unchanged or not) and, when no row is missing, warns on a page whose
+thought does not hold its render (a raw write; `ob1_render_page_thought(page)`
+repairs it). Every writer locks the page thought, then the page, then the
+section — the order `delete_thought`'s cascade takes, so a write racing a
+page's delete waits rather than deadlocking — and a writer given `supersedes`
+takes 029's supersession lock before any row, as every writer of that pointer
+does. The signatures, positional or named (`p_…`): `upsert_page(slug, title,
+page_kind DEFAULT 'topic', metadata DEFAULT '{}', actor DEFAULT NULL,
+supersedes DEFAULT NULL)`; `write_page_section(page_id, section_key, body_md,
+origin DEFAULT 'generated', heading, generation_source DEFAULT '{}',
+evidence_thought_ids, display_order, actor)`; `accept_page_section(section_id,
+actor)`, `release_page_section(section_id, actor)`,
+`lock_page_section(section_id, locked, actor)`,
+`delete_page_section(section_id, actor)`; `render_page(page_id, at DEFAULT
+NULL)`, `page_sections_as_of(page_id, at)`. A SQL caller that wants the page
+thought stamped with its key sets the session's envelope first — `SELECT
+set_config('ob1.actor', '{"name": "<key name>"}', false)` — as the servers do
+(008, 050); `actor` is the name the page's own history records. Names differ
+from upstream's `schemas/wiki-pages` (`pages`, not `wiki_pages`), whose
+directory retires with this file: a brain that applied it by hand keeps its
+tables untouched. The new `pages` grant group is what a role needs beside
+`capture` (the grants table). Additive; no arity moves; no seed row; a
+re-apply is idempotent (it re-validates the kind CHECK and moves no row).
+test-schema [58], test-live [31], test-upgrade [20o];
+`server-portable/test-preflight.ts` drives the census, the remedy and the
+repair arms.
 
 ## What changed relative to the guide
 
@@ -691,7 +708,7 @@ issues every group at once.
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
 | **pages** — the page store (063, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (063) | `SELECT, INSERT, UPDATE` |
 | | `page_sections` (063) | `SELECT, INSERT, UPDATE, DELETE` — `delete_page_section` deletes the row as the caller |
-| | `page_section_revisions` (063; append-only — UPDATE, a hand DELETE and TRUNCATE refused by trigger for the owner too, the cascade's DELETE allowed by its depth; the identity `seq` needs no sequence grant, test-schema [58]) | `SELECT, INSERT` |
+| | `page_section_revisions` (063; append-only — UPDATE, a DELETE while the section stands, and TRUNCATE refused by trigger for the owner too, so only a section's cascade removes its rows; the identity `seq` needs no sequence grant, test-schema [58]) | `SELECT, INSERT` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
 | | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
 | | `agent_memories`, `agent_memory_source_refs`, `agent_memory_artifacts`, `agent_memory_relations`, `agent_memory_review_actions`, `agent_memory_recall_traces`, `agent_memory_recall_items`, `agent_memory_audit_events` (schemas/agent-memory) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -2634,8 +2651,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2118 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 838 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2119 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 840 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
