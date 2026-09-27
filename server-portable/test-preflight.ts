@@ -1005,6 +1005,25 @@ else {
          `a chunk set without its lineage row does not start, the kind and the thought named, the raw writer blamed (every producer is current) and the re-apply's backfill the remedy (exit ${noLineage.code}: ${noLineage.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 220)})`);
   await ctx.unsafe(`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe) SELECT 'chunks', id, ARRAY[id], ARRAY[content_fingerprint], 'capture', '{"deterministic": true, "count": 2}'::jsonb FROM thoughts WHERE id = '${tid}'::uuid`);
   assert(/✓  lineage\s+every derived row has its lineage row — 1 lineage row\(s\): 0 backfilled/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and with the row back the check is ok again, counting the one row");
+  // The two bounds (cold read, third review pass: one flag said "the rest not
+  // read" of artifact tables read whole). 10,001 lineage rows and every
+  // artifact table under its bound: the verdict is exact, the headline plain,
+  // and only the counts are qualified as "of the 10,001 read". Then 10,001
+  // tagged thoughts — an ARTIFACT source at its bound: the headline says READ
+  // and that the rest were not, once; the untagged count is "more than
+  // 10,000", not a number a reader takes as exact.
+  await ctx.unsafe(`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
+                      SELECT 'entities', '${tid}'::uuid, ARRAY['${tid}'::uuid], ARRAY[(SELECT content_fingerprint FROM thoughts WHERE id = '${tid}'::uuid)], 'pf-bound:' || i, '{"deterministic": true, "legacy": true}'::jsonb FROM generate_series(1, 10001) i`);
+  const boundRows = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(boundRows.code === 0 && /✓  lineage\s+every derived row has its lineage row — more than 10,000 lineage rows; of the 10,001 read: 1000[01] backfilled by 061/.test(boundRows.out) && !/READ has its lineage row/.test(boundRows.out) && !/the rest not read/.test(boundRows.out),
+         `the lineage table past its bound qualifies the counts and nothing else: every artifact table was read whole, so the headline is plain (${boundRows.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 200)})`);
+  await ctx.unsafe(`DELETE FROM derivations WHERE produced_by LIKE 'pf-bound:%'`);
+  await ctx.unsafe(`INSERT INTO thoughts (content, metadata) SELECT 'pf bound ' || i, '{"type": "note", "source": "pf-bound"}'::jsonb FROM generate_series(1, 10001) i`);
+  const boundSource = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  const boundLine = boundSource.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "";
+  assert(boundSource.code === 0 && /^\s*✓  lineage\s+every derived row READ has its lineage row — the first 10,001 rows of an artifact table that has more, the rest not read — 1 lineage row\(s\)/.test(boundLine) && /more than 10,000 thought\(s\) carry tags with no tag lineage/.test(boundLine) && (boundLine.match(/not read/g) ?? []).length === 1,
+         `an artifact table at its bound is said READ in the headline, once, with the untagged count as "more than 10,000" (${boundLine.trim().slice(0, 240)})`);
+  await ctx.unsafe(`DELETE FROM thoughts WHERE metadata->>'source' = 'pf-bound'`);
   // The ticket's own mutant — a producer whose write skipped: 056's
   // record_thought_entities, from before 061, standing alone (061's form
   // dropped, 056 re-applied by hand) writes mentions with no lineage; the
@@ -1510,6 +1529,19 @@ else {
          "…and 060's 10-argument update_thought stands beside 061's eleven: the start is refused naming it with its DROP");
   assert(/!  lineage\s+every derived row has its lineage row, but a producer is missing or stands in two forms \(7 bodies where 061 leaves six — an earlier file re-applied by hand beside 061's\): its next write records no lineage \(SMD-1731\)/.test(pre061.out) && /Apply db\/migrations\/061_derivations\.sql\./.test(pre061.out),
          "…while the lineage census itself is clean, the check warns on the bodies: 060's 10-argument update_thought stands beside 061's, seven bodies where 061 leaves six (pass 2's cold read: the probe read two of the six)");
+  // 061's form dropped as well — a brain at 060 under this server: the SQL
+  // store sends eleven positional arguments and the PostgREST store names
+  // p_lineage, so every edit fails on the 10-argument form; a refusal naming
+  // 061, not the "every edit resolves" warning 046's 9-argument form earned
+  // when the servers sent nine (cold read, third review pass). The lineage
+  // row says the bodies are older, not that a producer is missing: six
+  // bodies, two of them 060's.
+  await claims.unsafe(`DROP FUNCTION ${UPDATE_THOUGHT_SIGNATURE}`);
+  const tenAlone = await run(SQL_ENV);
+  assert(tenAlone.code === 1 && /✗  edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb,jsonb\) is the form from before migration 061 \(046's, which 060 kept\); the servers send p_lineage \(the windows' and the tags' recipes\), which only 061's form takes — so every edit would fail, and db\/reembed\.ts, which resolves the body by/.test(tenAlone.out) && /Apply db\/migrations\/061_derivations\.sql\. Its DROP chain reaches every older form and leaves the one the servers call\./.test(tenAlone.out),
+         `a 10-argument form alone — a brain at 060 — is a refusal naming 061: the servers send eleven arguments (exit ${tenAlone.code})`);
+  assert(/!  lineage\s+every derived row has its lineage row, but a producer's body is from before 061 \(013, 029, 056 or 060 re-applied by hand\), or lost its record line: its next write records no lineage/.test(tenAlone.out),
+         "…and the lineage row names the older bodies — six bodies, 060's two among them — not a missing producer");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("061") });
   const shipped061 = await run(SQL_ENV);
   assert(shipped061.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, both shipped/.test(shipped061.out) && /✓  edit signature\s+[^\n]*with 061's body/.test(shipped061.out) && /✓  lineage\s+every derived row has its lineage row/.test(shipped061.out),
@@ -1612,15 +1644,16 @@ else {
   assert(pre032.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\) is the form from before migration 032; the server sends p_provenance, which only 032's form and its successors take — so every edit would fail, and db\/reembed\.ts refuses to run/.test(pre032.out) && /Apply db\/migrations\/061_derivations\.sql\. Its DROP chain reaches every older form/.test(pre032.out),
          "…and a 021-era one — a brain at 031 — likewise, with 061 as the remedy");
   // 032 re-applied on that brain leaves its 9-argument form ALONE — a brain at
-  // 044 under this server: every edit resolves, a warning naming what is lost
-  // and 046. Then 021 re-applied beside it: two older forms and none the
-  // servers call — the remedy is 046, whose DROP chain reaches both, not 032,
-  // which would leave its own 9 to be named on the next start (second review
-  // pass).
+  // 044 under this server: the servers send p_lineage, which only 061's form
+  // takes, so every edit fails there — a refusal naming 061, as the pre-032
+  // form is (until SMD-1731 the servers sent nine by name and this was a
+  // warning naming 046; pass 3's cold read). Then 021 re-applied beside it:
+  // two older forms and none the servers call — the remedy is 061, whose
+  // DROP chain reaches both (second review pass of SMD-1730).
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("032") });
   const nineAlone = await run(SQL_ENV);
-  assert(nineAlone.code === 0 && /!  edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\) is the form from before migration 046: every edit resolves, but no write event \(p_event — stance, cites, the valid window, trust\) reaches the audit row, and db\/reembed\.ts, which resolves the body by/.test(nineAlone.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\./.test(nineAlone.out),
-         `a 9-argument form alone — a brain at 044 — is a warning naming 046, not a refusal (exit ${nineAlone.code})`);
+  assert(nineAlone.code === 1 && /✗  edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\) is the form from before migration 046; the servers send p_lineage \(the windows' and the tags' recipes\), which only 061's form takes — so every edit would fail, and db\/reembed\.ts, which resolves the body by/.test(nineAlone.out) && /Apply db\/migrations\/061_derivations\.sql\. Its DROP chain reaches every older form and leaves the one the servers call\./.test(nineAlone.out) && !/Apply db\/migrations\/046/.test(nineAlone.out),
+         `a 9-argument form alone — a brain at 044 — is a refusal naming 061: the servers send eleven arguments (exit ${nineAlone.code})`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
   const eightAndNine = await run(SQL_ENV);
   const editLine = eightAndNine.out.split("\n").find((l) => /edit signature/.test(l)) ?? "";
@@ -1768,6 +1801,14 @@ else {
       // the writers that make them; granted with the chunk writes below.
       assert(/INSERT, UPDATE, DELETE on derivations/.test(writeLine(missingBoth.out)) && /GRANT INSERT, UPDATE, DELETE ON derivations TO ob1_pf_capture;/.test(missingBoth.out),
              "…and the lineage writes are named with 061's trigger and writers (SMD-1731)");
+      // A role that cannot READ derivations: the lineage census is a skip
+      // naming the GRANT and the group's row, not a bare "could not verify"
+      // (run-it, second review pass; the tooth from the third).
+      await claims.unsafe("REVOKE SELECT ON derivations FROM ob1_pf_capture");
+      const noRead = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(/·  lineage\s+not checked — this role cannot read derivations \(permission denied for table derivations\)/.test(noRead.out) && /GRANT SELECT ON derivations TO <the connector's role>; — the capture group's row since 061, which migrate\.ts --grant issues/.test(noRead.out) && /SELECT, INSERT, UPDATE, DELETE on derivations/.test(writeLine(noRead.out)),
+             `a role without SELECT on derivations gets a skip naming the GRANT and the group's row, beside the write-privileges refusal (${noRead.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 200)})`);
+      await claims.unsafe("GRANT SELECT ON derivations TO ob1_pf_capture");
 
       // Grant the chunk writes (and 060's snapshot writes, and 061's lineage writes) by hand; the audit INSERT and the facet UPDATE remain named.
       await claims.unsafe("GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture; GRANT INSERT, UPDATE ON ob1_embedding_snapshot TO ob1_pf_capture; GRANT INSERT, UPDATE, DELETE ON derivations TO ob1_pf_capture");

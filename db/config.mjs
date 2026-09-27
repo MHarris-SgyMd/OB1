@@ -1704,9 +1704,10 @@ export const ROLE_GRANTS = Object.freeze({
     // 061's lineage rows are written as the caller on EVERY capture and edit:
     // the vector trigger upserts (and, a vector cleared, deletes) the vector's
     // row; the write functions upsert the windows' and the tags' rows and
-    // delete a replaced set's. A role without these fails every capture that
-    // carries a vector inside the trigger — so all four are hard here
-    // (SMD-1731). The workers' passes write through the same table, and
+    // delete a replaced set's. A role without these fails EVERY capture and
+    // edit inside the trigger — a vectorless one too, since the trigger
+    // drops the vector's row when none is carried (run-it, third review
+    // pass) — so all four are hard here (SMD-1731). The workers' passes write through the same table, and
     // --grant issues every group.
     Object.freeze({ table: "derivations",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "061" }),
   ]),

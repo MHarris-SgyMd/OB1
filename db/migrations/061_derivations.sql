@@ -30,9 +30,13 @@
 --      pass — artifact_kind in (chunks, entities, proposal, vector, metadata),
 --      artifact_id (the thought's id for the four keyed by a thought, the
 --      proposal's for a proposal), input_ids and input_fingerprints (parallel
---      arrays, no NULL element: 018's state and a raw row carry a NULL key,
---      and every writer here hashes the text again — 003's rule through 016's
---      function), produced_by (the pass: an extraction_key, a judge_key,
+--      arrays, no NULL element: the thought's fingerprint COLUMN where 003's
+--      contract keeps it — a writer that moves the text owns the column, as
+--      every function here does — and the text hashed again where the column
+--      is NULL, 018's state and a raw row; a raw writer that moved the text
+--      and left the column is trusted as 003 and 060's snapshot trust it,
+--      and the census inherits that trust (run-it, third review pass)),
+--      produced_by (the pass: an extraction_key, a judge_key,
 --      'capture' / 'edit' for the windows, 'metadata' for the tags, the vector
 --      trigger's name), recipe (a JSON object carrying `deterministic`, a
 --      boolean the CHECK requires — what SMD-1732 will read to tell a re-run
@@ -149,8 +153,11 @@
 --   carried — functions are PUBLIC EXECUTE by default and `--grant` grants
 --   tables, not functions (db/README.md, "Grants for a capturing role"), so a
 --   brain that revoked EXECUTE on either by hand re-grants it by hand. Every
---   caller in the tree is positional with the old arity or fewer and resolves
---   through the defaults; no named-argument call exists. No return shape
+--   positional caller in the tree sends the old arity or fewer and resolves
+--   through the defaults; the named-argument calls — 032's and 036's
+--   update_thought(…, p_actor => …, p_provenance => …) in the delete path,
+--   the PostgREST store's rpc — name arguments every form keeps, and the new
+--   one defaults (cold read, third review pass). No return shape
 --   changes. The backfill is four reads of the artifact tables (ACCESS SHARE)
 --   into one table, the length of a read of them; measured on a copy of the
 --   dogfood brain in the record (changes/smd-1731.md). A brain that reverts
@@ -1092,9 +1099,13 @@ BEGIN
     END IF;
   END IF;
   -- 061: the tags' lineage row, when the caller's extractor wrote the patch
-  -- and the event moved the metadata; a patch that changed nothing, or one
-  -- no extractor produced, records nothing (SMD-1731).
-  IF p_lineage ? 'metadata' AND jsonb_typeof(p_lineage->'metadata') = 'object' AND v_diff ? 'metadata' THEN
+  -- and the event moved the metadata — or the TEXT moved under the
+  -- extractor's recipe: the tags were computed again from the new text and
+  -- came out the same, so the caller sent no patch, and the row moves to
+  -- the text they were computed from (a false stale otherwise; cold read,
+  -- third review pass). A patch that changed nothing on standing text, or
+  -- one no extractor produced, records nothing (SMD-1731).
+  IF p_lineage ? 'metadata' AND jsonb_typeof(p_lineage->'metadata') = 'object' AND (v_diff ? 'metadata' OR NOT v_same_text) THEN
     PERFORM ob1_record_derivation('metadata', p_id, ARRAY[p_id],
                                   ARRAY[COALESCE(v_new_fp, v_fingerprint, content_fingerprint_of(v_new_content))], 'metadata',
                                   p_lineage->'metadata', ob1_actor_agent_id());
@@ -1391,39 +1402,37 @@ BEGIN
 
   -- ob1:derivation-recorded-with-its-artifact — a CONTRACT SENTINEL, not prose
   -- (the 014 convention); preflight's `lineage` reads it. 061: the pass's
-  -- lineage row commits with its rows (SMD-1731), under the pass's own
-  -- replacement rule — an extraction's row replaces every extracted row's,
-  -- a structured pass's its own key's — and carries the INPUT'S FINGERPRINT
-  -- the stale check above compared and 016 never stored (the ADR's half a
-  -- key, closed). No rows standing under the key after the write — the
-  -- take at 053 pruning an old holder with an empty set, an extraction the
-  -- gate refused whole — is no artifact, so no row. A structured pass that
-  -- wrote and removed nothing (the same set twice) leaves its row where it
-  -- was, as it leaves last_seen_at (053's fourth review pass) — unless its
-  -- RECIPE moved, which SMD-1732's rebuild reads (cold read, first review
-  -- pass); an extraction always writes and always records.
+  -- lineage row commits with its rows (SMD-1731) and carries the INPUT'S
+  -- FINGERPRINT the stale check above compared and 016 never stored (the
+  -- ADR's half a key, closed). A structured pass that wrote and removed
+  -- nothing (the same set twice) leaves its row where it was, as it leaves
+  -- last_seen_at (053's fourth review pass) — unless its RECIPE moved,
+  -- which SMD-1732's rebuild reads (cold read, first review pass); an
+  -- extraction always writes and always records. Then the thought's
+  -- lineage rows are aligned to what STANDS, not to this pass's key: a row
+  -- under a key with no mention and no edge left goes — the extracted class
+  -- this extraction replaced above, this pass's own on an empty set (the
+  -- take at 053 pruning an old holder, an extraction the gate refused
+  -- whole: no artifact, no row), and what a pass racing this one under
+  -- another key left standing: its DELETE above does not see rows the
+  -- other committed after its snapshot, so they stand (016's race), and a
+  -- delete by KEY took their lineage row with them — a start refused for
+  -- a race the schema allows (cold read, third review pass).
   SELECT count(*) INTO v_touched FROM _rte_touched;
   v_recipe := COALESCE(p_recipe, jsonb_build_object('deterministic', v_structured, 'key', p_extraction_key, 'declared', false));
   SELECT d.recipe INTO v_recorded FROM derivations d
    WHERE d.artifact_kind = 'entities' AND d.artifact_id = p_thought_id AND d.produced_by = p_extraction_key;
   v_standing := EXISTS (SELECT 1 FROM thought_entities m WHERE m.thought_id = p_thought_id AND m.extraction_key = p_extraction_key)
              OR EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.thought_id = p_thought_id AND g.extraction_key = p_extraction_key);
-  IF NOT v_standing THEN
-    DELETE FROM derivations
-     WHERE artifact_kind = 'entities' AND artifact_id = p_thought_id
-       AND CASE WHEN v_structured THEN produced_by = p_extraction_key ELSE produced_by NOT LIKE 'source:%' END;
-  ELSIF NOT v_structured OR v_mentions > 0 OR v_edges > 0 OR v_touched > 0 OR v_recorded IS DISTINCT FROM v_recipe THEN
-    IF NOT v_structured THEN
-      -- The extracted class, replaced: an earlier model's or prompt's row goes
-      -- as its mentions and edges went above.
-      DELETE FROM derivations
-       WHERE artifact_kind = 'entities' AND artifact_id = p_thought_id
-         AND produced_by NOT LIKE 'source:%' AND produced_by <> p_extraction_key;
-    END IF;
+  IF v_standing AND (NOT v_structured OR v_mentions > 0 OR v_edges > 0 OR v_touched > 0 OR v_recorded IS DISTINCT FROM v_recipe) THEN
     PERFORM ob1_record_derivation('entities', p_thought_id, ARRAY[p_thought_id],
                                   ARRAY[COALESCE(p_content_fingerprint, v_current_fp)], p_extraction_key,
                                   v_recipe, p_agent_id);
   END IF;
+  DELETE FROM derivations d
+   WHERE d.artifact_kind = 'entities' AND d.artifact_id = p_thought_id
+     AND NOT EXISTS (SELECT 1 FROM thought_entities m WHERE m.thought_id = p_thought_id AND m.extraction_key = d.produced_by)
+     AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.thought_id = p_thought_id AND g.extraction_key = d.produced_by);
 
   RETURN jsonb_build_object(
     'ok', true, 'stale', false,

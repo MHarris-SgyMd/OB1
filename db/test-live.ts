@@ -6382,6 +6382,14 @@ console.log("\n[30] Migration 061 on a real server: the windowed capture's linea
   const other = (await sql`SELECT upsert_thought('061 live: windows without a recipe', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: "other-model" }}::jsonb, ${unit(7)}::vector) AS r`)[0].r as { existed: boolean };
   assert(other.existed === true && (await chunkRow(w2.id)) === undefined && (await windowsOf(w2.id)) === 0 && (await rowsOf(w2.id)).find((r) => r.kind === "vector")?.recipe.model === "other-model",
     "a re-capture under another label drops the windows and their row (022), and the vector's row follows the new label");
+  // The 4-argument form replaces the set: windows again under the new label,
+  // then the same text with an empty set — the windows and their row go, the
+  // vector's stays (run-it, third review pass: the DELETE before the replace
+  // had a textual tooth alone).
+  await sql`SELECT upsert_thought('061 live: windows without a recipe', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: "other-model" }}::jsonb, ${unit(7)}::vector, ${windows}::jsonb)`;
+  assert((await chunkRow(w2.id)) !== undefined && (await windowsOf(w2.id)) === 2, "a 4-argument re-capture with windows records the set again");
+  await sql`SELECT upsert_thought('061 live: windows without a recipe', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: "other-model" }}::jsonb, ${unit(7)}::vector, '[]'::jsonb)`;
+  assert((await chunkRow(w2.id)) === undefined && (await windowsOf(w2.id)) === 0 && (await rowsOf(w2.id)).map((r) => r.kind).join() === "vector", "…and the same text with an empty set drops the windows and their row, leaving the vector's");
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM derivations`;
   await sql.close();

@@ -9129,8 +9129,9 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
   assert([three, four, upd, rteSrc, rspSrc, vt].every((b) => RECORDS.test(b)) && !RECORDS.test(two), "the sentinel stands in the five redefined bodies and the vector trigger's, and not in the 2-argument form 061 leaves");
   assert(/ob1:capture-appends-then-projects/.test(three) && /ob1:capture-appends-then-projects/.test(upd) && !/ob1:capture-appends-then-projects/.test(four) && /ob1:vector-replaces-chunks/.test(three) && /ob1:name-gate/.test(rteSrc) && /ob1:structured-wins/.test(rteSrc) && /ob1:unchanged-edit-not-duplicate/.test(upd),
     "060's, 022's, 018's, 056's and 053's sentinels are carried in the bodies 061 redefines");
-  assert(/upsert_thought\(p_content, p_payload, p_embedding\)/.test(four) && /DELETE FROM derivations WHERE artifact_kind = 'chunks'/.test(four) && /DELETE FROM derivations WHERE artifact_kind = 'chunks'/.test(three) && /DELETE FROM derivations WHERE artifact_kind = 'chunks'/.test(upd),
-    "the 4-argument form still delegates to the 3-argument body; each body that replaces or drops the windows drops their row");
+  assert(/upsert_thought\(p_content, p_payload, p_embedding\)/.test(four) && /DELETE FROM derivations WHERE artifact_kind = 'chunks'/.test(four) && /DELETE FROM derivations WHERE artifact_kind = 'chunks'/.test(three) && /DELETE FROM derivations WHERE artifact_kind = 'chunks'/.test(upd)
+      && /ob1_record_derivation\('chunks'/.test(four) && /ob1_record_derivation\('chunks'/.test(upd) && !/ob1_record_derivation\('chunks'/.test(three),
+    "the 4-argument form still delegates to the 3-argument body; each body that replaces or drops the windows drops their row, and the two that write windows record their set — PGlite cannot drive the chunk INSERT, so the record line is read here and run in test-live [30] (run-it, third review pass)");
   const trigs = (await q<{ n: string; d: string }>(`SELECT tgname AS n, pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND NOT tgisinternal AND tgname IN ('thoughts_record_vector_lineage', 'thoughts_drop_derivations') ORDER BY tgname`));
   assert(trigs.length === 2 && /AFTER DELETE ON public\.thoughts FOR EACH ROW EXECUTE FUNCTION ob1_drop_thought_derivations\(\)/.test(trigs[0].d) && /AFTER INSERT OR UPDATE ON public\.thoughts FOR EACH ROW EXECUTE FUNCTION ob1_record_vector_lineage\(\)/.test(trigs[1].d),
     `the two triggers on thoughts: the drop after a delete, the vector's after every insert and update, bound to no column (${trigs.map((t) => t.d).join(" | ")})`);
@@ -9156,6 +9157,17 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
   again = await cap("061: a captured note", 1, { metadata: { source: "mcp", type: "idea" }, lineage: { metadata: { ...META, prompt_version: 2 } } });
   assert((await kinds(a.id)) === "metadata,vector" && (await rowOf(a.id, "metadata"))!.recipe.prompt_version === 2 && (await rowOf(a.id, "metadata"))!.at >= metaRow.at, "a re-capture whose merge moves the metadata re-records the tags under the new recipe — one row, upserted, produced_at moved");
   // No envelope: no tags' row — a caller's own tags are not a derivation; the vector's row still.
+  // The text moved under the extractor's recipe and the tags came out the same
+  // — the board sync sends no patch then — so the row moves to the text the
+  // tags were computed from, a false stale otherwise (cold read, third review
+  // pass); the same edit without the recipe leaves it.
+  const moved = await one<{ r: { ok: boolean } }>(`SELECT update_thought($1::uuid, '061: a captured note, rewritten', NULL, $4::vector, NULL, NULL, $2::jsonb, $5::text, NULL, NULL, $3::jsonb) AS r`, [a.id, JSON.stringify(ACTOR), JSON.stringify({ metadata: META }), unit(1), MODEL]);
+  const movedFp = (await one<{ f: string }>(`SELECT content_fingerprint AS f FROM thoughts WHERE id = $1::uuid`, [a.id])).f;
+  assert(moved.r.ok === true && (await rowOf(a.id, "metadata"))!.fps.join() === movedFp && movedFp !== a.fingerprint, "an edit that moves the text under the extractor's recipe re-records the tags' row at the new text, though the tags did not change");
+  const movedAt = (await rowOf(a.id, "metadata"))!.at;
+  await one(`SELECT update_thought($1::uuid, '061: a captured note, rewritten again', NULL, $3::vector, NULL, NULL, $2::jsonb, $4::text, NULL, NULL, NULL) AS r`, [a.id, JSON.stringify(ACTOR), unit(1), MODEL]);
+  assert((await rowOf(a.id, "metadata"))!.fps.join() === movedFp && (await rowOf(a.id, "metadata"))!.at === movedAt, "…and the same edit without a recipe leaves the row where it was — the census counts it stale, which it is");
+  await one(`SELECT update_thought($1::uuid, '061: a captured note', NULL, $4::vector, NULL, NULL, $2::jsonb, $5::text, NULL, NULL, $3::jsonb) AS r`, [a.id, JSON.stringify(ACTOR), JSON.stringify({ metadata: META }), unit(1), MODEL]);
   const b = await cap("061: a caller's own tags", 2, { metadata: { source: "mcp", type: "task" } });
   assert((await kinds(b.id)) === "vector", `a capture without a lineage envelope records the vector's row only (${await kinds(b.id)})`);
   // A vector-only re-capture (a refresh) moves the vector's row and not the tags'.
@@ -9227,6 +9239,20 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
   assert(er.ok === true && ens.length === 1 && ens[0].by === "extract:other@p2", "an empty structured pass leaves no rows under its key and drops its lineage row — no artifact, no lineage");
   er = await rte(t.id, "extract:other@p2", [{ name: "2024", type: "person", confidence: 0.9 }], t.fingerprint, null);
   assert(er.ok === true && !(await rowsOf(t.id)).some((r) => r.kind === "entities"), "an extraction the gate refuses whole leaves no rows standing and drops its row too");
+  // The rows align to what STANDS, not to the pass's key (cold read, third
+  // review pass: two extractions racing under different keys leave the
+  // first's mentions standing — 016's race — and a delete by key took their
+  // lineage row, a start refused). A lineage row under a key with nothing
+  // standing goes on the next pass, whatever its key; one whose rows stand
+  // survives a pass under another class.
+  await one(`SELECT ob1_record_derivation('entities', $1::uuid, ARRAY[$1::uuid], ARRAY['stale-fp'], 'extract:ghost@p1', '{"deterministic": false}'::jsonb) AS r`, [t.id]);
+  er = await rte(t.id, "extract:standing@p1", [{ name: "Alice", type: "person", confidence: 0.9 }], t.fingerprint, null);
+  er = await rte(t.id, "source:test", [{ name: "Open Brain", type: "project", confidence: 1 }], null, null);
+  ens = (await rowsOf(t.id)).filter((r) => r.kind === "entities");
+  assert(er.ok === true && ens.map((r) => r.by).sort().join() === "extract:standing@p1,source:test", `a lineage row with nothing standing under its key is swept by the next pass, and a row whose mentions stand survives a pass of the other class (${ens.map((r) => r.by).join()})`);
+  await one(`SELECT record_thought_entities($1::uuid, 'source:test', '[]'::jsonb, '[]'::jsonb, NULL, NULL) AS r`, [t.id]);
+  await one(`SELECT record_thought_entities($1::uuid, 'extract:standing@p1', '[]'::jsonb, '[]'::jsonb, NULL, NULL) AS r`, [t.id]);
+  assert(!(await rowsOf(t.id)).some((r) => r.kind === "entities"), "…and each class emptied leaves no row");
   const stale = await rte(t.id, "extract:other@p2", [{ name: "Carol", type: "person", confidence: 0.9 }], "not-the-fingerprint", null);
   assert(stale.ok === false && stale.error === "STALE_CONTENT" && !(await rowsOf(t.id)).some((r) => r.kind === "entities"), "a stale extraction is refused before any lineage is written");
   const six = await one<{ r: { ok: boolean } }>(`SELECT record_thought_entities($1::uuid, 'extract:six@p2', '[{"name": "Dan", "type": "person", "confidence": 0.9}]'::jsonb, '[]'::jsonb, NULL, NULL) AS r`, [t.id]);

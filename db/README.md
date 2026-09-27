@@ -758,8 +758,9 @@ separately `--grant`-provisioned scoped role is affected.
 the vector-lineage trigger and the write functions upsert **as the caller on
 every capture and edit** — and `ob1_record_derivation`'s `INSERT … RETURNING`
 needs the `SELECT`, 055's trap again. A role provisioned by `--grant` before 061
-holds no privilege on it, so **every capture that carries a vector fails inside
-the trigger: after upgrading a brain past 061, run `bun migrate.ts --grant
+holds no privilege on it, so **every capture and edit fails inside the
+trigger — a vectorless one too, since the trigger drops the vector's row when
+none is carried: after upgrading a brain past 061, run `bun migrate.ts --grant
 <role>` again for every role that captures or runs a worker.** Preflight's
 `write privileges` row names the table until it is granted.
 
@@ -2581,8 +2582,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2036 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 829 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2040 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 831 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

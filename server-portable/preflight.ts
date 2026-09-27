@@ -1939,15 +1939,23 @@ if (configFailed) {
             // Every producer's body: the 3- and 4-argument upsert_thought (the
             // 2-argument form records nothing and is not asked), update_thought,
             // the two record functions and the vector trigger's — six, each
-            // carrying 061's sentinel; a seventh is an older arity re-applied
-            // by hand beside 061's (cold read, second review pass: the probe
-            // read two of the six and called the rest "every producer").
+            // carrying 061's sentinel AND the call it vouches for — a body that
+            // kept the comment and lost its record line is not current (run-it,
+            // third review pass: a mutant's remedy blamed a raw writer); a
+            // seventh is an older arity re-applied by hand beside 061's (cold
+            // read, second review pass: the probe read two of the six and
+            // called the rest "every producer"). The vector trigger must also
+            // be ATTACHED and enabled — its function standing alone records
+            // nothing (cold read, third review pass).
             const [bodies] = (await sql`
-              SELECT bool_and(p.prosrc LIKE '%ob1:derivation-recorded-with-its-artifact%') AS records, count(*)::int AS n
+              SELECT bool_and(p.prosrc LIKE '%ob1:derivation-recorded-with-its-artifact%' AND p.prosrc LIKE '%ob1_record_derivation(%') AS records, count(*)::int AS n,
+                     EXISTS (SELECT 1 FROM pg_trigger tg JOIN pg_class c ON c.oid = tg.tgrelid JOIN pg_namespace tn ON tn.oid = c.relnamespace
+                              WHERE tn.nspname = 'public' AND c.relname = 'thoughts' AND tg.tgname = 'thoughts_record_vector_lineage' AND tg.tgenabled <> 'D') AS trigger_on
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                WHERE ns.nspname = 'public'
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
-                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number }[];
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean }[];
+            const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; untagged: number; stale: number; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number };
             const [c] = (await sql`
               WITH ch_s AS (SELECT thought_id FROM public.thought_chunks LIMIT ${BOUND}),
@@ -1984,16 +1992,22 @@ if (configFailed) {
                      (SELECT count(*)::int FROM ch_s) AS ch_read, (SELECT count(*)::int FROM vc_s) AS vc_read, (SELECT count(*)::int FROM en_s) AS en_read,
                      (SELECT count(*)::int FROM pr_s) AS pr_read, (SELECT count(*)::int FROM md_s) AS md_read`) as Census[];
             const n = (x: number) => (Number(x) > BOUND - 1 ? "more than 10,000" : String(x));
-            // A source that reached the bound was sampled, not read whole: the
-            // counts over it are of what was read, and the line says so.
-            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read, c.rows].some((r) => Number(r) >= BOUND);
-            const sample = capped ? ` — over the first ${BOUND.toLocaleString("en-US")} rows of each artifact table; the rest were not read` : "";
+            // Two bounds, two facts: an ARTIFACT source that reached the bound
+            // was sampled, so a missing row past it is not seen — the headline
+            // says "READ"; the LINEAGE table past the bound qualifies only the
+            // legacy/undeclared/stale counts, which are over the rows read. A
+            // brain with 4,000 thoughts passes the lineage bound long before
+            // any artifact table, and its verdict is exact (cold read, third
+            // review pass: one flag said "the rest not read" of tables read
+            // whole; run-it: the capped line said the disclosure twice).
+            const cappedSources = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read].some((r) => Number(r) >= BOUND);
+            const capped = cappedSources;
             const missing: string[] = [];
             if (Number(c.chunks)) missing.push(`${n(c.chunks)} chunk set(s) (thought ${(c.chunk_ids ?? []).join(", ")})`);
             if (Number(c.vectors)) missing.push(`${n(c.vectors)} vector(s) (thought ${(c.vector_ids ?? []).join(", ")})`);
             if (Number(c.entities)) missing.push(`${n(c.entities)} extraction(s) (${(c.entity_ids ?? []).join(", ")})`);
             if (Number(c.proposals)) missing.push(`${n(c.proposals)} proposal(s) (${(c.proposal_ids ?? []).join(", ")})`);
-            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — what SMD-1732's rebuild will re-derive); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)${sample}`;
+            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — what SMD-1732's rebuild will re-derive); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
               // so a raw writer (or a write skipped) — the re-apply's backfill, or
@@ -2002,18 +2016,18 @@ if (configFailed) {
               // ledger was blamed for a raw INSERT on a current schema).
               add("lineage", "fail",
                   `derived rows without a lineage row — ${missing.join("; ")} — written by a producer from before 061 (a write function, record_thought_entities or record_supersession_proposal re-applied by hand) or by a raw writer of the artifact tables; nothing can say what they were computed from (SMD-1731). ${coverage}`,
-                  bodies.records === true && Number(bodies.n) === 6
+                  producersCurrent
                     ? `Every producer is 061's, so these rows came from a raw writer of the artifact tables (a hand INSERT, a community schema, a bulk load) or a write skipped: re-apply the recorded migrations — ${REAPPLY_COMMAND} — and 061's backfill records every artifact standing, at the thought's current text, marked legacy; or record the rows' lineage yourself through ob1_record_derivation.`
                     : ledgerRemedy("061", `${APPLY_061} Its backfill records every artifact standing, at the thought's current text, marked legacy.`, "Re-applied, 061's backfill records every artifact standing, at the thought's current text, marked legacy."));
-            } else if (bodies.records !== true || Number(bodies.n) !== 6) {
+            } else if (!producersCurrent) {
               add("lineage", "warn",
-                  `every derived row has its lineage row, but ${Number(bodies.n) !== 6 ? `a producer is missing or stands in two forms (${bodies.n} bodies where 061 leaves six — an earlier file re-applied by hand beside 061's)` : "a producer's body is from before 061 (013, 029, 056 or 060 re-applied by hand)"}: its next write records no lineage (SMD-1731). ${coverage}`,
+                  `every derived row has its lineage row, but ${Number(bodies.n) !== 6 ? `a producer is missing or stands in two forms (${bodies.n} bodies where 061 leaves six — an earlier file re-applied by hand beside 061's)` : bodies.records !== true ? "a producer's body is from before 061 (013, 029, 056 or 060 re-applied by hand), or lost its record line" : "the vector trigger thoughts_record_vector_lineage is dropped or disabled, so a vector written now leaves no row"}: its next write records no lineage (SMD-1731). ${coverage}`,
                   ledgerRemedy("061", APPLY_061));
             } else {
               // A capped read says so in the headline, before the count that
               // a reader stops at (run-it, second review pass: a missing row
               // past the bound printed "every derived row has its lineage row").
-              add("lineage", "ok", capped ? `every derived row READ has its lineage row — the first ${BOUND.toLocaleString("en-US")} rows of each artifact table, the rest not read — ${coverage}` : `every derived row has its lineage row — ${coverage}`);
+              add("lineage", "ok", capped ? `every derived row READ has its lineage row — the first ${BOUND.toLocaleString("en-US")} rows of an artifact table that has more, the rest not read — ${coverage}` : `every derived row has its lineage row — ${coverage}`);
             }
           }
         } catch (e) {
@@ -2417,9 +2431,14 @@ if (configFailed) {
           // 061 (SMD-1731) gave update_thought an eleventh argument, the
           // lineage envelope, by dropping the 10-argument form — 046's
           // mechanism, one form later. A 10-argument form ALONE is a brain at
-          // 060: every edit resolves (the servers send ten by name), so it is
-          // a WARN naming what is lost — the lineage — as a 9-argument form
-          // alone was for 046's event.
+          // 060, a 9-argument form alone a brain at 044 — and under THIS
+          // server both are the pre-032 case, not 046's warning: the SQL store
+          // sends eleven positional arguments and the PostgREST store names
+          // p_lineage, which only 061's form takes, so every edit fails there
+          // ("function does not exist" / PGRST202), as it did for p_provenance
+          // before 032. A FAIL naming 061, whose DROP chain reaches both (cold
+          // read, third review pass of SMD-1731: the arms said "every edit
+          // resolves", true when the servers sent ten by name).
           const tenAlone = ut.length === 1 && Number(ut[0].nargs) === ARITY - 1;
           const nineAlone = ut.length === 1 && Number(ut[0].nargs) === ARITY - 2;
           if (!ut.length) {
@@ -2437,14 +2456,10 @@ if (configFailed) {
             add("edit signature", "fail",
                 `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 061 — so every call that sends fewer than eleven arguments to update_thought, which is every PostgREST caller by name, every hand-written SELECT and db/reembed.ts's positional call, fails with "function is not unique"`,
                 `Drop the earlier form, as 046, 060 and 061 do: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
-          } else if (tenAlone) {
-            add("edit signature", "warn",
-                `${ut[0].sig} is the form from before migration 061 (046's, which 060 kept): every edit resolves, but the lineage envelope (p_lineage — the windows' and the tags' recipes) reaches no row, so every windowed edit is a derived row without lineage, and db/reembed.ts, which resolves the body by ${UPDATE_THOUGHT_SIGNATURE}, refuses to run`,
-                ledgerRemedy("061", APPLY_061));
-          } else if (nineAlone) {
-            add("edit signature", "warn",
-                `${ut[0].sig} is the form from before migration 046: every edit resolves, but no write event (p_event — stance, cites, the valid window, trust) reaches the audit row, and db/reembed.ts, which resolves the body by ${UPDATE_THOUGHT_SIGNATURE}, refuses to run`,
-                ledgerRemedy("046", APPLY_046));
+          } else if (tenAlone || nineAlone) {
+            add("edit signature", "fail",
+                `${ut[0].sig} is the form from before migration ${tenAlone ? "061 (046's, which 060 kept)" : "046"}; the servers send p_lineage (the windows' and the tags' recipes), which only 061's form takes — so every edit would fail, and db/reembed.ts, which resolves the body by ${UPDATE_THOUGHT_SIGNATURE}, refuses to run`,
+                ledgerRemedy("061", `${APPLY_061} Its DROP chain reaches every older form and leaves the one the servers call.`, "Re-applied, 061's DROP chain reaches every older form and leaves the one the servers call."));
           } else if (ut.some((r) => Number(r.nargs) === ARITY - 1) || ut.some((r) => Number(r.nargs) === ARITY - 2)) {
             // A 10- or 9-argument form among the leftovers and no 11: 046 or
             // 032 re-applied would drop the older forms and leave its own to be
