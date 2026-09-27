@@ -411,7 +411,7 @@ import {
 } from "./config.mjs";
 import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { describeEgress, localKnob, mayLeaveBox, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
-import { UUID_RE } from "../server-portable/store.ts";
+import { maskUrl, UUID_RE } from "../server-portable/store.ts";
 import { chunkRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 import { commandLine } from "./cli.ts";
@@ -510,7 +510,7 @@ const refusalTtl: string | null = (() => {
 })();
 
 console.log(`  job:       ${JOB}`);
-console.log(`  embedding: ${embedConfig.embeddingModel} @ ${embedConfig.embeddingDim} dimensions, via ${embedConfig.embeddings.base}, ${embedConfig.timeoutMs / 1000} s per call`);
+console.log(`  embedding: ${embedConfig.embeddingModel} @ ${embedConfig.embeddingDim} dimensions, via ${maskUrl(embedConfig.embeddings.base)}, ${embedConfig.timeoutMs / 1000} s per call`);
 // What may leave the box (SMD-1903): a row the gate refuses is a failed claim
 // naming the rule, retried by --retry-failed once the policy or the endpoint
 // changes; the text never went anywhere.

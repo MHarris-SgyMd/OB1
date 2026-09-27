@@ -504,13 +504,24 @@ new thought's id, which is what the other two take.
 
 For ingestion that runs on its own — a mailbox polled on a schedule, a
 tracker synced — the `orchestration` profile runs n8n beside the stack
-(`docs/orchestration-tool.md`). Its workflows capture through the brain's
-MCP endpoint with a capture-scope key. No workflow template ships yet
-(SMD-2212 brings the first), so today the steps below leave n8n
-provisioned, with its credentials and keys and no workflows. Once, `--init` writes its secrets
-into `deploy/.env`. The capture key is yours to mint (`bun keygen.ts --name
-n8n --scope capture`: the key as `N8N_BRAIN_CAPTURE_KEY`, the line it prints
-into `MCP_ACCESS_KEYS`). Then:
+(`docs/orchestration-tool.md`). n8n reaches the brain through its MCP
+endpoint, with no write key. The profile's import runner is the one part that
+writes brain tables, as the pipeline does from a checkout, behind a key its
+allowlist bounds. Two kinds of template ship (SMD-2212):
+- **An act tool:** `linear_file_issue` on `/mcp/ob1-act`. It loads when
+  `N8N_LINEAR_API_KEY` is set.
+- **The import template:** one instance per pipeline in
+  `deploy/orchestration/pipelines.json`, run by the profile's import runner
+  over `deploy/imports/<pipeline>/`. The allowlist is empty until the
+  first import recipe is converted.
+
+Once, `--init` writes its secrets into `deploy/.env`. For the act tool, put a
+Linear key with write access in `deploy/.env` as `N8N_LINEAR_API_KEY` (a key
+of its own, not board-sync's) before provisioning, or provision again after.
+A capture key is optional until a template captures into the brain; none
+ships yet. It is made with `cd server-portable && bun keygen.ts --name n8n
+--scope capture && cd ..`: the key goes in as `N8N_BRAIN_CAPTURE_KEY`, and
+the line it prints is appended to `MCP_ACCESS_KEYS`, comma-separated. Then:
 
 ```bash
 bun deploy/orchestration/provision.ts --init
@@ -518,8 +529,9 @@ podman compose -f deploy/compose.yaml --profile orchestration up -d
 bun deploy/orchestration/provision.ts
 ```
 
-Once a template publishes an MCP endpoint, an AI client reaches it at
-`http://127.0.0.1:5678/mcp/<path>`, with the header
+With `N8N_LINEAR_API_KEY` set, an AI client reaches the act tool at
+`http://127.0.0.1:5678/mcp/ob1-act` (5678 is `N8N_PORT`'s default; any
+template's endpoint is at `/mcp/<path>`), with the header
 `x-n8n-key: <N8N_MCP_KEY>`. That endpoint carries workflow tools; the
 brain's own tools stay on the connector above. `deploy/README.md`,
 "Orchestration", has the keys, backups, the run-history window and upgrades.

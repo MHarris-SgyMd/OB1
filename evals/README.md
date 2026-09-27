@@ -5986,7 +5986,7 @@ a brain that does not report the stamp (below, "Found on the way").
     within a day;
   - the env file must hold exactly one key under its tag in n8n.
 
-  The kit's key carries the profile's eight scopes plus the two run-history
+  The kit's key carries the profile's scopes (ten since SMD-2212) plus the two run-history
   reads it needs. The decisions K does not reach are in
   `provision.ts --self-check` (CI), against a fake n8n: renewal near
   expiry, a busy n8n, missing scopes, the sweep of a key a failed run left,
@@ -6137,6 +6137,120 @@ stale one can be seen. The first sealed attempt
 also failed C1–C3 on 23-second captures. The cause was another session's
 jobs on the host's Ollama (a direct capture then took 18.6 s, then timed out
 on embeddings), not the seal: the re-run above has the host quiet.
+
+## The first templates: the import runner and the act tool (SMD-2212)
+
+Since SMD-2212, `--up n8n` also loads the profile's own templates as they
+ship (`deploy/orchestration/templates/`), and starts the import runner
+(`orchestration-runner`) beside n8n. The runner's shipped allowlist is empty
+until an import recipe is converted. So `compose.n8n.yaml` mounts the kit's
+`orchestration/runner/pipelines.json` over it, with three pipelines:
+- **`fixture`:** a Python emitter (`runner/emit-fixture.py`, standard
+  library) over a five-entry export in `runner/imports/fixture/`;
+- **`stray`:** the same emitter, with its third line claiming another
+  source;
+- **`snoop`:** an emitter an export has taken over. It reads
+  `/proc/<pid>/environ` for the runner and its parent, and fails if either
+  holds `DATABASE_URL` or `OB1_RUNNER_KEY`.
+
+The act tool's Linear key is the kit's one Linear key. Two checks join K, P
+and E:
+
+- **A — the act tool.** `/mcp/ob1-act` must:
+  - list exactly `linear_file_issue`;
+  - refuse a session with no key and one whose key differs in its last
+    character (401/403);
+  - answer a call for a team that does not exist (`ZZQNOPE`) with the flow's
+    own "no Linear team with key ZZQNOPE", reached through its Linear
+    lookup, with nothing filed.
+
+  Sealed, the call must fail, and not with that answer: Linear is
+  unreachable. The create path (label, then issue) writes to a real
+  workspace, so the kit does not run it.
+- **I — the import template, through the runner.** Each run goes through
+  the on-demand door, and its answer is read: the report, or the runner's
+  reason. The fixture's rows are first deleted through `delete_thought`.
+  Then:
+  - the first run must report `inserted 5` and leave five rows labelled
+    `orch-fixture`, all under the actor `orchestration-runner`, each with
+    a vector;
+  - a rerun must report `unchanged 5` and nothing inserted, updated or
+    patched;
+  - `stray` must answer 422, "the runner answered 422: one-source", naming
+    the stray line, with no row of the other source written;
+  - `snoop` must emit nothing, because the emitter runs as its pipeline's
+    uid and can read no process's environment. Run as root in the same
+    container, it reports the runner's (measured, names only);
+  - the child `snoop` leaves (`sleep 900`) must be gone when the run
+    answers. Run unswept, as a spare uid, it stays (measured) (review
+    pass 2);
+  - the fixture instance's schedule must be n8n `days 1`: an hourly 24
+    fires once, then never (review pass 2);
+  - `snoop` also fails if its HOME is writable or Python's user site is on.
+    With a shared writable HOME, one emitter planted code another ran
+    (review pass 3). Each kit pipeline owns its own source;
+  - with the runner stopped, the door must answer 502, "did not answer",
+    and the import's saved run of it may hold neither key (review pass 3).
+    Not under `--with sealed`: a restart can give the runner a new address
+    inside E's window, and E would count the old one as a dial (review
+    pass 4);
+  - neither the run key nor the runner's key may appear in any saved run of
+    the import workflows, the data included. Before the door, the webhook
+    saved its request headers, the run key among them (review pass 1).
+- **E** admits a connection to the runner's `:8090`, its addresses read from
+  the engine, and nothing else of it. The runner joins the sealed network
+  as the server does. The judge holds 39 crafted logs in CI.
+
+**The results** (the dogfood Mac, SQLite, `--wait-schedule`, 2026-09-26/27).
+Every check passed on each review pass's code:
+
+| Code | C1 | C1s seen after | P gone after | Also |
+|---|---|---|---|---|
+| pass 1 | 20.9 s | 601 s | 51 s | I: 5 inserted, all with vectors, then `unchanged 5`; the run key in 0 of 23 saved runs; the runner at 11–12 MiB |
+| pass 2 | 35.4 s (Ollama shared) | 481 s | 61 s | I: `stray` 422 with its line; `snoop` read nothing, none of its children survived; the schedule `days 1` |
+| pass 3 | 22.2 s | 451 s | 40 s | I: `snoop` found its HOME unwritable and the user site off; the runner down answered 502 |
+| pass 4 | 23.3 s | 271 s | 101 s | sealed too (below); an operator walk |
+| pass 5 | 19.8 s | 631 s | 30 s | a walk of adding a pipeline; reembed stopped mid-lease |
+| pass 6 | 20.7 s | 811 s | 40 s | CI's steps from a clean clone |
+| pass 7 | 29.0 s | 331 s | 91 s | the runner bounded (512 processes, 2 GB) |
+
+C1s's wait is where the verify began against the schedule, not a speed.
+
+**Sealed (`--with sealed`), on pass 1's and pass 4's code, every check
+passes.** C1 took 12.9 s and 12.5 s, P 92 s both times. C3's and A's Linear
+calls failed, as sealed they must. I passed as unsealed, and on pass 4
+without its runner-down leg. For E, every packet n8n sent was one of:
+- a question to the network's resolver: `api.linear.app` ×4 (the act
+  tools' host), `server.dns.podman` ×14, `orchestration-runner.dns.podman`
+  ×8 (pass 1);
+- a connection to the brain's `:8000` (7);
+- a connection to the runner's `:8090` (4).
+
+Nothing else was asked for or dialled.
+
+**Walks.** On pass 4's code a reviewer followed `deploy/README.md` on a
+throwaway stack: init, an empty allowlist, a pipeline added and removed, the
+Linear key set and unset, and an upgrade without `OB1_RUNNER_KEY`. On pass
+5's, a reviewer walked the add-a-pipeline sequence, and stopped the runner
+mid-reembed against a provider that hangs: the leased rows came back
+pending, and the next run embedded them. On pass 6's, a reviewer ran CI's
+steps from a clean clone (the self-checks, the typechecks, the loopback
+step, the runner image's build), and all passed.
+
+**What got in the way.** Before pass 5's run, a fresh kit project could not
+reach the host's Ollama through the podman VM's gateway (192.168.127.254)
+at all, though another project on the same VM could. Recreating the
+project's network cleared it, and nothing in this change touches it. Two
+cycles on the same project also overlapped: one's K check rotated the key
+the other's C1 was using, so the verify was re-run alone. Cycles on one
+project must not overlap.
+
+The implementation commit's first run had passed A, I, K and C3. C1, C1s
+and P failed that time because another session's 27B model held the host's
+Ollama. The capture path's metadata model then timed out (the server's log),
+though that path is unchanged by SMD-2212. An earlier attempt met a wedged
+Ollama. The runner then reported its rows written and reembed failed, which
+is its answer to a provider outage.
 
 ## Related
 

@@ -49,6 +49,14 @@ supabase
 db/*.ts
 !db/migrate.ts
 !db/cli.ts
+# The orchestration profile's import runner (deploy/orchestration/runner.Dockerfile,
+# SMD-2212) runs the ingestion pipeline, so its import graph is let back in:
+# these db/ modules (cli.ts above among them: every db/ script's flag scanner),
+# and the two files outside db/ it reaches.
+!db/ingest-*.ts
+!db/reembed.ts
+!db/lease.ts
+!evals/linear-corpus.ts
 db/*.sh
 db/package.json
 db/bun.lock
@@ -56,6 +64,9 @@ db/bun.lock
 # Local environment and editor state.
 .env
 **/.env
+# The exports an operator drops for the import runner: private data, mounted
+# read-only into the runner at run time and never part of any image.
+deploy/imports
 .DS_Store
 .vscode
 .idea

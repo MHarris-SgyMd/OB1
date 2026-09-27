@@ -41,7 +41,7 @@ import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-porta
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash } from "../server-portable/lineage.ts";
 import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
-import { corpusIngested, docOf, docsOf, INGEST_ACTOR, recordId, recordStructure, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
+import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
@@ -4586,6 +4586,13 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   assert(namedAudit?.origin === INGEST_ACTOR.via && namedAudit.actor_name === INGEST_ACTOR.name, "…and its audit row names the ingester as writer and door");
   assert((await sql`SELECT current_setting('ob1.actor', true) AS a`)[0].a === "" || (await sql`SELECT current_setting('ob1.actor', true) AS a`)[0].a === null, "…and the envelope does not outlive the record's transaction on the connection");
   ids.push(named.id);
+  // SMD-2212: `--actor` — the import runner's rows carry its own name, through the ingester's door.
+  const byRunner = mk("memory", "test-note-r", "Test note R: written by the import runner under its own name.");
+  assert((await upsertRecord(sql, byRunner, runName(), ingestActor("orchestration-runner"))).outcome === "inserted", "a record under another tool's actor name inserts");
+  const [runnerRow] = await sql`SELECT metadata->>'actor_name' AS n FROM thoughts WHERE id = ${byRunner.id}::uuid`;
+  const [runnerAudit] = await sql`SELECT origin, actor_name FROM thought_audit WHERE thought_id = ${byRunner.id}::uuid AND action = 'capture'`;
+  assert(runnerRow.n === "orchestration-runner" && runnerAudit?.actor_name === "orchestration-runner" && runnerAudit.origin === INGEST_ACTOR.via, `…stamped with that name, and its audit row keeps the ingester as the door (${runnerRow.n}/${runnerAudit?.origin})`);
+  ids.push(byRunner.id);
 
   // A record an adapter mapped (SMD-1867): the row, and in its transaction the
   // canonical, the links and the structured mentions; the same record again

@@ -585,6 +585,87 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  # The import runner (SMD-2212; docs/orchestration-tool.md, "Running a
+  # pipeline from a workflow"). It is part of the `orchestration` profile: the
+  # import templates call it, and nothing else does. n8n's image has neither
+  # Bun nor python3, so an import template's HTTP Request node asks this
+  # service to run one pipeline from its fixed allowlist
+  # (deploy/orchestration/pipelines.json):
+  #   1. the pipeline's emitter over imports/<pipeline>/;
+  #   2. every line held to the pipeline's one source;
+  #   3. `db/ingest-records.ts` under the actor `orchestration-runner`;
+  #   4. `db/reembed.ts`.
+  #
+  # No port. n8n reaches it as `orchestration-runner:8090` on the compose
+  # network, behind OB1_RUNNER_KEY, which `provision.ts --init` writes. The
+  # key is a write capability bounded by the allowlist, not a brain key. It
+  # reaches Postgres as the migrator and board-sync do. It embeds through the
+  # server's knobs, inherited by anchor, as board-sync does.
+  orchestration-runner:
+    build:
+      context: ..
+      dockerfile: deploy/orchestration/runner.Dockerfile
+    profiles: ["orchestration"]
+    volumes:
+      # The exports, read-only: one subdirectory per pipeline. Private data,
+      # which git and every build context ignore (deploy/imports/README.md).
+      # `z` relabels both mounts for a container on an SELinux host, where the
+      # runner otherwise meets EACCES and restarts (review pass 4); elsewhere
+      # it is a no-op.
+      - ${IMPORTS_DIR:-./imports}:/imports:ro,z
+      # The allowlist provisioning reads, so the two cannot disagree: a line
+      # the runner does not hold would load an import that fails every run
+      # (review pass 1). The runner reads it at start, so recreate it after an
+      # edit (`up -d --force-recreate orchestration-runner`; a plain `up -d`
+      # sees no change). It refuses to start on a line whose emitter the image
+      # lacks.
+      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z
+    # It starts as root only to hand each step to its own user (su-exec: each
+    # pipeline's emitter as a uid of its own, the pipeline as bun). These are
+    # the only capabilities it keeps: changing user, and signalling a step's
+    # processes (at the deadline, and to kill what an emitter leaves). init
+    # reaps what exits.
+    init: true
+    # Bounds on what one emitter an export has taken over can take from the
+    # host: processes and memory (review pass 7: neither was set, and Docker
+    # sets no process limit). An emitter's output is held up to 256 MB and read
+    # a few times over, so 2 GB leaves room for that and for reembed.
+    pids_limit: 512
+    mem_limit: 2g
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, KILL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      <<: *server-env
+      # The server's key material stays with the server (board-sync's rule).
+      # The runner reads the database, the embedding knobs and its own key.
+      MCP_ACCESS_KEYS: ""
+      PORT: ""
+      # No `:?`, for the reason n8n's block gives: the runner refuses to
+      # start without it, and says why.
+      OB1_RUNNER_KEY: ${OB1_RUNNER_KEY:-}
+      OB1_RUNNER_TIMEOUT_S: ${OB1_RUNNER_TIMEOUT_S:-}
+    # The server's host alias (SMD-1875): reembed dials OB1_LLM_BASE_URL.
+    extra_hosts: *host-alias
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r = await fetch('http://127.0.0.1:8090/health'); process.exit(r.ok ? 0 : 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # As n8n's: a configuration refusal (a missing key) exits 2 and the policy
+    # restarts it. The runner waits 30 s before that exit, so `ps` shows it up
+    # for under 30 s at a time rather than a hot loop, and its log says why
+    # each time. A server should come back after a reboot.
+    restart: unless-stopped
+    # A stop waits for a running step to hand back what it holds: the runner
+    # gives it two SIGTERMs and up to 5 s (review pass 4).
+    stop_grace_period: 15s
+
 volumes:
   pgdata:
   ollama:
