@@ -6336,7 +6336,7 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   assert(!("error" in pd) && pd.opts.decayDone && pd.opts.status === "all" && !("error" in parseArgs(["--decay-done", "--status", "all"])), "--decay-done lands, alone or with --status all");
   const bare = parseArgs([]);
   assert(!("error" in bare) && bare.subject === null, "no argument is the whole graph");
-  for (const [argv, why] of [[["--limit", "0"], "limit"], [["--limit"], "needs a value"], [["--types", "vegetable"], "vegetable"], [["a", "b"], "one subject"], [["--bogus"], "unknown flag"], [["--types", ""], "none given"],
+  for (const [argv, why] of [[["--limit", "0"], "limit"], [["--limit"], "needs a value"], [["--types", "vegetable"], "1 of the 1 given is not one"], [["a", "b"], "one subject"], [["--bogus"], "unknown argument"], [["--types", ""], "is empty"], [["--types", " , "], "none given"],
                              [["--limit", "5", "--limit", "50"], "given twice"], [["--json", "x", "--json"], "given twice"], [[""], "subject is empty"], [["  "], "subject is empty"],
                              [["--limit", "0x10"], "decimal"], [["--limit", "1e2"], "decimal"], [["--limit", " 7"], "decimal"], [["--limit", "7.0"], "decimal"],
                              [["--status", "closed"], "one of all, open, active, done"], [["--status"], "needs a value"], [["--status", "Open"], "one of"], [["--status", "toString"], "one of"], [["--status", "__proto__"], "one of"], [["--decay-done", "--status", "open"], "pass one or the other"], [["--status", "done", "--decay-done"], "already decides them"]] as [string[], string][])

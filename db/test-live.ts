@@ -2567,9 +2567,9 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const combined = await reembed("--accept-failed", poisonId, "--retry-failed");
   assert(combined.code === 2 && /do not combine/.test(combined.out), "…and it does not combine with a run's flags");
   const stray = await reembed("--accept-failed", poisonId, "--dry-run", lateId);
-  assert(stray.code === 2 && /not understood: /.test(stray.out) && stray.out.includes(lateId), "…and an id after another flag is refused rather than dropped");
+  assert(stray.code === 2 && /unknown argument \d+: a value where no flag takes one/.test(stray.out) && /--accept-failed <thought-id …> \(right after it, before any other flag\)/.test(stray.out), "…and an id after another flag is refused rather than dropped");
   const twice = await reembed("--accept-failed", poisonId, "--accept-failed", lateId);
-  assert(twice.code === 2 && /--accept-failed is given twice/.test(twice.out), "…as is the flag given twice, whose second list would otherwise be dropped");
+  assert(twice.code === 2 && /--accept-failed given twice/.test(twice.out), "…as is the flag given twice, whose second list would otherwise be dropped");
   const jobless = await reembedIn({}, "--job", "--switch-model");
   assert(jobless.code === 2 && /--job needs a value/.test(jobless.out) && (await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = '--switch-model'`)[0].c === 0,
     `a flag that takes a value followed by another flag is refused, not read as the value — no pass runs under the key "--switch-model" (exit ${jobless.code})`);
@@ -2603,7 +2603,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     `…and --all passes over it, saying so (exit ${allDry.code})`);
   await sql`DELETE FROM thoughts WHERE id = ${vectorlessId}::uuid`;
   const allAndIds = await reembed("--accept-failed", "--all", poisonId);
-  assert(allAndIds.code === 2 && /not understood: /.test(allAndIds.out) && allAndIds.out.includes(poisonId) && (await claimCounts()).failed === 3,
+  assert(allAndIds.code === 2 && /unknown argument \d+: a value where no flag takes one/.test(allAndIds.out) && (await claimCounts()).failed === 3,
     `…nor does --all take ids beside it — an id after it is a stray argument, refused (exit ${allAndIds.code})`);
   const idsAndAll = await reembed("--accept-failed", poisonId, "--all");
   assert(idsAndAll.code === 2 && /--all takes no ids beside it/.test(idsAndAll.out) && (await claimCounts()).failed === 3,
