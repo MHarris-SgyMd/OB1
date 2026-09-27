@@ -18,7 +18,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  LIBPQ_REDIRECT_ENV, LIBPQ_REDIRECT_PARAMS, LOOPBACK_HOSTS, NO_DATABASE_URL, REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, UNPARSEABLE_DATABASE_URL,
+  LIBPQ_KEPT_PARAMS, LOOPBACK_HOSTS, NO_DATABASE_URL, REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, UNPARSEABLE_DATABASE_URL,
   databaseUrl, hostOf, isThrowawayHost, mayReset, notThrowaway, openSql, remoteDbAllowed, resetRefusal,
 } from "./connect.ts";
 
@@ -33,13 +33,14 @@ const MARK = "SECRET-2302";
 /** What a child inherits: this environment without anything the rule or the resolver reads. */
 const BASE_ENV: Record<string, string> = {};
 {
-  const read = new Set(["DATABASE_URL", REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, "PGHOST", ...LIBPQ_REDIRECT_ENV]);
-  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !read.has(k)) BASE_ENV[k] = v;
+  const read = new Set(["DATABASE_URL", REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG]);
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !read.has(k) && !k.startsWith("PG")) BASE_ENV[k] = v;
   BASE_ENV.OB1_ENV_FILES = "off";
 }
 function spawn(argv: string[], env: Record<string, string> = {}): { code: number; out: string; err: string; ms: number } {
   const t0 = Date.now();
-  const r = Bun.spawnSync(["bun", "--no-env-file", ...argv], { cwd: HERE, env: { ...BASE_ENV, ...env }, stdout: "pipe", stderr: "pipe" });
+  // A child that hangs fails its check rather than the suite: 30 s, then killed.
+  const r = Bun.spawnSync(["bun", "--no-env-file", ...argv], { cwd: HERE, env: { ...BASE_ENV, ...env }, stdout: "pipe", stderr: "pipe", timeout: 30_000 });
   return { code: r.exitCode ?? -1, out: r.stdout.toString(), err: r.stderr.toString(), ms: Date.now() - t0 };
 }
 const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", code], env);
@@ -61,9 +62,10 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
     ["postgres:///db", false, "an empty host (resolves through PGHOST; tier.ts's rule trusted it)"],
     ["postgres://u@/db?host=/var/run/postgresql", false, "a libpq socket URL, which does not parse"],
     ["not a url", false, "a string that does not parse"],
-    [`postgres://u:${MARK}@localhost/db?host=db.example.com`, false, "localhost with host= in its query (pg_restore follows it)"],
-    [`postgres://u:${MARK}@127.0.0.1/db?hostaddr=10.0.0.5`, false, "127.0.0.1 with hostaddr= in its query"],
-    ["postgres://u@localhost/db?sslmode=disable&service=prod", false, "localhost with service= in its query (a pg_service.conf entry can name a hostaddr)"],
+    // The host Bun's client reaches is the rule's: these reach localhost, and a
+    // libpq tool is handed that host by libpqTarget, not these URLs (below).
+    [`postgres://u:${MARK}@localhost/db?host=db.example.com`, true, "localhost with host= in its query (Bun ignores it; libpqTarget drops it)"],
+    [`postgres://u:${MARK}@localhost/db#?host=db.example.com`, true, "localhost with a fragment libpq would read as a query"],
     ["postgres://localhost:5432@evil.com/db", false, "localhost:5432 as userinfo before a remote host"],
     [`postgres://u:${MARK}@postgres:5432/db`, false, "a compose service name"],
     [`postgres://u:${MARK}@192.168.1.5:5432/db`, false, "an RFC1918 address (config.mjs's isLocalHostname would say local)"],
@@ -75,7 +77,7 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
   ];
   const none = {};
   for (const [url, local, what] of HOSTS) {
-    ok(isThrowawayHost(url, none) === local, `isThrowawayHost: ${what} → ${local}`);
+    ok(isThrowawayHost(url) === local, `isThrowawayHost: ${what} → ${local}`);
     ok(mayReset(url, none) === local, `mayReset, no override: ${what} → ${local}`);
     ok(mayReset(url, { OB1_ALLOW_REMOTE_DB: "1" }) === true, `mayReset, OB1_ALLOW_REMOTE_DB=1: ${what} → true`);
     // The eval-local name, which the scaffolding honoured and tier.ts did not:
@@ -89,29 +91,19 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
     ["postgres://u@db.example.com/x", /^db\.example\.com is not a loopback host$/],
     ["postgres:///x", /no host .*PGHOST/],
     ["not a url", /does not parse/],
-    ["postgres://u@localhost/x?host=prod", /sets host=.*pg_restore/],
-    ["postgres://u@localhost/x?hostaddr=10.0.0.5", /sets hostaddr=/],
-    ["postgres://u@localhost/x?service=prod", /sets service=/],
   ];
-  for (const [url, re] of reasons) ok(re.test(notThrowaway(url, none) ?? ""), `notThrowaway(${url}) says ${re} (${notThrowaway(url, none)})`);
-  ok(LIBPQ_REDIRECT_PARAMS.join() === "host,hostaddr,service" && LIBPQ_REDIRECT_ENV.join() === "PGHOSTADDR,PGSERVICE", "the libpq redirects are host=, hostaddr=, service= and PGHOSTADDR, PGSERVICE");
-
-  // The environment a libpq tool would read: PGHOSTADDR or PGSERVICE sends it
-  // elsewhere even when the URL names localhost; PGHOST does not (the URL's host wins).
+  for (const [url, re] of reasons) ok(re.test(notThrowaway(url) ?? ""), `notThrowaway(${url}) says ${re} (${notThrowaway(url)})`);
+  // The rule is the host's alone: the PG* variables libpq reads are libpqTarget's
+  // to take out, and a developer's PGSERVICE does not refuse a suite (Bun ignores it).
   const LOCAL = "postgres://u@localhost/db";
-  for (const v of LIBPQ_REDIRECT_ENV) {
-    ok(!mayReset(LOCAL, { [v]: "10.0.0.5" }) && new RegExp(`^${v} is set`).test(resetRefusal(LOCAL, { [v]: "10.0.0.5" }) ?? ""), `${v} set: localhost is refused, naming ${v}`);
-    ok(mayReset(LOCAL, { [v]: "" }), `${v} empty: localhost stands`);
-    ok(mayReset(LOCAL, { [v]: "10.0.0.5", OB1_ALLOW_REMOTE_DB: "1" }), `${v} set with the override: allowed`);
-  }
-  ok(mayReset(LOCAL, { PGHOST: "db.example.com" }), "PGHOST set: localhost stands (a URL that names a host is not resolved through it)");
+  for (const v of ["PGHOSTADDR", "PGSERVICE", "PGHOST", "PGDATABASE"]) ok(mayReset(LOCAL, { [v]: "db.example.com" }), `${v} set: localhost stands`);
 
   ok(REMOTE_DB_FLAG === "OB1_ALLOW_REMOTE_DB" && RETIRED_REMOTE_DB_FLAG === "OB1_EVAL_ALLOW_REMOTE_DB", "the override is OB1_ALLOW_REMOTE_DB; the eval-local name is retired");
   for (const v of ["0", "", "true", "yes", " 1", "1 ", "01"])
     ok(!remoteDbAllowed({ OB1_ALLOW_REMOTE_DB: v }) && !mayReset("postgres:///db", { OB1_ALLOW_REMOTE_DB: v }), `OB1_ALLOW_REMOTE_DB=${JSON.stringify(v)} is not the override (exactly "1")`);
   ok(!remoteDbAllowed({ OB1_ALLOW_REMOTE: "1", ALLOW_REMOTE_DB: "1", OB1_EVAL_ALLOW_REMOTE_DB: "1" }), "a near name, or the retired one, is not the override");
   // The rule reads the environment it is given — process.env only by default.
-  const given = child(`import { mayReset } from "./connect.ts"; console.log(mayReset("postgres://u@db.example.com/x", {}), mayReset("postgres://u@db.example.com/x"), mayReset("postgres://u@localhost/x", {}), mayReset("postgres://u@localhost/x"));`, { OB1_ALLOW_REMOTE_DB: "1", PGHOSTADDR: "10.0.0.5" });
+  const given = child(`import { mayReset } from "./connect.ts"; console.log(mayReset("postgres://u@db.example.com/x", {}), mayReset("postgres://u@db.example.com/x"), mayReset("postgres://u@localhost/x", {}), mayReset("postgres://u@localhost/x"));`, { OB1_ALLOW_REMOTE_DB: "1" });
   ok(given.out.trim() === "false true true true", `an explicit environment is the one read; the default is process.env (${given.out.trim()})`);
 
   // deploy/tier.sh hands tier.ts every OB1_* variable of the stack's env file
@@ -126,6 +118,83 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
 }
 
 // ---------------------------------------------------------------------------
+// What a libpq tool is handed: the database Bun's client reached, and nothing
+// libpq could read another way (review pass 2).
+// ---------------------------------------------------------------------------
+/**
+ * A libpq URI read as libpq reads it (fe-connect.c's conninfo_uri_parse): no
+ * fragment, the userinfo up to the first `@` before any `/`, a comma list of
+ * hosts, the database up to the first `?`, and `&`-split, percent-decoded
+ * parameters. Enough to see where a URI sends pg_restore.
+ */
+function libpqParse(uri: string): { user: string; hosts: { host: string; port: string }[]; dbname: string; params: Record<string, string> } | null {
+  const m = uri.match(/^postgres(?:ql)?:\/\/(.*)$/);
+  if (!m) return null;
+  let rest = m[1];
+  let user = "";
+  const at = rest.search(/[@/]/);
+  if (at !== -1 && rest[at] === "@") { user = decodeURIComponent(rest.slice(0, at).split(":")[0]); rest = rest.slice(at + 1); }
+  const hostEnd = rest.search(/[/?]/);
+  const hostList = hostEnd === -1 ? rest : rest.slice(0, hostEnd);
+  rest = hostEnd === -1 ? "" : rest.slice(hostEnd);
+  const hosts = hostList.split(",").map((h) => { const hm = h.match(/^(\[[^\]]*\]|[^:]*)(?::(.*))?$/)!; return { host: decodeURIComponent(hm[1]), port: hm[2] ?? "" }; });
+  let dbname = "";
+  if (rest.startsWith("/")) { const q = rest.indexOf("?"); dbname = decodeURIComponent(q === -1 ? rest.slice(1) : rest.slice(1, q)); rest = q === -1 ? "" : rest.slice(q); }
+  const params: Record<string, string> = {};
+  if (rest.startsWith("?")) for (const kv of rest.slice(1).split("&")) { const eq = kv.indexOf("="); params[decodeURIComponent(eq === -1 ? kv : kv.slice(0, eq))] = decodeURIComponent(eq === -1 ? "" : kv.slice(eq + 1)); }
+  return { user, hosts, dbname, params };
+}
+{
+  // The parser has teeth: it reads the reviewers' shapes as libpq did in a real pg_restore.
+  ok(libpqParse("postgres://u@localhost:1/db#?host=10.9.9.9")?.params.host === "10.9.9.9", "libpqParse reads a fragment's ?host= as libpq does");
+  ok(libpqParse("postgres://u@10.9.9.9:5432,x@localhost:1/db")?.hosts[0].host === "10.9.9.9", "libpqParse splits the userinfo at the first @, as libpq does");
+
+  const SHAPES = [
+    `postgres://u:${MARK}@localhost:5433/canary#?host=prod.example.com&dbname=stable`,
+    `postgres://u@prod.example.com:5432,x:${MARK}@localhost:5433/canary`,
+    `postgres://u:${MARK}@127.0.0.1:5433/canary?host=prod&hostaddr=10.9.9.9&port=5432&dbname=stable&service=s&user=admin&sslmode=require&application_name=ob1`,
+    `postgres://u:${MARK}@[::1]:5433/url%20db`,
+    `postgres://u%40x:${MARK}@localhost/canary`,
+    "postgres://localhost/canary",
+    // No host: Bun resolves PGHOST, and the tool must get that host, not "localhost".
+    "postgres:///canary",
+  ];
+  const REDIRECTS = { PGHOSTADDR: "10.9.9.9", PGSERVICE: "prod", PGSERVICEFILE: "/tmp/none", PGDATABASE: "stable", PGHOST: "prod.example.com", PGPORT: "6543", PGUSER: "envuser", PGPASSWORD: "envpw-2302", PGOPTIONS: "-c search_path=x", PGSSLMODE: "prefer" };
+  const r = child(`import { libpqTarget, openSql } from "./connect.ts";
+    const out = [];
+    for (const u of ${JSON.stringify(SHAPES)}) { const s = openSql(u); const o = s.options; const t = libpqTarget(s, u); out.push({ given: u, bun: { host: String(o.hostname), port: String(o.port), db: o.database, user: o.username, pw: o.password }, target: t.url, env: t.env }); await s.close(); }
+    console.log(JSON.stringify(out));`, REDIRECTS);
+  const results = r.code === 0 ? JSON.parse(r.out) as { given: string; bun: { host: string; port: string; db: string; user: string; pw: string }; target: string; env: Record<string, string> }[] : [];
+  ok(results.length === SHAPES.length, `libpqTarget ran on every shape (exit ${r.code}${r.code ? `: ${r.err.trim().split("\n")[0]}` : ""})`);
+  for (const x of results) {
+    const lib = libpqParse(x.target);
+    const what = x.given.replace(MARK, "…");
+    const bunHost = x.bun.host.startsWith("[") ? x.bun.host : x.bun.host.includes(":") ? `[${x.bun.host}]` : x.bun.host;
+    ok(lib !== null && lib.hosts.length === 1 && lib.hosts[0].host === bunHost && lib.hosts[0].port === x.bun.port, `${what}: libpq reads the target's host as Bun's, ${bunHost}:${x.bun.port} (${JSON.stringify(lib?.hosts)})`);
+    ok(lib !== null && lib.dbname === x.bun.db && lib.user === x.bun.user, `${what}: …and its database and user as Bun's, ${x.bun.db} / ${x.bun.user}`);
+    ok(lib !== null && Object.keys(lib.params).every((k) => (LIBPQ_KEPT_PARAMS as readonly string[]).includes(k)), `${what}: …and nothing in its query but TLS, timeout and label (${JSON.stringify(lib?.params)})`);
+    const w = new URL(x.target);
+    ok(w.hostname === bunHost && w.port === x.bun.port && !x.target.includes("#") && !x.target.includes(","), `${what}: WHATWG reads the same target — no fragment, no host list`);
+    ok(!x.target.includes(MARK) && !x.target.includes(REDIRECTS.PGPASSWORD) && x.env.PGPASSWORD === x.bun.pw, `${what}: the password travels as PGPASSWORD, not on the command line`);
+    const leftIn = Object.keys(x.env).filter((k) => /^PG(HOST|HOSTADDR|PORT|DATABASE|USER|SERVICE|SERVICEFILE|OPTIONS)$/.test(k));
+    ok(leftIn.length === 0 && x.env.PGSSLMODE === "prefer" && typeof x.env.PATH === "string", `${what}: the tool's environment has no PG* that chooses a server, database or user (left: ${leftIn.join(", ") || "none"}), and keeps PGSSLMODE and PATH`);
+  }
+  // The database is the URL's, whatever PGDATABASE says (Bun 1.4.0 let it win).
+  ok(results.every((x) => x.bun.db === (x.given.includes("url%20db") ? "url db" : "canary")), `openSql pins the URL's database over PGDATABASE=stable (${results.map((x) => x.bun.db).join(", ")})`);
+  const q = results[2] ? new URL(results[2].target).searchParams : new URLSearchParams();
+  ok(q.get("sslmode") === "require" && q.get("application_name") === "ob1" && !q.has("host") && !q.has("dbname"), `the kept parameters travel: sslmode, application_name (${results[2]?.target})`);
+  const noPath = child(`import { openSql } from "./connect.ts"; const s = openSql("postgres://u@localhost"); console.log(s.options.database); await s.close();`, { PGDATABASE: "envdb" });
+  ok(noPath.out.trim() === "envdb", `a URL that names no database keeps the client's default, PGDATABASE (${noPath.out.trim()})`);
+
+  // tier.ts hands both tools libpqTarget's URL and environment, never the operator's URL.
+  const tier = readFileSync(join(HERE, "tier.ts"), "utf8");
+  const calls = [...tier.matchAll(/run\(\["pg_(dump|restore)"[^;]*;/g)].map((m) => m[0]);
+  ok(calls.length === 2, `tier.ts runs pg_dump and pg_restore once each (${calls.length})`);
+  for (const c of calls) ok(!/\b(fromUrl|toUrl)\b/.test(c) && /\.url\b/.test(c) && /\{ env: \w+\.env \}/.test(c), `tier.ts: ${c.slice(5, 16)} gets libpqTarget's url and env (${c.slice(0, 90)}…)`);
+  ok(/const dumpFrom = libpqTarget\(src, fromUrl\)/.test(tier) && /const restoreTo = libpqTarget\(target, toUrl\)/.test(tier), "tier.ts: the targets are the clients the guards asked");
+}
+
+// ---------------------------------------------------------------------------
 // The refusals that print the rule, run: the suites' and tier.ts --refresh's.
 // ---------------------------------------------------------------------------
 {
@@ -133,10 +202,10 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
   const REMOTE = guard(`postgres://u:${MARK}@db.example.com/x`);
   const guarded = child(REMOTE);
   ok(guarded.code === 2 && /Refusing to drop the schema: db\.example\.com is not a loopback host/.test(guarded.err) && !guarded.out.includes("dropped") && !guarded.err.includes(MARK) && !guarded.err.includes(RETIRED_REMOTE_DB_FLAG), `assertThrowawayDatabase refuses a remote host by name, never its password (exit ${guarded.code})`);
-  const redirected = child(guard(`postgres://u:${MARK}@localhost/x?host=db.example.com`));
-  ok(redirected.code === 2 && /Refusing to drop the schema: the URL's query sets host=/.test(redirected.err) && !redirected.err.includes(MARK), `…and localhost whose query sets host= (exit ${redirected.code})`);
-  const viaEnv = child(guard("postgres://u@localhost/x"), { PGHOSTADDR: "10.0.0.5" });
-  ok(viaEnv.code === 2 && /PGHOSTADDR is set/.test(viaEnv.err), `…and localhost with PGHOSTADDR set (exit ${viaEnv.code})`);
+  // The suites drop through Bun's client alone, which reaches the URL's host: a
+  // developer's PGSERVICE or PGHOSTADDR does not refuse them (pass 1's list did).
+  const viaEnv = child(guard("postgres://u@localhost/x"), { PGHOSTADDR: "10.0.0.5", PGSERVICE: "prod" });
+  ok(viaEnv.code === 0 && viaEnv.out.trim() === "dropped", `…and localhost with PGHOSTADDR/PGSERVICE exported passes (exit ${viaEnv.code})`);
   const retired = child(REMOTE, { [RETIRED_REMOTE_DB_FLAG]: "1" });
   ok(retired.code === 2 && retired.err.includes(`${RETIRED_REMOTE_DB_FLAG} is set, and is no longer read: the name is ${REMOTE_DB_FLAG}`) && !retired.out.includes("dropped"), `…and with the retired name set it still refuses, and says the name to use (exit ${retired.code})`);
   const allowed = child(REMOTE, { [REMOTE_DB_FLAG]: "1" });
@@ -150,7 +219,7 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
   for (const [to, re, what] of [
     ["postgres:///b", /--to is not plainly this machine — the URL has no host/, "an empty host"],
     ["postgres://u@db.example.com:5432/b", /--to is not plainly this machine — db\.example\.com is not a loopback host — and OB1_ALLOW_REMOTE_DB is not 1/, "a remote host"],
-    ["postgres://u@localhost:1/b?host=db.example.com", /--to is not plainly this machine — the URL's query sets host=/, "localhost whose query sets host="],
+    ["postgres://u@192.168.1.5:5432/b", /--to is not plainly this machine — 192\.168\.1\.5 is not a loopback host/, "an RFC1918 host"],
   ] as const) {
     const r = refresh(to);
     ok(r.code === 1 && re.test(r.err) && !/could not connect/.test(r.err) && !r.err.includes(MARK) && !r.out.includes(MARK), `tier.ts --refresh --to ${what}: exit 1, refused before connecting, no password (exit ${r.code}, ${r.ms} ms: ${r.err.trim().split("\n")[0]})`);
@@ -179,12 +248,26 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
   ok(set.code === 0 && set.out.trim() === `resolved postgres://u:${MARK}@h/db` && !set.err.includes(MARK), "a set DATABASE_URL resolves, and nothing is printed of it");
   // A password holding an unencoded / # ? makes the URL unparseable; the
   // client's own error printed it whole as `input` (review pass 1).
-  for (const bad of [`postgres://u:${MARK}/x@127.0.0.1:1/x`, `postgres://u:${MARK}#x@127.0.0.1:1/x`, `postgres://u:${MARK}@127.0.0.1:99999/x`]) {
+  // A password with a bad percent-escape parses, then the client threw a
+  // URIError; another scheme built a MySQL or SQLite client (review pass 2).
+  for (const [bad, what] of [
+    [`postgres://u:${MARK}/x@127.0.0.1:1/x`, "an unencoded / in the password"],
+    [`postgres://u:${MARK}#x@127.0.0.1:1/x`, "an unencoded # in the password"],
+    [`postgres://u:${MARK}@127.0.0.1:99999/x`, "a port past 65535"],
+    [`postgres://u:50%zz${MARK}@127.0.0.1:1/x`, "a bad percent-escape in the password"],
+    [`mysql://u:${MARK}@127.0.0.1:1/x`, "a mysql: URL"],
+    [`file:///tmp/${MARK}.db`, "a file: URL"],
+  ] as const) {
     const r = child(RESOLVE, { DATABASE_URL: bad });
-    ok(r.code === 2 && r.err.trim() === UNPARSEABLE_DATABASE_URL && !r.err.includes(MARK) && !r.out.includes(MARK), `an unparseable DATABASE_URL: exit 2, refused without a word of it (exit ${r.code}: ${r.err.trim().slice(0, 80)})`);
+    ok(r.code === 2 && r.err.trim() === UNPARSEABLE_DATABASE_URL && !r.err.includes(MARK) && !r.out.includes(MARK), `DATABASE_URL with ${what}: exit 2, refused without a word of it (exit ${r.code}: ${r.err.trim().slice(0, 80)})`);
+    const f = child(`import { databaseUrl } from "./connect.ts"; console.log("resolved " + databaseUrl(${JSON.stringify(bad)}, {}));`);
+    ok(f.code === 2 && f.err.trim() === UNPARSEABLE_DATABASE_URL && !f.out.includes("resolved"), `--url with ${what}: the same refusal (exit ${f.code})`);
     const o = child(`import { openSql } from "./connect.ts"; openSql(${JSON.stringify(bad)}); console.log("opened");`);
-    ok(o.code !== 0 && o.err.includes(UNPARSEABLE_DATABASE_URL) && !o.err.includes(MARK) && !o.out.includes("opened"), `openSql on it throws the fixed message, not the client's error (exit ${o.code})`);
+    ok(o.code !== 0 && o.err.includes(UNPARSEABLE_DATABASE_URL) && !o.err.includes(MARK) && !o.out.includes("opened"), `openSql on ${what} throws the fixed message, not the client's error (exit ${o.code})`);
   }
+  // A URL that parses but the client refuses: its own error is not what is thrown.
+  const refused = child(`import { openSql } from "./connect.ts"; try { openSql("postgres://u:${MARK}@127.0.0.1:1/x?sslmode=bogus"); console.log("opened"); } catch (e) { console.log("threw: " + e.message); }`);
+  ok(refused.out.trim() === "threw: The database client refused the URL. (Nothing of it is printed.)" && !refused.err.includes(MARK), `openSql on a URL the client refuses (sslmode=bogus) throws its own fixed message (${refused.out.trim()})`);
   // The client: one connection unless asked (opening one does not connect).
   const one = openSql("postgres://u@127.0.0.1:1/x"), five = openSql("postgres://u@127.0.0.1:1/x", { max: 5 });
   ok(one.options.max === 1 && five.options.max === 5, `openSql: one connection by default, the asked-for pool otherwise (${one.options.max}, ${five.options.max})`);
@@ -208,7 +291,7 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
   ok(zero.code === 0 && zero.out === "body\nclose a\nclose b\nexit 0\n", "0 exits 0, after both closes; nothing runs after the door");
   const top = door(`return 255;`);
   ok(top.code === 255, `255, the top exit status, stands (exit ${top.code})`);
-  for (const [bad, what] of [["NaN", "NaN"], ["2.7", "a fraction"], ["300", "past 255"], ["-1", "negative"], ["undefined", "no code"], [`"3"`, "a string"]] as const) {
+  for (const [bad, what] of [["NaN", "NaN"], ["2.7", "a fraction"], ["256", "256, which the runtime would exit as 0"], ["300", "past 255"], ["-1", "negative"], ["undefined", "no code"], [`"3"`, "a string"]] as const) {
     const r = door(`return ${bad};`);
     ok(r.code === 1 && r.out.includes("close a\nclose b\n"), `a code that is not an exit status (${what}) exits 1, after the closes (exit ${r.code})`);
   }
@@ -226,14 +309,14 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
   // What the body wrote reaches a slow pipe whole: an exit cut a 5 MB
   // process.stdout.write short, since Bun hands it on asynchronously.
   const BYTES = 100 * 50000;
-  for (const how of ["process.stdout.write", "console.log"] as const) {
-    const write = how === "console.log" ? `for (let i = 0; i < 50000; i++) console.log(line);` : `process.stdout.write((line + "\\n").repeat(50000));`;
+  for (const [how, stream] of [["process.stdout.write", "stdout"], ["console.log", "stdout"], ["process.stderr.write", "stderr"]] as const) {
+    const write = how === "console.log" ? `for (let i = 0; i < 50000; i++) console.log(line);` : `${how}((line + "\\n").repeat(50000));`;
     const p = Bun.spawn(["bun", "--no-env-file", "-e", `import { closeThenExit } from "./connect.ts"; await closeThenExit([], async () => { const line = "x".repeat(99); ${write} return 0; });`], { cwd: HERE, env: BASE_ENV, stdout: "pipe", stderr: "pipe" });
-    const reader = p.stdout.getReader();
-    let n = 0;
-    for (;;) { const { done, value } = await reader.read(); if (done) break; n += value.length; await Bun.sleep(1); }
+    const drain = async (s: ReadableStream<Uint8Array>, slow: boolean) => { const reader = s.getReader(); let n = 0; for (;;) { const { done, value } = await reader.read(); if (done) break; n += value.length; if (slow) await Bun.sleep(1); } return n; };
+    const [nOut, nErr] = await Promise.all([drain(p.stdout, stream === "stdout"), drain(p.stderr, stream === "stderr")]);
     const code = await p.exited;
-    ok(code === 0 && n === BYTES, `${how} of 5 MB through the door reaches a slow reader whole (${n} of ${BYTES} bytes, exit ${code})`);
+    const n = stream === "stdout" ? nOut : nErr;
+    ok(code === 0 && n === BYTES, `${how} of 5 MB through the door reaches a slow reader of ${stream} whole (${n} of ${BYTES} bytes, exit ${code})`);
   }
 }
 
@@ -265,7 +348,7 @@ function callText(text: string, from: number): string {
 {
   ok(sources.includes("connect.ts") && sources.length >= 30, `the census reads db/'s scripts and libraries (${sources.length})`);
   const READS_URL = /(process\.env|Bun\.env|import\.meta\.env)\s*(\.\s*DATABASE_URL\b|\[\s*["'`]DATABASE_URL["'`]\s*\])|\{[^}]*\bDATABASE_URL\b[^}]*\}\s*=\s*(process\.env|Bun\.env|import\.meta\.env)/;
-  const BUILDS_CLIENT = /new\s+(Bun\.)?SQL\s*\(|\bBun\.sql\b|import\s*\{[^}]*\b(sql|SQL\s+as\s+\w+)\b[^}]*\}\s*from\s*["']bun["']/;
+  const BUILDS_CLIENT = /new\s+SQL\s*\(|\bBun\.(sql|SQL)\b|import\s*\*\s*as\s+\w+\s+from\s*["']bun["']|import\s*\{[^}]*(\bsql\b|(?<!\btype\s+)\bSQL\s+as\s+\w+)[^}]*\}\s*from\s*["']bun["']/;
   for (const f of sources.filter((s) => s !== "connect.ts")) {
     const text = read(f);
     ok(!READS_URL.test(text), `${f} does not read DATABASE_URL itself — connect.ts's databaseUrl (or test-support's requireDatabaseUrl) does`);
@@ -275,9 +358,10 @@ function callText(text: string, from: number): string {
   // The census's patterns have teeth, on the shapes a refactor would write.
   for (const s of ["process.env.DATABASE_URL", "process.env['DATABASE_URL']", "process.env[`DATABASE_URL`]", "Bun.env.DATABASE_URL", "import.meta.env.DATABASE_URL", "const { DATABASE_URL } = process.env"])
     ok(READS_URL.test(s), `the census sees ${s}`);
-  for (const s of ["new SQL(url)", "new Bun.SQL({ url })", `import { sql } from "bun"`, `import { SQL as Pg } from "bun"`, "Bun.sql`SELECT 1`"])
+  for (const s of ["new SQL(url)", "new Bun.SQL({ url })", "const Pg = Bun.SQL; new Pg(url)", `import * as B from "bun"; new B.SQL(url)`, `import { sql } from "bun"`, `import { SQL as Pg } from "bun"`, "Bun.sql`SELECT 1`"])
     ok(BUILDS_CLIENT.test(s), `the census sees ${s}`);
-  ok(!BUILDS_CLIENT.test(`import { SQL } from "bun"; async function f(sql: SQL) {}`), "…and not a type-only use of SQL");
+  for (const s of [`import { SQL } from "bun"; async function f(sql: SQL) {}`, `import { type SQL as T } from "bun"`])
+    ok(!BUILDS_CLIENT.test(s), `…and not a type-only use: ${s}`);
 
   // A script that takes --url resolves it through databaseUrl, and reads it nowhere else.
   const withUrl = sources.filter((f) => /\burl: "one"/.test(read(f)));

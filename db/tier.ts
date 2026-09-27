@@ -80,7 +80,7 @@ import { parsePgUuidArray } from "../evals/query-log.ts";
 import { embed } from "../evals/lib.ts";
 import { runCompare, type CompareArgs } from "./brain-compare.ts";
 import { commandLine, scriptArgv } from "./cli.ts";
-import { closeThenExit, openSql, resetRefusal } from "./connect.ts";
+import { closeThenExit, libpqTarget, openSql, resetRefusal } from "./connect.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -472,11 +472,11 @@ export async function refreshToolsReady(serverMaj: number): Promise<{ ready: boo
   return { ready: true };
 }
 
-async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Promise<{ code: number; out: string; err: string }> {
+async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe"; env?: Record<string, string> } = {}): Promise<{ code: number; out: string; err: string }> {
   const proc = Bun.spawn(cmd, {
     stdout: opts.stdio === "inherit" ? "inherit" : "pipe",
     stderr: opts.stdio === "inherit" ? "inherit" : "pipe",
-    env: process.env,
+    env: opts.env ?? process.env,
   });
   const out = opts.stdio === "inherit" ? "" : await new Response(proc.stdout).text();
   const err = opts.stdio === "inherit" ? "" : await new Response(proc.stderr).text();
@@ -489,7 +489,8 @@ async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Pr
  *      may differ; ROLE_GRANTS are re-issued by migrate --grant, not carried).
  *   2. mark the target as a refresh target (refreshMark), then reset its public
  *      schema (the destructive step, guarded by targetRefusal and the loopback check).
- *   3. pg_restore the dump.
+ *   3. pg_restore the dump — both tools given the databases the clients here
+ *      reached (connect.ts's libpqTarget), not the URLs as typed.
  *   4. copy the source's database-level settings (databaseSettings), which the
  *      dump does not carry — 014's HNSW bounds among them (SMD-2037).
  *   5. migrate.ts forward — the point of the canary: a migration meets real data.
@@ -498,14 +499,18 @@ async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Pr
  */
 export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promise<void> {
   // connect.ts's one rule, the test scaffolding's too: loopback by name, not an
-  // empty host (it resolves through PGHOST), nothing pg_restore would follow
-  // elsewhere, or the override.
+  // empty host (it resolves through PGHOST), or the override.
   const refusal = resetRefusal(toUrl);
   if (refusal !== null) {
     throw new Error(`--to is not plainly this machine — ${refusal} — and OB1_ALLOW_REMOTE_DB is not 1. Refusing to reset it. (--refresh drops the target's schema.)`);
   }
   const src = openSql(fromUrl);
   const target = openSql(toUrl);
+  // pg_dump and pg_restore reach the databases these clients reach — the ones
+  // every guard here asks — not whatever libpq would make of the operator's
+  // URLs (connect.ts's libpqTarget; review pass 2).
+  const dumpFrom = libpqTarget(src, fromUrl);
+  const restoreTo = libpqTarget(target, toUrl);
   let serverMaj: number;
   let settings: Record<string, string>;
   try {
@@ -531,7 +536,7 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
   const dir = await mkdtemp(join(tmpdir(), "ob1-tier-"));
   const dumpFile = join(dir, "stable.dump");
   try {
-    const dumped = await run(["pg_dump", "-Fc", "--no-owner", "--no-privileges", "-f", dumpFile, fromUrl]);
+    const dumped = await run(["pg_dump", "-Fc", "--no-owner", "--no-privileges", "-f", dumpFile, dumpFrom.url], { env: dumpFrom.env });
     if (dumped.code !== 0) throw new Error(`pg_dump failed (exit ${dumped.code}): ${dumped.err.trim()}`);
 
     // Reset the target so the restore lands on a clean schema. DROP … CASCADE is
@@ -558,7 +563,7 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
       await dst.close();
     }
 
-    const restored = await run(["pg_restore", "--no-owner", "--no-privileges", "-d", toUrl, dumpFile]);
+    const restored = await run(["pg_restore", "--no-owner", "--no-privileges", "-d", restoreTo.url, dumpFile], { env: restoreTo.env });
     // pg_restore exits non-zero on benign warnings (e.g. a comment on an extension
     // it did not create); treat a restore that produced the core table as success,
     // otherwise surface it.
