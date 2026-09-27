@@ -45,6 +45,11 @@ const TABLES = [
   "ob1_entity_edges",
   "thought_entities",
   "ob1_entities",
+  // 064's page store (SMD-1812): the revisions reference the sections, the
+  // sections the pages, the pages `thoughts` — so all three before it.
+  "page_section_revisions",
+  "page_sections",
+  "pages",
   "thoughts",
   "ob1_agent_keys",
   "ob1_agents",
@@ -221,6 +226,25 @@ const FUNCTIONS = [
   // record_supersession_proposal) keep their signatures and are named above.
   "derivation_descendants(uuid, int, int)",
   "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)",
+  // 064 (SMD-1812): the page store's nine functions, its four helpers, the
+  // page-thought writer, the revisions' refusal trigger and the section drop
+  // trigger; ob1_record_derivation, redefined on 063's body, is named above.
+  "upsert_page(text, text, text, jsonb, text, uuid)",
+  "write_page_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)",
+  "accept_page_section(uuid, text)",
+  "release_page_section(uuid, text)",
+  "reject_page_section(uuid, text)",
+  "lock_page_section(uuid, boolean, text)",
+  "delete_page_section(uuid, text)",
+  "render_page(uuid, timestamptz)",
+  "page_sections_as_of(uuid, timestamptz)",
+  "ob1_render_page_thought(uuid, uuid)",
+  "ob1_page_actor(text)",
+  "ob1_page_lock(uuid, text)",
+  "ob1_page_evidence(uuid[], text, uuid)",
+  "ob1_page_recipe(jsonb, text)",
+  "page_section_revisions_refuse_mutation()",
+  "ob1_drop_section_derivations()",
 ];
 
 /**

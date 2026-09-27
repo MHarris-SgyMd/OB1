@@ -1022,6 +1022,54 @@ else {
          `a chunk set without its lineage row does not start, the kind and the thought named, the raw writer blamed (every producer is current) and the re-apply's backfill the remedy (exit ${noLineage.code}: ${noLineage.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 220)})`);
   await ctx.unsafe(`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe) SELECT 'chunks', id, ARRAY[id], ARRAY[content_fingerprint], 'capture', '{"deterministic": true, "count": 2}'::jsonb FROM thoughts WHERE id = '${tid}'::uuid`);
   assert(/✓  lineage\s+every derived row has its lineage row — 1 lineage row\(s\): 0 backfilled/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and with the row back the check is ok again, counting the one row");
+  // 064's kind (SMD-1812): a generated page section without its lineage row
+  // is refused the same way, the section named. The page is a thought, so
+  // its removal is one delete_thought, which takes the section, its revisions
+  // and the gap with it.
+  const pg064 = (await ctx.unsafe(`SELECT upsert_page('preflight-064', 'Preflight page') AS r`))[0].r as { page_id: string };
+  const sec064 = (await ctx.unsafe(`SELECT write_page_section('${pg064.page_id}'::uuid, 'body', 'A generated body.', 'generated', NULL, '{"model": "stub"}'::jsonb, ARRAY['${tid}']::uuid[]) AS r`))[0].r as { section_id: string };
+  assert(/✓  lineage\s+every derived row has its lineage row — 2 lineage row\(s\): 0 backfilled/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "a generated page section with its lineage row is ok, counted beside the chunk set's (two rows)");
+  await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'section' AND artifact_id = '${sec064.section_id}'::uuid`);
+  const noSection = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(noSection.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 page section\\(s\\) carrying a recipe \\(${sec064.section_id}\\) — written by a producer from before 061`).test(noSection.out) && /Every producer is 061's, so these rows came from a raw writer/.test(noSection.out) && /A page section's row is written by 064's write_page_section \(or accept_page_section\): regenerate the section through it, or record the row yourself through ob1_record_derivation with kind 'section'\./.test(noSection.out),
+         `a section carrying a recipe without its lineage row does not start, the section named, the raw writer blamed, and the remedy names the store's own writer beside 061's (exit ${noSection.code}: ${noSection.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 200)})`);
+  // The remedy as written: regenerating the section — the same body, evidence
+  // and recipe — records the missing row (walkthrough, second review pass: an
+  // identical regeneration recorded nothing, and the remedy was false).
+  await ctx.unsafe(`SELECT write_page_section('${pg064.page_id}'::uuid, 'body', 'A generated body.', 'generated', NULL, '{"model": "stub"}'::jsonb, ARRAY['${tid}']::uuid[]) AS r`);
+  assert(/✓  lineage\s+every derived row has its lineage row — 2 lineage row\(s\)/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and following the remedy — regenerating the section unchanged — records the row: ok again on two rows");
+  // The second fail branch — a producer body from before 061 beside a section
+  // missing its row — names the section's remedy too (run-it, third review
+  // pass: pass 1 put it in the first branch alone). The vector trigger
+  // disabled is the cheapest "not current" producer; its row deleted raw.
+  await ctx.unsafe(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_record_vector_lineage`);
+  await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'section' AND artifact_id = '${sec064.section_id}'::uuid`);
+  const olderProducer = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(olderProducer.code === 1 && /✗  lineage\s+derived rows without a lineage row — 1 page section\(s\) carrying a recipe/.test(olderProducer.out) && /Apply db\/migrations\/061_derivations\.sql\./.test(olderProducer.out) && /A page section's row is written by 064's write_page_section/.test(olderProducer.out),
+         `with a producer from before 061 beside it, a section missing its row still gets the store's remedy beside the ledger's (exit ${olderProducer.code}: ${olderProducer.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 160)})`);
+  await ctx.unsafe(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_record_vector_lineage`);
+  await ctx.unsafe(`SELECT write_page_section('${pg064.page_id}'::uuid, 'body', 'A generated body.', 'generated', NULL, '{"model": "stub"}'::jsonb, ARRAY['${tid}']::uuid[]) AS r`);
+  // A human's section is not a derivation: a manual write that moved the body
+  // emptied the recipe, so releasing it back to the machine leaves nothing
+  // for the census to count (cold read, first review pass: the origin-keyed
+  // census read a released section as a generated one without lineage, and
+  // named 061's backfill — which knows no section — as the remedy).
+  await ctx.unsafe(`SELECT write_page_section('${pg064.page_id}'::uuid, 'body', 'By hand now.', 'manual')`);
+  await ctx.unsafe(`SELECT release_page_section('${sec064.section_id}'::uuid)`);
+  const released = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(released.code === 0 && /✓  lineage\s+every derived row has its lineage row — 1 lineage row\(s\)/.test(released.out), `a section a human wrote and then released back to the machine is not a derivation without lineage: the check is ok (exit ${released.code})`);
+  // A raw write of page_sections leaves the page thought without its render:
+  // a warning naming the page and the repair door, not a refusal.
+  await ctx.unsafe(`UPDATE page_sections SET body_md = 'Edited around the store.' WHERE id = '${sec064.section_id}'::uuid`);
+  const stale = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(stale.code === 0 && new RegExp(`!  lineage\\s+every derived row has its lineage row, but 1 page\\(s\\) whose thought does not hold their render \\(${pg064.page_id}\\) — a raw write of page_sections or of the page thought`).test(stale.out) && /SELECT ob1_render_page_thought\('<page id>'\);/.test(stale.out),
+         `a page thought that does not hold its render is a warning naming the page and ob1_render_page_thought as the repair (exit ${stale.code}: ${stale.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 200)})`);
+  await ctx.unsafe(`SELECT ob1_render_page_thought('${pg064.page_id}'::uuid)`);
+  assert(/✓  lineage\s+every derived row has its lineage row/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and re-rendered through the door, the check is ok again");
+  // No actor on the delete: a name nobody classified would be a key with no
+  // kind, which the audit-events legs below count (run-it, the build).
+  await ctx.unsafe(`SELECT delete_thought('${pg064.page_id}'::uuid, NULL::jsonb)`);
+  assert(/✓  lineage\s+every derived row has its lineage row — 1 lineage row\(s\): 0 backfilled/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and the page gone through delete_thought — section, revisions and the gap with it — the check is ok again on the one row");
   // 063 (SMD-1732): the rows rebuild_derived marked for a re-run are counted
   // in the coverage; a lineage row whose ARTIFACT is gone while its thought
   // stands — the direction 061 did not read — is a WARN naming
