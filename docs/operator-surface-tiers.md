@@ -45,9 +45,11 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
    mcp ──token exchange──▶ auth  │
    mcp ─────REST client──▶ api ◀──── REST client ── app
    n8n ─────REST──────────▶ api ──▶ postgres
-   db/ workers (core codebase, separate processes) ──▶ postgres
+   n8n ──runner key──▶ orchestration-runner ──▶ postgres
+   db/ workers, board-sync (core codebase, separate processes) ──▶ postgres
 
-   egress network (outbound allowed): api → Ollama / Jev / OpenRouter;
+   egress network (outbound allowed): api, db/ workers, board-sync, orchestration-runner
+                                        → Ollama / Jev / OpenRouter (board-sync also → Linear);
                                       n8n → Linear, Gmail; auth → client metadata fetches
 ```
 
@@ -68,10 +70,12 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
   - **Mesh network.** Internal names are network aliases on a compose network with `internal: true`: `api.ob1.internal`, `mcp.ob1.internal`, `app.ob1.internal`, `auth.ob1.internal`. Postgres and every service join it. Calls between services still authenticate; being on the network is not trust.
   - **Egress network.** An `internal: true` network has no outbound route, to the internet or to the host. So the services that must reach out also join an ordinary network:
     - the REST core, for Ollama (host Ollama on the dogfood stack), Jev and OpenRouter;
+    - every worker-class process that calls a provider: the `db/` workers (extract, consolidate, reembed, rebuild's pools), board-sync (also Linear), and the `orchestration-runner`;
     - n8n, for Linear and Gmail;
     - the authorization server, if its client registration fetches metadata documents.
 
     The MCP server and the GUI stay mesh-only. The proxy joins the edge network and the mesh.
+- **Postgres from the host** stays an operator opt-in: `deploy/compose.host-ports.yaml` publishes it on loopback (SMD-1844). A host-run `db/` script or recipe uses that overlay, or runs in a tools container on the mesh (SMD-1869).
 - **The REST core's own `/health` is internal only.** Brain identity and ledger freshness reach the public side through the MCP server's `/health`, the one probe URL for `smoke.sh`, the image healthcheck and `db/brain-compare.ts`.
 - **`/.well-known/` stays a 404 except two routed paths:**
   - `/.well-known/oauth-protected-resource/mcp` goes to the MCP server (RFC 9728).
@@ -101,8 +105,9 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
 
 ## Where everything else lives
 
-- **Workers and `db/` scripts** stay in the core codebase as separate processes on Postgres (SMD-2134). They are controlled through the REST core's worker routes (SMD-2131/2132), not a container shell.
-- **Egress** (Ollama, Jev, OpenRouter) and its gate belong to the REST core alone.
+- **Workers and `db/` scripts** stay in the core codebase as separate processes on Postgres (SMD-2134). They sit on the mesh and the egress network. They are controlled through the REST core's worker routes (SMD-2131/2132), not a container shell.
+- **The `orchestration-runner`** (SMD-2212, on main since #222) is a worker-class process of the same kind. n8n asks it over HTTP, with `OB1_RUNNER_KEY`, to run one allowlisted pipeline (`db/ingest-records.ts`, then `db/reembed.ts`) straight against Postgres. It stays that way: an import is a batch write, like board-sync's, not a REST call per item. Its HTTP endpoint is mesh-only and answers n8n alone.
+- **Egress.** Every process that calls a provider joins the egress network. The gate is the shared `server-portable/egress.ts`, which each process enforces for itself; the REST core is the only egress point for requests that arrive over HTTP.
 - **Destructive-verb guards** live in the REST core, so every client gets them. These are the bulk cap, re-verify before delete, and restricted state from the principal, which `-pro` put in its route handlers.
 - **Prose, `structuredContent`, refusal envelopes, SSE keepalive, notification handling and the scope-filtered `tools/list`** belong to the MCP server alone.
 - **Telemetry:** each server emits OTLP spans with the SMD-1849 allow-list. The MCP span is the parent of the REST span through `traceparent`. Grafana owns storage and presentation.
@@ -123,7 +128,9 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
 | after 5 | SMD-2294: the tier stack (`compose.tiers.yaml`, `canary.sh`, `tier.sh`, `--compare`) on proxy paths | No `:8010`–`:8012` left in `deploy/` or `db/` |
 | after 2 | SMD-2295: n8n reaches the brain through the REST core; the orchestration ADR's boundary amended | A template's brain call audits as n8n's key |
 
-SMD-2278 (server-portable to SDK v2) goes ahead as written, since the current server stays in service through step 5. SMD-2279 (vendored servers to v2) mostly becomes retirement under SMD-1931.
+SMD-2278 (server-portable to SDK v2) has landed (#226), so the current server is on v2 through the transition. SMD-2279 (vendored servers to v2) mostly becomes retirement under SMD-1931.
+
+**Rule for new work while the migration runs:** a new brain operation (SMD-1715's deliverables, SMD-1723's forget, SMD-2272's drain, SMD-2273's jobs, SMD-2261's watermark, SMD-1812's page store) is written as a core operation in the shared zod contract (SMD-2283 / SMD-1931), exposed by the REST core and projected to MCP. It is never an MCP-only tool. Until SMD-2283 lands, it may still land in `index.ts`, but its logic goes in a module the core can import.
 
 ## What else this touches
 
@@ -134,8 +141,10 @@ Read against the tree on 2026-09-27.
 | Tier stack (stable / canary / working on 8010–8012) | Each tier is a REST core plus an MCP server on proxy paths | SMD-2294 |
 | MCP clients (Claude Code entries, claude.ai / Desktop connectors) | URLs become `https://<host>/mcp` and `/canary/mcp`; keys keep working; OAuth becomes available | SMD-2294, SMD-2286 |
 | Session-capture hook | New URL; stays an MCP client; refusal codes carried over exactly | SMD-2287 |
-| board-sync and the `db/` scripts | 35 files import `server-portable` modules (`entities`, `embed`, `chunk`, `egress`, `store`, …) and none import `index.ts`. SMD-2283 keeps those paths. The one-off worker containers join the mesh | SMD-2283, SMD-2134 |
-| n8n | Brain calls move from MCP to the REST core. SMD-2212 lands as is: its import runs `db/ingest-records.ts` and its act tool is n8n's own endpoint | SMD-2295 |
+| board-sync and the `db/` scripts | 35 files import `server-portable` modules (`entities`, `embed`, `chunk`, `egress`, `store`, …) and none import `index.ts`. SMD-2283 keeps those paths. The worker containers join the mesh and the egress network (they call providers) | SMD-2283, SMD-2134, SMD-1869 |
+| n8n | Brain calls move from MCP to the REST core. SMD-2212 (merged, #222) needs no re-aim for its import: n8n calls the `orchestration-runner`, not the brain. Its act tool is n8n's own endpoint | SMD-2295 |
+| `orchestration-runner` (#222) | A worker-class DB writer on the mesh and the egress network; its per-uid hardening is redesigned against the two networks | SMD-2289 |
+| `integrations/kubernetes-deployment` | Retires under compose-only | SMD-1931, SMD-2288 |
 | Jev, the LLM env forwarding, the preflight entrypoint | Move from the `server` service to the REST core | SMD-2284 |
 | Release images and CI | `ob1-server` becomes one image per server; the full-stack job goes through the proxy; the Workers build retires | SMD-2296, SMD-2288 |
 | Docs and skills with the one-process `?key=` URL shape | One bring-up path and the new URLs | SMD-2288 |
@@ -159,13 +168,19 @@ Read against the tree on 2026-09-27.
 - **`docs/orchestration-tool.md`:** n8n "reaches the brain only through its MCP surface". Under decision 1 it reaches the REST core instead. The key discipline (a capture-scope key in a domain-pinned credential) carries over unchanged.
 - **CLAUDE.md's MCP guard rail:** "one HTTP process reached by URL", never stdio, still holds for the MCP server. The reference deployment becomes the compose stack, not the Bun container (SMD-2288, maintainer review of the wording).
 - **SMD-2133's "Target end-state":** REST is canonical, and the deployed surface is three servers, not two interfaces on one process.
+- **`docs/mcp-sdk-v2-migration.md` (SMD-2275):** it calls server-portable "the canonical one-HTTP-process server". Its staging still holds, but the long-term MCP surface is SMD-2287's server, a client of the REST core.
+- **`integrations/kubernetes-deployment`:** under compose-only it has no deployment target. It retires, with SMD-1931 recording the disposition and SMD-2288 the removal. SMD-2259, the Kubernetes step of SMD-2080 and the Kubernetes outlier in SMD-2281 are held for that.
 
 ## Not decided here
 
 - **Which authorization server.** SMD-2285 selects it against eight criteria: token exchange, resource indicators, MCP client registration, PKCE, an issuer under a path, one compose service, licence, custom subject-token types.
 - **Whether agent-memory-api, smart-ingest and the `/ext/<name>` extension servers** fold into the core or retire. SMD-1931 gives the dispositions, and the GUI's agent-memory and kanban views follow from them.
 - **The importance scale, the restricted-content lock and kanban's status column.** Each is non-core schema today (`schemas/enhanced-thoughts`, `schemas/workflow-status`); adopting one is a migration decision of its own.
-- **Supersession accept/reject, lineage and provenance reads, and an entity-graph read.** These are core tools that do not exist yet, needed by the GUI's later views. File them when the GUI reaches them.
+- **Operations that exist only on the command line or not at all**, needed by the GUI's later views, filed when the GUI reaches them:
+  - supersession accept/reject (`db/consolidate.ts --accept/--reject`), where the list tool now also has a `stale` status (migration 063);
+  - `rebuild_derived`, its orphan sweep and its census (migration 063, `db/rebuild.ts`);
+  - lineage and provenance reads;
+  - an entity-graph read.
 
 ## Related
 
