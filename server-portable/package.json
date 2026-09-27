@@ -17,7 +17,7 @@
     "keygen": "bun keygen.ts",
     "test:local": "../db/with-postgres.sh bun test-local-provider.ts"
   },
-  "comment": "Runtime dependencies are pinned to the exact versions extensions/package.json installs for the vendored servers, so every target runs identical library code; extensions/test-auth.ts fails if the two drift. Bump both files in the same commit.",
+  "comment": "hono and zod match the versions extensions/package.json installs for the vendored servers; the MCP packages are the v2 scoped @modelcontextprotocol/core + @modelcontextprotocol/server (SMD-2278), while extensions and integrations/kubernetes-deployment stay on the v1 @modelcontextprotocol/sdk + @hono/mcp until SMD-2279 / SMD-2281. extensions/test-auth.ts holds each install to its stack and fails on drift; bump the shared packages across all three in the same commit.",
   "dependencies": {
     "@modelcontextprotocol/core": "2.1.0",
     "@modelcontextprotocol/server": "2.1.0",
