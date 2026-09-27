@@ -12,9 +12,11 @@ FROM oven/bun:1.4.0-alpine
 # (SMD-2147–2150, SMD-2021), each pinned, with the recipe's emitter copied below
 # and its line in pipelines.json.
 # py3-pip, for the pinned packages a converted recipe's emitter adds (review
-# pass 6: the pip line below could not run in an image without it).
-RUN apk add --no-cache python3 py3-pip su-exec \
- && python3 --version && python3 -m pip --version
+# pass 6: the pip line below could not run in an image without it). nftables
+# and setpriv, for the command below: the egress rules, then the capability to
+# change them dropped (SMD-2289).
+RUN apk add --no-cache python3 py3-pip su-exec nftables setpriv \
+ && python3 --version && python3 -m pip --version && nft --version && setpriv --version
 WORKDIR /app
 # The pipeline's import graph, as the checkout has it, so `bun db/ingest-records.ts`
 # and `bun db/reembed.ts` run here exactly as from a checkout. Not bundled: a
@@ -47,8 +49,16 @@ RUN bun build db/ingest-records.ts db/reembed.ts deploy/orchestration/runner.ts 
 # provisioning reads. Every emitter it names must be in the image.
 COPY deploy/orchestration/pipelines.json /app/deploy/orchestration/
 RUN bun deploy/orchestration/runner.ts --check-emitters
-# Root, so that it can hand each step to its own user; compose drops every
-# capability but the two that change user and the one that signals a step's
-# processes. The runner refuses to start as root without su-exec.
+# Root, so that it can hand each step to its own user. The command runs in
+# two steps (SMD-2289):
+# 1. `--egress`, with NET_ADMIN, sets the rules that give every emitter uid no
+#    network, but for a networked pipeline's own proxy port on loopback
+#    (runner.ts egressRules);
+# 2. setpriv drops NET_ADMIN and SETPCAP from the bounding set and runs the
+#    runner, which keeps only the capabilities that change user and signal a
+#    step's processes (compose cap_add), so nothing it runs can change the
+#    rules.
+# The runner refuses to start as root without su-exec, holding either of the
+# two, or with an emitter uid able to reach its own port.
 EXPOSE 8090
-CMD ["bun", "deploy/orchestration/runner.ts"]
+CMD ["sh", "-c", "bun deploy/orchestration/runner.ts --egress && exec setpriv --bounding-set=-net_admin,-setpcap -- bun deploy/orchestration/runner.ts"]

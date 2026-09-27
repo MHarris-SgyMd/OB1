@@ -162,8 +162,8 @@ async function pruningCheck(env: Record<string, string>, ctx: Ctx): Promise<Chec
 
 /** The profile's act tools as the template ships them (SMD-2212): the MCP endpoint must list exactly these. */
 const ACT = { path: "ob1-act", tools: ["linear_file_issue"] };
-/** The kit's import pipelines (runner/pipelines.json): the fixture's five rows, a batch the runner must refuse, and an emitter that tries to read the runner's secrets. */
-const IMPORT = { pipeline: "fixture", stray: "stray", snoop: "snoop", system: "orch-fixture", rows: 5, actor: RUNNER_ACTOR };
+/** The kit's import pipelines (runner/pipelines.json): the fixture's five rows, a batch the runner must refuse, an emitter that tries to read the runner's secrets and reach the network, and a live-API stand-in whose pipeline names one host. */
+const IMPORT = { pipeline: "fixture", stray: "stray", snoop: "snoop", vendor: "vendor", system: "orch-fixture", rows: 5, actor: RUNNER_ACTOR };
 
 /**
  * A: the act endpoint lists exactly the template's tools and refuses a
@@ -225,7 +225,12 @@ async function inRunData(env: Record<string, string>, names: string[], value: st
  *   nothing written, and the door answers the runner's reason;
  * - `snoop`'s emitter cannot read any process's environment: it runs as its
  *   pipeline's own uid (review pass 1). The child it leaves behind is gone
- *   once the run answers (review pass 2);
+ *   once the run answers (review pass 2). It reaches nothing on the network:
+ *   no DNS answer, not the host alias, Postgres, n8n, the internet or the
+ *   runner's own port (SMD-2289);
+ * - `vendor`'s pipeline names one host, server:8000. Its emitter reaches that
+ *   host through its proxy, has a CONNECT to Postgres refused, and opens no
+ *   direct connection. The report names the one refusal (SMD-2289);
  * - the instance's schedule is n8n days for 24 hours (review pass 2: an
  *   hourly 24 fires once, then never);
  * - neither the run key nor the runner's key is anywhere in n8n's saved runs
@@ -241,6 +246,7 @@ async function importChecks(env: Record<string, string>, ctx: Ctx): Promise<Chec
   const stray = await importRun(env, IMPORT.stray);
   const [n3] = rows();
   const snoop = await importRun(env, IMPORT.snoop);
+  const vendor = await importRun(env, IMPORT.vendor);
   // The listing must be read: a failed exec read as "no leftovers" (review pass 3).
   const ps = compose("n8n", ["exec", "-T", "orchestration-runner", "ps", "-o", "args"]);
   const leftovers = ps.code === 0 && /runner\.ts/.test(ps.out) ? ps.out.split("\n").filter((l) => /sleep 900/.test(l)).length : NaN;
@@ -252,7 +258,7 @@ async function importChecks(env: Record<string, string>, ctx: Ctx): Promise<Chec
   if (!sealed(ctx)) {
     compose("n8n", ["stop", "orchestration-runner"]);
     down = await importRun(env, IMPORT.pipeline).finally(() => compose("n8n", ["start", "orchestration-runner"]));
-    const runnerUp = async () => (await importRun(env, IMPORT.snoop)).status === 200;
+    const runnerUp = async () => (await importRun(env, IMPORT.vendor)).status === 200;
     const t0 = Date.now();
     while (Date.now() - t0 < 60_000 && !(await runnerUp().catch(() => false))) await Bun.sleep(2000);
   }
@@ -263,13 +269,14 @@ async function importChecks(env: Record<string, string>, ctx: Ctx): Promise<Chec
   const daily = schedule?.field === "days" && schedule?.daysInterval === 1;
   const leaked = Number(brainSql("n8n", `SELECT count(*) FROM thoughts WHERE metadata->>'source' = 'gmail' AND metadata->>'actor_name' = '${IMPORT.actor}'`));
   // Read after the runner-down run, so its saved error is among them.
-  const flows = [IMPORT.pipeline, IMPORT.stray, IMPORT.snoop].flatMap((p) => [`OB1 import — ${p}`, `OB1 import — ${p} (on demand)`]);
+  const flows = [IMPORT.pipeline, IMPORT.stray, IMPORT.snoop, IMPORT.vendor].flatMap((p) => [`OB1 import — ${p}`, `OB1 import — ${p} (on demand)`]);
   const [runKey, runnerKey] = [await inRunData(env, flows, env.N8N_WEBHOOK_KEY), await inRunData(env, flows, env.OB1_RUNNER_KEY)];
   const c1 = first.report?.counts, c2 = second.report?.counts;
   const pass = first.status === 200 && c1?.inserted === IMPORT.rows && n1 === IMPORT.rows && byRunner === IMPORT.rows && embedded === IMPORT.rows
     && second.status === 200 && c2?.inserted === 0 && c2?.updated === 0 && c2?.patched === 0 && c2?.unchanged === IMPORT.rows && n2 === IMPORT.rows
     && stray.status === 422 && /the runner answered 422: one-source/.test(stray.report?.why ?? "") && /identity\.system "gmail"/.test(stray.report?.why ?? "") && n3 === IMPORT.rows && leaked === 0
     && snoop.status === 200 && snoop.report?.emitted === 0 && leftovers === 0 && daily
+    && vendor.status === 200 && vendor.report?.emitted === 0 && vendor.report?.egress?.length === 1 && /^CONNECT postgres:5432: not a host vendor names \(network: server:8000\)$/.test(vendor.report.egress[0])
     && (down === null || (down.status === 502 && /did not answer/.test(down.report?.why ?? "")))
     && runKey.runs > 0 && runKey.holding === 0 && runnerKey.holding === 0;
   const fmt = (r: { status: number; report: any }) => `${r.status}${r.report?.counts ? ` inserted ${r.report.counts.inserted} unchanged ${r.report.counts.unchanged}` : ""}${r.report?.ok === false ? ` ${r.report.why}` : ""}`;
@@ -278,7 +285,8 @@ async function importChecks(env: Record<string, string>, ctx: Ctx): Promise<Chec
     pass,
     detail: `${reset} earlier fixture row(s) deleted; first run → ${fmt(first)}: ${n1} rows, ${byRunner} by ${IMPORT.actor}, ${embedded} with a vector; `
       + `rerun → ${fmt(second)}, ${n2} rows; stray → ${fmt(stray)}, ${n3} rows, ${leaked} of another source; `
-      + `snoop → ${snoop.status}, ${snoop.report?.emitted === 0 ? "no environment readable" : `READABLE: ${JSON.stringify(snoop.report).slice(0, 200)}`}, ${leftovers} of its leftover children still running; `
+      + `snoop → ${snoop.status}, ${snoop.status === 200 && snoop.report?.emitted === 0 ? "no environment readable, no network reached" : `FOUND: ${JSON.stringify(snoop.report).slice(0, 300)}`}, ${leftovers} of its leftover children still running; `
+      + `vendor → ${vendor.status}, ${vendor.status === 200 ? `its proxy refused ${JSON.stringify(vendor.report?.egress ?? [])}` : JSON.stringify(vendor.report).slice(0, 300)}; `
       + `the fixture's schedule ${JSON.stringify(schedule)}; runner down → ${down ? `${down.status} ${String(down.report?.why ?? "").slice(0, 80)}` : "not run (sealed)"}; `
       + `the run key in ${runKey.holding} of ${runKey.runs} saved import runs, the runner's key in ${runnerKey.holding}`,
   };

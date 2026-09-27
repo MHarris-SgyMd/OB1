@@ -6216,6 +6216,30 @@ Every check passed on each review pass's code:
 
 C1s's wait is where the verify began against the schedule, not a speed.
 
+**Emitter egress (SMD-2289).** The kit's allowlist gains a fourth pipeline,
+`vendor`, whose line names `server:8000`, and I two more demands:
+- `snoop` must also reach nothing: no DNS answer, not the host alias's
+  Ollama, Postgres, n8n, 1.1.1.1 or the runner's own port. Its run takes
+  about 15 s, most of it the lookups that get no answer;
+- `vendor` must reach `server:8000` through its proxy, have a CONNECT to
+  Postgres refused, and open no direct connection; its report must name the
+  one refusal. It also stands in for `snoop` as the runner-down leg's "is it
+  back" probe, since it answers at once.
+
+Every check passed on the change's code, plain and sealed (2026-09-27). With
+the rules deleted inside the running container, `snoop` reported every
+target reached (a DNS answer, the host alias's `:11434`, `postgres:5432`,
+`n8n:5678`, `1.1.1.1:443`, `127.0.0.1:8090`) and `vendor` a direct
+connection, and a restart set the rules again. The runner, started with a
+stand-in key on its own image:
+- by its plain command, holding NET_ADMIN and SETPCAP: refused, naming both;
+- by its plain command without them, so with no rules: refused, an emitter
+  uid having reached its port;
+- by the image's command without NET_ADMIN, or without SETPCAP: refused
+  before any rule is set;
+- as compose starts it: up, the runner's own process at CapEff `e0` (KILL,
+  SETGID, SETUID).
+
 **Sealed (`--with sealed`), on pass 1's and pass 4's code, every check
 passes.** C1 took 12.9 s and 12.5 s, P 92 s both times. C3's and A's Linear
 calls failed, as sealed they must. I passed as unsealed, and on pass 4

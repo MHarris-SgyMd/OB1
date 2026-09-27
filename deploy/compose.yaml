@@ -591,7 +591,8 @@ services:
   # Bun nor python3, so an import template's HTTP Request node asks this
   # service to run one pipeline from its fixed allowlist
   # (deploy/orchestration/pipelines.json):
-  #   1. the pipeline's emitter over imports/<pipeline>/;
+  #   1. the pipeline's emitter over imports/<pipeline>/, with no network
+  #      unless the pipeline names a host (SMD-2289);
   #   2. every line held to the pipeline's one source;
   #   3. `db/ingest-records.ts` under the actor `orchestration-runner`;
   #   4. `db/reembed.ts`.
@@ -623,8 +624,11 @@ services:
     # It starts as root only to hand each step to its own user (su-exec: each
     # pipeline's emitter as a uid of its own, the pipeline as bun). These are
     # the only capabilities it keeps: changing user, and signalling a step's
-    # processes (at the deadline, and to kill what an emitter leaves). init
-    # reaps what exits.
+    # processes (at the deadline, and to kill what an emitter leaves).
+    # NET_ADMIN and SETPCAP are for its first second only: the image's command
+    # sets the rules that give emitter uids no network, but for a networked
+    # pipeline's proxy, then drops both before the runner starts, and the
+    # runner refuses to start holding either (SMD-2289). init reaps what exits.
     init: true
     # Bounds on what one emitter an export has taken over can take from the
     # host: processes and memory (review pass 7: neither was set, and Docker
@@ -633,7 +637,7 @@ services:
     pids_limit: 512
     mem_limit: 2g
     cap_drop: [ALL]
-    cap_add: [SETUID, SETGID, KILL]
+    cap_add: [SETUID, SETGID, KILL, NET_ADMIN, SETPCAP]
     security_opt: ["no-new-privileges:true"]
     environment:
       <<: *server-env

@@ -42,10 +42,19 @@
  * parser an export exploits then holds no secret: it cannot read the runner's
  * environment, the ingester's or another emitter's (/proc/<pid>/environ is its
  * owner's), and it gets no database URL or key in its own.
+ *
+ * Nor any network (SMD-2289). The image's command sets rules that refuse
+ * every packet from an emitter uid (`--egress`, egressRules), then drops the
+ * capability to change them before the runner starts. A live-API pipeline
+ * names its hosts (`network` in pipelines.json), and its emitter reaches them
+ * only through the runner's proxy for that pipeline (startProxy), found in
+ * HTTPS_PROXY: CONNECT to a named host, nothing else.
  */
 import { SQL } from "bun";
 import { timingSafeEqual, createHash } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { connect as tcpConnect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -72,8 +81,10 @@ const PIPELINE_USER = "bun";
  * edits to the allowlist; the runner refuses two that collide.
  */
 export function emitterUid(name: string): number {
-  return 20000 + (parseInt(createHash("sha256").update(name).digest("hex").slice(0, 8), 16) % 40000);
+  return EMITTER_UIDS[0] + (parseInt(createHash("sha256").update(name).digest("hex").slice(0, 8), 16) % (EMITTER_UIDS[1] - EMITTER_UIDS[0] + 1));
 }
+/** Every uid an emitter can have, first and last: the range the egress rules close (SMD-2289). */
+export const EMITTER_UIDS = [20000, 59999] as const;
 const DEFAULT_PORT = 8090;
 export const DEFAULT_TIMEOUT_S = 3600;
 /** After a step's first SIGTERM, how long before SIGKILL. */
@@ -108,7 +119,12 @@ export type Pipeline = {
   emitter: string[];
   /** The import template's schedule for this pipeline, in hours. */
   everyHours: number;
+  /** The hosts its emitter may reach, through the runner's proxy; empty, the emitter has no network at all (SMD-2289). */
+  network: Host[];
 };
+
+/** A host a live-API emitter names: reached through the runner's proxy by CONNECT, on this port only. */
+export type Host = { host: string; port: number };
 
 const NAME_RE = /^[a-z][a-z0-9-]{0,39}$/;
 /** What the image has to run an emitter with. */
@@ -124,7 +140,7 @@ function parsePipelines(text: string, file = "pipelines.json"): Pipeline[] {
   return raw.map((p: any, i) => {
     const at = `${file}[${i}]${typeof p?.name === "string" ? ` (${p.name})` : ""}`;
     if (!p || typeof p !== "object" || Array.isArray(p)) throw new Error(`${at}: must be an object`);
-    const extra = Object.keys(p).filter((k) => !["name", "system", "scope", "emitter", "everyHours"].includes(k));
+    const extra = Object.keys(p).filter((k) => !["name", "system", "scope", "emitter", "everyHours", "network"].includes(k));
     if (extra.length) throw new Error(`${at}: unknown field ${extra[0]}`);
     if (typeof p.name !== "string" || !NAME_RE.test(p.name)) throw new Error(`${at}: name must match ${NAME_RE.source}`);
     if (seen.has(p.name)) throw new Error(`${at}: name ${p.name} is listed twice`);
@@ -141,8 +157,42 @@ function parsePipelines(text: string, file = "pipelines.json"): Pipeline[] {
     if (!Array.isArray(p.emitter) || !p.emitter.length || !p.emitter.every((a: unknown) => typeof a === "string" && a.length)) throw new Error(`${at}: emitter must be a non-empty argv of strings`);
     if (!INTERPRETERS.includes(p.emitter[0])) throw new Error(`${at}: emitter must start with ${INTERPRETERS.join(" or ")}, the interpreters the image has`);
     if (!Number.isInteger(p.everyHours) || p.everyHours < 1 || (p.everyHours > 23 && (p.everyHours % 24 !== 0 || p.everyHours > 168))) throw new Error(`${at}: everyHours must be 1 to 23, or whole days in hours (24, 48, … 168): n8n counts an hourly schedule within one day, and ran a 24-hour one once, then never`);
-    return { name: p.name, system: p.system, scope: p.scope, emitter: p.emitter, everyHours: p.everyHours };
+    return { name: p.name, system: p.system, scope: p.scope, emitter: p.emitter, everyHours: p.everyHours, network: parseNetwork(p.network, at) };
   });
+}
+
+const LABEL = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?";
+const HOST_RE = new RegExp(`^(${LABEL}(?:\\.${LABEL})*)(?::(\\d{1,5}))?$`);
+
+/**
+ * A pipeline's `network`: absent or false, none at all; otherwise the hosts
+ * its emitter needs, each "host" (port 443) or "host:port". `true` is refused,
+ * so a pipeline cannot ask for the whole network. So is a loopback or
+ * link-local name, the runner's own and a cloud metadata endpoint's.
+ */
+function parseNetwork(v: unknown, at: string): Host[] {
+  if (v === undefined || v === false) return [];
+  if (v === true) throw new Error(`${at}: network must name the hosts its emitter needs ("network": ["api.example.com"]), not true: an emitter reaches nothing else`);
+  if (!Array.isArray(v) || !v.length) throw new Error(`${at}: network must be false or a non-empty list of hosts, each "host" or "host:port"`);
+  const seen = new Set<string>();
+  return v.map((h) => {
+    const m = typeof h === "string" ? HOST_RE.exec(h.toLowerCase()) : null;
+    const port = m ? Number(m[2] ?? 443) : NaN;
+    if (!m || m[1].length > 253 || !(port >= 1 && port <= 65535)) throw new Error(`${at}: network entry ${JSON.stringify(h)} must be "host" or "host:port" (a DNS name or IPv4 address, a port 1 to 65535)`);
+    if (m[1] === "localhost" || m[1].endsWith(".localhost") || isLocalAddress(m[1])) throw new Error(`${at}: network entry ${JSON.stringify(h)} is a loopback or link-local address, which no emitter may reach`);
+    const key = `${m[1]}:${port}`;
+    if (seen.has(key)) throw new Error(`${at}: network names ${key} twice`);
+    seen.add(key);
+    return { host: m[1], port };
+  });
+}
+
+/** A loopback, unspecified or link-local address (a cloud metadata endpoint is 169.254.169.254), IPv4 or IPv6, an IPv4-mapped one included. Anything else, a name included, is not. */
+export function isLocalAddress(a: string): boolean {
+  const v4 = /^(?:::ffff:)?(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/i.exec(a);
+  if (v4) return v4[1] === "127" || v4[1] === "0" || (v4[1] === "169" && v4[2] === "254");
+  const v6 = a.toLowerCase();
+  return v6 === "::1" || v6 === "::" || /^fe[89ab][0-9a-f]:/.test(v6);
 }
 
 export const loadPipelines = (file = PIPELINES_FILE) => parsePipelines(readFileSync(file, "utf8"), file);
@@ -262,6 +312,10 @@ export type Config = {
   sweep: (p: Pipeline) => string[] | null;
   /** The command that asks, as the pipeline's emitter uid, whether its imports directory can be read; null where emitters have no uid of their own (the runner's own access is asked). */
   probe: (p: Pipeline, dir: string) => string[] | null;
+  /** The port a networked pipeline's proxy listens on: its emitter uid in the image, which the egress rules open to that uid alone; 0 (any) elsewhere. */
+  proxyPort: (p: Pipeline) => number;
+  /** Whether a named host may resolve to a loopback or link-local address: only the self-check's stand-in upstream, on 127.0.0.1. */
+  allowLocal: boolean;
 };
 
 /** Whatever a step printed, cut to its end: enough to say why, not a copy of what it read. */
@@ -331,9 +385,117 @@ export const redact = (text: string) => text.replace(/([a-z][a-z0-9+.-]*:\/\/)[^
 const shownTail = (text: string, n?: number) => lines(tail(redact(text), n));
 const redactAll = (xs: string[]) => xs.map(redact);
 
-/** The emitter's environment: enough to run, nothing the runner holds. */
+/** The emitter's environment: enough to run, nothing the runner holds; and a networked pipeline's, its proxy (SMD-2289). */
 // No HOME: su-exec sets `/` for an emitter's uid. No Python user site either, so nothing another uid could plant under a HOME is ever imported (review pass 3).
-const EMITTER_ENV = (env: Record<string, string | undefined>) => ({ PATH: env.PATH ?? "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", PYTHONDONTWRITEBYTECODE: "1", PYTHONNOUSERSITE: "1" });
+const EMITTER_ENV = (env: Record<string, string | undefined>, proxy?: Proxy) => ({
+  PATH: env.PATH ?? "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", PYTHONDONTWRITEBYTECODE: "1", PYTHONNOUSERSITE: "1",
+  // Both spellings: Python's urllib and requests read the lower case first, Bun's fetch either.
+  ...(proxy ? { HTTPS_PROXY: proxy.url, https_proxy: proxy.url } : {}),
+});
+
+/**
+ * The egress rules (SMD-2289), for `nft -f -`, which the image's command runs
+ * as root before the runner starts and drops the capability to change them
+ * (runner.Dockerfile). Every packet from an emitter uid is refused, loopback
+ * and DNS included, except a networked pipeline's own uid to its own proxy
+ * port on 127.0.0.1, which is the uid's number. The refusal is a reset or an
+ * ICMP error, so a connect fails at once rather than timing out (measured: a
+ * drop left it waiting). Replacing the table makes a rerun the same rules.
+ */
+export function egressRules(pipelines: Pipeline[]): string {
+  const opened = pipelines.filter((p) => p.network.length).map((p) => `    meta skuid ${emitterUid(p.name)} ip daddr 127.0.0.1 tcp dport ${emitterUid(p.name)} accept`);
+  return [
+    "table inet ob1_emitters",
+    "delete table inet ob1_emitters",
+    "table inet ob1_emitters {",
+    "  chain output {",
+    "    type filter hook output priority 0; policy accept;",
+    `    meta skuid ${EMITTER_UIDS[0]}-${EMITTER_UIDS[1]} jump emitters`,
+    "  }",
+    "  chain emitters {",
+    ...opened,
+    "    meta l4proto tcp reject with tcp reset",
+    "    reject with icmpx type admin-prohibited",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+}
+
+/** A networked pipeline's proxy: where its emitter's HTTPS_PROXY points; take() hands over what it refused since the last take (one run's worth: a pipeline runs once at a time). */
+export type Proxy = { url: string; port: number; take: () => string[]; close: () => void };
+/** The most refusals one run's report names; the rest are counted. */
+const REFUSALS_SHOWN = 20;
+
+/**
+ * A pipeline's proxy (SMD-2289): CONNECT to one of the hosts it names, on
+ * that port, and nothing else. It resolves the host itself, refuses one that
+ * resolves to a loopback or link-local address (the runner's own ports, a
+ * metadata endpoint), and dials the address it checked. Any other request is
+ * answered 405, another host 403, and each is kept for the run's report. It
+ * listens on 127.0.0.1 only, and in the image the egress rules let the
+ * pipeline's uid reach this port and nothing else.
+ */
+export function startProxy(p: Pipeline, port: number, o: { allowLocal?: boolean } = {}): Promise<Proxy> {
+  const refused: string[] = [];
+  let dropped = 0;
+  const cut = (s: string) => (s.length > 120 ? `${s.slice(0, 120)}…` : s);
+  const named = p.network.map((h) => `${h.host}:${h.port}`).join(", ");
+  const server = createServer((client) => {
+    let head = Buffer.alloc(0);
+    // Until the request arrives; a tunnel, once open, lasts as long as its emitter.
+    client.setTimeout(30_000, () => client.destroy());
+    client.on("error", () => {});
+    const answer = (status: string, why: string) => {
+      if (refused.length < REFUSALS_SHOWN) refused.push(why); else dropped++;
+      client.end(`HTTP/1.1 ${status}\r\ncontent-type: text/plain\r\nconnection: close\r\n\r\n${why}\n`);
+    };
+    const onData = async (chunk: Buffer) => {
+      head = Buffer.concat([head, chunk]);
+      const end = head.indexOf("\r\n\r\n");
+      if (end < 0) { if (head.length > 8192) { client.off("data", onData); answer("431 Request Header Fields Too Large", "a request past 8 KB of headers"); } return; }
+      client.off("data", onData);
+      client.pause();
+      const line = head.subarray(0, head.indexOf("\r\n")).toString("latin1");
+      const rest = head.subarray(end + 4);
+      const m = /^CONNECT ([^\s:]+):(\d{1,5}) HTTP\/1\.[01]$/.exec(line);
+      if (!m) return answer("405 Method Not Allowed", `${cut(line)}: the runner's proxy tunnels HTTPS only (CONNECT host:port)`);
+      const [host, want] = [m[1].toLowerCase(), Number(m[2])];
+      if (!p.network.some((h) => h.host === host && h.port === want)) return answer("403 Forbidden", `CONNECT ${cut(`${host}:${want}`)}: not a host ${p.name} names (network: ${named})`);
+      let address: string;
+      try { address = (await lookup(host)).address; } catch { return answer("502 Bad Gateway", `CONNECT ${host}:${want}: ${host} did not resolve`); }
+      if (!o.allowLocal && isLocalAddress(address)) return answer("403 Forbidden", `CONNECT ${host}:${want}: ${host} resolves to ${address}, a loopback or link-local address, which no emitter may reach`);
+      // Gone while the name resolved (its emitter stopped, the request timed out): nothing to tunnel for.
+      if (client.destroyed) return;
+      const up = tcpConnect({ host: address, port: want });
+      let open = false;
+      up.once("connect", () => {
+        open = true;
+        client.setTimeout(0);
+        client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        if (rest.length) up.write(rest);
+        client.pipe(up);
+        up.pipe(client);
+        client.resume();
+      });
+      up.on("error", (e) => (open ? client.destroy() : answer("502 Bad Gateway", `CONNECT ${host}:${want}: ${(e as Error).message}`)));
+      client.once("close", () => up.destroy());
+      up.once("close", () => { if (open) client.destroy(); });
+    };
+    client.on("data", onData);
+  });
+  return new Promise((ok, fail) => {
+    server.once("error", fail);
+    server.listen(port, "127.0.0.1", () => {
+      const at = (server.address() as { port: number }).port;
+      ok({
+        url: `http://127.0.0.1:${at}`, port: at,
+        take: () => { const out = refused.splice(0); const more = dropped; dropped = 0; return more ? [...out, `…and ${more} more`] : out; },
+        close: () => server.close(),
+      });
+    });
+  });
+}
 
 export type Stage = "emitter" | "one-source" | "ingest" | "reembed";
 export type Report = {
@@ -349,6 +511,8 @@ export type Report = {
   report?: string[];
   notes?: string[];
   reembed?: { exit: number; tail: string[]; unembedded?: number };
+  /** What the pipeline's proxy refused its emitter during the run (SMD-2289): a host it does not name, a request that is not CONNECT. */
+  egress?: string[];
 };
 
 /** The HTTP status for a report: the input's fault is 422 (the emitter, the one-source rule, the ingester refusing the batch), anything else 500. */
@@ -362,8 +526,16 @@ export function statusOf(r: Report): number {
 /** reembed is one pass over the whole brain at a time: two pipelines' passes would see each other's leases. */
 let reembedTurn: Promise<unknown> = Promise.resolve();
 
+/** One run of one pipeline, and what its proxy refused the emitter meanwhile. */
+async function runPipeline(c: Config, p: Pipeline, proxy?: Proxy): Promise<Report> {
+  proxy?.take();
+  const r = await runSteps(c, p, proxy);
+  const refused = proxy?.take().map(redact) ?? [];
+  return refused.length ? { ...r, egress: refused } : r;
+}
+
 /** One run of one pipeline, start to report, within one deadline. */
-async function runPipeline(c: Config, p: Pipeline): Promise<Report> {
+async function runSteps(c: Config, p: Pipeline, proxy: Proxy | undefined): Promise<Report> {
   const deadline = Date.now() + c.timeoutS * 1000;
   const past = `ran past the run's ${c.timeoutS} s and was stopped`;
   const input = join(c.importsDir, p.name);
@@ -382,7 +554,7 @@ async function runPipeline(c: Config, p: Pipeline): Promise<Report> {
     if (!readable) return { pipeline: p.name, ok: false, stage: "emitter", exit: null, why: `${p.name}'s emitter${probe ? ` runs as uid ${emitterUid(p.name)}, which` : ""} cannot read ${input}: make the export readable to it (deploy/imports/README.md)`, emitted: 0 };
   }
   const argv = [...c.asEmitter(p), ...p.emitter.map((a) => a.replaceAll("{input}", input))];
-  const e = await step(argv, { cwd: c.cwd, env: EMITTER_ENV(c.env), deadline, maxBytes: c.maxBytes });
+  const e = await step(argv, { cwd: c.cwd, env: EMITTER_ENV(c.env, proxy), deadline, maxBytes: c.maxBytes });
   // Whatever the emitter left running as its uid is stopped, whether it exited well or not (review pass 2).
   const sweep = c.sweep(p);
   if (sweep) await step(sweep, { cwd: c.cwd, env: EMITTER_ENV(c.env), deadline: Date.now() + 5000 });
@@ -456,11 +628,18 @@ function keyStatus(req: Request, key: string): 0 | 401 | 403 {
   return timingSafeEqual(digest(given), digest(key)) ? 0 : 403;
 }
 
-/** The service. `port: 0` picks one (the self-check). */
-export function serve(c: Config, port = DEFAULT_PORT) {
+/** The service, and a proxy for each networked pipeline. `port: 0` picks one (the self-check). */
+export async function serve(c: Config, port = DEFAULT_PORT): Promise<{ port: number; stop: (force?: boolean) => void }> {
   const byName = new Map(c.pipelines.map((p) => [p.name, p]));
   const busy = new Set<string>();
-  return Bun.serve({
+  const proxies = new Map<string, Proxy>();
+  try {
+    for (const p of c.pipelines) if (p.network.length) proxies.set(p.name, await startProxy(p, c.proxyPort(p), { allowLocal: c.allowLocal }));
+  } catch (e) {
+    for (const x of proxies.values()) x.close();
+    throw e;
+  }
+  const server = Bun.serve({
     port,
     hostname: "0.0.0.0",
     // Never Bun's development error page, which shows source and a stack.
@@ -488,7 +667,7 @@ export function serve(c: Config, port = DEFAULT_PORT) {
       if (busy.has(p.name)) return Response.json({ ok: false, pipeline: p.name, why: "a run of this pipeline is already going" }, { status: 409 });
       busy.add(p.name);
       try {
-        const r = await runPipeline(c, p);
+        const r = await runPipeline(c, p, proxies.get(p.name));
         console.log(`${new Date().toISOString()} ${p.name}: ${r.ok ? "ok" : `${r.stage}: ${r.why}`} (emitted ${r.emitted}${r.counts ? `, inserted ${r.counts.inserted}, updated ${r.counts.updated}, unchanged ${r.counts.unchanged}` : ""})`);
         return Response.json(r, { status: statusOf(r) });
       } finally {
@@ -496,6 +675,10 @@ export function serve(c: Config, port = DEFAULT_PORT) {
       }
     },
   });
+  return {
+    port: server.port ?? port,
+    stop: (force) => { server.stop(force); for (const x of proxies.values()) x.close(); },
+  };
 }
 
 /** su-exec, where the image installs it. */
@@ -589,7 +772,35 @@ function configFrom(env: Record<string, string | undefined>, uid = process.getui
     sweep: (p) => (uid === 0 ? [SU_EXEC!, `${emitterUid(p.name)}:${emitterUid(p.name)}`, "kill", "-9", "-1"] : null),
     // The kernel's own answer, as that uid: busybox's `test -r` reads the mode bits and ignores ACLs, so it refused an export the documented setfacl made readable (review pass 5).
     probe: (p, dir) => (uid === 0 ? [SU_EXEC!, `${emitterUid(p.name)}:${emitterUid(p.name)}`, "python3", "-c", "import os, sys; sys.exit(0 if os.access(sys.argv[1], os.R_OK | os.X_OK) else 1)", dir] : null),
+    proxyPort: (p) => (uid === 0 ? emitterUid(p.name) : 0),
+    allowLocal: false,
   };
+}
+
+/** A start that is refused: said, and after 30 s exit 2, which the restart policy retries without a hot loop filling the log (review pass 4: 229 restarts in 30 s). */
+async function refuseStart(why: string): Promise<never> {
+  console.error(`runner: ${why} (exiting in 30 s; the restart policy retries)`);
+  await Bun.sleep(30_000);
+  process.exit(2);
+}
+
+/** Capabilities this process holds that the image's command drops before the runner starts: the two that change the egress rules (SMD-2289). */
+function heldEgressCaps(status = existsSync("/proc/self/status") ? readFileSync("/proc/self/status", "utf8") : ""): string[] {
+  const eff = /^CapEff:\s*([0-9a-f]+)$/m.exec(status)?.[1];
+  if (!eff) return [];
+  const bits = BigInt(`0x${eff}`);
+  return ([["NET_ADMIN", 12n], ["SETPCAP", 8n]] as const).filter(([, b]) => (bits >> b) & 1n).map(([n]) => n);
+}
+
+/**
+ * Whether an emitter uid can reach the runner's own port on 127.0.0.1, asked
+ * as that uid (the range's last): true means the egress rules are not in
+ * place. The image's command sets them; a runner started another way, or an
+ * engine that dropped them, would otherwise give every emitter the network.
+ */
+async function emittersReach(port: number): Promise<boolean> {
+  const r = await step([SU_EXEC!, `${EMITTER_UIDS[1]}:${EMITTER_UIDS[1]}`, "python3", "-c", "import socket, sys; socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=3)", String(port)], { cwd: "/", env: EMITTER_ENV(process.env), deadline: Date.now() + 10_000 });
+  return r.code === 0;
 }
 
 /**
@@ -723,7 +934,7 @@ async function selfCheck(): Promise<number> {
     { ...good, name: "stray", emitter: emit(`console.log(${JSON.stringify(item("fixture"))}); console.log(${JSON.stringify(item("gmail"))})`) },
     { ...good, name: "fails", emitter: emit(`console.error("cannot read the export"); process.exit(3)`) },
     { ...good, name: "snoops", emitter: emit(`console.log(JSON.stringify({ identity: { system: "fixture", key: "k" }, scope: "fixture:export", text: String(process.env.DATABASE_URL ?? "") + "|" + String(process.env.OB1_RUNNER_KEY ?? "") }))`) },
-    { ...good, name: "envcheck", emitter: emit(`if (process.env.HOME !== undefined || process.env.PYTHONNOUSERSITE !== "1") process.exit(5); console.log(${JSON.stringify(item("fixture"))})`) },
+    { ...good, name: "envcheck", emitter: emit(`if (process.env.HOME !== undefined || process.env.PYTHONNOUSERSITE !== "1" || process.env.HTTPS_PROXY !== undefined || process.env.https_proxy !== undefined) process.exit(5); console.log(${JSON.stringify(item("fixture"))})`) },
     { ...good, name: "longpad", emitter: emit(`console.error("https://u:" + "P".repeat(2100) + "TAILSECRET@host/v1"); process.exit(3)`) },
     { ...good, name: "huge", emitter: emit(`console.log(JSON.stringify({ identity: { system: "s".repeat(100000), key: "k" }, scope: "fixture:export", text: "t" }))`) },
   ]);
@@ -736,8 +947,8 @@ async function selfCheck(): Promise<number> {
     reembed: () => ["bun", "-e", `console.log("reembed ran"); process.exit(${reembedExit})`],
     unembedded: async (x) => leftWithout.get(x.name) ?? 0,
   };
-  const config = (over: Partial<Config>): Config => ({ key, pipelines, importsDir: dir, cwd: REPO, commands, timeoutS: 30, maxBytes: 1 << 20, env: { ...process.env, DATABASE_URL: "postgres://secret@db/x", OB1_RUNNER_KEY: key }, asEmitter: () => [], asPipeline: [], sweep: () => null, probe: () => null, ...over });
-  const server = serve(config({}), 0);
+  const config = (over: Partial<Config>): Config => ({ key, pipelines, importsDir: dir, cwd: REPO, commands, timeoutS: 30, maxBytes: 1 << 20, env: { ...process.env, DATABASE_URL: "postgres://secret@db/x", OB1_RUNNER_KEY: key }, asEmitter: () => [], asPipeline: [], sweep: () => null, probe: () => null, proxyPort: () => 0, allowLocal: true, ...over });
+  const server = await serve(config({}), 0);
   const url = (path: string) => `http://127.0.0.1:${server.port}${path}`;
   const post = (path: string, headers: Record<string, string> = { "x-runner-key": key }) => fetch(url(path), { method: "POST", headers });
   try {
@@ -751,7 +962,7 @@ async function selfCheck(): Promise<number> {
     expect("GET on a run is 405", (await fetch(url("/run/writes"), { headers: { "x-runner-key": key } })).status === 405);
     const w = await post("/run/writes");
     const wr = await w.json() as Report;
-    expect(`a run writes and reports: 200, two emitted, inserted 2, reembed ran (${w.status} ${JSON.stringify(wr).slice(0, 200)})`, w.status === 200 && wr.ok && wr.emitted === 2 && wr.counts?.inserted === 2 && wr.reembed?.exit === 0);
+    expect(`a run writes and reports: 200, two emitted, inserted 2, reembed ran (${w.status} ${JSON.stringify(wr).slice(0, 200)})`, w.status === 200 && wr.ok && wr.emitted === 2 && wr.counts?.inserted === 2 && wr.reembed?.exit === 0 && wr.egress === undefined);
     expect(`the emitter's {input} is the pipeline's imports directory (${wr.notes?.[0]})`, wr.notes?.[0] === `first text ${join(dir, "writes")}`);
     expect("the ingester's own `next:` line is not in the report", !wr.report?.some((l) => /next:/.test(l)));
     reembedExit = 1;
@@ -770,7 +981,7 @@ async function selfCheck(): Promise<number> {
     const fr = await f.json() as Report;
     expect("an emitter that fails is 422 with its reason and exit code", f.status === 422 && fr.stage === "emitter" && fr.exit === 3 && fr.notes?.[0] === "cannot read the export");
     const ev = await post("/run/envcheck");
-    expect(`the emitter's environment has no HOME and no Python user site (${ev.status})`, ev.status === 200);
+    expect(`the emitter's environment has no HOME, no Python user site, and no proxy when its pipeline names no host (${ev.status})`, ev.status === 200);
     const lp = await post("/run/longpad");
     const lpr = await lp.json() as Report;
     expect(`a password the 2000-character cut lands inside is masked, not left as a tail (${(lpr.notes ?? []).join(" ").slice(-40)})`, lp.status === 422 && !(lpr.notes ?? []).some((l) => /TAILSECRET|PPPP/.test(l)));
@@ -796,7 +1007,7 @@ async function selfCheck(): Promise<number> {
     { ...good, name: "floods", emitter: emit(`const l = ${JSON.stringify(item("fixture"))} + "\\n"; for (let i = 0; i < 200; i++) process.stdout.write(l)`) },
   ]);
   const before = ingested;
-  const small = serve(config({ pipelines: bounded, timeoutS: 3, maxBytes: 2000, env: process.env }), 0);
+  const small = await serve(config({ pipelines: bounded, timeoutS: 3, maxBytes: 2000, env: process.env }), 0);
   const at = (path: string) => fetch(`http://127.0.0.1:${small.port}${path}`, { method: "POST", headers: { "x-runner-key": key } });
   try {
     const [a, b] = await Promise.all([at("/run/slow"), Bun.sleep(300).then(() => at("/run/slow"))]);
@@ -829,7 +1040,7 @@ async function selfCheck(): Promise<number> {
   ]);
   const lockedDir = join(dir, "locked");
   mkdirSync(lockedDir, { recursive: true });
-  const refusing = serve(config({
+  const refusing = await serve(config({
     pipelines: four, env: process.env,
     commands: { ...commands, reembed: () => ["bun", "-e", `console.error("\\n  Refusing to re-embed with a model other than the one ob1_config records without --switch-model.\\n  Every vector in the corpus would be replaced.\\n  If OB1_EMBEDDING_MODEL is simply set wrong in this shell, fix it instead."); process.exit(2)`], unembedded: async (x) => (x.name === "refused" ? 3 : 0) },
     probe: (x) => (x.name === "locked" ? ["bun", "-e", "process.exit(1)"] : null),
@@ -864,7 +1075,7 @@ async function selfCheck(): Promise<number> {
     { ...good, name: "second", emitter: emit(`await Bun.sleep(200); console.log(${JSON.stringify(item("fixture"))})`) },
     { ...good, name: "broken", emitter: emit(`process.exit(4)`) },
   ]);
-  const waits = serve(config({
+  const waits = await serve(config({
     pipelines: two, timeoutS: 3, env: process.env,
     // A reembed that outlasts the other run's deadline: it ignores SIGTERM, so it holds the turn until SIGKILL.
     commands: { ...commands, reembed: () => ["bun", "-e", "process.on('SIGTERM', () => {}); await Bun.sleep(20000)"] },
@@ -883,6 +1094,77 @@ async function selfCheck(): Promise<number> {
     rmSync(marker, { force: true });
   }
 
+  // SMD-2289: a pipeline's network, the egress rules, and its proxy. The
+  // rules themselves are the image's, and the eval kit holds them live
+  // (evals/orchestration/n8n.ts, I); here, their text.
+  const net = (network: unknown) => parsePipelines(one({ network }))[0].network;
+  expect("no network field, or false, is no network", net(undefined).length === 0 && net(false).length === 0);
+  expect("a named host is port 443, a host:port its own port, both lower-cased", JSON.stringify(net(["API.example.com", "h.example:8443"])) === JSON.stringify([{ host: "api.example.com", port: 443 }, { host: "h.example", port: 8443 }]));
+  expect("network true is refused: a pipeline names its hosts", throws(() => net(true), /name the hosts/));
+  expect("an empty list, a malformed host and a port out of range are refused", throws(() => net([]), /non-empty list/) && throws(() => net(["a b"]), /"host" or "host:port"/) && throws(() => net(["h:0"]), /port 1 to 65535/) && throws(() => net(["h:70000"]), /port 1 to 65535/) && throws(() => net([7]), /"host" or "host:port"/));
+  expect("a loopback or link-local name is refused (the runner's own ports, a metadata endpoint)", ["localhost", "x.localhost", "127.0.0.1:8090", "169.254.169.254", "0.0.0.0"].every((h) => throws(() => net([h]), /loopback or link-local/)));
+  expect("a host named twice is refused", throws(() => net(["h.example", "H.example:443"]), /names h\.example:443 twice/));
+  expect("loopback, unspecified and link-local addresses are local, v4, v6 and v4-mapped; others are not", ["127.0.0.1", "127.9.9.9", "0.0.0.0", "169.254.169.254", "::1", "::", "fe80::1", "FEBF::1", "::ffff:127.0.0.1", "::ffff:169.254.1.1"].every(isLocalAddress) && !["10.0.0.1", "172.17.0.1", "8.8.8.8", "fec0::1", "2001:db8::1", "api.example.com"].some(isLocalAddress));
+  const onNet = parsePipelines(JSON.stringify([{ ...good, name: "online", system: "online", network: ["h.example"] }, { ...good, name: "offline", system: "offline" }]));
+  const rules = egressRules(onNet);
+  const [uOn, uOff] = [emitterUid("online"), emitterUid("offline")];
+  const accept = rules.indexOf(`meta skuid ${uOn} ip daddr 127.0.0.1 tcp dport ${uOn} accept`);
+  expect(`the egress rules send every emitter uid to the refusals, open a networked pipeline's uid to its own proxy port and nothing else, before the refusals, and replace any earlier table\n${rules}`,
+    rules.startsWith("table inet ob1_emitters\ndelete table inet ob1_emitters\n") && rules.includes(`meta skuid ${EMITTER_UIDS[0]}-${EMITTER_UIDS[1]} jump emitters`)
+    && accept > 0 && accept < rules.indexOf("reject with tcp reset") && rules.indexOf("reject with tcp reset") < rules.indexOf("reject with icmpx") && !rules.includes(`skuid ${uOff} `) && (rules.match(/ accept$/gm) ?? []).length === 1);
+  expect("with no networked pipeline, the rules open nothing", !/ accept$/m.test(egressRules(parsePipelines(one({})))));
+  expect("every emitter uid is inside the range the rules close", [uOn, uOff, emitterUid("x"), emitterUid("fixture")].every((u) => u >= EMITTER_UIDS[0] && u <= EMITTER_UIDS[1]));
+  expect("the capabilities the image's command drops are read from CapEff", heldEgressCaps("CapEff:\t00000000000000e0\n").length === 0 && JSON.stringify(heldEgressCaps("CapPrm:\t0\nCapEff:\t00000000000011e0\n")) === JSON.stringify(["NET_ADMIN", "SETPCAP"]) && heldEgressCaps("") .length === 0);
+
+  // The proxy, through the service: a networked pipeline's emitter reaches
+  // its named host by CONNECT and nothing else, and the run's report names
+  // what was refused. The named host is a stand-in on 127.0.0.1, which only
+  // the self-check's allowLocal lets through.
+  const upstream = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("upstream ok") });
+  const closed = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
+  const gonePort = closed.port!;
+  closed.stop(true);
+  const raw = `const net = require("node:net"); const u = new URL(process.env.HTTPS_PROXY ?? "http://127.0.0.1:1"); const ask = (req) => new Promise((ok) => { let b = ""; const s = net.connect(Number(u.port), u.hostname, () => s.write(req)); s.on("data", (d) => (b += d)); s.on("close", () => ok(b)); s.on("error", () => ok(b)); });`;
+  const reachesEmitter = emit(`${raw} if (!process.env.HTTPS_PROXY || process.env.https_proxy !== process.env.HTTPS_PROXY) { console.error("no proxy in the environment"); process.exit(6); }
+    const t = await ask("CONNECT 127.0.0.1:${upstream.port} HTTP/1.1\\r\\nhost: 127.0.0.1\\r\\n\\r\\nGET / HTTP/1.1\\r\\nhost: x\\r\\nconnection: close\\r\\n\\r\\n");
+    const f = await ask("CONNECT elsewhere.example:443 HTTP/1.1\\r\\n\\r\\n");
+    const g = await ask("GET http://127.0.0.1:${upstream.port}/ HTTP/1.1\\r\\n\\r\\n");
+    if (!t.startsWith("HTTP/1.1 200") || !t.includes("upstream ok") || !f.startsWith("HTTP/1.1 403") || !g.startsWith("HTTP/1.1 405")) { console.error(JSON.stringify([t, f, g].map((x) => x.slice(0, 90)))); process.exit(7); }
+    console.log(${JSON.stringify(item("fixture"))})`);
+  const reaches: Pipeline = { ...parsePipelines(one({ name: "reaches", emitter: reachesEmitter }))[0], network: [{ host: "127.0.0.1", port: upstream.port! }] };
+  const netted = await serve(config({ pipelines: [reaches], env: process.env }), 0);
+  try {
+    const rr = await fetch(`http://127.0.0.1:${netted.port}/run/reaches`, { method: "POST", headers: { "x-runner-key": key } });
+    const rrr = await rr.json() as Report;
+    expect(`a networked pipeline's emitter reaches its named host through its proxy, a CONNECT elsewhere is 403 and a plain request 405, and the report names both refusals (${rr.status} ${rrr.why ?? ""} ${JSON.stringify(rrr.notes ?? []).slice(0, 200)} ${JSON.stringify(rrr.egress)})`,
+      rr.status === 200 && rrr.ok && rrr.emitted === 1 && rrr.egress?.length === 2
+      && /^CONNECT elsewhere\.example:443: not a host reaches names \(network: 127\.0\.0\.1:\d+\)$/.test(rrr.egress[0]) && /^GET http:\/\/127\.0\.0\.1:\d+\/ HTTP\/1\.1: the runner's proxy tunnels HTTPS only/.test(rrr.egress[1]));
+    const again = await (await fetch(`http://127.0.0.1:${netted.port}/run/reaches`, { method: "POST", headers: { "x-runner-key": key } })).json() as Report;
+    expect(`each run's report names its own refusals, not an earlier run's (${again.egress?.length})`, again.egress?.length === 2);
+  } finally {
+    netted.stop(true);
+  }
+  // The proxy on its own: a named host resolving to a loopback address, one
+  // that does not answer, and the cap on what one report lists.
+  const ask = (port: number, req: string) => new Promise<string>((ok) => { let b = ""; const s = tcpConnect(port, "127.0.0.1", () => s.write(req)); s.on("data", (d) => (b += d)); s.on("close", () => ok(b)); s.on("error", () => ok(b)); });
+  const strict = await startProxy({ ...reaches, network: [{ host: "localhost", port: upstream.port! }] }, 0);
+  const loose = await startProxy({ ...reaches, network: [{ host: "127.0.0.1", port: gonePort }] }, 0, { allowLocal: true });
+  try {
+    const lo = await ask(strict.port, `CONNECT localhost:${upstream.port} HTTP/1.1\r\n\r\n`);
+    expect(`a named host that resolves to a loopback address is refused (${lo.split("\r\n")[0]})`, lo.startsWith("HTTP/1.1 403") && /resolves to (127\.0\.0\.1|::1), a loopback or link-local address/.test(strict.take()[0] ?? ""));
+    const down = await ask(loose.port, `CONNECT 127.0.0.1:${gonePort} HTTP/1.1\r\n\r\n`);
+    expect(`a named host that does not answer is 502, named (${down.split("\r\n")[0]})`, down.startsWith("HTTP/1.1 502") && /^CONNECT 127\.0\.0\.1:\d+: /.test(loose.take()[0] ?? ""));
+    for (let i = 0; i < REFUSALS_SHOWN + 5; i++) await ask(strict.port, `CONNECT x${i}.example:443 HTTP/1.1\r\n\r\n`);
+    const many = strict.take();
+    expect(`one report lists ${REFUSALS_SHOWN} refusals and counts the rest, and take() clears them (${many.length}: ${many.at(-1)})`, many.length === REFUSALS_SHOWN + 1 && many.at(-1) === "…and 5 more" && strict.take().length === 0);
+    const long = await ask(strict.port, `${"A".repeat(9000)}`);
+    expect(`a request past 8 KB of headers is refused, not buffered (${long.split("\r\n")[0]})`, long.startsWith("HTTP/1.1 431"));
+  } finally {
+    strict.close();
+    loose.close();
+    upstream.stop(true);
+  }
+
   for (const x of fails) console.error(`FAIL ${x}`);
   console.log(fails.length ? `runner self-check: ${fails.length} failed` : "runner self-check: OK");
   return fails.length ? 1 : 0;
@@ -899,27 +1181,46 @@ if (import.meta.main && process.argv.includes("--check-emitters")) {
   process.exit(missing.length ? 1 : 0);
 }
 
+// The image's command, as root and before the runner starts: the egress rules for the allowlist it mounts (runner.Dockerfile, SMD-2289).
+if (import.meta.main && process.argv.includes("--egress")) {
+  let pipelines: Pipeline[] = [];
+  try { pipelines = loadPipelines(); } catch (e) { await refuseStart((e as Error).message); }
+  // Both, before anything is set: without SETPCAP the setpriv that follows fails at once, and the container restarts in a hot loop.
+  const held = heldEgressCaps();
+  if (held.length < 2) await refuseStart(`the image's command needs NET_ADMIN and SETPCAP at start (compose cap_add), to set the egress rules that close emitters' network and then drop both; it holds ${held.length ? `only ${held[0]}` : "neither"}`);
+  const nft = Bun.spawnSync(["nft", "-f", "-"], { stdin: new TextEncoder().encode(egressRules(pipelines)), stdout: "pipe", stderr: "pipe" });
+  if (nft.exitCode !== 0) await refuseStart(`could not set the egress rules that close emitters' network (nft: ${nft.stderr.toString().trim().split("\n")[0] || `exit ${nft.exitCode}`}): does the engine's kernel have nf_tables?`);
+  const opened = pipelines.filter((p) => p.network.length);
+  console.log(`runner: emitter uids ${EMITTER_UIDS[0]}–${EMITTER_UIDS[1]} have no network${opened.length ? `, but for each networked pipeline's proxy: ${opened.map((p) => `${p.name} → ${p.network.map((h) => `${h.host}:${h.port}`).join(", ")}`).join("; ")}` : ""}`);
+  process.exit(0);
+}
+
 if (import.meta.main) {
-  let c: Config;
+  let c!: Config;
   try {
     c = configFrom(process.env);
   } catch (e) {
-    // A configuration refusal: the restart policy brings the runner back, and
-    // the wait keeps that from being a hot loop filling the log (review pass 4:
-    // 229 restarts in 30 s).
-    console.error(`runner: ${(e as Error).message} (exiting in 30 s; the restart policy retries)`);
-    await Bun.sleep(30_000);
-    process.exit(2);
+    await refuseStart((e as Error).message);
+  }
+  const root = process.getuid?.() === 0;
+  if (root) {
+    const held = heldEgressCaps();
+    if (held.length) await refuseStart(`started holding ${held.join(" and ")}, which the image's command drops once it has closed emitters' network: start the runner with its image's command (runner.Dockerfile), not another`);
   }
   if (!existsSync(c.importsDir)) console.error(`runner: ${c.importsDir} does not exist; every emitter will find no export`);
-  const s = serve(c);
-  console.log(`runner: listening on :${s.port}, ${c.pipelines.length} pipeline(s)${c.pipelines.length ? `: ${c.pipelines.map((p) => `${p.name} (uid ${emitterUid(p.name)})`).join(", ")}` : " (none converted yet — deploy/orchestration/pipelines.json)"}`);
-  if (process.getuid?.() === 0) {
+  let s!: Awaited<ReturnType<typeof serve>>;
+  try { s = await serve(c); } catch (e) { await refuseStart(`could not listen: ${(e as Error).message}`); }
+  if (root && await emittersReach(s.port)) {
+    s.stop(true);
+    await refuseStart(`an emitter uid reached the runner's own port: the egress rules that close emitters' network are not in place. The image's command sets them (runner.Dockerfile); start the runner with it`);
+  }
+  console.log(`runner: listening on :${s.port}, ${c.pipelines.length} pipeline(s)${c.pipelines.length ? `: ${c.pipelines.map((p) => `${p.name} (uid ${emitterUid(p.name)}${p.network.length ? `, network ${p.network.map((h) => `${h.host}:${h.port}`).join(", ")} through its proxy` : ""})`).join(", ")}` : " (none converted yet — deploy/orchestration/pipelines.json)"}`);
+  if (root) {
     // An emitter's files in /tmp are its own.
     process.umask(0o077);
-    console.log(`runner: each emitter runs as its pipeline's uid, the pipeline as ${PIPELINE_USER}`);
+    console.log(`runner: each emitter runs as its pipeline's uid with no network but its proxy, the pipeline as ${PIPELINE_USER}`);
   } else {
-    console.error("runner: not root, so every emitter runs as this user and can read the runner's environment — the runner's image runs it as root to separate them");
+    console.error("runner: not root, so every emitter runs as this user, can read the runner's environment and has its network — the runner's image runs it as root to separate them");
   }
   // New requests are refused at once; a step still running is stopped the way a deadline stops it, so reembed hands its leases back (review pass 4).
   const stop = async () => {

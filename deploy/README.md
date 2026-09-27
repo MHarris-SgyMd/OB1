@@ -149,7 +149,7 @@ the repo root, with whatever `-f` files the stack was started with:
 | `jev` (`--profile jev`) | `jev:8020` — the server's preflight, and a spike run in a container | Nothing. The host-ports file publishes it on `127.0.0.1:${JEV_PORT:-8020}` for a spike run from a checkout (`OB1_JEV_BASE_URL=http://127.0.0.1:8020`) | Not intended; an unauthenticated model API, as Ollama's is |
 | `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` and the model provider, and Linear's API outward | Nothing | Nothing |
 | `n8n` (`--profile orchestration`) | `n8n:5678`, which nothing in the stack dials; n8n dials `server:8000`, `orchestration-runner:8090` and the vendors its workflows name | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
-| `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` and the model provider | Nothing | Nothing |
+| `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
 
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes one
 server per tier, each on loopback by default; its three Postgres services and
@@ -824,17 +824,32 @@ lines naming the same one are refused.
      - The export must be readable by the pipeline's uid. A directory it
        cannot read is refused as that (422, naming the uid and the path),
        not taken for an empty export.
-     - Two limits:
-       - Every emitter can read every pipeline's exports that are
-         world-readable. `deploy/imports/README.md` has how to keep one
-         pipeline's to its own uid, on a host that enforces file modes.
-         Docker Desktop and podman-machine do not.
-       - Emitters have the runner's network, which the live-API emitters
-         need. That includes the host's Ollama, unauthenticated, admin
-         API and all; Postgres (a password is still needed); and on a VPS
-         the cloud metadata endpoint. SMD-2289 takes the network away from
-         any pipeline that does not ask for a host. Meanwhile the runner is
-         bounded to 512 processes and 2 GB;
+     - It has no network (SMD-2289), unless its pipeline names hosts:
+       - Nothing is reachable: no DNS, not the host's Ollama, not Postgres,
+         n8n or the brain, not the internet or a cloud metadata endpoint,
+         not the runner's own port. The runner's command sets these rules
+         as the container starts, keyed on the emitter uids (nft), and then
+         drops the capability to change them. The runner refuses to start
+         if an emitter uid can reach its port, or if it still holds that
+         capability.
+       - A live-API emitter's pipeline names the hosts it needs:
+         `"network": ["api.readwise.io"]` (port 443), or `"host:port"`.
+         The emitter reaches them only through a proxy the runner keeps
+         for that pipeline, at `HTTPS_PROXY` in its environment, which
+         Python's urllib and requests and Bun's fetch read. The proxy
+         tunnels HTTPS (CONNECT) to a named host on its named port and
+         refuses anything else. The run's report lists what it refused
+         under `egress`. A name that is a loopback or link-local address,
+         or resolves to one, is refused, and so is `true`: a pipeline
+         cannot ask for the whole network. SMD-2211's egress checkpoint
+         governs the hosts a pipeline names.
+       - The ingester and reembed run as `bun` and keep the runner's
+         network: Postgres and the model provider.
+     - A limit: every emitter can read every pipeline's exports that are
+       world-readable. `deploy/imports/README.md` has how to keep one
+       pipeline's to its own uid, on a host that enforces file modes.
+       Docker Desktop and podman-machine do not. The runner is bounded to
+       512 processes and 2 GB;
   2. refuses the whole batch if any line is not the pipeline's one source
      and scope;
   3. runs `db/ingest-records.ts --source items --items -` under the actor
