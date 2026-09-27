@@ -27,11 +27,20 @@
 #   nothing itself.
 #
 # The Linear fetch cannot work in here, and that is the point. The verifier
-# runs the probe workflow instead (ten fixed captures), skips the act tool
-# and the schedule, and reports what the watcher saw.
+# runs the probe workflow instead (ten fixed captures), skips the schedule,
+# and requires the act tools to fail (C3's lookup and A's filing flow, which
+# cannot reach Linear). The import template runs as it does unsealed (I),
+# through the runner. Then it reports what the watcher saw.
 
 services:
   server:
+    networks: [default, sealed]
+
+  # The import runner (SMD-2212), which the import template dials as it
+  # dials the brain. It joins as the server does, since it too needs the
+  # default network: Postgres and the model provider. E admits a connection
+  # to its :8090 and nothing else of it.
+  orchestration-runner:
     networks: [default, sealed]
 
   egress-watch:

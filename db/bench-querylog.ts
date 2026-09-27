@@ -34,7 +34,9 @@
 
 import { SQL } from "bun";
 import { requireDatabaseUrl, resetSchema } from "./test-support.ts";
+import { commandLine } from "./cli.ts";
 
+commandLine("bench-querylog.ts", {}, { note: "its knobs are OB1_BENCH_* environment variables" });
 const URL_ = requireDatabaseUrl("bench-querylog.ts");
 
 /** query_log carries no vector; dim/model only satisfy the migration substitution. */

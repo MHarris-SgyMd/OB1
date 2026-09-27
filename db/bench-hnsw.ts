@@ -217,13 +217,15 @@
 
 import { SQL } from "bun";
 import { BENCH_MARKER, applyFunctionSettings, applyMigrations, assertThrowawayDatabase, dropSchema, explainPrepared, extractBody, hasKeptCorpus, ledgerNames, ledgerStrangers, migratorEnv, preparedSignature, requireDatabaseUrl, resetSchema, routingAt, runMigrator, seededRandom } from "./test-support.ts";
+import { commandLine } from "./cli.ts";
 import type { Branch } from "./test-support.ts";
 import { digestOf, markerAnswers } from "./bench-oracle.ts";
 import type { OracleAnswer, OracleCache } from "./bench-oracle.ts";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, HNSW_BOUNDS, HNSW_SEEDS, parseSetConfig } from "./config.mjs";
 
+const cli = commandLine("bench-hnsw.ts", { plans: "none" }, { note: "the rest of its knobs are OB1_BENCH_* environment variables" });
 const URL_ = requireDatabaseUrl("bench-hnsw.ts");
-const PRINT_PLANS = process.argv.includes("--plans");
+const PRINT_PLANS = cli.has("plans");
 
 const DIM = 64;
 // No trigram index: nothing here reads content, and 011's GIN would otherwise
