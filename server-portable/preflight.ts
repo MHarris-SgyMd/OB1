@@ -162,6 +162,7 @@ const APPLY_046 = "Apply db/migrations/046_thought_audit_event_shape.sql.";
 const APPLY_055 = "Apply db/migrations/055_capture_event_payload.sql.";
 const APPLY_060 = "Apply db/migrations/060_append_then_project.sql.";
 const APPLY_061 = "Apply db/migrations/061_derivations.sql.";
+const APPLY_063 = "Apply db/migrations/063_rebuild_derived.sql.";
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
@@ -2040,7 +2041,12 @@ if (configFailed) {
          * counted as coverage, not failed: nothing on a
          * row from before 061 says the extractor tagged it, and the file
          * backfilled none. Stale rows (the input's text moved since) are what
-         * SMD-1732's rebuild will re-derive; counted, not failed.
+         * rebuild_derived (063, SMD-1732) re-derives or hands to the workers;
+         * counted, not failed — as are the rows it has marked for a re-run. A
+         * lineage row whose ARTIFACT is gone while its thought stands (a raw
+         * delete of windows or mentions, a vector cleared under a replay) is
+         * the other direction, which 061 did not read and 063's rebuild
+         * deletes: a WARN naming `db/rebuild.ts --orphans` (SMD-1732).
          */
         try {
           const [tab] = (await sql`SELECT to_regclass('public.derivations') IS NOT NULL AS present`) as { present: boolean }[];
@@ -2061,16 +2067,28 @@ if (configFailed) {
             // called the rest "every producer"). The vector trigger must also
             // be ATTACHED and enabled — its function standing alone records
             // nothing (cold read, third review pass).
+            // …and 063's three bodies, where 063 has landed (the mark's column
+            // stands): the writer clears the mark, the proposal writer replaces
+            // a stale row, the candidate filter yields a stale pair. 061 (or
+            // 029) re-applied by hand over 063 puts older bodies back that keep
+            // 061's sentinel, so the probe above stays green while every mark
+            // stands for ever and a stale pair is never replaced (cold read,
+            // 063's second review pass: this suite's own ladder proved it).
             const [bodies] = (await sql`
               SELECT bool_and(p.prosrc LIKE '%ob1:derivation-recorded-with-its-artifact%' AND p.prosrc LIKE '%ob1_record_derivation(%') AS records, count(*)::int AS n,
                      EXISTS (SELECT 1 FROM pg_trigger tg JOIN pg_class c ON c.oid = tg.tgrelid JOIN pg_namespace tn ON tn.oid = c.relnamespace
-                              WHERE tn.nspname = 'public' AND c.relname = 'thoughts' AND tg.tgname = 'thoughts_record_vector_lineage' AND tg.tgenabled <> 'D') AS trigger_on
+                              WHERE tn.nspname = 'public' AND c.relname = 'thoughts' AND tg.tgname = 'thoughts_record_vector_lineage' AND tg.tgenabled <> 'D') AS trigger_on,
+                     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'derivations' AND column_name = 'stale_since') AS has_063,
+                     (SELECT w.prosrc LIKE '%ob1:rerun-clears-the-mark%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)')) AS marks_clear,
+                     (SELECT w.prosrc LIKE '%supersession_proposals.status = ''stale''%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid, text, text, jsonb)')) AS replaces_stale,
+                     (SELECT w.prosrc LIKE '%p.status <> ''stale''%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS yields_stale
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                WHERE ns.nspname = 'public'
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
-                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean }[];
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
-            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; untagged: number; stale: number; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number };
+            const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
+            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number };
             const [c] = (await sql`
               WITH ch_s AS (SELECT thought_id FROM public.thought_chunks LIMIT ${BOUND}),
                    ch AS (SELECT DISTINCT c.thought_id AS id FROM ch_s c
@@ -2090,16 +2108,26 @@ if (configFailed) {
                              WHERE (t.metadata ? 'type' OR t.metadata ? 'topics') AND t.metadata->>'metadata_extraction_failed' IS NULL LIMIT ${BOUND}),
                    md AS (SELECT s.id FROM md_s s
                            WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'metadata' AND d.artifact_id = s.id)),
-                   al AS (SELECT id, artifact_kind, input_ids, input_fingerprints, recipe FROM public.derivations LIMIT ${BOUND}),
+                   al AS (SELECT d.id, d.artifact_kind, d.artifact_id, d.produced_by, d.input_ids, d.input_fingerprints, d.recipe,
+                                 (to_jsonb(d) ->> 'stale_since')::timestamptz AS stale_since
+                            FROM public.derivations d LIMIT ${BOUND}),
                    st AS (SELECT d.id FROM al d JOIN public.thoughts t ON t.id = d.input_ids[1]
                            WHERE d.artifact_kind <> 'proposal'
-                             AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content)))
+                             AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content))),
+                   orph AS (SELECT d.id, d.artifact_kind FROM al d
+                             WHERE (d.artifact_kind = 'chunks'   AND NOT EXISTS (SELECT 1 FROM public.thought_chunks c WHERE c.thought_id = d.artifact_id))
+                                OR (d.artifact_kind = 'entities' AND NOT EXISTS (SELECT 1 FROM public.thought_entities m WHERE m.thought_id = d.artifact_id AND m.extraction_key = d.produced_by)
+                                                                 AND NOT EXISTS (SELECT 1 FROM public.ob1_entity_edges g WHERE g.thought_id = d.artifact_id AND g.extraction_key = d.produced_by))
+                                OR (d.artifact_kind = 'vector'   AND NOT EXISTS (SELECT 1 FROM public.thoughts t WHERE t.id = d.artifact_id AND t.embedding IS NOT NULL))
+                                OR (d.artifact_kind = 'metadata' AND NOT EXISTS (SELECT 1 FROM public.thoughts t WHERE t.id = d.artifact_id AND (t.metadata ? 'type' OR t.metadata ? 'topics'))))
               SELECT (SELECT count(*)::int FROM ch) AS chunks,    (SELECT array_agg(id::text) FROM (SELECT id FROM ch LIMIT 3) s) AS chunk_ids,
                      (SELECT count(*)::int FROM vc) AS vectors,   (SELECT array_agg(id::text) FROM (SELECT id FROM vc LIMIT 3) s) AS vector_ids,
                      (SELECT count(*)::int FROM en) AS entities,  (SELECT array_agg(id::text || ' under ' || key) FROM (SELECT id, key FROM en LIMIT 3) s) AS entity_ids,
                      (SELECT count(*)::int FROM pr) AS proposals, (SELECT array_agg(id::text) FROM (SELECT id FROM pr LIMIT 3) s) AS proposal_ids,
                      (SELECT count(*)::int FROM md) AS untagged,
                      (SELECT count(*)::int FROM st) AS stale,
+                     (SELECT count(*)::int FROM al WHERE stale_since IS NOT NULL) AS marked,
+                     (SELECT count(*)::int FROM orph) AS orphans, (SELECT array_agg(artifact_kind || ' ' || id::text) FROM (SELECT id, artifact_kind FROM orph LIMIT 3) s) AS orphan_ids,
                      (SELECT count(*)::int FROM al) AS rows,
                      (SELECT count(*)::int FROM al WHERE recipe->>'legacy' = 'true') AS legacy,
                      (SELECT count(*)::int FROM al WHERE recipe->>'declared' = 'false') AS undeclared,
@@ -2120,7 +2148,7 @@ if (configFailed) {
             if (Number(c.vectors)) missing.push(`${n(c.vectors)} vector(s) (thought ${(c.vector_ids ?? []).join(", ")})`);
             if (Number(c.entities)) missing.push(`${n(c.entities)} extraction(s) (${(c.entity_ids ?? []).join(", ")})`);
             if (Number(c.proposals)) missing.push(`${n(c.proposals)} proposal(s) (${(c.proposal_ids ?? []).join(", ")})`);
-            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — what SMD-1732's rebuild will re-derive); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
+            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass, or a pool that does not exist — the tags'); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
               // so a raw writer (or a write skipped) — the re-apply's backfill, or
@@ -2136,6 +2164,17 @@ if (configFailed) {
               add("lineage", "warn",
                   `every derived row has its lineage row, but ${Number(bodies.n) !== 6 ? `a producer is missing or stands in two forms (${bodies.n} bodies where 061 leaves six — an earlier file re-applied by hand beside 061's)` : bodies.records !== true ? "a producer's body is from before 061 (013, 029, 056 or 060 re-applied by hand), or lost its record line" : "the vector trigger thoughts_record_vector_lineage is dropped or disabled, so a vector written now leaves no row"}: its next write records no lineage (SMD-1731). ${coverage}`,
                   ledgerRemedy("061", APPLY_061));
+            } else if (rebuildOlder && rebuildOlder.length) {
+              add("lineage", "warn",
+                  `every derived row has its lineage row, but ${rebuildOlder.length === 3 ? "the three bodies 063 redefines are" : `${rebuildOlder.join(" and ")} ${rebuildOlder.length === 1 ? "is" : "are"}`} from before 063 (061 or 029 re-applied by hand over it): a rebuild's mark is never cleared by the producer's next write, and a stale proposal is never replaced by the next judgement (SMD-1732). ${coverage}`,
+                  ledgerRemedy("063", APPLY_063));
+            } else if (Number(c.orphans)) {
+              // The other direction (063): a row whose artifact is gone while
+              // its thought stands — nothing it describes exists, and the
+              // census above cannot see it (it starts from the artifacts).
+              add("lineage", "warn",
+                  `every derived row has its lineage row, but ${n(c.orphans)} lineage row(s) name an artifact that is gone (${(c.orphan_ids ?? []).join(", ")}) — a raw delete of windows or mentions, or a vector cleared under a replay, left the row behind (SMD-1732). ${coverage}`,
+                  "Run bun db/rebuild.ts --url <url> --orphans: it deletes each such row through rebuild_derived, which touches no row whose artifact stands.");
             } else {
               // A capped read says so in the headline, before the count that
               // a reader stops at (run-it, second review pass: a missing row
@@ -3419,8 +3458,15 @@ if (configFailed) {
                      (SELECT count(*)::int FROM consolidation_pool(NULL)) AS thoughts
               FROM thought_work_claims WHERE work_type LIKE ${CONSOLIDATE_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
               { work_type: string; status: string; c: number; thoughts: number }[];
-            const [{ pending: queued }] = await sql`SELECT count(*)::int AS pending FROM supersession_proposals WHERE status = 'pending'`;
-            const queue = Number(queued) > 0 ? `${queued} proposal(s) pending review — cd db && bun consolidate.ts --url $DATABASE_URL --list` : "";
+            // 063 (SMD-1732): a stale row is a pending verdict whose texts
+            // moved; the next pass replaces one it finds in conflict again,
+            // and one it does not is the reviewer's — said here, since no
+            // other row counts them (third review pass, cold read).
+            const [{ pending: queued, stale: staleQueued }] = await sql`SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending, count(*) FILTER (WHERE status = 'stale')::int AS stale FROM supersession_proposals`;
+            const queue = [
+              Number(queued) > 0 ? `${queued} proposal(s) pending review — cd db && bun consolidate.ts --url $DATABASE_URL --list` : "",
+              Number(staleQueued) > 0 ? `${staleQueued} stale (a text moved under the verdict; the next pass replaces one it finds in conflict again, a reviewer settles one it does not) — cd db && bun consolidate.ts --url $DATABASE_URL --list stale` : "",
+            ].filter(Boolean).join("; ");
             const byKey = new Map<string, PassCounts>();
             for (const r of rows) {
               const c = byKey.get(r.work_type) ?? { thoughts: Number(r.thoughts), succeeded: 0, fellBack: 0, accepted: 0, failed: 0, claimed: 0, pending: 0, unpooled: Number(r.thoughts) };

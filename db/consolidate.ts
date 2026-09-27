@@ -23,7 +23,7 @@
  *   bun db/consolidate.ts --url … --dry-run               # what a run would do; writes nothing
  *   bun db/consolidate.ts --url … --retry-failed          # failed rows back into the pool first
  *   bun db/consolidate.ts --url … --dump verdicts.jsonl   # also append every verdict, for evals/eval-consolidate.ts
- *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|all]   # the queue, with both thoughts
+ *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|stale|all]   # the queue, with both thoughts
  *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"] [--force]   # --force: a text edited since judged
  *   bun db/consolidate.ts --url … --reject <proposal-id> [--note "…"]
  *   bun db/consolidate.ts --url … --stale [DAYS]          # entities nothing has mentioned within DAYS (90)
@@ -169,8 +169,8 @@ const STALE_DAYS = has("stale") ? numberFlag("stale", 90, 1, { optional: true })
 const DIRECTION = flag("direction");
 const FORCE = has("force");
 const NOTE = flag("note");
-if (LIST !== undefined && !["pending", "accepted", "rejected", "all"].includes(LIST)) {
-  console.error(`--list takes pending, accepted, rejected or all, got "${LIST}"`);
+if (LIST !== undefined && !["pending", "accepted", "rejected", "stale", "all"].includes(LIST)) {
+  console.error(`--list takes pending, accepted, rejected, stale or all, got "${LIST}"`);
   process.exit(2);
 }
 for (const [name, v] of [["accept", ACCEPT], ["reject", REJECT]] as const) {
@@ -339,11 +339,13 @@ async function printList(status: string | undefined, limit = 50): Promise<number
     console.log(`     newer [${day(p.newer_created_at)}]${p.newer_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.newer_content)}\n        ID: ${p.newer_id}`);
     console.log(`     older [${day(p.older_created_at)}]${p.older_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.older_content)}\n        ID: ${p.older_id}`);
     console.log(`     proposal ${p.id}  cosine ${p.similarity === null ? "?" : Number(p.similarity).toFixed(3)}  judged by ${p.judge_key} on ${day(p.judged_at)}`);
-    if (p.status === "pending") {
+    if (p.status === "pending" || p.status === "stale") {
       // Commands as they run: a placeholder the shell cannot parse rather
       // than `newer|older`, which it would read as a pipe (review pass 3).
+      // A stale row (063: a text moved under the verdict) is the reviewer's
+      // too — its texts moved, so an accept takes --force.
       const dir = p.verdict === "conflict_undirected" ? " --direction <newer|older>" : "";
-      const force = p.older_edited || p.newer_edited ? " --force" : "";
+      const force = p.older_edited || p.newer_edited || p.status === "stale" ? " --force" : "";
       console.log(`     --accept ${p.id}${dir}${force}    --reject ${p.id}`);
     }
     console.log("");
@@ -432,9 +434,16 @@ async function printQueue(): Promise<void> {
     SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending,
            count(*) FILTER (WHERE status = 'accepted')::int AS accepted,
            count(*) FILTER (WHERE status = 'rejected')::int AS rejected,
+           count(*) FILTER (WHERE status = 'stale')::int AS stale,
            count(*) FILTER (WHERE status = 'pending' AND verdict = 'conflict_undirected')::int AS undirected
     FROM supersession_proposals`;
-  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected — --list shows them; --accept / --reject decides one`);
+  // 063 (SMD-1732): a stale row is a pending verdict whose texts moved under
+  // it. The next pass judges the pair again and REPLACES the row when it
+  // finds the conflict again; a pair it no longer finds in conflict (this
+  // pass writes a proposal only for a conflict at its confidence floor)
+  // leaves the row stale, and that one is the reviewer's: --list stale,
+  // --reject.
+  console.log(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.stale ? `, ${q.stale} stale (a text moved — the next pass replaces one it finds in conflict again; --list stale / --reject settles one it does not)` : ""} — --list shows them; --accept / --reject decides one`);
 }
 
 async function printFailures(limit = 10): Promise<void> {
