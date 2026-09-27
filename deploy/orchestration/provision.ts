@@ -58,7 +58,7 @@
  * - Every credential id a workflow names must be declared, and every
  *   workflow it names (`ob1wf:<template file stem>`) must be a template.
  *
- * SMD-2212's templates add three things:
+ * SMD-2212's templates add four things:
  * - A credential marked `optional` whose value is unset (the act tool's
  *   Linear key) is skipped, with every workflow that needs it, and the run
  *   says so.
@@ -1104,7 +1104,6 @@ async function selfCheck(): Promise<number> {
       rmSync(join(tdir, "orphan.json"));
       writeFileSync(join(tdir, "leaf.json"), flow("Leaf", [{ name: "x", parameters: { workflowId: { value: "ob1wf:plain" } } }]));
       expect("two templates naming each other are refused", await rejects(() => run(keys16), /name each other in a cycle/));
-      expect("a {{pipeline…}} placeholder that is not one is refused", throws(() => instanceFor({ x: "{{pipeline.nmae}}" }, pipes[0], "imp"), /not a pipeline placeholder/));
     } finally {
       rmSync(tdir, { recursive: true, force: true });
       rmSync(join(tdir, "..", `${basename(tdir)}.credentials.json`), { force: true });

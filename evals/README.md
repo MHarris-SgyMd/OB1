@@ -6078,6 +6078,13 @@ and E:
   the engine, and nothing else of it. The runner joins the sealed network
   as the server does. The judge holds 39 crafted logs in CI.
 
+**On review pass 6's code (`--wait-schedule`), every check passes.**
+- **C1:** 20.7 s. **C1s:** seen after 811 s. **P:** gone after 40 s.
+- **K, A, C3 and I** pass.
+- The runner's image now carries pip for a recipe's pinned packages.
+- A reviewer ran CI's steps from a clean clone: the self-checks, the
+  typechecks, the loopback step, and the runner image's build. All passed.
+
 **On review pass 5's code (`--wait-schedule`), every check passes.**
 - **C1:** 19.8 s. **C1s:** seen after 631 s. **P:** gone after 30 s.
 - **K, A, C3 and I** pass.
@@ -6088,8 +6095,9 @@ rows came back pending, and the next run embedded them. Before that run, a
 fresh kit project could not reach the host's Ollama through the podman VM's
 gateway (192.168.127.254) at all, though another project on the same VM
 could. Recreating the project's network cleared it, and nothing in this
-change touches it. Two of my own cycles also overlapped: one's K check
-rotated the key the other's C1 was using, and the verify was re-run alone.
+change touches it. Two cycles on the same project also overlapped: one's K
+check rotated the key the other's C1 was using, so the verify was re-run
+alone. Cycles on one project must not overlap.
 
 **On review pass 4's code, every check passes, plain and sealed.**
 - **Plain:** C1s was seen after 271 s, and P was gone after 101 s.

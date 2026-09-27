@@ -228,9 +228,9 @@ export function parseItem(value: unknown, line: number, label: string = "--items
   if (keyChars > IDENTITY_MAX) return refuse("identity.key", `${keyChars} characters; thought_sources.identity holds ${IDENTITY_MAX}`);
 
   // scope
-  const scope = value.scope as string;
-  const scopeWhy = scopeProblem(scope);
+  const scopeWhy = scopeProblem(value.scope);
   if (scopeWhy) return refuse("scope", scopeWhy);
+  const scope = value.scope as string;
 
   // canonical
   const canonical = value.canonical;

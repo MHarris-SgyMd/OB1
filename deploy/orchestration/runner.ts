@@ -165,12 +165,23 @@ export function scheduleOf(everyHours: number): { field: "hours"; hoursInterval:
  * .ts, .js, .mjs, .cjs), wherever it stands: after a flag, after `bun run`,
  * or bare. A flag's value (`-X utf8`, `-W ignore`, `--smol`) is never taken
  * for one (review pass 3: pass 2 read the first non-flag argument, and refused
- * a valid allowlist naming `utf8` as missing).
+ * a valid allowlist naming `utf8` as missing). An absolute path under the
+ * image's /app is checked against the repository, and a module given as
+ * `-m a.b.c` as a/b/c.py or a/b/c/__main__.py (review pass 6: both passed the
+ * build, then failed every run).
  */
 export function missingEmitters(pipelines: Pipeline[], root: string): string[] {
-  return pipelines.flatMap((p) => p.emitter.slice(1)
-    .filter((a) => /^[^-/][^\s]*\.(py|ts|js|mjs|cjs)$/.test(a) && !a.includes("{input}") && !existsSync(resolve(root, a)))
-    .map((a) => `${p.name}: ${a}`));
+  return pipelines.flatMap((p) => {
+    const args = p.emitter.slice(1);
+    const scripts = args
+      .map((a) => (a.startsWith("/app/") ? a.slice(5) : a))
+      .filter((a) => /^[^-/][^\s]*\.(py|ts|js|mjs|cjs)$/.test(a) && !a.includes("{input}") && !existsSync(resolve(root, a)));
+    const m = args.indexOf("-m");
+    const mod = m >= 0 ? args[m + 1] : undefined;
+    // A module of the repository (its top package a directory here, e.g. recipes.x.emit); the standard library and installed packages are not checked.
+    const missingModule = mod && /^[a-z_][\w.]*$/i.test(mod) && (mod.startsWith("recipes.") || existsSync(resolve(root, mod.split(".")[0]))) && ![`${mod.replaceAll(".", "/")}.py`, `${mod.replaceAll(".", "/")}/__main__.py`].some((x) => existsSync(resolve(root, x)));
+    return [...scripts, ...(missingModule ? [`-m ${mod}`] : [])].map((a) => `${p.name}: ${a}`);
+  });
 }
 
 /**
@@ -361,6 +372,7 @@ export async function runPipeline(c: Config, p: Pipeline): Promise<Report> {
   // (review pass 5: it read as absent and skipped the probe).
   const where = inputState(input);
   if (where === "blocked") return { pipeline: p.name, ok: false, stage: "emitter", exit: null, why: `the runner cannot search ${c.importsDir} to reach ${input}: the imports directory must be searchable (mode o+x) — deploy/imports/README.md`, emitted: 0 };
+  if (typeof where === "object") return { pipeline: p.name, ok: false, stage: "emitter", exit: null, why: `${input} cannot be read as a directory (${where.code}): is IMPORTS_DIR a directory? — deploy/imports/README.md`, emitted: 0 };
   if (where === "present") {
     const probe = c.probe(p, input);
     const readable = probe ? (await step(probe, { cwd: c.cwd, env: EMITTER_ENV(c.env), deadline: Date.now() + 5000 })).code === 0 : canRead(input);
@@ -410,16 +422,18 @@ export async function runPipeline(c: Config, p: Pipeline): Promise<Report> {
   // (review pass 5: pass 4 took every exit 2 for the first, and quoted
   // reembed's last line, which is advice, not the reason):
   // - a refusal no rerun fixes: a model switch it was not told of, a width
-  //   mismatch, an egress policy refusing everything;
+  //   mismatch, an unusable configuration, a missing migration, an egress
+  //   policy refusing everything, a provider refusing the model or the route;
   // - a provider that did not answer, or a start that met another claimer:
-  //   the next run tries again.
+  //   the next run tries again. Only these, by reembed's own rule; anything
+  //   else is taken for the first kind (review pass 6).
   if (unembedded > 0 && re.code === 2) {
     const { reason, configuration } = reembedRefusal(re.err);
     return {
       ...base, ok: false, stage: "reembed", exit: 2, reembed,
       why: configuration
-        ? `the rows are written, and reembed refused to run: ${reason} So ${unembedded} of ${p.system}'s rows have no vector, and no run embeds them until that is fixed. The runner takes the server's model and egress settings when it is created: after changing them, recreate both (compose --profile orchestration up -d --force-recreate server orchestration-runner)`
-        : `the rows are written, and reembed could not run this time: ${reason} ${unembedded} of ${p.system}'s rows have no vector yet; the next run tries again`,
+        ? `the rows are written, and reembed refused to run: ${sentence(reason)} So ${rowsLack(unembedded, p.system)} no vector, and no run embeds them until that is fixed. The runner takes the server's model and egress settings when it is created: after changing them, recreate both (compose --profile orchestration up -d --force-recreate server orchestration-runner)`
+        : `the rows are written, and reembed could not run this time: ${sentence(reason)} ${rowsLack(unembedded, p.system)} no vector yet; the next run tries again`,
     };
   }
   if (unembedded > 0) {
@@ -484,22 +498,51 @@ export function serve(c: Config, port = DEFAULT_PORT) {
 /** su-exec, where the image installs it. */
 const SU_EXEC = ["/sbin/su-exec", "/usr/bin/su-exec"].find((f) => existsSync(f));
 
-/** The service's configuration from its environment; throws with the reason. */
+/**
+ * The phrases reembedRefusal reads, as reembed and the embedder print them.
+ * The self-check fails when one disappears from their source, so a reworded
+ * message cannot silently change a refusal's kind (review pass 6).
+ */
+export const REEMBED_PHRASES = {
+  retryable: ["The embedding provider is not usable", "Could not start the pass"],
+  // reembed's own configShaped rule for a provider failure (db/reembed.ts), as the embedder words each case (server-portable/embed.ts).
+  configShaped: ["Embedding width mismatch", "returned no embedding", "with a body that is not JSON", "refused by the egress gate"],
+} as const;
+
 /**
  * reembed's reason for an exit 2: the first line of the last paragraph it
  * printed to stderr (its refusals are a paragraph, the reason first and advice
- * after), masked. And whether it is a refusal of the configuration, which no
- * rerun fixes, or something the next run may not meet.
+ * after), with a `✗` list joined onto the line that heads it; masked. And
+ * whether it is a refusal of the configuration, which no rerun fixes. Only a
+ * start that met another claimer, or a provider failure reembed's own rule
+ * does not call configuration-shaped (a timeout, a dropped connection, a 408,
+ * 429 or 5xx), is retryable. Anything else is configuration (review pass 6:
+ * the other way round, an unusable embedding configuration and a missing
+ * migration were promised a retry).
  */
 export function reembedRefusal(stderr: string): { reason: string; configuration: boolean } {
   const paragraphs = redact(stderr).split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean);
-  const reason = (paragraphs.at(-1)?.split("\n")[0].trim() ?? "") || "no reason printed";
-  return { reason, configuration: /^(Refusing to re-embed|thoughts\.embedding is vector|Nothing would be re-embedded)/.test(reason) };
+  const last = paragraphs.at(-1) ?? "";
+  const reason = (last.startsWith("✗")
+    ? `${paragraphs.at(-2)?.split("\n")[0].trim() ?? ""} ${last.split("\n").map((l) => l.trim()).join("; ")}`.trim()
+    : last.split("\n")[0].trim()) || "no reason printed";
+  const providerRetryable = reason.startsWith(REEMBED_PHRASES.retryable[0])
+    && !REEMBED_PHRASES.configShaped.some((x) => reason.includes(x))
+    && !/ failed: 40[0-4]\b/.test(reason);
+  return { reason, configuration: !(providerRetryable || reason.startsWith(REEMBED_PHRASES.retryable[1])) };
 }
 
-/** Where a pipeline's imports directory stands, as the runner sees it: there, not there, or behind a directory the runner cannot search. */
-export function inputState(dir: string): "present" | "absent" | "blocked" {
-  try { statSync(dir); return "present"; } catch (e) { return (e as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "blocked"; }
+/** A reason as a sentence: ended with a full stop when it has none. */
+const sentence = (t: string) => (/[.!?)]$/.test(t) ? t : `${t}.`);
+/** "1 of s's rows has" / "3 of s's rows have". */
+const rowsLack = (n: number, system: string) => `${n} of ${system}'s rows ${n === 1 ? "has" : "have"}`;
+
+/** Where a pipeline's imports directory stands, as the runner sees it: there, not there, behind a directory the runner cannot search, or something else that is not a directory it can reach (a file where the directory should be, a loop). */
+export function inputState(dir: string): "present" | "absent" | "blocked" | { code: string } {
+  try { statSync(dir); return "present"; } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code ?? "unknown";
+    return code === "ENOENT" ? "absent" : code === "EACCES" || code === "EPERM" ? "blocked" : { code };
+  }
 }
 
 /** Whether this process can list a directory: the runner's own access, where emitters share its uid. */
@@ -510,6 +553,7 @@ function canRead(dir: string): boolean {
 /** What a missing emitter needs, said the same way at build and at start (review pass 4: "rebuild" was the advice at both, and a rebuild can never add it). */
 export const missingEmitterHelp = (missing: string[]) => `pipelines.json names an emitter the image does not hold (${missing.join("; ")}). Copy it into the image: a COPY line in deploy/orchestration/runner.Dockerfile, and a \`!<its path>\` line in the repo root's .dockerignore (which keeps recipes/ and evals/ out); then rebuild the runner: compose --profile orchestration up -d --build orchestration-runner`;
 
+/** The service's configuration from its environment; throws with the reason. */
 export function configFrom(env: Record<string, string | undefined>, uid = process.getuid?.() ?? -1, file = PIPELINES_FILE): Config {
   const key = env.OB1_RUNNER_KEY?.trim() ?? "";
   if (key.length < 32) throw new Error("OB1_RUNNER_KEY is not set, or shorter than 32 characters — run `bun deploy/orchestration/provision.ts --init`, which writes it into deploy/.env");
@@ -557,7 +601,11 @@ export function configFrom(env: Record<string, string | undefined>, uid = proces
  *   environment;
  * - the bounds on a run: a second call while one is going (409), a step past
  *   the deadline, one that ignores SIGTERM, one that leaves a child holding
- *   its pipes, and output past the cap.
+ *   its pipes, and output past the cap;
+ * - an export its uid cannot read and an imports root the runner cannot
+ *   search, each refused; reembed's refusals told apart (configuration or
+ *   retryable), by phrases that must still be in reembed's source; live steps
+ *   stopped when the runner stops.
  * Running as another user is the image's, and the eval kit holds it live
  * (evals/orchestration/n8n.ts, I).
  */
@@ -595,6 +643,28 @@ async function selfCheck(): Promise<number> {
   const width = reembedRefusal("\n  thoughts.embedding is vector(1024) but OB1_EMBEDDING_DIM=768.\n  This tool re-embeds at the column's width.\n  (with OB1_EMBEDDING_DIMENSIONS=on …) or stop here.");
   expect("a provider that did not answer is not a configuration refusal, and its reason is masked", !transient.configuration && /^The embedding provider is not usable: fetch failed http:\/\/\*\*\*@host/.test(transient.reason));
   expect("a width mismatch is a configuration refusal, named by its first line", width.configuration && width.reason.startsWith("thoughts.embedding is vector(1024)"));
+  // Review pass 6: the default is configuration; only reembed's own retryable kinds promise a retry.
+  const listed = reembedRefusal("Embedding configuration is not usable:\n\n  ✗ OB1_EMBEDDING_DIM=5000 exceeds pgvector's HNSW limit of 2000\n  ✗ a second problem\n");
+  expect(`an unusable embedding configuration is a configuration refusal, its ✗ list joined onto its heading (${listed.reason})`, listed.configuration && listed.reason === "Embedding configuration is not usable: ✗ OB1_EMBEDDING_DIM=5000 exceeds pgvector's HNSW limit of 2000; ✗ a second problem");
+  expect("a missing migration is a configuration refusal", reembedRefusal("\n  thought_work_claims does not exist. Apply migration 015 first:\n    cd db && bun migrate.ts --url …").configuration);
+  expect("a provider refusing the model (404) or answering no JSON is configuration; one that timed out is retryable, as is a start that met another claimer",
+    reembedRefusal("\n  The embedding provider is not usable: Embeddings request to http://h/v1 failed: 404 model not found").configuration
+    && reembedRefusal("\n  The embedding provider is not usable: http://h/v1 answered 200 with a body that is not JSON").configuration
+    && !reembedRefusal("\n  The embedding provider is not usable: Embeddings request to http://h/v1 timed out after 120 s (OB1_LLM_TIMEOUT)").configuration
+    && !reembedRefusal("\n  The embedding provider is not usable: Embeddings request to http://h/v1 failed: 503 busy").configuration
+    && !reembedRefusal("\n  Could not start the pass: deadlock detected\n  Nothing was written — run again.").configuration);
+  expect("a message it does not know is taken for a configuration refusal, not promised a retry", reembedRefusal("\n  Something new went wrong.").configuration && reembedRefusal("").configuration);
+  const reembedSource = readFileSync(join(REPO, "db", "reembed.ts"), "utf8") + readFileSync(join(REPO, "server-portable", "embed.ts"), "utf8");
+  const gone = [...REEMBED_PHRASES.retryable, ...REEMBED_PHRASES.configShaped].filter((x) => !reembedSource.includes(x));
+  expect(`every phrase the refusal kinds are read by is still in reembed's or the embedder's source (${gone.join(", ") || "all there"})`, gone.length === 0);
+  const aFile = join(tmpdir(), `ob1-runner-file.${process.pid}`);
+  writeFileSync(aFile, "x");
+  try {
+    const odd = inputState(join(aFile, "p"));
+    expect(`a file where the imports directory should be is neither absent nor 'cannot search' (${JSON.stringify(odd)})`, typeof odd === "object" && odd.code === "ENOTDIR");
+  } finally {
+    rmSync(aFile, { force: true });
+  }
   const blockedRoot = join(tmpdir(), `ob1-runner-blocked.${process.pid}`);
   mkdirSync(join(blockedRoot, "p"), { recursive: true });
   chmodSync(blockedRoot, 0o000);
@@ -617,7 +687,9 @@ async function selfCheck(): Promise<number> {
     { ...good, name: "xflag", emitter: ["python3", "-X", "utf8", "-W", "ignore", "recipes/nowhere/x.py"] },
     { ...good, name: "smol", emitter: ["bun", "--smol", "run", "deploy/orchestration/runner.ts"] },
     { ...good, name: "print", emitter: ["bun", "-p", "1"] },
-  ]), REPO)) === JSON.stringify(["gone: recipes/nowhere/emit.py", "flagged: recipes/nowhere/emit.py", "run: nowhere.ts", "bare: emit.py", "xflag: recipes/nowhere/x.py"]));
+    { ...good, name: "absolute", emitter: ["python3", "/app/recipes/nowhere/a.py"] },
+    { ...good, name: "repomod", emitter: ["python3", "-m", "recipes.nowhere.emit"] },
+  ]), REPO)) === JSON.stringify(["gone: recipes/nowhere/emit.py", "flagged: recipes/nowhere/emit.py", "run: nowhere.ts", "bare: emit.py", "xflag: recipes/nowhere/x.py", "absolute: recipes/nowhere/a.py", "repomod: -m recipes.nowhere.emit"]));
   const item = (system: string, scope = "fixture:export") => JSON.stringify({ identity: { system, key: "k" }, scope, text: "t" });
   const p = parsePipelines(one({}))[0];
   expect("the pipeline's own lines are not stray", strayLines(new TextEncoder().encode(`${item("fixture")}\n\n${item("fixture")}\n`), p).length === 0);
@@ -634,7 +706,7 @@ async function selfCheck(): Promise<number> {
   // The service, with stand-in commands: an emitter per case, an "ingester"
   // that counts stdin's lines, a reembed that says it ran and exits as told,
   // and an unembedded count the case sets.
-  const dir = `${HERE}/.self-check.${process.pid}`;
+  const dir = join(tmpdir(), `ob1-runner-self-check.${process.pid}`);
   const emit = (body: string) => ["bun", "-e", body];
   const pipelines = each([
     { ...good, name: "writes", emitter: emit(`const at = process.argv.at(-1); for (const k of ["a", "b"]) console.log(JSON.stringify({ identity: { system: "fixture", key: k }, scope: "fixture:export", text: at }))`).concat("{input}") },
@@ -811,7 +883,9 @@ if (import.meta.main && process.argv.includes("--self-check")) process.exit(awai
 
 // The image's build: every emitter the baked allowlist names is in the image (runner.Dockerfile).
 if (import.meta.main && process.argv.includes("--check-emitters")) {
-  const missing = missingEmitters(loadPipelines(), REPO);
+  // Said plainly in the build log, not as a stack (review pass 6).
+  let missing: string[];
+  try { missing = missingEmitters(loadPipelines(), REPO); } catch (e) { console.error(`runner: ${(e as Error).message}`); process.exit(1); }
   if (missing.length) console.error(`runner: ${missingEmitterHelp(missing)}`);
   process.exit(missing.length ? 1 : 0);
 }

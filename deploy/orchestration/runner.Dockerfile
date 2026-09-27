@@ -11,8 +11,10 @@ FROM oven/bun:1.4.0-alpine
 # recipe's requirements.txt) are added here when its recipe is converted
 # (SMD-2147–2150, SMD-2021), each pinned, with the recipe's emitter copied below
 # and its line in pipelines.json.
-RUN apk add --no-cache python3 su-exec \
- && python3 --version
+# py3-pip, for the pinned packages a converted recipe's emitter adds (review
+# pass 6: the pip line below could not run in an image without it).
+RUN apk add --no-cache python3 py3-pip su-exec \
+ && python3 --version && python3 -m pip --version
 WORKDIR /app
 # The pipeline's import graph, as the checkout has it, so `bun db/ingest-records.ts`
 # and `bun db/reembed.ts` run here exactly as from a checkout. Not bundled: a
@@ -43,7 +45,7 @@ RUN bun build db/ingest-records.ts db/reembed.ts deploy/orchestration/runner.ts 
 COPY deploy/orchestration/pipelines.json /app/deploy/orchestration/
 RUN bun deploy/orchestration/runner.ts --check-emitters
 # Root, so that it can hand each step to its own user; compose drops every
-# capability but those two and the one that signals a step's process. The
-# runner refuses to start as root without su-exec.
+# capability but the two that change user and the one that signals a step's
+# processes. The runner refuses to start as root without su-exec.
 EXPOSE 8090
 CMD ["bun", "deploy/orchestration/runner.ts"]
