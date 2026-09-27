@@ -1750,6 +1750,13 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "thought_work_claims",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "015" }),
     Object.freeze({ table: "ob1_config",             privileges: Object.freeze(["INSERT", "UPDATE"]),                     since: "006" }),
     Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),          since: "029" }),
+    // 063's rebuild_derived (SMD-1732), run by db/rebuild.ts or by SMD-1723's
+    // forget: the forget arm removes the snapshot rows at a leaving thought's
+    // fingerprints — the one DELETE on 060's table, and this file's arm of the
+    // forgetting rule. In the worker group, not capture, so no server role
+    // granted before 063 fails preflight's write privileges over it; SMD-1723
+    // decides the capture group when forget lands on the server.
+    Object.freeze({ table: "ob1_embedding_snapshot", privileges: Object.freeze(["DELETE"]),                              since: "063" }),
   ]),
   // The entity-extraction worker, additionally, writes the entity graph — and
   // so does a structured pass (`source:` mentions). UPDATE on the mention and
