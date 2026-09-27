@@ -22,8 +22,7 @@
  *   repeated  one value per occurrence, any number of occurrences: `--query <q> --query <q>`
  *
  * Refused, with exit 2, the script's flag list and its note:
- *   - a flag the script does not have — with the nearest flag it does have,
- *     when one is a typo away (`--K` → `--k`, `--minsim` → `--min-sim`);
+ *   - a flag the script does not have;
  *   - a flag given twice (a lookup reads the first; `--url A --url B` would run
  *     against A), except a `repeated` one;
  *   - a flag that takes a value followed by nothing or by another flag
@@ -37,12 +36,16 @@
  *     the first argument (Bun itself consumes a `--` given first).
  *
  * A refusal never repeats what the operator typed: it names the script's own
- * flags and the argument's position (`unknown argument 3`), nothing else. An
- * argument can be a password or a key — `--url=postgres://user:PASSWORD@…`, a
- * key typed where no flag takes it, `--a-keySECRET` with the space missed — and
- * a refusal is printed to a log; review pass 1 masked the shapes it could name
- * (a URL, a joined value) and pass 2 found three it could not, so no shape is
- * trusted.
+ * flags and, for an argument no flag accounts for, its position among the
+ * script's own arguments (`unknown argument 3` — a wrapper that reorders them,
+ * as deploy/tier.sh does, or Bun's consuming a leading `--`, moves the count).
+ * An argument can be a password or a key — `--url=postgres://user:PASSWORD@…`,
+ * a key typed where no flag takes it, `--a-keySECRET` with the space missed —
+ * and a refusal is printed to a log; review pass 1 masked the shapes it could
+ * name (a URL, a joined value) and pass 2 found three it could not, so no shape
+ * is trusted. A script's own checks after the scan keep the rule for a value a
+ * flag takes as-is (reembed's ids, consolidate's --list word, graph-centrality's
+ * --types and --status): they name what is allowed, not what was given.
  * `--help` anywhere prints the flag list and exits 0, before any of the above.
  *
  * A number is read by `int` / `number`, which accept decimal digits only —
@@ -112,34 +115,6 @@ export function flagList<K extends string>(spec: FlagSpec<K>, hints: Partial<Rec
   return `  flags: ${items.length ? items.join(", ") : "none"}`;
 }
 
-/** Edit distance, for the nearest flag to a typo. */
-function distance(a: string, b: string): number {
-  let row = Array.from({ length: b.length + 1 }, (_, j) => j);
-  for (let i = 1; i <= a.length; i++) {
-    const next = [i];
-    for (let j = 1; j <= b.length; j++) next[j] = Math.min(row[j] + 1, next[j - 1] + 1, row[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
-    row = next;
-  }
-  return row[b.length];
-}
-
-/**
- * The one flag of `names` a typed name is a typo of — at most two edits, fewer
- * than the name's length, case aside, and nearer than any other — or undefined.
- * It returns one of the script's own names, never the typed one.
- */
-export function nearestFlag(typed: string, names: readonly string[]): string | undefined {
-  const lower = typed.toLowerCase();
-  let best: string | undefined;
-  let bestD = 3;
-  let tied = false;
-  for (const name of names) {
-    const d = distance(lower, name);
-    if (d < bestD) { best = name; bestD = d; tied = false; } else if (d === bestD) tied = true;
-  }
-  return best !== undefined && !tied && bestD < Math.max(lower.length, 1) ? best : undefined;
-}
-
 /** "3", "3 and 5", "3, 5 and 6". */
 function positionsOf(ns: readonly number[]): string {
   return ns.length === 1 ? `${ns[0]}` : `${ns.slice(0, -1).join(", ")} and ${ns[ns.length - 1]}`;
@@ -154,15 +129,13 @@ export function scanArgs<K extends string>(argv: readonly string[], spec: FlagSp
   const values = new Map<string, string[]>();
   const positionals: string[] = [];
   const strays: number[] = [];
-  const names = Object.keys(spec);
   const known = (name: string): name is K => Object.hasOwn(spec, name);
-  const didYouMean = (typed: string): string => { const near = nearestFlag(typed, names); return near ? ` — did you mean --${near}?` : ""; };
   /** The value at argv[i] for `flag`, or the refusal: `wanted` is "a value" or "two values". */
   const valueAt = (flag: string, i: number, wanted = "a value"): string | { error: string } => {
     const v = argv[i];
     if (v === undefined) return { error: `${flag} needs ${wanted}; nothing follows it` };
-    if (v.startsWith("--")) return { error: `${flag} needs ${wanted}; argument ${i + 1}, after it, is a flag` };
-    if (v.trim() === "") return { error: `${flag} is empty (argument ${i + 1}); give it ${wanted}` };
+    if (v.startsWith("--")) return { error: `${flag} needs ${wanted}; a flag follows it` };
+    if (v.trim() === "") return { error: `${flag} is empty; give it ${wanted}` };
     return v;
   };
   for (let i = 0; i < argv.length; i++) {
@@ -176,11 +149,11 @@ export function scanArgs<K extends string>(argv: readonly string[], spec: FlagSp
     const name = a.slice(2);
     if (name.includes("=")) {
       const base = name.slice(0, name.indexOf("="));
-      if (!known(base)) return { error: `unknown argument ${i + 1}: a flag with a value joined by "="${didYouMean(base)}` };
+      if (!known(base)) return { error: `unknown argument ${i + 1}: a flag this script does not have, with a value joined by "="` };
       if (spec[base] === "none") return { error: `argument ${i + 1} gives --${base} a value with "=", and --${base} takes none` };
       return { error: `argument ${i + 1} joins a value to --${base} with "="; give it as --${base} <value>` };
     }
-    if (!known(name)) return { error: `unknown argument ${i + 1}: not a flag this script has${didYouMean(name)}` };
+    if (!known(name)) return { error: `unknown argument ${i + 1}: not a flag this script has` };
     const takes = spec[name];
     if (values.has(name) && takes !== "repeated") return { error: `${a} given twice` };
     const got = values.get(name) ?? [];
@@ -200,13 +173,13 @@ export function scanArgs<K extends string>(argv: readonly string[], spec: FlagSp
     } else if (takes === "optional") {
       const next = argv[i + 1];
       if (next !== undefined && !next.startsWith("--")) {
-        if (next.trim() === "") return { error: `${a} is empty (argument ${i + 2}); give it a value or leave it out` };
+        if (next.trim() === "") return { error: `${a} is empty; give it a value or leave it out` };
         got.push(next);
         i++;
       }
     } else if (takes === "many") {
       while (i + 1 < argv.length && !argv[i + 1].startsWith("--")) {
-        if (argv[i + 1].trim() === "") return { error: `${a} is empty (argument ${i + 2}); give it a value` };
+        if (argv[i + 1].trim() === "") return { error: `one of ${a}'s values is empty` };
         got.push(argv[++i]);
       }
     }

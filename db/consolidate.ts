@@ -156,7 +156,7 @@ const DIRECTION = cli.value("direction");
 const FORCE = cli.has("force");
 const NOTE = cli.value("note");
 if (LIST !== undefined && !["pending", "accepted", "rejected", "all"].includes(LIST)) {
-  console.error(`--list takes pending, accepted, rejected or all, got "${LIST}"`);
+  console.error("--list takes pending, accepted, rejected or all (or nothing, for pending).");
   process.exit(2);
 }
 for (const [name, v] of [["accept", ACCEPT], ["reject", REJECT]] as const) {
@@ -175,6 +175,11 @@ if (DIRECTION !== undefined && (!ACCEPT || !["newer", "older"].includes(DIRECTIO
 }
 if (FORCE && !ACCEPT) {
   console.error("--force goes with --accept: it accepts a proposal whose thought was edited after it was judged.");
+  process.exit(2);
+}
+// Read only by the decision: beside anything else it would be dropped without a word (SMD-2015's kind).
+if (NOTE !== undefined && !ACCEPT && !REJECT) {
+  console.error("--note goes with --accept or --reject: it is recorded with the decision.");
   process.exit(2);
 }
 const REVIEW_ONLY = LIST !== undefined || ACCEPT !== undefined || REJECT !== undefined || STALE_DAYS > 0;

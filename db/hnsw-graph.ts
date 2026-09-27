@@ -333,6 +333,8 @@ if (import.meta.main) {
   const url = cli.value("url") ?? process.env.DATABASE_URL;
   if (!url) { console.error("usage: bun hnsw-graph.ts --url postgres://… [--index name --table name] [--json]"); process.exit(2); }
   const only = cli.value("index");
+  // Read only beside --index: alone it would be dropped and both shipped indexes checked (SMD-2015's kind).
+  if (cli.has("table") && !only) { console.error("--table goes with --index: it names the table that index is on."); process.exit(2); }
   const targets = only ? [{ index: only, table: cli.value("table") ?? (SHIPPED_INDEXES.find((s) => s.index === only)?.table ?? "thoughts") }] : SHIPPED_INDEXES;
   const sql = new SQL({ url, max: 1 });
   try {

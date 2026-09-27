@@ -738,17 +738,11 @@ export function parseCompareArgs(args: string[]): CompareArgs {
   const out: CompareArgs = { a, b, replay: cli.has("replay"), hybrid: cli.has("hybrid"), queries: [], json: cli.has("json") };
   if (cli.has("a-key")) out.aKey = cli.value("a-key");
   if (cli.has("b-key")) out.bKey = cli.value("b-key");
-  for (const q of cli.values("query")) {
-    if (q.trim().length === 0) refuse("--query is empty.");
-    out.queries.push(q);
-  }
+  // A blank --query or --from-log is refused by the scanner, as every flag's blank value is.
+  out.queries.push(...cli.values("query"));
   const file = cli.value("queries-file");
   if (file !== undefined) out.queries.push(...readQueriesFile(file));
-  const fromLog = cli.value("from-log");
-  if (fromLog !== undefined) {
-    if (fromLog.trim().length === 0) refuse("--from-log is empty.");
-    out.fromLog = fromLog;
-  }
+  out.fromLog = cli.value("from-log");
   const since = cli.value("since");
   if (since !== undefined) {
     if (Number.isNaN(Date.parse(since))) refuse("--since must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z).");

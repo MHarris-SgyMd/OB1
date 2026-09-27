@@ -426,7 +426,7 @@ const cli = commandLine("reembed.ts", {
   url: "one", workers: "one", batch: "one", ttl: "one", heartbeat: "one", job: "one", retire: "one",
   "accept-failed": "many",
   status: "none", "dry-run": "none", "switch-model": "none", "retry-failed": "none", "retry-fallbacks": "none", all: "none",
-}, { hints: { url: "<postgres://…>", job: "<reembed:model@dim[:suffix]>", retire: "<reembed:model@dim[:suffix] — preflight prints it>", "accept-failed": "<thought-id …>", all: "(with --accept-failed)" }, note: "thought ids go right after --accept-failed, before any other flag" });
+}, { hints: { url: "<postgres://…>", job: "<reembed:model@dim[:suffix]>", retire: "<reembed:model@dim[:suffix] — preflight prints it>", "accept-failed": "<thought-id …> (right after it, before any other flag)", all: "(with --accept-failed)" } });
 
 const url = cli.value("url") ?? process.env.DATABASE_URL;
 if (!url) {
@@ -1149,7 +1149,8 @@ if (ACCEPT_FAILED) {
   }
   // The stores' rule (store.ts), so the CLI refuses exactly the ids they answer null for.
   const bad = ACCEPT_IDS.filter((id) => !UUID_RE.test(id));
-  if (bad.length) await refuse(`not a thought id: ${bad.join(", ")}.`);
+  // Counted, not repeated: a value --accept-failed takes may be a URL given without --url (cli.ts's rule).
+  if (bad.length) await refuse(`${bad.length} of the ${ACCEPT_IDS.length} value(s) after --accept-failed ${bad.length === 1 ? "is" : "are"} not a thought id (a UUID).`);
   const failedIds = new Set(failedRows.map((r) => r.id));
   const asked = [...new Set(ACCEPT_IDS.map((id) => id.toLowerCase()))];
   const notFailed = asked.filter((id) => !failedIds.has(id));

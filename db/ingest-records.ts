@@ -753,7 +753,7 @@ async function main(): Promise<void> {
   }
   const wanted = sourceArg === "all" ? new Set<Source>(SOURCES) : new Set<Source>([sourceArg as Source]);
 
-  // Whitespace is unset (the fork's string-knob rule), defaulting to stable; an empty value is refused above, as every one-value flag's is.
+  // A blank OB1_TIER is unset (the fork's string-knob rule), defaulting to stable; a blank --tier is refused by the scanner, as every flag's blank value is.
   const tier = ((flag("tier") ?? process.env.OB1_TIER)?.trim() || "stable") as Tier;
   if (!TIERS.includes(tier)) {
     console.error(`--tier / OB1_TIER must be one of ${TIERS.join(", ")}.`);

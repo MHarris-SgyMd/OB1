@@ -85,8 +85,8 @@ const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "migrations
 // value where no flag takes one, a flag that takes a value followed by none,
 // or a flag given twice (`--url A --url B` would run against A), is refused
 // rather than dropped — `--reapply=021`, or a misspelt flag, would otherwise be
-// a silent plain run that exits 0. A value joined with "=" or a bare URL is
-// named by its shape, never echoed: it may carry a password.
+// a silent plain run that exits 0. The refusal names the flag or the
+// argument's position, never the argument: a URL carries a password.
 const cli = commandLine("migrate.ts", {
   url: "one", grant: "one", "dry-run": "none", baseline: "none", reapply: "none", force: "none",
 }, { hints: { url: "<postgres://…>", grant: "<role>", force: "(with --baseline)" } });

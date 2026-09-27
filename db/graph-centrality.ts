@@ -1017,12 +1017,13 @@ export function parseArgs(argv: readonly string[]): Parsed | { error: string } {
   if (typeList !== undefined) {
     const types = [...new Set(typeList.split(",").map((t) => t.trim()).filter(Boolean))];
     const bad = types.filter((t) => !(ENTITY_TYPES as readonly string[]).includes(t));
-    if (bad.length || types.length === 0) return { error: `--types takes a comma list of ${ENTITY_TYPES.join(", ")}; ${bad.length ? `not ${bad.map((b) => JSON.stringify(b)).join(", ")}` : "none given"}` };
+    // What is allowed, not what was given (cli.ts's rule): the value may be a pasted key or URL.
+    if (bad.length || types.length === 0) return { error: `--types takes a comma list of ${ENTITY_TYPES.join(", ")}; ${bad.length ? `${bad.length} of the ${types.length} given ${bad.length === 1 ? "is" : "are"} not one` : "none given"}` };
     opts.types = types as EntityType[];
   }
   const status = scanned.value("status");
   if (status !== undefined) {
-    if (!Object.hasOwn(LIFECYCLE_FILTERS, status)) return { error: `--status takes one of ${Object.keys(LIFECYCLE_FILTERS).join(", ")}; not ${JSON.stringify(status)}` };
+    if (!Object.hasOwn(LIFECYCLE_FILTERS, status)) return { error: `--status takes one of ${Object.keys(LIFECYCLE_FILTERS).join(", ")}` };
     opts.status = status as LifecycleFilter;
   }
   if (scanned.has("decay-done")) opts.decayDone = true;

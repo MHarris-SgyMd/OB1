@@ -2593,8 +2593,7 @@ bunx tsc --noEmit                           # every .ts here, strict, against th
 
 Every script here reads its arguments through `cli.ts` (SMD-2134), one table
 per script of what each flag takes, scanned before anything else runs. A flag
-the script does not have (the nearest one it has named when it is a typo away),
-one given twice, one that takes a value followed by nothing, another flag or a
+the script does not have, one given twice, one that takes a value followed by nothing, another flag or a
 blank, a value joined with `=`, or a value where no flag takes one exits 2 with
 the script's flag list; `--help` prints the list and exits 0; a number is
 decimal digits only. A refusal names the argument's position, never its text —

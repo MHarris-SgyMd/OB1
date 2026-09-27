@@ -2567,7 +2567,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const combined = await reembed("--accept-failed", poisonId, "--retry-failed");
   assert(combined.code === 2 && /do not combine/.test(combined.out), "…and it does not combine with a run's flags");
   const stray = await reembed("--accept-failed", poisonId, "--dry-run", lateId);
-  assert(stray.code === 2 && /unknown argument \d+: a value where no flag takes one/.test(stray.out) && /thought ids go right after --accept-failed/.test(stray.out), "…and an id after another flag is refused rather than dropped");
+  assert(stray.code === 2 && /unknown argument \d+: a value where no flag takes one/.test(stray.out) && /--accept-failed <thought-id …> \(right after it, before any other flag\)/.test(stray.out), "…and an id after another flag is refused rather than dropped");
   const twice = await reembed("--accept-failed", poisonId, "--accept-failed", lateId);
   assert(twice.code === 2 && /--accept-failed given twice/.test(twice.out), "…as is the flag given twice, whose second list would otherwise be dropped");
   const jobless = await reembedIn({}, "--job", "--switch-model");
