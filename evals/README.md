@@ -1358,7 +1358,9 @@ tokens per input token and a 95th percentile of 1.6 over the 262 thoughts the
 answer style, not a property of the task, and the budget shipped is three
 times the text plus 1,536. A runaway ends at the budget as a malformed answer
 the worker records failed in about a minute, where before it held a worker for
-the whole timeout.
+the whole timeout (since SMD-2260 a window's is left out of a thought at least
+one of whose other windows parsed, and the thought recorded succeeded with a
+partial caveat).
 
 ### The planted set: what a window costs in relations, 2026-09-22
 
