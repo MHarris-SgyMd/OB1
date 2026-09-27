@@ -68,6 +68,18 @@ export const REQUIRED_KEYS = ["identity", "scope", "canonical", "text", "links",
  * review pass, run-it); `items` is this flag's name, not a system.
  */
 export const RESERVED_SYSTEMS = ["fork", "commit", "linear", "memory", "markdown", "items"] as const;
+/**
+ * Facet keys that name another source's identity: a Linear ticket (`issue`,
+ * and its clock `linear_updated_at`) or a fork ticket (`ticket`). node_state's
+ * lifecycle, source_thought's claim fallback and the board sync all read a row
+ * carrying one as that ticket's, whatever its source, so an item under one
+ * could make itself a ticket's head or be adopted into its group (SMD-2212,
+ * review pass 7). An item names a ticket as a link or a mention instead.
+ */
+export const CROSS_SOURCE_FACETS = ["issue", "ticket", "linear_updated_at"] as const;
+/** How far ahead of now an item's createdAt may be: a clock's skew. Recency would read a row dated later still as new for as long as that (review pass 7). */
+export const CREATED_AT_SKEW_MS = 24 * 60 * 60 * 1000;
+
 /** The metadata keys the pipeline owns: `source` is the system's, the two actor keys are 050's trigger's. A watermark under one of them would be overwritten and the clock guard inert. */
 export const PIPELINE_META_KEYS = ["source", "actor_kind", "actor_name"] as const;
 /** normaliseMentions' bound on a name. */
@@ -276,10 +288,12 @@ export function parseItem(value: unknown, line: number, label: string = "--items
   if (!isObject(value.facets)) return refuse("facets", "an object — the row's metadata (tags, a title, dates); {} when the item has none");
   // `source` is the pipeline's and is overwritten with the system (the contract says so); the two actor keys are 050's trigger's and the pipeline deletes them before the INSERT — refused rather than dropped without a word (fifth review pass, cold read).
   for (const k of PIPELINE_META_KEYS) if (k !== "source" && k in value.facets) return refuse(`facets.${k}`, `the pipeline's own metadata key — 050's trigger stamps it from the ingester's envelope, and a facet under it would be dropped; a source's author belongs under another name`);
+  for (const k of CROSS_SOURCE_FACETS) if (k in value.facets) return refuse(`facets.${k}`, `names another source's ticket — node_state, source_thought and the board sync read a row carrying it as that ticket's, whatever its source; name the ticket as a link or a mention`);
 
   // createdAt — `null` is absent, as a Python emitter spells None.
   const createdAt = value.createdAt ?? undefined;
   if (createdAt !== undefined && (!isString(createdAt) || !isInstant(createdAt))) return refuse("createdAt", "an ISO-8601 instant with an offset (2026-09-25T10:00:00Z; seconds and a fraction of at most six digits optional; the offset within ±15:59) — a calendar date that exists, year 1 or later; a bare date or a rolled-over one is not taken; omit the key (or write null) when the source has none");
+  if (isString(createdAt) && Date.parse(createdAt) > Date.now() + CREATED_AT_SKEW_MS) return refuse("createdAt", "more than a day ahead of now — recency would read the row as new until then; an item is dated when the source made it");
 
   // watermark — `null` is absent too.
   let watermark: Ingested["watermark"];
@@ -478,6 +492,10 @@ export const MALFORMED: readonly [label: string, line: string, field: string, re
   ["an integer past 2^53 in a facet", `{${SAMPLE_LINE.slice(1, -1).replace('"facets":{', '"facets":{"tweet_id":9007199254740993,')}}`, "facets.tweet_id", /past 2\^53/],
   ["a magnitude JSON cannot hold", `{${SAMPLE_LINE.slice(1, -1).replace('"facets":{', '"facets":{"big":1e400,')}}`, "facets.big", /cannot hold/],
   ["createdAt a bare date", JSON.stringify({ ...SAMPLE_ITEM, createdAt: "2026-09-01" }), "createdAt", /ISO-8601 instant/],
+  ["createdAt years ahead", JSON.stringify({ ...SAMPLE_ITEM, createdAt: "9999-01-01T00:00:00Z" }), "createdAt", /ahead of now/],
+  ["a facet naming a Linear ticket", JSON.stringify({ ...SAMPLE_ITEM, facets: { issue: "SMD-2212" } }), "facets.issue", /another source's ticket/],
+  ["a facet naming a fork ticket", JSON.stringify({ ...SAMPLE_ITEM, facets: { ticket: "SMD-2212" } }), "facets.ticket", /another source's ticket/],
+  ["a facet under Linear's clock", JSON.stringify({ ...SAMPLE_ITEM, facets: { linear_updated_at: "9999-01-01T00:00:00Z" } }), "facets.linear_updated_at", /another source's ticket/],
   ["createdAt a rolled-over date", JSON.stringify({ ...SAMPLE_ITEM, createdAt: "2026-02-30T00:00:00Z" }), "createdAt", /ISO-8601 instant/],
   ["createdAt with no offset", JSON.stringify({ ...SAMPLE_ITEM, createdAt: "2026-09-01T10:00:00" }), "createdAt", /ISO-8601 instant/],
   ["createdAt a number", JSON.stringify({ ...SAMPLE_ITEM, createdAt: 1700000000 }), "createdAt", /ISO-8601 instant/],

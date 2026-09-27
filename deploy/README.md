@@ -759,7 +759,7 @@ hash, and no workflow can read one from there
 so several runs in a row can meet a 429. The step says so.
 
 **An AI client** connects to an MCP endpoint a template publishes, at
-`http://127.0.0.1:5678/mcp/<path>` with the header `x-n8n-key: $N8N_MCP_KEY`
+`http://127.0.0.1:5678/mcp/<path>` (the port is `N8N_PORT`) with the header `x-n8n-key: $N8N_MCP_KEY`
 (Claude Code: `claude mcp add --transport http n8n <url> --header
 "x-n8n-key: …"`). What that endpoint exposes is workflow-shaped: an act tool
 that is a multi-step flow, or a trigger an agent may pull. The brain's own
@@ -796,7 +796,7 @@ lines naming the same one are refused.
 - **On demand**, an instance runs through a POST to
   `/webhook/ob1-import-<pipeline>` with the run key. The door is a workflow
   of its own that saves no runs. It drops the request, headers and all, and
-  calls the import, so the run key never lands in n8n's store. It answers
+  calls the import, so the run key never lands in n8n's saved runs. It answers
   the report with 200, or the runner's reason with the runner's status (409
   when a run of that pipeline is already going, 422 refused, 500 failed).
   It answers 502 when the runner did not answer, or refused the door itself:
@@ -823,7 +823,11 @@ lines naming the same one are refused.
          pipeline's to its own uid, on a host that enforces file modes.
          Docker Desktop and podman-machine do not.
        - Emitters have the runner's network, which the live-API emitters
-         need (SMD-2211 covers their egress);
+         need. That includes the host's Ollama, unauthenticated, admin
+         API and all; Postgres (a password is still needed); and on a VPS
+         the cloud metadata endpoint. SMD-2289 takes the network away from
+         any pipeline that does not ask for a host. Meanwhile the runner is
+         bounded to 512 processes and 2 GB;
   2. refuses the whole batch if any line is not the pipeline's one source
      and scope;
   3. runs `db/ingest-records.ts --source items --items -` under the actor

@@ -259,10 +259,12 @@ concern SMD-1813's allowlist and SMD-1903's egress policy already name.
    - a key whose scope differs from the one its credential declares
      (`brainScope`), so ingestion's credential cannot carry a read key.
 4. **Key custody** (SMD-2210). n8n 2.40.6 offers 106 scopes (measured). The
-   POC's key held eight. The profile's also holds eight, a different eight:
+   POC's key held eight. The profile's held eight too, a different eight:
    it adds `credential:update` and `workflow:update`, so a re-provision
    patches credentials and replaces workflows in place, and drops the
-   run-history reads, which only the eval kit asks for, on its own key. The
+   run-history reads, which only the eval kit asks for, on its own key.
+   SMD-2212 adds two more, ten in all: `workflow:deactivate` and
+   `credential:delete`, to unload what a run no longer produces. The
    two calls outside the POC's scopes tried in the third review pass answered
    403, though n8n's docs say non-Enterprise keys have full access. But the
    scopes include creating and publishing workflows, so a holder can publish
@@ -432,8 +434,15 @@ runs outside n8n:
   - every emitter can read every pipeline's world-readable exports, unless
     the operator gives each directory to its pipeline's uid, on an engine
     that enforces host file modes (Docker Desktop and podman-machine do not);
-  - emitters have the runner's network, which the live-API emitters need,
-    and SMD-2211 covers their egress.
+  - emitters have the runner's network, which the live-API emitters need.
+    That includes the host's Ollama, unauthenticated with its admin API,
+    Postgres (a password is still needed), and on a VPS the cloud metadata
+    endpoint. SMD-2289 takes it away from any pipeline that does not ask for
+    a host. The runner also connects as the Postgres superuser, as the
+    migrator and board-sync do; SMD-2289 gives it a role of its own.
+  - An item's facets may not name another source's ticket (`issue`,
+    `ticket`, `linear_updated_at`), which node_state and the board sync
+    read whatever the source (review pass 7).
 
   The three bounds are the runner's own checks:
   - a pipeline not in the file is a 404;

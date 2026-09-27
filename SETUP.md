@@ -506,10 +506,13 @@ allowlist bounds. Two kinds of template ship (SMD-2212):
   over `deploy/imports/<pipeline>/`. The allowlist is empty until the
   first import recipe is converted.
 
-Once, `--init` writes its secrets into `deploy/.env`. A capture key
-(`bun keygen.ts --name n8n --scope capture`: the key as
-`N8N_BRAIN_CAPTURE_KEY`, the line it prints into `MCP_ACCESS_KEYS`) is
-optional until a template captures into the brain; none ships yet. Then:
+Once, `--init` writes its secrets into `deploy/.env`. For the act tool, put a
+Linear key with write access in `deploy/.env` as `N8N_LINEAR_API_KEY` (a key
+of its own, not board-sync's) before provisioning, or provision again after.
+A capture key is optional until a template captures into the brain; none
+ships yet. It is made with `cd server-portable && bun keygen.ts --name n8n
+--scope capture && cd ..`: the key goes in as `N8N_BRAIN_CAPTURE_KEY`, and
+the line it prints is appended to `MCP_ACCESS_KEYS`, comma-separated. Then:
 
 ```bash
 bun deploy/orchestration/provision.ts --init
@@ -517,8 +520,9 @@ podman compose -f deploy/compose.yaml --profile orchestration up -d
 bun deploy/orchestration/provision.ts
 ```
 
-An AI client reaches the act tool at `http://127.0.0.1:5678/mcp/ob1-act`
-(any template's endpoint at `/mcp/<path>`), with the header
+With `N8N_LINEAR_API_KEY` set, an AI client reaches the act tool at
+`http://127.0.0.1:5678/mcp/ob1-act` (5678 is `N8N_PORT`'s default; any
+template's endpoint is at `/mcp/<path>`), with the header
 `x-n8n-key: <N8N_MCP_KEY>`. That endpoint carries workflow tools; the
 brain's own tools stay on the connector above. `deploy/README.md`,
 "Orchestration", has the keys, backups, the run-history window and upgrades.

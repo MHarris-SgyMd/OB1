@@ -2006,7 +2006,11 @@ the row's value newer, or the same and written after `asOf`) or `held`
 (another thought is this identity) is named the same way. A facet under
 `actor_kind` or `actor_name` is refused — those are 050's trigger's, stamped
 from the ingester's envelope — and a `facets.source` is overwritten with the
-system. A facet integer at or past 2^53, or a magnitude JSON cannot hold, is
+system. So is a facet naming another source's ticket (`issue`, `ticket`,
+`linear_updated_at`): node_state, `source_thought` and the board sync read a
+row carrying one as that ticket's, whatever its source, so an item names a
+ticket as a link or a mention instead. A `createdAt` more than a day ahead of
+now is refused too (SMD-2212). A facet integer at or past 2^53, or a magnitude JSON cannot hold, is
 refused rather than stored as its neighbour or as `null`: write it as a
 string (a Python emitter's `json.dumps` writes a snowflake id exactly;
 `JSON.parse` does not read it so). The emitter an

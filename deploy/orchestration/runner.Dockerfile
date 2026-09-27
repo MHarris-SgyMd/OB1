@@ -29,7 +29,10 @@ COPY evals/linear-corpus.ts /app/evals/
 # its conversion (SMD-2147–2150, SMD-2021), with its pinned packages:
 #   .dockerignore:      !recipes/<recipe>/emit.py
 #   here:               COPY recipes/<recipe>/emit.py /app/recipes/<recipe>/
-#                       RUN pip install --no-cache-dir --break-system-packages <package>==<version>
+#                       RUN pip install --no-cache-dir --break-system-packages --root-user-action=ignore <package>==<version>
+# An emitter shares /tmp with every other pipeline's (each file its own, mode
+# 600): it writes scratch only through tempfile (mkstemp, mkdtemp), never to
+# a fixed path another emitter could plant first.
 COPY deploy/orchestration/runner.ts /app/deploy/orchestration/
 # A module the graph gained and this file does not copy, or an npm package (the
 # image installs none), fails the build here, not the first run: every import

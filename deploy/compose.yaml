@@ -614,6 +614,12 @@ services:
     # processes (at the deadline, and to kill what an emitter leaves). init
     # reaps what exits.
     init: true
+    # Bounds on what one emitter an export has taken over can take from the
+    # host: processes and memory (review pass 7: neither was set, and Docker
+    # sets no process limit). An emitter's output is held up to 256 MB and read
+    # a few times over, so 2 GB leaves room for that and for reembed.
+    pids_limit: 512
+    mem_limit: 2g
     cap_drop: [ALL]
     cap_add: [SETUID, SETGID, KILL]
     security_opt: ["no-new-privileges:true"]

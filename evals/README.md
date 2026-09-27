@@ -6078,6 +6078,11 @@ and E:
   the engine, and nothing else of it. The runner joins the sealed network
   as the server does. The judge holds 39 crafted logs in CI.
 
+**On review pass 7's code (`--wait-schedule`), every check passes.**
+- **C1:** 29.0 s. **C1s:** seen after 331 s. **P:** gone after 91 s.
+- **K, A, C3 and I** pass. The runner is bounded to 512 processes and 2 GB,
+  and `ingest-items` refuses a facet naming another source's ticket.
+
 **On review pass 6's code (`--wait-schedule`), every check passes.**
 - **C1:** 20.7 s. **C1s:** seen after 811 s. **P:** gone after 40 s.
 - **K, A, C3 and I** pass.

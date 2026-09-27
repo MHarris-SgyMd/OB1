@@ -173,11 +173,14 @@ export function scheduleOf(everyHours: number): { field: "hours"; hoursInterval:
 export function missingEmitters(pipelines: Pipeline[], root: string): string[] {
   return pipelines.flatMap((p) => {
     const args = p.emitter.slice(1);
+    // A module given by `-m x`, by a short-flag cluster ending in m (`-um x`), or inline (`-mx`); the argument after it is not a script (review pass 7).
+    const at = args.findIndex((a) => /^-[a-zA-Z]*m$/.test(a) || /^-m./.test(a));
+    const mod = at < 0 ? undefined : /^-m./.test(args[at]) ? args[at].slice(2) : args[at + 1];
     const scripts = args
+      .filter((_, i) => !(at >= 0 && i === at + 1 && !/^-m./.test(args[at])))
       .map((a) => (a.startsWith("/app/") ? a.slice(5) : a))
-      .filter((a) => /^[^-/][^\s]*\.(py|ts|js|mjs|cjs)$/.test(a) && !a.includes("{input}") && !existsSync(resolve(root, a)));
-    const m = args.indexOf("-m");
-    const mod = m >= 0 ? args[m + 1] : undefined;
+      // A script file (.py .ts .tsx .js .jsx .mjs .cjs), or any relative path with a directory in it (a script with no extension).
+      .filter((a) => (/^[^-/][^\s]*\.(py|ts|tsx|js|jsx|mjs|cjs)$/.test(a) || /^[^-/{][^\s]*\/[^\s]+$/.test(a)) && !a.includes("{input}") && !existsSync(resolve(root, a)));
     // A module of the repository (its top package a directory here, e.g. recipes.x.emit); the standard library and installed packages are not checked.
     const missingModule = mod && /^[a-z_][\w.]*$/i.test(mod) && (mod.startsWith("recipes.") || existsSync(resolve(root, mod.split(".")[0]))) && ![`${mod.replaceAll(".", "/")}.py`, `${mod.replaceAll(".", "/")}/__main__.py`].some((x) => existsSync(resolve(root, x)));
     return [...scripts, ...(missingModule ? [`-m ${mod}`] : [])].map((a) => `${p.name}: ${a}`);
@@ -432,14 +435,14 @@ export async function runPipeline(c: Config, p: Pipeline): Promise<Report> {
     return {
       ...base, ok: false, stage: "reembed", exit: 2, reembed,
       why: configuration
-        ? `the rows are written, and reembed refused to run: ${sentence(reason)} So ${rowsLack(unembedded, p.system)} no vector, and no run embeds them until that is fixed. The runner takes the server's model and egress settings when it is created: after changing them, recreate both (compose --profile orchestration up -d --force-recreate server orchestration-runner)`
+        ? `the rows are written, and reembed refused to run: ${sentence(reason)} So ${rowsLack(unembedded, p.system)} no vector, and no run embeds ${unembedded === 1 ? "it" : "them"} until that is fixed. The runner takes the server's model and egress settings when it is created: after changing them, recreate both (compose --profile orchestration up -d --force-recreate server orchestration-runner)`
         : `the rows are written, and reembed could not run this time: ${sentence(reason)} ${rowsLack(unembedded, p.system)} no vector yet; the next run tries again`,
     };
   }
   if (unembedded > 0) {
     return {
       ...base, ok: false, stage: "reembed", exit: re.timedOut ? null : re.code, reembed,
-      why: `the rows are written, and ${unembedded} of ${p.system}'s rows have no vector (reembed ${re.timedOut ? past : `exited ${re.code}`}). One still pending is embedded by the next run. One the provider refused waits for a retry, run in the runner: compose exec orchestration-runner su-exec bun bun db/reembed.ts --retry-failed. One it refuses every time is an item to fix or remove in the export, then delete its thought`,
+      why: `the rows are written, and ${rowsLack(unembedded, p.system)} no vector (reembed ${re.timedOut ? past : `exited ${re.code}`}). One still pending is embedded by the next run. One the provider refused waits for a retry, run in the runner: compose exec orchestration-runner su-exec bun bun db/reembed.ts --retry-failed. One it refuses every time is an item to fix or remove in the export, then delete its thought`,
     };
   }
   return { ...base, ok: true, reembed };
@@ -524,7 +527,7 @@ export function reembedRefusal(stderr: string): { reason: string; configuration:
   const paragraphs = redact(stderr).split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean);
   const last = paragraphs.at(-1) ?? "";
   const reason = (last.startsWith("✗")
-    ? `${paragraphs.at(-2)?.split("\n")[0].trim() ?? ""} ${last.split("\n").map((l) => l.trim()).join("; ")}`.trim()
+    ? `${paragraphs.at(-2)?.split("\n")[0].trim() ?? ""} ${last.split("\n").map((l) => l.trim().replace(/\.$/, "")).join("; ")}`.trim()
     : last.split("\n")[0].trim()) || "no reason printed";
   const providerRetryable = reason.startsWith(REEMBED_PHRASES.retryable[0])
     && !REEMBED_PHRASES.configShaped.some((x) => reason.includes(x))
@@ -646,6 +649,7 @@ async function selfCheck(): Promise<number> {
   // Review pass 6: the default is configuration; only reembed's own retryable kinds promise a retry.
   const listed = reembedRefusal("Embedding configuration is not usable:\n\n  ✗ OB1_EMBEDDING_DIM=5000 exceeds pgvector's HNSW limit of 2000\n  ✗ a second problem\n");
   expect(`an unusable embedding configuration is a configuration refusal, its ✗ list joined onto its heading (${listed.reason})`, listed.configuration && listed.reason === "Embedding configuration is not usable: ✗ OB1_EMBEDDING_DIM=5000 exceeds pgvector's HNSW limit of 2000; ✗ a second problem");
+  expect("a ✗ item's own full stop does not run into the join", reembedRefusal("Heading:\n\n  ✗ one.\n  ✗ two.").reason === "Heading: ✗ one; ✗ two");
   expect("a missing migration is a configuration refusal", reembedRefusal("\n  thought_work_claims does not exist. Apply migration 015 first:\n    cd db && bun migrate.ts --url …").configuration);
   expect("a provider refusing the model (404) or answering no JSON is configuration; one that timed out is retryable, as is a start that met another claimer",
     reembedRefusal("\n  The embedding provider is not usable: Embeddings request to http://h/v1 failed: 404 model not found").configuration
@@ -689,7 +693,12 @@ async function selfCheck(): Promise<number> {
     { ...good, name: "print", emitter: ["bun", "-p", "1"] },
     { ...good, name: "absolute", emitter: ["python3", "/app/recipes/nowhere/a.py"] },
     { ...good, name: "repomod", emitter: ["python3", "-m", "recipes.nowhere.emit"] },
-  ]), REPO)) === JSON.stringify(["gone: recipes/nowhere/emit.py", "flagged: recipes/nowhere/emit.py", "run: nowhere.ts", "bare: emit.py", "xflag: recipes/nowhere/x.py", "absolute: recipes/nowhere/a.py", "repomod: -m recipes.nowhere.emit"]));
+    { ...good, name: "cluster", emitter: ["python3", "-um", "recipes.nowhere.clustered"] },
+    { ...good, name: "inline", emitter: ["python3", "-mrecipes.nowhere.inline"] },
+    { ...good, name: "noext", emitter: ["python3", "recipes/nowhere/emit"] },
+    { ...good, name: "tsx", emitter: ["bun", "recipes/nowhere/emit.tsx"] },
+    { ...good, name: "absinput", emitter: ["bun", "deploy/orchestration/runner.ts", "/imports/fixture"] },
+  ]), REPO)) === JSON.stringify(["gone: recipes/nowhere/emit.py", "flagged: recipes/nowhere/emit.py", "run: nowhere.ts", "bare: emit.py", "xflag: recipes/nowhere/x.py", "absolute: recipes/nowhere/a.py", "repomod: -m recipes.nowhere.emit", "cluster: -m recipes.nowhere.clustered", "inline: -m recipes.nowhere.inline", "noext: recipes/nowhere/emit", "tsx: recipes/nowhere/emit.tsx"]));
   const item = (system: string, scope = "fixture:export") => JSON.stringify({ identity: { system, key: "k" }, scope, text: "t" });
   const p = parsePipelines(one({}))[0];
   expect("the pipeline's own lines are not stray", strayLines(new TextEncoder().encode(`${item("fixture")}\n\n${item("fixture")}\n`), p).length === 0);
