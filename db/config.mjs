@@ -1797,15 +1797,17 @@ export const ROLE_GRANTS = Object.freeze({
   // that writes pages holds `capture` too), and the sections, their pending
   // drafts and their revisions are these three tables, written only through
   // upsert_page, write_page_section, accept_page_section and
-  // release_page_section (SECURITY INVOKER, PUBLIC's EXECUTE as every core
-  // function). No DELETE: a section and its revisions go only with the page
-  // thought's delete, whose cascade runs as the tables' owner; the revisions
-  // take INSERT alone — append-only, and a trigger refuses UPDATE and TRUNCATE
-  // for the owner too. The identity column needs no sequence grant
-  // (test-schema [58] measures it).
+  // release_page_section, lock_page_section and delete_page_section
+  // (SECURITY INVOKER, PUBLIC's EXECUTE as every core function). No DELETE
+  // on the tables: a section goes through delete_page_section, whose DELETE
+  // runs as the caller — so page_sections carries DELETE — and its revisions
+  // by the cascade, which runs as the tables' owner; the revisions take INSERT
+  // alone, and a trigger refuses UPDATE, a hand DELETE and TRUNCATE for the
+  // owner too. The identity column needs no sequence grant (test-schema [58]
+  // measures it).
   pages: Object.freeze([
     Object.freeze({ table: "pages",                  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "063" }),
-    Object.freeze({ table: "page_sections",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "063" }),
+    Object.freeze({ table: "page_sections",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "063" }),
     Object.freeze({ table: "page_section_revisions", privileges: Object.freeze(["SELECT", "INSERT"]),           since: "063" }),
   ]),
   // The community schemas under schemas/ (SMD-1796), applied by hand beside the

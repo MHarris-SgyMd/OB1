@@ -6428,7 +6428,7 @@ console.log("\n[30] Migration 061 on a real server: the windowed capture's linea
   await sql.close();
 }
 
-console.log("\n[31] Migration 063 on a real server: the page store under concurrency — two sessions' first write of one section serialise on the page (one created, one updated); a human's edit and a machine's regeneration racing leave the human's text live whichever commits first; two creates of one slug leave one page and one refusal by name; after every race the render is the thought's content (SMD-1812)");
+console.log("\n[31] Migration 063 on a real server: the page store under concurrency — two sessions' first write of one section serialise on the page (one created, one updated), two sessions on two sections of one page leave the render the thought's content, a human's edit and a machine's regeneration racing leave the human's text live whichever commits first, a section write racing delete_thought of the page waits and finds no page (no deadlock), two creates of one slug — one title or two — leave one page and one refusal by name (SMD-1812)");
 {
   const sql = new SQL({ url: URL_, max: 1 });
   await sql`DELETE FROM thoughts`;
@@ -6467,10 +6467,43 @@ console.log("\n[31] Migration 063 on a real server: the page store under concurr
     assert(h.action === "updated" && (m.action === "pending" || m.action === "updated") && after.body_md === HUMAN && after.origin === "manual" && (m.action === "pending" ? after.pending === "The machine's regeneration." : after.pending === null) && (await consistent()),
       `a human and a machine racing on one section: the human's text is live and the section the human's whichever committed first (the machine's write ${m.action}${m.action === "pending" ? ", its draft parked" : ", overtaken"})`);
     // …and the machine racing the human again now parks: human-owned.
+    // …and again on the now human-owned section: the machine parks whichever
+    // order the lock hands out — parked and left when the machine went first
+    // and the human's in-place write then cleared the buffer, parked and
+    // waiting when the human went first (run-it, first review pass: 17 of 40
+    // rounds took the first branch and a single-outcome assertion flaked).
     const [h2, m2] = await Promise.all([write(cA, "steps", "The human's second text.", "manual", "alice"), write(cB, "steps", "The machine, again.", "generated", "gen-b")]);
     const after2 = (await secOf("steps"))!;
-    assert(h2.action === "updated" && m2.action === "pending" && after2.body_md === "The human's second text." && after2.pending === "The machine, again." && (await consistent()),
-      "…on a human-owned section the race has one outcome: the human's text live, the machine's parked");
+    assert(h2.action === "updated" && m2.action === "pending" && after2.body_md === "The human's second text." && after2.origin === "manual" && (after2.pending === "The machine, again." || after2.pending === null) && (await consistent()),
+      `…on a human-owned section the machine parks in either order and the human's text is live (the draft ${after2.pending === null ? "cleared by the human's later write" : "still waiting"})`);
+    // Two sessions on two DIFFERENT sections of one page: without the page lock
+    // the second writes the render it computed before the first committed, and
+    // the thought holds one section (run-it, first review pass: the mutant
+    // survived every suite). With it, B waits and the render is the content.
+    const t0 = Date.now();
+    const [d1, d2] = await Promise.all([write(cA, "left", "The left column.", "generated", "gen-a"), write(cB, "right", "The right column.", "generated", "gen-b")]);
+    const bothIn = (await sql`SELECT content FROM thoughts WHERE id = ${P}::uuid`)[0].content as string;
+    assert(d1.action === "created" && d2.action === "created" && /The left column\./.test(bothIn) && /The right column\./.test(bothIn) && (await consistent()),
+      `two sections written at once on one page: both in the thought, the render its content (${Date.now() - t0} ms for the pair)`);
+    // A section write racing delete_thought of the page: the writer locks the
+    // thought first, as the delete does, so one waits for the other — the
+    // write lands and the delete takes it, or the delete lands and the write
+    // finds no page — never a deadlock (run-it, first review pass: the
+    // page-first order deadlocked 38 of 40 races).
+    let deadlocks = 0, noPage = 0, landed = 0;
+    for (let i = 0; i < 12; i++) {
+      const pi = ((await sql`SELECT upsert_page(${`raced-delete-${i}`}, ${`Raced delete ${i}`}) AS r`)[0].r as { page_id: string }).page_id;
+      await sql`SELECT write_page_section(${pi}::uuid, 'first', 'Standing.', 'generated', NULL, '{}'::jsonb, ${sql.array([e.id], "TEXT")}::uuid[], NULL, 'gen')`;
+      const w = cA`SELECT write_page_section(${pi}::uuid, 'second', 'Racing the delete.', 'generated', NULL, '{}'::jsonb, ${sql.array([e.id], "TEXT")}::uuid[], NULL, 'gen') AS r`.then(() => "landed", (err: Error) => err.message);
+      const dl = cB`SELECT delete_thought(${pi}::uuid, NULL::jsonb) AS r`.then(() => "deleted", (err: Error) => err.message);
+      const [wr, dr] = await Promise.all([w, dl]);
+      if (/deadlock/.test(wr) || /deadlock/.test(dr)) deadlocks++;
+      else if (/no page/.test(wr)) noPage++;
+      else if (wr === "landed") landed++;
+      if (dr !== "deleted") deadlocks++;
+    }
+    const pagesLeft = Number((await sql`SELECT count(*)::int AS c FROM pages WHERE slug LIKE 'raced-delete-%'`)[0].c);
+    assert(deadlocks === 0 && noPage + landed === 12 && pagesLeft === 0, `twelve section writes racing delete_thought of their page: no deadlock, each write landed first or found no page, every page gone (landed ${landed}, no page ${noPage}, deadlocks ${deadlocks})`);
 
     // Two creates of one slug, at once: one page, the other refused by name —
     // the loser's capture waits on 033's fingerprint lock, merges into the
@@ -6482,6 +6515,14 @@ console.log("\n[31] Migration 063 on a real server: the page store under concurr
     const thoughtsRaced = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content = '# A raced page'`)[0].c);
     assert(created.length === 1 && refusedOne.length === 1 && /another writer created with this text meanwhile|holds this page's exact text/.test(refusedOne[0].err) && pagesRaced === 1 && thoughtsRaced === 1,
       `two creates of one slug: one page, one thought, the other refused by name (${refusedOne[0]?.err.split("\n")[0].slice(0, 110) ?? "neither refused"})`);
+    // …and under two titles the slug's own unique index is what the loser meets,
+    // said by name rather than as the constraint's error (run-it, first review pass).
+    const createTitled = async (c: SQL, title: string) => { try { return { ok: ((await c`SELECT upsert_page('raced-titles', ${title}) AS r`) as { r: R }[])[0].r, err: "" }; } catch (err) { return { ok: null as R | null, err: (err as Error).message }; } };
+    const [ta, tb] = await Promise.all([createTitled(cA, "Title A"), createTitled(cB, "Title B")]);
+    const titledOk = [ta, tb].filter((x) => x.ok?.created === true), titledNo = [ta, tb].filter((x) => x.ok === null);
+    const titledThoughts = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content IN ('# Title A', '# Title B')`)[0].c);
+    assert(titledOk.length === 1 && titledNo.length === 1 && /upsert_page: another writer created page 'raced-titles' meanwhile — retry, and the call will update it/.test(titledNo[0].err) && titledThoughts === 1,
+      `two creates of one slug under two titles: one page, the loser refused by name and its thought rolled back (${titledNo[0]?.err.split("\n")[0].slice(0, 110) ?? "neither refused"})`);
   } finally {
     await cA.close();
     await cB.close();

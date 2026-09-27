@@ -1956,7 +1956,7 @@ if (configFailed) {
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
                       OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
-            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; untagged: number; stale: number; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number };
+            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; stale_pages: number; stale_page_ids: string[] | null; untagged: number; stale: number; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number };
             // 063's sections join the census where the store is applied; a brain at
             // 062 has no page_sections, so the CTE is written only then (the text is
             // built here — BOUND is a constant — and run as one statement).
@@ -1980,11 +1980,16 @@ if (configFailed) {
                    md AS (SELECT s.id FROM md_s s
                            WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'metadata' AND d.artifact_id = s.id)),
                    ${tab.pages
-                     ? `se_s AS (SELECT id FROM public.page_sections WHERE origin = 'generated' LIMIT ${BOUND}),
+                     ? `se_s AS (SELECT id FROM public.page_sections WHERE generation_source <> '{}'::jsonb LIMIT ${BOUND}),
                    se AS (SELECT s.id FROM se_s s
-                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'section' AND d.artifact_id = s.id)),`
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'section' AND d.artifact_id = s.id)),
+                   pg_s AS (SELECT id FROM public.pages LIMIT ${BOUND}),
+                   pg AS (SELECT s.id FROM pg_s s JOIN public.thoughts t ON t.id = s.id
+                           WHERE t.content IS DISTINCT FROM public.render_page(s.id)),`
                      : `se_s AS (SELECT NULL::uuid AS id WHERE false),
-                   se AS (SELECT NULL::uuid AS id WHERE false),`}
+                   se AS (SELECT NULL::uuid AS id WHERE false),
+                   pg_s AS (SELECT NULL::uuid AS id WHERE false),
+                   pg AS (SELECT NULL::uuid AS id WHERE false),`}
                    al AS (SELECT id, artifact_kind, input_ids, input_fingerprints, recipe FROM public.derivations LIMIT ${BOUND}),
                    st AS (SELECT d.id FROM al d JOIN public.thoughts t ON t.id = d.input_ids[1]
                            WHERE d.artifact_kind <> 'proposal'
@@ -1994,6 +1999,7 @@ if (configFailed) {
                      (SELECT count(*)::int FROM en) AS entities,  (SELECT array_agg(id::text || ' under ' || key) FROM (SELECT id, key FROM en LIMIT 3) s) AS entity_ids,
                      (SELECT count(*)::int FROM pr) AS proposals, (SELECT array_agg(id::text) FROM (SELECT id FROM pr LIMIT 3) s) AS proposal_ids,
                      (SELECT count(*)::int FROM se) AS sections,  (SELECT array_agg(id::text) FROM (SELECT id FROM se LIMIT 3) s) AS section_ids,
+                     (SELECT count(*)::int FROM pg) AS stale_pages, (SELECT array_agg(id::text) FROM (SELECT id FROM pg LIMIT 3) s) AS stale_page_ids,
                      (SELECT count(*)::int FROM md) AS untagged,
                      (SELECT count(*)::int FROM st) AS stale,
                      (SELECT count(*)::int FROM al) AS rows,
@@ -2001,7 +2007,7 @@ if (configFailed) {
                      (SELECT count(*)::int FROM al WHERE recipe->>'declared' = 'false') AS undeclared,
                      (SELECT count(*)::int FROM ch_s) AS ch_read, (SELECT count(*)::int FROM vc_s) AS vc_read, (SELECT count(*)::int FROM en_s) AS en_read,
                      (SELECT count(*)::int FROM pr_s) AS pr_read, (SELECT count(*)::int FROM md_s) AS md_read,
-                     (SELECT count(*)::int FROM se_s) AS se_read`)) as Census[];
+                     (SELECT count(*)::int FROM se_s) AS se_read, (SELECT count(*)::int FROM pg_s) AS pg_read`)) as Census[];
             const n = (x: number) => (Number(x) > BOUND - 1 ? "more than 10,000" : String(x));
             // Two bounds, two facts: an ARTIFACT source that reached the bound
             // was sampled, so a missing row past it is not seen — the headline
@@ -2011,13 +2017,18 @@ if (configFailed) {
             // any artifact table, and its verdict is exact (cold read, third
             // review pass: one flag said "the rest not read" of tables read
             // whole; run-it: the capped line said the disclosure twice).
-            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read, c.se_read].some((r) => Number(r) >= BOUND);
+            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read, c.se_read, c.pg_read].some((r) => Number(r) >= BOUND);
             const missing: string[] = [];
             if (Number(c.chunks)) missing.push(`${n(c.chunks)} chunk set(s) (thought ${(c.chunk_ids ?? []).join(", ")})`);
             if (Number(c.vectors)) missing.push(`${n(c.vectors)} vector(s) (thought ${(c.vector_ids ?? []).join(", ")})`);
             if (Number(c.entities)) missing.push(`${n(c.entities)} extraction(s) (${(c.entity_ids ?? []).join(", ")})`);
             if (Number(c.proposals)) missing.push(`${n(c.proposals)} proposal(s) (${(c.proposal_ids ?? []).join(", ")})`);
-            if (Number(c.sections)) missing.push(`${n(c.sections)} generated section(s) (${(c.section_ids ?? []).join(", ")})`);
+            if (Number(c.sections)) missing.push(`${n(c.sections)} page section(s) carrying a recipe (${(c.section_ids ?? []).join(", ")})`);
+            // 063's kind has its own writer and no backfill: the remedy for a
+            // section is that writer, said beside the general one (cold read,
+            // first review pass: the general remedy named 061's backfill, which
+            // knows no section).
+            const sectionRemedy = Number(c.sections) ? " A page section's row is written by 063's write_page_section (or accept_page_section): regenerate the section through it, or record the row yourself through ob1_record_derivation with kind 'section'." : "";
             const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — what SMD-1732's rebuild will re-derive); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
@@ -2028,8 +2039,15 @@ if (configFailed) {
               add("lineage", "fail",
                   `derived rows without a lineage row — ${missing.join("; ")} — written by a producer from before 061 (a write function, record_thought_entities or record_supersession_proposal re-applied by hand) or by a raw writer of the artifact tables; nothing can say what they were computed from (SMD-1731). ${coverage}`,
                   producersCurrent
-                    ? `Every producer is 061's, so these rows came from a raw writer of the artifact tables (a hand INSERT, a community schema, a bulk load) or a write skipped: re-apply the recorded migrations — ${REAPPLY_COMMAND} — and 061's backfill records every artifact standing, at the thought's current text, marked legacy; or record the rows' lineage yourself through ob1_record_derivation.`
+                    ? `Every producer is 061's, so these rows came from a raw writer of the artifact tables (a hand INSERT, a community schema, a bulk load) or a write skipped: re-apply the recorded migrations — ${REAPPLY_COMMAND} — and 061's backfill records every artifact standing, at the thought's current text, marked legacy; or record the rows' lineage yourself through ob1_record_derivation.${sectionRemedy}`
                     : ledgerRemedy("061", `${APPLY_061} Its backfill records every artifact standing, at the thought's current text, marked legacy.`, "Re-applied, 061's backfill records every artifact standing, at the thought's current text, marked legacy."));
+            } else if (Number(c.stale_pages)) {
+              // 063: a page thought that does not hold its render — a raw write
+              // of page_sections or of the thought (run-it, first review pass:
+              // nothing saw it). The store's own door repairs it.
+              add("lineage", "warn",
+                  `every derived row has its lineage row, but ${n(c.stale_pages)} page(s) whose thought does not hold their render (${(c.stale_page_ids ?? []).join(", ")}) — a raw write of page_sections or of the page thought since the last live change; readers of the thought see a stale page — ${coverage}`,
+                  "For each page: SELECT ob1_render_page_thought('<page id>'); — re-renders the thought from its sections (an audited event). The store's own writers (write_page_section, delete_page_section, upsert_page) keep the two together.");
             } else if (!producersCurrent) {
               add("lineage", "warn",
                   `every derived row has its lineage row, but ${Number(bodies.n) !== 6 ? `a producer is missing or stands in two forms (${bodies.n} bodies where 061 leaves six — an earlier file re-applied by hand beside 061's)` : bodies.records !== true ? "a producer's body is from before 061 (013, 029, 056 or 060 re-applied by hand), or lost its record line" : "the vector trigger thoughts_record_vector_lineage is dropped or disabled, so a vector written now leaves no row"}: its next write records no lineage (SMD-1731). ${coverage}`,
@@ -2052,7 +2070,7 @@ if (configFailed) {
             add("lineage", "skip", `not checked — this role cannot read ${denied} (${msg})`,
                 `GRANT SELECT ON ${denied} TO <the connector's role>; — ${denied === "derivations" ? "the capture group's row since 061" : "a row of the grants table"}, which migrate.ts --grant issues (db/README.md, Grants for a capturing role).`);
           } else {
-            add("lineage", "warn", `could not verify: ${msg}`, "The check reads derivations, thoughts, thought_chunks, thought_entities, ob1_entity_edges, supersession_proposals, page_sections (063) and pg_proc.");
+            add("lineage", "warn", `could not verify: ${msg}`, "The check reads derivations, thoughts, thought_chunks, thought_entities, ob1_entity_edges, supersession_proposals, page_sections and pages (063) and pg_proc.");
           }
         }
 
