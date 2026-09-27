@@ -170,7 +170,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 17 | `[fork] evals: choose the local models by measurement` | The local defaults were picked by size. `evals/` benchmarks retrieval and extraction against real Ollama; `nomic-embed-text` placed 5th of 7 and `llama3.2` reproduced its production faults. Defaults are now `embeddinggemma` + `qwen2.5:7b`. | **Unfiled** |
 
 <!-- changes-index:start — generated from changes/ by scripts/fork-index.ts; do not edit by hand -->
-**185 numbered changes** on top of the pin: 1–17 are the table above; 18–185 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
+**215 numbered changes** on top of the pin: 1–17 are the table above; 18–215 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
 
 | # | Change | Ticket |
 | --- | --- | --- |
@@ -342,6 +342,36 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 183 | [A `source:` egress term gates a row's stored label, not who may capture](changes/183-a-source-egress-term-gates-a-row-s-stored-label.md) | SMD-1941 |
 | 184 | [The Obsidian vault import recipe retires](changes/184-the-obsidian-vault-import-recipe-retires.md) | SMD-2137 |
 | 185 | [A --grant role can run the entity writer and a structured pass](changes/185-a-grant-role-can-run-the-entity-writer.md) | SMD-2216 |
+| 186 | [The session-capture hook records how many secrets it blanked on the thought itself, in `metadata.redactions`, where before the count lived only in the log and the text's markers](changes/186-the-session-capture-hook-records-how-many.md) | SMD-2168 |
+| 187 | [graph-centrality's dependency read gates only on a system that states a lifecycle](changes/187-graph-centrality-s-dependency-read-gates.md) | SMD-2218 |
+| 188 | [The data-layer job runs test-upgrade and test-preflight side by side](changes/188-the-data-layer-job-runs-test-upgrade-and-test.md) | SMD-2219 |
+| 189 | [The local-Ollama embedding recipe retires](changes/189-the-local-ollama-embedding-recipe-retires.md) | SMD-2138 |
+| 190 | [The MCP route answers a refused notification per spec: 202/503 with no body, not a dropped 200 envelope](changes/190-the-mcp-route-answers-a-refused-notification-per.md) | SMD-2106 |
+| 191 | [`tier.ts --diff` exits 3 on a window it replayed nothing from, and says which side failed to connect](changes/191-tier-ts-diff-exits-3-on-a-window-it-replayed.md) | SMD-2182 |
+| 192 | [a cross-brain compare](changes/192-a-cross-brain-compare.md) | SMD-2109 |
+| 193 | [Preflight reads a table off the role's path in one row, not the block](changes/193-preflight-reads-a-table-off-the-role-s-path.md) | SMD-2062 |
+| 194 | [rest-api holds every paging parameter to a finite integer, and a non-object body to a 400](changes/194-rest-api-holds-every-paging-parameter.md) | SMD-2083 |
+| 195 | [test-live.ts sizes \[5d\]'s and \[5f\]'s tables to what their planner decisions need](changes/195-test-live-ts-sizes-5d-s-and-5f-s-tables-to-what.md) | SMD-2135 |
+| 196 | [node_state: a thought's lifecycle, blockers and supersession are one SQL read every ranking surface shares, and graph-centrality is its first reader](changes/196-node-state-a-thought-s-lifecycle-blockers.md) | SMD-2074 |
+| 197 | [`list_thought_ids`](changes/197-list-thought-ids.md) | SMD-2244 |
+| 198 | [A thought over the extraction bound is extracted over its prefix, not failed](changes/198-a-thought-over-the-extraction-bound-is-extracted.md) | SMD-2240 |
+| 199 | [n8n as an opt-in `orchestration` profile](changes/199-n8n-as-an-opt-in-orchestration-profile.md) | SMD-2210 |
+| 200 | [preflight's ledger row, and `migrate.ts --baseline`, no longer offer to baseline an empty database](changes/200-preflight-s-ledger-row-and-migrate-ts-baseline.md) | SMD-2237 |
+| 201 | [`list_logged_searches`](changes/201-list-logged-searches.md) | SMD-2245 |
+| 202 | [The two read-only recipe scripts move onto the SQL shim](changes/202-the-two-read-only-recipe-scripts-move-onto.md) | SMD-2144 |
+| 203 | [search_thoughts' prefer_current ranks finished and replaced work below live work, opt-in, priced before it was built](changes/203-search-thoughts-prefer-current-ranks-finished.md) | SMD-2255 |
+| 204 | [The server and the Kubernetes image stop on SIGTERM, finishing what is in flight](changes/204-the-server-and-the-kubernetes-image-stop.md) | SMD-2250 |
+| 205 | [The write functions append then project](changes/205-the-write-functions-append-then-project.md) | SMD-2116 |
+| 206 | [`worker_status`](changes/206-worker-status.md) | SMD-2131 |
+| 207 | [Preflight's `schema` row prints the exact search-path statement](changes/207-preflight-s-schema-row-prints-the-exact-search.md) | SMD-2242 |
+| 208 | [The extractor's precision on long documents is now measured against a real labelled set, not the three-document planted one](changes/208-the-extractor-s-precision-on-long-documents.md) | SMD-1961 |
+| 209 | [decider-4b behind the one typed-decision contract, and the tooling to compare Jev-class models on the same client](changes/209-decider-4b-behind-the-one-typed-decision.md) | SMD-2052 |
+| 210 | [A runaway extraction call escalates to a larger local model instead of the penalised retry](changes/210-a-runaway-extraction-call-escalates-to-a-larger.md) | SMD-2000 |
+| 211 | [A malformed window is left out of a windowed thought, not the thought](changes/211-a-malformed-window-is-left-out-of-a-windowed.md) | SMD-2260 |
+| 212 | [`retry_failed` and `release_stale_leases`](changes/212-retry-failed-and-release-stale-leases.md) | SMD-2132 |
+| 213 | [The full-stack job builds the three dashboards in the background while the stack comes up, not in series after it](changes/213-the-full-stack-job-builds-the-three-dashboards.md) | SMD-2251 |
+| 214 | [The thought-enrichment backfills move onto the SQL shim](changes/214-the-thought-enrichment-backfills-move-onto.md) | SMD-2139 |
+| 215 | [Lineage for every derived artifact, with its recipe: the `derivations` table every producer writes in its artifact's transaction](changes/215-lineage-for-every-derived-artifact.md) | SMD-1731 |
 
 Changes landed since the last release, if any, are the [`changes/smd-*.md`](changes/) files, numbered at the next cut (SMD-1804).
 <!-- changes-index:end -->
@@ -939,9 +969,10 @@ Deliberate. Recorded so nobody assumes they were missed.
   credentials (Gmail, Slack, Readwise). The shim itself has 61 assertions against
   real Postgres, and CI checks every banner-carrying file still parses and that
   the codemod round-trips byte-for-byte — but exercise the ones you actually run
-  before trusting them. The two hand ports (`recipes/brain-backup`,
-  `recipes/lint-sweep`, SMD-2144) carry no banner and are driven instead, as
-  deployed, by `db/test-live.ts` [26].
+  before trusting them. The hand ports (`recipes/brain-backup` and
+  `recipes/lint-sweep`, SMD-2144; `recipes/thought-enrichment`'s three scripts,
+  SMD-2139) carry no banner and are driven instead, as deployed, by
+  `db/test-live.ts` [26] and [29].
 - **No file imports supabase-js at runtime any more.** The six servers that
   used resource embedding and nested `.or()` moved with SMD-1798; the
   dashboard's type-only import went with its Supabase sign-in (SMD-1801). Check

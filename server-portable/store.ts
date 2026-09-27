@@ -29,6 +29,7 @@
 
 import type { EgressRecord } from "./egress.ts";
 import type { DatabaseFacts, ReadOptions, ReadProgress } from "./brain-info.ts";
+import type { Lineage } from "./lineage.ts";
 
 export type ThoughtMatch = {
   id: string;
@@ -457,6 +458,41 @@ export type WorkerStatusRow = {
   active: boolean | null;
 };
 
+/** The result of `retryFailed` (SMD-2132) — the `failed` rows of one work_type requeued to `pending`. */
+export type RetryFailedResult = {
+  /** The pool acted on, echoed back. */
+  workType: string;
+  /** How many `failed` rows moved to `pending`. */
+  retried: number;
+  /** The thought ids requeued. */
+  ids: string[];
+};
+
+/** How `releaseStaleLeases` (SMD-2132) is aimed — the optional scoping, and the live-lease escape hatch. */
+export type ReleaseLeasesOpts = {
+  /** Restrict to one pool; omit to reap stale leases across every work_type (the reaper's own cross-pool reach). */
+  workType?: string;
+  /** Restrict to one holder's leases. Required when `includeLive` is set. */
+  workerId?: string;
+  /**
+   * Release a holder's leases even when the TTL has NOT lapsed — a live lease.
+   * Off by default (only past-`ttl_expires_at` leases are touched), because
+   * releasing a live lease risks the holder double-processing; the caller must
+   * name the `workerId` to reach one.
+   */
+  includeLive?: boolean;
+};
+
+/** The result of `releaseStaleLeases` (SMD-2132) — the `claimed` rows returned to the pool. */
+export type ReleaseLeasesResult = {
+  /** How many `claimed` rows moved back to `pending`. */
+  released: number;
+  /** The thought ids released. */
+  ids: string[];
+  /** The distinct `worker_id`s whose leases were released. */
+  workers: string[];
+};
+
 export type ListFilters = {
   limit: number;
   type?: string;
@@ -847,7 +883,13 @@ export function captureEnvelope(
    * send it identically and upsert_thought validates it in one place. Absent
    * keys mean "no provenance"; upsert_thought refuses a malformed derived_from.
    */
-  provenance?: { derivedFrom?: string[]; supersedes?: string }
+  provenance?: { derivedFrom?: string[]; supersedes?: string },
+  /**
+   * Migration 061 (SMD-1731): the recipes of the windows and the tags this
+   * capture carries, recorded in `derivations` with the write. Absent: no
+   * `lineage` key, and upsert_thought records nothing for the tags.
+   */
+  lineage?: Lineage
 ): Record<string, unknown> {
   return {
     ...payload,
@@ -855,6 +897,7 @@ export function captureEnvelope(
     ...(embeddingModel !== undefined ? { embedding_model: embeddingModel } : {}),
     ...(provenance?.derivedFrom !== undefined ? { derived_from: provenance.derivedFrom } : {}),
     ...(provenance?.supersedes !== undefined ? { supersedes: provenance.supersedes } : {}),
+    ...(lineage !== undefined ? { lineage } : {}),
   };
 }
 
@@ -1046,6 +1089,29 @@ export interface ThoughtStore {
   workerStatus(): Promise<WorkerStatusRow[]>;
 
   /**
+   * Requeue a pool's `failed` claim rows to `pending` (SMD-2132) — the write
+   * half of `worker_status`, the `db/*.ts --retry-failed` path over a tool. One
+   * statement, scoped to `workType` alone (`WHERE work_type = $1 AND status =
+   * 'failed'`), resetting `last_error`, `finished_at` and `attempt_count`. Like
+   * `workerStatus`, SQL-backend only — the shim throws (migration 015 does not
+   * publish `thought_work_claims`). The caller has already been gated to a write
+   * key; this method does the mutation and returns the ids for the audit log.
+   */
+  retryFailed(workType: string): Promise<RetryFailedResult>;
+
+  /**
+   * Return `claimed` rows to the pool (SMD-2132) — the write half of
+   * `worker_status`, the `SELECT release_claims_for_worker(...)` path over a
+   * tool. By default only leases past `ttl_expires_at` (a dead worker's) are
+   * released; `includeLive` (which requires a `workerId`) reaches a live lease.
+   * Mirrors migration 015's release SET — `status='pending'`, TTL cleared,
+   * `attempt_count` decremented (an un-run lease is not penalised). SQL-backend
+   * only — the shim throws. The caller gates the write scope; the live-lease
+   * refusal is the caller's (a store method cannot answer as a value).
+   */
+  releaseStaleLeases(opts: ReleaseLeasesOpts): Promise<ReleaseLeasesResult>;
+
+  /**
    * Everything thought_stats needs, aggregated by the store. The two backends
    * differ, and this is one of the places the interface says so:
    *   - SQL (store-sql.ts) runs migration 024's thought_stats_summary() — the
@@ -1125,6 +1191,15 @@ export interface ThoughtStore {
      */
     derivedFrom?: string[];
     supersedes?: string;
+    /**
+     * Migration 061 (SMD-1731): the recipes of what this capture derived —
+     * `chunks` when it made windows (the split's parameters, the blurb model),
+     * `metadata` when the server's extractor wrote the tags (its model, prompt
+     * version and hash). Recorded in `derivations` in the write's own
+     * transaction; an absent key is no derivation, so a caller's own tags get
+     * no row. Rides the envelope, as the actor and the provenance do.
+     */
+    lineage?: Lineage;
   }): Promise<CaptureResult>;
 
   /**
@@ -1153,6 +1228,8 @@ export interface ThoughtStore {
      * altogether sends NULL.
      */
     provenance?: UpdateProvenance;
+    /** As on captureThought (061): the windows' recipe with content, the tags' when the extractor wrote the patch. Sent as update_thought's eleventh argument, `p_lineage`. */
+    lineage?: Lineage;
   }): Promise<UpdateResult>;
 
   /**

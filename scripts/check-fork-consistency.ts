@@ -235,7 +235,7 @@
  *      the class decision is docs/vendored-disposition.md's "PostgREST-
  *      speaking scripts" (an import emits ingestion-contract items, a
  *      maintenance script moves onto compat/supabase-sql, three retire), and
- *      POSTGREST_EXCEPTIONS counts the twenty-four files with a call site
+ *      POSTGREST_EXCEPTIONS counts the twenty-one files with a call site
  *      (two more reach the gateway through a lib; twenty-eight until
  *      obsidian-vault-import and local-ollama-embeddings retired, SMD-2137
  *      and SMD-2138, and brain-backup and lint-sweep moved onto the shim,
@@ -4870,10 +4870,11 @@ checkWorkflowPins();
 // that says it posts to `/rest/v1/rpc/…` is making a claim about itself), a
 // `rest/v1` path in any string, a supabase-py import or `create_client(`
 // (Python and shell alone), or a `@supabase/postgrest-js` specifier is a hit.
-// POSTGREST_EXCEPTIONS counts the twenty-four files with a call site (two
+// POSTGREST_EXCEPTIONS counts the twenty-one files with a call site (two
 // more reach the gateway through a lib; twenty-eight until the two retirements,
 // obsidian-vault-import and local-ollama-embeddings — SMD-2137 and SMD-2138 —
-// and the first two ports, brain-backup and lint-sweep — SMD-2144)
+// and the first five ports: brain-backup and lint-sweep — SMD-2144 — and
+// thought-enrichment's three — SMD-2139)
 // with the ticket that ports or retires each: a line past the count fails (a
 // new call beside the documented ones),
 // a count no line reaches fails as stale (the port landed on those lines —
@@ -4978,9 +4979,11 @@ const SHIM = "a maintenance script; it moves onto compat/supabase-sql under bun"
  * atomizer's backfill-gmail-correspondents.mjs and authorship-edges' backfill-authorship.mjs — reach the
  * gateway through their `lib/` file alone and have no line of their own. Two of the thirty are gone:
  * obsidian-vault-import's import-obsidian.py (SMD-2137) and local-ollama-embeddings' embed-local.py (SMD-2138)
- * retired with their recipes, the first entries to leave. Two more are on the shim: brain-backup's
- * backup-brain.mjs and lint-sweep's lint-sweep.js (SMD-2144), the first ports to land; weekly-digest's
- * entry moved to SMD-2239 with the rescope of 2026-09-26 (a sink, not a maintenance script).
+ * retired with their recipes, the first entries to leave. Five more are on the shim: brain-backup's
+ * backup-brain.mjs and lint-sweep's lint-sweep.js (SMD-2144), the first ports to land, and
+ * thought-enrichment's enrich-thoughts.mjs, backfill-type.mjs and backfill-sensitivity.mjs (SMD-2139),
+ * the first writers; weekly-digest's entry moved to SMD-2239 with the rescope of 2026-09-26 (a sink,
+ * not a maintenance script).
  */
 const POSTGREST_EXCEPTIONS = new Map<string, CountedException>([
   // Imports → the ingestion contract (after SMD-2136).
@@ -4993,9 +4996,6 @@ const POSTGREST_EXCEPTIONS = new Map<string, CountedException>([
   ["recipes/fingerprint-dedup-backfill/backfill-fingerprints.mjs", POSTGREST("superseded by migration 023; the file is removed", "SMD-2145", 1)],
   // Maintenance scripts → the shim under bun.
   ["recipes/fingerprint-dedup-backfill/delete-duplicates.mjs", POSTGREST(`${SHIM}, its deletes through delete_thought`, "SMD-2145", 1)],
-  ["recipes/thought-enrichment/enrich-thoughts.mjs", POSTGREST(SHIM, "SMD-2139", 4)],
-  ["recipes/thought-enrichment/backfill-type.mjs", POSTGREST(SHIM, "SMD-2139", 1)],
-  ["recipes/thought-enrichment/backfill-sensitivity.mjs", POSTGREST(SHIM, "SMD-2139", 1)],
   ["recipes/atomizer/audit-gmail-pipeline.mjs", POSTGREST(SHIM, "SMD-2140", 2)],
   ["recipes/atomizer/lib/entity-resolver.mjs", POSTGREST(`${SHIM} (backfill-gmail-correspondents.mjs reaches the gateway through it)`, "SMD-2140", 2)],
   ["recipes/atomizer/re-atomize-gmail-thought.mjs", POSTGREST(`${SHIM}, its thought writes through upsert_thought and delete_thought`, "SMD-2140", 2)],

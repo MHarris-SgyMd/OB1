@@ -60,6 +60,14 @@
     {
       "name": "delete_thought",
       "scope": "write"
+    },
+    {
+      "name": "retry_failed",
+      "scope": "write"
+    },
+    {
+      "name": "release_stale_leases",
+      "scope": "write"
     }
   ]
 }

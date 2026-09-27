@@ -166,8 +166,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1960 assertions: 1960 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports sixty (60) migrations applied, and
+`bun test-schema.ts` prints `2043 assertions: 2043 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports sixty-two (62) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -207,7 +207,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
-058 SMD-2074, 059 SMD-2255, 060 SMD-2116).
+058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -215,7 +215,8 @@ baseline `0.0.0+upstream.9543c29`), and every release cut appends the migration
 that writes its version as the last file of the range it freezes: 048 writes
 `1.0.0+upstream.9543c29`, the first release (`001..048`), and 051 writes
 `1.1.0+upstream.9543c29`, the second (`049..051`), and 057 writes
-`1.2.0+upstream.9543c29`, the third (`052..057`). `preflight` prints the
+`1.2.0+upstream.9543c29`, the third (`052..057`), and 062 writes
+`1.3.0+upstream.9543c29`, the fourth (`058..062`). `preflight` prints the
 value beside the ledger's highest migration and warns when a server is older than
 the brain, or a brain has run past its version's range. Both are introduced by a
 fragment or a cut rather than a hand-numbered change, so they are named here by
@@ -527,6 +528,48 @@ arity moves, idempotent; a re-apply re-seeds nothing. test-schema [56],
 test-live [28], test-upgrade [20m]; the redaction arm is SMD-1723's, the fold
 SMD-2117's.
 
+Migration 061 gives every derived artifact its lineage (SMD-1731, Phase 1b of
+SMD-1729; the projections table in `../docs/event-log-as-truth.md`). One
+table, `derivations`: a row per artifact per producing pass — `artifact_kind`
+in chunks / entities / proposal / vector / metadata, `artifact_id` (the
+thought's id, or the proposal's), `input_ids` and `input_fingerprints`
+(parallel, no NULL element), `produced_by` (the pass), `recipe` (a JSON object
+with a boolean `deterministic`, what SMD-1732's rebuild will read, and the
+producer's own record — model, prompt version and hash, window parameters),
+`produced_at`, 010's agent — keyed UNIQUE on (kind, artifact, pass), the unit
+each producer replaces, with a GIN index on `input_ids` for the forward walk
+and no foreign key (two AFTER DELETE triggers drop what a deleted thought or
+proposal keyed). Every producer records in the transaction that writes its
+rows, through `ob1_record_derivation`, which refuses a bad shape: the vector by
+a trigger on the row store (`thoughts_record_vector_lineage`, 060's snapshot
+trigger's shape — no column list, nothing under a replay, nothing while the
+vector and its label stand: a text edit alone leaves the row naming the text
+the vector came from, stale for the census to read), so a raw or vendored
+writer is covered; the windows and the tags by the
+3- and 4-argument `upsert_thought` and `update_thought` from a lineage envelope
+(`p_payload.lineage`, `update_thought`'s new eleventh argument `p_lineage`;
+the 10-argument form is dropped with its ACL carried, as 046 and 060 did) — a
+caller that sends no recipe gets no tags' row, since its tags are not a
+derivation, and the windows' row from the label alone marked undeclared; the
+extraction by `record_thought_entities`, now seven arguments (`p_recipe`; the
+six-argument form dropped), which stores the fingerprint it checked — the
+graph's half a key, closed — and follows its own replacement rule (an
+extraction's row replaces every extracted row's, a structured pass's its own
+key's; no rows standing under the key, no row); the proposal by
+`record_supersession_proposal`, now eleven arguments, with both fingerprints
+as the row takes them. The backfill records every artifact standing — every
+proposal (the judge key parsed where it has 029's shape), every (thought, key)
+pair over the mentions and edges at the thought's current fingerprint, every
+chunk set, every vector — marked `legacy: true`; the tags are not backfilled
+(nothing on a row says the extractor tagged it), and preflight's new `lineage`
+check counts them as coverage, fails on a derived row without a lineage row
+(naming the kind and the ids), and reports the legacy and stale counts. The
+capture role gains every privilege on `derivations` (the grants table): run
+`migrate.ts --grant` again for a role granted before this file. Additive; three
+arities move under their own DROP; a re-apply re-seeds nothing. test-schema
+[57], test-live [30], test-upgrade [20n]; the rebuild that walks the table is
+SMD-1732's, the forget SMD-1723's.
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -582,6 +625,7 @@ issues every group at once.
 | | `thought_facets` (042) | `SELECT, UPDATE` — the delete guard reads the citations that name a thought and, detaching, writes them, on every delete |
 | | `ob1_agents` (046) | `SELECT` — the audit trigger reads the key's kind on every write that carries an actor (SMD-1730) |
 | | `ob1_embedding_snapshot` (060) | `SELECT, INSERT, UPDATE` — the snapshot trigger upserts the row's vector under its key on every write of a vector, a label or a key (SMD-2116). `ob1_project_thought_event` and `ob1_refresh_thought_vector` keep PUBLIC's EXECUTE, as the SECURITY INVOKER writers that call them require; the audit trigger holds what either may do, and a replay is the owner's |
+| | `derivations` (061) | `SELECT, INSERT, UPDATE, DELETE` — the vector lineage trigger upserts the vector's row (and deletes it when the vector is cleared) on every write; the write functions upsert the windows' and the tags' rows and delete a replaced set's; `record_thought_entities` and `record_supersession_proposal` write theirs as the caller too, so the workers' role reads the same row (SMD-1731) |
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
@@ -710,6 +754,17 @@ granted only the `INSERT`: **after upgrading a brain past 055, run
 fail on the audit table's `SELECT`.** The role `migrate.ts` and the reference
 deploy connect as is the objects' owner, which holds it already — only a
 separately `--grant`-provisioned scoped role is affected.
+
+**And 061's lineage writes.** Migration 061 (SMD-1731) adds `derivations`, which
+the vector-lineage trigger and the write functions upsert **as the caller on
+every capture and edit** — and `ob1_record_derivation`'s `INSERT … RETURNING`
+needs the `SELECT`, 055's trap again. A role provisioned by `--grant` before 061
+holds no privilege on it, so **every capture and every content edit fails
+inside the trigger — a vectorless capture too, since the trigger drops the
+vector's row when none is carried: after upgrading a brain past 061, run `bun
+migrate.ts --grant <role>` again for every role that captures or runs a
+worker.** Preflight's
+`write privileges` row names the table until it is granted.
 
 ## Chunk context, and why it is off
 
@@ -1137,7 +1192,9 @@ bun extract-entities.ts --url … --limit 25              # a trial: this many, 
 bun extract-entities.ts --url … --status                # the pass, and the graph so far
 bun extract-entities.ts --url … --dry-run               # what a run would do; writes nothing
 bun extract-entities.ts --url … --retry-failed          # failed rows back into the pool first
-bun extract-entities.ts --url … --retry-partial         # rows extracted over a prefix back into the pool — after raising OB1_EXTRACT_MAX_WINDOWS
+bun extract-entities.ts --url … --retry-partial         # rows extracted in part back into the pool — after raising OB1_EXTRACT_MAX_WINDOWS
+bun extract-entities.ts --url … --retry-left-out        # …only those with windows left out as malformed — after a change of model, kept to this pool with --job (below)
+OB1_METADATA_MODEL=<larger> bun extract-entities.ts --url … --job <the recorded key> --retry-left-out --limit N   # a larger model over those N rows, the key and trigger left as they are (--status prints it)
 #   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (300, per model call — per window of a long thought)
 bun extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from the recorded key
 ```
@@ -1155,7 +1212,14 @@ running to the model's context and the worker's timeout — and a call cut that
 way is made once more with a frequency penalty (`RUNAWAY_PENALTY`, 0.5), which
 taxes the repetition the runaways were measured to be: on the fork's brain that
 retry, with the budget sized to both measured models, extracted all 32 thoughts
-one call could not finish, where windows alone reached 10 to 13. The answer is
+one call could not finish, where windows alone reached 10 to 13. Set
+`OB1_EXTRACT_ESCALATE_MODEL` and a runaway is instead remade once on that larger
+local model with no penalty (SMD-2000) — the pass key on the rows stays the
+first model's, and the dump line records which model answered. The 27B never
+looped on the thoughts the 7B could not finish, so the escalation spends the
+large model only where the small one has failed; it loads it beside the embedder
+(28 GB on the dogfood Mac, and `OLLAMA_MAX_LOADED_MODELS=2` can evict the
+embedder mid-pass), so it is a per-brain choice, not the default. The answer is
 streamed, and a call is aborted the moment its answer holds three copies of one
 item (`RunawayDetector`, `RUNAWAY_REPEATS`; SMD-1960) — the loop is visible on
 the stream long before the budget, so a runaway costs seconds rather than the
@@ -1165,8 +1229,11 @@ retry rule, so 32 of 32 is derived, not re-measured whole) — and a call
 aborted so is retried as a cut one is, the retry read whole, since a penalised
 answer was measured to repeat an item three times and recover; an
 answer that enumerates distinct ids is not a loop by that rule and runs to the
-budget, which stays the bound. A thought whose retry also runs away is recorded
-failed, retryable. The window is the **metadata model's**, not the embedding
+budget, which stays the bound. A call whose retry also runs away is a
+malformed answer: a window's is left out of a thought at least one of whose
+other windows parsed (SMD-2260, below), and a thought none of whose windows
+parsed is recorded failed, retryable.
+The window is the **metadata model's**, not the embedding
 model's: `OB1_EXTRACT_CHUNK_TOKENS` when set, else derived from the model's
 served context (`KNOWN_CHAT_MODEL_WINDOW`, measured as `KNOWN_MODEL_WINDOW` is)
 and held at the size the default model was measured to finish reliably; a model
@@ -1174,7 +1241,8 @@ the table does not list gets that default. The banner's `window:` line and
 preflight's `extraction window` row print the same sentence. The prompt version
 is 2 — a pass under it re-extracts a brain whose thoughts were cut at 8,000
 characters under p1 — so the first run after upgrading needs `--switch-key`.
-`--dump`'s line carries `windows`, `retried` and `abortedMs` — how far into
+`--dump`'s line carries `windows`, `retried` (or `escalated: <model>` when the
+runaway went to the larger model, SMD-2000) and `abortedMs` — how far into
 the call a runaway was aborted on the stream — and, for a windowed thought,
 each window's own answer in `parts` beside the merged one. Why, measured:
 `evals/README.md`, "Entity extraction in windows".
@@ -1211,6 +1279,44 @@ version is unchanged: a whole extraction is what it was. What changes is a
 thought over the count, which stored nothing and now stores its opening, and a
 thought whose runs pass the text bound, which was sent whole and is now cut at
 it.
+
+**A malformed window is left out, not the thought (SMD-2260).** A windowed
+thought some of whose windows the model answers with something other than JSON
+of the expected shape is written from the windows that parsed, and its claim is
+released succeeded with a caveat naming the rest: `partial: 2 of 3 windows
+extracted; the model's answer for window 2 was not JSON of the expected shape,
+and its text is not in the graph` (`… of the N sent …`, and the bound, for a
+prefix with windows left out). Only a thought none of whose windows parsed — a
+one-window thought's one answer included — is failed as malformed, as before; a
+window that times out still fails its thought. Until this,
+one malformed window failed the thought, its parsed windows with it: on the
+stable brain three research papers kept nothing because the model could not
+answer their reference lists, 15 to 22 of 24 windows parsed, and a larger model
+mangled the same windows. These rows are the second kind of partial row, which
+the summary and `--status` count and list apart from a prefix
+(`13 extracted (1 over a prefix only, 1 with windows left out as malformed), 1
+failed`) — a row with windows left out is closer to a failure, since the model
+decided it, not the bound; a row of both kinds, a prefix with windows left out
+as the papers were, counts with the windows left out, and the counts say how
+many of those are over the bound too. `--retry-partial` returns every partial
+row and `--retry-left-out` those with windows left out alone — the lever for
+them is the model, and re-reading every prefix to the place it already reached
+under a larger model would cost up to the bound's calls each for nothing. A
+changed `OB1_METADATA_MODEL` is another extraction key, so the retry keeps to
+this pool with `--job`, and to the returned rows with `--limit` and no other
+worker of the pool running, since the workers claim pending rows by queue time
+and a returned row keeps its own, so an older pending row is claimed in its
+place (`--status` prints the command, and the pool's pending count beside it).
+`OB1_EXTRACT_ESCALATE_MODEL` (SMD-2000, above) is not this: it remakes a call
+that ran away, within the pass, and a window answered in prose never ran away,
+so a window left out beside it was either not a runaway or failed the larger
+model too. Either
+flag reads a row again under the bound and the model in force: whole, or, over
+the bound, to it; a reading that fails outright — a window timing out, none
+parsing — records the row failed, and the earlier reading's entities stay in
+the graph until a later reading succeeds, since a failure writes nothing. A run that leaves partial rows and
+no failure exits 0, the partial rows listed on stdout: a job watching the exit
+code or stderr sees them only as `--status` counts them.
 
 **What may leave.** The egress gate (SMD-1903) reads each row's own
 `metadata` — `source`, `type`, `topics` — and its text against `OB1_EGRESS_POLICY`
@@ -2478,8 +2584,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1960 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 782 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 2043 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 832 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
@@ -2805,7 +2911,17 @@ first assumed. See FORK.md's SMD-1632 section.
   `OB1_EXTRACT_MAX_WINDOWS=2` is released succeeded with a `partial:` caveat,
   its opening's entities and edge in the graph and its closing's entity not, `--status` counting
   and listing it apart; `--retry-partial` under the default bound reads it
-  whole and clears the caveat (SMD-2240).
+  whole and clears the caveat (SMD-2240). Then, under a bound of two, a
+  two-window thought whose second window the stub answers in prose is released
+  succeeded with that window named in its caveat, the other window's entities
+  and edge in the graph, a three-window thought so is released with the window
+  and the bound both named, and a two-window thought answered in prose
+  throughout is failed; `--status` counts and lists the two kinds of partial
+  row apart, the row of both among the windows left out and counted over the
+  bound too; `--retry-left-out`, run as `--status` advises — another model,
+  `--job` this pool's key — the stub answering now, takes those two and not the prefix, saying one is a
+  prefix too, and clears their caveats and adds the windows' entities, and
+  `--retry-partial` then takes the prefix (SMD-2260).
 
 ### What test-schema.ts asserts
 

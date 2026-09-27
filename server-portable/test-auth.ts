@@ -23,7 +23,7 @@ const { assert, report } = createAssert();
 // both the manifest (tools.ts) and the server is still caught — but typed as
 // ToolName, so a typo in this list is a compile error, not a runtime surprise
 // (SMD-1805).
-const MUTATING = ["capture_thought", "update_thought", "delete_thought"] as const satisfies readonly ToolName[];
+const MUTATING = ["capture_thought", "update_thought", "delete_thought", "retry_failed", "release_stale_leases"] as const satisfies readonly ToolName[];
 
 
 const WRITE_KEY = "w".repeat(64);

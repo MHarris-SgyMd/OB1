@@ -186,6 +186,10 @@ services:
       # …and the per-thought bound (SMD-2240): unset, 24 windows. Forwarded
       # for preflight's row, as the window is.
       OB1_EXTRACT_MAX_WINDOWS: ${OB1_EXTRACT_MAX_WINDOWS:-}
+      # The larger model a runaway extraction escalates to (SMD-2000). The
+      # server never extracts; preflight, in this container, names it on the
+      # extraction window row and probes it with --deep.
+      OB1_EXTRACT_ESCALATE_MODEL: ${OB1_EXTRACT_ESCALATE_MODEL:-}
       OB1_EMBEDDING_DIMENSIONS: ${OB1_EMBEDDING_DIMENSIONS:-}
       OB1_LLM_API_KEY: ${OB1_LLM_API_KEY:-}
       # A chat endpoint of its own, when the two calls are not served by one
@@ -395,7 +399,8 @@ services:
       timeout: 5s
       retries: 20
 
-  # Pulls the two models — three when OB1_JUDGE_MODEL names one — then exits.
+  # Pulls the two models — more when OB1_JUDGE_MODEL or
+  # OB1_EXTRACT_ESCALATE_MODEL names one — then exits.
   # First run downloads a few hundred MB.
   ollama-pull:
     image: *ollama-image
@@ -408,12 +413,14 @@ services:
       # Read by the shell below, not by compose: `$$` reaches the container as
       # `$`, so an unset knob pulls nothing rather than a model named "".
       OB1_JUDGE_MODEL: ${OB1_JUDGE_MODEL:-}
+      OB1_EXTRACT_ESCALATE_MODEL: ${OB1_EXTRACT_ESCALATE_MODEL:-}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         ollama pull ${OB1_EMBEDDING_MODEL:-qwen3-embedding:4b}
         ollama pull ${OB1_METADATA_MODEL:-qwen2.5:7b}
         [ -z "$$OB1_JUDGE_MODEL" ] || ollama pull "$$OB1_JUDGE_MODEL"
+        [ -z "$$OB1_EXTRACT_ESCALATE_MODEL" ] || ollama pull "$$OB1_EXTRACT_ESCALATE_MODEL"
     restart: "no"
 
   # The typed-decision tier (SMD-2050). Optional — `--profile jev`; a brain

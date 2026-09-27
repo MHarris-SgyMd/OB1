@@ -25,6 +25,7 @@
 import { SQL } from "bun";
 import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgress } from "./brain-info.ts";
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
+import type { Lineage } from "./lineage.ts";
 import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
   Actor,
@@ -43,6 +44,9 @@ import type {
   ThoughtKeywordMatch,
   LoggedSearchPage,
   WorkerStatusRow,
+  RetryFailedResult,
+  ReleaseLeasesOpts,
+  ReleaseLeasesResult,
   ThoughtIdPage,
   ThoughtListItem,
   ThoughtMatch,
@@ -358,6 +362,58 @@ export class SqlStore implements ThoughtStore {
     });
   }
 
+  async retryFailed(workType: string): Promise<RetryFailedResult> {
+    // The write half of workerStatus, over thought_work_claims (SMD-2132): the
+    // db/*.ts --retry-failed path (extract-entities.ts:413-420) as one statement.
+    // Scoped to the one pool — WHERE work_type = $1 AND status = 'failed' — so a
+    // sibling pool's failures are untouched; a fresh attempt clears the recorded
+    // error, the finish time and the count (015's REQUEUE_SET_SQL shape). The
+    // caller has already gated the write scope. RETURNING the ids feeds the audit.
+    const rows = await this.sql`
+      UPDATE thought_work_claims
+         SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0
+       WHERE work_type = ${workType} AND status = 'failed'
+      RETURNING thought_id`;
+    const ids = rows.map((r: { thought_id: string }) => String(r.thought_id));
+    return { workType, retried: ids.length, ids };
+  }
+
+  async releaseStaleLeases(opts: ReleaseLeasesOpts): Promise<ReleaseLeasesResult> {
+    // The write half of workerStatus (SMD-2132): return `claimed` rows to the
+    // pool, the release_claims_for_worker(...) path (migration 015:362-382) over a
+    // tool. The SET mirrors that function — pending, TTL cleared, attempt
+    // decremented (an un-run lease is not penalised, so a released row is not one
+    // attempt closer to 'failed'). One static statement; the optional scoping and
+    // the live-lease switch ride as parameters rather than composed SQL, so there
+    // is no interpolation to escape (see the bun-sql template rules). Without
+    // includeLive only past-ttl_expires_at leases match — a live lease is left for
+    // its holder. The caller has gated the write scope and refused includeLive
+    // without a workerId; this method trusts that and does the mutation.
+    const workType = opts.workType ?? null;
+    const workerId = opts.workerId ?? null;
+    const includeLive = opts.includeLive === true;
+    // Defense in depth: the surfaces refuse includeLive without a workerId as a
+    // value (with a code), and never reach here without one — but a direct caller
+    // must not be able to release EVERY live lease across every pool by omitting it.
+    if (includeLive && (workerId === null || workerId.trim() === "")) {
+      throw new Error("releaseStaleLeases: includeLive requires a workerId — refusing to release every live lease");
+    }
+    const rows = await this.sql`
+      UPDATE thought_work_claims
+         SET status = 'pending', ttl_expires_at = NULL, attempt_count = GREATEST(attempt_count - 1, 0)
+       WHERE status = 'claimed'
+         AND (${workType}::text IS NULL OR work_type = ${workType})
+         AND (${workerId}::text IS NULL OR worker_id = ${workerId})
+         AND (${includeLive} OR ttl_expires_at < now())
+      RETURNING thought_id, worker_id`;
+    const claimed = rows as Record<string, unknown>[];
+    const ids = claimed.map((r) => String(r.thought_id));
+    const workers = Array.from(new Set(
+      claimed.map((r) => r.worker_id).filter((w): w is string => typeof w === "string"),
+    ));
+    return { released: ids.length, ids, workers };
+  }
+
   async databaseFacts(opts?: ReadOptions, progress?: ReadProgress): Promise<DatabaseFacts> {
     return readDatabaseFacts(this.sql, opts, progress);
   }
@@ -414,6 +470,7 @@ export class SqlStore implements ThoughtStore {
     embeddingModel?: string;
     derivedFrom?: string[];
     supersedes?: string;
+    lineage?: Lineage;
   }): Promise<CaptureResult> {
     // One statement. No two-step fallback and no PGRST202 handling: over SQL a
     // missing function is a migration failure, and silently degrading to a
@@ -442,8 +499,10 @@ export class SqlStore implements ThoughtStore {
     // key leaves the row's label unknown.
     // 025: derived_from / supersedes ride it too; upsert_thought validates
     // derived_from and refuses a bad one — see store.ts's captureEnvelope.
+    // 061: the lineage envelope — the windows' and the tags' recipes — rides
+    // the same way, and upsert_thought records them with the write.
     const envelope = captureEnvelope(opts.payload, opts.actor, opts.embeddingModel,
-      { derivedFrom: opts.derivedFrom, supersedes: opts.supersedes });
+      { derivedFrom: opts.derivedFrom, supersedes: opts.supersedes }, opts.lineage);
 
     const rows = chunks.length
       ? await this.sql`
@@ -479,14 +538,18 @@ export class SqlStore implements ThoughtStore {
     actor?: Actor;
     embeddingModel?: string;
     provenance?: UpdateProvenance;
+    lineage?: Lineage;
   }): Promise<UpdateResult> {
     const chunks = (opts.chunks ?? []).map((c) => ({
       content: c.content,
       embedding: toVector(c.embedding),
       context: c.context ?? null,
     }));
-    // Nine arguments since migration 032: the model beside the vector (021),
-    // then the provenance envelope — NULL when the edit named none.
+    // Eleven arguments since migration 061: the model beside the vector (021),
+    // the provenance envelope — NULL when the edit named none (032) — the
+    // write event, which this server does not send on an edit (046: NULL),
+    // and the lineage envelope, the windows' and the tags' recipes (061) —
+    // NULL when the edit carries neither.
     const rows = await this.sql`
       SELECT update_thought(
         ${opts.id}::uuid,
@@ -497,7 +560,9 @@ export class SqlStore implements ThoughtStore {
         ${opts.ifUnchangedSince ?? null}::timestamptz,
         ${actorPayload(opts.actor)}::jsonb,
         ${opts.embeddingModel ?? null}::text,
-        ${provenanceEnvelope(opts.provenance)}::jsonb
+        ${provenanceEnvelope(opts.provenance)}::jsonb,
+        NULL::jsonb,
+        ${opts.lineage ?? null}::jsonb
       ) AS r`;
     return normaliseMutation(rows[0]?.r as Record<string, unknown>);
   }

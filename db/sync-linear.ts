@@ -104,6 +104,7 @@ import { SqlStore } from "../server-portable/store-sql.ts";
 import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedEnv, type EmbeddedCapture } from "../server-portable/embed.ts";
 import { decideCalls, refusesEverything, type EgressSubject } from "../server-portable/egress.ts";
 import { extractMetadata, metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
+import { captureLineage } from "../server-portable/lineage.ts";
 import type { Actor } from "../server-portable/store.ts";
 import { describeEnv, loadEnv } from "./env.ts";
 import { linearClient, strict, type Gql } from "./linear-api.ts";
@@ -681,7 +682,8 @@ async function syncDerived(w: Writer, headId: string, parts: readonly Derived[])
     const { status: _status, ...tags } = g.chat.allowed ? await w.tags(content, subject) : metadataRefused();
     const actor: Actor = { ...w.actor, ...(g.record ? { egress: g.record } : {}) };
     if (row) {
-      const r = await w.store.updateThought({ id: row.id, content, metadataPatch: facetPatch(row.metadata ?? {}, { ...tagsOverExisting(tags), ...facets }) ?? undefined, embedding: embedded?.embedding, chunks: embedded?.chunks, actor, embeddingModel: embedded?.model });
+      // 061: the windows' and the tags' recipes ride the edit (SMD-1731).
+      const r = await w.store.updateThought({ id: row.id, content, metadataPatch: facetPatch(row.metadata ?? {}, { ...tagsOverExisting(tags), ...facets }) ?? undefined, embedding: embedded?.embedding, chunks: embedded?.chunks, actor, embeddingModel: embedded?.model, lineage: captureLineage(w.cfg, embedded, tags) });
       if (!r.ok && r.error === "DUPLICATE_CONTENT") { w.log(`  ! ${label}: the section's text is held by another thought (DUPLICATE_CONTENT); its row left as it was`); t.refused++; continue; }
       if (!r.ok) throw new Error(`section ${label}: updating ${row.id}: ${r.error}`);
       await w.structure(row.id, structure);
@@ -690,7 +692,7 @@ async function syncDerived(w: Writer, headId: string, parts: readonly Derived[])
       continue;
     }
     // The facets over the tags, as at a ticket's capture: `type: observation` is the adapter's word, not the model's guess.
-    const captured = await w.store.captureThought({ content, payload: { metadata: { ...tags, ...facets } }, chunks: embedded?.chunks ?? [], actor, embedding: embedded?.embedding ?? null, embeddingModel: embedded?.model, derivedFrom: [headId] });
+    const captured = await w.store.captureThought({ content, payload: { metadata: { ...tags, ...facets } }, chunks: embedded?.chunks ?? [], actor, embedding: embedded?.embedding ?? null, embeddingModel: embedded?.model, derivedFrom: [headId], lineage: captureLineage(w.cfg, embedded, tags) });
     // The text landed on another row in the window since the look above (a
     // race): a thought holds ONE identity (thought_sources' key is the
     // thought), so taking it would re-key that row — and two same-text parts
@@ -808,6 +810,8 @@ async function syncTicket(w: Writer, issue: LinearIssue, rows: BrainRow[], deriv
       actor: actorWith(g.record),
       embedding: embedded?.embedding ?? null,
       embeddingModel: embedded?.model,
+      // 061: the windows' and the tags' recipes, recorded with the write (SMD-1731).
+      lineage: captureLineage(w.cfg, embedded, tags),
     });
     await recordOn(captured.id);
     if (captured.existed === true) {
@@ -935,6 +939,8 @@ async function syncTicket(w: Writer, issue: LinearIssue, rows: BrainRow[], deriv
     chunks: embedded?.chunks,
     actor: actorWith(g.record),
     embeddingModel: embedded?.model,
+    // 061: the windows' and the tags' recipes ride the edit (SMD-1731).
+    lineage: captureLineage(w.cfg, embedded, tags),
   });
   // The holder arrived between the lookup and the edit (or is unfingerprinted): the same refusal.
   if (!r.ok && r.error === "DUPLICATE_CONTENT") return refuse(null);
