@@ -3099,13 +3099,12 @@ app.on(MCP_METHODS, "*", async (c) => {
   const server = buildServer(principal);
   const transport = new WebStandardStreamableHTTPServerTransport();
   await server.connect(transport);
-  // Reconstruct the Request from the cached body so the raw-stream read above
-  // does not leave the transport an empty body (SMD-2278). The client-abort
-  // signal is deliberately not carried onto it: this route already observes a
-  // disconnect through `c.req.raw.signal` at entry (the abandoned-request log,
-  // and `withSseKeepalive` below), and the server runs a started tool to
-  // completion (the keepalive comment below), so the transport is not handed a
-  // signal that would cancel it mid-run.
+  // Hand the transport the body reconstructed from the cached text above. The
+  // client-abort signal is deliberately not carried onto it: this route already
+  // observes a disconnect through `c.req.raw.signal` at entry (the
+  // abandoned-request log, and `withSseKeepalive` below), and the server runs a
+  // started tool to completion (the keepalive comment below), so the transport
+  // is not handed a signal that would cancel it mid-run.
   const mcpRequest = new Request(c.req.raw.url, {
     method: c.req.raw.method,
     headers: c.req.raw.headers,
