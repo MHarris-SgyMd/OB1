@@ -9231,7 +9231,9 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
   assert(stale.ok === false && stale.error === "STALE_CONTENT" && !(await rowsOf(t.id)).some((r) => r.kind === "entities"), "a stale extraction is refused before any lineage is written");
   const six = await one<{ r: { ok: boolean } }>(`SELECT record_thought_entities($1::uuid, 'extract:six@p2', '[{"name": "Dan", "type": "person", "confidence": 0.9}]'::jsonb, '[]'::jsonb, NULL, NULL) AS r`, [t.id]);
   assert(six.r.ok === true && (await rowOf(t.id, "entities"))!.recipe.declared === false && (await rowOf(t.id, "entities"))!.recipe.deterministic === false, "a six-argument call — every caller from before 061 — resolves through the default and records the key alone, undeclared");
-  assert(/p_recipe must be a JSON object, got array/.test(await refused(`SELECT record_thought_entities($1::uuid, 'extract:x@p2', '[]'::jsonb, '[]'::jsonb, NULL, NULL, '[]'::jsonb)`, [t.id])), "…and a non-object recipe is refused up front");
+  assert(/record_thought_entities: p_recipe must be a JSON object carrying a boolean "deterministic", got \[\]/.test(await refused(`SELECT record_thought_entities($1::uuid, 'extract:x@p2', '[]'::jsonb, '[]'::jsonb, NULL, NULL, '[]'::jsonb)`, [t.id]))
+      && /record_thought_entities: p_recipe must be a JSON object carrying a boolean "deterministic", got \{"model": "m"\}/.test(await refused(`SELECT record_thought_entities($1::uuid, 'extract:x@p2', '[]'::jsonb, '[]'::jsonb, NULL, NULL, '{"model": "m"}'::jsonb)`, [t.id])),
+    "…and a non-object recipe, or one without a boolean deterministic, is refused up front by the key's name (run-it, second review pass)");
 
   // The proposal: both inputs at the fingerprints the judge saw, as the row
   // takes them; a repeat pair records nothing; the ten-argument call resolves.
@@ -9244,7 +9246,9 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
     `the proposal's row: both thoughts at the fingerprints the row took, the judge's key and recipe (${JSON.stringify(pr)})`);
   const dup = await one<{ id: string | null }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'conflict_undirected', 0.5, NULL, 0.8, 'consolidate:other@p3') AS id`, [older.id, newer.id]);
   assert(dup.id === null && (await q(`SELECT 1 FROM derivations WHERE artifact_kind = 'proposal'`)).length === 1, "a pair already judged records nothing — through a seven-argument call, resolving by the defaults");
-  assert(/p_recipe must be a JSON object, got string/.test(await refused(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'conflict_undirected', 0.5, NULL, 0.8, 'consolidate:x@p3', NULL, NULL, NULL, '"x"'::jsonb)`, [newer.id, older.id])), "…and a non-object recipe is refused up front");
+  assert(/record_supersession_proposal: p_recipe must be a JSON object carrying a boolean "deterministic", got "x"/.test(await refused(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'conflict_undirected', 0.5, NULL, 0.8, 'consolidate:x@p3', NULL, NULL, NULL, '"x"'::jsonb)`, [newer.id, older.id]))
+      && /got \{"model": "j"\}/.test(await refused(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'conflict_undirected', 0.5, NULL, 0.8, 'consolidate:x@p3', NULL, NULL, NULL, '{"model": "j"}'::jsonb)`, [newer.id, older.id])),
+    "…and a non-object recipe, or one without a boolean deterministic, is refused up front by the key's name");
 
   // Deletes: a thought's rows go with it; the proposal 029's cascade removes takes its own.
   const del = await one<{ r: { ok: boolean } }>(`SELECT delete_thought($1::uuid, $2::jsonb, false) AS r`, [newer.id, JSON.stringify(ACTOR)]);
@@ -9272,6 +9276,12 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
   const rawAfter = await rowOf(RAW, "vector");
   assert(rawAfter !== undefined && rawAfter.fps[0] === rawFp0 && rawAfter.fps[0] !== (await fp("061: a raw row, rewritten")) && rawAfter.at === rawRow!.at,
     "a raw content edit that leaves the vector standing leaves its row at the text the vector came from — stale, as the census reads it — and moves no produced_at");
+  await db.query(`UPDATE thoughts SET embedding_model = 'relabelled' WHERE id = $1::uuid`, [RAW]);
+  const relabelled = await rowOf(RAW, "vector");
+  assert(relabelled !== undefined && relabelled.recipe.model === "relabelled" && relabelled.fps[0] === rawFp0 && relabelled.at !== rawRow!.at,
+    "a label moved alone re-records the model and keeps the fingerprint the vector was computed from — a stale row stays stale (run-it, second review pass)");
+  const nullEnv = await one<{ r: EditR }>(`SELECT update_thought($1::uuid, NULL, '{"n": 4}'::jsonb, NULL, NULL, NULL, $2::jsonb, NULL, NULL, NULL, 'null'::jsonb) AS r`, [a.id, JSON.stringify(ACTOR)]);
+  assert(nullEnv.r.ok === true, "a JSON null lineage envelope on an edit is no envelope, as it is on a capture");
   await db.query(`UPDATE thoughts SET embedding = NULL WHERE id = $1::uuid`, [RAW]);
   assert((await rowsOf(RAW)).length === 0, "a raw write clearing the vector drops its row");
 

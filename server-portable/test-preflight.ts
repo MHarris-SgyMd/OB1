@@ -1005,6 +1005,20 @@ else {
          `a chunk set without its lineage row does not start, the kind and the thought named, the raw writer blamed (every producer is current) and the re-apply's backfill the remedy (exit ${noLineage.code}: ${noLineage.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 220)})`);
   await ctx.unsafe(`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe) SELECT 'chunks', id, ARRAY[id], ARRAY[content_fingerprint], 'capture', '{"deterministic": true, "count": 2}'::jsonb FROM thoughts WHERE id = '${tid}'::uuid`);
   assert(/✓  lineage\s+every derived row has its lineage row — 1 lineage row\(s\): 0 backfilled/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and with the row back the check is ok again, counting the one row");
+  // The ticket's own mutant — a producer whose write skipped: 056's
+  // record_thought_entities, from before 061, standing alone (061's form
+  // dropped, 056 re-applied by hand) writes mentions with no lineage; the
+  // census fails naming the pair, and the remedy is the FILE, since a
+  // producer's body is older — not the raw writer (cold read, second review
+  // pass: the pass-1 tooth reached the raw-writer arm alone).
+  await ctx.unsafe(`DROP FUNCTION record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)`);
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("056") });
+  await ctx.unsafe(`SELECT record_thought_entities('${tid}'::uuid, 'extract:old@p2', '[{"name": "Ada", "type": "person", "confidence": 0.9}]'::jsonb, '[]'::jsonb, NULL, NULL)`);
+  const olderWriter = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(olderWriter.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 extraction\\(s\\) \\(${tid} under extract:old@p2\\) — written by a producer from before 061`).test(olderWriter.out) && /Apply db\/migrations\/061_derivations\.sql\. Its backfill records every artifact standing, at the thought's current text, marked legacy\./.test(olderWriter.out) && !/Every producer is 061's/.test(olderWriter.out),
+         `an extraction written by 056's writer — a producer from before 061 — does not start, the pair named, the file the remedy and not the raw writer (exit ${olderWriter.code}: ${olderWriter.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 220)})`);
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("061") });
+  assert(/✓  lineage\s+every derived row has its lineage row — 2 lineage row\(s\): 1 backfilled/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and 061 re-applied records the pair as legacy and leaves the one writer: ok again");
   await ctx.unsafe(`UPDATE thought_chunks SET context = 'Situating blurb.' WHERE context IS NULL`);
   const allCtxOff = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/all 2 chunks carry a context but OB1_CHUNK_CONTEXT is off/.test(allCtxOff.out),
@@ -1494,7 +1508,8 @@ else {
          "060 re-applied over 061 is a warning on the capture pair naming 061 — the body appends and projects, and records no lineage — with 061 as the remedy (SMD-1731)");
   assert(/✗  edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb,jsonb\) — an earlier migration re-applied by hand over 061/.test(pre061.out) && /DROP FUNCTION update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb,jsonb\);/.test(pre061.out),
          "…and 060's 10-argument update_thought stands beside 061's eleven: the start is refused naming it with its DROP");
-  assert(/✓  lineage\s+every derived row has its lineage row/.test(pre061.out), "…while the lineage census itself is clean — nothing has been written through the older body yet");
+  assert(/!  lineage\s+every derived row has its lineage row, but a producer is missing or stands in two forms \(7 bodies where 061 leaves six — an earlier file re-applied by hand beside 061's\): its next write records no lineage \(SMD-1731\)/.test(pre061.out) && /Apply db\/migrations\/061_derivations\.sql\./.test(pre061.out),
+         "…while the lineage census itself is clean, the check warns on the bodies: 060's 10-argument update_thought stands beside 061's, seven bodies where 061 leaves six (pass 2's cold read: the probe read two of the six)");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("061") });
   const shipped061 = await run(SQL_ENV);
   assert(shipped061.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, both shipped/.test(shipped061.out) && /✓  edit signature\s+[^\n]*with 061's body/.test(shipped061.out) && /✓  lineage\s+every derived row has its lineage row/.test(shipped061.out),
@@ -1545,12 +1560,14 @@ else {
   assert(reapplied003.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present and the 3-argument body is 061's, but the 2-argument body is not 005's — it does not refuse a non-object payload/.test(reapplied003.out) && /Apply db\/migrations\/061_derivations\.sql — the last definer of the 2-argument form as well\./.test(reapplied003.out),
          "an earlier 2-argument body over 060's is a warning naming 061, the last definer of that form too");
   // Both bodies stale at once — 003's 2-argument and 021's 3-argument: one
-  // warning says both, and the remedy is 035, once. 032 follows 021 here so
-  // `edit signature` stays ok and only `atomic capture` speaks.
+  // warning says both, and the remedy is 061, once on the capture pair. 032
+  // follows 021 here so `edit signature` stays ok; the lineage row warns too
+  // (021's body is a seventh where 061 leaves six) and names the same file.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") || f.startsWith("032") });
   const bothStale = await run(SQL_ENV);
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 .*; and it takes no fingerprint lock; and the 2-argument body is not 005's either — it does not refuse a non-object payload/.test(bothStale.out) && /Apply db\/migrations\/061_derivations\.sql — the last definer; 022's or 025's file alone/.test(bothStale.out) && (bothStale.out.match(/061_derivations/g) ?? []).length === 1,
-         "both bodies stale is one warning naming both, with 061 as the one remedy");
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 .*; and it takes no fingerprint lock; and the 2-argument body is not 005's either — it does not refuse a non-object payload/.test(bothStale.out) && /Apply db\/migrations\/061_derivations\.sql — the last definer; 022's or 025's file alone/.test(bothStale.out) && (bothStale.out.split("\n").filter((l, i, ls) => !/^\s*!\s+lineage\s/.test(l) && !/^\s*!\s+lineage\s/.test(ls[i - 1] ?? "")).join("\n").match(/061_derivations/g) ?? []).length === 1
+         && /^\s*!\s+lineage\s+.*7 bodies where 061 leaves six.*\n\s*→ Apply db\/migrations\/061_derivations\.sql\./m.test(bothStale.out),
+         "both bodies stale is one warning naming both, with 061 as the one remedy on the capture pair — and the lineage row warns on the same stale bodies, naming the same file (SMD-1731)");
   // 005 re-applied alone: a pre-022 3-argument body, and the 2-argument body
   // 005's — the guard back, no lock. The warning says which of the two stale
   // states the 2-argument body is in.

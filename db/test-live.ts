@@ -38,7 +38,8 @@ import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, applyFunctio
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES } from "../server-portable/consolidate.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-portable/entities.ts";
-import { CHUNK_ESTIMATOR, chunkRecipe, promptHash } from "../server-portable/lineage.ts";
+import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash } from "../server-portable/lineage.ts";
+import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, recordId, recordStructure, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
@@ -5966,6 +5967,17 @@ console.log("\n[29] Migration 061 on a real server: the windowed capture's linea
   const bare = chunkRecipe({ ...cfg, chunkContext: false }, { model: MODEL, chunks: [{ content: "w", embedding: [] as number[] }] });
   assert(bare !== undefined && bare.deterministic === true && !("blurb_model" in bare) && !("prompt_hash" in bare), "…deterministic, with no blurb model and no prompt hash, when the blurbs are off");
   assert(chunkRecipe(cfg, { model: MODEL, chunks: [] }) === undefined, "…and nothing for a capture that made no windows — no artifact, no recipe");
+  // The tags' recipe over the board sync's shape: tagsOverExisting clears an
+  // earlier marker with `metadata_extraction_failed: null` on a successful
+  // answer — a recipe still; a failure (a string reason) or an egress refusal —
+  // none (cold read, second review pass: the presence test recorded nothing
+  // for every ticket edit).
+  const metaCfg = { metadataModel: "stub-meta", metadataTemperature: 0 };
+  assert(metadataRecipe(metaCfg, tagsOverExisting({ people: [], topics: ["a"], type: "observation" }))?.model === "stub-meta"
+      && metadataRecipe(metaCfg, tagsOverExisting({ topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" })) === undefined
+      && metadataRecipe(metaCfg, metadataRefused()) === undefined
+      && metadataRecipe(metaCfg, { source: "mcp" }) === undefined,
+    "the tags' recipe reads the marker's value: a cleared marker (null) beside the extractor's tags is a recipe, a failure reason or a refusal is none, and tags with none of the extractor's keys are none");
 
   // The 4-argument form with the envelope: the set's row carries the recipe
   // as sent plus the count, at the capture's fingerprint; the vector's row beside it.

@@ -1913,10 +1913,14 @@ if (configFailed) {
          * epic names (SMD-1729: "an event and its lineage row commit
          * together"), and this is where it is caught: a producer's body from
          * before 061 (re-applied by hand), or a raw writer of the artifact
-         * tables. Every read is bounded at its SOURCE — the first 10,001 rows
-         * of each artifact table, whatever their order — so a start costs the
-         * same on a brain with a million mentions as on one with ten, and
-         * past the bound the line says the rest were not read. (Bounding the
+         * tables. Every SOURCE read is bounded — the first 10,001 rows of each
+         * artifact table, whatever their order — and past the bound the ok
+         * headline says "read" and the line says the rest were not; a missing
+         * row past the bound is not seen (a designed limit, said). The probe
+         * side is the lineage table's unique index, or a hash of the kind's
+         * rows when the planner prefers it — 26 ms at 24,000 lineage rows,
+         * 136 ms at 500,000 (run-it, second review pass) — so a start's cost
+         * follows the lineage table, not the artifact tables. (Bounding the
          * RESULT, the first shape, read every table whole on a healthy brain,
          * where nothing matches — cold read, first review pass.) The tags are
          * counted as coverage, not failed: nothing on a
@@ -1932,10 +1936,18 @@ if (configFailed) {
                 ledgerRemedy("061", APPLY_061));
           } else {
             const BOUND = 10001;
+            // Every producer's body: the 3- and 4-argument upsert_thought (the
+            // 2-argument form records nothing and is not asked), update_thought,
+            // the two record functions and the vector trigger's — six, each
+            // carrying 061's sentinel; a seventh is an older arity re-applied
+            // by hand beside 061's (cold read, second review pass: the probe
+            // read two of the six and called the rest "every producer").
             const [bodies] = (await sql`
               SELECT bool_and(p.prosrc LIKE '%ob1:derivation-recorded-with-its-artifact%') AS records, count(*)::int AS n
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
-               WHERE ns.nspname = 'public' AND p.proname IN ('record_thought_entities', 'record_supersession_proposal')`) as { records: boolean | null; n: number }[];
+               WHERE ns.nspname = 'public'
+                 AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number }[];
             type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; untagged: number; stale: number; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number };
             const [c] = (await sql`
               WITH ch_s AS (SELECT thought_id FROM public.thought_chunks LIMIT ${BOUND}),
@@ -1953,7 +1965,7 @@ if (configFailed) {
                    pr AS (SELECT s.id FROM pr_s s
                            WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'proposal' AND d.artifact_id = s.id)),
                    md_s AS (SELECT t.id FROM public.thoughts t
-                             WHERE (t.metadata ? 'type' OR t.metadata ? 'topics') AND NOT (t.metadata ? 'metadata_extraction_failed') LIMIT ${BOUND}),
+                             WHERE (t.metadata ? 'type' OR t.metadata ? 'topics') AND t.metadata->>'metadata_extraction_failed' IS NULL LIMIT ${BOUND}),
                    md AS (SELECT s.id FROM md_s s
                            WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'metadata' AND d.artifact_id = s.id)),
                    al AS (SELECT id, artifact_kind, input_ids, input_fingerprints, recipe FROM public.derivations LIMIT ${BOUND}),
@@ -1975,13 +1987,13 @@ if (configFailed) {
             // A source that reached the bound was sampled, not read whole: the
             // counts over it are of what was read, and the line says so.
             const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read, c.rows].some((r) => Number(r) >= BOUND);
-            const sample = capped ? ` — over the first ${BOUND.toLocaleString("en-US")} rows of each table read; the rest were not` : "";
+            const sample = capped ? ` — over the first ${BOUND.toLocaleString("en-US")} rows of each artifact table; the rest were not read` : "";
             const missing: string[] = [];
             if (Number(c.chunks)) missing.push(`${n(c.chunks)} chunk set(s) (thought ${(c.chunk_ids ?? []).join(", ")})`);
             if (Number(c.vectors)) missing.push(`${n(c.vectors)} vector(s) (thought ${(c.vector_ids ?? []).join(", ")})`);
             if (Number(c.entities)) missing.push(`${n(c.entities)} extraction(s) (${(c.entity_ids ?? []).join(", ")})`);
             if (Number(c.proposals)) missing.push(`${n(c.proposals)} proposal(s) (${(c.proposal_ids ?? []).join(", ")})`);
-            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — what SMD-1732's rebuild will re-derive); ${n(c.untagged)} thought(s) tagged before 061 carry no tag lineage (nothing on a row says which model tagged them — coverage, not a failure)${sample}`;
+            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — what SMD-1732's rebuild will re-derive); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)${sample}`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
               // so a raw writer (or a write skipped) — the re-apply's backfill, or
@@ -1990,19 +2002,33 @@ if (configFailed) {
               // ledger was blamed for a raw INSERT on a current schema).
               add("lineage", "fail",
                   `derived rows without a lineage row — ${missing.join("; ")} — written by a producer from before 061 (a write function, record_thought_entities or record_supersession_proposal re-applied by hand) or by a raw writer of the artifact tables; nothing can say what they were computed from (SMD-1731). ${coverage}`,
-                  bodies.records === true && Number(bodies.n) === 2
+                  bodies.records === true && Number(bodies.n) === 6
                     ? `Every producer is 061's, so these rows came from a raw writer of the artifact tables (a hand INSERT, a community schema, a bulk load) or a write skipped: re-apply the recorded migrations — ${REAPPLY_COMMAND} — and 061's backfill records every artifact standing, at the thought's current text, marked legacy; or record the rows' lineage yourself through ob1_record_derivation.`
                     : ledgerRemedy("061", `${APPLY_061} Its backfill records every artifact standing, at the thought's current text, marked legacy.`, "Re-applied, 061's backfill records every artifact standing, at the thought's current text, marked legacy."));
-            } else if (bodies.records === false || Number(bodies.n) !== 2) {
+            } else if (bodies.records !== true || Number(bodies.n) !== 6) {
               add("lineage", "warn",
-                  `every derived row has its lineage row, but ${Number(bodies.n) !== 2 ? "record_thought_entities or record_supersession_proposal is missing or doubled" : "record_thought_entities' or record_supersession_proposal's body is from before 061 (056 or 029 re-applied by hand)"}: the next extraction or consolidation pass writes rows without lineage (SMD-1731). ${coverage}`,
+                  `every derived row has its lineage row, but ${Number(bodies.n) !== 6 ? `a producer is missing or stands in two forms (${bodies.n} bodies where 061 leaves six — an earlier file re-applied by hand beside 061's)` : "a producer's body is from before 061 (013, 029, 056 or 060 re-applied by hand)"}: its next write records no lineage (SMD-1731). ${coverage}`,
                   ledgerRemedy("061", APPLY_061));
             } else {
-              add("lineage", "ok", `every derived row has its lineage row — ${coverage}`);
+              // A capped read says so in the headline, before the count that
+              // a reader stops at (run-it, second review pass: a missing row
+              // past the bound printed "every derived row has its lineage row").
+              add("lineage", "ok", capped ? `every derived row READ has its lineage row — the first ${BOUND.toLocaleString("en-US")} rows of each artifact table, the rest not read — ${coverage}` : `every derived row has its lineage row — ${coverage}`);
             }
           }
         } catch (e) {
-          add("lineage", "warn", `could not verify: ${(e as Error).message}`, "The check reads derivations, thoughts, thought_chunks, thought_entities, ob1_entity_edges, supersession_proposals and pg_proc.");
+          // A role that cannot read the table is the grant's fault, not the
+          // check's: a skip naming the grant, as the audit census does (run-it,
+          // second review pass) — `write privileges` above has already failed
+          // the start with the same GRANT.
+          const msg = (e as Error).message;
+          const denied = /permission denied for table (\w+)/.exec(msg)?.[1];
+          if (denied) {
+            add("lineage", "skip", `not checked — this role cannot read ${denied} (${msg})`,
+                `GRANT SELECT ON ${denied} TO <the connector's role>; — ${denied === "derivations" ? "the capture group's row since 061" : "a row of the grants table"}, which migrate.ts --grant issues (db/README.md, Grants for a capturing role).`);
+          } else {
+            add("lineage", "warn", `could not verify: ${msg}`, "The check reads derivations, thoughts, thought_chunks, thought_entities, ob1_entity_edges, supersession_proposals and pg_proc.");
+          }
         }
 
         /**

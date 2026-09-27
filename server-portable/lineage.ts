@@ -83,7 +83,12 @@ export function chunkRecipe(cfg: Pick<EmbedConfig, "chunkTokens" | "chunkOverlap
  * no model wrote would be a lie.
  */
 export function metadataRecipe(cfg: Pick<EmbedConfig, "metadataModel" | "metadataTemperature">, tags: Record<string, unknown> | undefined): Recipe | undefined {
-  if (!tags || "metadata_extraction_failed" in tags) return undefined;
+  // The marker's VALUE, not its presence: tagsOverExisting writes
+  // `metadata_extraction_failed: null` onto a successful answer to clear an
+  // earlier marker, and a presence test read that as a failure — the board
+  // sync's ticket-edit path recorded no tags' lineage at all (cold read,
+  // second review pass). A string marker (a reason) is a failure still.
+  if (!tags || tags.metadata_extraction_failed != null) return undefined;
   if (!TAG_KEYS.some((k) => k in tags)) return undefined;
   return { deterministic: false, model: cfg.metadataModel, prompt_version: METADATA_PROMPT_VERSION, prompt_hash: promptHash(METADATA_PROMPT), temperature: cfg.metadataTemperature };
 }

@@ -672,6 +672,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   assert(run.code === 0, `--reapply exits 0 ${shown(run)}`);
   assert(new RegExp(`re-applying every migration \\(${MIGRATIONS.length - 3} recorded, 3 pending\\), in order, in one transaction with a ${LOCK_TIMEOUT_S} s lock timeout`).test(run.out) &&
            /Stop the server and any re-embed or extraction worker first/.test(run.out) &&
+           /061 backfills the lineage table from the proposals, the mentions and edges, the chunks and the vectors \(reads; ON CONFLICT DO NOTHING on a re-apply\)\./.test(run.out) &&
            /021_embedding_model_per_row\.sql\s+applied/.test(run.out) && /022_capture_replaces_chunks\.sql\s+applied/.test(run.out) && /030_label_from_claims_excludes_accepted\.sql\s+applied/.test(run.out) &&
            new RegExp(`applied 3, re-applied ${MIGRATIONS.length - 3}, skipped 0`).test(run.out) && !/already applied/.test(run.out),
          "…says what it ran: every file in order, the pending ones (021, the hole at 022, and 030) applied in their place, none skipped, and the operator's precondition");

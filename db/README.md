@@ -166,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2034 assertions: 2034 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2036 assertions: 2036 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports sixty-one (61) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -541,8 +541,10 @@ and no foreign key (two AFTER DELETE triggers drop what a deleted thought or
 proposal keyed). Every producer records in the transaction that writes its
 rows, through `ob1_record_derivation`, which refuses a bad shape: the vector by
 a trigger on the row store (`thoughts_record_vector_lineage`, 060's snapshot
-trigger's shape — no column list, nothing under a replay, nothing when nothing
-moved), so a raw or vendored writer is covered; the windows and the tags by the
+trigger's shape — no column list, nothing under a replay, nothing while the
+vector and its label stand: a text edit alone leaves the row naming the text
+the vector came from, stale for the census to read), so a raw or vendored
+writer is covered; the windows and the tags by the
 3- and 4-argument `upsert_thought` and `update_thought` from a lineage envelope
 (`p_payload.lineage`, `update_thought`'s new eleventh argument `p_lineage`;
 the 10-argument form is dropped with its ACL carried, as 046 and 060 did) — a
@@ -562,7 +564,7 @@ chunk set, every vector — marked `legacy: true`; the tags are not backfilled
 check counts them as coverage, fails on a derived row without a lineage row
 (naming the kind and the ids), and reports the legacy and stale counts. The
 capture role gains every privilege on `derivations` (the grants table): run
-`migrate.ts --grant` again for a role granted before this file. Additive; two
+`migrate.ts --grant` again for a role granted before this file. Additive; three
 arities move under their own DROP; a re-apply re-seeds nothing. test-schema
 [57], test-live [29], test-upgrade [20n]; the rebuild that walks the table is
 SMD-1732's, the forget SMD-1723's.
@@ -2579,8 +2581,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2034 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 812 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 2036 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 813 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

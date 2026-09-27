@@ -94,8 +94,12 @@
 --        prompt's version and hash, the temperature) and the write moved the
 --        metadata — a fresh capture, a re-capture or an edit whose event
 --        carries a metadata diff. A caller that sends tags of its own sends no
---        recipe and gets no row: a client's tags are not a derivation. The
---        2-argument form is not redefined — it is a body of its own (060), and
+--        recipe and gets no row: a client's tags are not a derivation. On the
+--        board sync the extractor's tags and Linear's facets ride one patch,
+--        so a facet's move re-records the row: produced_at is the last write
+--        that carried the tags with a recipe, not the tagging time (cold read,
+--        second review pass) — the recipe's model and prompt are what a
+--        rebuild reads. The 2-argument form is not redefined — it is a body of its own (060), and
 --        no in-tree caller of it runs the extractor; a PostgREST caller by name
 --        gets no row, said here.
 --      - THE EXTRACTION: record_thought_entities gains p_recipe (a 7th
@@ -336,6 +340,8 @@ CREATE OR REPLACE FUNCTION ob1_record_vector_lineage()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+  v_fp text;
 BEGIN
   -- A fold's write is not a live derivation: the row it lands carries the
   -- lineage the copied table already holds (SMD-2117 copies both).
@@ -364,13 +370,24 @@ BEGIN
     DELETE FROM derivations WHERE artifact_kind = 'vector' AND artifact_id = NEW.id;
     RETURN NULL;
   END IF;
+  -- The fingerprint the row names: the text the VECTOR was computed from. A
+  -- vector that moved was computed from the row's current text; a label that
+  -- moved alone (021's and 030's backfills, a hand relabel) leaves the vector
+  -- as it was, so the row keeps the fingerprint it had — a stale row stays
+  -- stale (run-it, second review pass: a relabel re-hashed the current text
+  -- and laundered it), and a row that had none is at the current text.
+  IF TG_OP = 'UPDATE' AND NEW.embedding::real[] IS NOT DISTINCT FROM OLD.embedding::real[] THEN
+    SELECT d.input_fingerprints[1] INTO v_fp FROM derivations d
+     WHERE d.artifact_kind = 'vector' AND d.artifact_id = NEW.id AND d.produced_by = 'thoughts_record_vector_lineage';
+  END IF;
+  v_fp := COALESCE(v_fp, NEW.content_fingerprint, content_fingerprint_of(NEW.content));
   -- ob1:derivation-recorded-with-its-artifact — a CONTRACT SENTINEL, not
   -- prose (the 014 convention); preflight's `lineage` reads it. The whole
   -- recipe the decision's table names for a vector: the model and the width.
   -- The row's key as written, or the text hashed again (018's state, a raw
   -- row): a lineage row always names a fingerprint.
   PERFORM ob1_record_derivation('vector', NEW.id, ARRAY[NEW.id],
-                                ARRAY[COALESCE(NEW.content_fingerprint, content_fingerprint_of(NEW.content))],
+                                ARRAY[v_fp],
                                 'thoughts_record_vector_lineage',
                                 jsonb_build_object('deterministic', true, 'dims', array_length(NEW.embedding::real[], 1))
                                   || jsonb_strip_nulls(jsonb_build_object('model', NEW.embedding_model)),
@@ -840,7 +857,9 @@ BEGIN
   -- 061: the same guard for the lineage envelope, and for each recipe it
   -- names — an object carrying a boolean deterministic, refused by the
   -- key's name (run-it, first review pass).
-  IF p_lineage IS NOT NULL AND jsonb_typeof(p_lineage) <> 'object' THEN
+  -- A JSON null is no envelope, as p_payload.lineage's is (run-it, second
+  -- review pass: the two forms disagreed).
+  IF p_lineage IS NOT NULL AND jsonb_typeof(p_lineage) NOT IN ('object', 'null') THEN
     RAISE EXCEPTION
       'update_thought: p_lineage must be a JSON object, got %. A client that binds a JS string to a jsonb parameter double-encodes it — pass an object, or cast explicitly.',
       jsonb_typeof(p_lineage);
@@ -1168,8 +1187,8 @@ BEGIN
   IF p_relations IS NOT NULL AND jsonb_typeof(p_relations) <> 'array' THEN
     RAISE EXCEPTION 'record_thought_entities: p_relations must be a JSON array, got %', jsonb_typeof(p_relations);
   END IF;
-  IF p_recipe IS NOT NULL AND jsonb_typeof(p_recipe) <> 'object' THEN
-    RAISE EXCEPTION 'record_thought_entities: p_recipe must be a JSON object, got %', jsonb_typeof(p_recipe);
+  IF p_recipe IS NOT NULL AND (jsonb_typeof(p_recipe) <> 'object' OR COALESCE(jsonb_typeof(p_recipe->'deterministic'), '') <> 'boolean') THEN
+    RAISE EXCEPTION 'record_thought_entities: p_recipe must be a JSON object carrying a boolean "deterministic", got %', p_recipe;
   END IF;
 
   SELECT true, COALESCE(t.content_fingerprint, content_fingerprint_of(t.content))
@@ -1455,8 +1474,8 @@ BEGIN
   IF p_judge_key IS NULL OR p_judge_key = '' THEN
     RAISE EXCEPTION 'record_supersession_proposal: p_judge_key must name the pass, e.g. consolidate:<model>@p1';
   END IF;
-  IF p_recipe IS NOT NULL AND jsonb_typeof(p_recipe) <> 'object' THEN
-    RAISE EXCEPTION 'record_supersession_proposal: p_recipe must be a JSON object, got %', jsonb_typeof(p_recipe);
+  IF p_recipe IS NOT NULL AND (jsonb_typeof(p_recipe) <> 'object' OR COALESCE(jsonb_typeof(p_recipe->'deterministic'), '') <> 'boolean') THEN
+    RAISE EXCEPTION 'record_supersession_proposal: p_recipe must be a JSON object carrying a boolean "deterministic", got %', p_recipe;
   END IF;
   v_fp_older := COALESCE(p_older_fingerprint, (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = p_older_id));
   v_fp_newer := COALESCE(p_newer_fingerprint, (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = p_newer_id));
