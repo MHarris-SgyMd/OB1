@@ -788,19 +788,15 @@ jobs:
           bun-version: "1.4.0"
 
       # SMD-2251. The three dashboards need nothing from the stack, and built in
-      # series after it they added 35 s to the run's critical path. So they
-      # build here, in the background, one after another while the stack comes
-      # up (most of which is waiting on health checks, not CPU), and "The three
-      # dashboards build" below waits for them and reports each. The two Next
-      # dashboards read their env at build time — the gateway URL and a session
-      # secret, any values. Each dashboard writes its own log and exit code
-      # under $RUNNER_TEMP, and has its own time limit, which the wait step
-      # reads from there: a hang ends as 124 and the next dashboard still
-      # builds. timeout TERMs the build's process group and its KILL follows
-      # only while its own child lives, so a process that ignores TERM outlives
-      # the limit (and dies with the job); a 137 is a KILL from outside, as by
-      # the OOM killer. The subshell's output goes to files, so
-      # this step does not wait on it and ends at once; its stdin is /dev/null.
+      # series after it they added 35 s to this job. So they build here, in the
+      # background, one after another while the stack comes up (mostly waiting
+      # on health checks, not CPU), and "The three dashboards build" below
+      # waits for them and reports each. The two Next dashboards read their env
+      # at build time — the gateway URL and a session secret, any values. Each
+      # dashboard writes its log and exit code under $RUNNER_TEMP beside the
+      # one limit, which the wait step reads for its labels and cap; a hang
+      # ends as 124 and the next dashboard still builds. The subshell's output
+      # goes to files: otherwise this step would wait for the whole build.
       - name: The three dashboards start building, in the background
         id: dashboards
         env:
@@ -844,10 +840,8 @@ jobs:
       # passed a handler that exits at once, or that never got the server
       # (review pass 1). The stub runs from the image just built, which has
       # Bun, so nothing is pulled. The stop lands once the stub logs the
-      # server's request, not after a fixed head start: the dashboards build
-      # beside this step (SMD-2251), and under that load the call may not have
-      # reached the server in 0.5 s. The log is read into a string: `grep -q`
-      # on a pipe closes it early, which pipefail fails.
+      # server's request, so the call is in flight however loaded the runner
+      # is (the dashboards build beside this step, SMD-2251).
       - name: The Kubernetes image stops on SIGTERM, finishing a call in flight
         run: |
           KEY=$(openssl rand -hex 32)
@@ -859,7 +853,8 @@ jobs:
           for _ in $(seq 1 40); do curl -s -m 2 -o /dev/null -X POST -d '{}' http://127.0.0.1:8099/ && { up=1; break; }; sleep 0.25; done
           curl -s -N --max-time 10 -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $KEY" \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_thoughts","arguments":{"query":"stop probe"}}}' http://127.0.0.1:8099/ > /tmp/k8s-call.out &
-          for _ in $(seq 1 40); do grep -q 'embedding request' <<< "$(docker logs ob1-k8s-embed 2>&1)" && break; sleep 0.1; done
+          seen=""
+          for _ in $(seq 1 40); do grep -q 'embedding request' <<< "$(docker logs ob1-k8s-embed 2>&1)" && { seen=1; break; }; sleep 0.1; done
           t0=$(date +%s%3N); docker stop ob1-k8s-stop > /dev/null; ms=$(($(date +%s%3N) - t0))
           wait
           code=$(docker inspect -f '{{.State.ExitCode}}' ob1-k8s-stop)
@@ -869,6 +864,7 @@ jobs:
           echo "$log"
           echo "docker stop: ${ms} ms, exit $code; the call in flight answered: $(head -c 300 /tmp/k8s-call.out)"
           [ -n "$up" ] || { echo "the Kubernetes image never answered" >&2; exit 1; }
+          [ -n "$seen" ] || { echo "the server never called the embedding stub, so no call was in flight when the stop landed" >&2; exit 1; }
           if ! { [ "$code" = 0 ] && [ "$ms" -ge 1000 ] && [ "$ms" -lt 5000 ]; }; then echo "expected exit 0 once the call in flight answered, in 1–5 s (137 near 10 s is the grace period's kill; under 1 s it did not wait)" >&2; exit 1; fi
           grep -q '^SIGTERM: no longer accepting; 1 in flight' <<< "$log" || { echo "the handler did not count the call in flight" >&2; exit 1; }
           grep -q '"id":1' /tmp/k8s-call.out || { echo "the call in flight got no answer" >&2; exit 1; }
@@ -1270,19 +1266,23 @@ jobs:
 
       # SMD-1801. The three dashboards build from their pinned installs, with no
       # Supabase package among them (check 22 holds the imports; this holds the
-      # builds). The two Next dashboards are built, not run:
-      # they speak to the open-brain-rest gateway, which this stack does not
-      # serve (extensions/test-auth.ts starts it). The SvelteKit one speaks MCP
-      # to the server this stack serves, so it is driven too, below.
+      # builds). The two Next dashboards are built, not run: they speak to the
+      # open-brain-rest gateway, which this stack does not serve
+      # (extensions/test-auth.ts starts it). The SvelteKit one speaks MCP to
+      # the server this stack serves, so it is driven too, below.
       # They build in the background from the job's start (SMD-2251); this step
       # waits for that and reports it — each dashboard's log folded when it
-      # passed and open under an error when it failed, and a line of exit codes
-      # and times. It runs when a stack step failed too, so a broken build is
-      # never hidden behind one. The wait ends when the background shell
-      # writes its done mark or dies without it, or at a cap a minute past
-      # the three limits and their kill-after grace. A dead shell nothing has reaped yet is a zombie,
-      # which `kill -0` counts as alive, so its state is read instead (a
-      # never-reaped zombie held the wait to the cap; review pass 1).
+      # passed and open under an error when it failed, and a line per dashboard
+      # of exit code and seconds. It runs when a stack step failed too, so a
+      # broken build is never hidden behind one. The wait ends when the
+      # background shell writes its done mark or dies without it, or at a cap
+      # a minute past the three limits and their kill-after grace. A dead shell
+      # nothing has reaped yet is a zombie, which `kill -0` counts as alive, so
+      # its state is read instead (review pass 1). timeout TERMs a build's
+      # process group, and its child, the `sh -c` running the chain, dies on
+      # it (dash does not exec the last command of an && list), so a hang is
+      # 124 and a process that ignores TERM outlives the limit; a 137 is a KILL
+      # from outside.
       - name: The three dashboards build
         if: ${{ !cancelled() && steps.dashboards.outcome == 'success' }}
         run: |
