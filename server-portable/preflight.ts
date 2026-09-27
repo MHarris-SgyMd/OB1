@@ -874,8 +874,10 @@ if (configFailed) {
               if (r.usage || !schemas.includes("public")) {
                 causes.push(`public is not on its search_path, which is ${schemas.length ? schemas.map(quoteIdent).join(", ") : "empty"}`);
                 // pgvector's schema too, when the type does not resolve, so this
-                // row and `vector extension` print one statement (SMD-2238).
-                fixes.push(pathFix({ schemas, extension: r.vectorSchema, login: r.login, role: r.role, db: r.db, source }));
+                // row and `vector extension` print one path statement, which, run,
+                // puts both on the path (SMD-2238). A missing USAGE on pgvector's
+                // schema is the vector row's GRANT.
+                fixes.push(`${pathFix({ schemas, extension: r.vectorSchema, login: r.login, role: r.role, db: r.db, source })}  Then reconnect.`);
               }
               found = {
                 detail: `public.thoughts exists but does not resolve for this role (${causes.join("; ")})`,
@@ -1290,7 +1292,9 @@ if (configFailed) {
         } else if (vec.usage === false) {
           add("vector extension", "fail",
               `pgvector is installed in schema "${vec.schema}", but role ${vec.role} has no USAGE on that schema, so the bare type "vector" does not resolve and every capture and search would fail with 'type "vector" does not exist' — SET search_path alone will not help here`,
-              `GRANT USAGE ON SCHEMA ${vec.schema_ident} TO ${vec.role_ident};  (as a role that can)${vecOnPath ? "" : `  then put it on the path: ${vecPathFix()}  Then reconnect.`}`);
+              `GRANT USAGE ON SCHEMA ${vec.schema_ident} TO ${vec.role_ident};  (as a role that can)${vecOnPath ? "" : vecSource === "client"
+                ? `  ${vecPathFix().replace(/^./, (c) => c.toUpperCase())}  Then reconnect.`
+                : `  then put it on the path: ${vecPathFix()}  Then reconnect.`}`);
         } else {
           add("vector extension", "fail",
               `pgvector is installed in schema "${vec.schema}", which is not on this connection's search_path (role ${vec.role}, database ${vec.db}) — so the bare type "vector" does not resolve and every capture and search would fail with 'type "vector" does not exist'`,

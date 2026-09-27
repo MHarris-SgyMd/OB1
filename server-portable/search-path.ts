@@ -6,8 +6,9 @@
  * for the server's role, names the path's fix as a whole statement: the role's
  * own schemas, kept, with public added. Its `vector extension` row, when
  * pgvector's schema is off the path, names the same statement with that schema
- * added too: on one screen the two rows print one statement, and either, run,
- * mends both. The setting it starts from
+ * added too: on one screen the two rows print one path statement, which, run,
+ * puts both on the path (a missing USAGE on pgvector's schema is the vector
+ * row's GRANT). The setting it starts from
  * (`current_setting('search_path')`) is the session's own text, from the role,
  * the database or the connection. `SET` and `ALTER ROLE … SET` store it
  * re-quoted, but a connection string's `options`, `set_config` and `SET

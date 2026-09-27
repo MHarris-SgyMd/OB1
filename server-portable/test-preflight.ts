@@ -2348,6 +2348,9 @@ else {
       const vectorStmt = /(ALTER ROLE pf_reader IN DATABASE \S+ SET search_path = [^;]*;)/.exec(fix(wide.out, "vector extension"))?.[1];
       assert(!!schemaStmt && schemaStmt === vectorStmt && !/public, public/.test(wide.out),
              `…and the vector row prints the same statement, public once (${fix(wide.out, "vector extension")})`);
+      // Both say to reconnect: the running server's pooled connections keep the old path (review pass 2).
+      assert(fix(wide.out, "schema").endsWith(`${schemaStmt}  Then reconnect.  The table is there, so migrating would not make it resolve.`),
+             `…and the schema row, like the vector row, says to reconnect after it (${fix(wide.out, "schema")})`);
 
       // The path's statement is rebuilt from the parsed setting, never
       // echoed (SMD-2242). An empty path reads back as "" — a zero-length

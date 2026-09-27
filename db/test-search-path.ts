@@ -196,8 +196,12 @@ try {
     printedFix = new RegExp(`(ALTER ROLE \\S+ IN DATABASE \\S+ SET search_path = "\\$user", public, "${SCHEMA}";)`).exec(r.out)?.[1];
     assert(!!printedFix && !/ALTER DATABASE .* SET search_path/.test(r.out),
            `…with the login role's setting in this database, the path kept and ${SCHEMA} added (${printedFix})`);
-    assert(/beside any hnsw\.\* bounds, it does not replace them/.test(r.out),
-           "…and the note that the fix coexists with the hnsw walk bounds");
+    // The whole line, so a remedy that ran anything beside the statement
+    // (a RESET, say) — which [6], running the statement alone, would not see —
+    // fails here (review pass 2).
+    const vectorFix = r.out.split("\n").find((l) => /^\s*→ Put "ext" on the connection's search_path: /.test(l))?.trim();
+    assert(vectorFix === `→ Put "${SCHEMA}" on the connection's search_path: ${printedFix}  Then reconnect. This adds a setting beside any hnsw.* bounds, it does not replace them.`,
+           `…and the remedy line is that statement, then reconnect, and the note that it keeps the hnsw walk bounds (${vectorFix})`);
     // The two capture forms are matched by a signature built from pg_type's
     // names; regprocedure's text would spell `ext.vector` here and call the
     // present 3-argument form missing (SMD-1250, second review pass).
@@ -225,8 +229,14 @@ try {
     assert(new RegExp(`vector extension.*has no USAGE on that schema`, "s").test(r.out),
            "…the vector extension check names the missing USAGE, not an off-path schema");
     const grant = new RegExp(`(GRANT USAGE ON SCHEMA ${SCHEMA} TO ob1_nousage;)  \\(as a role that can\\)`).exec(r.out)?.[1];
-    const pathStmt = new RegExp(`then put it on the path: (ALTER ROLE ob1_nousage IN DATABASE \\S+ SET search_path = "\\$user", public, "${SCHEMA}";)`).exec(r.out)?.[1];
+    const pathStmt = new RegExp(`then put it on the path: (ALTER ROLE ob1_nousage IN DATABASE \\S+ SET search_path = "\\$user", public, "${SCHEMA}";)  Then reconnect\\.\\n`).exec(r.out)?.[1];
     assert(!!grant && !!pathStmt, `…and the remedy is the GRANT, which SET search_path alone would not fix, then the path (${grant} | ${pathStmt})`);
+    // The path from the connection string: the GRANT, then its options= value
+    // in the one-sentence form the off-path branch prints (review pass 2).
+    const viaOptions = await preflight({ DATABASE_URL: `${nurl}${nurl.includes("?") ? "&" : "?"}options=-csearch_path%3Dpublic` });
+    const clientLine = viaOptions.out.split("\n").find((l) => /^\s*→ GRANT USAGE ON SCHEMA/.test(l))?.trim() ?? "";
+    assert(new RegExp(`^→ GRANT USAGE ON SCHEMA ${SCHEMA} TO ob1_nousage;  \\(as a role that can\\)  The connection string sets search_path .*\\(separated by %20\\): -csearch_path%3Dpublic%2C%22${SCHEMA}%22  Then reconnect\\.$`).test(clientLine),
+           `…and with the path from the connection string, the GRANT and then its options= value (${clientLine})`);
     // Followed in two steps: the path first, and the row then asks for the
     // GRANT alone — the schema on the path, "put it on the path" is not said.
     if (pathStmt) await freshSession((sql) => sql.unsafe(pathStmt));
@@ -251,11 +261,11 @@ try {
            "…and with the setting replaced as printed, the type resolves");
   }
 
-  console.log("\n[5c] With public off the path too, the schema row and the vector row print one fix, which mends both");
+  console.log("\n[5c] With public off the path too, the schema row and the vector row print one fix, which puts both on the path");
   {
     // thoughts and pgvector both off the connection's path: the schema row's
-    // statement adds pgvector's schema as well, so the two rows agree, and
-    // either, followed, mends both (SMD-2238).
+    // statement adds pgvector's schema as well, so the two rows agree, and the
+    // one value, followed, puts both on the path (SMD-2238).
     const sep = URL_.includes("?") ? "&" : "?";
     const r = await preflight({ DATABASE_URL: `${URL_}${sep}options=-csearch_path%3Dnowhere` });
     const rowFix = (name: string) => {
@@ -274,8 +284,6 @@ try {
   console.log("\n[6] The printed fix makes preflight pass, and coexists with the hnsw bounds");
   {
     await freshSession(async (sql) => {
-      const [{ db }] = await sql`SELECT current_database() AS db`;
-      const ident = `"${String(db).replace(/"/g, '""')}"`;
       // An hnsw bound on the row the fix writes — the login role's in this
       // database — first, then the fix preflight printed in [4], run as
       // printed: it adds the path beside the bound, not in its place. Load
@@ -300,11 +308,10 @@ try {
            `the path and the hnsw bound are both the role's settings in the database, side by side (${roleCfg.join("; ")} | database: ${dbCfg.join("; ")})`);
   }
 } finally {
-  // ci-parity.sh shares one Postgres: leave pgvector in public and the database
-  // search_path and hnsw bounds cleared, and drop the role [5] mints, whatever
-  // happened above.
-  // [5] grants ob1_nousage USAGE on ext and a setting here, and [6] sets this
-  // role's path in the database.
+  // ci-parity.sh shares one Postgres: leave pgvector in public, this role's
+  // path and hnsw bound in the database ([6]) cleared, and the role [5] mints —
+  // with its USAGE on ext and its setting here — dropped, whatever happened
+  // above.
   await freshSession((sql) => sql.unsafe(`DO $r$ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_nousage') THEN EXECUTE 'DROP OWNED BY ob1_nousage'; END IF;
     EXECUTE format('ALTER ROLE %I IN DATABASE %I RESET search_path', session_user, current_database());
