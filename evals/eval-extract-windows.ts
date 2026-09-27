@@ -78,6 +78,10 @@ const arm = (name: string, windowTokens: number, opts: Partial<ExtractWindowing>
   name,
   windowing: { windowTokens, overlapTokens: windowTokens === Number.MAX_SAFE_INTEGER ? 0 : overlap(windowTokens), maxWindows: EXTRACT_MAX_WINDOWS, header: false, outputBudget: true, retryRunaway: false, streamAbort: false, ...opts },
 });
+// The larger model the `e` arms escalate a runaway to (SMD-2000): --escalate,
+// else OB1_EXTRACT_ESCALATE_MODEL. Absent, the `e` arms are refused below
+// rather than silently measured as a same-model penalised retry.
+const ESCALATE = flag("escalate") ?? process.env.OB1_EXTRACT_ESCALATE_MODEL ?? "";
 const ALL_ARMS: Arm[] = [
   arm("whole", Number.MAX_SAFE_INTEGER, { outputBudget: false }),
   arm("whole+budget", Number.MAX_SAFE_INTEGER),
@@ -94,10 +98,20 @@ const ALL_ARMS: Arm[] = [
   arm("whole+s", Number.MAX_SAFE_INTEGER, { retryRunaway: true, streamAbort: true }),
   arm("w1200s", 1200, { retryRunaway: true, streamAbort: true }),
   arm("w600s", 600, { retryRunaway: true, streamAbort: true }),
+  // `e`: a call that runs to its budget is escalated to a larger model
+  // (SMD-2000), unpenalised, rather than retried on the same model under the
+  // penalty — the w1200e arm the ticket measures beside w1200p on the
+  // stragglers and the brain's runaways.
+  arm("w1200e", 1200, { retryRunaway: true, ...(ESCALATE ? { escalateModel: ESCALATE } : {}) }),
 ];
 const wanted = flag("arms")?.split(",").map((s) => s.trim()).filter(Boolean);
 const ARMS = wanted ? ALL_ARMS.filter((a) => wanted.includes(a.name)) : ALL_ARMS;
 if (wanted && ARMS.length !== wanted.length) { console.error(`unknown arm in --arms; known: ${ALL_ARMS.map((a) => a.name).join(", ")}`); process.exit(2); }
+// An escalation arm with no model to escalate to would fall through to the
+// penalised retry and measure the wrong thing (SMD-2000) — refuse it by name.
+// Named explicitly, not by an `e` suffix (which "whole" also ends in).
+const ESCALATE_ARM_NAMES = new Set(["w1200e"]);
+if (ARMS.some((a) => ESCALATE_ARM_NAMES.has(a.name) && !a.windowing.escalateModel)) { console.error(`the ${[...ESCALATE_ARM_NAMES].join("/")} arm escalates a runaway to a larger model — pass --escalate <model> (or set OB1_EXTRACT_ESCALATE_MODEL)`); process.exit(2); }
 
 // ── The planted set ──────────────────────────────────────────────────────────
 
@@ -163,8 +177,8 @@ const norm = async (s: string) => ((await sql`SELECT normalize_entity_name(${s})
 
 /** `calls` is every model call the thought cost — entities.ts's callsOf, the worker's own count, or what a thrown thought had made (fourth and fifth review passes). */
 /** `abortedMs` is how far into its call a runaway was aborted on the stream — the longest call's, when several were (SMD-1960); absent when none was. */
-/** `partial`: the thought was over the per-thought bound and only its prefix was extracted (SMD-2240) — ok, but its counts are the prefix's. */
-type Outcome = { arm: string; id: string; tokens: number; windows: number; calls: number; ok: boolean; malformed: boolean; timedOut: boolean; error?: string; seconds: number; entities: number; edges: number; retried: boolean; abortedMs?: number; partial?: Coverage };
+/** `partial`: the thought was over the per-thought bound and only its prefix was extracted (SMD-2240), or some windows' answers were malformed and left out (SMD-2260) — ok, but its counts are the windows that parsed. */
+type Outcome = { arm: string; id: string; tokens: number; windows: number; calls: number; ok: boolean; malformed: boolean; timedOut: boolean; error?: string; seconds: number; entities: number; edges: number; retried: boolean; escalated?: string; abortedMs?: number; partial?: Coverage };
 const outcomes: Outcome[] = [];
 
 async function runOne(arm: Arm, doc: Doc): Promise<{ thoughtId: string | null; ex: Extraction | null; out: Outcome }> {
@@ -176,15 +190,16 @@ async function runOne(arm: Arm, doc: Doc): Promise<{ thoughtId: string | null; e
     const ex = await extractEntities(doc.content, cfg, TIMEOUT_MS, { kind: "extraction" }, arm.windowing);
     const seconds = (Date.now() - t0) / 1000;
     const retried = ex.retried === true;
+    const escalated = ex.escalated !== undefined ? { escalated: ex.escalated } : {};
     const aborted = ex.abortedMs !== undefined ? { abortedMs: ex.abortedMs } : {};
     if (ex.malformed) {
-      const out = { arm: arm.name, id: doc.id, tokens, windows: ex.windows, calls: callsOf(ex), ok: false, malformed: true, timedOut: false, seconds, entities: 0, edges: 0, retried, ...aborted };
+      const out = { arm: arm.name, id: doc.id, tokens, windows: ex.windows, calls: callsOf(ex), ok: false, malformed: true, timedOut: false, seconds, entities: 0, edges: 0, retried, ...escalated, ...aborted };
       outcomes.push(out);
       return { thoughtId, ex, out };
     }
     const [{ w }] = await sql`SELECT record_thought_entities(${thoughtId}::uuid, ${key}, ${ex.entities}::jsonb, ${ex.relations}::jsonb) AS w`;
     const res = w as { mentions?: number; edges?: number };
-    const out = { arm: arm.name, id: doc.id, tokens, windows: ex.windows, calls: callsOf(ex), ok: true, malformed: false, timedOut: false, seconds, entities: res.mentions ?? 0, edges: res.edges ?? 0, retried, ...aborted, ...(ex.coverage ? { partial: ex.coverage } : {}) };
+    const out = { arm: arm.name, id: doc.id, tokens, windows: ex.windows, calls: callsOf(ex), ok: true, malformed: false, timedOut: false, seconds, entities: res.mentions ?? 0, edges: res.edges ?? 0, retried, ...escalated, ...aborted, ...(ex.coverage ? { partial: ex.coverage } : {}) };
     outcomes.push(out);
     return { thoughtId, ex, out };
   } catch (e) {
@@ -260,7 +275,7 @@ for (const arm of ARMS) {
   for (const d of docs) {
     process.stderr.write(`  … ${arm.name} ${d.id.slice(0, 8)} (${estimateTokens(d.content)} tokens)\n`);
     const { out } = await runOne(arm, d);
-    console.log(`    ${arm.name.padEnd(13)} ${d.id.slice(0, 8)} ${String(out.tokens).padStart(5)} tok  ${out.ok ? "ok       " : out.malformed ? "malformed" : out.timedOut ? "TIMEOUT  " : "ERROR    "}  ${out.seconds.toFixed(1).padStart(6)} s  windows ${out.windows}  entities ${out.entities}  edges ${out.edges}${out.retried ? "  retried" : ""}${out.abortedMs !== undefined ? `  aborted at ${(out.abortedMs / 1000).toFixed(1)} s` : ""}${out.partial ? `  PARTIAL ${out.partial.windows} of ${out.partial.of} windows` : ""}${out.error ? `  ${out.error}` : ""}`);
+    console.log(`    ${arm.name.padEnd(13)} ${d.id.slice(0, 8)} ${String(out.tokens).padStart(5)} tok  ${out.ok ? "ok       " : out.malformed ? "malformed" : out.timedOut ? "TIMEOUT  " : "ERROR    "}  ${out.seconds.toFixed(1).padStart(6)} s  windows ${out.windows}  entities ${out.entities}  edges ${out.edges}${out.escalated ? `  escalated→${out.escalated}` : out.retried ? "  retried" : ""}${out.abortedMs !== undefined ? `  aborted at ${(out.abortedMs / 1000).toFixed(1)} s` : ""}${out.partial ? `  PARTIAL ${out.partial.windows - (out.partial.malformed?.length ?? 0)} of ${out.partial.of} windows${out.partial.malformed ? ` (${out.partial.malformed.length} malformed, left out)` : ""}` : ""}${out.error ? `  ${out.error}` : ""}`);
   }
 }
 
@@ -277,9 +292,16 @@ for (const arm of ARMS) {
   );
 }
 // Until SMD-2240 a thought over the bound was a failure here; now it is a
-// prefix, extracted — counted in "extracted", so say how many were (review pass 1).
+// prefix, extracted — counted in "extracted", so say how many were (review
+// pass 1). Until SMD-2260 a thought with one malformed window was counted
+// malformed; now it is extracted with the window left out, so say how many
+// were, and how many windows: the malformed column plus these is the old one.
 for (const arm of ARMS) {
-  const partial = outcomes.filter((o) => o.arm === arm.name && o.partial).length;
-  if (partial) console.log(`  ${arm.name}: ${partial} of the extracted thought(s) were over the per-thought bound and read as a prefix only — their entity and edge counts are the prefix's`);
+  const mine = outcomes.filter((o) => o.arm === arm.name && o.partial);
+  // A prefix with windows left out is counted on the second line, as the worker counts it (review pass 2).
+  const prefix = mine.filter((o) => !o.partial!.malformed?.length && (o.partial!.windows < o.partial!.of || o.partial!.cut)).length;
+  if (prefix) console.log(`  ${arm.name}: ${prefix} of the extracted thought(s) were over the per-thought bound and read as a prefix only — their entity and edge counts are the prefix's`);
+  const leftOut = mine.filter((o) => o.partial!.malformed?.length);
+  if (leftOut.length) console.log(`  ${arm.name}: ${leftOut.length} of the extracted thought(s) had ${leftOut.reduce((n, o) => n + o.partial!.malformed!.length, 0)} window(s) answered malformed and left out — counted malformed before SMD-2260; their counts are the windows that parsed`);
 }
 await sql.close();

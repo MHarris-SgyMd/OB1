@@ -321,7 +321,16 @@ The short version:
   re-embedding when you change your mind, which is exactly why it is not the
   default. The supersession judge (`db/consolidate.ts`) is the harder task and
   has its own knob, `OB1_JUDGE_MODEL`, so it alone can run on the larger model
-  while every capture's tagging stays on the default. Reasoning is off by
+  while every capture's tagging stays on the default. Extraction has the mirror
+  knob, `OB1_EXTRACT_ESCALATE_MODEL`: a call the default runs away on — one it
+  cannot finish (`finish_reason: length`) — is remade once on the larger model
+  with no penalty, rather than retried on the default under one. The 27B never
+  looped on the thoughts the 7B could not finish, and a whole-pass 27B run was
+  no faster than the 7B's (44–47 s a call against 33), so the escalation spends
+  it only on the failures, not as the default. It loads the 27B beside the 4B
+  embedder — 28 GB on the dogfood Mac, and with `OLLAMA_MAX_LOADED_MODELS=2` a
+  capture mid-pass can evict one and pay its reload — so leave it unset on a box
+  that cannot hold both. Reasoning is off by
   default: `think: false` is silently ignored on the OpenAI-compatible endpoint, so
   the server sends `reasoning_effort: "none"` — without it a thinking model
   multiplies capture latency with no warning.
