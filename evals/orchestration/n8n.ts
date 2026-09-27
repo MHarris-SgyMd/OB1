@@ -241,13 +241,22 @@ async function importChecks(env: Record<string, string>): Promise<Check> {
   const stray = await importRun(env, IMPORT.stray);
   const [n3] = rows();
   const snoop = await importRun(env, IMPORT.snoop);
-  const leftovers = compose("n8n", ["exec", "-T", "orchestration-runner", "ps", "-o", "args"]).out.split("\n").filter((l) => /sleep 900/.test(l)).length;
+  // The listing must be read: a failed exec read as "no leftovers" (review pass 3).
+  const ps = compose("n8n", ["exec", "-T", "orchestration-runner", "ps", "-o", "args"]);
+  const leftovers = ps.code === 0 && /runner\.ts/.test(ps.out) ? ps.out.split("\n").filter((l) => /sleep 900/.test(l)).length : NaN;
+  // The runner down: the door answers 502, and the import's saved run holds neither its key nor the header (review pass 3).
+  compose("n8n", ["stop", "orchestration-runner"]);
+  const down = await importRun(env, IMPORT.pipeline).finally(() => compose("n8n", ["start", "orchestration-runner"]));
+  const runnerUp = async () => (await importRun(env, IMPORT.snoop)).status === 200;
+  const t0 = Date.now();
+  while (Date.now() - t0 < 60_000 && !(await runnerUp().catch(() => false))) await Bun.sleep(2000);
   const key = await apiKey(env);
   const fixtureId = await workflowId(key, `OB1 import — ${IMPORT.pipeline}`);
   const fixtureFlow = fixtureId ? await api(BASE, key, "GET", `/workflows/${fixtureId}`) : null;
   const schedule = fixtureFlow?.nodes?.find((n: any) => n.name === "Schedule")?.parameters?.rule?.interval?.[0];
   const daily = schedule?.field === "days" && schedule?.daysInterval === 1;
   const leaked = Number(brainSql("n8n", `SELECT count(*) FROM thoughts WHERE metadata->>'source' = 'gmail' AND metadata->>'actor_name' = '${IMPORT.actor}'`));
+  // Read after the runner-down run, so its saved error is among them.
   const flows = [IMPORT.pipeline, IMPORT.stray, IMPORT.snoop].flatMap((p) => [`OB1 import — ${p}`, `OB1 import — ${p} (on demand)`]);
   const [runKey, runnerKey] = [await inRunData(env, flows, env.N8N_WEBHOOK_KEY), await inRunData(env, flows, env.OB1_RUNNER_KEY)];
   const c1 = first.report?.counts, c2 = second.report?.counts;
@@ -255,6 +264,7 @@ async function importChecks(env: Record<string, string>): Promise<Check> {
     && second.status === 200 && c2?.inserted === 0 && c2?.updated === 0 && c2?.patched === 0 && c2?.unchanged === IMPORT.rows && n2 === IMPORT.rows
     && stray.status === 422 && /the runner answered 422: one-source/.test(stray.report?.why ?? "") && /identity\.system "gmail"/.test(stray.report?.why ?? "") && n3 === IMPORT.rows && leaked === 0
     && snoop.status === 200 && snoop.report?.emitted === 0 && leftovers === 0 && daily
+    && down.status === 502 && /did not answer/.test(down.report?.why ?? "")
     && runKey.runs > 0 && runKey.holding === 0 && runnerKey.holding === 0;
   const fmt = (r: { status: number; report: any }) => `${r.status}${r.report?.counts ? ` inserted ${r.report.counts.inserted} unchanged ${r.report.counts.unchanged}` : ""}${r.report?.ok === false ? ` ${r.report.why}` : ""}`;
   return {
@@ -263,7 +273,7 @@ async function importChecks(env: Record<string, string>): Promise<Check> {
     detail: `${reset} earlier fixture row(s) deleted; first run → ${fmt(first)}: ${n1} rows, ${byRunner} by ${IMPORT.actor}, ${embedded} with a vector; `
       + `rerun → ${fmt(second)}, ${n2} rows; stray → ${fmt(stray)}, ${n3} rows, ${leaked} of another source; `
       + `snoop → ${snoop.status}, ${snoop.report?.emitted === 0 ? "no environment readable" : `READABLE: ${JSON.stringify(snoop.report).slice(0, 200)}`}, ${leftovers} of its leftover children still running; `
-      + `the fixture's schedule ${JSON.stringify(schedule)}; `
+      + `the fixture's schedule ${JSON.stringify(schedule)}; runner down → ${down.status} ${String(down.report?.why ?? "").slice(0, 80)}; `
       + `the run key in ${runKey.holding} of ${runKey.runs} saved import runs, the runner's key in ${runnerKey.holding}`,
   };
 }

@@ -6063,12 +6063,25 @@ and E:
     pass 2);
   - the fixture instance's schedule must be n8n `days 1`: an hourly 24
     fires once, then never (review pass 2);
+  - `snoop` also fails if its HOME is writable or Python's user site is on.
+    With a shared writable HOME, one emitter planted code another ran
+    (review pass 3). Each kit pipeline owns its own source;
+  - with the runner stopped, the door must answer 502, "did not answer",
+    and the import's saved run of it may hold neither key (review pass 3);
   - neither the run key nor the runner's key may appear in any saved run of
     the import workflows, the data included. Before the door, the webhook
     saved its request headers, the run key among them (review pass 1).
 - **E** admits a connection to the runner's `:8090`, its addresses read from
   the engine, and nothing else of it. The runner joins the sealed network
   as the server does. The judge holds 39 crafted logs in CI.
+
+**On review pass 3's code (`--wait-schedule`), every check passes again.**
+- **C1** took 22.2 s.
+- **C1s** was seen after 451 s, and **P** was gone after 40 s.
+- **I:**
+  - `snoop` found its HOME unwritable and the user site off;
+  - the runner down answered 502;
+  - no key was in any saved run.
 
 **On review pass 2's code (`--wait-schedule`), every check passes again.**
 - **C1** took 35.4 s, with the host's Ollama shared.

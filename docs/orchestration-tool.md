@@ -425,9 +425,14 @@ runs outside n8n:
     reach another pipeline's emitter, and whatever it leaves running is
     killed (review pass 2).
 
-  Two limits are named rather than closed. Every emitter can read every
-  pipeline's world-readable exports. Emitters have the runner's network,
-  which the live-API emitters need, and SMD-2211 covers their egress.
+  An emitter's HOME is one it cannot write, and Python's user site is off,
+  so no emitter can plant code another runs (review pass 3). Each pipeline
+  owns one source: two on the same `system` are refused. Two limits are
+  named rather than closed:
+  - every emitter can read every pipeline's world-readable exports, unless
+    the operator gives each directory to its pipeline's uid;
+  - emitters have the runner's network, which the live-API emitters need,
+    and SMD-2211 covers their egress.
 
   The three bounds are the runner's own checks:
   - a pipeline not in the file is a 404;

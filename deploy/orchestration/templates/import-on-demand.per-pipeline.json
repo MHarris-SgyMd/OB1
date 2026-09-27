@@ -81,7 +81,7 @@
         "respondWith": "json",
         "responseBody": "={{ JSON.stringify($json.error ? { ok: false, why: String($json.error.message ?? $json.error).replace(/ \\[line \\d+\\]$/, '') } : $json) }}",
         "options": {
-          "responseCode": "={{ !$json.error ? 200 : (Number((String($json.error.message ?? $json.error).match(/the runner answered (\\d{3})/) || [])[1]) || (/did not answer/.test(String($json.error.message ?? $json.error)) ? 502 : 500)) }}"
+          "responseCode": "={{ (() => { if (!$json.error) return 200; const m = String($json.error.message ?? $json.error); const c = Number((m.match(/the runner answered (\\d{3})/) || [])[1]); return [401, 403, 404].includes(c) ? 502 : c || (/did not answer/.test(m) ? 502 : 500); })() }}"
         }
       }
     }

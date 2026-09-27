@@ -739,6 +739,11 @@ produces:
   stop; the workflow stays, with its history);
 - a skipped optional credential is deleted, with the key it held.
 
+A workflow counts as a template's when its name fits the template's and it
+carries one of the template's node ids. So a workflow of your own is never
+touched, but a copy of an OB1 workflow renamed to an instance's name counts
+as that instance.
+
 No secret sits in n8n's environment but the encryption key and the owner's
 hash, and no workflow can read one from there
 (`N8N_BLOCK_ENV_ACCESS_IN_NODE`). n8n rate-limits sign-in to five a minute,
@@ -772,32 +777,40 @@ the next run if it was.
 An import recipe converted to an emitter of ingestion-contract items
 (SMD-2147–2150, SMD-2021) runs as one instance of the import template, one
 per line of `orchestration/pipelines.json`. That file is empty until the
-first recipe is converted.
+first recipe is converted. Each pipeline owns one source (its `system`): two
+lines naming the same one are refused.
 - **The schedule.** Each instance runs on a schedule of the pipeline's own,
   `everyHours`: 1 to 23 hours, or whole days (24, 48, … 168), since n8n
   counts an hourly schedule within one day. An hourly 24 ran once and never
-  again (measured in n8n 2.40.6's own code).
+  again (measured in n8n 2.40.6's own code). n8n counts days of the year, so
+  a weekly run can come a day late at the end of a leap year.
 - **On demand**, an instance runs through a POST to
   `/webhook/ob1-import-<pipeline>` with the run key. The door is a workflow
   of its own that saves no runs. It drops the request, headers and all, and
   calls the import, so the run key never lands in n8n's store. It answers
   the report with 200, or the runner's reason with the runner's status (409
-  when a run of that pipeline is already going, 422 refused, 500 failed),
-  or 502 when the runner did not answer.
+  when a run of that pipeline is already going, 422 refused, 500 failed).
+  It answers 502 when the runner did not answer, or refused the door itself:
+  a runner key out of step with n8n's copy, or a pipeline the runner lacks.
 - **The runner.** n8n's image has neither Bun nor python3, so the import asks
   the runner, `orchestration-runner`, over the compose network, with
   `OB1_RUNNER_KEY`. The runner publishes no port, and it:
   1. runs the pipeline's emitter over `deploy/imports/<pipeline>/`, mounted
      read-only (`IMPORTS_DIR` moves it). Each pipeline's emitter runs as a
-     uid of its own, with no database URL or key in its environment.
+     uid of its own, with no database URL or key in its environment. Its
+     HOME is `/`, which it cannot write, and Python's user site is off.
      - It cannot read the runner's, the ingester's or another emitter's
        environment, or reach another emitter's process.
      - Whatever it leaves running is killed when it finishes.
-     - A parser an export exploits holds no secret and cannot touch another
-       pipeline's batch.
-     - Two limits: every emitter can read every pipeline's exports that are
-       world-readable, and emitters have the runner's network, which the
-       live-API emitters need (SMD-2211 covers their egress);
+     - A parser an export exploits holds no secret, and cannot plant code
+       for, or lines into, another pipeline's emitter.
+     - Two limits:
+       - Every emitter can read every pipeline's exports that are
+         world-readable. The runner logs each pipeline's uid at start;
+         `chown` the pipeline's directory to it with mode 700, and only
+         that pipeline's emitter can read it.
+       - Emitters have the runner's network, which the live-API emitters
+         need (SMD-2211 covers their egress);
   2. refuses the whole batch if any line is not the pipeline's one source
      and scope;
   3. runs `db/ingest-records.ts --source items --items -` under the actor

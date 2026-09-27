@@ -496,12 +496,14 @@ export function instanceFor(template: unknown, p: Pipeline, stem: string, timeou
       const out = v.replaceAll("{{pipeline}}", p.name);
       // `pipeline` then anything up to the braces: `{{pipelines}}` is a typo too (review pass 1).
       const left = /\{\{\s*pipeline[^}]*\}\}/.exec(out);
-      if (left) throw new Error(`${stem}${PER_PIPELINE}: ${left[0]} is not a pipeline placeholder ({{pipeline}}, {{pipeline.everyHours}}, {{pipeline.schedule}}, {{pipeline.webhookId}}, {{pipeline.timeoutMs}})`);
+      if (left) throw new Error(`${stem}${PER_PIPELINE}: ${left[0]} is not a pipeline placeholder here ({{pipeline}} anywhere; {{pipeline.everyHours}}, {{pipeline.schedule}}, {{pipeline.webhookId}}, {{pipeline.timeoutMs}} as a whole value)`);
       return out;
     }
     if (Array.isArray(v)) return v.map(walk);
     // Keys too: n8n keys `connections` by node name, so a name with {{pipeline}} must be filled there as well (review pass 2).
-    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [walk(k) as string, walk(x)]));
+    // A key is text: a typed placeholder there (a whole value's) is refused, not turned into "[object Object]" (review pass 3).
+    const key = (k: string) => { const out = walk(k); if (typeof out !== "string") throw new Error(`${stem}${PER_PIPELINE}: ${k} stands for a value and cannot be a key`); return out; };
+    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [key(k), walk(x)]));
     return v;
   };
   return walk(template);
@@ -1069,6 +1071,7 @@ async function selfCheck(): Promise<number> {
       expect("a Basic credential's user name is not a secret: two may share one", sharedSecrets([{ name: "a", type: "httpBasicAuth", data: { user: "operator-account-1", password: "p".repeat(32) } }, { name: "b", type: "httpBasicAuth", data: { user: "operator-account-1", password: "q".repeat(32) } }]).length === 0);
       expect("a key --init writes, unset, is named with --init as the remedy", throws(() => render('"${OB1_RUNNER_KEY}"', {}, "t"), /OB1_RUNNER_KEY, which the env file does not set — run `bun deploy\/orchestration\/provision.ts --init`/));
       expect("a schedule placeholder becomes n8n's hours or days", JSON.stringify(instanceFor({ i: "{{pipeline.schedule}}" }, pipes[0], "imp").i) === JSON.stringify({ field: "hours", hoursInterval: 6 }) && JSON.stringify(instanceFor({ i: "{{pipeline.schedule}}" }, pipes[1], "imp").i) === JSON.stringify({ field: "days", daysInterval: 1 }));
+      expect("a typed placeholder in a key is refused, and an embedded one is told where it may stand", throws(() => instanceFor({ "{{pipeline.schedule}}": 1 }, pipes[0], "imp"), /cannot be a key/) && throws(() => instanceFor({ x: "every {{pipeline.schedule}}" }, pipes[0], "imp"), /as a whole value/));
       expect("a placeholder in a key is filled too (connections are keyed by node name)", JSON.stringify(instanceFor({ "Run {{pipeline}}": 1 }, pipes[0], "imp")) === JSON.stringify({ "Run alpha": 1 }) && throws(() => instanceFor({ "{{pipeline.nmae}}": 1 }, pipes[0], "imp"), /not a pipeline placeholder/));
       f.s.unpublished.length = 0;
       await run(keys16);

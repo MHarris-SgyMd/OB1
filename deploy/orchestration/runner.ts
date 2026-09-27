@@ -36,12 +36,12 @@
  * (deploy/orchestration/provision.ts, sharedSecrets).
  *
  * In the image the service runs as root, with every capability dropped but
- * the two that change user (compose), and it runs nothing as root: the
- * emitter as `ob1-emitter`, the ingester and reembed as `bun` (su-exec). An
- * emitter parses an outside export, and a parser an export exploits then
- * holds no secret: it cannot read the runner's environment or the ingester's
- * (/proc/<pid>/environ is its owner's), and it gets no database URL or key
- * in its own.
+ * the three that change user and signal a step (compose), and it runs nothing
+ * as root: each pipeline's emitter as a uid of its own, the ingester and
+ * reembed as `bun` (su-exec). An emitter parses an outside export, and a
+ * parser an export exploits then holds no secret: it cannot read the runner's
+ * environment, the ingester's or another emitter's (/proc/<pid>/environ is its
+ * owner's), and it gets no database URL or key in its own.
  */
 import { SQL } from "bun";
 import { timingSafeEqual, createHash } from "node:crypto";
@@ -65,9 +65,10 @@ export const PIPELINE_USER = "bun";
  * shared uid, an emitter an export had taken over could stay behind and write
  * lines, in the other's source, into another pipeline's batch through
  * /proc/<pid>/fd, or ptrace it). su-exec takes a numeric uid:gid with no
- * passwd entry, so HOME stays the emitter environment's /tmp. Derived from
- * the name, so it survives edits to the allowlist; the runner refuses two
- * that collide.
+ * passwd entry, and then sets HOME to `/`, which no emitter can write (review
+ * pass 3: a shared, writable HOME such as /tmp let one emitter plant Python
+ * user site code that ran as another's). Derived from the name, so it survives
+ * edits to the allowlist; the runner refuses two that collide.
  */
 export function emitterUid(name: string): number {
   return 20000 + (parseInt(createHash("sha256").update(name).digest("hex").slice(0, 8), 16) % 40000);
@@ -75,7 +76,9 @@ export function emitterUid(name: string): number {
 export const DEFAULT_PORT = 8090;
 export const DEFAULT_TIMEOUT_S = 3600;
 /** After SIGTERM, how long a step has before SIGKILL; after it exits, how long its pipes may stay open (a child it left holding them). */
-const KILL_GRACE_MS = 5000;
+const KILL_GRACE_MS = 6000;
+/** reembed stops after the thought in hand on a first SIGTERM, which can be a 120 s provider call, and hands its leased rows back on a second; SIGKILL left them leased for its 900 s lease (review pass 3). So a step gets a second SIGTERM this long after the first. */
+const SECOND_TERM_MS = 1000;
 const DRAIN_MS = 2000;
 
 export type Pipeline = {
@@ -101,6 +104,7 @@ export function parsePipelines(text: string, file = "pipelines.json"): Pipeline[
   try { raw = JSON.parse(text); } catch (e) { throw new Error(`${file}: not JSON (${(e as Error).message})`); }
   if (!Array.isArray(raw)) throw new Error(`${file}: must be a JSON array of pipelines`);
   const seen = new Set<string>();
+  const systems = new Map<string, string>();
   return raw.map((p: any, i) => {
     const at = `${file}[${i}]${typeof p?.name === "string" ? ` (${p.name})` : ""}`;
     if (!p || typeof p !== "object" || Array.isArray(p)) throw new Error(`${at}: must be an object`);
@@ -109,6 +113,10 @@ export function parsePipelines(text: string, file = "pipelines.json"): Pipeline[
     if (typeof p.name !== "string" || !NAME_RE.test(p.name)) throw new Error(`${at}: name must match ${NAME_RE.source}`);
     if (seen.has(p.name)) throw new Error(`${at}: name ${p.name} is listed twice`);
     seen.add(p.name);
+    // One pipeline, one source: its success counts that source's rows, and a
+    // second pipeline on the same system could write over its rows (review pass 3).
+    if (systems.has(p.system)) throw new Error(`${at}: system ${p.system} is already pipeline ${systems.get(p.system)}'s; each pipeline owns one source`);
+    systems.set(p.system, p.name);
     if (typeof p.system !== "string" || !SYSTEM_RE.test(p.system)) throw new Error(`${at}: system must match ${SYSTEM_RE.source}`);
     if ((RESERVED_SYSTEMS as readonly string[]).includes(p.system)) throw new Error(`${at}: system ${p.system} is one the pipeline reads itself, not an emitter's`);
     // The item rule itself: a scope every item would fail is refused here, not on every run.
@@ -137,17 +145,16 @@ export function scheduleOf(everyHours: number): { field: "hours"; hoursInterval:
 /**
  * The emitter scripts an allowlist names that the image does not hold: a
  * line added to pipelines.json before the image was rebuilt with its emitter.
- * The script is the first argument that is not a flag (`python3 -u x.py`,
- * `bun run x.ts`, a bare `x.py` all count; review pass 2). A module or code
- * given by flag (`-m`, `-c`, `-e`) names no file, and is not checked.
+ * A script is an argument that is a relative path to a script file (.py,
+ * .ts, .js, .mjs, .cjs), wherever it stands: after a flag, after `bun run`,
+ * or bare. A flag's value (`-X utf8`, `-W ignore`, `--smol`) is never taken
+ * for one (review pass 3: pass 2 read the first non-flag argument, and refused
+ * a valid allowlist naming `utf8` as missing).
  */
 export function missingEmitters(pipelines: Pipeline[], root: string): string[] {
-  return pipelines.flatMap((p) => {
-    const args = p.emitter.slice(1);
-    if (args.some((a) => ["-m", "-c", "-e", "--eval"].includes(a))) return [];
-    const script = args.find((a, i) => !a.startsWith("-") && !(a === "run" && i === 0 && p.emitter[0] === "bun"));
-    return script && !script.includes("{input}") && !existsSync(resolve(root, script)) ? [`${p.name}: ${script}`] : [];
-  });
+  return pipelines.flatMap((p) => p.emitter.slice(1)
+    .filter((a) => /^[^-/][^\s]*\.(py|ts|js|mjs|cjs)$/.test(a) && !a.includes("{input}") && !existsSync(resolve(root, a)))
+    .map((a) => `${p.name}: ${a}`));
 }
 
 /**
@@ -162,9 +169,11 @@ export function strayLines(bytes: Uint8Array, p: Pipeline): string[] {
     if (!line.trim()) return;
     let item: any;
     try { item = JSON.parse(line); } catch { return; }
+    // A quoted value is cut: an emitter an export has taken over could otherwise put megabytes into the report n8n saves (review pass 3).
+    const shown = (v: unknown) => { const t = JSON.stringify(v) ?? String(v); return t.length > 120 ? `${t.slice(0, 120)}…` : t; };
     const system = item?.identity?.system;
-    if (system !== p.system) out.push(`line ${i + 1}: identity.system ${JSON.stringify(system)} is not ${p.name}'s source, ${p.system}`);
-    else if (item?.scope !== p.scope) out.push(`line ${i + 1}: scope ${JSON.stringify(item?.scope)} is not ${p.name}'s scope, ${p.scope}`);
+    if (system !== p.system) out.push(`line ${i + 1}: identity.system ${shown(system)} is not ${p.name}'s source, ${p.system}`);
+    else if (item?.scope !== p.scope) out.push(`line ${i + 1}: scope ${shown(item?.scope)} is not ${p.name}'s scope, ${p.scope}`);
   });
   return out;
 }
@@ -242,7 +251,9 @@ async function step(argv: string[], o: { cwd: string; env: Record<string, string
   let killer: ReturnType<typeof setTimeout> | undefined;
   const stop = () => {
     try { proc.kill("SIGTERM"); } catch {}
-    killer ??= setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, KILL_GRACE_MS);
+    if (killer) return;
+    setTimeout(() => { try { proc.kill("SIGTERM"); } catch {} }, SECOND_TERM_MS);
+    killer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, KILL_GRACE_MS);
   };
   const timer = setTimeout(() => { timedOut = true; stop(); }, Math.max(0, o.deadline - Date.now()));
   const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
@@ -279,11 +290,15 @@ async function step(argv: string[], o: { cwd: string; env: Record<string, string
  * ingester name the provider's URL, and an operator's may carry a password
  * (review pass 2). The report is saved in n8n's run history.
  */
-export const redact = (text: string) => text.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s@]*@/gi, (_m, scheme: string) => `${scheme}***@`);
+// To the LAST `@` before the path, as maskUrl does: a raw `@` inside a password is masked with the rest (review pass 3).
+export const redact = (text: string) => text.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s]*@/gi, (_m, scheme: string) => `${scheme}***@`);
+/** Masked first, then cut: cutting first could leave a password's tail with no scheme before it to mask (review pass 3). */
+const shownTail = (text: string, n?: number) => lines(tail(redact(text), n));
 const redactAll = (xs: string[]) => xs.map(redact);
 
 /** The emitter's environment: enough to run, nothing the runner holds. */
-const EMITTER_ENV = (env: Record<string, string | undefined>) => ({ PATH: env.PATH ?? "/usr/local/bin:/usr/bin:/bin", HOME: "/tmp", LANG: "C.UTF-8", PYTHONDONTWRITEBYTECODE: "1" });
+// No HOME: su-exec sets `/` for an emitter's uid. No Python user site either, so nothing another uid could plant under a HOME is ever imported (review pass 3).
+const EMITTER_ENV = (env: Record<string, string | undefined>) => ({ PATH: env.PATH ?? "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", PYTHONDONTWRITEBYTECODE: "1", PYTHONNOUSERSITE: "1" });
 
 export type Stage = "emitter" | "one-source" | "ingest" | "reembed";
 export type Report = {
@@ -324,7 +339,7 @@ export async function runPipeline(c: Config, p: Pipeline): Promise<Report> {
   if (sweep) await step(sweep, { cwd: c.cwd, env: EMITTER_ENV(c.env), deadline: Date.now() + 5000 });
   if (e.timedOut || e.overflow || e.code !== 0) {
     const why = e.timedOut ? `the emitter ${past}` : e.overflow ? `the emitter printed more than ${c.maxBytes} bytes and was stopped` : `the emitter exited ${e.code}`;
-    return { pipeline: p.name, ok: false, stage: "emitter", exit: e.timedOut || e.overflow ? null : e.code, why, emitted: 0, notes: redactAll(lines(tail(e.err))) };
+    return { pipeline: p.name, ok: false, stage: "emitter", exit: e.timedOut || e.overflow ? null : e.code, why, emitted: 0, notes: shownTail(e.err) };
   }
   const emitted = lines(e.out).length;
   const stray = strayLines(e.bytes, p);
@@ -332,7 +347,7 @@ export async function runPipeline(c: Config, p: Pipeline): Promise<Report> {
   if (emitted === 0) return { pipeline: p.name, ok: true, emitted, counts: null, report: [`${p.name}: the emitter printed nothing — no export under ${input}?`] };
   const ing = await step([...c.asPipeline, ...c.commands.ingest(p)], { cwd: c.cwd, env: c.env, stdin: e.bytes, deadline });
   // The ingester's own "next: bun db/reembed.ts" is the runner's next step, not the reader's.
-  const base = { pipeline: p.name, emitted, counts: parseTally(ing.out), report: redactAll(lines(ing.out).filter((l) => !/^\s*next: /.test(l))), notes: redactAll(lines(tail(ing.err, 8000))) };
+  const base = { pipeline: p.name, emitted, counts: parseTally(ing.out), report: redactAll(lines(ing.out).filter((l) => !/^\s*next: /.test(l))), notes: shownTail(ing.err, 8000) };
   if (ing.timedOut || ing.code !== 0) return { ...base, ok: false, stage: "ingest", exit: ing.timedOut ? null : ing.code, why: ing.timedOut ? `the ingester ${past}` : `the ingester exited ${ing.code}${ing.code === 2 ? " (it refused the batch or its configuration; nothing written — the notes say which)" : ""}` };
   // One reembed pass at a time. The wait for another pipeline's pass counts
   // against this run's deadline too (review pass 2: two overlapping runs could
@@ -344,7 +359,8 @@ export async function runPipeline(c: Config, p: Pipeline): Promise<Report> {
   let re: Step, unembedded: number;
   try {
     if (!ours) return { ...base, ok: false, stage: "reembed", exit: null, why: `the rows are written; the run's ${c.timeoutS} s ran out waiting for another pipeline's reembed, and the next run embeds them` };
-    re = await step([...c.asPipeline, ...c.commands.reembed()], { cwd: c.cwd, env: c.env, deadline });
+    try { re = await step([...c.asPipeline, ...c.commands.reembed()], { cwd: c.cwd, env: c.env, deadline }); }
+    catch (err) { return { ...base, ok: false, stage: "reembed", exit: null, why: `the rows are written, and reembed could not be started: ${(err as Error).message}` }; }
     // reembed exits 1 for any failed row it holds from any earlier pass, and
     // for another pass's leases (review pass 1: every import then failed for
     // good). What this run owes is its own source's rows with a vector.
@@ -355,7 +371,7 @@ export async function runPipeline(c: Config, p: Pipeline): Promise<Report> {
     // Released once the chain reaches this run, whether it ran, gave up, or failed.
     before.then(() => release());
   }
-  const reembed = { exit: re.code, tail: redactAll(lines(tail(`${re.out}\n${re.err}`, 1500))), unembedded };
+  const reembed = { exit: re.code, tail: shownTail(`${re.out}\n${re.err}`, 1500), unembedded };
   if (unembedded > 0) {
     return {
       ...base, ok: false, stage: "reembed", exit: re.timedOut ? null : re.code, reembed,
@@ -478,6 +494,9 @@ async function selfCheck(): Promise<number> {
   expect("the shipped allowlist parses", Array.isArray(loadPipelines()));
   expect("a name that is not a label is refused", throws(() => parsePipelines(one({ name: "../x" })), /name must match/));
   expect("a name listed twice is refused", throws(() => parsePipelines(JSON.stringify([good, good])), /listed twice/));
+  // Stand-in pipelines below share the stand-in system; each is parsed on its own.
+  const each = (xs: object[]) => xs.flatMap((x) => parsePipelines(JSON.stringify([x])));
+  expect("two pipelines on one system are refused: each owns one source", throws(() => parsePipelines(JSON.stringify([good, { ...good, name: "other" }])), /already pipeline fixture's; each pipeline owns one source/));
   expect("a reserved system is refused", throws(() => parsePipelines(one({ system: "linear" })), /reads itself/));
   expect("two scopes are refused", throws(() => parsePipelines(one({ scope: "a,b" })), /separator between scopes/));
   expect("a scope the ingester would refuse (a `/`, surrounding space) is refused here", throws(() => parsePipelines(one({ scope: "a/b" })), /holds a `\/`/) && throws(() => parsePipelines(one({ scope: " a:b" })), /surrounding whitespace/));
@@ -488,9 +507,10 @@ async function selfCheck(): Promise<number> {
   expect("hours up to 23 are n8n hours, whole days are n8n days (an hourly 24 fires once, then never)", JSON.stringify([scheduleOf(1), scheduleOf(23), scheduleOf(24), scheduleOf(168)]) === JSON.stringify([{ field: "hours", hoursInterval: 1 }, { field: "hours", hoursInterval: 23 }, { field: "days", daysInterval: 1 }, { field: "days", daysInterval: 7 }]));
   expect("an emitter uid is its pipeline's own, stable, and outside the image's users", emitterUid("fixture") === emitterUid("fixture") && emitterUid("fixture") !== emitterUid("stray") && emitterUid("x") >= 20000 && emitterUid("x") < 60000);
   expect("a URL's userinfo is masked in anything a step printed", redact("via https://u:SECRET@host/v1, postgres://p:q@db/x, https://plain/") === "via https://***@host/v1, postgres://***@db/x, https://plain/");
+  expect("a raw @ inside a password is masked with the rest", redact("https://u:p@ss@host/v1") === "https://***@host/v1");
   const shipped = configFrom({ OB1_RUNNER_KEY: "k".repeat(40), DATABASE_URL: "postgres://x" }, 1000);
   expect("the ingester and reembed get the database, not the runner's own key", shipped.env.OB1_RUNNER_KEY === undefined && shipped.env.DATABASE_URL === "postgres://x" && shipped.asEmitter(parsePipelines(one({}))[0]).length === 0 && shipped.sweep(parsePipelines(one({}))[0]) === null);
-  expect("an emitter script the image lacks is named, after a flag, after `bun run`, or bare; an inline one, a module and a present one are not", JSON.stringify(missingEmitters(parsePipelines(JSON.stringify([
+  expect("an emitter script the image lacks is named, after a flag, after `bun run`, or bare; an inline one, a module and a present one are not", JSON.stringify(missingEmitters(each([
     { ...good, name: "gone", emitter: ["python3", "recipes/nowhere/emit.py", "{input}"] },
     { ...good, name: "flagged", emitter: ["python3", "-u", "recipes/nowhere/emit.py"] },
     { ...good, name: "run", emitter: ["bun", "run", "nowhere.ts"] },
@@ -498,7 +518,10 @@ async function selfCheck(): Promise<number> {
     { ...good, name: "here", emitter: ["bun", "deploy/orchestration/runner.ts"] },
     { ...good, name: "inline", emitter: ["bun", "-e", "1"] },
     { ...good, name: "module", emitter: ["python3", "-m", "json.tool"] },
-  ])), REPO)) === JSON.stringify(["gone: recipes/nowhere/emit.py", "flagged: recipes/nowhere/emit.py", "run: nowhere.ts", "bare: emit.py"]));
+    { ...good, name: "xflag", emitter: ["python3", "-X", "utf8", "-W", "ignore", "recipes/nowhere/x.py"] },
+    { ...good, name: "smol", emitter: ["bun", "--smol", "run", "deploy/orchestration/runner.ts"] },
+    { ...good, name: "print", emitter: ["bun", "-p", "1"] },
+  ]), REPO)) === JSON.stringify(["gone: recipes/nowhere/emit.py", "flagged: recipes/nowhere/emit.py", "run: nowhere.ts", "bare: emit.py", "xflag: recipes/nowhere/x.py"]));
   const item = (system: string, scope = "fixture:export") => JSON.stringify({ identity: { system, key: "k" }, scope, text: "t" });
   const p = parsePipelines(one({}))[0];
   expect("the pipeline's own lines are not stray", strayLines(new TextEncoder().encode(`${item("fixture")}\n\n${item("fixture")}\n`), p).length === 0);
@@ -517,13 +540,16 @@ async function selfCheck(): Promise<number> {
   // and an unembedded count the case sets.
   const dir = `${HERE}/.self-check.${process.pid}`;
   const emit = (body: string) => ["bun", "-e", body];
-  const pipelines = parsePipelines(JSON.stringify([
+  const pipelines = each([
     { ...good, name: "writes", emitter: emit(`const at = process.argv.at(-1); for (const k of ["a", "b"]) console.log(JSON.stringify({ identity: { system: "fixture", key: k }, scope: "fixture:export", text: at }))`).concat("{input}") },
     { ...good, name: "unembedded", emitter: emit(`console.log(${JSON.stringify(item("fixture"))})`) },
     { ...good, name: "stray", emitter: emit(`console.log(${JSON.stringify(item("fixture"))}); console.log(${JSON.stringify(item("gmail"))})`) },
     { ...good, name: "fails", emitter: emit(`console.error("cannot read the export"); process.exit(3)`) },
     { ...good, name: "snoops", emitter: emit(`console.log(JSON.stringify({ identity: { system: "fixture", key: "k" }, scope: "fixture:export", text: String(process.env.DATABASE_URL ?? "") + "|" + String(process.env.OB1_RUNNER_KEY ?? "") }))`) },
-  ]));
+    { ...good, name: "envcheck", emitter: emit(`if (process.env.HOME !== undefined || process.env.PYTHONNOUSERSITE !== "1") process.exit(5); console.log(${JSON.stringify(item("fixture"))})`) },
+    { ...good, name: "longpad", emitter: emit(`console.error("https://u:" + "P".repeat(2100) + "TAILSECRET@host/v1"); process.exit(3)`) },
+    { ...good, name: "huge", emitter: emit(`console.log(JSON.stringify({ identity: { system: "s".repeat(100000), key: "k" }, scope: "fixture:export", text: "t" }))`) },
+  ]);
   let ingested = 0;
   let reembedExit = 0;
   const leftWithout = new Map<string, number>([["unembedded", 1]]);
@@ -566,6 +592,14 @@ async function selfCheck(): Promise<number> {
     const f = await post("/run/fails");
     const fr = await f.json() as Report;
     expect("an emitter that fails is 422 with its reason and exit code", f.status === 422 && fr.stage === "emitter" && fr.exit === 3 && fr.notes?.[0] === "cannot read the export");
+    const ev = await post("/run/envcheck");
+    expect(`the emitter's environment has no HOME and no Python user site (${ev.status})`, ev.status === 200);
+    const lp = await post("/run/longpad");
+    const lpr = await lp.json() as Report;
+    expect(`a password the 2000-character cut lands inside is masked, not left as a tail (${(lpr.notes ?? []).join(" ").slice(-40)})`, lp.status === 422 && !(lpr.notes ?? []).some((l) => /TAILSECRET|PPPP/.test(l)));
+    const hg = await post("/run/huge");
+    const hgr = await hg.json() as Report;
+    expect(`a stray line's quoted value is cut in the report (${(hgr.notes?.[0] ?? "").length} chars)`, hg.status === 422 && (hgr.notes?.[0] ?? "").length < 300);
     const n = await post("/run/snoops");
     const nr = await n.json() as Report;
     expect(`the emitter's environment holds neither the database URL nor the key (${n.status} ${nr.why ?? ""})`, n.status === 200 && nr.ok);
@@ -576,13 +610,14 @@ async function selfCheck(): Promise<number> {
   // The bounds on one run: a second call while one is going, a step past the
   // deadline, one that ignores SIGTERM, one that leaves a child holding its
   // pipes, and an emitter printing past the cap. None reaches the ingester.
-  const bounded = parsePipelines(JSON.stringify([
+  const bounded = each([
     { ...good, name: "slow", emitter: emit(`await Bun.sleep(1500); console.log(${JSON.stringify(item("fixture"))})`) },
     { ...good, name: "hangs", emitter: emit(`await Bun.sleep(20000)`) },
     { ...good, name: "deaf", emitter: emit(`process.on("SIGTERM", () => {}); await Bun.sleep(30000)`) },
+    { ...good, name: "twice", emitter: emit(`let n = 0; process.on("SIGTERM", () => { if (++n === 2) process.exit(0); }); await Bun.sleep(30000)`) },
     { ...good, name: "orphans", emitter: emit(`Bun.spawn(["bun", "-e", "await Bun.sleep(30000)"], { stdout: "inherit", stderr: "inherit" }).unref(); process.exit(0)`) },
     { ...good, name: "floods", emitter: emit(`const l = ${JSON.stringify(item("fixture"))} + "\\n"; for (let i = 0; i < 200; i++) process.stdout.write(l)`) },
-  ]));
+  ]);
   const before = ingested;
   const small = serve(config({ pipelines: bounded, timeoutS: 3, maxBytes: 2000, env: process.env }), 0);
   const at = (path: string) => fetch(`http://127.0.0.1:${small.port}${path}`, { method: "POST", headers: { "x-runner-key": key } });
@@ -592,6 +627,8 @@ async function selfCheck(): Promise<number> {
     const timed = async (name: string) => { const t0 = Date.now(); const res = await at(`/run/${name}`); return { res, rep: await res.json() as Report, s: (Date.now() - t0) / 1000 }; };
     const h = await timed("hangs");
     expect(`an emitter past the deadline is stopped and refused (${h.res.status}, ${h.s.toFixed(1)} s, ${h.rep.why})`, h.res.status === 422 && /ran past the run's 3 s/.test(h.rep.why ?? "") && h.s < 6);
+    const tw = await timed("twice");
+    expect(`a step that hands back on a second SIGTERM gets one, well before SIGKILL (${tw.s.toFixed(1)} s)`, tw.res.status === 422 && tw.s < 3 + SECOND_TERM_MS / 1000 + 2);
     const d = await timed("deaf");
     expect(`an emitter that ignores SIGTERM is killed after the grace (${d.res.status}, ${d.s.toFixed(1)} s)`, d.res.status === 422 && d.s < 3 + KILL_GRACE_MS / 1000 + 3);
     const o = await timed("orphans");
@@ -611,11 +648,11 @@ async function selfCheck(): Promise<number> {
   // gives up at its own deadline (review pass 2).
   const marker = `${dir}.swept`;
   const swept = () => (existsSync(marker) ? readFileSync(marker, "utf8").split("\n").filter(Boolean) : []);
-  const two = parsePipelines(JSON.stringify([
+  const two = each([
     { ...good, name: "first", emitter: emit(`console.log(${JSON.stringify(item("fixture"))})`) },
     { ...good, name: "second", emitter: emit(`await Bun.sleep(200); console.log(${JSON.stringify(item("fixture"))})`) },
     { ...good, name: "broken", emitter: emit(`process.exit(4)`) },
-  ]));
+  ]);
   const waits = serve(config({
     pipelines: two, timeoutS: 3, env: process.env,
     // A reembed that outlasts the other run's deadline: it ignores SIGTERM, so it holds the turn until SIGKILL.

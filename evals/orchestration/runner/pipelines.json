@@ -12,20 +12,24 @@
   },
   {
     "name": "stray",
-    "system": "orch-fixture",
-    "scope": "orch-fixture:export",
+    "system": "orch-stray",
+    "scope": "orch-stray:export",
     "emitter": [
       "python3",
       "evals/orchestration/runner/emit-fixture.py",
       "/imports/fixture",
-      "--stray"
+      "--stray",
+      "--system",
+      "orch-stray",
+      "--scope",
+      "orch-stray:export"
     ],
     "everyHours": 24
   },
   {
     "name": "snoop",
-    "system": "orch-fixture",
-    "scope": "orch-fixture:export",
+    "system": "orch-snoop",
+    "scope": "orch-snoop:export",
     "emitter": [
       "python3",
       "evals/orchestration/runner/emit-fixture.py",

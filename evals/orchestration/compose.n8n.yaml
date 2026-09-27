@@ -23,10 +23,14 @@ services:
       EXECUTIONS_DATA_HARD_DELETE_BUFFER: "0"
 
   # The import runner as it ships (SMD-2212), given the kit's allowlist in
-  # place of the shipped one, which is empty until a recipe is converted. Two
-  # pipelines: `fixture` (a Python emitter over a five-entry export) and
-  # `stray`, whose third line claims another source and must be refused
-  # before anything is written (the I check, evals/orchestration/n8n.ts).
+  # place of the shipped one, which is empty until a recipe is converted.
+  # Three pipelines, each its own source (the I check,
+  # evals/orchestration/n8n.ts):
+  # - `fixture`: a Python emitter over a five-entry export;
+  # - `stray`: its third line claims another source, and it must be refused
+  #   before anything is written;
+  # - `snoop`: an emitter an export has taken over, which must find nothing
+  #   to read and leave nothing running.
   orchestration-runner:
     volumes:
       - ../evals/orchestration/runner/pipelines.json:/app/deploy/orchestration/pipelines.json:ro

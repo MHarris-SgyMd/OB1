@@ -603,10 +603,11 @@ services:
       # (review pass 1). The runner reads it at start, so recreate it after an
       # edit. It refuses to start on a line whose emitter the image lacks.
       - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro
-    # It starts as root only to hand each step to its own user (su-exec: an
-    # emitter as ob1-emitter, the pipeline as bun). These are the only
-    # capabilities it keeps: changing user, and signalling a step's process at
-    # the deadline. init reaps a step's leftover children.
+    # It starts as root only to hand each step to its own user (su-exec: each
+    # pipeline's emitter as a uid of its own, the pipeline as bun). These are
+    # the only capabilities it keeps: changing user, and signalling a step's
+    # processes (at the deadline, and to kill what an emitter leaves). init
+    # reaps what exits.
     init: true
     cap_drop: [ALL]
     cap_add: [SETUID, SETGID, KILL]
