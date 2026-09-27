@@ -339,7 +339,7 @@ export function staleStandingsText(st: StaleStandings, key: string | null, retry
     part("pooled", key === null ? `in a pass's pool under ${keysText(st.keys.pooled ?? [])}` : "in this pass's pool"),
     part("vector", "waiting for a vector the reembed pool writes"),
     part("failed", key === null ? `failed in a pass under ${keysText(st.keys.failed ?? [])} — ${retry} with that judge's model` : `failed in this pass — ${retry}`),
-    part("waiting", "waiting for the next run"),
+    part("waiting", `waiting for the next run${key !== null && st.keys.waiting?.length ? ` (a claim stands under ${keysText(st.keys.waiting)}, another judge's pool)` : ""}`),
   ].filter(Boolean).join(", ");
 }
 

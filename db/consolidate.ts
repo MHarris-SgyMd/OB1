@@ -71,8 +71,8 @@
  * both sides of which have a vector, with no live or failed claim here — a
  * failed claim is --retry-failed's, 015's rule), then judges the thought's
  * pairs again — up to --k model calls per re-pooled thought, since its
- * agree/unrelated pairs left no record — a stale pair the top-k left out
- * judged anyway when it still meets the candidate rule. A conflict at the
+ * agree/unrelated pairs left no record, plus one per stale pair the top-k
+ * left out that still meets the candidate rule, judged anyway. A conflict at the
  * floor REPLACES the row in place (063:
  * record_supersession_proposal, back to pending under this key); agree,
  * unrelated or a conflict under the floor SETTLES it — the row is rejected
@@ -613,7 +613,7 @@ type Row = { id: string; content: string; created_at: string | null; fingerprint
 type Candidate = { older_id: string; similarity: number; shared_entities: number };
 type Outcome = { outcome: "succeeded" } | { outcome: "failed"; error: string } | { outcome: "vanished" };
 /** 064: a stale proposal on the thought in hand (its newer side), with what the leftover rule needs of the older side. */
-type StaleRow = { id: string; older_id: string; older_fingerprint: string; older_vectorless: boolean; similarity: number | null; shared: number; superseded: boolean };
+type StaleRow = { id: string; older_id: string; older_fingerprint: string; older_vectorless: boolean; newer_vectorless: boolean; similarity: number | null; shared: number; superseded: boolean };
 
 /**
  * 064: the pass settles a stale row — rejected with the marker note, its
@@ -649,7 +649,7 @@ async function processRow(row: Row): Promise<Outcome> {
   // (see the header). Read before the candidates so a stale pair the top-k
   // leaves out is judged anyway when it still meets the candidate rule.
   const stale = (await sql`
-    SELECT p.id, p.older_id, content_fingerprint_of(o.content) AS older_fingerprint, (o.embedding IS NULL) AS older_vectorless,
+    SELECT p.id, p.older_id, content_fingerprint_of(o.content) AS older_fingerprint, (o.embedding IS NULL) AS older_vectorless, (me.embedding IS NULL) AS newer_vectorless,
            CASE WHEN o.embedding IS NOT NULL AND me.embedding IS NOT NULL THEN 1 - (o.embedding <=> me.embedding) END AS similarity,
            -- The candidate rule's other terms, so a pair it no longer admits is settled with the reason named
            -- (second review pass, cold read: the note listed three reasons with "or").
@@ -779,7 +779,9 @@ async function processRow(row: Row): Promise<Outcome> {
   // recorded failed, and --retry-failed revisits it.
   for (const s of stale) {
     if (reachedOlders.has(s.older_id)) continue;
-    if (!row.has_vector || s.older_vectorless) { staleMet.wait.add(s.id); continue; }
+    // (Both sides' vectors as the stale read saw them, one statement — not
+    // the newer's from the claim-time batch read; third review pass.)
+    if (s.newer_vectorless || s.older_vectorless) { staleMet.wait.add(s.id); continue; }
     // The reason, from the rule's own terms: a side superseded, no shared
     // entity, or under this run's similarity floor (a stricter --min-sim
     // than the one the pair was proposed under settles it, for good until
@@ -1038,7 +1040,9 @@ console.log(
 if (totals.pairs > 0) console.log(`  model time per pair: ${(llmMs / totals.pairs / 1000).toFixed(1)}s`);
 // 064: what became of the stale proposals this run met (a line only when it met one).
 {
-  const m = { replaced: staleMet.replaced.size, settled: staleMet.settled.size, settledOut: staleMet.settledOut.size, wait: [...staleMet.wait].filter((id) => !staleMet.settled.has(id) && !staleMet.settledOut.has(id) && !staleMet.replaced.has(id)).length, raced: staleMet.raced.size, gone: staleMet.gone.size };
+  // A row that waited on one poll and was settled, replaced, decided or deleted on a later one waits no more.
+  const decided = (id: string) => staleMet.settled.has(id) || staleMet.settledOut.has(id) || staleMet.replaced.has(id) || staleMet.raced.has(id) || staleMet.gone.has(id);
+  const m = { replaced: staleMet.replaced.size, settled: staleMet.settled.size, settledOut: staleMet.settledOut.size, wait: [...staleMet.wait].filter((id) => !decided(id)).length, raced: staleMet.raced.size, gone: staleMet.gone.size };
   if (m.replaced + m.settled + m.settledOut + m.wait + m.raced + m.gone > 0) {
     console.log(
       `  stale proposals: ` + [

@@ -4177,8 +4177,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const rebuildStatus = () => runScript(["bun", join(HERE, "rebuild.ts"), "--url", URL_!, "--status"], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" }, cwd: HERE });
     await sql`DELETE FROM thought_work_claims WHERE thought_id = ${atlasNew}::uuid AND work_type = ${KEY}`;
     await sql`SELECT requeue_thought_work(${consolidateKey("other-judge")}, ${atlasNew}::uuid)`;
-    assert(/1 waiting for the next run;/.test((await consolidate("--status")).out) && (await consolidate("--list", "stale")).out.includes(`(stale — waiting for the next run to re-pool it (a claim stands under ${consolidateKey("other-judge")}, another judge's pool))`),
-           "a live claim under another judge's key is not this pass's pool: the row waits for this run, the other key named");
+    assert((await consolidate("--status")).out.includes(`1 waiting for the next run (a claim stands under ${consolidateKey("other-judge")}, another judge's pool);`) && (await consolidate("--list", "stale")).out.includes(`(stale — waiting for the next run to re-pool it (a claim stands under ${consolidateKey("other-judge")}, another judge's pool))`),
+           "a live claim under another judge's key is not this pass's pool: the row waits for this run, the other key named by both lines");
     const doorStatus = await rebuildStatus();
     assert(doorStatus.code === 0 && doorStatus.out.includes(`1 in a pass's pool under ${consolidateKey("other-judge")}`), `rebuild.ts --status, keyless, names the key the row is pooled under (${doorStatus.out.split("\n").find((l) => /proposals:/.test(l))?.trim().slice(0, 200)})`);
     const dryOnce = await consolidate("--dry-run");
@@ -4304,9 +4304,29 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     seen.length = 0;
     const olderIdle = await consolidate();
     assert(olderIdle.code === 0 && !/re-pooled/.test(olderIdle.out) && !/stale proposals:/.test(olderIdle.out) && seen.length === 0, `…and a run meanwhile re-pools nothing and calls no judge (${olderIdle.out.split("\n").find((l) => /pool:/.test(l))?.trim()})`);
+    // …and under --follow the summary counts rows, not encounters: the row
+    // waits on the first polls and is settled once the vector lands, and the
+    // line says "1 settled" alone — anchored, so a "; 1 wait" suffix fails
+    // (third review pass, mutant: bags for the sets survived every tooth).
+    seen.length = 0;
+    const follower = Bun.spawn(["bun", "--no-env-file", join(HERE, "consolidate.ts"), "--url", URL_!, "--follow", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+    await Bun.sleep(2500);
+    assert((await proposalRow(cedar.id)).status === "stale" && seen.length === 0, "the follower's first polls leave the row waiting and call no judge");
     await sql`UPDATE thoughts SET embedding = ${unit(11)}::vector WHERE id = ${cedarOld}::uuid`;
-    const olderBack = await consolidate();
-    assert(olderBack.code === 0 && /\(1 more re-pooled for stale proposals\)/.test(olderBack.out) && /stale proposals: 1 settled by the pass/.test(olderBack.out) && (await proposalRow(cedar.id)).status === "rejected", `the run after the vector lands re-pools the thought and settles the row (${staleLine(olderBack.out)})`);
+    let followSettled = false;
+    for (let i = 0; i < 40 && !followSettled; i++) {
+      await Bun.sleep(250);
+      followSettled = (await proposalRow(cedar.id)).status === "rejected";
+    }
+    follower.kill("SIGINT");
+    const followOut = (await new Response(follower.stdout).text()) + (await new Response(follower.stderr).text());
+    const followCode = await follower.exited;
+    assert(followSettled && followCode === 0 && /\(1 more re-pooled for stale proposals\)/.test(followOut) && seen.length === 1,
+           `the poll after the vector lands re-pools the thought and settles the row, one judge call in all (exit ${followCode}; ${followOut.split("\n").filter((l) => /pool:|stale proposals:/.test(l)).map((l) => l.trim()).join(" | ").slice(0, 300)})`);
+    assert(/^\s*stale proposals: 1 settled by the pass \(1 judged again with no conflict at the floor\) — distinct rows across the polls\s*$/m.test(followOut),
+           `…and the summary counts the row once, settled, with no wait clause (${staleLine(followOut)})`);
+    const olderBack = await consolidate("--status");
+    assert(olderBack.code === 0 && !/stale/.test(olderBack.out.split("\n").find((l) => /queue:/.test(l)) ?? "x stale"), `no stale row is left (${olderBack.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 160)})`);
     assert((await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`)[0].n === 5, "…still without an audit row");
     // A person may not borrow the marker: rebuild_derived would read the
     // rejection as the pass's and reopen it on a move.

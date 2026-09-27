@@ -1755,8 +1755,8 @@ stale row's newer thought under its own key (a pair both sides of which have a
 vector, with no live or failed claim there — a failed claim is
 `--retry-failed`'s), judges the thought's pairs
 again — up to `--k` model calls per re-pooled thought, since its agree and
-unrelated pairs left no record; a stale pair the top-k left out is judged
-anyway when it still meets the candidate rule — and either **replaces** the
+unrelated pairs left no record, plus one per stale pair the top-k left out
+that still meets the candidate rule, judged anyway — and either **replaces** the
 row in place (a conflict at
 the floor: `record_supersession_proposal`, back to pending under this key) or
 **settles** it (agree, unrelated, a conflict under the floor, or a pair the
@@ -2754,7 +2754,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2146 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 886 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 889 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
