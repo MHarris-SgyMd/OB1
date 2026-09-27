@@ -395,6 +395,136 @@ console.log("\n[5d] listLoggedSearches — the search rows of query_log, windowe
   }
 }
 
+console.log("\n[5e] workerStatus — per-work_type counts, stale leases and the active flag (SMD-2131)");
+{
+  const raw = new SQL({ url: URL_, max: 1 });
+  try {
+    // Ten thoughts of our own to pool, so the counts are exact regardless of the
+    // corpus this section inherits. Captured before the key is set, so the capture
+    // trigger enqueues nothing; the DELETE then clears the slate.
+    const ids: string[] = [];
+    for (let i = 0; i < 10; i++) ids.push((await store.captureThought({ content: `worker-status pool thought ${i}`, payload: { metadata: {} }, embedding: unit(i % EMBEDDING_DIM) })).id);
+    await raw`DELETE FROM thought_work_claims`; // isolate this section from any trigger-enqueued rows
+    const total = await store.countThoughts();
+    const ACTIVE = "extract:test-model@p2";
+    const ORPHAN = "extract:test-model@p1";
+    const CONSOL = "consolidate:test-judge@p1";
+    // Set the active extraction key so ACTIVE reads active:true and ORPHAN false.
+    await raw`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${ACTIVE}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+    // Exact rows for ACTIVE, DISTINCT per status so a swapped filter is caught:
+    // 4 pending, 3 claimed (1 fresh + 2 stale, oldest = w-dead at −26h), 2 succeeded, 1 failed.
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status) VALUES
+      (${ids[0]}::uuid, ${ACTIVE}, 'pending'), (${ids[1]}::uuid, ${ACTIVE}, 'pending'),
+      (${ids[2]}::uuid, ${ACTIVE}, 'pending'), (${ids[3]}::uuid, ${ACTIVE}, 'pending')`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, claimed_at, ttl_expires_at) VALUES
+      (${ids[4]}::uuid, ${ACTIVE}, 'claimed', 'w-fresh', now(), now() + interval '5 minutes'),
+      (${ids[5]}::uuid, ${ACTIVE}, 'claimed', 'w-dead', now() - interval '26 hours', now() - interval '26 hours'),
+      (${ids[6]}::uuid, ${ACTIVE}, 'claimed', 'w-stale2', now() - interval '25 hours', now() - interval '25 hours')`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at) VALUES
+      (${ids[7]}::uuid, ${ACTIVE}, 'succeeded', 'w1', now()), (${ids[8]}::uuid, ${ACTIVE}, 'succeeded', 'w1', now())`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error) VALUES
+      (${ids[9]}::uuid, ${ACTIVE}, 'failed', 'w1', now(), 'boom')`;
+    // A superseded pool and a consolidate pool, one pending row each.
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status) VALUES (${ids[0]}::uuid, ${ORPHAN}, 'pending'), (${ids[0]}::uuid, ${CONSOL}, 'pending')`;
+
+    const st = await store.workerStatus();
+    const active = st.find((r) => r.workType === ACTIVE);
+    assert(!!active && active.pending === 4 && active.claimed === 3 && active.succeeded === 2 && active.failed === 1, `ACTIVE counts: 4 pending, 3 claimed (1 fresh + 2 stale), 2 succeeded, 1 failed (${JSON.stringify(active)})`);
+    assert(active!.thoughts === total && active!.unpooled === total - 10, `thoughts is the corpus (${active!.thoughts}), unpooled = corpus − 10 pooled (${active!.unpooled})`);
+    assert(active!.stale === 2 && active!.staleWorkerId === "w-dead" && active!.oldestStaleClaimedAt !== null && ISO_RE.test(active!.oldestStaleClaimedAt), `2 stale leases; the OLDEST is the dead worker's, with its claimed_at (${active!.stale}, ${active!.staleWorkerId})`);
+    assert(active!.active === true, "the entity_extraction_key work_type reads active: true");
+    const orphan = st.find((r) => r.workType === ORPHAN);
+    assert(!!orphan && orphan.pending === 1 && orphan.stale === 0 && orphan.active === false, "a superseded extract pool reads active: false");
+    const consol = st.find((r) => r.workType === CONSOL);
+    assert(!!consol && consol.active === null, "a consolidate pool (no recorded active key) reads active: null");
+    // Cleanup so later sections and their capture trigger are not polluted.
+    await raw`DELETE FROM thought_work_claims`;
+    await raw`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  } finally {
+    await raw.close();
+  }
+}
+
+console.log("\n[5f] retryFailed and releaseStaleLeases — the write half of worker_status (SMD-2132)");
+{
+  const raw = new SQL({ url: URL_, max: 1 });
+  try {
+    const ids: string[] = [];
+    for (let i = 0; i < 8; i++) ids.push((await store.captureThought({ content: `worker-action pool thought ${i}`, payload: { metadata: {} }, embedding: unit(i % EMBEDDING_DIM) })).id);
+    await raw`DELETE FROM thought_work_claims`; // isolate from any trigger-enqueued rows
+    const A = "extract:action-model@p2";
+    const B = "extract:action-model@p1";
+
+    // ── retryFailed: pool A has 2 failed + 1 succeeded + 1 pending; pool B has 1 failed.
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error, attempt_count) VALUES
+      (${ids[0]}::uuid, ${A}, 'failed', 'w1', now(), 'boom', 3),
+      (${ids[1]}::uuid, ${A}, 'failed', 'w1', now(), 'boom', 3)`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at) VALUES (${ids[2]}::uuid, ${A}, 'succeeded', 'w1', now())`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status) VALUES (${ids[3]}::uuid, ${A}, 'pending')`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error, attempt_count) VALUES (${ids[4]}::uuid, ${B}, 'failed', 'w1', now(), 'boom', 3)`;
+
+    const rf = await store.retryFailed(A);
+    assert(rf.workType === A && rf.retried === 2 && rf.ids.length === 2 && new Set(rf.ids).size === 2, `retryFailed reports 2 requeued ids for A (${JSON.stringify(rf)})`);
+    assert([ids[0], ids[1]].every((id) => rf.ids.includes(id)), "the reported ids are A's two failed thoughts");
+    const aRows = await raw`SELECT thought_id::text AS id, status, last_error, finished_at, attempt_count FROM thought_work_claims WHERE work_type = ${A}`;
+    const aReset = (aRows as Record<string, unknown>[]).filter((r) => r.id === ids[0] || r.id === ids[1]);
+    assert(aReset.length === 2 && aReset.every((r) => r.status === "pending" && r.last_error === null && r.finished_at === null && Number(r.attempt_count) === 0), `A's failed rows are pending with error/finish/attempt reset (${JSON.stringify(aReset)})`);
+    const bStill = await raw`SELECT status FROM thought_work_claims WHERE work_type = ${B} AND thought_id = ${ids[4]}::uuid`;
+    assert(bStill.length === 1 && bStill[0].status === "failed", "a sibling pool's failed row is untouched — retryFailed is scoped to its work_type");
+    const aSucc = await raw`SELECT status FROM thought_work_claims WHERE work_type = ${A} AND thought_id = ${ids[2]}::uuid`;
+    assert(aSucc[0].status === "succeeded", "a succeeded row in the same pool is not requeued");
+    // Idempotent: nothing failed now, so a second call moves nothing.
+    const rf2 = await store.retryFailed(A);
+    assert(rf2.retried === 0 && rf2.ids.length === 0, "retryFailed on a pool with no failures reports 0");
+
+    // ── releaseStaleLeases: A has 1 stale (w-dead, attempt 2) + 1 live (w-live); B has 1 stale (w-dead-b).
+    await raw`DELETE FROM thought_work_claims`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, claimed_at, ttl_expires_at, attempt_count) VALUES
+      (${ids[0]}::uuid, ${A}, 'claimed', 'w-dead', now() - interval '26 hours', now() - interval '26 hours', 2),
+      (${ids[1]}::uuid, ${A}, 'claimed', 'w-live', now(), now() + interval '10 minutes', 1)`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, claimed_at, ttl_expires_at, attempt_count) VALUES
+      (${ids[2]}::uuid, ${B}, 'claimed', 'w-dead-b', now() - interval '25 hours', now() - interval '25 hours', 1)`;
+
+    // Default: release every STALE lease across pools; the live one survives.
+    const rl = await store.releaseStaleLeases({});
+    assert(rl.released === 2 && rl.ids.length === 2 && new Set(rl.workers).size === 2 && rl.workers.includes("w-dead") && rl.workers.includes("w-dead-b"), `default release returns the 2 stale leases and their holders (${JSON.stringify(rl)})`);
+    const live = await raw`SELECT status, worker_id, ttl_expires_at FROM thought_work_claims WHERE thought_id = ${ids[1]}::uuid AND work_type = ${A}`;
+    assert(live.length === 1 && live[0].status === "claimed" && live[0].worker_id === "w-live", "the LIVE lease is left claimed — a default release never touches an unexpired lease");
+    const deadRow = await raw`SELECT status, ttl_expires_at, attempt_count FROM thought_work_claims WHERE thought_id = ${ids[0]}::uuid AND work_type = ${A}`;
+    assert(deadRow[0].status === "pending" && deadRow[0].ttl_expires_at === null && Number(deadRow[0].attempt_count) === 1, `a released stale lease is pending, ttl cleared, attempt decremented 2→1 (${JSON.stringify(deadRow[0])})`);
+
+    // Scoping: re-seed A stale + B stale; release A only.
+    await raw`DELETE FROM thought_work_claims`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, claimed_at, ttl_expires_at) VALUES
+      (${ids[0]}::uuid, ${A}, 'claimed', 'w-dead', now() - interval '2 hours', now() - interval '2 hours'),
+      (${ids[1]}::uuid, ${B}, 'claimed', 'w-dead', now() - interval '2 hours', now() - interval '2 hours')`;
+    const rlA = await store.releaseStaleLeases({ workType: A });
+    assert(rlA.released === 1 && rlA.ids[0] === ids[0], "releaseStaleLeases scoped to a work_type touches only that pool");
+    const bStale = await raw`SELECT status FROM thought_work_claims WHERE work_type = ${B} AND thought_id = ${ids[1]}::uuid`;
+    assert(bStale[0].status === "claimed", "the other pool's stale lease is left for a call that names it");
+
+    // include_live: reach a lease that has NOT lapsed, by holder.
+    await raw`DELETE FROM thought_work_claims`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, claimed_at, ttl_expires_at) VALUES
+      (${ids[0]}::uuid, ${A}, 'claimed', 'w-live', now(), now() + interval '10 minutes'),
+      (${ids[1]}::uuid, ${A}, 'claimed', 'w-other', now(), now() + interval '10 minutes')`;
+    const rlLive = await store.releaseStaleLeases({ workType: A, workerId: "w-live", includeLive: true });
+    assert(rlLive.released === 1 && rlLive.ids[0] === ids[0] && rlLive.workers[0] === "w-live", "include_live with a worker_id releases that holder's live lease alone");
+    const other = await raw`SELECT status FROM thought_work_claims WHERE thought_id = ${ids[1]}::uuid AND work_type = ${A}`;
+    assert(other[0].status === "claimed", "another holder's live lease is untouched");
+    // Backstop: includeLive without a workerId throws rather than releasing every live lease.
+    let threw = "";
+    try { await store.releaseStaleLeases({ includeLive: true }); } catch (e) { threw = (e as Error).message; }
+    assert(/includeLive requires a workerId/.test(threw), `includeLive with no workerId is refused at the store (${threw.slice(0, 60)})`);
+    const stillClaimed = await raw`SELECT count(*)::int AS n FROM thought_work_claims WHERE status = 'claimed'`;
+    assert(stillClaimed[0].n === 1, "…and released nothing (the w-other live lease still stands)");
+
+    await raw`DELETE FROM thought_work_claims`;
+  } finally {
+    await raw.close();
+  }
+}
+
 console.log("\n[6] Dedup and merge behave as the tools expect");
 {
   const before = await store.countThoughts();

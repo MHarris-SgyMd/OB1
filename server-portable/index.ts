@@ -96,6 +96,13 @@ type Env = {
    */
   OB1_EXTRACT_MAX_WINDOWS?: string;
   /**
+   * The larger local model a runaway extraction call escalates to instead of the
+   * penalised same-model retry (SMD-2000). Read here only by preflight, which
+   * names it on the extraction window row and probes it with --deep; the server
+   * never extracts. Unset (or equal to the metadata model): the retry is unchanged.
+   */
+  OB1_EXTRACT_ESCALATE_MODEL?: string;
+  /**
    * "on" to record the opt-in query log (migration 034, SMD-1295): one row per
    * search and one per follow-up fetch/edit/delete of a returned id — or, since
    * SMD-1719, per id a write cited as its source — so a
@@ -381,6 +388,8 @@ type ToolErrorCode =
   | "REFUSED_SUPERSEDES_UNKNOWN"   // the supersedes names no thought
   | "DERIVED_FROM_MISSING"         // a derived_from id names no thought
   | "SUPERSEDES_UNJUDGED"          // the server could not check/attribute the supersedes; retry
+  | "REFUSED_EMPTY_WORK_TYPE"      // retry_failed / release_stale_leases given a blank work_type
+  | "REFUSED_LIVE_LEASE_NEEDS_WORKER" // release_stale_leases include_live without a worker_id
   | "STORE_UNAVAILABLE";           // the store did not answer; retry
 type ToolErrorInfo = { code: ToolErrorCode; retryable: boolean; positions?: number[] };
 
@@ -1744,6 +1753,33 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
+  // Tool 3b-iv: the background-work queues (SMD-2131) — per work_type, what is
+  // pending / in flight / done / failed / stalled over thought_work_claims, so an
+  // operator or agent can ask a running brain about its queues without shelling into
+  // Postgres (SMD-1844 closed the host port). Read-only, aggregated in SQL; SQL
+  // backend only (the table is not on PostgREST). Gated like the other read tools.
+  if (canRead(principal)) server.registerTool(
+    "worker_status",
+    {
+      title: "Worker Queue Status",
+      description:
+        "Report the background-work pools (entity extraction, consolidation, re-embed) — one row per work_type that has any claim rows, with pending / claimed (in flight, INCLUDING stale) / succeeded / failed counts, how many thoughts are unpooled (not yet queued), the corpus total, how many claimed leases are STALE (a dead worker's lease past its ttl — healthy in-flight is claimed − stale), and whether the pool is the brain's active one. " +
+        "Read-only. Returns a JSON array; empty when nothing has been queued (a pool appears once it has a claim row).",
+      annotations: {
+        readOnlyHint: true,
+      },
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const rows = await (await db()).workerStatus();
+        return { content: [{ type: "text" as const, text: JSON.stringify(rows) }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
   // Tool 3c: what this brain is (SMD-2041) — version, commit, store, tier, the
   // database's versions, ledger, counts, size and HNSW parameters, one short
   // table. Gated like the other read tools. The same record is the keyed
@@ -2350,6 +2386,79 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
+  // Tool 12 & 13: the write half of worker_status (SMD-2132). Both mutate
+  // thought_work_claims and consume nothing on the model — they are the control
+  // plane over the EXISTING claim machinery (migration 015), not a new worker or
+  // scheduler, and never run the LLM drain (the server does not; entities.ts).
+  // Write-scoped, like update/delete: a read or capture key is refused, and the
+  // tool is never registered for it. Each stamps the calling key as actor into
+  // the action log, one row per affected thought (logActionCalls; the id is the
+  // UUID it needs). The keyed REST mirror is the app.post guard below.
+  if (canWrite(principal)) server.registerTool(
+    "retry_failed",
+    {
+      title: "Retry Failed Work",
+      description:
+        "Requeue a background-work pool's FAILED claim rows back to pending, so the next worker pass reprocesses them (the `--retry-failed` path over a tool). Read `worker_status` first for the `workType` and its `failed` count — pass that exact work_type (e.g. \"extract:qwen2.5:7b@p2\" or \"reembed:<model>@<dim>\"). Acts on this one pool only; a fresh attempt clears the recorded error and the attempt count. Requires a write key.",
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+      },
+      inputSchema: {
+        work_type: z.string().describe("The exact work_type whose failed rows to requeue — a `workType` from worker_status (e.g. \"extract:qwen2.5:7b@p2\"). Acts on this pool alone."),
+      },
+    },
+    async ({ work_type }) => {
+      try {
+        if (work_type.trim() === "") return toolError("Refused: work_type is required — pass the exact `workType` worker_status reports for the pool to retry.", { code: "REFUSED_EMPTY_WORK_TYPE", retryable: false });
+        const result = await (await db()).retryFailed(work_type);
+        // Audit: one action row per requeued thought, actor = this key (SMD-2132).
+        await logActionCalls(result.ids.map((id) => ({ tool: "retry_failed", targetId: id })));
+        return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+      } catch (e) {
+        // Codeless, as delete_thought/update_thought and worker_status are: on a
+        // PostgREST (Workers) deploy the store throws the SQL-only reason, which is
+        // permanent, not the transient STORE_UNAVAILABLE a code would imply.
+        return toolError(`retry_failed failed: ${(e as Error).message}`);
+      }
+    }
+  );
+
+  if (canWrite(principal)) server.registerTool(
+    "release_stale_leases",
+    {
+      title: "Release Stale Leases",
+      description:
+        "Return CLAIMED work rows whose lease has lapsed (a dead worker's, past its ttl) to the pending pool, so they can be reclaimed — the manual form of the lazy reaper. By default only STALE leases are released (worker_status reports `stale`, `staleWorkerId` and `oldestStaleClaimedAt`); a live lease is left for its holder. Pass `work_type` to scope to one pool, `worker_id` to scope to one holder. To release a lease that has NOT lapsed you must set `include_live` AND name the `worker_id` — releasing a live lease risks the holder double-processing. Requires a write key.",
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+      },
+      inputSchema: {
+        work_type: z.string().optional().describe("Restrict to one pool's leases (a `workType` from worker_status). Omit to reap stale leases across every pool."),
+        worker_id: z.string().optional().describe("Restrict to one holder's leases (a `staleWorkerId` from worker_status). Required when include_live is true."),
+        include_live: z.boolean().optional().describe("Release a holder's leases even if the ttl has NOT lapsed. Off by default (only stale leases are touched). Requires worker_id — releasing a live lease risks double-processing."),
+      },
+    },
+    async ({ work_type, worker_id, include_live }) => {
+      try {
+        if (work_type !== undefined && work_type.trim() === "") return toolError("Refused: work_type was given but blank — omit it to reap across all pools, or pass a real `workType`.", { code: "REFUSED_EMPTY_WORK_TYPE", retryable: false });
+        if (include_live === true && (worker_id === undefined || worker_id.trim() === "")) {
+          return toolError("Refused: include_live releases a lease that has not lapsed, which risks the holder double-processing — name the worker_id whose live lease to release (worker_status reports the holder).", { code: "REFUSED_LIVE_LEASE_NEEDS_WORKER", retryable: false });
+        }
+        const result = await (await db()).releaseStaleLeases({ workType: work_type, workerId: worker_id, includeLive: include_live === true });
+        await logActionCalls(result.ids.map((id) => ({ tool: "release_stale_leases", targetId: id })));
+        return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+      } catch (e) {
+        return toolError(`release_stale_leases failed: ${(e as Error).message}`);
+      }
+    }
+  );
+
   return server;
 }
 
@@ -2646,6 +2755,97 @@ app.get("*", async (c, next) => {
   clearTimeout(timer);
   if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
   return c.json(await info, 200, corsHeaders);
+});
+
+// The worker-queue status as a keyed GET (SMD-2131) — the REST mirror of the
+// worker_status tool, the same authentication as /health (keyed reader → the JSON,
+// capture/wrong/no/revoked key → plain "ok", HEAD → "ok"). Kept off the /health
+// BrainInfo body deliberately: this read is SQL-backend only and would otherwise
+// couple a work-queue read into the health path's identity budget.
+const WORKER_STATUS_PATH = /(^|\/)worker-status\/?$/;
+app.get("*", async (c, next) => {
+  if (!WORKER_STATUS_PATH.test(c.req.path)) return next();
+  const principal = authenticateRequest(c.req.raw, {
+    MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
+    MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
+  }, { admit: SCOPES });
+  if (!principal || !canRead(principal)) return c.text("ok", 200, corsHeaders);
+  if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
+  // The same identity gate as /health: a revoked or unresolved key is shown nothing.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const identity = await Promise.race([
+    agents().resolve(db(), principal),
+    new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), HEALTH_DEADLINE_MS); }),
+  ]);
+  clearTimeout(timer);
+  if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
+  try {
+    return c.json(await (await db()).workerStatus(), 200, corsHeaders);
+  } catch (e) {
+    // SQL-only: a PostgREST (Workers) deployment cannot serve this — a reason, not a bare 500.
+    return c.json({ error: (e as Error).message }, 200, corsHeaders);
+  }
+});
+
+// The worker-queue ACTIONS as keyed POSTs (SMD-2132) — the REST mirror of the
+// retry_failed and release_stale_leases tools. POST at every path is the MCP
+// endpoint (app.on(MCP_METHODS, "*") below), so this guard is registered BEFORE
+// it and falls through with next() for any path it does not own; the two action
+// paths it handles never reach the transport, and no MCP client posts JSON-RPC
+// there. WRITE-scoped (canWrite) — stricter than /worker-status's read mirror; a
+// read/capture/no/wrong/revoked key is shown and does nothing (plain "ok",
+// parity with /health and /worker-status). Args ride the JSON body; the
+// refusals-as-values are the tool's, as a 400 carrying the same code, and the
+// SQL-only reason (the PostgREST shim throws) is a 200 body as the read mirror's.
+const WORKER_RETRY_PATH = /(^|\/)worker-retry-failed\/?$/;
+const WORKER_RELEASE_PATH = /(^|\/)worker-release-leases\/?$/;
+app.post("*", async (c, next) => {
+  const isRetry = WORKER_RETRY_PATH.test(c.req.path);
+  const isRelease = WORKER_RELEASE_PATH.test(c.req.path);
+  if (!isRetry && !isRelease) return next();
+  const principal = authenticateRequest(c.req.raw, {
+    MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
+    MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
+  }, { admit: SCOPES });
+  if (!principal || !canWrite(principal)) return c.text("ok", 200, corsHeaders);
+  // The same identity gate as /worker-status: a revoked or unresolved key does nothing.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const identity = await Promise.race([
+    agents().resolve(db(), principal),
+    new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), HEALTH_DEADLINE_MS); }),
+  ]);
+  clearTimeout(timer);
+  if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
+  const body = await c.req.json().catch(() => null);
+  const args: Record<string, unknown> = body !== null && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
+  // Actor audit, one action-log row per affected thought (SMD-2132): the resolved
+  // agent id, tier and tool name, exactly as the MCP tools' logActionCalls does.
+  const audit = async (tool: string, ids: string[]): Promise<void> => {
+    if (!queryLogEnabled(env()) || ids.length === 0) return;
+    try {
+      await (await db()).logActions(ids.map((id) => ({ tool, agentId: identity.agentId, targetId: id, tier: env().OB1_TIER?.trim() || undefined })));
+    } catch { /* best-effort, as on the MCP path */ }
+  };
+  try {
+    if (isRetry) {
+      const workType = typeof args.work_type === "string" ? args.work_type : "";
+      if (workType.trim() === "") return c.json({ error: "work_type is required — pass the exact workType worker_status reports.", code: "REFUSED_EMPTY_WORK_TYPE" }, 400, corsHeaders);
+      const result = await (await db()).retryFailed(workType);
+      await audit("retry_failed", result.ids);
+      return c.json(result, 200, corsHeaders);
+    }
+    const workType = args.work_type === undefined ? undefined : String(args.work_type);
+    const workerId = args.worker_id === undefined ? undefined : String(args.worker_id);
+    const includeLive = args.include_live === true;
+    if (workType !== undefined && workType.trim() === "") return c.json({ error: "work_type was given but blank — omit it to reap across all pools, or pass a real workType.", code: "REFUSED_EMPTY_WORK_TYPE" }, 400, corsHeaders);
+    if (includeLive && (workerId === undefined || workerId.trim() === "")) return c.json({ error: "include_live requires worker_id — releasing a live lease risks the holder double-processing.", code: "REFUSED_LIVE_LEASE_NEEDS_WORKER" }, 400, corsHeaders);
+    const result = await (await db()).releaseStaleLeases({ workType, workerId, includeLive });
+    await audit("release_stale_leases", result.ids);
+    return c.json(result, 200, corsHeaders);
+  } catch (e) {
+    // SQL-only (the PostgREST shim throws), or a store failure: a reason, not a bare 500 (parity with /worker-status).
+    return c.json({ error: (e as Error).message }, 200, corsHeaders);
+  }
 });
 
 // ── A tool call outlives the runtime's idle timeout (SMD-1864) ───────────────

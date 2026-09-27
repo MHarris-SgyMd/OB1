@@ -30,6 +30,10 @@
       "scope": "read"
     },
     {
+      "name": "worker_status",
+      "scope": "read"
+    },
+    {
       "name": "list_supersession_proposals",
       "scope": "read"
     },
@@ -55,6 +59,14 @@
     },
     {
       "name": "delete_thought",
+      "scope": "write"
+    },
+    {
+      "name": "retry_failed",
+      "scope": "write"
+    },
+    {
+      "name": "release_stale_leases",
       "scope": "write"
     }
   ]

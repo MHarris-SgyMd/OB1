@@ -1358,7 +1358,9 @@ tokens per input token and a 95th percentile of 1.6 over the 262 thoughts the
 answer style, not a property of the task, and the budget shipped is three
 times the text plus 1,536. A runaway ends at the budget as a malformed answer
 the worker records failed in about a minute, where before it held a worker for
-the whole timeout.
+the whole timeout (since SMD-2260 a window's is left out of a thought at least
+one of whose other windows parsed, and the thought recorded succeeded with a
+partial caveat).
 
 ### The planted set: what a window costs in relations, 2026-09-22
 
@@ -1467,6 +1469,23 @@ What the rows say, read together:
   whole-thought retry averages 12.0 mentions where the shipped shape's
   windows, most of which converge first time, average 17.1 — the windows
   keep the rich answer where they can and the retry rescues where they cannot.
+- **Escalation is the alternative to the penalty (SMD-2000).** Where the retry
+  spends the same model again under a penalty that thins the rescued answer,
+  `OB1_EXTRACT_ESCALATE_MODEL` remakes the runaway once on a larger local model
+  with no penalty — the `w1200e` arm here (`--arms w1200e --escalate
+  qwen3.8:27b`). On the dogfood brain the 27B never looped on the thoughts the
+  7B could not finish: draining the p2 backlog on the 7B left nine hard
+  failures, eight of them runaways, and escalating exactly those to the 27B
+  extracted every one, 0 runaways, and dropped no relation for an unlisted
+  entity where the 7B passes dropped hundreds. Its answer is not thinner the
+  way the penalised one is — it is the larger model's whole answer. The cost is
+  the large model, spent only on the failures: ~45 s a call, ~1 h for a brain's
+  ~80 runaways, and the 27B beside the 4B embedder is 28 GB with
+  `OLLAMA_MAX_LOADED_MODELS=2`, so a capture mid-pass can evict the embedder and
+  pay its reload — leave the knob unset on a box that cannot hold both. Precision
+  of the escalated answers against the penalised ones is measured on SMD-1961's
+  labelled corpus once it lands; that number is pending the set, not this
+  section's synthetic one.
 
 **The default is 1200** (`chunk.ts`, `DEFAULT_EXTRACT_WINDOW_TOKENS`) **with
 the retry on** (`EXTRACT_RETRY_RUNAWAY`): 27 of 32 under this budget, 32 of 32

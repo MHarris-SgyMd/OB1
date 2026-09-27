@@ -33,6 +33,10 @@ import type {
   ThoughtHybridMatch,
   ThoughtKeywordMatch,
   LoggedSearchPage,
+  WorkerStatusRow,
+  RetryFailedResult,
+  ReleaseLeasesOpts,
+  ReleaseLeasesResult,
   ThoughtIdPage,
   ThoughtListItem,
   ThoughtMatch,
@@ -228,6 +232,25 @@ export class PostgrestStore implements ThoughtStore {
       filter: (r.filter as Record<string, unknown> | null) ?? {},
     }));
     return { searches, truncated };
+  }
+
+  async workerStatus(): Promise<WorkerStatusRow[]> {
+    // thought_work_claims is not published to PostgREST — migration 015 grants it no
+    // access and never NOTIFYs the schema cache, and the per-work_type counts are an
+    // ad-hoc GROUP BY no RPC exposes. Say so rather than a partial or a bare error,
+    // as databaseFacts does for the catalog reads (SMD-2131).
+    throw new Error("worker_status requires the SQL backend — thought_work_claims is not published to PostgREST (a container or Bun deployment on the SQL store reports the work queues; migration 015)");
+  }
+
+  async retryFailed(_workType: string): Promise<RetryFailedResult> {
+    // The write actions run over the same unpublished table as workerStatus, so
+    // the same reason: thought_work_claims is not on PostgREST (migration 015),
+    // and there is no RPC for the requeue UPDATE. Say so rather than a bare error.
+    throw new Error("retry_failed requires the SQL backend — thought_work_claims is not published to PostgREST (a container or Bun deployment on the SQL store controls the work queues; migration 015)");
+  }
+
+  async releaseStaleLeases(_opts: ReleaseLeasesOpts): Promise<ReleaseLeasesResult> {
+    throw new Error("release_stale_leases requires the SQL backend — thought_work_claims is not published to PostgREST (a container or Bun deployment on the SQL store controls the work queues; migration 015)");
   }
 
   async pageThoughtMeta(offset: number, limit: number): Promise<ThoughtMeta[]> {

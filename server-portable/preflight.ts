@@ -30,6 +30,7 @@ import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEn
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
+import { quoteIdent, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
 import { tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
@@ -778,19 +779,28 @@ if (configFailed) {
       // that holds it here (the alias included), and for PostgREST — which has
       // no connection string of its own — say what to hand it instead.
       const urlArg = conn ? `$${conn.from}` : "<the brain's postgres:// connection string — Supabase's direct connection, not the pooler>";
-      // public.thoughts present but not resolving for this role — no USAGE
-      // on public, or public off its search_path — is not a brain to
-      // migrate (SMD-2062). public alone, as every direct check judges it:
-      // a thoughts in some other schema is another tool's, and an
-      // un-migrated public still wants the migrations. With USAGE held the
-      // table can only be off the path; without it, whether the path holds
-      // public too cannot be read (current_schemas() leaves out a schema
-      // the role has no USAGE on), so the GRANT comes first and the path
-      // second. The exact path statement is SMD-2242's. pg_class answers
-      // for any role, whatever its path; over PostgREST there is no catalog
-      // to ask, and a failed probe asks nothing.
-      let offPath: { cause: string; fix: string } | null = null;
-      if (built.kind === "sql" && conn && /does not exist/i.test(msg)) {
+      // public.thoughts present but not resolving for this role — no USAGE on
+      // public, public off its search_path, or both — is not a brain to migrate
+      // (SMD-2062). Probed only when thoughts itself fails: 42P01 on the count
+      // (in any lc_messages; any other failure spares the second connection)
+      // and the probe's own to_regclass('thoughts') NULL — an RLS function
+      // reading some other missing table fails the count the same way. public
+      // alone: a thoughts elsewhere is another tool's. Each cause is named with
+      // its statement (SMD-2242). The path is parsed, never
+      // echoed, and not read from current_schemas(), which hides a schema
+      // without USAGE (search-path.ts); with USAGE held, thoughts not resolving
+      // means off the path whatever the parse says. The GRANT names
+      // current_user, whose privilege the count used; the ALTER ROLE names
+      // session_user, whose settings load, IN DATABASE since a role's setting
+      // there outranks its plain one and the database's. A path from the
+      // connection (source `client`) or SET after login (`session`) outranks
+      // it; an unread source gets that caveat. The connection's path is
+      // replaced, never appended to: Bun joins two options with a comma, libpq
+      // keeps the last, and Bun's search_path= parameter outranks options.
+      // Over PostgREST there is no catalog to ask, and a failed probe asks
+      // nothing.
+      let offPath: { causes: string[]; fixes: string[] } | null = null;
+      if (built.kind === "sql" && conn && String((e as { errno?: unknown }).errno ?? "") === "42P01") {
         try {
           const { SQL } = await import("bun");
           const probe = new SQL({ url: conn.url, max: 1 });
@@ -798,14 +808,43 @@ if (configFailed) {
             const [r] = (await probe`
               SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                               WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present,
+                     to_regclass('thoughts') IS NULL AS unresolved,
                      has_schema_privilege('public', 'USAGE') AS usage,
+                     current_setting('search_path') AS path,
+                     current_setting('server_version_num')::int AS version,
                      quote_ident(current_user::text) AS role,
-                     quote_ident(current_database()::text) AS db`) as { present: boolean; usage: boolean; role: string; db: string }[];
-            if (r?.present) {
-              const putOnPath = `ALTER ROLE ${r.role} IN DATABASE ${r.db} SET search_path = <the schemas it has>, public; (a search_path in the connection string outranks it)`;
-              offPath = r.usage
-                ? { cause: "public is not on its search_path", fix: `Put public on the role's search_path: ${putOnPath}` }
-                : { cause: "no USAGE on schema public", fix: `GRANT USAGE ON SCHEMA public TO ${r.role};  then, if public is not on the role's search_path, ${putOnPath}` };
+                     quote_ident(session_user::text) AS login,
+                     quote_ident(current_database()::text) AS db`) as { present: boolean; unresolved: boolean; usage: boolean; path: string; version: number; role: string; login: string; db: string }[];
+            if (r?.present && r.unresolved) {
+              let source: string | null = null;
+              try {
+                source = ((await probe`SELECT source FROM pg_settings WHERE name = 'search_path'`) as { source: string }[])[0]?.source ?? null;
+              } catch { /* unread: the ALTER ROLE statement stands */ }
+              const schemas = searchPathSchemas(String(r.path ?? ""), Number(r.version));
+              const causes: string[] = [];
+              const fixes: string[] = [];
+              if (!r.usage) {
+                causes.push("no USAGE on schema public");
+                fixes.push(`GRANT USAGE ON SCHEMA public TO ${r.role};`);
+              }
+              if (r.usage || !schemas.includes("public")) {
+                causes.push(`public is not on its search_path, which is ${schemas.length ? schemas.map(quoteIdent).join(", ") : "empty"}`);
+                // A superuser, a CREATEROLE role (from PostgreSQL 16, one with ADMIN
+                // on it), or the login role itself may alter it; under a SET ROLE the
+                // login role must drop it first (RESET ROLE returns to the role its
+                // settings SET).
+                const alter = r.login !== r.role
+                  ? `SET ROLE NONE; ALTER ROLE ${r.login} IN DATABASE ${r.db} SET search_path = ${withPublic(schemas)};  (as ${r.login}, or a superuser)`
+                  : `ALTER ROLE ${r.login} IN DATABASE ${r.db} SET search_path = ${withPublic(schemas)};`;
+                fixes.push(source === "client"
+                  ? `the connection string sets search_path (a search_path= parameter, or -c search_path= in options=), which outranks any ALTER ROLE: remove that and put this in options=, beside any other -c setting there (separated by %20): ${withPublicInOptions(schemas)}`
+                  : source === "session"
+                  ? `${alter}  (this session's path was SET after login — by a pooler replaying the connection string's, or a login trigger — which outranks it; change it there)`
+                  : source === null
+                  ? `${alter}  (unless the connection string sets search_path, which outranks it)`
+                  : alter);
+              }
+              offPath = { causes, fixes };
             }
           } finally {
             await probe.close();
@@ -813,9 +852,9 @@ if (configFailed) {
         } catch { /* the remedy below stays the migrate command */ }
       }
       add("schema", "fail",
-          offPath ? `${msg} — public.thoughts exists but does not resolve for this role (${offPath.cause})` : msg,
+          offPath ? `${msg} — public.thoughts exists but does not resolve for this role (${offPath.causes.join("; ")})` : msg,
           offPath
-            ? `${offPath.fix}  The table is there, so migrating would not make it resolve.`
+            ? `${offPath.fixes.join("  then ").replace(/^./, (c) => c.toUpperCase())}  The table is there, so migrating would not make it resolve.`
             : /does not exist|relation/i.test(msg)
             ? `Apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
             : "Check credentials and network reachability to the database.");
@@ -3477,10 +3516,22 @@ if (deep) {
   // and a judge model the endpoint does not serve fails the `judge model` row
   // rather than the first pass of db/consolidate.ts (SMD-1901). One model,
   // one probe: the two rows would otherwise report one call twice.
+  // The escalation target the worker would ACTUALLY dial (SMD-2000): windowingFor
+  // applies the rule — active only with reasoning off (a runaway exists only
+  // under a budget) and when it is not the metadata model — so the probe never
+  // fires for a model the worker would never reach.
+  const { windowingFor } = await import("./entities.ts");
+  const escalateModel = windowingFor(resolvedEmbed).escalateModel ?? "";
   const probes: [row: string, model: string, consequence: string][] = [
     ["metadata model", metaModel, "Capture would still succeed, but every thought would be tagged uncategorized."],
     ...(judgeModel !== metaModel
       ? [["judge model", judgeModel, "Capture is unaffected; db/consolidate.ts would fail every pair it judges."] as [string, string, string]]
+      : []),
+    // The escalation target (SMD-2000), when it is a third distinct model: a
+    // runaway is remade on it, so it must honour JSON mode too, or the answer
+    // it was meant to rescue is malformed and the thought fails.
+    ...(escalateModel && escalateModel !== judgeModel
+      ? [["extraction escalation model", escalateModel, "Capture and the judge are unaffected; a runaway extraction escalated to it would fail rather than be rescued."] as [string, string, string]]
       : []),
   ];
   for (const [row, model, consequence] of probes) {

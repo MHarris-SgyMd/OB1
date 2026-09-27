@@ -43,6 +43,10 @@ import type {
   ThoughtHybridMatch,
   ThoughtKeywordMatch,
   LoggedSearchPage,
+  WorkerStatusRow,
+  RetryFailedResult,
+  ReleaseLeasesOpts,
+  ReleaseLeasesResult,
   ThoughtIdPage,
   ThoughtListItem,
   ThoughtMatch,
@@ -294,6 +298,120 @@ export class SqlStore implements ThoughtStore {
       filter: (r.filter as Record<string, unknown> | null) ?? {},
     }));
     return { searches, truncated };
+  }
+
+  async workerStatus(): Promise<WorkerStatusRow[]> {
+    // Per work_type: the four status counts as the workers count them — a stale
+    // lease stays 'claimed' until the next claim_thoughts() reaps it, so it is in
+    // `claimed`, not `pending` (migration 015). `stale` is the derived subset, with
+    // the oldest lease's time and holder. One GROUP BY, read-only, no lock, no write.
+    // `thoughts` (the corpus total) rides the SAME statement as the per-work_type
+    // counts, so both come from one snapshot: pooled ≤ total always, and `unpooled`
+    // can never read negative under a concurrent delete of a pooled thought (a
+    // separate count query is a torn read that could — review pass 2). `unpooled` =
+    // corpus − pooled; the PK (thought_id, work_type) makes a work_type's claim rows
+    // exactly its pooled thoughts, so this equals db/extract-entities.ts counts()'s
+    // `NOT EXISTS` without the correlated scan. (reembed/consolidate keys pool by
+    // model-aware rules; this generic definition matches extraction — fragment.)
+    const rows = await this.sql`
+      SELECT work_type,
+             count(*) FILTER (WHERE status = 'pending')::int   AS pending,
+             count(*) FILTER (WHERE status = 'claimed')::int   AS claimed,
+             count(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
+             count(*) FILTER (WHERE status = 'failed')::int    AS failed,
+             count(*) FILTER (WHERE status = 'claimed' AND ttl_expires_at < now())::int AS stale,
+             min(claimed_at) FILTER (WHERE status = 'claimed' AND ttl_expires_at < now()) AS oldest_stale_claimed_at,
+             (array_agg(worker_id ORDER BY claimed_at) FILTER (WHERE status = 'claimed' AND ttl_expires_at < now()))[1] AS stale_worker_id,
+             (SELECT count(*)::int FROM thoughts) AS thoughts
+      FROM thought_work_claims
+      GROUP BY work_type
+      ORDER BY work_type`;
+    // The active pools, from ob1_config: the extraction key verbatim, and the reembed
+    // key built from the recorded embedding model and dim. consolidate records no key,
+    // so its work_types report active: null rather than a false negative.
+    const cfg = Object.fromEntries(
+      (await this.sql`SELECT key, value FROM ob1_config WHERE key IN ('entity_extraction_key', 'embedding_model', 'embedding_dim')`)
+        .map((r: { key: string; value: string }) => [r.key, r.value]),
+    ) as Record<string, string | undefined>;
+    const reembedKey = cfg.embedding_model && cfg.embedding_dim ? `reembed:${cfg.embedding_model}@${cfg.embedding_dim}` : null;
+    const activeOf = (wt: string): boolean | null => {
+      if (wt === cfg.entity_extraction_key) return true;
+      if (reembedKey !== null && wt === reembedKey) return true;
+      if (wt.startsWith("consolidate:")) return null;
+      return false;
+    };
+    return rows.map((r: Record<string, unknown>) => {
+      const pending = Number(r.pending);
+      const claimed = Number(r.claimed);
+      const succeeded = Number(r.succeeded);
+      const failed = Number(r.failed);
+      const total = Number(r.thoughts);
+      return {
+        workType: String(r.work_type),
+        pending,
+        claimed,
+        succeeded,
+        failed,
+        unpooled: total - (pending + claimed + succeeded + failed),
+        thoughts: total,
+        stale: Number(r.stale),
+        oldestStaleClaimedAt: isoTimestampOrNull(r.oldest_stale_claimed_at as string | null),
+        staleWorkerId: (r.stale_worker_id as string | null) ?? null,
+        active: activeOf(String(r.work_type)),
+      };
+    });
+  }
+
+  async retryFailed(workType: string): Promise<RetryFailedResult> {
+    // The write half of workerStatus, over thought_work_claims (SMD-2132): the
+    // db/*.ts --retry-failed path (extract-entities.ts:413-420) as one statement.
+    // Scoped to the one pool — WHERE work_type = $1 AND status = 'failed' — so a
+    // sibling pool's failures are untouched; a fresh attempt clears the recorded
+    // error, the finish time and the count (015's REQUEUE_SET_SQL shape). The
+    // caller has already gated the write scope. RETURNING the ids feeds the audit.
+    const rows = await this.sql`
+      UPDATE thought_work_claims
+         SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0
+       WHERE work_type = ${workType} AND status = 'failed'
+      RETURNING thought_id`;
+    const ids = rows.map((r: { thought_id: string }) => String(r.thought_id));
+    return { workType, retried: ids.length, ids };
+  }
+
+  async releaseStaleLeases(opts: ReleaseLeasesOpts): Promise<ReleaseLeasesResult> {
+    // The write half of workerStatus (SMD-2132): return `claimed` rows to the
+    // pool, the release_claims_for_worker(...) path (migration 015:362-382) over a
+    // tool. The SET mirrors that function — pending, TTL cleared, attempt
+    // decremented (an un-run lease is not penalised, so a released row is not one
+    // attempt closer to 'failed'). One static statement; the optional scoping and
+    // the live-lease switch ride as parameters rather than composed SQL, so there
+    // is no interpolation to escape (see the bun-sql template rules). Without
+    // includeLive only past-ttl_expires_at leases match — a live lease is left for
+    // its holder. The caller has gated the write scope and refused includeLive
+    // without a workerId; this method trusts that and does the mutation.
+    const workType = opts.workType ?? null;
+    const workerId = opts.workerId ?? null;
+    const includeLive = opts.includeLive === true;
+    // Defense in depth: the surfaces refuse includeLive without a workerId as a
+    // value (with a code), and never reach here without one — but a direct caller
+    // must not be able to release EVERY live lease across every pool by omitting it.
+    if (includeLive && (workerId === null || workerId.trim() === "")) {
+      throw new Error("releaseStaleLeases: includeLive requires a workerId — refusing to release every live lease");
+    }
+    const rows = await this.sql`
+      UPDATE thought_work_claims
+         SET status = 'pending', ttl_expires_at = NULL, attempt_count = GREATEST(attempt_count - 1, 0)
+       WHERE status = 'claimed'
+         AND (${workType}::text IS NULL OR work_type = ${workType})
+         AND (${workerId}::text IS NULL OR worker_id = ${workerId})
+         AND (${includeLive} OR ttl_expires_at < now())
+      RETURNING thought_id, worker_id`;
+    const claimed = rows as Record<string, unknown>[];
+    const ids = claimed.map((r) => String(r.thought_id));
+    const workers = Array.from(new Set(
+      claimed.map((r) => r.worker_id).filter((w): w is string => typeof w === "string"),
+    ));
+    return { released: ids.length, ids, workers };
   }
 
   async databaseFacts(opts?: ReadOptions, progress?: ReadProgress): Promise<DatabaseFacts> {

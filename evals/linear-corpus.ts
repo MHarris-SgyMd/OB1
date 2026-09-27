@@ -129,9 +129,10 @@ export async function cachedDocumentVectors(
  * model's parsed answer for one thought, the fingerprint of the text it saw,
  * and (since 2026-09-07) the extraction key it ran under. Older dumps lack
  * `key`; readers say so rather than assume. `coverage` (SMD-2240) is set when
- * the thought was over the per-thought bound and the answer is its prefix's.
+ * the thought was over the per-thought bound and the answer is its prefix's,
+ * or when windows were left out as malformed (SMD-2260) — `malformed` names them.
  */
-export type EntityAnswer = { id: string; fingerprint?: string; key?: string; entities: unknown[]; relations: unknown[]; coverage?: { windows: number; of: number; cut: boolean } };
+export type EntityAnswer = { id: string; fingerprint?: string; key?: string; entities: unknown[]; relations: unknown[]; coverage?: { windows: number; of: number; cut: boolean; malformed?: number[] } };
 
 /** Every usable line of a dump, and how many were not — a torn last line, or a shape the database would reject. */
 export function readEntityAnswers(path: string): { answers: EntityAnswer[]; unusable: number } {
@@ -147,8 +148,11 @@ export function readEntityAnswers(path: string): { answers: EntityAnswer[]; unus
     }
   }
   // Said once, here, for every replay: a prefix's answer scores as the
-  // thought's whole answer unless the reader is told (review pass 2).
-  const partial = answers.filter((a) => a.coverage).length;
-  if (partial) console.error(`  ${partial} dump line(s) are a prefix only — the thought was over the per-thought bound (SMD-2240), so its tail is in no answer; a score over them measures the prefix`);
+  // thought's whole answer unless the reader is told (review pass 2), and so
+  // does one with windows left out as malformed (SMD-2260).
+  const prefix = answers.filter((a) => a.coverage && !a.coverage.malformed?.length && (a.coverage.windows < a.coverage.of || a.coverage.cut)).length;
+  if (prefix) console.error(`  ${prefix} dump line(s) are a prefix only — the thought was over the per-thought bound (SMD-2240), so its tail is in no answer; a score over them measures the prefix`);
+  const leftOut = answers.filter((a) => a.coverage?.malformed?.length).length;
+  if (leftOut) console.error(`  ${leftOut} dump line(s) have windows left out — the model's answers for them were malformed (SMD-2260), so their text is in no answer; a score over them measures the windows that parsed`);
   return { answers, unusable };
 }
