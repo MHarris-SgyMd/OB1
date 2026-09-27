@@ -1290,11 +1290,15 @@ if (configFailed) {
         } else if (vec.usage === false) {
           add("vector extension", "fail",
               `pgvector is installed in schema "${vec.schema}", but role ${vec.role} has no USAGE on that schema, so the bare type "vector" does not resolve and every capture and search would fail with 'type "vector" does not exist' — SET search_path alone will not help here`,
-              `GRANT USAGE ON SCHEMA ${vec.schema_ident} TO ${vec.role_ident};  (as a role that can)${vecOnPath ? "" : `  then put it on the path: ${vecPathFix()}`}`);
+              `GRANT USAGE ON SCHEMA ${vec.schema_ident} TO ${vec.role_ident};  (as a role that can)${vecOnPath ? "" : `  then put it on the path: ${vecPathFix()}  Then reconnect.`}`);
         } else {
           add("vector extension", "fail",
               `pgvector is installed in schema "${vec.schema}", which is not on this connection's search_path (role ${vec.role}, database ${vec.db}) — so the bare type "vector" does not resolve and every capture and search would fail with 'type "vector" does not exist'`,
-              `Put ${vec.schema_ident} on the connection's search_path: ${vecPathFix()}  Then reconnect. This adds a setting beside any hnsw.* bounds, it does not replace them.`);
+              // A connection string's path is replaced there, beside its other
+              // -c settings; a role's is a setting beside any hnsw.* bounds.
+              vecSource === "client"
+                ? `${vecPathFix().replace(/^./, (c) => c.toUpperCase())}  Then reconnect.`
+                : `Put ${quoteIdent(vec.schema)} on the connection's search_path: ${vecPathFix()}  Then reconnect. This adds a setting beside any hnsw.* bounds, it does not replace them.`);
         }
 
         // One schema-qualified read of every form, signature and body; no name

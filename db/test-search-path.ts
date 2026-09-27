@@ -213,6 +213,8 @@ try {
     // role must name the GRANT, not send it round the search_path loop.
     const npw = "nousagepw";
     await freshSession(async (sql) => {
+      // A run cut short leaves [5]'s grant on ext, which DROP ROLE refuses.
+      await sql.unsafe(`DO $r$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_nousage') THEN EXECUTE 'DROP OWNED BY ob1_nousage'; END IF; END $r$`);
       await sql.unsafe(`DROP ROLE IF EXISTS ob1_nousage`);
       await sql.unsafe(`CREATE ROLE ob1_nousage LOGIN PASSWORD '${npw}'`);
       await sql.unsafe(`REVOKE USAGE ON SCHEMA ${SCHEMA} FROM ob1_nousage`); // insurance; PUBLIC has none anyway
@@ -242,7 +244,7 @@ try {
     const sep = URL_.includes("?") ? "&" : "?";
     const viaUrl = `${URL_}${sep}options=-csearch_path%3D%22%24user%22%2Cpublic`;
     const r = await preflight({ DATABASE_URL: viaUrl });
-    const value = new RegExp(`the connection string sets search_path .*\\(separated by %20\\): (-csearch_path%3D%22%24user%22%2Cpublic%2C%22${SCHEMA}%22)`).exec(r.out)?.[1];
+    const value = new RegExp(`→ The connection string sets search_path .*\\(separated by %20\\): (-csearch_path%3D%22%24user%22%2Cpublic%2C%22${SCHEMA}%22)  Then reconnect\\.\\n`).exec(r.out)?.[1];
     assert(!!value, `a path from the connection string gets the options= value, with ${SCHEMA} added (${r.out.split("\n").find((l) => /connection string sets search_path/.test(l))?.trim()})`);
     const replaced = await preflight({ DATABASE_URL: `${URL_}${sep}options=${value}` });
     assert(!!value && /vector extension\s+the vector type resolves/.test(replaced.out),
@@ -274,16 +276,14 @@ try {
     await freshSession(async (sql) => {
       const [{ db }] = await sql`SELECT current_database() AS db`;
       const ident = `"${String(db).replace(/"/g, '""')}"`;
-      // The persistent fix preflight printed in [4], run as printed, plus an
-      // hnsw bound on the database beside it, to prove the fix adds a setting
-      // rather than clearing the walk bounds.
-      if (printedFix) await sql.unsafe(printedFix);
-      // The setting takes effect for FUTURE sessions, not this one, so load
-      // pgvector here through the schema-qualified type — a bare cast would fail
-      // exactly as the server does. That loads the hnsw.* GUCs so the ALTER below
-      // is accepted.
+      // An hnsw bound on the row the fix writes — the login role's in this
+      // database — first, then the fix preflight printed in [4], run as
+      // printed: it adds the path beside the bound, not in its place. Load
+      // pgvector through the schema-qualified type first, as a bare cast would
+      // fail exactly as the server does, so the hnsw.* GUCs are known.
       await sql.unsafe(`SELECT '[1]'::${SCHEMA}.vector`);
-      await sql.unsafe(`ALTER DATABASE ${ident} SET hnsw.max_scan_tuples = 40000`);
+      await sql.unsafe(`DO $r$ BEGIN EXECUTE format('ALTER ROLE %I IN DATABASE %I SET hnsw.max_scan_tuples = 40000', session_user, current_database()); END $r$`);
+      if (printedFix) await sql.unsafe(printedFix);
     });
 
     const r = await preflight();
@@ -296,8 +296,8 @@ try {
       WHERE d.datname = current_database() AND s.setrole IN (0, (SELECT oid FROM pg_roles WHERE rolname = session_user))`);
     const dbCfg = (settings.find((x: { onDatabase: boolean }) => x.onDatabase)?.cfg ?? []) as string[];
     const roleCfg = (settings.find((x: { onDatabase: boolean }) => !x.onDatabase)?.cfg ?? []) as string[];
-    assert(roleCfg.some((c) => c.startsWith("search_path=")) && dbCfg.some((c) => c.startsWith("hnsw.max_scan_tuples=")),
-           `the path is the role's setting in the database and the hnsw bound the database's, side by side (${roleCfg.join("; ")} | ${dbCfg.join("; ")})`);
+    assert(roleCfg.some((c) => c.startsWith("search_path=")) && roleCfg.some((c) => c.startsWith("hnsw.max_scan_tuples=")),
+           `the path and the hnsw bound are both the role's settings in the database, side by side (${roleCfg.join("; ")} | database: ${dbCfg.join("; ")})`);
   }
 } finally {
   // ci-parity.sh shares one Postgres: leave pgvector in public and the database
@@ -308,6 +308,7 @@ try {
   await freshSession((sql) => sql.unsafe(`DO $r$ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_nousage') THEN EXECUTE 'DROP OWNED BY ob1_nousage'; END IF;
     EXECUTE format('ALTER ROLE %I IN DATABASE %I RESET search_path', session_user, current_database());
+    EXECUTE format('ALTER ROLE %I IN DATABASE %I RESET hnsw.max_scan_tuples', session_user, current_database());
   END $r$`));
   await freshSession((sql) => sql.unsafe(`DROP ROLE IF EXISTS ob1_nousage`));
   await restoreVectorToPublic(URL_);
