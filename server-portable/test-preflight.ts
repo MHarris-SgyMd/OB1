@@ -360,15 +360,31 @@ else {
   // a probe that read every schema would find a cause and say otherwise.
   const otherTool = new SQL({ url: LIVE, max: 1 });
   let strayRun: { code: number; out: string };
+  let strayFirst: { code: number; out: string } | null = null;
   try {
     await otherTool.unsafe("DROP SCHEMA IF EXISTS pf_stray CASCADE; CREATE SCHEMA pf_stray; CREATE TABLE pf_stray.thoughts (id int)");
     strayRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: offPathUrl });
+    // That table first on the path of a role that may not read it: 42501,
+    // and still a brain to migrate — never a GRANT on another tool's table
+    // (SMD-2238, review pass 1).
+    await otherTool.unsafe("DROP ROLE IF EXISTS pf_stray_reader");
+    await otherTool.unsafe("CREATE ROLE pf_stray_reader LOGIN PASSWORD 'stray'");
+    try {
+      await otherTool.unsafe("GRANT USAGE ON SCHEMA pf_stray TO pf_stray_reader");
+      const strayFirstUrl = `${LIVE.replace(/\/\/[^@]*@/, "//pf_stray_reader:stray@")}${LIVE.includes("?") ? "&" : "?"}options=-csearch_path%3Dpf_stray%2Cpublic`;
+      strayFirst = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: strayFirstUrl });
+    } finally {
+      await otherTool.unsafe("DROP OWNED BY pf_stray_reader");
+      await otherTool.unsafe("DROP ROLE pf_stray_reader");
+    }
   } finally {
     await otherTool.unsafe("DROP SCHEMA IF EXISTS pf_stray CASCADE");
     await otherTool.close();
   }
   assert(/✗\s+schema\s+relation "thoughts" does not exist\n\s+→ Apply the migrations: cd db && bun migrate\.ts/.test(strayRun.out),
          `…from the schema row too, with another schema's thoughts beside an empty public off the path (${strayRun.out.split("\n").find((l) => /\bschema\b/.test(l))?.trim()})`);
+  assert(/✗\s+schema\s+permission denied for table thoughts — thoughts resolves to pf_stray\.thoughts, another tool's table; the brain's public\.thoughts does not exist\n\s+→ Apply the migrations: cd db && bun migrate\.ts/.test(strayFirst?.out ?? "") && !/GRANT SELECT ON pf_stray/.test(strayFirst?.out ?? ""),
+         `…and with it first on the path of a role that may not read it, still the migrations, never a GRANT on it (${(strayFirst?.out ?? "").split("\n").find((l) => /\bschema\b/.test(l))?.trim()})`);
   // And the migration ledger row reads the SMD-2237 split by public alone: the
   // probe is pg_class-qualified to schema public, so pf_stray.thoughts (another
   // tool's, off the path) is not a schema to adopt — the row says "nothing has
@@ -2073,12 +2089,55 @@ else {
       assert(/✗\s+schema\s+permission denied for table thoughts — role pf_reader has no SELECT on public\.thoughts\n\s+→ GRANT SELECT ON public\.thoughts TO pf_reader;  — or, for the server's role, every privilege the capture path needs, as the tables' owner: cd db && bun migrate\.ts --url <the owner's connection string> --grant pf_reader /.test(noSelect.out)
                && !/Check credentials and network/.test(fix(noSelect.out, "schema")),
              `a role without SELECT on thoughts is told the grant (${row(noSelect.out, "schema")} ${fix(noSelect.out, "schema")})`);
-      assert(!/embedding_model does not exist/.test(noSelect.out), `…and the vector-models row does not call 021's column missing (${row(noSelect.out, "vector models")})`);
+      assert(!/embedding_model does not exist/.test(noSelect.out) && /!\s+vector models\s+could not verify: permission denied for table thoughts/.test(noSelect.out),
+             `…and the vector-models row names the refused read, not 021's column missing (${row(noSelect.out, "vector models")})`);
+      // With the probe refused its connection (the count holds the role's one
+      // slot), the refusal still names the grant, not the network (review pass 1).
+      await claims.unsafe("ALTER ROLE pf_reader CONNECTION LIMIT 1");
+      try {
+        const oneSlot = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+        assert(/✗\s+schema\s+permission denied for table thoughts\n\s+→ Grant this role SELECT on public\.thoughts — or, for the server's role/.test(oneSlot.out),
+               `…and with no connection for the probe, the refusal still names the grant (${fix(oneSlot.out, "schema")})`);
+      } finally {
+        await claims.unsafe("ALTER ROLE pf_reader CONNECTION LIMIT -1");
+      }
       const printedGrant = /→ (GRANT SELECT ON public\.thoughts TO pf_reader;)/.exec(noSelect.out)?.[1];
       if (printedGrant) await claims.unsafe(printedGrant);
       const granted = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
       assert(!!printedGrant && /✓\s+schema\s+thoughts table reachable/.test(granted.out),
              `…and that GRANT, run as printed, makes thoughts readable (${row(granted.out, "schema")})`);
+      // Another schema's thoughts ahead of public on the path, which the role
+      // may not read: another tool's table, never a GRANT on it — that GRANT,
+      // run, passed this row against it (review pass 1). Public put ahead, as
+      // the row says, reads the brain's.
+      try {
+        await claims.unsafe("DROP SCHEMA IF EXISTS pf_shadow CASCADE; CREATE SCHEMA pf_shadow; CREATE TABLE pf_shadow.thoughts (id int)");
+        await claims.unsafe("GRANT USAGE ON SCHEMA pf_shadow TO pf_reader");
+        await claims.unsafe("ALTER ROLE pf_reader SET search_path = pf_shadow, public");
+        const shadowed = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+        assert(/✗\s+schema\s+permission denied for table thoughts — thoughts resolves to pf_shadow\.thoughts, ahead of the brain's public\.thoughts on this role's search_path\n\s+→ Put public ahead of "pf_shadow" on this role's search_path, or take "pf_shadow" off it/.test(shadowed.out)
+                 && !/GRANT SELECT ON pf_shadow/.test(shadowed.out),
+               `another schema's thoughts first on the path is named, never granted on (${row(shadowed.out, "schema")} ${fix(shadowed.out, "schema")})`);
+        // With no USAGE on public too, the GRANT comes first; both, run, read it.
+        const [{ shadowPublicUsage }] = await claims`SELECT has_schema_privilege('public', 'public', 'USAGE') AS "shadowPublicUsage"`;
+        await claims.unsafe("REVOKE USAGE ON SCHEMA public FROM pf_reader, PUBLIC");
+        try {
+          const barred = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+          const usageGrant = /→ (GRANT USAGE ON SCHEMA public TO pf_reader;)  then put public ahead of "pf_shadow"/.exec(barred.out)?.[1];
+          assert(!!usageGrant, `…and with no USAGE on public, the GRANT USAGE comes first (${fix(barred.out, "schema")})`);
+          if (usageGrant) await claims.unsafe(usageGrant);
+          await claims.unsafe("ALTER ROLE pf_reader SET search_path = public, pf_shadow");
+          const unshadowed = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+          assert(/✓\s+schema\s+thoughts table reachable/.test(unshadowed.out),
+                 `…and that GRANT, with public put ahead of it as printed, reads the brain's table (${row(unshadowed.out, "schema")})`);
+        } finally {
+          await claims.unsafe("GRANT USAGE ON SCHEMA public TO pf_reader");
+          if (shadowPublicUsage) await claims.unsafe("GRANT USAGE ON SCHEMA public TO PUBLIC");
+        }
+      } finally {
+        await claims.unsafe("ALTER ROLE pf_reader RESET search_path");
+        await claims.unsafe("DROP SCHEMA IF EXISTS pf_shadow CASCADE");
+      }
       // --grant takes the role's name raw, so a name the shell would split is
       // printed shell-quoted; the command, run through sh as printed with the
       // owner's connection string put in, grants it.
@@ -2294,12 +2353,17 @@ else {
         await claims.unsafe("DROP POLICY IF EXISTS pf_rls ON public.thoughts; DROP FUNCTION IF EXISTS public.pf_rls_missing()");
         await claims.unsafe("CREATE FUNCTION public.pf_rls_missing() RETURNS boolean LANGUAGE plpgsql AS $f$ BEGIN PERFORM 1 FROM pf_no_such_table; RETURN true; END $f$");
         await claims.unsafe("CREATE POLICY pf_rls ON public.thoughts FOR SELECT TO pf_reader USING (public.pf_rls_missing())");
+        // Named: the policies a SELECT by this role meets. Not named: one for
+        // INSERT, one for a role it is not (review pass 1).
+        await claims.unsafe("CREATE POLICY pf_rls_public ON public.thoughts AS RESTRICTIVE FOR SELECT TO PUBLIC USING (true)");
+        await claims.unsafe("CREATE POLICY pf_rls_insert ON public.thoughts FOR INSERT TO pf_reader WITH CHECK (public.pf_rls_missing())");
+        await claims.unsafe("CREATE POLICY pf_rls_other ON public.thoughts FOR SELECT TO pg_monitor USING (public.pf_rls_missing())");
         await claims.unsafe("ALTER TABLE public.thoughts ENABLE ROW LEVEL SECURITY");
         const rls = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
         assert(/✗\s+schema\s+relation "pf_no_such_table" does not exist/.test(rls.out) && !/public is not on its search_path/.test(rls.out),
                `another relation's "does not exist" is not read as thoughts off the path (${row(rls.out, "schema")})`);
         // …nor as a brain to migrate: the row names the policy (SMD-2238).
-        assert(/relation "pf_no_such_table" does not exist — thoughts resolves \(public\.thoughts\), so the missing relation is read by what the count reaches: row-level security policy pf_rls on it\n\s+→ Fix the policy, or a function called there, so nothing reads a relation that does not exist\.  The table is there/.test(rls.out)
+        assert(/relation "pf_no_such_table" does not exist — thoughts resolves \(public\.thoughts\), so the missing relation is read by what the count reaches: row-level security policies pf_rls, pf_rls_public on it\n\s+→ Fix the policies, or a function called there, so nothing reads a relation that does not exist\.  The table is there/.test(rls.out)
                  && !/Apply the migrations/.test(fix(rls.out, "schema")),
                `…and names the policy, not the migrate command (${row(rls.out, "schema")} ${fix(rls.out, "schema")})`);
         // A policy calling a function this role may not run: 42501 with SELECT
@@ -2309,14 +2373,28 @@ else {
         await claims.unsafe("REVOKE EXECUTE ON FUNCTION public.pf_rls_denied() FROM PUBLIC");
         await claims.unsafe("CREATE POLICY pf_rls ON public.thoughts FOR SELECT TO pf_reader USING (public.pf_rls_denied())");
         const denied = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
-        assert(/✗\s+schema\s+permission denied for function pf_rls_denied — thoughts resolves \(public\.thoughts\) and this role may read it, so the refusal comes from what the count reaches: row-level security policy pf_rls on it\n\s+→ Grant this role what the error names, or change the policy to use only what the role may\.  The table is there/.test(denied.out)
+        assert(/✗\s+schema\s+permission denied for function pf_rls_denied — thoughts resolves \(public\.thoughts\) and this role may read it, so the refusal comes from what the count reaches: row-level security policies pf_rls, pf_rls_public on it\n\s+→ Grant this role what the error names, or change the policies to use only what the role may\.  The table is there/.test(denied.out)
                  && !/GRANT SELECT ON public\.thoughts/.test(denied.out),
                `…and a policy's refusal names the policy, not a GRANT on thoughts (${row(denied.out, "schema")} ${fix(denied.out, "schema")})`);
+        // row_security off: Postgres refuses a read a policy would filter, and
+        // neither a grant nor the policy fixes it (review pass 1). The printed
+        // BYPASSRLS, run, does.
+        await claims.unsafe("ALTER ROLE pf_reader SET row_security = off");
+        const rsOff = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+        assert(/✗\s+schema\s+query would be affected by row-level security policy for table "thoughts" — row_security is off for this session and public\.thoughts has row-level security, so Postgres refuses the read rather than skip its policies\n\s+→ Leave row_security on for this role .*ALTER ROLE pf_reader BYPASSRLS;/.test(rsOff.out),
+               `…and row_security off names that, not the policy (${row(rsOff.out, "schema")} ${fix(rsOff.out, "schema")})`);
+        const bypass = /(ALTER ROLE pf_reader BYPASSRLS;)/.exec(rsOff.out)?.[1];
+        if (bypass) await claims.unsafe(bypass);
+        const bypassed = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
+        assert(!!bypass && /✓\s+schema\s+thoughts table reachable/.test(bypassed.out),
+               `…and the printed BYPASSRLS, run, makes the count read (${row(bypassed.out, "schema")})`);
       } finally {
         try {
           if (!rowSecurity) await claims.unsafe("ALTER TABLE public.thoughts DISABLE ROW LEVEL SECURITY");
         } finally {
-          await claims.unsafe("DROP POLICY IF EXISTS pf_rls ON public.thoughts");
+          await claims.unsafe("DROP POLICY IF EXISTS pf_rls ON public.thoughts; DROP POLICY IF EXISTS pf_rls_public ON public.thoughts; DROP POLICY IF EXISTS pf_rls_insert ON public.thoughts; DROP POLICY IF EXISTS pf_rls_other ON public.thoughts");
+          await claims.unsafe("ALTER ROLE pf_reader NOBYPASSRLS");
+          await claims.unsafe("ALTER ROLE pf_reader RESET row_security");
           await claims.unsafe("DROP FUNCTION IF EXISTS public.pf_rls_missing()");
           await claims.unsafe("DROP FUNCTION IF EXISTS public.pf_rls_denied()");
           await claims.unsafe("ALTER ROLE pf_reader SET search_path = nowhere");

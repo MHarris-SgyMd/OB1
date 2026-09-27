@@ -749,7 +749,7 @@ if (configFailed) {
   if (built) {
     /**
      * Every schema check below is gated on the SQL store, because they read
-     * pg_proc and information_schema over a direct connection that the PostgREST
+     * pg_proc and pg_attribute over a direct connection that the PostgREST
      * path does not have. That has been true since migration 004's check and is
      * a limitation of the deployment shape rather than of any one migration.
      *
@@ -810,7 +810,13 @@ if (configFailed) {
           const { SQL } = await import("bun");
           const probe = new SQL({ url: conn.url, max: 1 });
           try {
+            // The policies a SELECT by this role meets: FOR SELECT or ALL, TO
+            // PUBLIC or a role whose privileges it has.
             const [r] = (await probe`
+              WITH pol AS (
+                SELECT quote_ident(p.polname) AS name FROM pg_policy p
+                 WHERE p.polrelid = to_regclass('thoughts') AND p.polcmd IN ('r', '*')
+                   AND (0 = ANY (p.polroles) OR EXISTS (SELECT 1 FROM unnest(p.polroles) g WHERE g <> 0 AND pg_has_role(current_user, g, 'USAGE'))))
               SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                               WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present,
                      to_regclass('thoughts') IS NULL AS unresolved,
@@ -823,11 +829,16 @@ if (configFailed) {
                      current_user::text AS "roleName",
                      (SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                        WHERE c.oid = to_regclass('thoughts')) AS resolved,
+                     (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                       WHERE c.oid = to_regclass('thoughts')) AS "resolvedSchema",
                      has_table_privilege(to_regclass('thoughts'), 'SELECT') AS "canSelect",
-                     (SELECT string_agg(quote_ident(p.polname), ', ' ORDER BY p.polname) FROM pg_policy p
-                       WHERE p.polrelid = to_regclass('thoughts')) AS policies`) as {
+                     (SELECT c.relrowsecurity FROM pg_class c WHERE c.oid = to_regclass('thoughts')) AS rls,
+                     current_setting('row_security') AS "rowSecurity",
+                     (SELECT string_agg(name, ', ' ORDER BY name) FROM pol) AS policies,
+                     (SELECT count(*)::int FROM pol) AS "policyCount"`) as {
               present: boolean; unresolved: boolean; usage: boolean; path: string; version: number; role: string; login: string; db: string;
-              roleName: string; resolved: string | null; canSelect: boolean | null; policies: string | null;
+              roleName: string; resolved: string | null; resolvedSchema: string | null; canSelect: boolean | null;
+              rls: boolean | null; rowSecurity: string; policies: string | null; policyCount: number;
             }[];
             if (r?.present && r.unresolved) {
               let source: string | null = null;
@@ -862,6 +873,21 @@ if (configFailed) {
                 detail: `public.thoughts exists but does not resolve for this role (${causes.join("; ")})`,
                 remedy: `${fixes.join("  then ").replace(/^./, (c) => c.toUpperCase())}  The table is there, so migrating would not make it resolve.`,
               };
+            } else if (r?.resolved && r.resolvedSchema !== "public") {
+              // Another schema's thoughts, first on the path: another tool's
+              // table, never one to grant on or to call the brain's (review
+              // pass 1: the GRANT printed for it, run, passed this row against
+              // it). The brain's table missing is still a brain to migrate.
+              const other = quoteIdent(String(r.resolvedSchema));
+              found = r.present
+                ? {
+                    detail: `thoughts resolves to ${r.resolved}, ahead of the brain's public.thoughts on this role's search_path`,
+                    remedy: `${r.usage ? "" : `GRANT USAGE ON SCHEMA public TO ${r.role};  then `}put public ahead of ${other} on this role's search_path, or take ${other} off it — the server reads the first thoughts on the path. The brain's table is there, so migrating would not change it.`.replace(/^./, (c) => c.toUpperCase()),
+                  }
+                : {
+                    detail: `thoughts resolves to ${r.resolved}, another tool's table; the brain's public.thoughts does not exist`,
+                    remedy: `Apply the migrations: cd db && bun migrate.ts --url ${urlArg}`,
+                  };
             } else if (r?.resolved && errno === "42501" && r.canSelect === false) {
               // --grant takes the name raw, so it goes to the shell quoted.
               const grantArg = /^[A-Za-z0-9_.-]+$/.test(r.roleName) ? r.roleName : `'${r.roleName.replaceAll("'", `'\\''`)}'`;
@@ -869,11 +895,19 @@ if (configFailed) {
                 detail: `role ${r.role} has no SELECT on ${r.resolved}`,
                 remedy: `GRANT SELECT ON ${r.resolved} TO ${r.role};  — or, for the server's role, every privilege the capture path needs, as the tables' owner: cd db && bun migrate.ts --url <the owner's connection string> --grant ${grantArg}  (db/README.md, Grants for a capturing role)`,
               };
+            } else if (r?.resolved && errno === "42501" && r.rls && r.rowSecurity === "off") {
+              // row_security off: Postgres refuses a read a policy would
+              // filter rather than skip the policies — no grant or policy
+              // change fixes that.
+              found = {
+                detail: `row_security is off for this session and ${r.resolved} has row-level security, so Postgres refuses the read rather than skip its policies`,
+                remedy: `Leave row_security on for this role (it is off in its settings or the connection string), or, for a role that should read every row, ALTER ROLE ${r.role} BYPASSRLS;  (as a superuser). The table is there, so migrating would not change it.`,
+              };
             } else if (r?.resolved) {
               const whence = errno === "42501"
                 ? `thoughts resolves (${r.resolved}) and this role may read it, so the refusal comes from`
                 : `thoughts resolves (${r.resolved}), so the missing relation is read by`;
-              const plural = !!r.policies?.includes(",");
+              const plural = r.policyCount > 1;
               const where = r.policies ? (plural ? "the policies" : "the policy") : "what the count reaches";
               found = {
                 detail: r.policies
@@ -900,7 +934,11 @@ if (configFailed) {
             : conn && errno === "3D000"
             ? `Correct the database name in $${conn.from} — or, for a new brain, create it (CREATE DATABASE, as a role that may) and apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
             : conn && errno === "28000"
-            ? `Check the role in $${conn.from}: the server refused it before any query — it must exist, may log in (LOGIN), and pg_hba.conf must admit it from this host.`
+            ? `Check the role in $${conn.from}: the server refused it before any query — it must exist, be allowed to log in (LOGIN), and be admitted by pg_hba.conf from this host.`
+            // A refusal the probe could not explain (it failed, or opened no
+            // connection): the table's privilege, or a policy.
+            : conn && errno === "42501"
+            ? `Grant this role SELECT on public.thoughts — or, for the server's role, every privilege the capture path needs, as the tables' owner: cd db && bun migrate.ts --url <the owner's connection string> --grant <the role> — or, if it holds that, fix the row-level security policy on thoughts that refuses it.`
             : /does not exist|relation/i.test(msg)
             ? `Apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
             : "Check credentials and network reachability to the database.");
