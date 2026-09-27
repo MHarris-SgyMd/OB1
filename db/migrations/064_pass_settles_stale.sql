@@ -50,9 +50,10 @@
 --      newer thought under its OWN key at the start of a run — a pair both
 --      sides of which have a vector, with no live or failed claim there — so
 --      a pass under a new judge key, or one whose earlier claim on the
---      thought is terminal, reaches the row 063 requeued under the row's
---      key. 029's posture — the pass proposes, never applies — is not
---      crossed: a rejection applies nothing.
+--      thought succeeded, reaches the row 063 requeued under the row's key
+--      (a failed claim is --retry-failed's, 015's rule). 029's posture — the
+--      pass proposes, never applies — is not crossed: a rejection applies
+--      nothing.
 --   2. THE REOPEN is this file's. rebuild_derived is redefined on 063's body
 --      verbatim, the proposal arm alone changed: a rejected row whose
 --      review_note begins 'settled by the pass:' is the pass's, so a text
