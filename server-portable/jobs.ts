@@ -196,12 +196,14 @@ function finish(rec: JobRecord, status: Exclude<JobStatus, "pending" | "running"
     rec.maxRunTimer = undefined;
   }
   if (status !== "succeeded" && !rec.abort.signal.aborted) rec.abort.abort();
-  broadcast(rec, terminalFrame(rec));
+  // Each subscriber gets the terminal frame, then its stream closes — one pass.
+  const term = terminalFrame(rec);
   for (const s of rec.subs) {
     try {
+      s.write(term);
       s.close();
     } catch {
-      /* already closed */
+      /* the readable side already closed: the client left */
     }
   }
   rec.subs.clear();
