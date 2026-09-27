@@ -9381,6 +9381,7 @@ console.log("\n[58] Migration 063: the page store — a page is a thought whose 
   const writeRefused = (p: string, key: string, body: string | null, origin: string, o: W = {}) => refused(writeSql, wargs(p, key, body, origin, o));
   const accept = async (id: string, actor: string | null = null) => (await one<{ r: R }>(`SELECT accept_page_section($1::uuid, $2) AS r`, [id, actor])).r;
   const release = async (id: string, actor: string | null = null) => (await one<{ r: R }>(`SELECT release_page_section($1::uuid, $2) AS r`, [id, actor])).r;
+  const reject = async (id: string, actor: string | null = null) => (await one<{ r: R }>(`SELECT reject_page_section($1::uuid, $2) AS r`, [id, actor])).r;
   const lock = async (id: string, locked: boolean | null, actor: string | null = null) => (await one<{ r: R }>(`SELECT lock_page_section($1::uuid, $2::boolean, $3) AS r`, [id, locked, actor])).r;
   const del = async (id: string, actor: string | null = null) => (await one<{ r: R & { section_key?: string } }>(`SELECT delete_page_section($1::uuid, $2) AS r`, [id, actor])).r;
 
@@ -9408,11 +9409,11 @@ console.log("\n[58] Migration 063: the page store — a page is a thought whose 
   const RD = "ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)";
   assert(lastDefinerOf("ob1_record_derivation").startsWith("063") && (await functionsNamed("ob1_record_derivation")) === 1 && /'section'/.test(await src(RD)) && /ON CONFLICT \(artifact_kind, artifact_id, produced_by\) DO UPDATE/.test(await src(RD)),
     "063 is the last definer of ob1_record_derivation — 061's body, one form, the section kind admitted, the upsert kept");
-  for (const fn of ["upsert_page", "write_page_section", "accept_page_section", "release_page_section", "lock_page_section", "delete_page_section", "render_page", "page_sections_as_of", "ob1_render_page_thought", "ob1_page_actor", "ob1_page_lock", "ob1_page_evidence", "ob1_page_recipe", "page_section_revisions_refuse_mutation", "ob1_drop_section_derivations"]) assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("063"), `one ${fn}, 063's`);
+  for (const fn of ["upsert_page", "write_page_section", "accept_page_section", "reject_page_section", "release_page_section", "lock_page_section", "delete_page_section", "render_page", "page_sections_as_of", "ob1_render_page_thought", "ob1_page_actor", "ob1_page_lock", "ob1_page_evidence", "ob1_page_recipe", "page_section_revisions_refuse_mutation", "ob1_drop_section_derivations"]) assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("063"), `one ${fn}, 063's`);
   const immutableDef = (await one<{ d: string }>(`SELECT pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgname = 'page_section_revisions_immutable'`))?.d ?? "";
   assert(/BEFORE (UPDATE OR DELETE|DELETE OR UPDATE) ON (public\.)?page_section_revisions FOR EACH ROW/.test(immutableDef), `the revisions' row trigger refuses UPDATE and DELETE (${immutableDef})`);
-  assert(/NOT EXISTS \(SELECT 1 FROM page_sections WHERE id = OLD\.section_id\)/.test(await src("page_section_revisions_refuse_mutation()")) && /FOR NO KEY UPDATE/.test(await src("ob1_page_lock(uuid, text)")) && /pg_advisory_xact_lock\(hashtext\('ob1:supersession-review'\)\)/.test(await src("upsert_page(text, text, text, jsonb, text, uuid)")) && [await src("write_page_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)"), await src("accept_page_section(uuid, text)"), await src("release_page_section(uuid, text)"), await src("lock_page_section(uuid, boolean, text)"), await src("delete_page_section(uuid, text)"), await src("upsert_page(text, text, text, jsonb, text, uuid)")].every((b) => /ob1_page_lock\(/.test(b)),
-    "the DELETE refusal reads whether the section stands (a cascade passes), every writer takes ob1_page_lock — the thought FOR NO KEY UPDATE, then the page — and upsert_page takes 029's supersession lock before any row");
+  assert(/NOT EXISTS \(SELECT 1 FROM page_sections WHERE id = OLD\.section_id\)/.test(await src("page_section_revisions_refuse_mutation()")) && /FOR NO KEY UPDATE/.test(await src("ob1_page_lock(uuid, text)")) && /pg_advisory_xact_lock\(hashtext\('ob1:supersession-review'\)\)/.test(await src("upsert_page(text, text, text, jsonb, text, uuid)")) && [await src("write_page_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)"), await src("accept_page_section(uuid, text)"), await src("reject_page_section(uuid, text)"), await src("release_page_section(uuid, text)"), await src("lock_page_section(uuid, boolean, text)"), await src("delete_page_section(uuid, text)")].every((b) => /ob1_page_lock\(/.test(b)) && /FROM thoughts WHERE id = v_id FOR NO KEY UPDATE/.test(await src("upsert_page(text, text, text, jsonb, text, uuid)")),
+    "the DELETE refusal reads whether the section stands (a cascade passes), every section writer takes ob1_page_lock — the thought FOR NO KEY UPDATE, then the page — upsert_page takes the same two by hand (a page gone while it waited is the create path), and takes 029's supersession lock before any row");
   assert(/ob1:page-regen-guard/.test(await src("write_page_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)")) && /ob1:page-render/.test(await src("render_page(uuid, timestamptz)")) && /ob1:derivation-recorded-with-its-artifact/.test(await src("accept_page_section(uuid, text)")),
     "the sentinels stand where the readers look: the guard in write_page_section, the render in render_page, 061's in accept_page_section");
   const trig = (await q<{ t: string }>(`SELECT tgname AS t FROM pg_trigger WHERE NOT tgisinternal AND tgrelid IN ('page_sections'::regclass, 'page_section_revisions'::regclass) ORDER BY 1`)).map((x) => x.t).join();
@@ -9457,10 +9458,8 @@ console.log("\n[58] Migration 063: the page store — a page is a thought whose 
   sec = await secOf(S);
   assert(regen.action === "pending" && sec.body_md === HUMAN && Buffer.from(sec.body_md, "utf8").equals(Buffer.from(HUMAN, "utf8")) && sec.origin === "manual",
     `THE REGEN GUARD: the machine's write onto the human-owned section parks — the live body is the human's, byte for byte (${JSON.stringify(regen)})`);
-  assert(sec.pending === "MACHINE REWRITE, version 3." && sec.pending_evidence?.join() === e3.id && sec.pending_fps?.join() === e3.fingerprint && sec.pending_source?.prompt_hash === "sha256:03" && sec.pending_source?.deterministic === false && sec.pending_at !== null && sec.evidence.join() === [e1.id, e2.id].join(),
-    "…the draft parked with the evidence, its fingerprints as generated from, and the recipe IT was made from, the live evidence untouched");
-  const same0 = await write(P, "steps", HUMAN, "generated", { source: { model: "stub" }, evidence: [e3.id] });
-  assert(same0.action === "unchanged" && (await secOf(S)).pending === "MACHINE REWRITE, version 3.", `a machine's draft that says what the human's live text says is unchanged — nothing parked, the earlier draft still waiting (${JSON.stringify(same0)})`);
+  assert(sec.pending === "MACHINE REWRITE, version 3." && sec.pending_evidence?.join() === e3.id && sec.pending_fps?.join() === e3.fingerprint && sec.pending_source?.prompt_hash === "sha256:03" && sec.pending_source?.deterministic === false && sec.pending_at !== null && sec.evidence.join() === [e1.id, e2.id].join() && sec.updated_by === "alice",
+    "…the draft parked with the evidence, its fingerprints as generated from, and the recipe IT was made from, the live evidence untouched and updated_by still the live text's writer");
   assert((await render(P)) === renderBefore && (await rowOf(P)).content === thoughtBefore && (await eventsOf(P)).length === eventsBefore && (await revsOf(S)).length === revsBefore && (await linOf(S)) === undefined,
     "…and nothing else moved: the render, the page thought, its log, the revisions, the lineage (a human's body has none)");
   // locked is the other spelling of human-owned.
@@ -9504,6 +9503,16 @@ console.log("\n[58] Migration 063: the page store — a page is a thought whose 
   assert(revs.map((x) => `${x.origin}/${x.actor}`).join() === "generated/gen-bot,manual/alice,generated/alice" && revs[2].body_md === "MACHINE REWRITE, version 3." && revs.every((x) => x.heading === "Steps" && x.display_order === 10),
     `three revisions — the machine's, the human's, the accepted draft under the accepter's name and the machine's origin — each carrying heading and order (${revs.map((x) => `${x.origin}/${x.actor}`).join()})`);
   assert((await accept(S)).action === "no_pending" && (await revsOf(S)).length === 3, "a second accept is no_pending and writes nothing");
+  // A draft that says what the live text says is unchanged, and withdraws an
+  // older draft still parked; a named reject discards one without a revision.
+  const park4 = await write(P, "steps", "MACHINE REWRITE, version 4 draft.", "generated", { source: { model: "stub" }, evidence: [e3.id] });
+  const same0 = await write(P, "steps", "MACHINE REWRITE, version 3.", "generated", { source: { model: "stub" }, evidence: [e3.id] });
+  assert(park4.action === "pending" && same0.action === "unchanged" && (await secOf(S)).pending === null && (await revsOf(S)).length === 3, `a machine's draft that says what the live text says is unchanged, nothing parked, and the older draft it had parked is withdrawn (${JSON.stringify([park4, same0])})`);
+  const park5 = await write(P, "steps", "MACHINE REWRITE, version 5 draft.", "generated", { source: { model: "stub" }, evidence: [e3.id] });
+  const rej = await reject(S, "alice");
+  const afterRej = await secOf(S);
+  assert(park5.action === "pending" && rej.action === "rejected" && afterRej.pending === null && afterRej.pending_evidence === null && afterRej.body_md === "MACHINE REWRITE, version 3." && afterRej.updated_by === "alice" && (await revsOf(S)).length === 3 && (await linOf(S)) !== undefined && (await reject(S)).action === "no_pending",
+    `reject_page_section discards the draft and nothing else — no revision, the live text, its lineage; a second reject is no_pending (${JSON.stringify(rej)})`);
   const R3 = `# Deploy runbook\n\n## Steps\n\nMACHINE REWRITE, version 3.\n\nOne command, by hand.`;
   t = await rowOf(P);
   assert(t.content === R3 && JSON.stringify(t.derived_from) === JSON.stringify([e2.id, e3.id].sort()), "the page thought follows: the accepted text in the render, the evidence union moved");
@@ -9588,9 +9597,15 @@ console.log("\n[58] Migration 063: the page store — a page is a thought whose 
     [await writeRefused(P, "steps", "x", "generated", { evidence: [e1.id, P] }), `a page is not its own evidence (${P} names the page)`],
     [await writeRefused(P, "steps", "x", "generated", { evidence: [e1.id], source: { deterministic: "yes" } }), "generation_source.deterministic must be a boolean, got string"],
     [await writeRefused(P, "steps", "x", "manual", { source: { deterministic: 1 } }), "generation_source.deterministic must be a boolean, got number"],
+    [await writeRefused(P, "steps", "x", "manual", { heading: "two\nlines" }), "heading is one line"],
+    [await refused(`SELECT upsert_page('has space', 'T')`), "slug holds whitespace ('has space')"],
+    [await refused(`SELECT upsert_page('nl', E'two\nlines')`), "title is one line"],
+    [await refused(`SELECT reject_page_section('00000000-0000-4000-8000-000000000009'::uuid)`), "reject_page_section: no section"],
+    [await refused(`SELECT ob1_render_page_thought($1::uuid)`, [e1.id]), `ob1_render_page_thought: no page ${e1.id}`],
   ];
   const missed = refusals.filter(([m, want]) => !m.includes(want)).map(([m, want]) => `${want} ← ${m.slice(0, 80)}`);
-  assert(missed.length === 0, `twenty refusals, each by name (${missed.join("; ") || "all named"})`);
+  assert(missed.length === 0, `twenty-five refusals, each by name (${missed.join("; ") || "all named"})`);
+  assert((await rowOf(e1.id)).derived_from === null && (await rowOf(e1.id)).content === "evidence one: the deploy runs at 02:00", "…and the repair door refused an evidence thought's id without touching it");
   assert((await count(`SELECT count(*)::int AS c FROM pages`)) === 1 && (await count(`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'source' = 'pages'`)) === 1, "…and none of them left a page or a page thought behind");
   // …and a full page by its render, through update_thought's DUPLICATE_CONTENT.
   const p2 = await page("runbook-copy", "Deploy runbook copy");

@@ -1797,7 +1797,7 @@ export const ROLE_GRANTS = Object.freeze({
   // that writes pages holds `capture` too), and the sections, their pending
   // drafts and their revisions are these three tables, written only through
   // upsert_page, write_page_section, accept_page_section and
-  // release_page_section, lock_page_section, delete_page_section
+  // release_page_section, reject_page_section, lock_page_section, delete_page_section
   // (SECURITY INVOKER, PUBLIC's EXECUTE as every core function). No DELETE
   // on pages (a page goes with its thought's delete, the capture group's) or
   // on the revisions (they go with their section's cascade, which runs as the

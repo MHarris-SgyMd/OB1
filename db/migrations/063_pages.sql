@@ -58,18 +58,25 @@
 --      human act — and the section stays human-owned: the machine proposes
 --      next time too. A manual write takes ownership; release_page_section
 --      hands a section back to the machine (upstream's release was a raw
---      UPDATE nothing recorded); lock_page_section sets the lock and
---      delete_page_section removes a section, the render following — the
---      doors upstream lacked. A revision is written on every change to what
---      the render reads, and on an ownership or lock move.
+--      UPDATE nothing recorded); reject_page_section discards a parked draft,
+--      lock_page_section sets the lock and delete_page_section removes a
+--      section, the render following — the doors upstream lacked. A generated
+--      write that says what the live text says withdraws any older draft it
+--      had parked (the machine no longer proposes it). A revision is written
+--      on every change to what the render reads, and on an ownership or lock
+--      move.
 --   3. THE RENDER. render_page(page, at) is the text the thought holds:
 --      `# title`, then each section by (display_order, section_key) — `##
 --      heading` when it has one, then its body — joined by blank lines; with
 --      `at`, the same over page_sections_as_of(page, at), the latest revision
---      of each section at or before that time: any prior state of the page,
---      byte for byte. After every live change ob1_render_page_thought writes
---      the render and the evidence union through update_thought; nothing
---      moved, nothing written (the audit's no-op rule holds by construction).
+--      of each section at or before that time: any prior state of the
+--      SECTIONS, byte for byte, under the current title (a section deleted
+--      since is absent, its revisions gone with it) — every full render, title
+--      and all, is in the page thought's audit log. After every live change
+--      ob1_render_page_thought writes the render and the evidence union
+--      through update_thought; nothing moved, nothing written (the audit's
+--      no-op rule holds by construction). A slug, a title and a heading are
+--      one line each, refused otherwise: the render is line-structured.
 --   4. THE LINEAGE. A generated section is a derived artifact: write_page_section
 --      and accept_page_section record a `derivations` row (artifact_kind
 --      `section`, the sixth kind — the CHECK and ob1_record_derivation's list
@@ -86,7 +93,9 @@
 --      its evidence had when it was generated, and accept records those. A
 --      manual write that moves the body drops the row and empties the recipe —
 --      the text is no longer the recipe's output (a heading or order move alone
---      leaves the machine's text, its recipe and its row). An AFTER DELETE
+--      leaves the machine's text, its recipe and its row; a human's re-citation
+--      without a body move moves the section's evidence alone, the row keeping
+--      the inputs the machine read). An AFTER DELETE
 --      trigger on page_sections drops a deleted section's rows (061's shape).
 --      Preflight's `lineage` check counts sections carrying a recipe without a
 --      row — a regeneration of such a section records the row even when nothing
@@ -100,7 +109,7 @@
 --
 -- SAFETY
 --   Additive: thoughts is untouched (no column, no index, no trigger); three
---   tables, thirteen functions and two trigger functions added; one CHECK on
+--   tables, fourteen functions and two trigger functions added; one CHECK on
 --   061's derivations widened by one value (found by what it constrains, not
 --   by its name — a renamed CHECK would otherwise stand beside the new one and
 --   refuse every section; added NOT VALID then validated, so a large table is
@@ -115,8 +124,9 @@
 --   row update_thought locks, and the order delete_thought's cascade takes: the
 --   thought, then the page), then the page row, then the section; a writer
 --   racing delete_thought of the page therefore waits and then finds no page —
---   or, for upsert_page, finds no slug and creates the page anew, an upsert —
---   where the page-first order deadlocked 38 of 40 races (run-it, first review
+--   or, for upsert_page, finds the page it waited on gone and creates it anew,
+--   an upsert (cold read, fourth review pass: it raised) — where the
+--   page-first order deadlocked 38 of 40 races (run-it, first review
 --   pass). The one inversion left is against 033's fingerprint lock, which
 --   update_thought takes after this row lock: a client editing the page
 --   thought directly to the very text the render is moving to holds the
@@ -185,8 +195,8 @@ CREATE TABLE IF NOT EXISTS pages (
   -- delete_thought (009) is the door; the thought's audit delete row holds the
   -- last render.
   id          uuid        PRIMARY KEY REFERENCES thoughts(id) ON DELETE CASCADE,
-  slug        text        NOT NULL UNIQUE CHECK (slug <> ''),
-  title       text        NOT NULL CHECK (title <> ''),
+  slug        text        NOT NULL UNIQUE CHECK (slug <> '' AND slug !~ '\s'),
+  title       text        NOT NULL CHECK (title <> '' AND title !~ '[\n\r]'),
   page_kind   text        NOT NULL DEFAULT 'topic' CHECK (page_kind IN ('topic', 'entity', 'autobiography', 'custom')),
   status      text        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
   metadata    jsonb       NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'),
@@ -201,7 +211,7 @@ CREATE TABLE IF NOT EXISTS page_sections (
   id                           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
   page_id                      uuid        NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
   section_key                  text        NOT NULL CHECK (section_key <> ''),
-  heading                      text,
+  heading                      text        CHECK (heading !~ '[\n\r]'),
   display_order                integer     NOT NULL DEFAULT 100,
   -- The OWNER: generated is the machine's (a generated write refreshes it in
   -- place); manual is a human's (a generated write parks). locked forces the
@@ -254,13 +264,13 @@ CREATE INDEX IF NOT EXISTS idx_page_section_revisions_section ON page_section_re
 COMMENT ON TABLE pages IS
   'The page store (migration 063 / SMD-1812): one row per page, keyed by the PAGE THOUGHT''S id — a page is a thought whose content is render_page()''s text, written through update_thought on every live change (its history is thought_audit''s), with derived_from the sorted union of its sections'' evidence and supersedes passed through. slug is the stable handle; status archived marks a page another superseded. Written by upsert_page; updated_at and updated_by move with delete_page_section too.';
 COMMENT ON TABLE page_sections IS
-  'The sections of a page, each with an OWNER: origin generated is the machine''s (a generated write refreshes it in place), origin manual or locked is a human''s (a generated write parks in the pending buffer — pending_body_md and the evidence and recipe it was made from — until accept_page_section promotes it). evidence_thought_ids and generation_source are the machine''s own record of the live body; the lineage row is in derivations (artifact_kind section). Written by write_page_section, accept_page_section, release_page_section, lock_page_section and delete_page_section only. Migration 063 / SMD-1812.';
+  'The sections of a page, each with an OWNER: origin generated is the machine''s (a generated write refreshes it in place), origin manual or locked is a human''s (a generated write parks in the pending buffer — pending_body_md and the evidence and recipe it was made from — until accept_page_section promotes it). evidence_thought_ids and generation_source are the machine''s own record of the live body; the lineage row is in derivations (artifact_kind section). Written by write_page_section, accept_page_section, reject_page_section, release_page_section, lock_page_section and delete_page_section only. Migration 063 / SMD-1812.';
 COMMENT ON COLUMN page_sections.origin IS
   'Who owns the section: manual (a human — a generated write parks) or generated (the machine — a generated write refreshes). A manual write takes ownership; release_page_section gives it back. Migration 063 / SMD-1812.';
 COMMENT ON COLUMN page_sections.pending_body_md IS
   'A machine draft parked because the section is human-owned (origin manual or locked), with pending_at, pending_generation_source, pending_evidence_thought_ids and pending_evidence_fingerprints (the evidence''s text as the draft was generated from it) beside it. Promoted by accept_page_section; cleared by any in-place write. Migration 063 / SMD-1812.';
 COMMENT ON COLUMN page_sections.generation_source IS
-  'The recipe of the live body when a machine wrote it — the lineage row''s recipe (deterministic, declared, the generator''s own keys) — and {} when the body is a human''s: a manual write that moves the body empties it. The one predicate for "this text is a machine''s", whatever the owner; preflight''s lineage check reads it. Migration 063 / SMD-1812.';
+  'The recipe of the live body when a machine wrote it — the lineage row''s recipe (deterministic, declared, the generator''s own keys) — and {} when the body is a human''s: a manual write that moves the body empties it. The one predicate for "this text is a machine''s", whatever the owner; preflight''s lineage check reads it. evidence_thought_ids beside it is the section''s own citation list: a human''s re-citation moves it alone, the lineage row keeping the inputs the machine read. Migration 063 / SMD-1812.';
 COMMENT ON TABLE page_section_revisions IS
   'Append-only history of a section: one row per change to what the render reads (body, heading, order) and per ownership or lock move, with the origin the write declared and the actor. Never rewritten, never deleted while its section stands and never truncated (a row trigger refuses UPDATE and a DELETE whose section still exists, a statement trigger the truncation), the owner''s included; a section''s rows go with the section — delete_page_section''s cascade, or the page thought''s delete. page_sections_as_of() reads the latest row per section at a time; render_page(page, at) renders it. seq is an internal order, never a thought id. Migration 063 / SMD-1812.';
 
@@ -392,6 +402,10 @@ $$;
 
 COMMENT ON FUNCTION ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid) IS
   'Records one derived artifact''s lineage in `derivations`, upserting on (artifact_kind, artifact_id, produced_by) and moving produced_at: the inputs and their fingerprints (parallel, no NULL), the pass, the recipe (a JSON object with a boolean `deterministic`), the agent. Refuses a bad shape with a RAISE — a producer that cannot record its lineage must not commit its artifact either. Six kinds since 063: chunks, entities, proposal, vector, metadata (061) and section (063, a page section a machine wrote). Migration 061 / SMD-1731; 063 / SMD-1812.';
+
+-- 061's table COMMENT names five kinds; the catalog's copy follows the file.
+COMMENT ON TABLE derivations IS
+  'Lineage for every derived artifact (SMD-1731, Phase 1b of SMD-1729): one row per artifact per producing pass, written in the transaction that writes the artifact. artifact_kind names the tier — chunks (a thought''s window set), entities (a thought''s extraction under one extraction_key), proposal (one supersession proposal), vector (a thought''s embedding), metadata (a thought''s capture-time tags), and since 063 section (a page section a machine wrote — SMD-1812); artifact_id is the thought''s id for the four keyed by a thought, the proposal''s id for a proposal, the section''s id for a section. input_ids and input_fingerprints are parallel arrays naming what the artifact was computed from and the text it was computed from — a row whose fingerprints no longer match its inputs'' is stale, which is a read (preflight counts them), not a trigger. produced_by is the pass; recipe is a JSON object carrying a boolean `deterministic` (what SMD-1732''s rebuild will read) and the producer''s own record — model, prompt_version, prompt_hash, window parameters; `legacy: true` on a row 061 backfilled, `declared: false` where a caller sent no recipe. No foreign key: thoughts_drop_derivations, supersession_proposals_drop_derivation and page_sections_drop_derivations drop the rows a deleted thought, proposal or section keyed. A `metadata` row outlives tags an edit strips — it reads as stale, and nothing drops it (a read, not a trigger). Migration 061 / SMD-1731; 063 / SMD-1812.';
 
 CREATE OR REPLACE FUNCTION ob1_drop_section_derivations()
 RETURNS trigger
@@ -603,10 +617,19 @@ DECLARE
   v_twin        uuid;
 BEGIN
   v_render := render_page(p_page_id);
+  -- No page under this id: refused, not rendered — as the repair door an
+  -- operator pastes ids into, a wrong id (an evidence thought's) would
+  -- otherwise have its derived_from cleared, silently (cold read, fourth
+  -- review pass).
+  IF v_render IS NULL THEN
+    RAISE EXCEPTION USING
+      MESSAGE = format('ob1_render_page_thought: no page %s', p_page_id),
+      ERRCODE = 'no_data_found';
+  END IF;
   SELECT content, derived_from, supersedes INTO v_current, v_cur_derived, v_cur_sup FROM thoughts WHERE id = p_page_id;
   IF v_current IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = format('page %s has no thought row — a page is a thought (063); the row was removed around delete_thought', p_page_id),
+      MESSAGE = format('ob1_render_page_thought: page %s has no thought row — a page is a thought (063); the row was removed around delete_thought', p_page_id),
       ERRCODE = 'no_data_found';
   END IF;
   -- 025's derived_from: the union of the live sections' evidence, sorted so
@@ -642,22 +665,22 @@ BEGIN
   IF v_res->>'error' = 'DUPLICATE_CONTENT' THEN
     SELECT id INTO v_twin FROM thoughts WHERE content_fingerprint = content_fingerprint_of(v_render) AND id <> p_page_id;
     RAISE EXCEPTION USING
-      MESSAGE = format('page %s: another thought (%s) holds this page''s exact text — a page is a thought, and two thoughts never share one text (003); give the page a title or a section of its own', p_page_id, COALESCE(v_twin::text, 'unknown')),
+      MESSAGE = format('ob1_render_page_thought: page %s: another thought (%s) holds this page''s exact text — a page is a thought, and two thoughts never share one text (003); give the page a title or a section of its own', p_page_id, COALESCE(v_twin::text, 'unknown')),
       ERRCODE = 'unique_violation';
   END IF;
   IF v_res->>'error' IN ('WOULD_CYCLE', 'SUPERSEDES_NOT_FOUND') THEN
     RAISE EXCEPTION USING
-      MESSAGE = format('page %s: supersedes %s is refused — %s (025: the pointer lives on the newer thought and never closes a loop)', p_page_id, v_res->>'supersedes', v_res->>'error'),
+      MESSAGE = format('ob1_render_page_thought: page %s: supersedes %s is refused — %s (025: the pointer lives on the newer thought and never closes a loop)', p_page_id, v_res->>'supersedes', v_res->>'error'),
       ERRCODE = 'invalid_parameter_value';
   END IF;
   RAISE EXCEPTION USING
-    MESSAGE = format('page %s: update_thought refused the render — %s', p_page_id, v_res::text),
+    MESSAGE = format('ob1_render_page_thought: page %s: update_thought refused the render — %s', p_page_id, v_res::text),
     ERRCODE = 'invalid_parameter_value';
 END;
 $$;
 
 COMMENT ON FUNCTION ob1_render_page_thought(uuid, uuid) IS
-  'Writes the page thought after a live change: render_page() as the content when it moved, derived_from as the sorted union of the live sections'' evidence when it moved, supersedes when given — through the eleven-argument update_thought (an audited event, the vector cleared for the re-embed worker), nothing when nothing moved. Refuses by name a render another thought holds (003''s one text, one row). Called by every writer of the store, and the repair door after a raw write of page_sections or of the page thought (preflight''s lineage check names it). Migration 063 / SMD-1812.';
+  'Writes the page thought after a live change: render_page() as the content when it moved, derived_from as the sorted union of the live sections'' evidence when it moved, supersedes when given — through the eleven-argument update_thought (an audited event, the vector cleared for the re-embed worker), nothing when nothing moved. Refuses by name a render another thought holds (003''s one text, one row), and an id that is no page''s. Called by every writer of the store, and the repair door after a raw write of page_sections or of the page thought (preflight''s lineage check names it). Migration 063 / SMD-1812.';
 
 -- ---------------------------------------------------------------------------
 -- 7. The page: create or update by slug.
@@ -689,6 +712,12 @@ BEGIN
   END IF;
   IF v_title IS NULL THEN
     RAISE EXCEPTION USING MESSAGE = 'upsert_page: title is required', ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF v_slug ~ '\s' THEN
+    RAISE EXCEPTION USING MESSAGE = format('upsert_page: slug holds whitespace (%L) — a slug is one word, the stable handle', v_slug), ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF v_title ~ '[\n\r]' THEN
+    RAISE EXCEPTION USING MESSAGE = 'upsert_page: title is one line — the render''s first line is `# title`', ERRCODE = 'invalid_parameter_value';
   END IF;
   IF v_kind NOT IN ('topic', 'entity', 'autobiography', 'custom') THEN
     RAISE EXCEPTION USING
@@ -722,11 +751,21 @@ BEGIN
   -- order (the thought, then the page — ob1_page_lock); the title and the
   -- metadata (merged with ||, one level deep) move, the kind stays (a page is
   -- what it was made as), supersedes when given. The render follows the title
-  -- through the thought. A page deleted while this call waited is created
-  -- anew — an upsert.
+  -- through the thought. A page deleted while this call waited on its
+  -- thought is created anew — an upsert — so the lock is taken by hand here,
+  -- in ob1_page_lock's order, and a row gone is the create path, not a
+  -- refusal (cold read, fourth review pass: the helper raised "no page").
   SELECT id INTO v_id FROM pages WHERE slug = v_slug;
   IF v_id IS NOT NULL THEN
-    PERFORM ob1_page_lock(v_id, 'upsert_page');
+    PERFORM 1 FROM thoughts WHERE id = v_id FOR NO KEY UPDATE;
+    IF FOUND THEN
+      PERFORM 1 FROM pages WHERE id = v_id FOR UPDATE;
+    END IF;
+    IF NOT FOUND THEN
+      v_id := NULL;
+    END IF;
+  END IF;
+  IF v_id IS NOT NULL THEN
     UPDATE pages
        SET title      = v_title,
            metadata   = pages.metadata || v_meta,
@@ -832,6 +871,9 @@ BEGIN
       MESSAGE = format('write_page_section: origin must be manual or generated, got %L', p_origin),
       ERRCODE = 'invalid_parameter_value';
   END IF;
+  IF p_heading ~ '[\n\r]' THEN
+    RAISE EXCEPTION USING MESSAGE = 'write_page_section: heading is one line — the render''s `## heading`', ERRCODE = 'invalid_parameter_value';
+  END IF;
   -- The recipe, checked whatever the origin (a manual write's is discarded
   -- below — a human's text has none — but a bad one is refused all the same).
   v_recipe := ob1_page_recipe(p_generation_source, 'write_page_section');
@@ -872,9 +914,19 @@ BEGIN
     -- The draft parks with the evidence (at the fingerprints it had) and the
     -- recipe it was made from; the live body, its revision history and its
     -- lineage stay as they are. A draft that says what the live body already
-    -- says is nothing to review: unchanged, nothing parked.
+    -- says is nothing to review: unchanged, nothing parked — and an older
+    -- draft still parked is withdrawn, since the machine no longer proposes
+    -- it (cold read, fourth review pass: it stayed on offer). updated_by is
+    -- the live text's last writer and does not move for a park; pending_at
+    -- records the park.
     IF p_origin = 'generated' AND (v_old.origin = 'manual' OR v_old.locked) THEN
       IF v_body = v_old.body_md THEN
+        IF v_old.pending_body_md IS NOT NULL THEN
+          UPDATE page_sections
+             SET pending_body_md = NULL, pending_at = NULL, pending_generation_source = NULL,
+                 pending_evidence_thought_ids = NULL, pending_evidence_fingerprints = NULL, updated_at = v_now
+           WHERE id = v_old.id;
+        END IF;
         RETURN jsonb_build_object('section_id', v_old.id, 'action', 'unchanged');
       END IF;
       UPDATE page_sections
@@ -883,15 +935,17 @@ BEGIN
              pending_generation_source     = v_recipe,
              pending_evidence_thought_ids  = v_ids,
              pending_evidence_fingerprints = v_fps,
-             updated_at                    = v_now,
-             updated_by                    = v_actor
+             updated_at                    = v_now
        WHERE id = v_old.id;
       RETURN jsonb_build_object('section_id', v_old.id, 'action', 'pending');
     END IF;
 
     -- In place. A manual write takes ownership and keeps the section's
-    -- evidence unless it cites anew (a human's citations), and — when it
-    -- moved the body — empties the recipe: the text is no longer a machine's.
+    -- evidence unless it cites anew (a human's citations: NULL keeps them, an
+    -- empty array clears them), and — when it moved the body — empties the
+    -- recipe: the text is no longer a machine's. A parked draft is discarded
+    -- by any in-place write (the human's re-write of the live body is the
+    -- implicit reject; reject_page_section is the named one).
     -- A generated write onto a machine-owned section refreshes body, recipe
     -- and evidence. Either way the pending buffer clears — the live text is
     -- now the newest word.
@@ -928,12 +982,14 @@ BEGIN
   -- ob1:derivation-recorded-with-its-artifact (061): the lineage row in the
   -- section's own transaction. A generated body is a derivation — recorded
   -- when it is new, or when its text, its evidence or its recipe moved (an
-  -- identical regeneration moves no produced_at, 061's rule for a re-capture).
+  -- identical regeneration, or a heading or order move alone, moves no
+  -- produced_at — 061's rule for a re-capture; updated_at and updated_by do
+  -- move, as for any write).
   -- A manual write that moved the BODY makes it a human's: its row goes with
   -- the recipe (a heading or order move alone leaves the machine's text, its
   -- recipe and its row).
   IF p_origin = 'generated' THEN
-    IF v_action = 'created' OR v_moved
+    IF v_action = 'created' OR v_body_moved
        OR v_row.evidence_thought_ids IS DISTINCT FROM v_old.evidence_thought_ids
        OR v_row.generation_source IS DISTINCT FROM v_old.generation_source
        -- …or the row is missing: a regeneration is the remedy preflight names
@@ -953,7 +1009,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION write_page_section(uuid, text, text, text, text, jsonb, uuid[], integer, text) IS
-  'The one door for a section''s text (the regen guard, ob1:page-regen-guard). Returns {section_id, action} with action created | updated | pending | unchanged. A generated write onto a human-owned section (origin manual, or locked) PARKS — body untouched, the draft with its evidence (at the fingerprints it had) and recipe in the pending buffer for accept_page_section; one that says what the live body already says is unchanged, nothing parked. Any other write updates in place (a manual write takes ownership; the pending buffer clears) and snapshots a revision when body, heading, order or ownership moved; a manual write onto a locked section leaves it locked (lock_page_section unlocks). p_heading NULL leaves the heading, '''' clears it. A generated write names its evidence (refused without; every id must exist and none may be the page itself) and records its lineage row in derivations (kind section) in the same transaction, the recipe held in generation_source too; a manual write that moves the body drops the row and empties the recipe. The page thought is re-rendered through update_thought when the render or the evidence union moved. Locks the page thought, then the page, then the section. Migration 063 / SMD-1812.';
+  'The one door for a section''s text (the regen guard, ob1:page-regen-guard). Returns {section_id, action} with action created | updated | pending | unchanged. A generated write onto a human-owned section (origin manual, or locked) PARKS — body untouched, the draft with its evidence (at the fingerprints it had) and recipe in the pending buffer for accept_page_section (or reject_page_section); one that says what the live body already says is unchanged, nothing parked, and withdraws an older draft still parked. Any other write updates in place (a manual write takes ownership; the pending buffer clears) and snapshots a revision when body, heading, order or ownership moved; a manual write onto a locked section leaves it locked (lock_page_section unlocks). p_heading NULL leaves the heading, '''' (or whitespace) clears it, a line sets it; p_evidence_thought_ids NULL keeps a manual section''s citations, an empty array clears them. A generated write names its evidence (refused without; every id must exist and none may be the page itself) and records its lineage row in derivations (kind section) in the same transaction, the recipe held in generation_source too; a manual write that moves the body drops the row and empties the recipe. The page thought is re-rendered through update_thought when the render or the evidence union moved. Locks the page thought, then the page, then the section. Migration 063 / SMD-1812.';
 
 -- ---------------------------------------------------------------------------
 -- 9. Accept a parked draft — a deliberate human decision.
@@ -1023,7 +1079,7 @@ COMMENT ON FUNCTION accept_page_section(uuid, text) IS
   'Promote a parked draft to the live body: the body, evidence and recipe move from the pending buffer, a revision is snapshotted (origin generated — the text is the machine''s — under the accepting actor), the lineage row is recorded at the fingerprints the draft was generated from, the page thought re-rendered, and the section STAYS human-owned (the machine proposes next time too). Returns {section_id, action} with accepted | no_pending. Refuses a draft whose evidence no longer exists. Migration 063 / SMD-1812.';
 
 -- ---------------------------------------------------------------------------
--- 10. Release a section back to the machine; lock one; delete one.
+-- 10. Release a section back to the machine; reject a draft; lock one; delete one.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION release_page_section(p_section_id uuid, p_actor text DEFAULT NULL)
 RETURNS jsonb
@@ -1062,6 +1118,42 @@ $$;
 
 COMMENT ON FUNCTION release_page_section(uuid, text) IS
   'Hand a human-owned (or locked) section back to the machine: origin generated, locked false, the body as it stands (its recipe empty when a human wrote it — preflight does not read such a section as a derivation without lineage), a revision recording the move. The next generated write refreshes it in place. Returns {section_id, action} with released | already_generated. Upstream''s release was a raw UPDATE nothing recorded. Migration 063 / SMD-1812.';
+
+CREATE OR REPLACE FUNCTION reject_page_section(p_section_id uuid, p_actor text DEFAULT NULL)
+RETURNS jsonb
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_actor text := ob1_page_actor(p_actor);
+  v_page  uuid;
+  v_row   page_sections%ROWTYPE;
+BEGIN
+  SELECT page_id INTO v_page FROM page_sections WHERE id = p_section_id;
+  IF v_page IS NULL THEN
+    RAISE EXCEPTION USING MESSAGE = format('reject_page_section: no section %s', p_section_id), ERRCODE = 'no_data_found';
+  END IF;
+  PERFORM ob1_page_lock(v_page, 'reject_page_section');
+  SELECT * INTO v_row FROM page_sections WHERE id = p_section_id FOR UPDATE;
+  IF v_row.id IS NULL THEN
+    RAISE EXCEPTION USING MESSAGE = format('reject_page_section: no section %s', p_section_id), ERRCODE = 'no_data_found';
+  END IF;
+  IF v_row.pending_body_md IS NULL THEN
+    RETURN jsonb_build_object('section_id', v_row.id, 'action', 'no_pending');
+  END IF;
+  -- The draft goes; the live text, its history and its lineage stand. Nothing
+  -- the render reads moved, so no revision: the rejection leaves updated_by
+  -- and updated_at as its mark (the machine will propose again next run).
+  UPDATE page_sections
+     SET pending_body_md = NULL, pending_at = NULL, pending_generation_source = NULL,
+         pending_evidence_thought_ids = NULL, pending_evidence_fingerprints = NULL,
+         updated_at = now(), updated_by = v_actor
+   WHERE id = v_row.id;
+  RETURN jsonb_build_object('section_id', v_row.id, 'action', 'rejected');
+END;
+$$;
+
+COMMENT ON FUNCTION reject_page_section(uuid, text) IS
+  'Discard a parked draft: the pending buffer clears, the live text, its revisions and its lineage stand, no revision is written (nothing the render reads moved); the machine proposes again next run. Returns {section_id, action} with rejected | no_pending. A manual write of the live body discards a draft too, implicitly. Migration 063 / SMD-1812.';
 
 CREATE OR REPLACE FUNCTION lock_page_section(p_section_id uuid, p_locked boolean, p_actor text DEFAULT NULL)
 RETURNS jsonb
@@ -1113,12 +1205,16 @@ BEGIN
   END IF;
   PERFORM ob1_page_lock(v_page, 'delete_page_section');
   -- The section goes with its revisions (the cascade, which the revisions'
-  -- trigger allows because the section row is gone) and its lineage rows (the drop trigger); the
-  -- page thought's audit log keeps every render the section was part of, and
-  -- the render moves through update_thought as for any live change. p_actor
-  -- is read for the thought's updated_by through the render's event alone —
-  -- the section leaves nothing to record it on.
+  -- trigger allows because the section row is gone) and its lineage rows (the
+  -- drop trigger); the page thought's audit log keeps every render the section
+  -- was part of, and the render moves through update_thought as for any live
+  -- change. p_actor is recorded on the page row (updated_by) — the section
+  -- leaves nothing to record it on, and the thought's actor is the envelope's
+  -- (050). A section another call removed meanwhile is refused by name.
   DELETE FROM page_sections WHERE id = p_section_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING MESSAGE = format('delete_page_section: no section %s', p_section_id), ERRCODE = 'no_data_found';
+  END IF;
   UPDATE pages SET updated_at = now(), updated_by = ob1_page_actor(p_actor) WHERE id = v_page;
   PERFORM ob1_render_page_thought(v_page);
   RETURN jsonb_build_object('section_id', p_section_id, 'section_key', v_key, 'action', 'deleted');

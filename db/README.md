@@ -166,7 +166,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2123 assertions: 2123 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2126 assertions: 2126 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports sixty-three (63) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -531,7 +531,7 @@ SMD-2117's.
 Migration 061 gives every derived artifact its lineage (SMD-1731, Phase 1b of
 SMD-1729; the projections table in `../docs/event-log-as-truth.md`). One
 table, `derivations`: a row per artifact per producing pass — `artifact_kind`
-in chunks / entities / proposal / vector / metadata, `artifact_id` (the
+in chunks / entities / proposal / vector / metadata (and section since 063), `artifact_id` (the
 thought's id, or the proposal's), `input_ids` and `input_fingerprints`
 (parallel, no NULL element), `produced_by` (the pass), `recipe` (a JSON object
 with a boolean `deterministic`, what SMD-1732's rebuild will read, and the
@@ -594,11 +594,16 @@ write onto a human-owned section parks, the live text byte-identical; any
 other write updates in place — a manual write takes ownership — and snapshots
 a revision. `accept_page_section` promotes a parked draft (the section stays
 human-owned: the machine proposes next time too); `release_page_section` hands
-one back; `lock_page_section` sets the lock; `delete_page_section` removes a
-section, the render following. `render_page(page, at)` and
-`page_sections_as_of(page, at)` render any prior state byte for byte from the
-revisions (a revision is written per change to body, heading or order and per
-ownership or lock move). A generated section is a derived artifact under
+one back; `reject_page_section` discards a parked draft; `lock_page_section`
+sets the lock; `delete_page_section` removes a section, the render following.
+A generated write that says what the live text says is `unchanged` and
+withdraws an older draft it had parked. `render_page(page, at)` and
+`page_sections_as_of(page, at)` render any prior state of the sections byte for
+byte from the revisions, under the current title (a revision is written per
+change to body, heading or order and per ownership or lock move; a deleted
+section's revisions go with it; every full render, title included, is in the
+page thought's audit log). A slug is one word and a title or heading one line —
+the render is line-structured. A generated section is a derived artifact under
 SMD-1729's rule: its `derivations` row (the sixth kind, `section` — 061's CHECK
 widened, its writer redefined on its own body plus the value) names the
 evidence at the fingerprints read and the generator's recipe, in the section's
@@ -621,6 +626,7 @@ supersedes DEFAULT NULL)`; `write_page_section(page_id, section_key, body_md,
 origin DEFAULT 'generated', heading, generation_source DEFAULT '{}',
 evidence_thought_ids, display_order, actor)`; `accept_page_section(section_id,
 actor)`, `release_page_section(section_id, actor)`,
+`reject_page_section(section_id, actor)`,
 `lock_page_section(section_id, locked, actor)`,
 `delete_page_section(section_id, actor)`; `render_page(page_id, at DEFAULT
 NULL)`, `page_sections_as_of(page_id, at)`. A SQL caller that wants the page
@@ -706,7 +712,7 @@ issues every group at once.
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
 | | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets; capture's `SELECT, UPDATE` cover the reads and the closing |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
-| **pages** — the page store (063, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (063) | `SELECT, INSERT, UPDATE` |
+| **pages** — the page store (063, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (063) | `SELECT, INSERT, UPDATE` |
 | | `page_sections` (063) | `SELECT, INSERT, UPDATE, DELETE` — `delete_page_section` deletes the row as the caller |
 | | `page_section_revisions` (063; append-only — UPDATE, a DELETE while the section stands, and TRUNCATE refused by trigger for the owner too, so only a section's cascade removes its rows; the identity `seq` needs no sequence grant, test-schema [58]) | `SELECT, INSERT` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
@@ -781,7 +787,8 @@ create the role first. `--grant --dry-run` prints the statements without running
 them, so a locked-down deployment can grant a subset by hand. A role that only
 ever runs the server needs the **capture** and **server** groups; add **worker**
 for the role your bulk passes connect as, **extraction** on top of that for
-entity extraction, and **structure** as well for a structured pass. The
+entity extraction, **structure** as well for a structured pass, and **pages**
+for a role that writes pages (063). The
 **community**, **extensions** and **recipes** groups are issued for whichever
 schema files you have applied — the objects not yet present are skipped and
 named, so run `--grant` again after applying one; apply
@@ -2651,7 +2658,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2123 assertions, PGlite, no container
+bun test-schema.ts                          # 2126 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 840 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

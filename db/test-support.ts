@@ -221,13 +221,14 @@ const FUNCTIONS = [
   "ob1_record_vector_lineage()",
   "ob1_drop_thought_derivations()",
   "ob1_drop_proposal_derivation()",
-  // 063 (SMD-1812): the page store's eight functions, its four helpers, the
+  // 063 (SMD-1812): the page store's nine functions, its four helpers, the
   // page-thought writer, the revisions' refusal trigger and the section drop
   // trigger; ob1_record_derivation, redefined on 061's body, is named above.
   "upsert_page(text, text, text, jsonb, text, uuid)",
   "write_page_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)",
   "accept_page_section(uuid, text)",
   "release_page_section(uuid, text)",
+  "reject_page_section(uuid, text)",
   "lock_page_section(uuid, boolean, text)",
   "delete_page_section(uuid, text)",
   "render_page(uuid, timestamptz)",
