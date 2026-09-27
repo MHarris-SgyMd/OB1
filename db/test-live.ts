@@ -36,7 +36,9 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
-import { consolidateKey } from "../server-portable/consolidate.ts";
+import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES } from "../server-portable/consolidate.ts";
+import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-portable/entities.ts";
+import { CHUNK_ESTIMATOR, chunkRecipe, promptHash } from "../server-portable/lineage.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, recordId, recordStructure, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
@@ -2398,6 +2400,16 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(first.code === 1, `the run exits 1 because rows failed (exit ${first.code})`);
   assert(/35 re-embedded, 3 failed/.test(first.out), `…and says so: 35 re-embedded, 3 failed (${first.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
   assert(/stub: refused this text/.test(first.out), "…naming the provider's error for the poisoned row");
+  // 061: every vectored row's lineage names the label it carries and the
+  // column's width — the rows the pass moved to stub-embed through the
+  // trigger, the three that failed under the model they kept (SMD-1731).
+  const vectored = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE embedding IS NOT NULL`)[0].c);
+  // IS NOT DISTINCT FROM: an unlabelled row (021's unknown model) has no
+  // `model` key on its row, and NULL = NULL would count it as disagreeing.
+  const vlin = (await sql`SELECT count(*)::int AS rows, count(*) FILTER (WHERE d.recipe->>'model' IS NOT DISTINCT FROM t.embedding_model AND (d.recipe->>'dims')::int = ${DIM})::int AS agreeing, count(*) FILTER (WHERE t.embedding_model = 'stub-embed')::int AS moved
+                             FROM thoughts t JOIN derivations d ON d.artifact_kind = 'vector' AND d.artifact_id = t.id WHERE t.embedding IS NOT NULL`)[0] as { rows: number; agreeing: number; moved: number };
+  assert(Number(vlin.rows) === vectored && Number(vlin.agreeing) === vectored && Number(vlin.moved) >= 35,
+    `every vectored row has a vector lineage row naming its label (or none, unlabelled) and the column's width, the 35 re-embedded among those at the new model (${JSON.stringify(vlin)} of ${vectored})`);
   assert(/whole-content embedding failed transiently \(.*429 .*stub: rate limited/.test(first.out), "…and, for the throttled long thought, that its head window stands in until a retry, with the 429 named");
   assert(/timed out after 2 s \(OB1_LLM_TIMEOUT\)/.test(first.out), "…and, for the tarpit, that its call timed out, naming the setting");
   assert(/1 succeeded row\(s\) carry a caveat/.test(first.out) && /413 .*stub: input too long/.test(first.out),
@@ -3185,6 +3197,16 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   const [{ attributed, total }] = await sql`
     SELECT count(*) FILTER (WHERE canonical_agent_id = ${agent.id}::uuid)::int AS attributed, count(*)::int AS total FROM thought_entities`;
   assert(Number(total) > 0 && Number(attributed) === Number(total), `every mention carries that agent id (${attributed} of ${total})`);
+  // 061: one lineage row per extracted thought under the job key — the input's
+  // fingerprint as checked, the agent, and lineage.ts's recipe: the stub
+  // model, the prompt's version and hash, the windows sent (SMD-1731).
+  const lin = (await sql`SELECT d.artifact_id::text AS id, d.input_fingerprints[1] AS fp, d.recipe, t.content_fingerprint AS current, d.canonical_agent_id::text AS agent
+                           FROM derivations d JOIN thoughts t ON t.id = d.artifact_id WHERE d.artifact_kind = 'entities' AND d.produced_by = ${KEY}`) as { id: string; fp: string; recipe: Record<string, unknown>; current: string; agent: string | null }[];
+  const extractedThoughts = Number((await sql`SELECT count(DISTINCT thought_id)::int AS c FROM thought_entities WHERE extraction_key = ${KEY}`)[0].c);
+  assert(lin.length === extractedThoughts && extractedThoughts > 0 && lin.every((l) => l.fp === l.current && l.agent === agent.id && l.recipe.deterministic === false && l.recipe.model === "stub-meta" && l.recipe.prompt_version === ENTITY_PROMPT_VERSION && l.recipe.prompt_hash === promptHash(ENTITY_EXTRACTION_PROMPT)),
+    `every extracted thought has its lineage row under the job key — the input's fingerprint as checked, the agent, the stub model, the prompt's version and hash (${lin.length} of ${extractedThoughts})`);
+  const ledgerLin = lin.find((l) => l.id === ledger);
+  assert(ledgerLin !== undefined && ledgerLin.recipe.windows === ledgerCalls && ledgerLin.recipe.parts === ledgerCalls, `…and the windowed thought's row counts its ${ledgerCalls} windows (${JSON.stringify(ledgerLin?.recipe)})`);
   const g1 = await graph();
   // Anita, Open Brain, PostgreSQL, Dev, Priya, Redis, observability, Ledger =
   // 8 entities; mentions 3 + 3 + 2 + 6 + 2 = 16; edges 2 + 2 + 1 + 1 = 6.
@@ -3848,6 +3870,13 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   const p1 = await proposals();
   assert(p1.length === 2 && p1.every((p) => p.status === "pending" && p.judge_key === KEY && p.canonical_agent_id === agent.id),
          `two pending proposals, each carrying the judge key and the agent id (${JSON.stringify(p1.map((p) => [p.verdict, p.confidence, p.judge_key])) })`);
+  // 061: each recorded proposal's lineage row — both thoughts at the
+  // fingerprints the row took, the judge's key, and lineage.ts's recipe: the
+  // stub judge, the prompt's version and hash, the candidate parameters.
+  const plin = (await sql`SELECT d.input_ids::text[] AS inputs, d.input_fingerprints AS fps, d.recipe, d.canonical_agent_id::text AS agent, sp.older_id::text AS o, sp.newer_id::text AS n, sp.older_fingerprint AS ofp, sp.newer_fingerprint AS nfp
+                            FROM derivations d JOIN supersession_proposals sp ON sp.id = d.artifact_id WHERE d.artifact_kind = 'proposal' AND d.produced_by = ${KEY}`) as { inputs: string[]; fps: string[]; recipe: Record<string, unknown>; agent: string | null; o: string; n: string; ofp: string; nfp: string }[];
+  assert(plin.length === 2 && plin.every((l) => l.inputs.join() === `${l.o},${l.n}` && l.fps.join() === `${l.ofp},${l.nfp}` && l.agent === agent.id && l.recipe.deterministic === false && l.recipe.model === "stub-judge" && l.recipe.prompt_version === CONSOLIDATE_PROMPT_VERSION && l.recipe.prompt_hash === promptHash(CONSOLIDATE_PROMPT) && l.recipe.candidates === DEFAULT_CANDIDATES && typeof l.recipe.similarity === "number"),
+    `each proposal has its lineage row: both thoughts at the fingerprints the row took, the agent, the judge's model, prompt version and hash, the candidate parameters (${JSON.stringify(plin.map((l) => l.recipe))})`);
   const directed = p1.find((p) => p.verdict === "newer_supersedes_older")!;
   const undirected = p1.find((p) => p.verdict === "conflict_undirected")!;
   assert(directed?.older_id === decision && directed.newer_id === reversal && Number(directed.confidence) === 0.92, "the billing pair is proposed newer-supersedes-older at the judge's confidence");
@@ -5758,6 +5787,63 @@ console.log("\n[28] Migration 060 on a real server: the windowed capture and an 
     `the delete lands and the edit is a clean write or a named refusal, never an error or a deadlock; the editor's pointer is null either way (${outcomes.join(", ")})`);
   await cD.close(); await cE.close();
   await sql`DELETE FROM thoughts`;
+  await sql.close();
+}
+
+console.log("\n[29] Migration 061 on a real server: the windowed capture's lineage (PGlite cannot drive the chunk INSERT) — the 4-argument form records the chunk set from the envelope's recipe, or the label alone marked undeclared; an edit with windows replaces the row under 'edit' at the new text, an edit without windows drops it, a re-capture under another label drops it with the windows (022); lineage.ts's recipe builder is the one spelling the server sends (SMD-1731)");
+{
+  // Its own pool, as [28] has: the sections before close the shared one.
+  const sql = new SQL({ url: URL_, max: 2 });
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM derivations`;
+  await sql`SELECT set_agent_kind('op-key', 'operator')`;
+  const ACTOR = { name: "op-key", via: "live-door" };
+  const MODEL = EMBEDDING_MODEL;
+  type Lin = { kind: string; by: string; fps: string[]; recipe: Record<string, unknown>; at: string };
+  const rowsOf = async (id: string) => (await sql`SELECT artifact_kind AS kind, produced_by AS by, input_fingerprints AS fps, recipe, produced_at::text AS at FROM derivations WHERE artifact_id = ${id}::uuid ORDER BY artifact_kind`) as Lin[];
+  const chunkRow = async (id: string) => (await rowsOf(id)).find((r) => r.kind === "chunks");
+  const windowsOf = async (id: string) => Number((await sql`SELECT count(*)::int AS c FROM thought_chunks WHERE thought_id = ${id}::uuid`)[0].c);
+  const params = (r: Record<string, unknown> | undefined) => (r?.params ?? {}) as Record<string, unknown>;
+  const windows = [{ content: "window one", embedding: unit(1), context: "ctx one" }, { content: "window two", embedding: unit(2), context: null }];
+
+  // The recipe as the server's embedder would build it — lineage.ts's one
+  // spelling — from the configuration the windows were made under.
+  const cfg = { chunkTokens: 300, chunkOverlap: 37, chunkThreshold: 300, chunkTokensFrom: "flag", chunkContext: true, metadataModel: "stub-meta" } as unknown as Parameters<typeof chunkRecipe>[0];
+  const recipe = chunkRecipe(cfg, { model: MODEL, chunks: windows.map((w) => ({ content: w.content, embedding: [] as number[], ...(w.context ? { context: w.context } : {}) })) });
+  assert(recipe !== undefined && recipe.deterministic === false && recipe.blurbs === 1 && recipe.blurb_model === "stub-meta" && /^sha256:[0-9a-f]{64}$/.test(String(recipe.prompt_hash)) && params(recipe).tokens === 300 && params(recipe).overlap === 37 && params(recipe).estimator === CHUNK_ESTIMATOR && recipe.model === MODEL,
+    `lineage.ts builds the window set's recipe: non-deterministic while a blurb rides a window, the blurb model and its prompt's hash, the split's parameters and estimator, the model (${JSON.stringify(recipe)})`);
+  const bare = chunkRecipe({ ...cfg, chunkContext: false }, { model: MODEL, chunks: [{ content: "w", embedding: [] as number[] }] });
+  assert(bare !== undefined && bare.deterministic === true && !("blurb_model" in bare) && !("prompt_hash" in bare), "…deterministic, with no blurb model and no prompt hash, when the blurbs are off");
+  assert(chunkRecipe(cfg, { model: MODEL, chunks: [] }) === undefined, "…and nothing for a capture that made no windows — no artifact, no recipe");
+
+  // The 4-argument form with the envelope: the set's row carries the recipe
+  // as sent plus the count, at the capture's fingerprint; the vector's row beside it.
+  const w = (await sql`SELECT upsert_thought('061 live: a windowed capture', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL, lineage: { chunks: recipe } }}::jsonb, ${unit(0)}::vector, ${windows}::jsonb) AS r`)[0].r as { id: string; fingerprint: string; chunks: number };
+  let c = await chunkRow(w.id);
+  assert(w.chunks === 2 && c !== undefined && c.by === "capture" && c.recipe.count === 2 && c.recipe.blurbs === 1 && params(c.recipe).tokens === 300 && c.fps.join() === w.fingerprint && (await rowsOf(w.id)).map((r) => r.kind).join() === "chunks,vector",
+    `the windowed capture records its chunk set from the envelope — the recipe as sent plus the count — and the vector's row beside it (${JSON.stringify(c?.recipe)})`);
+  // Without the envelope: the label alone, marked undeclared.
+  const w2 = (await sql`SELECT upsert_thought('061 live: windows without a recipe', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(3)}::vector, ${windows}::jsonb) AS r`)[0].r as { id: string };
+  c = await chunkRow(w2.id);
+  assert(c !== undefined && c.recipe.deterministic === true && c.recipe.declared === false && c.recipe.model === MODEL && c.recipe.count === 2 && !("params" in c.recipe), `a 4-argument caller that declares no recipe gets the label alone, marked undeclared (${JSON.stringify(c?.recipe)})`);
+  // An edit with windows and the envelope replaces the row under 'edit', at the new text.
+  const e = (await sql`SELECT update_thought(${w.id}::uuid, '061 live: the windowed capture, edited', NULL, ${unit(4)}::vector, ${[{ content: "window three", embedding: unit(5), context: null }]}::jsonb, NULL, ${ACTOR}::jsonb, ${MODEL}, NULL, NULL, ${{ chunks: bare }}::jsonb) AS r`)[0].r as { ok: boolean };
+  c = await chunkRow(w.id);
+  const fpE = (await sql`SELECT content_fingerprint_of('061 live: the windowed capture, edited') AS f`)[0].f as string;
+  assert(e.ok === true && c !== undefined && c.by === "edit" && c.recipe.count === 1 && c.recipe.deterministic === true && c.fps.join() === fpE && (await rowsOf(w.id)).length === 2 && (await windowsOf(w.id)) === 1,
+    `an edit with windows replaces the set and its row under 'edit', at the new text (${JSON.stringify(c)})`);
+  // An edit with content and no windows drops the set and its row; the vector's stands.
+  const e2 = (await sql`SELECT update_thought(${w.id}::uuid, '061 live: edited to one window-less text', NULL, ${unit(6)}::vector, NULL, NULL, ${ACTOR}::jsonb, ${MODEL}, NULL, NULL, NULL) AS r`)[0].r as { ok: boolean };
+  assert(e2.ok === true && (await chunkRow(w.id)) === undefined && (await windowsOf(w.id)) === 0 && (await rowsOf(w.id)).map((r) => r.kind).join() === "vector", "an edit with content and no windows drops the set and its row; the vector's stands");
+  // 022's rule: a re-capture under the same label keeps the windows and their
+  // row; under another label both go, and the vector's row follows the label.
+  const same = (await sql`SELECT upsert_thought('061 live: windows without a recipe', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(3)}::vector) AS r`)[0].r as { existed: boolean };
+  assert(same.existed === true && (await chunkRow(w2.id)) !== undefined && (await windowsOf(w2.id)) === 2, "a re-capture under the same label keeps the windows and their row");
+  const other = (await sql`SELECT upsert_thought('061 live: windows without a recipe', ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: "other-model" }}::jsonb, ${unit(7)}::vector) AS r`)[0].r as { existed: boolean };
+  assert(other.existed === true && (await chunkRow(w2.id)) === undefined && (await windowsOf(w2.id)) === 0 && (await rowsOf(w2.id)).find((r) => r.kind === "vector")?.recipe.model === "other-model",
+    "a re-capture under another label drops the windows and their row (022), and the vector's row follows the new label");
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM derivations`;
   await sql.close();
 }
 

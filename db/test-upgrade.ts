@@ -28,7 +28,7 @@ import { SQL } from "bun";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, loadChunkRows, migrationFiles, migratorEnv, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
-import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, reembedKey } from "./config.mjs";
+import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, reembedKey } from "./config.mjs";
 
 /**
  * 032's update_thought, by its own signature — the form a brain holds from 032
@@ -554,11 +554,17 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // ([20l]); 060 redefines the three write functions, 046's audit trigger
   // and 001's updated_at trigger on their own bodies, adds the projector,
   // the refresh and the vector snapshot with its trigger on 001's table,
-  // refusing by name without 042, 050 or 055 ([20m]) — all recorded by the
+  // refusing by name without 042, 050 or 055 ([20m]); 061 adds the lineage
+  // table, its writer, the vector-lineage trigger and two drop triggers on
+  // 001's and 029's tables, redefines the 3- and 4-argument upsert_thought,
+  // update_thought (an eleventh argument), 056's record_thought_entities (a
+  // seventh) and 029's record_supersession_proposal (an eleventh) on their
+  // own bodies and backfills the table from the artifacts standing, refusing
+  // by name without 013, 029, 056 or 060 ([20n]) — all recorded by the
   // baseline with their prerequisites present, so none becomes the
   // plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 31, `030 is among the last thirty-one migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 32, `030 is among the last thirty-two migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -751,7 +757,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // back — the very state preflight's `atomic capture` check warns about.
   const forms = (await sql`SELECT pronargs AS n FROM pg_proc WHERE proname = 'update_thought' ORDER BY 1`) as { n: number }[];
   // …and 021's 8-argument update_thought would have stayed beside 032's.
-  assert(forms.length === 1 && Number(forms[0].n) === 10, `the ten-argument update_thought, alone — 032 ran after 021 and dropped 021's, 046 after 033 and dropped its (${forms.map((f) => f.n).join(",")})`);
+  assert(forms.length === 1 && Number(forms[0].n) === 11, `the eleven-argument update_thought, alone — 032 ran after 021 and dropped 021's, 046 after 033 and dropped its, 061 after 060 and dropped its (${forms.map((f) => f.n).join(",")})`);
   const body3 = (await sql`SELECT prosrc FROM pg_proc WHERE oid = 'upsert_thought(text, jsonb, vector)'::regprocedure`)[0].prosrc as string;
   assert(/ob1:vector-replaces-chunks/.test(body3) && /derived_from/.test(body3), "the 3-argument upsert_thought is the LAST definer's body (022's sentinel, 025's provenance), not 021's");
 
@@ -1723,7 +1729,9 @@ console.log("\n[20b] Migration 046 onto a populated 044 — the audit row gains 
   assert(/append-only/i.test(refused), "the append-only trigger still refuses UPDATE after the ALTER (010's lesson, [2])");
   const forms = await sql`SELECT p.pronargs AS n FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace WHERE p.proname = 'update_thought' AND ns.nspname = 'public'`;
   assert(forms.length === 1 && Number(forms[0].n) === 10, `one update_thought, of ten arguments — the 9-argument form dropped (${forms.map((f: { n: number }) => f.n).join(", ")})`);
-  const acl10 = await aclOf(UPDATE_THOUGHT_SIGNATURE);
+  // 046's form is the 10-argument one — UPDATE_THOUGHT_SIGNATURE names 061's
+  // eleven, which this brain, at 046, does not have (SMD-1731).
+  const acl10 = await aclOf(UPDATE_THOUGHT_SIGNATURE_10);
   assert(acl10 === acl9 && !/(^\{|,)=X\//.test(acl10) && /ob1_upgrade_editor45=X\//.test(acl10), `the 9-argument form's ACL crosses the DROP onto the 10-argument one: PUBLIC still revoked, the role still granted (${acl10})`);
   const nine = (await sql`SELECT update_thought(${mcpRow.id}::uuid, NULL, ${{ k: 1 }}::jsonb, NULL, NULL, NULL, ${{ name: "laptop", agent_id: laptop.agent_id }}::jsonb, NULL, NULL) AS r`)[0].r as { ok: boolean };
   assert(nine.ok === true, "a 9-argument call — every caller before this change — still resolves, through the default");
@@ -1771,7 +1779,7 @@ console.log("\n[20b] Migration 046 onto a populated 044 — the audit row gains 
 
   const shapeAfter = await shape(sql);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("046") });
-  assert(JSON.stringify(await shape(sql)) === JSON.stringify(shapeAfter) && (await aclOf(UPDATE_THOUGHT_SIGNATURE)) === acl10 && ((await sql`SELECT backfill_thought_audit_events() AS r`)[0].r as { rows: number }).rows === 0,
+  assert(JSON.stringify(await shape(sql)) === JSON.stringify(shapeAfter) && (await aclOf(UPDATE_THOUGHT_SIGNATURE_10)) === acl10 && ((await sql`SELECT backfill_thought_audit_events() AS r`)[0].r as { rows: number }).rows === 0,
     "re-applying 046 is a no-op: the shape and the ACL as they were, the backfill finds nothing");
   await sql.unsafe(`DROP OWNED BY ob1_upgrade_editor45`);
   await sql.unsafe(`DROP ROLE ob1_upgrade_editor45`);
@@ -2138,8 +2146,9 @@ console.log("\n[20j] Migration 056 on a schema without 016, and on 016's tables 
     `…and with 016's tables but not 053's it names 053 (exit ${half.code})${half.code === 1 ? "" : `:\n${half.out}`}`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "053" });
   // An apply that did not throw is not the function present ([20c]'s lesson): read 056's sentinel off the live body.
-  const [body] = await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure('record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)')`;
-  assert(/ob1:name-gate/.test(String(body?.s ?? "")) && (await sql`SELECT to_regprocedure('apply_entity_type_gate()') IS NOT NULL AS p`)[0].p === true, "…and applied once both are there: the live writer is 056's and the pass is present");
+  // 061, applied in the same run, moved the writer to seven arguments and dropped the six (SMD-1731): whichever form stands is the live body.
+  const [body] = await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = COALESCE(to_regprocedure('record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)'), to_regprocedure('record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)'))`;
+  assert(/ob1:name-gate/.test(String(body?.s ?? "")) && (await sql`SELECT to_regprocedure('apply_entity_type_gate()') IS NOT NULL AS p`)[0].p === true, "…and applied once both are there: the live writer carries 056's gate (under 061's seven-argument form) and the pass is present");
   await sql.close();
 }
 
@@ -2288,6 +2297,100 @@ console.log("\n[20m] Migration 060 onto a populated brain at the file before it 
   const sql3 = new SQL({ url: URL_, max: 1 });
   const [present] = await sql3`SELECT to_regprocedure('ob1_project_thought_event(uuid, vector, text, boolean)') IS NOT NULL AS p, to_regprocedure('ob1_refresh_thought_vector(uuid, vector, text)') IS NOT NULL AS r, to_regclass('ob1_embedding_snapshot') IS NOT NULL AS s`;
   assert(present.p === true && present.r === true && present.s === true, "…and applied once every prerequisite is there: the projector, the refresh and the snapshot are present");
+  await sql3.close();
+}
+
+console.log("\n[20n] Migration 061 onto a populated brain at the file before it — every artifact standing gains its lineage row, marked legacy, at the thought's current fingerprint: the vectors (a raw row's NULL key hashed again), the chunk set, the extraction under each key, the proposals (the judge key parsed where it has 029's shape); no audit row written, no row moved, three arities moved under their own DROP; a re-apply a no-op; refused up front without 013, 029, 056 or 060, naming the migration and --reapply (SMD-1731)");
+{
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "061" });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  await sql`SELECT set_agent_kind('laptop', 'operator')`;
+  const laptop = (await sql`SELECT resolve_agent(${"a".repeat(64)}, 'laptop', 'write') AS r`)[0].r as { agent_id: string };
+  const actor = { name: "laptop", agent_id: laptop.agent_id, via: "open-brain" };
+  // A corpus at 060, the file before this one: a labelled vector, an
+  // unlabelled one, a row without a vector, a raw row with a NULL key, a
+  // windowed thought, an extraction under two keys, two proposals — one under
+  // a judge key of another shape.
+  const labelled = (await sql`SELECT upsert_thought('upgrade 061: labelled', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string; fingerprint: string };
+  const unlabelled = (await sql`SELECT upsert_thought('upgrade 061: unlabelled', ${{ metadata: { source: "mcp" }, actor }}::jsonb, ${vec(1)}::vector) AS r`)[0].r as { id: string; fingerprint: string };
+  await sql`SELECT upsert_thought('upgrade 061: no vector', ${{ metadata: { source: "mcp" }, actor }}::jsonb)`;
+  const RAW = "57575757-2061-4061-8061-000000000001";
+  await sql.unsafe(`INSERT INTO thoughts (id, content, metadata, embedding, embedding_model) VALUES ('${RAW}', 'upgrade 061: raw, no key', '{"source": "load"}'::jsonb, '${vec(2)}'::vector, '${OPTS.model}')`);
+  await sql.unsafe(`UPDATE thoughts SET content_fingerprint = NULL WHERE id = '${RAW}'`);
+  const windowed = (await sql`SELECT upsert_thought('upgrade 061: windowed', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(3)}::vector, ${[{ content: "w1", embedding: vec(3) }, { content: "w2", embedding: vec(4) }]}::jsonb) AS r`)[0].r as { id: string; fingerprint: string };
+  const e1 = (await sql`SELECT record_thought_entities(${labelled.id}::uuid, 'extract:m@p2', '[{"name": "Alice", "type": "person", "confidence": 0.9}]'::jsonb, '[]'::jsonb, NULL, ${laptop.agent_id}::uuid) AS r`)[0].r as { ok: boolean };
+  const e2 = (await sql`SELECT record_thought_entities(${labelled.id}::uuid, 'source:test', '[{"name": "Open Brain", "type": "project", "confidence": 1}]'::jsonb, '[]'::jsonb, NULL, NULL) AS r`)[0].r as { ok: boolean };
+  assert(e1.ok === true && e2.ok === true, "the corpus at 060 carries an extraction under two keys");
+  const p1 = (await sql`SELECT record_supersession_proposal(${labelled.id}::uuid, ${unlabelled.id}::uuid, 'newer_supersedes_older', 0.9, 'because', 0.8, 'consolidate:judge@p3', ${laptop.agent_id}::uuid) AS id`)[0].id as string;
+  const p2 = (await sql`SELECT record_supersession_proposal(${labelled.id}::uuid, ${windowed.id}::uuid, 'conflict_undirected', 0.6, NULL, 0.7, 'test:1731') AS id`)[0].id as string;
+  assert((await sql`SELECT to_regclass('derivations') IS NULL AS none`)[0].none === true, "before 061 there is no lineage table");
+  const stamps = async () => JSON.stringify(await sql`SELECT id, content, content_fingerprint, metadata, embedding::text AS e, embedding_model, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const before = await stamps();
+  const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  const shapeBefore = await shape(sql);
+  const [arities] = await sql`SELECT (SELECT pronargs FROM pg_proc WHERE proname = 'update_thought') AS u, (SELECT pronargs FROM pg_proc WHERE proname = 'record_thought_entities') AS e, (SELECT pronargs FROM pg_proc WHERE proname = 'record_supersession_proposal') AS p`;
+  assert(Number(arities.u) === 10 && Number(arities.e) === 6 && Number(arities.p) === 10, "at 060 the three producers stand at ten, six and ten arguments");
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("061") });
+
+  type L = { kind: string; artifact: string; by: string; fps: string[]; recipe: Record<string, unknown>; at: string; agent: string | null };
+  const rows = (await sql`SELECT artifact_kind AS kind, artifact_id::text AS artifact, produced_by AS by, input_fingerprints AS fps, recipe, produced_at::text AS at, canonical_agent_id::text AS agent FROM derivations ORDER BY artifact_kind, artifact_id, produced_by`) as L[];
+  const of = (kind: string, artifact?: string) => rows.filter((r) => r.kind === kind && (artifact === undefined || r.artifact === artifact));
+  assert(rows.length === 9 && rows.every((r) => r.recipe.legacy === true) && rows.every((r) => r.fps.every((f) => typeof f === "string" && f.length > 0)),
+    `nine rows, every one legacy, no NULL fingerprint (${rows.map((r) => r.kind).join(",")})`);
+  const rawFp = (await sql`SELECT content_fingerprint_of('upgrade 061: raw, no key') AS f`)[0].f as string;
+  assert(of("vector").length === 4 && of("vector", RAW)[0]?.fps[0] === rawFp && of("vector", unlabelled.id)[0]?.recipe.model === undefined && of("vector", labelled.id)[0]?.recipe.model === OPTS.model && of("vector").every((r) => r.recipe.dims === OPTS.dim && r.by === "thoughts_record_vector_lineage" && r.recipe.deterministic === true),
+    "four vector rows — the raw row's NULL key hashed again, the unlabelled row's model absent, every width the column's — under the trigger's name; the row without a vector has none");
+  assert(of("chunks").length === 1 && of("chunks")[0].artifact === windowed.id && of("chunks")[0].recipe.count === 2 && of("chunks")[0].recipe.model === OPTS.model && of("chunks")[0].by === "capture", "one chunks row for the windowed thought: the set's size, the parent's label");
+  assert(of("entities").map((r) => r.by).join() === "extract:m@p2,source:test" && of("entities").every((r) => r.fps[0] === labelled.fingerprint) && of("entities")[0].recipe.deterministic === false && of("entities")[1].recipe.deterministic === true && of("entities")[0].agent === laptop.agent_id,
+    "two entities rows, one per key, at the thought's current fingerprint — the extraction non-deterministic, the structured pass deterministic — the agent carried from the mentions");
+  const pj = of("proposal", p1)[0], pt = of("proposal", p2)[0];
+  assert(pj !== undefined && pj.recipe.model === "judge" && pj.recipe.prompt_version === 3 && pj.fps.length === 2 && pj.agent === laptop.agent_id && pt !== undefined && !("model" in pt.recipe) && !("prompt_version" in pt.recipe) && pt.recipe.key === "test:1731",
+    "two proposal rows: the judge key parsed into model and prompt version where it has 029's shape, the key alone where it has not");
+  const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  assert(Number(auditAfter) === Number(auditBefore) && (await stamps()) === before, "the backfill is a read of the artifacts: no audit row written, no thought moved");
+  const [after] = await sql`SELECT (SELECT pronargs FROM pg_proc WHERE proname = 'update_thought') AS u, (SELECT count(*)::int FROM pg_proc WHERE proname = 'update_thought') AS un, (SELECT pronargs FROM pg_proc WHERE proname = 'record_thought_entities') AS e, (SELECT count(*)::int FROM pg_proc WHERE proname = 'record_thought_entities') AS en, (SELECT pronargs FROM pg_proc WHERE proname = 'record_supersession_proposal') AS p, (SELECT count(*)::int FROM pg_proc WHERE proname = 'record_supersession_proposal') AS pn`;
+  assert(Number(after.u) === 11 && Number(after.un) === 1 && Number(after.e) === 7 && Number(after.en) === 1 && Number(after.p) === 11 && Number(after.pn) === 1, "…and the three producers stand alone at eleven, seven and eleven arguments — the older forms dropped");
+  for (const [fn, sig] of [["upsert_thought", "upsert_thought(text, jsonb, vector)"], ["update_thought", UPDATE_THOUGHT_SIGNATURE], ["record_thought_entities", "record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)"], ["record_supersession_proposal", "record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid, text, text, jsonb)"]]) {
+    const [body] = await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure(${sig})`;
+    assert(/ob1:derivation-recorded-with-its-artifact/.test(String(body?.s ?? "")), `${fn} is 061's body`);
+  }
+  // The mirror: the day after, a capture with a vector records its row live,
+  // not marked legacy; a re-apply re-seeds nothing and moves no produced_at.
+  const fresh = (await sql`SELECT upsert_thought('upgrade 061: captured after', ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(5)}::vector) AS r`)[0].r as { id: string };
+  const freshRows = (await sql`SELECT artifact_kind AS kind, recipe FROM derivations WHERE artifact_id = ${fresh.id}::uuid`) as { kind: string; recipe: Record<string, unknown> }[];
+  assert(freshRows.length === 1 && freshRows[0].kind === "vector" && freshRows[0].recipe.legacy === undefined, "after 061 a capture's vector row is written live, not marked legacy");
+  const lineage = async () => JSON.stringify(await sql`SELECT artifact_kind, artifact_id, produced_by, produced_at::text AS at, recipe FROM derivations ORDER BY 1, 2, 3`);
+  const shapeAfter = await shape(sql), again = await stamps(), lineageAfter = await lineage();
+  const [{ c: auditAgain }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("061") });
+  assert(JSON.stringify(await shape(sql)) === JSON.stringify(shapeAfter) && (await stamps()) === again && Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === Number(auditAgain) && (await lineage()) === lineageAfter && JSON.stringify(shapeAfter) !== JSON.stringify(shapeBefore),
+    "re-applying 061 is a no-op: the shape as it left it (a table and five functions more than 060), no row moved, no audit row added, no lineage row re-seeded or moved");
+  await sql.close();
+
+  // The guard, driven ([20g]'s shape): a brain baselined at a ledger through
+  // 061 whose schema stops before 013, then 029, then 056, then 060.
+  for (const [stop, needs] of [["013", "migration 061 needs 013 \\(thought_chunks\\.context, the 4-argument upsert_thought's context arm\\); this schema lacks it"], ["029", "migration 061 needs 029 \\(supersession_proposals\\); this schema lacks it"], ["056", "migration 061 needs 056 \\(entity_type_gate, record_thought_entities' body\\); this schema lacks it"], ["060", "migration 061 needs 060 \\(ob1_refresh_thought_vector, ob1_embedding_snapshot\\); this schema lacks it"]] as const) {
+    await dropSchema(URL_);
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
+    const baselined = await migrate("--baseline");
+    assert(baselined.code === 0, `--baseline records every migration over the pre-${stop} schema (exit ${baselined.code})`);
+    const sql2 = new SQL({ url: URL_, max: 1 });
+    const the061 = MIGRATIONS.find((f) => f.startsWith("061_"))!;
+    await sql2`DELETE FROM schema_migrations WHERE name = ${the061}`;
+    const plain = await migrate();
+    const ok = plain.code === 1 && new RegExp(`061_derivations\\.sql\\s+FAILED: ${needs}`).test(plain.out) &&
+      /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+    assert(ok, `a plain run fails at 061 naming ${stop} and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+    assert(Number((await sql2`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the061}`)[0].c) === 0, `…061 records nothing without ${stop}`);
+    await sql2.close();
+  }
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "060" });
+  const sql3 = new SQL({ url: URL_, max: 1 });
+  const [present] = await sql3`SELECT to_regclass('derivations') IS NOT NULL AS t, to_regprocedure('ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)') IS NOT NULL AS w, to_regprocedure('record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)') IS NOT NULL AS e`;
+  assert(present.t === true && present.w === true && present.e === true, "…and applied once every prerequisite is there: the table, the writer and the seven-argument extraction writer are present");
   await sql3.close();
 }
 

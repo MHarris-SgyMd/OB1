@@ -406,11 +406,13 @@ import {
   summariseCorpusByModel,
   UPDATE_THOUGHT_SIGNATURE,
   UPDATE_THOUGHT_SIGNATURE_9,
+  UPDATE_THOUGHT_SIGNATURE_10,
   validateEmbeddingConfig,
 } from "./config.mjs";
 import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { describeEgress, localKnob, mayLeaveBox, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
 import { UUID_RE } from "../server-portable/store.ts";
+import { chunkRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 
 const args = process.argv.slice(2);
@@ -686,14 +688,19 @@ const [fn] = await sql`
     -- missing piece is 046, not 032 (SMD-1730, fourth review pass).
     EXISTS (SELECT 1 FROM pg_proc
             WHERE oid = to_regprocedure(${"public." + UPDATE_THOUGHT_SIGNATURE_9})) AS nine,
+    -- 046's ten-argument form alone: a brain at 060, whose missing piece is
+    -- 061 — the lineage envelope this pass sends (SMD-1731).
+    EXISTS (SELECT 1 FROM pg_proc
+            WHERE oid = to_regprocedure(${"public." + UPDATE_THOUGHT_SIGNATURE_10})) AS ten,
     to_regclass('schema_migrations') IS NOT NULL AS has_ledger`;
 // Asked separately: a relation named in a statement is resolved when the
 // statement is parsed, whatever the AND before it would have short-circuited,
 // so a schema applied by hand — no ledger — must not be asked about its ledger.
 // Which migration the missing piece belongs to: the column is 021's, the
-// ten-argument body 046's when 032's nine-argument one is there, 032's when
-// neither is. The ledger is asked about that one.
-const missingMigration = !fn.labelled ? "021" : fn.nine ? "046" : "032";
+// eleven-argument body 061's when 046's ten-argument one is there, 046's when
+// 032's nine-argument one is, 032's when none is. The ledger is asked about
+// that one.
+const missingMigration = !fn.labelled ? "021" : fn.ten ? "061" : fn.nine ? "046" : "032";
 fn.ledgered = fn.has_ledger ? (await sql`SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name LIKE ${missingMigration + "%"}) AS l`)[0].l : false;
 /** Whether thoughts.embedding_model exists — the read-only modes answer without it. */
 const HAS_LABEL: boolean = Boolean(fn.labelled);
@@ -1537,7 +1544,10 @@ async function processRow(row: Row): Promise<Outcome> {
         ${chunks.length ? chunks : null}::jsonb,
         ${current.updated_at}::timestamptz,
         ${actor}::jsonb,
-        ${embedded.model}::text
+        ${embedded.model}::text,
+        NULL::jsonb,
+        NULL::jsonb,
+        ${chunks.length ? { chunks: chunkRecipe(embedConfig, embedded) } : null}::jsonb
       ) AS r`;
     const result = r.r as { ok: boolean; error?: string; duplicate_of?: string; fingerprint_held_by?: string };
     if (result.ok) {

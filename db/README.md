@@ -166,8 +166,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1960 assertions: 1960 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports sixty (60) migrations applied, and
+`bun test-schema.ts` prints `2032 assertions: 2032 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports sixty-one (61) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -207,7 +207,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
-058 SMD-2074, 059 SMD-2255, 060 SMD-2116).
+058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -527,6 +527,46 @@ arity moves, idempotent; a re-apply re-seeds nothing. test-schema [56],
 test-live [28], test-upgrade [20m]; the redaction arm is SMD-1723's, the fold
 SMD-2117's.
 
+Migration 061 gives every derived artifact its lineage (SMD-1731, Phase 1b of
+SMD-1729; the projections table in `../docs/event-log-as-truth.md`). One
+table, `derivations`: a row per artifact per producing pass — `artifact_kind`
+in chunks / entities / proposal / vector / metadata, `artifact_id` (the
+thought's id, or the proposal's), `input_ids` and `input_fingerprints`
+(parallel, no NULL element), `produced_by` (the pass), `recipe` (a JSON object
+with a boolean `deterministic`, what SMD-1732's rebuild will read, and the
+producer's own record — model, prompt version and hash, window parameters),
+`produced_at`, 010's agent — keyed UNIQUE on (kind, artifact, pass), the unit
+each producer replaces, with a GIN index on `input_ids` for the forward walk
+and no foreign key (two AFTER DELETE triggers drop what a deleted thought or
+proposal keyed). Every producer records in the transaction that writes its
+rows, through `ob1_record_derivation`, which refuses a bad shape: the vector by
+a trigger on the row store (`thoughts_record_vector_lineage`, 060's snapshot
+trigger's shape — no column list, nothing under a replay, nothing when nothing
+moved), so a raw or vendored writer is covered; the windows and the tags by the
+3- and 4-argument `upsert_thought` and `update_thought` from a lineage envelope
+(`p_payload.lineage`, `update_thought`'s new eleventh argument `p_lineage`;
+the 10-argument form is dropped with its ACL carried, as 046 and 060 did) — a
+caller that sends no recipe gets no tags' row, since its tags are not a
+derivation, and the windows' row from the label alone marked undeclared; the
+extraction by `record_thought_entities`, now seven arguments (`p_recipe`; the
+six-argument form dropped), which stores the fingerprint it checked — the
+graph's half a key, closed — and follows its own replacement rule (an
+extraction's row replaces every extracted row's, a structured pass's its own
+key's; no rows standing under the key, no row); the proposal by
+`record_supersession_proposal`, now eleven arguments, with both fingerprints
+as the row takes them. The backfill records every artifact standing — every
+proposal (the judge key parsed where it has 029's shape), every (thought, key)
+pair over the mentions and edges at the thought's current fingerprint, every
+chunk set, every vector — marked `legacy: true`; the tags are not backfilled
+(nothing on a row says the extractor tagged it), and preflight's new `lineage`
+check counts them as coverage, fails on a derived row without a lineage row
+(naming the kind and the ids), and reports the legacy and stale counts. The
+capture role gains every privilege on `derivations` (the grants table): run
+`migrate.ts --grant` again for a role granted before this file. Additive; two
+arities move under their own DROP; a re-apply re-seeds nothing. test-schema
+[57], test-live [29], test-upgrade [20n]; the rebuild that walks the table is
+SMD-1732's, the forget SMD-1723's.
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -582,6 +622,7 @@ issues every group at once.
 | | `thought_facets` (042) | `SELECT, UPDATE` — the delete guard reads the citations that name a thought and, detaching, writes them, on every delete |
 | | `ob1_agents` (046) | `SELECT` — the audit trigger reads the key's kind on every write that carries an actor (SMD-1730) |
 | | `ob1_embedding_snapshot` (060) | `SELECT, INSERT, UPDATE` — the snapshot trigger upserts the row's vector under its key on every write of a vector, a label or a key (SMD-2116). `ob1_project_thought_event` and `ob1_refresh_thought_vector` keep PUBLIC's EXECUTE, as the SECURITY INVOKER writers that call them require; the audit trigger holds what either may do, and a replay is the owner's |
+| | `derivations` (061) | `SELECT, INSERT, UPDATE, DELETE` — the vector lineage trigger upserts the vector's row (and deletes it when the vector is cleared) on every write; the write functions upsert the windows' and the tags' rows and delete a replaced set's; `record_thought_entities` and `record_supersession_proposal` write theirs as the caller too, so the workers' role reads the same row (SMD-1731) |
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
@@ -2467,8 +2508,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1960 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 782 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 2032 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 795 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

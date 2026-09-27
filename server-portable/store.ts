@@ -29,6 +29,7 @@
 
 import type { EgressRecord } from "./egress.ts";
 import type { DatabaseFacts, ReadOptions, ReadProgress } from "./brain-info.ts";
+import type { Lineage } from "./lineage.ts";
 
 export type ThoughtMatch = {
   id: string;
@@ -818,7 +819,13 @@ export function captureEnvelope(
    * send it identically and upsert_thought validates it in one place. Absent
    * keys mean "no provenance"; upsert_thought refuses a malformed derived_from.
    */
-  provenance?: { derivedFrom?: string[]; supersedes?: string }
+  provenance?: { derivedFrom?: string[]; supersedes?: string },
+  /**
+   * Migration 061 (SMD-1731): the recipes of the windows and the tags this
+   * capture carries, recorded in `derivations` with the write. Absent: no
+   * `lineage` key, and upsert_thought records nothing for the tags.
+   */
+  lineage?: Lineage
 ): Record<string, unknown> {
   return {
     ...payload,
@@ -826,6 +833,7 @@ export function captureEnvelope(
     ...(embeddingModel !== undefined ? { embedding_model: embeddingModel } : {}),
     ...(provenance?.derivedFrom !== undefined ? { derived_from: provenance.derivedFrom } : {}),
     ...(provenance?.supersedes !== undefined ? { supersedes: provenance.supersedes } : {}),
+    ...(lineage !== undefined ? { lineage } : {}),
   };
 }
 
@@ -1088,6 +1096,15 @@ export interface ThoughtStore {
      */
     derivedFrom?: string[];
     supersedes?: string;
+    /**
+     * Migration 061 (SMD-1731): the recipes of what this capture derived —
+     * `chunks` when it made windows (the split's parameters, the blurb model),
+     * `metadata` when the server's extractor wrote the tags (its model, prompt
+     * version and hash). Recorded in `derivations` in the write's own
+     * transaction; an absent key is no derivation, so a caller's own tags get
+     * no row. Rides the envelope, as the actor and the provenance do.
+     */
+    lineage?: Lineage;
   }): Promise<CaptureResult>;
 
   /**
@@ -1116,6 +1133,8 @@ export interface ThoughtStore {
      * altogether sends NULL.
      */
     provenance?: UpdateProvenance;
+    /** As on captureThought (061): the windows' recipe with content, the tags' when the extractor wrote the patch. Sent as update_thought's eleventh argument, `p_lineage`. */
+    lineage?: Lineage;
   }): Promise<UpdateResult>;
 
   /**

@@ -115,7 +115,7 @@ const CATALOG_HINT = "run once as the SQL store (OB1_STORE unset, DATABASE_URL s
 // that has not reported yet, rather than one name for whatever went wrong.
 const DIRECT_CHECKS = [
   "vector extension",
-  "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "agent identity",
+  "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search",
   "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "schema version", "query log", "tier",
@@ -160,6 +160,7 @@ const THEN_060 = " Then apply db/migrations/060_append_then_project.sql — it l
 const APPLY_046 = "Apply db/migrations/046_thought_audit_event_shape.sql.";
 const APPLY_055 = "Apply db/migrations/055_capture_event_payload.sql.";
 const APPLY_060 = "Apply db/migrations/060_append_then_project.sql.";
+const APPLY_061 = "Apply db/migrations/061_derivations.sql.";
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
@@ -1248,14 +1249,20 @@ if (configFailed) {
         // appending the event first and projecting the row: SMD-2116; the
         // recognisers below still tell every earlier shape, which 060
         // carries), so one file is the remedy for every stale state.
-        const LAST = "060_append_then_project.sql";
+        const LAST = "061_derivations.sql";
         const LOCKED = /ob1:capture-takes-fingerprint-lock/;
         const NO_FILL = /ob1:re-capture-writes-no-provenance/;
         // 060's own sentinel: the body appends the event and projects the row
         // from it. Without it — 046 re-applied by hand, or 060 not yet applied
         // — the row is written first and the trigger describes it (SMD-2116).
         const PROJECTS = /ob1:capture-appends-then-projects/;
-        const applyLast = (why: string) => ledgerRemedy("060", `Apply db/migrations/${LAST}${why}`);
+        // 061's own sentinel: the body records the tags' lineage row with the
+        // write, and the windows' row goes with the windows. Without it — 060
+        // re-applied by hand, or 061 not yet applied — a capture's tags are a
+        // derived row without lineage, which the `lineage` check fails on
+        // (SMD-1731).
+        const RECORDS_LINEAGE = /ob1:derivation-recorded-with-its-artifact/;
+        const applyLast = (why: string) => ledgerRemedy("061", `Apply db/migrations/${LAST}${why}`);
         // The 2-argument body is judged on its own and said beside whichever
         // 3-argument state fires, so a brain with both replaced hears it once
         // rather than on the run after the first remedy (first review pass).
@@ -1284,8 +1291,8 @@ if (configFailed) {
           // — 046 alone when `stage` is 046 or the ledger has it (a brain at
           // 032 lacks 033, 035 and 046).
           const list = (fs: string[]) => fs.length === 1 ? `migration ${fs[0]} is` : `migrations ${fs.slice(0, -1).join(", ")} and ${fs[fs.length - 1]} are`;
-          const files = ["033", "035", "046", "060"].filter((f) => f >= stage);
-          return ledger.has("060") ? `${earlier} re-applied by hand puts it back`
+          const files = ["033", "035", "046", "060", "061"].filter((f) => f >= stage);
+          return ledger.has("061") ? `${earlier} re-applied by hand puts it back`
             : ledgerRead && ledger.has(stage) ? `${earlier} re-applied by hand puts it back, and ${list(files.slice(1))} not yet applied`
             : ledgerRead ? `${list(files)} not yet applied`
               : `${list(files)} not yet applied, or ${earlier} was re-applied by hand`;
@@ -1298,7 +1305,7 @@ if (configFailed) {
         const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body is not 060's either — ${TWO_UNLOCKED_WHY}` : twoNoEvent ? `; and the 2-argument body is not 060's either — ${TWO_NO_EVENT_WHY}` : twoNoProject ? `; and the 2-argument body is not 060's either — ${TWO_NO_PROJECT_WHY}` : "";
         if (!three) {
           add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing${twoStale ? `; and the 2-argument body present is not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body present is not 060's — ${TWO_UNLOCKED_WHY}` : twoNoEvent ? `; and the 2-argument body present is not 060's — ${TWO_NO_EVENT_WHY}` : twoNoProject ? `; and the 2-argument body present is not 060's — ${TWO_NO_PROJECT_WHY}` : ""}${andOthers}`,
-              applyLast(" — the last definer of both forms (004 created the 3-argument one; 005, 008, 021, 022, 025, 033, 035, 046 and 060 redefined it, and an earlier file's body alone would drop what every later one added)."));
+              applyLast(" — the last definer of both forms (004 created the 3-argument one; 005, 008, 021, 022, 025, 033, 035, 046, 060 and 061 redefined it, and an earlier file's body alone would drop what every later one added)."));
         } else if (!two) {
           // This server never calls the 2-argument form; PostgREST callers by
           // name and the two-step fallback do. A warning.
@@ -1306,7 +1313,7 @@ if (configFailed) {
               applyLast(" — the last definer of the 2-argument form as well."));
         } else if (!/ob1:vector-replaces-chunks/.test(three.src)) {
           add("atomic capture", "warn",
-              `the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (004, 005, 008 or 021 re-applied by hand without 060 after them): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has; and it takes no fingerprint lock${andTwo}${andOthers}`,
+              `the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (004, 005, 008 or 021 re-applied by hand without 061 after them): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has; and it takes no fingerprint lock${andTwo}${andOthers}`,
               applyLast(" — the last definer; 022's or 025's file alone would leave what the later ones added out."));
         } else if (!UPSERT_THREE_ARG_SHIPPED_RE.test(three.src)) {
           add("atomic capture", "warn",
@@ -1336,12 +1343,19 @@ if (configFailed) {
           add("atomic capture", "warn",
               `the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, 025's envelope, the fingerprint lock, writes provenance on a first capture only and sets the write event beside the actor, but it is from before migration 060 (${pre("060", "046")}): the row is written first and the trigger derives the event after it — the log describes the write, it does not decide it, and no projected row is checked against its event (SMD-1997, step 2)${andTwo}${andOthers}`,
               applyLast("."));
+        } else if (!RECORDS_LINEAGE.test(three.src)) {
+          // 060's body: appending then projecting — and recording no lineage
+          // for the tags the envelope declares, nor dropping the windows' row
+          // with the windows. The 2-argument body is 060's = 061's.
+          add("atomic capture", "warn",
+              `the 2- and 3-argument upsert_thought present, and the 3-argument body appends the event first and projects the row (060), but it is from before migration 061 (${pre("061", "060")}): the tags' recipe a capture declares reaches no lineage row and a replaced window set keeps its old row — derived rows without lineage, or lineage without its artifact, which the lineage check fails on (SMD-1731)${andTwo}${andOthers}`,
+              applyLast("."));
         } else if (twoStale || twoUnlocked || twoNoEvent || twoNoProject) {
           add("atomic capture", "warn",
-              `the 2- and 3-argument upsert_thought present and the 3-argument body is 060's, but the 2-argument body is ${twoStale ? `not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `not 060's — ${TWO_UNLOCKED_WHY}` : twoNoEvent ? `not 060's — ${TWO_NO_EVENT_WHY}` : `not 060's — ${TWO_NO_PROJECT_WHY}`}${andOthers}`,
+              `the 2- and 3-argument upsert_thought present and the 3-argument body is 061's, but the 2-argument body is ${twoStale ? `not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `not 060's — ${TWO_UNLOCKED_WHY}` : twoNoEvent ? `not 060's — ${TWO_NO_EVENT_WHY}` : `not 060's — ${TWO_NO_PROJECT_WHY}`}${andOthers}`,
               applyLast(" — the last definer of the 2-argument form as well."));
         } else {
-          add("atomic capture", "ok", `the 2- and 3-argument upsert_thought present, both 060's — the 3-argument body carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop, and both carry the write event (046) and append it first, projecting the row from it (060); the 2-argument body refuses a non-object payload (005) and takes the lock${andOthers}`);
+          add("atomic capture", "ok", `the 2- and 3-argument upsert_thought present, both shipped — the 3-argument body (061's) carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop, and both carry the write event (046) and append it first, projecting the row from it (060); the 3-argument body records the tags' lineage with the write (061); the 2-argument body (060's) refuses a non-object payload (005) and takes the lock${andOthers}`);
         }
 
         // The privileges the capture path's SECURITY INVOKER writers need to run
@@ -1474,13 +1488,18 @@ if (configFailed) {
             // every write of a vector.
             const auditReadMiss = (missingByTable.get("thought_audit") ?? []).includes("SELECT");
             const snapshotMiss = missingByTable.has("ob1_embedding_snapshot");
+            // 061's vector-lineage trigger and the write functions record
+            // derivations as the caller on every capture and edit — and delete
+            // a replaced set's or a cleared vector's row (SMD-1731).
+            const lineageMiss = missingByTable.has("derivations");
             const fails: string[] = [];
             if (captureMiss) fails.push((triggerMiss
               ? "a windowed capture, an edit with content, 008's audit trigger, or 016's enqueue trigger — which as the caller reads ob1_config on every capture, and upserts a work claim while entity extraction is enabled —"
               : "a windowed capture, an edit with content, or 008's audit trigger")
               + (agentsMiss ? " (046's audit trigger reads ob1_agents as the caller on every capture, edit and delete that carries an actor)" : "")
               + (auditReadMiss ? " (055's ob1_append_thought_event reads the audit row it inserts — INSERT … RETURNING — and since 060 the audit trigger's check and the projector read the event, as the caller on every capture, edit and delete through the functions)" : "")
-              + (snapshotMiss ? " (060's snapshot trigger writes ob1_embedding_snapshot as the caller on every capture or edit that carries a vector)" : ""));
+              + (snapshotMiss ? " (060's snapshot trigger writes ob1_embedding_snapshot as the caller on every capture or edit that carries a vector)" : "")
+              + (lineageMiss ? " (061's vector lineage trigger and the write functions record derivations as the caller on every capture and edit, and drop a replaced set's row)" : ""));
             if (missingByTable.has("thought_facets")) fails.push("every delete of a thought (042's citation guard reads and writes thought_facets as the caller)");
             const why = ` — so ${fails.join(", and ")} would fail`;
             if (missingByTable.size) {
@@ -1846,6 +1865,83 @@ if (configFailed) {
           } else {
             add("audit events", "warn", `could not verify: ${msg}`, "The check reads information_schema.columns, pg_proc, ob1_agents and thought_audit.");
           }
+        }
+
+        /**
+         * Lineage (061, SMD-1731): every derived artifact has a row in
+         * `derivations` — the chunk sets, the extractions under each key, the
+         * proposals, the vectors. A derived row without one is the fault the
+         * epic names (SMD-1729: "an event and its lineage row commit
+         * together"), and this is where it is caught: a producer's body from
+         * before 061 (re-applied by hand), or a raw writer of the artifact
+         * tables. Every read is bounded (LIMIT 10,001, as the fingerprint
+         * census is) — a start costs the same on a brain with a million rows
+         * as on one with ten — and past the bound the line says "more than
+         * 10,000". The tags are counted as coverage, not failed: nothing on a
+         * row from before 061 says the extractor tagged it, and the file
+         * backfilled none. Stale rows (the input's text moved since) are what
+         * SMD-1732's rebuild will re-derive; counted, not failed.
+         */
+        try {
+          const [tab] = (await sql`SELECT to_regclass('public.derivations') IS NOT NULL AS present`) as { present: boolean }[];
+          if (!tab.present) {
+            add("lineage", "fail",
+                "the derivations table is missing — every derived artifact (a chunk set, an extraction, a proposal, a vector, the extractor's tags) is written with no record of what it was computed from or how, so nothing can tell a stale one from a current one or re-derive it (SMD-1731)",
+                ledgerRemedy("061", APPLY_061));
+          } else {
+            const BOUND = 10001;
+            const [bodies] = (await sql`
+              SELECT bool_and(p.prosrc LIKE '%ob1:derivation-recorded-with-its-artifact%') AS records, count(*)::int AS n
+                FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
+               WHERE ns.nspname = 'public' AND p.proname IN ('record_thought_entities', 'record_supersession_proposal')`) as { records: boolean | null; n: number }[];
+            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; untagged: number; stale: number; rows: number; legacy: number; undeclared: number };
+            const [c] = (await sql`
+              WITH ch AS (SELECT DISTINCT c.thought_id AS id FROM public.thought_chunks c
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'chunks' AND d.artifact_id = c.thought_id) LIMIT ${BOUND}),
+                   vc AS (SELECT t.id FROM public.thoughts t WHERE t.embedding IS NOT NULL
+                           AND NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'vector' AND d.artifact_id = t.id) LIMIT ${BOUND}),
+                   en AS (SELECT DISTINCT x.thought_id AS id, x.extraction_key AS key
+                            FROM (SELECT thought_id, extraction_key FROM public.thought_entities UNION ALL SELECT thought_id, extraction_key FROM public.ob1_entity_edges) x
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'entities' AND d.artifact_id = x.thought_id AND d.produced_by = x.extraction_key) LIMIT ${BOUND}),
+                   pr AS (SELECT sp.id FROM public.supersession_proposals sp
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'proposal' AND d.artifact_id = sp.id) LIMIT ${BOUND}),
+                   md AS (SELECT t.id FROM public.thoughts t
+                           WHERE (t.metadata ? 'type' OR t.metadata ? 'topics') AND NOT (t.metadata ? 'metadata_extraction_failed')
+                             AND NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'metadata' AND d.artifact_id = t.id) LIMIT ${BOUND}),
+                   st AS (SELECT d.id FROM public.derivations d JOIN public.thoughts t ON t.id = d.input_ids[1]
+                           WHERE d.artifact_kind <> 'proposal'
+                             AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content)) LIMIT ${BOUND}),
+                   al AS (SELECT recipe FROM public.derivations LIMIT ${BOUND})
+              SELECT (SELECT count(*)::int FROM ch) AS chunks,    (SELECT array_agg(id::text) FROM (SELECT id FROM ch LIMIT 3) s) AS chunk_ids,
+                     (SELECT count(*)::int FROM vc) AS vectors,   (SELECT array_agg(id::text) FROM (SELECT id FROM vc LIMIT 3) s) AS vector_ids,
+                     (SELECT count(*)::int FROM en) AS entities,  (SELECT array_agg(id::text || ' under ' || key) FROM (SELECT id, key FROM en LIMIT 3) s) AS entity_ids,
+                     (SELECT count(*)::int FROM pr) AS proposals, (SELECT array_agg(id::text) FROM (SELECT id FROM pr LIMIT 3) s) AS proposal_ids,
+                     (SELECT count(*)::int FROM md) AS untagged,
+                     (SELECT count(*)::int FROM st) AS stale,
+                     (SELECT count(*)::int FROM al) AS rows,
+                     (SELECT count(*)::int FROM al WHERE recipe->>'legacy' = 'true') AS legacy,
+                     (SELECT count(*)::int FROM al WHERE recipe->>'declared' = 'false') AS undeclared`) as Census[];
+            const n = (x: number) => (Number(x) > BOUND - 1 ? "more than 10,000" : String(x));
+            const missing: string[] = [];
+            if (Number(c.chunks)) missing.push(`${n(c.chunks)} chunk set(s) (thought ${(c.chunk_ids ?? []).join(", ")})`);
+            if (Number(c.vectors)) missing.push(`${n(c.vectors)} vector(s) (thought ${(c.vector_ids ?? []).join(", ")})`);
+            if (Number(c.entities)) missing.push(`${n(c.entities)} extraction(s) (${(c.entity_ids ?? []).join(", ")})`);
+            if (Number(c.proposals)) missing.push(`${n(c.proposals)} proposal(s) (${(c.proposal_ids ?? []).join(", ")})`);
+            const coverage = `${n(c.rows)} lineage row(s): ${n(c.legacy)} backfilled by 061 at the thought's current text (legacy), ${n(c.undeclared)} with no declared recipe (a caller from before the envelope), ${n(c.stale)} stale (the input's text moved since — what SMD-1732's rebuild will re-derive); ${n(c.untagged)} thought(s) tagged before 061 carry no tag lineage (nothing on a row says which model tagged them — coverage, not a failure)`;
+            if (missing.length) {
+              add("lineage", "fail",
+                  `derived rows without a lineage row — ${missing.join("; ")} — written by a producer from before 061 (a write function, record_thought_entities or record_supersession_proposal re-applied by hand) or by a raw writer of the artifact tables; nothing can say what they were computed from (SMD-1731). ${coverage}`,
+                  ledgerRemedy("061", `${APPLY_061} Its backfill records every artifact standing, at the thought's current text, marked legacy.`, "Re-applied, 061's backfill records every artifact standing, at the thought's current text, marked legacy."));
+            } else if (bodies.records === false || Number(bodies.n) !== 2) {
+              add("lineage", "warn",
+                  `every derived row has its lineage row, but ${Number(bodies.n) !== 2 ? "record_thought_entities or record_supersession_proposal is missing or doubled" : "record_thought_entities' or record_supersession_proposal's body is from before 061 (056 or 029 re-applied by hand)"}: the next extraction or consolidation pass writes rows without lineage (SMD-1731). ${coverage}`,
+                  ledgerRemedy("061", APPLY_061));
+            } else {
+              add("lineage", "ok", `every derived row has its lineage row — ${coverage}`);
+            }
+          }
+        } catch (e) {
+          add("lineage", "warn", `could not verify: ${(e as Error).message}`, "The check reads derivations, thoughts, thought_chunks, thought_entities, ob1_entity_edges, supersession_proposals and pg_proc.");
         }
 
         /**
@@ -2231,42 +2327,53 @@ if (configFailed) {
           // event — where a 7- or 8-argument form alone is the FAIL it was.
           const current = ut.filter((r) => Number(r.nargs) === ARITY);
           const extra = ut.filter((r) => Number(r.nargs) !== ARITY).map((r) => r.sig);
-          const nineAlone = ut.length === 1 && Number(ut[0].nargs) === ARITY - 1;
+          // 061 (SMD-1731) gave update_thought an eleventh argument, the
+          // lineage envelope, by dropping the 10-argument form — 046's
+          // mechanism, one form later. A 10-argument form ALONE is a brain at
+          // 060: every edit resolves (the servers send ten by name), so it is
+          // a WARN naming what is lost — the lineage — as a 9-argument form
+          // alone was for 046's event.
+          const tenAlone = ut.length === 1 && Number(ut[0].nargs) === ARITY - 1;
+          const nineAlone = ut.length === 1 && Number(ut[0].nargs) === ARITY - 2;
           if (!ut.length) {
             add("edit signature", "fail", "update_thought is missing — the update_thought tool and db/reembed.ts call it", ledgerRemedy("046", APPLY_046));
           } else if (current.length && extra.length === 0 && !/ob1:capture-appends-then-projects/.test(current[0].src)) {
             // 060's sentinel (SMD-2116): the body appends the edit as an event
-            // and projects the row from it. Without it — 046 re-applied by
-            // hand, or 060 not yet applied — the form is right and the body
-            // writes the row first, the trigger deriving the event after it.
+            // and projects the row from it. An 11-argument body without it is
+            // a hand edit of 061's body, since 061 carries 060's.
             add("edit signature", "warn",
-                `${current[0].sig}: the form the servers and reembed.ts call since migration 046, alone, but its body is from before migration 060 (migration 060 not yet applied, or 046 re-applied by hand): the row is written first and the trigger derives the event after it — the log describes the edit, it does not decide it (SMD-1997, step 2)`,
-                ledgerRemedy("060", APPLY_060));
+                `${current[0].sig}: the form the servers and reembed.ts call since migration 061, alone, but its body is not 060's (edited by hand?): the row is written first and the trigger derives the event after it — the log describes the edit, it does not decide it (SMD-1997, step 2)`,
+                ledgerRemedy("061", APPLY_061));
           } else if (current.length && extra.length === 0) {
-            add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 046 (${UPDATE_THOUGHT_SIGNATURE}), alone, with 060's body — the edit appended as an event first, the row projected from it`);
+            add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 061 (${UPDATE_THOUGHT_SIGNATURE}), alone, with 061's body — the edit appended as an event first, the row projected from it (060), the windows' and the tags' lineage recorded with it (061)`);
           } else if (current.length) {
             add("edit signature", "fail",
-                `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 046 — so every call that sends fewer than ten arguments to update_thought, which is every PostgREST caller by name, every hand-written SELECT and db/reembed.ts's positional eight, fails with "function is not unique"`,
-                `Drop the earlier form, as 046 and 060 do: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
+                `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 061 — so every call that sends fewer than eleven arguments to update_thought, which is every PostgREST caller by name, every hand-written SELECT and db/reembed.ts's positional call, fails with "function is not unique"`,
+                `Drop the earlier form, as 046, 060 and 061 do: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
+          } else if (tenAlone) {
+            add("edit signature", "warn",
+                `${ut[0].sig} is the form from before migration 061 (046's, which 060 kept): every edit resolves, but the lineage envelope (p_lineage — the windows' and the tags' recipes) reaches no row, so every windowed edit is a derived row without lineage, and db/reembed.ts, which resolves the body by ${UPDATE_THOUGHT_SIGNATURE}, refuses to run`,
+                ledgerRemedy("061", APPLY_061));
           } else if (nineAlone) {
             add("edit signature", "warn",
                 `${ut[0].sig} is the form from before migration 046: every edit resolves, but no write event (p_event — stance, cites, the valid window, trust) reaches the audit row, and db/reembed.ts, which resolves the body by ${UPDATE_THOUGHT_SIGNATURE}, refuses to run`,
                 ledgerRemedy("046", APPLY_046));
-          } else if (ut.some((r) => Number(r.nargs) === ARITY - 1)) {
-            // A 9-argument form among the leftovers and no 10: 032 re-applied
-            // would drop the 8 and 7 and leave its own 9 to be named on the next
-            // start; 046's chain reaches all three (second review pass).
+          } else if (ut.some((r) => Number(r.nargs) === ARITY - 1) || ut.some((r) => Number(r.nargs) === ARITY - 2)) {
+            // A 10- or 9-argument form among the leftovers and no 11: 046 or
+            // 032 re-applied would drop the older forms and leave its own to be
+            // named on the next start; 061's chain reaches all four (second
+            // review pass of SMD-1730, one form later).
             add("edit signature", "fail",
-                `${extra.join(" and ")} are forms from before migration 046 with none the servers call — every call with fewer than ten arguments is "function is not unique"`,
-                ledgerRemedy("046", `${APPLY_046} Its DROP chain reaches the 9-, 8- and 7-argument forms and leaves the one form.`, "Re-applied, 046's DROP chain reaches the 9-, 8- and 7-argument forms and leaves the one form."));
+                `${extra.join(" and ")} are forms from before migration 061 with none the servers call — every call with fewer than eleven arguments is "function is not unique"`,
+                ledgerRemedy("061", `${APPLY_061} Its DROP chain reaches the 10-, 9-, 8- and 7-argument forms and leaves the one form.`, "Re-applied, 061's DROP chain reaches the 10-, 9-, 8- and 7-argument forms and leaves the one form."));
           } else {
-            // 046 is the remedy here too: its DROP chain reaches the 8- and
+            // 061 is the remedy here too: its DROP chain reaches the 8- and
             // 7-argument forms and leaves the one form the servers call, where
-            // 032's would leave its own 9-argument form to be named on the next
-            // start (run-it, third review pass).
+            // 032's or 046's would leave its own form to be named on the next
+            // start (run-it, third review pass of SMD-1730).
             add("edit signature", "fail",
                 `${extra.join(" and ")} ${extra.length === 1 ? "is the form" : "are the forms"} from before migration 032; the server sends p_provenance, which only 032's form and its successors take — so every edit would fail, and db/reembed.ts refuses to run`,
-                ledgerRemedy("046", `${APPLY_046} Its DROP chain reaches every older form and leaves the one the servers call.`, "Re-applied, 046's DROP chain reaches every older form and leaves the one the servers call."));
+                ledgerRemedy("061", `${APPLY_061} Its DROP chain reaches every older form and leaves the one the servers call.`, "Re-applied, 061's DROP chain reaches every older form and leaves the one the servers call."));
           }
         } catch (e) {
           add("edit signature", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");

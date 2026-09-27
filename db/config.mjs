@@ -1444,11 +1444,13 @@ export const MATCH_THOUGHTS_SIGNATURE = "match_thoughts(vector, float, int, json
 export const SEARCH_THOUGHTS_HYBRID_SIGNATURE = "search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)";
 export const SEARCH_THOUGHTS_CURRENT_SIGNATURE = "search_thoughts_current(vector, text, float, int, jsonb, float, float)";
 /**
- * update_thought's signature since migration 046 (SMD-1730): a tenth,
- * defaulted parameter, `p_event`, the write event {stance, cites, valid_from,
- * valid_until, trust, actor_kind} the audit trigger stamps on the row — after
- * 032's ninth, `p_provenance`, the envelope that sets or clears `supersedes`
- * and `derived_from`, and 021's eighth, `p_embedding_model`, the model that
+ * update_thought's signature since migration 061 (SMD-1731): an eleventh,
+ * defaulted parameter, `p_lineage`, the lineage envelope {chunks, metadata}
+ * naming the recipes of the windows and the tags an edit carries — after
+ * 046's tenth, `p_event`, the write event {stance, cites, valid_from,
+ * valid_until, trust, actor_kind} the append stamps on the row, 032's ninth,
+ * `p_provenance`, the envelope that sets or clears `supersedes` and
+ * `derived_from`, and 021's eighth, `p_embedding_model`, the model that
  * produced the vector being written. Each dropped the form before it first,
  * for the reason above: CREATE OR REPLACE with a new parameter leaves the old
  * form beside it, and every call with fewer arguments is then "function is
@@ -1456,7 +1458,12 @@ export const SEARCH_THOUGHTS_CURRENT_SIGNATURE = "search_thoughts_current(vector
  * 018's sentinel), and preflight's `edit signature` check reads the forms
  * beside it.
  */
-export const UPDATE_THOUGHT_SIGNATURE = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb, jsonb)";
+export const UPDATE_THOUGHT_SIGNATURE = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb, jsonb, jsonb)";
+/**
+ * 046's form, the one 061 replaced: what a brain at 060 still carries, what
+ * reembed.ts and preflight probe for to name 061 as the missing file.
+ */
+export const UPDATE_THOUGHT_SIGNATURE_10 = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb, jsonb)";
 /**
  * 032's form, the one 046 replaced: what a brain at 044 still carries, what
  * reembed.ts probes for to name 046 as the missing file, and what a test that
@@ -1467,9 +1474,9 @@ export const UPDATE_THOUGHT_SIGNATURE = "update_thought(uuid, text, jsonb, vecto
  */
 export const UPDATE_THOUGHT_SIGNATURE_9 = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb)";
 /**
- * The forms 020, 021, 032 and 046 dropped. Still owned: a bench's "before"
- * arm re-applies 014 or 017, and a test re-applies 018, 021, 032 or 033,
- * re-creating them, so a schema reset must drop them too.
+ * The forms 020, 021, 032, 046 and 061 dropped. Still owned: a bench's
+ * "before" arm re-applies 014 or 017, and a test re-applies 018, 021, 032,
+ * 033, 046, 055 or 060, re-creating them, so a schema reset must drop them too.
  */
 export const SUPERSEDED_SIGNATURES = Object.freeze([
   "match_thoughts(vector, float, int, jsonb)",
@@ -1477,6 +1484,7 @@ export const SUPERSEDED_SIGNATURES = Object.freeze([
   "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb)",
   "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text)",
   UPDATE_THOUGHT_SIGNATURE_9,
+  UPDATE_THOUGHT_SIGNATURE_10,
 ]);
 
 /**
@@ -1693,6 +1701,14 @@ export const ROLE_GRANTS = Object.freeze({
     // without these fails every capture that carries a vector inside the
     // trigger — so the writes are hard here (SMD-2116).
     Object.freeze({ table: "ob1_embedding_snapshot", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "060" }),
+    // 061's lineage rows are written as the caller on EVERY capture and edit:
+    // the vector trigger upserts (and, a vector cleared, deletes) the vector's
+    // row; the write functions upsert the windows' and the tags' rows and
+    // delete a replaced set's. A role without these fails every capture that
+    // carries a vector inside the trigger — so all four are hard here
+    // (SMD-1731). The workers' passes write through the same table, and
+    // --grant issues every group.
+    Object.freeze({ table: "derivations",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "061" }),
   ]),
   // The server's soft extras, beyond the hard capture set: preflight reads its
   // own `ob1_config` as this role, and `resolve_agent` (010, SECURITY INVOKER)
