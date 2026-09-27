@@ -3,6 +3,7 @@ import { displayDate, thoughtTitle, thoughtUrl, THOUGHT_TYPES } from "./thoughts
 import { cleanForDisplay } from "./consolidate.ts";
 import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedKind, type EmbeddedCapture } from "./embed.ts";
 import { extractMetadata as extractMetadataWith, metadataRefused, TAG_KEYS } from "./metadata.ts";
+import { captureLineage } from "./lineage.ts";
 import { decideCalls, mayLeaveBox, type EgressDecision, type EgressSubject } from "./egress.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
@@ -1976,6 +1977,12 @@ function buildServer(principal: Principal): McpServer {
           content,
           payload,
           chunks,
+          // 061: what this capture derived and how — the windows' split and
+          // the extractor's model, prompt version and hash — recorded with
+          // the write (SMD-1731). Nothing when it made no windows and the
+          // extraction failed or was refused: a caller's tags are not a
+          // derivation.
+          lineage: captureLineage(cfg, embedded, metadata),
           // The audit trail's actor. `name` is the access key's name from
           // auth.ts; `agentId` is the stable id migration 010 resolved it to,
           // and is absent when the registry could not answer — see agents.ts.
@@ -2288,6 +2295,9 @@ function buildServer(principal: Principal): McpServer {
           actor: { name: principal.name, agentId: principal.agentId, via: SERVER_NAME, ...(gate?.record ? { egress: gate.record } : {}) },
           // Read by update_thought only with content, when the vector moves (021).
           embeddingModel: embedded?.model,
+          // 061: the windows' recipe when the new text made windows; the patch
+          // is the caller's, so no tag recipe (SMD-1731).
+          lineage: captureLineage(cfg, embedded, undefined),
           // 032: only the key the caller named reaches the envelope — absent
           // must stay absent, since null means CLEAR at the function.
           provenance: supersedes !== undefined ? { supersedes } : undefined,

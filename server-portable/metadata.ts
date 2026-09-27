@@ -42,6 +42,22 @@ export function metadataRefused(): Record<string, unknown> {
 export const TAG_KEYS = ["people", "action_items", "dates_mentioned", "topics", "type", "type_raw"] as const;
 
 /**
+ * The extractor's system prompt, a named constant so its version and hash can
+ * ride the tags' lineage row (SMD-1731, migration 061): `prompt_version` is
+ * bumped by hand when the prompt's meaning moves, `prompt_hash` names the
+ * exact text whatever the version says. Version 1 is the prompt as it stood
+ * from the first capture through migration 060.
+ */
+export const METADATA_PROMPT_VERSION = 1;
+export const METADATA_PROMPT = `Extract metadata from the user's captured thought. Return JSON with:
+- "people": array of people mentioned (empty if none)
+- "action_items": array of implied to-dos (empty if none)
+- "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
+- "topics": array of 1-3 short topic tags (always at least one)
+- "type": one of "observation", "task", "idea", "reference", "person_note"
+Only extract what's explicitly there.`;
+
+/**
  * What an answer writes over an EXISTING row's tags. A capture has no previous
  * tags, so the answer alone is right there; an edit has the previous text's
  * people, topics and action items on the row, and a shallow merge would leave
@@ -94,16 +110,7 @@ export async function extractMetadata(text: string, subject: EgressSubject, cfg:
       temperature: cfg.metadataTemperature,
       ...cfg.metadataReasoning,
       messages: [
-        {
-          role: "system",
-          content: `Extract metadata from the user's captured thought. Return JSON with:
-- "people": array of people mentioned (empty if none)
-- "action_items": array of implied to-dos (empty if none)
-- "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
-- "topics": array of 1-3 short topic tags (always at least one)
-- "type": one of "observation", "task", "idea", "reference", "person_note"
-Only extract what's explicitly there.`,
-        },
+        { role: "system", content: METADATA_PROMPT },
         { role: "user", content: text },
       ],
     }, subject);

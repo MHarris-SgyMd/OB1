@@ -59,6 +59,10 @@ const TABLES = [
   // embedding_model), no foreign key either way — a row outlives the
   // thought it came from on purpose — so its place in the order is free.
   "ob1_embedding_snapshot",
+  // 061's lineage table (SMD-1731): polymorphic artifact_id, no foreign key
+  // either way — two row triggers drop what a deleted thought or proposal
+  // keyed — so its place in the order is free.
+  "derivations",
   // bench-hnsw.ts's kept-corpus marker (SMD-1493): dropped with the schema it
   // vouches for, so a suite run in a kept database cannot leave a marker over
   // rows that are gone.
@@ -119,7 +123,11 @@ const FUNCTIONS = [
   "normalize_entity_name(text)",
   "content_fingerprint_of(text)",
   "backfill_content_fingerprints(integer)",
+  // 061 dropped the six-argument form for the seven-argument one (p_recipe);
+  // both named, since test-schema re-applies 053 and 056 by hand and each
+  // re-creates the six-argument form beside it.
   "record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)",
+  "record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)",
   "merge_entities(uuid, uuid)",
   "prune_orphan_entities()",
   "requeue_thought_work(text, uuid)",
@@ -128,7 +136,10 @@ const FUNCTIONS = [
   "extract_search_needles(text)",
   // 029 (SMD-1294)
   "consolidation_candidates(uuid, int, float)",
+  // 061 dropped the ten-argument form for the eleven-argument one (p_recipe);
+  // both named, for a re-apply of 029 by hand.
   "record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid, text, text)",
+  "record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid, text, text, jsonb)",
   "review_supersession_proposal(uuid, text, text, text, jsonb, boolean)",
   "list_supersession_proposals(text, int)",
   "thought_changes(timestamptz, uuid, text, text, text[], int)",
@@ -168,8 +179,9 @@ const FUNCTIONS = [
   "thoughts_guard_citation_sources()",
   "thought_facet_active(thought_facets)",
   "record_citation(uuid, uuid, text, text)",
-  // 046 (SMD-1730); update_thought's 10-argument form is UPDATE_THOUGHT_SIGNATURE
-  // above and the 9-argument one it dropped is in SUPERSEDED_SIGNATURES.
+  // 046 (SMD-1730); update_thought's 11-argument form is UPDATE_THOUGHT_SIGNATURE
+  // above (061's), and the 10- and 9-argument ones 061 and 046 dropped are in
+  // SUPERSEDED_SIGNATURES.
   "set_agent_kind(text, text)",
   "validate_write_event(jsonb)",
   "backfill_thought_audit_events(integer)",
@@ -196,6 +208,14 @@ const FUNCTIONS = [
   "ob1_refresh_thought_vector(uuid, vector, text)",
   "ob1_snapshot_embedding()",
   "ob1_thought_events_in_order(uuid[])",
+  // 061 (SMD-1731): the lineage writer, the agent it reads, the vector
+  // trigger's function and the two drop triggers' functions; the five bodies
+  // it redefines are named above under both signatures where the arity moved.
+  "ob1_actor_agent_id()",
+  "ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)",
+  "ob1_record_vector_lineage()",
+  "ob1_drop_thought_derivations()",
+  "ob1_drop_proposal_derivation()",
 ];
 
 /**

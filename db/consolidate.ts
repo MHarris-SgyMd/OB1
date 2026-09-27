@@ -93,6 +93,7 @@ import {
 } from "../server-portable/consolidate.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { isoTimestampOrNull } from "../server-portable/store.ts";
+import { proposalRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 
 const args = process.argv.slice(2);
@@ -575,10 +576,14 @@ async function processRow(row: Row): Promise<Outcome> {
         // The fingerprints of the texts the judge was sent, not of the rows as
         // they are at this write: an edit that landed during the call is then
         // visible to the reviewer (review pass 4).
+        // 061: the judge's recipe — model, prompt version and hash, the
+        // candidate parameters this pair was found under — recorded in
+        // `derivations` with the proposal, beside both fingerprints (SMD-1731).
         const [{ id }] = await sql`
           SELECT record_supersession_proposal(${c.older_id}::uuid, ${row.id}::uuid, ${verdict}::text,
                                               ${j.confidence}::numeric, ${j.reason || null}::text, ${c.similarity}::float,
-                                              ${JOB}::text, ${agentId}::uuid, ${older.fingerprint}::text, ${row.fingerprint}::text) AS id`;
+                                              ${JOB}::text, ${agentId}::uuid, ${older.fingerprint}::text, ${row.fingerprint}::text,
+                                              ${proposalRecipe(cfg, { similarity: c.similarity, candidates: K, minSimilarity: MIN_SIM })}::jsonb) AS id`;
         proposalId = (id as string | null) ?? null;
         if (proposalId) { totals.proposed++; recorded = "proposed"; if (verdict === "conflict_undirected") totals.undirected++; }
         else { totals.alreadyProposed++; recorded = "already"; }

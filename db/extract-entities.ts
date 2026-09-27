@@ -116,6 +116,7 @@ import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig, type EmbedEnv 
 import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type Extraction } from "../server-portable/entities.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
+import { entityRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 
 const args = process.argv.slice(2);
@@ -612,11 +613,16 @@ async function processRow(row: Row): Promise<Outcome> {
     // row itself staying the first model's.
     appendFileSync(DUMP, JSON.stringify({ id: row.id, fingerprint: row.fingerprint, key: JOB, entities: extraction.entities, relations: extraction.relations, windows: extraction.windows, ...(extraction.escalated ? { escalated: extraction.escalated } : extraction.retried ? { retried: true } : {}), ...(extraction.abortedMs !== undefined ? { abortedMs: extraction.abortedMs } : {}), ...(extraction.coverage ? { coverage: extraction.coverage } : {}), ...(extraction.parts ? { parts: extraction.parts } : {}) }) + "\n");
   }
+  // 061: the pass's recipe — the model, the prompt's version and hash, the
+  // windows sent and what was cut — recorded in `derivations` with the rows,
+  // beside the input's fingerprint the function checks and now stores
+  // (SMD-1731); the per-window answers stay in the dump above.
   const [r] = await sql`
     SELECT record_thought_entities(
       ${row.id}::uuid, ${JOB}::text,
       ${extraction.entities}::jsonb, ${extraction.relations}::jsonb,
-      ${row.fingerprint}::text, ${agentId}::uuid
+      ${row.fingerprint}::text, ${agentId}::uuid,
+      ${entityRecipe(cfg, extraction)}::jsonb
     ) AS r`;
   const res = r.r as { ok: boolean; stale?: boolean; error?: string; entities?: number; new_entities?: number; mentions?: number; edges?: number; dropped_relations?: number; ambiguous_relations?: number; refused_entities?: number; retyped_entities?: number };
   if (res.ok) {

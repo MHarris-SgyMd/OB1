@@ -25,6 +25,7 @@
 import { SQL } from "bun";
 import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgress } from "./brain-info.ts";
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
+import type { Lineage } from "./lineage.ts";
 import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
   Actor,
@@ -469,6 +470,7 @@ export class SqlStore implements ThoughtStore {
     embeddingModel?: string;
     derivedFrom?: string[];
     supersedes?: string;
+    lineage?: Lineage;
   }): Promise<CaptureResult> {
     // One statement. No two-step fallback and no PGRST202 handling: over SQL a
     // missing function is a migration failure, and silently degrading to a
@@ -497,8 +499,10 @@ export class SqlStore implements ThoughtStore {
     // key leaves the row's label unknown.
     // 025: derived_from / supersedes ride it too; upsert_thought validates
     // derived_from and refuses a bad one — see store.ts's captureEnvelope.
+    // 061: the lineage envelope — the windows' and the tags' recipes — rides
+    // the same way, and upsert_thought records them with the write.
     const envelope = captureEnvelope(opts.payload, opts.actor, opts.embeddingModel,
-      { derivedFrom: opts.derivedFrom, supersedes: opts.supersedes });
+      { derivedFrom: opts.derivedFrom, supersedes: opts.supersedes }, opts.lineage);
 
     const rows = chunks.length
       ? await this.sql`
@@ -534,14 +538,18 @@ export class SqlStore implements ThoughtStore {
     actor?: Actor;
     embeddingModel?: string;
     provenance?: UpdateProvenance;
+    lineage?: Lineage;
   }): Promise<UpdateResult> {
     const chunks = (opts.chunks ?? []).map((c) => ({
       content: c.content,
       embedding: toVector(c.embedding),
       context: c.context ?? null,
     }));
-    // Nine arguments since migration 032: the model beside the vector (021),
-    // then the provenance envelope — NULL when the edit named none.
+    // Eleven arguments since migration 061: the model beside the vector (021),
+    // the provenance envelope — NULL when the edit named none (032) — the
+    // write event, which this server does not send on an edit (046: NULL),
+    // and the lineage envelope, the windows' and the tags' recipes (061) —
+    // NULL when the edit carries neither.
     const rows = await this.sql`
       SELECT update_thought(
         ${opts.id}::uuid,
@@ -552,7 +560,9 @@ export class SqlStore implements ThoughtStore {
         ${opts.ifUnchangedSince ?? null}::timestamptz,
         ${actorPayload(opts.actor)}::jsonb,
         ${opts.embeddingModel ?? null}::text,
-        ${provenanceEnvelope(opts.provenance)}::jsonb
+        ${provenanceEnvelope(opts.provenance)}::jsonb,
+        NULL::jsonb,
+        ${opts.lineage ?? null}::jsonb
       ) AS r`;
     return normaliseMutation(rows[0]?.r as Record<string, unknown>);
   }

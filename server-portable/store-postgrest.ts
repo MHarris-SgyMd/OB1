@@ -15,6 +15,7 @@
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { DatabaseFacts, ReadOptions, ReadProgress } from "./brain-info.ts";
+import type { Lineage } from "./lineage.ts";
 import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
   Actor,
@@ -335,6 +336,7 @@ export class PostgrestStore implements ThoughtStore {
     embeddingModel?: string;
     derivedFrom?: string[];
     supersedes?: string;
+    lineage?: Lineage;
   }): Promise<CaptureResult> {
     // Preferred: content, metadata and embedding in one statement, so a failure
     // cannot leave a committed row with a NULL embedding — stored but invisible
@@ -350,8 +352,9 @@ export class PostgrestStore implements ThoughtStore {
     // The model rides the same way (021); an envelope without the key leaves
     // the row's label unknown.
     // 025: derived_from / supersedes ride it too, validated by upsert_thought.
+    // 061: and the lineage envelope, recorded with the write.
     const envelope = captureEnvelope(opts.payload, opts.actor, opts.embeddingModel,
-      { derivedFrom: opts.derivedFrom, supersedes: opts.supersedes });
+      { derivedFrom: opts.derivedFrom, supersedes: opts.supersedes }, opts.lineage);
 
     const { data: atomic, error: atomicError } = await this.client.rpc("upsert_thought", {
       p_content: opts.content,
@@ -428,16 +431,20 @@ export class PostgrestStore implements ThoughtStore {
     actor?: Actor;
     embeddingModel?: string;
     provenance?: UpdateProvenance;
+    lineage?: Lineage;
   }): Promise<UpdateResult> {
     const chunks = (opts.chunks ?? []).map((c) => ({
       content: c.content,
       embedding: `[${c.embedding.join(",")}]`,
       context: c.context ?? null,
     }));
-    // Nine named arguments since migration 032: the model beside the vector
-    // (021), then the provenance envelope, null when the edit named none.
-    // Against a database whose update_thought predates 032 this is PGRST202,
-    // which preflight's `edit signature` check reports before the server serves.
+    // Ten named arguments since migration 061: the model beside the vector
+    // (021), the provenance envelope, null when the edit named none (032),
+    // and the lineage envelope (061), null when the edit carries no windows
+    // and no extractor's tags; a named argument left out takes its default,
+    // so the write event (046) is not sent. Against a database whose
+    // update_thought predates 032 this is PGRST202, which preflight's `edit
+    // signature` check reports before the server serves.
     const { data, error } = await this.client.rpc("update_thought", {
       p_id: opts.id,
       p_content: opts.content ?? null,
@@ -448,6 +455,7 @@ export class PostgrestStore implements ThoughtStore {
       p_actor: actorPayload(opts.actor),
       p_embedding_model: opts.embeddingModel ?? null,
       p_provenance: provenanceEnvelope(opts.provenance),
+      p_lineage: opts.lineage ?? null,
     });
     if (error) throw new Error(error.message);
     return normaliseMutation(data as Record<string, unknown>);

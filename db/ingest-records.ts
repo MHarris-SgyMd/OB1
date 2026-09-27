@@ -579,7 +579,12 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()):
       }
       // The chunk rows were the old text's windows (022's rule: nothing vouches
       // for them now); reembed.ts writes the new ones with the vector.
-      if (outcome === "updated") await tx`DELETE FROM thought_chunks WHERE thought_id = ${doc.id}::uuid`;
+      if (outcome === "updated") {
+        await tx`DELETE FROM thought_chunks WHERE thought_id = ${doc.id}::uuid`;
+        // …and the set's lineage row with them (061): no artifact, no row
+        // (cold read, SMD-1731's second review pass).
+        await tx`DELETE FROM derivations WHERE artifact_kind = 'chunks' AND artifact_id = ${doc.id}::uuid`;
+      }
       if (!doc.structure) return { outcome };
       return { outcome, structure: await recordStructure(tx, doc.id, doc.structure, run) };
     });
