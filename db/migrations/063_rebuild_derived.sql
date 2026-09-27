@@ -226,7 +226,7 @@
 --   --grant` issues every group). MINOR under FORK.md's version rules.
 --   Measured on a read-only copy of the dogfood brain (1,025 thoughts, 2,472
 --   lineage rows, 15,520 mentions, 12,057 edges; PostgreSQL 16): the walk
---   from the most-fed thought up to 3.3 ms, a rebuild on it up to 3-4 ms
+--   from the most-fed thought up to 3.3 ms, a rebuild on it up to 3 ms
 --   whatever the arm, every thought in turn up to 523 ms for 1,025 calls, a
 --   force over every thought up to 544 ms (1,025 records renewed), the
 --   orphan census up to 37 ms (changes/smd-1732.md has the ranges).

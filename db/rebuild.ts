@@ -257,12 +257,16 @@ try {
     // Orphans only: a stale row on the same thought keeps its own reason
     // for its own rebuild (cold read, first review pass).
     const r = await callRebuild(o.id, REASON, false, null, false, true);
-    if (!r.ok) { console.error(`  ${o.id}: refused ${r.error}`); refused += 1; continue; }
+    if (!r.ok) {
+      console.error(`  ${o.id}: refused ${r.error}${r.error === "REPLAYING" ? " — this session is a replay (ob1.projecting_replay, a database- or role-level default); a rebuild is a live operation" : r.error === "NOT_FOUND" ? " — the thought went between the census and the call" : ""}`);
+      refused += 1;
+      continue;
+    }
     touched += 1;
     deleted += r.deleted;
   }
   console.log(`  orphans:     ${orphans.length} thought(s) carried a lineage row whose artifact is gone${orphans.length >= LIMIT ? ` (the first ${LIMIT}; run again for the rest)` : ""}`);
-  console.log(`  deleted:     ${deleted} lineage row(s) over ${touched} thought(s)${DRY ? " (rolled back)" : ""} — nothing else on those thoughts was touched`);
+  console.log(`  deleted:     ${deleted} lineage row(s) over ${touched} thought(s)${DRY ? " (rolled back)" : ""} — nothing else on those thoughts was touched${refused ? `; ${refused} call(s) refused (above)` : ""}`);
   await sql.close();
   // A refusal as a value is exit 1 here as under --input (fourth review pass).
   process.exit(refused ? 1 : 0);
