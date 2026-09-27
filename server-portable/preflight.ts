@@ -30,7 +30,7 @@ import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEn
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
-import { quoteIdent, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
+import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
 import { tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
@@ -854,10 +854,12 @@ if (configFailed) {
                      (SELECT c.relrowsecurity FROM pg_class c WHERE c.oid = to_regclass('thoughts')) AS rls,
                      current_setting('row_security') AS "rowSecurity",
                      (SELECT string_agg(name, ', ' ORDER BY name) FROM pol) AS policies,
-                     (SELECT count(*)::int FROM pol) AS "policyCount"`) as {
+                     (SELECT count(*)::int FROM pol) AS "policyCount",
+                     (SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+                       WHERE e.extname = 'vector' AND to_regtype('vector') IS NULL) AS "vectorSchema"`) as {
               present: boolean; unresolved: boolean; usage: boolean; path: string; version: number; role: string; login: string; db: string;
               roleName: string; resolved: string | null; resolvedSchema: string | null; canSelect: boolean | null;
-              rls: boolean | null; rowSecurity: string; policies: string | null; policyCount: number;
+              rls: boolean | null; rowSecurity: string; policies: string | null; policyCount: number; vectorSchema: string | null;
             }[];
             if (r?.present && r.unresolved) {
               let source: string | null = null;
@@ -873,20 +875,11 @@ if (configFailed) {
               }
               if (r.usage || !schemas.includes("public")) {
                 causes.push(`public is not on its search_path, which is ${schemas.length ? schemas.map(quoteIdent).join(", ") : "empty"}`);
-                // A superuser, a CREATEROLE role (from PostgreSQL 16, one with ADMIN
-                // on it), or the login role itself may alter it; under a SET ROLE the
-                // login role must drop it first (RESET ROLE returns to the role its
-                // settings SET).
-                const alter = r.login !== r.role
-                  ? `SET ROLE NONE; ALTER ROLE ${r.login} IN DATABASE ${r.db} SET search_path = ${withPublic(schemas)};  (as ${r.login}, or a superuser)`
-                  : `ALTER ROLE ${r.login} IN DATABASE ${r.db} SET search_path = ${withPublic(schemas)};`;
-                fixes.push(source === "client"
-                  ? `the connection string sets search_path (a search_path= parameter, or -c search_path= in options=), which outranks any ALTER ROLE: remove that and put this in options=, beside any other -c setting there (separated by %20): ${withPublicInOptions(schemas)}`
-                  : source === "session"
-                  ? `${alter}  (this session's path was SET after login — by a pooler replaying the connection string's, or a login trigger — which outranks it; change it there)`
-                  : source === null
-                  ? `${alter}  (unless the connection string sets search_path, which outranks it)`
-                  : alter);
+                // pgvector's schema too, when the type does not resolve, so this
+                // row and `vector extension` print one path statement, which, run,
+                // puts both on the path (SMD-2238). A missing USAGE on pgvector's
+                // schema is the vector row's GRANT.
+                fixes.push(`${pathFix({ schemas, extension: r.vectorSchema, login: r.login, role: r.role, db: r.db, source })}  Then reconnect.`);
               }
               found = {
                 detail: `public.thoughts exists but does not resolve for this role (${causes.join("; ")})`,
@@ -1262,9 +1255,26 @@ if (configFailed) {
                  v.schema, quote_ident(v.schema) AS schema_ident,
                  CASE WHEN v.schema IS NOT NULL THEN has_schema_privilege(v.schema, 'USAGE') END AS usage,
                  current_user::text AS role, quote_ident(current_user) AS role_ident,
-                 current_database()::text AS db, quote_ident(current_database()) AS db_ident
+                 current_database()::text AS db, quote_ident(current_database()) AS db_ident,
+                 quote_ident(session_user) AS login_ident,
+                 current_setting('search_path') AS path, current_setting('server_version_num')::int AS version
             FROM (SELECT (SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'vector') AS schema) v`;
-        const setPath = (verb: string, ident: string) => `${verb} ${ident} SET search_path = "$user", public, ${vec.schema_ident};`;
+        // The path's fix is the `schema` row's statement, pgvector's schema
+        // added (search-path.ts), so the two rows agree on one screen: the
+        // login role's setting IN DATABASE, which a plain ALTER ROLE or ALTER
+        // DATABASE is outranked by, the role's own path kept, public added
+        // once, and the connection string's path replaced where it sets one
+        // (SMD-2238). Only when the schema is not on the path already — with
+        // no USAGE it may be, and the GRANT alone is the fix.
+        const vecSchemas = searchPathSchemas(String(vec.path ?? ""), Number(vec.version));
+        const vecOnPath = !!vec.schema && vecSchemas.includes(vec.schema);
+        let vecSource: string | null = null;
+        if (!vec.resolves && vec.schema && !vecOnPath) {
+          try {
+            vecSource = ((await sql`SELECT source FROM pg_settings WHERE name = 'search_path'`) as { source: string }[])[0]?.source ?? null;
+          } catch { /* unread: the statement stands, with its caveat */ }
+        }
+        const vecPathFix = () => pathFix({ schemas: vecSchemas, extension: vec.schema, login: vec.login_ident, role: vec.role_ident, db: vec.db_ident, source: vecSource });
         // What the database says about itself, read ONCE through brain-info.ts —
         // the read brain_info and the keyed /health body make (SMD-2041) — so
         // this row, `migration ledger` and `schema version` below report what
@@ -1284,11 +1294,17 @@ if (configFailed) {
         } else if (vec.usage === false) {
           add("vector extension", "fail",
               `pgvector is installed in schema "${vec.schema}", but role ${vec.role} has no USAGE on that schema, so the bare type "vector" does not resolve and every capture and search would fail with 'type "vector" does not exist' — SET search_path alone will not help here`,
-              `GRANT USAGE ON SCHEMA ${vec.schema_ident} TO ${vec.role_ident};  (as a role that can), then put it on the path: ${setPath("ALTER ROLE", vec.role_ident)}`);
+              `GRANT USAGE ON SCHEMA ${vec.schema_ident} TO ${vec.role_ident};  (as a role that can)${vecOnPath ? "" : vecSource === "client"
+                ? `  ${vecPathFix().replace(/^./, (c) => c.toUpperCase())}  Then reconnect.`
+                : `  then put it on the path: ${vecPathFix()}  Then reconnect.`}`);
         } else {
           add("vector extension", "fail",
               `pgvector is installed in schema "${vec.schema}", which is not on this connection's search_path (role ${vec.role}, database ${vec.db}) — so the bare type "vector" does not resolve and every capture and search would fail with 'type "vector" does not exist'`,
-              `Put ${vec.schema} on the connection's search_path. Least-scoped (this role only): ${setPath("ALTER ROLE", vec.role_ident)}  — or database-wide: ${setPath("ALTER DATABASE", vec.db_ident)}  then reconnect. This adds a setting beside any hnsw.* bounds, it does not replace them.`);
+              // A connection string's path is replaced there, beside its other
+              // -c settings; a role's is a setting beside any hnsw.* bounds.
+              vecSource === "client"
+                ? `${vecPathFix().replace(/^./, (c) => c.toUpperCase())}  Then reconnect.`
+                : `Put ${quoteIdent(vec.schema)} on the connection's search_path: ${vecPathFix()}  Then reconnect. This adds a setting beside any hnsw.* bounds, it does not replace them.`);
         }
 
         // One schema-qualified read of every form, signature and body; no name

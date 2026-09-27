@@ -7855,6 +7855,8 @@ console.log("\n[52] Migration 056: the entity name gate — a number or a type w
     ["SMD-1804\n", "person"], ["SMD-1804\t", "person"], ["SMD-1804\v", "person"], ["\u3000SMD-1804", "person"], ["hono/mcp\t", "person"], ["x:80\f", "place"], ["a b_c", "person"], ["open_brai n", "place"], ["a\u00a0b_c", "place"], ["021\f", "tool"], ["\t021\r\n", "person"],
     // A leading form feed or vertical tab survives 016's strip (second review pass), and a handle's shape retypes a place, not a person.
     ["\f021", "person"], ["\vperson", "topic"], ["john.smith", "person"], ["mary_jane", "person"], ["St.Louis", "place"], ["open_brain:5432", "person"], ["open_brain:5432", "place"],
+    // SMD-2300: a high-precision identifier shape overrides whatever type the model gave (a topic, a project, an organization); a short hyphen-number (GPT-4) and a dotted name (Nature.com) are left as typed.
+    ["SMD-1549", "topic"], ["SMD-1549", "project"], ["worker_status", "topic"], ["OB1_METADATA_MODEL", "organization"], ["integrations/rest-api", "project"], ["origin/main", "topic"], ["thought_work_claims", "person"], ["GPT-4", "topic"], ["Llama-3", "organization"], ["Nature.com", "organization"], ["pg_class.reltuples", "topic"], ["COVID-19", "topic"],
   ];
   const parted: string[] = [];
   for (const [name, type] of probes) {
@@ -7863,15 +7865,24 @@ console.log("\n[52] Migration 056: the entity name gate — a number or a type w
     if (got.n !== normalizeEntityName(name)) parted.push(`normalise ${JSON.stringify(name)}: SQL ${got.n}, JS ${normalizeEntityName(name)}`);
   }
   assert(parted.length === 0, `entity_type_gate and entity-gate.ts answer alike, and so do the two normalisers, over ${probes.length} probes (${parted.join("; ") || "no parting"})`);
-  assert((await one<{ g: string | null }>(`SELECT entity_type_gate('021', 'person') AS g`)).g === null && (await one<{ g: string }>(`SELECT entity_type_gate('SMD-1804', 'person') AS g`)).g === "project" && (await one<{ g: string }>(`SELECT entity_type_gate('hono/mcp', 'place') AS g`)).g === "tool" && (await one<{ g: string }>(`SELECT entity_type_gate('SMD-1804', 'topic') AS g`)).g === "topic",
-    "…and the answers are the rule's: a number refused, a ticket-id person a project, a path place a tool, a topic left alone");
+  assert((await one<{ g: string | null }>(`SELECT entity_type_gate('021', 'person') AS g`)).g === null && (await one<{ g: string }>(`SELECT entity_type_gate('SMD-1804', 'person') AS g`)).g === "project" && (await one<{ g: string }>(`SELECT entity_type_gate('hono/mcp', 'place') AS g`)).g === "tool"
+    && (await one<{ g: string }>(`SELECT entity_type_gate('SMD-1804', 'topic') AS g`)).g === "project" && (await one<{ g: string }>(`SELECT entity_type_gate('worker_status', 'topic') AS g`)).g === "tool" && (await one<{ g: string }>(`SELECT entity_type_gate('GPT-4', 'topic') AS g`)).g === "topic",
+    "…and the answers are the rule's: a number refused, a ticket-id a project and a path a tool whatever the model's type, snake_case a tool, and a short hyphen-number (GPT-4) left as the model typed it (SMD-2300)");
   // The twin is held to the text too, so a pattern edited on one side fails
   // even where no probe reaches the difference.
   const gateSrc = await src("entity_type_gate(text, text)");
+  const gateDoor = gateSrc.indexOf("p_type NOT IN ('person', 'place')");
+  const gatePlace = gateSrc.indexOf("p_type = 'place' AND (");
   assert(IDENTIFIER_SHAPES.every((s) => gateSrc.includes(`'${s.pattern}'`)) && ENTITY_VOCABULARY.every((w) => gateSrc.includes(`'${w}'`)) && gateSrc.includes(`'${NUMERIC_NAME_RE}'`) && gateSrc.includes(`'${TRIM_RE}'`) && (gateSrc.match(/'[^']*'/g) ?? []).filter((l) => l.startsWith("'^")).length === IDENTIFIER_SHAPES.length + 2 &&
     (/s\.n IN \(([^)]*)\)/.exec(gateSrc)?.[1].match(/'[^']*'/g) ?? []).length === ENTITY_VOCABULARY.length &&
-    IDENTIFIER_SHAPES.every((x) => (gateSrc.indexOf(`'${x.pattern}'`) > gateSrc.indexOf("p_type = 'place' AND (")) === !x.person),
-    "the SQL rule spells every shape, every vocabulary word (no more), the numeric pattern and the trim entity-gate.ts does, no pattern beside them, and reads the two handle shapes for a place only");
+    IDENTIFIER_SHAPES.every((x) => {
+      const at = gateSrc.indexOf(`'${x.pattern}'`);
+      // SMD-2300: the any/notPerson overrides are spelled before the type door, the person/place shapes after it, and the place-only handle shape inside the place clause.
+      if (x.scope === "place") return at > gatePlace;
+      if (x.scope === "personPlace") return at > gateDoor && at < gatePlace;
+      return at < gateDoor;
+    }),
+    "the SQL rule spells every shape, every vocabulary word (no more), the numeric pattern and the trim entity-gate.ts does, no pattern beside them, and places each shape by its scope: the any and notPerson overrides before the type door, the person/place shapes after it, the place-only handle shape inside the place clause (SMD-2300)");
   const fn = await one<{ v: string; s: boolean }>(`SELECT provolatile AS v, proisstrict AS s FROM pg_proc WHERE oid = 'entity_type_gate(text, text)'::regprocedure`);
   assert(fn.v === "i" && fn.s === true, "entity_type_gate is IMMUTABLE and STRICT");
   assert(lastDefinerOf("record_thought_entities").startsWith("061") && /ob1:name-gate/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)")) && /ob1:structured-wins/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)")),

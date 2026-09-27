@@ -506,6 +506,27 @@ export const STACK: readonly string[] = ["hono", "zod", "@hono/mcp", "@modelcont
 export const PACKAGES = new RegExp(`^(${STACK.join("|")})(/|$)`);
 
 /**
+ * The MCP stack server-portable runs on since SMD-2278 — stage 1 of the SDK v2
+ * migration (docs/mcp-sdk-v2-migration.md). The v1 single package
+ * `@modelcontextprotocol/sdk` and the third-party `@hono/mcp` gave way to the v2
+ * scoped packages `@modelcontextprotocol/core` + `@modelcontextprotocol/server`;
+ * `hono` and `zod` are shared with STACK. The vendored servers (extensions) and
+ * the Kubernetes image stay on STACK until stages 2 and 3 (SMD-2279, SMD-2281), so
+ * during the window the two stacks coexist and extensions/test-auth.ts's pin guard
+ * holds each install to its own.
+ */
+export const SERVER_STACK: readonly string[] = ["hono", "zod", "@modelcontextprotocol/core", "@modelcontextprotocol/server"];
+/**
+ * The v2 packages' pinned versions — the independent truth the drift guard holds
+ * server-portable to while it is the sole v2 install. Stage 3 (SMD-2281) moves the
+ * Kubernetes image onto these too and the cross-install version check resumes.
+ */
+export const SERVER_V2_PINS: Readonly<Record<string, string>> = {
+  "@modelcontextprotocol/core": "2.1.0",
+  "@modelcontextprotocol/server": "2.1.0",
+};
+
+/**
  * A counting assert. Returned as an object rather than module state so two suites
  * in one process cannot pollute each other's tally — and so `report()` owns the
  * exit code, which every suite was also duplicating.
