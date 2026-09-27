@@ -795,8 +795,11 @@ jobs:
       # dashboards read their env at build time — the gateway URL and a session
       # secret, any values. Each dashboard writes its own log and exit code
       # under $RUNNER_TEMP, and has its own time limit, which the wait step
-      # reads from there: a hang ends as 124 (137 when TERM is ignored) and the
-      # next dashboard still builds. The subshell's output goes to files, so
+      # reads from there: a hang ends as 124 and the next dashboard still
+      # builds. timeout TERMs the build's process group and its KILL follows
+      # only while its own child lives, so a process that ignores TERM outlives
+      # the limit (and dies with the job); a 137 is a KILL from outside, as by
+      # the OOM killer. The subshell's output goes to files, so
       # this step does not wait on it and ends at once; its stdin is /dev/null.
       - name: The three dashboards start building, in the background
         id: dashboards
@@ -840,19 +843,23 @@ jobs:
       # never dialled. The stop has to wait for it and count it — an idle stop
       # passed a handler that exits at once, or that never got the server
       # (review pass 1). The stub runs from the image just built, which has
-      # Bun, so nothing is pulled.
+      # Bun, so nothing is pulled. The stop lands once the stub logs the
+      # server's request, not after a fixed head start: the dashboards build
+      # beside this step (SMD-2251), and under that load the call may not have
+      # reached the server in 0.5 s. The log is read into a string: `grep -q`
+      # on a pipe closes it early, which pipefail fails.
       - name: The Kubernetes image stops on SIGTERM, finishing a call in flight
         run: |
           KEY=$(openssl rand -hex 32)
           HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
           docker network create ob1-k8s-stop > /dev/null
-          docker run -d --name ob1-k8s-embed --network ob1-k8s-stop ob1-k8s-mcp:ci bun -e 'Bun.serve({ port: 8080, async fetch() { await Bun.sleep(2000); return new Response("stub", { status: 503 }); } })' > /dev/null
+          docker run -d --name ob1-k8s-embed --network ob1-k8s-stop ob1-k8s-mcp:ci bun -e 'Bun.serve({ port: 8080, async fetch() { console.log("embedding request"); await Bun.sleep(2000); return new Response("stub", { status: 503 }); } })' > /dev/null
           docker run -d --name ob1-k8s-stop --network ob1-k8s-stop -p 127.0.0.1:8099:8000 -e DB_PASSWORD=unused -e EMBEDDING_API_BASE=http://ob1-k8s-embed:8080 -e "MCP_ACCESS_KEYS=ci:read:$HASH" ob1-k8s-mcp:ci > /dev/null
           up=""
           for _ in $(seq 1 40); do curl -s -m 2 -o /dev/null -X POST -d '{}' http://127.0.0.1:8099/ && { up=1; break; }; sleep 0.25; done
           curl -s -N --max-time 10 -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $KEY" \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_thoughts","arguments":{"query":"stop probe"}}}' http://127.0.0.1:8099/ > /tmp/k8s-call.out &
-          sleep 0.5
+          for _ in $(seq 1 40); do grep -q 'embedding request' <<< "$(docker logs ob1-k8s-embed 2>&1)" && break; sleep 0.1; done
           t0=$(date +%s%3N); docker stop ob1-k8s-stop > /dev/null; ms=$(($(date +%s%3N) - t0))
           wait
           code=$(docker inspect -f '{{.State.ExitCode}}' ob1-k8s-stop)
@@ -1273,7 +1280,7 @@ jobs:
       # and times. It runs when a stack step failed too, so a broken build is
       # never hidden behind one. The wait ends when the background shell
       # writes its done mark or dies without it, or at a cap a minute past
-      # the three limits' sum. A dead shell nothing has reaped yet is a zombie,
+      # the three limits and their kill-after grace. A dead shell nothing has reaped yet is a zombie,
       # which `kill -0` counts as alive, so its state is read instead (a
       # never-reaped zombie held the wait to the cap; review pass 1).
       - name: The three dashboards build
@@ -1289,6 +1296,7 @@ jobs:
           echo "waited $((SECONDS - start)) s for the background build"
           if [ ! -e "$out/done" ]; then
             echo "::error title=The three dashboards build::the background build did not finish (its shell died, or it ran past $cap s) — its logs follow"
+            for rc in "$out"/*.rc; do [ -e "$rc" ] && echo "finished: $(basename "$rc" .rc), exit and seconds $(cat "$rc")"; done
             for log in "$out"/*.log; do echo "--- $log"; cat "$log"; done
             exit 1
           fi
@@ -1299,7 +1307,7 @@ jobs:
             why=$rc
             case $rc in
               124) why="124, over the $limit_s s limit" ;;
-              137) why="137, killed: over the $limit_s s limit with TERM ignored, or out of memory" ;;
+              137) why="137, killed from outside, most likely out of memory" ;;
             esac
             if [ "$rc" = 0 ]; then
               echo "::group::$d — built"
