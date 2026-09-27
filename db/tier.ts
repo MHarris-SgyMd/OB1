@@ -731,7 +731,7 @@ export function parseCompareArgs(args: string[]): CompareArgs {
   const cli = commandLine("tier.ts", {
     compare: "two", "a-key": "one", "b-key": "one", "queries-file": "one", "from-log": "one", since: "one", query: "repeated",
     replay: "none", hybrid: "none", json: "none",
-  }, { hints: { compare: "<a> <b>", "a-key": "<key>", "b-key": "<key>", "queries-file": "<path>", "from-log": "<brain>", since: "<iso>", query: "<q>" } }, args);
+  }, { hints: { compare: "<a> <b>", "a-key": "<key>", "b-key": "<key>", "queries-file": "<path>", "from-log": "<brain>", since: "<iso>", query: "<q>" }, note: USAGE.trimStart() }, args);
   const refuse = (why: string): never => { console.error(`${why}\n${USAGE}`); process.exit(2); };
   if (!cli.has("compare")) refuse("--compare needs two brains.");
   const [a, b] = cli.values("compare");

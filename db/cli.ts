@@ -21,28 +21,34 @@
  *   many      every value up to the next flag, none included: `--accept-failed <id> <id>`
  *   repeated  one value per occurrence, any number of occurrences: `--query <q> --query <q>`
  *
- * Refused, with exit 2 and the script's flag list:
- *   - a flag the script does not have;
+ * Refused, with exit 2, the script's flag list and its note:
+ *   - a flag the script does not have — with the nearest flag it does have,
+ *     when one is a typo away (`--K` → `--k`, `--minsim` → `--min-sim`);
  *   - a flag given twice (a lookup reads the first; `--url A --url B` would run
  *     against A), except a `repeated` one;
  *   - a flag that takes a value followed by nothing or by another flag
  *     (`--job --switch-model` once read "--switch-model" as the key);
- *   - an empty value (`--items "$OUT"` with the variable unset would read as
- *     the flag absent and write nothing, exit 0);
- *   - a value joined with "=" — named by its flag, the value never echoed:
- *     `--url=postgres://user:PASSWORD@…` would otherwise put a password in a log;
+ *   - an empty or blank value (`--items "$OUT"` with the variable unset would
+ *     read as the flag absent and write nothing, exit 0);
+ *   - a value joined with "=" (`--url=postgres://…`);
  *   - a value where no flag takes one, beyond the positionals the script
- *     declares — counted, not shown, unless the script's strays are ids or
- *     words (`showStrays`), and a URL shown as `<a URL>` even then: a key typed
- *     where no flag takes it has no shape to mask it by;
- *   - a bare `--`, which no script here reads as the end of its flags.
- * A refusal that names the argument after a flag (`--grant needs a value; what
- * follows it is --url=…`) shows it by the same rules.
+ *     declares;
+ *   - a bare `--` — which no script here reads as the end of its flags — after
+ *     the first argument (Bun itself consumes a `--` given first).
+ *
+ * A refusal never repeats what the operator typed: it names the script's own
+ * flags and the argument's position (`unknown argument 3`), nothing else. An
+ * argument can be a password or a key — `--url=postgres://user:PASSWORD@…`, a
+ * key typed where no flag takes it, `--a-keySECRET` with the space missed — and
+ * a refusal is printed to a log; review pass 1 masked the shapes it could name
+ * (a URL, a joined value) and pass 2 found three it could not, so no shape is
+ * trusted.
  * `--help` anywhere prints the flag list and exits 0, before any of the above.
  *
  * A number is read by `int` / `number`, which accept decimal digits only —
  * `Number()` would read "0x10", "1e2" and " 7" (graph-centrality.ts's rule,
- * now everyone's).
+ * now everyone's) — and an integer past 2^53, which would be rounded, is
+ * refused.
  *
  * `scanArgs` and `readNumber` are pure and return the refusal as a value, for
  * the suites; `commandLine` is the scripts' door, which prints it and exits;
@@ -61,13 +67,6 @@ export interface ScanOptions<K extends string = string> {
   positionals?: number;
   /** A word shown after a flag in the list: `<postgres://…>` for a value, `(with --baseline)` for a switch. */
   hints?: Partial<Record<K, string>>;
-  /**
-   * Name a stray value in the refusal (a URL still shown by its shape). Off by
-   * default: a key given where no flag takes it has no shape to mask it, so a
-   * script opts in only where its strays are ids or words (reembed's ids,
-   * migrate's `--reapply 021`).
-   */
-  showStrays?: boolean;
 }
 
 /** What argv said, read by flag name. */
@@ -101,15 +100,6 @@ export interface CommandLine<K extends string = string> extends Args<K> {
   number(name: K, rule: NumberRule): number;
 }
 
-/**
- * An argument as a refusal may show it: a flag with a value joined by "=" by
- * its flag alone, a URL by its shape — either may carry a password.
- */
-function shown(v: string): string {
-  if (v.startsWith("--") && v.includes("=")) return `${v.slice(0, v.indexOf("="))}=…`;
-  return /:\/\//.test(v) ? "<a URL>" : v;
-}
-
 /** The flag list a refusal and `--help` print: `  flags: --url <value>, --dry-run, …`. */
 export function flagList<K extends string>(spec: FlagSpec<K>, hints: Partial<Record<K, string>> = {}): string {
   const shape: Record<Takes, string> = { none: "", one: " <value>", two: " <a> <b>", optional: " [value]", many: " <value> …", repeated: " <value> (repeatable)" };
@@ -122,34 +112,75 @@ export function flagList<K extends string>(spec: FlagSpec<K>, hints: Partial<Rec
   return `  flags: ${items.length ? items.join(", ") : "none"}`;
 }
 
+/** Edit distance, for the nearest flag to a typo. */
+function distance(a: string, b: string): number {
+  let row = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const next = [i];
+    for (let j = 1; j <= b.length; j++) next[j] = Math.min(row[j] + 1, next[j - 1] + 1, row[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    row = next;
+  }
+  return row[b.length];
+}
+
+/**
+ * The one flag of `names` a typed name is a typo of — at most two edits, fewer
+ * than the name's length, case aside, and nearer than any other — or undefined.
+ * It returns one of the script's own names, never the typed one.
+ */
+export function nearestFlag(typed: string, names: readonly string[]): string | undefined {
+  const lower = typed.toLowerCase();
+  let best: string | undefined;
+  let bestD = 3;
+  let tied = false;
+  for (const name of names) {
+    const d = distance(lower, name);
+    if (d < bestD) { best = name; bestD = d; tied = false; } else if (d === bestD) tied = true;
+  }
+  return best !== undefined && !tied && bestD < Math.max(lower.length, 1) ? best : undefined;
+}
+
+/** "3", "3 and 5", "3, 5 and 6". */
+function positionsOf(ns: readonly number[]): string {
+  return ns.length === 1 ? `${ns[0]}` : `${ns.slice(0, -1).join(", ")} and ${ns[ns.length - 1]}`;
+}
+
 /**
  * Scan argv against `spec`: every argument accounted for, or the first reason
- * it is not. Pure — the refusal is returned, not printed.
+ * it is not. Pure — the refusal is returned, not printed. A refusal names the
+ * spec's flags and argument positions (from 1), never an argument's text.
  */
 export function scanArgs<K extends string>(argv: readonly string[], spec: FlagSpec<K>, options: ScanOptions<K> = {}): Args<K> | { error: string } {
   const values = new Map<string, string[]>();
   const positionals: string[] = [];
+  const strays: number[] = [];
+  const names = Object.keys(spec);
   const known = (name: string): name is K => Object.hasOwn(spec, name);
+  const didYouMean = (typed: string): string => { const near = nearestFlag(typed, names); return near ? ` — did you mean --${near}?` : ""; };
   /** The value at argv[i] for `flag`, or the refusal: `wanted` is "a value" or "two values". */
   const valueAt = (flag: string, i: number, wanted = "a value"): string | { error: string } => {
     const v = argv[i];
-    if (v === undefined || v.startsWith("--")) return { error: `${flag} needs ${wanted}; what follows it is ${v === undefined ? "nothing" : shown(v)}` };
-    if (v === "") return { error: `${flag} is empty; give it ${wanted}` };
+    if (v === undefined) return { error: `${flag} needs ${wanted}; nothing follows it` };
+    if (v.startsWith("--")) return { error: `${flag} needs ${wanted}; argument ${i + 1}, after it, is a flag` };
+    if (v.trim() === "") return { error: `${flag} is empty (argument ${i + 1}); give it ${wanted}` };
     return v;
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--") return { error: `unknown argument: -- (no script here reads a bare "--" as the end of its flags)` };
+    if (a === "--") return { error: `unknown argument ${i + 1}: a bare "--", which no script here reads as the end of its flags` };
     if (!a.startsWith("--")) {
       positionals.push(a);
+      if (positionals.length > (options.positionals ?? 0)) strays.push(i + 1);
       continue;
     }
     const name = a.slice(2);
     if (name.includes("=")) {
       const base = name.slice(0, name.indexOf("="));
-      return { error: `unknown argument: --${base}=… (a value joined with "="; give it as --${base} <value>)` };
+      if (!known(base)) return { error: `unknown argument ${i + 1}: a flag with a value joined by "="${didYouMean(base)}` };
+      if (spec[base] === "none") return { error: `argument ${i + 1} gives --${base} a value with "=", and --${base} takes none` };
+      return { error: `argument ${i + 1} joins a value to --${base} with "="; give it as --${base} <value>` };
     }
-    if (!known(name)) return { error: `unknown argument: ${a}` };
+    if (!known(name)) return { error: `unknown argument ${i + 1}: not a flag this script has${didYouMean(name)}` };
     const takes = spec[name];
     if (values.has(name) && takes !== "repeated") return { error: `${a} given twice` };
     const got = values.get(name) ?? [];
@@ -169,24 +200,18 @@ export function scanArgs<K extends string>(argv: readonly string[], spec: FlagSp
     } else if (takes === "optional") {
       const next = argv[i + 1];
       if (next !== undefined && !next.startsWith("--")) {
-        if (next === "") return { error: `${a} is empty; give it a value or leave it out` };
+        if (next.trim() === "") return { error: `${a} is empty (argument ${i + 2}); give it a value or leave it out` };
         got.push(next);
         i++;
       }
     } else if (takes === "many") {
       while (i + 1 < argv.length && !argv[i + 1].startsWith("--")) {
-        if (argv[i + 1] === "") return { error: `${a} is given an empty value` };
+        if (argv[i + 1].trim() === "") return { error: `${a} is empty (argument ${i + 2}); give it a value` };
         got.push(argv[++i]);
       }
     }
   }
-  const allowed = options.positionals ?? 0;
-  if (positionals.length > allowed) {
-    const stray = positionals.slice(allowed);
-    const what = stray.length === 1 ? "a value" : `${stray.length} values`;
-    if (!options.showStrays) return { error: `unknown argument: ${what} where no flag takes one (not shown: it may be a key)` };
-    return { error: `unknown argument: ${stray.map(shown).join(" ")} (${stray.length === 1 ? "a value" : "values"} where no flag takes one)` };
-  }
+  if (strays.length) return { error: `unknown argument${strays.length === 1 ? "" : "s"} ${positionsOf(strays)}: ${strays.length === 1 ? "a value" : "values"} where no flag takes one` };
   return {
     positionals,
     has: (name) => values.has(name),
@@ -197,17 +222,18 @@ export function scanArgs<K extends string>(argv: readonly string[], spec: FlagSp
 
 /**
  * A number from a flag's value: decimal digits, a sign, and — with `fraction`
- * — a decimal point; nothing `Number()` reads besides. Pure.
+ * — a decimal point; nothing `Number()` reads besides. Pure; the refusal names
+ * the flag and the rule, not the value.
  */
 export function readNumber(flag: string, raw: string, rule: { min: number; max?: number; fraction?: boolean }): number | { error: string } {
   const shape = rule.fraction ? /^-?(\d+(\.\d*)?|\.\d+)$/ : /^-?\d+$/;
   const n = shape.test(raw) ? Number(raw) : NaN;
-  // Past 2^53 an integer is not read exactly: "9007199254740993" is 9007199254740992.
-  if (!rule.fraction && Number.isFinite(n) && !Number.isSafeInteger(n)) return { error: `${flag} is too large to read exactly, got ${JSON.stringify(raw)}` };
   if (!Number.isFinite(n) || n < rule.min || (rule.max !== undefined && n > rule.max)) {
     const kind = rule.fraction ? "a decimal number" : "a decimal integer";
-    return { error: `${flag} must be ${kind} >= ${rule.min}${rule.max !== undefined ? ` and <= ${rule.max}` : ""}, got ${JSON.stringify(raw)}` };
+    return { error: `${flag} must be ${kind} >= ${rule.min}${rule.max !== undefined ? ` and <= ${rule.max}` : ""}` };
   }
+  // In range but past 2^53, an integer is not read exactly: "9007199254740993" is 9007199254740992.
+  if (!rule.fraction && !Number.isSafeInteger(n)) return { error: `${flag} is too large to read exactly` };
   return n;
 }
 
@@ -227,13 +253,13 @@ export function scriptArgv(usage: string): string[] {
 
 /**
  * The scripts' door: scan `argv` (the process's own by default) against
- * `spec`, print the refusal with the flag list and exit 2, or print the list
- * for `--help` and exit 0. `script` names the file in both.
+ * `spec`, print the refusal with the flag list and the note and exit 2, or
+ * print them for `--help` and exit 0. `script` names the file.
  */
 export function commandLine<K extends string>(script: string, spec: FlagSpec<K>, options: ScanOptions<K> & { note?: string } = {}, argv: readonly string[] = process.argv.slice(2)): CommandLine<K> {
-  const list = flagList(spec, options.hints);
+  const list = `${flagList(spec, options.hints)}${options.note ? `\n  ${options.note}` : ""}`;
   if (argv.includes("--help")) {
-    console.log(`usage: bun db/${script} [flags]\n${list}${options.note ? `\n  ${options.note}` : ""}\n  The header of db/${script} says what each does.`);
+    console.log(`usage: bun db/${script} [flags]\n${list}\n  The header of db/${script} says what each does.`);
     process.exit(0);
   }
   const refuse = (error: string): never => {

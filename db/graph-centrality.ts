@@ -1034,7 +1034,8 @@ export function parseArgs(argv: readonly string[]): Parsed | { error: string } {
   const json = scanned.has("json");
   const positional = [...scanned.positionals];
   if (positional.some((p) => p.trim() === "")) return { error: "the subject is empty; leave it out for the whole graph" };
-  if (positional.length > 1) return { error: `one subject at a time; got ${positional.map((p) => JSON.stringify(p)).join(", ")} — quote a name with spaces` };
+  // Counted, not repeated: a URL given without --url is a positional too (cli.ts's rule).
+  if (positional.length > 1) return { error: `one subject at a time; got ${positional.length} — quote a name with spaces` };
   // Decay weighs the completed and canceled thoughts; a filter other than
   // `all` drops them or keeps only them, so the two are two answers to one
   // question — and under `done` a uniform weight would change nothing.
