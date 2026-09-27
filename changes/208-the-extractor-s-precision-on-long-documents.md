@@ -1,17 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-1961]
-migrations: []
----
-
-## Changelog
-
-A labelled long-document entity set for extraction evals: the longest real thoughts on a brain, their candidate mentions graded by two blind graders and adjudicated (inter-annotator κ 0.931), frozen as `evals/fixtures/longdoc-grades.json` (ids + labels only). On it the generative extractor scores 75.3% entity precision / 72.6% type accuracy on long documents, over-typing `topic`/`project` where the truth is `tool`/`person` (SMD-1961).
-
-## FORK
-
-The extractor's precision on long documents is now measured against a real labelled set, not the three-document planted one (SMD-1961)
+# 208. The extractor's precision on long documents is now measured against a real labelled set, not the three-document planted one (SMD-1961)
 
 **What changed.**
 - **`evals/fixtures/longdoc-grades.json`, new.** 320 graded mentions — thought/entity ids + adjudicated `valid`/`type` + both graders' calls — inter-annotator κ 0.931. Ids and labels only (check 9); the corpus text is never committed.

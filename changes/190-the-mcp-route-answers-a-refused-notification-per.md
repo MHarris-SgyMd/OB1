@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2106]
-migrations: []
----
-
-## Changelog
-
-The MCP route no longer answers a refused JSON-RPC **notification** with an HTTP 200 error envelope — a shape the MCP TS SDK silently drops, so `notifications/initialized` and `notifications/cancelled` looked delivered when they were refused. A notification-only body now gets no JSON-RPC body: `202` for a refusal that cannot change on retry (no, wrong or revoked key), `503` with `Retry-After` for one that can (the agent registry busy). A request still gets its 200 envelope, and the busy request now carries `Retry-After` too (SMD-2106).
-
-## FORK
-
-The MCP route answers a refused notification per spec: 202/503 with no body, not a dropped 200 envelope (SMD-2106)
+# 190. The MCP route answers a refused notification per spec: 202/503 with no body, not a dropped 200 envelope (SMD-2106)
 
 **What changed.** `server-portable/index.ts`: the two pre-transport auth
 refusals (no/wrong key at the `!principal` site; revoked/busy at the

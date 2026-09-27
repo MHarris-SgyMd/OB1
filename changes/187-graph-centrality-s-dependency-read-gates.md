@@ -1,17 +1,4 @@
----
-type: changed
-bump: minor
-tickets: [SMD-2218]
-migrations: []
----
-
-## Changelog
-
-`db/graph-centrality.ts`'s dependency read (`--startable`, `--decay-blocked`) gates only on a system that states a lifecycle: the links of a system none of whose rows carries a known status_type — an `--items` source that never says a ticket is done — block nothing and name no ticket rather than hide its tickets for good, the dependency line names each source and says which gate nothing, and the JSON's `dependencies.systems` lists each system's facets and whether it gates; while the board is the only source, and states its lifecycle, every report renders as before and the JSON gains only `systems` (SMD-2218).
-
-## FORK
-
-graph-centrality's dependency read gates only on a system that states a lifecycle — an --items source with no statuses no longer blocks its tickets forever (SMD-2218)
+# 187. graph-centrality's dependency read gates only on a system that states a lifecycle — an --items source with no statuses no longer blocks its tickets forever (SMD-2218)
 
 **What changed.** SMD-2061 read the dependencies when board-sync was their only
 writer. Since SMD-2136, `ingest-records.ts --items` writes `blocks` /

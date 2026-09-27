@@ -1,17 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-2052]
-migrations: []
----
-
-## Changelog
-
-A second Jev-class model can serve the `ob1-jev/1` typed-decision contract: `jev/decider/serve.py` is a host adapter (decider-4b over Qwen3.5-4B, Apache-2.0, on Apple MPS) exposing `/health`, `/info`, `/decide` exactly as `jev/serve.ts` does for Verdict, so a caller switches models by `OB1_JEV_BASE_URL` / `OB1_JEV_MODEL` alone. SemIf, the ticket's original second model, is gated on Hugging Face and unobtainable; decider-4b is the measured alternative (SMD-2052).
-
-## FORK
-
-decider-4b behind the one typed-decision contract, and the tooling to compare Jev-class models on the same client (SMD-2052)
+# 209. decider-4b behind the one typed-decision contract, and the tooling to compare Jev-class models on the same client (SMD-2052)
 
 **What changed.**
 - **`jev/decider/serve.py`, new.** A Python FastAPI adapter over the `decider-ai` runtime serving `ob1-jev/1` (binary + choice, the tier's `__insufficient_evidence__` on every decision, the same validation, 409 model-mismatch and 413 body cap as `jev/serve.ts`). A host process on MPS; not wired into the default deploy — a spike/eval tier. Honest gaps vs Verdict's onnx path: `logits = ln(p)` at `temperature 1.0` (decider hides raw logits), `weights_sha256` pins the safetensors index, `tokens` reported 0.

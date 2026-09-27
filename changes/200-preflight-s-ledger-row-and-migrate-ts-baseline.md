@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2237]
-migrations: []
----
-
-## Changelog
-
-Preflight no longer tells an empty, unmigrated database to `migrate.ts --baseline`: with no schema the `migration ledger` row now says what the `schema` row says — apply the migrations — not the adoption step, which over no schema records every migration as applied without running one and leaves every later plain run skipping everything. And `migrate.ts --baseline` refuses when `public.thoughts` does not exist, naming the plain run and a `--force` override, so following the old remedy can no longer brick a database (SMD-2237).
-
-## FORK
-
-preflight's ledger row, and `migrate.ts --baseline`, no longer offer to baseline an empty database (SMD-2237)
+# 200. preflight's ledger row, and `migrate.ts --baseline`, no longer offer to baseline an empty database (SMD-2237)
 
 **What changed.** `server-portable/preflight.ts`: the `migration ledger` row's
 "no schema_migrations" branch now asks whether there is a fork schema to adopt —

@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-2240]
-migrations: []
----
-
-## Changelog
-
-`db/extract-entities.ts` extracts a thought over the per-thought bound over its first windows and records it succeeded with a `partial:` caveat, where it was failed with nothing in the graph; the bound is a knob (`OB1_EXTRACT_MAX_WINDOWS`, 24 unset), `--status` and the run's summary count and list partial rows apart, and `--retry-partial` re-extracts them after a raise (SMD-2240).
-
-## FORK
-
-A thought over the extraction bound is extracted over its prefix, not failed — its coverage on the claim, the bound a knob (SMD-2240)
+# 198. A thought over the extraction bound is extracted over its prefix, not failed — its coverage on the claim, the bound a knob (SMD-2240)
 
 **What changed.** `server-portable/entities.ts`: `extractEntities` no longer
 throws `over EXTRACT_MAX_WINDOWS (24); not extracted` before any call.

@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-2135]
-migrations: []
----
-
-## Changelog
-
-`db/test-live.ts` [5d] loads 15,000 rows where it loaded 25,000, after a `VACUUM` that keeps the rows an earlier section deleted out of its gate's sample and an assertion that every heap page holds a live row, and [5f] loads 6,000 where it loaded 12,000, the smallest count measured at which each mutant plan is still the one its header names; [5f]'s user triggers stay off until its cleanup has emptied the table (SMD-2135).
-
-## FORK
-
-test-live.ts sizes [5d]'s and [5f]'s tables to what their planner decisions need — the two sections stop spending over a third of CI's live step on rows and index builds (SMD-2135)
+# 195. test-live.ts sizes [5d]'s and [5f]'s tables to what their planner decisions need — the two sections stop spending over a third of CI's live step on rows and index builds (SMD-2135)
 
 **What changed.** The third cut of SMD-2135, after #169 (the deadlock timer, the lease clock) and #176 ([9]'s slowed stub). The ticket asked whether [5d] and [5f] could share one corpus, and whether 25,000 and 12,000 rows are what the planner needs or margin. They are margin, and the corpus is not where the time goes.
 - **[5f]: 12,000 rows → 6,000.** Its time was the two HNSW builds over the loaded rows and their chunks, 18 of its 22 s locally, and a build grows faster than its rows: the thoughts index took 9.4 s over 12,000 rows, 3.3 s over 6,000 and 1.1 s over 3,000, with 0, 2 or 4 parallel maintenance workers alike. Every assertion holds down to 2,000 rows, the mutant's buffer excess thousands of pages over the heap's size at each count. At 6,000 each mutant plan is also the one the section's header names, at both widths the suite runs (PostgreSQL 16). Below that, the unfiltered call's parent lookup becomes a Hash Join over the heap rather than a Merge Join over the whole primary key: between 5,000 and 5,600 rows at 1,024 dimensions, and between 5,500 and 6,000 at 768, so at 768 the count sits just above the switch. The assertion accepts either join.
